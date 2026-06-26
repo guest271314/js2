@@ -2,7 +2,7 @@
 id: 2660
 title: "Whole-program escape/dynamic-use gate for reconstructing `new F()` instances as `$Object` (value-rep infra)"
 status: in-progress
-assignee: ttraenkler/sd-s3a
+assignee: ttraenkler/sd-2674b
 sprint: 66
 created: 2026-06-25
 priority: medium
@@ -586,3 +586,83 @@ write-back=sidecar → desync). The substrate MUST cover **read + write + compou
 (`__extern_get` key histogram — named the Scope.flags wall), `this-bind-repro.mjs`
 (small-scale fix verification), `structwalk.mjs`, `diff-probe.mjs` +
 `tests/dogfood/probe-driver.mjs`.
+
+## PART-1 — LANDED (inert analysis layer, 2026-06-26, sd-2674b)
+
+The analysis layer of the unified substrate. **Inert / byte-identical** (compile
+of a representative fnctor + aliased-prototype + local-from-call fixture is
+SHA-identical pre/post: `bcecace2…`, 6350 bytes), so safe to land ahead of the
+dispatch. Banks the receiver-resolution infra on `main` for the PART-2 wiring.
+
+Added to `src/codegen/fnctor-escape-gate.ts` (the S1 home) + `context/types.ts`:
+- **`FunctionContext.thisStructName?: string`** — the `this`-receiver struct
+  (resolution case 1). DECL only here; the PART-2 dispatch owns the SETTER
+  (`resolveLiftedMethodThisStruct`) + the consuming emitters.
+- **`FnctorEscapeGateResult.receiverStruct: ReadonlyMap<ts.Expression, string>`**
+  — the local-receiver flow map. Every USE identifier of a binding
+  `var x = <call>` whose initializer is a *single-return-inferable* fnctor call
+  (`this.startNode() → return new Node() → __fnctor_Node`; depth-capped at 6,
+  memoized, recursion-safe) maps to the `__fnctor_<Name>` struct (the
+  `ctx.structMap` key). Callee resolution tries the **type-checker symbol**, then
+  a **syntactic unique-name prototype-method index** fallback — load-bearing
+  because the checker types acorn's lifted-method `this` / the call result `any`,
+  so symbol resolution of `this.startNode` MISSES (the noLib unit-repro confirmed
+  `getSymbolAtLocation` returns undefined; the syntactic index resolves it). A
+  name with ≥2 indexed bodies is left unresolved (conservative — never a wrong
+  callee). Multi-return / non-`new` returns are omitted.
+- **`resolveReceiverStruct(ctx, fctx, recvExpr): string | undefined`** — the
+  provider the PART-2 dispatch consumes. (1) `this` → `fctx.thisStructName`;
+  (2) flow-map hit; (3) `undefined`. The hit is gated on `ctx.structMap.has(name)`
+  so a not-yet-registered struct yields `undefined`, never a dangling pin.
+  Conservative-closed throughout: a miss ⇒ the consumer keeps its dynamic
+  (`__extern_get` / open-scan) lowering.
+
+Tests: `tests/issue-2660-part1-receiver-resolve.test.ts` (11, allowJs to mirror
+the acorn `.mjs` compile) + the 32 sibling S1/S2/S3 tests pass; tsc clean.
+
+## PART-2 — NEXT-SPRINT completion plan (the dispatch + its 3 regression-gates)
+
+The dispatch layer. sd-2674c built + happy-path-validated it on branch
+`issue-2681-acorn-lifted-method-this @ 86cd76321` but it hit 3 delete-tombstone-
+zone regressions that need a fix-iterate cycle beyond this sprint's budget, so it
+is **banked, not force-landed**. sd-2674b is the single #2660 owner for the
+handoff. Wire next sprint ON TOP of the landed PART-1 analysis:
+
+### Validated dispatch pieces to fold in (from `86cd76321`, don't rebuild)
+Symmetric **read + write + compound** pin (the symmetry is MANDATORY — a
+read-only slot fix caused a 35.9M-iter `__extern_get`/box/unbox desync loop in
+`parse("x")`; see "CRITICAL hazard" above):
+- `resolvePinnedReceiverStruct` — **swap its body to delegate to PART-1's
+  `resolveReceiverStruct(ctx, fctx, recv)`** (so the `this`-case AND the locals
+  via the flow map both resolve through one provider).
+- `tryEmitStructReceiverMemberRead` + the `pinnedStructName` arm in
+  `property-access.ts` (`emitAlternateStructSetDispatch` gains `pinnedStructName?:
+  string` — filters `findAlternateStructsForField` to the one pinned struct; the
+  actual #2664/#2659 fix, since the open-scan picks colliding slots).
+- The 3 wirings: `assignment.ts`, `unary-updates.ts` (compound `recv.f op= v`,
+  `recv.f++`), property-access read site.
+- **Drop sd-2674c's duplicate `thisStructName` field DECL** (PART-1 owns it) and
+  keep their `resolveLiftedMethodThisStruct` SETTER.
+
+### The 3 regression-gates to apply (documented by sd-2674c)
+1. **#2179 delete-then-re-add** — the pin reads/writes the SLOT, bypassing the
+   delete-tombstone. **Gate: do NOT pin a field that is a `delete X.<field>`
+   target — keep those on the tombstone-aware `__extern_get`/`__extern_set`.**
+   Ownership: the **dispatch consumer** (PART-2), because the gate is
+   per-ACCESS / per-FIELD (it knows the field name at the access site), whereas
+   PART-1's `resolveReceiverStruct` is per-RECEIVER (field-agnostic). PART-1
+   already exposes `ctx.moduleUsesDelete`; a finer per-field delete-target set can
+   be added to the analysis if the consumer wants a precomputed gate, but the
+   minimal correct gate lives at the access site.
+2. **#2656 `++this.pos` static receiver** — the pin intercepts a case that must
+   stay dynamic; needs tighter pin scoping (only fire on the dynamic-receiver
+   path, not the already-typed static-field path).
+3. **#2659 sidecar-only property** — exclude sidecar-only props from the pin
+   (they have no struct slot; keep on `__extern_get`/`__extern_set`).
+
+### Expected payoff (next sprint)
+Closes the #1712 walls #2681 (`this.type` — already validated: `__host_eq` 30k→163
+on `parse("x")`), #2694 (`Scope.flags` 11th wall — via the flow map), #2687
+(`node.expression`), #2686, plus the #2659 member-write swath. Validate on the
+full merge_group floor + a paired acorn jsonl diff; symmetry (read+write+compound)
+must be co-validated, not split.
