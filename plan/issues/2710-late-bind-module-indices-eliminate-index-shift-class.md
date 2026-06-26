@@ -1,7 +1,8 @@
 ---
 id: 2710
 title: "Late-bind module indices (func/global/type) to eliminate the late-index-shift bug class"
-status: ready
+status: in-progress
+assignee: ttraenkler/sd-indexshift
 sprint: 67
 created: 2026-06-26
 updated: 2026-06-26
@@ -463,3 +464,62 @@ unreachable by construction.
   every `?? funcIdx` repoint hack, and the `flushLateImportShifts` ordering deps.
 - Makes unreachable: #2078, #2191/#2193, #1839, #1819, and the recurring
   `project_type_index_shift_and_deadelim` factory.
+
+## Progress log
+
+### Slices 0 + 1 — foundation landed (sd-indexshift, 2026-06-26)
+
+**Scope of this PR:** the *safe foundation* only — slice 0 (proof harness) and
+slice 1 (handle vocabulary as transparent aliases). It does **not** add
+`resolveLayout`, wire `binary.ts`, convert positional reads, mint
+non-renumbering handles, or delete any shifter. The umbrella issue therefore
+stays `in-progress`; slices 2–5 are follow-up tasks.
+
+**Slice 0 — `scripts/prove-emit-identity.mjs`.** A sha256 byte-identity oracle:
+compiles the `website/playground/examples` corpus across the `{gc, standalone,
+wasi}` target matrix and records `sha256(emitBinary(mod))` per `(file,target)`.
+`write` mode captures a golden baseline; `check` mode fails (exit 1) on any
+single drift, pinpointing the exact `(file,target)`. The baseline is a hash of
+raw emitted bytes — it legitimately changes on most unrelated PRs — so it is
+written to gitignored `.tmp/` and is **never committed**; this is a developer
+proof tool, not a CI gate. It is the regression oracle for every later slice
+(reproducing the current final layout makes each slice byte-identical, so any
+representation bug shows up as a single sha mismatch — far sharper than test262
+row counts).
+
+**Slice 1 — branded handle types as pure aliases (`src/ir/types.ts`).** Defined
+`FuncHandle` / `GlobalHandle` / `TypeHandle` and pinned them onto the correct,
+*discriminated* `Instr` arms + type defs:
+- `funcIdx: FuncHandle` on `call` / `return_call` / `ref.func`; func-index
+  side-channels in this file (`WasmModule.startFuncIdx`, `declaredFuncRefs`,
+  `Element.funcIndices`).
+- `index: GlobalHandle` on **`global.{get,set}` only** — `local.{get,set,tee}`
+  share the `index` field name but are function-scoped and never shift, so they
+  stay raw `number`. This per-union-member field typing is the load-bearing
+  discrimination: `binary.ts` already switches on `op` at the encode seams, so
+  the global arms can later dereference a handle while the local arms pass
+  through unchanged.
+- `typeIdx: TypeHandle` on every type-bearing arm (`struct.*`, `array.*` incl.
+  `array.copy` `dst/srcTypeIdx`, `ref.cast{,_null}`, `ref.test`, `ref.null`,
+  `call_indirect`, `call_ref`, `return_call_ref`), plus `ValType.ref/ref_null`,
+  `BlockType{kind:"type"}`, `WasmFunction.typeIdx`, `StructTypeDef.superTypeIdx`,
+  `SubTypeDef.superType`, `TagDef.typeIdx`, `ImportDesc.func/tag.typeIdx`.
+- Left as raw `number` (separate index spaces, never the three handle kinds):
+  `tableIdx`, `fieldIdx`, `tagIdx`, and `WasmExport.desc.index` (polymorphic
+  func/table/memory/global/tag).
+
+**Why aliases, not the real `unique symbol` brand, in this slice.** The brand's
+*enforcement* (turning `mod.functions[h]` / `h - numImportFuncs` / `h + delta`
+into compile errors) only becomes safe AFTER the ~150 positional reads are
+converted (slices 3–4) and registration sites mint handles. Flipping the brand
+now would leave the tree red. So slice 1 ships the alias form: zero runtime
+change, fully interchangeable with `number`, `tsc`-clean, and **byte-identical**
+(brands erase). The future flip to
+`number & { readonly __func: unique symbol }` is a one-line change per type in
+`src/ir/types.ts` — the vocabulary and the correct arm placement are already in
+place, so that later slice only has to chase the errors `tsc` then surfaces.
+
+**Proof:** `tsc --noEmit` clean; `prove-emit-identity.mjs check` reports
+`IDENTICAL — all 39 (file,target) emits match baseline` (gc + standalone + wasi).
+Files touched: `scripts/prove-emit-identity.mjs` (new), `src/ir/types.ts`
+(typing only).

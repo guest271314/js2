@@ -1,4 +1,37 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
+
+// ---------------------------------------------------------------------------
+// Stable module-index handles (#2710 — late-bind module indices).
+//
+// `FuncHandle` / `GlobalHandle` / `TypeHandle` name the three module index
+// spaces whose *live positions* shift when late imports / string-constant
+// globals are appended, or DCE removes type/func entries. Instructions and type
+// defs reference functions / globals / types through these named types so that
+// — in a later slice — a single `resolveLayout()` pass becomes the sole place a
+// concrete final index is assigned (at serialization), eliminating the whole
+// class of "a baked index went stale when the index space changed" bugs.
+//
+// SLICE 1 (this change): the three are *transparent aliases* of `number` — zero
+// runtime change, fully interchangeable with `number`, so the tree stays
+// `tsc`-clean AND every emitted byte is identical (proven by
+// `scripts/prove-emit-identity.mjs`). Their only job here is to (a) establish
+// the vocabulary and (b) pin it onto the correct, discriminated union arms.
+// Crucially `GlobalHandle` is applied ONLY to `global.{get,set}`, NOT to
+// `local.{get,set,tee}`: locals are function-scoped and never shift, and
+// `src/emit/binary.ts` already discriminates on `op` at the encode seams, so
+// the global arms can later dereference while the local arms pass through raw.
+//
+// A LATER SLICE promotes these to true branded types, e.g.
+//   `type FuncHandle = number & { readonly __func: unique symbol }`
+// At that point `tsc` mechanically enumerates every remaining positional read
+// (`mod.functions[h]`, `h - numImportFuncs`, `h + delta`) as a compile error —
+// the structural guard that makes the bug class unreachable by construction.
+// Branding now (transparently) keeps that future flip to a one-line change here.
+// ---------------------------------------------------------------------------
+export type FuncHandle = number;
+export type GlobalHandle = number;
+export type TypeHandle = number;
+
 export interface ExternClassMeta {
   importPrefix: string;
   namespacePath: string[];
@@ -34,7 +67,7 @@ export interface WasmModule {
   /** Set of function names that are async (for .d.ts generation) */
   asyncFunctions: Set<string>;
   /** Function indices referenced by ref.func that need declarative element segments */
-  declaredFuncRefs: number[];
+  declaredFuncRefs: FuncHandle[];
   /** Linear memory definitions */
   memories: { min: number; max?: number }[];
   /** Data segments for linear memory (string literals, etc.) */
@@ -42,7 +75,7 @@ export interface WasmModule {
   /** Whether the module has top-level executable statements (module init code) */
   hasTopLevelStatements?: boolean;
   /** Wasm start function index — runs automatically on instantiation (#907) */
-  startFuncIdx?: number;
+  startFuncIdx?: FuncHandle;
   /**
    * Per-export TS-level type annotations (#1700). Surfaced so the JS-host
    * `wrapExports` can faithfully marshal `Uint8Array` (and other TypedArray)
@@ -83,7 +116,7 @@ export interface StructTypeDef {
   name: string;
   fields: FieldDef[];
   /** Type index of the parent struct (for class inheritance sub-typing) */
-  superTypeIdx?: number;
+  superTypeIdx?: TypeHandle;
   /** When true and superTypeIdx is set, emit sub_final instead of sub (leaf types in hierarchy) */
   final?: boolean;
 }
@@ -100,7 +133,7 @@ export interface RecGroupDef {
 export interface SubTypeDef {
   kind: "sub";
   name: string;
-  superType: number | null;
+  superType: TypeHandle | null;
   final: boolean;
   type: StructTypeDef | ArrayTypeDef | FuncTypeDef;
 }
@@ -118,8 +151,8 @@ export type ValType =
   | { kind: "v128" }
   | { kind: "i8" }
   | { kind: "i16" }
-  | { kind: "ref"; typeIdx: number }
-  | { kind: "ref_null"; typeIdx: number }
+  | { kind: "ref"; typeIdx: TypeHandle }
+  | { kind: "ref_null"; typeIdx: TypeHandle }
   | { kind: "funcref" }
   | { kind: "externref" }
   | { kind: "ref_extern" }
@@ -128,7 +161,7 @@ export type ValType =
 
 export interface WasmFunction {
   name: string;
-  typeIdx: number;
+  typeIdx: TypeHandle;
   locals: LocalDef[];
   body: Instr[];
   exported: boolean;
@@ -147,11 +180,14 @@ export interface SourcePos {
 }
 
 type InstrBase =
+  // locals are function-scoped and never shift — they stay raw `number`.
   | { op: "local.get"; index: number }
   | { op: "local.set"; index: number }
   | { op: "local.tee"; index: number }
-  | { op: "global.get"; index: number }
-  | { op: "global.set"; index: number }
+  // globals share the `index` field name with locals but live in the module
+  // index space, so they carry a GlobalHandle (binary.ts discriminates on `op`).
+  | { op: "global.get"; index: GlobalHandle }
+  | { op: "global.set"; index: GlobalHandle }
   | { op: "i32.const"; value: number }
   | { op: "i64.const"; value: bigint }
   | { op: "i64.add" }
@@ -242,39 +278,39 @@ type InstrBase =
   | { op: "br_table" }
   | { op: "return" }
   | { op: "end" }
-  | { op: "call"; funcIdx: number }
-  | { op: "return_call"; funcIdx: number }
-  | { op: "call_indirect"; typeIdx: number; tableIdx: number }
+  | { op: "call"; funcIdx: FuncHandle }
+  | { op: "return_call"; funcIdx: FuncHandle }
+  | { op: "call_indirect"; typeIdx: TypeHandle; tableIdx: number }
   | { op: "drop" }
   | { op: "select" }
   | { op: "unreachable" }
   | { op: "nop" }
-  | { op: "struct.new"; typeIdx: number }
-  | { op: "struct.get"; typeIdx: number; fieldIdx: number }
-  | { op: "struct.set"; typeIdx: number; fieldIdx: number }
-  | { op: "array.new"; typeIdx: number }
-  | { op: "array.new_fixed"; typeIdx: number; length: number }
-  | { op: "array.new_default"; typeIdx: number }
-  | { op: "array.get"; typeIdx: number }
-  | { op: "array.get_s"; typeIdx: number }
-  | { op: "array.get_u"; typeIdx: number }
-  | { op: "array.set"; typeIdx: number }
+  | { op: "struct.new"; typeIdx: TypeHandle }
+  | { op: "struct.get"; typeIdx: TypeHandle; fieldIdx: number }
+  | { op: "struct.set"; typeIdx: TypeHandle; fieldIdx: number }
+  | { op: "array.new"; typeIdx: TypeHandle }
+  | { op: "array.new_fixed"; typeIdx: TypeHandle; length: number }
+  | { op: "array.new_default"; typeIdx: TypeHandle }
+  | { op: "array.get"; typeIdx: TypeHandle }
+  | { op: "array.get_s"; typeIdx: TypeHandle }
+  | { op: "array.get_u"; typeIdx: TypeHandle }
+  | { op: "array.set"; typeIdx: TypeHandle }
   | { op: "array.len" }
-  | { op: "array.copy"; dstTypeIdx: number; srcTypeIdx: number }
-  | { op: "array.fill"; typeIdx: number }
-  | { op: "ref.null"; typeIdx: number }
+  | { op: "array.copy"; dstTypeIdx: TypeHandle; srcTypeIdx: TypeHandle }
+  | { op: "array.fill"; typeIdx: TypeHandle }
+  | { op: "ref.null"; typeIdx: TypeHandle }
   | { op: "ref.null.extern" }
   | { op: "ref.null.eq" }
   | { op: "ref.null.func" }
   | { op: "ref.is_null" }
   | { op: "ref.as_non_null" }
-  | { op: "ref.cast"; typeIdx: number }
-  | { op: "ref.cast_null"; typeIdx: number }
-  | { op: "ref.test"; typeIdx: number }
+  | { op: "ref.cast"; typeIdx: TypeHandle }
+  | { op: "ref.cast_null"; typeIdx: TypeHandle }
+  | { op: "ref.test"; typeIdx: TypeHandle }
   | { op: "ref.eq" }
-  | { op: "ref.func"; funcIdx: number }
-  | { op: "call_ref"; typeIdx: number }
-  | { op: "return_call_ref"; typeIdx: number }
+  | { op: "ref.func"; funcIdx: FuncHandle }
+  | { op: "call_ref"; typeIdx: TypeHandle }
+  | { op: "return_call_ref"; typeIdx: TypeHandle }
   | { op: "memory.size" }
   | { op: "memory.grow" }
   | { op: "try"; blockType: BlockType; body: Instr[]; catches: CatchClause[]; catchAll?: Instr[] }
@@ -402,7 +438,7 @@ type InstrBase =
 
 export type Instr = InstrBase & { sourcePos?: SourcePos };
 
-export type BlockType = { kind: "empty" } | { kind: "val"; type: ValType } | { kind: "type"; typeIdx: number };
+export type BlockType = { kind: "empty" } | { kind: "val"; type: ValType } | { kind: "type"; typeIdx: TypeHandle };
 
 export interface CatchClause {
   tagIdx: number;
@@ -412,7 +448,7 @@ export interface CatchClause {
 export interface TagDef {
   name: string;
   /** Type index of the tag's function signature (params = exception values) */
-  typeIdx: number;
+  typeIdx: TypeHandle;
 }
 
 export interface Import {
@@ -421,11 +457,11 @@ export interface Import {
   desc: ImportDesc;
 }
 export type ImportDesc =
-  | { kind: "func"; typeIdx: number }
+  | { kind: "func"; typeIdx: TypeHandle }
   | { kind: "table"; elementType: string; min: number; max?: number }
   | { kind: "global"; type: ValType; mutable: boolean }
   | { kind: "memory"; min: number; max?: number }
-  | { kind: "tag"; typeIdx: number };
+  | { kind: "tag"; typeIdx: TypeHandle };
 
 export interface WasmExport {
   name: string;
@@ -439,7 +475,7 @@ export interface Table {
 export interface Element {
   tableIdx: number;
   offset: Instr[];
-  funcIndices: number[];
+  funcIndices: FuncHandle[];
 }
 export interface GlobalDef {
   name: string;
