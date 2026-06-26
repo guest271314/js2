@@ -67,7 +67,20 @@ export function funcTypeEq(t: FuncTypeDef, params: ValType[], results: ValType[]
  * Reuses existing registrations so each element type only gets one array type.
  */
 export function getOrRegisterArrayType(ctx: CodegenContext, elemKind: string, elemTypeOverride?: ValType): number {
-  if (ctx.arrayTypeMap.has(elemKind)) return ctx.arrayTypeMap.get(elemKind)!;
+  // (#2688) Qualify a bare `ref`/`ref_null` elemKind with its struct typeIdx so
+  // DISTINCT ref-struct element types get DISTINCT array types. Caching ref
+  // arrays under the plain `"ref"` key collapsed every ref-element array to the
+  // FIRST-registered element struct — so a shape-transforming `.map` returning a
+  // different struct stored into an array typed for the wrong struct
+  // (`array.set` validation failure, eslint apply-disable-directives.js). Matches
+  // the existing `ref_<typeIdx>` convention (symbol-native / native-string vecs).
+  const cacheKey =
+    (elemKind === "ref" || elemKind === "ref_null") &&
+    elemTypeOverride &&
+    (elemTypeOverride.kind === "ref" || elemTypeOverride.kind === "ref_null")
+      ? `ref_${(elemTypeOverride as { typeIdx: number }).typeIdx}`
+      : elemKind;
+  if (ctx.arrayTypeMap.has(cacheKey)) return ctx.arrayTypeMap.get(cacheKey)!;
   let elemType: ValType =
     elemTypeOverride ??
     (elemKind === "f64" ? { kind: "f64" } : elemKind === "i32" ? { kind: "i32" } : { kind: "externref" });
@@ -77,11 +90,11 @@ export function getOrRegisterArrayType(ctx: CodegenContext, elemKind: string, el
   const idx = ctx.mod.types.length;
   ctx.mod.types.push({
     kind: "array",
-    name: `__arr_${elemKind}`,
+    name: `__arr_${cacheKey}`,
     element: elemType,
     mutable: true,
   } as ArrayTypeDef);
-  ctx.arrayTypeMap.set(elemKind, idx);
+  ctx.arrayTypeMap.set(cacheKey, idx);
   return idx;
 }
 
@@ -125,7 +138,16 @@ export function getOrRegisterVecType(ctx: CodegenContext, elemKind: string, elem
   // calls in `createCodegenContext` set `ctx.suppressVecUsageFlag` so they do
   // NOT count as usage.
   if (!ctx.suppressVecUsageFlag) ctx.usesVecValue = true;
-  const existing = ctx.vecTypeMap.get(elemKind);
+  // (#2688) Qualify a bare `ref`/`ref_null` elemKind with its struct typeIdx (see
+  // getOrRegisterArrayType) so distinct ref-struct vecs are distinct types, not
+  // collapsed onto the first ref struct registered.
+  const cacheKey =
+    (elemKind === "ref" || elemKind === "ref_null") &&
+    elemTypeOverride &&
+    (elemTypeOverride.kind === "ref" || elemTypeOverride.kind === "ref_null")
+      ? `ref_${(elemTypeOverride as { typeIdx: number }).typeIdx}`
+      : elemKind;
+  const existing = ctx.vecTypeMap.get(cacheKey);
   if (existing !== undefined) return existing;
 
   // (#2186) Ensure the shared `$__vec_base` length supertype exists before
@@ -140,7 +162,7 @@ export function getOrRegisterVecType(ctx: CodegenContext, elemKind: string, elem
   const vecIdx = ctx.mod.types.length;
   ctx.mod.types.push({
     kind: "struct",
-    name: `__vec_${elemKind}`,
+    name: `__vec_${cacheKey}`,
     superTypeIdx: vecBaseIdx,
     fields: [
       { name: "length", type: { kind: "i32" }, mutable: true },
@@ -151,9 +173,9 @@ export function getOrRegisterVecType(ctx: CodegenContext, elemKind: string, elem
       },
     ],
   });
-  ctx.vecTypeMap.set(elemKind, vecIdx);
+  ctx.vecTypeMap.set(cacheKey, vecIdx);
 
-  const vecStructName = `__vec_${elemKind}`;
+  const vecStructName = `__vec_${cacheKey}`;
   ctx.structMap.set(vecStructName, vecIdx);
   ctx.typeIdxToStructName.set(vecIdx, vecStructName);
   ctx.structFields.set(vecStructName, [
