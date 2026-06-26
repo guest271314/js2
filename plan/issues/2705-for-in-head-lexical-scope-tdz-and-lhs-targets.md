@@ -83,7 +83,7 @@ This is marked `feasibility: hard` because (a) requires per-iteration environmen
 
 ## Acceptance criteria
 
-At least 18 of the 20 closeable listed tests (excluding eval-based and resizable-buffer) flip from fail to pass. No regression in `statements/for-in/` currently-passing tests. Full CI green.
+At least 10 of the **11** closeable listed tests flip from fail to pass (Slice A: 5, Slice B: 6). Note: 8 of the originally-listed for-in tests (`S12.6.4_A3/A3.1/A4/A4.1`, `scope-head-var-none`, `scope-body-var-none`, and the `cptn-*` set) route through `__extern_eval` because `allNodesInlineSupported` bails on `ForInStatement` — they are **eval-blocked, not closeable by this issue** (they belong to the eval-inline Slice D, deferred). See the Implementation Plan note below. No regression in `statements/for-in/` currently-passing tests. Full CI green.
 
 ## Notes
 
