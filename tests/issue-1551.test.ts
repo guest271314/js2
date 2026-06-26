@@ -104,3 +104,153 @@ describe("#1551 SuperCall argument evaluation", () => {
     expect(await runReturnNumber(src)).toBe(123);
   });
 });
+
+// ---------------------------------------------------------------------------
+// #1551 — `super(...)` nested inside control flow (try/if/loop) must NOT escape
+// the enclosing try-region.
+//
+// Verified root cause (2026-06-26): the nested-super fallback in
+// compileCallExpression (super inside control flow — the class-bodies inline
+// handler never sees it) returned `null` after emitting the super-argument
+// evaluation. The #1919 speculative wrapper in compileExpressionBody interprets
+// a `null` inner result as "no usable value" and calls rollbackSpeculative,
+// which TRUNCATED the just-emitted arg-evaluation instructions (including a
+// throwing super-arg call) and replaced them with a default constant. So
+// `super(thrower())` inside `try { } catch` never actually threw: the
+// exception-raising call was deleted at compile time, the user's `catch` never
+// ran, and execution fell through past `super(...)`. The fallback now returns
+// VOID_RESULT (preserved by the wrapper) so ArgumentListEvaluation's side
+// effects and abrupt completion survive (§13.3.7.1 step 4).
+// ---------------------------------------------------------------------------
+describe("#1551 super(...) inside try does not escape the try-region", () => {
+  it("super(thrower()) inside try{}catch: the catch runs and past-super is NOT reached", async () => {
+    // 0 PASS (catch ran, identity ok, reached 0); 1 escaped out of new C;
+    // 2 catch never ran (reached set); 3 caught wrong identity
+    const src = `
+      let thrown = 777;
+      let caught = -1;
+      let reached = 0;
+      class C extends Object {
+        constructor() {
+          try {
+            super((() => { throw thrown; })());
+            reached = 1;
+          } catch (e) {
+            caught = e as any;
+          }
+        }
+      }
+      export function test(): number {
+        try { new C(); } catch (e) { return 1; }
+        if (reached === 1) return 2;
+        if (caught !== thrown) return 3;
+        return 0;
+      }
+    `;
+    expect(await runReturnNumber(src)).toBe(0);
+  });
+
+  it("super(thrower()) with a named-function arg inside try: catch runs, exception identity preserved", async () => {
+    const src = `
+      let caught = -1; let reached = 0;
+      function thrower(): number { throw 777; }
+      class C extends Object {
+        constructor() {
+          try { super(thrower()); reached = 1; } catch (e) { caught = e as any; }
+        }
+      }
+      export function test(): number {
+        try { new C(); } catch (e) { return 1; }
+        if (reached === 1) return 2;
+        return caught === 777 ? 0 : 3;
+      }
+    `;
+    expect(await runReturnNumber(src)).toBe(0);
+  });
+
+  it("a NON-throwing super arg inside try is still evaluated (side effect persists)", async () => {
+    const src = `
+      let ran = 0;
+      function f(): number { ran = 1; return 5; }
+      class C extends Object {
+        constructor() { try { super(f()); } catch (e) {} }
+      }
+      export function test(): number { new C(); return ran; }
+    `;
+    expect(await runReturnNumber(src)).toBe(1);
+  });
+
+  it("super(thrower()) with NO surrounding try still throws OUT of new C (no regression)", async () => {
+    // 0 = threw out & reached stayed 0; 1 = no throw; 2 = threw but reached set
+    const src = `
+      let reached = 0;
+      class C extends Object {
+        constructor() { super((() => { throw 9; })()); reached = 1; }
+      }
+      export function test(): number {
+        try { new C(); } catch (e) { return reached === 0 ? 0 : 2; }
+        return 1;
+      }
+    `;
+    expect(await runReturnNumber(src)).toBe(0);
+  });
+
+  it("plain ctor try/catch with no super still catches (baseline, unaffected)", async () => {
+    const src = `
+      let caught = -1;
+      class C {
+        constructor() {
+          try { throw 55; } catch (e) { caught = e as any; }
+        }
+      }
+      export function test(): number { new C(); return caught === 55 ? 0 : 1; }
+    `;
+    expect(await runReturnNumber(src)).toBe(0);
+  });
+
+  it("multi-arg super: left-to-right eval order + abrupt at 2nd arg propagates to catch", async () => {
+    // order accumulates which args ran (a -> 1, bThrow -> 2): want 12; caught want 99
+    const src = `
+      let order = 0; let caught = -1;
+      function a(): number { order = order * 10 + 1; return 1; }
+      function bThrow(): number { order = order * 10 + 2; throw 99; }
+      class C extends Object {
+        constructor() { try { super(a(), bThrow()); } catch (e) { caught = e as any; } }
+      }
+      export function test(): number {
+        new C();
+        return order === 12 && caught === 99 ? 0 : 1;
+      }
+    `;
+    expect(await runReturnNumber(src)).toBe(0);
+  });
+
+  it("super inside an if-branch evaluates its arg (nested non-try control flow)", async () => {
+    const src = `
+      let ran = 0;
+      function g(): number { ran = ran + 1; return 7; }
+      class C extends Object {
+        constructor(b: boolean) { if (b) { super(g()); } else { super(0); } }
+      }
+      export function test(): number { new C(true); return ran; }
+    `;
+    expect(await runReturnNumber(src)).toBe(1);
+  });
+
+  it("super inside a nested try re-thrown to the outer catch", async () => {
+    // inner catch sets 1 + rethrows; outer catch adds 10 => 11
+    const src = `
+      let caught = 0;
+      function t(): number { throw 5; }
+      class C extends Object {
+        constructor() {
+          try {
+            try { super(t()); } catch (e) { caught = 1; throw e; }
+          } catch (e2) { caught = caught + 10; }
+        }
+      }
+      export function test(): number { new C(); return caught; }
+    `;
+    expect(await runReturnNumber(src)).toBe(11);
+  });
+});
