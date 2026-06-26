@@ -79,9 +79,21 @@ js2wasm-specific `process.stdin.read(buf, offset)` shape — which matched **no*
 real Node API (`process.stdin` is an async Duplex stream with no synchronous
 buffer-filling `read`; loopdive/js2#389). The same source now (a) compiles via
 js2wasm to standalone WASI **and** (b) runs **unmodified** under real `node`.
-Compile with `--target wasi --link-node-shims`; the `node:fs` import is bound at
-link time by [`node-fs.wat`](./node-fs.wat) (which maps `readSync`/`writeSync` to
-WASI `fd_read`/`fd_write`). See [`NODE-FS-SHIM.md`](./NODE-FS-SHIM.md).
+
+**To get a module you can run directly under `wasmtime`, compile with `--target
+wasi` ALONE** (no `--link-node-shims`): the `node:fs` `readSync`/`writeSync` calls
+lower **inline** to `wasi_snapshot_preview1` `fd_read`/`fd_write`, so the emitted
+module imports ONLY `wasi_snapshot_preview1` and owns its own memory (#2655). This
+is the runnable standalone path the loopdive/js2#389 reporter wanted.
+
+`--link-node-shims` is a **separate modular-linking variant**, NOT a
+run-directly-under-bare-wasmtime flag: it makes the module _import_ a stable
+`node:fs` interface (`readSync`/`writeSync` + its `memory`) that you then **link**
+against [`node-fs.wat`](./node-fs.wat) (which maps them to WASI `fd_read`/
+`fd_write`) — or satisfy from a JS host's real `node:fs`. A `--link-node-shims`
+module run under bare `wasmtime` with no link step fails with `unknown import:
+node:fs::readSync` (loopdive/js2#389 bug 2) — that is expected; link it first. See
+[`NODE-FS-SHIM.md`](./NODE-FS-SHIM.md) for the link step.
 
 | Capability                                            | Status | Detail                                                                                                                                                                                                                             |
 | ----------------------------------------------------- | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -142,20 +154,38 @@ From the repo root (works immediately after `pnpm install`, no build step):
 
 ```bash
 mkdir -p examples/native-messaging/out
-npx tsx src/cli.ts examples/native-messaging/nm_js2wasm.ts --target wasi --link-node-shims -o examples/native-messaging/out
+# Standalone, runs directly under wasmtime — imports ONLY wasi_snapshot_preview1:
+npx tsx src/cli.ts examples/native-messaging/nm_js2wasm.ts --target wasi -o examples/native-messaging/out
 ```
 
 (Once the package is built — `pnpm run build` — or installed from npm, you can
-use the `js2wasm` bin directly: `npx js2wasm nm_js2wasm.ts --target wasi --link-node-shims -o out`.)
+use the `js2wasm` bin directly: `npx js2wasm nm_js2wasm.ts --target wasi -o out`.)
 
-This produces `out/nm_js2wasm.wasm`. The module imports its IO interface from
-`node:fs` (`readSync`, `writeSync`) plus the shared linear `memory` — bound at
-link time by [`node-fs.wat`](./node-fs.wat), which maps them to
-`wasi_snapshot_preview1` `fd_read`/`fd_write`. So the module declares **what**
-host API it needs (`node:fs`), not how it's satisfied: link it against
-`node-fs.wasm` (built from `node-fs.wat`), a native WASI host, or the real
-`node:fs` module under a JS host. See [`NODE-FS-SHIM.md`](./NODE-FS-SHIM.md) for
-the link step.
+This produces `out/nm_js2wasm.wasm`, a self-contained WASI Preview-1 command
+module: the `node:fs` `readSync`/`writeSync` calls lower **inline** to
+`wasi_snapshot_preview1` `fd_read`/`fd_write`, so the module imports ONLY
+`wasi_snapshot_preview1`, owns + exports its own `memory`, and runs directly under
+`wasmtime` with no link step (#2655).
+
+**Optional modular-linking variant — `--link-node-shims`.** Adding
+`--link-node-shims` instead makes the module _import_ a stable `node:fs` interface
+(`readSync`/`writeSync` + the shared linear `memory`) rather than inlining the
+syscalls:
+
+```bash
+npx tsx src/cli.ts examples/native-messaging/nm_js2wasm.ts --target wasi --link-node-shims -o examples/native-messaging/out
+```
+
+The result declares **what** host API it needs (`node:fs`), not how it's
+satisfied — so you must **link** it against `node-fs.wasm` (built from
+[`node-fs.wat`](./node-fs.wat), which maps `node:fs` → WASI `fd_read`/`fd_write`),
+a native WASI host, or the real `node:fs` module under a JS host BEFORE it can
+run. Running a `--link-node-shims` module directly under bare `wasmtime` with no
+link step fails with `unknown import: node:fs::readSync` (loopdive/js2#389 bug 2)
+— that is by design; link it first. See [`NODE-FS-SHIM.md`](./NODE-FS-SHIM.md) for
+the link step. Use this variant only when you want the same binary to link against
+an external `node:fs` provider; for a drop-in standalone host, prefer `--target
+wasi` alone above.
 
 > The `-o` flag is an **output directory**, not a filename. js2wasm names the
 > output after the input basename (`nm_js2wasm.wasm`).

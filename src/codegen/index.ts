@@ -12234,6 +12234,18 @@ function collectReferencedGlobalNames(userFiles: readonly ts.SourceFile[], check
   return names;
 }
 
+// #2696/#2632 — the fd0 stdin-reactor intrinsic names. The injected
+// process.stdin Readable prelude declares these as `declare function` stubs;
+// under `--target wasi` every call site is inline-lowered to poll_oneoff/fd_read
+// (tryWasiTimerCall), so collectExternDeclarations must NOT re-register them as
+// `env.*` host imports (which would only be dropped with a spurious warning).
+const WASI_STDIN_REACTOR_INTRINSICS = new Set([
+  "__wasiStdinReadByte",
+  "__wasiStdinAvailable",
+  "__wasiStdinEof",
+  "__wasiStdinSetReader",
+]);
+
 // `libReferencedNames`, when provided (lib-file scan only), gates ambient
 // `declare function` host-import registration to names the user references
 // (#2520). User-file call sites omit it so preprocessImports stubs always
@@ -12269,6 +12281,28 @@ function collectExternDeclarations(
       //   • WASI target → __wasi_*  syscall helpers (#1035)
       //   • non-WASI + allowFs → __node_fs_* JS-host imports (#1491)
       if (ctx.wasiNodeFsFuncs.has(name) && (ctx.wasi || ctx.allowFs)) continue;
+      // #2696 — raw-WASI intrinsics (#2657): the `wasm:memory` accessors
+      // (store32/load32/store8/load8) lower to INLINE memory ops and the
+      // `wasi_snapshot_preview1` fd funcs (fd_read/fd_write) bind to the real
+      // WASI import via registerWasiImports. preprocessImports rewrites BOTH
+      // import forms into bare `declare function` stubs that lose their module
+      // origin, so without this guard they would re-register here as `env.*`
+      // host imports — spuriously firing the "not on the dual-mode allowlist"
+      // drop warning on the clean nm_wasi.ts compile, and (on the npm/bun path,
+      // where the stub survives) leaking an unsatisfiable `env.store32` import
+      // that breaks wasmtime instantiation (loopdive/js2#389 bug 1).
+      // tryCompileRawWasiCall (raw-wasi-api.ts) already handles every call site,
+      // so skip the stub entirely under `--target wasi`.
+      if (ctx.wasi && (ctx.wasiMemAccessors.has(name) || ctx.wasiRawImports.has(name))) continue;
+      // #2696 — the #2632 fd0 stdin-reactor intrinsics. The injected
+      // process.stdin prelude (src/process-stdin-prelude.ts) declares these as
+      // `declare function __wasiStdin*` stubs, but every call site is
+      // inline-lowered to poll_oneoff/fd_read by tryWasiTimerCall (calls.ts) when
+      // `ctx.wasi`. Registering them as `env.*` host imports here therefore only
+      // leaks a spurious "not on the dual-mode allowlist" dropped-import warning
+      // on the otherwise-runnable standalone nm_node_process.ts module
+      // (loopdive/js2#389 bug 2). Skip the stub under WASI.
+      if (ctx.wasi && WASI_STDIN_REACTOR_INTRINSICS.has(name)) continue;
       // #1663: parseInt / parseFloat have no JS host under WASI / standalone —
       // skip the stub so the unified-collector finalize can emit the WasmGC
       // native scanners (registered under the same funcMap names) instead.
@@ -12934,6 +12968,17 @@ function collectDeclaredGlobals(ctx: CodegenContext, libFile: ts.SourceFile, use
     // native fast paths and needs no host constructor object.
     if (!valueRefNames.has(name)) continue;
     if (ctx.declaredGlobals.has(name)) continue;
+    // #2696 — under strict-no-host-imports (auto-on for --target wasi /
+    // standalone) there is no JS host to satisfy `env.global_<Ctor>`, so
+    // addImport would drop it AND, because the dropped import leaves no funcMap
+    // entry, the `declaredGlobals.set` below never fires either — the whole
+    // registration is already a no-op EXCEPT for the spurious "not on the
+    // dual-mode allowlist" warning it emits. nm_node_process.ts trips this via
+    // the `String.fromCharCode` receiver in the injected process.stdin prelude
+    // (loopdive/js2#389 bug 2: `env.global_String`). Skip it so the standalone
+    // module compiles cleanly; bare identity uses already had no host global
+    // under strict mode, so behavior is unchanged.
+    if (ctx.strictNoHostImports) continue;
     const importName = `global_${name}`;
     const typeIdx = addFuncType(ctx, [], [{ kind: "externref" }]);
     addImport(ctx, "env", importName, { kind: "func", typeIdx });
