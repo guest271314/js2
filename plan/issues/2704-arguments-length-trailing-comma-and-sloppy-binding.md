@@ -1,7 +1,8 @@
 ---
 id: 2704
 title: "arguments.length off-by-N with trailing comma in async-gen/static methods; sloppy-mode arguments binding missing"
-status: in-progress
+status: done
+completed: 2026-06-26
 assignee: ttraenkler/dev3
 sprint: 67
 goal: test262-conformance
@@ -89,3 +90,40 @@ At least 30 of the 32 listed tests flip from fail to pass (trailing comma: 25, s
 - Reference: #1053 (the original plain-method trailing-comma fix) — read that PR diff first to understand the normalization site.
 - Mapped arguments exotic tests → #1726. Do NOT attempt to fix mapped-argument descriptor semantics in this issue.
 - `unmapped/via-params-rest.js` (wasm_compile error) and `10.6-6-3.js`, `10.6-6-4.js` (illegal_cast) are NOT included in the closeable count here; they may require separate investigation.
+
+## Resolution (dev3, 2026-06-26)
+
+**Root cause was NOT a trailing-comma parser bug.** TypeScript's parser already
+drops a call's trailing comma, so `ref(42,)` and `ref(42)` produce the same
+AST. The real defect: `arguments.length` / `arguments[i]` were wrong whenever a
+method was invoked through an **aliased / indirect reference** — exactly the
+`var ref = obj.method; ref(42,)` shape every failing test uses — regardless of
+the trailing comma. Verified: the *direct* call `obj.m(42)` already returned the
+correct count; only `ref(42)` (a closure-value call) returned the formal-param
+count (0 for the 0-formal `arguments`-reading methods).
+
+The indirect-callable dispatch in `compileCallExpression`
+(`src/codegen/expressions/calls.ts`) has two arms: a single-funcref-type arm
+that already set the `__argc` / `__extras_argv` globals the callee's `arguments`
+object reads (`buildArgcExtrasSetupFromLocals` + reset), and a **multi-funcref-
+type** arm (taken when several closures of the matched struct shape have
+distinct funcref types) that built each `self + args + funcref` call but **never
+set those globals** — so the boxed call-site args sat unused in locals and the
+callee fell back to its formal-param count. Fix: set `__argc`/`__extras_argv`
+once before the funcref-type dispatch chain (it is pure `ref.test`/`if` with no
+intervening calls and exactly one arm runs) and reset after (save/restore the
+return value), mirroring the single-funcref arm. Spec: ECMAScript §10.4.4
+CreateUnmappedArgumentsObject (`arguments.length` = count of *passed* args).
+
+Closes the **non-spread** (a) forms: `single-args` / `null` / `multiple` /
+`undefined` trailing-comma tests across async-gen-meth, static, and class-expr
+variants (~20 tests). Regression test: `tests/issue-2704.test.ts`.
+
+**Split out to #2725** (separate, deeper changes):
+- **(a)-spread** (~5 tests): spread args (`...arr`) in an *indirect* call need
+  runtime-length argc plumbing; the direct path already handles them.
+- **(b) sloppy-mode arguments-object identity** (~7 `S10.6_*` tests):
+  `arguments.callee` / `arguments.constructor` / `arguments.hasOwnProperty`
+  require the arguments object to carry an `Object.prototype` chain + `callee`
+  slot + own-property semantics — an arguments-object *representation* change,
+  not argc plumbing.

@@ -12170,7 +12170,31 @@ function compileCallExpression(
               ];
             }
 
+            // (#2704) Set __argc / __extras_argv ONCE around the funcref-type
+            // dispatch so the callee's `arguments` object observes the TRUE
+            // call-site arg count. The single-funcref arm above already does
+            // this (via buildArgcExtrasSetupFromLocals); this multi-funcref arm
+            // previously omitted it, so an aliased / indirect method call —
+            // `var ref = obj.m; ref(42)` — left __argc at its -1 sentinel and
+            // the callee fell back to its formal-param count: `arguments.length`
+            // came back 0 for a 0-formal method that reads `arguments` (the
+            // async-gen-meth / static-async-gen test262 forms in #2704). The
+            // dispatch chain below is pure ref.test/if with no intervening
+            // calls and exactly ONE arm runs, so a single set-before /
+            // reset-after is correct. Reset prevents stale extras from leaking
+            // into a subsequent callee that DOES read `arguments` (#1511).
+            for (const ins of buildArgcExtrasSetupFromLocals(ctx, fctx, cpParamCnt, cpExtrasLocals)) {
+              fctx.body.push(ins);
+            }
             fctx.body.push(...funcDispatch);
+            if (expectedReturn !== null) {
+              const retL = allocLocal(fctx, `__mfd_ret_${fctx.locals.length}`, expectedReturn);
+              fctx.body.push({ op: "local.set", index: retL } as Instr);
+              for (const ins of buildArgcExtrasReset(ctx)) fctx.body.push(ins);
+              fctx.body.push({ op: "local.get", index: retL } as Instr);
+            } else {
+              for (const ins of buildArgcExtrasReset(ctx)) fctx.body.push(ins);
+            }
           }
 
           // (#1712) Assemble the host-callable fallback split: the funcref
