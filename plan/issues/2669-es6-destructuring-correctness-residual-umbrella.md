@@ -3,7 +3,7 @@ id: 2669
 title: "ES2015: destructuring correctness residual umbrella (~696 fails — iterator-close, defaults, holes, rest across for-of/assignment/binding/params)"
 status: ready
 created: 2026-06-25
-updated: 2026-06-25
+updated: 2026-06-26
 priority: high
 feasibility: hard
 reasoning_effort: high
@@ -61,13 +61,18 @@ after a close assertion, `Cannot destructure 'null' or 'undefined'`,
 
 ## Failing-test cluster (examples)
 
+> **2026-06-26 re-sweep (current `origin/main`, post-#2692).** 2 of the 6 below
+> now PASS and are struck through; the remaining 4 are all **iterator-protocol
+> semantic gaps** routed to #1642 (IteratorClose) / #2566 (generator
+> over-consumption) — NOT the codegen-default family. See "## Slice landed".
+
 ```
-language/statements/for-of/dstr/array-elem-iter-nrml-close-err.js
-language/statements/for-of/dstr/let-obj-ptrn-prop-id-init-skipped.js
-language/statements/for-of/dstr/const-ary-ptrn-elem-ary-elem-init.js
-language/expressions/assignment/dstr/array-elem-trlg-iter-elision-iter-abpt.js
-language/expressions/object/dstr/meth-ary-ptrn-elem-ary-elision-init.js
-language/statements/class/dstr/private-meth-ary-ptrn-elem-ary-elision-init.js
+language/statements/for-of/dstr/array-elem-iter-nrml-close-err.js            # FAIL — IteratorClose (#1642)
+# PASS (#2692): language/statements/for-of/dstr/let-obj-ptrn-prop-id-init-skipped.js
+# PASS (this slice): language/statements/for-of/dstr/const-ary-ptrn-elem-ary-elem-init.js
+language/expressions/assignment/dstr/array-elem-trlg-iter-elision-iter-abpt.js  # FAIL — trailing-elision over-consumption (#2566)
+language/expressions/object/dstr/meth-ary-ptrn-elem-ary-elision-init.js      # FAIL — generator over-consumption (#2566)
+language/statements/class/dstr/private-meth-ary-ptrn-elem-ary-elision-init.js  # FAIL — generator over-consumption (#2566)
 ```
 
 ## Acceptance criteria
@@ -182,3 +187,83 @@ an architect spec + full `merge_group` validation, not an inline patch.
   apparent failures are the closure-box bug.
 
 Repro driver + probes used: `.tmp/runsrc.mts`, `.tmp/runwasm.mts` (gitignored).
+
+## Slice landed (dev-dstr2669, 2026-06-26) — nested-array-default codegen family
+
+Verify-first re-sweep of the 6-sample cluster on current `origin/main` (post-#2692):
+**2 PASS, 4 FAIL**. The single `let-obj-ptrn-prop-id-init-skipped` was already
+fixed by #2692 (the closure-box surface). The verify-first sweep then root-caused
+the `const-ary-ptrn-elem-ary-elem-init` failure to **three distinct codegen
+defects** in the array-destructuring *default-init* family (NOT the closure box,
+NOT an iterator-protocol gap) — all fixed in this slice with guard test
+`tests/issue-2669.test.ts` (9/9 green):
+
+1. **Malformed Wasm — `extern.convert_any` on an already-externref `array.get`.**
+   A `ref_*` keyed vec (nested arrays/objects, e.g. `number[][]`) lowers its
+   backing store to `(array (mut externref))` — its elements are *already*
+   externref. The element-conversion loop in `destructureParamArray`
+   (`src/codegen/destructuring-params.ts`, `boxToExternref`) and the host-boundary
+   `__vec_get` helper (`src/codegen/index.ts`) keyed off the `"ref_*"` STRING and
+   emitted `extern.convert_any` (operand must be `anyref`) on the externref slot →
+   invalid Wasm, module failed to instantiate (`const [[x,y,z]=[4,5,6]] = []`).
+   Fix: decide boxing from the **real backing-array element kind** — an externref
+   store is a straight pass-through.
+2. **for-of identifier default never fired (externref source).** A for-of element
+   with a default over an externref source was coerced to the (numeric) binding
+   type BEFORE the default check (`src/codegen/statements/loops.ts`), unboxing
+   `undefined` to a plain NaN that never matched the f64 sNaN sentinel the check
+   looks for (`for (const [a=9] of [[]])` kept NaN). Fix: run
+   `emitDefaultValueCheck` on the RAW externref (`__extern_is_undefined`), then
+   coerce the survivor.
+3. **for-of nested-pattern default ignored.** The for-of nested-pattern branch
+   dropped `element.initializer` entirely, so a short/empty source left the nested
+   slot null and the recursive destructure threw "Cannot destructure 'null' or
+   'undefined'" (`for (const [[x,y,z]=[4,5,6]] of [[]])`). Fix: apply
+   `emitNestedBindingDefault` (with the externref OOB→undefined sentinel) before
+   recursing — **scoped to the SYNC for-of path AND PURE (non-call) default
+   initializers** (array/object literals, identifiers). See the CI-FIX note below.
+
+### CI-FIX (merge_group floor) — scope narrowed (2026-06-26)
+
+The first cut of fix #3 applied the nested default for **all** initializers in
+**both** for-of and for-await. The #2097 merge_group floor (full test262, not the
+scoped sweep) flagged **15 `for-await-of` regressions** (`async-{func,gen}-dstr-…
+ary-ptrn-elem-ary-elision-{init,iter}` + 3 `…ary-empty-init` flake timeouts): a
+**CALL-expression** default (generator `g()`, capturing helper, IIFE) compiled
+inside the conditionally-skipped default arm materialised its capture box **only
+on the not-taken branch**, corrupting later reads of the captured variable
+(#2692 closure-box-lazy territory; the generator case also over-consumes,
+#2566). On clean main fix #3 didn't exist so those defaults were ignored and the
+tests passed by coincidence (the element was present, so the default must not
+fire anyway). Net was +9 but the regression **ratio** (12/24 = 50%) tripped the
+gate. Fix: gate the nested-default application to `!stmt.awaitModifier &&
+!ts.isCallExpression(initializer)`. Pure literal/identifier defaults have no side
+effect or capture box, so they are safe to evaluate conditionally; call-default
+nested cases (and all for-await nested defaults) revert byte-for-byte to the
+pre-fix behaviour and stay tracked under the umbrella tail (#2566 / #2692).
+Result: all 15 for-await regressions cleared, 12 sync improvements retained
+(`ary-elem-init`, `ary-rest-init`, `obj-id-init`, `obj-prop-id-init`),
+`ary-empty-init` (IIFE default) deliberately forgone. Guard
+`tests/issue-2669.test.ts` extended with the capturing-call present-element
+poison signature.
+
+**Validation:** 10/10 guard tests; `hardError=0` across 1781 dstr files (no new
+malformed-Wasm); all 15 floor-regressed `for-await-of` tests verified back to
+PASS via fresh single-file runs; 12 sync improvements re-verified PASS.
+
+**Remaining umbrella tail (NOT this slice):**
+- The 4 still-failing cluster samples are iterator-protocol semantics → **#1642**
+  (IteratorClose on abrupt completion) and **#2566** (generator / trailing-elision
+  over-consumption). Keep those as the concrete sub-issues.
+- A separate **in-bounds `undefined`/hole** default-init sub-bug remains: a literal
+  `undefined`/elision element of a *typed* nested vec is not carried as a
+  recognizable "undefined" through the default check (`for (let [x=23] of
+  [[undefined]])` / `[[,]]` → `x` stays the value, default never fires;
+  `[a=1,b,c=3] = [..., , undefined]` assignment likewise). Distinct from the three
+  fixes above (those are the externref/OOB and malformed-Wasm paths); the typed
+  in-bounds sentinel-propagation is the next carve.
+- The nested **object**-default (`[{a}={a:1}]`) over an empty/externref source also
+  still mis-binds — same default-init family, follow-up carve.
+
+This slice keeps the umbrella OPEN (status stays `ready`) — it burns down the
+nested-array-default codegen corner, not the iterator-protocol tail.

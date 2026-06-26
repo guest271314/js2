@@ -4570,6 +4570,14 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
       const [elemKey, vecTypeIdx] = vecEntries[i]!;
       const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
       if (arrTypeIdx < 0) continue;
+      // (#2669) The REAL backing-array element kind, not the `elemKey` string,
+      // decides whether the read value needs converting to externref: a `ref_*`
+      // keyed vec stores its (boxed) elements as externref already.
+      const arrElemDef = ctx.mod.types[arrTypeIdx];
+      const arrElemIsExternref =
+        arrElemDef !== undefined &&
+        arrElemDef.kind === "array" &&
+        ((arrElemDef.element as ValType).kind === "externref" || (arrElemDef.element as ValType).kind === "ref_extern");
       // Skip numeric element types if __box_number is not available
       if (
         (elemKey === "f64" || elemKey === "i32" || elemKey === "i32_byte" || elemKey === "i8_byte") &&
@@ -4626,6 +4634,13 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
         } else {
           boxInstrs = [{ op: "drop" } as Instr, { op: "ref.null.extern" } as Instr];
         }
+      } else if (arrElemIsExternref) {
+        // (#2669) A `ref_*` keyed vec (nested arrays/objects, e.g. `number[][]`)
+        // lowers its backing store to `(array (mut externref))` — the elements
+        // are already boxed to externref. `array.get` yields externref, so an
+        // `extern.convert_any` (whose operand MUST be an anyref) is invalid Wasm.
+        // Pass the externref slot through unchanged.
+        boxInstrs = [];
       } else {
         boxInstrs = [{ op: "extern.convert_any" } as Instr];
       }
