@@ -1,10 +1,11 @@
 ---
 id: 2566
 title: "Eager-buffer generator over-consumes in array destructuring (capturing generators yield wrong side-effect counts; trailing elision steps too far)"
-status: ready
+status: blocked
+blocked_by: 2662
 sprint: 66
 created: 2026-06-21
-updated: 2026-06-21
+updated: 2026-06-26
 priority: medium
 feasibility: hard
 reasoning_effort: high
@@ -19,6 +20,17 @@ origin: "2026-06-21 split out of #2203. #2203 fixed the STANDALONE invalid-Wasm 
 ---
 
 # #2566 — Eager-buffer generator over-consumes in array destructuring
+
+> **BLOCKED on #2662 (verify-first, dev-1556b 2026-06-26).** Re-confirmed the
+> eager over-consume on current `origin/main`: `function* g(){first+=1;yield;second+=1;} let [,]=g();`
+> ⇒ `second=1` (want `0`); two-yield / empty-pattern cases also run the body to
+> completion. Root cause is #2662 — the default gc-mode **host generator backend
+> is eager-buffered** (drains the whole body into `buf:any[]` at call time, then
+> `.next()` just replays the buffer), so destructuring cannot step the iterator
+> once-per-element per §13.3.3.6. There is **no focused dstr-codegen fix** until
+> #2662's lazy/suspendable host backend lands (the native lazy machine is
+> standalone-only and bails on captured outer-scope bindings, which these cases
+> intrinsically have).
 
 ## Problem
 
