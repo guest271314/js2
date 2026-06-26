@@ -85,6 +85,50 @@ built-ins/JSON/parse/reviver-array-non-configurable-prop-delete.js
 built-ins/JSON/stringify/replacer-wrong-type.js
 ```
 
+**Progress (agent-ae565d4893a5783d7, 2026-06-26): JSON.stringify array-replacer
+PropertyList slice — SHIPPED.**
+
+Verified-first against the fresh baseline jsonl (JSON area = **55** standalone
+fails, not 44 — the gross count is higher than the residual estimate; the other
+four areas measured Date 100 / RegExp 178 / Promise 145 / super 81). Reproduced
+on current main with single-file processes through the real worker harness
+(`setExports` wired — critical: without it the array-replacer branch is silently
+disabled and *every* replacer test mis-reports as a fail).
+
+Three host-runtime (`src/runtime.ts`) bugs in the array-form replacer, all
+fixed (JSON.stringify-scoped — `_liveGet` has 5 callers, all in the JSON
+serialize/toJSON walk; `_normaliseJsonReplacer`/new `_buildJsonPropertyList`
+feed only JSON.stringify):
+- **Absent PropertyList keys emitted with a zero default** instead of dropped:
+  the live walk read each key via `_liveGet`, which invoked a module-global
+  `__sget_<key>` getter on a struct lacking that field — those return `0`/`null`,
+  not `undefined`. `JSON.stringify({a:{b:2,c:3}}, ['c','b','a'])` produced
+  `{"c":0,"b":0,"a":{"c":3,"b":2,"a":null}}`. Gated the getter on the canonical
+  `_wasmStructHasOwn` own-property check (true for every real field, so present
+  fields and accessor/getter own-props are unaffected).
+- **No de-duplication** of the PropertyList (`['key','key']` kept both) — §25.5.2.1
+  step 4.b.iv requires "append only if not already present".
+- **String/Number wrapper-object elements** (`new String`/`new Number`) were
+  ignored instead of ToString'd into keys.
+- Fixed tests: `replacer-array-order`, `replacer-array-number-object`,
+  `replacer-array-string-object` (fail→pass; `tests/issue-2671-json-replacer.test.ts`
+  8/8). 25 currently-passing JSON tests spot-checked — no regression.
+- ⏳ Remaining JSON: `replacer-array-duplicates`/`-undefined`/`-empty` (getter
+  side-effect counting + sparse/hole handling), reviver descriptor edges (ties to
+  #2668), Proxy/BigInt/circular cases — separate root causes, not in this slice.
+
+**Other areas — verified NOT independent of the deferred member-dispatch /
+string substrate (do NOT pick these before the proto-read substrate lands):**
+- **RegExp Symbol.split** (8, all "Cannot convert object to primitive value"):
+  bottoms out in `Symbol.species` construction + dynamic `exec`/`lastIndex`
+  dispatch on arbitrary objects.
+- **RegExp dotAll** (~8): root cause is lone-surrogate string representation
+  (`"\uD800"` literal reaches the host `length` import as `undefined`) — a deep,
+  broad string-backend issue, high regression risk.
+- **super** (81): prototype-chain member dispatch.
+- **Date** (100): scattered singletons; the cleanest cluster (`A4` multi-arg
+  ctor `PoisonedValueOf`, 7) needs object→f64 ToNumber on class instances.
+
 ### super (68)
 super-property access on null-proto / computed key errors, `super(...spread)`
 argument-list evaluation + getter side effects (eval order is #1551).

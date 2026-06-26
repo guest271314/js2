@@ -3213,13 +3213,7 @@ function _normaliseJsonReplacer(
   if (typeof replacer === "number" && isNaN(replacer)) return { kind: "none" };
   if (typeof replacer === "function") return { kind: "fn", fn: replacer };
   if (Array.isArray(replacer)) {
-    const keys: string[] = [];
-    for (let i = 0; i < replacer.length; i++) {
-      const v = replacer[i];
-      if (typeof v === "string") keys.push(v);
-      else if (typeof v === "number") keys.push(String(v));
-    }
-    return { kind: "list", keys };
+    return { kind: "list", keys: _buildJsonPropertyList(replacer) };
   }
   if (typeof replacer === "object" && _isWasmStruct(replacer)) {
     const exports = callbackState?.getExports();
@@ -3229,16 +3223,30 @@ function _normaliseJsonReplacer(
     // Otherwise treat as property-list array if it materialises as one.
     const asPlain = _wasmToPlain(replacer, exports);
     if (Array.isArray(asPlain)) {
-      const keys: string[] = [];
-      for (let i = 0; i < asPlain.length; i++) {
-        const v = asPlain[i];
-        if (typeof v === "string") keys.push(v);
-        else if (typeof v === "number") keys.push(String(v));
-      }
-      return { kind: "list", keys };
+      return { kind: "list", keys: _buildJsonPropertyList(asPlain) };
     }
   }
   return { kind: "none" };
+}
+
+// (#2671) Build the JSON.stringify PropertyList from a replacer array per
+// §25.5.2.1 step 4.b.iv. For each element: a String stays as-is; a Number is
+// ToString'd; a String/Number *wrapper object* (`new String`/`new Number`) is
+// ToString'd via its [[StringData]]/[[NumberData]]; anything else (undefined,
+// holes, booleans, symbols, plain objects) is ignored. Each resulting key is
+// appended only if not already present — the list is de-duplicated, and the
+// holder is read at most once per distinct key (`['key','key']` → one read).
+function _buildJsonPropertyList(arr: any[]): string[] {
+  const keys: string[] = [];
+  for (let i = 0; i < arr.length; i++) {
+    const v = arr[i];
+    let key: string | undefined;
+    if (typeof v === "string") key = v;
+    else if (typeof v === "number") key = String(v);
+    else if (v instanceof String || v instanceof Number) key = String(v);
+    if (key !== undefined && !keys.includes(key)) keys.push(key);
+  }
+  return keys;
 }
 
 function _liveIsArray(v: any, exports: Record<string, Function> | undefined): boolean {
@@ -3288,6 +3296,16 @@ function _liveGet(obj: any, key: string | number, exports: Record<string, Functi
     return undefined;
   }
   // Named struct: __sget_<key>.
+  // (#2671) Gate the read on the canonical own-property check. A module-global
+  // `__sget_<key>` getter invoked on a struct that lacks the field returns a
+  // zero-value default (`0`/`null`) rather than `undefined`. The JSON live walk
+  // reads each PropertyList key via `_liveGet`, so an absent key was serialized
+  // with a bogus default (`JSON.stringify({a:{}}, ['c','b','a'])` →
+  // `{"c":0,"b":0,...}`) instead of being dropped per SerializeJSONObject
+  // step 6.a. `_wasmStructHasOwn` returns true for every real struct field, so
+  // present fields are unaffected; only genuinely-absent keys now read as
+  // `undefined`, which SerializeJSONProperty correctly omits.
+  if (!_wasmStructHasOwn(obj, key, exports)) return undefined;
   const getter = exports[`__sget_${String(key)}`];
   if (typeof getter === "function") {
     try {

@@ -12,13 +12,57 @@ script. This directory contains:
 
 ```
 examples/native-messaging/
-  nm_js2wasm.ts          ← the TypeScript host (compiled with --target wasi)
-  README.md        ← this file
-  nm_js2wasm.json  ← Native host manifest template
-  manifest.json    ← Web extension manifest
-  nm_js2wasm.sh    ← wasmtime/wasmer wrapper the browser invokes
-  background.js    ← MV3 Web extension background `ServiceWorker` script
+  nm_wasi.ts          ← host via RAW wasi_snapshot_preview1 fd_read/fd_write
+  nm_js2wasm.ts       ← host via synchronous node:fs readSync/writeSync
+  nm_node_process.ts  ← host via async process.stdin Readable + process.stdout.write
+  nm_deno.ts          ← host via the Deno stdio surface (lands separately)
+  nm_wasi_p3.ts       ← host via the WASI Preview 3 spike (lands separately)
+  README.md           ← this file
+  nm_js2wasm.json     ← Native host manifest template
+  manifest.json       ← Web extension manifest
+  nm_js2wasm.sh       ← wasmtime/wasmer wrapper the browser invokes
+  background.js       ← MV3 Web extension background `ServiceWorker` script
 ```
+
+## Five hosts, one wire protocol — a comparison
+
+The point of this directory is a side-by-side comparison: the **same** echo host
+(read a framed message off stdin, write the framed echo to stdout) written
+against **five different host surfaces**. They all speak the identical Native
+Messaging wire protocol, so a single framed request comes back **byte-identical**
+from every one (pinned by [`tests/native-messaging-comparison.test.ts`](../../tests/native-messaging-comparison.test.ts)).
+What differs is the API each reaches for to touch stdio — and therefore the wasm
+imports it emits, whether the read loop is synchronous or event-driven, and which
+runtimes can launch the result. The original report ([loopdive/js2#389](https://github.com/loopdive/js2/issues/389))
+asked for a host that runs under a WASI runtime, "not chasing Node.js" — the raw
+`nm_wasi.ts` is that answer; the others show the same protocol expressed through
+progressively higher-level (and more Node-shaped) surfaces.
+
+| Variant                                      | Host surface                                    | Source import                                                                              | Sync or async                                                  | Emitted wasm imports                                                                       | Runs natively under                                       | Compiles to                                                         |
+| -------------------------------------------- | ----------------------------------------------- | ------------------------------------------------------------------------------------------ | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------ | --------------------------------------------------------- | ------------------------------------------------------------------- |
+| [`nm_wasi.ts`](./nm_wasi.ts)                 | Raw WASI Preview 1 syscalls over linear memory  | `wasi_snapshot_preview1` (`fd_read`/`fd_write`) + `wasm:memory` (intrinsic, lowers inline) | **sync** — blocking `fd_read`/`fd_write` loop                  | only `wasi_snapshot_preview1`                                                              | `wasmtime` / `wasmer` / `wazero`                          | standalone WASI P1 command module (owns + exports its own `memory`) |
+| [`nm_js2wasm.ts`](./nm_js2wasm.ts)           | Node synchronous `node:fs` fd IO                | `node:fs` (`readSync`/`writeSync`)                                                         | **sync** — `readSync`/`writeSync` read-until loop              | only `wasi_snapshot_preview1` (inlined); or a `node:fs` interface with `--link-node-shims` | `wasmtime` **and** unmodified under real `node`           | standalone WASI P1 command module (or a `node:fs`-linkable module)  |
+| [`nm_node_process.ts`](./nm_node_process.ts) | Node async streaming stdio                      | `process.stdin` (global) Readable + `process.stdout.write`                                 | **async** — event-driven `'data'`/`'end'`, incremental framing | only `wasi_snapshot_preview1`                                                              | `wasmtime` (drives the injected fd0 reactor / event loop) | standalone WASI P1 command module with an event loop                |
+| [`nm_deno.ts`](./nm_deno.ts)                 | Deno stdio surface (`Deno.stdin`/`Deno.stdout`) | _(lands separately)_                                                                       | sync (`readSync`/`writeSync`)                                  | _(WASI-targeted; filled in when it lands)_                                                 | Deno / a WASI runtime                                     | standalone WASI module                                              |
+| [`nm_wasi_p3.ts`](./nm_wasi_p3.ts)           | WASI Preview 3 async streams                    | _(lands separately)_                                                                       | **async** — P3 stream reads                                    | WASI Preview 3 component interfaces                                                        | a Preview-3 / component-capable runner                    | WASI Preview 3 component                                            |
+
+The bottom two rows are pre-filled descriptively; the comparison test
+**discovers** variant files on disk and picks them up automatically as they land,
+running each that lowers to a standalone WASI command module and asserting the
+byte-identical echo (the P3 component variant, which needs its own runner, is
+skipped gracefully).
+
+> **Why `nm_node_process.ts` writes a `Uint8Array`, not a string.** Its
+> `process.stdin` `'data'` chunks arrive as strings (one char per raw byte), but
+> the framed response is written via `process.stdout.write(uint8Array)` so the
+> binary 4-byte length prefix and any high body byte go out verbatim — a string
+> argument would be UTF-8 re-encoded and corrupt those bytes. It also references
+> the `process` **global** (not `import process from "node:process"`): the
+> `process.stdin` Readable prelude (#2632) deliberately leaves a user-imported
+> `process` binding alone, so the global surface is what lowers to the async
+> stream. And its `main` is intentionally **not exported** — an exported no-arg
+> `main` is both the `_start` target and the top-level call, which would register
+> the stdin listeners (and thus echo every frame) twice.
 
 ## Status: a working drop-in host
 
@@ -39,13 +83,13 @@ Compile with `--target wasi --link-node-shims`; the `node:fs` import is bound at
 link time by [`node-fs.wat`](./node-fs.wat) (which maps `readSync`/`writeSync` to
 WASI `fd_read`/`fd_write`). See [`NODE-FS-SHIM.md`](./NODE-FS-SHIM.md).
 
-| Capability                                            | Status | Detail                                                                                                                                                                                                            |
-| ----------------------------------------------------- | ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Capability                                            | Status | Detail                                                                                                                                                                                                                             |
+| ----------------------------------------------------- | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Read framed message from stdin                        | works  | `readSync(0, buf, { offset, length })` does a binary, incremental fd=0 read into the caller's buffer, returning the byte count (#2631); `length` is the remaining-to-target count so a read never over-reads into the next message |
-| Decode the 4-byte LE length prefix                    | works  | byte math on the first 4 bytes of the read header buffer                                                                                                                                                                    |
-| Route debug to stderr (fd=2)                          | works  | `writeSync(2, bytes, …)` — keeps the stdout protocol stream clean (#2631)                                                                                                                                                   |
-| Write raw bytes to stdout with no newline             | works  | `writeSync(1, bytes, off)` → `fd_write(1, …)`, partial-write loop drains the whole buffer, no `\n` (#2631)                                                                                                                  |
-| Emit the **binary 4-byte LE length prefix** on stdout | works  | the length prefix + body live in ONE buffer written with a single `writeSync` (atomic framing, #2526)                                                                                                                       |
+| Decode the 4-byte LE length prefix                    | works  | byte math on the first 4 bytes of the read header buffer                                                                                                                                                                           |
+| Route debug to stderr (fd=2)                          | works  | `writeSync(2, bytes, …)` — keeps the stdout protocol stream clean (#2631)                                                                                                                                                          |
+| Write raw bytes to stdout with no newline             | works  | `writeSync(1, bytes, off)` → `fd_write(1, …)`, partial-write loop drains the whole buffer, no `\n` (#2631)                                                                                                                         |
+| Emit the **binary 4-byte LE length prefix** on stdout | works  | the length prefix + body live in ONE buffer written with a single `writeSync` (atomic framing, #2526)                                                                                                                              |
 
 The response is framed with `writeSync(1, …)` — the 4-byte LE length prefix and
 the body bytes in one `Uint8Array`, written atomically — mirroring the Node.js
