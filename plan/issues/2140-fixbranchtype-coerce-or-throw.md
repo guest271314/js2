@@ -3,7 +3,7 @@ id: 2140
 title: "stack-balance fixBranchType: coerce-where-possible, throw on impossible (split of #1858-C1)"
 status: blocked
 blocked_by: [2167]
-sprint: 66
+sprint: 67
 created: 2026-06-12
 updated: 2026-06-24
 priority: critical

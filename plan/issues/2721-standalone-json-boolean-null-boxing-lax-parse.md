@@ -2,7 +2,7 @@
 id: 2721
 title: "Standalone JSON: booleans/null box as numbers; JSON.parse accepts malformed number/\\uXXXX grammar"
 status: ready
-sprint: 66
+sprint: 67
 created: 2026-06-26
 updated: 2026-06-26
 priority: medium

@@ -2,7 +2,7 @@
 id: 2712
 title: "Introduce a real bool ValType; retire the optional i32 boolean brand"
 status: ready
-sprint: 66
+sprint: 67
 created: 2026-06-26
 updated: 2026-06-26
 priority: high

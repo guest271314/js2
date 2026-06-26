@@ -2,7 +2,7 @@
 id: 2720
 title: "Standalone regex: /i is ASCII-only case-fold; /u and /v match per-code-unit not per-code-point"
 status: ready
-sprint: 66
+sprint: 67
 created: 2026-06-26
 updated: 2026-06-26
 priority: medium

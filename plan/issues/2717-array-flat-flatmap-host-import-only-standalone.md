@@ -2,7 +2,7 @@
 id: 2717
 title: "Array flat/flatMap are host-import-only — no standalone native arm, no ctx.standalone guard"
 status: ready
-sprint: 66
+sprint: 67
 created: 2026-06-26
 updated: 2026-06-26
 priority: high
