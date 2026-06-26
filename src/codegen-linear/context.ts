@@ -36,6 +36,16 @@ export interface LinearContext {
 /** Collection type tag for tracking variable types */
 export type CollectionKind = "Array" | "Uint8Array" | "ArrayOrUint8Array" | "Map" | "Set";
 
+/** (#2716) A `finally` block pending replay on early-exit paths out of its try. */
+export interface FinallyEntry {
+  /** The `finally` block statements to replay. */
+  block: ts.Block;
+  /** `breakStack.length` at try-entry — used to decide if a `break` replays it. */
+  breakDepth: number;
+  /** `continueStack.length` at try-entry — used to decide if a `continue` replays it. */
+  continueDepth: number;
+}
+
 /** Per-function context for linear-memory codegen */
 export interface LinearFuncContext {
   /** Function name */
@@ -56,6 +66,15 @@ export interface LinearFuncContext {
   breakStack: number[];
   /** Continue label depth stack */
   continueStack: number[];
+  /**
+   * (#2716) Stack of enclosing `try { … } finally { … }` blocks whose `finally`
+   * must run on every completion path out of the try. Normal fall-through runs
+   * the finally inline; `return` / `break` / `continue` replay the applicable
+   * finally blocks before the jump. Each entry records the break/continue
+   * nesting at try-entry so a `break`/`continue` only replays the finallys that
+   * sit BETWEEN it and its target loop/switch.
+   */
+  finallyStack: FinallyEntry[];
   /** Track which locals are collection types (varName → kind) */
   collectionTypes: Map<string, CollectionKind>;
   /** Parameters that are callback/function-typed (param name → call_indirect type index) */

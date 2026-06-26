@@ -3,7 +3,7 @@ import { ts, forEachChild } from "../ts-api.js";
 import type { MultiTypedAST, TypedAST } from "../checker/index.js";
 import type { FuncTypeDef, Instr, ValType, WasmModule } from "../ir/types.js";
 import { createEmptyModule } from "../ir/types.js";
-import type { CollectionKind, LinearContext, LinearFuncContext } from "./context.js";
+import type { CollectionKind, FinallyEntry, LinearContext, LinearFuncContext } from "./context.js";
 import { addLocal } from "./context.js";
 import type { ClassLayout } from "./layout.js";
 import { computeClassLayout } from "./layout.js";
@@ -408,6 +408,7 @@ function compileFunctionMulti(
     blockDepth: 0,
     breakStack: [],
     continueStack: [],
+    finallyStack: [],
     collectionTypes: new Map(),
     callbackParams: new Map(),
   };
@@ -488,6 +489,7 @@ function compileFunction(ctx: LinearContext, decl: ts.FunctionDeclaration): void
     blockDepth: 0,
     breakStack: [],
     continueStack: [],
+    finallyStack: [],
     collectionTypes: new Map(),
     callbackParams: new Map(),
   };
@@ -538,8 +540,97 @@ function compileFunction(ctx: LinearContext, decl: ts.FunctionDeclaration): void
   ctx.currentFunc = null;
 }
 
+/**
+ * (#2716) Does a `finally` block itself perform a `return` / `break` / `continue`
+ * (a completion that would override the pending early-exit being replayed)?
+ *
+ * Such a finally needs the spec's completion-override semantics, which the
+ * simple replay model below does not implement — so we refuse loudly (like the
+ * try/catch gate, #1838) rather than miscompile. The scan does NOT descend into
+ * nested function/class bodies (their early exits belong to a different frame)
+ * but DOES descend into nested loops/switches: a `break`/`continue` whose target
+ * is INSIDE the finally is fine, so we only flag exits not captured by a
+ * breakable/iteration construct within the finally.
+ */
+function finallyBlockHasOwnEarlyExit(block: ts.Block): boolean {
+  let found = false;
+  const visit = (node: ts.Node, inBreakable: boolean, inLoop: boolean): void => {
+    if (found) return;
+    // Don't cross into a new function/class scope — their exits are unrelated.
+    if (
+      ts.isFunctionDeclaration(node) ||
+      ts.isFunctionExpression(node) ||
+      ts.isArrowFunction(node) ||
+      ts.isClassDeclaration(node) ||
+      ts.isClassExpression(node) ||
+      ts.isMethodDeclaration(node)
+    ) {
+      return;
+    }
+    if (ts.isReturnStatement(node)) {
+      found = true;
+      return;
+    }
+    if (ts.isBreakStatement(node) && !inBreakable) {
+      found = true;
+      return;
+    }
+    if (ts.isContinueStatement(node) && !inLoop) {
+      found = true;
+      return;
+    }
+    const isLoop =
+      ts.isForStatement(node) ||
+      ts.isForOfStatement(node) ||
+      ts.isForInStatement(node) ||
+      ts.isWhileStatement(node) ||
+      ts.isDoStatement(node);
+    const isBreakable = isLoop || ts.isSwitchStatement(node);
+    ts.forEachChild(node, (child) => visit(child, inBreakable || isBreakable, inLoop || isLoop));
+  };
+  for (const s of block.statements) visit(s, false, false);
+  return found;
+}
+
+/**
+ * (#2716) Replay the given `finally` blocks (already ordered innermost-first)
+ * inline at the current program point, ahead of an early-exit jump. localMap is
+ * snapshotted/restored around each replay so any block-scoped declaration in the
+ * finally does not leak its name binding into the surrounding code (the backing
+ * locals stay allocated; only the name→index map is scoped).
+ */
+function replayFinallyBlocks(ctx: LinearContext, fctx: LinearFuncContext, entries: FinallyEntry[]): void {
+  for (const entry of entries) {
+    const savedMap = new Map(fctx.localMap);
+    for (const s of entry.block.statements) compileStatement(ctx, fctx, s);
+    fctx.localMap = savedMap;
+  }
+}
+
 function compileStatement(ctx: LinearContext, fctx: LinearFuncContext, stmt: ts.Statement): void {
   if (ts.isReturnStatement(stmt)) {
+    // (#2716) Run every enclosing finally before leaving the function. The
+    // return value is already on the stack; the finally blocks are side-effect
+    // statements (a finally with its own early-exit is refused at the try site),
+    // so they don't disturb it. Innermost finally first.
+    if (fctx.finallyStack.length > 0 && stmt.expression) {
+      // Evaluate the return value into a temp, run finallys, then reload it, so a
+      // finally that reads/writes globals can't clobber the in-flight value.
+      const rt = fctx.returnType ?? { kind: "f64" };
+      const tmp = fctx.params.length + fctx.locals.length;
+      fctx.locals.push({ name: `__retval_${tmp}`, type: rt });
+      compileExpression(ctx, fctx, stmt.expression);
+      fctx.body.push({ op: "local.set", index: tmp });
+      replayFinallyBlocks(ctx, fctx, [...fctx.finallyStack].reverse());
+      fctx.body.push({ op: "local.get", index: tmp });
+      fctx.body.push({ op: "return" });
+      return;
+    }
+    if (fctx.finallyStack.length > 0) {
+      replayFinallyBlocks(ctx, fctx, [...fctx.finallyStack].reverse());
+      fctx.body.push({ op: "return" });
+      return;
+    }
     if (stmt.expression) {
       compileExpression(ctx, fctx, stmt.expression);
     }
@@ -738,15 +829,39 @@ function compileStatement(ctx: LinearContext, fctx: LinearFuncContext, stmt: ts.
           "would silently drop the catch handler (#1838). A Wasm-EH try/catch lowering is " +
           "the planned fix; a bare `try { ... }` with only `finally` is supported.",
       );
-    } else {
-      // try { ... } finally { ... } — no handler to lose; inline both blocks.
+    } else if (stmt.finallyBlock) {
+      // try { ... } finally { ... } — no catch to lose. (#2716) The finally must
+      // run on EVERY completion path out of the try, not just fall-through: an
+      // early `return` / `break` / `continue` in the try body used to inline
+      // straight to the exit and SKIP the trailing finally. We register the
+      // finally on fctx.finallyStack so those exits replay it before jumping,
+      // and still emit it inline for the normal fall-through path.
+      if (finallyBlockHasOwnEarlyExit(stmt.finallyBlock)) {
+        // A finally that itself returns/breaks/continues needs completion-
+        // override semantics the replay model doesn't implement — refuse loudly
+        // (like try/catch, #1838) rather than miscompile.
+        throw new Error(
+          "try/finally where the `finally` block itself performs a return/break/continue is not " +
+            "yet supported by the linear/standalone backend (#2716) — it requires completion-override " +
+            "semantics; a `finally` with only side effects is supported.",
+        );
+      }
+      const entry: FinallyEntry = {
+        block: stmt.finallyBlock,
+        breakDepth: fctx.breakStack.length,
+        continueDepth: fctx.continueStack.length,
+      };
+      fctx.finallyStack.push(entry);
       for (const s of stmt.tryBlock.statements) {
         compileStatement(ctx, fctx, s);
       }
-      if (stmt.finallyBlock) {
-        for (const s of stmt.finallyBlock.statements) {
-          compileStatement(ctx, fctx, s);
-        }
+      fctx.finallyStack.pop();
+      // Normal fall-through completion: run finally inline.
+      replayFinallyBlocks(ctx, fctx, [entry]);
+    } else {
+      // Bare `try { ... }` with neither catch nor finally — inline the body.
+      for (const s of stmt.tryBlock.statements) {
+        compileStatement(ctx, fctx, s);
       }
     }
   } else if (ts.isExpressionStatement(stmt)) {
@@ -778,6 +893,19 @@ function compileStatement(ctx: LinearContext, fctx: LinearFuncContext, stmt: ts.
           ...nodeLoc(stmt),
         });
       } else {
+        // (#2716) Replay any finally blocks that sit BETWEEN this break/continue
+        // and its target. A finally is "inside" the target iff it was entered
+        // when the break/continue nesting was already at the current depth (i.e.
+        // inside the innermost loop/switch the jump exits). Innermost first.
+        // Replaying inline keeps blockDepth balanced, so the br depth below is
+        // unchanged.
+        const targetDepth = stack.length;
+        const pending = fctx.finallyStack.filter((e) =>
+          isBreak ? e.breakDepth === targetDepth : e.continueDepth === targetDepth,
+        );
+        if (pending.length > 0) {
+          replayFinallyBlocks(ctx, fctx, [...pending].reverse());
+        }
         fctx.body.push({ op: "br", depth: fctx.blockDepth - stack[stack.length - 1]! - 1 });
       }
     }
@@ -4418,6 +4546,7 @@ function compileClassCtor(
     blockDepth: 0,
     breakStack: [],
     continueStack: [],
+    finallyStack: [],
     collectionTypes: new Map(),
     callbackParams: new Map(),
   };
@@ -4512,6 +4641,7 @@ function compileClassMethod(
     blockDepth: 0,
     breakStack: [],
     continueStack: [],
+    finallyStack: [],
     collectionTypes: new Map(),
     callbackParams: new Map(),
   };
@@ -4580,6 +4710,7 @@ function compileClassGetter(
     blockDepth: 0,
     breakStack: [],
     continueStack: [],
+    finallyStack: [],
     collectionTypes: new Map(),
     callbackParams: new Map(),
   };
@@ -5228,6 +5359,7 @@ function compileArrowFunctionArg(
     blockDepth: 0,
     breakStack: [],
     continueStack: [],
+    finallyStack: [],
     collectionTypes: new Map(),
     callbackParams: new Map(),
   };

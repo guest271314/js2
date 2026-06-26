@@ -8760,6 +8760,32 @@ function compileArrayFlat(
   propAccess: ts.PropertyAccessExpression,
   callExpr: ts.CallExpression,
 ): ValType | null {
+  // (#2717) `flat` has no Wasm-native arm — it delegates to the host
+  // `__array_flat` import. Under `--target standalone`/`wasi` there is no JS host
+  // to satisfy that import, so emitting it produces a module that traps at
+  // instantiation. Per the #2711 fail-loud policy, refuse loudly instead of
+  // emitting an unsatisfiable import. A native recursive-flatten arm (depth +
+  // runtime IsArray + dynamic result-build over heterogeneous WasmGC element
+  // types) is a separate, larger follow-up. Host/gc mode is unchanged.
+  if (ctx.standalone || ctx.wasi) {
+    reportError(
+      ctx,
+      callExpr,
+      `Codegen error: Array.prototype.flat() is not yet supported in --target standalone/wasi ` +
+        `(#2717) — there is no Wasm-native flatten arm and emitting the host import __array_flat ` +
+        `would produce a module that traps at instantiation. Recompile without --target ` +
+        `standalone, or avoid flat() in standalone/WASI code.`,
+    );
+    // Return a non-null type (matching the host externref result) + `unreachable`
+    // so the #1919 speculative wrapper COMMITS instead of rolling back: a rolled-
+    // back null would discard the diagnostic (truncate `ctx.errors`) and emit a
+    // silent default, so the standalone build would compile to a wrong value
+    // (e.g. `flat().length === 0`) instead of failing loud. The `unreachable`
+    // keeps the body well-typed; the recorded error fails the compile.
+    fctx.body.push({ op: "unreachable" } as Instr);
+    return { kind: "externref" };
+  }
+
   // __array_flat(receiver: externref, depth: externref) -> externref
   const flatIdx = ensureLateImport(
     ctx,
@@ -8803,6 +8829,27 @@ function compileArrayFlatMap(
   callExpr: ts.CallExpression,
 ): ValType | null {
   if (callExpr.arguments.length < 1) return null; // flatMap requires a callback
+
+  // (#2717) `flatMap` has no Wasm-native arm — it delegates to the host
+  // `__array_flatMap` import, which is unsatisfiable under `--target
+  // standalone`/`wasi` (no JS host) and traps at instantiation. Per the #2711
+  // fail-loud policy, refuse loudly instead of emitting the unsatisfiable import.
+  // A native arm (callback invocation + depth-1 flatten of scalar-or-array
+  // returns) is a separate follow-up. Host/gc mode is unchanged.
+  if (ctx.standalone || ctx.wasi) {
+    reportError(
+      ctx,
+      callExpr,
+      `Codegen error: Array.prototype.flatMap() is not yet supported in --target standalone/wasi ` +
+        `(#2717) — there is no Wasm-native arm and emitting the host import __array_flatMap ` +
+        `would produce a module that traps at instantiation. Recompile without --target ` +
+        `standalone, or avoid flatMap() in standalone/WASI code.`,
+    );
+    // Non-null type + `unreachable` so the #1919 speculative wrapper commits and
+    // the diagnostic is not rolled back into a silent default (see compileArrayFlat).
+    fctx.body.push({ op: "unreachable" } as Instr);
+    return { kind: "externref" };
+  }
 
   // __array_flatMap(receiver: externref, fn: externref, thisArg: externref) -> externref
   const flatMapIdx = ensureLateImport(

@@ -1,11 +1,12 @@
 ---
 id: 2706
 title: "for-in enumeration order: integer-index keys ascending, insertion-order strings, prototype-chain dedup"
-status: ready
+status: blocked
+assignee: ttraenkler/Esch
 sprint: 67
 goal: test262-conformance
 feasibility: medium
-depends_on: []
+depends_on: [2731]
 priority: medium
 es_edition: ES5
 language_feature: for-in
@@ -59,3 +60,50 @@ All 5 listed tests flip from fail to pass. No regression in `statements/for-in/`
 - Keep separate from #2705 (for-in lexical scoping — different code path: enumeration key generation vs head/body scoping).
 - The ordering requirement is "implementation-defined for string keys" per strict spec reading, but test262 validates the de-facto standard: integer-index ascending, then insertion order, then prototype chain without duplicates. Conforming implementations all follow this pattern.
 - If the `__for_in_keys` helper is shared between `for-in` and `for-of` on objects, changes here must not regress `for-of` enumeration.
+
+## Findings (esch, 2026-06-26) — TWO distinct root causes, only one is a runtime.ts fix
+
+Verify-first against current `origin/main` shows the 5 failing tests are gated by
+**two independent bugs**, not one:
+
+### Bug 1 — #1830 well-known-symbol-id ↔ integer-index collision (FIXED here)
+
+`src/runtime.ts` `_safeGet` / `_safeSet` remapped a numeric key `1..15` on a
+WasmGC struct to a well-known-symbol slot via `_symbolIdToKeys`
+(`5 → @@species`, `7 → @@match`, …). So `o[5]=55` on a typed struct stored under
+`Symbol.species` + a `"@@species"` sidecar string: `o[5]` round-tripped `55` but
+`5 in o` was `false`, `Object.keys` dropped `"5"`, and for-in **leaked
+`"@@species"`**. **Verified premise:** in host mode (the only mode `runtime.ts`
+runs in — standalone uses `object-runtime.ts`) the compiler boxes every
+well-known-symbol access into a **real JS Symbol** via `__box_symbol`
+(instrumented: `o[Symbol.species]=9` arrives at `_safeSet` as
+`typeof key === "symbol"`, never a number). So a numeric key reaching these
+host functions is **always** a genuine integer index — the remap was pure cruft.
+
+**Fix applied:** drop the numeric `1..15 → _symbolIdToKeys` remap in `_safeGet`
+and `_safeSet`; numeric keys fall through to the sidecar (stored under `"5"`),
+so `in`/for-in/`_orderOwnKeysSpec` see `"5"`. Real-symbol keys keep their
+`typeof key === "symbol"` routing. **Regression: for-in suite 94→94 PASS, zero
+deltas; `o[5]/o[7]` now enumerate correctly + ordered.**
+
+### Bug 2 — delete-then-re-add never re-appears (PRE-EXISTING, NOT a runtime.ts fix, blocks all 5)
+
+A property that is **deleted then re-assigned** does not re-appear in for-in:
+`{a,b,c}; delete o.a; delete o.c; o.a=9` enumerates `b` only (expected `b,a`).
+- **Pre-existing** — reproduces identically on `origin/main` WITHOUT the Bug-1 fix.
+- **Independent of #1830** — occurs with pure string keys (no symbol collision).
+- **Root cause (instrumented):** for a native `$Object` (`const o: any = {…}`),
+  property **writes and for-in enumeration are Wasm-native** (`object-runtime.ts`),
+  but `delete` routes through the **host `__delete_property` import**, which records
+  a host-side tombstone in `_wasmStructDeletedKeys` (disconnected from the native
+  `$Object`'s own key storage). A re-add is a native Wasm write that never clears
+  the host tombstone, so the key stays suppressed. (The only host import the repro
+  requests is `__delete_property`; assignments emit no `__extern_set`/`_safeSet`.)
+
+**Consequence:** the Bug-1 fix alone closes **0 of the 5** listed tests — every
+one is gated by Bug 2 (e.g. `order-simple-object` improves from fully-wrong to
+`0,1,2,p2,p4` missing only the re-added `p1`). Bug 2 is a host/wasm-boundary
+representation issue (`$Object` delete-tombstone vs native storage), far larger
+and riskier than the runtime.ts symbol-remap fix, and warrants its own issue +
+architect spec. **This contradicts the original "all 5 hinge on #1830 / it's a
+runtime.ts fix" framing** — #1830 is necessary but not sufficient.
