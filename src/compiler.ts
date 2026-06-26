@@ -1161,6 +1161,11 @@ export function compileSourceSync(
     1100, // "Invalid use of 'X' in strict mode" — sloppy-mode JS allows eval/arguments (#331)
     1121, // "Octal literals are not allowed in strict mode" — valid sloppy-mode JS
     1489, // "Decimals with leading zeros are not allowed" — valid sloppy-mode JS octal literals
+    // #2708 — legacy string-literal escapes (Annex B §12.9.4) are valid in sloppy
+    // mode. Don't let the TS scanner errors block compilation; node-checks.ts
+    // re-raises them as a hard early error in strict mode (mirrors 1121/1489).
+    1487, // "Octal escape sequences are not allowed." — sloppy-mode legacy octal in string
+    1488, // "Escape sequence '\\8'/'\\9' is not allowed." — sloppy-mode NonOctalDecimalEscape
     // #2631/#1768 — "Signature declarations can only be used in TypeScript files."
     // Fires under checkJs at the import site when a `.js` file imports a value
     // whose synthetic `.d.ts` typing is a callable/overloaded declaration (e.g.

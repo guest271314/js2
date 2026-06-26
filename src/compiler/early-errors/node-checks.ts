@@ -49,6 +49,32 @@ import { checkDuplicateLabelsInBlock } from "./labels.js";
 import { checkTDZInStatements } from "./tdz.js";
 
 /**
+ * #2708 — detect a legacy escape sequence in a string literal's RAW source text.
+ *
+ * Returns true when `raw` contains a LegacyOctalEscapeSequence (`\1`–`\7`, or
+ * `\0` immediately followed by a decimal digit) or a NonOctalDecimalEscapeSequence
+ * (`\8`, `\9`) — the escapes ES Annex B §12.9.4 permits only in non-strict code.
+ * The lone `\0` NUL escape (not followed by a decimal digit) is intentionally NOT
+ * flagged. Consecutive backslashes are handled so an escaped backslash (`\\8`)
+ * is not misread as a legacy escape.
+ */
+function hasLegacyStringEscape(raw: string): boolean {
+  for (let i = 0; i < raw.length; i++) {
+    if (raw[i] !== "\\") continue;
+    const next = raw[i + 1];
+    // \1–\9 : LegacyOctal (1–7) or NonOctalDecimal (8,9)
+    if (next >= "1" && next <= "9") return true;
+    // \0 followed by a decimal digit → LegacyOctalEscapeSequence (e.g. \05, \012)
+    if (next === "0") {
+      const after = raw[i + 2];
+      if (after >= "0" && after <= "9") return true;
+    }
+    i++; // consume the escaped character (so "\\8" skips the second backslash)
+  }
+  return false;
+}
+
+/**
  * Run all per-node early-error checks rooted at `node`, recursing into its
  * descendants. Equivalent to the original detectEarlyErrors `visit` closure.
  */
@@ -352,6 +378,19 @@ export function runNodeChecks(ctx: EarlyErrorContext, node: ts.Node): void {
       if (/[89]/.test(text)) {
         ctx.addError(node, "Decimals with leading zeros are not allowed in strict mode");
       }
+    }
+  }
+
+  // #2708 — Legacy string-literal escapes are a SyntaxError in strict mode
+  // (ES Annex B §12.9.4 only enables them in non-strict code). The TS scanner's
+  // 1487/1488 errors are downgraded in compiler.ts so sloppy code compiles, so we
+  // re-raise them here for strict code — mirroring the numeric-octal check above.
+  //   • LegacyOctalEscapeSequence:    \1–\7, \0 followed by an octal/decimal digit
+  //   • NonOctalDecimalEscapeSequence: \8 \9
+  // The lone `\0` NUL escape (not followed by a decimal digit) stays legal.
+  if (ts.isStringLiteral(node) && isStrictMode(node)) {
+    if (hasLegacyStringEscape(node.getText(ctx.sourceFile))) {
+      ctx.addError(node, "Octal escape sequences are not allowed in strict mode");
     }
   }
 
