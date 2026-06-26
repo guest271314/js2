@@ -1,7 +1,8 @@
 ---
 id: 2704
 title: "arguments.length off-by-N with trailing comma in async-gen/static methods; sloppy-mode arguments binding missing"
-status: ready
+status: in-progress
+assignee: ttraenkler/dev3
 sprint: 67
 goal: test262-conformance
 feasibility: medium
