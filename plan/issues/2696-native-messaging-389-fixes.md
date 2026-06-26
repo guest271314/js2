@@ -58,4 +58,41 @@ precisely to identify these, but `collectExternDeclarations` did not consult the
 the existing node:fs skip. After the fix both the direct `.ts` and a tsc/bun-transpiled
 `.js` (types stripped, ESM imports intact) compile with ZERO `env.*` imports — only
 `wasi_snapshot_preview1` — and echo a framed message byte-exactly under wasmtime.
-</content>
+
+### Bug 2 — node:fs / node:process flags
+**Point 1 (#2655 direct path) — CONFIRMED working, not a bug.** `nm_js2wasm.ts
+--target wasi` ALONE already emits a self-contained module importing only
+`wasi_snapshot_preview1` (the `node:fs` readSync/writeSync lower inline) and echoes
+byte-exactly under wasmtime. The reporter's `unknown import: node:fs::readSync`
+came from adding `--link-node-shims`, which is the **modular-linking variant**: it
+makes the module *import* a stable `node:fs` interface that must be linked against
+`node-fs.wasm` (or a JS host) BEFORE running. Running it under bare wasmtime with
+no link step is expected to fail — not a compiler bug. **Fix:** corrected the
+README to lead with `--target wasi` alone as the runnable standalone build, and
+clearly mark `--link-node-shims` as a link-step-required variant (the example
+header `nm_js2wasm.ts` was already correct; `smoke-test.sh` already links
+node-fs.wasm, so it stays).
+
+**Point 3 (`nm_node_process.ts` leaks) — REPRODUCED, fixed.** `--target wasi`
+emitted dropped `env.*` imports: the four #2632 fd0 stdin-reactor intrinsics
+(`__wasiStdinReadByte/Available/Eof/SetReader`) and `env.global_String`. Despite
+the warnings the module ALREADY echoed correctly under wasmtime — the #2632 reactor
+drives `poll_oneoff`/`fd_read` natively, so `process.stdin` Readable IS standalone
+WASI, NOT host-dependent. The leaks were spurious:
+- The four `__wasiStdin*` are js2wasm intrinsics declared as `declare function`
+  stubs by the injected `src/process-stdin-prelude.ts`; every call site is
+  inline-lowered by `tryWasiTimerCall` (calls.ts) under `ctx.wasi`, but
+  `collectExternDeclarations` still re-registered the stubs as `env.*` host
+  imports (same root cause as bug 1). **Fix:** skip them via
+  `WASI_STDIN_REACTOR_INTRINSICS` under `ctx.wasi`.
+- `env.global_String` comes from the `AMBIENT_BUILTIN_CTORS` loop registering
+  `global_<Ctor>` when a builtin is used as a bare value — `String.fromCharCode`
+  in the prelude makes `String` a value-ref. Under `ctx.strictNoHostImports`
+  (auto-on for wasi/standalone) that import is ALWAYS dropped and, because the
+  drop leaves no funcMap entry, the `declaredGlobals.set` never fires either — the
+  registration is a pure no-op except the warning. **Fix:** skip the
+  `AMBIENT_BUILTIN_CTORS` registration under `ctx.strictNoHostImports`.
+
+After both fixes `nm_node_process.ts --target wasi` compiles with ZERO warnings,
+imports only `wasi_snapshot_preview1`, and echoes byte-exactly under wasmtime — a
+genuine standalone-WASI async-stream variant.
