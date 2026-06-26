@@ -5435,9 +5435,119 @@ function emitArrayForIn(
   });
 }
 
+/**
+ * (#2705) Is the for-in receiver statically the `null`/`undefined`/`void`
+ * literal? §14.7.5.6 ForIn/OfHeadEvaluation step 7 yields zero iterations for a
+ * nullish receiver. Detect the literal forms syntactically (the checker can
+ * widen the receiver to `any`, so a type-based test is unreliable). Conservative
+ * by design — a runtime-nullish receiver (`for (k in maybeNull)`) is NOT covered
+ * here and would still enumerate; only the statically-provable literal nullish
+ * forms short-circuit.
+ */
+function isStaticNullishReceiver(expr: ts.Expression): boolean {
+  if (expr.kind === ts.SyntaxKind.NullKeyword) return true;
+  if (ts.isIdentifier(expr) && expr.text === "undefined") return true;
+  if (ts.isVoidExpression(expr)) return true;
+  if (ts.isParenthesizedExpression(expr)) return isStaticNullishReceiver(expr.expression);
+  return false;
+}
+
+/**
+ * (#2705) Which of a `for (let/const <head> in …)` head's bound names are
+ * referenced from a nested closure anywhere in the receiver, the ForDeclaration
+ * (binding-pattern default initializers), or the body? Such names must be boxed
+ * into a ref cell so the closure captures the binding by reference — for the
+ * head TDZ environment (a closure built in the receiver captures the
+ * never-initialized binding → `typeof x` throws) and the per-iteration
+ * environment. Mirrors `findHeadBindingsCapturedByClosures` (the C-style-loop
+ * analogue) but walks the for-in's receiver/ForDeclaration/body.
+ */
+function collectForInHeadClosureCaptures(stmt: ts.ForInStatement, headNames: ReadonlySet<string>): Set<string> {
+  const captured = new Set<string>();
+  if (headNames.size === 0) return captured;
+  function visit(node: ts.Node | undefined): void {
+    if (!node) return;
+    if (
+      ts.isArrowFunction(node) ||
+      ts.isFunctionExpression(node) ||
+      ts.isFunctionDeclaration(node) ||
+      ts.isMethodDeclaration(node) ||
+      ts.isGetAccessorDeclaration(node) ||
+      ts.isSetAccessorDeclaration(node) ||
+      ts.isClassDeclaration(node) ||
+      ts.isClassExpression(node)
+    ) {
+      const refs = new Set<string>();
+      collectReferencedIdentifiers(node, refs);
+      for (const n of headNames) if (refs.has(n)) captured.add(n);
+      return; // collectReferencedIdentifiers already walked nested closures.
+    }
+    forEachChild(node, visit);
+  }
+  visit(stmt.expression); // receiver (head TDZ scope)
+  visit(stmt.initializer); // ForDeclaration — binding-pattern default initializers
+  visit(stmt.statement); // body
+  return captured;
+}
+
+/**
+ * (#2705) Saved outer-scope binding for a for-in head name, so the head's
+ * lexical environment can be torn down and the outer binding restored after the
+ * loop (no leak — `head-bound` names must not escape per §14.7.5.7).
+ */
+interface ForInHeadSaved {
+  name: string;
+  localMap: number | undefined;
+  tdz: number | undefined;
+  boxed: { refCellTypeIdx: number; valType: ValType } | undefined;
+  boxedTdz: { localIdx: number; refCellTypeIdx: number } | undefined;
+  isConst: boolean;
+}
+
 export function compileForInStatement(ctx: CodegenContext, fctx: FunctionContext, stmt: ts.ForInStatement): void {
   // Get the loop variable name
   const init = stmt.initializer;
+  // (#2705) Unwrap a CoverParenthesizedExpression head — `for ((x) in obj)` /
+  // `for ((a.b) in obj)`. The parenthesized form parses as a
+  // ParenthesizedExpression wrapping the real LHS target. A
+  // VariableDeclarationList is never parenthesized, so only the expression
+  // branches dispatch on `head`.
+  let head: ts.Node = init;
+  while (ts.isParenthesizedExpression(head)) head = head.expression;
+  // (#2705) A `let`/`const` head needs a per-iteration lexical environment with
+  // a TDZ binding (§14.7.5.6/.7). A `var` head reuses the function-scope slot
+  // the var-hoister already allocated. The non-strict `for (let in obj)` legacy
+  // form (an *empty* VariableDeclarationList — see below) is an identifier
+  // reference, not a ForDeclaration, so it is NOT treated as lexical.
+  const isLexicalHead =
+    ts.isVariableDeclarationList(init) &&
+    init.declarations.length > 0 &&
+    !!(init.flags & (ts.NodeFlags.Let | ts.NodeFlags.Const));
+
+  // (#2705 Slice B) Snapshot the OUTER binding of each head bound name BEFORE the
+  // dispatch below allocates the head's own local — for a plain-identifier let
+  // head the dispatch does `localMap.set(x, keyLocal)`, overwriting the true
+  // outer slot, so capturing the save afterwards would restore to `keyLocal`
+  // (the leaked head binding) instead of the enclosing scope's `x`. The head
+  // names come straight from the ForDeclaration. Used to install the head TDZ
+  // env around the receiver compile (host path) and to restore the outer
+  // bindings after the loop so head names do not leak (§14.7.5.7).
+  const headNames: string[] = [];
+  const headSaved: ForInHeadSaved[] = [];
+  if (isLexicalHead) {
+    const headDecl = init.declarations[0]!;
+    for (const n of collectPatternBindingNames(headDecl.name)) headNames.push(n);
+    for (const name of headNames) {
+      headSaved.push({
+        name,
+        localMap: fctx.localMap.get(name),
+        tdz: fctx.tdzFlagLocals?.get(name),
+        boxed: fctx.boxedCaptures?.get(name),
+        boxedTdz: fctx.boxedTdzFlags?.get(name),
+        isConst: fctx.constBindings?.has(name) ?? false,
+      });
+    }
+  }
   let varName: string;
   let keyLocal: number;
   // For non-identifier heads (binding pattern / member-expression target) the
@@ -5446,27 +5556,51 @@ export function compileForInStatement(ctx: CodegenContext, fctx: FunctionContext
   let bindingPattern: ts.ObjectBindingPattern | ts.ArrayBindingPattern | null = null;
   let memberTarget: ts.PropertyAccessExpression | ts.ElementAccessExpression | null = null;
   if (ts.isVariableDeclarationList(init)) {
-    const decl = init.declarations[0]!;
-    if (!ts.isIdentifier(decl.name)) {
-      // Destructuring binding head: `for (var/let [a] in obj)`. The key is a
-      // string; per spec the binding pattern destructures that string value.
-      bindingPattern = decl.name;
-      varName = `__forin_key_${fctx.locals.length}`;
-      keyLocal = allocLocal(fctx, varName, { kind: "externref" });
+    if (init.declarations.length === 0) {
+      // (#2705) `for (let in obj)` in non-strict mode: TS parses the head as a
+      // VariableDeclarationList with ZERO declarations (the `let` token is
+      // consumed as the list keyword and the identifier text is lost). Per the
+      // grammar's `[lookahead ∉ { let [ }]` restriction, a `let` not followed by
+      // `[` is the *identifier* `let`. `var`/`const` cannot produce an empty
+      // list (both are reserved as identifiers), so the name is unambiguously
+      // "let" — a real, writable binding visible after the loop.
+      varName = "let";
+      const existingLocal = fctx.localMap.get(varName);
+      keyLocal = existingLocal !== undefined ? existingLocal : allocLocal(fctx, varName, { kind: "externref" });
     } else {
-      varName = decl.name.text;
-      // Allocate a local for the loop variable (string / externref)
-      keyLocal = allocLocal(fctx, varName, { kind: "externref" });
+      const decl = init.declarations[0]!;
+      if (!ts.isIdentifier(decl.name)) {
+        // Destructuring binding head: `for (var/let [a] in obj)`. The key is a
+        // string; per spec the binding pattern destructures that string value.
+        bindingPattern = decl.name;
+        varName = `__forin_key_${fctx.locals.length}`;
+        keyLocal = allocLocal(fctx, varName, { kind: "externref" });
+      } else {
+        varName = decl.name.text;
+        if (!isLexicalHead) {
+          // (#2705) `var` head: reuse the function-scope slot the var-hoister
+          // already allocated so the body's `var x` re-declaration and the
+          // post-loop read all resolve to the SAME slot. Allocating a fresh
+          // local here shadowed the hoisted one (writes never reached the body's
+          // view of `x`).
+          const existingLocal = fctx.localMap.get(varName);
+          keyLocal = existingLocal !== undefined ? existingLocal : allocLocal(fctx, varName, { kind: "externref" });
+        } else {
+          // let/const head: fresh block-scoped local (Slice B refines this into
+          // a per-iteration ref cell + TDZ flag).
+          keyLocal = allocLocal(fctx, varName, { kind: "externref" });
+        }
+      }
     }
-  } else if (ts.isPropertyAccessExpression(init) || ts.isElementAccessExpression(init)) {
+  } else if (ts.isPropertyAccessExpression(head) || ts.isElementAccessExpression(head)) {
     // Member-expression target: `for (x.y in obj)` / `for (x[k] in obj)`.
     // Per spec the enumerated key is assigned to the reference each iteration.
-    memberTarget = init;
+    memberTarget = head;
     varName = `__forin_key_${fctx.locals.length}`;
     keyLocal = allocLocal(fctx, varName, { kind: "externref" });
-  } else if (ts.isIdentifier(init)) {
+  } else if (ts.isIdentifier(head)) {
     // Bare identifier: `for (x in obj)` — look up existing local
-    varName = init.text;
+    varName = head.text;
     const existingLocal = fctx.localMap.get(varName);
     if (existingLocal !== undefined) {
       keyLocal = existingLocal;
@@ -5475,12 +5609,12 @@ export function compileForInStatement(ctx: CodegenContext, fctx: FunctionContext
       keyLocal = allocLocal(fctx, varName, { kind: "externref" });
     }
   } else if (
-    ts.isBinaryExpression(init) &&
-    init.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
-    ts.isIdentifier(init.left)
+    ts.isBinaryExpression(head) &&
+    head.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+    ts.isIdentifier(head.left)
   ) {
     // Assignment expression: `for (x = defaultVal in obj)` — compile assignment, use the target
-    varName = init.left.text;
+    varName = head.left.text;
     const existingLocal = fctx.localMap.get(varName);
     if (existingLocal !== undefined) {
       keyLocal = existingLocal;
@@ -5488,10 +5622,21 @@ export function compileForInStatement(ctx: CodegenContext, fctx: FunctionContext
       keyLocal = allocLocal(fctx, varName, { kind: "externref" });
     }
     // Compile the initializer assignment (default value)
-    compileExpression(ctx, fctx, init.right);
+    compileExpression(ctx, fctx, head.right);
     fctx.body.push({ op: "local.set", index: keyLocal });
   } else {
     reportError(ctx, stmt, "for-in requires a variable declaration or identifier");
+    return;
+  }
+
+  // (#2705) §14.7.5.6 step 7: a `null`/`undefined` receiver yields zero
+  // iterations. When the receiver is statically the `null`/`undefined`/`void`
+  // literal, emit NO loop — the body is never reached (so a body that would
+  // compile to invalid Wasm, e.g. a lexical-decl-only statement after ASI, is
+  // correctly skipped) and the enumeration primitives are never invoked over a
+  // null ref (which trapped / produced invalid Wasm before). `var`-hoisting
+  // already ran in the function pre-pass, so nothing is lost by the early exit.
+  if (isStaticNullishReceiver(stmt.expression)) {
     return;
   }
 
@@ -5577,10 +5722,90 @@ export function compileForInStatement(ctx: CodegenContext, fctx: FunctionContext
   const objLocal = allocLocal(fctx, `__forin_obj_${fctx.locals.length}`, {
     kind: "externref",
   });
+
+  // (#2705 Slice B) For a `let`/`const` head, §14.7.5.6 ForIn/OfHeadEvaluation
+  // step 2 puts the head's bound names in a fresh TDZ environment while the
+  // RECEIVER is evaluated — so a read of a head name inside the receiver (direct
+  // `{ x }`, or via a closure built there) throws ReferenceError / `typeof`
+  // throws. We install that TDZ env now, compile the receiver, then tear it down
+  // (step 4) before the per-iteration body binds the names to the key. The outer
+  // binding was snapshot into `headSaved` (BEFORE the dispatch) and is restored
+  // after the loop so the head names do not leak.
+  if (isLexicalHead) {
+    const captured = collectForInHeadClosureCaptures(stmt, new Set(headNames));
+    for (const name of headNames) {
+      if (captured.has(name)) {
+        // Closure-captured head name → box the binding + its TDZ flag so the
+        // closure captures them by reference. The receiver-env cell is NEVER
+        // initialized (TDZ flag stays 0), so a closure built in the receiver
+        // observes a permanent TDZ.
+        const valCellTypeIdx = getOrRegisterRefCellType(ctx, { kind: "externref" });
+        const boxLocal = allocLocal(fctx, `__forin_hbox_${name}_${fctx.locals.length}`, {
+          kind: "ref_null",
+          typeIdx: valCellTypeIdx,
+        });
+        fctx.body.push({ op: "ref.null.extern" } as Instr); // placeholder value
+        fctx.body.push({ op: "struct.new", typeIdx: valCellTypeIdx });
+        fctx.body.push({ op: "local.set", index: boxLocal });
+        const flagCellTypeIdx = getOrRegisterRefCellType(ctx, { kind: "i32" });
+        const flagBoxLocal = allocLocal(fctx, `__forin_hflag_${name}_${fctx.locals.length}`, {
+          kind: "ref_null",
+          typeIdx: flagCellTypeIdx,
+        });
+        fctx.body.push({ op: "i32.const", value: 0 }); // uninitialized
+        fctx.body.push({ op: "struct.new", typeIdx: flagCellTypeIdx });
+        fctx.body.push({ op: "local.set", index: flagBoxLocal });
+        fctx.localMap.set(name, boxLocal);
+        if (!fctx.boxedCaptures) fctx.boxedCaptures = new Map();
+        fctx.boxedCaptures.set(name, { refCellTypeIdx: valCellTypeIdx, valType: { kind: "externref" } });
+        if (!fctx.tdzFlagLocals) fctx.tdzFlagLocals = new Map();
+        fctx.tdzFlagLocals.set(name, flagBoxLocal);
+        if (!fctx.boxedTdzFlags) fctx.boxedTdzFlags = new Map();
+        fctx.boxedTdzFlags.set(name, { localIdx: flagBoxLocal, refCellTypeIdx: flagCellTypeIdx });
+      } else {
+        // Not captured — a plain local + a plain (i32, zero-init = uninitialized)
+        // TDZ flag suffice. The value slot is never read (TDZ throws first).
+        const slot = allocLocal(fctx, `__forin_hbind_${name}_${fctx.locals.length}`, { kind: "externref" });
+        const flagLocal = allocLocal(fctx, `__forin_hflag_${name}_${fctx.locals.length}`, { kind: "i32" });
+        fctx.localMap.set(name, slot);
+        if (!fctx.tdzFlagLocals) fctx.tdzFlagLocals = new Map();
+        fctx.tdzFlagLocals.set(name, flagLocal);
+        fctx.boxedCaptures?.delete(name);
+        fctx.boxedTdzFlags?.delete(name);
+      }
+      fctx.constBindings?.delete(name);
+    }
+  }
+
   const exprType = compileExpression(ctx, fctx, stmt.expression);
   if (exprType && exprType.kind !== "externref") {
     coerceType(ctx, fctx, exprType, { kind: "externref" });
   }
+
+  // (#2705 Slice B) Tear down the head TDZ env (HeadEvaluation step 4). The
+  // per-iteration body now binds the head names afresh: a binding-pattern head
+  // re-allocates them via the destructuring path below; a plain-identifier head
+  // uses `keyLocal` (which receives keys[i] each iteration). Remove the TDZ-env
+  // entries so the body reads resolve to the per-iteration binding, not the
+  // never-initialized receiver-env cell.
+  if (isLexicalHead) {
+    for (const s of headSaved) {
+      fctx.localMap.delete(s.name);
+      fctx.tdzFlagLocals?.delete(s.name);
+      fctx.boxedCaptures?.delete(s.name);
+      fctx.boxedTdzFlags?.delete(s.name);
+      fctx.constBindings?.delete(s.name);
+    }
+    if (bindingPattern === null && memberTarget === null) {
+      // Plain-identifier head: `keyLocal` is the per-iteration binding.
+      fctx.localMap.set(varName, keyLocal);
+      if (init.flags & ts.NodeFlags.Const) {
+        if (!fctx.constBindings) fctx.constBindings = new Set();
+        fctx.constBindings.add(varName);
+      }
+    }
+  }
+
   fctx.body.push({ op: "local.tee", index: objLocal });
   fctx.body.push({ op: "call", funcIdx: keysIdx }); // __for_in_keys(obj) -> keys array
 
@@ -5729,4 +5954,30 @@ export function compileForInStatement(ctx: CodegenContext, fctx: FunctionContext
       },
     ],
   });
+
+  // (#2705 Slice B) Restore the outer bindings the head TDZ / per-iteration env
+  // shadowed, so the head names do not leak past the loop (§14.7.5.7 — the
+  // lexical bindings are scoped to the loop). Without this, `let x = 'outside';
+  // for (let x in obj) …; x /* === 'outside' */` would observe the loop's last
+  // binding instead.
+  for (const s of headSaved) {
+    if (s.localMap !== undefined) fctx.localMap.set(s.name, s.localMap);
+    else fctx.localMap.delete(s.name);
+    if (s.tdz !== undefined) {
+      if (!fctx.tdzFlagLocals) fctx.tdzFlagLocals = new Map();
+      fctx.tdzFlagLocals.set(s.name, s.tdz);
+    } else fctx.tdzFlagLocals?.delete(s.name);
+    if (s.boxed !== undefined) {
+      if (!fctx.boxedCaptures) fctx.boxedCaptures = new Map();
+      fctx.boxedCaptures.set(s.name, s.boxed);
+    } else fctx.boxedCaptures?.delete(s.name);
+    if (s.boxedTdz !== undefined) {
+      if (!fctx.boxedTdzFlags) fctx.boxedTdzFlags = new Map();
+      fctx.boxedTdzFlags.set(s.name, s.boxedTdz);
+    } else fctx.boxedTdzFlags?.delete(s.name);
+    if (s.isConst) {
+      if (!fctx.constBindings) fctx.constBindings = new Set();
+      fctx.constBindings.add(s.name);
+    } else fctx.constBindings?.delete(s.name);
+  }
 }

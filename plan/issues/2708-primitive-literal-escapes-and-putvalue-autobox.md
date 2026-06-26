@@ -1,7 +1,7 @@
 ---
 id: 2708
 title: "primitive & literal edge cases: legacy string escapes \\8/\\9/octal, regexp \\u atoms, PutValue primitive-base auto-box"
-status: ready
+status: done
 sprint: 67
 goal: test262-conformance
 feasibility: medium
@@ -12,6 +12,8 @@ language_feature: primitives
 task_type: bug
 created: 2026-06-26
 updated: 2026-06-26
+completed: 2026-06-26
+assignee: ttraenkler/dev1
 ---
 # #2708 — primitive/literal: legacy escapes, regexp \\u, PutValue primitive-base auto-box
 
@@ -99,3 +101,63 @@ At least 18 of the 32 listed tests flip from fail to pass (3 string escape + 3 r
 - `mongolian-vowel-separator-eval.js` is excluded (eval-deferred).
 - `named-groups/invalid-lone-surrogate-groupname.js` — investigate; if it requires named-group regexp work beyond unicode escapes, exclude from this issue.
 - `S8.6.2_A8.js` ("Prototype of non-extensible object mutated") and `S8.1_A5.js` (stack overflow) may have distinct root causes — confirm before including in the fix count.
+
+## Resolution (2026-06-26, dev1)
+
+Sub-bugs (a) and (b) are fixed. Sub-bug (c) was verified **out of scope** for
+this issue — its tests require large, unrelated features.
+
+### (a) Legacy string escapes — FIXED (+3)
+
+The TS scanner reports `\8`/`\9` as code **1488** and legacy octal (`\251`) as
+code **1487**, but TS *already decodes the text correctly* (`'\8'.text === "8"`,
+`'\251'.text === "©"`). The fix mirrors the existing numeric-octal treatment
+(1121/1489):
+
+- `src/compiler/import-manifest.ts` — add 1487/1488 to `DOWNGRADE_DIAG_CODES`
+  (TS error → warning, so sloppy code compiles).
+- `src/compiler.ts` — add 1487/1488 to `TOLERATED_SYNTAX_CODES` (so they don't
+  trip the `hasSyntaxErrors` gate).
+- `src/compiler/early-errors/node-checks.ts` — re-raise a hard early error for a
+  legacy escape inside a string literal **when `isStrictMode(node)`**, so the
+  strict-mode negative tests still reject (`hasLegacyStringEscape` helper detects
+  `\1`–`\9` and `\0`+digit while skipping the lone `\0` NUL and escaped `\\`).
+
+Flips: `legacy-non-octal-escape-sequence-{8,9}-non-strict.js`,
+`legacy-octal-escape-sequence.js`. The 7 strict negative counterparts continue
+to pass; full `language/literals/string` dir = 73/73.
+
+### (b) Regexp `\u` atom escapes — FIXED (+2)
+
+Root cause was in the **test harness**, not the compiler: the compiler returns
+`/A/.source === "\\u0041"` and matches `"A"` correctly. The test262 runner's
+`resolveUnicodeEscapes` (tests/test262-runner.ts) only skipped *string* literals,
+so it rewrote the `A` inside the regexp literal to `A`, corrupting
+`/A/` → `/A/` and breaking `.source`. Rewrote it as a small tokenizer that
+also copies regexp literals, line/block comments through verbatim (with a
+standard regex-vs-division heuristic). Verified behaviour-preserving: across all
+11,036 `language/expressions` tests the old and new functions produce *identical*
+output; the only files whose output changes are regexp-literals-containing-`\u`.
+
+Flips: `S7.8.5_A1.1_T1.js`, `S7.8.5_A2.1_T1.js`.
+`u-surrogate-pairs-atom-escape-decimal.js` (surrogate-pair backreference matching
+under the `u` flag) and `mongolian-vowel-separator-eval.js` (eval) remain failing
+— both out of scope.
+
+### (c) PutValue / GetValue on primitive base — OUT OF SCOPE (deferred)
+
+Ground-truthed all 26 (c)-cluster tests through the runner. None are a clean
+"write-to-primitive-base auto-box" fix; each needs a large unrelated feature the
+compiler does not have:
+
+- `put/get-value-prop-base-primitive[-realm]` — require **Proxy** + `Object.setPrototypeOf(Number.prototype, …)` (+ `realm`/**eval**).
+- `S8.6.2_A5_T1`–`T4` — depend on **global-object `this` binding** (`this.count=0` creating a bare global `count`).
+- `8.7.2-{1,3,5,7}-s`, `7.8.3-3gs` — **strict-mode write semantics**: throw on non-writable / non-extensible / undeclared, `Object.preventExtensions`.
+- `S8.6_A2_T2`/`A3_T2` — **dynamic property addition** to a plain object via `++` (our object literals are fixed-shape WasmGC structs).
+- `S8.6.2_A1`, `S8.6.2_A8`, `S8.6_A4_T1`, `S8.7_A5_*`, `S8.7.2_A3`, `S8.1_A5` — distinct root causes (prototype chains, for-in enumeration, stack overflow).
+
+These should be tracked under their respective feature goals (Proxy, global-this,
+strict-mode write, dynamic object shape), not under a "primitive/literal" issue.
+
+**Net result:** +5 test262 (3 string-escape + 2 regexp), 0 regressions.
+Implementation tests in `tests/issue-2708.test.ts`.
