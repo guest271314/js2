@@ -23,7 +23,7 @@ import {
 } from "./index.js";
 import { addStringConstantGlobal, ensureExnTag, localGlobalIdx } from "./registry/imports.js";
 import { emitToBoolean } from "./coercion-engine.js";
-import { compileStringLiteral } from "./shared.js";
+import { compileStringLiteral, valTypesMatch } from "./shared.js";
 import {
   getArrTypeIdxFromVec,
   getOrRegisterArrayType,
@@ -3093,8 +3093,20 @@ export function compileArrayMethodCall(
           : undefined;
       break;
     case "map":
+      // (#2688) Include ref/ref_null struct-element receivers (mirrors the #1967
+      // `sort` gate widening). A `Directive[].map(d => ({…}))` (eslint
+      // apply-disable-directives.js) otherwise fell through to a generic builder
+      // that typed the result array with the RECEIVER element struct instead of
+      // the callback's return struct. `compileArrayMap` derives the result
+      // element type from the callback's actual return (typeIdx-aware as of
+      // #2688), so routing struct-element receivers through it types the result
+      // array correctly.
       result =
-        elemType.kind === "f64" || elemType.kind === "i32" || elemType.kind === "externref"
+        elemType.kind === "f64" ||
+        elemType.kind === "i32" ||
+        elemType.kind === "externref" ||
+        elemType.kind === "ref" ||
+        elemType.kind === "ref_null"
           ? compileArrayMap(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType)
           : undefined;
       break;
@@ -6552,7 +6564,13 @@ function compileArrayMap(
     if (cbSig) {
       const retType = ctx.checker.getReturnTypeOfSignature(cbSig);
       const mapped = resolveWasmType(ctx, retType);
-      if (mapped.kind !== elemType.kind) {
+      // (#2688) Compare the FULL ValType (incl. struct typeIdx), not just `.kind`.
+      // A shape-transforming `.map` whose callback returns a DIFFERENT ref struct
+      // than the receiver's element struct is `ref`-vs-`ref` by kind, so the old
+      // `.kind`-only check left the result array typed as the INPUT element struct
+      // while the callback emitted a different struct → `array.set` validation
+      // failure (apply-disable-directives.js, eslint Linter path).
+      if (!valTypesMatch(mapped, elemType)) {
         mapResultElemType = mapped;
         mapArrTypeIdx = getOrRegisterArrayType(ctx, mapResultElemType.kind, mapResultElemType);
         mapVecTypeIdx = getOrRegisterVecType(ctx, mapResultElemType.kind, mapResultElemType);
@@ -6563,8 +6581,11 @@ function compileArrayMap(
   const setup = setupArrayCallback(ctx, fctx, callExpr, "map", "map", undefined, 1);
   if (!setup) return null;
 
-  // Update map result type from closure return type if available
-  if (setup.closureInfo?.returnType && setup.closureInfo.returnType.kind !== mapResultElemType.kind) {
+  // Update map result type from the closure's ACTUAL compiled return type — the
+  // ground truth for what `call_ref` produces. (#2688) typeIdx-aware so a
+  // ref-struct return differing from the current result element struct is honored
+  // (not just a differing kind).
+  if (setup.closureInfo?.returnType && !valTypesMatch(setup.closureInfo.returnType, mapResultElemType)) {
     mapResultElemType = setup.closureInfo.returnType;
     mapArrTypeIdx = getOrRegisterArrayType(ctx, mapResultElemType.kind, mapResultElemType);
     mapVecTypeIdx = getOrRegisterVecType(ctx, mapResultElemType.kind, mapResultElemType);
@@ -6590,7 +6611,7 @@ function compileArrayMap(
       // JS semantics: `undefined → mapped` maps to NaN/null/0 per type. (#1522)
       ...(retType === null
         ? defaultValueInstrs(mapResultElemType)
-        : retType.kind !== mapResultElemType.kind
+        : !valTypesMatch(retType, mapResultElemType)
           ? coercionInstrs(ctx, retType, mapResultElemType, fctx)
           : []),
     ];

@@ -1,7 +1,9 @@
 ---
 id: 2688
 title: "ESLint apply-disable-directives.js: conditional-spread produces two struct shapes for array.set element type"
-status: ready
+status: done
+assignee: ttraenkler/sd-2668c
+completed: 2026-06-26
 created: 2026-06-26
 priority: medium
 area: codegen
@@ -121,3 +123,49 @@ Escalated for an architect spec rather than a risky partial fix on remaining
 budget. The bounded sub-piece (route struct-element `.map` through
 `compileArrayMap` AND make that path reachable for non-typed-vec receivers) is
 the most promising starting point for the spec.
+
+## Resolution (sd-2668c, 2026-06-26) — BOUNDED root cause: ref-element array/vec dedup-key collapse
+
+Earlier verify-first (#2109 doc) found the failing `array.set` is a
+struct-element `.map` typing its result array from the wrong struct. The actual
+ROOT CAUSE turned out to be **bounded**, not the broad shape-unification infra
+first suspected:
+
+**`getOrRegisterArrayType` / `getOrRegisterVecType` cached ref-element arrays/
+vecs under the plain `"ref"` / `"ref_null"` string key, ignoring the struct
+typeIdx.** So the FIRST ref-struct array registered (element struct A) was
+returned for EVERY subsequent ref-element request — `getOrRegisterArrayType(ctx,
+"ref", {ref:B})` returned array-of-A, not array-of-B. A shape-transforming
+`.map` (`Directive[].map(d => ({kind, justification}))`) then stored a struct-B
+`call_ref` result into an array typed for struct-A → `array.set expected (ref
+null A), found call_ref of type (ref null B)` validation failure in
+`applyDirectives` (the `Linter.verify` → `applyDisableDirectives` path).
+
+### Fix (3 localized changes, no new infra)
+
+1. `src/codegen/registry/types.ts` — `getOrRegisterArrayType` /
+   `getOrRegisterVecType` qualify the cache key + type name with the struct
+   typeIdx for `ref`/`ref_null` elements (`ref_<typeIdx>`), matching the
+   existing convention used by symbol-native / native-string vecs. f64 / i32 /
+   externref keys are unchanged (type-index stability preserved). This SPLITS
+   the incorrectly-collapsed ref arrays/vecs into correct distinct types.
+2. `src/codegen/array-methods.ts` — `compileArrayMap` element-type
+   reconciliation is now typeIdx-aware (`valTypesMatch` instead of `.kind`-only),
+   so a callback returning a different ref struct than the receiver element
+   updates the result array element type (and requests the correct
+   `getOrRegisterArrayType(ref, <callbackStruct>)`).
+3. `src/codegen/array-methods.ts` — the `case "map"` gate now includes
+   `ref`/`ref_null` struct-element receivers (mirrors the #1967 `sort` gate
+   widening), so struct-element `.map` is routed through `compileArrayMap` (the
+   callback-return-typed builder) instead of falling through to a generic path.
+
+### Validation
+
+- Repro: `compileProject("node_modules/eslint/lib/linter/apply-disable-directives.js",
+  {allowJs:true})` → `WebAssembly.validate` **true** (was false).
+- New `tests/issue-2688.test.ts` (4 cases): struct→different-struct `.map`,
+  two-distinct-shape maps don't collapse, smaller-struct return, + the eslint
+  integration validate. All green.
+- Regression: `tests/array-methods` + `tests/equivalence/array-*` (71 tests)
+  green; `tsc --noEmit` clean. Full `merge_group` floor + paired jsonl on the PR
+  (broad codegen — type registry).
