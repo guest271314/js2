@@ -2152,7 +2152,21 @@ function _instanceofResult(
   }
 
   // §13.10.2 step 5: Return OrdinaryHasInstance(target, V). (§7.3.20)
-  // step 5: P = Get(target, "prototype"); if Type(P) is not Object → TypeError.
+  //
+  // ORDER MATTERS (#2702): §7.3.20 step 3 ("If Type(O) is not Object, return
+  // false") is evaluated BEFORE step 4 ("Let P be ? Get(C, 'prototype')"). So a
+  // primitive V short-circuits to `false` WITHOUT ever reading `target.prototype`
+  // — the `prototype` getter must not run, and a primitive `prototype` value
+  // must NOT throw, when V is itself a primitive (e.g. `0 instanceof
+  // Function.prototype`). Checking the prototype first would invert the spec and
+  // either fire a `prototype` accessor or throw on a non-object prototype that
+  // the spec never reaches.
+  if (v === null || v === undefined || (typeof v !== "object" && typeof v !== "function")) {
+    return 0;
+  }
+
+  // §7.3.20 step 4/5: P = Get(target, "prototype"); if Type(P) is not Object →
+  // TypeError. Reached only for an object V, per the step-3 short-circuit above.
   let proto: unknown;
   try {
     proto = (target as { prototype?: unknown }).prototype;
@@ -2161,11 +2175,6 @@ function _instanceofResult(
   }
   if (proto === null || proto === undefined || (typeof proto !== "object" && typeof proto !== "function")) {
     return _INSTANCEOF_THROW;
-  }
-
-  // §7.3.20 step 3: If Type(O) is not Object, return false.
-  if (v === null || v === undefined || (typeof v !== "object" && typeof v !== "function")) {
-    return 0;
   }
 
   // (#1729/#1992) WasmGC-struct-backed values (object literals, arrays, closures)

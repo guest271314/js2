@@ -140,6 +140,31 @@ Flipped fail → pass:
 Verified zero regressions against `origin/main` over the full directory, plus
 `language/statements/try` (80/80 unchanged) and `class/subclass` (17/17 unchanged).
 
+### Merge-group fix (2026-06-26) — OrdinaryHasInstance step ordering
+
+The first PR (#2151) auto-parked in the `merge_group` re-validation with **2
+regressions** (`primitive-prototype-with-primitive.js`,
+`prototype-getter-with-primitive.js` — both `0 instanceof Function.prototype`).
+Root cause: although the Resolution narrative above describes the correct
+ordering, the shipped `_instanceofResult` actually read `target.prototype`
+(§7.3.20 **step 4/5**) *before* the "V is not an object → return false"
+short-circuit (**step 3**). So `0 instanceof Function.prototype` (where
+`Function.prototype.prototype` is a primitive or a throwing getter) wrongly fired
+the non-object-prototype TypeError / invoked the `prototype` getter instead of
+returning `false`. The local equivalence test for this case passed only by
+accident: a user `function(){}` target is wrapped as a JS callable whose
+`.prototype` reads as an object, masking the primitive prototype set on the
+WasmGC side — only a genuine builtin (`Function.prototype`) exposes the bug, which
+is why test262 caught it.
+
+Fix: in `_instanceofResult` move the §7.3.20 step-3 primitive-V short-circuit
+*ahead of* the `target.prototype` read, matching the spec exactly. Confirmed on
+current `origin/main` + the change: the 2 regressions flip fail → pass, all 8
+prior improvements stay passing, and the fix is neutral (identical results) on
+every other `instanceof/` test. The regression was DRIFT-SUSPECT (baseline was 2
+commits behind) but proved **REAL** — the inverted ordering is reproduced
+directly on a fresh baseline.
+
 ### Deferred (the remaining ~11 listed tests — out of scope, blocked elsewhere)
 
 - **`Function(...)` constructor** (`S15.3.5.3_A2_T5`, `A3_T1/T2`, `S11.8.6_A7_T3`, …):
