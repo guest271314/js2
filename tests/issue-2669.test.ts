@@ -106,4 +106,23 @@ describe("#2669 — for-of nested destructuring default (Bug 2: nested default i
     );
     expect(e.test!()).toBe(6);
   });
+
+  // (#2669 CI-FIX) A CALL-expression nested default (capturing helper / generator
+  // / IIFE) is deliberately DEFERRED: compiling it inside the conditionally-skipped
+  // default arm materialised its capture box only on the not-taken branch and
+  // corrupted later reads of the captured variable (#2692 closure-box-lazy
+  // territory; also #2566 generator over-consumption). This regressed 15
+  // `for-await-of` elision-default tests in the merge_group floor. The deferral
+  // keeps the captured variable intact when the element is PRESENT — h() must not
+  // run AND `count` must read its real value (0), not a poisoned NaN.
+  it("for-of nested call-default does not poison a captured var when element present", async () => {
+    const e = await compileAndRun(`export function test(): number {
+      let count = 0;
+      function h(): number[] { count += 1; return [9]; }
+      let s = -1;
+      for (const [[x] = h()] of [[[5]]]) { s = x; }  // element present → x = 5, h() never runs
+      return count * 100 + s;                         // expect 0*100 + 5 = 5
+    }`);
+    expect(e.test!()).toBe(5);
+  });
 });

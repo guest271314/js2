@@ -1719,29 +1719,45 @@ function compileForOfDestructuring(
             fieldIdx: 1,
           });
           fctx.body.push({ op: "i32.const", value: i });
-          // (#2669) When the nested element has a default (`[[x,y,z]=[4,5,6]]`),
-          // the OOB else-branch must yield JS `undefined` (not wasm-null) for an
-          // externref source so `emitNestedBindingDefault`'s
-          // `__extern_is_undefined` check fires the initializer. For a typed
-          // (f64/ref) source the existing sentinel/null check already fires.
-          const nestedWantsUndef =
-            element.initializer !== undefined &&
-            (innerElemType.kind === "externref" || innerElemType.kind === "ref_extern");
-          emitBoundsCheckedArrayGet(fctx, innerArrTypeIdx, innerElemType, ctx, nestedWantsUndef);
-          fctx.body.push({ op: "local.set", index: nestedLocal });
           // (#2669) Apply the nested element's default initializer BEFORE recursing
           // into the sub-pattern — otherwise a short/empty source left `nestedLocal`
           // null/undefined and the recursive destructure threw
           // "Cannot destructure 'null' or 'undefined'"
           // (`for (const [[x,y,z]=[4,5,6]] of [[]])`). Mirrors the
           // `destructureParamArray` nested-default path.
-          if (element.initializer) {
+          //
+          // Restricted to (a) the SYNC for-of path and (b) PURE (non-call)
+          // default initializers — array/object literals and identifiers. A
+          // CALL-expression default (IIFE, generator `g()`, capturing helper) is
+          // deferred to the pre-fix behaviour because compiling it inside the
+          // conditionally-skipped default arm materialises its capture box only on
+          // the not-taken branch, corrupting later reads of the captured variable
+          // (#2692 closure-box-lazy territory) — and the generator case also
+          // over-consumes the iterator (#2566). This is exactly what regressed 15
+          // `for-await-of` elision-default tests in the merge_group floor; a pure
+          // literal/identifier default has no side effect or capture box, so it is
+          // safe to evaluate conditionally. Call-expression nested defaults stay
+          // tracked under the umbrella tail (#2566 / #2692).
+          const applyNestedDefault =
+            element.initializer !== undefined && !stmt.awaitModifier && !ts.isCallExpression(element.initializer);
+          if (applyNestedDefault) {
+            // The OOB else-branch must yield JS `undefined` (not wasm-null) for an
+            // externref source so `emitNestedBindingDefault`'s
+            // `__extern_is_undefined` check fires the initializer. For a typed
+            // (f64/ref) source the existing sentinel/null check already fires.
+            const nestedWantsUndef = innerElemType.kind === "externref" || innerElemType.kind === "ref_extern";
+            emitBoundsCheckedArrayGet(fctx, innerArrTypeIdx, innerElemType, ctx, nestedWantsUndef);
+            fctx.body.push({ op: "local.set", index: nestedLocal });
             (ctx as any)._arrayLiteralForceVec = true;
             try {
-              emitNestedBindingDefault(ctx, fctx, nestedLocal, innerElemType, element.initializer);
+              emitNestedBindingDefault(ctx, fctx, nestedLocal, innerElemType, element.initializer!);
             } finally {
               (ctx as any)._arrayLiteralForceVec = false;
             }
+          } else {
+            // Byte-identical to the pre-#2669 extraction (no sentinel, no default).
+            emitBoundsCheckedArrayGet(fctx, innerArrTypeIdx, innerElemType);
+            fctx.body.push({ op: "local.set", index: nestedLocal });
           }
           compileForOfDestructuring(ctx, fctx, element.name, nestedLocal, innerElemType, stmt);
           continue;

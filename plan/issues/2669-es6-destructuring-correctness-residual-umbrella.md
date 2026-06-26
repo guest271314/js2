@@ -220,11 +220,36 @@ NOT an iterator-protocol gap) — all fixed in this slice with guard test
    slot null and the recursive destructure threw "Cannot destructure 'null' or
    'undefined'" (`for (const [[x,y,z]=[4,5,6]] of [[]])`). Fix: apply
    `emitNestedBindingDefault` (with the externref OOB→undefined sentinel) before
-   recursing.
+   recursing — **scoped to the SYNC for-of path AND PURE (non-call) default
+   initializers** (array/object literals, identifiers). See the CI-FIX note below.
 
-**Validation:** 9/9 guard tests; `hardError=0` across 1781 dstr files (no new
-malformed-Wasm); 13/14 curated fresh-process regression sample green (the 1 fail
-is the pre-existing in-bounds-undefined/hole sub-bug below, an unrelated path).
+### CI-FIX (merge_group floor) — scope narrowed (2026-06-26)
+
+The first cut of fix #3 applied the nested default for **all** initializers in
+**both** for-of and for-await. The #2097 merge_group floor (full test262, not the
+scoped sweep) flagged **15 `for-await-of` regressions** (`async-{func,gen}-dstr-…
+ary-ptrn-elem-ary-elision-{init,iter}` + 3 `…ary-empty-init` flake timeouts): a
+**CALL-expression** default (generator `g()`, capturing helper, IIFE) compiled
+inside the conditionally-skipped default arm materialised its capture box **only
+on the not-taken branch**, corrupting later reads of the captured variable
+(#2692 closure-box-lazy territory; the generator case also over-consumes,
+#2566). On clean main fix #3 didn't exist so those defaults were ignored and the
+tests passed by coincidence (the element was present, so the default must not
+fire anyway). Net was +9 but the regression **ratio** (12/24 = 50%) tripped the
+gate. Fix: gate the nested-default application to `!stmt.awaitModifier &&
+!ts.isCallExpression(initializer)`. Pure literal/identifier defaults have no side
+effect or capture box, so they are safe to evaluate conditionally; call-default
+nested cases (and all for-await nested defaults) revert byte-for-byte to the
+pre-fix behaviour and stay tracked under the umbrella tail (#2566 / #2692).
+Result: all 15 for-await regressions cleared, 12 sync improvements retained
+(`ary-elem-init`, `ary-rest-init`, `obj-id-init`, `obj-prop-id-init`),
+`ary-empty-init` (IIFE default) deliberately forgone. Guard
+`tests/issue-2669.test.ts` extended with the capturing-call present-element
+poison signature.
+
+**Validation:** 10/10 guard tests; `hardError=0` across 1781 dstr files (no new
+malformed-Wasm); all 15 floor-regressed `for-await-of` tests verified back to
+PASS via fresh single-file runs; 12 sync improvements re-verified PASS.
 
 **Remaining umbrella tail (NOT this slice):**
 - The 4 still-failing cluster samples are iterator-protocol semantics → **#1642**
