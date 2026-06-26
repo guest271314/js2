@@ -1596,6 +1596,35 @@ function compileForOfDestructuring(
  *   for ({a, b} of arr) — assigns to already-declared variables
  *   for ([x, y] of arr) — assigns to already-declared variables
  */
+/**
+ * (#2692) Store a for-of-assignment destructuring field value — currently the
+ * single value on top of the stack (type `fieldType`) — into a target that is a
+ * closure-captured-mutable BOX. A plain `local.set` on the box-ref local would
+ * clobber the cell pointer; we must write THROUGH the cell with `struct.set`.
+ * Mirrors the #1510 vec-default / #1258 externref box-aware branches, but covers
+ * the plain (no-default) array/tuple writes that were left box-unaware — newly
+ * reachable now that #2692 boxes captured-mutable vars eagerly at function-top.
+ * Captured-mutable names live in a cell, never a module global, so there is no
+ * global-sync to emit. Consumes exactly one stack value.
+ */
+function emitBoxedForOfAssignStore(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  targetLocal: number,
+  fieldType: ValType,
+  boxedCap: { refCellTypeIdx: number; valType: ValType },
+): void {
+  const valType = boxedCap.valType;
+  const tmpVal = allocLocal(fctx, `__forof_boxset_${fctx.locals.length}`, fieldType);
+  fctx.body.push({ op: "local.set", index: tmpVal });
+  fctx.body.push({ op: "local.get", index: targetLocal });
+  fctx.body.push({ op: "local.get", index: tmpVal });
+  if (!valTypesMatch(fieldType, valType)) {
+    coerceType(ctx, fctx, fieldType, valType);
+  }
+  fctx.body.push({ op: "struct.set", typeIdx: boxedCap.refCellTypeIdx, fieldIdx: 0 } as Instr);
+}
+
 function compileForOfAssignDestructuring(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -1647,10 +1676,17 @@ function compileForOfAssignDestructuring(
         // Property doesn't exist on primitive — use default if provided
         const init = ts.isShorthandPropertyAssignment(prop) ? prop.objectAssignmentInitializer : undefined;
         if (init) {
-          const targetType = getLocalType(fctx, targetLocal);
+          // (#2692) Box-aware: when `targetName` is a captured-mutable var (now
+          // boxed eagerly at function-top), write the default THROUGH the cell.
+          const boxedCapPrim = fctx.boxedCaptures?.get(targetName);
+          const targetType = boxedCapPrim ? boxedCapPrim.valType : getLocalType(fctx, targetLocal);
           const instrs = collectInstrs(fctx, () => {
-            compileExpression(ctx, fctx, init, targetType ?? { kind: "externref" });
-            fctx.body.push({ op: "local.set", index: targetLocal } as Instr);
+            const dfltType = compileExpression(ctx, fctx, init, targetType ?? { kind: "externref" });
+            if (boxedCapPrim) {
+              emitBoxedForOfAssignStore(ctx, fctx, targetLocal, dfltType ?? boxedCapPrim.valType, boxedCapPrim);
+            } else {
+              fctx.body.push({ op: "local.set", index: targetLocal } as Instr);
+            }
           });
           fctx.body.push(...instrs);
         }
@@ -1706,6 +1742,25 @@ function compileForOfAssignDestructuring(
       const fieldEntry2 = fields[fieldIdx];
       if (!fieldEntry2) continue;
       const fieldType = fieldEntry2.type;
+      // (#2692) Box-aware write: when `targetName` is a closure-captured-mutable
+      // var, `targetLocal` is the ref-cell-ref local (now the common case since
+      // #2692 boxes such vars eagerly at function-top). A plain
+      // `emitCoercedLocalSet` would coerce the field value f64/externref → cell
+      // ref (garbage / null deref). Write THROUGH the cell with `struct.set`,
+      // mirroring the #1510 vec box-aware branch below. (Module-global sync is
+      // moot here — captured-mutable names live in a cell, not a global.)
+      const boxedCapObj = fctx.boxedCaptures?.get(targetName);
+      if (boxedCapObj) {
+        const valType = boxedCapObj.valType;
+        fctx.body.push({ op: "local.get", index: targetLocal });
+        fctx.body.push({ op: "local.get", index: elemLocal });
+        fctx.body.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx });
+        if (!valTypesMatch(fieldType, valType)) {
+          coerceType(ctx, fctx, fieldType, valType);
+        }
+        fctx.body.push({ op: "struct.set", typeIdx: boxedCapObj.refCellTypeIdx, fieldIdx: 0 } as Instr);
+        continue;
+      }
       const targetType = getLocalType(fctx, targetLocal);
       fctx.body.push({ op: "local.get", index: elemLocal });
       fctx.body.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx });
@@ -1880,13 +1935,35 @@ function compileForOfAssignDestructuring(
           tupleSyncGlobalIdx = globalIdx;
         }
 
-        const targetType = getLocalType(fctx, targetLocal);
+        // (#2692) Box-aware write when the target is a captured-mutable var
+        // (now boxed eagerly at function-top). `targetLocal` is the cell ref —
+        // route through `struct.set`, NOT a plain `local.set` (which would clobber
+        // the cell pointer → null deref). Tuple path: field read by index `i`.
+        const boxedCapTup = fctx.boxedCaptures?.get(targetEl.text);
+        const targetType = boxedCapTup ? boxedCapTup.valType : getLocalType(fctx, targetLocal);
         fctx.body.push({ op: "local.get", index: elemLocal });
         fctx.body.push({
           op: "struct.get",
           typeIdx: innerVecTypeIdx,
           fieldIdx: i,
         });
+
+        if (boxedCapTup) {
+          if (defaultInit) {
+            // Compute value-or-default into a temp of the cell's value type
+            // (emitDefaultValueCheck consumes the field value on the stack and
+            // stores into the temp), then write the temp through the cell.
+            const tmpV = allocLocal(fctx, `__forof_tupdflt_${fctx.locals.length}`, boxedCapTup.valType);
+            emitDefaultValueCheck(ctx, fctx, fieldType, tmpV, defaultInit, boxedCapTup.valType);
+            fctx.body.push({ op: "local.get", index: targetLocal });
+            fctx.body.push({ op: "local.get", index: tmpV });
+            fctx.body.push({ op: "struct.set", typeIdx: boxedCapTup.refCellTypeIdx, fieldIdx: 0 } as Instr);
+          } else {
+            emitBoxedForOfAssignStore(ctx, fctx, targetLocal, fieldType, boxedCapTup);
+          }
+          // captured-mutable lives in a cell, not a global → no global sync.
+          continue;
+        }
 
         if (defaultInit) {
           // Check for undefined and apply default — BEFORE type coercion
@@ -2106,6 +2183,10 @@ function compileForOfAssignDestructuring(
           if (defaultInit) {
             // Check for undefined and apply default — BEFORE type coercion
             emitDefaultValueCheck(ctx, fctx, innerElemType, targetLocal, defaultInit, targetType ?? undefined);
+          } else if (boxedCapVec) {
+            // (#2692) Box-aware plain write (boxed+default already handled and
+            // `continue`d at the #1510 branch above, so here it is no-default).
+            emitBoxedForOfAssignStore(ctx, fctx, targetLocal, innerElemType, boxedCapVec);
           } else {
             if (targetType && !valTypesMatch(innerElemType, targetType)) {
               coerceType(ctx, fctx, innerElemType, targetType);
