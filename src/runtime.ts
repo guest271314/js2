@@ -3071,6 +3071,7 @@ function _wasmStructHasOwn(obj: any, key: any, exports: Record<string, Function>
 function _structToPlainObject(
   obj: any,
   exports: Record<string, Function> | undefined,
+  seen?: Set<any>,
 ): Record<string, any> | undefined {
   const fieldNames = _getStructFieldNames(obj, exports);
   if (!fieldNames) return undefined;
@@ -3079,8 +3080,11 @@ function _structToPlainObject(
     const getter = exports?.[`__sget_${key}`];
     if (typeof getter === "function") {
       let val = getter(obj);
-      // Recursively convert nested WasmGC structs and vecs
-      val = _wasmToPlain(val, exports);
+      // Recursively convert nested WasmGC structs and vecs (threading the
+      // JSON cycle-detection `seen` set, when supplied, so a self-referential
+      // field — `o.prop = o` — raises a TypeError instead of recursing here
+      // until a host stack overflow; #2671).
+      val = _wasmToPlain(val, exports, seen);
       result[key] = val;
     }
   }
@@ -3142,48 +3146,68 @@ function _installErrorCause(inst: any, options: any, exports: Record<string, Fun
  *   - WasmGC vecs     -> JS arrays (via __vec_len / __vec_get)
  *   - primitives / normal JS objects -> returned as-is
  */
-function _wasmToPlain(val: any, exports: Record<string, Function> | undefined): any {
+function _wasmToPlain(val: any, exports: Record<string, Function> | undefined, seen?: Set<any>): any {
   if (val == null || typeof val !== "object") return val;
   if (!_isWasmStruct(val)) return val;
 
-  // Check if this is a named struct (has field names from __struct_field_names).
-  // Named structs are user-defined types — convert to plain objects.
-  // Vec wrappers (arrays) don't have meaningful field names registered.
-  const fieldNames = _getStructFieldNames(val, exports);
-  if (fieldNames) {
-    // It's a named struct — convert to plain object with recursive conversion
-    return _structToPlainObject(val, exports);
+  // (#2671) Cycle detection for the JSON.stringify flatten fast path. When a
+  // `seen` ancestor set is supplied, a struct already on the current
+  // serialization path is a circular reference — §25.5.2.5 / §25.5.2.6 step 1
+  // mandate a TypeError ("Converting circular structure to JSON"); the previous
+  // behaviour recursed (`_wasmToPlain` → `_structToPlainObject` → `_wasmToPlain`
+  // via the field getter) until a host RangeError stack overflow. The set is
+  // PATH-scoped (added before descending, removed in `finally`), so a DAG with
+  // shared-but-acyclic references still flattens correctly. Callers that omit
+  // `seen` (non-JSON consumers) keep the original cycle-unsafe behaviour.
+  if (seen) {
+    if (seen.has(val)) throw new TypeError("Converting circular structure to JSON");
+    seen.add(val);
   }
+  try {
+    // Check if this is a named struct (has field names from __struct_field_names).
+    // Named structs are user-defined types — convert to plain objects.
+    // Vec wrappers (arrays) don't have meaningful field names registered.
+    const fieldNames = _getStructFieldNames(val, exports);
+    if (fieldNames) {
+      // It's a named struct — convert to plain object with recursive conversion
+      return _structToPlainObject(val, exports, seen);
+    }
 
-  // Try vec (array wrapper) conversion — vec structs have {length, data} fields
-  // but are NOT registered in __struct_field_names (they're internal types).
-  if (exports) {
-    const vecLen = exports.__vec_len;
-    const vecGet = exports.__vec_get;
-    if (typeof vecLen === "function" && typeof vecGet === "function") {
-      try {
-        const len = vecLen(val);
-        if (typeof len === "number" && len > 0) {
-          const arr: any[] = [];
-          for (let i = 0; i < len; i++) {
-            arr.push(_wasmToPlain(vecGet(val, i), exports));
+    // Try vec (array wrapper) conversion — vec structs have {length, data} fields
+    // but are NOT registered in __struct_field_names (they're internal types).
+    if (exports) {
+      const vecLen = exports.__vec_len;
+      const vecGet = exports.__vec_get;
+      if (typeof vecLen === "function" && typeof vecGet === "function") {
+        try {
+          const len = vecLen(val);
+          if (typeof len === "number" && len > 0) {
+            const arr: any[] = [];
+            for (let i = 0; i < len; i++) {
+              arr.push(_wasmToPlain(vecGet(val, i), exports, seen));
+            }
+            return arr;
           }
-          return arr;
+          // len === 0 could be an empty array or a non-vec struct with 0 as first field.
+          // Since we already checked field names above (and it wasn't a named struct),
+          // treat len=0 as an empty array if __vec_get doesn't throw.
+          if (len === 0) {
+            return [];
+          }
+        } catch (e) {
+          // Propagate a circular-structure TypeError raised by a deeper element;
+          // only a genuine "not a vec" probe failure should fall through.
+          if (e instanceof TypeError) throw e;
+          // Not a vec — fall through
         }
-        // len === 0 could be an empty array or a non-vec struct with 0 as first field.
-        // Since we already checked field names above (and it wasn't a named struct),
-        // treat len=0 as an empty array if __vec_get doesn't throw.
-        if (len === 0) {
-          return [];
-        }
-      } catch {
-        // Not a vec — fall through
       }
     }
-  }
 
-  // Unknown WasmGC struct — return as-is
-  return val;
+    // Unknown WasmGC struct — return as-is
+    return val;
+  } finally {
+    if (seen) seen.delete(val);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -3220,10 +3244,25 @@ function _normaliseJsonReplacer(
     // Try function bridge first (Wasm closure → JS callable via __call_fn_2).
     const wrapped = exports ? _wrapWasmClosure(replacer, 2, callbackState) : null;
     if (wrapped) return { kind: "fn", fn: wrapped };
-    // Otherwise treat as property-list array if it materialises as one.
-    const asPlain = _wasmToPlain(replacer, exports);
-    if (Array.isArray(asPlain)) {
-      return { kind: "list", keys: _buildJsonPropertyList(asPlain) };
+    // (#2671) §25.5.2.1 step 4.b — only an *array* replacer becomes a
+    // PropertyList; any other object (`JSON.stringify(obj, {})`,
+    // `new String('s')`, …) is silently ignored. `_wasmToPlain` cannot tell an
+    // empty object struct from an empty vec (both report `__vec_len` 0 — the
+    // not-a-vec default), so it mis-materialises `{}` as `[]`, producing an
+    // empty PropertyList that wrongly filters out every key (`{}` → `"{}"`).
+    // Gate the PropertyList path on the *positive* `__is_vec` discriminator
+    // (`ref.test` over all registered vec types); a plain object struct answers
+    // 0 and correctly falls through to `{ kind: "none" }` (no replacer). Genuine
+    // array replacers cross the host boundary as real JS arrays and are handled
+    // by the `Array.isArray(replacer)` branch above, so this branch is reached
+    // only by object structs (and, defensively, any true wasm vec struct, which
+    // `__is_vec` still routes to the PropertyList path).
+    const isVecFn = exports?.__is_vec;
+    if (typeof isVecFn === "function" && isVecFn(replacer) === 1) {
+      const asPlain = _wasmToPlain(replacer, exports);
+      if (Array.isArray(asPlain)) {
+        return { kind: "list", keys: _buildJsonPropertyList(asPlain) };
+      }
     }
   }
   return { kind: "none" };
@@ -7152,7 +7191,10 @@ function resolveImport(
             // flatten path would drop the method before host JSON.stringify
             // sees it.
             if (!_hasReachableToJSON(v, exports, new Set())) {
-              const plain = _wasmToPlain(v, exports);
+              // (#2671) Pass a fresh path-scoped `seen` set so a circular
+              // structure raises a TypeError (§25.5.2.5/6 step 1) instead of a
+              // host stack-overflow RangeError.
+              const plain = _wasmToPlain(v, exports, new Set());
               return JSON.stringify(plain, undefined, sp);
             }
           }

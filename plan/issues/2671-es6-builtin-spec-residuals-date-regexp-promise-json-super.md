@@ -3,7 +3,7 @@ id: 2671
 title: "ES2015 builtin/feature spec residuals: Date, RegExp, Promise, JSON, super (~400 fails — tracking, slice per area)"
 status: ready
 created: 2026-06-25
-updated: 2026-06-25
+updated: 2026-06-26
 priority: medium
 feasibility: medium
 reasoning_effort: high
@@ -116,6 +116,54 @@ feed only JSON.stringify):
 - ⏳ Remaining JSON: `replacer-array-duplicates`/`-undefined`/`-empty` (getter
   side-effect counting + sparse/hole handling), reviver descriptor edges (ties to
   #2668), Proxy/BigInt/circular cases — separate root causes, not in this slice.
+
+**Progress (dev-builtin2671, 2026-06-26): JSON.stringify §25.5.2 host-runtime
+serialization fidelity (wrong-type replacer + circular crash) — SHIPPED.**
+
+Verified-first through the real harness (`runTest262File`, `setExports` wired).
+Two `src/runtime.ts` host-runtime bugs, both rooted in `_wasmToPlain`
+mis-treating a non-vec WasmGC struct as an empty array (`__vec_len`'s not-a-vec
+default is 0, indistinguishable from an empty vec):
+- **Non-array object replacer not ignored** (§25.5.2.1 step 4.b):
+  `JSON.stringify({key:[1]}, {})` produced `"{}"` (the empty `{}` materialised
+  as `[]` → empty PropertyList that filtered every key) instead of the full
+  `'{"key":[1]}'`. Fixed in `_normaliseJsonReplacer` by gating the PropertyList
+  path on the **positive** `__is_vec` discriminator (`ref.test` over all
+  registered vec types); a plain object answers 0 and falls through to "no
+  replacer". Genuine array replacers cross the host boundary as real JS arrays
+  and hit the existing `Array.isArray` branch, so they are unaffected.
+- **Circular structure stack-overflows instead of throwing TypeError**
+  (§25.5.2.5/6 step 1): `var o:any={}; o.prop=o; JSON.stringify(o)` recursed
+  `_wasmToPlain → _structToPlainObject → _wasmToPlain` (via the `__sget_prop`
+  field getter) until a host RangeError "Maximum call stack size exceeded". Added
+  an opt-in, **path-scoped** `seen` set threaded through `_wasmToPlain` /
+  `_structToPlainObject` (added before descending, removed in `finally`, so a DAG
+  with shared-but-acyclic refs still flattens); the JSON fast path passes a fresh
+  set, all non-JSON callers omit it (behaviour unchanged). A self-referential
+  struct now throws the spec TypeError.
+- Guard: `tests/issue-2671-json-replacer.test.ts` extended to 15/15 (8 prior + 7
+  new wrong-type/array-replacer cases). Acyclic/DAG/shared-ref JSON verified
+  byte-identical; `built-ins/JSON/stringify` survey unchanged at 35 pass / 31
+  fail (no regression).
+- ⚠️ **Harness blockers — these correct fixes do NOT flip their test262 files**
+  (recorded so future devs don't re-chase them):
+  - `replacer-wrong-type.js` / `space-wrong-type.js` — `wrapTest`'s
+    `assert_sameValue(..., (true|false))` rewrite regex (test262-runner.ts
+    ~L2000) is not paren-balanced, so `assert.sameValue(JSON.stringify(obj,
+    true), json)` is mis-wrapped as `assert_sameValue_bool` (it greedily matches
+    the *inner* `, true)`). The replacer fix advances `replacer-wrong-type` from
+    failing at assert #1 to assert #8 (the mis-wrapped `true` line). Needs a
+    harness regex fix (tester scope), not a compiler change.
+  - `value-array-circular.js` — uses a **typed** `var direct = []` which routes
+    JSON.stringify through a separate typed-array serialization path (not
+    `_wasmToPlain`); the cycle there does not throw. `value-object-circular.js`
+    needs the nested object-literal getter (`get p3(){…}`) case too (assert #2
+    hits a separate codegen null-deref). Both need typed-path / getter work.
+- ⏳ Remaining JSON value cases (separate, deeper root causes): function values
+  inside arrays/objects render as `[[]]`/`{"key":[]}` instead of `[null]`/`{}`
+  (captureless closures answer `__is_closure`=0, then mis-flatten as `[]`);
+  Symbol values leak as a numeric id; lone-surrogate string escaping; BigInt
+  (gated).
 
 **Other areas — verified NOT independent of the deferred member-dispatch /
 string substrate (do NOT pick these before the proto-read substrate lands):**
