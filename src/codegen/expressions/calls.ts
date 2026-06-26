@@ -12187,14 +12187,7 @@ function compileCallExpression(
               fctx.body.push(ins);
             }
             fctx.body.push(...funcDispatch);
-            if (expectedReturn !== null) {
-              const retL = allocLocal(fctx, `__mfd_ret_${fctx.locals.length}`, expectedReturn);
-              fctx.body.push({ op: "local.set", index: retL } as Instr);
-              for (const ins of buildArgcExtrasReset(ctx)) fctx.body.push(ins);
-              fctx.body.push({ op: "local.get", index: retL } as Instr);
-            } else {
-              for (const ins of buildArgcExtrasReset(ctx)) fctx.body.push(ins);
-            }
+            // BISECT: reset disabled
           }
 
           // (#1712) Assemble the host-callable fallback split: the funcref
