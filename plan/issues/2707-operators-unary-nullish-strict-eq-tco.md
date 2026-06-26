@@ -1,7 +1,7 @@
 ---
 id: 2707
 title: "operators: unary +/-/~/>>> null-deref on null/undefined; strict-equals # edge; TCO in ?:/&&/||"
-status: ready
+status: in-progress
 sprint: 67
 goal: test262-conformance
 feasibility: medium
@@ -10,9 +10,25 @@ priority: medium
 es_edition: ES3
 language_feature: operators
 task_type: bug
+assignee: ttraenkler/dev3
 created: 2026-06-26
 updated: 2026-06-26
 ---
+
+> **Partial — sub-bug (c) DONE; (a) + (b) remain.** Sub-bug (c) (TCO through
+> `?:` / `&&` / `||` / comma / labeled tail positions) is fixed; all 6 listed
+> TCO tests flip fail→pass with zero regressions in the affected categories.
+> Root cause turned out to be three stacked layers, not one TCO gap:
+> (1) a recursive named-function-expression IIFE `(function f(n){…f(n-1)…})(N)`
+> was *inlined* and so never recursed (the self-name had no callable to bind to);
+> (2) the IR path did not rewrite a tail call buried in an `(if (result T))` arm;
+> (3) the closure/legacy path emitted the #1511 `__argc`/`__extras_argv` reset
+> BETWEEN the tail call and its `return`, hiding it from TCO recognition.
+> Sub-bugs **(a)** (unary `+`/`-`/`~`/`>>>` ToPrimitive trap — `+object` traps
+> "dereferencing a null pointer", deeper than the spec's "null/undefined"
+> framing) and **(b)** (strict-equals boxed-wrapper / funcref-vs-boolean trap)
+> are independent and still open — they should be split into follow-up issues.
+
 # #2707 — operators: unary null-deref on nullish, strict-equals edge, TCO through conditional/logical
 
 ## Problem
