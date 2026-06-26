@@ -23,8 +23,8 @@ export class IncrementalLanguageService {
   private fileName: string;
   private compilerOptions: ts.CompilerOptions;
   private host: ts.CompilerHost;
-  // #2528 — the default-lib composite name for the current `analyze` call.
-  // `lib.d.ts` (DOM) by default; `lib.no-dom.d.ts` under `--platform node`.
+  // #2528/#2736 — the default-lib composite name for the current `analyze` call.
+  // `lib.d.ts` (DOM) by default; `lib.no-dom.d.ts` under `--target node`/`deno`.
   // Read by the host's `getDefaultLibFileName` closure at `createProgram` time.
   private defaultLibName = "lib.d.ts";
 
@@ -83,10 +83,12 @@ export class IncrementalLanguageService {
       options.allowJs = true;
       options.checkJs = true;
     }
-    // #2528 — select the DOM-free composite under `--platform node` so DOM-only
-    // globals are not in scope on the incremental path either. The host closure
-    // reads `this.defaultLibName` at `createProgram` time below.
-    this.defaultLibName = analyzeOptions?.platform === "node" ? "lib.no-dom.d.ts" : "lib.d.ts";
+    // #2528/#2736 — select the DOM-free composite under `--target node`/`deno`
+    // (formerly `--platform node`) so DOM-only globals are not in scope on the
+    // incremental path either. The host closure reads `this.defaultLibName` at
+    // `createProgram` time below.
+    this.defaultLibName =
+      analyzeOptions?.platform === "node" || analyzeOptions?.platform === "deno" ? "lib.no-dom.d.ts" : "lib.d.ts";
 
     // Fresh program each time — no oldProgram reuse. (#973)
     const program = ts.createProgram([this.fileName], options, this.host);
