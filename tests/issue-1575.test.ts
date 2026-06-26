@@ -75,27 +75,30 @@ describe("#1575 - Node.js builtin gap survey", () => {
       export const marker = 1;
     `);
 
+    // #1791 — `node:path` is now bound to the pure-TS posix shim (host +
+    // standalone), so it is NOT recorded as an opaque `__node_path` builtin.
+    // The remaining opaque builtins (http, events) are still recorded.
     expect(result.nodeBuiltins).toEqual([
-      { localName: "path", moduleName: "path" },
       { localName: "http", moduleName: "http" },
       { localName: "EventEmitter", moduleName: "events", namedBindings: ["EventEmitter"] },
     ]);
     expect(result.source).not.toContain("import path");
     expect(result.source).not.toContain("import * as http");
     expect(result.source).not.toContain("import { EventEmitter }");
+    // The path shim prelude is injected in place of the opaque import.
+    expect(result.source).toContain("__js2wasm_path_");
   });
 
   it("routes unsupported default builtin imports through opaque __node_<module> imports", async () => {
     const result = await compile(
       `
-        import path from "node:path";
         import http from "node:http";
         import events from "node:events";
 
         export function touch(): any {
           const h = http;
           const e = events;
-          return path.join("a", "b") || h || e;
+          return h || e;
         }
       `,
       { fileName: "issue-1575-default-builtins.ts" },
@@ -107,8 +110,9 @@ describe("#1575 - Node.js builtin gap survey", () => {
       .filter((imp) => imp.intent.type === "node_builtin")
       .map((imp) => [imp.name, imp.intent.moduleName]);
 
+    // #1791 — `node:path` is no longer opaque (it has a real shim); http/events
+    // remain opaque `__node_<module>` host imports.
     expect(moduleImports).toEqual([
-      ["__node_path", "path"],
       ["__node_http", "http"],
       ["__node_events", "events"],
     ]);
@@ -117,6 +121,47 @@ describe("#1575 - Node.js builtin gap survey", () => {
       (imp) => imp.intent.type === "node_builtin_fn" && ["path", "http", "events"].includes(imp.intent.moduleName),
     );
     expect(typedImports).toEqual([]);
+  });
+
+  it("binds node:path (default import) to the pure-TS posix shim, not an opaque import (#1791)", async () => {
+    const result = await compile(
+      `
+        import path from "node:path";
+        export function touch(): string {
+          return path.join("a", "b");
+        }
+      `,
+      { fileName: "issue-1575-path-shim.ts" },
+    );
+
+    expectSuccessfulCompile(result);
+
+    // No opaque __node_path import, and no node_builtin_fn for path.
+    expect(result.imports.some((imp) => imp.intent.type === "node_builtin" && imp.intent.moduleName === "path")).toBe(
+      false,
+    );
+    expect(
+      result.imports.some((imp) => imp.intent.type === "node_builtin_fn" && imp.intent.moduleName === "path"),
+    ).toBe(false);
+  });
+
+  it("keeps node:path on the legacy opaque path when an unsupported member is used (#1791)", async () => {
+    // `path.parse` is out of the posix Tier-0 shim surface, so the default
+    // import must stay on the legacy `__node_path` host route (no regression).
+    const result = await compile(
+      `
+        import path from "node:path";
+        export function touch(): any {
+          return path.parse("/a/b.txt");
+        }
+      `,
+      { fileName: "issue-1575-path-unsupported.ts" },
+    );
+
+    expectSuccessfulCompile(result);
+    expect(result.imports.some((imp) => imp.intent.type === "node_builtin" && imp.intent.moduleName === "path")).toBe(
+      true,
+    );
   });
 
   it("keeps the current typed-function exceptions limited to fs and crypto", async () => {
@@ -160,7 +205,7 @@ describe("#1575 - Node.js builtin gap survey", () => {
     ).toEqual([["__node_fs_readFileSync", "fs", "readFileSync"]]);
   });
 
-  it("documents the unsupported named-import gap for common npm builtins", async () => {
+  it("resolves named node:path imports via the shim; other named builtins remain a gap", async () => {
     const result = await compile(
       `
         import { join } from "node:path";
@@ -175,22 +220,20 @@ describe("#1575 - Node.js builtin gap survey", () => {
 
     expectSuccessfulCompile(result);
 
-    expect(result.imports.find((imp) => imp.name === "join")?.intent).toEqual({ type: "builtin", name: "join" });
+    // #1791 — `join` is now a real shim function, so there is NO `join` import
+    // at all (neither generic-builtin nor node_builtin_fn).
+    expect(result.imports.find((imp) => imp.name === "join")).toBeUndefined();
+    expect(
+      result.imports.some((imp) => imp.intent.type === "node_builtin_fn" && imp.intent.moduleName === "path"),
+    ).toBe(false);
+    expect(result.imports.some((imp) => imp.intent.type === "node_builtin" && imp.intent.moduleName === "path")).toBe(
+      false,
+    );
+
+    // `createHash` is still an unsupported named crypto import → generic stub.
     expect(result.imports.find((imp) => imp.name === "createHash")?.intent).toEqual({
       type: "builtin",
       name: "createHash",
     });
-
-    expect(result.imports.some((imp) => imp.intent.type === "node_builtin" && imp.intent.moduleName === "path")).toBe(
-      false,
-    );
-    expect(
-      result.imports.some(
-        (imp) =>
-          imp.intent.type === "node_builtin_fn" &&
-          ((imp.intent.moduleName === "path" && imp.intent.name === "join") ||
-            (imp.intent.moduleName === "crypto" && imp.intent.name === "createHash")),
-      ),
-    ).toBe(false);
   });
 });
