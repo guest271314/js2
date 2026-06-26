@@ -68,3 +68,53 @@ describe("#2671 — JSON.stringify array replacer (PropertyList)", () => {
     expect(exp.test()).toBe('{"a":5,"b":7}');
   });
 });
+
+// §25.5.2.1 step 4 — when `Type(replacer)` is Object and `IsCallable(replacer)`
+// is false, only an *array* replacer (`IsArray` true) becomes a PropertyList;
+// EVERY other replacer (a plain object, a String/Number wrapper object, or a
+// non-object primitive) is silently ignored, so the value serializes in full.
+// The regression: a plain object literal `{}` reached the host as a WasmGC
+// struct, and `_wasmToPlain` mis-materialised it as `[]` (an empty vec, because
+// `__vec_len` returns 0 for a non-vec struct), yielding an empty PropertyList
+// that wrongly filtered out every own key — `JSON.stringify(obj, {})` produced
+// `"{}"` instead of the full serialization. (test262
+// built-ins/JSON/stringify/replacer-wrong-type.js.)
+describe("#2671 — JSON.stringify wrong-type replacer is silently ignored", () => {
+  const FULL = '{"key":[1]}';
+
+  it("a plain object replacer `{}` is ignored (regression — was `{}`)", async () => {
+    const exp = await run(`return JSON.stringify({key: [1]}, {} as any);`);
+    expect(exp.test()).toBe(FULL);
+  });
+
+  it("a non-empty plain object replacer is ignored, not treated as a key list", async () => {
+    const exp = await run(`return JSON.stringify({key: [1]}, {key: 0, other: 1} as any);`);
+    expect(exp.test()).toBe(FULL);
+  });
+
+  it("a String wrapper-object replacer is ignored", async () => {
+    const exp = await run(`return JSON.stringify({key: [1]}, new String('str') as any);`);
+    expect(exp.test()).toBe(FULL);
+  });
+
+  it("a Number wrapper-object replacer is ignored", async () => {
+    const exp = await run(`return JSON.stringify({key: [1]}, new Number(6.1) as any);`);
+    expect(exp.test()).toBe(FULL);
+  });
+
+  it("null / primitive replacers are ignored", async () => {
+    expect((await run(`return JSON.stringify({key: [1]}, null as any);`)).test()).toBe(FULL);
+    expect((await run(`return JSON.stringify({key: [1]}, '' as any);`)).test()).toBe(FULL);
+    expect((await run(`return JSON.stringify({key: [1]}, 0 as any);`)).test()).toBe(FULL);
+  });
+
+  it("an empty array replacer still filters everything (genuine PropertyList path)", async () => {
+    const exp = await run(`return JSON.stringify({key: [1]}, [] as any);`);
+    expect(exp.test()).toBe("{}");
+  });
+
+  it("a non-empty array replacer still filters by its keys (no regression)", async () => {
+    const exp = await run(`return JSON.stringify({a: 1, b: 2}, ['b'] as any);`);
+    expect(exp.test()).toBe('{"b":2}');
+  });
+});
