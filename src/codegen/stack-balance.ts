@@ -613,27 +613,6 @@ function inferLastType(body: Instr[], types: TypeDef[], sigs: FuncSigInfo): stri
     // Skip drops, local.set, global.set (they consume but don't produce)
     if (op === "drop" || op === "local.set" || op === "global.set") continue;
 
-    // Structured control flow (if / block / loop / try): the value it leaves on
-    // the stack (if any) is fully determined by its block result type — that IS
-    // the branch result. A VOID structured instruction (empty block type, e.g. a
-    // null-guarded callback writeback `if`) leaves the real branch result BELOW
-    // it while having consumed its own condition/operands; the naive backward
-    // scan must NOT continue past it, or it misreads an operand of the block's
-    // condition (e.g. the writeback's internal `i32.eqz`) as the branch result.
-    // Stop here and report the block's own result type (or null when void/
-    // multi-value), which makes `fixBranchType` skip rather than mis-coerce.
-    // (Root cause of the ESLint `LazyLoadingRuleMap_new` / map-callback-capture
-    // `f64.convert_i32_s expected i32, found externref` validation failure.)
-    if (op === "if" || op === "block" || op === "loop" || op === "try") {
-      const bt = (instr as { blockType?: BlockType }).blockType;
-      if (bt && bt.kind === "val") return valTypeCategory(bt.type) ?? null;
-      if (bt && bt.kind === "type") {
-        const ft = resolveFuncType(types, bt.typeIdx);
-        if (ft && ft.results.length === 1) return valTypeCategory(ft.results[0]!) ?? null;
-      }
-      return null;
-    }
-
     // f64 producers
     if (
       op === "f64.const" ||
@@ -808,7 +787,15 @@ function inferLastType(body: Instr[], types: TypeDef[], sigs: FuncSigInfo): stri
         if (t.kind === "externref" || t.kind === "ref_extern") return "externref";
         if (t.kind === "ref" || t.kind === "ref_null") return "ref";
       }
-      if (bt?.kind === "empty") continue; // doesn't produce a value
+      // (#1573) A VOID structured instruction (empty block type — e.g. a
+      // null-guarded callback-capture writeback `if`) consumes its own
+      // condition/operands and produces nothing; the real branch result is
+      // BELOW it. Continuing the backward scan past it misreads an operand of
+      // the block's condition (the writeback's internal `i32.eqz`) as the
+      // branch result → "i32", and `fixBranchType` then splices a wrong
+      // `f64.convert_i32_s + __box_number` over the real externref value
+      // (ESLint `LazyLoadingRuleMap_new` validation failure). Stop and report
+      // null so `fixBranchType` SKIPS rather than mis-coerces.
       return null;
     }
 
