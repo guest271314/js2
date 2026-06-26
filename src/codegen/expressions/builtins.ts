@@ -1652,15 +1652,29 @@ function compileDateMethodCall(
     fctx.body.push({ op: "local.get", index: tempAnyInvalid } as Instr);
     fctx.body.push({ op: "i32.or" } as Instr);
 
-    // then-branch: write sentinel and push NaN.
+    // then-branch: the time-value result is NaN → push NaN. Write the
+    // Invalid-Date sentinel ONLY when the receiver was still VALID before
+    // this call (curTs != sentinel) and an arg coerced to NaN / out-of-range
+    // invalidated it — then §21.4.4.* step "Set dateObject.[[DateValue]] to u"
+    // stores NaN. When the receiver was ALREADY invalid (curTs == sentinel),
+    // the spec's earlier step "If t is NaN, return NaN" returns WITHOUT
+    // touching [[DateValue]]; a ToNumber side-effect during arg coercion (e.g.
+    // `value.valueOf()` calling `this.setTime(0)`) may have legitimately
+    // re-set it, and clobbering it back to the sentinel violates the spec
+    // (test262 date-value-read-before-tonumber-when-date-is-invalid).
     const savedThen = pushBody(fctx);
-    fctx.body.push({ op: "local.get", index: tempRef } as Instr);
+    fctx.body.push({ op: "local.get", index: tempCurTs } as Instr);
     fctx.body.push({ op: "i64.const", value: -9223372036854775808n } as Instr);
+    fctx.body.push({ op: "i64.ne" } as Instr);
     fctx.body.push({
-      op: "struct.set",
-      typeIdx: dateTypeIdx,
-      fieldIdx: 0,
-    });
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: tempRef } as Instr,
+        { op: "i64.const", value: -9223372036854775808n } as Instr,
+        { op: "struct.set", typeIdx: dateTypeIdx, fieldIdx: 0 } as Instr,
+      ],
+    } as unknown as Instr);
     fctx.body.push({ op: "f64.const", value: NaN } as Instr);
     const thenInstrs = fctx.body;
     popBody(fctx, savedThen);
@@ -1912,15 +1926,41 @@ function compileDateMethodCall(
       fctx.body.push({ op: "i32.or" } as Instr);
     }
 
-    // then-branch: invalid → sentinel + NaN.
+    // then-branch: invalid → NaN.
+    // setFullYear / setUTCFullYear / setYear (§21.4.4.21) re-validate an
+    // Invalid receiver (t → +0) and ALWAYS write [[DateValue]] (no early "if t
+    // is NaN return") — the then-branch is reached only when an arg coerced to
+    // NaN/out-of-range, so the sentinel write is unconditional. setDate /
+    // setMonth (+UTC) (§21.4.4.{20,24}) have step "If t is NaN, return NaN"
+    // which returns WITHOUT writing when the receiver was ALREADY invalid
+    // (curTs == sentinel) — a ToNumber side-effect during arg coercion
+    // (`value.valueOf()` calling `this.setTime(0)`) may have legitimately
+    // re-set it. So write the sentinel only when the receiver was still valid
+    // (curTs != sentinel) and an arg invalidated it
+    // (test262 date-value-read-before-tonumber-when-date-is-invalid).
     const savedThen = pushBody(fctx);
-    fctx.body.push({ op: "local.get", index: tempRef } as Instr);
-    fctx.body.push({ op: "i64.const", value: -9223372036854775808n } as Instr);
-    fctx.body.push({
-      op: "struct.set",
-      typeIdx: dateTypeIdx,
-      fieldIdx: 0,
-    });
+    if (isSetFullYear) {
+      fctx.body.push({ op: "local.get", index: tempRef } as Instr);
+      fctx.body.push({ op: "i64.const", value: -9223372036854775808n } as Instr);
+      fctx.body.push({
+        op: "struct.set",
+        typeIdx: dateTypeIdx,
+        fieldIdx: 0,
+      });
+    } else {
+      fctx.body.push({ op: "local.get", index: tempCurTs } as Instr);
+      fctx.body.push({ op: "i64.const", value: -9223372036854775808n } as Instr);
+      fctx.body.push({ op: "i64.ne" } as Instr);
+      fctx.body.push({
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: tempRef } as Instr,
+          { op: "i64.const", value: -9223372036854775808n } as Instr,
+          { op: "struct.set", typeIdx: dateTypeIdx, fieldIdx: 0 } as Instr,
+        ],
+      } as unknown as Instr);
+    }
     fctx.body.push({ op: "f64.const", value: NaN } as Instr);
     const thenInstrs = fctx.body;
     popBody(fctx, savedThen);
