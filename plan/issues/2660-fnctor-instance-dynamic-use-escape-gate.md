@@ -2,7 +2,7 @@
 id: 2660
 title: "Whole-program escape/dynamic-use gate for reconstructing `new F()` instances as `$Object` (value-rep infra)"
 status: in-progress
-assignee: ttraenkler/sd-s3a
+assignee: ttraenkler/sd-2674b
 sprint: 66
 created: 2026-06-25
 priority: medium
@@ -586,6 +586,59 @@ write-back=sidecar → desync). The substrate MUST cover **read + write + compou
 (`__extern_get` key histogram — named the Scope.flags wall), `this-bind-repro.mjs`
 (small-scale fix verification), `structwalk.mjs`, `diff-probe.mjs` +
 `tests/dogfood/probe-driver.mjs`.
+
+## PART-1 — LANDED (inert analysis layer, 2026-06-26, sd-2674b)
+
+The analysis layer of the unified substrate. **Inert / byte-identical** (compile
+of a representative fnctor + aliased-prototype + local-from-call fixture is
+SHA-identical pre/post: `bcecace2…`, 6350 bytes), so safe to land ahead of the
+dispatch. Banks the receiver-resolution infra on `main` for the PART-2 wiring.
+
+Added to `src/codegen/fnctor-escape-gate.ts` (the S1 home) + `context/types.ts`:
+- **`FunctionContext.thisStructName?: string`** — the `this`-receiver struct
+  (resolution case 1). DECL only here; the PART-2 dispatch owns the SETTER
+  (`resolveLiftedMethodThisStruct`) + the consuming emitters.
+- **`FnctorEscapeGateResult.receiverStruct: ReadonlyMap<ts.Expression, string>`**
+  — the local-receiver flow map. Every USE identifier of a binding
+  `var x = <call>` whose initializer is a *single-return-inferable* fnctor call
+  (`this.startNode() → return new Node() → __fnctor_Node`; depth-capped at 6,
+  memoized, recursion-safe) maps to the `__fnctor_<Name>` struct (the
+  `ctx.structMap` key). Callee resolution tries the **type-checker symbol**, then
+  a **syntactic unique-name prototype-method index** fallback — load-bearing
+  because the checker types acorn's lifted-method `this` / the call result `any`,
+  so symbol resolution of `this.startNode` MISSES (the noLib unit-repro confirmed
+  `getSymbolAtLocation` returns undefined; the syntactic index resolves it). A
+  name with ≥2 indexed bodies is left unresolved (conservative — never a wrong
+  callee). Multi-return / non-`new` returns are omitted.
+- **`resolveReceiverStruct(ctx, fctx, recvExpr): string | undefined`** — the
+  provider the PART-2 dispatch consumes. (1) `this` → `fctx.thisStructName`;
+  (2) flow-map hit; (3) `undefined`. The hit is gated on `ctx.structMap.has(name)`
+  so a not-yet-registered struct yields `undefined`, never a dangling pin.
+  Conservative-closed throughout: a miss ⇒ the consumer keeps its dynamic
+  (`__extern_get` / open-scan) lowering.
+
+Tests: `tests/issue-2660-part1-receiver-resolve.test.ts` (11, allowJs to mirror
+the acorn `.mjs` compile) + the 32 sibling S1/S2/S3 tests pass; tsc clean.
+
+## PART-2 — NEXT-SPRINT ownership/wiring delta (sd-2674b, single #2660 owner)
+
+The dispatch layer is built + mechanism-validated by sd-2674c (full record in the
+section just below). PART-2 lands NEXT SPRINT on top of the now-landed PART-1
+analysis. The provider/consumer ownership split (locked with sd-2674c):
+- **PART-1 (landed) owns** `FunctionContext.thisStructName` (the field DECL),
+  `resolveReceiverStruct`, and the `receiverStruct` flow map.
+- **PART-2 owns** the dispatch: keep `resolveLiftedMethodThisStruct` (the
+  `thisStructName` SETTER) but **DROP its duplicate `thisStructName` field DECL**
+  on rebase (PART-1 declares it); **swap `resolvePinnedReceiverStruct`'s body to
+  delegate to `resolveReceiverStruct(ctx, fctx, recv)`** so the `this`-case AND
+  flow-resolved locals both resolve through the one provider; keep
+  `pinnedStructName` / `tryEmitStructReceiverMemberRead` / the 3 wirings.
+- **#2179 delete-target gate ownership** = the **dispatch consumer** (PART-2), not
+  PART-1: the gate is per-ACCESS/per-FIELD (it knows the field name at the access
+  site) whereas `resolveReceiverStruct` is per-RECEIVER (field-agnostic). PART-1
+  exposes `ctx.moduleUsesDelete`; a finer per-field delete-target set can be added
+  to the analysis later if the consumer wants a precomputed gate, but the minimal
+  correct gate lives at the access site.
 
 ## P1 DISPATCH BUILT + MECHANISM-VALIDATED (2026-06-26, sd-2674c) — next-sprint regression gate
 

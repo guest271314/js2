@@ -43,6 +43,7 @@
  * share an alias oracle, but the questions they answer are distinct.
  */
 import { ts, forEachChild } from "../ts-api.js";
+import type { CodegenContext, FunctionContext } from "./context/types.js";
 
 /** Classification of a `new F()` fnctor allocation site. */
 export type FnctorGateClass =
@@ -73,13 +74,41 @@ export interface FnctorEscapeGateResult {
    * interception caused).
    */
   readonly approvedNames: ReadonlySet<string>;
+  /**
+   * #2660 PART-1 — receiver-expression → `__fnctor_<Name>` struct-name flow map.
+   *
+   * Keyed by every USE-site expression (the identifier nodes) of a LOCAL binding
+   * `const/let/var x = <call>` whose initializer call is a *single-return-
+   * inferable* fnctor-returning method (e.g. `var node = this.startNode()` where
+   * `startNode` is the aliased-prototype method `pp.startNode = function(){ return
+   * new Node(...) }`). The mapped value is the `__fnctor_<Name>` struct name
+   * (the `ctx.structMap` key from `new-super.ts`). It lets the PART-2 dispatch
+   * pin the dynamic `x.<field>` read/write/compound to that one struct instead of
+   * the open-scan `findAlternateStructsForField` — the local-receiver half of the
+   * #2660 substrate (the `this`-receiver half is `FunctionContext.thisStructName`,
+   * resolution case (1)).
+   *
+   * **Conservative-closed**: only bindings whose initializer resolves to a SINGLE
+   * `return new X()` / `return <single-return call>` chain (depth-capped,
+   * memoized) are recorded; anything ambiguous is omitted ⇒ `resolveReceiverStruct`
+   * returns `undefined` ⇒ the consumer stays on the dynamic path. A miss NEVER
+   * yields a wrong struct.
+   *
+   * **INERT in PART-1**: produced here but consulted only by the (as-yet-uncalled)
+   * `resolveReceiverStruct`; no lowering reads it, so emitted Wasm is byte-identical.
+   */
+  readonly receiverStruct: ReadonlyMap<ts.Expression, string>;
 }
 
 const EMPTY_RESULT: FnctorEscapeGateResult = {
   sites: new Map(),
   approved: new Set(),
   approvedNames: new Set(),
+  receiverStruct: new Map(),
 };
+
+/** Max callee-chain depth the single-return struct inference will follow. */
+const RETURN_INFER_MAX_DEPTH = 6;
 
 /** A generic Array/Function method that, used as `m.call(recv,…)`, makes `recv` array-like-dynamic. */
 const GENERIC_METHOD_CALL = new Set(["call", "apply", "bind"]);
@@ -243,6 +272,262 @@ function bindingOf(newExpr: ts.NewExpression): ts.Identifier | undefined {
   return undefined;
 }
 
+// ── #2660 PART-1 — receiver-struct flow map (single-return inference) ─────────
+
+/** Unwrap `( … )` / `as` / `!` wrappers around an expression. */
+function unwrapExpr(e: ts.Expression): ts.Expression {
+  let cur = e;
+  while (ts.isParenthesizedExpression(cur) || ts.isAsExpression(cur) || ts.isNonNullExpression(cur)) {
+    cur = (cur as ts.ParenthesizedExpression | ts.AsExpression | ts.NonNullExpression).expression;
+  }
+  return cur;
+}
+
+/** True for any function-like node that can carry a `return`-bearing body. */
+function isFunctionLike(node: ts.Node): node is ts.FunctionLikeDeclaration {
+  return (
+    ts.isFunctionDeclaration(node) ||
+    ts.isFunctionExpression(node) ||
+    ts.isArrowFunction(node) ||
+    ts.isMethodDeclaration(node)
+  );
+}
+
+/**
+ * A program-wide index `methodName → FunctionLike[]` of expando method
+ * assignments `<obj>.<name> = function(){…}` (the acorn aliased-prototype form
+ * `pp.m = function(){…}`, and `Class.prototype.m = function(){…}`). Used as the
+ * callee-resolution FALLBACK when the type-checker cannot resolve a
+ * `this.<name>()` / `recv.<name>()` callee — which is the COMMON case here: the
+ * checker types acorn's lifted-method `this` / the call result as `any` (the
+ * whole reason #2660 exists), so symbol resolution of `this.startNode` fails. A
+ * name with exactly ONE indexed body resolves unambiguously; a colliding name
+ * (≥2 bodies) is left unresolved (conservative — never a wrong callee).
+ */
+type ProtoMethodIndex = ReadonlyMap<string, ts.FunctionLikeDeclaration[]>;
+
+function buildProtoMethodIndex(sourceFile: ts.SourceFile): ProtoMethodIndex {
+  const idx = new Map<string, ts.FunctionLikeDeclaration[]>();
+  const walk = (n: ts.Node): void => {
+    if (
+      ts.isBinaryExpression(n) &&
+      n.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      ts.isPropertyAccessExpression(n.left)
+    ) {
+      const rhs = unwrapExpr(n.right);
+      if (isFunctionLike(rhs)) {
+        const name = n.left.name.text;
+        const arr = idx.get(name);
+        if (arr) arr.push(rhs);
+        else idx.set(name, [rhs]);
+      }
+    }
+    forEachChild(n, walk);
+  };
+  walk(sourceFile);
+  return idx;
+}
+
+/**
+ * Resolve a method/function call's callee to the function-like declaration that
+ * supplies its body. Tries the type-checker symbol first (precise when it
+ * resolves), then falls back to the syntactic {@link ProtoMethodIndex} for the
+ * acorn-dominant `this.<name>()` / `recv.<name>()` form the checker leaves `any`.
+ * Handles plain `function f(){…}`, `var f = function(){…}`, object/class methods,
+ * `{ m() {} }` / `{ m: function(){} }`, and the aliased-prototype
+ * `var pp = Class.prototype; pp.m = function(){…}` assignment. Returns `undefined`
+ * when ambiguous (a name with ≥2 indexed bodies) — conservative, never a wrong
+ * callee.
+ */
+function resolveCalleeFunction(
+  checker: ts.TypeChecker,
+  callExpr: ts.CallExpression,
+  protoIndex: ProtoMethodIndex,
+): ts.FunctionLikeDeclaration | undefined {
+  const callee = unwrapExpr(callExpr.expression);
+  let sym: ts.Symbol | undefined;
+  if (ts.isPropertyAccessExpression(callee)) {
+    sym = checker.getSymbolAtLocation(callee.name) ?? checker.getSymbolAtLocation(callee);
+  } else if (ts.isIdentifier(callee)) {
+    sym = checker.getSymbolAtLocation(callee);
+  }
+  if (sym) {
+    for (const decl of sym.getDeclarations() ?? []) {
+      const fn = functionFromDeclaration(decl);
+      if (fn?.body) return fn;
+    }
+  }
+  // Checker miss → syntactic prototype-method fallback (unique name only).
+  if (ts.isPropertyAccessExpression(callee)) {
+    const cands = protoIndex.get(callee.name.text);
+    if (cands && cands.length === 1 && cands[0]!.body) return cands[0];
+  }
+  return undefined;
+}
+
+/** Extract the FunctionLike body-bearer a declaration node defines, if any. */
+function functionFromDeclaration(decl: ts.Declaration): ts.FunctionLikeDeclaration | undefined {
+  if (isFunctionLike(decl)) return decl;
+  // `var f = function(){…}` / `var f = () => …`
+  if (ts.isVariableDeclaration(decl) && decl.initializer) {
+    const init = unwrapExpr(decl.initializer);
+    if (isFunctionLike(init)) return init;
+    return undefined;
+  }
+  // `{ m: function(){…} }` / `{ m() {} }`
+  if (ts.isPropertyAssignment(decl)) {
+    const init = unwrapExpr(decl.initializer);
+    if (isFunctionLike(init)) return init;
+    return undefined;
+  }
+  if (ts.isMethodDeclaration(decl)) return decl;
+  // `pp.m = function(){…}` — the symbol's declaration is the LHS PropertyAccess;
+  // its BinaryExpression parent's RHS is the function.
+  if (ts.isPropertyAccessExpression(decl) || ts.isElementAccessExpression(decl)) {
+    const parent = decl.parent;
+    if (
+      ts.isBinaryExpression(parent) &&
+      parent.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      parent.left === decl
+    ) {
+      const rhs = unwrapExpr(parent.right);
+      if (isFunctionLike(rhs)) return rhs;
+    }
+  }
+  return undefined;
+}
+
+/** The single `return <expr>` of a function body, or `undefined` if not exactly one. */
+function singleReturnExpr(fn: ts.FunctionLikeDeclaration): ts.Expression | undefined {
+  const body = fn.body;
+  if (!body) return undefined;
+  // Arrow with an expression body: `() => new Node()`.
+  if (!ts.isBlock(body)) return body;
+  const returns: ts.Expression[] = [];
+  const walk = (n: ts.Node): void => {
+    if (ts.isReturnStatement(n)) {
+      if (n.expression) returns.push(n.expression);
+      return;
+    }
+    // Do NOT descend into nested functions — their returns are not ours.
+    if (isFunctionLike(n)) return;
+    forEachChild(n, walk);
+  };
+  walk(body);
+  return returns.length === 1 ? returns[0] : undefined;
+}
+
+/**
+ * Infer the `__fnctor_<Name>` struct a function's SINGLE return yields, if any.
+ * Follows `return new X()` directly and `return <single-return call>` chains
+ * (depth-capped + memoized against recursion). Returns `undefined` when the
+ * single return is anything else, when there is not exactly one return, or when
+ * the chain exceeds the depth cap — conservative-closed, never a wrong struct.
+ */
+function inferReturnStruct(
+  checker: ts.TypeChecker,
+  fn: ts.FunctionLikeDeclaration,
+  depth: number,
+  memo: Map<ts.FunctionLikeDeclaration, string | undefined>,
+  protoIndex: ProtoMethodIndex,
+): string | undefined {
+  if (memo.has(fn)) return memo.get(fn);
+  if (depth <= 0) return undefined;
+  // Tentative `undefined` guards against self-recursive chains resolving to junk.
+  memo.set(fn, undefined);
+  const ret = singleReturnExpr(fn);
+  let result: string | undefined;
+  if (ret) {
+    const r = unwrapExpr(ret);
+    if (ts.isNewExpression(r)) {
+      const ctorSym = resolveFnctorSymbol(checker, r.expression);
+      if (ctorSym) result = `__fnctor_${ctorSym.name}`;
+    } else if (ts.isCallExpression(r)) {
+      const callee = resolveCalleeFunction(checker, r, protoIndex);
+      if (callee) result = inferReturnStruct(checker, callee, depth - 1, memo, protoIndex);
+    }
+    // `return this.field` / `return this.arr[i]` element-struct inference needs a
+    // reliable element type (the checker types acorn's parser fields `any`), so it
+    // is intentionally NOT attempted here — omission keeps the consumer on the
+    // dynamic path (safe). A later slice can add a syntactic push-site scan.
+  }
+  memo.set(fn, result);
+  return result;
+}
+
+/**
+ * Build the #2660 PART-1 receiver-struct flow map: for every local binding
+ * `const/let/var x = <call>` whose initializer call's single-return chain
+ * resolves to a `__fnctor_<Name>` struct, map every USE identifier of `x` to
+ * that struct name. Reuses the caller's symbol→uses index so it is a single
+ * extra pass over the already-collected bindings.
+ */
+function buildReceiverStructMap(
+  checker: ts.TypeChecker,
+  sourceFile: ts.SourceFile,
+  usesBySymbol: ReadonlyMap<ts.Symbol, ts.Identifier[]>,
+): Map<ts.Expression, string> {
+  const map = new Map<ts.Expression, string>();
+  const memo = new Map<ts.FunctionLikeDeclaration, string | undefined>();
+  const protoIndex = buildProtoMethodIndex(sourceFile);
+  const visit = (node: ts.Node): void => {
+    if (ts.isVariableDeclaration(node) && node.initializer && ts.isIdentifier(node.name)) {
+      const init = unwrapExpr(node.initializer);
+      if (ts.isCallExpression(init)) {
+        const callee = resolveCalleeFunction(checker, init, protoIndex);
+        const struct = callee
+          ? inferReturnStruct(checker, callee, RETURN_INFER_MAX_DEPTH, memo, protoIndex)
+          : undefined;
+        if (struct) {
+          const bindSym = checker.getSymbolAtLocation(node.name);
+          const uses = bindSym ? (usesBySymbol.get(bindSym) ?? []) : [];
+          for (const use of uses) {
+            if (use === node.name) continue; // the declaration name itself
+            map.set(use, struct);
+          }
+        }
+      }
+    }
+    forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return map;
+}
+
+/**
+ * #2660 PART-1 — resolve the WasmGC struct a member-access RECEIVER expression
+ * concretely is, for the dynamic read/write/compound dispatch to PIN to.
+ *
+ * Resolution order (the consumer pins to the first hit; a miss ⇒ dynamic path):
+ *   1. `this` receiver → `fctx.thisStructName` (the #2681 syntactic prototype
+ *      resolver's result, populated by the PART-2 dispatch slice);
+ *   2. a local receiver in the {@link FnctorEscapeGateResult.receiverStruct} flow
+ *      map (bound from a single-return-inferable fnctor call);
+ *   3. otherwise `undefined` → the consumer keeps its existing dynamic
+ *      (`__extern_get` / open-scan) lowering.
+ *
+ * **Conservative-closed**: a returned name is additionally gated on
+ * `ctx.structMap.has(name)`, so a struct not (yet) registered at the call site
+ * yields `undefined` rather than a dangling pin — a miss NEVER produces a wrong
+ * struct. **INERT in PART-1**: exported for the PART-2 dispatch to consume; no
+ * lowering calls it yet, so emitted Wasm is byte-identical.
+ */
+export function resolveReceiverStruct(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  recvExpr: ts.Expression,
+): string | undefined {
+  const recv = unwrapExpr(recvExpr);
+  let name: string | undefined;
+  if (recv.kind === ts.SyntaxKind.ThisKeyword) {
+    name = fctx.thisStructName;
+  } else {
+    name = ctx.fnctorEscapeGate?.receiverStruct.get(recv);
+  }
+  if (name !== undefined && ctx.structMap.has(name)) return name;
+  return undefined;
+}
+
 /**
  * #2660 S1 — classify every `new F()` fnctor site in the program.
  *
@@ -344,16 +629,22 @@ export function analyzeFnctorEscapeGate(checker: ts.TypeChecker, sourceFile: ts.
     }
   }
 
-  // 4. Optional inert logging (no effect on output).
-  if (process.env.JS2WASM_LOG_FNCTOR_GATE === "1" && sites.size > 0) {
+  // 4. (#2660 PART-1) Build the receiver-struct flow map for local bindings whose
+  //    initializer is a single-return-inferable fnctor-returning call. Reuses the
+  //    symbol→uses index from step 2. INERT — stored for the PART-2 dispatch.
+  const receiverStruct = buildReceiverStructMap(checker, sourceFile, usesBySymbol);
+
+  // 5. Optional inert logging (no effect on output).
+  if (process.env.JS2WASM_LOG_FNCTOR_GATE === "1" && (sites.size > 0 || receiverStruct.size > 0)) {
     const counts = { reconstruct: 0, "keep-typed": 0, "keep-static": 0 };
     for (const c of sites.values()) counts[c]++;
     // eslint-disable-next-line no-console
     console.error(
       `[#2660 fnctor-escape-gate] ${sites.size} new F() site(s): ` +
-        `reconstruct=${counts.reconstruct} keep-typed=${counts["keep-typed"]} keep-static=${counts["keep-static"]}`,
+        `reconstruct=${counts.reconstruct} keep-typed=${counts["keep-typed"]} keep-static=${counts["keep-static"]}; ` +
+        `receiverStruct flow-map entries=${receiverStruct.size}`,
     );
   }
 
-  return { sites, approved, approvedNames };
+  return { sites, approved, approvedNames, receiverStruct };
 }
