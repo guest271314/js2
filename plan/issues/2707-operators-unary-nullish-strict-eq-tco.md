@@ -23,7 +23,7 @@ Three sub-bugs in operator codegen (BigInt and `with`-statement tests are exclud
 
 **(b) `strict-equals` / `strict-does-not-equals` edge: `false !== #`.** `S11.9.4_A8_T3.js`, `S11.9.4_A8_T2.js`, `S11.9.4_A8_T1.js`, `S11.9.5_A8_T3.js`, `S11.9.5_A8_T2.js`, `S11.9.5_A8_T1.js` — the `#` is a wasm function reference, and `false !== <funcref>` should be `true` (they are of different types) but our strict-equals emits incorrect results for the function-reference vs boolean case.
 
-**(c) Tail-call optimization is not recognized in `?:` / `&&` / `||` tail positions.** `conditional/tco-cond.js`, `conditional/tco-pos.js`, `logical-and/tco-right.js`, `logical-or/tco-right.js` — these set a `callCount` and assert it equals 1 (the function calls itself recursively but TCO should prevent stack growth). The `return_call` opcode is not being emitted for tail calls in the consequent/alternate of `?:` or the RHS of `&&`/`||`.
+**(c) Tail-call optimization is not recognized in `?:` / `&&` / `||` / comma / labeled-block tail positions.** `conditional/tco-cond.js`, `conditional/tco-pos.js`, `logical-and/tco-right.js`, `logical-or/tco-right.js`, `comma/tco-final.js`, `labeled/tco.js` — these set a `callCount` and assert it equals 1 (the function calls itself recursively but TCO should prevent stack growth). The `return_call` opcode is not being emitted for tail calls in the consequent/alternate of `?:`, the RHS of `&&`/`||`, the **final operand of a comma expression** (`return 0, f(n-1)`), or a **labeled return** (`test262: return f(n-1)`). All five are the **same tail-call-position recognition gap** — `emitReturnTail` (`src/codegen/statements/control-flow.ts:340`) only rewrites the *last emitted* `call`/`call_ref` to `return_call`, so a call buried inside a conditional/logical/comma sub-expression or a labeled wrapper is never recognized — in additional syntactic contexts.
 
 **Excluded (not in this issue):**
 - BigInt tests (`unsigned-right-shift/bigint.js`, `bitwise-not/bigint.js`, `unary-minus/bigint.js`, etc.) → blocked on #2044 (BigInt i64-brand).
@@ -56,13 +56,15 @@ test/language/expressions/strict-does-not-equals/S11.9.5_A8_T2.js
 test/language/expressions/strict-does-not-equals/S11.9.5_A8_T1.js
 ```
 
-### (c) TCO through conditional and logical operators (~4 tests)
+### (c) TCO through conditional, logical, comma, and labeled tail positions (~6 tests)
 
 ```
 test/language/expressions/conditional/tco-cond.js
 test/language/expressions/conditional/tco-pos.js
 test/language/expressions/logical-and/tco-right.js
 test/language/expressions/logical-or/tco-right.js
+test/language/expressions/comma/tco-final.js
+test/language/statements/labeled/tco.js
 ```
 
 ### Additional non-BigInt, non-with tests to confirm
