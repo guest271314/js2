@@ -248,3 +248,49 @@ close (origin/main 5ca4931a7). **Net +98 passes.** 43 issues done (0 wont-fix),
 **Carried to sprint 66**: the #2580 spine (M3→M4), the IR effect-model lane
 (#1373b/#2134/#2135/#2138/#2140/#2141), async/Promise (#1042/#2613/#2614),
 Proxy (#1355/#2618), standalone residual tails, type-oracle/pipeline refactors.
+
+## Sprint 66 (2026-06-24 → 2026-06-26) — architecture continuation: value-rep substrate + conformance fixes
+
+**Baseline**: 31,853 / 43,135 (sprint/65 close) → **32,158 / 43,135 (74.6%)** at
+close (sprint/66 tag, PR #2146). **Net +305 passes.** 22 issues done + 1 wont-fix
+(#1762 linear-memory string backing deferred), 54 carried to sprint 67.
+
+**Key wins**:
+- **merge_group standalone floor caught THREE host-masked regressions** (#2124/#2134
+  and one more in the #2140-#2142 range) — each recovered via diagnose→narrow→
+  re-validate. The floor has now caught host-masked regressions in every sprint
+  since #2097 wired it. Non-negotiable for broad-impact PRs.
+- **Verify-first architecting shrank "hard substrate" issues**: #2724 accessor-rep
+  (1 guard, closes #1642 — framed as a substrate rebuild, confirmed as 1 edit) and
+  #2722 nested-optional Path A (2 edits, not expected ~150 LOC). The s65
+  retro "spec-as-hypothesis" discipline proved out again.
+- **2026-06-26 session landings**: #1551 (SuperCall try-region guard — speculative-
+  rollback-eats-side-effects defect); #2671 three sub-areas (JSON.stringify +
+  Date.set* + RegExp lastIndex); #2692 (closure-capture ref-cell eager
+  materialization); #2713 (IR↔legacy parity correctness twins); #2711 (cross-backend
+  differential parity advisory CI gate); #2710 slices 0–1 (late-bind module indices
+  foundation, byte-identical); #2709 (super[super()] PutValue ReferenceError).
+- **Earlier s66 landings**: #2045 (linear Uint8Array WASI corruption), #2637 (Promise
+  capability protocol), #2652/#2654 (parseFloat ToString + precision), #2656/+#2664
+  (acorn tokenizer ++this.field fix → 8th dogfood blocker), #2665 (dashboard
+  feature-labels from pass-rates), #2667 (mapped arguments), #2675 (computed key
+  ++/--), #2677 (chained this-assignment), #2678 (Date.parse host mode), #2679
+  (valueOf wrong `this`), #2683/#2684 (Node Messaging + Deno stdio), #2083
+  (host-glue size).
+
+**Process**:
+- The **standalone floor + diagnose→narrow→re-validate cycle** is the definitive
+  broad-impact discipline. Anticipate it; one-shot enqueue only after the floor passes.
+- **Verify-first before the architect spec** — confirmed site first, document mechanism
+  second. The "substrate rebuild" framing is usually wrong; per-process tracing finds
+  the real site.
+- **Dev enqueue lag is structural**: dev agents complete fixes but the final enqueue
+  step falls to the lead/shepherd. The dedicated PR-queue shepherd role is the designed
+  mitigation; staff it at sprint start.
+- **statusline-sprint bug fixed**: a `status: planned` sprint was hijacking the active
+  badge. Guard committed 2026-06-26.
+
+**Carried to sprint 67**: 54 issues — the #2580 value-rep spine (M3→M4), #2660
+fnctor-reconstruct, IR effect-model lane (#2134–#2141), async/Promise (#2613/#2614),
+Proxy (#1355/#2618), standalone residual tails, type-oracle/pipeline refactors, and
+the newly-unblocked substrate slices (#2710/#2722/#2724 for implementation in s67).
