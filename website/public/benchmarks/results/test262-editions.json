@@ -10,8 +10,8 @@
   },
   {
     "edition": "ES5",
-    "pass": 9769,
-    "fail": 3182,
+    "pass": 9770,
+    "fail": 3181,
     "ce": 135,
     "skip": 0,
     "total": 13086,
@@ -19,12 +19,12 @@
   },
   {
     "edition": "ES2015",
-    "pass": 11293,
-    "fail": 3928,
-    "ce": 176,
+    "pass": 11317,
+    "fail": 3907,
+    "ce": 173,
     "skip": 0,
     "total": 15397,
-    "pct": 73
+    "pct": 74
   },
   {
     "edition": "ES2016",

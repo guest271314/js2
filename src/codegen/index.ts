@@ -6165,7 +6165,8 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
         callee === "__wasiStdinReadByte" ||
         callee === "__wasiStdinAvailable" ||
         callee === "__wasiStdinEof" ||
-        callee === "__wasiStdinSetReader"
+        callee === "__wasiStdinSetReader" ||
+        callee === "__wasiStdinStop"
       ) {
         needsStdinReactor = true;
         needsFdRead = true;

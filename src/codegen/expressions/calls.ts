@@ -36,12 +36,14 @@ import {
   emitStdinEof,
   emitStdinReadByte,
   emitStdinSetReader,
+  emitStdinStop,
   emitTimerAdd,
   emitTimerCallbackWrapper,
   emitTimerCancel,
   ensureTimerHeap,
   getRunLoopNowFuncIdx,
   isStandalonePromiseActive,
+  isStdinReactorActive,
   type StandalonePromiseThenCallback,
 } from "../async-scheduler.js";
 import {
@@ -3216,6 +3218,13 @@ function tryWasiTimerCall(
     // boolean result (i32 0/1)
     return { kind: "i32" };
   }
+  // #2735 — `__wasiStdinStop()` drops the fd0 subscription so the reactor can
+  // terminate WITHOUT stdin EOF (in-band shutdown / `process.stdin.destroy()`).
+  // The library `Readable.destroy()` lowers to this.
+  if (name === "__wasiStdinStop") {
+    emitStdinStop(ctx, fctx);
+    return VOID_RESULT;
+  }
   // #2632 Phase 3 — `__wasiStdinSetReader(cb)` registers the Readable's pump as
   // the reactor-tick hook (run loop call_ref's it each tick after the drain).
   // The callback closure is compiled into a `$__mt_func_type` wrapper + captures
@@ -4806,6 +4815,15 @@ function compileCallExpression(
       propAccess.name.text === "exit" &&
       ctx.wasiProcExitIdx >= 0
     ) {
+      // #2735 — when the fd0 stdin reactor is active, drop its subscription
+      // before `proc_exit` so the intent (terminate now) is explicit and the
+      // run loop cannot out-live the exit. `proc_exit` already tears the whole
+      // instance down, so this is belt-and-suspenders; it is gated on the
+      // reactor being active so a `process.exit`-only program (no stdin) is
+      // NOT forced to wire the reactor.
+      if (isStdinReactorActive(ctx)) {
+        emitStdinStop(ctx, fctx);
+      }
       if (expr.arguments.length >= 1) {
         // #1801: `proc_exit` takes an i32 exit code. Compiling the argument
         // with expected type `{ kind: "i32" }` already delivers an i32 on the

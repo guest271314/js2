@@ -177,17 +177,20 @@ const STDIN_READABLE_PRELUDE = `declare function __wasiStdinReadByte(): number;
 declare function __wasiStdinAvailable(): number;
 declare function __wasiStdinEof(): boolean;
 declare function __wasiStdinSetReader(cb: () => void): void;
+declare function __wasiStdinStop(): void;
 
 class __Js2wasmReadable {
   private chunk: string = "";
   private dataCbs: ((c: string) => void)[] = [];
   private endCbs: (() => void)[] = [];
   private readableCbs: (() => void)[] = [];
+  private closeCbs: (() => void)[] = [];
   private flowing: boolean = false;
   private paused: boolean = false;
   private ended: boolean = false;
   private armed: boolean = false;
   private eofReadableFired: boolean = false;
+  private destroyed: boolean = false;
 
   private drainBytes(): number {
     let n = 0;
@@ -204,6 +207,9 @@ class __Js2wasmReadable {
   }
 
   private pump(): void {
+    // A destroyed stream emits no further 'readable'/'data'/'end' (Node parity)
+    // and stops draining; the reactor's fd0 subscription was already dropped.
+    if (this.destroyed) { return; }
     const got = this.drainBytes();
     const atEof = __wasiStdinEof();
     // 'readable' fires when new bytes arrived OR when the stream has just reached
@@ -234,12 +240,14 @@ class __Js2wasmReadable {
     if (event === "data") { this.dataCbs.push(cb); this.flowing = true; this.arm(); }
     else if (event === "end") { this.endCbs.push(cb); this.arm(); }
     else if (event === "readable") { this.readableCbs.push(cb); this.arm(); }
+    else if (event === "close") { this.closeCbs.push(cb); }
     return this;
   }
 
   // read([size]): returns a string chunk of up to size chars, or null when fewer
   // than size are buffered and EOF has not been reached (paused-mode semantics).
   read(size?: number): string | null {
+    if (this.destroyed) { return null; }
     // Pull any freshly-ready bytes so a paused .read() sees the latest buffer.
     this.drainBytes();
     const avail = this.chunk.length;
@@ -271,6 +279,22 @@ class __Js2wasmReadable {
     // Flush any bytes withheld while paused immediately (the reactor may already
     // be at EOF and not call the hook again).
     this.pump();
+    return this;
+  }
+
+  // destroy(): tear the stream down NOW. Unlike .pause() (which leaves stdin
+  // subscribed so the process stays alive while data listeners remain), destroy
+  // drops the fd0 reactor subscription via __wasiStdinStop(), so the run loop's
+  // 'pending' test falls through and _start returns cleanly EVEN THOUGH stdin
+  // never reached EOF. This is the in-band / programmatic shutdown escape hatch
+  // (#2735): without it the reactor's only exit is stdin EOF, which hangs when
+  // the peer keeps the pipe open (the real Native-Messaging case). Emits 'close'
+  // once, then suppresses all further events (Node parity).
+  destroy(): __Js2wasmReadable {
+    if (this.destroyed) { return this; }
+    this.destroyed = true;
+    __wasiStdinStop();
+    for (let i = 0; i < this.closeCbs.length; i = i + 1) { this.closeCbs[i](); }
     return this;
   }
 }
