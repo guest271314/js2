@@ -359,14 +359,64 @@ export function ensureExternStrictEqHelper(ctx: CodegenContext): number | undefi
     "__extern_strict_eq",
   );
   const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const EQ_HEAP_TYPE = -19; // WasmGC `eq` abstract heap type
   const body: Instr[] = [
+    // (#2734) Object/reference-identity fast path. `__any_from_extern` has no
+    // dedicated Object tag — it folds an object externref into the tag-5 (string)
+    // fallback, so the `__any_strict_eq` below would string-compare two objects
+    // and never match them by identity (`[o].indexOf(o)` → -1). That regressed
+    // the `built-ins/Array/prototype/{indexOf,lastIndexOf}/...` object-element
+    // cluster (and `includes`, which calls this helper) when #2719 replaced the
+    // `__host_eq` import with this native arm. Internalise both externrefs; if
+    // both are non-null `eq` refs and `ref.eq` (the SAME reference), they are
+    // `===` → return 1. Otherwise fall through to the primitive comparison. This
+    // never false-positives a primitive: distinct number/string boxes are
+    // distinct refs (→ value comparison); only a genuinely identical reference
+    // short-circuits. `null`/non-eq values fail `ref.test (ref eq)` and fall
+    // through (so `null === null` etc. stay handled by `__any_strict_eq`).
+    { op: "local.get", index: 0 },
+    { op: "any.convert_extern" } as Instr,
+    { op: "local.tee", index: 2 },
+    { op: "ref.test", typeIdx: EQ_HEAP_TYPE } as Instr,
+    { op: "local.get", index: 1 },
+    { op: "any.convert_extern" } as Instr,
+    { op: "local.tee", index: 3 },
+    { op: "ref.test", typeIdx: EQ_HEAP_TYPE } as Instr,
+    { op: "i32.and" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: 2 },
+        { op: "ref.cast", typeIdx: EQ_HEAP_TYPE } as Instr,
+        { op: "local.get", index: 3 },
+        { op: "ref.cast", typeIdx: EQ_HEAP_TYPE } as Instr,
+        { op: "ref.eq" } as Instr,
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [{ op: "i32.const", value: 1 }, { op: "return" } as Instr],
+        },
+      ],
+    },
+    // Primitive comparison (numbers unified via f64.eq, strings by content,
+    // booleans, null/undefined by tag) for everything the fast path didn't match.
     { op: "local.get", index: 0 },
     { op: "call", funcIdx: fromExternIdx },
     { op: "local.get", index: 1 },
     { op: "call", funcIdx: fromExternIdx },
     { op: "call", funcIdx: strictEqIdx },
   ];
-  ctx.mod.functions.push({ name: "__extern_strict_eq", typeIdx, locals: [], body, exported: false });
+  ctx.mod.functions.push({
+    name: "__extern_strict_eq",
+    typeIdx,
+    locals: [
+      { name: "a_any", type: { kind: "anyref" } },
+      { name: "b_any", type: { kind: "anyref" } },
+    ],
+    body,
+    exported: false,
+  });
   ctx.funcMap.set("__extern_strict_eq", funcIdx);
   return funcIdx;
 }
