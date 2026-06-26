@@ -369,14 +369,15 @@ function emitReturnTail(ctx: CodegenContext, fctx: FunctionContext, hasPendingFi
       const target = fctx.body[tIdx]!;
       if (target.op === "call" && canTailCall(ctx, fctx, (target as any).funcIdx as number)) {
         (target as any).op = "return_call";
-        fctx.body.length = tIdx + 1; // drop dead materialization + reset
+        // Truncate dead code (materialization + #1511 reset) after the terminator.
+        fctx.body.length = tIdx + 1; // not-a-probe-rollback (#1919): dead-code truncation after return_call, not a speculative-compile rollback
         return; // return_call implicitly returns
       }
       if (target.op === "call_ref") {
         const typeIdx = (target as any).typeIdx as number | undefined;
         if (typeIdx !== undefined && canTailCallRef(ctx, fctx, typeIdx)) {
           (target as any).op = "return_call_ref";
-          fctx.body.length = tIdx + 1; // drop dead materialization + reset
+          fctx.body.length = tIdx + 1; // not-a-probe-rollback (#1919): dead-code truncation after return_call_ref, not a speculative-compile rollback
           return;
         }
       }
