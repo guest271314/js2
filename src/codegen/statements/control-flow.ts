@@ -363,7 +363,59 @@ function emitReturnTail(ctx: CodegenContext, fctx: FunctionContext, hasPendingFi
     }
   }
 
+  // (#2707c) Tail calls buried inside a `return <conditional>` / `return
+  // <logical>` are not the *last* emitted instruction — the value-producing
+  // expression lowers to an `(if (result T) …)` whose tail call lives inside an
+  // arm (e.g. `return n===0 ? 0 : f(n-1)` → `(if (then 0) (else … call $f …))`;
+  // `&&`/`||` nest a second `if`). Recurse into the arms and rewrite each arm's
+  // trailing call to `return_call`, so `?:` / `&&` / `||` tail recursion no
+  // longer grows the stack (§14.9.2 tail-position calls in Conditional/Logical
+  // expressions). The `if` block itself still produces a value for any arm that
+  // is NOT a tail call, so the trailing `return` below stays correct.
+  if (!resetBeforeReturn && !inTryWithHandler && lastInstr && lastInstr.op === "if") {
+    rewriteArmTailCalls(ctx, fctx, (lastInstr as any).then as Instr[] | undefined);
+    rewriteArmTailCalls(ctx, fctx, (lastInstr as any).else as Instr[] | undefined);
+  }
+
   fctx.body.push({ op: "return" });
+}
+
+/**
+ * (#2707c) Rewrite the trailing tail call of one `if`-arm (a Conditional /
+ * Logical branch in return position) to `return_call` / `return_call_ref`.
+ *
+ * The arm's value-producing tail is one of:
+ *   - a bare `call` / `call_ref` (e.g. the `||` short-circuit RHS),
+ *   - a `call` / `call_ref` immediately followed by the IR's materialization
+ *     `local.tee` / `local.set` (`… call $f / local.tee $ir`), or
+ *   - a nested `if` (a `&&`/`||`/`?:` chain) — recurse into it.
+ * Any other trailing shape (`f() + 1`, a plain value, a non-tail outer call)
+ * is left untouched, so non-tail calls are never mis-promoted.
+ *
+ * Safe because the arm is in return position: the `if` result flows straight to
+ * the `return`, so a materialization local written after the call is dead, and
+ * `return_call` is a stack-polymorphic terminator, so any instruction left after
+ * it in the arm is valid unreachable code.
+ */
+function rewriteArmTailCalls(ctx: CodegenContext, fctx: FunctionContext, arm: Instr[] | undefined): void {
+  if (!arm || arm.length === 0) return;
+  let idx = arm.length - 1;
+  // Skip a single trailing materialization tee/set the IR inserts after the
+  // value-producing instruction.
+  const trailing = arm[idx];
+  if (trailing && (trailing.op === "local.tee" || trailing.op === "local.set")) idx -= 1;
+  if (idx < 0) return;
+  const target = arm[idx];
+  if (!target) return;
+  if (target.op === "call") {
+    if (canTailCall(ctx, fctx, (target as any).funcIdx as number)) (target as any).op = "return_call";
+  } else if (target.op === "call_ref") {
+    const typeIdx = (target as any).typeIdx as number | undefined;
+    if (typeIdx !== undefined && canTailCallRef(ctx, fctx, typeIdx)) (target as any).op = "return_call_ref";
+  } else if (target.op === "if") {
+    rewriteArmTailCalls(ctx, fctx, (target as any).then as Instr[] | undefined);
+    rewriteArmTailCalls(ctx, fctx, (target as any).else as Instr[] | undefined);
+  }
 }
 
 /**
