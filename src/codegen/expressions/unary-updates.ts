@@ -31,7 +31,7 @@ import {
 import { coerceType, compileExpression, skipTransparentExpressions } from "../shared.js";
 import { compileStringLiteral } from "../string-ops.js";
 import { defaultValueInstrs } from "../type-coercion.js";
-import { emitThrowString, emitThrowTypeError, getFuncParamTypes } from "./helpers.js";
+import { emitSuperUninitializedThisGuard, emitThrowString, emitThrowTypeError, getFuncParamTypes } from "./helpers.js";
 import { ensureLateImport, flushLateImportShifts } from "./late-imports.js";
 import { emitToPropertyKeyOnce } from "./assignment.js";
 import { emitMappedArgParamSync } from "./logical-ops.js";
@@ -420,6 +420,19 @@ function compileMemberIncDec(
 
   // Unwrap parenthesized expressions: ++(obj.x) -> ++obj.x
   operand = unwrapParens(operand);
+
+  // (#2709) `super[super()]++` / `++super[super()]` — a SuperProperty UPDATE whose
+  // computed key contains a super() call. §13.3.7.1 resolves the reference (with
+  // GetThisBinding) BEFORE evaluating the key, so this always throws a
+  // ReferenceError; emit it and stop, before the inner super() is evaluated. No-op
+  // for every other shape (see emitSuperUninitializedThisGuard).
+  if (
+    ts.isElementAccessExpression(operand) &&
+    operand.expression.kind === ts.SyntaxKind.SuperKeyword &&
+    emitSuperUninitializedThisGuard(ctx, fctx, operand.argumentExpression)
+  ) {
+    return { kind: "f64" };
+  }
 
   // Handle obj.prop
   if (ts.isPropertyAccessExpression(operand)) {
@@ -1631,6 +1644,17 @@ function compilePrefixIncrementElement(
   target: ts.ElementAccessExpression,
   isIncrement: boolean,
 ): ValType | null {
+  // (#2709) `++super[super()]` is a SuperProperty UPDATE; reference resolution
+  // runs GetThisBinding() FIRST (§13.3.7.1 step 2), throwing ReferenceError before
+  // the inner super() (in the key) is evaluated. Emit that throw and stop so the
+  // inner super() never runs. No-op for every other shape.
+  if (
+    target.expression.kind === ts.SyntaxKind.SuperKeyword &&
+    emitSuperUninitializedThisGuard(ctx, fctx, target.argumentExpression)
+  ) {
+    return { kind: "f64" };
+  }
+
   // #2045 C.8: linear-backed Uint8Array element update — read-modify-write the
   // linear memory directly (the GC path below requires a ref array and throws on
   // a (ptr,len) buffer). Prefix → new value. Falls through for any other target.
@@ -1839,6 +1863,17 @@ function compilePostfixIncrementElement(
   target: ts.ElementAccessExpression,
   isIncrement: boolean,
 ): ValType | null {
+  // (#2709) `super[super()]++` is a SuperProperty UPDATE; reference resolution
+  // runs GetThisBinding() FIRST (§13.3.7.1 step 2), throwing ReferenceError before
+  // the inner super() (in the key) is evaluated. Emit that throw and stop so the
+  // inner super() never runs. No-op for every other shape.
+  if (
+    target.expression.kind === ts.SyntaxKind.SuperKeyword &&
+    emitSuperUninitializedThisGuard(ctx, fctx, target.argumentExpression)
+  ) {
+    return { kind: "f64" };
+  }
+
   // #2045 C.8: linear-backed Uint8Array element update — read-modify-write the
   // linear memory directly. Postfix → old value. Falls through for any other.
   const linU8 = tryEmitLinearU8ElementUpdate(ctx, fctx, target, isIncrement, /* isPrefix */ false);
