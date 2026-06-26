@@ -2083,6 +2083,41 @@ function buildArgcExtrasReset(ctx: CodegenContext): Instr[] {
 }
 
 /**
+ * Reset `__argc` to its -1 sentinel and `__extras_argv` to null WITHOUT
+ * lazily creating either global. Unlike {@link buildArgcExtrasReset}, this
+ * never calls `ensureExtrasArgvGlobal` — so it cannot register the
+ * `__extras_argv` vec heap type for the FIRST time mid-function-body.
+ *
+ * Why this matters (#2704 / PR #2149): the multi-funcref dispatch arm builds
+ * its ref.test/ref.cast/call_ref chain (with type indices already resolved)
+ * BEFORE emitting the post-dispatch reset. The preceding setup only registers
+ * `__extras_argv` when the call actually has overflow args; a 0-extras callback
+ * (e.g. the `() => void` thunk passed to `assert.throws`) leaves it
+ * unregistered. Calling `ensureExtrasArgvGlobal` from the reset then becomes
+ * the FIRST registration of that global/type at a point where the surrounding
+ * function body has already been partially emitted — which desynced codegen
+ * and silently miscompiled `new Map/WeakMap/WeakSet(iterable)` inside the
+ * callback so it no longer threw (4-test merge_group regression).
+ *
+ * Resetting `__argc` is always safe (it is an i32 global with no heap type and
+ * is already registered by the preceding setup). `__extras_argv` only needs a
+ * reset when it was actually used / previously registered: if it was never
+ * registered it still holds its null initializer, so there is nothing to leak
+ * (#1511) and skipping the reset is correct.
+ */
+function buildArgcResetNoLazyExtras(ctx: CodegenContext): Instr[] {
+  const argcGlobalIdx = ensureArgcGlobal(ctx);
+  const out: Instr[] = [];
+  if (ctx.extrasArgvGlobalIdx >= 0) {
+    out.push({ op: "ref.null", typeIdx: ctx.extrasArgvVecTypeIdx } as Instr);
+    out.push({ op: "global.set", index: ctx.extrasArgvGlobalIdx } as Instr);
+  }
+  out.push({ op: "i32.const", value: -1 } as Instr);
+  out.push({ op: "global.set", index: argcGlobalIdx } as Instr);
+  return out;
+}
+
+/**
  * Flatten call-site arguments, expanding spread elements on array literals
  * into individual expressions. Returns the flat list of expressions.
  * For spread on non-literal arrays, returns null (cannot flatten at compile time).
@@ -12181,13 +12216,28 @@ function compileCallExpression(
             // async-gen-meth / static-async-gen test262 forms in #2704). The
             // dispatch chain below is pure ref.test/if with no intervening
             // calls and exactly ONE arm runs, so a single set-before /
-            // reset-after is correct. Reset prevents stale extras from leaking
-            // into a subsequent callee that DOES read `arguments` (#1511).
+            // reset-after is correct.
             for (const ins of buildArgcExtrasSetupFromLocals(ctx, fctx, cpParamCnt, cpExtrasLocals)) {
               fctx.body.push(ins);
             }
             fctx.body.push(...funcDispatch);
-            // BISECT: reset disabled
+            // (#2704) Reset __argc to its sentinel after the dispatch so a stale
+            // count can't leak into a subsequent callee that reads `arguments`
+            // (#1511). Use the no-lazy-register variant: the dispatch chain's
+            // type operands are already baked above, and calling
+            // ensureExtrasArgvGlobal here for a 0-extras callback would register
+            // the __extras_argv vec type for the FIRST time mid-body and desync
+            // codegen — that miscompiled `new Map/WeakMap/WeakSet(iterable)`
+            // inside an assert.throws callback so it stopped throwing (the
+            // 4-test merge_group regression that parked PR #2149).
+            if (expectedReturn !== null) {
+              const retL = allocLocal(fctx, `__mfd_ret_${fctx.locals.length}`, expectedReturn);
+              fctx.body.push({ op: "local.set", index: retL } as Instr);
+              for (const ins of buildArgcResetNoLazyExtras(ctx)) fctx.body.push(ins);
+              fctx.body.push({ op: "local.get", index: retL } as Instr);
+            } else {
+              for (const ins of buildArgcResetNoLazyExtras(ctx)) fctx.body.push(ins);
+            }
           }
 
           // (#1712) Assemble the host-callable fallback split: the funcref
