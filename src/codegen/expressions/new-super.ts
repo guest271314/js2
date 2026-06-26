@@ -12,7 +12,7 @@ import {
   isOwnParamName,
 } from "../closures.js";
 import { reportError } from "../context/errors.js";
-import { allocLocal, allocTempLocal, releaseTempLocal } from "../context/locals.js";
+import { allocLocal, allocTempLocal, getLocalType, releaseTempLocal } from "../context/locals.js";
 import type { CodegenContext, FunctionContext } from "../context/types.js";
 import {
   addFuncType,
@@ -69,6 +69,8 @@ import {
 } from "./helpers.js";
 import { localGlobalIdx } from "../registry/imports.js";
 import { ensureLateImport, flushLateImportShifts } from "./late-imports.js";
+import { emitFnctorProtoGet } from "./fnctor-prototype.js"; // (#2660 S3a) reconstruct `new F()` as $Object
+import { resolveFnctorSymbol } from "../fnctor-escape-gate.js"; // (#2660 S3a) canonical fnctor-name key
 
 // #2146: resolveEnclosingClassName now lives in shared.ts (imported above).
 
@@ -913,6 +915,83 @@ function flattenCallArgs(args: readonly ts.Expression[]): ts.Expression[] | null
 }
 
 /**
+ * (#2660 S3a) True when the result of an approved empty-body `new F()` — which
+ * the reconstruct path emits as an externref `$Object` — flows into a slot that
+ * accepts externref, so returning externref cannot trap. Two safe shapes:
+ *   (a) a function-local `var`/`let`/`const x = new F()` whose ALREADY-ALLOCATED
+ *       local is externref. `compileVariableStatement` allocates that local from
+ *       the binding's declared type BEFORE compiling the initializer (which is
+ *       what calls us), so by the time we run the slot's type is final. Reading
+ *       the REAL slot type — rather than re-deriving it from the TS annotation —
+ *       is robust against every type-override in variables.ts and is exactly the
+ *       value the result is `local.set` into.
+ *   (b) an inline member/element receiver `new F().x` / `new F()[i]` (unwrapping
+ *       `( )`/`as`/`!`): an externref receiver routes through the dynamic
+ *       `__extern_get` + `$proto` walk — the resolution path we want.
+ * Anything else (a struct-typed local, a module-global binding, a call argument,
+ * a return, an assignment target) → false → status-quo struct lowering. The
+ * conservative miss costs a row, never the floor.
+ */
+function fnctorNewResultConsumedAsExternref(
+  _ctx: CodegenContext,
+  fctx: FunctionContext,
+  newExpr: ts.NewExpression,
+): boolean {
+  const declParent = newExpr.parent;
+  if (ts.isVariableDeclaration(declParent) && declParent.initializer === newExpr && ts.isIdentifier(declParent.name)) {
+    const localIdx = fctx.localMap.get(declParent.name.text);
+    if (localIdx === undefined) return false; // module-global binding → status quo
+    return getLocalType(fctx, localIdx)?.kind === "externref";
+  }
+  // Inline: unwrap `( )` / `as` / `!` between the new-expression and its consumer.
+  let inner: ts.Expression = newExpr;
+  let parent: ts.Node = inner.parent;
+  while (ts.isParenthesizedExpression(parent) || ts.isAsExpression(parent) || ts.isNonNullExpression(parent)) {
+    inner = parent;
+    parent = parent.parent;
+  }
+  if (ts.isPropertyAccessExpression(parent) && parent.expression === inner) return true;
+  if (ts.isElementAccessExpression(parent) && parent.expression === inner) return true;
+  return false;
+}
+
+/**
+ * (#2660 S3a) Emit an approved empty-body `new F()` as a native `$Object` whose
+ * `$proto` is seeded from F's per-fnctor prototype `$Object` (S2,
+ * `ctx.fnctorPrototypeObject[F]`). Reuses the ONE `$Object.$proto` walk: the
+ * result is a real `$Object`, so its inherited reads resolve natively via
+ * `__extern_get`'s proto walk — no parallel `[[Prototype]]` mechanism, and the
+ * identity `Object.getPrototypeOf(new F()) === F.prototype` holds.
+ *
+ * `__object_create(proto)` (ES §20.1.2.2) allocates the fresh `$Object` AND
+ * seeds `$proto = (proto is $Object ? proto : null)` in one call — exactly the
+ * construction-time snapshot `new F()` needs (§9.1.13: a later `F.prototype = …`
+ * reassignment does NOT retro-change existing instances). In standalone both
+ * `__object_create` and the prototype global's lazy `__new_plain_object` are
+ * DEFINED functions (ensureObjectRuntime — late-imports.ts), so no host import is
+ * added and no funcidx shift is incurred; the closed `$__fnctor_<Name>` struct
+ * shape is left entirely untouched (no #1100/#2009 canonicalization re-entry).
+ *
+ * Leaves the new `$Object` externref on the stack and returns its ValType, or
+ * null to decline (caller falls through to the bespoke struct lowering).
+ */
+function compileFnctorNewAsObject(ctx: CodegenContext, fctx: FunctionContext, fnctorKey: string): ValType | null {
+  const createIdx = ensureLateImport(ctx, "__object_create", [{ kind: "externref" }], [{ kind: "externref" }]);
+  flushLateImportShifts(ctx, fctx);
+  if (createIdx === undefined) return null;
+  // Push F's prototype `$Object` (S2's lazy-init read — mints an empty `$Object`
+  // if `F.prototype` was never assigned, so `$proto` is always a real object).
+  if (!emitFnctorProtoGet(ctx, fctx, fnctorKey)) return null;
+  // __object_create(proto) → fresh $Object with $proto = proto. Re-read the
+  // funcMap index after emitFnctorProtoGet (its `__new_plain_object` ensure is a
+  // defined-func no-op in standalone, but re-reading is the safe late-import
+  // discipline every call site in this file follows).
+  const finalCreateIdx = ctx.funcMap.get("__object_create") ?? createIdx;
+  fctx.body.push({ op: "call", funcIdx: finalCreateIdx } as Instr);
+  return { kind: "externref" };
+}
+
+/**
  * Compile `new FuncDecl(args)` where FuncDecl is a function declaration used
  * as a constructor (e.g. `function Foo() { this.x = 1; }; new Foo()`).
  *
@@ -931,6 +1010,55 @@ function compileNewFunctionDeclaration(
 ): ValType | null {
   const body = funcDecl.body;
   if (!body) return null;
+
+  // (#2660 S3a) Reconstruct an APPROVED, EMPTY-BODY `new F()` as a native
+  // `$Object` (standalone) so its inherited-prototype reads route through the
+  // ONE `$Object.$proto` walk instead of the bespoke `$__fnctor_<Name>` struct,
+  // which has no `$proto` field and misses every inherited read. Verified on
+  // current main: `function Con(){}; Con.prototype={foo:7}; const c:any=new
+  // Con(); c.foo` returns 0 on the struct path; reconstruction makes it 7.
+  //
+  // This is the value-rep CANARY (the low-risk first slice). It fires ONLY on a
+  // proven-safe intersection and keeps the status-quo struct lowering everywhere
+  // else, so it cannot regress a typed own-field read (#1888 floor). The broad
+  // binding-retype that banks the test262 cluster is S3b — intentionally NOT
+  // here. The gate (ALL must hold; any miss → fall through to the struct):
+  //   (G0) standalone — host/WASI keep the existing lowering BYTE-IDENTICAL
+  //        (host has the #1712 instance→prototype sidecar; `__object_create` is
+  //        native only in standalone via ensureObjectRuntime — late-imports.ts).
+  //   (G1) the S1 escape-gate approved THIS exact site (node identity) — i.e.
+  //        dynamically consumed AND no typed own-field consumer (clause A∧B).
+  //   (G2) truly empty body — no `this.x=` (so no own field exists to regress)
+  //        AND no ctor-body side effects to drop (running the body is S3c).
+  //   (G3) no constructor args — nothing to evaluate/drop (arg'd sites keep
+  //        status quo, which still runs their arg side effects via the ctor).
+  //   (G4) the instance's result-externref flows into an externref slot: a
+  //        function-local binding whose ALLOCATED local is externref (the
+  //        `any`/`unknown` case), OR an inline `new F().x` / `new F()[i]`
+  //        receiver. Reading the REAL local type (not the TS annotation) is the
+  //        load-bearing safety check — returning externref into a struct-ref
+  //        local would `ref.cast`-trap (that retype ripple is S3b).
+  //
+  // Cache-order note: this gate sits at the cache-MISS entry. If a NON-approved
+  // sibling `new F()` of the same fnctor compiled first, it populated
+  // `funcConstructorMap[F]` and a later approved site hits that cache in
+  // `compileNewExpression` (returning the struct) WITHOUT reaching this gate — so
+  // it keeps status quo. That is a safe MISS (a 0-row outcome), never a trap: the
+  // struct ref coerces cleanly into the approved site's externref/any binding.
+  // S3b's binding-retype removes the miss; S3a deliberately does not chase it.
+  if (
+    ctx.standalone &&
+    ctx.fnctorEscapeGate?.approved.has(expr) &&
+    body.statements.length === 0 &&
+    (expr.arguments?.length ?? 0) === 0 &&
+    fnctorNewResultConsumedAsExternref(ctx, fctx, expr)
+  ) {
+    const fnctorKey = resolveFnctorSymbol(ctx.checker, expr.expression)?.name ?? funcName;
+    const reconstructed = compileFnctorNewAsObject(ctx, fctx, fnctorKey);
+    if (reconstructed) return reconstructed;
+    // Helper declined (e.g. `__object_create` unavailable) → fall through to the
+    // bespoke struct lowering below (status quo, safe).
+  }
 
   // 1. Analyze the function body for `this.prop = value` assignments
   const fields: FieldDef[] = [];
