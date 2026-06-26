@@ -96,3 +96,30 @@ WASI, NOT host-dependent. The leaks were spurious:
 After both fixes `nm_node_process.ts --target wasi` compiles with ZERO warnings,
 imports only `wasi_snapshot_preview1`, and echoes byte-exactly under wasmtime — a
 genuine standalone-WASI async-stream variant.
+
+### Bug 3 — `__str_to_number` externref/f64 invalid Wasm — REPRODUCED, fixed
+`nm_wasi_p3.ts --target wasi` emitted a module that fails Wasm validation:
+`call $__str_to_number` is fed an f64 where its `(externref)->f64` signature wants
+an externref (`wasm-validator`/wasmtime: `type mismatch: expected externref, found
+f64`). nm_wasi_p3 is a P3 source-reference (not runnable until the #2658 P3 backend
+lands), but valid TS must never compile to INVALID Wasm — and the defect is in a
+shared coercion path that affects any non-standalone program coercing an externref
+iterable to a WasmGC vec (e.g. `const [a] = hostFnReturningTuple()`).
+
+**Root cause:** `buildVecFromExternref` (src/codegen/type-coercion.ts) captured the
+helper funcIdx values (`__extern_length`/`__extern_get`/`__unbox_number`/
+`__box_number`) and THEN called `ensureLateImport("__array_from_iter")` (and, in
+standalone, `__extern_get_idx`). Registering a NEW env import shifts the index of
+every DEFINED function — and under nativeStrings/WASI `__box_number` /
+`__unbox_number` / `__str_to_number` are emitted as native DEFINED helpers. So the
+captured `boxIdx` (`__box_number`) went stale by one and pointed at the adjacent
+`__str_to_number`. The per-element read loop then emitted `f64.convert_i32_s; call
+<stale boxIdx → __str_to_number>` — handing `__str_to_number` an f64 index where it
+expects an externref. This is the exact late-import index-shift hazard that
+`buildTupleFromIterableFallback` already documents and guards against (#2043 class).
+
+**Fix:** register ALL late imports for the path up front (gated on
+`useNativeObjVec` for the standalone-only / host-only ones), `flushLateImportShifts`
+ONCE, THEN read every funcIdx from `ctx.funcMap` — so no captured index can be
+shifted out from under a later registration. After the fix the loop emits `call
+$__box_number` (f64→externref) and the module passes wasmtime validation; tsc clean.

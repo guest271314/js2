@@ -213,19 +213,6 @@ export function buildVecFromExternref(
   vecTypeIdx: number,
   vecInfo: { arrTypeIdx: number; elemType: ValType },
 ): Instr[] {
-  const lenIdx = ensureLateImport(ctx, "__extern_length", [{ kind: "externref" }], [{ kind: "f64" }]);
-  flushLateImportShifts(ctx, fctx);
-  const getIdx = ensureLateImport(
-    ctx,
-    "__extern_get",
-    [{ kind: "externref" }, { kind: "externref" }],
-    [{ kind: "externref" }],
-  );
-  flushLateImportShifts(ctx, fctx);
-  const unboxIdx = ensureLateImport(ctx, "__unbox_number", [{ kind: "externref" }], [{ kind: "f64" }]);
-  flushLateImportShifts(ctx, fctx);
-  const boxIdx = ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
-  flushLateImportShifts(ctx, fctx);
   // #1472 Phase B Blocker B Slice 2 — standalone enumeration consumer.
   //
   // `__array_from_iter` is a JS-host import (it invokes the Symbol.iterator
@@ -239,18 +226,38 @@ export function buildVecFromExternref(
   // standalone materialization is a separate slice — those don't reach an
   // $ObjVec source.) The JS-host path is unchanged.
   const useNativeObjVec = ctx.standalone;
-  const iterIdx = useNativeObjVec
-    ? undefined
-    : ensureLateImport(ctx, "__array_from_iter", [{ kind: "externref" }], [{ kind: "externref" }]);
-  if (!useNativeObjVec) flushLateImportShifts(ctx, fctx);
-  // In standalone, indexed reads go through the native `__extern_get_idx`
-  // (f64 index → element) instead of `__extern_get(obj, boxed-index)` — the
-  // native `__extern_get` casts its key to $AnyString and would trap on a
-  // boxed number. (#1472 Phase B Blocker B Slice 2)
-  const getIdxIdx = useNativeObjVec
-    ? ensureLateImport(ctx, "__extern_get_idx", [{ kind: "externref" }, { kind: "f64" }], [{ kind: "externref" }])
-    : undefined;
-  if (useNativeObjVec) flushLateImportShifts(ctx, fctx);
+  // #2696 — register EVERY late import (helper) FIRST, flush ONCE, then read the
+  // funcIdx values from funcMap. ensureLateImport for a NEW env import shifts the
+  // index of every DEFINED helper func (the native `__box_number` /
+  // `__unbox_number` / `__str_to_number` emitted under nativeStrings/WASI), so a
+  // funcIdx captured BEFORE a later ensureLateImport goes stale and lands the
+  // call on the adjacent helper. The previous code captured `boxIdx`
+  // (`__box_number`, a defined func) and only THEN registered `__array_from_iter`
+  // / `__extern_get_idx`, shifting `boxIdx` by one onto `__str_to_number` — which
+  // emitted `call $__str_to_number` with an f64 index argument where an externref
+  // is required, producing invalid Wasm (loopdive/js2#389 bug 3, nm_wasi_p3.ts:
+  // `type mismatch: expected externref, found f64`). Mirror
+  // buildTupleFromIterableFallback's register-all-then-freeze discipline.
+  ensureLateImport(ctx, "__extern_length", [{ kind: "externref" }], [{ kind: "f64" }]);
+  ensureLateImport(ctx, "__extern_get", [{ kind: "externref" }, { kind: "externref" }], [{ kind: "externref" }]);
+  ensureLateImport(ctx, "__unbox_number", [{ kind: "externref" }], [{ kind: "f64" }]);
+  ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
+  if (useNativeObjVec) {
+    // In standalone, indexed reads go through the native `__extern_get_idx`
+    // (f64 index → element) instead of `__extern_get(obj, boxed-index)` — the
+    // native `__extern_get` casts its key to $AnyString and would trap on a
+    // boxed number. (#1472 Phase B Blocker B Slice 2)
+    ensureLateImport(ctx, "__extern_get_idx", [{ kind: "externref" }, { kind: "f64" }], [{ kind: "externref" }]);
+  } else {
+    ensureLateImport(ctx, "__array_from_iter", [{ kind: "externref" }], [{ kind: "externref" }]);
+  }
+  flushLateImportShifts(ctx, fctx);
+  const lenIdx = ctx.funcMap.get("__extern_length");
+  const getIdx = ctx.funcMap.get("__extern_get");
+  const unboxIdx = ctx.funcMap.get("__unbox_number");
+  const boxIdx = ctx.funcMap.get("__box_number");
+  const iterIdx = useNativeObjVec ? undefined : ctx.funcMap.get("__array_from_iter");
+  const getIdxIdx = useNativeObjVec ? ctx.funcMap.get("__extern_get_idx") : undefined;
 
   if (lenIdx === undefined || getIdx === undefined) {
     return [{ op: "ref.null", typeIdx: vecTypeIdx } as Instr];
