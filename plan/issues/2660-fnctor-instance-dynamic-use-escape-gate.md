@@ -691,3 +691,50 @@ cases. Each has a known fix — these are the acceptance gate for landing P1:
 GATE: after the 3 fixes, re-run those 3 suites + the full merge_group floor +
 paired baseline jsonl (broad value-rep). net<0 / bucket>50 → stop. Then P2 flips
 the `receiverStruct` map on → #2687/#2694 close; P3 #2686; #1712 differential.
+
+## S3b — GROUNDING VERDICT: STRATEGY COLLISION, ESCALATED (do NOT build in parallel) (2026-06-26, sd-s3a)
+
+> Verify-first grounded against current `main` (`49505a46`, after S3a + the 2674
+> PART-1 both landed). **Verdict: S3b as specified (binding-retype +
+> reconstruct-as-`$Object` for the struct-typed cluster) should NOT be built right
+> now — it COLLIDES with the 2674 track's pinned-struct dispatch.** Escalated to the
+> lead for a strategy decision before any broad change.
+
+### The collision (verified in code, not just doc)
+Two strategies have converged on this issue with the OPPOSITE instance
+representation, both rewriting `compileNewFunctionDeclaration` + `fnctor-escape-gate.ts`:
+- **2674 track (PART-1 LANDED, inert; PART-2 next-sprint, "single #2660 owner"):**
+  KEEP the instance as `(ref $__fnctor_F)` and make `any`-typed receiver
+  reads/writes PIN to the struct (`ref.test $struct → struct.get/set`). Provider
+  `resolveReceiverStruct` + the `receiverStruct` flow-map are landed (verified
+  inert: no lowering consumes them yet). Dispatch (`resolvePinnedReceiverStruct` /
+  `emitAlternateStructSetDispatch` / `tryEmitStructReceiverMemberRead`) is built +
+  MECHANISM-VALIDATED on acorn (`__host_eq` 30k→163) on WIP branch
+  `issue-2681-acorn-lifted-method-this`. Crucially this AVOIDS the binding-retype
+  blast radius — the instance type never changes.
+- **S3b (this slice):** RECONSTRUCT the same struct-typed cluster instances as
+  `$Object` (externref) and RE-TYPE the binding local/param/return — the broad
+  ~3–5 day value-rep ripple, HIGH #1888-floor risk.
+
+You cannot have the same `new F()` site be BOTH a struct (for pinned `struct.get`)
+AND an `$Object` (for the externref dynamic path). The representation is singular
+per site → the two strategies are mutually exclusive for the cluster.
+
+### Recommendation (for the lead + sd-2674b to reconcile)
+1. **Prefer the 2674 pinned-struct strategy for the cluster** (recommended): it
+   avoids the binding-retype blast radius and is already acorn-validated. The
+   bounded, *diagnosed* next step is landing PART-2's 3-fix regression gate (#2179
+   delete-tombstone, #2656 typed-receiver scope, #2659 sidecar-only) + wiring the
+   dispatch — NOT a parallel S3b. **S3a (the narrow reconstruct canary) coexists
+   cleanly** — it fires only on the `any`-binding / empty-body / inline niche the
+   pin does not touch.
+2. **Reconstruct-as-`$Object` is only justified IF** the *generic-method* sub-cluster
+   (`forEach.call(child,cb)` — the test262 `15.4.4.*` rows) genuinely needs the
+   instance to be an `$Object` participating in the INDEXED-read `$proto` walk,
+   which a pinned `struct.get` does NOT provide. If so, S3b is scoped to ONLY that
+   sub-cluster, coordinated with sd-2674b (one owner of `compileNewFunctionDeclaration`),
+   and sub-sliced (single-local-binding-retype canary first). Otherwise S3b is the
+   higher-risk path to a goal the pin already reaches.
+
+**Status: S3b PARKED pending the strategy decision. No S3b code written. Branch
+`issue-2660-s3b` carries only this grounding note.**
