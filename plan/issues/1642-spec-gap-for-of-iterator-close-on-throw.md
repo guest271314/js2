@@ -2,7 +2,7 @@
 id: 1642
 title: "spec gap: for-of IteratorClose — RE-SCOPED to the residual 8 (return-method representation + generator-close)"
 status: in-progress
-assignee: ttraenkler/dev-conformance
+assignee: ttraenkler/sd-iterclose
 created: 2026-05-08
 updated: 2026-06-26
 priority: medium
