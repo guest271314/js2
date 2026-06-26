@@ -11545,10 +11545,11 @@ export function ensureStructForType(ctx: CodegenContext, tsType: ts.Type): void 
   // Get properties from the type (empty objects get an empty struct)
   const props = tsType.getProperties();
 
-  // (#2724) An object-LITERAL accessor-bearing type must not become a closed
-  // struct. getTypeOfSymbol on a getter symbol yields the getter's RETURN type,
-  // so a getter `return` would be laid out as a plain data field (e.g. f64) — but
-  // the literal is built as an externref $Object by compileObjectLiteralWithAccessors
+  // (#2724) An object-LITERAL accessor-bearing type that ALSO carries a
+  // non-accessor (data/method) own property must not become a closed struct.
+  // getTypeOfSymbol on a getter symbol yields the getter's RETURN type, so a
+  // getter `return` would be laid out as a plain data field (e.g. f64) — but the
+  // literal is built as an externref $Object by compileObjectLiteralWithAccessors
   // (literals.ts). The two representations collide (gc: the externref $Object does
   // not match the struct, so reads come back null; standalone: the externref→struct
   // ref.cast traps with "illegal cast"). Skip registration → the type lowers to
@@ -11557,20 +11558,47 @@ export function ensureStructForType(ctx: CodegenContext, tsType: ts.Type): void 
   // it. This is the root cause of #1642's residual iterator-close-*-get-method-* edges
   // (the iterator factory `{ next, get return() }` registered a closed struct, so
   // __iterator(iterable) read back null and __iterator_next(null) threw upstream of
-  // close). SCOPED to object-LITERAL accessors only (declaration parent is an
-  // ObjectLiteralExpression): a CLASS getter's declaration parent is a
+  // close).
+  //
+  // (#2724 narrowing — merge_group floor fix) SCOPED to MIXED accessor literals
+  // (≥1 obj-literal accessor AND ≥1 non-accessor own property). A getter-ONLY
+  // literal like `{ get v() {} }` is, on main, used almost exclusively as an
+  // object-REST/spread SOURCE (`{...x} = { get v() {} }`, `for await ({...x} of
+  // [{ get v() {} }])`, RegExpExec's `{ get 0() {} }`). The object-rest copy paths
+  // (assignment.ts / loops.ts) read the source through a `struct→externref →
+  // __extern_rest_object` conversion that REQUIRES the source to be a registered
+  // struct; lowering a getter-only literal to externref instead routes it to the
+  // externref-rest path which does not run __extern_rest_object (assignment-rest)
+  // or double-wraps it (`extern.convert_any` on an already-externref value in the
+  // for-await path) — so the getter is never invoked / re-invoked, breaking
+  // CopyDataProperties semantics. Restricting the guard to MIXED literals keeps
+  // every getter-only rest/RegExp source on its working struct path (zero
+  // regressions vs. the merged baseline) while still externref-lowering the #1642
+  // iterators (which are mixed: an iterator always has a `next` method). The
+  // getter-only return/member-read case is deferred to the #2580 externref-rest
+  // substrate work. SCOPED to object-LITERAL accessors only (declaration parent is
+  // an ObjectLiteralExpression): a CLASS getter's declaration parent is a
   // ClassDeclaration (and an interface's an InterfaceDeclaration) and MUST keep the
   // struct + getter-method representation.
+  let hasObjLitAccessor = false;
+  let hasNonAccessor = false;
   for (const prop of props) {
-    if ((prop.flags & (ts.SymbolFlags.GetAccessor | ts.SymbolFlags.SetAccessor)) === 0) continue;
-    const isObjLitAccessor = (prop.declarations ?? []).some(
-      (d) =>
-        (ts.isGetAccessorDeclaration(d) || ts.isSetAccessorDeclaration(d)) &&
-        d.parent != null &&
-        ts.isObjectLiteralExpression(d.parent),
-    );
-    if (isObjLitAccessor) return; // leave externref; do not register a struct
+    const isAccessorSym = (prop.flags & (ts.SymbolFlags.GetAccessor | ts.SymbolFlags.SetAccessor)) !== 0;
+    if (
+      isAccessorSym &&
+      (prop.declarations ?? []).some(
+        (d) =>
+          (ts.isGetAccessorDeclaration(d) || ts.isSetAccessorDeclaration(d)) &&
+          d.parent != null &&
+          ts.isObjectLiteralExpression(d.parent),
+      )
+    ) {
+      hasObjLitAccessor = true;
+    } else if (!isAccessorSym) {
+      hasNonAccessor = true;
+    }
   }
+  if (hasObjLitAccessor && hasNonAccessor) return; // leave externref; do not register a struct
 
   const fields: FieldDef[] = [];
   // #1118 follow-up: track callable-property arities so structs whose methods

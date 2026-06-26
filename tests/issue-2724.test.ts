@@ -15,31 +15,42 @@ import { compile } from "../src/index.js";
  *   - standalone: the externref→struct `ref.cast` traps ("illegal cast")
  *
  * Fix: `ensureStructForType` skips closed-struct registration for object-LITERAL
- * accessor-bearing types (declaration parent is an ObjectLiteralExpression), so
- * they lower to externref end to end and the existing `$Object` accessor read
- * path services them. CLASS accessors (parent = ClassDeclaration) keep the
- * struct + getter-method representation.
+ * accessor-bearing types that ALSO carry a non-accessor (data/method) own
+ * property (declaration parent is an ObjectLiteralExpression), so they lower to
+ * externref end to end and the existing `$Object` accessor read path services
+ * them. CLASS accessors (parent = ClassDeclaration) keep the struct +
+ * getter-method representation.
  *
  * This is the root cause of #1642's residual `iterator-close-*-get-method-*`
- * edges: the for-of iterator factory `{ next, get return() }` registered a
- * closed struct, so `__iterator(iterable)` read back null and threw upstream of
- * IteratorClose.
+ * edges: the for-of iterator factory `{ next, get return() }` (MIXED: a `next`
+ * method + a `get return()` accessor) registered a closed struct, so
+ * `__iterator(iterable)` read back null and threw upstream of IteratorClose.
+ *
+ * NARROWING (merge_group floor fix): the guard fires only for MIXED literals
+ * (≥1 accessor AND ≥1 non-accessor property). A getter-ONLY literal like
+ * `{ get v() {} }` is, on main, used predominantly as an object-REST/spread
+ * source (`{...x} = { get v() {} }`, RegExpExec's `{ get 0() {} }`), whose copy
+ * paths require the source to be a registered struct; externref-lowering it broke
+ * CopyDataProperties. Getter-only literals therefore stay on the struct path; the
+ * getter-only return/member-read case is deferred to the #2580 externref-rest
+ * substrate work. Every #1642 iterator is mixed (an iterator always has `next`),
+ * so the acceptance edges are fully covered.
  */
 describe("#2724 object-literal accessor representation (gc/host)", () => {
-  it("(a) accessor literal returned from a function — getter fires on read", async () => {
+  it("(a) MIXED accessor literal returned from a function — getter fires on read", async () => {
     const src = `
 let sideEffect = 0;
 function makeObj() {
-  return { get x() { sideEffect++; return 42; } };
+  return { tag: 7, get x() { sideEffect++; return 42; } };
 }
 export function test(): number {
   const o = makeObj();
   const a = o.x; // fires getter -> 42, sideEffect = 1
   const b = o.x; // fires getter -> 42, sideEffect = 2
-  return a + b + sideEffect; // 42 + 42 + 2 = 86
+  return a + b + sideEffect + o.tag; // 42 + 42 + 2 + 7 = 93
 }`;
     const exp = await compileToWasm(src);
-    expect((exp.test as Function)()).toBe(86);
+    expect((exp.test as Function)()).toBe(93);
   });
 
   it("(b) for-of IteratorClose with get return() throwing → throw propagates", async () => {
@@ -140,19 +151,38 @@ export function test(): number {
     expect((exp.test as Function)()).toBe(13);
   });
 
-  it("(c2) setter-only literal returned from a function still routes to externref", async () => {
+  it("(c2) MIXED setter literal returned from a function routes to externref", async () => {
     const src = `
 let stored = 0;
 function make() {
-  return { set s(v: number) { stored = v; } };
+  return { tag: 3, set s(v: number) { stored = v; } };
 }
 export function test(): number {
   const o = make();
   o.s = 9;
-  return stored; // 9
+  return stored + o.tag; // 9 + 3 = 12
 }`;
     const exp = await compileToWasm(src);
-    expect((exp.test as Function)()).toBe(9);
+    expect((exp.test as Function)()).toBe(12);
+  });
+
+  it("(c3) getter-ONLY literal as an object-REST source — getter fires once (narrowing regression guard)", async () => {
+    // A getter-only literal is kept on the struct path so the object-rest copy
+    // (struct→externref→__extern_rest_object) invokes the getter exactly once.
+    // Lowering it to externref (the un-narrowed guard) broke this (#2724 floor).
+    const src = `
+let count = 0;
+function run(): number {
+  let x: any;
+  let threw = 0;
+  try {
+    ({ ...x } = { get v() { count++; throw new Error("T"); } });
+  } catch (e) { threw = 1; }
+  return threw * 100 + count; // getter invoked once during rest, then throws -> 101
+}
+export function test(): number { return run(); }`;
+    const exp = await compileToWasm(src);
+    expect((exp.test as Function)()).toBe(101);
   });
 
   it("(d) CLASS getter control — struct + getter-method representation preserved", async () => {
@@ -176,19 +206,19 @@ describe("#2724 object-literal accessor representation (standalone)", () => {
     return (instance.exports.test as Function)() as number;
   }
 
-  it("accessor literal returned from a function — getter fires (no illegal cast)", async () => {
+  it("MIXED accessor literal returned from a function — getter fires (no illegal cast)", async () => {
     const v = await run(`
 let sideEffect = 0;
 function makeObj() {
-  return { get x() { sideEffect++; return 42; } };
+  return { tag: 7, get x() { sideEffect++; return 42; } };
 }
 export function test(): number {
   const o = makeObj();
   const a = o.x;
   const b = o.x;
-  return a + b + sideEffect; // 86
+  return a + b + sideEffect + o.tag; // 42 + 42 + 2 + 7 = 93
 }`);
-    expect(v).toBe(86);
+    expect(v).toBe(93);
   });
 
   it("mixed data + accessor returned from a function", async () => {
