@@ -1,7 +1,8 @@
 ---
 id: 2707
-title: "operators: unary +/-/~/>>> null-deref on null/undefined; strict-equals # edge; TCO in ?:/&&/||"
-status: in-progress
+title: "operators: TCO in ?:/&&/||/comma/labeled tail positions (sub-bug c)"
+status: done
+completed: 2026-06-26
 sprint: 67
 goal: test262-conformance
 feasibility: medium
@@ -15,19 +16,21 @@ created: 2026-06-26
 updated: 2026-06-26
 ---
 
-> **Partial — sub-bug (c) DONE; (a) + (b) remain.** Sub-bug (c) (TCO through
-> `?:` / `&&` / `||` / comma / labeled tail positions) is fixed; all 6 listed
-> TCO tests flip fail→pass with zero regressions in the affected categories.
-> Root cause turned out to be three stacked layers, not one TCO gap:
+> **Scope narrowed to sub-bug (c) — DONE in PR #2159.** This issue originally
+> bundled three independent operator bugs. Sub-bug (c) (TCO through `?:` / `&&`
+> / `||` / comma / labeled tail positions) is fixed here; all 6 listed TCO
+> tests flip fail→pass with zero regressions in the affected categories. Root
+> cause was three stacked layers, not one TCO gap:
 > (1) a recursive named-function-expression IIFE `(function f(n){…f(n-1)…})(N)`
 > was *inlined* and so never recursed (the self-name had no callable to bind to);
 > (2) the IR path did not rewrite a tail call buried in an `(if (result T))` arm;
 > (3) the closure/legacy path emitted the #1511 `__argc`/`__extras_argv` reset
 > BETWEEN the tail call and its `return`, hiding it from TCO recognition.
-> Sub-bugs **(a)** (unary `+`/`-`/`~`/`>>>` ToPrimitive trap — `+object` traps
-> "dereferencing a null pointer", deeper than the spec's "null/undefined"
-> framing) and **(b)** (strict-equals boxed-wrapper / funcref-vs-boolean trap)
-> are independent and still open — they should be split into follow-up issues.
+>
+> Sub-bugs **(a)** (unary `+`/`-`/`~`/`>>>` ToPrimitive(object) trap) and **(b)**
+> (strict-equals boxed-wrapper / funcref-vs-boolean trap) are independent runtime
+> *traps* (value-rep/boxed-wrapper substrate, architect-routed) and were **split
+> out to #2732**. They are NOT part of this issue's acceptance.
 
 # #2707 — operators: unary null-deref on nullish, strict-equals edge, TCO through conditional/logical
 
@@ -102,9 +105,18 @@ test/language/expressions/strict-equals/S11.9.4_A2.4_T2.js
 
 **(c)** The TCO pass (`src/codegen/peephole.ts` or tail-call detection in `src/codegen/statements.ts`) looks for `ReturnStatement` with a `CallExpression`. In `ConditionalExpression` (`?:`) and `LogicalExpression` (`&&`, `||`), the tail call is inside a sub-expression, not directly under a `ReturnStatement`. The codegen needs to propagate the "is-tail-position" flag into conditional/logical branches.
 
-## Acceptance criteria
+## Acceptance criteria (narrowed to sub-bug (c) — sub-bugs (a)/(b) → #2732)
 
-At least 15 of the 21 listed non-BigInt, non-with tests flip from fail to pass (5 null-deref + 6 strict-equals + 4 TCO, adjusting for any that turn out to be with-based after inspection). No regression in operator tests. Full CI green.
+All 6 TCO tests flip from fail to pass — conditional `tco-cond`/`tco-pos`,
+logical-and `tco-right`, logical-or `tco-right`, comma `tco-final`, labeled
+`tco`. No regression in operator/conditional/logical/comma tests. Full CI green.
+
+**Met** (PR #2159): all 6 pass; category sweep conditional+logical+comma+labeled
+67→73 pass, zero new regressions; non-tail calls not mis-promoted; `tsc` clean.
+
+> Sub-bugs (a) unary ToPrimitive(object) trap and (b) strict-equals
+> boxed-wrapper trap are tracked in **#2732** (architect-routed, feasibility:hard)
+> and are out of scope here.
 
 ## Notes
 
