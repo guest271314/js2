@@ -300,6 +300,17 @@ export function lowerFunctionAstToIr(
     if (!ts.isIdentifier(p.name)) {
       throw new Error(`ir/from-ast: unsupported param shape in Phase 1 (${name})`);
     }
+    // #2713 — rest (`...args`), default (`x = 5`) and optional (`x?`) params
+    // keep an Identifier name and so slip this gate, after which their
+    // arity/defaulting semantics are dropped (a regression against #1372).
+    // The top-level selector already rejects them (`select.ts` →
+    // param-shape-rejected); mirror that here so nested function declarations
+    // lowered through this path demote cleanly to legacy rather than
+    // miscompiling. (No-op for top-level claimed functions — the selector has
+    // already filtered these out.)
+    if (p.questionToken || p.dotDotDotToken || p.initializer) {
+      throw new Error(`ir/from-ast: rest/default/optional param not in Phase 1 IR scope (${name})`);
+    }
     return {
       name: p.name.text,
       type: resolveIrType(p.type, override, `param ${p.name.text} of ${name}`),
@@ -1906,6 +1917,18 @@ function lowerObjectLiteral(expr: ts.ObjectLiteralExpression, cx: LowerCtx): IrV
  * legacy.
  */
 function lowerElementAccess(expr: ts.ElementAccessExpression, cx: LowerCtx): IrValueId {
+  // #2713 — `a?.[i]` carries a `questionDotToken`: on a `null`/`undefined`
+  // receiver the access must short-circuit to `undefined`, not index it.
+  // The element-access lowering below ignores the token and emits an
+  // unconditional `vec.get` (or object field read), which TRAPS on a null
+  // receiver instead of yielding `undefined`. Optional chaining is
+  // explicitly out of slice scope (#1169n: "Optional chaining `?.` / `?.()`
+  // — need null-guard branching"), so demote the whole function to legacy,
+  // which has the runtime null-guard. (Same demote-to-legacy discipline the
+  // property-access optional arm already follows.)
+  if (expr.questionDotToken) {
+    throw new Error(`ir/from-ast: optional element access (a?.[i]) not in IR scope (${cx.funcName})`);
+  }
   const arg = expr.argumentExpression;
   const isStringLitKey = ts.isStringLiteral(arg) || arg.kind === ts.SyntaxKind.NoSubstitutionTemplateLiteral;
   // Lower the receiver first so we can dispatch by its IrType.
@@ -4184,6 +4207,16 @@ function tryFoldNullCompare(expr: ts.BinaryExpression, op: ts.SyntaxKind, cx: Lo
   if (otherType.kind === "class" || otherType.kind === "object" || otherType.kind === "closure") {
     return null;
   }
+  // #2713 — a `string` IrType lowers to a nullable ref shape: host-strings
+  // backend → `externref`, native-strings backend → `(ref null $AnyString)`.
+  // A host caller can pass `null` for a `string`-typed parameter (JS has no
+  // type enforcement), so the slice-1 "string is provably non-null"
+  // assumption is unsound. Folding `s === null` → `false` / `s !== null` →
+  // `true` then silently miscompiles the defensive guard (legacy emits the
+  // correct runtime `ref.is_null` check, returning the spec result). Bail so
+  // the caller falls back to legacy — same fix class as the #1981 class/
+  // object/closure arm above, left open for the string arm.
+  if (otherType.kind === "string") return null;
   // Slice 10 (#1169i): a `val { externref }` operand is similarly
   // nullable. Functions that compare externref-typed values against
   // null (e.g. through extern.call results assigned to a local) need
@@ -4219,6 +4252,16 @@ function lowerClosureExpression(expr: ts.ArrowFunction | ts.FunctionExpression, 
   const params: IrType[] = expr.parameters.map((p) => {
     if (!ts.isIdentifier(p.name) || !p.type) {
       throw new Error(`ir/from-ast: closure params must be Identifier-named with annotations (${cx.funcName})`);
+    }
+    // #2713 — rest (`...xs`), default (`x = 5`) and optional (`x?`) params keep
+    // an Identifier name, so the gate above lets them through and the lowering
+    // below silently drops their arity/defaulting semantics (a regression
+    // against #1372's intent). Reject them to legacy here, mirroring the
+    // top-level selector gate (`select.ts` param-shape-rejected). Demote-to-
+    // legacy is the documented contract; legacy applies the default initializer
+    // / rest gathering correctly.
+    if (p.questionToken || p.dotDotDotToken || p.initializer) {
+      throw new Error(`ir/from-ast: closure rest/default/optional param not in IR scope (${cx.funcName})`);
     }
     return typeNodeToIr(p.type, `param ${p.name.text} of ${cx.funcName}.<closure>`);
   });
