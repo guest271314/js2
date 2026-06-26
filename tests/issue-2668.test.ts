@@ -271,3 +271,144 @@ describe("#2668 Slice B — own-property accessor descriptor identity", () => {
     ).toBe(1);
   });
 });
+
+// #2668 Slice C — Array exotic [[DefineOwnProperty]] for `length`
+// (ES §10.4.2.1 ArraySetLength). Scope: the spec-mandated rejections
+// (RangeError on a non-uint32 length value; TypeError on an illegal
+// attribute change / accessor descriptor) plus the simple length set on the
+// valid path. Per-index configurability on shrink, frozen (non-writable)
+// length blocking index adds, and object/string ToPrimitive value coercion
+// are DEFERRED (need per-index descriptor tracking / full host ToNumber).
+describe("#2668 Slice C — Array length exotic defineProperty", () => {
+  it("RangeError on a fractional length value (15.2.3.6-4-style)", async () => {
+    expect(
+      await run(`
+        export function test(): number {
+          const arr = [0, 1];
+          try {
+            Object.defineProperty(arr, "length", { value: 4.5 });
+            return 10;
+          } catch (e) {
+            return e instanceof RangeError ? 1 : 20;
+          }
+        }
+      `),
+    ).toBe(1);
+  });
+
+  it("RangeError on a negative length value", async () => {
+    expect(
+      await run(`
+        export function test(): number {
+          const arr = [0, 1];
+          try {
+            Object.defineProperty(arr, "length", { value: -1 });
+            return 10;
+          } catch (e) {
+            return e instanceof RangeError ? 1 : 20;
+          }
+        }
+      `),
+    ).toBe(1);
+  });
+
+  it("RangeError on an undefined length value (15.2.3.6-4-125)", async () => {
+    expect(
+      await run(`
+        export function test(): number {
+          const arr: number[] = [];
+          try {
+            Object.defineProperty(arr, "length", { value: undefined });
+            return 10;
+          } catch (e) {
+            return e instanceof RangeError ? 1 : 20;
+          }
+        }
+      `),
+    ).toBe(1);
+  });
+
+  it("TypeError making length configurable:true (15.2.3.6-4-120)", async () => {
+    expect(
+      await run(`
+        export function test(): number {
+          const arr: number[] = [];
+          try {
+            Object.defineProperty(arr, "length", { configurable: true });
+            return 10;
+          } catch (e) {
+            return e instanceof TypeError ? 1 : 20;
+          }
+        }
+      `),
+    ).toBe(1);
+  });
+
+  it("TypeError making length enumerable:true", async () => {
+    expect(
+      await run(`
+        export function test(): number {
+          const arr: number[] = [];
+          try {
+            Object.defineProperty(arr, "length", { enumerable: true });
+            return 10;
+          } catch (e) {
+            return e instanceof TypeError ? 1 : 20;
+          }
+        }
+      `),
+    ).toBe(1);
+  });
+
+  it("TypeError on an accessor descriptor for length", async () => {
+    expect(
+      await run(`
+        export function test(): number {
+          const arr: number[] = [];
+          try {
+            Object.defineProperty(arr, "length", { get: function () { return 0; } });
+            return 10;
+          } catch (e) {
+            return e instanceof TypeError ? 1 : 20;
+          }
+        }
+      `),
+    ).toBe(1);
+  });
+
+  it("a valid uint32 length value updates arr.length", async () => {
+    expect(
+      await run(`
+        export function test(): number {
+          const arr = [10, 20, 30];
+          Object.defineProperty(arr, "length", { value: 1 });
+          return arr.length;
+        }
+      `),
+    ).toBe(1);
+  });
+
+  it("does NOT throw for a valid integer length value", async () => {
+    expect(
+      await run(`
+        export function test(): number {
+          const arr: number[] = [];
+          Object.defineProperty(arr, "length", { value: 2 });
+          return arr.length === 2 ? 1 : 20;
+        }
+      `),
+    ).toBe(1);
+  });
+
+  it("index-define length growth is NOT regressed (Slice C guard)", async () => {
+    expect(
+      await run(`
+        export function test(): number {
+          const arr = [0, 1];
+          Object.defineProperty(arr, "5", { value: 99 });
+          return arr.length === 6 ? 1 : arr.length;
+        }
+      `),
+    ).toBe(1);
+  });
+});
