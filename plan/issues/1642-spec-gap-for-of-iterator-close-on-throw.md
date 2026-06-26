@@ -1,8 +1,8 @@
 ---
 id: 1642
 title: "spec gap: for-of IteratorClose — RE-SCOPED to the residual 8 (return-method representation + generator-close)"
-status: in-progress
-assignee: ttraenkler/dev-conformance
+status: blocked
+depends_on: [2580]
 created: 2026-05-08
 updated: 2026-06-26
 priority: medium
@@ -16,6 +16,91 @@ goal: spec-completeness
 sprint: 66
 renumbered_from: 1348
 parent: 1328
+---
+
+## SLICE 1 GROUNDING + COLLISION VERDICT — STOP/ESCALATE (2026-06-26, sd-iterclose)
+
+**Verdict: the Slice-1 root-cause model below is INCORRECT. The 4 `iterator-close-*`
+edge failures are NOT a close-time return-method reachability gap. They fail
+UPSTREAM of close, on the `get return()` ACCESSOR in the iterator object literal.
+The real fix is object-literal accessor representation = #2580 substrate. Do NOT
+build the spec's `__get_return`/`__call_return` close-time read — it fixes none of
+these tests. Escalated to lead.**
+
+### How grounded (faithful harness, current `origin/main` @ 93e7aebb)
+
+Ran the real test262 files through `wrapTest`+`parseMeta`+`buildImports`+`setExports`
+(mirrors the sharded worker), plus host-call tracing on `__iterator` /
+`__iterator_next` / `__iterator_return`, plus emitted-WAT inspection. The
+discriminator across the whole close cluster is **100% the accessor**:
+
+| test (for-of/) | iterator's `return` | `__iterator(iterable)` | result |
+|---|---|---|---|
+| iterator-close-non-throw-get-method-**is-null** | `get return()` accessor | **null** | THROWS `null.next` (FAIL) |
+| iterator-close-non-throw-get-method-**abrupt** | `get return()` accessor | **null** | FAIL (ret 3) |
+| iterator-close-throw-get-method-**abrupt** | `get return()` accessor | **null** | FAIL (ret 3) |
+| iterator-close-throw-get-method-**non-callable** | plain data `return:` | `[object Object]` | PASS (ret 1) |
+| iterator-close-non-throw-get-method-**non-callable** | plain data `return:` | `[object Object]` | PASS (ret 1) |
+| iterator-close-via-break / -return / -throw / -continue | plain data | object | PASS |
+
+Every `get return()` (accessor) case: the host `__iterator(iterable)` —
+which invokes the dynamically-assigned `[Symbol.iterator]` factory closure via
+`__call_fn_0` — **returns `null`**, so `__iterator_next(null)` throws and close is
+never reached. Every plain-data-`return:` case already iterates AND closes
+correctly (the host `__iterator_return` chain `iter.return ?? _sidecar ??
+__sget_return` works; `__sget_return`/`__sset_return` ARE emitted — contradicting
+the spec's "no such getter is emitted").
+
+### Smoking gun (emitted WAT, accessor vs plain, identical otherwise)
+
+```
+get return(){ return 5 } -> (type $__anon_0 (struct (field $next (mut externref)) (field $return (mut f64))))
+return: function(){...}   -> (type $__anon_0 (struct (field $next (mut externref)) (field $return (mut externref))))
+```
+
+An object literal with an **accessor** lowers `$return` to a plain `(mut f64)`
+data field whose **type is inferred from the getter's return expression** (`f64`
+for `return 5`); the getter is **lazy but its accessor semantics are dropped** (a
+`get g(){ throw }` does NOT throw at construction and a side-effecting getter's
+counter stays 0 — so it is neither a real accessor nor an eager field). Building
+the iterator object through the dynamic/closure path with such a mixed/garbage
+field shape is what makes the factory's `__call_fn_0` return `null`. The
+`get`/`set` accessor is **not represented as an accessor at all** in the
+object-literal struct lowering.
+
+### Collision verdict — STOP
+
+The actual fix is **object-literal `get`/`set` accessor representation in the
+dynamic/any path** (real lazy getter call-at-read, accessor descriptor, correct
+field typing). That is exactly the **#2580 method/accessor-representation
+substrate** the spec itself flagged as "overlap" and the task named as a
+STOP-and-escalate trigger (the S3b lesson). #2580 is currently *released* (no live
+lock / no open PR), so this is not recreating a LIVE conflict — but the spec's
+Slice-1 mechanism is invalidated by grounding and the genuine fix lands in
+representation territory #2580 owns. Per instructions I am **not building in
+parallel**. Recommend: re-scope #1642 Slice 1 onto the verified accessor-rep
+root cause and coordinate with the #2580 owner (sd-protoextend), or have #2580
+land the general object-literal accessor representation first and let #1642
+consume it. The `non-callable` + `via-*` close tests already pass, so once
+accessor object literals are represented correctly, the close path likely needs
+no further change for the 3 accessor edges. (`return-emulates-undefined` is an
+`IsHTMLDDA`/document.all host-object case — separate, not an accessor, likely
+out of scope for standalone.)
+
+**Lead decision (2026-06-26): release + stand down — do NOT pivot into the
+accessor-rep fix.** Like S3b, object-literal get/set accessor representation is
+broad value-rep substrate that must be a DELIBERATE #2580 slice (architect-spec
++ single-owner), not a rushed #1642 side-effect on the floor-sensitive lane.
+**#1642 is now `status: blocked`, `depends_on: [2580]`** — specifically blocked on
+a #2580 object-literal-accessor-representation slice. Once `get`/`set` are real
+accessors, the close path likely needs NO further change for the 3 accessor edges
+(`non-throw-get-method-abrupt`, `non-throw-get-method-is-null`,
+`throw-get-method-abrupt`); the 4th, `return-emulates-undefined-throws-when-called`,
+is a separate `IsHTMLDDA`/document.all case. This write-up landed on `main` via a
+doc-only PR (branch `issue-1642-iterclose-slice1`) so the corrected root cause +
+#2580 cross-ref are visible to the next session / the #2580 owner. The #1642 lock
+is released; no production code changed.
+
 ---
 
 ## RE-SCOPE + VERIFIED FINDINGS (2026-06-26, dev-conformance)
