@@ -1,8 +1,8 @@
 ---
 id: 1642
 title: "spec gap: for-of IteratorClose — RE-SCOPED to the residual 8 (return-method representation + generator-close)"
-status: in-progress
-assignee: ttraenkler/sd-iterclose
+status: blocked
+depends_on: [2580]
 created: 2026-05-08
 updated: 2026-06-26
 priority: medium
@@ -87,8 +87,19 @@ no further change for the 3 accessor edges. (`return-emulates-undefined` is an
 `IsHTMLDDA`/document.all host-object case — separate, not an accessor, likely
 out of scope for standalone.)
 
-Branch `issue-1642-iterclose-slice1` parked at the grounding commit; lock held by
-sd-iterclose pending lead direction (no code changed).
+**Lead decision (2026-06-26): release + stand down — do NOT pivot into the
+accessor-rep fix.** Like S3b, object-literal get/set accessor representation is
+broad value-rep substrate that must be a DELIBERATE #2580 slice (architect-spec
++ single-owner), not a rushed #1642 side-effect on the floor-sensitive lane.
+**#1642 is now `status: blocked`, `depends_on: [2580]`** — specifically blocked on
+a #2580 object-literal-accessor-representation slice. Once `get`/`set` are real
+accessors, the close path likely needs NO further change for the 3 accessor edges
+(`non-throw-get-method-abrupt`, `non-throw-get-method-is-null`,
+`throw-get-method-abrupt`); the 4th, `return-emulates-undefined-throws-when-called`,
+is a separate `IsHTMLDDA`/document.all case. This write-up landed on `main` via a
+doc-only PR (branch `issue-1642-iterclose-slice1`) so the corrected root cause +
+#2580 cross-ref are visible to the next session / the #2580 owner. The #1642 lock
+is released; no production code changed.
 
 ---
 
