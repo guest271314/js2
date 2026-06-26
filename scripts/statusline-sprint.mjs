@@ -68,9 +68,40 @@ function flatTree() {
   return (_flatCache ??= scanFlatTree());
 }
 
+const SPRINTS_DIR = join(ISSUES_DIR, "sprints");
+// A sprint whose doc status is one of these is NOT the current working sprint,
+// even if its issues are already tagged `sprint: N` in frontmatter. This stops a
+// PRE-PLANNED future sprint (issues queued but the sprint not yet started) from
+// hijacking the "current sprint" pick — the bug where pre-creating sprint N+1's
+// issues made the badge jump to N+1 0/X while the team was still on sprint N.
+const INACTIVE_SPRINT_STATUSES = new Set(["planning", "planned", "closed", "done"]);
+function inactiveSprintNumbers() {
+  const out = new Set();
+  let names = [];
+  try {
+    names = readdirSync(SPRINTS_DIR);
+  } catch {
+    return out;
+  }
+  for (const f of names) {
+    const m = f.match(/^(\d+)\.md$/);
+    if (!m) continue;
+    let content;
+    try {
+      content = readFileSync(join(SPRINTS_DIR, f), "utf8");
+    } catch {
+      continue;
+    }
+    const st = content.match(/^status:\s*(\S+)/m)?.[1] ?? "";
+    if (INACTIVE_SPRINT_STATUSES.has(st)) out.add(Number(m[1]));
+  }
+  return out;
+}
+
 function currentSprint() {
   const buckets = flatTree();
-  const nums = [...buckets.keys()].sort((a, b) => b - a);
+  const inactive = inactiveSprintNumbers();
+  const nums = [...buckets.keys()].filter((n) => !inactive.has(n)).sort((a, b) => b - a);
   return nums[0] ?? 0;
 }
 
