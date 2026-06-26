@@ -33,6 +33,7 @@ export const NODE_BUILTIN_MODULES = new Set([
   "fs",
   "crypto",
   "os",
+  "module",
   "child_process",
   "assert",
   "dns",
@@ -73,6 +74,34 @@ const NODE_BUILTIN_FN_TYPED_STUBS: Record<
   crypto: {
     randomBytes: { params: "size: number", returns: "Uint8Array", passthrough: "size" },
     randomUUID: { params: "", returns: "string", passthrough: "" },
+  },
+  // #2699 — the destructured/named `node:url` function surface ESLint + npm libs
+  // import (`const { pathToFileURL } = require("node:url")`). Routes to
+  // `__nodefn__url__*` → `require("node:url")[fn]` (host) via the existing
+  // `node_builtin_fn` adapter. The namespace form (`url.pathToFileURL`) already
+  // worked via the `__node_url` module route; this fixes the destructured form,
+  // which otherwise fell through to a broken generic `env` stub.
+  url: {
+    pathToFileURL: { params: "path: any", returns: "any", passthrough: "path" },
+    fileURLToPath: { params: "url: any", returns: "any", passthrough: "url" },
+  },
+  // #2699 — `node:module` (not previously a recognized builtin). `createRequire`
+  // is used by ESLint's config loader and by many ESM/CJS-interop shims.
+  module: {
+    createRequire: { params: "filename: any", returns: "any", passthrough: "filename" },
+  },
+  // NOTE: `node:fs/promises` is deferred — the `/` in the module name breaks the
+  // `__nodefn__<module>__<fn>` identifier scheme (would emit an invalid
+  // `__nodefn__fs/promises__readFile` declaration). Sanitising the slash needs
+  // coordinated changes in the import-manifest classifier + runtime resolver;
+  // tracked as a follow-up. ESLint's `fs/promises` use is in the CLI/config
+  // layers, not the Linter.verify hot path.
+  // #2699 — `node:os` destructured function surface (`const { platform } =
+  // require("node:os")`). The namespace form (`os.platform()`) already worked
+  // via `__node_os`; this covers the destructured form ESLint's deps use.
+  os: {
+    platform: { params: "", returns: "any", passthrough: "" },
+    release: { params: "", returns: "any", passthrough: "" },
   },
 };
 
