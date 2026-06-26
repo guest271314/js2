@@ -1,7 +1,8 @@
 ---
 id: 2682
 title: "perf(strings): string read-loop fast path — hoist charCodeAt flatten/descriptor + i32 hash accumulator (the #1762 NO-GO redirect)"
-status: ready
+status: in-progress
+assignee: ttraenkler/sd-strhash
 needs_arch_spec: false
 created: 2026-06-26
 updated: 2026-06-26
@@ -183,3 +184,59 @@ Senior-dev. Spec settled here; implementation is a deliberate, floor-validated
 follow-on slice (recommend the pattern-recognizer FIRST slice in D1–D4's note).
 Measurement instrument: `.tmp/measure.py` + the 3 hand-WAT variants from #1762
 Slice 0 (re-create per the verdict section) for the before/after warm delta.
+
+## Implementation Notes — sd-strhash verify-first grounding (2026-06-26)
+
+**Verdict: CLEAN BOUNDED SLICE.** Scope is *narrower* than the spec's D1–D4
+because grounding the actual codegen on current `main` (commit 93e7aebbc849)
+shows D2 (relational) and D4 (accumulator) are **already done** by existing
+passes. Decoded WAT of `hashStr` (probe `.tmp/probe2.mjs` / `.tmp/probe-native.mjs`):
+
+- **D4 already done.** `collectI32CoercedLocals` (function-body.ts:186) already
+  promotes `h` to an **i32 local** in all modes — `let h=0; h=(h*31+c)|0` is
+  i32-safe because the assignment's top op is `|` (isI32SafeExpr returns true on
+  bitwise without recursing). The spec's "h is f64 today" is stale.
+- **D2 relational partly done.** In `{fast,nativeStrings}` the loop condition
+  `i < s.length` already emits `i32.lt_s` and `h*31` is `i32.mul`. (Non-fast
+  native still routes the condition through f64.lt — a minor residual, out of
+  this slice's critical path.)
+- **The real remaining cost is D1 + D3:**
+  - **D1** — `call $__str_flatten($0)` runs **every iteration** (loop-invariant),
+    plus per-iter `struct.get` of `.len/.off/.data`. This is the dominant
+    1.66–1.8x per Slice-0. Hoist into locals before the loop.
+  - **D3** — charCodeAt reads via the NaN-branch then `f64.convert_i32_u`, and the
+    consumer immediately `i32.trunc_sat_f64_s`-es it back — a pointless f64
+    round-trip. Under the in-bounds proof the NaN branch is dead and the read is a
+    direct i32 `array.get_u`.
+
+**Soundness (R1) is cleanly expressible on current main.** The in-bounds proof
+reuses `detectI32LoopVar` (loops.ts:157 — proves init non-neg literal + strict
+`<`/`>` condition + monotonic `++`/`+=k` step, so `i>=0` always) and a
+string-specific mutation check modeled on `loopBodyMutatesIndexOrArray`
+(loops.ts:237). NOTE: the #1196 helper rejects **all** method calls on the array
+(lines 299–307), so it can't be reused verbatim — strings are immutable, so only
+reassignment of `recv`/`i` and nested closures matter; `recv.charCodeAt(i)` reads
+must be allowed. With `0<=i<len` proven at every body point, dropping BOTH OOB
+checks and emitting a bare `array.get_u(dataL, offL+i)` is byte-identical.
+
+**Implementation loci (verified on main):**
+- `src/codegen/statements/loops.ts` `compileForStatement` (~819–868, the #1196
+  block) — add the canonical-loop recognizer: detect `i < recv.length` (recv
+  string-typed), check the string mutation guard, hoist `__str_flatten` + descriptor
+  reads into fresh locals before the loop, record a per-loop proof on a new
+  `fctx.hoistedCharReads` side-table (scoped save/restore exactly like
+  `safeIndexedArrays`).
+- `src/codegen/context/types.ts` (~377) — add `hoistedCharReads?` field next to
+  `safeIndexedArrays`.
+- `src/codegen/string-ops.ts` `compileNativeStringMethodCall` charCodeAt arm
+  (2230) — when an active proof matches `(recvName, idx===indexName)`, emit the
+  direct hoisted i32 read (no flatten / struct.get / NaN branch), wrap to f64 for
+  the f64-consumption context.
+- `src/codegen/binary-ops.ts` `isI32PureExpr` (1571) + `emitI32PureExpr` (1635) —
+  add a proof-gated charCodeAt **i32 leaf** so the whole `(h*31+c)|0` chain stays
+  i32 (this is what drops the f64 round-trip; the existing path already keeps
+  `h*31` in i32 once `c` is a pure leaf).
+
+Only fires in native-string mode (host/externref strings have no flattenable
+descriptor — charCodeAt is a host call there, untouched). Validated through the
+#2097 merge_group standalone floor.
