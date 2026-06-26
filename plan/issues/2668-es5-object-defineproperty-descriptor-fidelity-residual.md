@@ -2,9 +2,9 @@
 id: 2668
 title: "ES5: Object.defineProperty/defineProperties descriptor fidelity residual (~788 fails — largest ES5 cluster)"
 status: in-progress
-assignee: ttraenkler/sd-2668b
+assignee: ttraenkler/sd-2668c
 created: 2026-06-25
-updated: 2026-06-25
+updated: 2026-06-26
 priority: high
 feasibility: hard
 reasoning_effort: high
@@ -247,6 +247,76 @@ and identity is recovered by the existing `__host_eq` unwrap.
 - Regression: `issue-1460/1629*/1364a/1364b/2017/2580-m3-bacc/2042-s3` +
   `accessor-side-effects` green (119 passed; the lone fail is the pre-existing
   `issue-929` inline-capture case, fails on base). `tsc --noEmit` clean.
+
+## Slice C — landed (sd-2668c, host/standalone mode-agnostic)
+
+**Status:** Slice C merged; issue stays open for Slice D (cleanup). Slice C
+targets **Array exotic `[[DefineOwnProperty]]` for the `length` property** —
+`Object.defineProperty(arr, "length", desc)`, ES §10.4.2.1 `ArraySetLength`.
+
+### Verify-first finding — every failing array-length test fails at the FIRST `assert.throws`
+
+Reproduced per-file on current main (fresh single-process `runTest262File`, NOT
+the in-process batch — fork-state poisoning). Every `15.2.3.6-4-*` array row and
+every `built-ins/Array/length/define-own-prop-*` row fails at the **first
+`assert.throws(RangeError|TypeError, …)`**: `Object.defineProperty(arr,
+"length", desc)` was a silent no-op — `parseCanonicalArrayIndex` explicitly
+rejects `"length"` so `maybeEmitVecLengthGrowth` skipped it, and the generic
+descriptor path has no array-length-exotic handling. So nothing threw, and a
+valid value never updated `vec.length` (struct field 0).
+
+### The fix (one new function, `src/codegen/object-ops.ts`)
+
+`maybeEmitVecLengthDefine(ctx, fctx, objArg, propArg, descArg)` — called from
+`compileObjectDefineProperty` just before `maybeEmitVecLengthGrowth`; returns a
+`ValType` (handled, caller returns immediately) or `false` (defer, unchanged).
+Fires only for a `"length"` string-literal key + object-literal descriptor +
+side-effect-free receiver that resolves to a WasmGC vec. Implements the
+spec-mandated **rejections** plus the simple length set:
+
+- get/set accessor descriptor on `length` → **TypeError** (length is a data prop).
+- `configurable:true` / `enumerable:true` (literal) → **TypeError** (illegal
+  change of a non-configurable, non-enumerable property's attributes).
+- `value` (number/boolean/null/undefined/**string**) whose ToUint32 ≠ ToNumber
+  (NaN / ±Infinity / fractional / negative / > 2³²−1 / non-numeric string) →
+  **RangeError** (computed inline: `nl≥0 && nl≤4294967295 && floor(nl)===nl`).
+  Spec order is preserved — the value RangeError is checked **before** the
+  illegal-attr TypeError when both are present.
+- a valid uint32 `value` → set `vec.length` (field 0), **growing the backing
+  `$data` array** when `newLen` exceeds capacity (mirrors
+  `maybeEmitVecLengthGrowth` — the vec invariant length ≤ array.len(data) must
+  hold; setting the length field alone caused an OOB read). Allocation guarded
+  at `nl ≤ 16M`. Shrinks keep the backing capacity (reads are length-bounded).
+
+Strings are admitted because `StringToNumber` (§7.1.4.1) has **no** observable
+side effects — same "no object ToPrimitive" guarantee as a number.
+
+### Out of scope / deferred
+
+- **Per-index configurability on shrink** (`15.2.3.6-4-116/117/168-177`):
+  shrinking length below a non-configurable index must throw TypeError and stop
+  at that index — needs per-index descriptor tracking (an array substrate gap),
+  not present. Those rows stay failing (no regression).
+- **Object/symbol-valued length descriptors** (`15.2.3.6-4-146-151`): need the
+  full host ToNumber/ToPrimitive engine + spec field read-order. Deferred.
+- **Frozen (`writable:false`) length blocking later index adds** (`-188/-189`):
+  needs a per-array frozen-length sidecar bit. Deferred.
+- **Sparse near-2³² lengths** (`-154/-155/-183-186`): a dense WasmGC vec cannot
+  represent a 4-billion-slot sparse array. Deferred.
+- **`getOwnPropertyDescriptor(arr, "length")` attribute fidelity** + the
+  `verifyProperty` tails (`-116/-222/…`): depend on the per-index work above.
+
+### Test results
+
+- New: 9 `#2668 Slice C` cases in `tests/issue-2668.test.ts` (RangeError on
+  fractional/negative/undefined value, TypeError on configurable/enumerable
+  true + accessor descriptor, valid value updates `length`, no-throw on valid
+  integer, index-define growth no-regression guard). Full file green (21 cases).
+- Per-file array-length batch (79 files: `15.2.3.6-4-*` array rows +
+  `Array/length/*`, fresh single-process): **+18 pass, 0 regressions**
+  (pass→fail). `tsc --noEmit` clean.
+- Conformance: net-positive, **0 regressions** — re-validated via the
+  `merge_group` floor (define/array path is broad-impact).
 
 ---
 
