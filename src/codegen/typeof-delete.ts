@@ -476,8 +476,19 @@ export function compileDeleteExpression(
     // EXCEPTION: a `this` base is excluded — top-level `this` is the global
     // object (object-coercible), but the compiler currently represents it as a
     // null/undefined externref, which would make the guard fire spuriously on
-    // `delete this.x` (a legal sloppy-mode delete that returns `true`).
-    if (inner.expression.kind !== ts.SyntaxKind.ThisKeyword) {
+    // `delete this.x` (a legal sloppy-mode delete that returns `true`). Unwrap
+    // parens / casts on the receiver so `delete (this).x` / `delete (this as
+    // any).x` are excluded too.
+    let recvCore: ts.Expression = inner.expression;
+    while (
+      ts.isParenthesizedExpression(recvCore) ||
+      ts.isAsExpression(recvCore) ||
+      ts.isNonNullExpression(recvCore) ||
+      ts.isTypeAssertionExpression(recvCore)
+    ) {
+      recvCore = recvCore.expression;
+    }
+    if (recvCore.kind !== ts.SyntaxKind.ThisKeyword) {
       emitExternrefDestructureGuard(ctx, fctx, recvLocal);
     }
 
