@@ -2,7 +2,7 @@
 id: 2660
 title: "Whole-program escape/dynamic-use gate for reconstructing `new F()` instances as `$Object` (value-rep infra)"
 status: in-progress
-assignee: ttraenkler/sd-s3a
+assignee: ttraenkler/sd-2674b
 sprint: 66
 created: 2026-06-25
 priority: medium
@@ -586,3 +586,206 @@ write-back=sidecar → desync). The substrate MUST cover **read + write + compou
 (`__extern_get` key histogram — named the Scope.flags wall), `this-bind-repro.mjs`
 (small-scale fix verification), `structwalk.mjs`, `diff-probe.mjs` +
 `tests/dogfood/probe-driver.mjs`.
+
+## PART-1 — LANDED (inert analysis layer, 2026-06-26, sd-2674b)
+
+The analysis layer of the unified substrate. **Inert / byte-identical** (compile
+of a representative fnctor + aliased-prototype + local-from-call fixture is
+SHA-identical pre/post: `bcecace2…`, 6350 bytes), so safe to land ahead of the
+dispatch. Banks the receiver-resolution infra on `main` for the PART-2 wiring.
+
+Added to `src/codegen/fnctor-escape-gate.ts` (the S1 home) + `context/types.ts`:
+- **`FunctionContext.thisStructName?: string`** — the `this`-receiver struct
+  (resolution case 1). DECL only here; the PART-2 dispatch owns the SETTER
+  (`resolveLiftedMethodThisStruct`) + the consuming emitters.
+- **`FnctorEscapeGateResult.receiverStruct: ReadonlyMap<ts.Expression, string>`**
+  — the local-receiver flow map. Every USE identifier of a binding
+  `var x = <call>` whose initializer is a *single-return-inferable* fnctor call
+  (`this.startNode() → return new Node() → __fnctor_Node`; depth-capped at 6,
+  memoized, recursion-safe) maps to the `__fnctor_<Name>` struct (the
+  `ctx.structMap` key). Callee resolution tries the **type-checker symbol**, then
+  a **syntactic unique-name prototype-method index** fallback — load-bearing
+  because the checker types acorn's lifted-method `this` / the call result `any`,
+  so symbol resolution of `this.startNode` MISSES (the noLib unit-repro confirmed
+  `getSymbolAtLocation` returns undefined; the syntactic index resolves it). A
+  name with ≥2 indexed bodies is left unresolved (conservative — never a wrong
+  callee). Multi-return / non-`new` returns are omitted.
+- **`resolveReceiverStruct(ctx, fctx, recvExpr): string | undefined`** — the
+  provider the PART-2 dispatch consumes. (1) `this` → `fctx.thisStructName`;
+  (2) flow-map hit; (3) `undefined`. The hit is gated on `ctx.structMap.has(name)`
+  so a not-yet-registered struct yields `undefined`, never a dangling pin.
+  Conservative-closed throughout: a miss ⇒ the consumer keeps its dynamic
+  (`__extern_get` / open-scan) lowering.
+
+Tests: `tests/issue-2660-part1-receiver-resolve.test.ts` (11, allowJs to mirror
+the acorn `.mjs` compile) + the 32 sibling S1/S2/S3 tests pass; tsc clean.
+
+## PART-2 — NEXT-SPRINT ownership/wiring delta (sd-2674b, single #2660 owner)
+
+The dispatch layer is built + mechanism-validated by sd-2674c (full record in the
+section just below). PART-2 lands NEXT SPRINT on top of the now-landed PART-1
+analysis. The provider/consumer ownership split (locked with sd-2674c):
+- **PART-1 (landed) owns** `FunctionContext.thisStructName` (the field DECL),
+  `resolveReceiverStruct`, and the `receiverStruct` flow map.
+- **PART-2 owns** the dispatch: keep `resolveLiftedMethodThisStruct` (the
+  `thisStructName` SETTER) but **DROP its duplicate `thisStructName` field DECL**
+  on rebase (PART-1 declares it); **swap `resolvePinnedReceiverStruct`'s body to
+  delegate to `resolveReceiverStruct(ctx, fctx, recv)`** so the `this`-case AND
+  flow-resolved locals both resolve through the one provider; keep
+  `pinnedStructName` / `tryEmitStructReceiverMemberRead` / the 3 wirings.
+- **#2179 delete-target gate ownership** = the **dispatch consumer** (PART-2), not
+  PART-1: the gate is per-ACCESS/per-FIELD (it knows the field name at the access
+  site) whereas `resolveReceiverStruct` is per-RECEIVER (field-agnostic). PART-1
+  exposes `ctx.moduleUsesDelete`; a finer per-field delete-target set can be added
+  to the analysis later if the consumer wants a precomputed gate, but the minimal
+  correct gate lives at the access site.
+
+## P1 DISPATCH BUILT + MECHANISM-VALIDATED (2026-06-26, sd-2674c) — next-sprint regression gate
+
+Built the PART-2 unified PINNED read+write+compound dispatch (the consumer the
+analysis plugs into). WIP preserved on branch `issue-2681-acorn-lifted-method-this`
+@ `86cd76321` (pushed; NOT merged). Pieces:
+- `resolvePinnedReceiverStruct(ctx, fctx, recvExpr)` (property-access.ts) — the
+  consumer seam: `this` → `fctx.thisStructName` (#2681) now; **P2**: delegate to
+  this issue's `resolveReceiverStruct` provider for flow-resolved locals.
+- `emitAlternateStructSetDispatch(..., pinnedStructName?)` — PINNED write arm
+  (`ref.test $pinned → struct.set $pinned <slot>`, sidecar else). The real #2664
+  fix: the open candidate-scan can pick a structurally-identical sibling's slot
+  (#2009) ≠ the read's slot → desync; pinning both to ONE resolved struct off the
+  SAME direct receiver value makes them agree.
+- `tryEmitStructReceiverMemberRead` (property-access.ts) — symmetric PINNED read
+  (no open alternates).
+- Compound wired via `emitExternrefMemberIncDec(..., pinnedStructName)` + the 3
+  this-write call sites (assignment.ts ×2, unary-updates.ts ×1).
+
+**MECHANISM PROVEN** (`.tmp/sym-repro.mjs`): `while (this.pos < 3) this.pos++` +
+`this.type = "done"` → `"3|done"` with NO read/write/compound desync (the
+35.9M-loop hazard does NOT occur — symmetry holds). #2681 comparison repro
+(`switch(this.type){case types$1.name}`) still matches (`switch=1`).
+
+### NEXT-SPRINT REGRESSION GATE (3 fixes diagnosed — do NOT re-derive)
+A targeted vitest run (before the floor) showed the pin, as built, regresses 3
+cases. Each has a known fix — these are the acceptance gate for landing P1:
+
+1. **#2179 — delete-tombstone bypass** (`tests/issue-2179.test.ts` "delete then
+   re-add reads the new value"). The pin reads/writes the SLOT, ignoring the
+   delete sidecar tombstone. **FIX:** a delete-target-field gate — pre-scan
+   `delete X.<field>` (PropertyAccess) field NAMES (+ a conservative flag for any
+   computed `delete X[e]` whose receiver could be a struct); `resolveReceiverStruct`
+   / `resolvePinnedReceiverStruct` returns `undefined` for a delete-target field so
+   it STAYS on the tombstone-aware `__extern_get`/`__extern_set` path. Non-delete
+   fields pin. (acorn's only static delete target is `operator`; its computed
+   delete is on `this.undefinedExports[name]`, a non-struct receiver → safe.)
+2. **#2656 — `++this.pos` statically-typed receiver** (`tests/issue-2656.test.ts`).
+   The pin intercepts a static/typed-receiver case that must keep its existing
+   path. **FIX:** scope the pin to fire ONLY when the receiver is genuinely the
+   lifted-method externref `this` (i.e. `thisStructName` set AND no typed `this`
+   local / not a `resolveThisStructName` static-receiver case).
+3. **#2659 — sidecar-only property** (`tests/issue-2659-member-write-struct-slot.test.ts`
+   "dynamic (sidecar-only) property still works via the __extern_set fallback").
+   The pin intercepts a prop that must stay dynamic. **FIX:** ensure the pinned
+   read's `fieldIdx === -1` fall-through (and the write's) truly defers a
+   sidecar-only prop to the dynamic path — verify the field-collection didn't add
+   a phantom slot for a sidecar-only name.
+
+GATE: after the 3 fixes, re-run those 3 suites + the full merge_group floor +
+paired baseline jsonl (broad value-rep). net<0 / bucket>50 → stop. Then P2 flips
+the `receiverStruct` map on → #2687/#2694 close; P3 #2686; #1712 differential.
+
+## S3b — RECONCILED PLAN (PARKED this session; single-owner sequencing) (2026-06-26, sd-s3a + lead decision)
+
+> Verify-first grounding (current `main` `49505a46`, after S3a + 2674 PART-1 both
+> landed) surfaced that TWO #2660 efforts converged with OPPOSITE instance
+> representations. The early-branch-push protocol caught this BEFORE any S3b code.
+> **Lead DECISION: park S3b this session; the 2674 pinned PART-2 lands first; the
+> complementary generic-method reconstruct is a FOLLOW-UP on the landed routing,
+> under ONE owner of `compileNewFunctionDeclaration` (sd-2674b) — never two
+> parallel agents.** This section is the canonical cross-session reconciliation so
+> the single owner can implement BOTH lowerings coherently.
+
+### The two strategies are COMPLEMENTARY, not redundant (verified in code + by probe)
+
+Both touch `compileNewFunctionDeclaration` + `fnctor-escape-gate.ts`, but they
+serve DIFFERENT consumer shapes and the representation is singular per `new F()`
+site — so they must be routed per-site by ONE owner, not built in parallel.
+
+| | 2674 pinned-struct (PART-1 landed inert, PART-2 next) | reconstruct-as-`$Object` (S3a landed narrow; S3b extends) |
+|---|---|---|
+| instance rep | KEEPS `(ref $__fnctor_F)` | reconstructs to `$Object` (externref) |
+| serves | **named-field** dynamic reads/writes (`node.expression`, `this.type`, `scope.flags` — acorn #1712) | **indexed / generic-method** inherited reads (`c[1]`, `forEach.call(child)` — test262 `15.4.4.*` B-fnctor) |
+| mechanism | `resolveReceiverStruct` → `ref.test $struct → struct.get/set` (pinned) | `__object_create(proto)` + `$Object.$proto` walk |
+| blast radius | NONE (instance type unchanged) | binding-local/param/return RE-TYPE (broad) |
+| status | dispatch built + acorn-validated (`__host_eq` 30k→163), WIP `issue-2681-acorn-lifted-method-this` | S3a niche landed (PR #2104); cluster needs S3b |
+
+### Decisive evidence: the pin CANNOT serve the generic-method cluster
+Bounded standalone probe on current main (with S3a):
+- `function Con(){}; Con.prototype={0:10,1:20,length:2}; const c:any=new Con()`:
+  `c[0]+c[1]+c.length` = **32**, and `Array.prototype.forEach.call(c, fn)` sum =
+  **30**. The reconstructed `$Object` resolves INDEXED INHERITED elements through
+  the `$proto` walk and drives generic-method dispatch.
+- A pinned `struct.get` CANNOT give `c[1]`: the fnctor struct has no field `1`;
+  the inherited indexed elements live on `Con.prototype` (an `$Object`). So
+  reconstruct is genuinely REQUIRED for this sub-cluster — it is not the
+  higher-risk path to a goal the pin reaches; it reaches a goal the pin cannot.
+- S3a already proves the END-TO-END mechanism (`forEach.call(new Con())`→30); it
+  only lacks the struct-typed `var child = new Con()` binding retype to reach the
+  real test262 cluster.
+
+### Per-site routing design (the single owner builds this on the landed gate)
+The S1 escape gate's `classifyUse` already distinguishes consumer shapes, so the
+approved set can be SPLIT per-site, never competing for the same instance:
+- **`reconstruct` site** (→ `$Object`, S3b path): the instance's dynamic uses are
+  **indexed** (`c[i]`) or **generic-method receivers** (`m.call(c,…)`/`.apply`) —
+  the uses that need the indexed `$proto` walk. (S1 `classifyUse` already returns
+  `dynamic` for element-access and `.call`/`.apply` first-arg.)
+- **`pin` site** (→ keep struct + `struct.get`, 2674 path): the instance's dynamic
+  uses are **named-field** reads/writes only (`c.field`) AND the field is a
+  resolvable struct slot (acorn lifted-method `this`/`node`/`scope`).
+- **default**: neither proven → status-quo (no reconstruct, no pin). Conservative.
+
+A site that is BOTH indexed/generic-method AND named-typed-field is the genuine
+mixed case → keep status quo (out of scope; let the dynamic read miss), exactly as
+the §1 gate's (A)∧(B) already defaults. The two lowerings therefore partition the
+approved set disjointly; ONE owner picks per site at the dispatch in
+`compileNewFunctionDeclaration`.
+
+### S3b sub-slice plan (when it proceeds, AFTER PART-2 lands, under sd-2674b)
+Mirror S3a's discipline — bounded, floor-validated, stop-the-line per slice:
+1. **S3b-1 — single-local-binding-retype canary.** For an approved site whose
+   consumer set is purely indexed/generic-method AND whose binding is a
+   FUNCTION-LOCAL `var/let/const x = new F()` (no param/return/field flow),
+   re-type that one local from `(ref $__fnctor_F)` to externref and reconstruct.
+   Gate it to generic-method/indexed consumers ONLY so it never overlaps a pin
+   site. Validates the retype mechanism on ONE binding shape. Full merge_group
+   floor.
+2. **S3b-2 — downstream-use propagation.** Extend the retype across the instance's
+   intra-function alias flow (reassignment, passed to another generic-method).
+   Still local-scope.
+3. **S3b-3 — cross-function flow (param/return/field).** The broad value-rep
+   ripple; needs the whole-program flow retype + a fix-iterate budget (S2 took
+   one). This is the part sized at ~3–5 days; do it LAST, behind two green floors.
+4. **S4 — the test262 `15.4.4.*` B-fnctor cluster lands** as the consequence;
+   measure per-process.
+
+### Prerequisite: PART-2's 3-fix regression gate (do NOT re-derive — diagnosed)
+Before S3b proceeds, the 2674 PART-2 pinned dispatch should land, gated on its
+already-diagnosed 3 fixes (see the "P1 DISPATCH" section above):
+- **#2179** delete-tombstone bypass → delete-target-field gate returns `undefined`
+  from `resolveReceiverStruct` for a `delete X.<field>` target so it stays on the
+  tombstone-aware `__extern_get/set` path.
+- **#2656** statically-typed-receiver `++this.pos` → scope the pin to the genuine
+  lifted-method externref `this` only.
+- **#2659** sidecar-only property → ensure the pinned read/write `fieldIdx === -1`
+  fall-through truly defers to the dynamic path.
+
+### Banked this session (sd-s3a)
+- **S3a** (PR #2104, MERGED, floor-clean): the narrow reconstruct canary —
+  `approved ∩ standalone ∩ empty-body ∩ externref-binding/inline`. It is the
+  `reconstruct`-path niche and COEXISTS cleanly with the pin (the pin never
+  touches an `any`/empty-body/inline site).
+- **This reconciliation doc** — the canonical #2660 strategy split for the single
+  owner.
+
+**Status: S3b PARKED (single-owner follow-up). No S3b code on branch
+`issue-2660-s3b` — it carries only this grounding/reconciliation note as the
+cross-session sync point. sd-s3a standing down.**
