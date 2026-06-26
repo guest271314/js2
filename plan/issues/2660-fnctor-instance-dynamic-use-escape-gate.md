@@ -586,3 +586,55 @@ write-back=sidecar → desync). The substrate MUST cover **read + write + compou
 (`__extern_get` key histogram — named the Scope.flags wall), `this-bind-repro.mjs`
 (small-scale fix verification), `structwalk.mjs`, `diff-probe.mjs` +
 `tests/dogfood/probe-driver.mjs`.
+
+## P1 DISPATCH BUILT + MECHANISM-VALIDATED (2026-06-26, sd-2674c) — next-sprint regression gate
+
+Built the PART-2 unified PINNED read+write+compound dispatch (the consumer the
+analysis plugs into). WIP preserved on branch `issue-2681-acorn-lifted-method-this`
+@ `86cd76321` (pushed; NOT merged). Pieces:
+- `resolvePinnedReceiverStruct(ctx, fctx, recvExpr)` (property-access.ts) — the
+  consumer seam: `this` → `fctx.thisStructName` (#2681) now; **P2**: delegate to
+  this issue's `resolveReceiverStruct` provider for flow-resolved locals.
+- `emitAlternateStructSetDispatch(..., pinnedStructName?)` — PINNED write arm
+  (`ref.test $pinned → struct.set $pinned <slot>`, sidecar else). The real #2664
+  fix: the open candidate-scan can pick a structurally-identical sibling's slot
+  (#2009) ≠ the read's slot → desync; pinning both to ONE resolved struct off the
+  SAME direct receiver value makes them agree.
+- `tryEmitStructReceiverMemberRead` (property-access.ts) — symmetric PINNED read
+  (no open alternates).
+- Compound wired via `emitExternrefMemberIncDec(..., pinnedStructName)` + the 3
+  this-write call sites (assignment.ts ×2, unary-updates.ts ×1).
+
+**MECHANISM PROVEN** (`.tmp/sym-repro.mjs`): `while (this.pos < 3) this.pos++` +
+`this.type = "done"` → `"3|done"` with NO read/write/compound desync (the
+35.9M-loop hazard does NOT occur — symmetry holds). #2681 comparison repro
+(`switch(this.type){case types$1.name}`) still matches (`switch=1`).
+
+### NEXT-SPRINT REGRESSION GATE (3 fixes diagnosed — do NOT re-derive)
+A targeted vitest run (before the floor) showed the pin, as built, regresses 3
+cases. Each has a known fix — these are the acceptance gate for landing P1:
+
+1. **#2179 — delete-tombstone bypass** (`tests/issue-2179.test.ts` "delete then
+   re-add reads the new value"). The pin reads/writes the SLOT, ignoring the
+   delete sidecar tombstone. **FIX:** a delete-target-field gate — pre-scan
+   `delete X.<field>` (PropertyAccess) field NAMES (+ a conservative flag for any
+   computed `delete X[e]` whose receiver could be a struct); `resolveReceiverStruct`
+   / `resolvePinnedReceiverStruct` returns `undefined` for a delete-target field so
+   it STAYS on the tombstone-aware `__extern_get`/`__extern_set` path. Non-delete
+   fields pin. (acorn's only static delete target is `operator`; its computed
+   delete is on `this.undefinedExports[name]`, a non-struct receiver → safe.)
+2. **#2656 — `++this.pos` statically-typed receiver** (`tests/issue-2656.test.ts`).
+   The pin intercepts a static/typed-receiver case that must keep its existing
+   path. **FIX:** scope the pin to fire ONLY when the receiver is genuinely the
+   lifted-method externref `this` (i.e. `thisStructName` set AND no typed `this`
+   local / not a `resolveThisStructName` static-receiver case).
+3. **#2659 — sidecar-only property** (`tests/issue-2659-member-write-struct-slot.test.ts`
+   "dynamic (sidecar-only) property still works via the __extern_set fallback").
+   The pin intercepts a prop that must stay dynamic. **FIX:** ensure the pinned
+   read's `fieldIdx === -1` fall-through (and the write's) truly defers a
+   sidecar-only prop to the dynamic path — verify the field-collection didn't add
+   a phantom slot for a sidecar-only name.
+
+GATE: after the 3 fixes, re-run those 3 suites + the full merge_group floor +
+paired baseline jsonl (broad value-rep). net<0 / bucket>50 → stop. Then P2 flips
+the `receiverStruct` map on → #2687/#2694 close; P3 #2686; #1712 differential.
