@@ -324,6 +324,35 @@ This touches broad closure codegen and is the exact machinery behind the
 4. Confirm the expected large **improvement** in the `/dstr/` cluster
    (captured-counter template) materializes — that is the value signal.
 
+## Implementation note — first floor attempt regressed, fix applied (sd-dstr, 2026-06-26)
+
+PR #2102's first `merge_group` floor run **regressed -133 net** (189 pass→other,
+56 improvements). Root cause pinned via the merged-report jsonl diff + WAT of a
+failing case (`Reflect/apply/arguments-list-is-not-array-like`):
+
+- The regressions were **all `let`/`const` captures** (the entire for-await-of
+  async-dstr cluster uses `let x`/`let iterCount`; the scattered Promise/module
+  cases likewise). Validation error: `ref.is_null expected reference type, found
+  local.get of type f64`.
+- Mechanism: eager-boxing a `let`/`const` captured var at function-top **races
+  the variable's own block-scoped declaration**. The `let count` decl, compiled
+  later, re-allocates the value slot (block-scope shadow / type reset) and resets
+  `localMap[count]` to a fresh **f64** local — but `boxedCaptures[count]` stays
+  set from the eager pass. The var-decl box-write path (`boxedForInit`) then runs
+  `local.get <fresh f64>; ref.is_null` → invalid Wasm. (`var` decls and params
+  have no such re-declaration, so they were fine — and the captured-counter dstr
+  win, all `var`-based, held: 56 improvements.)
+- **Fix:** `emitEagerCaptureBoxes` now **skips TDZ-flagged (`let`/`const`)
+  captures** (`if (cap.hasTdzFlag) continue;`). Those fall back to the existing
+  lazy call-site boxing (pre-#2692 behaviour — correct for the non-conditional
+  cases that dominate; the conditional-branch `let`-counter residual is a small
+  follow-up, noted in code). `var`/param captures keep eager boxing → the #2669
+  win.
+- **Post-fix local re-verification** (fresh single-file, the exact regressed
+  files): for-await-of cluster + the 6 runnable non-for-await regressions all
+  flip back to pass; new `tests/issue-2692-closure-box-eager.test.ts` 12/12 still
+  green; tsc clean. Re-validated on the full floor before re-enqueue.
+
 ## References (read before implementing)
 
 - `src/codegen/expressions/calls.ts` L12316–12354 — lazy box (current) + narrow
