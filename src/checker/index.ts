@@ -326,7 +326,7 @@ export interface AnalyzeOptions {
   emulateNode?: boolean;
   /**
    * Host environment scoping the AMBIENT global surface (#2528/#2645), unified
-   * under `--target {web,node,deno}` (#2734; `--platform` is a deprecated
+   * under `--target {web,node,deno}` (#2736; `--platform` is a deprecated
    * alias). Orthogonal to the backend `target` (`gc`/`wasi`/…): this selects
    * which globals are in scope at type-check time.
    *
@@ -343,13 +343,13 @@ export interface AnalyzeOptions {
    * `undefined` (unset) preserves today's behaviour exactly: the DOM composite
    * is loaded and `emulateNode` is driven solely by its own option. This keeps
    * the common (web/test262) path byte-neutral. See `buildNodeEnvDtsForSource`
-   * + the `emulateNode ||= platform ∈ {node,deno}` composition in #2645/#2734.
+   * + the `emulateNode ||= platform ∈ {node,deno}` composition in #2645/#2736.
    */
   platform?: "web" | "node" | "deno";
 }
 
 /**
- * #2645/#2734 — resolve the EFFECTIVE node-emulation decision from the two
+ * #2645/#2736 — resolve the EFFECTIVE node-emulation decision from the two
  * composing inputs: the explicit `emulateNode` option (#2603) and the host axis
  * (`--target node`/`deno`, formerly `--platform`). A node/deno host implies the
  * node-emulation injection path so the ambient global surface and the importable
@@ -364,7 +364,7 @@ function resolveEmulateNode(analyzeOptions?: AnalyzeOptions): boolean {
 }
 
 /**
- * #2528/#2734 — select the default-lib composite name for the chosen host. Unset
+ * #2528/#2736 — select the default-lib composite name for the chosen host. Unset
  * host → the historical DOM composite (byte-neutral). `--target node`/`deno`
  * drops the DOM ambient surface; `--target web` keeps it explicitly.
  */

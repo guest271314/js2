@@ -1,4 +1,4 @@
-// #2734 — unify `--platform` into the single `--target {wasi,node,deno,web}`
+// #2736 — unify `--platform` into the single `--target {wasi,node,deno,web}`
 // host axis. The host environment (web/node/deno) selects the ambient global
 // surface (#2528) and node-style emulation (#2645); `wasi` is the standalone
 // output ABI; the backend-lowering names (gc/linear/standalone) stay orthogonal.
@@ -39,7 +39,7 @@ function nameNotFound(
 }
 
 async function withTempTs<T>(source: string, fn: (dir: string, path: string) => Promise<T>): Promise<T> {
-  const dir = await mkdtemp(join(tmpdir(), "issue-2734-"));
+  const dir = await mkdtemp(join(tmpdir(), "issue-2736-"));
   try {
     const path = join(dir, "input.ts");
     await writeFile(path, source);
@@ -49,7 +49,7 @@ async function withTempTs<T>(source: string, fn: (dir: string, path: string) => 
   }
 }
 
-describe("#2734 — `deno` host routes through the node-emulation / no-DOM surface", () => {
+describe("#2736 — `deno` host routes through the node-emulation / no-DOM surface", () => {
   const winSrc = `export function test(): number { (window as any).stop(); return 1; }`;
   const procSrc = `process.exit(0);`;
 
@@ -74,7 +74,7 @@ describe("#2734 — `deno` host routes through the node-emulation / no-DOM surfa
   });
 });
 
-describe("#2734 — byte-neutrality of the host axis (ES-only program)", () => {
+describe("#2736 — byte-neutrality of the host axis (ES-only program)", () => {
   const src = `export function test(): number {
     let s = 0;
     for (let i = 0; i < 10; i++) s += i * 2;
@@ -93,7 +93,7 @@ describe("#2734 — byte-neutrality of the host axis (ES-only program)", () => {
   });
 });
 
-describe("#2734 — CLI `--target {web,node,deno}` flag parsing + deprecated `--platform` alias", () => {
+describe("#2736 — CLI `--target {web,node,deno}` flag parsing + deprecated `--platform` alias", () => {
   const NODE_PROC = `process.exit(0);\nexport function test(): number { return 1; }\n`;
 
   it("--target node compiles and suppresses the `process` TS2580 (emulation implied)", async () => {

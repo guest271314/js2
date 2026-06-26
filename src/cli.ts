@@ -39,7 +39,7 @@ Compile a TypeScript file to WebAssembly (GC proposal).
 
 Options:
   -o, --out <dir>   Output directory (default: same as input)
-  --target <t>      Host/output target — the single host axis (#2734):
+  --target <t>      Host/output target — the single host axis (#2736):
                       web   (default) WasmGC / JS-host browser surface (DOM
                             ambient globals in scope);
                       node  a real Node host (Node ambient surface, no DOM);
@@ -91,7 +91,7 @@ Options:
                     Auto-enabled (type-level only) when the source imports a
                     'node:' builtin (use 'none' to disable that); otherwise off,
                     and using process warns to add this flag (#2603).
-  --platform <p>    DEPRECATED (#2734): alias for --target {web,node,deno}.
+  --platform <p>    DEPRECATED (#2736): alias for --target {web,node,deno}.
                     'web' = DOM globals (window/document/…) in scope (today's
                     default); 'node'/'deno' = DOM globals NOT in scope (so
                     window.stop is a type error) and Node-style API emulation on
@@ -164,7 +164,7 @@ let linkNodeShims = false;
 // `node:` import won't auto-enable over an explicit choice.
 let emulateNode = false;
 let emulateExplicit = false;
-// #2528/#2645/#2734 — the host environment, scoping the AMBIENT global surface
+// #2528/#2645/#2736 — the host environment, scoping the AMBIENT global surface
 // (DOM vs node) and node/deno emulation. Now driven by the unified `--target
 // {web,node,deno}` axis; `--platform` is a deprecated alias. `undefined`
 // preserves today's behaviour exactly (DOM ambient surface loaded, byte-neutral).
@@ -176,7 +176,7 @@ for (let i = 0; i < args.length; i++) {
   if (arg === "-o" || arg === "--out") {
     outDir = args[++i];
   } else if (arg === "--target" || arg.startsWith("--target=")) {
-    // #2734 — `--target` is now the SINGLE host/output axis (unifying the
+    // #2736 — `--target` is now the SINGLE host/output axis (unifying the
     // retired `--platform`). It accepts:
     //   - the host environments: `web` (default), `node`, `deno` — these select
     //     the ambient global surface (#2528/#2645) and leave the backend at its
@@ -258,7 +258,7 @@ for (let i = 0; i < args.length; i++) {
       process.exit(1);
     }
   } else if (arg === "--platform" || arg.startsWith("--platform=")) {
-    // #2734 — DEPRECATED alias for `--target {web,node,deno}`. `--platform`
+    // #2736 — DEPRECATED alias for `--target {web,node,deno}`. `--platform`
     // selected the ambient global surface (#2528): `node`/`deno` drop the DOM
     // globals and imply Node-style emulation (#2645); `web` keeps the DOM
     // surface. The host axis is now unified under `--target`; this alias maps

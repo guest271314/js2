@@ -23,7 +23,7 @@ export class IncrementalLanguageService {
   private fileName: string;
   private compilerOptions: ts.CompilerOptions;
   private host: ts.CompilerHost;
-  // #2528/#2734 — the default-lib composite name for the current `analyze` call.
+  // #2528/#2736 — the default-lib composite name for the current `analyze` call.
   // `lib.d.ts` (DOM) by default; `lib.no-dom.d.ts` under `--target node`/`deno`.
   // Read by the host's `getDefaultLibFileName` closure at `createProgram` time.
   private defaultLibName = "lib.d.ts";
@@ -83,7 +83,7 @@ export class IncrementalLanguageService {
       options.allowJs = true;
       options.checkJs = true;
     }
-    // #2528/#2734 — select the DOM-free composite under `--target node`/`deno`
+    // #2528/#2736 — select the DOM-free composite under `--target node`/`deno`
     // (formerly `--platform node`) so DOM-only globals are not in scope on the
     // incremental path either. The host closure reads `this.defaultLibName` at
     // `createProgram` time below.

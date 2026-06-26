@@ -1,5 +1,5 @@
 ---
-id: 2734
+id: 2736
 title: "Unify --platform into --target {wasi,node,deno,web} — the single host axis (#2698 foundation)"
 status: done
 created: 2026-06-27
@@ -20,7 +20,7 @@ parent: 2698
 origin: "Stakeholder directive (2026-06-26/27): collapse the two host axes (`--target wasi` output ABI + `--platform node|web|deno` ambient surface) into ONE `--target {wasi,node,deno,web}` axis. Foundation slice of the re-scoped #2698."
 ---
 
-# #2734 — `--platform` → `--target` unification (single host axis)
+# #2736 — `--platform` → `--target` unification (single host axis)
 
 ## Problem
 
@@ -90,7 +90,7 @@ wasi` backend can still carry a node/web ambient surface; `gc/linear/standalone`
 ## Validation
 
 - tsc + biome lint clean.
-- `tests/issue-2734-target-axis.test.ts` (new): deno routing (no DOM, process
+- `tests/issue-2736-target-axis.test.ts` (new): deno routing (no DOM, process
   resolves), byte-neutrality (default ≡ web ≡ node ≡ deno), and CLI parsing
   (`--target node|deno`, deprecated `--platform` warning, unknown-value message).
 - `tests/issue-2528-2645-platform-node-web.test.ts` (existing): unchanged, still
@@ -101,7 +101,7 @@ wasi` backend can still carry a node/web ambient surface; `gc/linear/standalone`
 - [x] `--target {wasi,node,deno,web}` is the single user-facing host axis;
       default = web (today's behaviour).
 - [x] `--platform` works as a deprecated alias with a one-line warning.
-- [x] Default + `--target wasi` byte-identical to pre-#2734.
+- [x] Default + `--target wasi` byte-identical to pre-#2736.
 - [x] `--target node|deno|web` route to the correct ambient surface.
 - [x] #2698 updated to the unified `--target` model.
 

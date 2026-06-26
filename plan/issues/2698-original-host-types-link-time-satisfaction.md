@@ -14,7 +14,7 @@ language_feature: node-api-compat
 goal: platform
 sprint: Backlog
 es_edition: n/a
-related: [2734, 2634, 1772, 2655, 2657, 2684, 2696, 2528, 2645, 2624, 2603, 2094, 1524]
+related: [2736, 2634, 1772, 2655, 2657, 2684, 2696, 2528, 2645, 2624, 2603, 2094, 1524]
 supersedes_verdict_of: 2634
 origin: "Stakeholder directive (2026-06-26) reversing the #2634 'reject real @types/node' verdict: type against the REAL host surface, move the satisfiability error from type-check-time to link-time-used-only."
 ---
@@ -25,7 +25,7 @@ origin: "Stakeholder directive (2026-06-26) reversing the #2634 'reject real @ty
 > defines the model, the feasibility verdict, and the dev-sized slices.** Slices
 > S1/S3/S4 are senior-dev; S2/S5/S6 are dev. See ordering at the end.
 
-> **AXIS UNIFICATION (#2734, foundation — LANDED).** The two host axes have been
+> **AXIS UNIFICATION (#2736, foundation — LANDED).** The two host axes have been
 > collapsed into a single user-facing `--target {wasi, node, deno, web}`:
 >
 > - `--target web` (the **default**) — WasmGC / JS-host browser surface (DOM
@@ -148,7 +148,7 @@ link-time used+unsatisfiable check built on top of `scanForLeakedHostImports`.
 | `buildNodeEnvDts` synthetic `.d.ts` injection (`src/checker/index.ts`)                                                                                     | **KEPT as the fallback path**; bypassed for mapped modules when real-types loading is active under `--target node`. The bare-`process` / permissive-`any` branches stay.                            |
 | #1772 P2-a **compile-time** call-site gate in `tryCompileNodeFsCall` (`isMemberSatisfiable === false` → `ctx.errors.push`)                                 | **TRANSFORMED**: the call-site early-error is removed; its _data source_ (the registry) feeds the unified link-time check instead. (File owned by the #2696 fixer — sequence S4 after #2696 lands.) |
 | `scanForLeakedHostImports` + `isHostImportAllowed` (#2094, `host-import-allowlist.ts`)                                                                     | **KEPT and GENERALIZED** into the single "used + unsatisfiable at link" mechanism — it already does (b) compiled-in-but-missing; S4 routes node/deno member satisfiability through it too.          |
-| `--target` host axis, `resolveEmulateNode`, `defaultLibNameForPlatform` (#2528/#2645/#2734)                                                                | **KEPT and EXTENDED** — the host-mode is the gate that decides whether to load real types and which provider set is active. `--platform`→`--target` unification + `--target deno` landed in #2734.  |
+| `--target` host axis, `resolveEmulateNode`, `defaultLibNameForPlatform` (#2528/#2645/#2736)                                                                | **KEPT and EXTENDED** — the host-mode is the gate that decides whether to load real types and which provider set is active. `--platform`→`--target` unification + `--target deno` landed in #2736.  |
 
 ---
 
@@ -222,7 +222,7 @@ In `src/checker/index.ts` `analyze`/`analyzeMulti` compiler-host:
 #### S2 — Real Deno surface under `--target deno` · dev
 
 - ~~Add `--target deno` to `AnalyzeOptions.platform` and the CLI.~~ **DONE in
-  #2734** — `--target deno` is accepted and routes through `AnalyzeOptions.platform
+  #2736** — `--target deno` is accepted and routes through `AnalyzeOptions.platform
 = "deno"`, currently sharing the node-emulation / no-DOM ambient surface. S2's
   remaining work is swapping that placeholder surface for the real Deno lib:
 - Snapshot `lib.deno.ns.d.ts` (`deno types`; `deno` CLI is present at
@@ -231,7 +231,7 @@ In `src/checker/index.ts` `analyze`/`analyzeMulti` compiler-host:
   `DOM_FREE_LIB_NAME` composite machinery — it's self-contained, so this is the
   simple ambient-lib path, NOT a module graph).
 - `resolveEmulateNode` already composes deno into the node-emulation path
-  (#2734, placeholder); once the real Deno lib loads, decide whether deno keeps
+  (#2736, placeholder); once the real Deno lib loads, decide whether deno keeps
   the node-emulation injection or gets its own Deno-namespace plumbing.
 - Register Deno's std-IO members in the S3 registry with their providers
   (fd-based → `wasi-fd` / native deno host).

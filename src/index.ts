@@ -301,7 +301,7 @@ export interface CompileOptions {
   emulateNode?: boolean;
   /**
    * Host environment scoping the AMBIENT global surface (#2528/#2645), now the
-   * unified host axis driven by `--target {web,node,deno}` (#2734). The legacy
+   * unified host axis driven by `--target {web,node,deno}` (#2736). The legacy
    * `--platform` flag is a deprecated alias onto this same field. It selects
    * which globals are in scope at type-check time and whether Node-style
    * emulation is on. The backend-lowering names (`gc`/`linear`/`wasi`/

@@ -1044,7 +1044,7 @@ export function compileSourceSync(
   let isJsMode = options.allowJs === true || (options.fileName?.endsWith(".js") ?? false);
   const defaultFileName = options.fileName ?? (isJsMode ? "input.js" : "input.ts");
   const effectiveFileName = options.moduleName ?? defaultFileName;
-  // #2645/#2734 — `--target node`/`deno` (formerly `--platform node`) implies
+  // #2645/#2736 — `--target node`/`deno` (formerly `--platform node`) implies
   // node-style emulation so the ambient surface and the importable `node:<mod>`
   // capability gate share one target model. This EFFECTIVE flag drives the
   // TS2580 message gate below too (so the node/deno host doesn't get pointed at
