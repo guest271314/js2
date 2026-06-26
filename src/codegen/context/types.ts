@@ -263,6 +263,20 @@ export interface NullGuardFact {
   provesNonNull: boolean;
 }
 
+/**
+ * #2682: a recognised canonical string-read loop. `dataLocal` holds the
+ * (non-null) `ref $__str_data` i16 array of the once-flattened receiver and
+ * `offLocal` its i32 byte offset; `recvName`/`indexName` are the loop-invariant
+ * receiver and the in-bounds-proven induction variable. See
+ * `FunctionContext.hoistedCharReads`.
+ */
+export interface HoistedCharRead {
+  recvName: string;
+  indexName: string;
+  dataLocal: number;
+  offLocal: number;
+}
+
 /** Per-function context. */
 export interface FunctionContext {
   /** Function name */
@@ -375,6 +389,23 @@ export interface FunctionContext {
    * Populated when a for-loop condition guarantees indexVar < arrayVar.length.
    */
   safeIndexedArrays?: Set<string>;
+  /**
+   * #2682: per-loop proofs for the canonical string-read hot loop
+   * `for (let i = 0; i < recv.length; i++) … recv.charCodeAt(i) …`.
+   *
+   * Keyed by the (loop-invariant) string receiver identifier name. When an
+   * entry is present, the loop has been recognised by
+   * `detectCanonicalCharReadLoop` (statements/loops.ts): the receiver was
+   * flattened ONCE before the loop and its `.data`/`.off` descriptor hoisted
+   * into the listed locals, and `i` is PROVEN in-bounds (`0 <= i < len`) at
+   * every body point (init >= 0, strict `<`, monotonic step, `i`/`recv` not
+   * mutated, no capturing closure). `recv.charCodeAt(i)` reads then lower to a
+   * direct i32 `array.get_u(dataLocal, offLocal + i)` with NO per-call flatten,
+   * NO struct.get reload, and NO OOB/NaN branch (the branch is dead under the
+   * proof — byte-identical to the guarded read). Native-string mode only.
+   * Scoped save/restore around the loop body exactly like `safeIndexedArrays`.
+   */
+  hoistedCharReads?: Map<string, HoistedCharRead>;
   /**
    * #1120: Set of let/const locals whose lifecycle is fully constrained
    * to int32 by explicit `| 0` (or other bitwise) coercion. These get

@@ -10,7 +10,7 @@ import { popBody, pushBody } from "../context/bodies.js";
 import { reportError, reportErrorNoNode } from "../context/errors.js";
 import { allocLocal, getLocalType } from "../context/locals.js";
 import { snapshotSpeculative, rollbackSpeculative } from "../context/speculative.js";
-import type { CodegenContext, FunctionContext } from "../context/types.js";
+import type { CodegenContext, FunctionContext, HoistedCharRead } from "../context/types.js";
 import { emitExternrefDestructureGuard } from "../destructuring-params.js";
 import {
   findUnresolvableInArrayPattern,
@@ -34,7 +34,7 @@ import { containsLinearU8Allocation, emitLinearU8ArenaMark, linearU8ArenaResetIn
 import { resolveComputedKeyExpression } from "../literals.js";
 import { emitCollectionIteratorVec, ensureMapHelpers, MAP_LAYOUT } from "../map-runtime.js";
 import { resolveArrayInfo } from "../array-methods.js";
-import { stringConstantExternrefInstrs } from "../native-strings.js";
+import { flatStringType, stringConstantExternrefInstrs } from "../native-strings.js";
 import { emitNativeNumberFormat } from "../number-format-native.js";
 import { ensureObjectRuntime } from "../object-runtime.js";
 import { coercionInstrs } from "../type-coercion.js";
@@ -327,6 +327,229 @@ function loopBodyMutatesIndexOrArray(body: ts.Statement, indexName: string, arra
 }
 
 /**
+ * #2682: the increment must strictly INCREASE `i` so that, combined with a
+ * non-negative init and the strict `i < recv.length` condition, `0 <= i < len`
+ * holds at every body point. `i++`/`++i` and `i += <positive int literal>`
+ * qualify; `i--`/`i -= k`/`i += <non-positive>` do NOT (would break the proof).
+ * Narrower than `detectI32LoopVar`'s incrementor check, which also accepts the
+ * decreasing forms.
+ */
+function isIncreasingStep(incr: ts.Expression | undefined, name: string): boolean {
+  if (!incr) return false;
+  if (ts.isPostfixUnaryExpression(incr) || ts.isPrefixUnaryExpression(incr)) {
+    return ts.isIdentifier(incr.operand) && incr.operand.text === name && incr.operator === ts.SyntaxKind.PlusPlusToken;
+  }
+  if (ts.isBinaryExpression(incr)) {
+    if (!ts.isIdentifier(incr.left) || incr.left.text !== name) return false;
+    if (incr.operatorToken.kind !== ts.SyntaxKind.PlusEqualsToken) return false;
+    if (!ts.isNumericLiteral(incr.right)) return false;
+    const step = Number(incr.right.text.replace(/_/g, ""));
+    return Number.isInteger(step) && step > 0;
+  }
+  return false;
+}
+
+/**
+ * #2682: string-specific variant of {@link loopBodyMutatesIndexOrArray} for the
+ * canonical read-loop hoist. Returns true if the body could invalidate the
+ * loop-invariance of `recvName` or the in-bounds invariant of `indexName`.
+ *
+ * Strings are IMMUTABLE, so — unlike the #1196 array helper — method calls on
+ * the receiver (notably `recv.charCodeAt(i)`, the whole point) are SAFE and must
+ * NOT disqualify. Only these break the invariants:
+ *   - assignment / compound-assignment / `++`/`--` to `recvName` or `indexName`;
+ *   - a body-local declaration that SHADOWS `recvName` or `indexName` — the
+ *     downstream `recv.charCodeAt(i)` match keys on identifier TEXT, so a shadow
+ *     (`for (…) { let recv = other; … recv.charCodeAt(i) … }`) would wrongly read
+ *     the hoisted OUTER descriptor. Reject any such shadow (sound, conservative);
+ *   - any nested function / arrow / class (could capture and reassign either
+ *     binding via a call we can't statically see — conservative, matches #1196).
+ */
+function loopBodyMutatesStringReadInvariants(body: ts.Statement, indexName: string, recvName: string): boolean {
+  let mutates = false;
+  const declaresShadow = (name: ts.BindingName | undefined): boolean => {
+    if (!name) return false;
+    for (const n of collectPatternBindingNames(name)) {
+      if (n === indexName || n === recvName) return true;
+    }
+    return false;
+  };
+  function isAssignmentOp(kind: ts.SyntaxKind): boolean {
+    return (
+      kind === ts.SyntaxKind.EqualsToken ||
+      kind === ts.SyntaxKind.PlusEqualsToken ||
+      kind === ts.SyntaxKind.MinusEqualsToken ||
+      kind === ts.SyntaxKind.AsteriskEqualsToken ||
+      kind === ts.SyntaxKind.SlashEqualsToken ||
+      kind === ts.SyntaxKind.PercentEqualsToken ||
+      kind === ts.SyntaxKind.AsteriskAsteriskEqualsToken ||
+      kind === ts.SyntaxKind.LessThanLessThanEqualsToken ||
+      kind === ts.SyntaxKind.GreaterThanGreaterThanEqualsToken ||
+      kind === ts.SyntaxKind.GreaterThanGreaterThanGreaterThanEqualsToken ||
+      kind === ts.SyntaxKind.AmpersandEqualsToken ||
+      kind === ts.SyntaxKind.BarEqualsToken ||
+      kind === ts.SyntaxKind.CaretEqualsToken ||
+      kind === ts.SyntaxKind.QuestionQuestionEqualsToken ||
+      kind === ts.SyntaxKind.AmpersandAmpersandEqualsToken ||
+      kind === ts.SyntaxKind.BarBarEqualsToken
+    );
+  }
+  function visit(node: ts.Node): void {
+    if (mutates) return;
+    if (ts.isBinaryExpression(node) && isAssignmentOp(node.operatorToken.kind)) {
+      const lhs = node.left;
+      if (ts.isIdentifier(lhs) && (lhs.text === indexName || lhs.text === recvName)) {
+        mutates = true;
+        return;
+      }
+    }
+    if (
+      (ts.isPostfixUnaryExpression(node) || ts.isPrefixUnaryExpression(node)) &&
+      (node.operator === ts.SyntaxKind.PlusPlusToken || node.operator === ts.SyntaxKind.MinusMinusToken) &&
+      ts.isIdentifier(node.operand) &&
+      (node.operand.text === indexName || node.operand.text === recvName)
+    ) {
+      mutates = true;
+      return;
+    }
+    // Body-local declaration shadowing recv/i — see the doc comment.
+    if (
+      (ts.isVariableDeclaration(node) || ts.isParameter(node) || ts.isBindingElement(node)) &&
+      declaresShadow(node.name)
+    ) {
+      mutates = true;
+      return;
+    }
+    if (ts.isCatchClause(node) && declaresShadow(node.variableDeclaration?.name)) {
+      mutates = true;
+      return;
+    }
+    if (
+      ts.isFunctionDeclaration(node) ||
+      ts.isFunctionExpression(node) ||
+      ts.isArrowFunction(node) ||
+      ts.isClassDeclaration(node) ||
+      ts.isClassExpression(node)
+    ) {
+      mutates = true;
+      return;
+    }
+    forEachChild(node, visit);
+  }
+  visit(body);
+  return mutates;
+}
+
+/**
+ * #2682: true iff the body contains at least one `recvName.charCodeAt(indexName)`
+ * read (exact receiver + induction identifier). Gating the hoist on this keeps
+ * codegen byte-identical for string loops that never read a char by the
+ * induction var, and avoids emitting a dead `__str_flatten` + descriptor hoist.
+ */
+function bodyHasMatchingCharRead(body: ts.Statement, recvName: string, indexName: string): boolean {
+  let found = false;
+  function visit(node: ts.Node): void {
+    if (found) return;
+    if (
+      ts.isCallExpression(node) &&
+      ts.isPropertyAccessExpression(node.expression) &&
+      node.expression.name.text === "charCodeAt" &&
+      ts.isIdentifier(node.expression.expression) &&
+      node.expression.expression.text === recvName &&
+      node.arguments.length === 1 &&
+      ts.isIdentifier(node.arguments[0]!) &&
+      (node.arguments[0] as ts.Identifier).text === indexName
+    ) {
+      found = true;
+      return;
+    }
+    forEachChild(node, visit);
+  }
+  visit(body);
+  return found;
+}
+
+/**
+ * #2682: recognise the canonical string-read hot loop
+ * `for (let i = <non-neg int>; i < recv.length; i++/+=k) … recv.charCodeAt(i) …`
+ * and, when matched, hoist the loop-invariant `__str_flatten(recv)` + its
+ * `.data`/`.off` descriptor into fresh locals emitted ONCE before the loop.
+ * Returns the in-bounds proof to install on `fctx.hoistedCharReads`, or null
+ * (emitting nothing) on any deviation — refuse-loud, never miscompile.
+ *
+ * Native-string mode only: host/externref strings have no flattenable
+ * descriptor (charCodeAt is a host call there), so the receiver isn't a
+ * `$NativeString` struct and this never fires.
+ *
+ * Soundness of dropping the OOB/NaN branch at the read sites (R1): `init >= 0`
+ * + strict `<` + monotonic increase + `i`/`recv` not mutated in the body (and
+ * no capturing closure) ⇒ `0 <= i < len` at every `recv.charCodeAt(i)`. The
+ * read can never be out of range, so the NaN branch is dead and the direct
+ * `array.get_u` is byte-identical to the guarded read.
+ *
+ * MUST be called while `fctx.body` is the OUTER body (before `pushBody`) so the
+ * hoisted descriptor setup runs exactly once, before the loop.
+ */
+function detectCanonicalCharReadLoop(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  stmt: ts.ForStatement,
+): HoistedCharRead | null {
+  // Native-string mode only.
+  if (!ctx.nativeStrings || ctx.nativeStrTypeIdx < 0 || ctx.nativeStrDataTypeIdx < 0) return null;
+  const flattenIdx = ctx.nativeStrHelpers.get("__str_flatten");
+  if (flattenIdx === undefined) return null;
+
+  // Induction var: reuse detectI32LoopVar (same shape the i32-promotion uses),
+  // then add the strictly-increasing-from-non-negative constraints it lacks.
+  const i32Loop = detectI32LoopVar(stmt);
+  if (!i32Loop) return null;
+  const indexName = i32Loop.name;
+  if (i32Loop.initValue < 0) return null; // i must start >= 0
+  if (!isIncreasingStep(stmt.incrementor, indexName)) return null;
+
+  // Condition must be exactly `i < recv.length` (strict <, index on the left).
+  if (!stmt.condition || !ts.isBinaryExpression(stmt.condition)) return null;
+  const cond = stmt.condition;
+  if (cond.operatorToken.kind !== ts.SyntaxKind.LessThanToken) return null;
+  if (!ts.isIdentifier(cond.left) || cond.left.text !== indexName) return null;
+  if (!ts.isPropertyAccessExpression(cond.right) || cond.right.name.text !== "length") return null;
+  if (!ts.isIdentifier(cond.right.expression)) return null;
+  const recvIdent = cond.right.expression;
+  const recvName = recvIdent.text;
+
+  // recv must be a (native) string — not any/union/array.
+  if (!isStringType(ctx.checker.getTypeAtLocation(recvIdent))) return null;
+
+  // Loop-invariance + induction-in-bounds: no mutation of recv/i, no closures.
+  if (loopBodyMutatesStringReadInvariants(stmt.statement, indexName, recvName)) return null;
+
+  // Only hoist if the body actually reads `recv.charCodeAt(i)` at least once.
+  if (!bodyHasMatchingCharRead(stmt.statement, recvName, indexName)) return null;
+
+  // --- Emit the hoist into the OUTER body (runs once, before the loop) ---
+  ensureNativeStringHelpers(ctx); // idempotent; __str_flatten already present
+  const flatTmp = allocLocal(fctx, `__cca_flat_${fctx.locals.length}`, flatStringType(ctx));
+  const dataLocal = allocLocal(fctx, `__cca_data_${fctx.locals.length}`, {
+    kind: "ref",
+    typeIdx: ctx.nativeStrDataTypeIdx,
+  });
+  const offLocal = allocLocal(fctx, `__cca_off_${fctx.locals.length}`, { kind: "i32" });
+
+  compileExpression(ctx, fctx, recvIdent); // push recv (ref $AnyString)
+  fctx.body.push({ op: "call", funcIdx: ctx.nativeStrHelpers.get("__str_flatten")! });
+  fctx.body.push({ op: "local.set", index: flatTmp });
+  fctx.body.push({ op: "local.get", index: flatTmp });
+  fctx.body.push({ op: "struct.get", typeIdx: ctx.nativeStrTypeIdx, fieldIdx: 2 }); // .data
+  fctx.body.push({ op: "local.set", index: dataLocal });
+  fctx.body.push({ op: "local.get", index: flatTmp });
+  fctx.body.push({ op: "struct.get", typeIdx: ctx.nativeStrTypeIdx, fieldIdx: 1 }); // .off
+  fctx.body.push({ op: "local.set", index: offLocal });
+
+  return { recvName, indexName, dataLocal, offLocal };
+}
+
+/**
  * #1453: Per-iteration fresh binding detection for `for (let X = …; …; …)`.
  *
  * Per ECMA-262 §14.7.4.4 (CreatePerIterationEnvironment), each iteration of
@@ -463,6 +686,9 @@ export function compileForStatement(ctx: CodegenContext, fctx: FunctionContext, 
   // #1453: Save existing boxedCaptures entries that we will overwrite when
   // boxing per-iteration cells. `undefined` means the name had no prior entry.
   let savedForBoxedCaptures: Map<string, { refCellTypeIdx: number; valType: ValType } | undefined> | null = null;
+  // #2682: canonical string-read-loop hoist proof + its scoped save/restore.
+  let charReadProof: HoistedCharRead | null = null;
+  let savedHoistedCharReads: Map<string, HoistedCharRead> | undefined;
   if (
     stmt.initializer &&
     ts.isVariableDeclarationList(stmt.initializer) &&
@@ -783,6 +1009,19 @@ export function compileForStatement(ctx: CodegenContext, fctx: FunctionContext, 
     ? emitLinearU8ArenaMark(ctx, fctx, "__linu8_loop_mark")
     : undefined;
   const arenaReset = linearU8ArenaResetInstrs(ctx, arenaMark);
+
+  // #2682: recognise the canonical string-read hot loop and hoist the
+  // loop-invariant `__str_flatten` + descriptor into locals emitted into the
+  // OUTER body (here — BEFORE pushBody — so they run exactly once before the
+  // loop). The proof is installed on a scoped `fctx.hoistedCharReads` consumed
+  // by the body's `recv.charCodeAt(i)` lowering, then restored after the body.
+  charReadProof = detectCanonicalCharReadLoop(ctx, fctx, stmt);
+  if (charReadProof) {
+    savedHoistedCharReads = fctx.hoistedCharReads;
+    fctx.hoistedCharReads = new Map(fctx.hoistedCharReads ?? []);
+    fctx.hoistedCharReads.set(charReadProof.recvName, charReadProof);
+  }
+
   const savedBody = pushBody(fctx);
 
   // Adjust existing break/continue depths: block+loop+block adds 3 nesting levels
@@ -882,6 +1121,10 @@ export function compileForStatement(ctx: CodegenContext, fctx: FunctionContext, 
 
   // Restore previous safeIndexedArrays (scoped to this loop)
   fctx.safeIndexedArrays = savedSafeIndexed;
+  // #2682: restore the canonical-read proof (scoped to this loop). The hoisted
+  // descriptor locals stay allocated (they're function-wide), but the proof is
+  // only visible to THIS loop's body — the incrementor (`i++`) must NOT see it.
+  if (charReadProof) fctx.hoistedCharReads = savedHoistedCharReads;
 
   // Incrementor (inside $loop, after $continue block)
   // (#1690) Same liveBodies registration as condInstrs above: the incrementor
