@@ -1,7 +1,9 @@
 ---
 id: 2724
 title: "Object-literal get/set accessor representation: accessor-bearing literal types mis-register as closed structs (unblocks #1642)"
-status: ready
+status: done
+completed: 2026-06-26
+assignee: ttraenkler/sd-accessor
 sprint: 67
 created: 2026-06-26
 priority: high
@@ -16,6 +18,64 @@ goal: test262-conformance
 related: [2580, 1642, 1239, 1888]
 depends_on: []
 ---
+
+## Test Results (2026-06-26, sd-accessor)
+
+Implemented a scoped guard in `ensureStructForType` (`src/codegen/index.ts`,
+after `tsType.getProperties()`) that early-returns for a type whose own
+properties include an object-LITERAL get/set accessor (declaration parent is an
+`ObjectLiteralExpression`), leaving it to lower to externref via
+`resolveWasmType` → `mapTsTypeToWasm`. Slice 2 was NOT needed.
+
+### merge_group floor fix — narrowed to MIXED accessor literals (2026-06-26)
+
+The first cut of the guard fired for ANY object-literal accessor type. It passed
+PR-level CI but FAILED the `merge_group` floor (`check for test262 regressions`,
+run 28246424070): **8 regressions** (ratio 22.9% > 10% gate; net was +27), all
+**getter-ONLY** literals used as object-REST/spread sources —
+`{...x} = { get v() {} }` (assignment-rest), `for await ({...x} of [{ get v() {}
+}])` (×6), and RegExpExec's `{ get 0() {} }`. Root cause: the object-rest copy
+paths (`assignment.ts` externref branch / `loops.ts` for-await) require the
+source to be a **registered struct** (they do `struct → externref →
+__extern_rest_object`); externref-lowering a getter-only literal routes it to the
+externref-rest path which never runs `__extern_rest_object` (assignment-rest) or
+double-wraps via `extern.convert_any` on an already-externref value (for-await),
+so the getter is never invoked / re-invoked — breaking CopyDataProperties.
+
+Fix: the guard now fires **only for MIXED literals** (≥1 obj-literal accessor AND
+≥1 non-accessor own property). Every #1642 iterator is mixed (an iterator always
+has a `next` method), so the acceptance edges stay fixed; every getter-only
+rest/RegExp source stays on its working struct path (zero merged-baseline
+regressions). Verified locally via the faithful `runTest262File` harness:
+**8/8 former regressions now PASS**, **5/5 iterator-close acceptance edges PASS**.
+The getter-ONLY return/member-read case (e.g. `const o = { get x() {} }; o.x`)
+is deferred to the #2580 externref-rest substrate work. A *mixed* literal used as
+an assignment-rest source (`{...x} = { a:1, get v() {} }`) is a latent gap with
+**no test262 coverage** (all test262 object-rest-getter sources are getter-only).
+
+- `tests/issue-2724.test.ts` — 12/12 green (9 gc/host + 3 standalone), covering:
+  MIXED accessor literal returned from a fn (getter fires); for-of IteratorClose
+  with `get return()` throwing / returning null / throw-completion ordering / runs
+  once; mixed data+accessor; mixed setter; getter-only object-rest-source
+  regression guard; CLASS-getter control (struct preserved, gc + standalone).
+- #1642's 3 failing edges flip to PASS in gc (faithful repros): non-throw +
+  getter-throws → forwarded; getter-returns-null → no throw; throw-completion +
+  getter-throws → original throw wins. The 2 `…-non-callable.js` stay green.
+- Regression basket diffed against `origin/main` @ 4b4549d: identical results —
+  `tests/issue-1239.test.ts` + `tests/getters-setters.test.ts` carry 7
+  pre-existing reds (harness artifacts) on BOTH main and this branch (0 new);
+  `tests/accessor-side-effects.test.ts` + `tests/object-literals.test.ts` +
+  `tests/iterators.test.ts` + `tests/symbol-iterator-protocol.test.ts` +
+  `tests/issue-2162-iterators.test.ts` all green.
+- `tsc --noEmit` clean; `prettier --check` clean.
+- Standalone direct-accessor reads work (no illegal cast) — the standalone
+  accessor *type representation* is now correct. Standalone dynamic-iterable
+  for-of remains a separate pre-existing data-path gap (out of scope, #2580).
+- Broad-impact representation change → real floor validation is the #2097
+  merge_group standalone shard.
+
+Closes #1642 (the actual root cause; its earlier "close-time return-method" and
+"#2580 substrate rebuild" framings were stale).
 
 # #2724 — Object-literal get/set accessor representation
 
