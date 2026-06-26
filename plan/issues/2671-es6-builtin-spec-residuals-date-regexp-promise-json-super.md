@@ -57,6 +57,37 @@ annexB/built-ins/Date/prototype/getYear/not-a-constructor.js
 - ⏳ Remaining Date: `set*` ToNumber-coercion side-effect ordering,
   `proto-from-ctor-realm-*`, not-a-constructor (#930-family).
 
+**Progress (dev-builtin2671c, 2026-06-26): `set*` Invalid-Date
+[[DateValue]]-clobber on ToNumber side-effect — SHIPPED (+12 test262).**
+
+Verified-first against the real test262 harness (`runTest262File`, `setExports`
+wired — critical: a `: any` receiver routes through generic host dispatch and
+silently bypasses the typed Date codegen, so the repro/test must let `dt` infer
+as `Date`, matching the plain-JS test262 source).
+
+Root cause in `compileDateMethodCall` (`src/codegen/expressions/builtins.ts`):
+the time-of-day setters (`setSeconds/setMinutes/setHours/setMilliseconds` +UTC)
+and the calendar setters `setDate/setMonth` (+UTC) read `t = [[DateValue]]`
+FIRST, then ToNumber each arg, then — §21.4.4.* step "If t is NaN, return NaN" —
+return WITHOUT writing `[[DateValue]]`. The compiler's invalid-branch wrote the
+Invalid-Date sentinel **unconditionally**, clobbering a `[[DateValue]]` that a
+ToNumber side-effect (`value.valueOf()` calling `this.setTime(0)`) had
+legitimately re-set. Fixed both then-branches to write the sentinel only when
+the receiver was still VALID before the call (`curTs != sentinel`) and an arg
+invalidated it; an already-invalid receiver now returns NaN without touching the
+slot.
+- `setFullYear/setUTCFullYear/setYear` (§21.4.4.21) are exempt — they
+  re-validate an Invalid receiver to `t=+0` and ALWAYS write — and were already
+  correct; their `isSetFullYear` then-branch keeps the unconditional write.
+- Flips 12 `built-ins/Date/prototype/<setter>/date-value-read-before-tonumber-when-date-is-invalid.js`
+  (the 12 non-FullYear setters; FullYear's 2 already passed). 230/232 pass across
+  the touched `set*`/`get*` dirs — the 2 residual setFullYear fails
+  (`15.9.5.40_1.js` not-a-constructor #930-family, `arg-year-to-number.js` valueOf
+  calling-convention) are pre-existing and unrelated.
+- Guard: `tests/issue-2671-date-setter-ordering.test.ts` (41/41).
+- ⏳ Remaining Date: `proto-from-ctor-realm-*`, not-a-constructor (#930-family),
+  `A4` multi-arg ctor `PoisonedValueOf` (object→f64 ToNumber on class instances).
+
 ### RegExp (95)
 `Symbol.split` / `Symbol.match` / `Symbol.replace` / `Symbol.search` protocol
 edge cases: `lastIndex` get/coerce errors, species constructor validation,
