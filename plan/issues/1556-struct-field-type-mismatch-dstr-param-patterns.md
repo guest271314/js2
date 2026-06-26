@@ -1,9 +1,10 @@
 ---
 id: 1556
 title: "architect-spec: struct-field type mismatch in binding-pattern param destructuring — root cause of #1543/#1544 illegal-cast cluster"
-status: ready
+status: done
 created: 2026-05-20
-updated: 2026-05-20
+updated: 2026-06-26
+completed: 2026-06-26
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -210,3 +211,70 @@ identical compiler root cause. One PR, two issue closures.
   code already exists on main and is not the fix.
 - #1544 original architect spec pointed at `ref.test` guard (Path C) — valid as
   a partial fix for runtime traps only.
+
+## VERIFY-FIRST verdict (2026-06-26) — core done, residual is architectural
+
+Re-verified against current `origin/main` (dev-1556b) through the real
+`compileToWasm` harness. **The core scope of #1556 is delivered** — Path B+D
+landed via #1543 / #1544 / #1542 (all `status: done`). Closing #1556 as `done`;
+the narrow residual below is carved out as **#2722**.
+
+### What now passes (core delivered)
+
+| Shape | Example | Result |
+|-------|---------|--------|
+| Shape 1 — compile-time validation error | `method({ x = thrower() } = {})` | compiles + runs |
+| Shape 2 — runtime illegal cast in closure | #1543 async-gen-method, #1544 for-of rest/elision | pass |
+| Single-level struct-path default | `function h({ b = 3 }: { b?: number } = {})` — `h()`, `h({})`, `h({b:5})` | all correct |
+| Array-element nested object default | `function m([{ b = 3 } = {}] = [])` — `m()`, `m([{}])`, `m([{b:5}])` | all correct |
+| Required nested object field | `function g({ a: { b = 3 } }: { a: { b?: number } })` — `g({a:{}})⇒3`, `g({a:{b:5}})⇒5` | all correct |
+
+### Residual defect (→ #2722): nested **optional** object field, inner default not firing
+
+Only this narrow shape is still wrong — the nested field is **optional** (`a?`)
+and an inner default must fire from absence:
+
+```ts
+function f({ a: { b = 3 } = {} }: { a?: { b?: number } } = {}): number { return b; }
+f()              // => 0   (want 3)   WRONG
+f({ a: {} })     // => 0   (want 3)   WRONG
+f({ a: { c: 1 }})// => 1   (want 3)   WRONG
+f({ a: { b: 5 }})// => 5   (correct — inner literal HAS the field)
+```
+
+The **required**-field twin (`{ a: { b = 3 } }`) works; only the optional one fails.
+
+### Root cause (WAT + runtime.ts trace)
+
+1. `a?` has type `{b?:number} | undefined` (a union) → `resolveWasmType` makes the
+   param-struct field `a` **externref**, NOT a `(ref null structB)`. A *required*
+   `a` stays a struct ref — which is exactly why the required twin works.
+2. The inner `{}` / `{c:1}` value is built as a WasmGC struct that does NOT match
+   the `{b}` struct type, then boxed to externref.
+3. Destructuring reads `b` via host `__extern_get` → `__sget_b`. `$__sget_b`'s
+   else branch (object isn't the expected struct) returns `f64.const 0`. So
+   `__extern_get` yields JS `0`, `__extern_is_undefined(0)` is false, and the
+   `b = 3` default never fires. **An f64-returning struct getter fundamentally
+   cannot signal "field absent" across the host boundary.**
+4. The required-field path works because field `a` is a real struct ref →
+   `ref.test` succeeds → the in-Wasm i64 undefined-sentinel check fires the
+   default with no host roundtrip.
+
+### Why architectural (not a focused dstr-codegen fix) — three Path options
+
+- **Path A (recommended)** — represent optional object fields as **nullable
+  struct refs** instead of externref, so the struct fast path (with the in-Wasm
+  sentinel check) handles them. Touches the type-resolver: `ensureStructForType`
+  (`src/codegen/index.ts` ~:11559, where union/optional members widen to
+  externref) + threading the widened/nullable type through `function-body.ts`
+  param resolution. The issue's own estimate: ~150–200 lines.
+- **Path B** — build `{}`/partial object literals assigned to externref fields as
+  **plain objects** (`__new_plain_object`) so `__extern_get` returns `undefined`
+  for missing fields. Touches object-literal codegen (`literals.ts`) + call-site
+  coercion — the flagged "150+ regression" surface.
+- **Path C** — a struct-getter representation that can signal absence (substrate
+  change). Broadest blast radius.
+
+A focused partial (make `emitNestedBindingDefault`'s `{}` a plain object) would
+fix only the default-built cases (`f()`, `f({})`) and leave caller-built ones
+(`f({a:{}})`, `f({a:{c:1}})`) broken — deliberately NOT shipped (fragile partial).
