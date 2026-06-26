@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-06-26T15:19:09.146Z",
-  "baseline_generated_at": "2026-06-26T15:19:09.146Z",
-  "baseline_sha": "17c553a41f5208d646ca2fbbeca5628879fdf09b",
+  "timestamp": "2026-06-26T17:14:14.840Z",
+  "baseline_generated_at": "2026-06-26T17:14:14.840Z",
+  "baseline_sha": "8fc7ee5283d731dd8e592c09a53e634637f2fc9d",
   "oracle_version": 1,
   "mode": {
     "target": "standalone",
@@ -10,22 +10,22 @@
   },
   "summary": {
     "total": 43136,
-    "pass": 24176,
-    "fail": 13063,
-    "compile_error": 5873,
+    "pass": 24178,
+    "fail": 13064,
+    "compile_error": 5870,
     "compile_timeout": 6,
     "skip": 18,
-    "compilable": 37239,
+    "compilable": 37242,
     "stale": 0,
     "by_category": {
       "standard": {
         "total": 42050,
-        "pass": 23656,
-        "fail": 12629,
-        "compile_error": 5741,
+        "pass": 23658,
+        "fail": 12630,
+        "compile_error": 5738,
         "compile_timeout": 6,
         "skip": 18,
-        "compilable": 36285,
+        "compilable": 36288,
         "stale": 0,
         "label": "ECMAScript current standard"
       },
@@ -53,23 +53,23 @@
       },
       "official": {
         "total": 43136,
-        "pass": 24176,
-        "fail": 13063,
-        "compile_error": 5873,
+        "pass": 24178,
+        "fail": 13064,
+        "compile_error": 5870,
         "compile_timeout": 6,
         "skip": 18,
-        "compilable": 37239,
+        "compilable": 37242,
         "stale": 0,
         "label": "standard + annex_b (default)"
       },
       "full": {
         "total": 48118,
-        "pass": 25316,
-        "fail": 14082,
-        "compile_error": 8590,
+        "pass": 25318,
+        "fail": 14083,
+        "compile_error": 8587,
         "compile_timeout": 7,
         "skip": 123,
-        "compilable": 39398,
+        "compilable": 39401,
         "stale": 0,
         "label": "standard + annex_b + proposals"
       }
@@ -77,32 +77,32 @@
   },
   "official_summary": {
     "total": 43136,
-    "pass": 24176,
-    "fail": 13063,
-    "compile_error": 5873,
+    "pass": 24178,
+    "fail": 13064,
+    "compile_error": 5870,
     "compile_timeout": 6,
     "skip": 18,
-    "compilable": 37239,
+    "compilable": 37242,
     "stale": 0
   },
   "full_summary": {
     "total": 48118,
-    "pass": 25316,
-    "fail": 14082,
-    "compile_error": 8590,
+    "pass": 25318,
+    "fail": 14083,
+    "compile_error": 8587,
     "compile_timeout": 7,
     "skip": 123,
-    "compilable": 39398,
+    "compilable": 39401,
     "stale": 0
   },
   "strict_summary": {
     "total": 40627,
-    "pass": 22989,
-    "fail": 12223,
-    "compile_error": 5391,
+    "pass": 22991,
+    "fail": 12224,
+    "compile_error": 5388,
     "compile_timeout": 6,
     "skip": 18,
-    "compilable": 35212,
+    "compilable": 35215,
     "stale": 0
   },
   "scope_summaries": {
@@ -128,12 +128,12 @@
     },
     "standard": {
       "total": 42050,
-      "pass": 23656,
-      "fail": 12629,
-      "compile_error": 5741,
+      "pass": 23658,
+      "fail": 12630,
+      "compile_error": 5738,
       "compile_timeout": 6,
       "skip": 18,
-      "compilable": 36285,
+      "compilable": 36288,
       "stale": 0
     }
   },
@@ -181,8 +181,8 @@
     {
       "name": "built-ins/Array",
       "path": "built-ins/Array",
-      "pass": 1058,
-      "fail": 1662,
+      "pass": 1059,
+      "fail": 1661,
       "compile_error": 358,
       "compile_timeout": 3,
       "skip": 0,
@@ -591,9 +591,9 @@
     {
       "name": "built-ins/Proxy",
       "path": "built-ins/Proxy",
-      "pass": 51,
-      "fail": 177,
-      "compile_error": 83,
+      "pass": 52,
+      "fail": 179,
+      "compile_error": 80,
       "compile_timeout": 0,
       "skip": 0,
       "total": 311
@@ -1080,15 +1080,15 @@
     }
   ],
   "error_categories": {
-    "assertion_fail": 9652,
+    "assertion_fail": 9653,
     "illegal_cast": 1801,
     "negative_test_fail": 77,
     "null_deref": 419,
     "oob": 35,
-    "other": 2546,
+    "other": 2547,
     "promise_error": 218,
     "range_error": 16,
-    "runtime_error": 6768,
+    "runtime_error": 6764,
     "type_error": 18,
     "unreachable": 4,
     "wasm_compile": 1118
@@ -1101,8 +1101,8 @@
   },
   "root_cause_map": {
     "target": "standalone",
-    "total_non_pass_non_skip": 22679,
-    "classified": 22679,
+    "total_non_pass_non_skip": 22677,
+    "classified": 22677,
     "unclassified_threshold": null,
     "buckets": [
       {
@@ -1199,8 +1199,8 @@
         "sample_files": [
           "test/built-ins/Temporal/Now/zonedDateTimeISO/return-value.js",
           "test/built-ins/Temporal/PlainDateTime/subclass.js",
-          "test/built-ins/Temporal/ZonedDateTime/prototype/eraYear/prop-desc.js",
           "test/built-ins/Temporal/PlainDateTime/prototype/month/prop-desc.js",
+          "test/built-ins/Temporal/ZonedDateTime/prototype/eraYear/prop-desc.js",
           "test/built-ins/Temporal/Instant/prototype/toString/timezone-wrong-type.js"
         ],
         "sample_signatures": [
@@ -1353,15 +1353,15 @@
         "sample_files": [
           "test/built-ins/JSON/parse/15.12.2-2-2.js",
           "test/built-ins/JSON/stringify/space-wrong-type.js",
-          "test/built-ins/JSON/stringify/replacer-array-empty.js",
           "test/built-ins/JSON/parse/reviver-array-define-prop-err.js",
-          "test/built-ins/JSON/parse/15.12.2-2-6.js"
+          "test/built-ins/JSON/parse/15.12.2-2-6.js",
+          "test/built-ins/JSON/stringify/replacer-array-empty.js"
         ],
         "sample_signatures": [
           "illegal_cast:L#:## illegal cast [in test()]",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(JSON.stringify(obj), JSON.stringify(obj, null, null));",
-          "assertion_fail:returned # — assert ## at L#: assert.sameValue( JSON.stringify([#, {a: #}], []), '[#,{}]' );",
           "assertion_fail:returned # — assert ## at L#: throw new Test262Error();",
+          "assertion_fail:returned # — assert ## at L#: assert.sameValue( JSON.stringify([#, {a: #}], []), '[#,{}]' );",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(JSON.stringify(obj, null, ' '), [ '{' , ' \"a1\": {' , ' \"b1\": [' , ' #,' , ' #,' , ' #,' , ' #' , ' ],' , ' \"b2\": {' , ' \"c1\": #,' , ' \"c2\": #'"
         ]
       },
@@ -1456,23 +1456,23 @@
           "total": 425
         },
         "error_categories": {
-          "assertion_fail": 129,
           "runtime_error": 166,
+          "assertion_fail": 129,
           "other": 16,
           "illegal_cast": 49,
           "wasm_compile": 20,
           "null_deref": 45
         },
         "sample_files": [
-          "test/built-ins/RegExp/from-regexp-like-get-ctor-err.js",
           "test/built-ins/RegExp/prototype/flags/coercion-ignoreCase.js",
+          "test/built-ins/RegExp/from-regexp-like-get-ctor-err.js",
           "test/annexB/built-ins/RegExp/legacy-accessors/leftContext/this-not-regexp-constructor.js",
           "test/language/literals/regexp/S7.8.5_A2.3_T4.js",
           "test/built-ins/Proxy/has/trap-is-missing-target-is-proxy.js"
         ],
         "sample_signatures": [
-          "assertion_fail:returned # — assert ## at L#: throw new Test262Error();",
           "runtime_error:Cannot convert object to primitive value",
+          "assertion_fail:returned # — assert ## at L#: throw new Test262Error();",
           "other:L#:## Codegen error: '__get_builtin' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get/struct",
           "runtime_error:L#:## Cannot convert object to primitive value",
           "assertion_fail:returned # — assert ## at L#: assert(Reflect.has(regExpProxy, \"ignoreCase\"));"
@@ -1523,19 +1523,19 @@
           "#1472"
         ],
         "label": "Standalone dynamic object/property operation gate",
-        "count": 3870,
+        "count": 3869,
         "statuses": {
           "pass": 0,
-          "fail": 2669,
-          "compile_error": 1201,
+          "fail": 2671,
+          "compile_error": 1198,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 3870
+          "total": 3869
         },
         "error_categories": {
           "illegal_cast": 1006,
-          "runtime_error": 794,
-          "assertion_fail": 1251,
+          "runtime_error": 791,
+          "assertion_fail": 1253,
           "other": 742,
           "promise_error": 16,
           "null_deref": 12,
@@ -1612,9 +1612,9 @@
         },
         "error_categories": {
           "wasm_compile": 305,
-          "assertion_fail": 1724,
+          "assertion_fail": 1723,
           "runtime_error": 398,
-          "other": 261,
+          "other": 262,
           "illegal_cast": 461,
           "null_deref": 49,
           "type_error": 10,
@@ -1686,18 +1686,18 @@
           "#1364"
         ],
         "label": "Class element, prototype, private-name, and descriptor reconciliation gaps",
-        "count": 5614,
+        "count": 5613,
         "statuses": {
           "pass": 0,
-          "fail": 3773,
+          "fail": 3772,
           "compile_error": 1838,
           "compile_timeout": 3,
           "skip": 0,
-          "total": 5614
+          "total": 5613
         },
         "error_categories": {
           "assertion_fail": 3030,
-          "runtime_error": 1466,
+          "runtime_error": 1465,
           "other": 474,
           "illegal_cast": 178,
           "wasm_compile": 270,
@@ -2376,8 +2376,8 @@
         },
         "sample_files": [
           "test/language/expressions/object/method-definition/forbidden-ext/b2/async-meth-forbidden-ext-indirect-access-own-prop-caller-get.js",
-          "test/built-ins/Promise/race/same-resolve-function.js",
           "test/built-ins/Promise/all/resolve-element-function-extensible.js",
+          "test/built-ins/Promise/race/same-resolve-function.js",
           "test/built-ins/Promise/allSettled/reject-element-function-multiple-calls.js",
           "test/built-ins/Promise/any/ctx-non-ctor.js"
         ],
@@ -2564,14 +2564,14 @@
           "test/built-ins/Atomics/load/expected-return-value.js",
           "test/built-ins/SharedArrayBuffer/negative-length-throws.js",
           "test/built-ins/SharedArrayBuffer/length-is-too-large-throws.js",
-          "test/built-ins/WeakRef/undefined-newtarget-throws.js"
+          "test/built-ins/WeakRef/throws-when-target-cannot-be-held-weakly.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert.throws(TypeError, function() { FinalizationRegistry(); });",
           "illegal_cast:L#:## illegal cast [in test()]",
           "assertion_fail:returned # — assert ## at L#: assert.throws(RangeError, function() { new SharedArrayBuffer(-#); });",
           "assertion_fail:returned # — assert ## at L#: assert.throws(RangeError, function() { // Math.pow(#, #) = # new SharedArrayBuffer(#); }, \"`length` parameter is too large\");",
-          "assertion_fail:returned # — assert ## at L#: assert.throws(TypeError, function() { WeakRef(); });"
+          "runtime_error:L#:## WeakRef: invalid target"
         ]
       },
       {
