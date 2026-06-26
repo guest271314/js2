@@ -2,7 +2,7 @@
 id: 2705
 title: "for-in: head let/const TDZ, lexical scope open/close, LHS non-simple targets, var-head visibility"
 status: done
-assignee: ttraenkler/esch
+assignee: ttraenkler/Esch
 completed: 2026-06-26
 sprint: 67
 goal: test262-conformance
@@ -464,12 +464,27 @@ identifier for-in — the overwhelming common case — are byte-identical.
 
 ### Regression validation (scoped, host mode, fresh process per test)
 
-- 10/11 target tests pass; the eval-routed `S12.6.4_A3/A3.1/A4/A4.1`,
-  `scope-head/body-var-none`, `cptn-*` remain deferred (Slice D / eval-inline)
-  as specced.
-- `language/statements/for-in`: the only fresh-process fails are pre-existing
-  **enumeration-order** cases (`S12.6.4_A6/A6.1`, `order-simple-object`,
-  `order-property-on-prototype`, `order-after-define-property` — #2706) — all
-  confirmed already failing on `origin/main`. No scoping regressions.
-- `language/expressions/typeof`: 11/16 branch == 11/16 baseline.
+Re-run on resume (full for-in suite, both branch HEAD and merge-base `14fa625`
+via a fresh tsx process per test — the test262 worker uses fork isolation, so
+each compile must be isolated to avoid in-process TS-program pollution):
+
+- **`language/statements/for-in` + `annexB/.../for-in` (122 tests): baseline 94
+  PASS → branch 104 PASS = +10, ZERO regressions.** The 10 improvements are
+  exactly the closeable set (Slice A: `head-lhs-cover`, `head-var-bound-names-in-stmt`,
+  `identifier-let-allowed`, `let-identifier-with-newline`; Slice B: the 6
+  TDZ/scope tests). `head-lhs-let` remains FAIL on both branches (the 1 allowed
+  miss — Array.prototype numeric-index setter, out of scope; not a regression).
+- **Broad var/typeof/scope sample (70 tests across
+  `language/statements/{variable,for,let,const}` + `language/expressions/typeof`):
+  baseline 56 PASS == branch 56 PASS, ZERO deltas.** Confirms the broad-reach
+  `variables.ts` var-redecl-no-op and `typeof-delete.ts` boxed-TDZ changes do not
+  regress non-for-in code.
+- Curated equivalence batch (`issue-1896-typeof-closure`, `issue-1128-dstr-tdz`,
+  `issue-2572-standalone-forin`, `issue-2200-annexb-block-fn-hoist`,
+  `for-of-array-destructuring`, `issue-2705`) all green; the 3 failing files in
+  the batch (`ir-let-const-equivalence`, `issue-1690b`, `illegal-cast-closures-585`)
+  fail **identically on the merge-base** — pre-existing stale-import-map harness
+  drift in those test files, not a codegen regression.
+- The eval-routed `S12.6.4_A3/A3.1/A4/A4.1`, `scope-head/body-var-none`, `cptn-*`
+  remain deferred (Slice D / eval-inline) as specced.
 - CI runs full test262 for the authoritative regression check.
