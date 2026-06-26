@@ -1,12 +1,12 @@
 ---
 id: 2706
 title: "for-in enumeration order: integer-index keys ascending, insertion-order strings, prototype-chain dedup"
-status: in-progress
+status: blocked
 assignee: ttraenkler/Esch
 sprint: 67
 goal: test262-conformance
 feasibility: medium
-depends_on: []
+depends_on: [2731]
 priority: medium
 es_edition: ES5
 language_feature: for-in
