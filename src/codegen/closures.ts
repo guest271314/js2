@@ -1324,6 +1324,17 @@ export function isDeferredCallbackArgument(node: ts.Node, ctx: CodegenContext): 
  * iteration. Force-boxing here would break per-iteration semantics (all
  * closures would share the same Wasm box slot, observing the final value).
  */
+/** (#2705) True if `node` is `ancestor` or a descendant of it. */
+function isNodeDescendantOf(node: ts.Node | undefined, ancestor: ts.Node | undefined): boolean {
+  if (!ancestor) return false;
+  let cur: ts.Node | undefined = node;
+  while (cur) {
+    if (cur === ancestor) return true;
+    cur = cur.parent;
+  }
+  return false;
+}
+
 function closureProvablyAfterLetDecl(
   ctx: CodegenContext,
   arrow: ts.ArrowFunction | ts.FunctionExpression,
@@ -1367,6 +1378,20 @@ function closureProvablyAfterLetDecl(
       let d: ts.Node | undefined = decl;
       while (d) {
         if (d === cur) {
+          // (#2705) Exception: a `for (let/const <head> in/of RECEIVER)` whose
+          // RECEIVER builds a closure capturing the HEAD binding. Per §14.7.5.6
+          // ForIn/OfHeadEvaluation step 2, the receiver is evaluated in a TDZ
+          // environment where the head binding is NOT yet initialized — distinct
+          // from the per-iteration environment. A closure inside the receiver
+          // therefore captures a binding that stays in its TDZ forever, so its
+          // read/`typeof` MUST throw — it is a TDZ risk. Detect: for-in/for-of,
+          // decl is the head (`cur.initializer`), closure is in the receiver
+          // (`cur.expression`).
+          if (ts.isForInStatement(cur) || ts.isForOfStatement(cur)) {
+            if (isNodeDescendantOf(arrow, cur.expression) && isNodeDescendantOf(decl, cur.initializer)) {
+              return false; // head binding is in TDZ while the receiver is evaluated
+            }
+          }
           // Decl is inside (or part of) this loop. The loop wraps both
           // the decl and the closure — per-iteration semantics apply,
           // closure runs after decl in each iteration, no TDZ risk.

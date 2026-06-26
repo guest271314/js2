@@ -1103,10 +1103,35 @@ export function compileTypeofExpression(
 
   const tsType = ctx.checker.getTypeAtLocation(operand);
 
+  // (#2705) `typeof x` where x is a let/const binding boxed for closure capture
+  // (so it carries a boxed TDZ flag) must NOT static-fold to a type string — if
+  // the binding is in its temporal dead zone the read must throw a
+  // ReferenceError (§13.5.3.1 / §14.7.5.6). Force the runtime path so
+  // `compileExpression(operand)` emits the boxed TDZ check. This fires for a
+  // closure built inside a `for (let x in …)` head's receiver that captures the
+  // never-initialized head binding (scope-head/​body-lex-open/close).
+  let forceRuntimeTypeof = false;
+  {
+    let bareTdz: ts.Expression = operand;
+    while (
+      ts.isParenthesizedExpression(bareTdz) ||
+      ts.isAsExpression(bareTdz) ||
+      ts.isTypeAssertionExpression(bareTdz) ||
+      ts.isNonNullExpression(bareTdz)
+    ) {
+      bareTdz = (bareTdz as ts.ParenthesizedExpression | ts.AsExpression).expression;
+    }
+    if (ts.isIdentifier(bareTdz) && fctx.boxedTdzFlags?.has(bareTdz.text)) {
+      forceRuntimeTypeof = true;
+    }
+  }
+
   // Try static resolution first via the shared helper
-  const staticResult = staticTypeofForType(ctx, tsType);
-  if (staticResult !== null) {
-    return compileStringLiteral(ctx, fctx, staticResult);
+  if (!forceRuntimeTypeof) {
+    const staticResult = staticTypeofForType(ctx, tsType);
+    if (staticResult !== null) {
+      return compileStringLiteral(ctx, fctx, staticResult);
+    }
   }
 
   // $AnyValue operand → runtime typeof via __any_typeof, which tag-dispatches

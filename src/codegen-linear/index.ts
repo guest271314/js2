@@ -1474,8 +1474,9 @@ export function compileExpression(ctx: LinearContext, fctx: LinearFuncContext, e
       // Result is i32 (0 or 1), convert back to f64
       fctx.body.push({ op: "f64.convert_i32_s" });
     } else if (expr.operator === ts.SyntaxKind.TildeToken) {
-      // Bitwise NOT: ~x = (x ^ -1)
-      compileExprToI32(ctx, fctx, expr.operand);
+      // Bitwise NOT: ~x = (x ^ -1). ToInt32 the operand (#2715: NaN/∞/large wrap,
+      // never trap) so `~(0/0) === -1`.
+      compileExprToInt32(ctx, fctx, expr.operand);
       fctx.body.push({ op: "i32.const", value: -1 });
       fctx.body.push({ op: "i32.xor" });
       fctx.body.push({ op: "f64.convert_i32_s" });
@@ -2018,9 +2019,9 @@ function compileBinaryExpression(ctx: LinearContext, fctx: LinearFuncContext, ex
     const idx = fctx.localMap.get(expr.left.text);
     if (idx !== undefined) {
       if (isBitwiseCompoundAssignment(op)) {
-        // Bitwise compound: operate in i32, store f64 result
-        compileExprToI32(ctx, fctx, expr.left);
-        compileExprToI32(ctx, fctx, expr.right);
+        // Bitwise compound: operate in i32 (JS ToInt32 operands — #2715), store f64 result
+        compileExprToInt32(ctx, fctx, expr.left);
+        compileExprToInt32(ctx, fctx, expr.right);
         fctx.body.push(bitwiseOp(bitwiseCompoundToOp(op)));
         if (op === ts.SyntaxKind.GreaterThanGreaterThanGreaterThanEqualsToken) {
           fctx.body.push({ op: "f64.convert_i32_u" });
@@ -2088,10 +2089,11 @@ function compileBinaryExpression(ctx: LinearContext, fctx: LinearFuncContext, ex
     }
   }
 
-  // Bitwise operators: need i32 truncation
+  // Bitwise operators: ToInt32 both operands per JS spec (#2715: NaN/∞/large
+  // wrap mod 2^32, never trap — `(0/0)|0 === 0`).
   if (isBitwiseOp(op)) {
-    compileExprToI32(ctx, fctx, expr.left);
-    compileExprToI32(ctx, fctx, expr.right);
+    compileExprToInt32(ctx, fctx, expr.left);
+    compileExprToInt32(ctx, fctx, expr.right);
     fctx.body.push(bitwiseOp(op));
     // Unsigned right shift converts back with unsigned conversion
     if (op === ts.SyntaxKind.GreaterThanGreaterThanGreaterThanToken) {
@@ -3200,7 +3202,9 @@ function compileElementAccessAssignment(
     compileExpression(ctx, fctx, left.expression);
     compileExprToI32(ctx, fctx, left.argumentExpression); // index → i32
     fctx.body.push({ op: "local.get", index: valLocal });
-    fctx.body.push({ op: "i32.trunc_f64_s" }); // byte value
+    // ToUint8 byte value (#2715): ToInt32 then `__u8arr_set`'s i32.store8 keeps the
+    // low byte. NaN/∞ → 0, large values wrap mod 256, never trap.
+    emitToInt32(fctx);
     fctx.body.push({ op: "call", funcIdx: setIdx });
     fctx.body.push({ op: "local.get", index: valLocal }); // assigned value (f64)
   } else {
@@ -3950,12 +3954,58 @@ function compileSetMethodCall(
 /**
  * Compile an expression and convert to i32 if needed.
  * If the expression produces f64, emit i32.trunc_f64_s; if i32, no-op.
+ *
+ * NOTE: this uses the **trapping** `i32.trunc_f64_s` and is for internal
+ * integer conversions (array indices, lengths, handles) where the value is
+ * expected to be a representable integer. JS-number paths that require the
+ * §7.1.6 `ToInt32` / `ToUint8` wrap (bitwise operators, integer typed-array
+ * element stores) must use {@link compileExprToInt32} / {@link emitToInt32}
+ * instead — those wrap mod 2³² and map NaN/±∞ to 0 rather than trapping (#2715).
  */
 function compileExprToI32(ctx: LinearContext, fctx: LinearFuncContext, expr: ts.Expression): void {
   const exprType = inferExprType(ctx, fctx, expr);
   compileExpression(ctx, fctx, expr);
   if (exprType.kind === "f64") {
     fctx.body.push({ op: "i32.trunc_f64_s" });
+  }
+}
+
+/**
+ * #2715 — JS ToInt32 (§7.1.6) for an f64 already on the stack → i32 bit pattern.
+ *
+ * NaN / ±Infinity → 0; finite values truncate toward zero then reduce mod 2³²
+ * (large magnitudes WRAP, not saturate). Mirrors the WasmGC backend's
+ * `emitToInt32` (src/codegen/binary-ops.ts): the non-trapping saturating
+ * conversion removes the `i32.trunc_f64_s` trap on NaN/∞, and the explicit
+ * `x - floor(x / 2³²) * 2³²` reduction supplies the modular wrap that saturation
+ * alone does not. The `_u` saturating conversion then yields the correct 32-bit
+ * pattern (reinterpreted as signed by the consumer).
+ */
+function emitToInt32(fctx: LinearFuncContext): void {
+  const tmp = fctx.params.length + fctx.locals.length;
+  fctx.locals.push({ name: `__toint32_${tmp}`, type: { kind: "f64" } });
+  fctx.body.push({ op: "f64.trunc" }); // truncate toward zero (ToInteger)
+  fctx.body.push({ op: "local.tee", index: tmp });
+  fctx.body.push({ op: "local.get", index: tmp });
+  fctx.body.push({ op: "f64.const", value: 4294967296 }); // 2^32
+  fctx.body.push({ op: "f64.div" });
+  fctx.body.push({ op: "f64.floor" });
+  fctx.body.push({ op: "f64.const", value: 4294967296 });
+  fctx.body.push({ op: "f64.mul" });
+  fctx.body.push({ op: "f64.sub" }); // x - floor(x/2^32)*2^32 ∈ [0, 2^32)
+  fctx.body.push({ op: "i32.trunc_sat_f64_u" }); // bit pattern; NaN/∞ → 0
+}
+
+/**
+ * #2715 — compile an expression and coerce to i32 using JS `ToInt32` semantics
+ * (for bitwise operands). An already-i32 value is left untouched (it is already a
+ * 32-bit integer); an f64 value is run through {@link emitToInt32}.
+ */
+function compileExprToInt32(ctx: LinearContext, fctx: LinearFuncContext, expr: ts.Expression): void {
+  const exprType = inferExprType(ctx, fctx, expr);
+  compileExpression(ctx, fctx, expr);
+  if (exprType.kind === "f64") {
+    emitToInt32(fctx);
   }
 }
 
