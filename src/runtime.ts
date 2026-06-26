@@ -6936,6 +6936,29 @@ function resolveImport(
           return new Ctor(...args);
         };
       }
+      // (#2671) `RegExp.lastIndex` is a value-preserving data slot: §22.2.7.2
+      // RegExpBuiltinExec (and @@match/@@replace/@@split/@@search via RegExpExec)
+      // read it as `ToLength(? Get(R, "lastIndex"))` at exec time — the spec
+      // stores whatever was assigned verbatim. A WasmGC-struct value
+      // (`r.lastIndex = {valueOf(){…}}`) is opaque to V8's ToNumber ("Cannot
+      // convert object to primitive value"), so on WRITE wrap a struct as a
+      // host-coercibility proxy whose `valueOf` bridges back to the struct —
+      // native exec / @@replace can then ToLength it (and a *throwing* `valueOf`
+      // surfaces as the program's own error, not a generic TypeError). On READ
+      // unwrap the proxy back to the raw struct so an explicit `r.lastIndex` read
+      // sees the SAME object the program stored (`assert.sameValue(r.lastIndex,
+      // obj)`). Primitive numbers pass through untouched.
+      if (intent.className === "RegExp" && intent.member === "lastIndex") {
+        if (intent.action === "get") {
+          return (self: any) => _unwrapForHost(_safeGet(self, "lastIndex"));
+        }
+        if (intent.action === "set") {
+          return (self: any, v: any) => {
+            const liExports = callbackState?.getExports();
+            _safeSet(self, "lastIndex", _isWasmStruct(v) ? _wrapForHost(v, liExports) : v);
+          };
+        }
+      }
       if (intent.action === "get") {
         const member = intent.member!;
         return (self: any) => _safeGet(self, member);

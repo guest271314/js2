@@ -98,6 +98,49 @@ built-ins/RegExp/prototype/Symbol.split/species-ctor-ctor-non-obj.js
 built-ins/RegExp/prototype/exec/success-lastindex-access.js
 ```
 
+**Progress (dev-2671e, 2026-06-26): RegExp `lastIndex` value-preserving data
+slot (§22.2.7.2 RegExpBuiltinExec step 4) — SHIPPED.**
+
+Verified-first against current main through the real worker harness (`compile` +
+`__setExports` + `wrapExports`). Root cause: the extern `RegExp` interface typed
+`lastIndex` as `number`, so the host import eagerly `ToNumber`'d any assigned
+value at WRITE time. The spec instead stores whatever is assigned **verbatim**
+and coerces only inside `exec` (`lastIndex = ToLength(? Get(R, "lastIndex"))`,
+writing back only when the regex is global/sticky). On pristine main,
+`r.lastIndex = {valueOf(){…}}` followed by a non-global `r.exec(s)` returned
+`r.lastIndex !== counter` (identity discarded — the eager set stored the coerced
+number), failing `assert.sameValue(r.lastIndex, counter)`; on the dynamic-receiver
+path the eager coerce of an opaque WasmGC struct threw "Cannot convert object to
+primitive value".
+
+Two host-mode-scoped fixes:
+- **`src/codegen/index.ts`** (`collectInterfaceMembers`): carry
+  `RegExp.lastIndex` as `externref` (not `number`) in **host mode only**
+  (`!ctx.standalone && !ctx.wasi`) so the raw value round-trips through the native
+  RegExp; numeric uses coerce at the use site, the exec-time ToLength runs in
+  native code. Standalone/WASI keep their native struct-field RegExp path
+  untouched (the `RegExp_*_lastIndex` extern import is never emitted there).
+- **`src/runtime.ts`** (`resolveImport`, RegExp `lastIndex` get/set): on WRITE
+  wrap a WasmGC struct as a host-coercibility `_wrapForHost` proxy (native exec
+  can then `ToLength` it; a *throwing* `valueOf` surfaces as the program's own
+  error); on READ `_unwrapForHost` back to the raw struct so an explicit
+  `r.lastIndex` read sees the SAME object the program stored. Primitive numbers
+  pass through untouched, and the global/sticky numeric write-back path is
+  unchanged.
+- Flips `built-ins/RegExp/prototype/exec/success-lastindex-access.js`
+  (identity-preserved + `gets === 1` exec-time read). Guard:
+  `tests/issue-2671-regexp.test.ts` (6/6 — core identity scenario, exec-time
+  valueOf-once, global numeric write-back, default-0 read, numeric round-trip,
+  sticky start-anchor). No regression: 212/212 host-mode regex tests pass
+  (`regexp`, `issue-2175-proto-readers`, `issue-2161-symbol-protocol`/`-string-coercion`,
+  `issue-2588-2589-groups-indices`, `issue-1911`/`-1912`); the 6 standalone-refusal
+  failures (`issue-1474`/`issue-1539-*`) pre-exist on pristine main (unrelated —
+  standalone is gated out).
+- ⏳ Remaining RegExp: `Symbol.split`/`Symbol.replace` protocol (species ctor
+  validation + dynamic `exec`/`lastIndex` dispatch on arbitrary objects), dotAll
+  lone-surrogate string-rep (deep string-backend), `str-get-lastindex-err`
+  (Symbol.split lastIndex getter-error ordering — separate root cause).
+
 ### Promise (76)
 resolve-element function attributes (extensible/own-props), invoke-resolve
 error-close paths, race/all resolver-element edge cases, `then` spec asserts.

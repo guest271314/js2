@@ -12607,7 +12607,23 @@ function collectInterfaceMembers(
       const propName = member.name.text;
       if (info.properties.has(propName)) continue;
       const propType = ctx.checker.getTypeAtLocation(member);
-      const wasmType = mapTsTypeToWasm(propType, ctx.checker);
+      let wasmType = mapTsTypeToWasm(propType, ctx.checker);
+      // (#2671) `RegExp.lastIndex` is a value-preserving data slot: §22.2.7.2
+      // RegExpBuiltinExec reads it via `ToLength(? Get(R, "lastIndex"))` at exec
+      // time — the spec stores whatever was assigned verbatim and coerces only
+      // inside exec (writing back only when the regex is global/sticky). Typing
+      // the field `number` makes the host import eagerly ToNumber the assigned
+      // value: an opaque WasmGC struct (`r.lastIndex = {valueOf(){…}}`) is
+      // unconvertible to V8 ("Cannot convert object to primitive value"), so the
+      // subsequent `exec` throws instead of firing the object's `valueOf` once.
+      // Carry the slot as `externref` in host mode so the raw value round-trips
+      // through the native RegExp; numeric uses coerce at the use site, and the
+      // exec-time ToLength is performed by native code. Standalone / WASI keep
+      // their native struct-field RegExp path (the `RegExp_*_lastIndex` extern
+      // import is never emitted there), so only true host mode is retyped.
+      if (info.className === "RegExp" && propName === "lastIndex" && !ctx.standalone && !ctx.wasi) {
+        wasmType = { kind: "externref" };
+      }
       const isReadonly = member.modifiers?.some((m) => m.kind === ts.SyntaxKind.ReadonlyKeyword) ?? false;
       info.properties.set(propName, { type: wasmType, readonly: isReadonly });
     }
