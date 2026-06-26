@@ -622,6 +622,23 @@ export interface FunctionContext {
   >;
   /** #1886 — function-entry arena mark for rewinding short-lived linear-U8 locals. */
   linearU8ArenaMarkLocalIdx?: number;
+  /**
+   * #2660 PART-1 — the WasmGC struct name (`__fnctor_<Name>` / class-struct key
+   * in `ctx.structMap`) that a lifted method's `this` receiver resolves to, when
+   * statically known. Populated by the #2681 syntactic prototype-alias resolver
+   * (`resolveLiftedMethodThisStruct`, owned by the PART-2 dispatch slice) when a
+   * function is lowered as a `Class.prototype.m = function(){}` (or aliased
+   * `var pp = Class.prototype; pp.m = …`) method, so the dynamic `this.<field>`
+   * read/write/compound dispatch can pin to that one struct instead of the
+   * open-scan `findAlternateStructsForField`.
+   *
+   * **Read by `resolveReceiverStruct` case (1)** (the analysis-layer provider in
+   * `fnctor-escape-gate.ts`). **INERT in PART-1**: this slice only DECLARES the
+   * field; nothing in PART-1 sets it and `resolveReceiverStruct` is not yet
+   * called by any lowering, so emitted Wasm is byte-identical. PART-2 wires the
+   * setter + the consuming read/write/compound emitters.
+   */
+  thisStructName?: string;
 }
 
 /** Context shared across all codegen. */
