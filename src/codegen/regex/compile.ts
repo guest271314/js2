@@ -22,8 +22,18 @@
  * modifier groups `(?ims-ims:…)` are a pure compile-time flag-scope: the
  * emitter's i/m/s state nests with the group.
  */
-import { INSTR_WIDTH, ReOp, RE_FLAG_I, RE_FLAG_M, RE_FLAG_S, type CompiledRegex } from "./bytecode.js";
+import {
+  INSTR_WIDTH,
+  ReOp,
+  RE_FLAG_I,
+  RE_FLAG_M,
+  RE_FLAG_S,
+  RE_FLAG_U,
+  RE_FLAG_V,
+  type CompiledRegex,
+} from "./bytecode.js";
 import { parsePattern, type ParsedRegex, type ReNode } from "./parse.js";
+import { foldCharUnitsLegacy, foldClassRangesLegacy, unitsToRanges } from "./casefold.js";
 import { cpRangesToNode, dotCpRanges } from "./unicode.js";
 
 /** Bounded repetition expansion guard — `{n,m}` with large m is rewritten to
@@ -57,6 +67,11 @@ class Emitter {
   private dotAll: boolean;
   /** multiline (`m` flag): `^`/`$` match at line boundaries, not just BOS/EOS. */
   private multiline: boolean;
+  /** Code-point mode (`u`/`v`). Pattern-level (not modifier-scoped). In u/v mode
+   *  cased atoms are already folded to plain unit classes at parse time by the
+   *  host-oracle (`unicode.ts`); the `i`-fold below therefore only applies full
+   *  legacy (non-Unicode) case folding when this is false. #2720. */
+  private readonly unicode: boolean;
   /** Lookbehind bodies emit group SAVE slots swapped (end first) so capture
    *  spans stay [left, right] while matching right-to-left. #1911. */
   private reversed = false;
@@ -71,10 +86,11 @@ class Emitter {
    *  Set by compileParsed before compileNode runs. */
   private scratchBase = 0;
 
-  constructor(caseInsensitive: boolean, dotAll: boolean, multiline: boolean) {
+  constructor(caseInsensitive: boolean, dotAll: boolean, multiline: boolean, unicode: boolean) {
     this.caseInsensitive = caseInsensitive;
     this.dotAll = dotAll;
     this.multiline = multiline;
+    this.unicode = unicode;
   }
 
   /** Append an instruction, return its program-counter (instruction index). */
@@ -132,10 +148,25 @@ class Emitter {
   compileNode(node: ReNode): void {
     switch (node.kind) {
       case "char": {
-        if (this.caseInsensitive) {
-          this.emit(ReOp.CHARI, asciiFold(node.code));
-        } else {
+        if (!this.caseInsensitive) {
           this.emit(ReOp.CHAR, node.code);
+          return;
+        }
+        if (this.unicode) {
+          // u/v mode: the parser already folded cased atoms to classes via the
+          // host oracle, so a bare CHAR here is non-cased — ASCII fold is a no-op.
+          this.emit(ReOp.CHARI, asciiFold(node.code));
+          return;
+        }
+        // Non-Unicode `i`: full legacy (§22.2.2.9.3) Canonicalize, resolved at
+        // compile time into the code-unit equivalence set and desugared to a
+        // plain CHAR/CLASS so the VM needs no runtime Unicode tables. #2720.
+        const units = foldCharUnitsLegacy(node.code);
+        if (units.length === 1) {
+          this.emit(ReOp.CHAR, units[0]!);
+        } else {
+          const offset = this.addClass(unitsToRanges(units));
+          this.emit(ReOp.CLASS, offset, 0);
         }
         return;
       }
@@ -150,7 +181,13 @@ class Emitter {
         this.compileNode(cpRangesToNode(dotCpRanges(this.dotAll)));
         return;
       case "class": {
-        const ranges = this.caseInsensitive ? foldClassRangesAscii(node.ranges) : node.ranges;
+        // Non-Unicode `i` uses full legacy (§22.2.2.9.3) case folding; u/v mode
+        // classes are already host-folded at parse time, so keep the (harmless,
+        // idempotent) ASCII fold there to avoid touching that path. #2720.
+        let ranges = node.ranges;
+        if (this.caseInsensitive) {
+          ranges = this.unicode ? foldClassRangesAscii(node.ranges) : foldClassRangesLegacy(node.ranges);
+        }
         const offset = this.addClass(ranges);
         this.emit(ReOp.CLASS, offset, node.negated ? 1 : 0);
         return;
@@ -532,8 +569,9 @@ export function compileParsed(parsed: ParsedRegex, flags: number): CompiledRegex
   const caseInsensitive = (flags & RE_FLAG_I) !== 0;
   const dotAll = (flags & RE_FLAG_S) !== 0;
   const multiline = (flags & RE_FLAG_M) !== 0;
+  const unicode = (flags & (RE_FLAG_U | RE_FLAG_V)) !== 0;
   const nGroups = parsed.numCaptures + 1;
-  const em = new Emitter(caseInsensitive, dotAll, multiline);
+  const em = new Emitter(caseInsensitive, dotAll, multiline, unicode);
   // Scratch slots for PROGRESS guards (#1959) live after the 2*nGroups capture
   // slots, so the emitter must know the capture-slot count before lowering.
   em.setScratchBase(2 * nGroups);
