@@ -35,8 +35,9 @@ import { stringConstantExternrefInstrs } from "../native-strings.js";
 import { BUILTIN_TYPE_TAGS, isBuiltinSubtype, isBuiltinTypeName } from "../builtin-tags.js";
 import { getOrRegisterErrorStructType, isWasiErrorName } from "../registry/error-types.js";
 import { allocLocal } from "../context/locals.js";
+import { popBody, pushBody } from "../context/bodies.js";
 import { reportSilentFallback } from "../fallback-telemetry.js";
-import { emitThrowReferenceError, noJsHost } from "./helpers.js";
+import { emitThrowReferenceError, emitThrowTypeError, noJsHost } from "./helpers.js";
 import { emitDynamicWithGet, emitWithBindingGet, resolveWithBinding } from "../with-scope.js";
 import { emitBuiltinNamespaceObject, isSupportedBuiltinNamespace } from "../builtin-static-globals.js";
 import { tryEmitPromiseSubclassValue } from "./promise-subclass.js";
@@ -1208,10 +1209,49 @@ function identifierHasSourceDeclaration(ctx: CodegenContext, id: ts.Identifier):
   return declarations.some((decl) => !decl.getSourceFile().isDeclarationFile);
 }
 
+/**
+ * (#2702) Given the i32 tri-state result of an instanceof host check on the
+ * stack — 0 (false) / 1 (true) / 2 (throw) — emit a wasm-level `TypeError`
+ * throw for the `2` sentinel and leave the boolean i32 (0/1) on the stack.
+ *
+ * The throw MUST originate in wasm: a host-thrown JS error loses its identity
+ * crossing the wasm catch boundary (the caught binding arrives as `undefined`),
+ * so `catch (e) { e instanceof TypeError }` — the exact test262 shape — would
+ * fail if the host threw. ECMA-262 §13.10.2 mandates a TypeError when the RHS
+ * is not an object, is not callable with no `@@hasInstance`, has a non-callable
+ * `@@hasInstance`, or (OrdinaryHasInstance §7.3.20) has a non-object prototype.
+ */
+function emitInstanceofThrowGuard(ctx: CodegenContext, fctx: FunctionContext): void {
+  // stack in: [i32 code]
+  const codeLocal = allocLocal(fctx, `__instanceof_code_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "local.tee", index: codeLocal });
+  fctx.body.push({ op: "i32.const", value: 2 });
+  fctx.body.push({ op: "i32.eq" });
+  // Build the throw into a sub-body (the late-import shift walker covers both
+  // savedBodies and the active body, so registering __new_TypeError here stays
+  // index-consistent with the already-emitted host call).
+  const saved = pushBody(fctx);
+  emitThrowTypeError(ctx, fctx, "Right-hand side of 'instanceof' is not callable");
+  const throwBody = fctx.body;
+  popBody(fctx, saved);
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: throwBody,
+    else: [],
+  } as Instr);
+  fctx.body.push({ op: "local.get", index: codeLocal });
+  // stack out: [i32 0|1]
+}
+
 function emitDynamicInstanceOf(ctx: CodegenContext, fctx: FunctionContext, expr: ts.BinaryExpression): ValType {
+  // (#2702) `__instanceof_check` implements §13.10.2 InstanceofOperator +
+  // §7.3.20 OrdinaryHasInstance and returns a tri-state (0/1/2) so the
+  // non-object / non-callable / custom-@@hasInstance cases are handled
+  // spec-correctly (TypeError emitted from wasm via emitInstanceofThrowGuard).
   const instanceofIdx = ensureLateImport(
     ctx,
-    "__instanceof_dyn",
+    "__instanceof_check",
     [{ kind: "externref" }, { kind: "externref" }],
     [{ kind: "i32" }],
   );
@@ -1239,6 +1279,7 @@ function emitDynamicInstanceOf(ctx: CodegenContext, fctx: FunctionContext, expr:
   }
 
   fctx.body.push({ op: "call", funcIdx: instanceofIdx });
+  emitInstanceofThrowGuard(ctx, fctx);
   return { kind: "i32" };
 }
 
@@ -1254,6 +1295,45 @@ function emitDynamicInstanceOf(ctx: CodegenContext, fctx: FunctionContext, expr:
  * obvious — important for standalone/WASI mode (#1325).
  */
 function compileHostInstanceOf(ctx: CodegenContext, fctx: FunctionContext, expr: ts.BinaryExpression): ValType {
+  // (#2702) §13.10.2 step 1: a RHS that is statically and *exclusively* a
+  // primitive / null / undefined — `x instanceof undefined`, `[] instanceof 1`,
+  // an identifier of primitive type — can NEVER be a valid constructor, so the
+  // operator throws a TypeError after evaluating both operands (§13.10.1). Emit
+  // that throw unconditionally here rather than routing to the runtime host
+  // check: the dynamic check is deliberately conservative about a *runtime*
+  // `undefined`/`null` target (a `Function(...)` constructor result lowers to
+  // `undefined` in our backend and must still answer `false`, not throw), so the
+  // genuine "statically non-constructor RHS" case is distinguished in codegen
+  // where the static type is visible. We require the type to be EXCLUSIVELY
+  // primitive (no Object / Any / Unknown / TypeParameter members) so an
+  // `any`-typed or `string | Ctor` RHS is never spuriously thrown on.
+  {
+    const rhsType = ctx.checker.getTypeAtLocation(expr.right);
+    const PRIMITIVE_RHS =
+      ts.TypeFlags.Undefined |
+      ts.TypeFlags.Null |
+      ts.TypeFlags.NumberLike |
+      ts.TypeFlags.StringLike |
+      ts.TypeFlags.BooleanLike |
+      ts.TypeFlags.BigIntLike |
+      ts.TypeFlags.ESSymbolLike;
+    const NON_PRIMITIVE =
+      ts.TypeFlags.Object |
+      ts.TypeFlags.Any |
+      ts.TypeFlags.Unknown |
+      ts.TypeFlags.TypeParameter |
+      ts.TypeFlags.NonPrimitive;
+    if ((rhsType.flags & PRIMITIVE_RHS) !== 0 && (rhsType.flags & NON_PRIMITIVE) === 0) {
+      // Evaluate LHS then RHS for side effects, discard both, then throw.
+      const lt = compileExpression(ctx, fctx, expr.left);
+      if (lt) fctx.body.push({ op: "drop" });
+      const rt = compileExpression(ctx, fctx, expr.right);
+      if (rt) fctx.body.push({ op: "drop" });
+      emitThrowTypeError(ctx, fctx, "Right-hand side of 'instanceof' is not an object");
+      return { kind: "i32" };
+    }
+  }
+
   // Resolve constructor name from the RHS expression (simple identifiers only)
   let ctorName: string | undefined;
   if (ts.isIdentifier(expr.right)) {
@@ -1402,11 +1482,22 @@ function compileHostInstanceOf(ctx: CodegenContext, fctx: FunctionContext, expr:
   if (!leftType) {
     fctx.body.push({ op: "ref.null.extern" });
   } else if (leftType.kind === "i32" || leftType.kind === "f64") {
-    // Stack-level fast path: a primitive numeric value is never an instance of
-    // any constructor — drop and emit false. (Avoids a host call + boxing.)
-    fctx.body.push({ op: "drop" });
-    fctx.body.push({ op: "i32.const", value: 0 });
-    return { kind: "i32" };
+    // (#2702) §13.10.2 checks the RHS-is-an-object/callable condition (step 1/4,
+    // which may throw a TypeError) BEFORE OrdinaryHasInstance looks at V. So the
+    // "a primitive is never an instance → false" stack-level fast path is only
+    // valid when the RHS is a KNOWN callable constructor (a builtin ctor or a
+    // user class). For a RHS that resolves to a non-callable object
+    // (`1 instanceof Math`) the spec requires a TypeError, so box the primitive
+    // and let the host check return the throw sentinel (2). (The builtin +
+    // statically-numeric-LHS case already short-circuited via
+    // tryStaticInstanceOf, so reaching here with a builtin RHS means an
+    // any-typed LHS — primitive → false is still correct there.)
+    if (isBuiltinTypeName(ctorName) || ctx.classTagMap.has(ctorName)) {
+      fctx.body.push({ op: "drop" });
+      fctx.body.push({ op: "i32.const", value: 0 });
+      return { kind: "i32" };
+    }
+    coerceType(ctx, fctx, leftType, { kind: "externref" });
   } else if (leftType.kind !== "externref") {
     coerceType(ctx, fctx, leftType, { kind: "externref" });
   }
@@ -1420,8 +1511,11 @@ function compileHostInstanceOf(ctx: CodegenContext, fctx: FunctionContext, expr:
   addStringConstantGlobal(ctx, ctorName);
   fctx.body.push(...stringConstantExternrefInstrs(ctx, ctorName));
 
-  // Call __instanceof(value, ctorName) -> i32
+  // Call __instanceof(value, ctorName) -> i32 (tri-state: 0/1/2). (#2702) A
+  // RHS that resolves to a non-callable object (`x instanceof Math`) returns 2,
+  // which emitInstanceofThrowGuard turns into a spec-mandated wasm TypeError.
   fctx.body.push({ op: "call", funcIdx: instanceofIdx });
+  emitInstanceofThrowGuard(ctx, fctx);
   return { kind: "i32" };
 }
 

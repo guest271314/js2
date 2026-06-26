@@ -2071,6 +2071,132 @@ function _maybeWrapCallableUnknownArity(
 }
 
 /**
+ * (#2702) Tri-state result of `V instanceof target` per ECMA-262 §13.10.2
+ * (InstanceofOperator) + §7.3.20 (OrdinaryHasInstance). The wasm caller turns
+ * this into a value or a *wasm-thrown* `TypeError` (a host-thrown JS error
+ * loses its identity crossing the wasm catch boundary, so the throw must
+ * originate in wasm — the caller emits it when this returns `2`):
+ *
+ *   0 → false
+ *   1 → true
+ *   2 → throw TypeError  (RHS not an object, or not callable with no
+ *                         `@@hasInstance`, or a non-callable `@@hasInstance`,
+ *                         or OrdinaryHasInstance's `prototype` is not an object)
+ *
+ * A throwing `@@hasInstance` getter or handler call propagates as a wasm
+ * exception (ReturnIfAbrupt) — it is NOT swallowed.
+ */
+const _INSTANCEOF_THROW = 2;
+function _instanceofResult(
+  v: any,
+  rawTarget: any,
+  callbackState?: { getExports: () => Record<string, Function> | undefined },
+  // `strict` distinguishes the two call paths. The STRING path (`__instanceof`)
+  // resolves `target` from `globalThis[ctorName]`, so a non-callable object
+  // there is GENUINELY non-callable (`x instanceof Math`) → always throw. The
+  // DYNAMIC path (`__instanceof_check`) receives an arbitrary runtime value that
+  // may be a callable our WasmGC representation does not expose as a JS function
+  // (e.g. a `Function(...)`-constructor result). To avoid throwing on such a
+  // mis-represented callable (which would regress `primitive instanceof
+  // Function(...)` → must be `false`), the dynamic path only throws for a
+  // non-callable object that carries its OWN `@@hasInstance` (i.e. one that opts
+  // into the protocol); otherwise it conservatively returns `false`.
+  strict = false,
+): number {
+  // A wasm-closure target must look like a function to the spec checks below.
+  const wrapped = _maybeWrapCallableUnknownArity(rawTarget, callbackState);
+  const target = typeof wrapped === "function" ? wrapped : rawTarget;
+
+  // §13.10.2 step 1: If Type(target) is not Object, throw a TypeError.
+  // A genuine primitive (number / string / boolean / symbol / bigint) always
+  // throws. `null`/`undefined`, however, are also produced by features our
+  // backend does not yet lower (notably a `Function(...)` constructor result),
+  // and the pre-#2702 dynamic path returned `false` for them — so on the DYNAMIC
+  // path we keep that conservative `false` to avoid regressing `primitive
+  // instanceof Function(...)`. The STRING path (`strict`) and the codegen
+  // unconditional-throw path (a statically primitive/`undefined`/`null` RHS)
+  // still throw for a genuinely non-object RHS.
+  if (target === null || target === undefined) {
+    return strict ? _INSTANCEOF_THROW : 0;
+  }
+  if (typeof target !== "object" && typeof target !== "function") {
+    return _INSTANCEOF_THROW;
+  }
+
+  // §13.10.2 step 2: instOfHandler = GetMethod(target, @@hasInstance). Reading
+  // may invoke an accessor that throws — propagate it (ReturnIfAbrupt).
+  const handler = (target as Record<symbol, unknown>)[Symbol.hasInstance];
+  if (handler !== undefined && handler !== null && handler !== Function.prototype[Symbol.hasInstance]) {
+    // A *custom* @@hasInstance must be callable (GetMethod), else TypeError.
+    const wrappedHandler = _maybeWrapCallableUnknownArity(handler, callbackState);
+    const hfn = typeof wrappedHandler === "function" ? wrappedHandler : handler;
+    if (typeof hfn !== "function") return _INSTANCEOF_THROW;
+    // step 3: Return ToBoolean(Call(instOfHandler, target, «V»)). `this` is the
+    // ORIGINAL target so a WasmGC-struct receiver round-trips to the same ref.
+    return (hfn as (this: unknown, v: unknown) => unknown).call(rawTarget, v) ? 1 : 0;
+  }
+
+  // §13.10.2 step 4: If IsCallable(target) is false, throw a TypeError.
+  if (typeof target !== "function") {
+    if (strict) return _INSTANCEOF_THROW;
+    // Dynamic path: `target` is an object (primitives were thrown at step 1) of
+    // unknown callability. An OWN `@@hasInstance` (even null/undefined) means it
+    // is deliberately used as a non-callable RHS → TypeError. Otherwise it may
+    // be a callable our representation does not surface as a JS function (a
+    // `Function(...)` result); return `false` to match OrdinaryHasInstance's
+    // §7.3.20 step 3 outcome for a primitive V rather than spuriously throwing.
+    if (Object.prototype.hasOwnProperty.call(target, Symbol.hasInstance)) {
+      return _INSTANCEOF_THROW;
+    }
+    return 0;
+  }
+
+  // §13.10.2 step 5: Return OrdinaryHasInstance(target, V). (§7.3.20)
+  // step 5: P = Get(target, "prototype"); if Type(P) is not Object → TypeError.
+  let proto: unknown;
+  try {
+    proto = (target as { prototype?: unknown }).prototype;
+  } catch (e) {
+    throw e;
+  }
+  if (proto === null || proto === undefined || (typeof proto !== "object" && typeof proto !== "function")) {
+    return _INSTANCEOF_THROW;
+  }
+
+  // §7.3.20 step 3: If Type(O) is not Object, return false.
+  if (v === null || v === undefined || (typeof v !== "object" && typeof v !== "function")) {
+    return 0;
+  }
+
+  // (#1729/#1992) WasmGC-struct-backed values (object literals, arrays, closures)
+  // are opaque to V8's native `instanceof`. Recognise the universal Object /
+  // Function memberships explicitly, mirroring the `__instanceof` string path.
+  if (typeof v === "object" && _isWasmStruct(v)) {
+    if (target === Object) return 1;
+    if (target === Function) {
+      const exports = callbackState?.getExports();
+      const isClosureFn = exports?.__is_closure as ((x: unknown) => number) | undefined;
+      try {
+        if (typeof isClosureFn === "function" && isClosureFn(v) === 1) return 1;
+      } catch {
+        /* fall through */
+      }
+      return 0;
+    }
+  }
+
+  try {
+    return v instanceof (target as { new (...a: unknown[]): unknown }) ? 1 : 0;
+  } catch (e) {
+    // OrdinaryHasInstance prototype-chain walk raised — a TypeError here is the
+    // spec's §7.3.20 step 5 "prototype is not an object" path (e.g. native
+    // `[] instanceof Function.prototype` after setting `.prototype` to a string).
+    if (e instanceof TypeError) return _INSTANCEOF_THROW;
+    throw e;
+  }
+}
+
+/**
  * (#1382) Per-method callback-slot table — maps a method name to the index
  * of its callback argument and the arity at which the engine will invoke
  * it. Consulted by `__proto_method_call` and `__extern_method_call` so a
@@ -11735,8 +11861,23 @@ assert._isSameValue = isSameValue;
               }
             }
           }
+          // (#2702) §13.10.2 step 1/4: a RHS identifier that resolves to a
+          // *non-callable* object — `x instanceof Math` / `instanceof JSON` —
+          // must throw a TypeError (or honor a custom @@hasInstance) rather than
+          // silently answering `false`. Delegate to the shared spec helper,
+          // which returns `2` to tell the wasm caller to throw. Callable
+          // constructors and names that don't resolve on `globalThis` keep the
+          // historical `return 0` (no new throws on unresolved/false cases).
+          {
+            const ctorVal = (globalThis as any)[ctorName];
+            if (ctorVal !== undefined && ctorVal !== null && typeof ctorVal !== "function") {
+              return _instanceofResult(v, ctorVal, callbackState, /* strict */ true);
+            }
+          }
           return 0;
         };
+      if (name === "__instanceof_check")
+        return (v: any, ctor: any) => _instanceofResult(v, ctor, callbackState, /* strict */ false);
       if (name === "__instanceof_dyn")
         return (v: any, ctor: any) => {
           try {
