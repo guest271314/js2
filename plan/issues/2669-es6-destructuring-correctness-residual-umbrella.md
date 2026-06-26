@@ -1,9 +1,10 @@
 ---
 id: 2669
 title: "ES2015: destructuring correctness residual umbrella (~696 fails — iterator-close, defaults, holes, rest across for-of/assignment/binding/params)"
-status: ready
+status: in-progress
+assignee: ttraenkler/dev-dstr2669
 created: 2026-06-25
-updated: 2026-06-25
+updated: 2026-06-26
 priority: high
 feasibility: hard
 reasoning_effort: high
