@@ -1,7 +1,9 @@
 ---
 id: 1551
 title: "spec gap: SuperCall — argument-list evaluation order, spread getter side-effects, uninitialized-this PutValue"
-status: ready
+status: done
+assignee: ttraenkler/sd-super1551
+completed: 2026-06-26
 created: 2026-05-20
 updated: 2026-06-26
 priority: medium
@@ -18,7 +20,56 @@ note: "Verified 2026-05-21: compileSuperPropertyAccess at new-super.ts:258, comp
 ---
 # #1551 — `super(...)` / `super[expr]` evaluation order and abrupt-completion handling
 
+## RESOLUTION (2026-06-26, sd-super1551) — actual root cause + fix
+
+**Fixed:** the verified primary sub-case — `super(...)` inside a `try`/control-flow
+region escaping the enclosing try-region (the catch never ran, execution fell
+through past `super(...)`).
+
+**The actual root cause differs from the speculation in VERIFIED FINDINGS below.**
+The try-region nesting was *correct* — the `super(...)` *was* emitted inside the
+`try_table` body. The bug was that the nested-super fallback in
+`compileCallExpression` (`src/codegen/expressions/calls.ts` ~:13024 — reached
+when `super(...)` appears inside control flow, where the `class-bodies.ts` inline
+handler never sees it) **returned `null`** after emitting the super-argument
+evaluation. A `null` inner result is interpreted by the **#1919 speculative
+wrapper** in `compileExpressionBody` (`expressions.ts:782` — "inner compile
+produced no usable value") as a failure, so it called `rollbackSpeculative`,
+which **truncated the just-emitted arg-evaluation instructions** — including the
+throwing super-arg call — and replaced them with a default constant
+(`i32.const 0`). So the exception-raising call was *deleted at compile time*: the
+throw never happened, the catch never fired, and `reached = 1` ran.
+
+Traced by freezing the emitted instr buffer and trapping the in-place mutation:
+`[call, drop]` → `[i32.const 0, drop]` via the speculative rollback +
+`pushDefaultValue`.
+
+**Fix (one line + comment):** the fallback returns `VOID_RESULT` instead of
+`null`. `VOID_RESULT` means "compiled, void result, KEEP the emitted
+instructions" — the speculative wrapper preserves the arg evaluation, so
+ArgumentListEvaluation's side effects and abrupt completion (§13.3.7.1 step 4)
+survive. Net stack effect is unchanged (args evaluated + dropped).
+
+Guard tests in `tests/issue-1551.test.ts` (new `describe` block): super-arg
+throw caught (identity preserved), non-throwing arg side effect persists,
+no-`try` still throws OUT, multi-arg left-to-right + abrupt-at-2nd, super in an
+`if`-branch, super in a nested `try` rethrow. Verified regression-free against
+the scoped class/super suites (identical pass/fail vs origin/main).
+
+**Carved to follow-up #2709** (independent code paths, NOT bundled here):
+spread-getter side-effects (`call-spread-*`), uninitialized-`this` PutValue,
+`GetSuperBase`-before-`ToPropertyKey` ordering, the nested-super `this`-init gap
+(args now evaluate but the parent ctor is still not invoked for nested super),
+and the top-level super-arg global-visibility "secondary quirk" below.
+
+---
+
 ## VERIFIED FINDINGS — abrupt completion root cause (2026-06-26, dev-conformance)
+
+> NOTE: the "Where to fix" hypothesis in this section (super emitted *outside*
+> the try-region) was **disproven** during implementation — see RESOLUTION
+> above. The symptom table is accurate; the mechanism was the speculative-wrapper
+> rollback, not try-region nesting.
 
 Deep-traced sub-case (1) `call-arg-evaluation-err.js` on current `main` (probes,
 not issue text). The bug is **`super(...)` inside a `try` ESCAPES the

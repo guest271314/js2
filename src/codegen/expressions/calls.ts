@@ -13029,7 +13029,17 @@ function compileCallExpression(
         fctx.body.push({ op: "drop" });
       }
     }
-    return null;
+    // (#1551) Return VOID_RESULT, NOT null. A `null` return signals "no usable
+    // value" to the #1919 speculative wrapper in compileExpressionBody, which
+    // then calls rollbackSpeculative — TRUNCATING the argument-evaluation
+    // instructions we just emitted (including a throwing super-arg call) and
+    // replacing them with a default constant. That rollback is exactly why the
+    // super-arg throw escaped the enclosing try-region: the exception-raising
+    // call was deleted before it could run, so the user's `catch` never fired
+    // and execution fell through past `super(...)`. VOID_RESULT means "compiled,
+    // void result, KEEP the emitted instructions" — the wrapper preserves the
+    // arg evaluation so ArgumentListEvaluation's abrupt completion propagates.
+    return VOID_RESULT;
   }
 
   // Handle IIFE: (function(...) { ... })(...) — immediately invoked function expression
