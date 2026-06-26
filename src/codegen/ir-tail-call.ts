@@ -96,6 +96,67 @@ function callIsTailEligible(ctx: CodegenContext, instr: Instr, caller: CallerSig
 }
 
 /**
+ * (#2707c) Rewrite the trailing tail call of one `if`-arm that sits in return
+ * position — i.e. the `if` is immediately followed by `return`, so each arm's
+ * value flows straight into that return.
+ *
+ * `return <?:>` / `return <a && b>` / `return <a || b>` lower to an
+ * `(if (result T) (then …) (else …))` that PRODUCES the returned value, with a
+ * single `return` AFTER the `if`. The tail call is then the last value-producing
+ * instruction of an arm (e.g. `… call $f` in the `&&` RHS), NOT a `call`
+ * immediately followed by `return` — so the adjacency rewrite in `convertBuffer`
+ * never sees it. Here the arm's value-producing tail is one of:
+ *   - a `call`/`call_ref` optionally followed by a single IR materialization
+ *     `local.tee`/`local.set` (the IR tees the call result into a temp) — rewrite
+ *     to `return_call`/`return_call_ref` and drop the now-dead materialization,
+ *   - a nested `if` (a chained `?:` / `&&` / `||`) — recurse into its arms.
+ * Any other trailing shape (a plain value, `f() + 1`, a non-eligible call) is
+ * left untouched, so a non-tail call is never mis-promoted. `return_call` is a
+ * stack-polymorphic terminator, so an arm that terminates this way still
+ * satisfies the `if`'s declared result type even when the sibling arm produces a
+ * value that flows to the outer `return`.
+ */
+function rewriteArmTrailingTailCall(ctx: CodegenContext, arm: Instr[], caller: CallerSig): void {
+  if (arm.length === 0) return;
+  let idx = arm.length - 1;
+  const last = arm[idx]!;
+  // Skip the IR's trailing call-result materialization, which moves the call's
+  // single result into the arm's result value. Two shapes occur before the
+  // peephole pass collapses them:
+  //   `… call; local.set X; local.get X`  (store-then-reload the SAME local), or
+  //   `… call; local.tee X`               (already collapsed / tee form).
+  // The `local.set X; local.get X` pair is only a passthrough when both touch
+  // the same local — otherwise the trailing `local.get` is an unrelated value
+  // and the call is NOT in tail position.
+  const prev = idx >= 1 ? arm[idx - 1]! : undefined;
+  if (
+    last.op === "local.get" &&
+    prev &&
+    prev.op === "local.set" &&
+    (last as { index?: number }).index === (prev as { index?: number }).index
+  ) {
+    idx -= 2;
+  } else if (last.op === "local.tee" || last.op === "local.set") {
+    idx -= 1;
+  }
+  if (idx < 0) return;
+  const target = arm[idx]!;
+  if ((target.op === "call" || target.op === "call_ref") && callIsTailEligible(ctx, target, caller)) {
+    if (target.op === "call") {
+      arm[idx] = { op: "return_call", funcIdx: target.funcIdx };
+    } else {
+      arm[idx] = { op: "return_call_ref", typeIdx: target.typeIdx! };
+    }
+    // Drop any now-unreachable instruction(s) after the terminator (the
+    // materialization tee/set, if present).
+    arm.length = idx + 1;
+  } else if (target.op === "if") {
+    rewriteArmTrailingTailCall(ctx, target.then, caller);
+    if (target.else) rewriteArmTrailingTailCall(ctx, target.else, caller);
+  }
+}
+
+/**
  * Rewrite `<call>; return` → `<return_call>` in-place within one instruction
  * buffer, recursing into the tail arms of structured control flow. Returns the
  * (possibly shortened) buffer. `try` is intentionally NOT descended into.
@@ -114,7 +175,9 @@ function convertBuffer(ctx: CodegenContext, body: Instr[], caller: CallerSig): I
     // callee throw escape the catch — #1972).
   }
 
-  // Local rewrite: any `call`/`call_ref` immediately followed by `return`.
+  // Local rewrite: any `call`/`call_ref` immediately followed by `return`, plus
+  // (#2707c) any `if` immediately followed by `return` — the latter is a
+  // `return <?:|&&|||>` whose value-producing arms are in tail position.
   const out: Instr[] = [];
   for (let i = 0; i < body.length; i++) {
     const cur = body[i]!;
@@ -132,6 +195,10 @@ function convertBuffer(ctx: CodegenContext, body: Instr[], caller: CallerSig): I
       }
       i++; // consume the following `return`
       continue;
+    }
+    if (cur.op === "if" && next && next.op === "return") {
+      rewriteArmTrailingTailCall(ctx, cur.then, caller);
+      if (cur.else) rewriteArmTrailingTailCall(ctx, cur.else, caller);
     }
     out.push(cur);
   }
