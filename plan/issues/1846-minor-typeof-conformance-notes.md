@@ -1,7 +1,7 @@
 ---
 id: 1846
 title: "Minor typeof conformance: i64->'number' in with-bindings; externref->null fallthrough"
-status: ready
+status: backlog
 created: 2026-06-04
 updated: 2026-06-26
 priority: low
@@ -9,9 +9,33 @@ feasibility: low
 task_type: bugfix
 area: codegen
 goal: test262-conformance
-sprint: 67
+sprint: Backlog
+depends_on: []
 ---
 # #1846 — minor `typeof` conformance notes
+
+## DESCOPED → Backlog (2026-06-26)
+
+Investigated the 3 Sprint-67 "closeable" tests against current main. None is a
+clean win; each real sub-gap is split to its own tracked issue, and the original
+one-liner defects yield ~0 test262 movement. Set `status: backlog`.
+
+- **`built-in-exotic-objects-no-call.js`** — ALL `typeof new X()` asserts already
+  pass ("object"); the only failure is assert #1 `typeof this` (top-level
+  sloppy-script `this` must be the global object → "object"). Real semantics gap,
+  **split to #2727** (feasibility: hard — needs script-mode-`this` / global-object
+  design; do NOT attempt as a one-off).
+- **`symbol.js`** — only `typeof Object(Symbol())` fails (returns "symbol"); needs
+  a Symbol-wrapper-object boxing branch in the `Object()` call path. **Split to
+  #2728** (feasibility: medium). Deliberately NOT done here: the `Object()`
+  call-lowering is the busy/broad-coverage path that produced the #2149/#2702
+  merge_group regressions — not worth the risk for a single test.
+- **`syntax.js`** — routes through `eval(...)`; **eval-blocked** (see #1066
+  standalone-eval). Consistent with the sprint's eval carve-out.
+- **`bigint.js`** — blocked on #2044 (BigInt i64-brand ValType decision).
+- **Original one-liner defects** (i64→"bigint" static map; externref→null
+  fallthrough) — correct but near-nil impact (i64 path is `with`-bindings-only;
+  bigint blocked on #2044). Not worth a standalone PR.
 
 ## Defects
 - `src/codegen/typeof-delete.ts:831` (`staticTypeofForWasmType`) maps i64 → "number"

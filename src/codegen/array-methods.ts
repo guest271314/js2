@@ -4031,19 +4031,24 @@ function compileArrayIndexOf(
   // For ref/ref_null elements, use ref.eq for reference identity comparison.
   let eqInstrs: Instr[];
   if (elemType.kind === "externref") {
-    const hostEqIdx = ensureLateImport(
-      ctx,
-      "__host_eq",
-      [{ kind: "externref" }, { kind: "externref" }],
-      [{ kind: "i32" }],
-    );
+    // (#2719) Standalone/WASI have no JS host, so the `__host_eq` import is
+    // unsatisfiable and the module fails to instantiate. Route element Strict
+    // Equality through the pure-Wasm `__extern_strict_eq` helper there (composed
+    // from `__any_from_extern` + `__any_strict_eq`, §7.2.16-equivalent). Host/gc
+    // mode keeps the `__host_eq` host import. Mirrors the standalone arm in
+    // `compileArrayLikePrototypeSearch` (the `.call(...)` form).
+    const nativeCmp = ctx.standalone || ctx.wasi;
+    const cmpIdx = nativeCmp
+      ? ensureExternStrictEqHelper(ctx)
+      : ensureLateImport(ctx, "__host_eq", [{ kind: "externref" }, { kind: "externref" }], [{ kind: "i32" }]);
     flushLateImportShifts(ctx, fctx);
-    const finalHostEqIdx = ctx.funcMap.get("__host_eq") ?? hostEqIdx;
-    if (finalHostEqIdx === undefined) {
-      reportError(ctx, callExpr, "indexOf: failed to bind __host_eq import");
+    const cmpName = nativeCmp ? "__extern_strict_eq" : "__host_eq";
+    const finalCmpIdx = ctx.funcMap.get(cmpName) ?? cmpIdx;
+    if (finalCmpIdx === undefined) {
+      reportError(ctx, callExpr, "indexOf: failed to bind element equality helper");
       return null;
     }
-    eqInstrs = [{ op: "call", funcIdx: finalHostEqIdx } as Instr];
+    eqInstrs = [{ op: "call", funcIdx: finalCmpIdx } as Instr];
   } else if (elemType.kind === "ref" || elemType.kind === "ref_null") {
     // #2036 — native-string elements compare by content (§7.2.16), not identity.
     eqInstrs = nativeStringElementEqInstrs(ctx, fctx, elemType) ?? [{ op: "ref.eq" }];
@@ -4259,16 +4264,18 @@ function compileArrayIncludes(
     // identity, cross-type → false. The wasm:js-string `equals` builtin
     // coerces both operands to strings, mis-matching object/boolean/number
     // elements (#786 — `includes` on an externref vec).
-    const svzIdx = ensureLateImport(
-      ctx,
-      "__same_value_zero",
-      [{ kind: "externref" }, { kind: "externref" }],
-      [{ kind: "i32" }],
-    );
+    // (#2719) Standalone/WASI have no JS host, so the `__same_value_zero` import
+    // is unsatisfiable. Route SameValueZero through the pure-Wasm
+    // `__extern_same_value_zero` helper there; host/gc mode keeps the import.
+    const nativeCmp = ctx.standalone || ctx.wasi;
+    const svzIdx = nativeCmp
+      ? ensureExternSameValueZeroHelper(ctx)
+      : ensureLateImport(ctx, "__same_value_zero", [{ kind: "externref" }, { kind: "externref" }], [{ kind: "i32" }]);
     flushLateImportShifts(ctx, fctx);
-    const finalSvzIdx = ctx.funcMap.get("__same_value_zero") ?? svzIdx;
+    const svzName = nativeCmp ? "__extern_same_value_zero" : "__same_value_zero";
+    const finalSvzIdx = ctx.funcMap.get(svzName) ?? svzIdx;
     if (finalSvzIdx === undefined) {
-      reportError(ctx, callExpr, "includes: failed to bind __same_value_zero import");
+      reportError(ctx, callExpr, "includes: failed to bind SameValueZero helper");
       return null;
     }
     // (#2001 S1) §22.1.3.13 includes uses Get (holes → undefined), so
@@ -8645,19 +8652,21 @@ function compileArrayLastIndexOf(
   // For ref/ref_null elements, use ref.eq for reference identity comparison.
   let liofEqInstrs: Instr[];
   if (elemType.kind === "externref") {
-    const hostEqIdx = ensureLateImport(
-      ctx,
-      "__host_eq",
-      [{ kind: "externref" }, { kind: "externref" }],
-      [{ kind: "i32" }],
-    );
+    // (#2719) Standalone/WASI route element Strict Equality through the pure-Wasm
+    // `__extern_strict_eq` helper instead of the unsatisfiable `__host_eq` import;
+    // host/gc mode keeps the import. Mirrors indexOf / the `.call(...)` form.
+    const nativeCmp = ctx.standalone || ctx.wasi;
+    const cmpIdx = nativeCmp
+      ? ensureExternStrictEqHelper(ctx)
+      : ensureLateImport(ctx, "__host_eq", [{ kind: "externref" }, { kind: "externref" }], [{ kind: "i32" }]);
     flushLateImportShifts(ctx, fctx);
-    const finalHostEqIdx = ctx.funcMap.get("__host_eq") ?? hostEqIdx;
-    if (finalHostEqIdx === undefined) {
-      reportError(ctx, callExpr, "lastIndexOf: failed to bind __host_eq import");
+    const cmpName = nativeCmp ? "__extern_strict_eq" : "__host_eq";
+    const finalCmpIdx = ctx.funcMap.get(cmpName) ?? cmpIdx;
+    if (finalCmpIdx === undefined) {
+      reportError(ctx, callExpr, "lastIndexOf: failed to bind element equality helper");
       return null;
     }
-    liofEqInstrs = [{ op: "call", funcIdx: finalHostEqIdx } as Instr];
+    liofEqInstrs = [{ op: "call", funcIdx: finalCmpIdx } as Instr];
   } else if (elemType.kind === "ref" || elemType.kind === "ref_null") {
     // #2036 — native-string elements compare by content (§7.2.16), not identity.
     liofEqInstrs = nativeStringElementEqInstrs(ctx, fctx, elemType) ?? [{ op: "ref.eq" }];
