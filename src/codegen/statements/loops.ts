@@ -54,6 +54,7 @@ import {
   compileExternrefObjectDestructuringDecl,
   compileObjectDestructuring,
   emitDefaultValueCheck,
+  emitNestedBindingDefault,
   emitNullGuard,
   ensureAsyncIterator,
   ensureExternIsUndefined,
@@ -1718,8 +1719,30 @@ function compileForOfDestructuring(
             fieldIdx: 1,
           });
           fctx.body.push({ op: "i32.const", value: i });
-          emitBoundsCheckedArrayGet(fctx, innerArrTypeIdx, innerElemType);
+          // (#2669) When the nested element has a default (`[[x,y,z]=[4,5,6]]`),
+          // the OOB else-branch must yield JS `undefined` (not wasm-null) for an
+          // externref source so `emitNestedBindingDefault`'s
+          // `__extern_is_undefined` check fires the initializer. For a typed
+          // (f64/ref) source the existing sentinel/null check already fires.
+          const nestedWantsUndef =
+            element.initializer !== undefined &&
+            (innerElemType.kind === "externref" || innerElemType.kind === "ref_extern");
+          emitBoundsCheckedArrayGet(fctx, innerArrTypeIdx, innerElemType, ctx, nestedWantsUndef);
           fctx.body.push({ op: "local.set", index: nestedLocal });
+          // (#2669) Apply the nested element's default initializer BEFORE recursing
+          // into the sub-pattern — otherwise a short/empty source left `nestedLocal`
+          // null/undefined and the recursive destructure threw
+          // "Cannot destructure 'null' or 'undefined'"
+          // (`for (const [[x,y,z]=[4,5,6]] of [[]])`). Mirrors the
+          // `destructureParamArray` nested-default path.
+          if (element.initializer) {
+            (ctx as any)._arrayLiteralForceVec = true;
+            try {
+              emitNestedBindingDefault(ctx, fctx, nestedLocal, innerElemType, element.initializer);
+            } finally {
+              (ctx as any)._arrayLiteralForceVec = false;
+            }
+          }
           compileForOfDestructuring(ctx, fctx, element.name, nestedLocal, innerElemType, stmt);
           continue;
         }
@@ -1820,14 +1843,24 @@ function compileForOfDestructuring(
           (innerElemType.kind === "externref" || innerElemType.kind === "ref_extern");
         emitBoundsCheckedArrayGet(fctx, innerArrTypeIdx, innerElemType, ctx, wantUndefinedSentinel);
 
-        if (!valTypesMatch(innerElemType, bindingWasmType)) {
-          coerceType(ctx, fctx, innerElemType, bindingWasmType);
-        }
-
-        if (element.initializer) {
-          emitDefaultValueCheck(ctx, fctx, bindingWasmType, localIdx, element.initializer);
+        if (element.initializer && wantUndefinedSentinel) {
+          // (#2669) Externref source element WITH a default: the OOB else-branch
+          // yields JS `undefined`, which is only detectable on the RAW externref
+          // via `__extern_is_undefined`. Coercing to the (numeric) binding type
+          // FIRST would unbox `undefined` to a plain NaN — NOT the f64 sNaN
+          // sentinel the default-check looks for — so the default never fired
+          // (`for (const [a=9] of [[]])` kept NaN). Run the check on the externref
+          // and let emitDefaultValueCheck coerce the surviving value afterwards.
+          emitDefaultValueCheck(ctx, fctx, innerElemType, localIdx, element.initializer, bindingWasmType);
         } else {
-          fctx.body.push({ op: "local.set", index: localIdx });
+          if (!valTypesMatch(innerElemType, bindingWasmType)) {
+            coerceType(ctx, fctx, innerElemType, bindingWasmType);
+          }
+          if (element.initializer) {
+            emitDefaultValueCheck(ctx, fctx, bindingWasmType, localIdx, element.initializer);
+          } else {
+            fctx.body.push({ op: "local.set", index: localIdx });
+          }
         }
       }
     }); // end null guard for for-of array destructuring

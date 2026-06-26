@@ -265,7 +265,20 @@ function emitBoundsCheckedArrayGetUndef(
   });
 }
 
-function boxToExternref(ctx: CodegenContext, elemKey: string): Instr[] {
+function boxToExternref(ctx: CodegenContext, elemKey: string, srcElemType?: ValType): Instr[] {
+  // (#2669) When the backing array ALREADY stores externref elements, the value
+  // produced by `array.get` is already an externref and needs no conversion.
+  // The vec-type-map key alone is misleading here: a `ref_*` keyed vec (a vec of
+  // nested arrays/objects, e.g. from `number[][]`) lowers its backing store to
+  // `(array (mut externref))` — its elements are boxed to externref — so keying
+  // off the `"ref_*"` string would emit `extern.convert_any`, whose operand must
+  // be an `anyref`, on an externref `array.get`. That is invalid Wasm and made
+  // `const [[x,y,z]=[4,5,6]] = []` (over a `number[][]` source) fail to
+  // instantiate. Decide from the real element kind: an externref store is a
+  // straight pass-through.
+  if (srcElemType && (srcElemType.kind === "externref" || srcElemType.kind === "ref_extern")) {
+    return [];
+  }
   if (elemKey === "externref") {
     // Already externref, just pass through
     return [];
@@ -1262,6 +1275,12 @@ export function destructureParamArray(
         const dataField = vecDef.fields[1];
         if (!dataField || dataField.name !== "data") continue;
         const srcArrTypeIdx = (dataField.type as { typeIdx: number }).typeIdx;
+        // (#2669) The real backing-store element type drives boxing/conversion —
+        // a `ref_*` keyed vec stores its (boxed) elements as externref, so the
+        // string key would mis-trigger `extern.convert_any` on an externref.
+        const srcArrDef = ctx.mod.types[srcArrTypeIdx];
+        const srcElemType: ValType | undefined =
+          srcArrDef && srcArrDef.kind === "array" ? (srcArrDef.element as ValType) : undefined;
 
         const cvtTmp = allocLocal(fctx, `__dparam_src_${key}_${fctx.locals.length}`, {
           kind: "ref_null",
@@ -1310,7 +1329,7 @@ export function destructureParamArray(
                   { op: "local.get", index: idxTmp } as Instr,
                   { op: "array.get", typeIdx: srcArrTypeIdx } as Instr,
                   // Box primitive types before storing as externref
-                  ...boxToExternref(ctx, key),
+                  ...boxToExternref(ctx, key, srcElemType),
                   { op: "array.set", typeIdx: extArrTypeIdx } as Instr,
                   // idx++
                   { op: "local.get", index: idxTmp } as Instr,
