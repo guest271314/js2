@@ -40,6 +40,17 @@
 // The prelude injection that backs `process.stdin` deliberately leaves a
 // user-declared/-imported `process` binding alone, so the faithful global surface
 // is what compiles to the async Readable here.
+//
+// Clean shutdown WITHOUT stdin EOF (#2735): a real Native-Messaging port keeps
+// stdin OPEN for the lifetime of the connection and signals end-of-conversation
+// IN BAND — here, with a zero-length frame (a 4-byte prefix declaring length 0).
+// The fd0 reactor that drives the async `'data'` callbacks only terminates on
+// stdin EOF, so an open-stdin peer would make `_start` block forever. On the
+// shutdown frame we therefore call `process.stdin.destroy()`, which drops the
+// reactor's fd0 subscription so the run loop falls through and the program exits
+// cleanly. (`process.exit(0)` is the alternative — it routes to WASI `proc_exit`
+// after the same subscription drop.) Feeding the host a bounded buffer that hits
+// EOF still exits via the `'end'` path, exactly as before.
 
 // The buffered, not-yet-echoed input. Each char's code is a raw input byte
 // (0–255), so `charCodeAt` recovers the byte and `length` counts bytes.
@@ -63,6 +74,12 @@ function drain(): void {
     const len = decodeLength(buffered);
     if (len === 0) {
       stopped = true; // zero-length frame = clean shutdown
+      // #2735: in-band shutdown. The peer (a long-lived Native-Messaging port)
+      // keeps stdin OPEN — it signals "done" with a zero-length frame rather
+      // than by closing the pipe, so stdin never reaches EOF. `.destroy()`
+      // drops the fd0 reactor subscription so `_start` returns cleanly; without
+      // it the reactor's only exit is stdin EOF and the program HANGS forever.
+      process.stdin.destroy();
       return;
     }
     const frameLen = 4 + len;
