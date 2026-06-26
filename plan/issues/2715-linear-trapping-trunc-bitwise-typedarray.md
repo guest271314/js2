@@ -1,10 +1,12 @@
 ---
 id: 2715
 title: "Linear backend: trapping i32.trunc_f64_s in bitwise ops + typed-array stores → use trunc_sat / ToInt32 wrap"
-status: ready
+status: done
 sprint: 67
 created: 2026-06-26
 updated: 2026-06-26
+completed: 2026-06-26
+assignee: ttraenkler/dev1
 priority: high
 feasibility: medium
 reasoning_effort: medium
@@ -14,6 +16,7 @@ language_feature: standalone
 goal: standalone-everything
 parent: 2711
 ---
+
 # #2715 — Linear backend traps on float→int conversion (bitwise / Uint8Array)
 
 **Parent:** #2711 (standalone↔host differential parity gate). **Surfaced by**
@@ -48,7 +51,40 @@ correct because it routes through a different path).
 
 ## Acceptance criteria
 
-- [ ] `(0/0)|0`, `(1/0)|0`, large-magnitude `x|0` agree with host on the linear
-      backend (add to the cross-backend corpus once green).
-- [ ] `u8[i] = NaN` stores `0` on linear, no trap.
-- [ ] No remaining trapping `i32.trunc_f64_s` on the JS-number→int paths.
+- [x] `(0/0)|0`, `(1/0)|0`, large-magnitude `x|0` agree with host on the linear
+      backend (added the `numeric/bitwise-toint32-nan-wrap` cross-backend corpus entry).
+- [x] `u8[i] = NaN` stores `0` on linear, no trap.
+- [x] No remaining trapping `i32.trunc_f64_s` on the JS-number→int paths.
+
+## Resolution (2026-06-26, dev1)
+
+Added a non-trapping `emitToInt32` to the linear backend (`src/codegen-linear/index.ts`)
+mirroring the WasmGC `emitToInt32` (binary-ops.ts): `f64.trunc` → modular
+reduction `x - floor(x/2³²)*2³²` → `i32.trunc_sat_f64_u`. NaN/±∞ map to 0 and
+large magnitudes wrap mod 2³² instead of trapping. A new `compileExprToInt32`
+routes bitwise operands through it.
+
+Sites changed (all the JS-number→int paths):
+
+- unary `~` operand
+- binary bitwise operators (`& | ^ << >> >>>`)
+- bitwise compound assignment (`&= |= ^= <<= >>= >>>=`)
+- `Uint8Array` element store (ToUint8 — `__u8arr_set`'s `i32.store8` keeps the low byte)
+
+The trapping `compileExprToI32` is retained (renamed-in-doc) for **internal**
+integer conversions (array indices, lengths, struct-handle slots) where the
+value is a representable integer and a trap on garbage is acceptable; the 4
+native-`i32`-typed field/handle conversion sites (`index.ts` ~1658/1930/3584/4393)
+are intentionally left on it (native-type semantics, not JS ToInt32).
+
+Verified every case against the JS oracle: `(0/0)|0===0`, `1e20|0===1661992960`,
+`4294967297|0===1`, `-1>>>0===4294967295`, `~(0/0)===-1`, `u8[0]=257→1`,
+`u8[0]=NaN→0`, `u8[0]=-1→255`. Tests: `tests/issue-2715.test.ts` (22) +
+`numeric/bitwise-toint32-nan-wrap` cross-backend corpus entry. Full linear suite
+(18 files / 159 tests) + cross-backend-diff green.
+
+**Discovered + filed #2729**: the WasmGC backend has a _separate_ pre-existing
+bug — `new Uint8Array(n)` element stores skip ToUint8 entirely (`u[0]=257` reads
+257, `u[0]=NaN` reads NaN). That's why a Uint8Array cross-backend corpus entry is
+NOT added here (the backends diverge for an unrelated reason); it's tracked in
+#2729 and the corpus entry should be added once WasmGC is fixed.
