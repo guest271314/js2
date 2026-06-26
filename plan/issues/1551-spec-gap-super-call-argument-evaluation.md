@@ -1,7 +1,8 @@
 ---
 id: 1551
 title: "spec gap: SuperCall — argument-list evaluation order, spread getter side-effects, uninitialized-this PutValue"
-status: ready
+status: in-progress
+assignee: ttraenkler/sd-super1551
 created: 2026-05-20
 updated: 2026-06-26
 priority: medium
