@@ -1367,6 +1367,90 @@ export function emitJsonParseText(ctx: CodegenContext): number {
     { op: "struct.new", typeIdx: boxNumTypeIdx },
   ];
 
+  // (#2721) JSON number-grammar guards (§25.5.1 / JSON.org `number`). Host
+  // `JSON.parse` rejects a leading zero followed by another digit ("01") and a
+  // decimal point with no following digit ("1."); the hand-written parser below
+  // was too permissive and silently accepted both. These reusable Instr[]
+  // blocks throw a standalone `SyntaxError` (via `throwSyntaxError`) to match.
+  //
+  // integerStartGuard: cursor is at the first integer digit (after the optional
+  // '-'). The JSON grammar requires `int = "0" / (digit1-9 *DIGIT)`, so:
+  //   (1) EOF here is invalid (a lone "-") → SyntaxError. This ALSO keeps the
+  //       guard bounds-safe — `loadC` below reads `data[V_POS]`, which would
+  //       trap out-of-bounds for a lone "-" where V_POS has reached V_END.
+  //   (2) a non-digit here is invalid → SyntaxError.
+  //   (3) a leading '0' (48) followed by another digit ("01") is invalid.
+  // Leaves V_C clobbered (the integer loop re-loads it); touches no other state.
+  const integerStartGuard: Instr[] = [
+    // (1) EOF → SyntaxError (also makes the loadC below in-bounds).
+    { op: "local.get", index: V_POS },
+    { op: "local.get", index: V_END },
+    { op: "i32.ge_s" },
+    { op: "if", blockType: { kind: "empty" }, then: throwSyntaxError("Unexpected end of JSON input") },
+    // (2) first integer char must be a digit.
+    ...loadC, // V_C = data[V_POS]
+    { op: "local.get", index: V_C },
+    { op: "i32.const", value: 48 },
+    { op: "i32.lt_s" },
+    { op: "local.get", index: V_C },
+    { op: "i32.const", value: 57 },
+    { op: "i32.gt_s" },
+    { op: "i32.or" }, // not a digit
+    { op: "if", blockType: { kind: "empty" }, then: throwSyntaxError("Unexpected token in JSON") },
+    // (3) leading zero followed by another digit → SyntaxError. V_C still holds
+    //     data[V_POS] from the loadC above.
+    { op: "local.get", index: V_C },
+    { op: "i32.const", value: 48 },
+    { op: "i32.eq" }, // data[V_POS] == '0'
+    { op: "local.get", index: V_POS },
+    { op: "i32.const", value: 1 },
+    { op: "i32.add" },
+    { op: "local.get", index: V_END },
+    { op: "i32.lt_s" }, // V_POS+1 < V_END (a next char exists)
+    { op: "i32.and" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: V_DATA },
+        { op: "local.get", index: V_POS },
+        { op: "i32.const", value: 1 },
+        { op: "i32.add" },
+        { op: "array.get_u", typeIdx: strDataTypeIdx },
+        { op: "local.set", index: V_C }, // V_C = data[V_POS+1]
+        { op: "local.get", index: V_C },
+        { op: "i32.const", value: 48 },
+        { op: "i32.ge_s" },
+        { op: "local.get", index: V_C },
+        { op: "i32.const", value: 57 },
+        { op: "i32.le_s" },
+        { op: "i32.and" }, // next char is a digit
+        { op: "if", blockType: { kind: "empty" }, then: throwSyntaxError("Unexpected number in JSON") },
+      ],
+    },
+  ];
+
+  // digitRequiredGuard: at least one DIGIT is required at the cursor, else
+  // SyntaxError. Used after the '.' (`frac = "." 1*DIGIT` — rejects "1.",
+  // "1.e5") and after the exponent 'e'/'E' + optional sign (`exp = e [sign]
+  // 1*DIGIT` — rejects "1e", "1e+"). EOF here is also invalid. Leaves V_C
+  // clobbered (the following digit loop re-loads it).
+  const digitRequiredGuard: Instr[] = [
+    { op: "local.get", index: V_POS },
+    { op: "local.get", index: V_END },
+    { op: "i32.ge_s" },
+    { op: "if", blockType: { kind: "empty" }, then: throwSyntaxError("Unexpected end of JSON input") },
+    ...loadC, // V_C = data[V_POS]
+    { op: "local.get", index: V_C },
+    { op: "i32.const", value: 48 },
+    { op: "i32.lt_s" },
+    { op: "local.get", index: V_C },
+    { op: "i32.const", value: 57 },
+    { op: "i32.gt_s" },
+    { op: "i32.or" }, // not a digit
+    { op: "if", blockType: { kind: "empty" }, then: throwSyntaxError("Unexpected token in JSON") },
+  ];
+
   // number parser (cursor at '-'/digit) → f64 in V_NUM; advances V_POS.
   const parseNumberV: Instr[] = [
     { op: "f64.const", value: 1 },
@@ -1389,6 +1473,9 @@ export function emitJsonParseText(ctx: CodegenContext): number {
         { op: "local.set", index: V_POS },
       ],
     },
+    // (#2721) Require an integer digit (reject lone "-"); reject a leading zero
+    // followed by another digit ("01").
+    ...integerStartGuard,
     {
       op: "block",
       blockType: { kind: "empty" },
@@ -1446,6 +1533,8 @@ export function emitJsonParseText(ctx: CodegenContext): number {
             { op: "i32.const", value: 1 },
             { op: "i32.add" },
             { op: "local.set", index: V_POS },
+            // (#2721) Require ≥1 digit after the decimal point ("1." is invalid).
+            ...digitRequiredGuard,
             {
               op: "block",
               blockType: { kind: "empty" },
@@ -1553,6 +1642,8 @@ export function emitJsonParseText(ctx: CodegenContext): number {
             },
             { op: "i32.const", value: 0 },
             { op: "local.set", index: V_EXPMAG },
+            // (#2721) Require ≥1 exponent digit ("1e", "1e+" are invalid).
+            ...digitRequiredGuard,
             {
               op: "block",
               blockType: { kind: "empty" },

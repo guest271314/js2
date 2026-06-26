@@ -216,6 +216,42 @@ export const CROSS_BACKEND_CORPUS: readonly CrossBackendProgram[] = [
       { fn: "logic", args: [1, -1] },
     ],
   },
+  {
+    // #2716 — try/finally must run the finally on early exit. Each function
+    // exposes a finally side effect that is observable AFTER the early return /
+    // break / continue, so a skipped finally would diverge from the WasmGC/host
+    // oracle (the linear backend used to inline past the finally and trap-free
+    // drop it).
+    name: "control/try-finally-early-exit",
+    category: "control",
+    source: `
+      let earlyReturnFlag = 0;
+      function earlyReturn(): number { try { return 1; } finally { earlyReturnFlag = 9; } }
+      export function returnRunsFinally(): number { const r = earlyReturn(); return r * 100 + earlyReturnFlag; }
+
+      export function breakRunsFinally(): number {
+        let fin = 0;
+        for (let i = 0; i < 3; i++) { try { if (i === 0) break; } finally { fin = fin + 1; } }
+        return fin;
+      }
+
+      export function continueRunsFinally(): number {
+        let fin = 0;
+        for (let i = 0; i < 3; i++) { try { continue; } finally { fin = fin + 1; } }
+        return fin;
+      }
+
+      let nestedLog = 0;
+      function nested(): number { try { try { return 1; } finally { nestedLog = nestedLog * 10 + 2; } } finally { nestedLog = nestedLog * 10 + 3; } }
+      export function nestedFinallyOrder(): number { const r = nested(); return r * 1000 + nestedLog; }
+    `,
+    calls: [
+      { fn: "returnRunsFinally", args: [] },
+      { fn: "breakRunsFinally", args: [] },
+      { fn: "continueRunsFinally", args: [] },
+      { fn: "nestedFinallyOrder", args: [] },
+    ],
+  },
 
   // ── strings ──────────────────────────────────────────────────────────────
   {

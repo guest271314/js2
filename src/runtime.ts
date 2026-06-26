@@ -4096,18 +4096,19 @@ function _safeGet(obj: any, key: any, callbackState?: { getExports: () => Record
     const getter = exports?.[`__sget_${String(key)}`];
     if (typeof getter === "function") return getter(obj);
   }
-  if (_isWasmStruct(obj) && typeof key === "number" && key >= 1 && key <= 15) {
-    const symKeys = _symbolIdToKeys.get(key);
-    if (symKeys) {
-      const v = obj[symKeys.sym];
-      if (v !== undefined) return v;
-      const sc = _sidecarGet(obj, symKeys.sym);
-      if (sc !== undefined) return sc;
-      const sc2 = _sidecarGet(obj, symKeys.wasm);
-      if (sc2 !== undefined) return sc2;
-      return undefined;
-    }
-  }
+  // (#2706 / #1830) A genuine integer-index key (`o[5]`) on a WasmGC struct is
+  // NOT a well-known-symbol ID. `runtime.ts` only runs in host mode, where the
+  // compiler boxes every well-known-symbol access into a REAL JS Symbol via
+  // `__box_symbol` (verified: `o[Symbol.species]` arrives as
+  // `typeof key === "symbol"`, never a number). So a NUMBER key reaching here is
+  // always a real integer index — the old `1 <= key <= 15 → _symbolIdToKeys`
+  // remap mis-routed `o[5]=55` onto the `@@species` slot, leaking a `"@@species"`
+  // string from for-in / Object.keys and making `5 in o` false even though
+  // `o[5]` round-tripped its value. Dropping the remap lets the numeric key fall
+  // through to the sidecar (stored under `"5"`) so enumeration / `in` / Object.keys
+  // see `"5"` (ordered by `_orderOwnKeysSpec`). Real symbol keys still resolve via
+  // the `typeof key === "symbol"` arm below; only standalone mode (object-runtime.ts,
+  // never this file) uses i32 symbol ids.
   if (_isWasmStruct(obj)) {
     // (#2130) A deleted property reads as `undefined` even when the static
     // struct shape still carries the field (the `__sget_<key>` getter would
@@ -4245,27 +4246,20 @@ function _safeSet(
     const tomb = _wasmStructDeletedKeys.get(obj);
     if (tomb) tomb.delete(typeof key === "symbol" ? key : String(key));
   }
-  // Well-known symbol ID (i32 from compiler): store under both real Symbol and "@@name".
-  // ONLY apply this remapping to WasmGC structs — for regular JS objects/arrays,
-  // numeric keys 1-15 are actual indices (e.g. `srcArr[1] = undefined` from a test).
-  // #1830 — range covers every id in `_symbolIdToKeys` (1-15, 15 = @@matchAll).
-  // Without the _isWasmStruct guard, we would mis-route `arr[1]=v` to
-  // `arr[Symbol.iterator]=v`, which under accumulated fork state could leak to
-  // `Object.prototype[Symbol.iterator] = <number>` and trip every subsequent
-  // compile that calls Array.from on a plain object (#1160 follow-up).
-  if (_isWasmStruct(obj) && typeof key === "number" && key >= 1 && key <= 15) {
-    const symKeys = _symbolIdToKeys.get(key);
-    if (symKeys) {
-      try {
-        obj[symKeys.sym] = val;
-      } catch {
-        /* WasmGC struct */
-      }
-      _sidecarSet(obj, symKeys.sym, val);
-      _sidecarSet(obj, symKeys.wasm, val);
-      return;
-    }
-  }
+  // (#2706 / #1830) Mirror of the `_safeGet` fix above. A genuine integer-index
+  // assignment (`o[5] = 55`) on a WasmGC struct is NOT a well-known-symbol write.
+  // `runtime.ts` only runs in host mode, where the compiler boxes every
+  // well-known-symbol access into a REAL JS Symbol (`o[Symbol.species]` arrives
+  // as `typeof key === "symbol"`, never a number — verified). The old
+  // `1 <= key <= 15 → _symbolIdToKeys` remap stored `o[5]` under the `@@species`
+  // Symbol + `"@@species"` sidecar string, so for-in / Object.keys leaked
+  // `"@@species"` and dropped `"5"`, and `5 in o` was false even though `o[5]`
+  // round-tripped. Dropping the remap lets a numeric key fall through to the
+  // sidecar write below (stored under `"5"`), so enumeration / `in` / Object.keys
+  // see `"5"`. Real symbol keys (`typeof key === "symbol"`) keep their existing
+  // routing; only standalone mode (object-runtime.ts, never this file) uses i32
+  // symbol ids.
+  //
   // WasmGC structs: native property assignment silently fails for non-struct fields
   // (V8 ignores `struct.constructor = {}` without throwing in non-strict mode).
   // Always write to sidecar so that dynamic properties are accessible via _safeGet.
