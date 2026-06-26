@@ -325,44 +325,51 @@ export interface AnalyzeOptions {
    */
   emulateNode?: boolean;
   /**
-   * Target host environment for the AMBIENT global surface (#2528). Orthogonal
-   * to the backend `target` (`gc`/`wasi`/…): `platform` selects which globals
-   * are in scope at type-check time.
+   * Host environment scoping the AMBIENT global surface (#2528/#2645), unified
+   * under `--target {web,node,deno}` (#2734; `--platform` is a deprecated
+   * alias). Orthogonal to the backend `target` (`gc`/`wasi`/…): this selects
+   * which globals are in scope at type-check time.
    *
-   *   - `"web"`  → the DOM ambient surface (`window`, `document`, DOM types).
-   *               This is byte-identical to the historical default.
-   *   - `"node"` → the DOM-free ambient surface (DOM-only globals are NOT in
-   *               scope, so `window.stop` is a clear type error) AND implies the
-   *               Node-emulation injection path (`emulateNode`), so `process` &
-   *               friends type-check without @types/node.
+   *   - `"web"`         → the DOM ambient surface (`window`, `document`, DOM
+   *                       types). Byte-identical to the historical default.
+   *   - `"node"`/`"deno"` → the DOM-free ambient surface (DOM-only globals are
+   *                       NOT in scope, so `window.stop` is a clear type error)
+   *                       AND implies the Node-emulation injection path
+   *                       (`emulateNode`), so `process` & friends type-check
+   *                       without @types/node. (Real `@types/node`/Deno-lib
+   *                       loading is a later #2698 slice; `deno` currently routes
+   *                       through the same node-emulation/no-DOM surface.)
    *
    * `undefined` (unset) preserves today's behaviour exactly: the DOM composite
    * is loaded and `emulateNode` is driven solely by its own option. This keeps
    * the common (web/test262) path byte-neutral. See `buildNodeEnvDtsForSource`
-   * + the `emulateNode ||= platform === "node"` composition in #2645.
+   * + the `emulateNode ||= platform ∈ {node,deno}` composition in #2645/#2734.
    */
-  platform?: "web" | "node";
+  platform?: "web" | "node" | "deno";
 }
 
 /**
- * #2645 — resolve the EFFECTIVE node-emulation decision from the two composing
- * inputs: the explicit `emulateNode` option (#2603) and the ambient `platform`
- * (#2528). `--platform node` implies the node-emulation injection path so the
- * ambient global surface and the importable `node:<mod>` capability gate agree
- * on one target model. The per-member `providersFor` gate stays the authority
- * for importable members; this only sets the ambient default.
+ * #2645/#2734 — resolve the EFFECTIVE node-emulation decision from the two
+ * composing inputs: the explicit `emulateNode` option (#2603) and the host axis
+ * (`--target node`/`deno`, formerly `--platform`). A node/deno host implies the
+ * node-emulation injection path so the ambient global surface and the importable
+ * `node:<mod>` capability gate agree on one target model. The per-member
+ * `providersFor` gate stays the authority for importable members; this only sets
+ * the ambient default.
  */
 function resolveEmulateNode(analyzeOptions?: AnalyzeOptions): boolean {
-  return analyzeOptions?.emulateNode === true || analyzeOptions?.platform === "node";
+  return (
+    analyzeOptions?.emulateNode === true || analyzeOptions?.platform === "node" || analyzeOptions?.platform === "deno"
+  );
 }
 
 /**
- * #2528 — select the default-lib composite name for the chosen platform. Unset
- * platform → the historical DOM composite (byte-neutral). `--platform node`
- * drops the DOM ambient surface; `--platform web` keeps it explicitly.
+ * #2528/#2734 — select the default-lib composite name for the chosen host. Unset
+ * host → the historical DOM composite (byte-neutral). `--target node`/`deno`
+ * drops the DOM ambient surface; `--target web` keeps it explicitly.
  */
 function defaultLibNameForPlatform(analyzeOptions?: AnalyzeOptions): string {
-  return analyzeOptions?.platform === "node" ? DOM_FREE_LIB_NAME : DOM_LIB_NAME;
+  return analyzeOptions?.platform === "node" || analyzeOptions?.platform === "deno" ? DOM_FREE_LIB_NAME : DOM_LIB_NAME;
 }
 
 /**

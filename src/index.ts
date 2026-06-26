@@ -300,32 +300,35 @@ export interface CompileOptions {
    */
   emulateNode?: boolean;
   /**
-   * Target host environment for the AMBIENT global surface (#2528), set via
-   * `--platform node|web`. Orthogonal to the backend `target`
-   * (`gc`/`wasi`/`standalone`/`linear`): `platform` scopes which globals are in
-   * scope at type-check time, `target` chooses the backend lowering.
+   * Host environment scoping the AMBIENT global surface (#2528/#2645), now the
+   * unified host axis driven by `--target {web,node,deno}` (#2734). The legacy
+   * `--platform` flag is a deprecated alias onto this same field. It selects
+   * which globals are in scope at type-check time and whether Node-style
+   * emulation is on. The backend-lowering names (`gc`/`linear`/`wasi`/
+   * `standalone`) still live on the separate `target` option, so this stays an
+   * internal sub-axis even though the user-facing flag is unified.
    *
-   *   - `"web"`  → DOM ambient surface (`window`, `document`, DOM types) in
-   *               scope; node-only globals are not. Byte-identical to the
-   *               historical default.
-   *   - `"node"` → DOM-only globals are NOT in scope (so `window.stop` in a node
-   *               host is a clear type error), AND the Node-emulation injection
-   *               path turns on (#2645), so `process` & friends type-check
-   *               without @types/node.
+   *   - `"web"`         → DOM ambient surface (`window`, `document`, DOM types)
+   *                       in scope; node-only globals are not. Byte-identical to
+   *                       the historical default.
+   *   - `"node"`/`"deno"` → DOM-only globals are NOT in scope (so `window.stop`
+   *                       in a node/deno host is a clear type error), AND the
+   *                       Node-emulation injection path turns on (#2645), so
+   *                       `process` & friends type-check without @types/node.
+   *                       (Real `@types/node` / Deno-lib loading is a later
+   *                       #2698 slice; here `deno` routes through the same
+   *                       node-emulation/no-DOM ambient surface as `node`.)
    *
    * `undefined` (unset) preserves today's behaviour exactly: the DOM ambient
    * surface is loaded and `emulateNode` is driven solely by its own option /
    * `node:`-import auto-detection. Type-level only; does not change emitted wasm.
    *
-   * Precedence vs `--target wasi`: the two are independent axes and may disagree
-   * (e.g. `--platform web --target wasi`). `platform` wins for the *ambient
-   * surface* (web globals stay in scope); `target` still governs the backend, so
-   * actually *using* a DOM-only global under `--target wasi` is rejected by the
-   * existing WASI DOM-usage gate. When `platform` is unset, a `wasi`/`standalone`
+   * Precedence vs the backend `target` (e.g. `--target wasi`): the host surface
+   * and the backend are independent. When this is unset, a `wasi`/`standalone`
    * target does NOT implicitly drop the DOM ambient surface — that would change
-   * today's output; pass `--platform node` explicitly to scope it.
+   * today's output; pass `--target node`/`deno` explicitly to scope it.
    */
-  platform?: "web" | "node";
+  platform?: "web" | "node" | "deno";
   /**
    * Enforce dual-mode discipline (#1524): when true, codegen rejects any
    * JS-host `env` import that is not on

@@ -39,7 +39,15 @@ Compile a TypeScript file to WebAssembly (GC proposal).
 
 Options:
   -o, --out <dir>   Output directory (default: same as input)
-  --target <t>      Compilation target: gc (default), linear, wasi, standalone
+  --target <t>      Host/output target — the single host axis (#2734):
+                      web   (default) WasmGC / JS-host browser surface (DOM
+                            ambient globals in scope);
+                      node  a real Node host (Node ambient surface, no DOM);
+                      deno  a real Deno host (Deno ambient surface, no DOM);
+                      wasi  standalone WASI Preview 1 (fd-based host calls).
+                    Also accepts the backend-lowering names gc / linear /
+                    standalone (orthogonal backend choice; gc is the default
+                    backend for web/node/deno).
   --standalone      Shorthand for --target standalone (pure WasmGC, no JS host,
                     no WASI). Forces nativeStrings: true and refuses to emit
                     wasm:js-string or env JS-host imports.
@@ -83,12 +91,12 @@ Options:
                     Auto-enabled (type-level only) when the source imports a
                     'node:' builtin (use 'none' to disable that); otherwise off,
                     and using process warns to add this flag (#2603).
-  --platform <p>    Target host environment for the AMBIENT global surface
-                    (#2528). 'web' = DOM globals (window/document/…) in scope
-                    (today's default); 'node' = DOM globals NOT in scope (so
-                    window.stop is a type error) and Node API emulation on
-                    (implies --emulate node). Orthogonal to --target (backend).
-                    Unset preserves today's behaviour (DOM surface loaded).
+  --platform <p>    DEPRECATED (#2734): alias for --target {web,node,deno}.
+                    'web' = DOM globals (window/document/…) in scope (today's
+                    default); 'node'/'deno' = DOM globals NOT in scope (so
+                    window.stop is a type error) and Node-style API emulation on
+                    (implies --emulate node). Prefer --target; this prints a
+                    deprecation warning. Unset preserves today's behaviour.
   --no-host-imports Strict dual-mode: reject JS-host 'env' imports not on
                     the allowlist (#1524). Implied by --target wasi.
   --allow-host-imports
@@ -156,21 +164,36 @@ let linkNodeShims = false;
 // `node:` import won't auto-enable over an explicit choice.
 let emulateNode = false;
 let emulateExplicit = false;
-// #2528 — `--platform node|web`: scope the AMBIENT global surface (DOM vs node).
-// `undefined` preserves today's behaviour exactly (DOM ambient surface loaded).
-let platform: "web" | "node" | undefined;
+// #2528/#2645/#2734 — the host environment, scoping the AMBIENT global surface
+// (DOM vs node) and node/deno emulation. Now driven by the unified `--target
+// {web,node,deno}` axis; `--platform` is a deprecated alias. `undefined`
+// preserves today's behaviour exactly (DOM ambient surface loaded, byte-neutral).
+let platform: "web" | "node" | "deno" | undefined;
 const defines: Record<string, string> = {};
 
 for (let i = 0; i < args.length; i++) {
   const arg = args[i]!;
   if (arg === "-o" || arg === "--out") {
     outDir = args[++i];
-  } else if (arg === "--target") {
-    const t = args[++i];
+  } else if (arg === "--target" || arg.startsWith("--target=")) {
+    // #2734 — `--target` is now the SINGLE host/output axis (unifying the
+    // retired `--platform`). It accepts:
+    //   - the host environments: `web` (default), `node`, `deno` — these select
+    //     the ambient global surface (#2528/#2645) and leave the backend at its
+    //     WasmGC/JS-host default;
+    //   - `wasi` — the standalone WASI P1 output ABI (as today);
+    //   - the backend-lowering names `gc` / `linear` / `standalone` (kept for
+    //     back-compat; they are orthogonal backend choices, not host axes).
+    // Host values route to the internal `platform` field; backend values route
+    // to `target`. `--target wasi` keeps today's behaviour (backend + no
+    // platform scoping) and stays byte-identical.
+    const t = arg.startsWith("--target=") ? arg.slice("--target=".length) : args[++i];
     if (t === "gc" || t === "linear" || t === "wasi" || t === "standalone") {
       target = t;
+    } else if (t === "web" || t === "node" || t === "deno") {
+      platform = t;
     } else {
-      console.error(`Unknown target: ${t} (expected gc, linear, wasi, or standalone)`);
+      console.error(`Unknown target: ${t} (expected web, node, deno, wasi, gc, linear, or standalone)`);
       process.exit(1);
     }
   } else if (arg === "--standalone") {
@@ -235,14 +258,17 @@ for (let i = 0; i < args.length; i++) {
       process.exit(1);
     }
   } else if (arg === "--platform" || arg.startsWith("--platform=")) {
-    // #2528 — select the ambient global surface. `node` drops the DOM globals
-    // (and implies Node API emulation, #2645); `web` keeps the DOM surface and
-    // excludes node-only globals. Orthogonal to `--target` (the backend axis).
+    // #2734 — DEPRECATED alias for `--target {web,node,deno}`. `--platform`
+    // selected the ambient global surface (#2528): `node`/`deno` drop the DOM
+    // globals and imply Node-style emulation (#2645); `web` keeps the DOM
+    // surface. The host axis is now unified under `--target`; this alias maps
+    // onto the same internal `platform` field and emits a one-line deprecation.
     const p = arg.startsWith("--platform=") ? arg.slice("--platform=".length) : args[++i];
-    if (p === "node" || p === "web") {
+    if (p === "node" || p === "web" || p === "deno") {
       platform = p;
+      console.error(`warning: --platform is deprecated; use --target ${p} instead.`);
     } else {
-      console.error(`Unknown --platform value: ${p ?? "(missing)"} (expected: node | web)`);
+      console.error(`Unknown --platform value: ${p ?? "(missing)"} (expected: node | web | deno)`);
       process.exit(1);
     }
   } else if (arg === "--no-host-imports") {

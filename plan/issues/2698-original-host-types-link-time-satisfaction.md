@@ -14,7 +14,7 @@ language_feature: node-api-compat
 goal: platform
 sprint: Backlog
 es_edition: n/a
-related: [2634, 1772, 2655, 2657, 2684, 2696, 2528, 2645, 2624, 2603, 2094, 1524]
+related: [2734, 2634, 1772, 2655, 2657, 2684, 2696, 2528, 2645, 2624, 2603, 2094, 1524]
 supersedes_verdict_of: 2634
 origin: "Stakeholder directive (2026-06-26) reversing the #2634 'reject real @types/node' verdict: type against the REAL host surface, move the satisfiability error from type-check-time to link-time-used-only."
 ---
@@ -24,6 +24,24 @@ origin: "Stakeholder directive (2026-06-26) reversing the #2634 'reject real @ty
 > **Scoping issue (architecture). Do NOT implement from this file alone — it
 > defines the model, the feasibility verdict, and the dev-sized slices.** Slices
 > S1/S3/S4 are senior-dev; S2/S5/S6 are dev. See ordering at the end.
+
+> **AXIS UNIFICATION (#2734, foundation — LANDED).** The two host axes have been
+> collapsed into a single user-facing `--target {wasi, node, deno, web}`:
+>
+> - `--target web` (the **default**) — WasmGC / JS-host browser surface (DOM
+>   ambient globals);
+> - `--target node` — a real **Node** host (Node ambient surface, no DOM);
+> - `--target deno` — a real **Deno** host (Deno ambient surface, no DOM);
+> - `--target wasi` — standalone WASI Preview 1 (as today).
+>
+> The old `--platform node|web|deno` flag is now a **deprecated alias** that maps
+> onto `--target` (one-line deprecation warning). The backend-lowering names
+> (`gc`/`linear`/`standalone`) remain orthogonal `--target` values. Throughout
+> this issue, read every `--platform <x>` below as `--target <x>`. The remaining
+> #2698 slices layer onto that axis: **S1** = real `@types/node` under
+> `--target node`, **S2** = real Deno lib under `--target deno`, **S3** = the
+> link-satisfaction registry keyed on the host (`hostMode`), **S4** = the
+> link-time used+unsatisfiable gate.
 
 ## Stakeholder model (captured verbatim)
 
@@ -83,8 +101,8 @@ wrong is exactly the half the #2634 verdict was protecting.**
   mirage; you load the **full graph or nothing**.
 
 - **Therefore the only way to honor "type against the ORIGINAL definitions" is to
-  load the full real graph — gated STRICTLY on host-mode** (`--platform node` /
-  `--platform deno`) so the default / web / test262 path never pays the parse
+  load the full real graph — gated STRICTLY on host-mode** (`--target node` /
+  `--target deno`) so the default / web / test262 path never pays the parse
   cost. This is the design pivot vs #2634: #2634's verdict was _correct under its
   constraint_ (don't make every compile load `@types/node`; keep type == runtime).
   The stakeholder is **changing the constraint**: fidelity is now worth the cost
@@ -114,7 +132,7 @@ wrong is exactly the half the #2634 verdict was protecting.**
 
 **Bottom line:** ship it, gated hard on host-mode. The capability map is
 **demoted** from a _type gate_ to a _link-satisfaction registry_ and survives in
-that role; the hand-authored type mirror is **superseded** for `--platform
+that role; the hand-authored type mirror is **superseded** for `--target
 node`/`deno` (kept only as the no-`node_modules` fallback); the #1772 P2-a
 compile-time call-site rejection is **transformed** into one feeder of a unified
 link-time used+unsatisfiable check built on top of `scanForLeakedHostImports`.
@@ -125,12 +143,12 @@ link-time used+unsatisfiable check built on top of `scanForLeakedHostImports`.
 
 | Piece (on main)                                                                                                                                            | Fate under #2698                                                                                                                                                                                    |
 | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `node-capability-map.ts` **type-surface emission** (`buildModuleDecls`, the `decls` mirror strings, `NODE_FS_SUPPORT_DECLS`, `FS_*_DECLS`)                 | **SUPERSEDED for `--platform node`** by real-`@types/node` loading. Mirror **retained only as the no-`node_modules`/browser fallback** until S5 bundles a snapshot.                                 |
+| `node-capability-map.ts` **type-surface emission** (`buildModuleDecls`, the `decls` mirror strings, `NODE_FS_SUPPORT_DECLS`, `FS_*_DECLS`)                 | **SUPERSEDED for `--target node`** by real-`@types/node` loading. Mirror **retained only as the no-`node_modules`/browser fallback** until S5 bundles a snapshot.                                   |
 | `node-capability-map.ts` **provider/satisfiability registry** (`NodeProvider`, `CapabilityTarget`, `providersFor`, `isMemberSatisfiable`, `isKnownMember`) | **KEPT and PROMOTED** to the authority for the link-time gate. Generalized to be host-mode-keyed (node/deno/wasi), not `node:fs`-only.                                                              |
-| `buildNodeEnvDts` synthetic `.d.ts` injection (`src/checker/index.ts`)                                                                                     | **KEPT as the fallback path**; bypassed for mapped modules when real-types loading is active under `--platform node`. The bare-`process` / permissive-`any` branches stay.                          |
+| `buildNodeEnvDts` synthetic `.d.ts` injection (`src/checker/index.ts`)                                                                                     | **KEPT as the fallback path**; bypassed for mapped modules when real-types loading is active under `--target node`. The bare-`process` / permissive-`any` branches stay.                            |
 | #1772 P2-a **compile-time** call-site gate in `tryCompileNodeFsCall` (`isMemberSatisfiable === false` → `ctx.errors.push`)                                 | **TRANSFORMED**: the call-site early-error is removed; its _data source_ (the registry) feeds the unified link-time check instead. (File owned by the #2696 fixer — sequence S4 after #2696 lands.) |
 | `scanForLeakedHostImports` + `isHostImportAllowed` (#2094, `host-import-allowlist.ts`)                                                                     | **KEPT and GENERALIZED** into the single "used + unsatisfiable at link" mechanism — it already does (b) compiled-in-but-missing; S4 routes node/deno member satisfiability through it too.          |
-| `--platform`, `resolveEmulateNode`, `defaultLibNameForPlatform` (#2528/#2645)                                                                              | **KEPT and EXTENDED** — the host-mode is the gate that decides whether to load real types and which provider set is active. Add `--platform deno`.                                                  |
+| `--target` host axis, `resolveEmulateNode`, `defaultLibNameForPlatform` (#2528/#2645/#2734)                                                                | **KEPT and EXTENDED** — the host-mode is the gate that decides whether to load real types and which provider set is active. `--platform`→`--target` unification + `--target deno` landed in #2734.  |
 
 ---
 
@@ -177,7 +195,7 @@ registry**, decoupled from type-surface emission.
   exported functions (re-exported), so this slice is byte-neutral. Add a unit
   test asserting registry queries are unchanged.
 
-#### S1 — Real `@types/node` loading under `--platform node` · senior-dev
+#### S1 — Real `@types/node` loading under `--target node` · senior-dev
 
 In `src/checker/index.ts` `analyze`/`analyzeMulti` compiler-host:
 
@@ -188,9 +206,9 @@ In `src/checker/index.ts` `analyze`/`analyzeMulti` compiler-host:
   `fileExists` / `readFile` must serve those `.d.ts` (today they hard-stop at lib
   files + the synthetic node-env root — extend them to serve `@types/node` files
   when host-mode is node).
-- **Gate strictly**: unset platform / `--platform web` → unchanged (no real-types
+- **Gate strictly**: unset platform / `--target web` → unchanged (no real-types
   load, mirror/synthetic path as today, **byte-neutral for test262/web**).
-- For mapped modules under `--platform node`, **bypass the synthetic
+- For mapped modules under `--target node`, **bypass the synthetic
   `buildNodeEnvDts` injection** and let real resolution provide the surface; keep
   `buildNodeEnvDts` as the fallback when `@types/node` can't be resolved
   (browser / no `node_modules` until S5).
@@ -201,15 +219,20 @@ In `src/checker/index.ts` `analyze`/`analyzeMulti` compiler-host:
   without duplicate-global clashes. Reuse the existing dup-identifier rebuild
   fallback pattern.
 
-#### S2 — Real Deno surface under `--platform deno` · dev
+#### S2 — Real Deno surface under `--target deno` · dev
 
-- Add `--platform deno` to `AnalyzeOptions.platform` and the CLI.
+- ~~Add `--target deno` to `AnalyzeOptions.platform` and the CLI.~~ **DONE in
+  #2734** — `--target deno` is accepted and routes through `AnalyzeOptions.platform
+= "deno"`, currently sharing the node-emulation / no-DOM ambient surface. S2's
+  remaining work is swapping that placeholder surface for the real Deno lib:
 - Snapshot `lib.deno.ns.d.ts` (`deno types`; `deno` CLI is present at
   `~/.deno/bin/deno`) into the repo (e.g. `vendor/deno/lib.deno.ns.d.ts`) and
   load it as an **ambient lib composite** alongside the no-DOM ES base (mirror the
   `DOM_FREE_LIB_NAME` composite machinery — it's self-contained, so this is the
   simple ambient-lib path, NOT a module graph).
-- `resolveEmulateNode` stays node-only; add the analogous deno-mode plumbing.
+- `resolveEmulateNode` already composes deno into the node-emulation path
+  (#2734, placeholder); once the real Deno lib loads, decide whether deno keeps
+  the node-emulation injection or gets its own Deno-namespace plumbing.
 - Register Deno's std-IO members in the S3 registry with their providers
   (fd-based → `wasi-fd` / native deno host).
 
@@ -243,15 +266,15 @@ _(sequence AFTER #2696 lands — it owns `node-fs-api.ts` / `raw-wasi-api.ts`.)_
 
 #### S6 — Tests + byte-neutrality · dev
 
-- **Byte-neutrality**: default / `--platform web` / test262 path byte-identical
+- **Byte-neutrality**: default / `--target web` / test262 path byte-identical
   to pre-#2698 (the #1968 batch-byte-diff method) — proves no real-types load on
   the common path.
-- `--platform node`: a program using a real `@types/node` overload the mirror
+- `--target node`: a program using a real `@types/node` overload the mirror
   rejected now type-checks (e.g. an `fs` member outside `FS_MEMBERS`).
 - **Used-only semantics**: `import { openSync } from "node:fs"` _without a call_
   compiles clean under `--target wasi`; _with_ a call → the (a) used+unsatisfiable
   error. (Regression-locks the central shift.)
-- `--platform deno`: a `Deno.readSync` program type-checks against the real
+- `--target deno`: a `Deno.readSync` program type-checks against the real
   namespace.
 - (b) compiled-in-but-missing: an `env` leak still produces the structured error.
 
@@ -275,14 +298,14 @@ byte-neutral harness can be scaffolded against S3).
   to link-time, used-only.
 - **Changed**: the capability map stops emitting type text (mirror split out);
   becomes the link registry. `buildNodeEnvDts` becomes a fallback, not the primary
-  node-surface source under `--platform node`.
+  node-surface source under `--target node`.
 - **Reversed**: the #2634 "reject literal `@types/node`" verdict — under the new
   host-mode-gated constraint, literal loading is the chosen design for
-  `--platform node`/`deno`.
+  `--target node`/`deno`.
 
 ## Acceptance
 
-- `--platform node` type-checks against real `@types/node`; `--platform deno`
+- `--target node` type-checks against real `@types/node`; `--target deno`
   against the real Deno namespace; default/web/test262 path **byte-neutral**.
 - A _called_ unsatisfiable host member errors at link-scan time with a precise
   per-member message; an _imported-but-uncalled_ one compiles clean.
@@ -293,10 +316,10 @@ byte-neutral harness can be scaffolded against S3).
 
 ## Risks
 
-- **Parse cost**: ~50k lines of `@types/node` per process under `--platform node`
+- **Parse cost**: ~50k lines of `@types/node` per process under `--target node`
   — must be cached once and gated hard off the default path.
 - **Global clashes**: `@types/node`'s `NodeJS` namespace + the no-DOM composite
   co-resolving; reuse the dup-identifier rebuild fallback.
 - **#2696 file overlap**: S4 edits `node-fs-api.ts`; must land after #2696.
 - **Browser packaging**: real-types loading is meaningless in the browser without
-  S5; until then `--platform node` in-browser falls back to the mirror.
+  S5; until then `--target node` in-browser falls back to the mirror.
