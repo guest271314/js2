@@ -13,8 +13,8 @@ task_type: bugfix
 area: codegen
 language_feature: unknown
 goal: acorn-dogfood
-related: [1712, 2681, 2674, 2664]
-depends_on: []
+related: [1712, 2681, 2674, 2664, 2660]
+depends_on: [2660]
 origin: "Surfaced re-verifying the acorn dogfood after #2085 fixed the 9th-wall hang (sd-2674c, #2674). With parseExpression() now running, numeric/empty statements parse, but a binary-expression statement THROWS a WebAssembly.Exception — distinct from the #2681 identifier-`unexpected()` wall."
 ---
 

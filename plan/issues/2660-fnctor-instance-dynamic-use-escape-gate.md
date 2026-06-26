@@ -515,3 +515,74 @@ S3b re-types the binding local / param / return that an approved struct-typed
 reconstructed `$Object` flows through the dynamic-read + generic-method paths and
 the test262 cluster lands. Held behind S3a's floor result; budget a fix-iterate
 cycle (S2 took one). Issue stays `in-progress`.
+
+## HANDOFF (2026-06-26, sd-2674c) — acorn #1712 endgame needs this keystone; validated READ-half component ready
+
+The acorn dogfood (#1712) endgame converges on THIS issue. After #2085 fixed the
+9th-wall hang, `parse()` returns Programs for empty/numeric statements but the
+remaining walls are all ONE family: an **`any`/`unknown`-typed receiver that at
+runtime IS a known WasmGC struct**, where the dynamic read path
+(`__extern_get` → host proxy / sidecar) diverges in representation from the
+struct-slot write (`#2664`/`#2659` `emitAlternateStructSetDispatch`). Identity
+breaks (`this.type === types$1.X` → false) and read/write desync (numeric-field
+loops).
+
+### Bounded-vs-escape-analysis verdict (cheap TS-checker probe — conclusive)
+`.tmp/checker-probe.mjs` (mirrors the compiler's `createProgram`+allowJs) shows
+the compiler's checker types the local receivers as **`any`**:
+- `var node = this.startNode(...)` → **any** (43/43 samples)
+- `scope.flags` where `scope = this.currentVarScope()` → receiver **any**;
+  `currentVarScope()` / `enterScope()` return types → **any**
+- `this` in the lifted parser methods → the polymorphic `this`-type (no struct)
+
+So receiver-resolution splits in two:
+- **`this` receiver = BOUNDED** — recoverable SYNTACTICALLY from the
+  `Class.prototype.m = function(){}` (or aliased `var pp = Class.prototype; pp.m
+  = …`) assignment. No flow needed. **Already implemented + validated** (below).
+- **local receivers (`node`, `scope`) = NEEDS #2660** — they are bound from
+  METHOD-CALL RETURNS (`this.startNode()`, `this.currentVarScope()`) the checker
+  leaves `any` (the callees are aliased-prototype methods — same root). Recovering
+  `Node`/`Scope` requires inter-procedural return-type + field-element-type
+  inference (follow callee `return new Node()` / `return this.scopeStack[i]`
+  chains). That is the whole-program flow THIS issue builds.
+
+### Per-wall map (all the same family)
+| wall | receiver | resolution |
+|---|---|---|
+| #2681 `this.type` (parseExprAtom switch `unexpected()`) | `this` | BOUNDED — FIXED + validated (read-half below) |
+| #2694 `Scope.flags` (11th wall, tight loop) | `this.currentVarScope()` (local) | needs #2660 flow |
+| #2687 `node.expression` null | `node = this.startNode()` (local) | needs #2660 flow |
+| #2686 binary-expr throw | parseExprOp token compares / node builds | almost certainly same family → needs #2660 |
+
+### Validated READ-half component to REUSE (don't rebuild)
+Branch `issue-2681-acorn-lifted-method-this` @ `c83216fe2` (WIP, NOT PR'd —
+preserved for folding in). It is the symmetric READ counterpart to #2664's
+`emitAlternateStructSetDispatch` WRITE half:
+- `FunctionContext.thisStructName` (context/types.ts) — the struct a lifted
+  method's `this` resolves to.
+- `resolveLiftedMethodThisStruct` (closures.ts) — the SYNTACTIC prototype-alias
+  resolver (set on `liftedFctx`).
+- `tryEmitThisStructMemberRead` (property-access.ts) — guarded
+  `emitExternrefToStructGet` (`ref.test $struct → struct.get → __extern_get`
+  fallback) for `this.<field>`.
+Validated: on compiled acorn, `parse("x")` `__host_eq` dropped **30k → 163** — the
+parseExprAtom switch now matches and the #2681 `unexpected()` throw is gone.
+
+### How the unified substrate should generalize it
+Keep this exact symmetric read+write+**compound** dispatch; only generalize the
+RECEIVER-RESOLUTION step from "syntactic `this`" to "any receiver whose struct
+type #2660's flow proves". I.e. `thisStructName` becomes a general
+`receiverStructName(expr)` backed by the #2660 escape/flow result; the
+read/write/compound emitters are unchanged.
+
+### CRITICAL hazard — symmetry is mandatory
+A READ-only slot fix WITHOUT the matching write+compound caused a **35.9M-iter
+`__extern_get`/box/unbox loop** in `parse("x")` (read=slot, `this.field++`
+write-back=sidecar → desync). The substrate MUST cover **read + write + compound**
+(`recv.field++`, `recv.field op= v`) consistently, or numeric-field loops appear.
+
+### Probes banked (`.tmp/`, single-compile worker+SAB; ~290s/acorn-compile)
+`checker-probe.mjs` (the verdict gate, no Wasm compile), `keyhist2.mjs`
+(`__extern_get` key histogram — named the Scope.flags wall), `this-bind-repro.mjs`
+(small-scale fix verification), `structwalk.mjs`, `diff-probe.mjs` +
+`tests/dogfood/probe-driver.mjs`.
