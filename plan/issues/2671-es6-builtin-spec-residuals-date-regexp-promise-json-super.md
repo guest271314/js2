@@ -98,6 +98,62 @@ built-ins/RegExp/prototype/Symbol.split/species-ctor-ctor-non-obj.js
 built-ins/RegExp/prototype/exec/success-lastindex-access.js
 ```
 
+**Progress (dev-2671e, 2026-06-26): RegExp `lastIndex` value-preserving data
+slot (§22.2.7.2 RegExpBuiltinExec step 4) — SHIPPED.**
+
+Verified-first against current main through the real worker harness (`compile` +
+`__setExports` + `wrapExports`). Root cause: the extern `RegExp` interface typed
+`lastIndex` as `number`, so the host import eagerly `ToNumber`'d any assigned
+value at WRITE time. The spec instead stores whatever is assigned **verbatim**
+and coerces only inside `exec` (`lastIndex = ToLength(? Get(R, "lastIndex"))`,
+writing back only when the regex is global/sticky). On pristine main,
+`r.lastIndex = {valueOf(){…}}` followed by a non-global `r.exec(s)` returned
+`r.lastIndex !== counter` (identity discarded — the eager set stored the coerced
+number), failing `assert.sameValue(r.lastIndex, counter)`; on the dynamic-receiver
+path the eager coerce of an opaque WasmGC struct threw "Cannot convert object to
+primitive value".
+
+Host-mode-scoped fix in three parts:
+- **`src/codegen/index.ts`** (`collectInterfaceMembers`): carry
+  `RegExp.lastIndex` as `externref` (not `number`) in **host mode only**
+  (`!ctx.standalone && !ctx.wasi`) so the raw value round-trips through the native
+  RegExp; numeric uses coerce at the use site, the exec-time ToLength runs in
+  native code. Standalone/WASI keep their native struct-field RegExp path
+  untouched (the `RegExp_*_lastIndex` extern import is never emitted there).
+- **`src/runtime.ts`** (`resolveImport`, RegExp `lastIndex` get/set): the
+  **default (deferred)** representation stores a struct behind a small coercion
+  shim (`_makeLastIndexShim`) whose ToPrimitive bridges to `_hostToPrimitive`, so
+  native exec / the protocol ToLength fire the struct's `valueOf` once (a throw
+  surfaces as the program's own error); the get-import unwraps the shim back to
+  the raw struct so an explicit `r.lastIndex` read keeps object identity. Numbers
+  pass through verbatim; the global/sticky numeric write-back is unchanged.
+- **`src/runtime.ts`** (`__regex_symbol_call` protocol-depth carve-out): the one
+  case the deferred shim cannot cover — a `lastIndex` set performed by a
+  user-overridden `exec` *invoked from* `RegExp.prototype[@@replace]` — because
+  native V8 @@replace does **not** ToLength the JS-visible `lastIndex` in its
+  empty-match advance (verified: `execCalls=2`, `valueOf` count `0`). A
+  `_regexProtocolDepth` counter (inc/dec around the protocol dispatch, `finally`)
+  marks sets that happen *during* a protocol call; those coerce eagerly so a
+  throwing `valueOf` surfaces at the assignment (§22.2.5.8 "abrupt completion
+  during coercion of lastIndex"). Sets outside any protocol stay deferred.
+- Flips **8** `built-ins/RegExp` files: `exec/success-lastindex-access`,
+  `exec/failure-lastindex-access`, `exec/failure-g-lastindex-reset`,
+  `exec/S15.10.6.2_A4_T11`/`_T12`, `Symbol.match/builtin-y-coerce-lastindex-err`,
+  `Symbol.matchAll/this-tolength-lastindex-throws`, and keeps
+  `Symbol.replace/coerce-lastindex-err` green (the proxy-only first cut regressed
+  this one; the protocol-depth carve-out fixes it). Guard:
+  `tests/issue-2671-regexp.test.ts` (8/8). **Differential vs pristine main: +7
+  pass, 0 regressions** across 340 protocol/exec/test files and all 64
+  `lastIndex`-named `built-ins/RegExp` tests (sequential `runTest262File`); 228/228
+  broad host-mode regex vitest tests pass; String.prototype.replace/split/match
+  (which route through the same protocol path) verified correct. The
+  standalone-refusal failures (`issue-1474`/`issue-1539-*`/`issue-2161-matchall`)
+  pre-exist on pristine main (unrelated — standalone is gated out).
+- ⏳ Remaining RegExp: `Symbol.split`/`Symbol.replace` protocol (species ctor
+  validation + dynamic `exec`/`lastIndex` dispatch on arbitrary objects), dotAll
+  lone-surrogate string-rep (deep string-backend), `str-get-lastindex-err`
+  (Symbol.split lastIndex getter-error ordering — separate root cause).
+
 ### Promise (76)
 resolve-element function attributes (extensible/own-props), invoke-resolve
 error-close paths, race/all resolver-element edge cases, `then` spec asserts.
