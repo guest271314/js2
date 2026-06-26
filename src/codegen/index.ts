@@ -11545,6 +11545,33 @@ export function ensureStructForType(ctx: CodegenContext, tsType: ts.Type): void 
   // Get properties from the type (empty objects get an empty struct)
   const props = tsType.getProperties();
 
+  // (#2724) An object-LITERAL accessor-bearing type must not become a closed
+  // struct. getTypeOfSymbol on a getter symbol yields the getter's RETURN type,
+  // so a getter `return` would be laid out as a plain data field (e.g. f64) — but
+  // the literal is built as an externref $Object by compileObjectLiteralWithAccessors
+  // (literals.ts). The two representations collide (gc: the externref $Object does
+  // not match the struct, so reads come back null; standalone: the externref→struct
+  // ref.cast traps with "illegal cast"). Skip registration → the type lowers to
+  // externref everywhere (resolveWasmType falls through to mapTsTypeToWasm), and the
+  // existing $Object accessor read path (__extern_get → __call_accessor_get) services
+  // it. This is the root cause of #1642's residual iterator-close-*-get-method-* edges
+  // (the iterator factory `{ next, get return() }` registered a closed struct, so
+  // __iterator(iterable) read back null and __iterator_next(null) threw upstream of
+  // close). SCOPED to object-LITERAL accessors only (declaration parent is an
+  // ObjectLiteralExpression): a CLASS getter's declaration parent is a
+  // ClassDeclaration (and an interface's an InterfaceDeclaration) and MUST keep the
+  // struct + getter-method representation.
+  for (const prop of props) {
+    if ((prop.flags & (ts.SymbolFlags.GetAccessor | ts.SymbolFlags.SetAccessor)) === 0) continue;
+    const isObjLitAccessor = (prop.declarations ?? []).some(
+      (d) =>
+        (ts.isGetAccessorDeclaration(d) || ts.isSetAccessorDeclaration(d)) &&
+        d.parent != null &&
+        ts.isObjectLiteralExpression(d.parent),
+    );
+    if (isObjLitAccessor) return; // leave externref; do not register a struct
+  }
+
   const fields: FieldDef[] = [];
   // #1118 follow-up: track callable-property arities so structs whose methods
   // differ in arity don't dedup. Two object literals like `{ then(r) {…} }`

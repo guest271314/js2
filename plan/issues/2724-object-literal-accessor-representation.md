@@ -1,7 +1,9 @@
 ---
 id: 2724
 title: "Object-literal get/set accessor representation: accessor-bearing literal types mis-register as closed structs (unblocks #1642)"
-status: ready
+status: done
+completed: 2026-06-26
+assignee: ttraenkler/sd-accessor
 sprint: 67
 created: 2026-06-26
 priority: high
@@ -16,6 +18,39 @@ goal: test262-conformance
 related: [2580, 1642, 1239, 1888]
 depends_on: []
 ---
+
+## Test Results (2026-06-26, sd-accessor)
+
+Implemented Slice 1 (the core fix) exactly as specced: a scoped guard in
+`ensureStructForType` (`src/codegen/index.ts`, after `tsType.getProperties()`)
+that early-returns for any type whose own properties include an object-LITERAL
+get/set accessor (declaration parent is an `ObjectLiteralExpression`), leaving it
+to lower to externref via `resolveWasmType` → `mapTsTypeToWasm`. Slice 2 was NOT
+needed — Slice 1 alone makes every acceptance edge green.
+
+- `tests/issue-2724.test.ts` — 11/11 green (8 gc/host + 3 standalone), covering:
+  accessor literal returned from a fn (getter fires); for-of IteratorClose with
+  `get return()` throwing / returning null / throw-completion ordering / runs
+  once; mixed data+accessor; setter-only; CLASS-getter control (struct preserved,
+  gc + standalone).
+- #1642's 3 failing edges flip to PASS in gc (faithful repros): non-throw +
+  getter-throws → forwarded; getter-returns-null → no throw; throw-completion +
+  getter-throws → original throw wins. The 2 `…-non-callable.js` stay green.
+- Regression basket diffed against `origin/main` @ 4b4549d: identical results —
+  `tests/issue-1239.test.ts` + `tests/getters-setters.test.ts` carry 7
+  pre-existing reds (harness artifacts) on BOTH main and this branch (0 new);
+  `tests/accessor-side-effects.test.ts` + `tests/object-literals.test.ts` +
+  `tests/iterators.test.ts` + `tests/symbol-iterator-protocol.test.ts` +
+  `tests/issue-2162-iterators.test.ts` all green.
+- `tsc --noEmit` clean; `prettier --check` clean.
+- Standalone direct-accessor reads work (no illegal cast) — the standalone
+  accessor *type representation* is now correct. Standalone dynamic-iterable
+  for-of remains a separate pre-existing data-path gap (out of scope, #2580).
+- Broad-impact representation change → real floor validation is the #2097
+  merge_group standalone shard.
+
+Closes #1642 (the actual root cause; its earlier "close-time return-method" and
+"#2580 substrate rebuild" framings were stale).
 
 # #2724 — Object-literal get/set accessor representation
 

@@ -1,8 +1,10 @@
 ---
 id: 1642
 title: "spec gap: for-of IteratorClose — RE-SCOPED to the residual 8 (return-method representation + generator-close)"
-status: blocked
-depends_on: [2580]
+status: done
+completed: 2026-06-26
+depends_on: []
+fixed_by: 2724
 created: 2026-05-08
 updated: 2026-06-26
 priority: medium
@@ -16,6 +18,37 @@ goal: spec-completeness
 sprint: 66
 renumbered_from: 1348
 parent: 1328
+---
+
+## RESOLVED by #2724 (2026-06-26, sd-accessor)
+
+**Closed — fixed by #2724 (object-literal accessor representation).** The
+SLICE-1 grounding below was correct: these `iterator-close-*-get-method-*`
+edges fail UPSTREAM of close, on the `get return()` accessor in the iterator
+object literal being mis-registered as a closed WasmGC struct (so
+`__iterator(iterable)` read back `null` and `__iterator_next(null)` threw before
+close was ever reached). #2724's one-guard fix in `ensureStructForType`
+(`src/codegen/index.ts`) skips closed-struct registration for object-LITERAL
+accessor-bearing types, so they lower to externref end to end and the existing
+`$Object` accessor read path services the `get return()` read.
+
+The earlier framings on this issue — a close-time `__get_return`/`__call_return`
+return-method reachability gap, and the "needs the big #2580 substrate rebuild"
+dependency — were **both stale**. No close-time read and no substrate rebuild
+were needed; this was a *type-layer* representation collision, fixed by one
+scoped guard. `depends_on: [2580]` removed.
+
+Verified by faithful repros (`tests/issue-2724.test.ts`, edges (b)/(b2)/(b3)/(b4)):
+- non-throw completion + `get return()` throws → error forwarded (PASS)
+- `get return()` returns null → IteratorClose skips return, no throw (PASS)
+- throw completion + `get return()` also throws → original throw wins (PASS)
+- `get return()` runs exactly once on break (PASS)
+
+The two `…-get-method-non-callable.js` edges already passed (plain data
+`return:`). Standalone for-of over a *dynamically-assigned* `[Symbol.iterator]`
+remains a separate pre-existing data-path gap (a distinct #2580 slice) and is
+explicitly out of #2724's scope.
+
 ---
 
 ## SLICE 1 GROUNDING + COLLISION VERDICT — STOP/ESCALATE (2026-06-26, sd-iterclose)
