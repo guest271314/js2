@@ -74,3 +74,19 @@ assertion (`assert.sameValue(second, 0)`).
 - [ ] `var [[,] = g()] = []` with a capturing `g` ⇒ default runs once, not resumed.
 - [ ] The ~29 capturing-generator `*ary-ptrn*elision*` test262 cases flip from
       fail → pass without regressing the non-capturing (native) generator cases.
+
+## Related residual deferred here (from #2669, 2026-06-26)
+
+#2669 landed the SYNC for-of nested-default codegen (`for (const [[x,y,z]=[4,5,6]]
+of [[]])`) but **deliberately forgoes the nested default when the initializer is a
+CALL expression** (generator `g()`, capturing helper, IIFE) — gated
+`!ts.isCallExpression(initializer)` — and skips it entirely for **for-await-of**.
+Reason: compiling such a default inside the conditionally-skipped default arm
+materialises its capture box only on the not-taken branch and corrupts later reads
+of the captured variable (a #2692 closure-box-lazy interaction), and the generator
+case additionally over-consumes — this issue. The forgone surface is the
+`for-await-of/async-{func,gen}-dstr-…ary-ptrn-elem-ary-elision-{init,iter,empty}`
+cluster (~15 tests) plus the sync `ary-empty-init` IIFE-default cases. They unblock
+once this (#2566) + a fully-general #2692 land; then the `!isCallExpression`
+restriction in `compileForOfDestructuring` (`src/codegen/statements/loops.ts`) can
+be lifted.
