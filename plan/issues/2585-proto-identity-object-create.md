@@ -2,7 +2,7 @@
 id: 2585
 title: "standalone: getPrototypeOf(Object.create(p)) === p is false — object identity lost in __any_strict_eq tag-5 arm"
 status: blocked
-sprint: 66
+sprint: 67
 created: 2026-06-21
 updated: 2026-06-24
 priority: high

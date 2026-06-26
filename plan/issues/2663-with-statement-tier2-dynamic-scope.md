@@ -14,7 +14,7 @@ language_feature: with
 goal: spec-completeness
 depends_on: [1387, 2580]
 needs_arch_spec: false
-sprint: 66
+sprint: 67
 ---
 
 # #2663 — `with` statement Tier 2: dynamic-scope fallback

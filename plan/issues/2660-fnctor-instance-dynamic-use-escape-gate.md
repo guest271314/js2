@@ -3,7 +3,7 @@ id: 2660
 title: "Whole-program escape/dynamic-use gate for reconstructing `new F()` instances as `$Object` (value-rep infra)"
 status: in-progress
 assignee: ttraenkler/sd-2674b
-sprint: 66
+sprint: 67
 created: 2026-06-25
 priority: medium
 feasibility: hard

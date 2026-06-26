@@ -14,7 +14,7 @@ es_edition: 5
 language_feature: array-methods
 goal: spec-completeness
 related: [2177, 2151, 473, 2580]
-sprint: 66
+sprint: 67
 ---
 # #2670 — ES2015 Array.prototype iteration-method semantics residual
 

@@ -3,7 +3,7 @@ id: 2694
 title: "acorn parse() 11th wall — Scope.flags read loop (local-receiver slot/sidecar asymmetry, needs #2660)"
 status: blocked
 assignee: ttraenkler/unassigned
-sprint: 66
+sprint: 67
 created: 2026-06-26
 updated: 2026-06-26
 priority: medium

@@ -14,7 +14,7 @@ es_edition: 5
 language_feature: property-descriptors
 goal: spec-completeness
 related: [1460, 1462, 929]
-sprint: 66
+sprint: 67
 ---
 # #2668 — ES5 Object.defineProperty/defineProperties descriptor fidelity residual
 

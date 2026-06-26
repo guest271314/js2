@@ -2,7 +2,7 @@
 id: 2715
 title: "Linear backend: trapping i32.trunc_f64_s in bitwise ops + typed-array stores → use trunc_sat / ToInt32 wrap"
 status: ready
-sprint: 66
+sprint: 67
 created: 2026-06-26
 updated: 2026-06-26
 priority: high
