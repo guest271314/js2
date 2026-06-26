@@ -787,7 +787,15 @@ function inferLastType(body: Instr[], types: TypeDef[], sigs: FuncSigInfo): stri
         if (t.kind === "externref" || t.kind === "ref_extern") return "externref";
         if (t.kind === "ref" || t.kind === "ref_null") return "ref";
       }
-      if (bt?.kind === "empty") continue; // doesn't produce a value
+      // (#1573) A VOID structured instruction (empty block type — e.g. a
+      // null-guarded callback-capture writeback `if`) consumes its own
+      // condition/operands and produces nothing; the real branch result is
+      // BELOW it. Continuing the backward scan past it misreads an operand of
+      // the block's condition (the writeback's internal `i32.eqz`) as the
+      // branch result → "i32", and `fixBranchType` then splices a wrong
+      // `f64.convert_i32_s + __box_number` over the real externref value
+      // (ESLint `LazyLoadingRuleMap_new` validation failure). Stop and report
+      // null so `fixBranchType` SKIPS rather than mis-coerces.
       return null;
     }
 
