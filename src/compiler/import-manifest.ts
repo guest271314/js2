@@ -462,6 +462,13 @@ const DOWNGRADE_DIAG_CODES = new Set([
   2474, // "Cannot access 'X' before initialization" — valid JS TDZ pattern, runtime ReferenceError (#723)
   1489, // "Decimals with leading zeros are not allowed" — valid sloppy-mode JS octal literals
   1121, // "Octal literals are not allowed in strict mode" — valid sloppy-mode JS
+  // #2708 — legacy string-literal escapes are valid in sloppy mode (Annex B
+  // §12.9.4: LegacyOctalEscapeSequence + NonOctalDecimalEscapeSequence). Downgrade
+  // the TS scanner errors so non-strict code compiles; the strict-mode SyntaxError
+  // is re-enforced by the ES early-error pass (node-checks.ts), mirroring the
+  // numeric-octal treatment above.
+  1487, // "Octal escape sequences are not allowed. Use the syntax '\\xNN'." (string '\251')
+  1488, // "Escape sequence '\\8'/'\\9' is not allowed." (NonOctalDecimalEscapeSequence)
 ]);
 
 export { buildImportManifest, checkJsTypeCoverage, classifyImport, DOWNGRADE_DIAG_CODES, looksLikeTsSyntaxOnJs };
