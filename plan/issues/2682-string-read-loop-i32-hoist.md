@@ -1,8 +1,9 @@
 ---
 id: 2682
 title: "perf(strings): string read-loop fast path — hoist charCodeAt flatten/descriptor + i32 hash accumulator (the #1762 NO-GO redirect)"
-status: in-progress
+status: done
 assignee: ttraenkler/sd-strhash
+completed: 2026-06-26
 needs_arch_spec: false
 created: 2026-06-26
 updated: 2026-06-26
@@ -240,3 +241,48 @@ checks and emitting a bare `array.get_u(dataL, offL+i)` is byte-identical.
 Only fires in native-string mode (host/externref strings have no flattenable
 descriptor — charCodeAt is a host call there, untouched). Validated through the
 #2097 merge_group standalone floor.
+
+## Implementation — DONE (sd-strhash, 2026-06-26)
+
+Landed the single canonical-loop pattern recognizer (D1 hoist + D3 proof-gated
+i32 leaf; D2/D4 were already done by existing passes). Files:
+
+- `src/codegen/context/types.ts` — `HoistedCharRead` interface + scoped
+  `FunctionContext.hoistedCharReads` side-table (sibling of `safeIndexedArrays`).
+- `src/codegen/statements/loops.ts` — `detectCanonicalCharReadLoop` (the
+  recognizer; emits the once-before-loop `__str_flatten` + `.data`/`.off` hoist),
+  plus guards `isIncreasingStep`, `loopBodyMutatesStringReadInvariants` (string
+  variant of the #1196 helper — allows receiver method calls, but rejects
+  recv/i reassignment, `++`/`--`, **shadowing declarations**, and closures),
+  `bodyHasMatchingCharRead`. Wired into `compileForStatement` with scoped
+  save/restore around the body.
+- `src/codegen/string-ops.ts` — `matchHoistedCharRead` + `emitHoistedCharCodeAtRead`
+  helpers; charCodeAt arm (≈2230) fast-path for the f64-consumption case.
+- `src/codegen/binary-ops.ts` — proof-gated charCodeAt **i32 leaf** in
+  `isI32PureExpr` + `emitI32PureExpr` (keeps the whole `(h*31+c)|0` chain i32).
+
+### Result (decoded WAT of `hashStr`, acceptance met)
+
+`{fast,nativeStrings}` and `{nativeStrings}` both now emit: ONE `call $__str_flatten`
++ `.data`/`.off` hoisted into locals BEFORE the loop, and an inner loop body of
+`i32.add(i32.mul(h,31), array.get_u(dataL, offL+i))` — **no** per-iteration
+flatten, **no** `struct.get` reload, **no** OOB/NaN `if` branch, **no**
+`f64.convert_i32_u` round-trip, **no** `|0` f64 emulation (`4294967296` gone).
+Non-fast `hashStr` dropped from the full f64 ToUint32 emulation to pure i32.
+(Residual: the non-fast loop *condition* `i < s.length` still uses `f64.lt` —
+the optional D2 relational extension, deliberately out of this slice's scope.)
+
+### Validation (verify-first, byte-identity discipline — #2078 class)
+
+- `tests/issue-2682.test.ts` (12 tests, all green): result-parity for the
+  canonical loop (fast + non-fast, incl. empty/unicode/long/ConsString/step-2/
+  multi-read), and NOT-optimised+correct for every non-matching shape
+  (OOB-outside-loop, `charCodeAt(i+1)`, reassigned-recv, mutated-i, shadowed
+  recv, `other.length` bound mismatch).
+- **Byte-identity proof**: decoded WAT of non-matching functions
+  (`oobOutside`, `nonInductionIdx`, `reassignRecv`, `mutateI`) is **identical**
+  between this branch and pristine `origin/main`; only the recognised loop
+  changes (115→90 lines). The pre-existing fast-mode OOB-charCodeAt quirks are
+  unchanged (identical results on baseline). `tsc --noEmit` clean; biome clean.
+  Existing suites (8-file i32/charCodeAt set; 4-file bitwise/string set) show
+  **identical** pass/fail counts vs baseline → zero new failures.

@@ -42,7 +42,7 @@ import { addStringImports, addUnionImports, resolveNativeTypeAnnotation, resolve
 import type { InnerResult } from "./shared.js";
 import { coerceType, compileExpression, ensureAnyHelpers, flushLateImportShifts } from "./shared.js";
 import { isLogicalAssignNamedEvalNameRead, resolveStructNameForExpr } from "./property-access.js";
-import { compileStringBinaryOp } from "./string-ops.js";
+import { compileStringBinaryOp, emitHoistedCharCodeAtRead, matchHoistedCharRead } from "./string-ops.js";
 import { emitAnyEqFromExternTemps, emitLooseEq, emitStrictEq } from "./coercion-engine.js";
 import { compileInstanceOf, compileTypeofComparison } from "./typeof-delete.js";
 
@@ -1580,6 +1580,15 @@ export function compileBinaryExpression(
     // §7.1.7 ToInt32 maps that NaN to 0 only after the surrounding expression
     // has evaluated. Treating `x.charCodeAt(i)` as a direct i32 leaf inside
     // `(a + x.charCodeAt(i)) | 0` would incorrectly preserve `a` for OOB reads.
+    //
+    // #2682 EXCEPTION: inside a recognised canonical read loop, `recv.charCodeAt(i)`
+    // is PROVEN in-bounds (`0 <= i < len`) so it can never return NaN — it is a
+    // genuine i32 leaf (an unsigned 16-bit code unit). `matchHoistedCharRead`
+    // gates this to exactly that proven receiver+index; every other charCodeAt
+    // stays excluded (falls through to `return false`), preserving #1105.
+    if (ts.isCallExpression(inner) && matchHoistedCharRead(fctx, inner)) {
+      return true;
+    }
     if (ts.isBinaryExpression(inner)) {
       const k = inner.operatorToken.kind;
       // `expr | 0` always produces i32 cleanly when its operand does.
@@ -1642,6 +1651,17 @@ export function compileBinaryExpression(
     if (ts.isNumericLiteral(inner)) {
       fctx.body.push({ op: "i32.const", value: Number(inner.text.replace(/_/g, "")) | 0 });
       return;
+    }
+    // #2682: proven-in-bounds `recv.charCodeAt(i)` — emit the direct i32 read
+    // from the hoisted descriptor (no flatten / struct.get / OOB branch / f64
+    // round-trip). This is what keeps the whole `(h*31 + charCodeAt) | 0` chain
+    // in i32 and drops the f64 |0 emulation. Gated by `matchHoistedCharRead`.
+    if (ts.isCallExpression(inner)) {
+      const hoisted = matchHoistedCharRead(fctx, inner);
+      if (hoisted) {
+        emitHoistedCharCodeAtRead(ctx, fctx, hoisted, inner.arguments[0]!);
+        return;
+      }
     }
     if (ts.isBinaryExpression(inner)) {
       const k = inner.operatorToken.kind;

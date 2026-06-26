@@ -13,7 +13,7 @@ import { compileAndEmitToString, emitToString, registerStringHelperEmitters } fr
 import { popBody, pushBody } from "./context/bodies.js";
 import { reportError } from "./context/errors.js";
 import { allocLocal } from "./context/locals.js";
-import type { ClosureInfo, CodegenContext, FunctionContext } from "./context/types.js";
+import type { ClosureInfo, CodegenContext, FunctionContext, HoistedCharRead } from "./context/types.js";
 import { emitThrowTypeError, getFuncParamTypes, noJsHost } from "./expressions/helpers.js";
 import { addStringImports, flatStringType, nativeStringType, resolveIdentifierType, resolveWasmType } from "./index.js";
 import {
@@ -2151,6 +2151,51 @@ function compileStringIntegerArg(ctx: CodegenContext, fctx: FunctionContext, arg
 }
 
 /**
+ * #2682: if `expr` is `recv.charCodeAt(i)` where `recv` is the loop-invariant
+ * receiver and `i` the in-bounds-proven induction variable of an active
+ * canonical string-read loop, return that loop's hoisted-descriptor proof.
+ * Otherwise return null. Both the i32-pure-leaf path (binary-ops.ts) and the
+ * f64 charCodeAt lowering below consult this. The match is deliberately exact —
+ * the argument must be the SAME induction identifier (not `i+1`, not a literal)
+ * so the dropped OOB branch stays sound.
+ */
+export function matchHoistedCharRead(fctx: FunctionContext, expr: ts.Expression): HoistedCharRead | null {
+  const reads = fctx.hoistedCharReads;
+  if (!reads || reads.size === 0) return null;
+  if (!ts.isCallExpression(expr)) return null;
+  const callee = expr.expression;
+  if (!ts.isPropertyAccessExpression(callee) || callee.name.text !== "charCodeAt") return null;
+  if (!ts.isIdentifier(callee.expression)) return null;
+  const entry = reads.get(callee.expression.text);
+  if (!entry) return null;
+  if (expr.arguments.length !== 1) return null;
+  const arg = expr.arguments[0]!;
+  if (!ts.isIdentifier(arg) || arg.text !== entry.indexName) return null;
+  return entry;
+}
+
+/**
+ * #2682: emit the hoisted-descriptor charCodeAt read, leaving an i32 char code
+ * on the stack. The receiver was flattened once before the loop and `i` is
+ * proven `0 <= i < len`, so this is a bare `array.get_u(dataLocal, offLocal + i)`
+ * — no `__str_flatten`, no `.data`/`.off` struct.get reload, no OOB/NaN branch.
+ * Caller must have matched via {@link matchHoistedCharRead}.
+ */
+export function emitHoistedCharCodeAtRead(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  entry: HoistedCharRead,
+  idxArg: ts.Expression,
+): void {
+  fctx.body.push({ op: "local.get", index: entry.dataLocal });
+  fctx.body.push({ op: "local.get", index: entry.offLocal });
+  // The argument is the proven induction var (an i32 local) — emits `local.get`.
+  compileExpression(ctx, fctx, idxArg, { kind: "i32" });
+  fctx.body.push({ op: "i32.add" });
+  fctx.body.push({ op: "array.get_u", typeIdx: ctx.nativeStrDataTypeIdx });
+}
+
+/**
  * Compile a method call on a native string in fast mode.
  * Handles: charCodeAt (inline), charAt, substring, slice (native helpers),
  * and delegates other methods to host via marshal.
@@ -2228,6 +2273,20 @@ export function compileNativeStringMethodCall(
   // ECMA-262 §22.1.3.3: ToIntegerOrInfinity(pos), then return NaN when
   // the resulting position is outside [0, string length).
   if (method === "charCodeAt") {
+    // #2682 fast path: inside a recognised canonical read loop the receiver was
+    // flattened once and the index is proven in-bounds — read directly from the
+    // hoisted descriptor (no flatten / struct.get / NaN branch). This arm is the
+    // f64-consumption case (the i32-pure chain reads it via emitI32PureExpr in
+    // binary-ops.ts). Result is byte-identical to the guarded read on the
+    // in-bounds path, which is the only path the proof admits.
+    if (!receiverOverride) {
+      const hoisted = matchHoistedCharRead(fctx, expr);
+      if (hoisted) {
+        emitHoistedCharCodeAtRead(ctx, fctx, hoisted, expr.arguments[0]!);
+        fctx.body.push({ op: "f64.convert_i32_u" });
+        return { kind: "f64" };
+      }
+    }
     emitReceiver();
     // Flatten to FlatString (handles ConsString → FlatString)
     const flattenIdx = ctx.nativeStrHelpers.get("__str_flatten")!;
