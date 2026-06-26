@@ -791,44 +791,143 @@ function stripUndefinedThrowGuards(code: string): string {
  * This normalizes test262 sources that use escaped keywords as property names
  * (e.g. obj.bre\u0061k → obj.break) so that regex preprocessing works correctly.
  */
+//
+// #2708 — regexp literals must also be preserved verbatim: a `\uNNNN` inside
+// `/.../` is a regexp Unicode escape whose raw text is observable via
+// `RegExp#source` (e.g. `/A/.source === "\\u0041"`). The previous segment
+// scanner only skipped string literals, so it rewrote `/A/` → `/A/` and broke
+// `language/literals/regexp/S7.8.5_A1.1_T1` / `_A2.1_T1`. We now run a small
+// tokenizer that copies string/template literals, line/block comments, and
+// regexp literals through untouched, applying escape resolution only to the
+// remaining code (where escaped identifiers actually appear).
 function resolveUnicodeEscapes(source: string): string {
-  // Split source into string-literal and non-string-literal segments.
-  // We only resolve escapes in non-string segments.
-  const parts: string[] = [];
+  let out = "";
   let i = 0;
-  while (i < source.length) {
-    // Check for string literal start
-    if (source[i] === '"' || source[i] === "'" || source[i] === "`") {
-      const quote = source[i]!;
+  const n = source.length;
+  // The last significant (non-whitespace) token emitted, used to disambiguate a
+  // `/` that begins a regexp literal from a division operator. For a word token
+  // we keep the whole word so keyword checks (return/typeof/…) work; for
+  // punctuation we keep the single char. Literals collapse to "str"/"re".
+  let lastTok = "";
+  // Punctuators after which a `/` starts a regexp (i.e. an expression follows).
+  const REGEX_OK_PUNCT = new Set("([{,;:=!&|?+-*/%^~<>".split(""));
+  // Keywords after which a `/` starts a regexp.
+  const REGEX_OK_KEYWORDS = new Set([
+    "return",
+    "typeof",
+    "instanceof",
+    "in",
+    "of",
+    "new",
+    "delete",
+    "void",
+    "do",
+    "else",
+    "yield",
+    "case",
+    "throw",
+  ]);
+  const isWordChar = (ch: string) => /[A-Za-z0-9_$]/.test(ch);
+  const regexpAllowed = () =>
+    lastTok === "" || (lastTok.length === 1 && REGEX_OK_PUNCT.has(lastTok)) || REGEX_OK_KEYWORDS.has(lastTok);
+
+  while (i < n) {
+    const c = source[i]!;
+
+    // ── String / template literal — copy verbatim ──────────────────────────
+    if (c === '"' || c === "'" || c === "`") {
       let j = i + 1;
-      while (j < source.length) {
+      while (j < n) {
         if (source[j] === "\\") {
-          j += 2; // skip escaped char
+          j += 2;
           continue;
         }
-        if (source[j] === quote) {
+        if (source[j] === c) {
           j++;
           break;
         }
         j++;
       }
-      parts.push(source.slice(i, j)); // push string literal unchanged
+      out += source.slice(i, j);
       i = j;
-    } else {
-      // Non-string segment: find next string literal or end
+      lastTok = "str";
+      continue;
+    }
+
+    // ── Line comment — copy verbatim (not a significant token) ─────────────
+    if (c === "/" && source[i + 1] === "/") {
+      let j = i + 2;
+      while (j < n && source[j] !== "\n") j++;
+      out += source.slice(i, j);
+      i = j;
+      continue;
+    }
+
+    // ── Block comment — copy verbatim ──────────────────────────────────────
+    if (c === "/" && source[i + 1] === "*") {
+      let j = i + 2;
+      while (j < n && !(source[j] === "*" && source[j + 1] === "/")) j++;
+      j = Math.min(n, j + 2);
+      out += source.slice(i, j);
+      i = j;
+      continue;
+    }
+
+    // ── Regexp literal — copy verbatim (track char classes + escapes) ──────
+    if (c === "/" && regexpAllowed()) {
       let j = i + 1;
-      while (j < source.length && source[j] !== '"' && source[j] !== "'" && source[j] !== "`") {
+      let inClass = false;
+      let ok = false;
+      while (j < n) {
+        const d = source[j]!;
+        if (d === "\\") {
+          j += 2;
+          continue;
+        }
+        if (d === "\n") break; // unterminated — not a regexp after all
+        if (d === "[") inClass = true;
+        else if (d === "]") inClass = false;
+        else if (d === "/" && !inClass) {
+          ok = true;
+          j++;
+          break;
+        }
         j++;
       }
-      // Replace \uNNNN in this segment
-      const segment = source
-        .slice(i, j)
-        .replace(/\\u([0-9a-fA-F]{4})/g, (_match, hex) => String.fromCharCode(parseInt(hex, 16)));
-      parts.push(segment);
-      i = j;
+      if (ok) {
+        while (j < n && isWordChar(source[j]!)) j++; // consume flags
+        out += source.slice(i, j);
+        i = j;
+        lastTok = "re";
+        continue;
+      }
+      // Not a well-formed regexp — fall through and treat `/` as a normal char.
     }
+
+    // ── \uNNNN escape — resolve to the encoded character ───────────────────
+    if (c === "\\" && source[i + 1] === "u" && /^[0-9a-fA-F]{4}$/.test(source.slice(i + 2, i + 6))) {
+      out += String.fromCharCode(parseInt(source.slice(i + 2, i + 6), 16));
+      i += 6;
+      lastTok = "id";
+      continue;
+    }
+
+    // ── Ordinary character ─────────────────────────────────────────────────
+    out += c;
+    if (!/\s/.test(c)) {
+      if (isWordChar(c)) {
+        // Accumulate the running word so keyword detection works; reset when the
+        // previous significant token was punctuation or a literal.
+        const prevIsWord =
+          lastTok.length > 0 && lastTok !== "str" && lastTok !== "re" && isWordChar(lastTok[lastTok.length - 1]!);
+        lastTok = prevIsWord ? lastTok + c : c;
+      } else {
+        lastTok = c;
+      }
+    }
+    i++;
   }
-  return parts.join("");
+  return out;
 }
 
 /**

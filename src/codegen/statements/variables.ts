@@ -1052,34 +1052,46 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
         emitCoercedLocalSet(ctx, fctx, localIdx, stackType);
       }
     } else if (wasmType.kind === "externref") {
-      // No initializer: `let x;` / `var x;` — in JS, uninitialized variables
-      // are `undefined`, not `null`. Emit __get_undefined() so that
-      // `x === undefined` works correctly (#737).
-      emitUndefined(ctx, fctx);
-      // #1177: If a closure captured x BEFORE this declaration ran, `localIdx`
-      // is now the boxed ref-cell ref local. Route the init through
-      // `struct.set` on the ref cell so the closure observes the same value.
-      // Without this, the post-fixup `local.set` becomes an `any.convert_extern;
-      // ref.cast null (ref __ref_cell_T)` that traps at runtime ("illegal cast"),
-      // because JS undefined is not a struct ref.
-      const boxedNoInit = fctx.boxedCaptures?.get(name);
-      if (boxedNoInit) {
-        const tmpVal = allocLocal(fctx, `__box_init_tmp_${fctx.locals.length}`, boxedNoInit.valType);
-        fctx.body.push({ op: "local.set", index: tmpVal });
-        fctx.body.push({ op: "local.get", index: localIdx });
-        fctx.body.push({ op: "ref.is_null" });
-        fctx.body.push({
-          op: "if",
-          blockType: { kind: "empty" },
-          then: [] as Instr[],
-          else: [
-            { op: "local.get", index: localIdx } as Instr,
-            { op: "local.get", index: tmpVal } as Instr,
-            { op: "struct.set", typeIdx: boxedNoInit.refCellTypeIdx, fieldIdx: 0 } as Instr,
-          ],
-        });
-      } else {
-        fctx.body.push({ op: "local.set", index: localIdx });
+      // (#2705) A bare `var x;` redeclaration whose slot was already hoisted to
+      // the function scope (and initialized to `undefined` at function entry by
+      // `hoistVarDecl`) is a runtime NO-OP per ECMA-262 §14.3.2.1 — re-emitting
+      // `__get_undefined` here would CLOBBER any value the variable already
+      // holds. Concretely, `for (var x in obj) { var x; … }` writes the
+      // enumerated key into x's slot, then the body's `var x;` redeclaration
+      // would reset it to undefined. Only emit the undefined-init for a FRESH
+      // slot (the genuine first declaration) or a let/const binding leaving the
+      // TDZ; skip it for a var that reused a hoisted local.
+      const isVarRedeclOfHoistedSlot = isVar && existingIdx !== undefined && existingIdx >= fctx.params.length;
+      if (!isVarRedeclOfHoistedSlot) {
+        // No initializer: `let x;` / `var x;` — in JS, uninitialized variables
+        // are `undefined`, not `null`. Emit __get_undefined() so that
+        // `x === undefined` works correctly (#737).
+        emitUndefined(ctx, fctx);
+        // #1177: If a closure captured x BEFORE this declaration ran, `localIdx`
+        // is now the boxed ref-cell ref local. Route the init through
+        // `struct.set` on the ref cell so the closure observes the same value.
+        // Without this, the post-fixup `local.set` becomes an `any.convert_extern;
+        // ref.cast null (ref __ref_cell_T)` that traps at runtime ("illegal cast"),
+        // because JS undefined is not a struct ref.
+        const boxedNoInit = fctx.boxedCaptures?.get(name);
+        if (boxedNoInit) {
+          const tmpVal = allocLocal(fctx, `__box_init_tmp_${fctx.locals.length}`, boxedNoInit.valType);
+          fctx.body.push({ op: "local.set", index: tmpVal });
+          fctx.body.push({ op: "local.get", index: localIdx });
+          fctx.body.push({ op: "ref.is_null" });
+          fctx.body.push({
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [] as Instr[],
+            else: [
+              { op: "local.get", index: localIdx } as Instr,
+              { op: "local.get", index: tmpVal } as Instr,
+              { op: "struct.set", typeIdx: boxedNoInit.refCellTypeIdx, fieldIdx: 0 } as Instr,
+            ],
+          });
+        } else {
+          fctx.body.push({ op: "local.set", index: localIdx });
+        }
       }
     }
     // Set local TDZ flag to 1 (initialized) if this is a hoisted let/const
