@@ -35,6 +35,7 @@ import {
   emitNullGuardedStructGet,
   isProvablyNonNull,
   isSafeBoundsEliminated,
+  tryEmitDeleteAwareDynamicSet,
   typeErrorThrowInstrs,
 } from "../property-access.js";
 import type { InnerResult } from "../shared.js";
@@ -2690,6 +2691,21 @@ function compilePropertyAssignment(
       if (!ctx.fast) fctx.body.push({ op: "f64.convert_i32_s" });
       return ctx.fast ? { kind: "i32" } : { kind: "f64" };
     }
+  }
+
+  // (#2731) Symmetric tombstone-aware WRITE routing. In a `delete`-using module,
+  // any-receiver READS already route through the tombstone-aware host
+  // `__extern_get` (`tryEmitDeleteAwareDynamicGet`); the WRITE must match. Without
+  // this, `o.x = 9` after `delete o.x` takes the native `struct.set` fast-path
+  // below (`resolveStructNameForExpr` resolves the shape-inferred anon struct),
+  // bypassing `_safeSet`'s tombstone-clear — so the re-added key stays suppressed
+  // in `__extern_get` / `__for_in_*` / `__object_keys`. Runs BEFORE the
+  // struct-name resolution so the native struct.set is skipped for `any`
+  // receivers; concrete-typed receivers and reserved/callable props decline.
+  {
+    const dynPropName = ts.isPrivateIdentifier(target.name) ? "__priv_" + target.name.text.slice(1) : target.name.text;
+    const dynSet = tryEmitDeleteAwareDynamicSet(ctx, fctx, target, value, objType, dynPropName);
+    if (dynSet !== undefined) return dynSet;
   }
 
   const typeName = resolveStructNameForExpr(ctx, fctx, target.expression);
