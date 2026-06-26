@@ -962,7 +962,20 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
         const prevElemOverride = ctxAny._i32ElemArrayOverride;
         if (isI32SpecializedArray) ctxAny._i32ElemArrayOverride = true;
         let resultType: ValType | null;
-        const initializerExpectedType = getLocalType(fctx, localIdx) ?? wasmType;
+        // (#2692) If `name` is a closure-captured-mutable boxed BEFORE this
+        // declaration runs — now the common case since #2692 materializes the
+        // ref-cell box eagerly at function-top, but also the #1177 case of a
+        // closure constructed before the decl — then `localIdx` points at the
+        // ref-cell-ref local. The initializer's VALUE type, the type hint, and
+        // the coercion target must all be the box's `valType` (the inner field
+        // type), NOT the box ref type. The box write itself is done by the
+        // `boxedForInit`/`boxedNoInit` `struct.set` paths below; using the box
+        // ref type here would coerce the value f64/externref → ref-cell (garbage
+        // `ref.null; ref.as_non_null` / illegal cast). Computed once, reused.
+        const boxedForInit = fctx.boxedCaptures?.get(name);
+        const initializerExpectedType = boxedForInit
+          ? boxedForInit.valType
+          : (getLocalType(fctx, localIdx) ?? wasmType);
         try {
           resultType = compileExpression(ctx, fctx, decl.initializer, initializerExpectedType);
         } finally {
@@ -985,8 +998,11 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
                 : resultType;
           }
         }
-        // Coerce if the expression produced a type that doesn't match the local
-        const targetType = getLocalType(fctx, localIdx) ?? wasmType;
+        // Coerce if the expression produced a type that doesn't match the local.
+        // (#2692) When boxed, the target is the box's value type — the
+        // `boxedForInit` struct.set path below writes the cell; coercing to the
+        // box ref type here would corrupt the stack.
+        const targetType = boxedForInit ? boxedForInit.valType : (getLocalType(fctx, localIdx) ?? wasmType);
         if (resultType && !valTypesMatch(resultType, targetType)) {
           const bodyLenBeforeCoerce = fctx.body.length;
           coerceType(ctx, fctx, resultType, targetType);
@@ -999,14 +1015,17 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
           }
         }
       }
-      // #1177: If the variable was boxed by a closure constructed BEFORE this
-      // declaration ran (e.g. `function() { f(); }` constructed before
-      // `let x` is reached), `localIdx` already points to a `ref __ref_cell_T`
-      // local and a plain `local.set` would be a type mismatch. Route the
-      // assignment through `struct.set` on the ref cell so post-init mutations
-      // propagate to every closure that captured the same cell.
-      const boxedForInit = fctx.boxedCaptures?.get(name);
-      if (boxedForInit) {
+      // #1177/#2692: If the variable was boxed BEFORE this declaration ran
+      // (a closure constructed earlier, OR #2692 eager function-top boxing),
+      // `localIdx` already points to a `ref __ref_cell_T` local and a plain
+      // `local.set` would be a type mismatch. Route the assignment through
+      // `struct.set` on the ref cell so post-init mutations propagate to every
+      // closure that captured the same cell. (The inner-scope `boxedForInit`
+      // above made the initializer value/coerce box-aware; re-resolve here for
+      // this outer scope.)
+      const boxedForInitStore = fctx.boxedCaptures?.get(name);
+      if (boxedForInitStore) {
+        const boxedForInit = boxedForInitStore;
         // Coerce stack to value type if needed.
         if (!valTypesMatch(stackType, boxedForInit.valType)) {
           coerceType(ctx, fctx, stackType, boxedForInit.valType);

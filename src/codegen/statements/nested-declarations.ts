@@ -1154,11 +1154,79 @@ function annexBBlockNestedEligible(fnDecl: ts.FunctionDeclaration): ts.Block | n
   return block;
 }
 
+/**
+ * (#2692) Eagerly materialize the ref-cell box for each mutable variable
+ * captured by a successfully-hoisted nested `function` declaration.
+ *
+ * Background: a mutable captured variable (written by a nested function) is
+ * boxed into a `struct (field $value (mut T))` so writes propagate across the
+ * scope boundary. Historically the box was created LAZILY at the FIRST
+ * capturing call site (`calls.ts` `nestedFuncCaptures` mutable branch). The
+ * compile-time re-aim of `fctx.localMap`/`fctx.boxedCaptures` is global to the
+ * function context, but the runtime `struct.new` + `local.set` landed in
+ * whatever body buffer was active at that call site. When the first call site
+ * sat inside a conditionally-executed buffer (a destructuring default's
+ * then-branch, any `if`/ternary/`&&` arm) that did NOT run at runtime, the box
+ * was never created — yet every later read had been statically re-aimed to a
+ * `struct.get` on the still-null box → null deref → sNaN/NaN. (Root cause:
+ * #2669 diagnosis.)
+ *
+ * Fix: create the box here, during function-declaration hoisting, where it
+ * lands in the UNCONDITIONAL function-top `fctx.body`. The call site then takes
+ * its existing already-boxed branch (no `struct.new`) because
+ * `fctx.boxedCaptures.has(name)` is already true.
+ *
+ * This is a declaration-side MIRROR of the call-site machinery — it does NOT
+ * widen the set of boxed variables (same `mutable && valType && !alreadyBoxed`
+ * predicate, deduped via `boxedCaptures.has`), it only changes WHEN and INTO
+ * WHICH buffer the box is created. The `__boxed_<name>` naming convention and
+ * the lockstep `boxedCaptures` + `localMap` writes are load-bearing for the
+ * call-site narrow two-signal guard (calls.ts) — preserve them.
+ */
+function emitEagerCaptureBoxes(ctx: CodegenContext, fctx: FunctionContext, funcName: string): void {
+  const caps = ctx.nestedFuncCaptures.get(funcName);
+  if (!caps) return;
+  for (const cap of caps) {
+    // Match the call-site predicate exactly: only mutable value captures with a
+    // resolved value type are boxed. Immutable captures pass by value.
+    if (!cap.mutable || !cap.valType) continue;
+    // Dedup: a sibling nested fn already boxed this name (multi-capture of the
+    // same var), OR the outer slot is itself the canonical cell (#2623
+    // alreadyBoxed — re-boxing would create a cell-of-cell). `boxedCaptures.has`
+    // covers both: alreadyBoxed ⟺ an outer `boxedCaptures` entry exists.
+    if (fctx.boxedCaptures?.has(cap.name)) continue;
+    const refCellTypeIdx = getOrRegisterRefCellType(ctx, cap.valType);
+    // Mirror the call-site alloc: a NON-null `ref` to the cell, `__boxed_`-named.
+    const boxedLocalIdx = allocLocal(fctx, `__boxed_${cap.name}`, {
+      kind: "ref",
+      typeIdx: refCellTypeIdx,
+    });
+    // Box the canonical declaration slot's current value (the hoisted default —
+    // 0.0 / null — for `var`/`let`; the entry value for a param). All later
+    // writes route through the box via `boxedCaptures`, so the end state matches
+    // the lazy path. `local.set` (not `tee`) — the eager site leaves nothing on
+    // the stack; the call site re-reads the box via its already-boxed branch.
+    fctx.body.push({ op: "local.get", index: cap.outerLocalIdx });
+    fctx.body.push({ op: "struct.new", typeIdx: refCellTypeIdx });
+    fctx.body.push({ op: "local.set", index: boxedLocalIdx });
+    fctx.localMap.set(cap.name, boxedLocalIdx);
+    if (!fctx.boxedCaptures) fctx.boxedCaptures = new Map();
+    fctx.boxedCaptures.set(cap.name, { refCellTypeIdx, valType: cap.valType });
+  }
+}
+
 export function hoistFunctionDeclarations(
   ctx: CodegenContext,
   fctx: FunctionContext,
   stmts: ts.NodeArray<ts.Statement> | ts.Statement[],
+  // (#2692) Internal: accumulates every successfully-hoisted nested-function
+  // name across the recursive walk (into if/loop/try blocks). The TOP-LEVEL
+  // call (where this is undefined) runs the eager-capture-box pass ONCE after
+  // the entire recursion completes — see the rationale at the post-pass below.
+  _eagerBoxFuncNames?: Set<string>,
 ): void {
+  const isTopLevelHoist = _eagerBoxFuncNames === undefined;
+  const eagerBoxFuncNames = _eagerBoxFuncNames ?? new Set<string>();
   // (#2068) Phase 0: reserve a correctly-typed bodyless funcMap slot for every
   // direct-sibling function that captures NO outer local, BEFORE compiling any
   // body. Without this a forward sibling reference
@@ -1332,8 +1400,22 @@ export function hoistFunctionDeclarations(
           // Track failed hoist so compileStatement doesn't re-attempt
           if (!ctx.hoistFailedFuncs) ctx.hoistFailedFuncs = new Set();
           ctx.hoistFailedFuncs.add(funcName);
-        } else if (reservedEntry) {
-          ctx.preRegisteredBodyless?.delete(funcName);
+        } else {
+          if (reservedEntry) {
+            ctx.preRegisteredBodyless?.delete(funcName);
+          }
+          // (#2692) Defer eager-box materialization to the post-recursion pass.
+          // Boxing here (inline) would set `fctx.boxedCaptures` BEFORE a
+          // LATER-hoisted sibling that captures the same var is compiled — that
+          // sibling's capture detection would then see the var as `alreadyBoxed`
+          // (#2623), giving it a different lifted signature (cell threaded
+          // directly) than the earlier sibling (cell wrapped), and the call site
+          // re-derives a cell-of-cell (illegal cast). Collecting now and boxing
+          // once AFTER all nested fns are compiled keeps every sibling's
+          // signature consistent (plain mutable capture), then boxes once.
+          // Success path only — the rollback arm above deletes
+          // `nestedFuncCaptures`, so a failed fn is never collected.
+          eagerBoxFuncNames.add(funcName);
         }
       }
     }
@@ -1342,55 +1424,72 @@ export function hoistFunctionDeclarations(
     // even when inside if-branches, try/catch blocks, etc.
     if (ts.isIfStatement(stmt)) {
       if (ts.isBlock(stmt.thenStatement)) {
-        hoistFunctionDeclarations(ctx, fctx, stmt.thenStatement.statements);
+        hoistFunctionDeclarations(ctx, fctx, stmt.thenStatement.statements, eagerBoxFuncNames);
       }
       if (stmt.elseStatement) {
         if (ts.isBlock(stmt.elseStatement)) {
-          hoistFunctionDeclarations(ctx, fctx, stmt.elseStatement.statements);
+          hoistFunctionDeclarations(ctx, fctx, stmt.elseStatement.statements, eagerBoxFuncNames);
         } else if (ts.isIfStatement(stmt.elseStatement)) {
-          hoistFunctionDeclarations(ctx, fctx, [stmt.elseStatement]);
+          hoistFunctionDeclarations(ctx, fctx, [stmt.elseStatement], eagerBoxFuncNames);
         }
       }
     }
     if (ts.isTryStatement(stmt)) {
-      hoistFunctionDeclarations(ctx, fctx, stmt.tryBlock.statements);
+      hoistFunctionDeclarations(ctx, fctx, stmt.tryBlock.statements, eagerBoxFuncNames);
       if (stmt.catchClause) {
-        hoistFunctionDeclarations(ctx, fctx, stmt.catchClause.block.statements);
+        hoistFunctionDeclarations(ctx, fctx, stmt.catchClause.block.statements, eagerBoxFuncNames);
       }
       if (stmt.finallyBlock) {
-        hoistFunctionDeclarations(ctx, fctx, stmt.finallyBlock.statements);
+        hoistFunctionDeclarations(ctx, fctx, stmt.finallyBlock.statements, eagerBoxFuncNames);
       }
     }
     if (ts.isBlock(stmt)) {
-      hoistFunctionDeclarations(ctx, fctx, stmt.statements);
+      hoistFunctionDeclarations(ctx, fctx, stmt.statements, eagerBoxFuncNames);
     }
     // Recurse into loop bodies — function declarations inside loops are hoisted
     // to the enclosing function scope in JS semantics.
     if (ts.isForStatement(stmt) || ts.isWhileStatement(stmt) || ts.isDoStatement(stmt)) {
       if (ts.isBlock(stmt.statement)) {
-        hoistFunctionDeclarations(ctx, fctx, stmt.statement.statements);
+        hoistFunctionDeclarations(ctx, fctx, stmt.statement.statements, eagerBoxFuncNames);
       } else {
-        hoistFunctionDeclarations(ctx, fctx, [stmt.statement]);
+        hoistFunctionDeclarations(ctx, fctx, [stmt.statement], eagerBoxFuncNames);
       }
     }
     if (ts.isForInStatement(stmt) || ts.isForOfStatement(stmt)) {
       if (ts.isBlock(stmt.statement)) {
-        hoistFunctionDeclarations(ctx, fctx, stmt.statement.statements);
+        hoistFunctionDeclarations(ctx, fctx, stmt.statement.statements, eagerBoxFuncNames);
       } else {
-        hoistFunctionDeclarations(ctx, fctx, [stmt.statement]);
+        hoistFunctionDeclarations(ctx, fctx, [stmt.statement], eagerBoxFuncNames);
       }
     }
     if (ts.isSwitchStatement(stmt)) {
       for (const clause of stmt.caseBlock.clauses) {
-        hoistFunctionDeclarations(ctx, fctx, clause.statements);
+        hoistFunctionDeclarations(ctx, fctx, clause.statements, eagerBoxFuncNames);
       }
     }
     if (ts.isLabeledStatement(stmt)) {
       if (ts.isBlock(stmt.statement)) {
-        hoistFunctionDeclarations(ctx, fctx, stmt.statement.statements);
+        hoistFunctionDeclarations(ctx, fctx, stmt.statement.statements, eagerBoxFuncNames);
       } else {
-        hoistFunctionDeclarations(ctx, fctx, [stmt.statement]);
+        hoistFunctionDeclarations(ctx, fctx, [stmt.statement], eagerBoxFuncNames);
       }
+    }
+  }
+
+  // (#2692) Eager-box pass — runs ONCE, at the TOP-LEVEL call, AFTER the entire
+  // recursive hoist has compiled every nested function (in blocks/loops/try
+  // too). Materializing the ref-cell boxes now — not inline during the walk —
+  // guarantees every nested function that captures a given mutable var was
+  // compiled with the SAME (plain-mutable, not `alreadyBoxed`) lifted signature,
+  // so sibling call sites agree on the capture's cell type (no cell-of-cell).
+  // The box `struct.new`/`local.set` lands in the unconditional function-top
+  // `fctx.body` (hoisting never swaps the body buffer), so the box always exists
+  // before any conditionally-executed capturing call site — the bug #2692 fixes.
+  // `emitEagerCaptureBoxes` dedups via `boxedCaptures.has`, so a var captured by
+  // several siblings is boxed exactly once. Root cause: #2669 diagnosis.
+  if (isTopLevelHoist) {
+    for (const funcName of eagerBoxFuncNames) {
+      emitEagerCaptureBoxes(ctx, fctx, funcName);
     }
   }
 }
