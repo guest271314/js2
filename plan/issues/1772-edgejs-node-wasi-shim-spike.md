@@ -12,7 +12,7 @@ task_type: research
 area: host-interop
 language_feature: node-api-compat
 goal: platform
-sprint: 66
+sprint: 67
 es_edition: n/a
 related: [389, 1575, 1766, 2527, 2528, 2624, 2625, 2631, 2632, 2083, 2181, 2634, 2635]
 origin: "Follow-up from PR #1010 review direction; regrounded 2026-06-23 against the landed node:fs/node:process shim work"

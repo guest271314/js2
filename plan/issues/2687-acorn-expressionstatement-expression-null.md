@@ -3,7 +3,7 @@ id: 2687
 title: "acorn parse() — ExpressionStatement.expression is null (parsed Literal not attached to the statement node)"
 status: ready
 assignee: ttraenkler/unassigned
-sprint: 66
+sprint: 67
 created: 2026-06-26
 updated: 2026-06-26
 priority: medium

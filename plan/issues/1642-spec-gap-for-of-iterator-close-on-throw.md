@@ -13,7 +13,7 @@ task_type: bugfix
 area: codegen
 language_feature: iteration
 goal: spec-completeness
-sprint: 66
+sprint: 67
 renumbered_from: 1348
 parent: 1328
 ---

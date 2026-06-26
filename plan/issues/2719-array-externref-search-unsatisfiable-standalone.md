@@ -2,7 +2,7 @@
 id: 2719
 title: "Array indexOf/includes/lastIndexOf on externref elements emit __host_eq/__same_value_zero with no standalone branch"
 status: ready
-sprint: 66
+sprint: 67
 created: 2026-06-26
 updated: 2026-06-26
 priority: medium

@@ -3,7 +3,7 @@ id: 2161
 title: "Standalone RegExp engine conformance residual (~579 tests)"
 status: blocked
 assignee: ttraenkler/sd1
-sprint: 66
+sprint: 67
 created: 2026-06-15
 updated: 2026-06-25
 blocked_on: [2175]

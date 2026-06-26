@@ -2,7 +2,7 @@
 id: 2716
 title: "Linear backend: try/finally with early return/break inlines past the finally block"
 status: ready
-sprint: 66
+sprint: 67
 created: 2026-06-26
 updated: 2026-06-26
 priority: medium

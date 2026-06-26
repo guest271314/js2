@@ -4,7 +4,7 @@ title: "Symbolic function references in WasmGC codegen — retire the late-impor
 status: blocked
 blocked_by: [2167]
 pipeline_unblocked: 1927
-sprint: 66
+sprint: 67
 model: fable
 created: 2026-06-10
 updated: 2026-06-24

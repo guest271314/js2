@@ -2,7 +2,7 @@
 id: 2167
 title: "Fable model disabled — frontier-reasoning work blocked"
 status: blocked
-sprint: 66
+sprint: 67
 created: 2026-06-15
 updated: 2026-06-24
 priority: high

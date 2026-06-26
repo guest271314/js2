@@ -12,7 +12,7 @@ es_edition: 5
 language_feature: property-descriptors
 goal: spec-completeness
 related: [2668, 2580]
-sprint: 66
+sprint: 67
 ---
 # #2680 — ToPropertyDescriptor reads a struct descriptor's attributes own-level only
 
