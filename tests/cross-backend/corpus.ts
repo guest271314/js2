@@ -86,6 +86,40 @@ export const CROSS_BACKEND_CORPUS: readonly CrossBackendProgram[] = [
     ],
   },
   {
+    // #2715 — bitwise ToInt32 (§7.1.6): NaN/±Infinity → 0, large magnitudes wrap
+    // mod 2^32 (never trap). The linear backend used to lower these with the
+    // trapping i32.trunc_f64_s, so `(0/0)|0` trapped instead of returning 0.
+    name: "numeric/bitwise-toint32-nan-wrap",
+    category: "numeric",
+    source: `
+      export function nanOr(): number { return (0 / 0) | 0; }
+      export function infOr(): number { return (1 / 0) | 0; }
+      export function negInfOr(): number { return (-1 / 0) | 0; }
+      export function bigWrap(): number { return 1e20 | 0; }
+      export function plus2to32(): number { return 4294967297 | 0; }
+      export function notNan(): number { return ~(0 / 0); }
+      export function ushrNeg(): number { return (-1 >>> 0) === 4294967295 ? 1 : 0; }
+      export function compoundNan(): number { let x = 5; x |= 0 / 0; return x; }
+    `,
+    calls: [
+      { fn: "nanOr", args: [] },
+      { fn: "infOr", args: [] },
+      { fn: "negInfOr", args: [] },
+      { fn: "bigWrap", args: [] },
+      { fn: "plus2to32", args: [] },
+      { fn: "notNan", args: [] },
+      { fn: "ushrNeg", args: [] },
+      { fn: "compoundNan", args: [] },
+    ],
+  },
+  // NOTE: a Uint8Array ToUint8 store cross-backend entry is deliberately NOT
+  // added here — the WasmGC backend has a separate, pre-existing bug where
+  // `new Uint8Array(1)` element stores skip ToUint8 entirely (`u[0]=257` reads
+  // back 257, `u[0]=NaN` reads back NaN), so the two backends diverge for an
+  // unrelated reason. The linear ToUint8 fix is covered directly against the JS
+  // oracle in tests/issue-2715.test.ts; the WasmGC store bug is tracked
+  // separately (follow-up issue).
+  {
     // Math.trunc is not yet lowered by the linear backend (Unsupported method
     // call: .trunc()). Tracked here so the gap is visible and the flag drops
     // the moment linear gains Math.* support.
