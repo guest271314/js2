@@ -1,0 +1,61 @@
+name: Cross-backend parity (advisory)
+
+# ADVISORY / NON-BLOCKING (#2711).
+#
+# This check runs the #1854 cross-backend differential harness
+# (tests/cross-backend-diff.test.ts): every corpus program is compiled to BOTH
+# the WasmGC/host backend and the linear/standalone backend, and their exported
+# functions' return values are diffed. A host<->standalone DIVERGENCE turns the
+# check red — a visible regression signal that PR-level test262 (which runs one
+# mode) and the single-oracle equivalence suite cannot catch.
+#
+# Why it is intentionally NOT a required check (do not promote without flagging
+# the team):
+#   * It is deliberately absent from the branch-protection required-checks list
+#     (docs/ci-policy.md), so a red result here CANNOT block or wedge the merge
+#     queue.
+#   * It deliberately does NOT run in the `merge_group` context, so it cannot
+#     even appear as a queue gate. (Corollary: do NOT add it to branch
+#     protection while it skips merge_group — a required check that never runs
+#     in the queue would block the queue permanently; see the test262-skip
+#     warning in docs/ci-policy.md.)
+#
+# The harness already baselines known linear gaps via `expectLinearUnsupported`
+# (ratcheted in the corpus), so this is green on main today; it goes red only
+# when a NEW host<->standalone divergence is introduced. Per-method native-arm
+# gaps it documents are tracked as child issues #2715-#2721.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  cross-backend-parity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 25
+
+      - name: Setup pnpm via Corepack
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.30.2 --activate
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Cross-backend differential harness (WasmGC vs linear)
+        # Single-fork keeps peak RAM ~1 GB (same pattern as the equivalence /
+        # linear-tests jobs). A divergence fails this step -> the advisory check
+        # goes red, but is non-required so it never blocks merge.
+        run: |
+          pnpm exec vitest run tests/cross-backend-diff.test.ts \
+            --pool=forks --poolOptions.forks.singleFork=true --no-file-parallelism

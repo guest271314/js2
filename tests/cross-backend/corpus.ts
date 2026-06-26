@@ -271,4 +271,112 @@ export const CROSS_BACKEND_CORPUS: readonly CrossBackendProgram[] = [
     calls: [{ fn: "counter", args: [] }],
     expectLinearUnsupported: true,
   },
+
+  // ── builtin surface (#2711) ────────────────────────────────────────────────
+  // Programs below broaden the differential over the builtin-method surface,
+  // which the original seed corpus did not cover. Entries that compile on BOTH
+  // backends are diffed (and currently AGREE); entries the linear/standalone
+  // backend cannot yet lower are flagged expectLinearUnsupported so the gate
+  // ratchets when the gap closes (see child issues #2715-#2721). Known
+  // host↔standalone DIVERGENCES that compile-but-trap/miscompile on linear
+  // (e.g. trapping `i32.trunc_f64_s` on `NaN|0`, #2715) are intentionally NOT
+  // added here yet — they would make the advisory gate red on main; they are
+  // tracked as child issues and become corpus entries once fixed.
+
+  {
+    // % modulo lowers natively on both backends and agrees with host.
+    name: "numeric/modulo",
+    category: "numeric",
+    source: `
+      export function md(a: number, b: number): number { return a % b; }
+      export function negmod(a: number, b: number): number { return a % b; }
+    `,
+    calls: [
+      { fn: "md", args: [17, 5] },
+      { fn: "negmod", args: [-7, 3] },
+    ],
+  },
+  {
+    // String concat + indexOf lower on both backends and agree with host.
+    name: "string/concat-indexof",
+    category: "string",
+    source: `
+      export function cc(): number { const s = "ab" + "cd"; return s.length; }
+      export function io(): number { const s = "hello"; return s.indexOf("l"); }
+      export function miss(): number { const s = "hello"; return s.indexOf("z"); }
+    `,
+    calls: [
+      { fn: "cc", args: [] },
+      { fn: "io", args: [] },
+      { fn: "miss", args: [] },
+    ],
+  },
+  {
+    // `**` (exponent) is not yet lowered by the linear backend
+    // (Unsupported binary operator: AsteriskAsteriskToken). Ratchet entry.
+    name: "numeric/exponent",
+    category: "numeric",
+    source: `
+      export function pw(a: number, b: number): number { return a ** b; }
+    `,
+    calls: [{ fn: "pw", args: [2, 10] }],
+    expectLinearUnsupported: true,
+  },
+  {
+    // Math.* static methods are not yet lowered by the linear backend
+    // (Unsupported method call: .max()/.floor()/…). Ratchet entry.
+    name: "math/builtins",
+    category: "numeric",
+    source: `
+      export function mx(): number { return Math.max(3, 7, 2); }
+      export function ab(x: number): number { return Math.abs(x); }
+      export function fl(x: number): number { return Math.floor(x); }
+    `,
+    calls: [
+      { fn: "mx", args: [] },
+      { fn: "ab", args: [-5] },
+      { fn: "fl", args: [3.7] },
+    ],
+    expectLinearUnsupported: true,
+  },
+  {
+    // Array search methods (indexOf/includes/lastIndexOf) are not lowered by
+    // the linear backend; in standalone the externref-element arm emits an
+    // unsatisfiable host import (#2719). Ratchet entry.
+    name: "array/search-methods",
+    category: "array",
+    source: `
+      export function idx(): number { const a = [10, 20, 30, 40]; return a.indexOf(30); }
+      export function inc(): number { const a = [1, 2, 3]; return a.includes(2) ? 1 : 0; }
+      export function last(): number { const a = [5, 6, 5, 7]; return a.lastIndexOf(5); }
+    `,
+    calls: [
+      { fn: "idx", args: [] },
+      { fn: "inc", args: [] },
+      { fn: "last", args: [] },
+    ],
+    expectLinearUnsupported: true,
+  },
+  {
+    // Array.prototype.flat / flatMap are host-import-only with no standalone
+    // native arm (#2717); the linear backend has no lowering at all. Ratchet.
+    name: "array/flat-flatMap",
+    category: "array",
+    source: `
+      export function fl(): number { const a = [[1, 2], [3, 4]]; const b = a.flat(); let t = 0; for (const x of b) t += x; return t; }
+    `,
+    calls: [{ fn: "fl", args: [] }],
+    expectLinearUnsupported: true,
+  },
+  {
+    // Higher-order array methods (map/filter/reduce with a closure callback)
+    // are not yet lowered by the linear backend. Ratchet entry.
+    name: "array/higher-order",
+    category: "array",
+    source: `
+      export function r(): number { const a = [1, 2, 3, 4]; return a.reduce((s, x) => s + x, 0); }
+    `,
+    calls: [{ fn: "r", args: [] }],
+    expectLinearUnsupported: true,
+  },
 ];
