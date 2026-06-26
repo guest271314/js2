@@ -12269,6 +12269,19 @@ function collectExternDeclarations(
       //   • WASI target → __wasi_*  syscall helpers (#1035)
       //   • non-WASI + allowFs → __node_fs_* JS-host imports (#1491)
       if (ctx.wasiNodeFsFuncs.has(name) && (ctx.wasi || ctx.allowFs)) continue;
+      // #2696 — raw-WASI intrinsics (#2657): the `wasm:memory` accessors
+      // (store32/load32/store8/load8) lower to INLINE memory ops and the
+      // `wasi_snapshot_preview1` fd funcs (fd_read/fd_write) bind to the real
+      // WASI import via registerWasiImports. preprocessImports rewrites BOTH
+      // import forms into bare `declare function` stubs that lose their module
+      // origin, so without this guard they would re-register here as `env.*`
+      // host imports — spuriously firing the "not on the dual-mode allowlist"
+      // drop warning on the clean nm_wasi.ts compile, and (on the npm/bun path,
+      // where the stub survives) leaking an unsatisfiable `env.store32` import
+      // that breaks wasmtime instantiation (loopdive/js2#389 bug 1).
+      // tryCompileRawWasiCall (raw-wasi-api.ts) already handles every call site,
+      // so skip the stub entirely under `--target wasi`.
+      if (ctx.wasi && (ctx.wasiMemAccessors.has(name) || ctx.wasiRawImports.has(name))) continue;
       // #1663: parseInt / parseFloat have no JS host under WASI / standalone —
       // skip the stub so the unified-collector finalize can emit the WasmGC
       // native scanners (registered under the same funcMap names) instead.
