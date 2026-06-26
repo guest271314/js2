@@ -9,16 +9,62 @@ import type { Instr, ValType } from "../ir/types.js";
 import { reportError } from "./context/errors.js";
 import { allocLocal, allocTempLocal, releaseTempLocal } from "./context/locals.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
+import { isStrictContext } from "./expressions/assignment.js";
 import { ensureLateImport, flushLateImportShifts, shiftLateImportIndices } from "./expressions/late-imports.js";
 import { resolveStructName } from "./expressions/misc.js";
 import { addUnionImports, parseRegExpLiteral, resolveWasmType } from "./index.js";
+import { emitExternrefDestructureGuard } from "./destructuring-params.js";
+import { stringConstantExternrefInstrs } from "./native-strings.js";
 import { compileStandaloneRegExpLiteral } from "./regexp-standalone.js";
-import { addImport } from "./registry/imports.js";
+import { addImport, addStringConstantGlobal, ensureExnTag } from "./registry/imports.js";
 import { addFuncType } from "./registry/types.js";
 import type { InnerResult } from "./shared.js";
 import { compileExpression, ensureAnyHelpers, isAnyValue } from "./shared.js";
 import { compileStringLiteral } from "./string-ops.js";
 import { emitDynamicWithDelete, findWithBinding, resolveWithBinding } from "./with-scope.js";
+
+/**
+ * (#2703) Emit an unconditional `throw` of a string-valued exception, used for
+ * the spec error cases of `delete` (§13.5.1.2): a super reference, a null/
+ * undefined base, or a strict-mode non-configurable property. The test262
+ * `assert.throws` harness catches *any* thrown value (the expected constructor
+ * is stripped during the source transform), and a string carried on the
+ * standard exception tag is catchable in both the JS-host and standalone lanes
+ * (the same pattern `object-runtime.ts` uses for descriptor TypeErrors). After
+ * the throw the rest of the enclosing expression is unreachable, so the
+ * `delete` expression's nominal i32 result is supplied stack-polymorphically.
+ */
+function deleteThrowInstrs(ctx: CodegenContext, message: string): Instr[] {
+  const tagIdx = ensureExnTag(ctx);
+  addStringConstantGlobal(ctx, message);
+  return [...stringConstantExternrefInstrs(ctx, message), { op: "throw", tagIdx }];
+}
+
+function emitDeleteThrow(ctx: CodegenContext, fctx: FunctionContext, message: string): void {
+  for (const instr of deleteThrowInstrs(ctx, message)) fctx.body.push(instr);
+}
+
+/**
+ * (#2703) Strict-mode wrapper around a `__delete_property` result (an i32 on
+ * the stack). In strict mode a `false` result — a non-configurable own
+ * property whose delete was refused — is a TypeError (§13.5.1.2 step 6.b); in
+ * sloppy mode the boolean result is preserved unchanged. The (truthy) result
+ * is left on the stack when no throw occurs. A no-op outside strict context.
+ */
+function emitStrictDeleteCheck(ctx: CodegenContext, fctx: FunctionContext, expr: ts.DeleteExpression): void {
+  if (!isStrictContext(expr)) return;
+  const resLocal = allocLocal(fctx, `__del_res_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "local.set", index: resLocal });
+  fctx.body.push({ op: "local.get", index: resLocal });
+  fctx.body.push({ op: "i32.eqz" } as Instr);
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: deleteThrowInstrs(ctx, "TypeError: Cannot delete non-configurable property in strict mode"),
+    else: [],
+  } as Instr);
+  fctx.body.push({ op: "local.get", index: resLocal });
+}
 
 // ── Delete expression ─────────────────────────────────────────────────
 
@@ -29,25 +75,49 @@ import { emitDynamicWithDelete, findWithBinding, resolveWithBinding } from "./wi
  * - f64: NaN (chosen as sentinel since deleted numeric props return undefined -> NaN in numeric context)
  * - i32: 0
  */
-function emitDeleteSentinel(fctx: FunctionContext, fieldType: ValType): void {
+function deleteSentinelInstr(fieldType: ValType): Instr {
   switch (fieldType.kind) {
     case "ref":
     case "ref_null":
-      fctx.body.push({ op: "ref.null", typeIdx: (fieldType as { typeIdx: number }).typeIdx });
-      break;
-    case "externref":
-      fctx.body.push({ op: "ref.null.extern" });
-      break;
+      return { op: "ref.null", typeIdx: (fieldType as { typeIdx: number }).typeIdx };
     case "f64":
-      fctx.body.push({ op: "f64.const", value: NaN });
-      break;
+      return { op: "f64.const", value: NaN };
     case "i32":
-      fctx.body.push({ op: "i32.const", value: 0 });
-      break;
+      return { op: "i32.const", value: 0 };
+    // externref and any other shape fall through to the null-extern sentinel.
     default:
-      fctx.body.push({ op: "ref.null.extern" });
-      break;
+      return { op: "ref.null.extern" };
   }
+}
+
+/**
+ * (#2703) Emit the tail of a struct-field `delete` once `__delete_property`'s
+ * i32 result is stored in `resLocal`: clear the struct field to its undefined
+ * sentinel **only when the delete succeeded** (so a refused non-configurable
+ * delete leaves the field — and its value — intact, §13.5.1.2 / OrdinaryDelete),
+ * raise a TypeError in strict mode on a refused delete, and leave the boolean
+ * result on the stack. `clearField` are the instrs that perform the struct.set.
+ */
+function emitStructDeleteOutcome(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.DeleteExpression,
+  resLocal: number,
+  clearField: Instr[],
+): void {
+  fctx.body.push({ op: "local.get", index: resLocal });
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: clearField, else: [] } as Instr);
+  if (isStrictContext(expr)) {
+    fctx.body.push({ op: "local.get", index: resLocal });
+    fctx.body.push({ op: "i32.eqz" } as Instr);
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "empty" },
+      then: deleteThrowInstrs(ctx, "TypeError: Cannot delete non-configurable property in strict mode"),
+      else: [],
+    } as Instr);
+  }
+  fctx.body.push({ op: "local.get", index: resLocal });
 }
 
 /**
@@ -82,6 +152,20 @@ export function compileDeleteExpression(
         : ts.isNonNullExpression(inner)
           ? inner.expression
           : (inner as ts.TypeAssertion).expression;
+  }
+
+  // (#2703) `delete super.x` / `delete super[k]` is ALWAYS a ReferenceError
+  // (§13.5.1.2 step 5.b: IsSuperReference(ref) ⇒ throw ReferenceError). It is
+  // detectable syntactically, so emit an unconditional throw. The restriction
+  // on the super base is enforced here, when the delete is evaluated — not
+  // before — so a null / uninitialized super base still reaches this throw
+  // (super-property-null-base.js, super-property-uninitialized-this.js).
+  if (
+    (ts.isPropertyAccessExpression(inner) || ts.isElementAccessExpression(inner)) &&
+    inner.expression.kind === ts.SyntaxKind.SuperKeyword
+  ) {
+    emitDeleteThrow(ctx, fctx, "ReferenceError: 'super' property cannot be deleted");
+    return { kind: "i32" };
   }
 
   if (ts.isIdentifier(inner)) {
@@ -164,13 +248,15 @@ export function compileDeleteExpression(
         const fieldIdx = fields.findIndex((f) => f.name === fieldName);
         if (fieldIdx !== -1 && fields[fieldIdx]!.mutable) {
           const fieldType = fields[fieldIdx]!.type;
-          // (#1334) Compile the receiver once, save to a local, then both
-          //   (a) set the struct field to a sentinel (legacy fast-path), and
-          //   (b) clear any sidecar descriptor entry via `__delete_property`.
-          // Without (b), `Object.defineProperty(obj, "x", { configurable: true })`
-          // (which stores a descriptor-only entry in `_wasmPropDescs`) would
-          // leave `obj.hasOwnProperty("x")` returning true after `delete obj.x`,
-          // because `__hasOwnProperty` consults the descriptor map.
+          // (#1334 / #2703) Compile the receiver once, save to a local, then
+          //   (a) clear any sidecar descriptor entry via `__delete_property`
+          //       (which reports configurability), and
+          //   (b) reset the struct field to its undefined sentinel — but ONLY
+          //       when the delete actually succeeds, so a refused
+          //       non-configurable delete leaves the field's value intact
+          //       (§13.5.1.2 / OrdinaryDelete). Without (a), `Object.define-
+          //       Property(obj, "x", { configurable: true })` would leave
+          //       `obj.hasOwnProperty("x")` true after `delete obj.x`.
           const recvType = compileExpression(ctx, fctx, inner.expression);
           if (!recvType) {
             fctx.body.push({ op: "i32.const", value: 1 });
@@ -180,53 +266,59 @@ export function compileDeleteExpression(
           const recvLocal = allocLocal(fctx, `__del_recv_${fctx.locals.length}`, recvType);
           fctx.body.push({ op: "local.set", index: recvLocal });
 
-          // (a) struct.set with sentinel — restores the field to undefined.
-          fctx.body.push({ op: "local.get", index: recvLocal });
-          emitDeleteSentinel(fctx, fieldType);
-          fctx.body.push({ op: "struct.set", typeIdx: structTypeIdx, fieldIdx });
+          // Instrs that reset the field to undefined (run only on success).
+          const clearField: Instr[] = [
+            { op: "local.get", index: recvLocal },
+            deleteSentinelInstr(fieldType),
+            { op: "struct.set", typeIdx: structTypeIdx, fieldIdx },
+          ];
 
-          // (b) Sidecar / descriptor-map cleanup. Push receiver as externref +
-          // key as externref, then call __delete_property and RETURN its result
-          // (#1821). The helper reports `false` (0) for a non-configurable
-          // descriptor entry (ECMA-262 §13.5.1 step 5) and `true` (1) otherwise
-          // — including a plain struct field with no descriptor (deletable).
-          // The previous code dropped the result and hardcoded `true`, so
-          // `delete obj.nonConfigurable` wrongly returned `true`.
-          fctx.body.push({ op: "local.get", index: recvLocal });
-          if (recvType.kind === "ref" || recvType.kind === "ref_null") {
-            fctx.body.push({ op: "extern.convert_any" } as Instr);
-          } else if (recvType.kind !== "externref") {
-            // Non-struct numeric/bool — skip sidecar cleanup. struct.set above
-            // suffices and __delete_property doesn't apply.
-            fctx.body.push({ op: "drop" });
+          if (recvType.kind !== "ref" && recvType.kind !== "ref_null" && recvType.kind !== "externref") {
+            // Non-struct numeric/bool receiver (defensive) — no sidecar applies;
+            // just clear the field and report success.
+            for (const instr of clearField) fctx.body.push(instr);
             fctx.body.push({ op: "i32.const", value: 1 });
             return { kind: "i32" };
           }
-          const keyResult = compileStringLiteral(ctx, fctx, fieldName, inner.name);
-          if (keyResult) {
-            const delIdx = ensureLateImport(
-              ctx,
-              "__delete_property",
-              [{ kind: "externref" }, { kind: "externref" }],
-              [{ kind: "i32" }],
-            );
-            flushLateImportShifts(ctx, fctx);
-            if (delIdx !== undefined) {
-              fctx.body.push({ op: "call", funcIdx: delIdx });
-              // Leave __delete_property's i32 result on the stack as the
-              // `delete` expression value (spec-correct configurability check).
-              return { kind: "i32" };
-            }
-            // No host import (standalone): drop receiver + key; struct.set
-            // already cleared the field, so report `true`.
-            fctx.body.push({ op: "drop" });
-            fctx.body.push({ op: "drop" });
-          } else {
-            // String literal failed (shouldn't happen for a static field name);
-            // discard the receiver/key and continue.
-            fctx.body.push({ op: "drop" });
+
+          // (a) Push receiver as externref + key, then call __delete_property.
+          fctx.body.push({ op: "local.get", index: recvLocal });
+          if (recvType.kind === "ref" || recvType.kind === "ref_null") {
+            fctx.body.push({ op: "extern.convert_any" } as Instr);
           }
-          fctx.body.push({ op: "i32.const", value: 1 });
+          const keyResult = compileStringLiteral(ctx, fctx, fieldName, inner.name);
+          if (!keyResult) {
+            // String literal failed (shouldn't happen for a static field name);
+            // drop the receiver, clear the field, report `true`.
+            fctx.body.push({ op: "drop" });
+            for (const instr of clearField) fctx.body.push(instr);
+            fctx.body.push({ op: "i32.const", value: 1 });
+            return { kind: "i32" };
+          }
+          const delIdx = ensureLateImport(
+            ctx,
+            "__delete_property",
+            [{ kind: "externref" }, { kind: "externref" }],
+            [{ kind: "i32" }],
+          );
+          flushLateImportShifts(ctx, fctx);
+          if (delIdx === undefined) {
+            // No host import (standalone): drop receiver + key; clear the field
+            // unconditionally (no configurability info) and report `true`.
+            fctx.body.push({ op: "drop" });
+            fctx.body.push({ op: "drop" });
+            for (const instr of clearField) fctx.body.push(instr);
+            fctx.body.push({ op: "i32.const", value: 1 });
+            return { kind: "i32" };
+          }
+          fctx.body.push({ op: "call", funcIdx: delIdx });
+          // (b) Clear the field on success; strict-mode refusal ⇒ TypeError;
+          // leave __delete_property's boolean result as the expression value.
+          {
+            const resLocal = allocLocal(fctx, `__del_res_${fctx.locals.length}`, { kind: "i32" });
+            fctx.body.push({ op: "local.set", index: resLocal });
+            emitStructDeleteOutcome(ctx, fctx, expr, resLocal, clearField);
+          }
           return { kind: "i32" };
         }
       }
@@ -248,13 +340,10 @@ export function compileDeleteExpression(
         const fieldIdx = fields.findIndex((f) => f.name === fieldName);
         if (fieldIdx !== -1 && fields[fieldIdx]!.mutable) {
           const fieldType = fields[fieldIdx]!.type;
-          // (#1821) Mirror the property-access arm above: clear the struct
-          // field AND the sidecar/descriptor entry, then return
-          // __delete_property's result. The previous element-access arm only
-          // did the struct.set + hardcoded `true`, so `delete obj["x"]`
-          // diverged from `delete obj.x` — it left the `Object.defineProperty`
-          // descriptor in place (`hasOwnProperty("x")` stayed true) and
-          // reported `true` even for a non-configurable property.
+          // (#1821 / #2703) Mirror the property-access arm: clear the sidecar/
+          // descriptor entry via __delete_property, reset the struct field to
+          // its sentinel ONLY on a successful delete, and throw in strict mode
+          // on a refused non-configurable delete. Returns the boolean result.
           const recvType = compileExpression(ctx, fctx, inner.expression);
           if (!recvType) {
             fctx.body.push({ op: "i32.const", value: 1 });
@@ -263,39 +352,49 @@ export function compileDeleteExpression(
           const recvLocal = allocLocal(fctx, `__del_recv_${fctx.locals.length}`, recvType);
           fctx.body.push({ op: "local.set", index: recvLocal });
 
-          // (a) struct.set with sentinel — restores the field to undefined.
-          fctx.body.push({ op: "local.get", index: recvLocal });
-          emitDeleteSentinel(fctx, fieldType);
-          fctx.body.push({ op: "struct.set", typeIdx: structTypeIdx, fieldIdx });
+          const clearField: Instr[] = [
+            { op: "local.get", index: recvLocal },
+            deleteSentinelInstr(fieldType),
+            { op: "struct.set", typeIdx: structTypeIdx, fieldIdx },
+          ];
 
-          // (b) sidecar / descriptor-map cleanup, returning the helper result.
-          fctx.body.push({ op: "local.get", index: recvLocal });
-          if (recvType.kind === "ref" || recvType.kind === "ref_null") {
-            fctx.body.push({ op: "extern.convert_any" } as Instr);
-          } else if (recvType.kind !== "externref") {
-            fctx.body.push({ op: "drop" });
+          if (recvType.kind !== "ref" && recvType.kind !== "ref_null" && recvType.kind !== "externref") {
+            for (const instr of clearField) fctx.body.push(instr);
             fctx.body.push({ op: "i32.const", value: 1 });
             return { kind: "i32" };
           }
-          const keyResult = compileStringLiteral(ctx, fctx, fieldName, inner.argumentExpression);
-          if (keyResult) {
-            const delIdx = ensureLateImport(
-              ctx,
-              "__delete_property",
-              [{ kind: "externref" }, { kind: "externref" }],
-              [{ kind: "i32" }],
-            );
-            flushLateImportShifts(ctx, fctx);
-            if (delIdx !== undefined) {
-              fctx.body.push({ op: "call", funcIdx: delIdx });
-              return { kind: "i32" };
-            }
-            fctx.body.push({ op: "drop" });
-            fctx.body.push({ op: "drop" });
-          } else {
-            fctx.body.push({ op: "drop" });
+
+          fctx.body.push({ op: "local.get", index: recvLocal });
+          if (recvType.kind === "ref" || recvType.kind === "ref_null") {
+            fctx.body.push({ op: "extern.convert_any" } as Instr);
           }
-          fctx.body.push({ op: "i32.const", value: 1 });
+          const keyResult = compileStringLiteral(ctx, fctx, fieldName, inner.argumentExpression);
+          if (!keyResult) {
+            fctx.body.push({ op: "drop" });
+            for (const instr of clearField) fctx.body.push(instr);
+            fctx.body.push({ op: "i32.const", value: 1 });
+            return { kind: "i32" };
+          }
+          const delIdx = ensureLateImport(
+            ctx,
+            "__delete_property",
+            [{ kind: "externref" }, { kind: "externref" }],
+            [{ kind: "i32" }],
+          );
+          flushLateImportShifts(ctx, fctx);
+          if (delIdx === undefined) {
+            fctx.body.push({ op: "drop" });
+            fctx.body.push({ op: "drop" });
+            for (const instr of clearField) fctx.body.push(instr);
+            fctx.body.push({ op: "i32.const", value: 1 });
+            return { kind: "i32" };
+          }
+          fctx.body.push({ op: "call", funcIdx: delIdx });
+          {
+            const resLocal = allocLocal(fctx, `__del_res_${fctx.locals.length}`, { kind: "i32" });
+            fctx.body.push({ op: "local.set", index: resLocal });
+            emitStructDeleteOutcome(ctx, fctx, expr, resLocal, clearField);
+          }
           return { kind: "i32" };
         }
       }
@@ -322,12 +421,20 @@ export function compileDeleteExpression(
     if (recvType.kind === "ref" || recvType.kind === "ref_null") {
       fctx.body.push({ op: "extern.convert_any" } as Instr);
     } else if (recvType.kind !== "externref") {
-      // Other shapes (f64/i32) — drop and return false; primitives have no
-      // own properties to delete.
+      // Other shapes (f64/i32) — drop and return true; primitives are
+      // object-coercible (RequireObjectCoercible passes) and a wrapper has no
+      // own property to delete, so the delete vacuously succeeds.
       fctx.body.push({ op: "drop" });
       fctx.body.push({ op: "i32.const", value: 1 });
       return { kind: "i32" };
     }
+
+    // (#2703) Stash the receiver so we can run RequireObjectCoercible
+    // (§13.5.1.2 step 5.b) before the property delete and re-push it for the
+    // helper call. The base and key are both evaluated first (per the
+    // Reference-evaluation order), then the coercibility check throws.
+    const recvLocal = allocLocal(fctx, `__del_recv_${fctx.locals.length}`, { kind: "externref" });
+    fctx.body.push({ op: "local.set", index: recvLocal });
 
     // Compile the key as externref. Property access uses the static name;
     // element access uses the bracket expression (any externref).
@@ -335,7 +442,7 @@ export function compileDeleteExpression(
       const keyName = ts.isPrivateIdentifier(inner.name) ? `__priv_${inner.name.text.slice(1)}` : inner.name.text;
       const keyResult = compileStringLiteral(ctx, fctx, keyName, inner.name);
       if (!keyResult) {
-        fctx.body.push({ op: "drop" });
+        // Receiver already stashed off-stack — stack is clean.
         fctx.body.push({ op: "i32.const", value: 1 });
         return { kind: "i32" };
       }
@@ -344,7 +451,6 @@ export function compileDeleteExpression(
       // runtime helper can stringify or treat as Symbol.
       const keyType = compileExpression(ctx, fctx, inner.argumentExpression, { kind: "externref" });
       if (keyType === null) {
-        fctx.body.push({ op: "drop" });
         fctx.body.push({ op: "i32.const", value: 1 });
         return { kind: "i32" };
       }
@@ -356,10 +462,34 @@ export function compileDeleteExpression(
         // returning true. Tests that rely on numeric keys via element
         // access will still hit the struct-field arm above when applicable.
         fctx.body.push({ op: "drop" });
-        fctx.body.push({ op: "drop" });
         fctx.body.push({ op: "i32.const", value: 1 });
         return { kind: "i32" };
       }
+    }
+    const keyLocal = allocLocal(fctx, `__del_key_${fctx.locals.length}`, { kind: "externref" });
+    fctx.body.push({ op: "local.set", index: keyLocal });
+
+    // (#2703) RequireObjectCoercible(base) — `delete null.x` / `delete
+    // undefined[k]` (and any unresolvable base such as `Object[0][0]`) throw a
+    // TypeError (§13.5.1.2 step 5.b → ToObject). The guard only fires when the
+    // receiver is actually null/undefined, so a normal delete is unaffected.
+    // EXCEPTION: a `this` base is excluded — top-level `this` is the global
+    // object (object-coercible), but the compiler currently represents it as a
+    // null/undefined externref, which would make the guard fire spuriously on
+    // `delete this.x` (a legal sloppy-mode delete that returns `true`). Unwrap
+    // parens / casts on the receiver so `delete (this).x` / `delete (this as
+    // any).x` are excluded too.
+    let recvCore: ts.Expression = inner.expression;
+    while (
+      ts.isParenthesizedExpression(recvCore) ||
+      ts.isAsExpression(recvCore) ||
+      ts.isNonNullExpression(recvCore) ||
+      ts.isTypeAssertionExpression(recvCore)
+    ) {
+      recvCore = recvCore.expression;
+    }
+    if (recvCore.kind !== ts.SyntaxKind.ThisKeyword) {
+      emitExternrefDestructureGuard(ctx, fctx, recvLocal);
     }
 
     const delIdx = ensureLateImport(
@@ -371,12 +501,15 @@ export function compileDeleteExpression(
     flushLateImportShifts(ctx, fctx);
     if (delIdx === undefined) {
       // Registration failed for some reason — preserve the legacy stub.
-      fctx.body.push({ op: "drop" });
-      fctx.body.push({ op: "drop" });
       fctx.body.push({ op: "i32.const", value: 1 });
       return { kind: "i32" };
     }
+    fctx.body.push({ op: "local.get", index: recvLocal });
+    fctx.body.push({ op: "local.get", index: keyLocal });
     fctx.body.push({ op: "call", funcIdx: delIdx });
+    // (#2703) Strict mode: a failed delete (result 0 — a non-configurable own
+    // property) is a TypeError instead of a `false` result (§13.5.1.2 step 6.b).
+    emitStrictDeleteCheck(ctx, fctx, expr);
     return { kind: "i32" };
   }
 
