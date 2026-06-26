@@ -176,7 +176,11 @@ function classifyImport(name: string, mod: WasmModule): ImportIntent {
     const payload = name.slice("__nodefn__".length);
     const sepIdx = payload.indexOf("__");
     if (sepIdx > 0) {
-      const moduleName = payload.slice(0, sepIdx);
+      // #2701 — decode the `/`→`$` encoding applied to slashed module names
+      // (e.g. `fs$promises` → `fs/promises`) so the runtime resolves the real
+      // `require("fs/promises")`. `$` never appears in a Node module name, so the
+      // decode is unambiguous.
+      const moduleName = payload.slice(0, sepIdx).replace(/\$/g, "/");
       const fnName = payload.slice(sepIdx + 2);
       if (fnName.length > 0) {
         return { type: "node_builtin_fn", moduleName, name: fnName };
