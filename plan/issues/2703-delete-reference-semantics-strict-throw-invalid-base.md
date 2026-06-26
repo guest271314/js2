@@ -1,7 +1,7 @@
 ---
 id: 2703
 title: "delete reference semantics: strict-mode TypeError throws, null/undefined base TypeError, super-property ReferenceError"
-status: ready
+status: done
 sprint: 67
 goal: test262-conformance
 feasibility: medium
@@ -12,6 +12,38 @@ language_feature: delete
 task_type: bug
 created: 2026-06-26
 updated: 2026-06-26
+completed: 2026-06-26
+assignee: ttraenkler/dev1
+---
+
+## Resolution (2026-06-26)
+
+The **throw semantics** that name this issue — strict-mode TypeError, null/
+undefined base TypeError, super-property ReferenceError — are implemented in
+`src/codegen/typeof-delete.ts` (ECMA-262 §13.5.1.2). 14 of the 28 listed tests
+now pass; the delete category moved 41 → 55 with **0 regressions** (verified
+against the test262 baseline, incl. `built-ins/Object/defineProperty/`).
+
+**Fixed (throw cases):**
+- super: `super-property.js`, `super-property-method.js`,
+  `super-property-null-base.js`, `super-property-uninitialized-this.js`
+- null/undefined base: `member-computed-reference-null.js`,
+  `member-identifier-reference-null.js`,
+  `member-computed-reference-undefined.js`,
+  `member-identifier-reference-undefined.js`,
+  `delete-unresolvable-base-object-reference-throws-typeerror.js`
+- strict non-configurable: `11.4.1-4.a-9-s.js`, `11.4.4-4.a-3-s.js`,
+  `11.4.1-4-a-1-s.js`, `11.4.1-4.a-3-s.js`, `11.4.1-4.a-8-s.js`
+
+Also makes the struct-field clobber conditional on a *successful* delete, so a
+refused non-configurable delete leaves the field value intact (latent sloppy
+bug, e.g. `11.4.1-4-a-1-s`'s `obj.prop === 'abc'` post-throw assert).
+
+**Deferred to #2726** (non-throw concerns, each a distinct subsystem):
+sloppy unresolvable-identifier → true; sloppy global-object model
+(`delete this.y`, implicit globals, ReferenceError-after-delete); hasOwnProperty
+false after a configurable defineProperty delete; non-configurable accessor
+descriptor; mapped-arguments delete; preventExtensions; prototype-chain read.
 ---
 # #2703 — delete reference semantics: strict-mode throws, null base, super property
 
