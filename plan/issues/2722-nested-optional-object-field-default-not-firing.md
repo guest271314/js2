@@ -1,12 +1,13 @@
 ---
 id: 2722
-title: "Nested OPTIONAL object-field binding default not firing — externref field + f64 struct-getter can't signal field-absent"
-status: ready
+title: "Nested OPTIONAL object-field binding default not firing — Path A INVALIDATED, needs substrate re-spec"
+status: blocked
 created: 2026-06-26
 updated: 2026-06-26
 priority: medium
 feasibility: hard
 reasoning_effort: high
+needs_arch_spec: true
 task_type: fix
 area: codegen, type-resolver
 language_feature: destructuring, optional-properties
@@ -14,9 +15,53 @@ goal: test262-conformance
 sprint: 67
 parent: 1556
 related: [1542, 1543, 1544, 1550, 1556]
-owner_role: senior-developer
+owner_role: architect
 ---
 # #2722 — Nested optional object-field destructuring default not firing
+
+## Path A INVALIDATED — floor-unsafe (2026-06-26, sd-accessor)
+
+> **The architect's "two small edits" Path A prototype is INVALID. It validated
+> 4 synthetic repros but BREAKS the dstr floor in every configuration. Routed
+> back to the architect for a genuine substrate re-spec (status: blocked,
+> needs_arch_spec). PR #2145 was closed.**
+
+Verified with a bounded **1,660-file object-pattern dstr sweep** (for-of /
+for-await-of / variable / class / function / arrow dstr families) diffed against
+the merged baseline, with a per-edit bisection:
+
+| Config | Net | Regression cluster |
+|---|---|---|
+| **Both edits** (the committed PR #2145) | **-38** (44 regr / 6 impr) | `*obj-ptrn-prop-obj-value-null` + `*dflt-obj-ptrn-prop-obj-init` |
+| **Change 1 only** (#1589A `resolvedIsEmpty` gating) | breaks the same cluster | forces EVERY optional-object field to `ref_null struct`; nested-pattern fields whose value isn't built as a matching struct then deref **`ref.null`** → *"Cannot destructure 'null' or 'undefined'"* (and the null-`TypeError` assertion mis-fires) |
+| **Change 2 only** (`literals.ts` `T\|undefined`→`T` strip) | **-18** (24 regr / 6 impr) | `*dflt-obj-ptrn-prop-obj` → `assert.sameValue(x, undefined)` FAILS: building `{}` defaults as structs gives an absent field a **sentinel/0 instead of `undefined`** |
+
+**No configuration is net ≥ 0.** The change fixes only **6** test262 tests while
+breaking **18-44**. Bisection proves the two edits perturb the *shared* nested-
+object-pattern representation in opposite-but-both-wrong directions — neither is
+salvageable by narrowing. This matches #1556's original warning verbatim ("a
+type-resolver representation change, not a focused dstr-codegen edit; **do not
+ship a fragile partial**", ~150-200 LOC).
+
+### What a correct fix actually requires (#1556 Path A, properly)
+
+Represent optional object fields as **nullable struct refs** (`ref null structB`)
+**AND thread that nullable type through `function-body.ts` param-type resolution**
+so the destructure reader sees a struct ref (running the in-Wasm sentinel check),
+not externref — **AND** ensure every value source (caller-built literal, nested
+`= {}` default, outer `= {}` default) is *constructed* as the matching struct in
+*all* nested-pattern shapes (not just the 2-member `T|undefined` contextual-type
+case Change 2 covered). The `prop-obj`/`prop-obj-value-null`/`prop-obj-init`
+clusters above are the regression gate the substrate version must clear. This is
+the ~150-200 LOC substrate task #1556 scoped, not a 2-edit shortcut.
+
+### Regression-gate files the substrate fix MUST keep green (sampled)
+- `language/expressions/class/dstr/{meth,gen-meth,*-static}-dflt-obj-ptrn-prop-obj.js` (Change-2 cluster)
+- `language/**/dstr/*dflt-obj-ptrn-prop-obj-init.js` (Change-1 cluster)
+- `language/**/dstr/*obj-ptrn-prop-obj-value-null.js` (Change-1 cluster)
+
+---
+
 
 **Carved from #1556** (verify-first by dev-1556b, 2026-06-26). #1556's core scope
 (the #1543/#1544 illegal-cast cluster + single-level defaults) is **done**. This
