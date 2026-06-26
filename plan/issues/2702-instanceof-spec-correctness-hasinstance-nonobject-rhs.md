@@ -1,7 +1,7 @@
 ---
 id: 2702
 title: "instanceof spec correctness: non-object RHS TypeError, Symbol.hasInstance protocol, null-deref edge cases"
-status: ready
+status: done
 sprint: 67
 goal: test262-conformance
 feasibility: medium
@@ -12,6 +12,7 @@ language_feature: instanceof
 task_type: bug
 created: 2026-06-26
 updated: 2026-06-26
+completed: 2026-06-26
 ---
 # #2702 — instanceof spec correctness: HasInstance, non-object RHS, Symbol.hasInstance
 
@@ -94,3 +95,64 @@ All 20 listed tests flip from fail to pass. No regression in `expressions/instan
 - Related: #1325 (optimization, perf — do NOT conflate with this correctness fix).
 - The `S11.8.6_A2.4_T*` side-effect-ordering tests may share a root cause with the null-deref tests (prototype getter called before object check).
 - If `Symbol.hasInstance` implementation requires broader WellKnownSymbol support changes, note them in the PR but keep this issue focused on `instanceof` correctness only.
+
+## Resolution (2026-06-26)
+
+Implemented ECMA-262 §13.10.2 (InstanceofOperator) + §7.3.20 (OrdinaryHasInstance)
+in a shared host helper `_instanceofResult(v, target, callbackState, strict)`
+(`src/runtime.ts`), driven from two codegen call sites in
+`src/codegen/expressions/identifiers.ts`:
+
+- **Non-object / non-callable RHS → TypeError.** The helper returns a tri-state
+  (`0` false / `1` true / `2` throw). The throw MUST originate in *wasm* — a
+  host-thrown JS error loses its identity crossing the wasm catch boundary
+  (`catch (e) { e instanceof TypeError }` would see `undefined`), so
+  `emitInstanceofThrowGuard` emits a wasm `TypeError` for the `2` sentinel and
+  leaves the boolean i32 on the stack. A statically-and-exclusively primitive /
+  `null` / `undefined` RHS is thrown unconditionally in codegen (where the
+  static type is visible).
+- **`Symbol.hasInstance` protocol.** A custom `@@hasInstance` is read, wrapped
+  (wasm-closure → JS-callable) and invoked with the original target as `this`;
+  the result is ToBoolean-coerced. A non-callable `@@hasInstance` throws; a
+  throwing getter / handler propagates as a wasm exception.
+- **OrdinaryHasInstance ordering.** The "V is not an object → false" step (§7.3.20
+  step 3) precedes the `Get(target,"prototype")` read (step 4), so a primitive V
+  never triggers a `prototype` getter or the non-object-prototype TypeError.
+
+**Two-path design (`strict`).** The `__instanceof` STRING path resolves the RHS
+from `globalThis[ctorName]`, so a non-callable object there is *genuinely*
+non-callable (`x instanceof Math`) and throws (`strict=true`). The dynamic
+`__instanceof_check` path receives an arbitrary runtime value that may be a
+callable our WasmGC representation does not surface as a JS function (e.g. a
+`Function(...)`-constructor result lowers to `undefined`); to avoid regressing
+`primitive instanceof Function(...)` (must be `false`), the dynamic path only
+throws for a non-callable object carrying its OWN `@@hasInstance`, and treats a
+runtime `null`/`undefined` target as `false`.
+
+### Outcome — `expressions/instanceof/` directory: 21 → 28 pass (+7, 0 regressions)
+
+Flipped fail → pass:
+- `S11.8.6_A3` (primitive RHS — `true`/`1`/`"s"`/`undefined`/`null` — throws TypeError)
+- `S11.8.6_A6_T2` (`1 instanceof Math` throws TypeError)
+- `symbol-hasinstance-to-boolean`, `symbol-hasinstance-not-callable`, `symbol-hasinstance-get-err`
+- `primitive-prototype-with-object`, `prototype-getter-with-object-throws`
+
+Verified zero regressions against `origin/main` over the full directory, plus
+`language/statements/try` (80/80 unchanged) and `class/subclass` (17/17 unchanged).
+
+### Deferred (the remaining ~11 listed tests — out of scope, blocked elsewhere)
+
+- **`Function(...)` constructor** (`S15.3.5.3_A2_T5`, `A3_T1/T2`, `S11.8.6_A7_T3`, …):
+  the Function constructor is eval-family and currently lowers to `undefined`.
+- **builtin constructor as a first-class VALUE** (`S11.8.6_A2.1_T1`, `A2.4_T1/T4` —
+  `{} instanceof OBJECT` where `OBJECT = Object`): tracked by **#2651**.
+- **`arguments.length` fidelity through the closure-dispatch table**
+  (`symbol-hasinstance-invocation` — only the `args.length === 1` assert fails):
+  the wasm-closure wrapper pads to the dispatch arity; a separate concern.
+- **undeclared-identifier ReferenceError** (`S11.8.6_A2.1_T3` —
+  `({}) instanceof OBJECT` with `OBJECT` undeclared): a scoping concern, not instanceof.
+- **function-expression instanceof** (`S11.8.6_A6_T4` #1): pre-existing.
+
+The original "all 20" acceptance was over-scoped (it bundled four unrelated
+blockers); this PR closes the spec-correctness core (non-object/non-callable RHS,
+`@@hasInstance`, OrdinaryHasInstance ordering) with no regressions.
