@@ -22,9 +22,20 @@ Current layout (flat, #1616):
   directly under `sprints/`. Any sprint-scoped planning artifacts (drafts,
   triage notes, screenshots) stay in the corresponding `sprints/<number>/`
   sub-directory.
-- sprint membership / bucket is frontmatter only: `sprint: <N>` (numbered
-  sprint), `sprint: 0` (pre-sprint history), `sprint: Backlog` (unscheduled);
-  wont-fix is a `status: wont-fix`, not a sprint value.
+- sprint membership / bucket is frontmatter only: `sprint: current` (the live
+  budget window — see below), `sprint: <N>` (a frozen numbered window),
+  `sprint: 0` (pre-sprint history), `sprint: Backlog` (unscheduled); wont-fix is a
+  `status: wont-fix`, not a sprint value.
+- **`sprint: current` — the rolling budget window (#2751).** All live work carries
+  `sprint: current`; the TaskList is a long, priority-ordered, over-provisioned
+  queue auto-synced from these issues (`scripts/sync-current-tasklist.mjs`, wired
+  into the `post-file-edit` + SessionStart hooks). At token-budget rollover
+  (≥ 99% spent, or ≤ 1h left) `scripts/freeze-sprint.mjs` re-tags every
+  `sprint: current` issue that is `status: done` to the **lowest free numbered
+  index** N (and writes `sprints/N.md` as that window's retrospective record);
+  not-done issues stay `sprint: current` and roll forward, so a window can never
+  strand unfinished work. A numbered `sprint: <N>` is therefore a _retrospective
+  label assigned at freeze_, never a prospective commitment.
 - `plan/issues/backlog/index.md` and `plan/issues/wont-fix/index.md` are
   generated indexes (link to `../<id>-<slug>.md`); `backlog/backlog.md` is the
   curated backlog doc.
@@ -43,6 +54,7 @@ created: 2026-04-09
 updated: 2026-04-09
 completed: 2026-04-12
 priority: medium
+horizon: m
 feasibility: medium
 reasoning_effort: medium
 task_type: feature
@@ -101,6 +113,20 @@ assignee: "ttraenkler/senior-dev-1"
 
 - `priority`
   - `critical`, `high`, `medium`, `low`
+- `horizon`
+  - Expected token/work **cost class** for budget-aware scheduling (#2751):
+    `xl` | `l` | `m` | `s` (default `m`). Distinct from `priority` (importance)
+    and `reasoning_effort` (model setting) — `horizon` is _how much budget the
+    task is likely to burn_.
+  - The pull-time helper `scripts/budget-status.mjs` reads it: an agent claiming
+    work learns the remaining budget + parallelism (per-agent share) and pulls a
+    task whose horizon fits. A fresh window surfaces `xl`/`l` first (big rocks
+    first); as the window drains or parallelism rises, only smaller horizons are
+    recommended, with `s` as the always-available tail filler — so a long-horizon
+    task is preferentially started at the _beginning_ of a budget window and never
+    started so late it would strand.
+  - `scripts/sync-current-tasklist.mjs` surfaces it as a `[XL]`/`[L]`/`[M]`/`[S]`
+    tag in the task subject.
 - `feasibility`
   - `easy`, `medium`, `hard`
 - `reasoning_effort`
