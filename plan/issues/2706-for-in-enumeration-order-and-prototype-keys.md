@@ -6,7 +6,7 @@ assignee: ttraenkler/Esch
 sprint: 67
 goal: test262-conformance
 feasibility: medium
-depends_on: [2731]
+depends_on: [2739]
 priority: medium
 es_edition: ES5
 language_feature: for-in
@@ -54,6 +54,21 @@ Standalone mode must also implement this without relying on JS engine for-in ord
 ## Acceptance criteria
 
 All 5 listed tests flip from fail to pass. No regression in `statements/for-in/` currently-passing tests. Full CI green.
+
+## Split status (esch, 2026-06-27) — three independent halves, two landed
+
+This issue's scope decomposed into three independent bug classes; two are landed
+and the remaining blocker is now #2739:
+
+| Half | Tests | Status |
+|------|-------|--------|
+| Integer-index keys ascending (#1830) | (integer-key mis-routing) | **landed** — PR #2160 |
+| Insertion-order + delete/re-add (#2731) | `order-simple-object` | **landed** — PR #2170 |
+| Prototype-chain (`setPrototypeOf`/constructor) + `defineProperty` ordering (**#2739**) | `order-property-on-prototype`, `S12.6.4_A6`, `S12.6.4_A6.1`, `order-after-define-property` | **open** — `depends_on: [2739]` |
+
+So this issue is now blocked solely on **#2739** (prototype/defineProperty for-in
+enumeration). Re-point the acceptance to those 4 prototype/defineProperty tests
+once #2739 lands.
 
 ## Notes
 
