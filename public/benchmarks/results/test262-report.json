@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-06-26T23:05:01.618Z",
-  "baseline_generated_at": "2026-06-26T23:05:01.618Z",
-  "baseline_sha": "5a923816149c2ef9f8ac37014555a18ba059d258",
+  "timestamp": "2026-06-27T00:03:27.871Z",
+  "baseline_generated_at": "2026-06-27T00:03:27.871Z",
+  "baseline_sha": "7ae89d4611b542b5be99be9081cd18c54d2bcbe1",
   "oracle_version": 1,
   "mode": {
     "target": "gc",
@@ -10,8 +10,8 @@
   },
   "summary": {
     "total": 43135,
-    "pass": 32290,
-    "fail": 10359,
+    "pass": 32318,
+    "fail": 10331,
     "compile_error": 389,
     "compile_timeout": 79,
     "skip": 18,
@@ -20,8 +20,8 @@
     "by_category": {
       "standard": {
         "total": 42049,
-        "pass": 31686,
-        "fail": 9899,
+        "pass": 31714,
+        "fail": 9871,
         "compile_error": 367,
         "compile_timeout": 79,
         "skip": 18,
@@ -53,8 +53,8 @@
       },
       "official": {
         "total": 43135,
-        "pass": 32290,
-        "fail": 10359,
+        "pass": 32318,
+        "fail": 10331,
         "compile_error": 389,
         "compile_timeout": 79,
         "skip": 18,
@@ -64,8 +64,8 @@
       },
       "full": {
         "total": 48117,
-        "pass": 33781,
-        "fail": 13516,
+        "pass": 33809,
+        "fail": 13488,
         "compile_error": 617,
         "compile_timeout": 80,
         "skip": 123,
@@ -77,8 +77,8 @@
   },
   "official_summary": {
     "total": 43135,
-    "pass": 32290,
-    "fail": 10359,
+    "pass": 32318,
+    "fail": 10331,
     "compile_error": 389,
     "compile_timeout": 79,
     "skip": 18,
@@ -87,8 +87,8 @@
   },
   "full_summary": {
     "total": 48117,
-    "pass": 33781,
-    "fail": 13516,
+    "pass": 33809,
+    "fail": 13488,
     "compile_error": 617,
     "compile_timeout": 80,
     "skip": 123,
@@ -97,8 +97,8 @@
   },
   "strict_summary": {
     "total": 40626,
-    "pass": 30922,
-    "fail": 9322,
+    "pass": 30950,
+    "fail": 9294,
     "compile_error": 286,
     "compile_timeout": 78,
     "skip": 18,
@@ -128,8 +128,8 @@
     },
     "standard": {
       "total": 42049,
-      "pass": 31686,
-      "fail": 9899,
+      "pass": 31714,
+      "fail": 9871,
       "compile_error": 367,
       "compile_timeout": 79,
       "skip": 18,
@@ -891,8 +891,8 @@
     {
       "name": "language/expressions",
       "path": "language/expressions",
-      "pass": 8543,
-      "fail": 2182,
+      "pass": 8552,
+      "fail": 2173,
       "compile_error": 265,
       "compile_timeout": 28,
       "skip": 18,
@@ -1051,8 +1051,8 @@
     {
       "name": "language/statements",
       "path": "language/statements",
-      "pass": 7141,
-      "fail": 2067,
+      "pass": 7160,
+      "fail": 2048,
       "compile_error": 97,
       "compile_timeout": 32,
       "skip": 0,
@@ -1080,15 +1080,15 @@
     }
   ],
   "error_categories": {
-    "assertion_fail": 7238,
+    "assertion_fail": 7207,
     "illegal_cast": 91,
     "negative_test_fail": 78,
     "null_deref": 208,
     "oob": 39,
-    "other": 3930,
+    "other": 3934,
     "promise_error": 58,
     "range_error": 31,
-    "runtime_error": 1191,
+    "runtime_error": 1190,
     "type_error": 292,
     "unreachable": 26,
     "wasm_compile": 951

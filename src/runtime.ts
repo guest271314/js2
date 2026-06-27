@@ -71,7 +71,11 @@ const _wasmStructProps = new WeakMap<object, Record<string | symbol, any>>();
 const _fnctorInstanceCtor = new WeakMap<object, object>();
 
 /** (#1712) Resolve a property through the instance's fnctor prototype chain. */
-function _fnctorProtoLookup(obj: any, key: any): PropertyDescriptor | undefined {
+function _fnctorProtoLookup(
+  obj: any,
+  key: any,
+  exports?: Record<string, Function> | undefined,
+): PropertyDescriptor | undefined {
   if (!_canBeWeakKey(obj)) return undefined;
   const ctor = _fnctorInstanceCtor.get(obj);
   if (ctor == null) return undefined;
@@ -80,7 +84,17 @@ function _fnctorProtoLookup(obj: any, key: any): PropertyDescriptor | undefined 
   let cur: any = proto;
   let guard = 0;
   while (cur != null && typeof cur === "object" && guard++ < 16) {
-    const desc = Object.getOwnPropertyDescriptor(cur, key);
+    // (#2680) Per ES §10.1.6.2 ToPropertyDescriptor → §7.3.12 HasProperty /
+    // §7.3.3 Get (both prototype-inclusive), an inherited attribute must be
+    // read. When an ancestor is itself a WasmGC struct (the common case:
+    // `F.prototype = {…}` / a `new F()` proto literal compiles to a struct whose
+    // attribute lives in its sidecar / typed field), native
+    // Object.getOwnPropertyDescriptor sees an opaque null-proto object and drops
+    // it. Use the wasmGC-aware, #1629-safe reader (_readOwnDescriptor: sidecar +
+    // descriptor table + __sget_<key> gated on the concrete struct shape, NEVER
+    // an __sget_* try/catch probe) at each such level; plain JS ancestors keep
+    // the native reader.
+    const desc = _isWasmStruct(cur) ? _readOwnDescriptor(cur, key, exports) : Object.getOwnPropertyDescriptor(cur, key);
     if (desc) return desc;
     cur = Object.getPrototypeOf(cur);
     if (cur === Object.prototype) break;
@@ -4158,7 +4172,7 @@ function _safeGet(obj: any, key: any, callbackState?: { getExports: () => Record
     // (proxy-wrapped when one exists) as the receiver per §6.2.5.5 Get.
     // Raw closure structs (stored during the module START function, before
     // exports existed for the write-side wrap) are wrapped at read time.
-    const protoDesc = _fnctorProtoLookup(obj, key);
+    const protoDesc = _fnctorProtoLookup(obj, key, callbackState?.getExports());
     if (protoDesc) {
       if (protoDesc.get) return protoDesc.get.call(_hostProxyCache.get(obj) ?? obj);
       return _maybeWrapCallableUnknownArity(protoDesc.value, callbackState);
@@ -4966,7 +4980,7 @@ function _wrapForHost(obj: any, exports: Record<string, Function> | undefined): 
     // Values stored during the module START function were written before
     // exports existed, so the write-side closure wrap no-op'd — wrap raw
     // closure structs here, at read time, instead.
-    const protoDesc = _fnctorProtoLookup(obj, key);
+    const protoDesc = _fnctorProtoLookup(obj, key, exports);
     if (protoDesc) {
       if (process.env.DEBUG_1712)
         console.error(
@@ -8825,8 +8839,36 @@ assert._isSameValue = isSameValue;
           // ToPropertyDescriptor) and WasmGC structs (sidecar + the compiled
           // module's `__sget_<field>` exports for typed struct fields that
           // never reach the sidecar). Mirrors the reader in __defineProperties.
+          // Own-level presence ONLY (no prototype walk). (#1629) Presence MUST
+          // consult the struct's real shape, not a probe through `__sget_${f}`:
+          // a `__sget_*` getter is module-global (one per field NAME across all
+          // struct types) and DOES NOT trap on a struct that lacks the field — it
+          // falls through to ref.null/0, so a try/catch probe returns `true` for
+          // every ubiquitous descriptor name (value/get/set/writable) on any
+          // struct, producing spurious ToPropertyDescriptor data⇄accessor
+          // conflicts. `__struct_field_names(o)` returns THIS instance's concrete
+          // field names — the precise membership test.
+          const ownHasField = (o: any, f: string): boolean => {
+            if (!_isWasmStruct(o)) return f in Object(o);
+            const sc = _wasmStructProps.get(o);
+            if (sc && f in sc) return true;
+            const names = _getStructFieldNames(o, callbackState?.getExports());
+            return names !== null && names.includes(f);
+          };
           const getField = (o: any, f: string): any => {
             if (!_isWasmStruct(o)) return o[f];
+            // (#2680) ToPropertyDescriptor's Get (§7.3.3) is prototype-inclusive.
+            // Resolve an own-level MISS through the descriptor's #1712 fnctor
+            // prototype chain (wasmGC-aware) BEFORE the own-level __sget fallback:
+            // that fallback calls a module-global `__sget_<f>` on the INSTANCE,
+            // which returns a spurious ref.null (not `undefined`) for a field the
+            // instance lacks (#1629) and would mask the inherited value. Own
+            // attributes (sidecar / struct shape) shadow the prototype per spec
+            // and take the own-read path below.
+            if (!ownHasField(o, f)) {
+              const pd = _fnctorProtoLookup(o, f, callbackState?.getExports());
+              if (pd) return pd.get ? pd.get.call(o) : pd.value;
+            }
             const sc = _wasmStructProps.get(o);
             if (sc && f in sc) return sc[f];
             // _safeGet fires struct accessor getters (__get_<f>) and the
@@ -8840,19 +8882,12 @@ assert._isSameValue = isSameValue;
             return v;
           };
           const hasField = (o: any, f: string): boolean => {
-            if (!_isWasmStruct(o)) return f in Object(o);
-            const sc = _wasmStructProps.get(o);
-            if (sc && f in sc) return true;
-            // (#1629) Presence MUST consult the struct's real shape, not a probe
-            // through `__sget_${f}`. A `__sget_*` getter is module-global (one per
-            // field NAME across all struct types) and DOES NOT trap on a struct
-            // that lacks the field — it falls through to ref.null/0. So a try/catch
-            // probe returns `true` for every ubiquitous descriptor name (value/get
-            // /set/writable) on any struct, producing spurious ToPropertyDescriptor
-            // data⇄accessor conflicts. `__struct_field_names(o)` returns the field
-            // names of THIS instance's concrete type — the precise membership test.
-            const names = _getStructFieldNames(o, callbackState?.getExports());
-            return names !== null && names.includes(f);
+            if (ownHasField(o, f)) return true;
+            if (!_isWasmStruct(o)) return false;
+            // (#2680) own-level miss → prototype-inclusive HasProperty (§7.3.12)
+            // via the #1712 link (wasmGC-aware, #1629-safe — never an __sget_*
+            // probe).
+            return _fnctorProtoLookup(o, f, callbackState?.getExports()) !== undefined;
           };
           // (#1629a) When the descriptor is a WasmGC struct, its get/set fields
           // are Wasm-closure structs, not JS callables. Wrap them so the spec
@@ -9091,8 +9126,29 @@ assert._isSameValue = isSameValue;
           // Helper to get a field value from plain or opaque object.
           // Field key may be string or symbol per #1362 (Object.defineProperties
           // spans both per §20.1.2.3 / [[OwnPropertyKeys]]).
+          // Own-level presence ONLY (no prototype walk). (#1629) `__sget_*`
+          // getters are global per field-name and don't trap on a struct missing
+          // the field, so a try/catch probe falsely reports presence — use the
+          // concrete struct shape via __struct_field_names instead.
+          const ownHasField = (o: any, field: string | symbol): boolean => {
+            if (!_isWasmStruct(o)) return field in Object(o);
+            const sc = _wasmStructProps.get(o);
+            if (sc && field in sc) return true;
+            if (typeof field !== "string") return false;
+            const names = _getStructFieldNames(o, callbackState?.getExports());
+            return names !== null && names.includes(field);
+          };
           const getField = (o: any, field: string | symbol): any => {
             if (!_isWasmStruct(o)) return o[field];
+            // (#2680) ToPropertyDescriptor's Get (§7.3.3) is prototype-inclusive.
+            // Resolve an own-level MISS through the descriptor's #1712 fnctor
+            // prototype chain (wasmGC-aware) BEFORE the own-level __sget fallback
+            // (which returns a spurious ref.null on the instance for a missing
+            // field, #1629). Own attributes shadow the prototype per spec.
+            if (!ownHasField(o, field)) {
+              const pd = _fnctorProtoLookup(o, field, callbackState?.getExports());
+              if (pd) return pd.get ? pd.get.call(o) : pd.value;
+            }
             const sc = _wasmStructProps.get(o);
             if (sc && field in sc) return sc[field];
             let v = _sidecarGet(o, field);
@@ -9104,16 +9160,12 @@ assert._isSameValue = isSameValue;
             return v;
           };
           const hasField = (o: any, field: string | symbol): boolean => {
-            if (!_isWasmStruct(o)) return field in Object(o);
-            const sc = _wasmStructProps.get(o);
-            if (sc && field in sc) return true;
-            if (typeof field !== "string") return false;
-            // (#1629) See the matching probe in __defineProperty_desc: `__sget_*`
-            // getters are global per field-name and don't trap on a struct missing
-            // the field, so a try/catch probe falsely reports presence. Use the
-            // concrete struct shape via __struct_field_names instead.
-            const names = _getStructFieldNames(o, callbackState?.getExports());
-            return names !== null && names.includes(field);
+            if (ownHasField(o, field)) return true;
+            if (!_isWasmStruct(o)) return false;
+            // (#2680) own-level miss → prototype-inclusive HasProperty (§7.3.12)
+            // via the #1712 link (wasmGC-aware, #1629-safe — never an __sget_*
+            // probe).
+            return _fnctorProtoLookup(o, field, callbackState?.getExports()) !== undefined;
           };
           // (#1629 S2) When a per-property descriptor is itself a WasmGC struct,
           // its `get`/`set` fields arrive as Wasm-closure structs, not JS
