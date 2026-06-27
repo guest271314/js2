@@ -49,6 +49,38 @@ import { compileInstanceOf, compileTypeofComparison } from "./typeof-delete.js";
 // ── Binary operations ─────────────────────────────────────────────────
 
 /**
+ * (#2741) `key in rval` throws a TypeError when `Type(rval)` is not Object
+ * (§13.10.1 step 5). Returns true when the RHS static type is EXCLUSIVELY a
+ * non-object primitive — every constituent is number / string / boolean /
+ * bigint / symbol / null / undefined / void — so the runtime value can never be
+ * an Object and the throw is statically certain. `any` / `unknown` / `never` /
+ * object types and any union with a non-primitive constituent return false (they
+ * defer to the runtime `[[HasProperty]]` / `__extern_has` check).
+ */
+function inRhsIsExclusivelyPrimitive(t: ts.Type): boolean {
+  const PRIM =
+    ts.TypeFlags.Number |
+    ts.TypeFlags.NumberLiteral |
+    ts.TypeFlags.String |
+    ts.TypeFlags.StringLiteral |
+    ts.TypeFlags.Boolean |
+    ts.TypeFlags.BooleanLiteral |
+    ts.TypeFlags.BigInt |
+    ts.TypeFlags.BigIntLiteral |
+    ts.TypeFlags.ESSymbol |
+    ts.TypeFlags.UniqueESSymbol |
+    ts.TypeFlags.Null |
+    ts.TypeFlags.Undefined |
+    ts.TypeFlags.Void;
+  const parts = t.isUnion() ? t.types : [t];
+  if (parts.length === 0) return false;
+  for (const p of parts) {
+    if ((p.flags & PRIM) === 0) return false;
+  }
+  return true;
+}
+
+/**
  * Binary operators whose evaluation applies ToNumeric / ToPrimitive→(number or
  * string) to their operands. A Symbol operand of any of these throws TypeError
  * per §7.1.3 (ToNumeric step 3) and §7.1.4 (ToNumber). `+` is included because
@@ -542,6 +574,26 @@ export function compileBinaryExpression(
     const rightType = ctx.checker.getTypeAtLocation(expr.right);
     let rightWasm = resolveWasmType(ctx, rightType);
 
+    // (#2741) §13.10.1 step 5 — `key in rval` throws a **TypeError** when
+    // `Type(rval)` is not Object. When the RHS static type is EXCLUSIVELY a
+    // non-object primitive (number / string / boolean / bigint / symbol / null /
+    // undefined, or a literal/union thereof), its runtime value can never be an
+    // Object, so emit a runtime throw rather than statically folding to a boolean
+    // (which is what the path below would do, e.g. `"toString" in true → true`).
+    // Spec evaluation order (steps 1-4): evaluate the LHS (key) then the RHS for
+    // side effects, THEN throw. `any` / `unknown` / object / `never` / a union
+    // containing a non-primitive constituent are NOT caught here — they defer to
+    // the runtime [[HasProperty]] / `__extern_has` path, which throws for a
+    // genuinely-primitive runtime value via the native `key in obj`.
+    if (inRhsIsExclusivelyPrimitive(rightType)) {
+      const lt = compileExpression(ctx, fctx, expr.left);
+      if (lt !== null) fctx.body.push({ op: "drop" });
+      const rt = compileExpression(ctx, fctx, expr.right);
+      if (rt !== null) fctx.body.push({ op: "drop" });
+      emitThrowTypeError(ctx, fctx, "Cannot use 'in' operator to search for property in a non-object");
+      return { kind: "i32" };
+    }
+
     // (#2617) The TS type of a `new Proxy(...)`-bound identifier is its TARGET
     // type (ProxyConstructor returns T), so `resolveWasmType` yields the target
     // struct and the static `in` fold below would constant-fold `'k' in p` to
@@ -712,20 +764,27 @@ export function compileBinaryExpression(
         );
         if (hasIdx !== undefined) {
           flushLateImportShifts(ctx, fctx);
-          const rightResult = compileExpression(ctx, fctx, expr.right, { kind: "externref" });
-          if (rightResult && rightResult.kind !== "externref") {
-            fctx.body.push({ op: "extern.convert_any" });
-          }
-          if (rightResult === null) {
-            fctx.body.push({ op: "ref.null.extern" });
-          }
+          // (#2741) §13.10.1 evaluates the LHS (key, steps 1-2) BEFORE the RHS
+          // (object, steps 3-4). Evaluate the key first into a temp, then the
+          // object, then re-push the key so the call args are `(obj, key)`.
+          // Use coerceType (not a bare extern.convert_any) so a non-ref key
+          // (e.g. `Infinity` → f64) is boxed to externref via __box_number.
           const leftResult = compileExpression(ctx, fctx, expr.left, { kind: "externref" });
-          if (leftResult && leftResult.kind !== "externref") {
-            fctx.body.push({ op: "extern.convert_any" });
-          }
           if (leftResult === null) {
             fctx.body.push({ op: "ref.null.extern" });
+          } else if (leftResult.kind !== "externref") {
+            coerceType(ctx, fctx, leftResult, { kind: "externref" });
           }
+          const keyTmp = allocTempLocal(fctx, { kind: "externref" });
+          fctx.body.push({ op: "local.set", index: keyTmp });
+          const rightResult = compileExpression(ctx, fctx, expr.right, { kind: "externref" });
+          if (rightResult === null) {
+            fctx.body.push({ op: "ref.null.extern" });
+          } else if (rightResult.kind !== "externref") {
+            coerceType(ctx, fctx, rightResult, { kind: "externref" });
+          }
+          fctx.body.push({ op: "local.get", index: keyTmp });
+          releaseTempLocal(fctx, keyTmp);
           fctx.body.push({ op: "call", funcIdx: hasIdx });
           return { kind: "i32" };
         }
@@ -744,8 +803,20 @@ export function compileBinaryExpression(
       return { kind: "i32" };
     }
 
-    // Dynamic key with known struct fields: runtime string comparison
-    if (structFieldNames !== null && structFieldNames.length > 0) {
+    // Dynamic key with known struct fields: runtime string comparison.
+    // (#2741) Gate to a REFERENCE-like key (string / externref / anyref). A
+    // value-typed key (`Infinity`/`true`/a number → f64/i32) cannot be fed to
+    // `__str_eq` (it expects a string/externref) — doing so produced a malformed
+    // module ("call expected externref, found f64"). Such keys (now reachable
+    // because the §13.10.1 ToPropertyKey 2322 is downgraded) fall through to the
+    // defined fallback below instead of crashing wasm validation.
+    const leftKeyWasm = resolveWasmType(ctx, ctx.checker.getTypeAtLocation(expr.left));
+    const keyIsRefLike =
+      leftKeyWasm.kind === "externref" ||
+      leftKeyWasm.kind === "anyref" ||
+      leftKeyWasm.kind === "ref" ||
+      leftKeyWasm.kind === "ref_null";
+    if (structFieldNames !== null && structFieldNames.length > 0 && keyIsRefLike) {
       // Compile the key expression (should produce a string/externref)
       const keyType = compileExpression(ctx, fctx, expr.left);
       if (keyType) {
@@ -794,21 +865,28 @@ export function compileBinaryExpression(
         );
         if (hasIdx !== undefined) {
           flushLateImportShifts(ctx, fctx);
-          // Push obj (RHS) then key (LHS) — runtime signature is (obj, key).
-          const rightResult = compileExpression(ctx, fctx, expr.right, { kind: "externref" });
-          if (rightResult && rightResult.kind !== "externref") {
-            fctx.body.push({ op: "extern.convert_any" });
-          }
-          if (rightResult === null) {
-            fctx.body.push({ op: "ref.null.extern" });
-          }
+          // (#2741) §13.10.1 evaluates the LHS (key, steps 1-2) BEFORE the RHS
+          // (object, steps 3-4) — e.g. `x() in y()` must throw from `x()` first,
+          // and an unresolvable LHS reference (`undef in obj`) must throw before
+          // the object is evaluated. Evaluate the key first into a temp, then the
+          // object, then re-push the key so the call args stay `(obj, key)`.
+          // coerceType (not a bare extern.convert_any) boxes a non-ref key.
           const leftResult = compileExpression(ctx, fctx, expr.left, { kind: "externref" });
-          if (leftResult && leftResult.kind !== "externref") {
-            fctx.body.push({ op: "extern.convert_any" });
-          }
           if (leftResult === null) {
             fctx.body.push({ op: "ref.null.extern" });
+          } else if (leftResult.kind !== "externref") {
+            coerceType(ctx, fctx, leftResult, { kind: "externref" });
           }
+          const keyTmp = allocTempLocal(fctx, { kind: "externref" });
+          fctx.body.push({ op: "local.set", index: keyTmp });
+          const rightResult = compileExpression(ctx, fctx, expr.right, { kind: "externref" });
+          if (rightResult === null) {
+            fctx.body.push({ op: "ref.null.extern" });
+          } else if (rightResult.kind !== "externref") {
+            coerceType(ctx, fctx, rightResult, { kind: "externref" });
+          }
+          fctx.body.push({ op: "local.get", index: keyTmp });
+          releaseTempLocal(fctx, keyTmp);
           fctx.body.push({ op: "call", funcIdx: hasIdx });
           return { kind: "i32" };
         }

@@ -480,11 +480,47 @@ function isProxyHandlerTrapDiagnostic(diag: ts.Diagnostic): boolean {
   return false;
 }
 
+/**
+ * (#2741) Detect a TS2322 raised on an operand of the `in` operator
+ * (`RelationalExpression in ShiftExpression`, ES2023 §13.10.1). TypeScript
+ * requires the RHS to be an object and the LHS to be a PropertyKey
+ * (`string | number | symbol`), but `in` is a RUNTIME operation:
+ * - a non-Object RHS is a runtime **TypeError** (§13.10.1 step 5), not a static
+ *   error; and
+ * - a non-PropertyKey LHS (e.g. `true`/`null`/`undefined`) is **ToPropertyKey**'d
+ *   (ToString, step 6).
+ *
+ * `language/expressions/in/*` test262 cases have no `negative` phase — they must
+ * compile and exhibit the runtime behaviour. Downgrade the 2322 so the program
+ * compiles and the codegen (binary-ops.ts `InKeyword` arm) emits the correct
+ * runtime semantics (throw on a primitive RHS, ToString the key, prototype-chain
+ * `[[HasProperty]]`). Mirrors the #2616 Proxy-handler-trap downgrade.
+ *
+ * Tightly scoped: only a 2322 whose node sits inside the LHS or RHS operand of a
+ * BinaryExpression whose operator is `InKeyword`.
+ */
+function isInOperatorOperandDiagnostic(diag: ts.Diagnostic): boolean {
+  if (diag.code !== 2322) return false;
+  const file = diag.file;
+  if (!file || diag.start === undefined) return false;
+  let n = findSmallestNodeAtPosition(file, diag.start);
+  while (n) {
+    if (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.InKeyword) {
+      const inLeft = diag.start >= n.left.getStart(file) && diag.start < n.left.getEnd();
+      const inRight = diag.start >= n.right.getStart(file) && diag.start < n.right.getEnd();
+      return inLeft || inRight;
+    }
+    n = n.parent;
+  }
+  return false;
+}
+
 function isHardTypeScriptDiagnostic(diag: ts.Diagnostic, checker?: ts.TypeChecker): boolean {
   if (diag.category !== 1 || !HARD_TS_DIAG_CODES.has(diag.code)) return false;
   if (checker && isBindingPatternFalsePositive(diag, checker)) return false;
   if (checker && isGuardedNullablePrimitiveDiagnostic(diag, checker)) return false;
   if (isProxyHandlerTrapDiagnostic(diag)) return false;
+  if (isInOperatorOperandDiagnostic(diag)) return false;
   return true;
 }
 
