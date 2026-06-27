@@ -2198,6 +2198,107 @@ function tryEmitDeleteAwareDynamicGet(
 }
 
 /**
+ * (#2731) Symmetric mirror of `tryEmitDeleteAwareDynamicGet` for the WRITE side.
+ *
+ * In a module that contains a member-`delete`, `ctx.moduleUsesDelete` routes
+ * `any`/`unknown`-receiver property READS through the tombstone-aware host
+ * `__extern_get` (above). The corresponding WRITE had no symmetric gate, so
+ * `o.x = 9` still took the native `struct.set` fast-path
+ * (`emitAlternateStructSetDispatch`), which **bypasses `_safeSet`** — the host
+ * function where the delete-tombstone (`_wasmStructDeletedKeys`) is cleared on
+ * re-assignment (`runtime.ts`). Result: `delete o.x; o.x = 9` left the tombstone
+ * set, so every tombstone-consulting reader (`__extern_get`, `__for_in_has`,
+ * `_wasmStructHasOwn`, `__object_keys`) suppressed the re-added key
+ * (`o.x === undefined`, `"x" in o === false`, for-in dropped `x`).
+ *
+ * This reroutes the `any`-receiver write through the strict host setter
+ * `__extern_set_strict` → `_safeSet`, which clears the tombstone, writes the
+ * sidecar, AND mirrors the native field via `__sset_<key>` — so read/write stay
+ * symmetric. Returns the assignment-result type when handled, else `undefined`
+ * (caller falls through to the native struct-set dispatch). Gated identically to
+ * the read side: `moduleUsesDelete && !standalone`, `any`/`unknown` receiver,
+ * non-reserved-accessor, non-callable property. Delete-free modules are
+ * untouched (`moduleUsesDelete` false → byte-identical).
+ */
+export function tryEmitDeleteAwareDynamicSet(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  target: ts.PropertyAccessExpression,
+  value: ts.Expression,
+  objType: ts.Type,
+  propName: string,
+): ValType | undefined {
+  if (!ctx.moduleUsesDelete || ctx.standalone) return undefined;
+  // The receiver must be a shape-inferred dynamic struct that `delete` can
+  // tombstone: `any`/`unknown` (the read side's case) OR a shape-inferred
+  // ANONYMOUS object/type literal (`var o = { … }` / `(o: { a: T })`). The
+  // actual test262 cases use the latter — a concrete inferred object-literal
+  // type (`SymbolFlags.ObjectLiteral`), NOT `any` — and its native `struct.set`
+  // re-add leaves the delete-tombstone set so for-in's per-visit `__for_in_has`
+  // drops the re-added key. EXCLUDE class instances (`SymbolFlags.Class`),
+  // arrays, and named interfaces — those are not the deleted-then-readded
+  // dynamic-object shape and keep their fast native writes.
+  const isAnyOrUnknown = (objType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0;
+  const sym = objType.getSymbol();
+  const isAnonObjectLiteral = !!(sym && sym.flags & (ts.SymbolFlags.ObjectLiteral | ts.SymbolFlags.TypeLiteral));
+  if (!isAnyOrUnknown && !isAnonObjectLiteral) return undefined;
+  if (
+    propName === "length" ||
+    propName === "constructor" ||
+    propName === "__proto__" ||
+    propName === "prototype" ||
+    propName === "name"
+  ) {
+    return undefined;
+  }
+  // A method/function-typed write keeps its closure/funcref lowering.
+  const accessType = ctx.checker.getTypeAtLocation(target);
+  if (accessType.getCallSignatures && accessType.getCallSignatures().length > 0) return undefined;
+
+  const setIdx = ensureLateImport(
+    ctx,
+    "__extern_set_strict",
+    [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
+    [],
+  );
+  flushLateImportShifts(ctx, fctx);
+  if (setIdx === undefined) return undefined;
+
+  // Evaluate the receiver (spec order: reference before value), coerce to externref.
+  const objResult = compileExpression(ctx, fctx, target.expression);
+  if (objResult && objResult.kind !== "externref") {
+    coerceType(ctx, fctx, objResult, { kind: "externref" });
+  } else if (!objResult) {
+    fctx.body.push({ op: "ref.null.extern" } as Instr);
+  }
+  const objLocal = allocLocal(fctx, `__daset_obj_${fctx.locals.length}`, { kind: "externref" });
+  fctx.body.push({ op: "local.set", index: objLocal });
+
+  // Evaluate the value, coerce/box to externref.
+  const valResult = compileExpression(ctx, fctx, value);
+  if (valResult && valResult.kind !== "externref") {
+    coerceType(ctx, fctx, valResult, { kind: "externref" });
+  } else if (!valResult) {
+    fctx.body.push({ op: "ref.null.extern" } as Instr);
+  }
+  const valLocal = allocLocal(fctx, `__daset_val_${fctx.locals.length}`, { kind: "externref" });
+  fctx.body.push({ op: "local.set", index: valLocal });
+
+  // __extern_set_strict(obj, "prop", val) → _safeSet (clears tombstone, writes
+  // sidecar, mirrors __sset_<key>). Bare call — NOT the struct.set dispatcher,
+  // whose native arm is exactly what bypassed _safeSet.
+  fctx.body.push({ op: "local.get", index: objLocal });
+  addStringConstantGlobal(ctx, propName);
+  fctx.body.push(...stringConstantExternrefInstrs(ctx, propName));
+  fctx.body.push({ op: "local.get", index: valLocal });
+  fctx.body.push({ op: "call", funcIdx: setIdx } as Instr);
+
+  // `=` evaluates to the assigned value.
+  fctx.body.push({ op: "local.get", index: valLocal });
+  return { kind: "externref" };
+}
+
+/**
  * (#2026 PR-2) `.constructor` identity on an externref / `any`-typed instance.
  *
  * The static arm (`compileInstanceMember`, gated on `ctx.classSet.has(typeName)`)

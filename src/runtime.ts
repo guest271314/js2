@@ -585,6 +585,19 @@ function _getAsyncGeneratorFunctionPrototype(): any {
 const _wasmStructDeletedKeys = new WeakMap<object, Set<string | symbol>>();
 
 /**
+ * (#2731) Struct-shape fields that were DELETED then RE-ADDED, so their live
+ * value now lives in the sidecar (insertion-ordered) and they must be enumerated
+ * from the sidecar at insertion-order END — NOT from their fixed struct-shape
+ * slot. Set in `_safeSet` when a re-assignment clears a tombstone on a key that
+ * is a struct-shape field; consulted by `__for_in_keys` (and the `__object_*`
+ * key collectors) to skip the struct-slot emission so the sidecar loop supplies
+ * the field at the correct (end) position. A plain re-assignment of a
+ * never-deleted field is NOT marked (it keeps its struct position), and a
+ * dynamic sidecar-only key needs no marker (it already orders via the sidecar).
+ */
+const _wasmStructShadowedFields = new WeakMap<object, Set<string>>();
+
+/**
  * Sidecar property descriptor store for WasmGC structs.
  *
  * Stores property descriptor flags per property on WasmGC structs, enabling
@@ -4258,7 +4271,24 @@ function _safeSet(
   // that bypass the sidecar (A3).
   if (_isWasmStruct(obj)) {
     const tomb = _wasmStructDeletedKeys.get(obj);
-    if (tomb) tomb.delete(typeof key === "symbol" ? key : String(key));
+    const k = typeof key === "symbol" ? key : String(key);
+    // (#2731) Before clearing the tombstone, note whether THIS write is the
+    // re-add of a deleted STRUCT-SHAPE field. If so, mark it shadowed: its live
+    // value now lives in the sidecar (re-inserted below at the end) and it must
+    // enumerate from there, not its fixed struct slot, so the for-in / Object.*
+    // collectors place it at insertion-order END (§ EnumerateObjectProperties).
+    if (typeof k === "string" && !!tomb && tomb.has(k)) {
+      const exportsForShape = exports ?? callbackState?.getExports();
+      if (_getStructFieldNames(obj, exportsForShape)?.includes(k)) {
+        let shadowed = _wasmStructShadowedFields.get(obj);
+        if (!shadowed) {
+          shadowed = new Set<string>();
+          _wasmStructShadowedFields.set(obj, shadowed);
+        }
+        shadowed.add(k);
+      }
+    }
+    if (tomb) tomb.delete(k);
   }
   // (#2706 / #1830) Mirror of the `_safeGet` fix above. A genuine integer-index
   // assignment (`o[5] = 55`) on a WasmGC struct is NOT a well-known-symbol write.
@@ -10781,7 +10811,13 @@ assert._isSameValue = isSameValue;
               // collect this level's keys first, order, then push.
               const levelKeys: string[] = [];
               const fieldNames = _getStructFieldNames(current, exports) ?? [];
+              // (#2731) A deleted-then-re-added struct-shape field is emitted from
+              // the sidecar below (insertion-order END), not its fixed struct
+              // slot. Skip it here so it isn't enumerated twice / at the wrong
+              // position.
+              const shadowedFields = _wasmStructShadowedFields.get(current);
               for (const k of fieldNames) {
+                if (shadowedFields && shadowedFields.has(k)) continue;
                 if (!seen.has(k) && !levelKeys.includes(k)) levelKeys.push(k);
               }
               // Also include enumerable sidecar properties
