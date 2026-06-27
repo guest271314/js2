@@ -45,6 +45,38 @@ function emitDeleteThrow(ctx: CodegenContext, fctx: FunctionContext, message: st
 }
 
 /**
+ * (#2726 group (d)) Emit the OrdinaryDelete refusal for `delete obj.<prop>` of a
+ * statically-known NON-configurable accessor (defined via the inline-accessor
+ * `Object.defineProperty` fast path, whose `configurable:false` flag never
+ * reaches the runtime `__delete_property`). Per §13.5.1.2 + OrdinaryDelete: the
+ * receiver is evaluated for side effects, the property is left untouched, and the
+ * result is `false` — which in strict mode (§13.5.1.2 step 6.b) is a TypeError.
+ * Returns `true` if the refusal was emitted (the caller should `return` the i32),
+ * `false` if the key is not a tracked non-configurable accessor (caller proceeds
+ * with the normal runtime-driven delete).
+ */
+function maybeEmitNonConfigurableAccessorDelete(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.DeleteExpression,
+  receiver: ts.Expression,
+  fieldName: string,
+): boolean {
+  if (!ts.isIdentifier(receiver)) return false;
+  if (!ctx.nonConfigurableAccessorKeys.has(`${receiver.text}:${fieldName}`)) return false;
+  // Evaluate the receiver for its side effects, then drop it.
+  const recvType = compileExpression(ctx, fctx, receiver);
+  if (recvType) fctx.body.push({ op: "drop" });
+  // Strict mode: a refused non-configurable delete is a TypeError.
+  if (isStrictContext(expr)) {
+    emitDeleteThrow(ctx, fctx, "TypeError: Cannot delete non-configurable property in strict mode");
+  }
+  // Sloppy mode: the delete expression evaluates to `false`.
+  fctx.body.push({ op: "i32.const", value: 0 });
+  return true;
+}
+
+/**
  * (#2703) Strict-mode wrapper around a `__delete_property` result (an i32 on
  * the stack). In strict mode a `false` result — a non-configurable own
  * property whose delete was refused — is a TypeError (§13.5.1.2 step 6.b); in
@@ -248,6 +280,10 @@ export function compileDeleteExpression(
         const fieldIdx = fields.findIndex((f) => f.name === fieldName);
         if (fieldIdx !== -1 && fields[fieldIdx]!.mutable) {
           const fieldType = fields[fieldIdx]!.type;
+          // (#2726 group (d)) Non-configurable accessor → refuse the delete.
+          if (maybeEmitNonConfigurableAccessorDelete(ctx, fctx, expr, inner.expression, fieldName)) {
+            return { kind: "i32" };
+          }
           // (#1334 / #2703) Compile the receiver once, save to a local, then
           //   (a) clear any sidecar descriptor entry via `__delete_property`
           //       (which reports configurability), and
@@ -340,6 +376,10 @@ export function compileDeleteExpression(
         const fieldIdx = fields.findIndex((f) => f.name === fieldName);
         if (fieldIdx !== -1 && fields[fieldIdx]!.mutable) {
           const fieldType = fields[fieldIdx]!.type;
+          // (#2726 group (d)) Non-configurable accessor → refuse the delete.
+          if (maybeEmitNonConfigurableAccessorDelete(ctx, fctx, expr, inner.expression, fieldName)) {
+            return { kind: "i32" };
+          }
           // (#1821 / #2703) Mirror the property-access arm: clear the sidecar/
           // descriptor entry via __delete_property, reset the struct field to
           // its sentinel ONLY on a successful delete, and throw in strict mode
