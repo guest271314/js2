@@ -1,7 +1,8 @@
 ---
 id: 2743
 title: "arguments object as an ordinary Object: [[Prototype]]=Object.prototype, .constructor, Symbol.iterator, and unmapped arguments for non-simple parameter lists"
-status: ready
+status: in-progress
+assignee: ttraenkler/sendev-args
 sprint: 67
 created: 2026-06-27
 updated: 2026-06-27
@@ -186,3 +187,70 @@ remaining (a)-group (≥5) and the 2 Symbol.iterator tests.
 - `unmapped/Symbol.iterator.js`, `mapped/Symbol.iterator.js` → Symbol→number trap (b)
 - `unmapped/via-params-dflt.js`, `via-params-dstr.js` → `sameValue(value,1)` (c)
 - `unmapped/via-params-rest.js` → `local.set[0] expected type` invalid Wasm (c)
+
+## Implementation notes — PR-1 = group (c) (sendev-args, 2026-06-27)
+
+**Status: group (c) DELIVERED in PR-1; groups (a)+(b) remain → PR-2.** Issue
+frontmatter stays `in-progress`; PR-2 flips it to `done` once the acceptance
+criteria (≥9 of ~13, incl. the (a)/(b) groups) are met.
+
+### What PR-1 changes (and WHY)
+
+The mapped-vs-unmapped split was driven *only* by `isStrictFunction(...)`, so a
+**sloppy** function with a **non-simple parameter list** (rest / default /
+destructuring) wrongly got a **mapped** arguments object. Spec §10.2.11
+(FunctionDeclarationInstantiation) step 22.a requires unmapped iff
+`strict OR !IsSimpleParameterList`.
+
+- New pure AST predicate `isSimpleParameterList(params)` in
+  `src/codegen/helpers/is-strict-function.ts` (co-located with `isStrictFunction`,
+  already imported by every call site — no new import cycle). False if any param
+  has `dotDotDotToken` (rest), `initializer` (default), or a non-identifier name
+  (object/array binding pattern). A TS `this` param stays simple.
+- ORed `|| !isSimpleParameterList(stmt.parameters)` into the `unmapped` argument
+  at every `emitArgumentsObject` call site:
+  - `statements/nested-declarations.ts:521` and `:793` (function-declaration /
+    closure-lifted paths — the path the failing tests take),
+  - `literals.ts:2544` (object-literal method path),
+  - `class-bodies.ts:2247` already hard-codes `true` (class bodies are strict) —
+    unchanged, verified.
+- `function-body.ts` (the inline top-level path) had its *own* simple-param
+  check that caught rest + destructuring but **missed defaulted params**
+  (`initializer`); replaced the ad-hoc `every(isIdentifier && !rest)` with the
+  shared `isSimpleParameterList`, so defaults are now correctly unmapped there too.
+
+When `unmapped` is true, `emitArgumentsObject` skips installing `mappedArgsInfo`
+(`nested-declarations.ts:2292`), so **no write-back** is emitted. That (1) makes
+`arguments[0]=2` not flow into the named param (fixes `via-params-dflt/dstr`,
+`sameValue(value,1)`), and (2) removes the bad mapped-write `local.set` that the
+rest-param local shape couldn't satisfy — which was the *root cause* of
+`via-params-rest`'s "invalid Wasm binary" `compile_error` (a symptom, not a
+separate Wasm-emit bug).
+
+### Verification (isolated `runTest262File`, this branch)
+- `unmapped/via-params-rest.js` compile_error → **pass**
+- `unmapped/via-params-dflt.js` fail → **pass**
+- `unmapped/via-params-dstr.js` fail → **pass**
+- `unmapped/via-strict.js` **pass** (unchanged guard)
+- `mapped/mapped-arguments-nonconfigurable-1.js` **pass** (mapped/simple unaffected)
+
+### Regression surface (why this is safe)
+The change only flips mapped→unmapped for functions with a **non-simple**
+parameter list. A grep of `language/arguments-object/` confirms **no** mapped/*
+or other in-scope test uses a non-simple param list, so the only suite files the
+change touches are the three (c) tests (now green). Mapped behaviour with a
+non-simple param list is itself spec-wrong, so no conformant *passing* test can
+rely on the prior (buggy) behaviour. Broad-impact validation (full sharded
+test262 + the merge_group standalone floor) runs in CI. Tag-marker for the floor:
+watch for an auto-park after enqueue since this touches arguments-object
+machinery.
+
+Lock-in test: `tests/issue-2743.test.ts` (drives `runTest262File` on the three
+(c) files + the `via-strict` guard).
+
+### Remaining for PR-2 (groups (a)+(b))
+- (a) `[[Prototype]]`=Object.prototype + `.constructor`=Object: host `_argumentsObjects`
+  WeakSet marker registered after the vec `struct.new`, with `__getPrototypeOf` /
+  `__extern_get("constructor")` hooks in `runtime.ts`; standalone keeps the vec.
+- (b) `arguments[Symbol.iterator]` = %Array.prototype.values%: gate the vec
+  computed-get so a Symbol key is not coerced via ToNumber, route @@iterator.
