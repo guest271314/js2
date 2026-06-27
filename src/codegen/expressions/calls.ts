@@ -5940,13 +5940,41 @@ function compileCallExpression(
         }
         return { kind: "externref" };
       }
-      // GC/host stub: compile both args, drop proto, return obj.
-      const objType = compileExpression(ctx, fctx, expr.arguments[0]!);
-      const protoType = compileExpression(ctx, fctx, expr.arguments[1]!);
+      // (#2739) GC/host: record the user [[Prototype]] via the host import so the
+      // for-in walk + read path can follow it. An opaque WasmGC struct has no
+      // host-observable [[Prototype]], so the previous stub (drop proto) lost the
+      // link entirely and inherited keys never enumerated.
+      const objType = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "externref" });
+      if (!objType) {
+        fctx.body.push({ op: "ref.null.extern" });
+        return { kind: "externref" };
+      }
+      if (objType.kind !== "externref") {
+        coerceType(ctx, fctx, objType, { kind: "externref" });
+      }
+      const protoType = compileExpression(ctx, fctx, expr.arguments[1]!, { kind: "externref" });
       if (protoType) {
+        if (protoType.kind !== "externref") {
+          coerceType(ctx, fctx, protoType, { kind: "externref" });
+        }
+      } else {
+        // proto produced no value — push null so the import receives two args.
+        fctx.body.push({ op: "ref.null.extern" });
+      }
+      const sproIdx = ensureLateImport(
+        ctx,
+        "__host_set_struct_proto",
+        [{ kind: "externref" }, { kind: "externref" }],
+        [{ kind: "externref" }],
+      );
+      flushLateImportShifts(ctx, fctx);
+      if (sproIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx: sproIdx });
+      } else {
+        // Import unavailable — fall back to the old stub (drop proto, keep obj).
         fctx.body.push({ op: "drop" });
       }
-      return objType;
+      return { kind: "externref" };
     }
 
     // Handle Object.getPrototypeOf(obj) — return prototype as externref
