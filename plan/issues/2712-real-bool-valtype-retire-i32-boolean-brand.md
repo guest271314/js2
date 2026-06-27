@@ -216,3 +216,11 @@ cause) — but the registration cost is real and must be sequenced with #1917 /
 `Object.values({a:true})[0]===true`, `new Set([true]).has(1)===false`, `o[true]`
 keys `"true"`, `o[null]` keys `"null"` (no trap); equivalence + test262
 non-regressing on full CI.
+
+**Sequencing cross-link (architect, esch 2026-06-27):** #2732(b) — strict-equality
+between a primitive boolean and a number returning the wrong answer (`true === 1`
+should be `false`; verified `false === 0` evaluates EQ on current main) — is
+downstream of this same boolean-as-i32 representation collision and is
+**unrepresentable to fix cleanly until the `bool` lane exists**. Sequence #2732(b)
+behind #2712; #2732(a) (unary `+/-/~/>>>` ToPrimitive trap) is independent and
+ships on its own.
