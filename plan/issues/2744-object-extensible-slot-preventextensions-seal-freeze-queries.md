@@ -1,7 +1,8 @@
 ---
 id: 2744
 title: "ES5: object [[Extensible]] internal slot — preventExtensions/seal/freeze set it; isExtensible/isSealed/isFrozen read it"
-status: ready
+status: done
+completed: 2026-06-27
 sprint: 67
 created: 2026-06-27
 updated: 2026-06-27
@@ -80,6 +81,36 @@ queryable `[[Extensible]]` slot on our object representation.
   orthogonal to descriptor read-back and can land independently.
 - `seal-finalizationregistry.js` (FinalizationRegistry) and Proxy-handler seal
   tests are out of scope (blocked clusters).
+
+## Test Results (esch, 2026-06-27) — Slice 1: routing + slot + TestIntegrityLevel
+
+Implemented the architect's Slice-1 (routing + `[[Extensible]]` slot, the
+independent unit). Measured on `built-ins/Object/{isExtensible,isFrozen,isSealed,
+preventExtensions,seal,freeze}` (317 tests) via the real `wrapTest`+runner:
+
+- **baseline (origin/main): 252 pass / 65 fail → with fix: 281 pass / 36 fail**
+  = **+29 fixed, ZERO regressions** (verified by fail-set diff).
+
+Changes:
+- `src/codegen/expressions/calls.ts` — the integrity codegen treated any
+  non-`externref` argType as a primitive (folding `isExtensible`→0 /
+  `isFrozen`,`isSealed`→1 for arrays/typed-structs/Date). Now an `isObjectRef`
+  predicate routes EVERY object ref through the runtime via **raw
+  `extern.convert_any`** (NOT `coerceType`, which appends `__make_iterable` and
+  materializes a vec into a *fresh* JS array per call → identity loss). Dropped the
+  order-blind host-mode static fold for the queries (fixes the
+  `isExtensible`-pre-check-before-`seal` failures). Generalized the freeze/seal/
+  preventExtensions SET coercion from standalone-only to ALL modes.
+- `src/runtime.ts` — reimplemented `__object_isFrozen`/`__object_isSealed` as
+  WeakSet fast-path **OR** `_testIntegrityLevel` (§7.3.16) over the live descriptor
+  table (`_getSidecarDescs` + canonical `_ownStructKeys`), so `preventExtensions` +
+  `defineProperty(non-writable/non-config)` (data AND accessor) reports `isFrozen`.
+
+Remaining (deferred follow-ons, #2668-coupled, per the architect's sequencing):
+group (c) sloppy frozen-write strict-gate (the `freeze/15.2.3.9-2-c-*` propertyHelper
+tests trap deeper than the write-throw), the global-object sub-case (overlaps #2726),
+and the `propertyHelper.js`/descriptor-precision cluster. Out of scope: Proxy-handler,
+FinalizationRegistry, `not-a-constructor` harness CEs, resizable-buffer TypedArray.
 
 ## Implementation Plan (architect: esch, 2026-06-27) — dev-implementable
 
