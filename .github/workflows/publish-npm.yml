@@ -73,9 +73,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # No `version:` here on purpose — package.json pins pnpm via the
+      # "packageManager" field, and passing both makes pnpm/action-setup@v4
+      # fail with ERR_PNPM_BAD_PM_VERSION (it killed the v0.56.0 and v0.57.0
+      # publish runs). Let action-setup read the pinned version instead.
       - uses: pnpm/action-setup@v4
-        with:
-          version: 10
 
       - uses: actions/setup-node@v6
         with:
