@@ -5316,9 +5316,29 @@ function _wrapCallableForHost(
       if (typeof wrapped !== "function") {
         throw new TypeError("compiled function is not a constructor (no __call_fn_* export)");
       }
-      const self: Record<string, any> = {};
+      // (#2628) Link the fresh instance to the constructor closure's vivified
+      // prototype so a subsequent prototype-method call resolves. Previously the
+      // instance was a bare `{}` with no `[[Prototype]]` and no
+      // `_fnctorInstanceCtor` entry, so `new this(...).m()` (acorn's
+      // `new this(opts,input).parse()`) routed through `__extern_method_call`,
+      // found no `m` on the bare object, and threw "m is not a function" — even
+      // though `new Parser(...).m()` (the raw-struct `<Class>_new` path) works.
+      // `Object.create(proto)` gives native prototype-chain reads; the
+      // `_fnctorInstanceCtor` registration lets `_fnctorProtoLookup` wrap the
+      // raw-struct method values into callables on dispatch (same machinery the
+      // identifier-constructed fnctor instance uses for in-wasm method calls).
+      const ctorProto = _getOrVivifyFnPrototype(closure, callbackState);
+      const self: Record<string, any> =
+        ctorProto != null && typeof ctorProto === "object" ? Object.create(ctorProto) : {};
+      if (_canBeWeakKey(self)) _fnctorInstanceCtor.set(self, closure);
       const r = wrapped.apply(self, args);
-      return r != null && typeof r === "object" ? r : self;
+      const inst = r != null && typeof r === "object" ? r : self;
+      // The body may `return {...}` a different object; link it too so method
+      // dispatch resolves on whichever instance escapes.
+      if (inst !== self && _canBeWeakKey(inst) && !_fnctorInstanceCtor.has(inst)) {
+        _fnctorInstanceCtor.set(inst, closure);
+      }
+      return inst;
     },
     // Property reads / writes / enumeration delegate to the standard
     // `_wrapForHost` proxy so `.prototype`, `.name`, static members, `has`,
@@ -9438,6 +9458,29 @@ assert._isSameValue = isSameValue;
               if (typeof resolved === "function") {
                 const ret = resolved.apply(obj, wrappedArgs);
                 return ret === obj || ret === wrappedObj ? obj : _unwrapForHost(ret);
+              }
+            }
+            // (#2628) Prototype method on a `__construct_closure`-built instance.
+            // The construct trap returns a PLAIN JS object (not a wasm struct)
+            // whose method values live on the constructor closure's vivified
+            // prototype as RAW closure structs (`Parser.prototype.m = fn`), so
+            // the native `wrappedObj[method]` read above yielded a non-callable
+            // raw struct. The trap registered the instance in
+            // `_fnctorInstanceCtor`, so resolve the method through
+            // `_fnctorProtoLookup` (which walks the vivified prototype chain),
+            // wrap it into a callable, and dispatch with the instance as `this`.
+            // This is what makes `new this(...).m()` resolve like the
+            // identifier-constructed `new Parser(...).m()` path does.
+            {
+              const protoDesc = _fnctorProtoLookup(obj, method);
+              if (protoDesc) {
+                const resolved = protoDesc.get
+                  ? protoDesc.get.call(obj)
+                  : _maybeWrapCallableUnknownArity(protoDesc.value, callbackState);
+                if (typeof resolved === "function") {
+                  const ret = resolved.apply(obj, wrappedArgs);
+                  return ret === obj ? obj : _unwrapForHost(ret);
+                }
               }
             }
             // (#1712) Array mutators on WasmGC vec structs. acorn mutates

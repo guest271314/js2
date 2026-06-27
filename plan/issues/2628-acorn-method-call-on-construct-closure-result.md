@@ -1,8 +1,10 @@
 ---
 id: 2628
 title: "compiled-acorn: method call on a __construct_closure-constructed instance fails (5th dogfood blocker)"
-status: ready
-sprint: Backlog
+status: done
+sprint: 67
+completed: 2026-06-27
+assignee: ttraenkler/dev-acorn-construct
 created: 2026-06-22
 priority: high
 feasibility: medium
@@ -127,3 +129,57 @@ framing **for the acorn dogfood path**:
 NOT dispatch #2628 as a standalone acorn blocker; the dogfood lap is unblocked,
 and the host-facing identity fix rides #2623-B. Re-probe the next acorn wall
 after #2623-B lands.
+
+## Resolution (dev-acorn-construct, 2026-06-27) — the IN-WASM path WAS broken on current main
+
+The 2026-06-22 re-grounding above is **STALE / refuted by a verify-first probe on
+current `origin/main` (`d52cca0c9`)**. The exact in-wasm chained shape the note
+claimed "returns 5 ✓" actually **throws**:
+
+```
+new this({}, input).getLen()  chained IN-WASM  →  THREW "getLen is not a function"
+new Parser({}, input).getLen() chained IN-WASM  →  5 ✓
+```
+
+So #2628 was a real, live, in-wasm dispatch defect — exactly as the original
+symptom stated. (The intervening sibling PRs must have moved the path since the
+note was written; re-grounding must always re-probe current main, per
+`feedback_reground_spec_against_current_main`.)
+
+### Root cause
+The `__construct_closure` host bridge constructs the instance in the
+`_wrapCallableForHost` **`construct` trap** (`runtime.ts`), which built a **bare
+`self = {}`** — no `[[Prototype]]` link to the constructor closure's vivified
+prototype, and no `_fnctorInstanceCtor` registration. A subsequent `p.m()`
+routes through `__extern_method_call`, where the native `wrappedObj[method]` read
+misses (the bare object has only own data fields) and the only fallback branch
+required `_isWasmStruct(obj)` — false for the plain bridge object — so it threw.
+By contrast `new Parser(...)` returns the raw WasmGC struct via `<Class>_new`,
+whose method dispatch resolves through the registered fnctor machinery (#1712).
+
+### Fix (two edits, `src/runtime.ts`, JS-host glue only)
+1. **`construct` trap**: build the instance with
+   `Object.create(_getOrVivifyFnPrototype(closure))` and register it via
+   `_fnctorInstanceCtor.set(self, closure)` (also link a body-returned distinct
+   object). Mirrors the identifier-constructed instance's prototype link.
+2. **`__extern_method_call`**: when the native method read misses, consult
+   `_fnctorProtoLookup(obj, method)` (works for any registered instance, struct
+   or plain object), wrap the raw-struct method value into a callable, and
+   dispatch with the instance as `this`.
+
+Standalone/`noJsHost` is unaffected — the #2608 `new this` arm and this bridge
+are JS-host-only; the standalone path keeps its existing behavior.
+
+### Test Results (`tests/issue-2628.test.ts`, all pass)
+- `new this({}, "hello").getLen()` (acorn parse shape) → **5** ✓ (was: THREW)
+- `new Parser({}, "hello").getLen()` (no regression) → **5** ✓
+- method calling another prototype method via `this` (`twice → this.getLen()*2`) → **10** ✓
+
+Adjacent regression sweep (all green): issue-1528-closure-construct, issue-1632a,
+issue-2608-new-this-fnctor-static, issue-1712(+dynamic-dispatch),
+issue-2637-b2-ctor-closure-registration, fn-constructor,
+issue-2026-constructor-identity-any, issue-28-promise-executor-invocation,
+issue-2623-promise-subclass-identity, issue-1772-capability-map-extend,
+issue-2660-s2/s3, wrapper-constructors. The 2 `promise-combinators` "with
+resolved values" failures are **pre-existing on `origin/main`** (verified on a
+clean checkout) — `_toIterable(arr)` argument shape, unrelated to this change.
