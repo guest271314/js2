@@ -22,6 +22,7 @@ ls /workspace/.claude/worktrees/
 ```
 
 For each worktree:
+
 - Check for uncommitted work: `git -C <wt> diff --stat`
 - Check for unmerged commits: `git -C <wt> log --oneline main..HEAD`
 - If all merged: `git worktree remove --force <wt>`
@@ -66,6 +67,11 @@ git tag sprint/N  # replace N with sprint number
 git push origin sprint/N
 ```
 
+> Sprint-end tags ONLY `sprint/N` — it does **not** tag a version. Never
+> `git tag vX.Y.Z` at sprint end. Version tags are cut exclusively via
+> `node scripts/release.mjs <x.y.z>` (the deliberate, reviewed release flow);
+> see `docs/releasing.md` and loopdive/js2#389.
+
 Then set `end_tag_pushed: true` in the `wrap_checklist` in `plan/issues/sprints/{N}/sprint.md`.
 
 ## Step 6: Carry over unfinished issues to the next sprint
@@ -90,6 +96,7 @@ numbers and the phrase "moved into [sprint-M.md]" (this sets the dashboard's
 
 Sprint docs are **flat files** (#1616): `plan/issues/sprints/{N}.md` (NOT a
 `{N}/sprint.md` directory). Edit `plan/issues/sprints/{N}.md`:
+
 - Fill in final test262 numbers
 - Calculate delta from baseline
 - Note any deferred tasks
@@ -122,6 +129,7 @@ deploy regen.
 ## Step 9: Spawn SM for retrospective
 
 Spawn the scrum-master agent to write `plan/log/retrospectives/sprint-{N}.md`. The SM reads:
+
 - `plan/issues/sprints/{N}.md` — results, deferred tasks
 - `git log sprint-{N}/begin..sprint/{N}` — what landed
 - Previous retro for format reference
@@ -145,6 +153,7 @@ Invoke the harvest-errors skill (or spawn a dedicated harvester agent)
 ```
 
 The harvester:
+
 - Clusters failures in the baseline JSONL by normalized error pattern (run
   `node scripts/fetch-baseline-jsonl.mjs` first to populate
   `.test262-cache/test262-current.jsonl` — the file is no longer
@@ -155,11 +164,12 @@ The harvester:
 
 Commit any newly-filed issues before Step 10.
 
-**Why here and not at sprint kickoff:** after the sprint's merges have landed, the failure distribution has shifted — running harvest at wrap-up captures the *current* gaps, not stale pre-sprint ones. The next sprint's planning session (PO) can then slice the fresh issue list by theme. See memory: `feedback_harvest_at_sprint_end.md`.
+**Why here and not at sprint kickoff:** after the sprint's merges have landed, the failure distribution has shifted — running harvest at wrap-up captures the _current_ gaps, not stale pre-sprint ones. The next sprint's planning session (PO) can then slice the fresh issue list by theme. See memory: `feedback_harvest_at_sprint_end.md`.
 
 ## Step 12: Update session memory
 
 Update `/home/node/.claude/projects/-workspace/memory/project_next_session.md` with:
+
 - Final git hash
 - Test262 numbers
 - What's still open
