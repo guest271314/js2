@@ -138,7 +138,7 @@ pass rate goes from "good" to "excellent."
 | **1340** | spec gap: Iterator.prototype helpers wasm_compile errors (89 of 245 fails) | 50 | done | high |
 | **1342** | spec gap: JSON.stringify replacer/toJSON/property-list (49 of 66 test262 fails) | 50 | wont-fix | medium |
 | **1343** | spec gap: Date.prototype string formatters and parsers (174 of 485 test262 fails) | 50 | done | medium |
-| **1344** | spec gap: Generator/AsyncIterator prototype receiver TypeErrors + return/throw (52 + 12 test262 fails) | 64 | suspended | medium |
+| **1344** | spec gap: Generator return/throw abrupt completion through try/catch/finally (31 GeneratorPrototype fails; receiver-checks landed in Slice 1) | 67 | in-progress | medium |
 | **1345** | spec gap: Reflect.* invariant checks mirror internal-method bugs (46 test262 fails as of 2026-05-28) | Backlog | blocked | medium |
 | **1346** | spec gap: yield in nested try/finally + yield expression evaluation order (46 test262 fails) | 61 | done | medium |
 | **1347** | spec gap: for-of doesn't IteratorClose on body throw (portion of 389 fails) | 50 | done | high |
@@ -147,7 +147,7 @@ pass rate goes from "good" to "excellent."
 | **1350** | spec gap: ArrayBuffer resizable + TypedArray detached-buffer guards (100 + 39 test262 fails) — DUPLICATE of #1645 | Backlog | blocked | medium |
 | **1352** | RegExp exec result: wasmGC string struct ≠ externref string in strict equality (S15.10.2 cluster) | ~ | done | medium |
 | **1354** | spec backlog: SharedArrayBuffer + Atomics (full implementation, requires multi-thread Wasm) | Backlog | backlog | low |
-| **1355** | spec backlog: Proxy implementation beyond JS-host fallback (235 test262 fails) | 64 | in-progress | top |
+| **1355** | spec backlog: Proxy implementation beyond JS-host fallback (235 test262 fails) | 67 | in-progress | top |
 | **1356** | spec backlog: ShadowRealm implementation (61 test262 fails, requires per-realm parser) | Backlog | backlog | low |
 | **1357** | spec backlog: AbstractModuleSource constructor (Stage 3 import-source proposal, 8 test262 fails) | Backlog | backlog | low |
 | **1358** | spec gap: Array.prototype.{filter,map,every,some,forEach,reduce} on array-like (.call) receivers — ~452 assertion_fail | 51 | done | high |
@@ -224,7 +224,7 @@ pass rate goes from "good" to "excellent."
 | **1519** | spec gap: `new` expression — non-literal spread + non-constructor TypeError + new.target via apply/call | 52 | done | medium |
 | **1525b** | ToPrimitive residuals: object-method trampoline invalid Wasm + §7.1.1.1 step-6 TypeError | 61 | done | medium |
 | **1550** | spec gap: dstr-binding default initializer evaluated when value is non-undefined (`init-skipped` pattern) | 52 | done | high |
-| **1551** | spec gap: SuperCall — argument-list evaluation order, spread getter side-effects, uninitialized-this PutValue | Backlog | ready | medium |
+| **1551** | spec gap: SuperCall — argument-list evaluation order, spread getter side-effects, uninitialized-this PutValue | 66 | done | medium |
 | **1552** | spec gap: catch parameter destructuring (`try/dstr`) — share dstr-binding helper with function decls | 52 | done | medium |
 | **1553** | spec gap: let/const/var destructuring declarations — residuals after #1432/#1450/#1454/#1550 | 52 | done | medium |
 | **1553a** | destructure-helpers: thread decl-mode + bindingKind through destructureParamObject/Array (foundation) | 53 | done | high |
@@ -261,7 +261,7 @@ pass rate goes from "good" to "excellent."
 | **1639** | spec gap: Generator/AsyncIterator prototype receiver TypeErrors + return/throw (52 + 12 test262 fails) | 50 | done | medium |
 | **1640** | spec gap: Reflect.* invariant checks mirror internal-method bugs (47 test262 fails) | 50 | wont-fix | medium |
 | **1641** | spec gap: yield in nested try/finally + yield expression evaluation order (46 test262 fails) | Backlog | ready | medium |
-| **1642** | spec gap: for-of doesn't IteratorClose on body throw (portion of 389 fails) | Backlog | ready | high |
+| **1642** | spec gap: for-of IteratorClose — RE-SCOPED to the residual 8 (return-method representation + generator-close) | 67 | done | medium |
 | **1643** | spec gap: class static initialization order + private field semantics (significant share of 1500+ class fails) | 50 | done | high |
 | **1644** | spec gap: BigInt typed-path eager f64 assumptions (47 test262 fails, 4 illegal_cast + 13 runtime) | 61 | done | medium |
 | **1645** | spec gap: ArrayBuffer resizable + TypedArray detached-buffer guards (100 + 39 test262 fails) | Backlog | ready | medium |
@@ -287,15 +287,40 @@ pass rate goes from "good" to "excellent."
 | **1732** | spec gap: builtin method values lack [[Construct]]-absent brand + own length/name descriptors (~40 String.prototype A7/A8 fails) | Backlog | ready | medium |
 | **1743** | Bytecode VM: coordinated stack → register+accumulator encoding flip | Backlog | ready | medium |
 | **1761** | perf(string-hash): presize string-build buffer from static loop-trip-count to kill reallocs + per-append cap-check | 59 | done | high |
-| **1762** | perf(strings): linear-memory string backing for the build/hash hot path — drop the WasmGC (array i16) GC barrier | Backlog | ready | high |
+| **1762** | perf(strings): linear-memory string backing for the build/hash hot path — drop the WasmGC (array i16) GC barrier | 66 | wont-fix | high |
 | **1788** | boolean i32 struct fields boxed as number — typeof/=== mismatch on dynamic read | 58 | done | medium |
 | **1796** | Migrate synchronous-async contract to CPS Promise model (flip ASYNC_CPS_ENABLED) | 63 | done | top |
 | **2180** | Host-mode Proxy: close remaining test262 failures toward 100% (invariant checks, Wasm-typed targets, revocation lifecycle) | 62 | done | top |
 | **2183** | test262 runner: inject proxyTrapsHelper.js (allowProxyTraps) so Proxy trap tests construct a real handler | 62 | done | high |
 | **2200** | Annex B B.3.3 block-level function declaration hoisting — outer binding created/initialized incorrectly (~186 test262 fails) | 64 | in-progress | high |
-| **2201** | Logical-assignment NamedEvaluation — `x ??=/\|\|=/&&= fn` must set fn.name to \"x\" (~9 test262 fails) | 64 | ready | medium |
-| **2202** | arguments.length wrong for trailing-comma + spread call args in generator / class-method bodies (~30 test262 fails) | 64 | ready | medium |
-| **2203** | Array destructuring with elisions + defaults binds wrong elements (host) / emits invalid funcidx (standalone) (~54 standalone CE + host fails) | 64 | ready | high |
+| **2201** | Logical-assignment NamedEvaluation — `x ??=/\|\|=/&&= fn` must set fn.name to \"x\" (~9 test262 fails) | 64 | done | medium |
+| **2202** | arguments.length wrong for trailing-comma + spread call args in generator / class-method bodies (~30 test262 fails) | 64 | done | medium |
+| **2203** | Array destructuring with elisions + defaults binds wrong elements (host) / emits invalid funcidx (standalone) (~54 standalone CE + host fails) | 64 | done | high |
+| **2501** | Object.prototype.toString [object X] builtin tag — Array/Function/Date missing (host) + standalone CE (~151 test262) | 64 | done | medium |
+| **2552** | Annex B B.3.3 Phase 2 rework — TDZ-var outer-binding allocation perturbs hot-path codegen (-1180 test262 regression) | 64 | in-progress | medium |
+| **2566** | Eager-buffer generator over-consumes in array destructuring (capturing generators yield wrong side-effect counts; trailing elision steps too far) | 67 | blocked | medium |
+| **2615** | Proxy (host): a `new Proxy` result typed as its target's struct causes every read through the proxy to trap (~32+ fails) | 65 | done | top |
+| **2616** | Proxy (host): present-but-non-callable trap is silently dropped instead of throwing TypeError (~19 fails) | 65 | done | high |
+| **2617** | Proxy (host): trap-thrown exceptions and §10.5 invariant TypeErrors are swallowed by the boundary try/catch (~40 fails) | 65 | done | high |
+| **2618** | Proxy (host): calling / constructing a Proxy whose target is callable traps (illegal cast) or ignores the construct trap result (~15 fails) | 67 | blocked | medium |
+| **2661** | AsyncIteratorPrototype[Symbol.asyncDispose] — explicit-resource-management disposal protocol (7 test262 fails) |  | ready | low |
+| **2662** | host (gc) generator backend is EAGER-buffered — breaks lazy/suspension semantics on the default path (architecture) |  | ready | high |
+| **2663** | feat: `with` statement Tier 2 — dynamic-scope fallback (de-skip the 294 test262 WithStatement tests; landing page shows unsupported) | 67 | in-progress | medium |
+| **2665** | dashboard: landing-page feature-support labels are hardcoded HTML, not auto-derived from test262 pass-rates (with/SAB/top-level-await/__proto__ etc. shown permanently 'not supported') | 66 | done | medium |
+| **2666** | ≤ES3: member-reference base[prop] evaluation order in compound-assignment and prefix/postfix ++/-- (ToPropertyKey once, left-before-right) | 67 | in-progress | high |
+| **2667** | ≤ES3: mapped arguments object — non-configurable/non-writable property + [[Delete]] semantics (residual of #1511) | 66 | done | high |
+| **2668** | ES5: Object.defineProperty/defineProperties descriptor fidelity residual (~788 fails — largest ES5 cluster) | 67 | in-progress | high |
+| **2669** | ES2015: destructuring correctness residual umbrella (~696 fails — iterator-close, defaults, holes, rest across for-of/assignment/binding/params) | 67 | ready | high |
+| **2670** | ES2015: Array.prototype iteration-method semantics residual (~1017 fails — generic array-like receiver, callback/thisArg, holes, length coercion) | 67 | in-progress | high |
+| **2671** | ES2015 builtin/feature spec residuals: Date, RegExp, Promise, JSON, super (~400 fails — tracking, slice per area) | 67 | ready | medium |
+| **2675** | ++/-- on a computed object key (obj[keyExpr]++) is broken: NaN/no-update + double ToPropertyKey — #2659-family struct-slot vs sidecar | 66 | done | medium |
+| **2676** | ≤ES3: mapped arguments — strict-mode aliased `delete args[i]` must throw TypeError on a non-configurable index (residual of #2667) | Backlog | ready | medium |
+| **2678** | Date.parse / new Date(str) are NaN stubs in HOST mode — native parser is standalone/WASI-only (needs js-string externref support) | 66 | done | medium |
+| **2679** | ToNumber/ToPrimitive invokes valueOf with the WRONG `this` (receiver identity lost) — breaks arg-*-to-number tests across builtins | 66 | done | high |
+| **2680** | Runtime ToPropertyDescriptor reads a WasmGC-struct descriptor's attributes own-level only (drops prototype-inherited get/set/value/enumerable/configurable) | 67 | ready | high |
+| **2682** | perf(strings): string read-loop fast path — hoist charCodeAt flatten/descriptor + i32 hash accumulator (the #1762 NO-GO redirect) |  | done | high |
+| **2709** | SuperCall remaining sub-cases: spread-getter side-effects, uninitialized-this PutValue, GetSuperBase ordering, nested-super this-init, top-level super-arg global visibility | Backlog | done | medium |
+| **2714** | Object spread copies values but the copied keys are not enumerable (Object.keys / spread-then-data drop) | Backlog | ready | medium |
 
 <!-- AUTOGENERATED:GOAL-ISSUES-END -->
 
