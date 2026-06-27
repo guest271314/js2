@@ -29,6 +29,7 @@
 
 import { readdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
+import { homedir } from "node:os";
 
 const args = process.argv.slice(2);
 const DRY = args.includes("--dry-run");
@@ -37,10 +38,25 @@ const FORCE = args.includes("--force");
 const REPO = process.env.REPO_ROOT || process.cwd();
 const ISSUES_DIR = join(REPO, "plan", "issues");
 const SPRINTS_DIR = join(ISSUES_DIR, "sprints");
+const CLAUDE_HOME = process.env.CLAUDE_HOME || join(homedir(), ".claude");
+
+// Weekly budget cache written by the statusline (#2751): { seven_day_used_pct,
+// resets_at, written_at }. Lets the freeze trigger read the same "wkly" / "d left"
+// data the statusline shows, without a manual env var.
+function readBudgetCache() {
+  try {
+    const c = JSON.parse(readFileSync(join(CLAUDE_HOME, "js2wasm-budget.json"), "utf8"));
+    return c && Number.isFinite(Number(c.seven_day_used_pct)) ? c : null;
+  } catch {
+    return null;
+  }
+}
 
 const today = new Date().toISOString().slice(0, 10);
 
 // --- trigger evaluation -------------------------------------------------------
+// Precedence: --force → explicit env → statusline weekly cache. Fires at
+// >=99% weekly budget spent OR <=1h until the weekly window resets.
 function triggerReason() {
   if (FORCE) return "--force";
   const pct = Number(process.env.JS2WASM_BUDGET_PCT);
@@ -51,6 +67,16 @@ function triggerReason() {
     if (Number.isFinite(t)) {
       const msLeft = t - Date.now();
       if (msLeft <= 3600 * 1000) return `${Math.round(msLeft / 60000)} min left (<= 60)`;
+    }
+  }
+  // Statusline weekly cache (the "wkly" % and "d left" the statusline shows).
+  const cache = readBudgetCache();
+  if (cache) {
+    const used = Number(cache.seven_day_used_pct);
+    if (used >= 99) return `weekly budget ${used}% >= 99% (statusline)`;
+    if (Number.isFinite(Number(cache.resets_at))) {
+      const minLeft = (Number(cache.resets_at) - Date.now() / 1000) / 60;
+      if (minLeft > 0 && minLeft <= 60) return `${Math.round(minLeft)} min left in weekly window (statusline)`;
     }
   }
   return null;

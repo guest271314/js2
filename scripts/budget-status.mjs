@@ -16,13 +16,17 @@
 // for the remaining share is deferred to the next window's start, never started
 // late where it would strand.
 //
-// INPUTS (env; all optional — sane fresh-window defaults so it never misleads):
-//   JS2WASM_BUDGET_REMAINING_PCT   remaining budget, 0..100   (preferred)
+// BUDGET SOURCE: the statusline (.claude/statusline-command.sh, which shows "wkly"
+// % and "d left") caches rate_limits.seven_day to ~/.claude/js2wasm-budget.json on
+// every render; this script reads it automatically. Env vars below override it; with
+// neither cache nor env it assumes a fresh window (R=100%) so it recommends big rocks
+// rather than falsely deferring.
+//
+// INPUTS (env; all optional):
+//   JS2WASM_BUDGET_REMAINING_PCT   remaining budget, 0..100   (overrides cache)
 //   JS2WASM_BUDGET_PCT             spent budget, 0..100        (remaining = 100 - spent)
 //   JS2WASM_PARALLELISM            active-agent count override (else auto-detected)
 //   JS2WASM_HORIZON_COSTS          JSON override of class costs, e.g. {"xl":0.25,...}
-// (Budget source is the one open dependency from #2751; with none set it assumes a
-//  fresh window — R=100% — so it recommends big rocks rather than falsely deferring.)
 //
 // Usage:
 //   node scripts/budget-status.mjs            # human summary + recommended max horizon
@@ -63,17 +67,41 @@ const CLASSES_BIG_FIRST = ["xl", "l", "m", "s"]; // cost-descending
 const SLACK = 0.03;
 const PRIO_RANK = { high: 1, medium: 2, low: 3 };
 
+// --- weekly budget cache (written by the statusline, #2751) -------------------
+// .claude/statusline-command.sh caches rate_limits.seven_day here on every render
+// (the "wkly" / "d left" indicators); standalone scripts can't see that stdin JSON
+// otherwise. { seven_day_used_pct, resets_at, written_at }.
+function readBudgetCache() {
+  try {
+    const c = JSON.parse(readFileSync(join(CLAUDE_HOME, "js2wasm-budget.json"), "utf8"));
+    return c && Number.isFinite(Number(c.seven_day_used_pct)) ? c : null;
+  } catch {
+    return null;
+  }
+}
+const BUDGET_CACHE = readBudgetCache();
+
 // --- remaining budget fraction R (0..1) ---------------------------------------
+// Precedence: explicit env override → statusline weekly cache → fresh-window.
 function remainingFraction() {
   const rem = Number(process.env.JS2WASM_BUDGET_REMAINING_PCT);
   if (Number.isFinite(rem)) return Math.max(0, Math.min(1, rem / 100));
   const spent = Number(process.env.JS2WASM_BUDGET_PCT);
   if (Number.isFinite(spent)) return Math.max(0, Math.min(1, (100 - spent) / 100));
+  if (BUDGET_CACHE) return Math.max(0, Math.min(1, (100 - Number(BUDGET_CACHE.seven_day_used_pct)) / 100));
   return 1; // no budget source → assume a fresh window
 }
 const budgetKnown =
   Number.isFinite(Number(process.env.JS2WASM_BUDGET_REMAINING_PCT)) ||
-  Number.isFinite(Number(process.env.JS2WASM_BUDGET_PCT));
+  Number.isFinite(Number(process.env.JS2WASM_BUDGET_PCT)) ||
+  BUDGET_CACHE != null;
+
+// Days left in the weekly window (from the statusline cache's reset timestamp).
+function daysLeft() {
+  if (!BUDGET_CACHE || !Number.isFinite(Number(BUDGET_CACHE.resets_at))) return null;
+  const secs = Number(BUDGET_CACHE.resets_at) - Date.now() / 1000;
+  return secs > 0 ? secs / 86400 : 0;
+}
 
 // --- task stores --------------------------------------------------------------
 function taskStoreDirs() {
@@ -209,7 +237,14 @@ const picks = PICK || JSON_OUT ? pickTasks() : [];
 
 // --- output -------------------------------------------------------------------
 const pctRem = Math.round(R * 100);
-const note = budgetKnown ? "" : " (no budget source — assuming fresh window; set JS2WASM_BUDGET_REMAINING_PCT)";
+const dl = daysLeft();
+const src = budgetKnown
+  ? BUDGET_CACHE &&
+    !Number.isFinite(Number(process.env.JS2WASM_BUDGET_REMAINING_PCT)) &&
+    !Number.isFinite(Number(process.env.JS2WASM_BUDGET_PCT))
+    ? " (source: statusline weekly cache)"
+    : ""
+  : " (no budget source — assuming fresh window; statusline writes ~/.claude/js2wasm-budget.json, or set JS2WASM_BUDGET_REMAINING_PCT)";
 
 if (JSON_OUT) {
   console.log(
@@ -217,6 +252,7 @@ if (JSON_OUT) {
       {
         remaining_pct: pctRem,
         budget_known: budgetKnown,
+        days_left: dl == null ? null : Number(dl.toFixed(2)),
         parallelism: N,
         per_agent_share: Number(share.toFixed(3)),
         recommended_max_horizon: maxHz,
@@ -233,11 +269,11 @@ if (JSON_OUT) {
   );
 } else if (QUIET) {
   console.log(
-    `budget ${pctRem}% rem | ${N} agents | share ${(share * 100).toFixed(0)}% | pull ≤ ${maxHz.toUpperCase()}${budgetKnown ? "" : " (assumed)"}`,
+    `budget ${pctRem}% rem${dl == null ? "" : ` | ${dl.toFixed(1)}d left`} | ${N} agents | share ${(share * 100).toFixed(0)}% | pull ≤ ${maxHz.toUpperCase()}${budgetKnown ? "" : " (assumed)"}`,
   );
 } else {
-  console.log(`\nbudget-status${note}`);
-  console.log(`  remaining budget : ${pctRem}%`);
+  console.log(`\nbudget-status${src}`);
+  console.log(`  remaining budget : ${pctRem}%${dl == null ? "" : `   (${dl.toFixed(1)}d left in window)`}`);
   console.log(`  parallelism      : ${N} active agent(s)`);
   console.log(`  per-agent share  : ${(share * 100).toFixed(0)}% of a window`);
   console.log(`  → pull a task ≤ horizon ${maxHz.toUpperCase()} (cost ≤ ${(fitsCost * 100).toFixed(1)}% of window)`);
