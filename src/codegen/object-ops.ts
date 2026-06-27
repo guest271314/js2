@@ -4316,30 +4316,41 @@ export function compilePropertyIntrospection(
     let needsRuntime = false;
     if (recvVarName) {
       const prefix = `${recvVarName}:`;
-      // Cheap pre-check: if any defineProperty entry exists for this var
-      // (`definePropertyReceiverKeys` records EVERY lowering path uniformly;
-      // `definedPropertyFlags` / `sidecarDefinedPropertyKeys` are kept as
-      // belt-and-braces), the runtime tombstone / descriptor map could differ
-      // from the static shape answer. Bail to the runtime path.
-      for (const k of ctx.definePropertyReceiverKeys) {
+      // (#2726) Pre-existing signal (mode-agnostic): an inline object-literal
+      // descriptor recorded in `definedPropertyFlags`. Routing on this in BOTH
+      // modes preserves origin/main behavior.
+      for (const k of ctx.definedPropertyFlags.keys()) {
         if (k.startsWith(prefix)) {
           needsRuntime = true;
           break;
         }
       }
-      if (!needsRuntime) {
-        for (const k of ctx.definedPropertyFlags.keys()) {
+      // (#2726 standalone fix) The broad new signals — `definePropertyReceiverKeys`
+      // (every lowering path) and `sidecarDefinedPropertyKeys` (runtime-descriptor
+      // route) — route to the `__hasOwnProperty` / `__propertyIsEnumerable` helper.
+      // In HOST mode that helper consults the descriptor/tombstone sidecar and
+      // answers correctly. In STANDALONE mode the wasm-native helper does NOT
+      // report a `defineProperty`-added struct-shape property as own (it returns
+      // false), so routing there REGRESSES every `defineProperty(o,k,…)` +
+      // `o.hasOwnProperty(k)` test (the 19-file standalone-floor park on PR #2177:
+      // built-ins/Object/{defineProperty,prototype/hasOwnProperty,getOwnPropertyNames}).
+      // Gate these two broad signals to host mode; standalone keeps the
+      // const-fold (correct for the no-delete case, unchanged from origin/main).
+      // The narrower delete-tombstone benefit in standalone awaits the standalone
+      // `__hasOwnProperty` sidecar-awareness substrate work.
+      if (!needsRuntime && !ctx.standalone) {
+        for (const k of ctx.definePropertyReceiverKeys) {
           if (k.startsWith(prefix)) {
             needsRuntime = true;
             break;
           }
         }
-      }
-      if (!needsRuntime) {
-        for (const k of ctx.sidecarDefinedPropertyKeys) {
-          if (k.startsWith(prefix)) {
-            needsRuntime = true;
-            break;
+        if (!needsRuntime) {
+          for (const k of ctx.sidecarDefinedPropertyKeys) {
+            if (k.startsWith(prefix)) {
+              needsRuntime = true;
+              break;
+            }
           }
         }
       }

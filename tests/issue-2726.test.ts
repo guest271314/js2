@@ -27,6 +27,20 @@ async function run(source: string): Promise<unknown> {
   return (instance.exports as Record<string, (...a: unknown[]) => unknown>).test();
 }
 
+// Standalone (pure-Wasm, no JS host) compile + run. The standalone
+// `__hasOwnProperty` does NOT report a `defineProperty`-added struct-shape
+// property as own, so the host-mode runtime-routing of `hasOwnProperty`
+// (groups (c)) must be gated to host mode (#2726 standalone-floor park on PR
+// #2177). This runner exercises that gate.
+async function runStandalone(source: string): Promise<unknown> {
+  const result = await compile(source, { target: "standalone" });
+  if (!result.success) {
+    throw new Error(`Compile failed:\n${result.errors.map((e) => `  L${e.line}: ${e.message}`).join("\n")}`);
+  }
+  const { instance } = await WebAssembly.instantiate(result.binary, {});
+  return (instance.exports as Record<string, (...a: unknown[]) => unknown>).test();
+}
+
 describe("#2726 delete residual", () => {
   // (c) 11.4.1-4.a-1: configurable data property, variable descriptor.
   it("hasOwnProperty is false after deleting a configurable data property (variable descriptor)", async () => {
@@ -128,5 +142,32 @@ describe("#2726 delete residual", () => {
         return 1;
       }`;
     expect(await run(src)).toBe(1);
+  });
+
+  // (#2177 standalone-floor park) In STANDALONE mode the broad host-routing of
+  // `hasOwnProperty`/`propertyIsEnumerable` must NOT fire: the wasm-native
+  // `__hasOwnProperty` returns false for a defineProperty-added struct-shape
+  // property, which regressed ~12 built-ins/Object/{defineProperty,prototype/
+  // hasOwnProperty} tests. Gating the new signals to host mode keeps the
+  // (correct, no-delete) const-fold in standalone.
+  it("standalone: hasOwnProperty is true after defineProperty of an inline accessor (no delete)", async () => {
+    const src = `
+      export function test(): number {
+        var o = {};
+        Object.defineProperty(o, "foo", { get: function() { return 42; } });
+        return o.hasOwnProperty("foo") ? 1 : 0;
+      }`;
+    expect(await runStandalone(src)).toBe(1);
+  });
+
+  it("standalone: hasOwnProperty is true after defineProperty with a variable descriptor (no delete)", async () => {
+    const src = `
+      export function test(): number {
+        var o = {};
+        var d = { value: 1001, enumerable: true, configurable: true };
+        Object.defineProperty(o, "property", d);
+        return o.hasOwnProperty("property") ? 1 : 0;
+      }`;
+    expect(await runStandalone(src)).toBe(1);
   });
 });
