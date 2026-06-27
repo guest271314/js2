@@ -1,8 +1,8 @@
 ---
 id: 2740
 title: "instanceof residual: non-callable RHS TypeError, null/undefined LHS, evaluation-order ReferenceError, Symbol.hasInstance arg count"
-status: ready
-sprint: 67
+status: in-progress
+sprint: current
 created: 2026-06-27
 updated: 2026-06-27
 priority: medium
