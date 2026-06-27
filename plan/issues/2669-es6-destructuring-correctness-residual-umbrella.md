@@ -267,3 +267,7 @@ PASS via fresh single-file runs; 12 sync improvements re-verified PASS.
 
 This slice keeps the umbrella OPEN (status stays `ready`) — it burns down the
 nested-array-default codegen corner, not the iterator-protocol tail.
+
+## Residual (as of #2199, PO reconcile 2026-06-28)
+
+NOT done — broad umbrella. The referencing PR landed the nested-array default-init codegen family (3 defects). The umbrella stays OPEN: iterator-close, defaults, holes, rest across for-of / assignment / binding / params (~696 fails) need further concrete slices carved.

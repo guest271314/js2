@@ -523,3 +523,7 @@ place, so that later slice only has to chase the errors `tsc` then surfaces.
 `IDENTICAL — all 39 (file,target) emits match baseline` (gc + standalone + wasi).
 Files touched: `scripts/prove-emit-identity.mjs` (new), `src/ir/types.ts`
 (typing only).
+
+## Residual (as of #2199, PO reconcile 2026-06-28)
+
+NOT done — multi-slice refactor. Slices 0 (proof harness, no behavior change) + 1 (foundation) landed. Slices 2-4 — the actual late-bind of func/global/type indices that retires the late-index-shift class, each byte-identity-provable — remain. Stays in-progress.

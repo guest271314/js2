@@ -286,3 +286,7 @@ language/expressions/super/call-spread-err-sngl-err-expr-throws.js
 - JSON reviver descriptor failures partially resolve once #2668 (defineProperty
   fidelity) lands — sequence JSON after #2668.
 - Deprioritized relative to #2666–#2670; pick up after the structural clusters.
+
+## Residual (as of #2199, PO reconcile 2026-06-28)
+
+NOT done — tracking umbrella. The referencing PR landed the RegExp lastIndex value-preserving data-slot slice (host). Date / Promise / JSON / super areas remain (~400 fails); slice per area. Stays ready as the tracker.
