@@ -1,10 +1,11 @@
 ---
 id: 2751
 title: "Budget-windowed rolling sprint model: sprint:current queue + budget-triggered freeze + auto-sync to TaskList"
-status: ready
+status: done
 sprint: current
 created: 2026-06-27
 updated: 2026-06-27
+completed: 2026-06-27
 priority: high
 horizon: l
 feasibility: medium
@@ -109,11 +110,13 @@ best-fit claimable tasks. Rules realised:
 - **Triggers / wiring:**
   - forward-sync: fire from the existing `post-file-edit.sh` hook when the edited
     path matches `plan/issues/*.md`, **plus** the SessionStart reconcile cycle.
-  - freeze: needs a **token-budget source**. Options to evaluate — read a budget
-    feed the tech-lead loop already tracks (see `feedback_token_budget_guardrails`
-    / the workflow `budget` meter), or have the TL run `freeze-sprint.mjs` when the
-    meter crosses the threshold. The ≤ 1-hour time-floor is a cheap wall-clock
-    check. Document where the budget number comes from before automating.
+  - freeze / budget source: **RESOLVED** — the statusline
+    (`.claude/statusline-command.sh`, which already shows "wkly" % and "d left")
+    caches `rate_limits.seven_day` (`used_percentage` + `resets_at`) to
+    `~/.claude/js2wasm-budget.json` on every render. `freeze-sprint.mjs` and
+    `budget-status.mjs` read that cache (env overrides still take precedence),
+    so the `≥99%` and `≤1h` triggers fire automatically off the same weekly
+    budget the statusline displays — no manual env-setting needed.
 - **Dashboard / sprint-stats**: `sprint: current` is the active window;
   `build:pages` and `sprint-stats` must render it without choking on the
   non-numeric value.

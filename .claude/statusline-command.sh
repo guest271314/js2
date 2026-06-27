@@ -137,6 +137,17 @@ if [ -n "$resets_at" ]; then
   fi
 fi
 
+# Budget cache for budget-aware sprint scheduling (#2751): standalone scripts
+# (budget-status.mjs / freeze-sprint.mjs) can't see this stdin JSON, so expose the
+# weekly (seven_day) usage% + reset timestamp to them via a small cache file the
+# statusline keeps fresh on every render.
+if [ -n "$weekly" ] || [ -n "$resets_at" ]; then
+  _budget_dir="${CLAUDE_HOME:-$HOME/.claude}"
+  printf '{"seven_day_used_pct":%s,"resets_at":%s,"written_at":%s}\n' \
+    "${weekly:-null}" "${resets_at:-null}" "$(date +%s)" \
+    > "$_budget_dir/js2wasm-budget.json" 2>/dev/null || true
+fi
+
 if [ -n "$used" ] || [ -n "$weekly" ] || [ -n "$five_hour" ]; then
   if [ -n "$used" ]; then
     awk -v p="$used" 'BEGIN {
