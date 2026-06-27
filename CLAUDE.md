@@ -206,7 +206,7 @@ Spawn dedicated agents when:
 
 - Multiple tasks need the same role concurrently (e.g., 3 devs)
 - The role needs sustained back-and-forth with the user (e.g., PO during planning)
-- The role accumulates context that's hard to capture in a skill (e.g., SM during retro discussion)
+- The role accumulates context that's hard to capture in a skill (e.g., PO during a multi-issue planning discussion)
 
 **Pick the right spawn mode (this matters for lifecycle):**
 
@@ -215,7 +215,7 @@ Spawn dedicated agents when:
 
 Default rule: if the agent's job is "produce one document and exit," it's a subagent. If the agent's job is "stay on the task queue and grab the next thing," it's a teammate. Misusing teammates for one-shot work causes pane exhaustion because they idle forever waiting for orchestration that never comes (confirmed via Claude Code docs — see [[feedback_agent_self_termination]]).
 
-**Worktree isolation on spawn (REQUIRED for writers).** The lead runs as an un-isolated background job in `/workspace`. A background-isolation guard (`worktree.bgIsolation` in `.claude/settings.json`) blocks file writes from background-spawned agents that aren't isolated. The agent-def `isolation: worktree` frontmatter (set on developer/senior-developer/architect/product-owner/scrum-master) is honored for plain **subagent** spawns but is **NOT auto-applied to teammate spawns** (`team_name` set) — so **always pass `isolation: "worktree"` explicitly on every teammate `Agent` spawn**. That gives each teammate a harness-managed worktree, satisfying the guard with it ON. `bgIsolation` is **`"worktree"` (guard ON)** as of 2026-05-29 — the temporary `"none"` unblock has been removed now that teammate spawns pass `isolation: worktree` explicitly. So every background-spawned writer MUST carry explicit `isolation: "worktree"` or its file writes are blocked. Valid `bgIsolation` values are only `"worktree"` (default/on) and `"none"` — there is no auto mode (Claude Code v2.1.143+).
+**Worktree isolation on spawn (REQUIRED for writers).** The lead runs as an un-isolated background job in `/workspace`. A background-isolation guard (`worktree.bgIsolation` in `.claude/settings.json`) blocks file writes from background-spawned agents that aren't isolated. The agent-def `isolation: worktree` frontmatter (set on developer/senior-developer/architect/product-owner) is honored for plain **subagent** spawns but is **NOT auto-applied to teammate spawns** (`team_name` set) — so **always pass `isolation: "worktree"` explicitly on every teammate `Agent` spawn**. That gives each teammate a harness-managed worktree, satisfying the guard with it ON. `bgIsolation` is **`"worktree"` (guard ON)** as of 2026-05-29 — the temporary `"none"` unblock has been removed now that teammate spawns pass `isolation: worktree` explicitly. So every background-spawned writer MUST carry explicit `isolation: "worktree"` or its file writes are blocked. Valid `bgIsolation` values are only `"worktree"` (default/on) and `"none"` — there is no auto mode (Claude Code v2.1.143+).
 
 **IMPORTANT: Always use team name `"js2wasm"`** — this is the single permanent team. Never create ad-hoc team names (e.g. `"wasi-conflicts"`, `"s52-wave2"`). One team, one task queue, always.
 
@@ -240,7 +240,7 @@ Default rule: if the agent's job is "produce one document and exit," it's a suba
 | Need to validate 1-2 issues                    | Invoke `/smoke-test-issue` skill                                                                                                             |
 | Sprint planning (collaborative, multi-issue)   | Spawn PO + Architect agents                                                                                                                  |
 | Hard issue needs design                        | Invoke `/architect-spec` skill, or spawn architect if multiple issues                                                                        |
-| Sprint retro (discussion with user)            | Spawn SM agent                                                                                                                               |
+| Sprint retro / process improvement             | Tech lead runs it directly (no SM agent)                                                                                                     |
 | Planning agents done, user not talking to them | Write context summary → terminate                                                                                                            |
 | Planning agents done, user IS talking to them  | Keep alive until user signals done                                                                                                           |
 | Dev between tasks                              | Keep alive — wait for CI, self-merge if green, then claim next task from TaskList                                                            |
@@ -263,18 +263,21 @@ Developers (×3)
   ↑ signal completion → tech lead merges → broadcast rebase
 PR-queue Shepherd
   ↔ owns the merge queue end-to-end: enqueues green PRs, handles parks/ejections
-Scrum Master
-  ↔ reviews sprint → proposes process changes to PO + tech lead
+Tech Lead (also)
+  ↔ owns process improvement / retrospectives (formerly Scrum Master)
 ```
 
-| Role                  | Agent                                             | Owns                                | Reads from                                             | Writes to                                          |
-| --------------------- | ------------------------------------------------- | ----------------------------------- | ------------------------------------------------------ | -------------------------------------------------- |
-| **Product Owner**     | `.claude/agents/product-owner.md`                 | Backlog, issue creation, priorities | test262 results, dependency graph                      | `plan/issues/`, `plan/log/dependency-graph.md`     |
-| **Architect**         | `.claude/agents/architect.md`                     | Implementation specs                | Issue files, compiler source                           | `## Implementation Plan` in issue files            |
-| **Tech Lead**         | (orchestrator)                                    | Task queue, merges, test runs       | Issue files, agent messages                            | `main` branch, task list                           |
-| **Developer**         | `.claude/agents/developer.md`                     | Code changes in worktree            | Issue file + impl spec, checklists                     | Source code, test files, issue status              |
-| **PR-queue Shepherd** | `.claude/agents/developer.md` (standing teammate) | The merge queue end-to-end          | Open PRs, CI/`merge_group` results, park-hold comments | Enqueue mutations, `[CI-FIX]` tasks, escalations   |
-| **Scrum Master**      | `.claude/agents/scrum-master.md`                  | Process improvement                 | Done issues, git history, messages                     | `plan/retrospectives/`, checklist edits (proposed) |
+| Role                  | Agent                                             | Owns                                | Reads from                                             | Writes to                                        |
+| --------------------- | ------------------------------------------------- | ----------------------------------- | ------------------------------------------------------ | ------------------------------------------------ |
+| **Product Owner**     | `.claude/agents/product-owner.md`                 | Backlog, issue creation, priorities | test262 results, dependency graph                      | `plan/issues/`, `plan/log/dependency-graph.md`   |
+| **Architect**         | `.claude/agents/architect.md`                     | Implementation specs                | Issue files, compiler source                           | `## Implementation Plan` in issue files          |
+| **Tech Lead**         | (orchestrator)                                    | Task queue, merges, test runs       | Issue files, agent messages                            | `main` branch, task list                         |
+| **Developer**         | `.claude/agents/developer.md`                     | Code changes in worktree            | Issue file + impl spec, checklists                     | Source code, test files, issue status            |
+| **PR-queue Shepherd** | `.claude/agents/developer.md` (standing teammate) | The merge queue end-to-end          | Open PRs, CI/`merge_group` results, park-hold comments | Enqueue mutations, `[CI-FIX]` tasks, escalations |
+
+Process improvement / retrospectives are owned by the **Tech Lead** (the standing
+Scrum Master role is retired) — see "Process improvement & retrospectives" in
+`.claude/agents/tech-lead.md`.
 
 **Interaction flow:**
 
@@ -287,7 +290,7 @@ Sprint planning:
 
 During sprint: 5. **Dev** reads issue (with impl plan) → implements → follows checklists → signals completion 6. **Dev** invokes `/test-and-merge` skill → merges main into branch → equiv tests → if pass: ff-only to main → post-merge cleanup. If fail: fixes on branch. 7. **PO** accepts/rejects completed work against acceptance criteria
 
-End of sprint: 8. **Tech lead** runs full test262 → records results 9. **SM** reviews sprint → proposes process improvements 10. **PO** grooms backlog for next sprint
+End of sprint: 8. **Tech lead** runs full test262 → records results 9. **Tech lead** runs the retrospective → applies process improvements (formerly SM) 10. **PO** grooms backlog for next sprint
 
 **Tech lead discipline:**
 
@@ -402,7 +405,9 @@ The issue frontmatter `status:` field tracks where an issue is, set by whichever
 3. Update `plan/issues/backlog/backlog.md` if the issue was listed there
 
 <!-- AUTO:conformance-start -->
+
 **test262 conformance**: 32,456 / 43,135 (75.2 %)
+
 <!-- AUTO:conformance-end -->
 
 ### Sprint History
