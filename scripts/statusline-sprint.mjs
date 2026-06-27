@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 // Sprint progress statusline for Claude Code.
-// Prefers dashboard/data/sprints.json (accurate deduplicated view) when available.
-// Falls back to scanning the flat plan/issues/*.md tree, reading the `sprint:`
-// and `status:` frontmatter fields (#1616 — sprint membership is frontmatter,
-// not directory).
+// PRIMARY: reads from the base remote ref (origin/main or upstream/main) via a
+// single batched `git grep` call so the statusline always reflects committed truth
+// even when the local /workspace working tree is behind.
+// FALLBACK: scans the local working-tree plan/issues/*.md frontmatter.
+// LAST RESORT: reads from dashboard/data/sprints.json cache.
 // Emits a colored badge: "sprint N  NN%"
 
+import { spawnSync } from "node:child_process";
 import { readdirSync, readFileSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,6 +15,123 @@ import { fileURLToPath } from "node:url";
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const ISSUES_DIR = join(ROOT, "plan", "issues");
 const SPRINTS_JSON = join(ROOT, "website", "dashboard", "data", "sprints.json");
+
+// ── Remote detection ────────────────────────────────────────────────────────
+
+/** Returns 'upstream' if that remote exists in this repo, else 'origin'. */
+function detectBaseRemote() {
+  try {
+    const r = spawnSync("git", ["-C", ROOT, "remote"], {
+      encoding: "utf8",
+      timeout: 3000,
+    });
+    if (r.status === 0) {
+      const remotes = r.stdout.trim().split("\n");
+      if (remotes.includes("upstream")) return "upstream";
+    }
+  } catch {
+    // ignore
+  }
+  return "origin";
+}
+
+// ── Remote ref scan (PRIMARY) ───────────────────────────────────────────────
+
+/**
+ * Reads sprint+status frontmatter for all issue files on <remote>/main via a
+ * single `git grep -E` call (batched — never per-file git show).
+ * Returns { sprint, done, total } or null on failure / unavailability.
+ */
+function sprintFromRemote(remote) {
+  const ref = `${remote}/main`;
+
+  // Single grep for sprint and status lines across all flat issue files.
+  // git grep output format: <ref>:<path>:<matched-line>
+  const grepResult = spawnSync(
+    "git",
+    ["-C", ROOT, "grep", "-E", "^(sprint: [0-9]|status: )", ref, "--", "plan/issues/*.md"],
+    { encoding: "utf8", timeout: 8000, maxBuffer: 16 * 1024 * 1024 },
+  );
+
+  // grep exits 1 when no matches (treat as empty, not failure)
+  if (!grepResult.stdout) return null;
+
+  // Parse output lines: <ref>:<path>:<content>
+  // Split only on the first two colons (paths never contain colons on Linux).
+  const byFile = new Map(); // path -> { sprint?, status? }
+  for (const line of grepResult.stdout.split("\n")) {
+    if (!line) continue;
+    const c1 = line.indexOf(":");
+    if (c1 === -1) continue;
+    const c2 = line.indexOf(":", c1 + 1);
+    if (c2 === -1) continue;
+    const path = line.slice(c1 + 1, c2);
+    const content = line.slice(c2 + 1);
+
+    // Only flat issue files (not plan/issues/sprints/*.md subdirectory)
+    if (path.includes("/sprints/")) continue;
+    // Filename must start with a digit
+    const base = path.slice(path.lastIndexOf("/") + 1);
+    if (!/^\d/.test(base)) continue;
+
+    const file = byFile.get(path) ?? {};
+    // First-wins: frontmatter appears before body text
+    if (file.sprint === undefined) {
+      const m = content.match(/^sprint:\s*(\d+)\s*$/);
+      if (m) file.sprint = Number(m[1]);
+    }
+    if (file.status === undefined) {
+      const m = content.match(/^status:\s*(\S+)/);
+      if (m) file.status = m[1];
+    }
+    byFile.set(path, file);
+  }
+
+  if (byFile.size === 0) return null;
+
+  // Detect inactive sprint numbers from sprint doc files on the remote ref.
+  const sprintDocGrep = spawnSync(
+    "git",
+    ["-C", ROOT, "grep", "-E", "^status: (planning|planned|closed|done)", ref, "--", "plan/issues/sprints/*.md"],
+    { encoding: "utf8", timeout: 4000 },
+  );
+
+  const inactive = new Set();
+  if (sprintDocGrep.stdout) {
+    for (const line of sprintDocGrep.stdout.split("\n")) {
+      if (!line) continue;
+      const c1 = line.indexOf(":");
+      if (c1 === -1) continue;
+      const c2 = line.indexOf(":", c1 + 1);
+      if (c2 === -1) continue;
+      const path = line.slice(c1 + 1, c2);
+      const m = path.match(/\/(\d+)\.md$/);
+      if (m) inactive.add(Number(m[1]));
+    }
+  }
+
+  // Build sprint buckets from the parsed file map.
+  const bySprint = new Map(); // sprintNum -> { total, done }
+  for (const { sprint, status } of byFile.values()) {
+    if (!sprint) continue;
+    const bucket = bySprint.get(sprint) ?? { total: 0, done: 0 };
+    bucket.total++;
+    if (status === "done" || status === "wont-fix") bucket.done++;
+    bySprint.set(sprint, bucket);
+  }
+
+  if (bySprint.size === 0) return null;
+
+  // Current sprint = highest numbered sprint that is not inactive.
+  const nums = [...bySprint.keys()].filter((n) => !inactive.has(n)).sort((a, b) => b - a);
+  const sprintNum = nums[0] ?? 0;
+  if (!sprintNum) return null;
+
+  const { total, done } = bySprint.get(sprintNum);
+  return { sprint: sprintNum, done, total };
+}
+
+// ── Local working-tree fallback ─────────────────────────────────────────────
 
 function fromJson() {
   if (!existsSync(SPRINTS_JSON)) return null;
@@ -69,11 +188,7 @@ function flatTree() {
 }
 
 const SPRINTS_DIR = join(ISSUES_DIR, "sprints");
-// A sprint whose doc status is one of these is NOT the current working sprint,
-// even if its issues are already tagged `sprint: N` in frontmatter. This stops a
-// PRE-PLANNED future sprint (issues queued but the sprint not yet started) from
-// hijacking the "current sprint" pick — the bug where pre-creating sprint N+1's
-// issues made the badge jump to N+1 0/X while the team was still on sprint N.
+// A sprint whose doc status is one of these is NOT the current working sprint.
 const INACTIVE_SPRINT_STATUSES = new Set(["planning", "planned", "closed", "done"]);
 function inactiveSprintNumbers() {
   const out = new Set();
@@ -98,15 +213,46 @@ function inactiveSprintNumbers() {
   return out;
 }
 
-function currentSprint() {
+function currentSprintLocal() {
   const buckets = flatTree();
   const inactive = inactiveSprintNumbers();
   const nums = [...buckets.keys()].filter((n) => !inactive.has(n)).sort((a, b) => b - a);
   return nums[0] ?? 0;
 }
 
-function sprintProgress(n) {
+function sprintProgressLocal(n) {
   return flatTree().get(n) ?? { done: 0, total: 0 };
+}
+
+// ── Main ────────────────────────────────────────────────────────────────────
+
+// Priority 1: remote ref (always reflects committed truth regardless of local-tree state)
+const remote = detectBaseRemote();
+let sprintData = sprintFromRemote(remote);
+
+// Priority 2: local working-tree scan (fallback when offline / ref not yet fetched)
+if (!sprintData) {
+  const localSprint = currentSprintLocal();
+  if (localSprint) {
+    sprintData = { sprint: localSprint, ...sprintProgressLocal(localSprint) };
+  }
+}
+
+// Priority 3: pre-built sprints.json cache (last resort)
+if (!sprintData) {
+  sprintData = fromJson();
+}
+
+const sprint = sprintData?.sprint ?? 0;
+const done = sprintData?.done ?? 0;
+const total = sprintData?.total ?? 0;
+const pct = total === 0 ? 0 : done / total;
+
+// --porcelain: emit machine-readable "N done total" for shell callers
+// (.claude/statusline-command.sh renders its own progress bar from these).
+if (process.argv.includes("--porcelain")) {
+  process.stdout.write(`${sprint} ${done} ${total}\n`);
+  process.exit(0);
 }
 
 function interpolateColor(pct) {
@@ -129,31 +275,6 @@ function interpolateColor(pct) {
     b = x;
   }
   return [Math.round(r * 220), Math.round(g * 200), Math.round(b * 20)];
-}
-
-// LIVE-FIRST: read the current working-tree frontmatter (flatTree) so the
-// statusline always reflects reality. The sprints.json cache only rebuilds on
-// push-to-main, so preferring it made the statusline go silently stale (it
-// reported a closed sprint for days). Fall back to the cache only when the flat
-// scan finds no numbered sprint at all (e.g. a partial checkout).
-const flatSprint = currentSprint();
-let sprint, done, total;
-if (flatSprint) {
-  sprint = flatSprint;
-  ({ done, total } = sprintProgress(sprint));
-} else {
-  const jsonData = fromJson();
-  sprint = jsonData ? jsonData.sprint : 0;
-  ({ done, total } = jsonData ?? { done: 0, total: 0 });
-}
-const pct = total === 0 ? 0 : done / total;
-const pctInt = Math.round(pct * 100);
-
-// --porcelain: emit machine-readable "N done total" for shell callers
-// (.claude/statusline-command.sh renders its own progress bar from these).
-if (process.argv.includes("--porcelain")) {
-  process.stdout.write(`${sprint} ${done} ${total}\n`);
-  process.exit(0);
 }
 
 const [r, g, b] = interpolateColor(pct);
