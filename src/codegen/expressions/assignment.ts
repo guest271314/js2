@@ -41,6 +41,7 @@ import {
 import type { InnerResult } from "../shared.js";
 import { coerceType, compileExpression, skipTransparentExpressions, valTypesMatch, VOID_RESULT } from "../shared.js";
 import { compileStringLiteral, emitBoolToString } from "../string-ops.js";
+import { compileProtoArg } from "./calls.js";
 import { findExternInfoForMember, patchStructNewForDynamicField } from "./extern.js";
 import { tryCompileFnctorPrototypeAssign } from "./fnctor-prototype.js";
 import { reserveAccessorSetDriver } from "../accessor-driver.js";
@@ -2495,6 +2496,55 @@ function compilePropertyAssignment(
   {
     const fnctorProtoWrite = tryCompileFnctorPrototypeAssign(ctx, fctx, target, value);
     if (fnctorProtoWrite !== undefined) return fnctorProtoWrite;
+  }
+
+  // (#2747 d) `o.__proto__ = v` invokes the §B.2.2.1 Object.prototype.__proto__
+  // setter — i.e. SetPrototypeOf(o, v) — NOT a generic own-property write. Route
+  // to the SAME proto-link machinery as Object.setPrototypeOf / Reflect.
+  // setPrototypeOf: standalone → native __object_setPrototypeOf; gc/host →
+  // __host_set_struct_proto (records `_wasmStructProto` so the for-in walk +
+  // getPrototypeOf read path follow it). Without this the assignment fell
+  // through to the generic struct-write, which wrote `__proto__` as an OWN
+  // enumerable data property AND dropped the real prototype link (verify-first:
+  // for-in listed `__proto__` and the inherited key never appeared). The
+  // assignment expression evaluates to the RHS value (§13.15.2), so the proto
+  // value is tee'd and re-pushed after the (obj-returning) helper call.
+  if (!ts.isPrivateIdentifier(target.name) && target.name.text === "__proto__") {
+    const externRef: ValType = { kind: "externref" };
+    // obj (externref)
+    const objResult = compileExpression(ctx, fctx, target.expression, externRef);
+    if (!objResult) return null;
+    if (objResult.kind !== "externref") coerceType(ctx, fctx, objResult, externRef);
+    // proto (externref). Standalone reifies an inline-literal proto into a
+    // native `$Object` (compileProtoArg) so __object_setPrototypeOf's
+    // `ref.test $Object` succeeds; gc/host stores the externref as-is.
+    if (ctx.standalone) {
+      compileProtoArg(ctx, fctx, value);
+    } else {
+      const protoResult = compileExpression(ctx, fctx, value, externRef);
+      if (protoResult) {
+        if (protoResult.kind !== "externref") coerceType(ctx, fctx, protoResult, externRef);
+      } else {
+        fctx.body.push({ op: "ref.null.extern" });
+      }
+    }
+    // Save the RHS (assignment result) before it is consumed by the call.
+    const tmpVal = allocTempLocal(fctx, externRef);
+    fctx.body.push({ op: "local.tee", index: tmpVal });
+    const helperName = ctx.standalone ? "__object_setPrototypeOf" : "__host_set_struct_proto";
+    const idx = ensureLateImport(ctx, helperName, [externRef, externRef], [externRef]);
+    flushLateImportShifts(ctx, fctx);
+    if (idx !== undefined) {
+      fctx.body.push({ op: "call", funcIdx: idx });
+      fctx.body.push({ op: "drop" }); // native returns obj; assignment yields the RHS
+    } else {
+      // Helper unavailable — discard [obj, proto] left on the stack.
+      fctx.body.push({ op: "drop" }); // proto
+      fctx.body.push({ op: "drop" }); // obj
+    }
+    fctx.body.push({ op: "local.get", index: tmpVal });
+    releaseTempLocal(fctx, tmpVal);
+    return externRef;
   }
 
   // #1456: Private method or getter-only accessor → TypeError on write.

@@ -585,7 +585,7 @@ function compileObjectAssignArg(ctx: CodegenContext, fctx: FunctionContext, arg:
  * `__object_create` JS import and a separate (still-broken, tracked) proto-link
  * mechanism, untouched here.
  */
-function compileProtoArg(ctx: CodegenContext, fctx: FunctionContext, arg: ts.Expression): void {
+export function compileProtoArg(ctx: CodegenContext, fctx: FunctionContext, arg: ts.Expression): void {
   if (
     ctx.standalone &&
     ts.isObjectLiteralExpression(arg) &&
@@ -7838,15 +7838,61 @@ function compileCallExpression(
       }
 
       // Reflect.setPrototypeOf(target, proto) — returns i32 (boolean).
+      // (#2747 d) Record the user [[Prototype]] on BOTH channels:
+      //   - __host_set_struct_proto populates `_wasmStructProto` — the SAME link
+      //     the Object.setPrototypeOf gc/host arm (calls.ts ~5980) writes and the
+      //     for-in walk consults via `_structUserProto`. Without this the
+      //     inherited keys never enumerated (verify-first: for-in dropped the
+      //     inherited key).
+      //   - __reflect_setPrototypeOf preserves the host-wrapper round-trip that
+      //     Reflect.getPrototypeOf reads (and is the only channel that handles a
+      //     non-weak-key-able empty `{}` target — #1466). Keeping it means the
+      //     existing Reflect.get/setPrototypeOf round-trip does not regress.
+      // target/proto are saved in temp locals so both calls receive them.
       if (reflectMethod === "setPrototypeOf" && expr.arguments.length >= 2) {
-        emitReflectArgs(2);
-        const funcIdx = ensureLateImport(ctx, "__reflect_setPrototypeOf", [externRef, externRef], [i32Ty]);
+        const objLocal = allocTempLocal(fctx, externRef);
+        const protoLocal = allocTempLocal(fctx, externRef);
+        // target → objLocal
+        {
+          const a = expr.arguments[0];
+          const ty = a ? compileExpression(ctx, fctx, a, externRef) : null;
+          if (ty && ty.kind !== "externref") coerceType(ctx, fctx, ty, externRef);
+          else if (ty === null || a === undefined) fctx.body.push({ op: "ref.null.extern" });
+        }
+        fctx.body.push({ op: "local.set", index: objLocal });
+        // proto → protoLocal
+        {
+          const a = expr.arguments[1];
+          const ty = a ? compileExpression(ctx, fctx, a, externRef) : null;
+          if (ty && ty.kind !== "externref") coerceType(ctx, fctx, ty, externRef);
+          else if (ty === null || a === undefined) fctx.body.push({ op: "ref.null.extern" });
+        }
+        fctx.body.push({ op: "local.set", index: protoLocal });
+        // __host_set_struct_proto(obj, proto) → for-in channel; returns obj, drop.
+        const hIdx = ensureLateImport(ctx, "__host_set_struct_proto", [externRef, externRef], [externRef]);
         flushLateImportShifts(ctx, fctx);
-        if (funcIdx !== undefined) {
-          fctx.body.push({ op: "call", funcIdx });
+        if (hIdx !== undefined) {
+          fctx.body.push({ op: "local.get", index: objLocal });
+          fctx.body.push({ op: "local.get", index: protoLocal });
+          fctx.body.push({ op: "call", funcIdx: hIdx });
+          fctx.body.push({ op: "drop" });
+        }
+        // __reflect_setPrototypeOf(obj, proto) → wrapper round-trip; returns i32.
+        const rIdx = ensureLateImport(ctx, "__reflect_setPrototypeOf", [externRef, externRef], [i32Ty]);
+        flushLateImportShifts(ctx, fctx);
+        if (rIdx !== undefined) {
+          fctx.body.push({ op: "local.get", index: objLocal });
+          fctx.body.push({ op: "local.get", index: protoLocal });
+          fctx.body.push({ op: "call", funcIdx: rIdx });
+          releaseTempLocal(fctx, objLocal);
+          releaseTempLocal(fctx, protoLocal);
           return { kind: "i32" };
         }
-        return fallbackReturn(2, "i32-true");
+        releaseTempLocal(fctx, objLocal);
+        releaseTempLocal(fctx, protoLocal);
+        // Reflect helper unavailable — return the success sentinel (true).
+        fctx.body.push({ op: "i32.const", value: 1 });
+        return { kind: "i32" };
       }
 
       // Reflect.ownKeys(target) — returns externref (Array including Symbol keys, per §28.1.13).

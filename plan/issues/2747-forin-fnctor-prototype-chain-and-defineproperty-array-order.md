@@ -1,7 +1,8 @@
 ---
 id: 2747
 title: "for-in: constructor-function prototype-chain enumeration (S12.6.4_A6*) + Object.defineProperty array+accessor ordering"
-status: ready
+status: in-progress
+assignee: ttraenkler/issue-2747-reflect-setprototypeof-mirror
 sprint: Backlog
 goal: test262-conformance
 feasibility: hard
@@ -89,6 +90,33 @@ mirror to **`Reflect.setPrototypeOf`** (`calls.ts` ~7593) and the
 **`o.__proto__ = v`** write path (assignment.ts) so all three record the
 `_wasmStructProto` link. Low-risk (same import); folded here to keep the
 setPrototypeOf capability complete.
+
+
+### (d) — LANDED (carve-out PR, 2026-06-27)
+
+Routed both sinks through the same `__host_set_struct_proto` channel the
+Object.setPrototypeOf gc/host arm uses:
+- **`Reflect.setPrototypeOf(o, p)`** (host arm, `calls.ts`): now calls BOTH
+  `__host_set_struct_proto` (populates `_wasmStructProto` for the for-in walk via
+  `_structUserProto`) AND the existing `__reflect_setPrototypeOf` (preserves the
+  host-wrapper `Reflect.getPrototypeOf` round-trip, incl. a non-weak-key-able
+  empty `{}` target — keeps #1466 green). The standalone Reflect arm already
+  routed to `__object_setPrototypeOf` (untouched).
+- **`o.__proto__ = v`** (assignment.ts `compilePropertyAssignment`): intercepted
+  as the §B.2.2.1 `Object.prototype.__proto__` setter = SetPrototypeOf(o, v), so
+  it no longer writes an OWN enumerable `__proto__` data property. Host →
+  `__host_set_struct_proto`; standalone → native `__object_setPrototypeOf` (with
+  `compileProtoArg` inline-literal reification). Assignment expression yields the
+  RHS (§13.15.2).
+
+Verify-first (host, mirroring the #2739 test): for-in over an object whose proto
+was set via `Reflect.setPrototypeOf` / `o.__proto__=` now matches the
+`Object.setPrototypeOf` case (`p1,p2,p3,p4,`), including multi-level chains and
+set-to-null. Tests in `tests/issue-2747.test.ts`. No new regressions (the
+pre-existing #1472/object-mutability/closed-imports failures are unrelated).
+
+**(b) and (c) remain OPEN** — architect-scoped (the #1712 two-channel divergence
++ full-harness defineProperty ordering). This carve-out does NOT close #2747.
 
 ## Acceptance criteria
 - `S12.6.4_A6.js`, `S12.6.4_A6.1.js`, `order-after-define-property.js` flip
