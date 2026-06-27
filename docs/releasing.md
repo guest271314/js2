@@ -26,6 +26,13 @@ The fix has two parts:
    publish unless the tag version equals BOTH `package.json` versions. This
    catches both the original drift bug and a forgotten lockstep proxy bump.
 
+**Version tags are release-only.** The 44 legacy `v0.*` tags that caused #389
+came from an old per-sprint / manual version-tagging habit. To prevent a repeat,
+`vX.Y.Z` tags are cut **exclusively** via `node scripts/release.mjs <x.y.z>` (the
+flow below). **Sprint-end must NOT create a version tag** — the sprint protocol
+tags only `sprint/N` (+ `sprint-N/begin`); see `CLAUDE.md` and
+`.claude/skills/sprint-wrap-up.md`. Never `git tag vX.Y.Z` outside this flow.
+
 ## How to cut a release
 
 1. **Bump both packages, commit, and tag — in one step, on a clean tree:**
@@ -86,12 +93,12 @@ The script tags the release commit **on your branch**, and the tag stays valid
 after merge because the merge queue uses a **merge commit** (`mergeMethod = MERGE`,
 confirmed for this repo) — the merge commit keeps your tagged commit reachable in
 `main`'s history. So you push the same `vX.Y.Z` tag after merge and it points at a
-commit that *is* on `main`.
+commit that _is_ on `main`.
 
 > **If the repo ever switches `main` to squash or rebase merges**, the branch
 > commit (and therefore the branch tag) would be rewritten or dropped on merge,
 > leaving the tag dangling off `main`. In that case this flow must change to
-> *tag the merge commit* after it lands (`git tag vX.Y.Z <merge-sha>`) rather
+> _tag the merge commit_ after it lands (`git tag vX.Y.Z <merge-sha>`) rather
 > than tagging on the branch. The `verify-version` guard is the backstop either
 > way: a tag pointing at the wrong commit fails the publish instead of shipping a
 > stale version.
