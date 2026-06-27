@@ -1,6 +1,6 @@
 ---
 id: 2751
-title: "Evaluate whether our APPROACH to type soundness is itself sound (meta-evaluation of the #2698/#2750 strategy)"
+title: "Evaluate whether our APPROACH to type soundness is itself sound (meta-evaluation of the #2698/#2754 strategy)"
 status: ready
 created: 2026-06-27
 updated: 2026-06-27
@@ -15,14 +15,14 @@ goal: platform
 sprint: current
 es_edition: n/a
 parent: 2698
-related: [2698, 2750, 2748]
-origin: "Stakeholder directive (2026-06-27): distinct from #2750's implementation scope — evaluate whether the chosen STRATEGY (force sound TS settings + defensively patch the unsound holes) actually guarantees JS-runtime-correctness, or only shrinks the surface."
+related: [2698, 2754, 2748]
+origin: "Stakeholder directive (2026-06-27): distinct from #2754's implementation scope — evaluate whether the chosen STRATEGY (force sound TS settings + defensively patch the unsound holes) actually guarantees JS-runtime-correctness, or only shrinks the surface."
 ---
 
 # #2751 — Is our type-soundness _approach_ itself sound? (evaluation charter)
 
 > **Research / evaluation charter — the question to be worked, NOT solved here.**
-> Distinct from **#2750** (which _implements_ the sound-settings + codegen-
+> Distinct from **#2754** (which _implements_ the sound-settings + codegen-
 > obligation plan). #2751 steps back and asks whether that _strategy_ is the right
 > one. Deliver a **written assessment + a recommendation**, not code.
 
@@ -30,7 +30,7 @@ origin: "Stakeholder directive (2026-06-27): distinct from #2750's implementatio
 
 js2wasm lowers based on the static TS type — it chooses the Wasm value-rep
 (packed `f64`/`i32` vs boxed `externref`) and constant-folds branches from the
-declared type. #2698/#2750 propose: **force sound TS settings, then defensively
+declared type. #2698/#2754 propose: **force sound TS settings, then defensively
 handle the unsound holes**. Does that strategy actually **guarantee
 JS-runtime-correctness**, or only **reduce the surface** of miscompiles? What is
 the residual risk, and is there a fundamentally safer model?
@@ -40,16 +40,16 @@ the residual risk, and is there a fundamentally safer model?
 1. **Guarantee vs surface-reduction.** Does "sound flags + patch known holes"
    _guarantee_ correctness for any checker-accepted program, or just lower the
    probability? Characterize the **residual** — the set of accepted programs that
-   still miscompile after #2750 lands.
+   still miscompile after #2754 lands.
 
 2. **The core model choice.** Is "**trust TS types, patch the known holes**" right,
    or should the codegen treat TS types as **optimization hints, never a
    correctness contract** — i.e. a **JS-semantics-first** lowering that is correct
    for ANY input the checker accepts, _regardless of declared types_, and uses
    types only to choose a faster rep when it can _prove_ the value matches?
-   - **Canonical tension (from #2750, empirically grounded):** `const a: number[] = [1,4,5]; a[4]` is typed `number` but is `undefined` at runtime. Today our
+   - **Canonical tension (from #2754, empirically grounded):** `const a: number[] = [1,4,5]; a[4]` is typed `number` but is `undefined` at runtime. Today our
      lowering returns a **sNaN sentinel** (number), `false` (boolean), or **`null`**
-     (externref) — **never `undefined`** (verified on current main; see #2750
+     (externref) — **never `undefined`** (verified on current main; see #2754
      Prong 2 #1). So "trust the type" is _already_ insufficient for index access,
      **with strict flags on**. This is the strongest evidence for the
      hints-not-contract model.
@@ -86,7 +86,7 @@ the residual risk, and is there a fundamentally safer model?
 
 ## Inputs
 
-- **#2750** findings — especially the empirical OOB result (the index-access case
+- **#2754** findings — especially the empirical OOB result (the index-access case
   proves "trust the type" already breaks today). Read its Prong 2 catalog as the
   starting list of holes.
 - **#2748** — the strictNullChecks miscompile that motivated the whole track.
@@ -97,7 +97,7 @@ the residual risk, and is there a fundamentally safer model?
 ## Acceptance
 
 A written assessment that (1) characterizes the **residual** miscompile set after
-#2750, (2) takes a position on hints-vs-contract using the OOB evidence,
+#2754, (2) takes a position on hints-vs-contract using the OOB evidence,
 (3) lists the un-closeable categories that must be codegen-defensive,
 (4) proposes the enforceable invariant + a concrete differential/fuzz test design,
 and (5) gives an honest verdict: **stay the course / partial mitigation /

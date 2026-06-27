@@ -1,5 +1,5 @@
 ---
-id: 2750
+id: 2754
 title: "Sound TS checker settings for .ts AND .js + codegen defensive-correctness where TS is deliberately unsound (#2698 track)"
 status: ready
 created: 2026-06-27
@@ -19,7 +19,7 @@ related: [2698, 2748, 389]
 origin: "Stakeholder directive (2026-06-27), #2698 checker track: generalize the #2748 strictNullChecks point-fix into a principled sound-settings policy for both .ts and .js, AND spec the codegen's defensive obligations where TS is INHERENTLY unsound (no flag reaches it)."
 ---
 
-# #2750 — Sound TS settings (.ts + .js) + codegen correctness where TS is unsound
+# #2754 — Sound TS settings (.ts + .js) + codegen correctness where TS is unsound
 
 > **Scoping issue (architecture). Do NOT implement from this file alone.** It
 > defines the policy, the empirical OOB finding, and the dev-sized slices.
@@ -38,7 +38,7 @@ codegen can **silently miscompile**.
 OFF, so `Deno.stdin.readSync(): number | null` collapsed to `number`. The EOF
 guard `r === null` then **constant-folded to `false`** → a silent **infinite-loop
 miscompile**. #2748 force-set `strictNullChecks:true` for `.js` as a _point fix_
-(`src/checker/index.ts:680`). #2750 **generalizes** that point fix.
+(`src/checker/index.ts:680`). #2754 **generalizes** that point fix.
 
 **But this is TWO-pronged, not "turn on every strict flag."** TS is _deliberately_
 unsound in places no strict flag reaches (`a[OOB]` typed `T`, `as any`, JSON-as-T,
