@@ -1,7 +1,8 @@
 ---
 id: 2743
 title: "arguments object as an ordinary Object: [[Prototype]]=Object.prototype, .constructor, Symbol.iterator, and unmapped arguments for non-simple parameter lists"
-status: ready
+status: in-progress
+assignee: ttraenkler/sendev-args
 sprint: 67
 created: 2026-06-27
 updated: 2026-06-27
