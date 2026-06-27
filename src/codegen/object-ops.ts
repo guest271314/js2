@@ -3826,6 +3826,26 @@ export function compileObjectKeysOrValues(
   const arg = expr.arguments[0]!;
   const argType = ctx.checker.getTypeAtLocation(arg);
 
+  // (#2746) ES ToObject (§7.1.18): Object.keys/values/entries of `null` or
+  // `undefined` throws a TypeError. A bare nullish-typed argument otherwise
+  // falls into the empty-object-literal fast path below (no own properties to
+  // enumerate) and wrongly compiles away to `[]` instead of throwing. Detect a
+  // purely-nullish argument type and emit the ToObject TypeError directly — this
+  // is mode-agnostic (works in JS-host and standalone) since it never reaches a
+  // host import. `any`/`unknown` keep flowing to the runtime path (which throws
+  // at runtime when the value turns out to be nullish).
+  const NULLISH_FLAGS = ts.TypeFlags.Null | ts.TypeFlags.Undefined | ts.TypeFlags.Void;
+  const isNullishType = (t: ts.Type): boolean =>
+    t.isUnion() ? t.types.every(isNullishType) : (t.flags & NULLISH_FLAGS) !== 0 && (t.flags & ~NULLISH_FLAGS) === 0;
+  if (isNullishType(argType)) {
+    const t = compileExpression(ctx, fctx, arg);
+    if (t) fctx.body.push({ op: "drop" });
+    const which = !argType.isUnion() && argType.flags & ts.TypeFlags.Null ? "null" : "undefined";
+    emitThrowTypeError(ctx, fctx, `Cannot convert ${which} to object`);
+    fctx.body.push({ op: "unreachable" });
+    return { kind: "externref" };
+  }
+
   // Resolve struct name from the argument type
   const structName = resolveStructName(ctx, argType);
   if (!structName) {
@@ -3895,6 +3915,51 @@ export function compileObjectKeysOrValues(
   // by Object.defineProperty calls. shapePropFlags is initialized with defaults after
   // compilation, so it won't reflect defineProperty updates during this pass.
   const argVarName = ts.isIdentifier(arg) ? arg.text : undefined;
+
+  // (#2746) An object that received an `Object.defineProperty` ADDING a property
+  // beyond its static struct shape needs the runtime own-property set: the
+  // compile-time field expansion below can only see the literal's declared
+  // fields. Route `Object.keys` for such a receiver to the runtime
+  // `__object_keys` helper (which reads struct fields + the defineProperty/
+  // dynamic-write sidecar with the correct enumerable filter — #2746 runtime
+  // fix). Gate PRECISELY on a property that is NOT a known struct field
+  // (`definePropertyReceiverKeys` records every `varName:propName` define at a
+  // single chokepoint, independent of the lowering path): a define that only
+  // re-flags an EXISTING field is already handled by the `definedPropertyFlags`
+  // filter below, so it keeps the fast compile-time vec path and does not perturb
+  // the many currently-green define-on-existing-field tests. The `!structName`
+  // branch above proves this helper exists in both host and standalone modes.
+  const fieldNameSetForRoute = new Set(userFields.map((e) => e.field.name));
+  const hasAddedDefineProp =
+    method === "keys" &&
+    argVarName !== undefined &&
+    (() => {
+      const prefix = `${argVarName}:`;
+      for (const k of ctx.definePropertyReceiverKeys) {
+        if (!k.startsWith(prefix)) continue;
+        if (!fieldNameSetForRoute.has(k.slice(prefix.length))) return true;
+      }
+      return false;
+    })();
+  if (hasAddedDefineProp) {
+    const objType = compileExpression(ctx, fctx, arg);
+    if (!objType) return null;
+    if (objType.kind === "ref" || objType.kind === "ref_null") {
+      fctx.body.push({ op: "extern.convert_any" } as Instr);
+    } else if (objType.kind !== "externref") {
+      coerceType(ctx, fctx, objType, { kind: "externref" });
+    }
+    const funcIdx = ensureLateImport(ctx, "__object_keys", [{ kind: "externref" }], [{ kind: "externref" }]);
+    flushLateImportShifts(ctx, fctx);
+    if (funcIdx !== undefined) {
+      fctx.body.push({ op: "call", funcIdx });
+    } else {
+      fctx.body.push({ op: "drop" });
+      fctx.body.push({ op: "ref.null.extern" } as Instr);
+    }
+    return { kind: "externref" };
+  }
+
   const enumUserFields = userFields.filter((e) => {
     if (argVarName) {
       const key = `${argVarName}:${e.field.name}`;
@@ -4155,6 +4220,102 @@ export function compilePropertyIntrospection(
       fctx.body.push({ op: "call", funcIdx: hopIdx });
       return { kind: "i32", boolean: true };
     }
+  }
+
+  // (#2746) Array-exotic own index keys. An Array compiles to a `__vec_*` struct
+  // whose integer-index elements are own (enumerable) data properties — NOT
+  // static WasmGC struct fields, so the field-name logic below would wrongly
+  // answer `false` for `arr.hasOwnProperty(0)` (e.g. on the result array of
+  // `Object.keys`). The answer is `(index in-bounds and the slot is present) OR
+  // the index was added to the runtime sidecar (e.g. `Object.defineProperty(arr,
+  // "0", …)` on an empty array)` — the OR with the host/native `__hasOwnProperty`
+  // covers the sidecar case the vec data alone can't see.
+  //
+  // We only run the vec bounds branch for REFERENCE-element vecs (string/object
+  // arrays): there a hole is a distinguishable `ref.null`, so `index < length AND
+  // data[index] != null` is exact. NUMERIC-element vecs densify holes to `0`/`NaN`
+  // (indistinguishable) AND a `defineProperties` length-shrink leaves stale slots,
+  // so a bounds check there would mis-report holes/shrunk indices as own — those
+  // keep the legacy field-name path. The result array of `Object.keys`/
+  // `getOwnPropertyNames` is an externref string vec, so the targeted tests are
+  // covered. Only a statically-resolvable canonical index is handled.
+  if (propAccess.name.text === "hasOwnProperty" && (receiverWasm.kind === "ref" || receiverWasm.kind === "ref_null")) {
+    const vecTypeIdx = (receiverWasm as { typeIdx: number }).typeIdx;
+    const vecInfo = getVecInfo(ctx, vecTypeIdx);
+    const elemIsRef =
+      vecInfo !== null &&
+      (vecInfo.elemType.kind === "externref" ||
+        vecInfo.elemType.kind === "ref" ||
+        vecInfo.elemType.kind === "ref_null" ||
+        vecInfo.elemType.kind === "anyref" ||
+        vecInfo.elemType.kind === "eqref");
+    const keyArg = expr.arguments[0];
+    let staticKey: string | null = null;
+    if (keyArg) {
+      if (ts.isStringLiteral(keyArg) || ts.isNumericLiteral(keyArg)) staticKey = keyArg.text;
+      else {
+        const at = ctx.checker.getTypeAtLocation(keyArg);
+        if (at.isStringLiteral()) staticKey = at.value;
+        else if (at.isNumberLiteral()) staticKey = String(at.value);
+      }
+    }
+    if (elemIsRef && keyArg && staticKey !== null && _isCanonicalArrayIndexString(staticKey)) {
+      const dataArrTypeIdx = vecInfo!.arrTypeIdx;
+      const idxVal = Number(staticKey);
+      const recvLocal = allocLocal(fctx, `__hop_arr_${fctx.locals.length}`, receiverWasm);
+      const presentLocal = allocLocal(fctx, `__hop_present_${fctx.locals.length}`, { kind: "i32" });
+      const recv = compileExpression(ctx, fctx, propAccess.expression, receiverWasm);
+      if (recv && (recv.kind === "ref" || recv.kind === "ref_null")) {
+        fctx.body.push({ op: "ref.as_non_null" } as Instr);
+      }
+      fctx.body.push({ op: "local.set", index: recvLocal });
+      // present := (index < length) ? (data[index] != null) : 0. The bounds test
+      // gates the element load via an `if` so an out-of-range index never traps.
+      fctx.body.push({ op: "local.get", index: recvLocal });
+      fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 }); // length
+      fctx.body.push({ op: "i32.const", value: idxVal });
+      fctx.body.push({ op: "i32.gt_u" }); // length > index  ⇔  index in bounds
+      fctx.body.push({
+        op: "if",
+        blockType: { kind: "val", type: { kind: "i32" } },
+        then: [
+          { op: "local.get", index: recvLocal } as Instr,
+          { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr, // data array
+          { op: "i32.const", value: idxVal } as Instr,
+          { op: "array.get", typeIdx: dataArrTypeIdx } as Instr, // element
+          { op: "ref.is_null" } as Instr,
+          { op: "i32.eqz" } as Instr, // present (non-null) → 1
+        ],
+        else: [{ op: "i32.const", value: 0 } as Instr],
+      } as Instr);
+      fctx.body.push({ op: "local.set", index: presentLocal });
+      // result := present OR __hasOwnProperty(arr, key) — the latter catches an
+      // index added to the sidecar (e.g. defineProperty on an array index, where
+      // the vec data length is unchanged). __hasOwnProperty exists in both modes.
+      const hopIdx2 = ensureLateImport(
+        ctx,
+        "__hasOwnProperty",
+        [{ kind: "externref" }, { kind: "externref" }],
+        [{ kind: "i32" }],
+      );
+      fctx.body.push({ op: "local.get", index: recvLocal });
+      fctx.body.push({ op: "extern.convert_any" } as Instr);
+      const keyT = compileExpression(ctx, fctx, keyArg, { kind: "externref" });
+      if (keyT && keyT.kind !== "externref") coerceType(ctx, fctx, keyT, { kind: "externref" });
+      flushLateImportShifts(ctx, fctx);
+      if (hopIdx2 !== undefined) {
+        fctx.body.push({ op: "call", funcIdx: hopIdx2 });
+      } else {
+        // No host helper available — drop the args, sidecar contributes nothing.
+        fctx.body.push({ op: "drop" });
+        fctx.body.push({ op: "drop" });
+        fctx.body.push({ op: "i32.const", value: 0 });
+      }
+      fctx.body.push({ op: "local.get", index: presentLocal });
+      fctx.body.push({ op: "i32.or" });
+      return { kind: "i32", boolean: true };
+    }
+    // else fall through to the generic struct-field path (legacy behaviour).
   }
 
   // Build a set of private member names (without '#') from the TS type.
