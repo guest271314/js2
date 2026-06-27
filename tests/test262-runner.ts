@@ -515,7 +515,6 @@ function stripThirdArg(code: string, fnName: string): string {
  *
  * Used for:
  *   Object.prototype.hasOwnProperty.call(obj, key)  → (obj).hasOwnProperty(key)
- *   Object.prototype.propertyIsEnumerable.call(obj, key) → (obj).hasOwnProperty(key)
  *
  * Uses paren-counting to correctly extract the first argument (obj),
  * then emits `(obj).hasOwnProperty(` followed by the remaining args.
@@ -1917,14 +1916,6 @@ export function wrapTest(source: string, meta?: Test262Meta): WrapResult {
   // Transform Object.prototype.hasOwnProperty.call(obj, key) → (obj).hasOwnProperty(key)
   // This is semantically equivalent, and our compiler handles obj.hasOwnProperty("key").
   body = transformPrototypeCall(body, "Object.prototype.hasOwnProperty.call");
-
-  // Transform Object.prototype.propertyIsEnumerable.call(obj, key) → (obj).hasOwnProperty(key)
-  // All own struct fields are enumerable in our model, so propertyIsEnumerable === hasOwnProperty.
-  body = transformPrototypeCall(body, "Object.prototype.propertyIsEnumerable.call");
-
-  // Transform obj.propertyIsEnumerable(key) → obj.hasOwnProperty(key)
-  // All own struct fields are enumerable in our Wasm model.
-  body = body.replace(/\.propertyIsEnumerable\s*\(/g, ".hasOwnProperty(");
 
   // Transform assert.throws(ErrorType, fn) → assert_throws(fn)
   body = transformAssertThrows(body);
