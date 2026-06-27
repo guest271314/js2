@@ -39,6 +39,26 @@ else                                           model_color='00;32'
 fi
 branch=$(git -C "${cwd:-$(pwd)}" rev-parse --abbrev-ref HEAD 2>/dev/null)
 issue=$(echo "$branch" | sed -n 's/^issue-\([a-zA-Z0-9]*\).*/\1/p')
+# Base remote: 'upstream' if it exists, else 'origin'. Resolved once at startup.
+_base_remote=$(git -C "${cwd:-$(pwd)}" remote 2>/dev/null | grep -Fx 'upstream' | head -1)
+[ -z "$_base_remote" ] && _base_remote="origin"
+_base_ref="${_base_remote}/main"
+# Throttled background fetch: ensure the base ref stays reasonably fresh
+# without ever blocking the render. If >180s since the last fetch, launch
+# `git fetch` detached in the background (timeout 20s) and update the
+# timestamp. The current render uses whatever objects are already cached.
+_fetch_ts="${HOME}/.cache/js2-statusline/last-fetch"
+_now_s=$(date +%s)
+_do_fetch=1
+if [ -f "$_fetch_ts" ]; then
+  _last=$(cat "$_fetch_ts" 2>/dev/null)
+  [ -n "$_last" ] && [ $(( _now_s - _last )) -lt 180 ] && _do_fetch=0
+fi
+if [ "$_do_fetch" = "1" ]; then
+  mkdir -p "${HOME}/.cache/js2-statusline" 2>/dev/null
+  printf '%s' "$_now_s" > "$_fetch_ts" 2>/dev/null
+  (timeout 20 git -C "${cwd:-$(pwd)}" fetch --quiet "$_base_remote" main 2>/dev/null &) 2>/dev/null
+fi
 display_cwd=$(basename "${cwd:-$(pwd)}")
 printf '\033[01;34m%s\033[00m' "$display_cwd"
 # Model badge — before the ctx bar
@@ -275,11 +295,9 @@ if [ -z "$in_worktree" ] && [ "$branch" = "main" ]; then
   sprint_n=""
   sprint_done=0
   sprint_total=0
-  # LIVE-FIRST: statusline-sprint.mjs scans the working-tree plan/issues/*.md
-  # frontmatter (always current) and only falls back to the sprints.json cache
-  # internally when the flat scan finds nothing. Reading the cache here FIRST is
-  # what made the statusline go stale — sprints.json only rebuilds on
-  # push-to-main, so it reported a closed sprint for days.
+  # statusline-sprint.mjs reads from origin/main via git grep (PRIMARY) so the
+  # sprint numbers always reflect committed truth even when /workspace is stale.
+  # Falls back to the local working-tree scan, then sprints.json, internally.
   sprint_mjs="/workspace/scripts/statusline-sprint.mjs"
   if [ -f "$sprint_mjs" ] && command -v node >/dev/null 2>&1; then
     sprint_data=$(node "$sprint_mjs" --porcelain 2>/dev/null)
@@ -396,8 +414,21 @@ elif [ -n "$vitesting" ]; then
     printf ' \033[00;33m⟳t262:starting\033[00m'
   fi
 elif [ -f "$report" ]; then
-  pass=$(jq -r '.summary.pass // 0' "$report" 2>/dev/null)
-  total=$(jq -r '.summary.total // 1' "$report" 2>/dev/null)
+  # Read host pass/total from the base remote ref (test262-current.json is the
+  # authoritative committed file, refreshed on every push to main). Fall back
+  # to the local file only when the ref read fails (offline / first run).
+  # No timeout: git show on a local ref is a pack-file read — never blocks.
+  _t262_json=$(git -C "${cwd:-$(pwd)}" show "${_base_ref}:benchmarks/results/test262-current.json" 2>/dev/null)
+  if [ -n "$_t262_json" ]; then
+    pass=$(printf '%s' "$_t262_json" | jq -r '.summary.pass // .pass // 0' 2>/dev/null)
+    total=$(printf '%s' "$_t262_json" | jq -r '.summary.total // .total // 1' 2>/dev/null)
+  else
+    # Fallback: local committed file (may be stale when /workspace is behind)
+    _local_t262="/workspace/benchmarks/results/test262-current.json"
+    [ ! -f "$_local_t262" ] && _local_t262="$report"
+    pass=$(jq -r '.summary.pass // .pass // 0' "$_local_t262" 2>/dev/null)
+    total=$(jq -r '.summary.total // .total // 1' "$_local_t262" 2>/dev/null)
+  fi
   pass_pct=$(awk "BEGIN {printf \"%.1f\", $pass * 100 / $total}")
   free_mb=$(free -m | awk '/Mem/{print $7}')
   free_g=$(awk "BEGIN {printf \"%.0f\", $free_mb / 1024}")
@@ -405,20 +436,23 @@ elif [ -f "$report" ]; then
     p_bar=$(pass_bar "$pass_pct" "${pass_pct}% t262")
     f_bar=$(free_bar "$free_g")
     # Standalone (pure-Wasm, no JS host) test262 pass rate, shown right after
-    # the JS-host bar. `.summary` is standard+annexB (43,135) — TC39 proposals
-    # excluded, matching the host bar's denominator.
+    # the JS-host bar. official_pass/official_total = standard+annexB (43,135),
+    # TC39 proposals excluded, matching the host bar's denominator.
     sa_bar=""
     sa_pass=""; sa_total=""
-    # Prefer the committed high-water mark (official_* = standalone pass/total
-    # WITHOUT proposals): the promote-baseline CI job refreshes it on every push
-    # to main, so it tracks the latest js2wasm-baselines numbers. The local
-    # test262-standalone-report.json is an UNtracked dev-run artifact that goes
-    # stale (a 5-day-old 47% shadowed the fresh 52.6% high-water), so use it only
-    # when it is genuinely newer than the high-water file.
-    if [ -f "$standalone_highwater" ]; then
-      sa_pass=$(jq -r '.official_pass // empty' "$standalone_highwater" 2>/dev/null)
-      sa_total=$(jq -r '.official_total // empty' "$standalone_highwater" 2>/dev/null)
+    # Read standalone from the base remote ref (always current).
+    _sa_json=$(git -C "${cwd:-$(pwd)}" show "${_base_ref}:benchmarks/results/test262-standalone-highwater.json" 2>/dev/null)
+    if [ -n "$_sa_json" ]; then
+      sa_pass=$(printf '%s' "$_sa_json" | jq -r '.official_pass // empty' 2>/dev/null)
+      sa_total=$(printf '%s' "$_sa_json" | jq -r '.official_total // empty' 2>/dev/null)
+    else
+      # Fallback to local high-water file
+      if [ -f "$standalone_highwater" ]; then
+        sa_pass=$(jq -r '.official_pass // empty' "$standalone_highwater" 2>/dev/null)
+        sa_total=$(jq -r '.official_total // empty' "$standalone_highwater" 2>/dev/null)
+      fi
     fi
+    # A locally-run standalone report that is genuinely newer takes precedence.
     if [ -f "$standalone_report" ] && [ "$standalone_report" -nt "$standalone_highwater" ]; then
       sa_pass=$(jq -r '.summary.pass // 0' "$standalone_report" 2>/dev/null)
       sa_total=$(jq -r '.summary.total // 1' "$standalone_report" 2>/dev/null)
