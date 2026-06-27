@@ -142,6 +142,40 @@ ROOT-CAUSE" + "## RESOLVED BY #2085"). Summary:
 Reusable `.tmp` probes (worker-thread + SAB, single-compile) banked under #2674.
 Each full-acorn compile is ~290s on this box — reuse one compile per probe.
 
+## Architect verdict — NOT unblocked by #2731 (esch, 2026-06-27)
+
+**Verdict: #2731 does NOT unblock #2681. Still requires the ranked-#1/#2 substrate
+work — NOT a clean dev fix as-is.**
+
+#2731 (PR #2170) added ONLY the symmetric WRITE routing
+(`tryEmitDeleteAwareDynamicSet`, property-access.ts:2223). The GET path this issue
+pinned — `tryEmitDeleteAwareDynamicGet` (property-access.ts:2148) → plain
+`__extern_get` — is **byte-unchanged**, and #2731 touched neither `__host_eq` /
+`_unwrapForHost` nor the lifted-method `this`-binding.
+
+Verified on current `origin/main` HEAD (f51590644910a, post-#2731) with a minimal
+faithful repro of the mechanism (a fnctor whose `this.<field>` is written in the
+ctor and read in a `pp = F.prototype; pp.m = function(this:any){…}` lifted method,
+`skipSemanticDiagnostics: true` to match the runner):
+- `this.type` written in the ctor reads back as **`undefined`/null** inside the
+  lifted method (`var t = this.type` → null), and `this.type === TT.name` is **`0`**
+  → a `switch(this.type){ case TT.name: … }` falls to `default` (acorn's
+  `unexpected()`). This is the exact host-proxy-vs-struct divergence #2681 names.
+- It reproduces **even without `delete`** in the module, confirming the defect is the
+  lifted-method `this`→struct binding (ranked #1), broader than the delete-aware GET
+  path. #2731's write-symmetry cannot bridge it: the ctor write is `struct.set` on a
+  concretely-typed `this` (NOT rerouted by `tryEmitDeleteAwareDynamicSet`, which gates
+  on an `any`/`unknown` receiver), while the lifted-method read is `__extern_get` on a
+  host proxy that never saw that struct field.
+
+The scale-dependent `name-token === empty-proxy → 1` collision (the full-acorn smoking
+gun) is a *symptom* of the same divergence; minimally it surfaces as a null read. The
+fix set is unchanged from the pinned analysis: **ranked #1** (whole-program
+prototype-alias `pp$N = F.prototype` tracking + lifted-method `this`→`$__fnctor_F`
+binding — the substrate fix), or **ranked #2** (route `tryEmitDeleteAwareDynamicGet`
+through the struct-candidate dispatch first, `__extern_get` terminal). Both are
+architect/senior-dev-scoped; #2731 changes none of the inputs.
+
 ### Carved sibling walls (now their own issues — do NOT bundle into #2681)
 - **#2686 — Binary-expression throw**: `parse("1 + 2 * 3;")` THROWS (separate from
   the identifier path; likely the same token-type-comparison root via parseExprOp).

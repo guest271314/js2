@@ -96,3 +96,135 @@ mode (the standalone prototype-link model is a separate sub-case). Full CI green
   integer-index half. These 4 are the remaining prototype/defineProperty half.
 - Route to **architect** for a prototype-link spec. Overlaps #2706's
   "prototype-chain dedup" scope and the #2580/#2660 substrate.
+
+## Implementation Plan (architect: esch, 2026-06-27)
+
+**All claims below VERIFIED by compile+run on current `origin/main` HEAD
+(f51590644910a), host/gc mode, via `compile()` + `buildImports`/`instantiateWasm`
+probes and the real `runTest262File` runner.** The three sub-bugs split into
+**two root causes** plus one separate lower-confidence item:
+
+### Root cause
+
+**Shape-inferred and fnctor WasmGC structs have NO host-observable `[[Prototype]]`
+link that `__for_in_keys`' manual walk can follow.** The walk in `__for_in_keys`
+(`src/runtime.ts:10844-10906`) advances with `current = Object.getPrototypeOf(current)`
+(`:10902`). For an opaque WasmGC struct exported to JS, host `Object.getPrototypeOf`
+returns null/the engine default — **never** the user-intended prototype. The link
+is also never *recorded* at the two mutation sites:
+
+- **(a) `Object.setPrototypeOf(o, proto)` is a COMPLETE NO-OP in gc/host mode.**
+  `src/codegen/expressions/calls.ts:5943-5949` compiles both args, `drop`s `proto`,
+  returns `obj`. The comment claims "the host runtime owns proto" but codegen never
+  calls any host `setPrototypeOf` — the link is dropped on the floor. Verified:
+  `Object.setPrototypeOf(o,{p4})` then `for k in o` yields `p1,p2,p3` (no `p4`).
+
+- **(b) `new F()` builds a `$__fnctor_F` struct with no prototype link, and
+  `F.prototype = {...}` is silently dropped in host mode.** `new FACTORY` →
+  `compileNewFunctionDeclaration` (`new-super.ts:1004`) builds a `$__fnctor_FACTORY`
+  struct with fields `prop`,`hint`. Its `__register_fnctor_instance` registration
+  (`new-super.ts:1267-1287`) fires **only when `ctorGlobalIdx` is defined** — i.e.
+  the fnctor has a closure global. A fnctor that is *only* `new`'d (never used as a
+  value) has **no** closure global, so registration never fires (WAT-verified:
+  `__fn_closure_FACTORY` absent, `__register_fnctor_instance` absent). Separately,
+  `FACTORY.prototype = {feat,hint}` routes through `tryCompileFnctorPrototypeAssign`
+  (`assignment.ts:2489-2498`) which is **standalone-only**; in host mode it falls to
+  `__extern_set($closure,"prototype",…)` which (per the in-code comment) "misses
+  `ref.test $Object` and silently drops the write". Net: the `F.prototype` object and
+  the `new F()` instance never rendezvous on a shared identity. Verified: own fields
+  enumerate (`prop1`,`hinthinted` — own `hint` correctly shadows), but inherited
+  `feat` is MISSING from for-in AND `__instance.feat`/`__instance["feat"]` read
+  `undefined` (the instance has no proto link the read path can walk either).
+
+So (a) and (b) are the **same** missing-prototype-link defect at two construction
+sites, both surfacing in the SAME `__for_in_keys` walk.
+
+### Changes
+
+**Part 1a — record the setPrototypeOf link (host mode).**
+- `src/runtime.ts`: add `const _wasmStructProto = new WeakMap<object, any>();`
+  (sibling of `_wasmStructProps`/`_wasmStructDeletedKeys`/`_wasmStructShadowedFields`).
+- `src/runtime.ts`: add a host import `__host_set_struct_proto(obj, proto)` that, when
+  `_isWasmStruct(obj)` and `proto` is object-or-null, performs the §10.1.2.1
+  OrdinarySetPrototypeOf extensibility + cycle checks (mirror the native
+  `__object_setPrototypeOf` logic, object-runtime.ts:2426), then
+  `_wasmStructProto.set(obj, proto)` and returns `obj`. Register its name so
+  `buildImports` wires it.
+- `src/codegen/expressions/calls.ts:5943-5949` (the gc/host arm): instead of
+  `drop`+return, emit `call __host_set_struct_proto(obj, proto)` (ensureLateImport
+  + flushLateImportShifts, same discipline as the standalone arm at :5927-5935).
+  Mirror at **`Reflect.setPrototypeOf`** (calls.ts:7593) and the `o.__proto__ = v`
+  write path (grep `__proto__` in assignment.ts) so all three record the link.
+
+**Part 1b — record the fnctor instance→prototype link (host mode).** Pick ONE:
+- *Preferred (reuse #1712 machinery):* ensure `__register_fnctor_instance` fires for
+  EVERY `new`'d fnctor. At `new-super.ts:1267`, when `ctorGlobalIdx` is undefined,
+  allocate the closure global for `funcName` (the same lazy global `closures.ts:4300`
+  mints) so the registration emits, AND make `F.prototype = {...}` vivify the SAME
+  closure-sidecar prototype object in host mode (extend `tryCompileFnctorPrototypeAssign`
+  / its host fall-through to write `_sidecarSet(closure,"prototype",rhs)` via
+  `_getOrVivifyFnPrototype`). Then `_fnctorInstanceCtor`→`_sidecarGet(ctor,"prototype")`
+  is the link, and the existing read path (`_fnctorProtoLookup`, runtime.ts:74) already
+  resolves inherited reads — closing the `__instance.feat`→undefined half of (b).
+- *Alternative (name-keyed rendezvous):* a host `Map<string,object> _fnctorPrototypeByName`;
+  `F.prototype = {...}` (host) writes it; construction does
+  `_wasmStructProto.set(instance, _fnctorPrototypeByName.get(F))`. Simpler but a second
+  proto-link channel; prefer reusing `_fnctorInstanceCtor` to avoid divergence.
+
+**Part 2 — consult the link in the for-in walk (fixes a + b enumeration).**
+- `src/runtime.ts`: add `_structUserProto(current, exports)` returning, for a wasm
+  struct: (1) `_wasmStructProto.get(current)` if set; else (2) the fnctor prototype
+  via `_fnctorInstanceCtor.get(current)` → `_sidecarGet(ctor,"prototype")`; else (3)
+  `Object.getPrototypeOf(current)`. For a non-struct, return `Object.getPrototypeOf`.
+- `__for_in_keys` (runtime.ts): replace the `current = Object.getPrototypeOf(current)`
+  step at `:10902` with `current = _structUserProto(current, exports)`. The existing
+  `seen` set + `_orderOwnKeysSpec` already give own-before-proto ordering and
+  own-shadows-proto dedup (verified: own `hint` already wins). The proto level may
+  itself be a wasm struct (`{p4}`/`{feat,hint}` compile to structs) — the walk's
+  struct branch (`:10850`) already handles that recursively.
+
+**Part 3 — read-path consistency (already mostly covered).**
+- For (b) the test reads `__instance[key]`; once Part 1b registers the link,
+  `_fnctorProtoLookup` (consulted by `__extern_get` at runtime.ts:4170/4977) resolves
+  inherited reads. ALSO have `_fnctorProtoLookup` (or a shared resolver) consult
+  `_wasmStructProto` so setPrototypeOf-set protos resolve reads too — keeps reads and
+  for-in walking ONE prototype source.
+
+**Part 4 — `__getPrototypeOf` consistency (recommended, not strictly required by the
+4 tests).** Route `__getPrototypeOf` (runtime.ts:9353) through `_structUserProto` for
+wasm structs so `Object.getPrototypeOf(o)` post-setPrototypeOf returns the user proto.
+Guard against regressing existing proto-walk tests (run the `Object/getPrototypeOf`
+and `setPrototypeOf` test262 dirs).
+
+### Edge cases
+- `Object.setPrototypeOf(o, null)` → store null; for-in then enumerates own keys only.
+- Cycle: OrdinarySetPrototypeOf must refuse a cycle (no-op); ALSO add a visited-object
+  guard in the `__for_in_keys` walk (the `_fnctorProtoLookup` uses `guard++ < 16`) so a
+  hand-built cycle can't loop the enumerator.
+- own-shadows-proto: `seen` is populated with own keys BEFORE the proto level — already
+  correct; do not reorder.
+- proto level is a plain JS object vs a wasm struct — both branches already exist.
+- Standalone/WASI is OUT OF SCOPE for these 4 tests (host mode). Standalone already has
+  `$Object.$proto` (calls.ts:5909) + fnctor S3a reconstruction; a separate sub-case.
+- Do NOT regress `for-of` over objects if it shares `__for_in_keys` (it does not today —
+  verify before shipping).
+
+### (c) `order-after-define-property` — SEPARATE, lower-confidence sub-task
+Verified split: assert #1 (plain object: `obj.a=1;obj.b=2;defineProperty(obj,"a",{value})`
+→ `["a","b"]`) **already PASSES** on current main. Only assert #2 (the **array +
+accessor-descriptor** case: `defineProperty(arr,"a",{get,enumerable,configurable})`;
+`arr.b=2`; redefine `a`) fails — AND it fails **only in the full-harness `runTest262File`
+run**; an isolated `compile()` probe of the same array snippet returns the correct
+`["a","b"]` (len=2). This is a full-program-compilation interaction (array vec +
+accessor-descriptor sidecar for-in under the assert.js harness), NOT the
+prototype-link defect. **Treat as its own follow-up**; the dev MUST reproduce via
+`runTest262File(".../order-after-define-property.js")` (it does NOT repro in a bare
+`compile()` probe). Do not block (a)+(b) on it. Recommend the PO file (c) as a separate
+issue if (a)+(b) ship first.
+
+### Test files to verify
+- `statements/for-in/order-property-on-prototype.js` — Part 1a + Part 2 (a)
+- `statements/for-in/S12.6.4_A6.js`, `S12.6.4_A6.1.js` — Part 1b + Part 2 + Part 3 (b)
+- `statements/for-in/order-after-define-property.js` — (c), separate sub-task
+- Regression watch: `statements/for-in/` (esp. `order-simple-object` from #2731),
+  `built-ins/Object/getPrototypeOf`, `built-ins/Object/setPrototypeOf`.
