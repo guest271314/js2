@@ -42,6 +42,11 @@
           },
           {
             "type": "command",
+            "command": "REPO_ROOT=/workspace node /workspace/scripts/sync-current-tasklist.mjs --quiet 2>/dev/null || true",
+            "timeout": 20
+          },
+          {
+            "type": "command",
             "command": "bash /workspace/scripts/sync-workspace-main.sh 2>/dev/null || true",
             "timeout": 20
           }

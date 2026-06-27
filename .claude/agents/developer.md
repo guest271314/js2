@@ -69,7 +69,8 @@ These help the tech lead know you're alive and progressing, not stuck. Keep them
 ## Workflow
 
 ### Start
-1. `TaskList` — pick the lowest-ID candidate task. **Before claiming, run the pre-claim gate. Skip the task (do NOT claim) and move to the next candidate if ANY of these is true:**
+0. **Budget-fit check (#2751)** — run `node scripts/budget-status.mjs --pick` first. It reports the remaining token budget, the active parallelism, your per-agent share, and the largest task **horizon** (`[XL]`/`[L]`/`[M]`/`[S]` subject tag) you should pull. Claim an **adequately-sized** task: pick from its recommended best-fit list (highest-priority task whose horizon fits the share). Do NOT start a task whose horizon exceeds the recommended max — that risks stranding it at the window's budget freeze; defer it to the next window and take a smaller one (an `S` tail-filler is always fine). Big-horizon tasks are preferentially started when the window is fresh.
+1. `TaskList` — pick the lowest-ID candidate task **among the budget-fitting ones**. **Before claiming, run the pre-claim gate. Skip the task (do NOT claim) and move to the next candidate if ANY of these is true:**
    - **Owner pin**: the task already has an `owner` set to a name other than yours. An owned task belongs to that agent — never take it, even if it looks idle. (The auto-dispatcher only offers ownerless tasks; if you were handed an owned one, that is stale routing — skip it.)
    - **Scope mismatch**: the subject carries a role tag outside your lane — `[SENIOR-DEV ONLY]`, `[ARCH]`/`arch(...)`, `[PO]`/`po:`, `[CONFLICT]` (senior-dev), or `[PARKED ...]`/`[PAUSE]`. You are a `developer`; only claim plain `fix(...)`/`refactor(...)`/`dev:` tasks with no foreign role tag.
    - **Already done**: a PR for this issue is already merged (`gh pr list --state merged --search "<issue#>"`) or open and owned by someone else. If so, the task is stale — flag the tech lead so they reconcile it, and skip.
