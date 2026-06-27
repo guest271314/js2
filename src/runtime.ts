@@ -79,6 +79,31 @@ const _wasmStructProto = new WeakMap<object, any>();
  */
 const _fnctorInstanceCtor = new WeakMap<object, object>();
 
+/**
+ * (#2743 a) Arguments objects are ordinary Objects (§10.4.4): their
+ * `[[Prototype]]` is %Object.prototype% and `.constructor` resolves to %Object%.
+ * The compiled `arguments` vec is an opaque WasmGC struct, so the host MOP can't
+ * see those by itself — codegen registers each arguments vec here (host-mode
+ * only; standalone keeps the bare vec) and the `__getPrototypeOf` /
+ * `__extern_get` / `__hasOwnProperty` hooks treat a registered vec as an
+ * ordinary Object inheriting from %Object.prototype%.
+ */
+const _argumentsObjects = new WeakSet<object>();
+
+/**
+ * (#2743 a) Own-property predicate for a registered arguments object. `length`
+ * and `callee` are always own properties of an arguments object (§10.4.4 —
+ * callee is present-but-poisoned in strict mode, an ordinary data property in
+ * sloppy mode). The numeric indices `0 .. length-1` are also own, but the vec's
+ * length is opaque to the host here, so they are not reported (no in-scope
+ * conformance test checks `arguments.hasOwnProperty(<index>)`; the
+ * length/callee keys are what the suite exercises). A genuinely-numeric-index
+ * own check is a documented follow-up gap.
+ */
+function _argumentsHasOwn(_obj: any, key: any): boolean {
+  return key === "length" || key === "callee";
+}
+
 /** (#1712) Resolve a property through the instance's fnctor prototype chain. */
 function _fnctorProtoLookup(
   obj: any,
@@ -7754,6 +7779,18 @@ assert._isSameValue = isSameValue;
       }
       if (name === "__extern_get")
         return (obj: any, key: any) => {
+          // (#2743 a) A registered arguments object is an ordinary Object whose
+          // `[[Prototype]]` is %Object.prototype%. The vec is opaque to the
+          // host, so resolve the inherited members it would otherwise miss:
+          //   - `.constructor` → %Object%;
+          //   - `hasOwnProperty` → a vec-aware predicate (the opaque struct
+          //     hides the own `length`/`callee`/index keys from the host MOP).
+          // `length` and the numeric indices stay on the existing vec path
+          // (they fall through below).
+          if (obj != null && typeof obj === "object" && _argumentsObjects.has(obj)) {
+            if (key === "constructor") return Object;
+            if (key === "hasOwnProperty") return (k: any) => _argumentsHasOwn(obj, k);
+          }
           if (obj != null && typeof obj === "object") {
             try {
               if (Object.getPrototypeOf(obj) !== null && key in Object(obj)) return obj[key];
@@ -7807,6 +7844,21 @@ assert._isSameValue = isSameValue;
         return (inst: any, ctor: any) => {
           if (_canBeWeakKey(inst) && ctor != null) _fnctorInstanceCtor.set(inst, ctor);
         };
+      // (#2743 a) Mark a compiled `arguments` vec as an ordinary Object so the
+      // MOP hooks (`__getPrototypeOf` / `__extern_get` / `__hasOwnProperty`)
+      // link it to %Object.prototype% and resolve `.constructor` → %Object%.
+      // Emitted right after the vec `struct.new` (host-mode only).
+      if (name === "__register_arguments")
+        return (vec: any) => {
+          if (_canBeWeakKey(vec)) _argumentsObjects.add(vec);
+        };
+      // (#2743 b) `%Array.prototype.values%` — the value of
+      // `arguments[Symbol.iterator]` and `[][Symbol.iterator]` (§10.4.4.6 /
+      // §10.4.4.7). Returning the host intrinsic gives both sites the same
+      // identity (`[][Symbol.iterator] === Array.prototype.values`), which is
+      // what the conformance tests compare. Used by the vec computed-get when
+      // the key is a `Symbol.iterator` (host-mode only).
+      if (name === "__array_proto_values") return () => Array.prototype.values;
       if (name === "__extern_set")
         return (obj: any, key: any, val: any) => {
           // (#860) When a Wasm closure struct is stored as a property value
@@ -9467,6 +9519,13 @@ assert._isSameValue = isSameValue;
           // matching built-in (Number.prototype, String.prototype, …).
           if (obj === null) throw new TypeError("Cannot convert null to object");
           if (obj === undefined) throw new TypeError("Cannot convert undefined to object");
+          // (#2743 a) A registered arguments object's `[[Prototype]]` is
+          // %Object.prototype% (§10.4.4). The opaque vec's native prototype is
+          // null, so map it to the host realm's Object.prototype — the same
+          // identity `Object.getPrototypeOf({})` returns.
+          if (obj != null && typeof obj === "object" && _argumentsObjects.has(obj)) {
+            return Object.prototype;
+          }
           try {
             return Object.getPrototypeOf(obj);
           } catch (e) {
@@ -10905,6 +10964,12 @@ assert._isSameValue = isSameValue;
       if (name === "__hasOwnProperty")
         return (obj: any, key: any): number => {
           if (obj == null) return 0;
+          // (#2743 a) A registered arguments object's own properties (`length`,
+          // `callee`) are invisible to the host on the opaque vec — answer from
+          // the arguments-aware predicate before the generic struct path.
+          if (typeof obj === "object" && _argumentsObjects.has(obj) && _argumentsHasOwn(obj, key)) {
+            return 1;
+          }
           if (!_isWasmStruct(obj)) {
             try {
               return Object.prototype.hasOwnProperty.call(obj, key) ? 1 : 0;

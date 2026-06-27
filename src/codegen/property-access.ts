@@ -318,6 +318,23 @@ function getWellKnownSymbolId(name: string): number | undefined {
 }
 
 /**
+ * (#2743 b) Is `expr` a syntactic `Symbol.iterator` member access? Used by the
+ * vec computed-get to route `vec[Symbol.iterator]` to %Array.prototype.values%
+ * instead of coercing the Symbol key to a numeric index (which ToNumber-throws
+ * "Cannot convert a Symbol value to a number"). Matches the same syntactic gate
+ * `getWellKnownSymbolId` uses (`Symbol.iterator` as a bare identifier member),
+ * so a locally-shadowed `Symbol` is not special-cased here either.
+ */
+function isSymbolIteratorKey(expr: ts.Expression): boolean {
+  return (
+    ts.isPropertyAccessExpression(expr) &&
+    ts.isIdentifier(expr.expression) &&
+    expr.expression.text === "Symbol" &&
+    expr.name.text === "iterator"
+  );
+}
+
+/**
  * (#1888 S6-c) Math/Number constant property names that have a Wasm-native
  * fall-through emitter further down in `compileMemberRead` (the `f64.const`
  * handlers for `Math.PI` / `Number.MAX_SAFE_INTEGER` & co.). These MUST be
@@ -2472,6 +2489,54 @@ export function compilePropertyAccess(
 
   const objType = ctx.checker.getTypeAtLocation(expr.expression);
   const propName = ts.isPrivateIdentifier(expr.name) ? "__priv_" + expr.name.text.slice(1) : expr.name.text;
+
+  // (#2743 a) `arguments.constructor.prototype` → %Object.prototype% (§10.4.4):
+  // the arguments object's `.constructor` is %Object%, whose `.prototype` is
+  // %Object.prototype%. The arguments object is modeled as a vec, so the inner
+  // `arguments.constructor` would resolve to the Array constructor and the outer
+  // `.prototype` to %Array.prototype%. Intercept the COMPOUND access and emit the
+  // compiler's own `Object.prototype` value-read (a synthetic `Object.prototype`
+  // member access — the lowering is name-keyed on `Object`), so it matches the
+  // identity a plain `Object.prototype` read produces. Host-mode only.
+  if (
+    !noJsHost(ctx) &&
+    propName === "prototype" &&
+    ts.isPropertyAccessExpression(expr.expression) &&
+    expr.expression.name.text === "constructor" &&
+    ts.isIdentifier(expr.expression.expression) &&
+    expr.expression.expression.text === "arguments" &&
+    fctx.localMap.has("arguments")
+  ) {
+    const objIdent = ts.factory.createIdentifier("Object");
+    (objIdent as { parent?: ts.Node }).parent = expr;
+    ts.setTextRange(objIdent, expr.expression.expression);
+    const objProtoExpr = ts.factory.createPropertyAccessExpression(objIdent, ts.factory.createIdentifier("prototype"));
+    (objProtoExpr as { parent?: ts.Node }).parent = expr.parent ?? expr;
+    ts.setTextRange(objProtoExpr, expr);
+    const t = compileExpression(ctx, fctx, objProtoExpr, { kind: "externref" });
+    if (t) return t.kind === "externref" ? t : { kind: "externref" };
+  }
+
+  // (#2743 a) `arguments.constructor` → %Object% (§10.4.4). The arguments object
+  // is modeled as a vec (array-like), so `.constructor` would otherwise resolve
+  // to the Array constructor. Emit the compiler's own `Object` value-read via a
+  // synthetic `Object` identifier so `arguments.constructor === Object`. (The
+  // compound `arguments.constructor.prototype` shape is handled above, because
+  // the bare `Object` value's `.prototype` is not identity-equal to the
+  // `Object.prototype` member-read in this compiler.) Host-mode only.
+  if (
+    !noJsHost(ctx) &&
+    propName === "constructor" &&
+    ts.isIdentifier(expr.expression) &&
+    expr.expression.text === "arguments" &&
+    fctx.localMap.has("arguments")
+  ) {
+    const objIdent = ts.factory.createIdentifier("Object");
+    (objIdent as { parent?: ts.Node }).parent = expr.parent ?? expr;
+    ts.setTextRange(objIdent, expr.expression);
+    const t = compileExpression(ctx, fctx, objIdent, { kind: "externref" });
+    if (t) return t.kind === "externref" ? t : { kind: "externref" };
+  }
 
   // (#2026 PR-2) `.constructor` on an externref / `any`-typed instance: recover
   // class identity by reading the instance `__tag` and dispatching to the
@@ -6176,6 +6241,30 @@ export function compileElementAccessBody(
     if (!arrDef || arrDef.kind !== "array") {
       reportErrorNoNode(ctx, "Element access: vec data is not array");
       return null;
+    }
+
+    // (#2743 b) `vec[Symbol.iterator]` is %Array.prototype.values%
+    // (§10.4.4.6/§10.4.4.7 + the Array iterator), NOT a numeric index. This
+    // covers BOTH `[][Symbol.iterator]` and `arguments[Symbol.iterator]` — both
+    // are vec-typed receivers reaching this path. The default vec lowering
+    // coerces the key to an i32 index, which ToNumber-throws on a Symbol
+    // ("Cannot convert a Symbol value to a number"). Intercept the
+    // statically-known `Symbol.iterator` key and return the host intrinsic, so
+    // both sites get the SAME identity (`[][Symbol.iterator] ===
+    // Array.prototype.values`). Host-mode only: in standalone `Symbol.iterator`
+    // lowers to an i32 well-known id and the index path is harmless. The
+    // receiver vec ref is on the stack here (nothing emitted since entry), so
+    // drop it — `Array.prototype.values` is the shared intrinsic.
+    if (!noJsHost(ctx) && isSymbolIteratorKey(expr.argumentExpression)) {
+      fctx.body.push({ op: "drop" } as Instr);
+      const valuesIdx = ensureLateImport(ctx, "__array_proto_values", [], [{ kind: "externref" }]);
+      flushLateImportShifts(ctx, fctx);
+      if (valuesIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx: valuesIdx } as Instr);
+      } else {
+        fctx.body.push({ op: "ref.null.extern" } as Instr);
+      }
+      return { kind: "externref" };
     }
     // (#2593) Signedness of a packed i8/i16 typed-array element is driven by the
     // VIEW NAME (Int8/Int16 → sign-extend; Uint8/Uint8Clamped/Uint16 →

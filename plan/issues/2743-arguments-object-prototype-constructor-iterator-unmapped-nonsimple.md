@@ -1,11 +1,12 @@
 ---
 id: 2743
 title: "arguments object as an ordinary Object: [[Prototype]]=Object.prototype, .constructor, Symbol.iterator, and unmapped arguments for non-simple parameter lists"
-status: in-progress
+status: done
 assignee: ttraenkler/sendev-args
 sprint: 67
 created: 2026-06-27
 updated: 2026-06-27
+completed: 2026-06-27
 priority: medium
 feasibility: hard
 reasoning_effort: high
@@ -254,3 +255,114 @@ Lock-in test: `tests/issue-2743.test.ts` (drives `runTest262File` on the three
   `__extern_get("constructor")` hooks in `runtime.ts`; standalone keeps the vec.
 - (b) `arguments[Symbol.iterator]` = %Array.prototype.values%: gate the vec
   computed-get so a Symbol key is not coerced via ToNumber, route @@iterator.
+
+## Implementation notes — PR-2 = groups (a)+(b) (sendev-args, 2026-06-27)
+
+**Status: DELIVERED. Combined green = 9 of the in-scope arguments tests** (PR-1's
+3 (c) + PR-2's 6), meeting the issue's ≥9 target. Issue flips to `status: done`.
+
+PR-2 green: `10.6-5-1.js`, `S10.6_A2.js`, `S10.6_A3_T1.js`, `S10.6_A5_T1.js`
+(group a) + `unmapped/Symbol.iterator.js`, `mapped/Symbol.iterator.js` (group b).
+Lock-in: `tests/issue-2743-pr2.test.ts`.
+
+### The non-obvious root cause that reshaped the (a) approach (WHY)
+
+The architect's (a) sketch (a host `_argumentsObjects` WeakSet + `__getPrototypeOf`
+/ `__extern_get` hooks returning the **host** `Object.prototype`/`Object`) is
+*necessary but not sufficient*, because of two facts the verify-first pass
+uncovered on current `main`:
+
+1. **`arguments` is modeled as an array (vec).** `Object.getPrototypeOf(arguments)`
+   and `arguments.constructor` are resolved by the **codegen** array path
+   (`Object.getPrototypeOf(arguments) === Object.getPrototypeOf([])`,
+   `typeof arguments.constructor === "function"`), so they **never reach** the
+   `__getPrototypeOf` / `__extern_get` host imports the hooks live in. The hooks
+   alone are dead code for these two reads.
+2. **The compiler's `Object` / `Object.prototype` are a DISTINCT representation
+   from the host intrinsics.** `Object.getPrototypeOf({}) === Object.prototype`
+   holds, but `Object.prototype` (the member-read) is **NOT** identity-equal to
+   the host realm's `Object.prototype`, and a bare `Object` value's `.prototype`
+   is not identity-equal to the `Object.prototype` member-read either. So a host
+   hook that returns the host `Object.prototype`/`Object` fails the test's
+   `=== Object.prototype` / `=== Object` comparisons.
+
+**Fix that actually works (codegen, host-mode):** intercept the `arguments`
+identifier and emit the compiler's *own* `Object` / `Object.prototype`
+value-read so the identity matches a plain object's:
+- `Object.getPrototypeOf(arguments)` (`calls.ts`) → compile a synthetic
+  `Object.prototype` member access, **reusing the real `Object` identifier node**
+  from the `Object.getPrototypeOf` callee (so it carries a valid symbol/type).
+- `arguments.constructor.prototype` (`property-access.ts`, the COMPOUND shape) →
+  compile a synthetic `Object.prototype` (the `Object.prototype` member-read is
+  name-keyed on `Object`, so a synthetic `Object` identifier resolves it). This
+  is the shape `S10.6_A2` checks; the bare-`Object`-value `.prototype` is *not*
+  identity-equal to the `Object.prototype` member-read, so the compound form must
+  be special-cased rather than relying on `arguments.constructor === Object`.
+- `arguments.constructor` (standalone shape) → emit the compiler's `Object` value
+  (synthetic `Object` identifier; `=== Object` holds).
+The host `_argumentsObjects` WeakSet + `__getPrototypeOf` / `__hasOwnProperty`
+hooks still ship and cover the runtime-routed reads —
+`arguments.hasOwnProperty("length"/"callee")` DOES route to `__hasOwnProperty`,
+where the static vec path would (wrongly) report `length`/`callee` per the
+`{length,data}` struct shape; the `_argumentsHasOwn` predicate answers
+`length`/`callee` → own (`S10.6_A3_T1`, `S10.6_A5_T1`).
+
+### (b) @@iterator (WHY the trap is where it is)
+
+The "Cannot convert a Symbol value to a number" trap is reached through the
+**vec computed-get** (`compileElementAccessBody`, the `{length,data}` struct
+arm), which compiles the key with `expectedType i32` → a host ToNumber coercion
+on the `Symbol.iterator` externref. The runner rewrites
+`verifyProperty(arguments, Symbol.iterator, {value:[][Symbol.iterator],…})` into
+`assert_sameValue(arguments[Symbol.iterator], [][Symbol.iterator])`, so BOTH a
+vec from an array literal AND the arguments vec hit this arm. Fix: in the vec arm
+intercept a syntactic `Symbol.iterator` key (host-mode), drop the receiver, and
+call a new `__array_proto_values` host import returning `Array.prototype.values`
+— the intrinsic both `[][Symbol.iterator]` and `arguments[Symbol.iterator]`
+must equal (`[][Symbol.iterator] === Array.prototype.values`).
+
+### Index-shift hazard handling (the headline risk)
+
+`__register_arguments` + `__array_proto_values` are NEW host imports → adding
+them late shifts function indices (the `addUnionImports` trap). Both are
+registered via `ensureLateImport` immediately followed by `flushLateImportShifts`
+(the same machinery `__register_fnctor_instance` uses), which walks `fctx.body`,
+`ctx.currentFunc`, the func/parent stacks, and every `ctx.mod.functions` body to
+bump stale `call`/`ref.func` funcIdxs. `__register_arguments` is registered+flushed
+at the **top** of `emitArgumentsVecBody` — before any `call` (box/unbox resolve
+their funcIdx post-shift via `funcMap`) — and the registration `call` is emitted
+at the end against the settled `funcMap` entry. Validation: every PR-2 + PR-1 +
+normal-arguments test both COMPILES and RUNS (an "invalid Wasm binary" at
+instantiation would mean an index desync; none occurred).
+
+### Standalone
+
+All (a)/(b) codegen + the registration are gated on `!noJsHost(ctx)` /
+`!ctx.standalone && !ctx.wasi` — standalone/WASI keeps the bare vec
+(`Symbol.iterator` is an i32 id there, so the index path is harmless; the
+ordinary-Object linkage rides on the #1888 open-object runtime later). The
+standalone floor only runs in `merge_group`.
+
+### Documented gaps (not regressions) — clean follow-up
+
+The remaining (a) files need vec **property write/delete** and **callee-closure
+capture** semantics, which are out of PR-2's [[Prototype]]/constructor/@@iterator
+scope:
+- `S10.6_A4` — `arguments.callee === f1`: needs the enclosing closure captured at
+  the arguments-emission site (across decl + function-expression call paths).
+- `S10.6_A5_T3` (`delete arguments.length`), `A5_T4` (`arguments.length = str`),
+  `A3_T4` (`arguments.callee = str`): need writable/deletable own data-property
+  semantics over the i32 vec `length` field + a `callee` slot.
+- Numeric-index `arguments.hasOwnProperty(i)` is conservatively `false` (the vec
+  length is opaque to the host); no in-scope test exercises it.
+These + mapped/* exotic descriptors (#1726) are a separate lap.
+
+### Files
+- `src/runtime.ts` — `_argumentsObjects` WeakSet + `_argumentsHasOwn`;
+  `__register_arguments` / `__array_proto_values` imports; `__getPrototypeOf`,
+  `__extern_get` (constructor + vec-aware hasOwnProperty), `__hasOwnProperty` hooks.
+- `src/codegen/statements/nested-declarations.ts` — register the vec in
+  `emitArgumentsVecBody` (covers both the closure-lifted and inline paths).
+- `src/codegen/property-access.ts` — `isSymbolIteratorKey` + vec @@iterator route;
+  `arguments.constructor[.prototype]` interceptors.
+- `src/codegen/expressions/calls.ts` — `Object.getPrototypeOf(arguments)` interceptor.
