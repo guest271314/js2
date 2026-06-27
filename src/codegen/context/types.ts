@@ -1847,6 +1847,32 @@ export interface CodegenContext {
   definedPropertyFlags: Map<string, number>;
   /** Properties whose descriptor/value lives in the runtime sidecar. */
   sidecarDefinedPropertyKeys: Set<string>;
+  /**
+   * (#2726) `varName:propName` keys for which `Object.defineProperty` was
+   * statically observed on an identifier receiver — recorded uniformly across
+   * EVERY defineProperty lowering path (inline data, inline accessor fast path,
+   * runtime-descriptor, etc.). Used ONLY to route `hasOwnProperty` /
+   * `propertyIsEnumerable` to the runtime helper instead of constant-folding
+   * against the (defineProperty-widened) static struct shape: a configurable
+   * `delete` records a `_wasmStructDeletedKeys` tombstone the compile-time
+   * shape answer can't see. Kept SEPARATE from `definedPropertyFlags` /
+   * `sidecarDefinedPropertyKeys` so it never perturbs descriptor-flag or
+   * `getOwnPropertyDescriptor` routing — it is a presence-routing signal only.
+   */
+  definePropertyReceiverKeys: Set<string>;
+  /**
+   * (#2726) `varName:propName` keys defined as a NON-configurable ACCESSOR via
+   * the inline-accessor `Object.defineProperty` fast path on a statically
+   * struct-typed receiver. That path compiles the getter/setter into a
+   * `${struct}_get/set_<prop>` function + `classAccessorSet` and — unlike the
+   * data fast path — never mirrors the descriptor's `configurable` flag into the
+   * runtime `_wasmPropDescs` sidecar, so the host `__delete_property` can't see
+   * it and wrongly reports a successful delete. The struct-field `delete` site
+   * consults this set to emit OrdinaryDelete's refusal (return `false`; strict
+   * mode ⇒ TypeError) for `delete obj.accessor` of a non-configurable accessor
+   * (#2726 group (d): `11.4.1-4-a-2-s`). Consumed ONLY by the delete site.
+   */
+  nonConfigurableAccessorKeys: Set<string>;
   /** Object mutability state sets */
   nonExtensibleVars: Set<string>;
   frozenVars: Set<string>;
