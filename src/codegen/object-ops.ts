@@ -1301,6 +1301,27 @@ export function compileObjectDefineProperty(
     descArg = (descArg as ts.AsExpression).expression;
   }
 
+  // (#2726) Record the defineProperty'd `varName:propName` on an identifier
+  // receiver up-front, BEFORE any lowering-path branch (inline data fast path,
+  // inline accessor fast path, runtime-descriptor route, …). This is the single
+  // chokepoint every path flows through, so it captures the signal uniformly —
+  // unlike `definedPropertyFlags` (inline-literal only) and
+  // `sidecarDefinedPropertyKeys` (runtime route only). It exists ONLY to route
+  // `hasOwnProperty` / `propertyIsEnumerable` to the runtime helper (so a
+  // subsequent configurable `delete`'s tombstone is honoured) and never feeds
+  // descriptor-flag logic. Recorded even if a guard below throws — a defineProperty
+  // that throws defines nothing, and the runtime presence answer stays correct.
+  if (ts.isIdentifier(objArg)) {
+    const dpPropName = ts.isStringLiteral(propArg)
+      ? propArg.text
+      : ts.isNumericLiteral(propArg)
+        ? propArg.text
+        : undefined;
+    if (dpPropName !== undefined) {
+      ctx.definePropertyReceiverKeys.add(`${objArg.text}:${dpPropName}`);
+    }
+  }
+
   // ES spec 19.1.2.4 step 1: throw TypeError if first arg is not an object
   if (emitNonObjectArgGuard(ctx, fctx, objArg, "Object.defineProperty")) {
     // After the throw, emit unreachable and return externref to satisfy callers
@@ -1823,6 +1844,21 @@ export function compileObjectDefineProperty(
 
     const accessorKey = `${structName}_${propName}`;
     ctx.classAccessorSet.add(accessorKey);
+
+    // (#2726 group (d)) Record a NON-configurable accessor key on an identifier
+    // receiver. Per ES §6.2.5.6, an omitted `configurable` defaults to false, so
+    // the accessor is non-configurable unless `configurable: true` was given.
+    // This fast path doesn't mirror the flag into `_wasmPropDescs`, so the
+    // struct-field `delete` site consults this set to refuse the delete
+    // (OrdinaryDelete ⇒ false; strict ⇒ TypeError) — `__delete_property` alone
+    // would wrongly report success.
+    if (descConfigurable !== true && ts.isIdentifier(objArg)) {
+      ctx.nonConfigurableAccessorKeys.add(`${objArg.text}:${propName}`);
+    } else if (descConfigurable === true && ts.isIdentifier(objArg)) {
+      // A later `configurable: true` redefine clears any earlier non-configurable
+      // record for the same key (last-write-wins, mirroring runtime semantics).
+      ctx.nonConfigurableAccessorKeys.delete(`${objArg.text}:${propName}`);
+    }
 
     // (#1888 S5c / C2) STORE arm — land dark behind `S5C_STRUCT_ACCESSOR_CLOSURE`.
     // The #1629-S3 bare `${struct}_get/set_${prop}` fns below have NO capture
@@ -4261,20 +4297,61 @@ export function compilePropertyIntrospection(
     // Route through the runtime helper so the tombstone (`__delete_property`
     // path) and any sidecar accessor entries are consulted.
     //
-    // The signal we use is `ctx.definedPropertyFlags`: it's populated only
-    // when `Object.defineProperty` is statically observed, so we only pay
-    // the runtime call cost on objects that have actually been mutated.
+    // The signals we use are `ctx.definedPropertyFlags` AND
+    // `ctx.sidecarDefinedPropertyKeys`: both are populated only when
+    // `Object.defineProperty` is statically observed, so we only pay the
+    // runtime call cost on objects that have actually been mutated.
     // Anonymous receivers (e.g. `({}).hasOwnProperty(...)`) skip this path.
+    //
+    // (#2726) `definedPropertyFlags` is populated ONLY for *inline* object-literal
+    // descriptors (`defineProperty(o, k, { value: 1 })`). The dominant ES5
+    // `var d = { value: 1, configurable: true }; defineProperty(o, k, d)` shape
+    // (the `15.2.3.6-3-*` cluster) routes through `emitDefinePropertyDescRuntime`,
+    // which records the key in `sidecarDefinedPropertyKeys` instead. Without
+    // consulting that set, `hasOwnProperty` constant-folds to `true` because the
+    // queried key is in the (defineProperty-widened) struct shape, ignoring a
+    // subsequent configurable `delete` that tombstoned it — the root of the
+    // `11.4.1-4.a-1/-2`, `11.4.1-4-a-4-s` failures.
     const recvVarName = ts.isIdentifier(propAccess.expression) ? propAccess.expression.text : undefined;
     let needsRuntime = false;
     if (recvVarName) {
-      // Cheap pre-check: if any defineProperty entry exists for this var,
-      // the runtime tombstone / descriptor map could differ from the static
-      // shape answer. Bail to the runtime path.
+      const prefix = `${recvVarName}:`;
+      // (#2726) Pre-existing signal (mode-agnostic): an inline object-literal
+      // descriptor recorded in `definedPropertyFlags`. Routing on this in BOTH
+      // modes preserves origin/main behavior.
       for (const k of ctx.definedPropertyFlags.keys()) {
-        if (k.startsWith(`${recvVarName}:`)) {
+        if (k.startsWith(prefix)) {
           needsRuntime = true;
           break;
+        }
+      }
+      // (#2726 standalone fix) The broad new signals — `definePropertyReceiverKeys`
+      // (every lowering path) and `sidecarDefinedPropertyKeys` (runtime-descriptor
+      // route) — route to the `__hasOwnProperty` / `__propertyIsEnumerable` helper.
+      // In HOST mode that helper consults the descriptor/tombstone sidecar and
+      // answers correctly. In STANDALONE mode the wasm-native helper does NOT
+      // report a `defineProperty`-added struct-shape property as own (it returns
+      // false), so routing there REGRESSES every `defineProperty(o,k,…)` +
+      // `o.hasOwnProperty(k)` test (the 19-file standalone-floor park on PR #2177:
+      // built-ins/Object/{defineProperty,prototype/hasOwnProperty,getOwnPropertyNames}).
+      // Gate these two broad signals to host mode; standalone keeps the
+      // const-fold (correct for the no-delete case, unchanged from origin/main).
+      // The narrower delete-tombstone benefit in standalone awaits the standalone
+      // `__hasOwnProperty` sidecar-awareness substrate work.
+      if (!needsRuntime && !ctx.standalone) {
+        for (const k of ctx.definePropertyReceiverKeys) {
+          if (k.startsWith(prefix)) {
+            needsRuntime = true;
+            break;
+          }
+        }
+        if (!needsRuntime) {
+          for (const k of ctx.sidecarDefinedPropertyKeys) {
+            if (k.startsWith(prefix)) {
+              needsRuntime = true;
+              break;
+            }
+          }
         }
       }
     }

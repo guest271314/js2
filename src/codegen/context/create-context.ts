@@ -248,6 +248,8 @@ export function createCodegenContext(
     tdzLetConstNames: new Set(),
     definedPropertyFlags: new Map(),
     sidecarDefinedPropertyKeys: new Set(),
+    definePropertyReceiverKeys: new Set(),
+    nonConfigurableAccessorKeys: new Set(),
     nonExtensibleVars: new Set(),
     frozenVars: new Set(),
     sealedVars: new Set(),

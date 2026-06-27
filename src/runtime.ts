@@ -47,6 +47,15 @@ function _getNodeRequire(): ((id: string) => any) | undefined {
  */
 const _wasmStructProps = new WeakMap<object, Record<string | symbol, any>>();
 
+// (#2739) Host-recorded [[Prototype]] link for an opaque WasmGC struct. A struct
+// exported to JS has no host-observable [[Prototype]] (`Object.getPrototypeOf`
+// returns null/the engine default), so `Object.setPrototypeOf(struct, proto)` /
+// `Reflect.setPrototypeOf` / `struct.__proto__ = proto` record the user-intended
+// prototype here, and the for-in walk + read path consult it via
+// `_structUserProto`. A recorded value may be `null` (setPrototypeOf(o, null));
+// presence is tested with `.has`, never `!== undefined`.
+const _wasmStructProto = new WeakMap<object, any>();
+
 /**
  * (#1712) Function-style-constructor prototype bridge.
  *
@@ -100,6 +109,33 @@ function _fnctorProtoLookup(
     if (cur === Object.prototype) break;
   }
   return undefined;
+}
+
+/**
+ * (#2739) Resolve the user-intended [[Prototype]] of a value for the for-in
+ * walk — the ONE prototype source for enumeration so it stays consistent with
+ * member reads (§13.7.5.15 EnumerateObjectProperties walks [[GetPrototypeOf]]).
+ * For an opaque WasmGC struct, native `Object.getPrototypeOf` is blind to the
+ * user prototype, so consult the explicit `_wasmStructProto` link first
+ * (setPrototypeOf / Reflect.setPrototypeOf / `__proto__` — the value may be
+ * `null`, meaning "own keys only", which must stop the walk). Otherwise fall
+ * back to the native `[[Prototype]]`.
+ *
+ * NOTE: the fnctor instance→ctor prototype link (`function F(){}; F.prototype =
+ * {…}; new F()`) is intentionally NOT consulted here — that path (the
+ * `S12.6.4_A6*` for-in tests) is carved to a follow-up because routing existing
+ * #1712 fnctor instances through the prototype walk changes their for-in output
+ * and must be validated against the acorn/#1712 prototype-method surface.
+ */
+function _structUserProto(current: any): any {
+  if (_isWasmStruct(current) && _canBeWeakKey(current) && _wasmStructProto.has(current)) {
+    return _wasmStructProto.get(current);
+  }
+  try {
+    return Object.getPrototypeOf(current);
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -10821,6 +10857,37 @@ assert._isSameValue = isSameValue;
           // (#1334) Deleted property — not own, hence not enumerable.
           return _wasmStructPropertyIsEnumerable(obj, key, callbackState?.getExports());
         };
+      // (#2739) Record a WasmGC struct's user [[Prototype]] (Object.setPrototypeOf
+      // / Reflect.setPrototypeOf / `o.__proto__ = v`). In gc/host mode the struct
+      // is opaque, so codegen previously dropped `proto` on the floor; this stores
+      // it in `_wasmStructProto` for the for-in walk + read path. Mirrors
+      // §10.1.2.1 OrdinarySetPrototypeOf: a non-object/non-null proto is ignored;
+      // a proto chain that would reach `obj` (cycle) is refused.
+      if (name === "__host_set_struct_proto")
+        return (obj: any, proto: any): any => {
+          if (!_isWasmStruct(obj) || !_canBeWeakKey(obj)) return obj;
+          if (proto !== null && typeof proto !== "object" && typeof proto !== "function") {
+            // Neither Object nor Null: OrdinarySetPrototypeOf is a no-op here.
+            return obj;
+          }
+          // Cycle check (§10.1.2.1 step 8): walk proto's chain; refuse on reaching obj.
+          let p: any = proto;
+          let guard = 0;
+          while (p != null && guard++ < 100) {
+            if (p === obj) return obj; // would create a cycle — no-op
+            if (_isWasmStruct(p) && _canBeWeakKey(p) && _wasmStructProto.has(p)) {
+              p = _wasmStructProto.get(p);
+            } else {
+              try {
+                p = Object.getPrototypeOf(p);
+              } catch {
+                break;
+              }
+            }
+          }
+          _wasmStructProto.set(obj, proto);
+          return obj;
+        };
       // for-in key enumeration: returns a JS array of enumerable string keys
       if (name === "__for_in_keys")
         return (obj: any) => {
@@ -10845,8 +10912,13 @@ assert._isSameValue = isSameValue;
           const exports = callbackState?.getExports();
           const keys: string[] = [];
           const seen = new Set<string>();
+          // (#2739) Visited-object guard: a hand-built or recorded prototype
+          // link could in principle form a cycle; stop if we revisit an object.
+          const visitedObjs = new Set<any>();
           let current: any = obj;
           while (current != null) {
+            if (visitedObjs.has(current)) break;
+            visitedObjs.add(current);
             if (_isWasmStruct(current)) {
               // WasmGC struct — get field names from exported helper.
               // (#2131) Per spec, EnumerateObjectProperties visits each
@@ -10898,11 +10970,10 @@ assert._isSameValue = isSameValue;
                 break;
               }
             }
-            try {
-              current = Object.getPrototypeOf(current);
-            } catch {
-              break;
-            }
+            // (#2739) Advance through the user-intended prototype (consults the
+            // recorded setPrototypeOf link + the #1712 fnctor proto), not the
+            // native [[Prototype]] which is null for an opaque WasmGC struct.
+            current = _structUserProto(current);
           }
           return keys;
         };
