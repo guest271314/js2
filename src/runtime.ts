@@ -8502,19 +8502,36 @@ assert._isSameValue = isSameValue;
           if (_isWasmStruct(obj)) {
             const exports = callbackState?.getExports();
             const fieldNames = _getStructFieldNames(obj, exports);
-            if (fieldNames) {
-              const descs = _wasmPropDescs.get(obj);
-              // (#2179) Drop deleted keys — the static struct shape still carries
-              // the field, but `delete o.k` tombstoned it.
-              const tomb = _wasmStructDeletedKeys.get(obj);
-              return _orderOwnKeysSpec(
-                fieldNames.filter((k) => {
-                  if (tomb && tomb.has(k)) return false;
-                  if (!descs) return true;
-                  const flags = descs.get(k);
-                  return flags === undefined || !!(flags & _SC_ENUMERABLE);
-                }),
-              ); // (#2131)
+            const descs = _wasmPropDescs.get(obj);
+            const tomb = _wasmStructDeletedKeys.get(obj);
+            const sc = _wasmStructProps.get(obj);
+            // Enumerable iff not deleted and (no descriptor entry ⇒ enumerable by
+            // default, else the descriptor's ENUMERABLE flag).
+            const isEnumerable = (k: string): boolean => {
+              if (tomb && tomb.has(k)) return false;
+              const flags = descs?.get(_normalizeDescKey(k));
+              return flags === undefined || !!(flags & _SC_ENUMERABLE);
+            };
+            if (fieldNames || sc) {
+              const result: string[] = [];
+              // (#2179) Static struct fields — UNCHANGED legacy filter (drop
+              // deleted keys + non-enumerable redefinitions).
+              if (fieldNames) for (const k of fieldNames) if (isEnumerable(k)) result.push(k);
+              // (#2746) ADD own ENUMERABLE keys that live ONLY in the
+              // defineProperty/dynamic-write sidecar (not part of the static struct
+              // shape) — e.g. `Object.defineProperty(obj, "prop3", {enumerable:true})`
+              // on an object whose literal declared only prop1/prop2. The accessor
+              // bookkeeping keys (`__get_<p>`/`__set_<p>`) are skipped. This only
+              // ADDS keys the old path omitted; it never drops a previously-returned
+              // key, so the legacy struct-field result cannot regress.
+              if (sc) {
+                for (const k of Object.getOwnPropertyNames(sc)) {
+                  if (k.startsWith("__get_") || k.startsWith("__set_")) continue;
+                  if (result.includes(k) || (fieldNames && fieldNames.includes(k))) continue;
+                  if (isEnumerable(k)) result.push(k);
+                }
+              }
+              return _orderOwnKeysSpec(result); // (#2131)
             }
           }
           return Object.keys(obj);
