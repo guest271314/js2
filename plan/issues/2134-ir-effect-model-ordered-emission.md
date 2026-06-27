@@ -3,7 +3,7 @@ id: 2134
 title: "IR effect model: classify instruction kinds, enforce program-order emission for effectful ops"
 status: blocked
 blocked_by: [2167]
-sprint: 67
+sprint: current
 created: 2026-06-12
 updated: 2026-06-24
 priority: high

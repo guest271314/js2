@@ -3,7 +3,7 @@ id: 2175
 title: "architect spec: standalone builtin-prototype object representation + native-method-closure dispatch"
 status: in-progress
 assignee: ttraenkler/se-2175
-sprint: 67
+sprint: current
 created: 2026-06-16
 updated: 2026-06-24
 priority: high

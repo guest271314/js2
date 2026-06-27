@@ -3,7 +3,7 @@ id: 2686
 title: "acorn parse() — binary-expression statement throws (parse(\"1 + 2 * 3;\") → WebAssembly.Exception)"
 status: ready
 assignee: ttraenkler/unassigned
-sprint: 67
+sprint: current
 created: 2026-06-26
 updated: 2026-06-26
 priority: medium

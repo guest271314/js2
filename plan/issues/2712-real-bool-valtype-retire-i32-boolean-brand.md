@@ -3,7 +3,7 @@ id: 2712
 title: "Introduce a real bool ValType; retire the optional i32 boolean brand"
 status: blocked
 blocked_on: "architect ValType-registration decision — the boolean analog of #2044's BigInt i64-brand decision (see Senior dev note + Architect hand-off below)"
-sprint: 67
+sprint: current
 created: 2026-06-26
 updated: 2026-06-27
 priority: high

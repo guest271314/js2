@@ -11,7 +11,7 @@ task_type: feature
 area: codegen, promise, async, capability-bridge
 language_feature: promise, async, proxy
 goal: async-model
-sprint: Backlog
+sprint: current
 parent: 1528
 related: [2614, 2618, 1373b, 1042, 86, 56]
 note: "Spun off from #86 (class-ctor arm, merged) + #55 async-bucket scope (PR #1947). The #56/#1940 closure-construct bridge + #86 executor-call host-routing landed the SURFACE of the capability lane; this issue is the DEEPER shared substrate behind three clusters that the surface fixes did NOT close."

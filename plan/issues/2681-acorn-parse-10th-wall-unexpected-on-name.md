@@ -3,7 +3,7 @@ id: 2681
 title: "acorn parse() 10th wall — identifier expression-statement throws (unexpected() on a `name` token) after the #2664 arity-dispatch fix"
 status: ready
 assignee: ttraenkler/unassigned
-sprint: 67
+sprint: current
 created: 2026-06-26
 updated: 2026-06-26
 priority: high

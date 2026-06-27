@@ -5,7 +5,7 @@ status: blocked
 blocked_by: [2167]
 pipeline_unblocked: 1927
 spec: ready
-sprint: 67
+sprint: current
 created: 2026-06-12
 updated: 2026-06-24
 priority: high
