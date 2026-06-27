@@ -142,3 +142,155 @@ off when the descriptor has any wasmGC ancestor in that chain.
 BROAD → escalated for an architect spec (next-sprint), same as #2688. The
 ~29-test ceiling + the substrate dependency (#2580) make a careful spec the right
 path over a risky partial reader patch on the auto-park-prone descriptor surface.
+
+## Implementation Plan (architect, verified on origin/main @ 5a92381, 2026-06-27)
+
+### The verify-first finding (sd-2668c) was WRONG about "no proto link exists" — it MISSED #1712
+
+The sd-2668c finding looked for `Object.getPrototypeOf(child)` returning `proto`
+(a real JS `[[Prototype]]` edge) and, not finding one, concluded a whole new
+`_wasmStructProto` representation must be built. **That conclusion is incorrect.**
+A runtime-reachable instance→prototype link **already exists** in HOST mode
+(`#1712`):
+
+- `_fnctorInstanceCtor: WeakMap<object, object>` (`src/runtime.ts:71`) links each
+  constructed fnctor instance struct → its **constructor closure struct**.
+- It is populated by the `__register_fnctor_instance` host import
+  (`runtime.ts:7669`), emitted in the fnctor ctor PROLOGUE
+  (`src/codegen/expressions/new-super.ts:1267-1287`).
+- `F.prototype = proto` stores `proto` in the **constructor closure's sidecar**
+  under key `"prototype"` (host mode: `__extern_set_strict($ctorClosure,
+  "prototype", proto)` — verified by tracing the repro).
+- `_fnctorProtoLookup(obj, key)` (`runtime.ts:74`) already walks: `ctor =
+  _fnctorInstanceCtor.get(obj)` → `proto = _sidecarGet(ctor, "prototype")` →
+  walk `proto`'s chain.
+
+So the link is real and reachable. There are **two actual gaps** (both verified by
+instrumenting the cited-cluster pattern `var ConstructFun = function(){};
+ConstructFun.prototype = proto; var child = new ConstructFun(); ...`):
+
+**GAP A — the descriptor reader never consults the proto chain.** The
+`getField`/`hasField` closures in `__defineProperty_desc` (`runtime.ts:8798-8826`)
+and `__defineProperties` (`9064-9095`) read a wasmGC-struct descriptor's attribute
+slots **own-level only** (sidecar + `__sget_<f>` + `_getStructFieldNames`). Per
+ES §10.1.6.2 ToPropertyDescriptor → §7.3.12 HasProperty / §7.3.3 Get (both
+proto-inclusive), a descriptor attribute on the descriptor's `[[Prototype]]` must
+be read. They do not call `_fnctorProtoLookup` (or any proto walk).
+
+**GAP B — even the existing proto walk is NOT wasmGC-aware.** `_fnctorProtoLookup`
+(`74-89`) walks each ancestor with **native `Object.getOwnPropertyDescriptor(cur,
+key)`** (line 83). When `proto` is itself a wasmGC struct (the common case: `var
+proto = {}` is a wasmGC struct whose `configurable`/`enumerable`/`value`/`get`
+attribute lives in proto's **sidecar**), `Object.getOwnPropertyDescriptor` on the
+opaque struct returns `undefined` and the inherited attribute is dropped. This is
+why even a DIRECT inherited read `child.configurable` returns `0`/false — verified.
+
+### Verified buggy outputs (host mode, current main)
+
+- `child.configurable` (direct inherited read, module-scope ctor) → `false`
+  (expected `true`).
+- `Object.defineProperty(obj,"property",child)` then
+  `Object.getOwnPropertyDescriptor(obj,"property").configurable` → `false`
+  (expected `true`).
+- Trace confirms BOTH `__extern_set_strict($ctor,"prototype",<proto>)` AND
+  `__register_fnctor_instance(child,$ctor)` fire (link populated), yet
+  `_fnctorProtoLookup` returns `undefined` (it walks `proto` via native
+  `Object.getOwnPropertyDescriptor`, which can't see the wasmGC-struct sidecar).
+
+### Registration-scope precondition (already satisfied for the target cluster)
+
+`__register_fnctor_instance` is emitted ONLY when the ctor closure is a **module
+global** (`ctorGlobalIdx !== undefined`, `new-super.ts:1267-1287`). The cited
+cluster uses top-level `var ConstructFun` (module global) → covered. A
+**function-LOCAL** fnctor ctor is NOT registered → its instances have no link →
+out of scope (a known, acceptable limitation for the ~29-test ceiling). Verified:
+module-scope ctor emits the registration; a `const ConstructFun = function(){}`
+inside a function does not. Do NOT widen the registration gate in this PR.
+
+### Fix — two changes, both in `src/runtime.ts` (no new representation, no codegen change)
+
+#### GAP B — make the proto walk wasmGC-aware (also fixes direct inherited reads)
+
+**`_fnctorProtoLookup` (`runtime.ts:74-89`)**: thread `exports`
+(`callbackState?.getExports()`) in (add a param; callers at `4148` and `4939`
+already have `callbackState`/`exports`). At each `cur` in the walk: if
+`_isWasmStruct(cur)`, read the own descriptor via the existing wasmGC-aware
+`_readOwnDescriptor(cur, key, exports)` (`runtime.ts:4655` — reads sidecar +
+descriptor table + `__sget_<key>` + class methods, the #1629-safe reader);
+else use `Object.getOwnPropertyDescriptor(cur, key)` (plain JS ancestor). Advance
+`cur` via: wasmGC struct → its recorded parent (the ctor-closure sidecar
+`"prototype"` is already the first hop; deeper wasmGC chains via a recorded proto
+link if/when present — for the cluster the chain is depth-1, so the first hop
+suffices). Keep the existing 16-level guard + `Object.prototype` stop (cycle-safe).
+
+#### GAP A — make the descriptor reader consult the proto chain
+
+**`getField`/`hasField` in `__defineProperty_desc` (`runtime.ts:8798-8826`)** and
+the matching pair in `__defineProperties` (`9064-9095`): after the own-level miss
+(sidecar miss + `_getStructFieldNames` miss), walk the descriptor's prototype
+chain via the #1712 link:
+
+- `getField(o,f)`: own-level (unchanged) → on miss, `const d =
+  _fnctorProtoLookup(o, f /*, exports*/)`; if `d` has a getter return
+  `d.get.call(o)`, else return `d?.value`.
+- `hasField(o,f)`: own-level (unchanged) → on miss, return
+  `_fnctorProtoLookup(o, f) !== undefined`.
+
+Both go through `_fnctorProtoLookup`, which (after GAP B) walks ancestor levels
+with the **shape-precise** `_readOwnDescriptor` / `_getStructFieldNames`
+membership — **NEVER** a `__sget_*` try/catch probe (the #1629 hazard: `__sget_*`
+getters are module-global, one per field NAME, and do NOT trap on a struct lacking
+the field, so a probe returns a spurious value for every ubiquitous descriptor name
+`value`/`get`/`set`/`writable` → bogus data⇄accessor conflicts). This guarantee is
+already met because `_readOwnDescriptor` and `_getStructFieldNames` are
+shape-derived, not probe-derived.
+
+#### Gate the native fast-path off when the descriptor has a wasmGC ancestor
+
+`__defineProperty_desc` short-circuits `!_isWasmStruct(obj) && !_isWasmStruct(desc)
+→ Object.defineProperty(obj,key,desc)` (`runtime.ts:8834`). A wasmGC descriptor is
+already excluded (`_isWasmStruct(desc)` true → skips the native path). But a
+**plain JS descriptor whose `[[Prototype]]` is a wasmGC struct** (e.g.
+`Object.create(<wasmStruct>)`) would still take the native path and drop the
+wasmGC-proto attribute. Extend the guard: also skip the native fast-path when the
+descriptor's own proto chain contains any wasmGC struct (walk `Object.getProtoOf`
++ the #1712 link; bounded). For the cited cluster the descriptor is a wasmGC struct
+already, so this is a no-regression hardening for the `Object.create(wasmStruct)`
+neighbour — verify on the floor.
+
+### Why this is small, not a substrate rebuild
+
+The link + a 16-level cycle-safe walk already exist (#1712). The fix is: (1) make
+the walk read wasmGC-struct levels via `_readOwnDescriptor` instead of native
+`Object.getOwnPropertyDescriptor`, and (2) call that walk from the two descriptor
+readers' own-level miss. No new WeakMap, no construct-site codegen, no #2580
+substrate dependency for the host-mode cluster. (The standalone equivalent — where
+descriptors are native `$Object` structs — rides on #2580 separately and is out of
+scope here.)
+
+### Edge cases
+- Accessor descriptor whose `get`/`set` is proto-inherited (e.g. 15.2.3.6-3-31):
+  `getField(o,"get")` walks to proto, `_readOwnDescriptor` returns the accessor
+  pair; `_maybeWrapCallable` (the existing `wrap`, `8830`) makes it invocable.
+- `child` overrides one half on its OWN level (own `set`, inherited `get`): own
+  level wins (checked first); proto walk only fills genuine own-misses. ✓
+- proto-inherited `enumerable:false` honoring (the #2668 Slice A re-introduction):
+  once `getField(child,"enumerable")` reads the proto value accurately, the
+  for-in filter can be re-enabled per the acceptance criteria.
+- Function-local fnctor ctor descriptor → no link → own-level only (status quo,
+  acceptable; not in the cluster).
+- Cycle / deep chain: the existing `guard++ < 16` cap + `Object.prototype` stop
+  prevent runaway.
+
+### Validating tests (test262, the ~29 genuinely proto-inherited cases)
+`built-ins/Object/defineProperty/15.2.3.6-3-{31,32,76,77,78,80,81,82,85,129,133,
+134,135,138,208,209,210,212,213,214,216,217,238,239,240,242,243,244,246}.js`.
+No regression in the own-level `15.2.3.6-3-*` data/accessor family already fixed by
+#2668 Slice A (23,25,28,35,40,45,…). **Validate on the full `merge_group` floor** —
+this is the descriptor surface that auto-parked #2668 Slice A's first cut.
+
+### Coordination
+- Independent of #2731 (different mechanism; #2731 is the delete-tombstone
+  asymmetry, #2680 is the descriptor proto-walk). They can land in either order.
+- Once landed: re-introduce the #2668 Slice A for-in `enumerable:false` filter and
+  re-widen the Slice A dynamic-descriptor route (per this issue's acceptance).
