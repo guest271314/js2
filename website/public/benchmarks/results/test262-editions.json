@@ -64,8 +64,8 @@
   },
   {
     "edition": "ES2020",
-    "pass": 1466,
-    "fail": 380,
+    "pass": 1467,
+    "fail": 379,
     "ce": 37,
     "skip": 18,
     "total": 1901,
