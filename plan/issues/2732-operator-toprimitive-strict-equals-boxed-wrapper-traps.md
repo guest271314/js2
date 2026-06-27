@@ -1,17 +1,18 @@
 ---
 id: 2732
 title: "operators: unary +/-/~/>>> ToPrimitive(object) trap; strict-equals boxed-wrapper/funcref trap"
-status: ready
+status: blocked
 sprint: 67
 goal: test262-conformance
 feasibility: hard
-depends_on: []
+depends_on: [2712]
+blocked_on: "(a) dynamic-ToPrimitive $Object dispatch substrate (#2580/#2660/#2175, in-flight); (b) bool-ValType decision #2712 — see Senior verify-first note"
 priority: medium
 es_edition: ES3
 language_feature: operators
 task_type: bug
 created: 2026-06-26
-updated: 2026-06-26
+updated: 2026-06-27
 ---
 # #2732 — operator trapping residuals (split from #2707 (a)+(b))
 
@@ -79,38 +80,78 @@ with no regression in operator tests and full CI green.
 - `with`-statement increment/decrement tests remain wont-fix (skip-filtered).
 - TCO portion (c) of the parent #2707 is done in PR #2159.
 
-## Architect scope-read (esch, 2026-06-27) — SPLIT (a) from (b); (b) depends on #2712
+---
 
-Re-verified on current `origin/main` HEAD (f51590644910a) via the real
-`runTest262File` runner. **(a) and (b) have DIFFERENT root causes and must NOT be
-dispatched as one task.**
+## Senior verify-first note (Esch, 2026-06-27) — both halves are substrate-gated; status → blocked
 
-**(a) unary `+`/`-`/`~`/`>>>` on object → REAL, still traps.** All 5 listed tests
-`fail` with **"dereferencing a null pointer in test()"**. (Note: a *simple*
-`+{valueOf(){return 1}}` probe returns 1 — the trap is on the FULL OrdinaryToPrimitive
-fallback chain the tests exercise: `valueOf` returns an object → must fall to
-`toString`; `toString` throws → must propagate; `valueOf`-only / `toString`-only.) The
-unary lowering reads a numeric field off the operand ref before coercing, null-derefing
-on a non-number object. **This is a self-contained ToNumber/ToPrimitive-in-numeric-
-context codegen gap — architect-spec-able and dev-implementable independently of #2712.**
-Spec target: the unary numeric lowering must call ToPrimitive(operand, Number)
-(valueOf→toString, §7.1.1) BEFORE extracting the f64/i32, when the operand is a
-non-primitive ref. This is the higher-value, independently-shippable half.
+Verify-first done on `origin/main` `f515906`, running the **actual** 11 test262
+files through the runner's own `wrapTest`. Both (a) and (b) **still trap** — the
+issue is real, not stale. But the root causes show **neither half is an
+independently dev-able localized fix**; both are gated on architect-class
+value-rep substrate. Set `status: blocked`. (The architect's earlier split call —
+"(a) dev-able" — was a scope-read; this is the traced mechanism, which supersedes
+it. Both sub-bugs are documented below so the work isn't lost.)
 
-**(b) strict-equals — NOT a trap; it is the boolean-as-i32 representation collision →
-DEPENDS ON #2712.** The 6 strict-(in)equals tests fail at assertion **#2: `true === 1`**
-(must be `false` per §7.2.16 step 1, Type(boolean) ≠ Type(number)). The compiler
-returns `true` because boolean `true` and number share the i32 `1` representation —
-confirmed directly: `false === 0` evaluates `EQ` (wrong) on current main. The original
-"traps with a WebAssembly.Exception" framing is stale — it now mis-VALUES, not traps.
-**This cannot be fixed cleanly without a value-rep way to distinguish boolean from
-number, which is exactly #2712 (real bool ValType).** Recommend: re-scope (b) as
-blocked-on / folded-into #2712; do NOT dispatch (b) as an independent operator patch
-(a localized strict-eq tag check would re-encode the same brand fragility #2712
-retires). The `new Boolean(...)`/`new Number(...)`/`new String(...)` boxed-wrapper
-cases (#1/#3/#5) are downstream of the same primitive-tag gap.
+### (a) Unary `+`/`-`/`~`/`>>>` on object — traced root cause
 
-**Recommended action:** keep (a) in this issue (architect-spec the ToPrimitive unary
-path; dev-able). Move (b) to depend on #2712 (or carve a `#2732b` blocked-on-#2712).
-Acceptance "9 of 11" is not reachable while (b) is blocked — (a) alone is the 5 unary
-tests.
+It is **not** the issue's original framing ("the unary lowering reads a numeric
+field off the operand ref before coercing"). The trap is a **type-soundness gap**:
+
+- The 5 unary test files compile with `success: true` but **5 ignored TS errors**:
+  `Subsequent variable declarations must have the same type. Variable 'object'
+  must be of type '{ valueOf: () => number; }', but here has type '{...}'`.
+  test262 reassigns `var object` to type-**incompatible** shapes (legal JS,
+  illegal TS). The compiler proceeds and keeps `object` **statically typed as the
+  first shape** (`{valueOf:()=>number}`).
+- `+object` then emits **static struct-field valueOf dispatch** against that first
+  shape's layout. At CHECK#6 the runtime value is a *different* struct shape
+  (`{valueOf:()=>{}, toString:()=>1}`); the valueOf field-ref read at the stale
+  static offset is null/wrong → **"dereferencing a null pointer"**.
+  (Bisect: truncating the file through CHECK#5 passes; adding CHECK#6 traps.)
+
+**Proof it is NOT a localized unary fix** (all on current main):
+- single-shape objects PASS — `+{valueOf(){return 1}}` → 1; `{valueOf(){return{}},
+  toString(){return 1}}` (toString fallback) → 1;
+- type-correct 2- and 3-member unions PASS — even unions whose members' valueOf
+  returns an object, and a member where both valueOf+toString return objects;
+- it reproduces **only** on the stale-static-type + heterogeneous-`var`-
+  reassignment pattern;
+- `+(object as any)` and `Number(object)` **also trap** on the full file — boxing
+  to externref inherits the wrong static type, feeding the existing dynamic
+  ToNumber funnel (`__unbox_number`) a mis-boxed value. So even the dynamic funnel
+  cannot save it; the substrate isn't there.
+
+**Sound fix:** ToPrimitive/ToNumber on an object operand must use **dynamic
+valueOf/toString lookup on a `$Object` representation**, not static struct-field
+dispatch — the dynamic-object-dispatch substrate (in-flight **#2580 / #2660 /
+#2175**). A localized force-box of object operands on the hot ToNumber path would
+regress the many single-shape cases that currently pass (broad-impact-without-
+substrate). → fold this requirement into the substrate spec; not a separate dev
+task. `blocked_on` #2580/#2660/#2175.
+
+### (b) strict-equals / strict-does-not-equals with boxed wrapper — it's the bool collision
+
+The wrapper-object arm itself is fine: with the wrapper TS type preserved (the real
+test scenario, no `as any`), `true === new Boolean(true)` etc. correctly return
+`false` via `__host_eq` (`src/codegen/binary-ops.ts:2563-2585`). The 6 tests fail
+on the **primitive cross-type** comparisons they also contain:
+
+- `true === 1` → **true** (should be false); `false === 0` → **true**; `0 ===
+  false` → **true**. These are the **boolean-as-i32 representation collision**:
+  `true`/`false` lower to bare `{kind:"i32"}` (1/0), identical to a number's i32,
+  so the equality path compares values and the static type-mismatch short-circuit
+  (`binary-ops.ts:2587`, `leftJsKind !== rightJsKind`) is bypassed by the earlier
+  numeric i32 path. (Bisect of S11.9.4_A8_T1: check#1 `true === new Boolean(true)`
+  passes; check#2 `true === 1` is where it goes wrong.)
+
+This is exactly **#2712** (real bool ValType / retire the i32-boolean brand). (b)
+rides the bool-ValType lane when #2712 lands. `depends_on: [2712]`. This is a
+**live conformance cost** that validates the #2712 architect-gate.
+
+### Acceptance re-scope
+
+Original acceptance (9 of 11 fail→pass) is **unreachable now**: (a) = 5 tests
+substrate-blocked, (b) = 6 tests blocked on #2712. Neither half is independently
+dev-able. When the dynamic-ToPrimitive substrate lands, (a)'s 5 should close; when
+#2712 lands, (b)'s 6 should close. Re-open / re-scope per whichever lane lands
+first.
