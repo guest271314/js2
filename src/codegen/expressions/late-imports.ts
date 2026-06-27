@@ -417,9 +417,24 @@ export function ensureLateImport(
   // OBJECT_RUNTIME_HELPER_NAMES in funcMap as a DEFINED function (no import is
   // added, so no index shift is required — same invariant as the #1471 boxing
   // helpers above). This keeps every existing externref-based call site
-  // unchanged. (WASI is intentionally NOT routed here yet — it retains the
-  // host-import object machinery until the standalone path is proven.)
-  if (ctx.standalone && OBJECT_RUNTIME_HELPER_NAMES.has(name)) {
+  // unchanged.
+  //
+  // #2748 — WASI is ALSO host-free (`ctx.strictNoHostImports` is true for
+  // `--target wasi`), so it MUST take the SAME native object-runtime path, NOT
+  // the `env::*` host import below. The deferred "WASI not routed yet" note here
+  // predated the now-proven standalone path; leaving WASI on the host import
+  // leaked an unsatisfiable `env::__extern_get` / `env::__extern_is_undefined`
+  // the moment an `any`/externref receiver reached a dynamic `.length` / indexed
+  // read — exactly the bun/tsc-transpiled `nm_deno.js` symptom (the `Uint8Array`
+  // param types were stripped, so `out.length` / `out[i]` lower through the
+  // polymorphic dyn-read dispatch whose host-object MISS arm calls
+  // `__extern_get`). The Deno `fd_read`/`fd_write` stdio lowering itself already
+  // fires on the type-stripped shape and is unaffected; this is purely the shared
+  // dyn-read / object-runtime host-import gate. Mirrors the `ctx.wasi ||
+  // ctx.standalone` routing of UNION_NATIVE_HELPER_NAMES above and the #2609
+  // `__object_is` host-free (`ctx.standalone || ctx.wasi`) registration inside
+  // ensureObjectRuntime.
+  if ((ctx.standalone || ctx.wasi) && OBJECT_RUNTIME_HELPER_NAMES.has(name)) {
     ensureObjectRuntime(ctx);
     return ctx.funcMap.get(name);
   }

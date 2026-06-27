@@ -25,6 +25,7 @@ import {
   ensureWasiWriteUint8ArrayHelper,
   getArrTypeIdxFromVec,
   getOrRegisterVecType,
+  typedArrayVecStorage,
   WASI_READSYNC_IOV_OFFSET,
   WASI_READSYNC_NREAD_OFFSET,
   WASI_STDIN_BUF_START,
@@ -554,17 +555,56 @@ function findObjectProp(obj: ts.ObjectLiteralExpression, name: string): ts.Expre
  * ref + the underlying i8 array ref + the element length into fresh i32/ref
  * locals. Returns those locals, or `null` if the arg isn't a GC Uint8Array.
  */
+/**
+ * (#2748) The module's canonical `Uint8Array` vec struct typeIdx, or `undefined`
+ * when the module never materialised a `Uint8Array` (so there is nothing to cast
+ * an externref buffer to). The key matches what `new Uint8Array(n)` registers via
+ * `getOrRegisterVecType` — `i8_byte` under WASI/standalone (packed bytes), else
+ * `f64`. Used to runtime-resolve a type-stripped (`any`/externref) buffer to its
+ * GC vec without a static `Uint8Array` annotation.
+ */
+function canonicalUint8VecTypeIdx(ctx: CodegenContext): number | undefined {
+  const { key } = typedArrayVecStorage(ctx, "Uint8Array");
+  return ctx.vecTypeMap.get(key);
+}
+
 export function emitNodeFsResolveGcU8(
   ctx: CodegenContext,
   fctx: FunctionContext,
   bufExpr: ts.Expression,
 ): { arrLocal: number; arrTypeIdx: number; lenLocal: number } | null {
   const bufType = compileExpression(ctx, fctx, bufExpr);
-  if (!bufType || (bufType.kind !== "ref" && bufType.kind !== "ref_null") || !("typeIdx" in bufType)) {
-    if (bufType) fctx.body.push({ op: "drop" } as Instr);
+  if (!bufType) return null;
+
+  // Resolve the concrete vec struct typeIdx for the buffer. A statically-typed
+  // `Uint8Array` compiles to a `ref`/`ref_null` of its vec struct. An `any`/
+  // externref buffer — e.g. a bun/tsc-transpiled (type-stripped) param that lost
+  // its `Uint8Array` annotation (#2748) — compiles to a bare `externref`; resolve
+  // it at RUNTIME by casting to the module's canonical `Uint8Array` vec struct
+  // (the same type a `new Uint8Array(n)` materialises). The cast traps only if the
+  // value is genuinely not a Uint8Array, which matches the source-level type
+  // contract — and replaces the prior silent no-op (drop + null → a read/write
+  // that read/wrote nothing), so it strictly improves the untyped path without
+  // touching the statically-typed one.
+  let vecTypeIdx: number;
+  if ((bufType.kind === "ref" || bufType.kind === "ref_null") && "typeIdx" in bufType) {
+    vecTypeIdx = bufType.typeIdx;
+    if (bufType.kind === "ref_null") fctx.body.push({ op: "ref.as_non_null" } as Instr);
+  } else if (bufType.kind === "externref") {
+    const canonical = canonicalUint8VecTypeIdx(ctx);
+    if (canonical === undefined) {
+      fctx.body.push({ op: "drop" } as Instr);
+      return null;
+    }
+    vecTypeIdx = canonical;
+    // externref → anyref → (ref $vec). ref.cast traps iff the receiver is not the
+    // Uint8Array vec, matching the TS type contract for the buffer argument.
+    fctx.body.push({ op: "any.convert_extern" } as Instr);
+    fctx.body.push({ op: "ref.cast", typeIdx: vecTypeIdx } as Instr);
+  } else {
+    fctx.body.push({ op: "drop" } as Instr);
     return null;
   }
-  const vecTypeIdx = bufType.typeIdx;
   const vecDef = ctx.mod.types[vecTypeIdx];
   if (!vecDef || vecDef.kind !== "struct" || vecDef.fields.length < 2) {
     fctx.body.push({ op: "drop" } as Instr);
@@ -575,7 +615,6 @@ export function emitNodeFsResolveGcU8(
     fctx.body.push({ op: "drop" } as Instr);
     return null;
   }
-  if (bufType.kind === "ref_null") fctx.body.push({ op: "ref.as_non_null" } as Instr);
 
   const vecLocal = allocLocal(fctx, `__nodefs_vec_${fctx.locals.length}`, {
     kind: "ref",

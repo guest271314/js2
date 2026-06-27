@@ -677,6 +677,7 @@ export function analyzeSource(source: string, fileName = "input.ts", analyzeOpti
     target: ts.ScriptTarget.ES2022,
     module: ts.ModuleKind.ESNext,
     strict: !isJs,
+    strictNullChecks: true,
     noImplicitAny: false,
     noEmit: true,
     // Enable JSX parsing for .tsx/.jsx files. ReactJSX desugars JSX to
