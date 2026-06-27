@@ -15,6 +15,11 @@ export default defineConfig({
       include: ["src/**/*.ts"],
       exclude: ["src/**/*.test.ts"],
       rollupTypes: false,
+      // Don't ship .d.ts.map: the published tarball has no src/, so their
+      // "../src/*.ts" sources are dead references that just double the file
+      // count. tsconfig keeps declarationMap on for in-repo editor
+      // go-to-definition; this overrides it for the published lib build only.
+      compilerOptions: { declarationMap: false },
     }),
   ],
   publicDir: false,
