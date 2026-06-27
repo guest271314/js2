@@ -78,3 +78,39 @@ with no regression in operator tests and full CI green.
 - BigInt operator tests remain out of scope (blocked on #2044).
 - `with`-statement increment/decrement tests remain wont-fix (skip-filtered).
 - TCO portion (c) of the parent #2707 is done in PR #2159.
+
+## Architect scope-read (esch, 2026-06-27) — SPLIT (a) from (b); (b) depends on #2712
+
+Re-verified on current `origin/main` HEAD (f51590644910a) via the real
+`runTest262File` runner. **(a) and (b) have DIFFERENT root causes and must NOT be
+dispatched as one task.**
+
+**(a) unary `+`/`-`/`~`/`>>>` on object → REAL, still traps.** All 5 listed tests
+`fail` with **"dereferencing a null pointer in test()"**. (Note: a *simple*
+`+{valueOf(){return 1}}` probe returns 1 — the trap is on the FULL OrdinaryToPrimitive
+fallback chain the tests exercise: `valueOf` returns an object → must fall to
+`toString`; `toString` throws → must propagate; `valueOf`-only / `toString`-only.) The
+unary lowering reads a numeric field off the operand ref before coercing, null-derefing
+on a non-number object. **This is a self-contained ToNumber/ToPrimitive-in-numeric-
+context codegen gap — architect-spec-able and dev-implementable independently of #2712.**
+Spec target: the unary numeric lowering must call ToPrimitive(operand, Number)
+(valueOf→toString, §7.1.1) BEFORE extracting the f64/i32, when the operand is a
+non-primitive ref. This is the higher-value, independently-shippable half.
+
+**(b) strict-equals — NOT a trap; it is the boolean-as-i32 representation collision →
+DEPENDS ON #2712.** The 6 strict-(in)equals tests fail at assertion **#2: `true === 1`**
+(must be `false` per §7.2.16 step 1, Type(boolean) ≠ Type(number)). The compiler
+returns `true` because boolean `true` and number share the i32 `1` representation —
+confirmed directly: `false === 0` evaluates `EQ` (wrong) on current main. The original
+"traps with a WebAssembly.Exception" framing is stale — it now mis-VALUES, not traps.
+**This cannot be fixed cleanly without a value-rep way to distinguish boolean from
+number, which is exactly #2712 (real bool ValType).** Recommend: re-scope (b) as
+blocked-on / folded-into #2712; do NOT dispatch (b) as an independent operator patch
+(a localized strict-eq tag check would re-encode the same brand fragility #2712
+retires). The `new Boolean(...)`/`new Number(...)`/`new String(...)` boxed-wrapper
+cases (#1/#3/#5) are downstream of the same primitive-tag gap.
+
+**Recommended action:** keep (a) in this issue (architect-spec the ToPrimitive unary
+path; dev-able). Move (b) to depend on #2712 (or carve a `#2732b` blocked-on-#2712).
+Acceptance "9 of 11" is not reachable while (b) is blocked — (a) alone is the 5 unary
+tests.

@@ -67,3 +67,37 @@ and the #2580 substrate spine so the bool lane lands once, centrally.
       `o[true]` keys `"true"`, `o[null]` keys `"null"` (no trap) — all in both
       host and standalone modes.
 - [ ] Equivalence + test262 non-regressing; full-CI / merge_group (broad impact).
+
+## Architect scope-read (esch, 2026-06-27) — needs a fuller spec before dispatch
+
+**Verdict: NOT plain-dev-able. Needs a short architect addendum (a representation
+decision + a switch-site sweep), then senior-dev-able.** The issue body lists the
+5 boxing drop-sites correctly, but the framing "the way `bigint` already has a
+typed i64 lane" understates the blast radius. The current `ValType` union
+(`src/ir/types.ts:146-160`) is:
+```ts
+| { kind: "i32"; boolean?: true }
+| { kind: "i64"; bigint?: boolean }    // bigint is ALSO an optional brand, not a separate kind
+```
+So **`bigint` is NOT a separate `{kind:"bigint"}`** — it is the same optional-brand
+shape this issue wants to retire for booleans. Promoting boolean to a first-class
+`{kind:"bool"}` therefore introduces a *genuinely new kind*, not a mirror of an
+existing one.
+
+The load-bearing design decision the architect must settle first: **a `bool` value
+is physically an `i32` in wasm** (locals, `i32.eqz`/branches, comparisons, struct
+fields all stay i32). So `{kind:"bool"}` must be treated as i32 by every low-level
+site (local allocation, the emitter's `case "i32"`, arithmetic/branch lowering,
+field storage) but as bool by the boxing/coercion/property-key/SameValueZero sites.
+That means a `bool` arm is needed at MANY more `switch (vt.kind)` sites than the 5
+listed — the spec must enumerate the full sweep (emitter encoding, `resolveWasmType`,
+local/global type mapping, `coerceType` both directions, struct field types,
+function param/result types) and define which fall through to the i32 path vs. take
+a distinct bool path. Recommend the architect (or the senior dev, inline) produce
+that switch-site inventory + the physical-rep contract as a `## Implementation Plan`
+before code starts; the 5 drop-sites are the *acceptance* surface, not the *change*
+surface. Already `[SENIOR-DEV]` (task #3) — keep it there; do not hand to a plain dev.
+
+Cross-link: **#2732(b) `true === 1` depends on this** (see #2732 scope-read) — the
+strict-equals type-tag distinction between boolean and number is unrepresentable
+until the bool lane exists.
