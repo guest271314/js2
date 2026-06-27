@@ -1611,6 +1611,43 @@ function _getSidecarDescs(obj: object): Map<string | symbol, number> {
 }
 
 /**
+ * (#2744) TestIntegrityLevel (§7.3.16) for a WasmGC struct / vec receiver,
+ * computed over OUR descriptor table (`_getSidecarDescs`) rather than "was
+ * Object.freeze/seal called" (the `_wasmFrozenObjs`/`_wasmSealedObjs` caches).
+ *
+ *   sealed (`frozen=false`): non-extensible AND every own property is
+ *     non-configurable.
+ *   frozen (`frozen=true`): sealed AND every own DATA property is non-writable.
+ *
+ * This answers correctly for objects made non-extensible and then reconfigured
+ * via `Object.defineProperty` (e.g. `preventExtensions(o)` on an object whose
+ * props were defined non-writable+non-configurable → `isFrozen` is true), which
+ * the WeakSet cache cannot. Own keys = static struct fields (`_getStructFieldNames`)
+ * + dynamic sidecar props (`_wasmStructProps`), minus tombstoned (`delete`d) keys.
+ * A property with NO descriptor entry is a default data property
+ * (writable+enumerable+configurable) → not sealed/frozen.
+ */
+function _testIntegrityLevel(obj: any, frozen: boolean, exports: Record<string, Function> | undefined): boolean {
+  // An extensible object can never be sealed or frozen (§7.3.16 step 4).
+  if (!_wasmNonExtensibleObjs.has(obj)) return false;
+  const descs = _getSidecarDescs(obj);
+  // Use the canonical own-key enumeration (skips internal `__get_`/`__set_`
+  // accessor-storage keys, tombstoned `delete`d keys, and includes symbols /
+  // class methods consistently with Object.keys/getOwnPropertyNames).
+  for (const key of _ownStructKeys(obj, exports)) {
+    const flags = descs.get(_normalizeDescKey(key));
+    // No descriptor → default data property (writable+configurable): fails both.
+    if (flags === undefined) return false;
+    // Both sealed and frozen require every own property be non-configurable.
+    if (flags & _SC_CONFIGURABLE) return false;
+    // Frozen additionally requires data properties be non-writable. Accessor
+    // properties (no writable attribute) are exempt from the writable check.
+    if (frozen && !(flags & _SC_ACCESSOR) && flags & _SC_WRITABLE) return false;
+  }
+  return true;
+}
+
+/**
  * Validate a defineProperty call against existing sidecar property descriptor.
  * Implements ES spec 9.1.6.3 ValidateAndApplyPropertyDescriptor for WasmGC structs.
  * Throws TypeError if the redefinition violates non-configurable constraints.
@@ -8473,7 +8510,11 @@ assert._isSameValue = isSameValue;
           // true for them. Test262 covers this under `Object/isFrozen/`.
           if (obj == null) return 1;
           if (typeof obj !== "object" && typeof obj !== "function") return 1;
-          if (_isWasmStruct(obj)) return _wasmFrozenObjs.has(obj) ? 1 : 0;
+          // (#2744) WasmGC struct/vec: WeakSet fast-path (Object.freeze was
+          // called) OR TestIntegrityLevel over the live descriptor table (covers
+          // preventExtensions + defineProperty(non-writable, non-configurable)).
+          if (_isWasmStruct(obj))
+            return _wasmFrozenObjs.has(obj) || _testIntegrityLevel(obj, true, callbackState?.getExports()) ? 1 : 0;
           return Object.isFrozen(obj) ? 1 : 0;
         };
       if (name === "__object_isSealed")
@@ -8481,7 +8522,15 @@ assert._isSameValue = isSameValue;
           // (#1462) ES2015+ §19.1.2.14: if Type(O) is not Object, return true.
           if (obj == null) return 1;
           if (typeof obj !== "object" && typeof obj !== "function") return 1;
-          if (_isWasmStruct(obj)) return _wasmSealedObjs.has(obj) || _wasmFrozenObjs.has(obj) ? 1 : 0;
+          // (#2744) WasmGC struct/vec: WeakSet fast-path (Object.seal/freeze was
+          // called) OR TestIntegrityLevel (non-extensible + all own props
+          // non-configurable) over the live descriptor table.
+          if (_isWasmStruct(obj))
+            return _wasmSealedObjs.has(obj) ||
+              _wasmFrozenObjs.has(obj) ||
+              _testIntegrityLevel(obj, false, callbackState?.getExports())
+              ? 1
+              : 0;
           return Object.isSealed(obj) ? 1 : 0;
         };
       if (name === "__object_isExtensible")
