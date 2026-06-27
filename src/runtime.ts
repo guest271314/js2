@@ -8551,19 +8551,43 @@ assert._isSameValue = isSameValue;
           if (_isWasmStruct(obj)) {
             const exports = callbackState?.getExports();
             const fieldNames = _getStructFieldNames(obj, exports);
-            if (fieldNames) {
-              const descs = _wasmPropDescs.get(obj);
-              // (#2179) Drop deleted keys — the static struct shape still carries
-              // the field, but `delete o.k` tombstoned it.
-              const tomb = _wasmStructDeletedKeys.get(obj);
-              return _orderOwnKeysSpec(
-                fieldNames.filter((k) => {
-                  if (tomb && tomb.has(k)) return false;
-                  if (!descs) return true;
-                  const flags = descs.get(k);
-                  return flags === undefined || !!(flags & _SC_ENUMERABLE);
-                }),
-              ); // (#2131)
+            const descs = _wasmPropDescs.get(obj);
+            const tomb = _wasmStructDeletedKeys.get(obj);
+            const sc = _wasmStructProps.get(obj);
+            // Enumerable iff not deleted and (no descriptor entry ⇒ enumerable by
+            // default, else the descriptor's ENUMERABLE flag).
+            const isEnumerable = (k: string): boolean => {
+              if (tomb && tomb.has(k)) return false;
+              const flags = descs?.get(_normalizeDescKey(k));
+              return flags === undefined || !!(flags & _SC_ENUMERABLE);
+            };
+            if (fieldNames || sc) {
+              const result: string[] = [];
+              // (#2179) Static struct fields — UNCHANGED legacy filter (drop
+              // deleted keys + non-enumerable redefinitions).
+              if (fieldNames) for (const k of fieldNames) if (isEnumerable(k)) result.push(k);
+              // (#2746) ADD own ENUMERABLE keys introduced via
+              // `Object.defineProperty` BEYOND the static struct shape — e.g.
+              // `Object.defineProperty(obj, "prop3", {enumerable:true})` on an
+              // object whose literal declared only prop1/prop2. Gate on a
+              // descriptor-table entry (`_wasmPropDescs`): defineProperty records
+              // one, a plain dynamic write (`obj.x = 1`) does NOT. This keeps the
+              // enumeration consistent with the for-in path (which likewise does
+              // not surface plain dynamic-write sidecar props on a struct), so we
+              // don't make `Object.keys` over-report relative to for-in (which
+              // would break tests that compare the two — e.g. keys of a `Date`
+              // with `obj.prop1 = …`). Accessor bookkeeping keys
+              // (`__get_<p>`/`__set_<p>`) are skipped. This only ADDS keys the old
+              // path omitted, so the legacy struct-field result cannot regress.
+              if (sc && descs) {
+                for (const k of Object.getOwnPropertyNames(sc)) {
+                  if (k.startsWith("__get_") || k.startsWith("__set_")) continue;
+                  if (result.includes(k) || (fieldNames && fieldNames.includes(k))) continue;
+                  if (!descs.has(_normalizeDescKey(k))) continue; // defineProperty'd only
+                  if (isEnumerable(k)) result.push(k);
+                }
+              }
+              return _orderOwnKeysSpec(result); // (#2131)
             }
           }
           return Object.keys(obj);
