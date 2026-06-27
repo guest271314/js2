@@ -3,7 +3,7 @@ id: 2710
 title: "Late-bind module indices (func/global/type) to eliminate the late-index-shift bug class"
 status: in-progress
 assignee: ttraenkler/sd-indexshift
-sprint: 67
+sprint: current
 created: 2026-06-26
 updated: 2026-06-26
 priority: high

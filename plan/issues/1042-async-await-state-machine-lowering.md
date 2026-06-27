@@ -8,7 +8,7 @@ priority: high
 feasibility: hard
 reasoning_effort: max
 goal: async-model
-sprint: 67
+sprint: current
 parent: 1032
 depends_on: [680]
 required_by: [1058, 1766, 1774]

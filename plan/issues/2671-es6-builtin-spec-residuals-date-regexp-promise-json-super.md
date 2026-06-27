@@ -13,7 +13,7 @@ es_edition: 2015
 language_feature: builtins, regexp, promise, date, json, super
 goal: spec-completeness
 related: [1343, 1440, 1444, 1439, 1465, 1368, 1551, 1342]
-sprint: 67
+sprint: current
 ---
 # #2671 — ES2015 builtin/feature spec residuals (Date / RegExp / Promise / JSON / super)
 

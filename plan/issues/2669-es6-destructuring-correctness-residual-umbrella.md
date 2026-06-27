@@ -13,7 +13,7 @@ es_edition: 2015
 language_feature: destructuring
 goal: spec-completeness
 related: [1642, 2566, 1556, 1454, 2203, 2032, 796]
-sprint: 67
+sprint: current
 ---
 # #2669 — ES2015 destructuring correctness residual umbrella
 
