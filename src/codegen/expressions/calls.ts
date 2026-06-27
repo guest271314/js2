@@ -6004,6 +6004,27 @@ function compileCallExpression(
     ) {
       const arg0 = expr.arguments[0]!;
 
+      // (#2743 a) `Object.getPrototypeOf(arguments)` is %Object.prototype%
+      // (§10.4.4), NOT the array prototype the vec representation would yield.
+      // The arguments object is an ordinary Object, so its `[[Prototype]]` must
+      // be the SAME `Object.prototype` value the compiler materializes for any
+      // plain object — `Object.getPrototypeOf({}) === Object.getPrototypeOf(
+      // arguments)`. Emit the compiler's own `Object.prototype` value-read
+      // (reusing the real `Object` identifier node `propAccess.expression`), so
+      // both sides reference one identity. Host-mode only; standalone keeps the
+      // bare vec. (`arguments` is a side-effect-free identifier, so dropping it
+      // is unnecessary.)
+      if (!noJsHost(ctx) && ts.isIdentifier(arg0) && arg0.text === "arguments" && fctx.localMap.has("arguments")) {
+        const objProtoExpr = ts.factory.createPropertyAccessExpression(
+          propAccess.expression,
+          ts.factory.createIdentifier("prototype"),
+        );
+        (objProtoExpr as { parent?: ts.Node }).parent = propAccess.parent ?? propAccess;
+        ts.setTextRange(objProtoExpr, propAccess.expression);
+        const t = compileExpression(ctx, fctx, objProtoExpr, { kind: "externref" });
+        return t ?? { kind: "externref" };
+      }
+
       // For Object.getPrototypeOf(Child.prototype), return Parent's prototype singleton
       // Must check BEFORE the general class instance check, because TS types
       // Child.prototype as Child (the instance type).
