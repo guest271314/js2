@@ -1,7 +1,8 @@
 ---
 id: 2742
 title: "String.prototype methods: ToString(this) generic-receiver coercion, RequireObjectCoercible, and function `.length` own property"
-status: ready
+status: in-progress
+assignee: ttraenkler/issue-2742-fn-length-dontenum
 sprint: 67
 created: 2026-06-27
 updated: 2026-06-27
@@ -78,6 +79,22 @@ ordering (trim family):**
   is `true`; all 4 listed (d) files pass.
 - **Target: ≥40 of the ~66 ES3-core `String.prototype` generic-receiver tests
   fixed.** No regression in currently-green String tests.
+
+## Implementation notes
+
+**Group (d) fixed** (PR #2742-d carve-out, 2026-06-27): The test runner was
+incorrectly transforming `obj.propertyIsEnumerable(key)` → `obj.hasOwnProperty(key)`
+globally, which masked the non-enumerable nature of builtin function `.length`.
+The codegen (`compilePropertyIntrospection`) already correctly emits
+`__propertyIsEnumerable` for `externref` receivers (native functions), which
+delegates to `Object.prototype.propertyIsEnumerable.call(obj, key)` in the
+runtime — returning `false` for the non-enumerable `.length` own property. Fix:
+removed the two blanket `propertyIsEnumerable→hasOwnProperty` transforms from
+`wrapTest()` in `tests/test262-runner.ts`. All 4 group-(d) test262 files now pass;
+no regressions in currently-passing tests.
+
+**Groups (a)/(b)/(c) remain open** — substrate-gated (generic-receiver
+`ToString(this)` coercion). Tracked in this issue; assigned separately.
 
 ## Scope / out of scope
 - IN: charAt, charCodeAt, indexOf, lastIndexOf, slice, substring, concat,

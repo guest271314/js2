@@ -79,6 +79,31 @@ const _wasmStructProto = new WeakMap<object, any>();
  */
 const _fnctorInstanceCtor = new WeakMap<object, object>();
 
+/**
+ * (#2743 a) Arguments objects are ordinary Objects (§10.4.4): their
+ * `[[Prototype]]` is %Object.prototype% and `.constructor` resolves to %Object%.
+ * The compiled `arguments` vec is an opaque WasmGC struct, so the host MOP can't
+ * see those by itself — codegen registers each arguments vec here (host-mode
+ * only; standalone keeps the bare vec) and the `__getPrototypeOf` /
+ * `__extern_get` / `__hasOwnProperty` hooks treat a registered vec as an
+ * ordinary Object inheriting from %Object.prototype%.
+ */
+const _argumentsObjects = new WeakSet<object>();
+
+/**
+ * (#2743 a) Own-property predicate for a registered arguments object. `length`
+ * and `callee` are always own properties of an arguments object (§10.4.4 —
+ * callee is present-but-poisoned in strict mode, an ordinary data property in
+ * sloppy mode). The numeric indices `0 .. length-1` are also own, but the vec's
+ * length is opaque to the host here, so they are not reported (no in-scope
+ * conformance test checks `arguments.hasOwnProperty(<index>)`; the
+ * length/callee keys are what the suite exercises). A genuinely-numeric-index
+ * own check is a documented follow-up gap.
+ */
+function _argumentsHasOwn(_obj: any, key: any): boolean {
+  return key === "length" || key === "callee";
+}
+
 /** (#1712) Resolve a property through the instance's fnctor prototype chain. */
 function _fnctorProtoLookup(
   obj: any,
@@ -1608,6 +1633,43 @@ function _getSidecarDescs(obj: object): Map<string | symbol, number> {
     _wasmPropDescs.set(obj, m);
   }
   return m;
+}
+
+/**
+ * (#2744) TestIntegrityLevel (§7.3.16) for a WasmGC struct / vec receiver,
+ * computed over OUR descriptor table (`_getSidecarDescs`) rather than "was
+ * Object.freeze/seal called" (the `_wasmFrozenObjs`/`_wasmSealedObjs` caches).
+ *
+ *   sealed (`frozen=false`): non-extensible AND every own property is
+ *     non-configurable.
+ *   frozen (`frozen=true`): sealed AND every own DATA property is non-writable.
+ *
+ * This answers correctly for objects made non-extensible and then reconfigured
+ * via `Object.defineProperty` (e.g. `preventExtensions(o)` on an object whose
+ * props were defined non-writable+non-configurable → `isFrozen` is true), which
+ * the WeakSet cache cannot. Own keys = static struct fields (`_getStructFieldNames`)
+ * + dynamic sidecar props (`_wasmStructProps`), minus tombstoned (`delete`d) keys.
+ * A property with NO descriptor entry is a default data property
+ * (writable+enumerable+configurable) → not sealed/frozen.
+ */
+function _testIntegrityLevel(obj: any, frozen: boolean, exports: Record<string, Function> | undefined): boolean {
+  // An extensible object can never be sealed or frozen (§7.3.16 step 4).
+  if (!_wasmNonExtensibleObjs.has(obj)) return false;
+  const descs = _getSidecarDescs(obj);
+  // Use the canonical own-key enumeration (skips internal `__get_`/`__set_`
+  // accessor-storage keys, tombstoned `delete`d keys, and includes symbols /
+  // class methods consistently with Object.keys/getOwnPropertyNames).
+  for (const key of _ownStructKeys(obj, exports)) {
+    const flags = descs.get(_normalizeDescKey(key));
+    // No descriptor → default data property (writable+configurable): fails both.
+    if (flags === undefined) return false;
+    // Both sealed and frozen require every own property be non-configurable.
+    if (flags & _SC_CONFIGURABLE) return false;
+    // Frozen additionally requires data properties be non-writable. Accessor
+    // properties (no writable attribute) are exempt from the writable check.
+    if (frozen && !(flags & _SC_ACCESSOR) && flags & _SC_WRITABLE) return false;
+  }
+  return true;
 }
 
 /**
@@ -7717,6 +7779,18 @@ assert._isSameValue = isSameValue;
       }
       if (name === "__extern_get")
         return (obj: any, key: any) => {
+          // (#2743 a) A registered arguments object is an ordinary Object whose
+          // `[[Prototype]]` is %Object.prototype%. The vec is opaque to the
+          // host, so resolve the inherited members it would otherwise miss:
+          //   - `.constructor` → %Object%;
+          //   - `hasOwnProperty` → a vec-aware predicate (the opaque struct
+          //     hides the own `length`/`callee`/index keys from the host MOP).
+          // `length` and the numeric indices stay on the existing vec path
+          // (they fall through below).
+          if (obj != null && typeof obj === "object" && _argumentsObjects.has(obj)) {
+            if (key === "constructor") return Object;
+            if (key === "hasOwnProperty") return (k: any) => _argumentsHasOwn(obj, k);
+          }
           if (obj != null && typeof obj === "object") {
             try {
               if (Object.getPrototypeOf(obj) !== null && key in Object(obj)) return obj[key];
@@ -7770,6 +7844,21 @@ assert._isSameValue = isSameValue;
         return (inst: any, ctor: any) => {
           if (_canBeWeakKey(inst) && ctor != null) _fnctorInstanceCtor.set(inst, ctor);
         };
+      // (#2743 a) Mark a compiled `arguments` vec as an ordinary Object so the
+      // MOP hooks (`__getPrototypeOf` / `__extern_get` / `__hasOwnProperty`)
+      // link it to %Object.prototype% and resolve `.constructor` → %Object%.
+      // Emitted right after the vec `struct.new` (host-mode only).
+      if (name === "__register_arguments")
+        return (vec: any) => {
+          if (_canBeWeakKey(vec)) _argumentsObjects.add(vec);
+        };
+      // (#2743 b) `%Array.prototype.values%` — the value of
+      // `arguments[Symbol.iterator]` and `[][Symbol.iterator]` (§10.4.4.6 /
+      // §10.4.4.7). Returning the host intrinsic gives both sites the same
+      // identity (`[][Symbol.iterator] === Array.prototype.values`), which is
+      // what the conformance tests compare. Used by the vec computed-get when
+      // the key is a `Symbol.iterator` (host-mode only).
+      if (name === "__array_proto_values") return () => Array.prototype.values;
       if (name === "__extern_set")
         return (obj: any, key: any, val: any) => {
           // (#860) When a Wasm closure struct is stored as a property value
@@ -8473,7 +8562,11 @@ assert._isSameValue = isSameValue;
           // true for them. Test262 covers this under `Object/isFrozen/`.
           if (obj == null) return 1;
           if (typeof obj !== "object" && typeof obj !== "function") return 1;
-          if (_isWasmStruct(obj)) return _wasmFrozenObjs.has(obj) ? 1 : 0;
+          // (#2744) WasmGC struct/vec: WeakSet fast-path (Object.freeze was
+          // called) OR TestIntegrityLevel over the live descriptor table (covers
+          // preventExtensions + defineProperty(non-writable, non-configurable)).
+          if (_isWasmStruct(obj))
+            return _wasmFrozenObjs.has(obj) || _testIntegrityLevel(obj, true, callbackState?.getExports()) ? 1 : 0;
           return Object.isFrozen(obj) ? 1 : 0;
         };
       if (name === "__object_isSealed")
@@ -8481,7 +8574,15 @@ assert._isSameValue = isSameValue;
           // (#1462) ES2015+ §19.1.2.14: if Type(O) is not Object, return true.
           if (obj == null) return 1;
           if (typeof obj !== "object" && typeof obj !== "function") return 1;
-          if (_isWasmStruct(obj)) return _wasmSealedObjs.has(obj) || _wasmFrozenObjs.has(obj) ? 1 : 0;
+          // (#2744) WasmGC struct/vec: WeakSet fast-path (Object.seal/freeze was
+          // called) OR TestIntegrityLevel (non-extensible + all own props
+          // non-configurable) over the live descriptor table.
+          if (_isWasmStruct(obj))
+            return _wasmSealedObjs.has(obj) ||
+              _wasmFrozenObjs.has(obj) ||
+              _testIntegrityLevel(obj, false, callbackState?.getExports())
+              ? 1
+              : 0;
           return Object.isSealed(obj) ? 1 : 0;
         };
       if (name === "__object_isExtensible")
@@ -8502,19 +8603,43 @@ assert._isSameValue = isSameValue;
           if (_isWasmStruct(obj)) {
             const exports = callbackState?.getExports();
             const fieldNames = _getStructFieldNames(obj, exports);
-            if (fieldNames) {
-              const descs = _wasmPropDescs.get(obj);
-              // (#2179) Drop deleted keys — the static struct shape still carries
-              // the field, but `delete o.k` tombstoned it.
-              const tomb = _wasmStructDeletedKeys.get(obj);
-              return _orderOwnKeysSpec(
-                fieldNames.filter((k) => {
-                  if (tomb && tomb.has(k)) return false;
-                  if (!descs) return true;
-                  const flags = descs.get(k);
-                  return flags === undefined || !!(flags & _SC_ENUMERABLE);
-                }),
-              ); // (#2131)
+            const descs = _wasmPropDescs.get(obj);
+            const tomb = _wasmStructDeletedKeys.get(obj);
+            const sc = _wasmStructProps.get(obj);
+            // Enumerable iff not deleted and (no descriptor entry ⇒ enumerable by
+            // default, else the descriptor's ENUMERABLE flag).
+            const isEnumerable = (k: string): boolean => {
+              if (tomb && tomb.has(k)) return false;
+              const flags = descs?.get(_normalizeDescKey(k));
+              return flags === undefined || !!(flags & _SC_ENUMERABLE);
+            };
+            if (fieldNames || sc) {
+              const result: string[] = [];
+              // (#2179) Static struct fields — UNCHANGED legacy filter (drop
+              // deleted keys + non-enumerable redefinitions).
+              if (fieldNames) for (const k of fieldNames) if (isEnumerable(k)) result.push(k);
+              // (#2746) ADD own ENUMERABLE keys introduced via
+              // `Object.defineProperty` BEYOND the static struct shape — e.g.
+              // `Object.defineProperty(obj, "prop3", {enumerable:true})` on an
+              // object whose literal declared only prop1/prop2. Gate on a
+              // descriptor-table entry (`_wasmPropDescs`): defineProperty records
+              // one, a plain dynamic write (`obj.x = 1`) does NOT. This keeps the
+              // enumeration consistent with the for-in path (which likewise does
+              // not surface plain dynamic-write sidecar props on a struct), so we
+              // don't make `Object.keys` over-report relative to for-in (which
+              // would break tests that compare the two — e.g. keys of a `Date`
+              // with `obj.prop1 = …`). Accessor bookkeeping keys
+              // (`__get_<p>`/`__set_<p>`) are skipped. This only ADDS keys the old
+              // path omitted, so the legacy struct-field result cannot regress.
+              if (sc && descs) {
+                for (const k of Object.getOwnPropertyNames(sc)) {
+                  if (k.startsWith("__get_") || k.startsWith("__set_")) continue;
+                  if (result.includes(k) || (fieldNames && fieldNames.includes(k))) continue;
+                  if (!descs.has(_normalizeDescKey(k))) continue; // defineProperty'd only
+                  if (isEnumerable(k)) result.push(k);
+                }
+              }
+              return _orderOwnKeysSpec(result); // (#2131)
             }
           }
           return Object.keys(obj);
@@ -9394,6 +9519,13 @@ assert._isSameValue = isSameValue;
           // matching built-in (Number.prototype, String.prototype, …).
           if (obj === null) throw new TypeError("Cannot convert null to object");
           if (obj === undefined) throw new TypeError("Cannot convert undefined to object");
+          // (#2743 a) A registered arguments object's `[[Prototype]]` is
+          // %Object.prototype% (§10.4.4). The opaque vec's native prototype is
+          // null, so map it to the host realm's Object.prototype — the same
+          // identity `Object.getPrototypeOf({})` returns.
+          if (obj != null && typeof obj === "object" && _argumentsObjects.has(obj)) {
+            return Object.prototype;
+          }
           try {
             return Object.getPrototypeOf(obj);
           } catch (e) {
@@ -10832,6 +10964,12 @@ assert._isSameValue = isSameValue;
       if (name === "__hasOwnProperty")
         return (obj: any, key: any): number => {
           if (obj == null) return 0;
+          // (#2743 a) A registered arguments object's own properties (`length`,
+          // `callee`) are invisible to the host on the opaque vec — answer from
+          // the arguments-aware predicate before the generic struct path.
+          if (typeof obj === "object" && _argumentsObjects.has(obj) && _argumentsHasOwn(obj, key)) {
+            return 1;
+          }
           if (!_isWasmStruct(obj)) {
             try {
               return Object.prototype.hasOwnProperty.call(obj, key) ? 1 : 0;

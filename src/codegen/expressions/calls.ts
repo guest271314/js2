@@ -5706,6 +5706,19 @@ function compileCallExpression(
       return compileObjectKeysOrValues(ctx, fctx, propAccess.name.text, expr);
     }
 
+    // (#2744) An object operand for the integrity methods can compile to any
+    // reference kind — `externref` ($Object/any), a `ref`/`ref_null` to a typed
+    // object struct or a vec (array / typed Date), `anyref`, or `eqref`. All of
+    // these are OBJECTS; only the scalar kinds (f64/i32/i64/f32/v128/i8/i16/
+    // funcref) are genuine primitives. The integrity SET + query codegen routes
+    // every object ref through the runtime helpers (coercing to externref via
+    // `extern.convert_any` first), and folds to the primitive answer ONLY for
+    // true primitives. Previously any non-`externref` argType was treated as a
+    // primitive, so arrays (vec ref) and typed object structs (ref) mis-folded
+    // `isExtensible`→0 / `isFrozen`,`isSealed`→1 and never reached the runtime.
+    const isObjectRef = (t: ValType): boolean =>
+      t.kind === "ref" || t.kind === "ref_null" || t.kind === "anyref" || t.kind === "eqref" || t.kind === "externref";
+
     // Handle Object.freeze/seal/preventExtensions — compile-away strategy
     if (
       ts.isIdentifier(propAccess.expression) &&
@@ -5752,23 +5765,28 @@ function compileCallExpression(
       let argType = compileExpression(ctx, fctx, expr.arguments[0]!);
       if (!argType) return null;
 
-      // #1472 Phase B Blocker A Half 2 — open-`any` receiver normalization.
-      // The open-object representation is a $Object wrapped to externref, but a
-      // variable reference (`Object.freeze(o)` where `o: any`) can compile to a
-      // ref/ref_null/anyref rather than externref, which would fall through to
-      // the return-arg no-op and never reach the native __object_freeze (the
-      // $flags would never be set). In standalone, coerce a non-externref
-      // ref/anyref receiver to externref first (extern.convert_any) so the
-      // native SET helper fires and the integrity bits actually get written.
-      // JS-host mode is unchanged (it already routes externref args to the host
-      // import; non-externref args there are typed objects with no dynamic
-      // freeze semantics).
-      if (
-        ctx.standalone &&
-        argType.kind !== "externref" &&
-        (argType.kind === "ref" || argType.kind === "ref_null" || argType.kind === "anyref")
-      ) {
-        coerceType(ctx, fctx, argType, { kind: "externref" });
+      // #1472 Phase B Blocker A Half 2 — object-receiver normalization.
+      // The open-object representation is a $Object wrapped to externref, but an
+      // object receiver (`Object.freeze(o)` where `o: any`, a typed object
+      // struct, or an array/vec) can compile to a ref/ref_null/anyref/eqref
+      // rather than externref, which would fall through to the return-arg no-op
+      // and never reach the native __object_freeze (the runtime WeakSet/
+      // descriptor state would never be set, so a later isFrozen/isSealed/
+      // isExtensible query returns the wrong answer). (#2744) Coerce ANY
+      // non-externref object receiver to externref first (extern.convert_any) so
+      // the runtime SET helper fires for arrays/structs/Date in ALL modes, not
+      // just standalone. Use RAW `extern.convert_any` (NOT coerceType): for a vec
+      // (array) receiver, coerceType appends `__make_iterable`, which materializes
+      // a *fresh* JS array per call — so the runtime WeakSet/descriptor state keyed
+      // on that throwaway wrapper would never match a later query's fresh wrapper
+      // (`Object.freeze(arr); Object.isFrozen(arr)` → false). The bare
+      // `extern.convert_any` passes the OPAQUE WasmGC ref, which is
+      // identity-preserving across SET/query coercions of the same object AND is
+      // recognized by `_isWasmStruct`, so arrays track integrity exactly like
+      // plain structs. The compile-time `markIntegrity` var-marking remains as an
+      // additional fast-path for the strict-mode write-throw decision.
+      if (argType.kind !== "externref" && isObjectRef(argType)) {
+        fctx.body.push({ op: "extern.convert_any" });
         argType = { kind: "externref" };
       }
 
@@ -5808,28 +5826,23 @@ function compileCallExpression(
       const method = propAccess.name.text;
       const arg0 = expr.arguments[0]!;
 
-      // Compile-time fast path: identifier known to be frozen/sealed at compile
-      // time. This is execution-order-blind (Object.freeze(o) populates
-      // ctx.frozenVars during codegen, so an *earlier* Object.isFrozen(o) would
-      // wrongly fold to const 1). In standalone mode the Wasm-native
-      // __object_isFrozen/__object_isSealed read the live $Object.flags, so we
-      // skip the static fold and let the runtime answer correctly (#1472
-      // Phase B Blocker A Half 1).
-      if (!ctx.standalone && ts.isIdentifier(arg0)) {
-        const isKnown =
-          (method === "isFrozen" && ctx.frozenVars.has(arg0.text)) ||
-          (method === "isSealed" && ctx.sealedVars.has(arg0.text));
-        if (isKnown) {
-          const argType = compileExpression(ctx, fctx, arg0);
-          if (argType) fctx.body.push({ op: "drop" });
-          fctx.body.push({ op: "i32.const", value: 1 });
-          return { kind: "i32" };
-        }
-      }
-
-      // General case: compile arg and delegate to runtime host import
+      // (#2744) The host-mode static fold (`ctx.frozenVars`/`ctx.sealedVars`
+      // keyed on the identifier) was execution-order-blind — `Object.freeze(o)`
+      // populates those sets during codegen, so an *earlier* `Object.isFrozen(o)`
+      // / `assert(Object.isExtensible(o))` pre-check wrongly folded to the sealed
+      // answer. The runtime `__object_is*` helpers now answer authoritatively for
+      // every object ref (the SET path records WeakSet/descriptor state for
+      // arrays/structs/Date too), so the static fold is dropped here; the
+      // compile-time tracking remains only for the strict-mode write-throw
+      // decision.
       const argType = compileExpression(ctx, fctx, arg0);
-      if (argType?.kind === "externref") {
+      if (argType && isObjectRef(argType)) {
+        // Object receiver ($Object/any externref, typed struct ref, array vec,
+        // Date) → RAW extern.convert_any (identity-preserving, recognized by
+        // _isWasmStruct; NOT coerceType, which would materialize a vec into a
+        // fresh JS array and lose the WeakSet/descriptor identity) and delegate to
+        // the runtime TestIntegrityLevel query.
+        if (argType.kind !== "externref") fctx.body.push({ op: "extern.convert_any" });
         const importName = method === "isFrozen" ? "__object_isFrozen" : "__object_isSealed";
         const hostIdx = ensureLateImport(ctx, importName, [{ kind: "externref" }], [{ kind: "i32" }]);
         flushLateImportShifts(ctx, fctx);
@@ -5838,6 +5851,8 @@ function compileCallExpression(
           return { kind: "i32" };
         }
         fctx.body.push({ op: "drop" });
+        fctx.body.push({ op: "i32.const", value: 0 });
+        return { kind: "i32" };
       } else if (argType) {
         fctx.body.push({ op: "drop" });
         // (#1462) Primitive (f64/i32/i64) is not an Object per ES2015+ §19.1.2.13/14;
@@ -5859,20 +5874,19 @@ function compileCallExpression(
     ) {
       const arg0 = expr.arguments[0]!;
 
-      // Compile-time fast path: identifier known to be non-extensible.
-      // Skipped in standalone (execution-order-blind, same reason as
-      // isFrozen/isSealed above) — the native __object_isExtensible reads the
-      // live $Object.flags instead (#1472 Phase B Blocker A Half 1).
-      if (!ctx.standalone && ts.isIdentifier(arg0) && ctx.nonExtensibleVars.has(arg0.text)) {
-        const argType = compileExpression(ctx, fctx, arg0);
-        if (argType) fctx.body.push({ op: "drop" });
-        fctx.body.push({ op: "i32.const", value: 0 });
-        return { kind: "i32" };
-      }
-
-      // General case: delegate to runtime
+      // (#2744) The host-mode static fold (`ctx.nonExtensibleVars`) was
+      // execution-order-blind (same reason as isFrozen/isSealed above) — a
+      // pre-check `Object.isExtensible(o)` before a later `Object.seal(o)` wrongly
+      // folded to 0. The runtime `__object_isExtensible` now answers
+      // authoritatively for every object ref (the SET path records the WeakSet
+      // for arrays/structs/Date too), so the static fold is dropped here.
       const argType = compileExpression(ctx, fctx, arg0);
-      if (argType?.kind === "externref") {
+      if (argType && isObjectRef(argType)) {
+        // Object receiver → RAW extern.convert_any (identity-preserving,
+        // recognized by _isWasmStruct; NOT coerceType, which would materialize a
+        // vec into a fresh JS array and lose identity) and delegate to the runtime
+        // query.
+        if (argType.kind !== "externref") fctx.body.push({ op: "extern.convert_any" });
         const hostIdx = ensureLateImport(ctx, "__object_isExtensible", [{ kind: "externref" }], [{ kind: "i32" }]);
         flushLateImportShifts(ctx, fctx);
         if (hostIdx !== undefined) {
@@ -5880,6 +5894,8 @@ function compileCallExpression(
           return { kind: "i32" };
         }
         fctx.body.push({ op: "drop" });
+        fctx.body.push({ op: "i32.const", value: 1 });
+        return { kind: "i32" };
       } else if (argType) {
         fctx.body.push({ op: "drop" });
         // (#1462) Primitive (f64/i32/i64) is not an Object per ES2015+ §19.1.2.12;
@@ -5987,6 +6003,27 @@ function compileCallExpression(
       expr.arguments.length >= 1
     ) {
       const arg0 = expr.arguments[0]!;
+
+      // (#2743 a) `Object.getPrototypeOf(arguments)` is %Object.prototype%
+      // (§10.4.4), NOT the array prototype the vec representation would yield.
+      // The arguments object is an ordinary Object, so its `[[Prototype]]` must
+      // be the SAME `Object.prototype` value the compiler materializes for any
+      // plain object — `Object.getPrototypeOf({}) === Object.getPrototypeOf(
+      // arguments)`. Emit the compiler's own `Object.prototype` value-read
+      // (reusing the real `Object` identifier node `propAccess.expression`), so
+      // both sides reference one identity. Host-mode only; standalone keeps the
+      // bare vec. (`arguments` is a side-effect-free identifier, so dropping it
+      // is unnecessary.)
+      if (!noJsHost(ctx) && ts.isIdentifier(arg0) && arg0.text === "arguments" && fctx.localMap.has("arguments")) {
+        const objProtoExpr = ts.factory.createPropertyAccessExpression(
+          propAccess.expression,
+          ts.factory.createIdentifier("prototype"),
+        );
+        (objProtoExpr as { parent?: ts.Node }).parent = propAccess.parent ?? propAccess;
+        ts.setTextRange(objProtoExpr, propAccess.expression);
+        const t = compileExpression(ctx, fctx, objProtoExpr, { kind: "externref" });
+        return t ?? { kind: "externref" };
+      }
 
       // For Object.getPrototypeOf(Child.prototype), return Parent's prototype singleton
       // Must check BEFORE the general class instance check, because TS types

@@ -8,7 +8,7 @@ import { ts } from "../../ts-api.js";
 import { isVoidType, unwrapPromiseType } from "../../checker/type-mapper.js";
 import { bodyUsesArguments } from "../helpers/body-uses-arguments.js";
 import { bodyReferencesOwnThis } from "../helpers/body-references-own-this.js";
-import { isStrictFunction } from "../helpers/is-strict-function.js";
+import { isStrictFunction, isSimpleParameterList } from "../helpers/is-strict-function.js";
 import type { Instr, ValType, WasmFunction } from "../../ir/types.js";
 import {
   collectReferencedIdentifiers,
@@ -516,9 +516,14 @@ export function compileNestedFunctionDeclaration(
       }
     }
 
-    // Set up `arguments` object if the function body references it
+    // Set up `arguments` object if the function body references it.
+    // (#2743) Unmapped when strict OR the parameter list is non-simple
+    // (rest/default/destructuring) — §10.2.11 FunctionDeclarationInstantiation
+    // step 22.a.
     if (stmt.body && bodyUsesArguments(stmt.body)) {
-      emitArgumentsObject(ctx, liftedFctx, paramTypes, 0, isStrictFunction(stmt, ctx.inferModuleStrictArguments));
+      const unmapped =
+        isStrictFunction(stmt, ctx.inferModuleStrictArguments) || !isSimpleParameterList(stmt.parameters);
+      emitArgumentsObject(ctx, liftedFctx, paramTypes, 0, unmapped);
     }
 
     if (nativeGenInfo) {
@@ -788,15 +793,13 @@ export function compileNestedFunctionDeclaration(
       }
     }
 
-    // Set up `arguments` object if the function body references it
+    // Set up `arguments` object if the function body references it.
+    // (#2743) Unmapped when strict OR the parameter list is non-simple
+    // (rest/default/destructuring) — §10.2.11 step 22.a.
     if (stmt.body && bodyUsesArguments(stmt.body)) {
-      emitArgumentsObject(
-        ctx,
-        liftedFctx,
-        paramTypes,
-        captures.length,
-        isStrictFunction(stmt, ctx.inferModuleStrictArguments),
-      );
+      const unmapped =
+        isStrictFunction(stmt, ctx.inferModuleStrictArguments) || !isSimpleParameterList(stmt.parameters);
+      emitArgumentsObject(ctx, liftedFctx, paramTypes, captures.length, unmapped);
     }
 
     if (isGenerator) {
@@ -2121,6 +2124,18 @@ export function emitArgumentsVecBody(
   const numArgs = paramTypes.length;
   const { vecTypeIdx: vti, arrTypeIdx: ati, argsLocalIdx: argsLocal, arrTmpIdx: arrTmp } = locals;
 
+  // (#2743 a) Register this arguments vec with the host so its `[[Prototype]]`
+  // resolves to %Object.prototype% and `.constructor`/`hasOwnProperty` behave
+  // like an ordinary Object (§10.4.4). This is a NEW host import; adding it
+  // shifts function indices, so register + flush HERE — before any `call` is
+  // emitted below — so the box/unbox `funcMap` lookups resolve post-shift and
+  // already-emitted bodies (this fctx + prior functions) are walked by the
+  // flush. Host-mode only: standalone/WASI keeps the bare opaque vec.
+  if (!ctx.standalone && !ctx.wasi) {
+    ensureLateImport(ctx, "__register_arguments", [{ kind: "externref" }], []);
+    flushLateImportShifts(ctx, fctx);
+  }
+
   const { globalIdx: extrasGlobalIdx } = ensureExtrasArgvGlobal(ctx);
   const argcGlobalIdx = ensureArgcGlobal(ctx);
   const extrasVecType: ValType = { kind: "ref_null", typeIdx: vti };
@@ -2253,6 +2268,16 @@ export function emitArgumentsVecBody(
   fctx.body.push({ op: "local.get", index: arrTmp });
   fctx.body.push({ op: "struct.new", typeIdx: vti });
   fctx.body.push({ op: "local.set", index: argsLocal });
+
+  // (#2743 a) Tag the freshly-built vec as an ordinary arguments Object. The
+  // import + index shift were settled at the top of this function, so the
+  // funcMap entry is final here — no further shift between registration and use.
+  const registerArgsIdx = ctx.funcMap.get("__register_arguments");
+  if (registerArgsIdx !== undefined && !ctx.standalone && !ctx.wasi) {
+    fctx.body.push({ op: "local.get", index: argsLocal });
+    fctx.body.push({ op: "extern.convert_any" } as Instr);
+    fctx.body.push({ op: "call", funcIdx: registerArgsIdx } as Instr);
+  }
 }
 
 /**
