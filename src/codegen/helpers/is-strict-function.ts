@@ -103,6 +103,33 @@ export function isStrictFunction(
 }
 
 /**
+ * (#2743) IsSimpleParameterList (ECMA-262 §15.1.3). A FormalParameters list is
+ * "simple" iff every element is a plain `BindingIdentifier` with no default
+ * initializer — i.e. it contains NO rest element, NO defaulted parameter, and
+ * NO destructuring (binding-pattern) parameter.
+ *
+ * This drives the mapped-vs-unmapped `arguments` split in
+ * FunctionDeclarationInstantiation (§10.2.11 step 22.a): the arguments object is
+ * *unmapped* when the function is strict OR its parameter list is non-simple.
+ * A non-simple list must therefore NOT install `mappedArgsInfo`, so a write to
+ * `arguments[i]` does not flow back into the named parameter (and the mapped
+ * write-back's `local.set` — which the rest/default param local shapes can't
+ * satisfy — is never emitted).
+ *
+ * A TypeScript `this` parameter (`function f(this: T, ...)`) is a plain
+ * identifier with no initializer/rest, so it does not make the list non-simple;
+ * it is erased before lowering and the call sites skip it via `paramOffset`.
+ */
+export function isSimpleParameterList(params: readonly ts.ParameterDeclaration[]): boolean {
+  for (const p of params) {
+    if (p.dotDotDotToken) return false; // rest parameter
+    if (p.initializer) return false; // defaulted parameter
+    if (!ts.isIdentifier(p.name)) return false; // object/array binding pattern (destructuring)
+  }
+  return true;
+}
+
+/**
  * (#2119) True iff `sf` is genuine module code — it carries a top-level
  * `import`/`export` (TypeScript sets the internal `externalModuleIndicator`),
  * or its implied node format is ESM. Deliberately ignores `scriptKind`: a

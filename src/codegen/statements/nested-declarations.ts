@@ -8,7 +8,7 @@ import { ts } from "../../ts-api.js";
 import { isVoidType, unwrapPromiseType } from "../../checker/type-mapper.js";
 import { bodyUsesArguments } from "../helpers/body-uses-arguments.js";
 import { bodyReferencesOwnThis } from "../helpers/body-references-own-this.js";
-import { isStrictFunction } from "../helpers/is-strict-function.js";
+import { isStrictFunction, isSimpleParameterList } from "../helpers/is-strict-function.js";
 import type { Instr, ValType, WasmFunction } from "../../ir/types.js";
 import {
   collectReferencedIdentifiers,
@@ -516,9 +516,14 @@ export function compileNestedFunctionDeclaration(
       }
     }
 
-    // Set up `arguments` object if the function body references it
+    // Set up `arguments` object if the function body references it.
+    // (#2743) Unmapped when strict OR the parameter list is non-simple
+    // (rest/default/destructuring) — §10.2.11 FunctionDeclarationInstantiation
+    // step 22.a.
     if (stmt.body && bodyUsesArguments(stmt.body)) {
-      emitArgumentsObject(ctx, liftedFctx, paramTypes, 0, isStrictFunction(stmt, ctx.inferModuleStrictArguments));
+      const unmapped =
+        isStrictFunction(stmt, ctx.inferModuleStrictArguments) || !isSimpleParameterList(stmt.parameters);
+      emitArgumentsObject(ctx, liftedFctx, paramTypes, 0, unmapped);
     }
 
     if (nativeGenInfo) {
@@ -788,15 +793,13 @@ export function compileNestedFunctionDeclaration(
       }
     }
 
-    // Set up `arguments` object if the function body references it
+    // Set up `arguments` object if the function body references it.
+    // (#2743) Unmapped when strict OR the parameter list is non-simple
+    // (rest/default/destructuring) — §10.2.11 step 22.a.
     if (stmt.body && bodyUsesArguments(stmt.body)) {
-      emitArgumentsObject(
-        ctx,
-        liftedFctx,
-        paramTypes,
-        captures.length,
-        isStrictFunction(stmt, ctx.inferModuleStrictArguments),
-      );
+      const unmapped =
+        isStrictFunction(stmt, ctx.inferModuleStrictArguments) || !isSimpleParameterList(stmt.parameters);
+      emitArgumentsObject(ctx, liftedFctx, paramTypes, captures.length, unmapped);
     }
 
     if (isGenerator) {

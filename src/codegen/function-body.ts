@@ -47,7 +47,7 @@ import {
 } from "./statements/nested-declarations.js";
 import { emitThrowReferenceError } from "./expressions/helpers.js";
 import { bodyUsesArguments } from "./helpers/body-uses-arguments.js";
-import { isStrictFunction } from "./helpers/is-strict-function.js";
+import { isStrictFunction, isSimpleParameterList } from "./helpers/is-strict-function.js";
 import { detectStringBuilders, type StringBuilderPresizeInfo } from "./string-builder.js";
 import { collectI32SpecializedArrays } from "./array-element-typing.js";
 import { detectArrayReduceFusion, applyArrayReduceFusion } from "./array-reduce-fusion.js";
@@ -976,13 +976,14 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
     const argsLocal = allocLocal(fctx, "arguments", vecRef);
     const arrTmp = allocLocal(fctx, "__args_arr_tmp", { kind: "ref", typeIdx: arrTypeIdx });
 
-    // Check if all params are simple identifiers (not destructuring patterns).
-    // Mapped arguments only applies to simple parameter lists in non-strict mode.
-    // In strict mode the arguments object is *unmapped* (§10.4.4): writes to
-    // `arguments[i]` must not flow back into the named parameter, so skip
-    // mappedArgsInfo entirely and leave the built vec as an independent copy
-    // (#779e).
-    const allSimpleParams = decl.parameters.every((p) => ts.isIdentifier(p.name) && !p.dotDotDotToken);
+    // Mapped arguments only applies to a *simple* parameter list in non-strict
+    // mode. In strict mode the arguments object is *unmapped* (§10.4.4); so is a
+    // non-simple parameter list (rest/default/destructuring — §10.2.11 step
+    // 22.a, #2743): writes to `arguments[i]` must not flow back into the named
+    // parameter, so skip mappedArgsInfo entirely and leave the built vec as an
+    // independent copy (#779e). (`isSimpleParameterList` also rejects defaulted
+    // params, which the prior local `every(isIdentifier && !rest)` check missed.)
+    const allSimpleParams = isSimpleParameterList(decl.parameters);
     const mappedAllowed = allSimpleParams && !isStrictFunction(decl, ctx.inferModuleStrictArguments);
 
     // Set up mapped arguments info for param ↔ arguments sync (#849)
