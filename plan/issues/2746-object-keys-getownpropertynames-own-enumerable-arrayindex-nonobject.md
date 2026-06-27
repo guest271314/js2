@@ -99,12 +99,26 @@ dev-able mechanisms** (none are the enumeration-ORDER substrate #2706/#2739):
    type (mode-agnostic). `getOwnPropertyNames(null/undefined)` already threw.
 
 **Tests fixed (host + standalone verified):** `keys/15.2.3.14-{1-4,1-5,4-1,5-1,
-5-2,3-7}`, `getOwnPropertyNames/15.2.3.4-3-1`. Net **+9** across
-`built-ins/Object/{keys,getOwnPropertyNames,values,entries,
-getOwnPropertyDescriptor,getOwnPropertyDescriptors}` (395→404), with **zero
-regressions** across the entire `built-ins/Object` tree (the earlier
-naive-bounds-check M1 that broke sparse/length-shrink `hasOwnProperty`
-— `defineProperties/15.2.3.7-6-a-{156,161,162}` — was refined away).
+5-2,3-7}`, `getOwnPropertyNames/15.2.3.4-3-1`, `entries|values/exception-not-
+object-coercible`. Net **+9** with **zero regressions** across the full test262
+suite (merge_group re-validation).
+
+**merge_group regression fixes (2026-06-27).** The first cut passed PR-CI but
+the merge_group full-suite found 2 real regressions PR-CI does not run:
+- `defineProperty/15.2.3.6-4-531-6` — `[].hasOwnProperty("0")` after a
+  defineProperty'd index accessor. M1's vec bounds-check returns false (length 0)
+  because the index lives in the runtime sidecar, not the vec data. **Fix:** M1 is
+  now `(vec slot present) OR __hasOwnProperty(arr, key)` — the OR with the
+  host/native helper catches the sidecar index. (Also retired the earlier
+  naive sparse/length-shrink M1 break on `defineProperties/15.2.3.7-6-a-{156,
+  161,162}` by gating M1 to reference-element vecs only.)
+- `keys/15.2.3.14-6-5` — `Object.keys(Date)` vs for-in parity. The M2 superset
+  over-reported plain dynamic-write (`obj.x = …`) sidecar props that for-in does
+  not surface. **Fix:** the M2 superset now adds ONLY defineProperty'd sidecar
+  keys (those with a `_wasmPropDescs` entry), keeping `Object.keys` consistent
+  with for-in. (Trade-off: `keys/15.2.3.14-3-2` — function with a dynamic-write
+  `.x` — reverts to its baseline fail; it needs for-in/keys to BOTH surface
+  dynamic writes, out of scope here.)
 
 **Left for later (substrate-gated, not this issue):** function-dynamic-prop keys
 (`3-2`); sparse-array hole listing (`5-13`, `6-2`); accessor-materialized-as-

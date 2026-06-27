@@ -8566,17 +8566,24 @@ assert._isSameValue = isSameValue;
               // (#2179) Static struct fields — UNCHANGED legacy filter (drop
               // deleted keys + non-enumerable redefinitions).
               if (fieldNames) for (const k of fieldNames) if (isEnumerable(k)) result.push(k);
-              // (#2746) ADD own ENUMERABLE keys that live ONLY in the
-              // defineProperty/dynamic-write sidecar (not part of the static struct
-              // shape) — e.g. `Object.defineProperty(obj, "prop3", {enumerable:true})`
-              // on an object whose literal declared only prop1/prop2. The accessor
-              // bookkeeping keys (`__get_<p>`/`__set_<p>`) are skipped. This only
-              // ADDS keys the old path omitted; it never drops a previously-returned
-              // key, so the legacy struct-field result cannot regress.
-              if (sc) {
+              // (#2746) ADD own ENUMERABLE keys introduced via
+              // `Object.defineProperty` BEYOND the static struct shape — e.g.
+              // `Object.defineProperty(obj, "prop3", {enumerable:true})` on an
+              // object whose literal declared only prop1/prop2. Gate on a
+              // descriptor-table entry (`_wasmPropDescs`): defineProperty records
+              // one, a plain dynamic write (`obj.x = 1`) does NOT. This keeps the
+              // enumeration consistent with the for-in path (which likewise does
+              // not surface plain dynamic-write sidecar props on a struct), so we
+              // don't make `Object.keys` over-report relative to for-in (which
+              // would break tests that compare the two — e.g. keys of a `Date`
+              // with `obj.prop1 = …`). Accessor bookkeeping keys
+              // (`__get_<p>`/`__set_<p>`) are skipped. This only ADDS keys the old
+              // path omitted, so the legacy struct-field result cannot regress.
+              if (sc && descs) {
                 for (const k of Object.getOwnPropertyNames(sc)) {
                   if (k.startsWith("__get_") || k.startsWith("__set_")) continue;
                   if (result.includes(k) || (fieldNames && fieldNames.includes(k))) continue;
+                  if (!descs.has(_normalizeDescKey(k))) continue; // defineProperty'd only
                   if (isEnumerable(k)) result.push(k);
                 }
               }

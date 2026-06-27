@@ -57,6 +57,37 @@ describe("#2746 Object.keys own-key listing", () => {
         expect(await run(src, mode)).toBe(1);
       });
 
+      it("M1: defineProperty-added array index is an own property (sidecar OR bounds)", async () => {
+        // Regression guard (merge_group): an empty array with a defineProperty'd
+        // index lives in the sidecar, not the vec data — the vec bounds check
+        // alone (length 0) returns false, so the OR with __hasOwnProperty is
+        // required. cf. defineProperty/15.2.3.6-4-531-6.
+        const src = `
+          export function test(): number {
+            var obj: any[] = [];
+            Object.defineProperty(obj, "0", { get: function () { return 7; }, enumerable: true, configurable: true });
+            return obj.hasOwnProperty("0") ? 1 : 0;
+          }`;
+        expect(await run(src, mode)).toBe(1);
+      });
+
+      it("M2: Object.keys does NOT over-report plain dynamic-write sidecar props (for-in parity)", async () => {
+        // Regression guard (merge_group): keys must stay consistent with for-in,
+        // which does not surface plain `obj.x = …` writes on a struct receiver —
+        // only defineProperty'd props are added. cf. keys/15.2.3.14-6-5.
+        const src = `
+          export function test(): number {
+            var obj = new Date(0);
+            (obj as any).p1 = 1;
+            (obj as any).p2 = 2;
+            var forin = 0;
+            for (var p in obj) { if (obj.hasOwnProperty(p)) forin++; }
+            var keys = Object.keys(obj).length;
+            return keys === forin ? 1 : 100 + keys * 10 + forin;
+          }`;
+        expect(await run(src, mode)).toBe(1);
+      });
+
       it("M2: Object.keys lists enumerable defineProperty-added prop, drops non-enumerable", async () => {
         const src = `
           export function test(): number {

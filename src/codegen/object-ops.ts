@@ -4226,21 +4226,20 @@ export function compilePropertyIntrospection(
   // whose integer-index elements are own (enumerable) data properties — NOT
   // static WasmGC struct fields, so the field-name logic below would wrongly
   // answer `false` for `arr.hasOwnProperty(0)` (e.g. on the result array of
-  // `Object.keys`). Per ES §10.4.2 a canonical in-bounds index is an own
-  // property iff that slot is present (not a hole).
+  // `Object.keys`). The answer is `(index in-bounds and the slot is present) OR
+  // the index was added to the runtime sidecar (e.g. `Object.defineProperty(arr,
+  // "0", …)` on an empty array)` — the OR with the host/native `__hasOwnProperty`
+  // covers the sidecar case the vec data alone can't see.
   //
-  // We only intercept REFERENCE-element vecs (string/object arrays): there a hole
-  // is a distinguishable `ref.null`, so `index < length AND data[index] != null`
-  // is exact. NUMERIC-element vecs densify holes to `0`/`NaN` (indistinguishable
-  // from a real value) AND a `defineProperties` length-shrink leaves stale slots,
+  // We only run the vec bounds branch for REFERENCE-element vecs (string/object
+  // arrays): there a hole is a distinguishable `ref.null`, so `index < length AND
+  // data[index] != null` is exact. NUMERIC-element vecs densify holes to `0`/`NaN`
+  // (indistinguishable) AND a `defineProperties` length-shrink leaves stale slots,
   // so a bounds check there would mis-report holes/shrunk indices as own — those
-  // keep the legacy field-name path (which answers `false`) to avoid regressing
-  // the sparse/length-shrink `hasOwnProperty` tests. The result array of
-  // `Object.keys`/`getOwnPropertyNames` is an externref string vec, so the
-  // affected tests are covered. Only a statically-resolvable canonical index is
-  // handled; everything else (incl. `"length"`, dynamic keys, numeric vecs) falls
-  // through unchanged.
-  if (receiverWasm.kind === "ref" || receiverWasm.kind === "ref_null") {
+  // keep the legacy field-name path. The result array of `Object.keys`/
+  // `getOwnPropertyNames` is an externref string vec, so the targeted tests are
+  // covered. Only a statically-resolvable canonical index is handled.
+  if (propAccess.name.text === "hasOwnProperty" && (receiverWasm.kind === "ref" || receiverWasm.kind === "ref_null")) {
     const vecTypeIdx = (receiverWasm as { typeIdx: number }).typeIdx;
     const vecInfo = getVecInfo(ctx, vecTypeIdx);
     const elemIsRef =
@@ -4260,18 +4259,18 @@ export function compilePropertyIntrospection(
         else if (at.isNumberLiteral()) staticKey = String(at.value);
       }
     }
-    if (elemIsRef && staticKey !== null && _isCanonicalArrayIndexString(staticKey)) {
+    if (elemIsRef && keyArg && staticKey !== null && _isCanonicalArrayIndexString(staticKey)) {
       const dataArrTypeIdx = vecInfo!.arrTypeIdx;
       const idxVal = Number(staticKey);
       const recvLocal = allocLocal(fctx, `__hop_arr_${fctx.locals.length}`, receiverWasm);
+      const presentLocal = allocLocal(fctx, `__hop_present_${fctx.locals.length}`, { kind: "i32" });
       const recv = compileExpression(ctx, fctx, propAccess.expression, receiverWasm);
       if (recv && (recv.kind === "ref" || recv.kind === "ref_null")) {
         fctx.body.push({ op: "ref.as_non_null" } as Instr);
       }
       fctx.body.push({ op: "local.set", index: recvLocal });
-      // own iff (index < length) && (data[index] !== null). The bounds test
-      // gates the element load via an `if` so an out-of-range index never traps
-      // in `array.get`.
+      // present := (index < length) ? (data[index] != null) : 0. The bounds test
+      // gates the element load via an `if` so an out-of-range index never traps.
       fctx.body.push({ op: "local.get", index: recvLocal });
       fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 }); // length
       fctx.body.push({ op: "i32.const", value: idxVal });
@@ -4289,6 +4288,31 @@ export function compilePropertyIntrospection(
         ],
         else: [{ op: "i32.const", value: 0 } as Instr],
       } as Instr);
+      fctx.body.push({ op: "local.set", index: presentLocal });
+      // result := present OR __hasOwnProperty(arr, key) — the latter catches an
+      // index added to the sidecar (e.g. defineProperty on an array index, where
+      // the vec data length is unchanged). __hasOwnProperty exists in both modes.
+      const hopIdx2 = ensureLateImport(
+        ctx,
+        "__hasOwnProperty",
+        [{ kind: "externref" }, { kind: "externref" }],
+        [{ kind: "i32" }],
+      );
+      fctx.body.push({ op: "local.get", index: recvLocal });
+      fctx.body.push({ op: "extern.convert_any" } as Instr);
+      const keyT = compileExpression(ctx, fctx, keyArg, { kind: "externref" });
+      if (keyT && keyT.kind !== "externref") coerceType(ctx, fctx, keyT, { kind: "externref" });
+      flushLateImportShifts(ctx, fctx);
+      if (hopIdx2 !== undefined) {
+        fctx.body.push({ op: "call", funcIdx: hopIdx2 });
+      } else {
+        // No host helper available — drop the args, sidecar contributes nothing.
+        fctx.body.push({ op: "drop" });
+        fctx.body.push({ op: "drop" });
+        fctx.body.push({ op: "i32.const", value: 0 });
+      }
+      fctx.body.push({ op: "local.get", index: presentLocal });
+      fctx.body.push({ op: "i32.or" });
       return { kind: "i32", boolean: true };
     }
     // else fall through to the generic struct-field path (legacy behaviour).
