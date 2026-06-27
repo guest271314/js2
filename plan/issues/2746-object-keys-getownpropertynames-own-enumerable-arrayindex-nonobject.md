@@ -1,7 +1,8 @@
 ---
 id: 2746
 title: "Object.keys / Object.getOwnPropertyNames: own-enumerable key listing, array-exotic index keys, and non-object receiver handling"
-status: ready
+status: in-progress
+assignee: ttraenkler/agent-a4c75e2b30
 sprint: 67
 created: 2026-06-27
 updated: 2026-06-27
