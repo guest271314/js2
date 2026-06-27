@@ -37,7 +37,7 @@ import { resolveStructName } from "./expressions/misc.js";
 import { arrayIteratorOverrideGlobalIdx, emitArrayProtoIteratorDrive } from "./expressions/proto-override.js";
 import { ensureObjVecBuilders } from "./object-runtime.js";
 import { bodyUsesArguments } from "./helpers/body-uses-arguments.js";
-import { isStrictFunction } from "./helpers/is-strict-function.js";
+import { isStrictFunction, isSimpleParameterList } from "./helpers/is-strict-function.js";
 import { collectInstrs } from "./statements/shared.js";
 import {
   cacheStringLiterals,
@@ -2541,13 +2541,11 @@ export function compileObjectLiteralForStruct(
       if (prop.body && bodyUsesArguments(prop.body)) {
         const methodParamTypes = methodFctxParams.slice(1).map((p) => p.type); // skip 'this'
         // Object-literal methods inherit the surrounding code's strictness (#779e).
-        emitArgumentsObject(
-          ctx,
-          methodFctx,
-          methodParamTypes,
-          1,
-          isStrictFunction(prop, ctx.inferModuleStrictArguments),
-        ); // paramOffset 1 to skip 'this'
+        // (#2743) Also unmapped when the parameter list is non-simple
+        // (rest/default/destructuring) — §10.2.11 step 22.a.
+        const unmapped =
+          isStrictFunction(prop, ctx.inferModuleStrictArguments) || !isSimpleParameterList(prop.parameters);
+        emitArgumentsObject(ctx, methodFctx, methodParamTypes, 1, unmapped); // paramOffset 1 to skip 'this'
       }
 
       if (isGeneratorMethod && prop.body && objMethNativeGen) {
