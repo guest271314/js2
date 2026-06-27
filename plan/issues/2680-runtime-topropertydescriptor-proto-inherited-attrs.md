@@ -1,7 +1,9 @@
 ---
 id: 2680
 title: "Runtime ToPropertyDescriptor reads a WasmGC-struct descriptor's attributes own-level only (drops prototype-inherited get/set/value/enumerable/configurable)"
-status: ready
+status: done
+assignee: ttraenkler/dev2
+completed: 2026-06-27
 created: 2026-06-25
 priority: high
 feasibility: hard
