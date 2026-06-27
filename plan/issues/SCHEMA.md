@@ -34,8 +34,8 @@ Current layout (flat, #1616):
   `sprint: current` issue that is `status: done` to the **lowest free numbered
   index** N (and writes `sprints/N.md` as that window's retrospective record);
   not-done issues stay `sprint: current` and roll forward, so a window can never
-  strand unfinished work. A numbered `sprint: <N>` is therefore a *retrospective
-  label assigned at freeze*, never a prospective commitment.
+  strand unfinished work. A numbered `sprint: <N>` is therefore a _retrospective
+  label assigned at freeze_, never a prospective commitment.
 - `plan/issues/backlog/index.md` and `plan/issues/wont-fix/index.md` are
   generated indexes (link to `../<id>-<slug>.md`); `backlog/backlog.md` is the
   curated backlog doc.
@@ -116,14 +116,14 @@ assignee: "ttraenkler/senior-dev-1"
 - `horizon`
   - Expected token/work **cost class** for budget-aware scheduling (#2751):
     `xl` | `l` | `m` | `s` (default `m`). Distinct from `priority` (importance)
-    and `reasoning_effort` (model setting) — `horizon` is *how much budget the
-    task is likely to burn*.
+    and `reasoning_effort` (model setting) — `horizon` is _how much budget the
+    task is likely to burn_.
   - The pull-time helper `scripts/budget-status.mjs` reads it: an agent claiming
     work learns the remaining budget + parallelism (per-agent share) and pulls a
     task whose horizon fits. A fresh window surfaces `xl`/`l` first (big rocks
     first); as the window drains or parallelism rises, only smaller horizons are
     recommended, with `s` as the always-available tail filler — so a long-horizon
-    task is preferentially started at the *beginning* of a budget window and never
+    task is preferentially started at the _beginning_ of a budget window and never
     started so late it would strand.
   - `scripts/sync-current-tasklist.mjs` surfaces it as a `[XL]`/`[L]`/`[M]`/`[S]`
     tag in the task subject.

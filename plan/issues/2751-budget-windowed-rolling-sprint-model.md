@@ -14,6 +14,7 @@ area: process
 language_feature: none
 goal: maintainability
 ---
+
 # #2751 — Budget-windowed rolling sprint model
 
 ## Problem
@@ -53,7 +54,7 @@ Stop defining a sprint as a fixed list ≈ one budget. Decouple the two clocks:
      impossible),
    - stamp `plan/issues/sprints/N.md` as the **retrospective** record of the
      window (date range, budget spent, frozen issues, conformance delta). The
-     sprint number is thus a *retrospective window label*, assigned at rollover,
+     sprint number is thus a _retrospective window label_, assigned at rollover,
      never a prospective commitment.
 
 3. **Auto-sync `sprint: current` → team TaskList.**
@@ -67,12 +68,14 @@ Stop defining a sprint as a fixed list ≈ one budget. Decouple the two clocks:
    TaskList in lockstep in both directions.
 
 ### 4. Budget-aware pull-time scheduling (IMPLEMENTED)
+
 Each issue carries a `horizon:` cost class (`xl`/`l`/`m`/`s`, default `m`) — the
 expected token/work cost, distinct from `priority` (importance). The agent about
 to claim work runs `scripts/budget-status.mjs --pick`, which reports the
 **remaining token budget**, the **parallelism** (active agents), the **per-agent
 share** (≈ remaining ÷ agents), and the largest horizon it should pull, plus the
 best-fit claimable tasks. Rules realised:
+
 - **Long-horizon tasks preferentially at the START of a window** — a fresh window
   has a large per-agent share, so `xl`/`l` fit and are surfaced first (big rocks
   first).
@@ -81,8 +84,8 @@ best-fit claimable tasks. Rules realised:
   fits is deferred to the next window's start rather than started and stranded.
 - **`s` is always-available tail filler** so the last slice of budget neither
   strands a big item nor sits idle.
-`sync-current-tasklist.mjs` surfaces the class as a `[XL]`/`[L]`/`[M]`/`[S]` tag.
-Only rough size classes are needed, not accurate per-issue estimates.
+  `sync-current-tasklist.mjs` surfaces the class as a `[XL]`/`[L]`/`[M]`/`[S]` tag.
+  Only rough size classes are needed, not accurate per-issue estimates.
 
 ## Implementation surface
 
@@ -118,6 +121,7 @@ Only rough size classes are needed, not accurate per-issue estimates.
   instruction with the rolling `sprint: current` + freeze model.
 
 ## Edge cases
+
 - An issue reopened (`done` → `ready`) after a freeze: it was already numbered N;
   decide whether reopening re-tags it back to `current` (recommended) so it
   re-enters the queue.
@@ -127,6 +131,7 @@ Only rough size classes are needed, not accurate per-issue estimates.
   (only `done` freezes); blocked stays `current` or moves to `Backlog` per PO.
 
 ## Acceptance criteria
+
 - [ ] `sprint: current` is a documented, validated sprint value; tooling/dashboard
       handle it.
 - [ ] Assigning/updating an issue to `sprint: current` auto-creates/updates its
@@ -145,6 +150,7 @@ Only rough size classes are needed, not accurate per-issue estimates.
       fixed-list sprint instructions are removed.
 
 ## Notes
+
 - Sibling to #2750 (process-doc consolidation); the CLAUDE.md edits here should be
   done in the same human-reviewable, one-small-PR-at-a-time spirit.
 - This issue dogfoods the model: it is itself tagged `sprint: current`.

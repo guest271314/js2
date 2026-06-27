@@ -13,6 +13,7 @@ area: process
 language_feature: none
 goal: maintainability
 ---
+
 # #2750 — Consolidate process docs (memory store + CLAUDE.md)
 
 ## Problem
@@ -44,6 +45,7 @@ small, self-contained consolidation a human can read end-to-end and judge.
 ## Scope — two workstreams, many small PRs
 
 ### A. Memory store prune/consolidate (recommendation #3)
+
 - Move the narrow per-issue root-cause notes into a single searchable
   `plan/log/root-causes.md` (or a small set of grouped docs), one cluster per PR.
 - Keep `MEMORY.md` to **cross-cutting invariants** only; each migrated note drops
@@ -53,6 +55,7 @@ small, self-contained consolidation a human can read end-to-end and judge.
   substrate notes for one subsystem), leaving MEMORY.md consistent.
 
 ### B. CLAUDE.md slim → role-specific law into agent defs (recommendation #5)
+
 - Move role-specific sections out of CLAUDE.md and into the agent def that owns
   them, one section per PR:
   - merge-queue mechanics / enqueue rules → PR-queue shepherd (`developer.md`
@@ -65,6 +68,7 @@ small, self-contained consolidation a human can read end-to-end and judge.
   rule written for a different role.
 
 ## Pre-work checkpoint (do first, its own PR)
+
 Before moving anything, run the **"does this failure mode still exist under the
 setup we actually run today?"** pass over the rules being consolidated. Some rules
 guard configurations no longer in use (e.g. the retired `bgIsolation: "none"`
@@ -73,6 +77,7 @@ the PR description with the incident it originally guarded so the history is
 recoverable.
 
 ## Acceptance criteria
+
 - [ ] Memory store reduced toward < ~50 active files; migrated notes searchable in
       a consolidated doc; `MEMORY.md` index stays consistent after each PR.
 - [ ] CLAUDE.md reduced toward ~150 lines; relocated rules live in the owning
@@ -82,6 +87,7 @@ recoverable.
 - [ ] Each dropped rule is recorded with the incident it guarded.
 
 ## Notes
+
 - Related cleanup already landed under this directive: removed retired `tester`
   and `scrum-master` agent defs; folded Scrum-Master process-improvement /
   retrospective duties into `tech-lead.md`.
