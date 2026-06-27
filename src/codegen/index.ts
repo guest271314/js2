@@ -1768,6 +1768,31 @@ export function generateModule(
     // when no arity-5 closure exists.
     emitClosureMethodCallExportN(ctx, 5);
 
+    // (#2687) Arities 6..8 for HIGHER-arity prototype methods. acorn's
+    // `parseSubscript(base, startPos, startLoc, noCalls, maybeAsyncArrow,
+    // optionalChained, forInit)` is arity 7 and `parsePropertyValue` is arity 8;
+    // a `this.parseSubscript(...)` host method-call wraps the closure and
+    // dispatches it through `__call_fn_method_<N>` (runtime.ts wasmClosureBridge /
+    // wasmClosureDynamicBridge). With the highest emitted dispatcher capped at 5,
+    // an arity-7 closure was OMITTED from `__call_fn_method_5` (its filter is
+    // `paramTypes.length <= arity`), so the dynamic method-call returned null and
+    // the body never ran — parseSubscript returned null up the parse chain, leaving
+    // `ExpressionStatement.expression` null (#2687) and breaking the acorn dogfood.
+    // Emit one dispatcher per arity up to the module's actual max closure arity,
+    // capped at 8 — the dynamic bridge's scan range
+    // (`_wrapWasmClosureUnknownArity` iterates `a = 8..0`). Each call no-ops when
+    // no closure of arity ≤ N exists, so modules whose methods top out at ≤5 are
+    // byte-identical. Mirrors the #2664 fix direction (a method's declared arity
+    // EXCEEDING the dispatcher arity — the symmetric case of fewer-args-than-params).
+    {
+      let maxClosureArity = 5;
+      for (const info of ctx.closureInfoByTypeIdx.values()) {
+        if (info.paramTypes.length > maxClosureArity) maxClosureArity = info.paramTypes.length;
+      }
+      const cap = Math.min(maxClosureArity, 8);
+      for (let n = 6; n <= cap; n++) emitClosureMethodCallExportN(ctx, n);
+    }
+
     // (#1719 CPR read-drive) Fill the reserved `__drive_proto_iterator` driver
     // body now that `__call_fn_method_0` is registered. No-op when no read-drive
     // site reserved a driver (brand clear / no Array.prototype @@iterator override).
