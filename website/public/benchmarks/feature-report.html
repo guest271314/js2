@@ -154,28 +154,37 @@
         width: 28px;
       }
       .col-file {
-        white-space: nowrap;
+        max-width: 420px;
+      }
+      .file-cell {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .file-name {
         overflow: hidden;
         text-overflow: ellipsis;
-        max-width: 280px;
-      }
-      .col-file a {
+        white-space: nowrap;
+        min-width: 0;
         color: var(--fg-soft);
       }
-      .col-file a:hover {
+      .file-name:hover {
         color: var(--fg);
+      }
+      .play-link {
+        flex: none;
+        color: var(--accent);
+        font-size: 12px;
+        text-decoration: none;
+      }
+      .play-link:hover {
+        text-decoration: none;
+        opacity: 0.8;
       }
       .col-error {
         color: var(--fg-soft);
         word-break: break-word;
         max-width: 480px;
-      }
-      .col-action {
-        white-space: nowrap;
-      }
-      .col-action a {
-        color: var(--accent);
-        font-size: 12px;
       }
       .status-pass {
         color: var(--ok);
@@ -218,25 +227,48 @@
           gap: 12px;
           margin: 4px 0 10px;
         }
-        /* Drop the hard nowrap caps so columns reflow to the phone width;
-           the wrapper still allows horizontal scroll if a cell is wide. */
-        .col-file {
-          white-space: normal;
-          word-break: break-word;
+        /* On phones, stop laying the test list out as a wide table.
+           Each row becomes a card; its cells stack as rows: the status
+           icon + filename share the first line, the error wraps below. */
+        .test-table,
+        .test-table tbody {
+          display: block;
+        }
+        .test-table thead {
+          display: none;
+        }
+        .test-table tr {
+          display: grid;
+          grid-template-columns: auto 1fr;
+          gap: 2px 8px;
+          padding: 10px 0;
+          border-bottom: 1px solid var(--line);
+        }
+        .test-table td {
+          display: block;
+          padding: 0;
+          border: none;
           max-width: none;
         }
+        .col-status {
+          grid-column: 1;
+          grid-row: 1;
+          width: auto;
+        }
+        .col-file {
+          grid-column: 2;
+          grid-row: 1;
+        }
+        .file-name {
+          white-space: normal;
+          word-break: break-word;
+        }
         .col-error {
-          max-width: none;
+          grid-column: 2;
+          grid-row: 2;
         }
         .test-table {
           font-size: 12px;
-        }
-        .test-table thead th,
-        .test-table tbody td {
-          padding: 6px 8px;
-        }
-        .col-action {
-          white-space: normal;
         }
       }
     </style>
@@ -409,21 +441,20 @@
           html += '<th class="col-status"></th>';
           html += '<th class="col-file">File</th>';
           html += '<th class="col-error">Error</th>';
-          html += '<th class="col-action">Playground</th>';
           html += "</tr></thead><tbody>";
 
           for (const test of filtered) {
             const { icon, cls } = statusIcon(test.status);
             const short = shortFile(test.file);
+            const link = escapeHtml(playgroundLink(test));
             const errorText = truncateError(test.error);
             const errorHtml = errorText
               ? `<span class="error-msg-text">${escapeHtml(errorText)}</span>`
               : '<span class="error-msg">—</span>';
             html += "<tr>";
             html += `<td class="col-status ${cls}" title="${escapeHtml(test.status)}">${icon}</td>`;
-            html += `<td class="col-file" title="${escapeHtml(test.file)}">${escapeHtml(short)}</td>`;
+            html += `<td class="col-file" title="${escapeHtml(test.file)}"><span class="file-cell"><a class="file-name" href="${link}" rel="noopener">${escapeHtml(short)}</a><a class="play-link" href="${link}" rel="noopener" title="Open in playground" aria-label="Open in playground">▶</a></span></td>`;
             html += `<td class="col-error">${errorHtml}</td>`;
-            html += `<td class="col-action"><a href="${escapeHtml(playgroundLink(test))}" rel="noopener">▶ playground</a></td>`;
             html += "</tr>";
           }
 
