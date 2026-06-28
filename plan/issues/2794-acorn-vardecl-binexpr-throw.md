@@ -208,6 +208,25 @@ NOT reproducible in a small module — tied to acorn's large struct-type graph
 emitter). This is the blocker for EVERY binary expression and is independent of
 (1)/(2).
 
+**Sharper pointer for the codegen fix (3):** `__sget_<field>` is emitted by
+`_emitStructFieldGettersInner` (`src/codegen/index.ts:2240`). It builds a
+`fieldMap: fieldName → [{structTypeIdx, fieldIdx, fieldType}]` from
+`ctx.structFields`/`ctx.structMap`, picks a return mode (extern/f64/i32) per
+bucket, and emits the getter as a `ref.test`-against-each-`structTypeIdx`
+dispatch chain (fall-through → `ref.null.extern`). `__sget_binop(plusMin)`
+returning **null (extern mode, fall-through)** means **plusMin's runtime struct
+type is NOT matched by the `binop` dispatch chain** — i.e. the `structTypeIdx`
+the dispatcher `ref.test`s against ≠ plusMin's actual runtime type. Most likely a
+struct-type identity/coverage problem: either the TokenType type carrying `binop`
+in `ctx.structFields` was **remapped/deduped by DCE** after the getter captured
+its index (cf. `project_type_index_shift_and_deadelim` /
+`reference_subview_type_idx_stability`), or acorn produced **multiple TokenType
+struct shapes** and `binop` was only registered on one. Repro path: dump the
+`binop` fieldMap entries + the post-DCE type index of plusMin's struct and
+compare. (`label` works because it resolves via an earlier host path before
+`__sget`; `start`/`end` work because the Node type IS covered — so the bug is
+TokenType-type-coverage-specific, not a blanket `__sget` failure.)
+
 ### Status / recommendation
 
 - **#2681 (var-decl)** root-caused: needs a reliable data-vs-closure
