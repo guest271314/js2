@@ -152,11 +152,19 @@ const VARIANTS = [
     bunExtra: [],
     js2wasmExtra: [],
     preload: null,
-    // verbatim single-write echoer — THE #2807 variant (the only one that issues
-    // one >128 MiB fd_write).
+    // Re-chunks bodies > 1 MiB into valid <=1 MiB JSON frames on the WRITE side
+    // (#2810) — formerly THE #2807 variant that built the whole frame and issued
+    // one >128 MiB fd_write; now bounded like nm_js2wasm_node_fs.
+    mode: "rechunk",
+  },
+  {
+    name: "nm_js2wasm_deno",
+    src: "nm_js2wasm_deno.ts",
+    bunExtra: [],
+    js2wasmExtra: [],
+    preload: null,
     mode: "verbatim",
   },
-  { name: "nm_js2wasm_deno", src: "nm_js2wasm_deno.ts", bunExtra: [], js2wasmExtra: [], preload: null, mode: "verbatim" },
   {
     name: "nm_js2wasm_wasi_p1",
     src: "nm_js2wasm_wasi_p1.ts",

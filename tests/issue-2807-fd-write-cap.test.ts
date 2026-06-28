@@ -46,6 +46,53 @@ function frame(body: Uint8Array): Uint8Array {
   return out;
 }
 
+const MiB = 1024 * 1024;
+
+// A valid JSON-array body `[null,null,…]` of ~`approx` bytes — the loopdive/js2#389
+// payload shape the re-chunker splits on. nm_js2wasm_node_process now re-chunks a
+// body > 1 MiB into a sequence of valid <=1 MiB `[run]` frames (#2810), so the
+// #2807 coverage drives a JSON body (not arbitrary bytes) and asserts re-chunk
+// round-trip rather than a single byte-exact echo.
+function jsonArrayBody(approx: number): Uint8Array {
+  const m = Math.max(1, Math.floor((approx - 6) / 5) + 1);
+  const total = 2 + 4 + 5 * (m - 1);
+  const buf = new Uint8Array(total);
+  let p = 0;
+  buf[p++] = 0x5b; // [
+  for (const c of "null") buf[p++] = c.charCodeAt(0);
+  for (let i = 1; i < m; i++) for (const c of ",null") buf[p++] = c.charCodeAt(0);
+  buf[p++] = 0x5d; // ]
+  return buf;
+}
+
+// Split a stream of `[4-byte LE length][body]` Native-Messaging frames into the
+// body slices.
+function parseFrames(stream: Uint8Array): Uint8Array[] {
+  const frames: Uint8Array[] = [];
+  let p = 0;
+  while (p + 4 <= stream.length) {
+    const len = stream[p]! + stream[p + 1]! * 256 + stream[p + 2]! * 65536 + stream[p + 3]! * 16777216;
+    p += 4;
+    if (p + len > stream.length) break;
+    frames.push(stream.subarray(p, p + len));
+    p += len;
+  }
+  return frames;
+}
+
+// Reassemble re-chunked `[run]` array frames: concatenate each frame's interior
+// (drop the outer `[` / `]`), re-inserting one comma between frames, and wrap the
+// whole in `[` … `]` — must reproduce the original array body byte-for-byte.
+function reassembleArrayFrames(frames: Uint8Array[]): Buffer {
+  const parts: Buffer[] = [];
+  for (let i = 0; i < frames.length; i++) {
+    const f = frames[i]!;
+    if (i > 0) parts.push(Buffer.from([0x2c])); // ,
+    parts.push(Buffer.from(f.subarray(1, f.length - 1))); // strip [ … ]
+  }
+  return Buffer.concat([Buffer.from([0x5b]), Buffer.concat(parts), Buffer.from([0x5d])]);
+}
+
 /**
  * Reactor shim for `nm_js2wasm_node_process`, with a wasmtime-FAITHFUL capped `fd_write`:
  * a single iovec whose length exceeds {@link MODELLED_CAP} is rejected with errno
@@ -163,13 +210,14 @@ async function runReactorShimCapped(
   return { out, maxWrite, rejected };
 }
 
-describe("#2807 — nm_js2wasm_node_process echoes a >chunk frame under a wasmtime-faithful fd_write cap", () => {
+describe("#2810 — nm_js2wasm_node_process re-chunks to <=1 MiB frames under a wasmtime-faithful fd_write cap", () => {
   it(
-    "chunks the write so no single fd_write exceeds the cap, and echoes byte-exact",
+    "re-chunks a >1 MiB JSON body into valid <=1 MiB frames that reassemble byte-exact, with no fd_write over the cap",
     { timeout: 180_000 },
     async () => {
       // The chunk size must sit safely below wasmtime's real ~128 MiB cap, or a
-      // single chunk would itself be rejected by real wasmtime.
+      // single chunk would itself be rejected by real wasmtime. (#2807 guard: it
+      // still holds even though the re-chunk now keeps every write <=1 MiB.)
       expect(WASI_FD_WRITE_MAX_CHUNK).toBeLessThan(WASMTIME_REAL_CAP);
 
       const src = readFileSync(join(NM_DIR, "nm_js2wasm_node_process.ts"), "utf-8");
@@ -181,17 +229,54 @@ describe("#2807 — nm_js2wasm_node_process echoes a >chunk frame under a wasmti
       expect(r.success, r.success ? "" : `compile error: ${r.errors?.[0]?.message}`).toBe(true);
       expect(WebAssembly.validate(r.binary!), "nm_js2wasm_node_process.ts must validate").toBe(true);
 
-      // One chunk + a remainder: the OLD single-shot write would be one
-      // (chunk + remainder) iovec — rejected by the modelled cap → zero output.
-      const body = new Uint8Array(WASI_FD_WRITE_MAX_CHUNK + 8192).fill(0x61);
+      // Just over one compiler-chunk of valid JSON array body: the OLD single-shot
+      // write would be one (chunk + remainder) iovec — rejected by the modelled
+      // cap → zero output (the #2807 regression). The re-chunk now splits this into
+      // valid <=1 MiB JSON frames.
+      const body = jsonArrayBody(WASI_FD_WRITE_MAX_CHUNK + 8192);
       const input = frame(body);
 
       const { out, maxWrite, rejected } = await runReactorShimCapped(r.binary!, input);
 
+      // #2807 capped-fd_write guard STAYS: no single fd_write may exceed the cap,
+      // and output is non-zero. (Re-chunking keeps every write <=1 MiB, far under
+      // the modelled cap, so `rejected` is 0 by construction.)
       expect(rejected, "no fd_write may exceed the cap (the #2807 single-shot regression)").toBe(0);
-      expect(out.length, "must not emit zero bytes (the #2807 silent failure)").toBe(input.length);
-      expect(Buffer.compare(Buffer.from(out), Buffer.from(input)), "echo must be byte-identical").toBe(0);
+      expect(out.length, "must not emit zero bytes (the #2807 silent failure)").toBeGreaterThan(0);
       expect(maxWrite, "every single fd_write stays within the chunk cap").toBeLessThanOrEqual(WASI_FD_WRITE_MAX_CHUNK);
+
+      // #2810 re-chunk round-trip: every emitted frame body is within the 1 MiB
+      // browser cap, and the frame interiors reassemble to the original body.
+      const frames = parseFrames(out);
+      expect(frames.length, "the >1 MiB body must be split into multiple frames").toBeGreaterThan(1);
+      for (let i = 0; i < frames.length; i++) {
+        expect(frames[i]!.length, `frame ${i} body must be within the 1 MiB browser cap`).toBeLessThanOrEqual(MiB);
+      }
+      expect(
+        Buffer.compare(reassembleArrayFrames(frames), Buffer.from(body)),
+        "reassembled frame interiors must equal the input array body",
+      ).toBe(0);
     },
   );
+
+  it("echoes a body within the 1 MiB cap verbatim, in a single frame", { timeout: 120_000 }, async () => {
+    const src = readFileSync(join(NM_DIR, "nm_js2wasm_node_process.ts"), "utf-8");
+    const r = await compile(src, {
+      fileName: "nm_js2wasm_node_process.ts",
+      target: "wasi",
+      skipSemanticDiagnostics: true,
+    });
+    expect(r.success, r.success ? "" : `compile error: ${r.errors?.[0]?.message}`).toBe(true);
+
+    // A sub-1 MiB JSON body fits the cap → echoed verbatim (prefix + body) as a
+    // single frame, byte-identical to the input.
+    const body = jsonArrayBody(64 * 1024);
+    const input = frame(body);
+
+    const { out, rejected } = await runReactorShimCapped(r.binary!, input);
+
+    expect(rejected).toBe(0);
+    expect(out.length, "verbatim echo is one frame, same size as input").toBe(input.length);
+    expect(Buffer.compare(Buffer.from(out), Buffer.from(input)), "sub-cap body echoes byte-identical").toBe(0);
+  });
 });
