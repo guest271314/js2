@@ -18,7 +18,7 @@ REPO_ROOT=$(CDPATH= cd -- "$DIR/../.." && pwd)
 OUT_DIR=$(mktemp -d)
 trap 'rm -rf "$OUT_DIR"' EXIT
 
-echo "== Compiling examples/native-messaging/nm_js2wasm.ts --target wasi =="
+echo "== Compiling examples/native-messaging/nm_node_fs.ts --target wasi =="
 CLI="$OUT_DIR/js2wasm-cli.mjs"
 # #2631 — the host now uses node:fs readSync/writeSync via the linkable `node:fs`
 # shim, so compile with --link-node-shims and build node-fs.wasm to preload.
@@ -26,10 +26,10 @@ SHIM="$OUT_DIR/node-fs.wasm"
 (
   cd "$REPO_ROOT"
   node scripts/build-standalone-cli.mjs --outfile "$CLI"
-  node "$CLI" examples/native-messaging/nm_js2wasm.ts --target wasi --link-node-shims -o "$OUT_DIR" --quiet
+  node "$CLI" examples/native-messaging/nm_node_fs.ts --target wasi --link-node-shims -o "$OUT_DIR" --quiet
   node scripts/build-node-fs-shim.mjs "$SHIM"
 )
-WASM="$OUT_DIR/nm_js2wasm.wasm"
+WASM="$OUT_DIR/nm_node_fs.wasm"
 [ -f "$WASM" ] || { echo "FAIL: $WASM was not produced" >&2; exit 1; }
 [ -f "$SHIM" ] || { echo "FAIL: $SHIM was not produced" >&2; exit 1; }
 

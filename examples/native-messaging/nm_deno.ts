@@ -27,9 +27,9 @@
 // works in the standalone module exactly as it does under real Deno.
 //
 // Contrast with the siblings:
-//   - `nm_js2wasm.ts` uses Node's `node:fs` `readSync`/`writeSync(fd, …)` — also
+//   - `nm_node_fs.ts` uses Node's `node:fs` `readSync`/`writeSync(fd, …)` — also
 //     runs unmodified under real `node`.
-//   - `nm_wasi.ts` imports `fd_read`/`fd_write` from `wasi_snapshot_preview1`
+//   - `nm_wasi_p1.ts` imports `fd_read`/`fd_write` from `wasi_snapshot_preview1`
 //     directly (the rawest pure-WASI expression, no runtime API surface).
 // All three compile to the SAME pure-WASI-P1 shape; they differ only in which
 // runtime's source-level API they additionally run under, unmodified.

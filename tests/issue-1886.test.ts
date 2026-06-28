@@ -351,7 +351,7 @@ describe("#1886 linear-safe Uint8Array analysis", () => {
     // faithful synchronous Node primitives) instead of process.std*.{read,write}.
     // The #1886 analysis recognises readSync(fd, buf, …)/writeSync(fd, buf, …) as
     // byte-I/O buffer sinks (ioBufferArgIndex), so every buffer stays linear-safe.
-    const nmPath = resolve(here, "../examples/native-messaging/nm_js2wasm.ts");
+    const nmPath = resolve(here, "../examples/native-messaging/nm_node_fs.ts");
     const src = readFileSync(nmPath, "utf-8");
     const { safeNames, linearParamFns } = analyze(src);
     // Buffers declared in main + the per-frame temporaries + the write buffer
@@ -483,7 +483,7 @@ describe("#1886 Slice B intraprocedural eligibility (localOnlyBindings)", () => 
     // buffer in `logFrameBodyRead`) is built + written entirely within one
     // function and only flows into writeSync (an I/O sink), so it is Slice-B
     // (local-only) eligible.
-    const nmPath = resolve(here, "../examples/native-messaging/nm_js2wasm.ts");
+    const nmPath = resolve(here, "../examples/native-messaging/nm_node_fs.ts");
     const src = readFileSync(nmPath, "utf-8");
     const { localOnlyNames } = analyze(src);
     // `bytes` (logFrameBodyRead) is local-only — never threaded into a user fn.

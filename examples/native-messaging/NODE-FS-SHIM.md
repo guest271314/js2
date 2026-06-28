@@ -19,7 +19,7 @@ module can be linked against:
   interface to WASI `fd_read`/`fd_write`,
 - a **native WASI host** that provides `node:fs` directly, or
 - the **real `node:fs` module** under a JS host (where `import { readSync,
-  writeSync } from "node:fs"` resolves to the actual Node implementation, so the
+writeSync } from "node:fs"` resolves to the actual Node implementation, so the
   same source runs **unmodified** under `node`).
 
 Naming the import `node:fs` (not `js2wasm:node-fs`) keeps the shim implementation
@@ -31,9 +31,9 @@ A byte boundary over a **shared linear memory** — nothing GC-typed crosses the
 link. The js2wasm pointer ABI passes `(fd, ptr, len)`; the compiler bridges its
 GC/linear `Uint8Array` buffer to `(ptr, len)`:
 
-| Function | Signature | Meaning |
-|----------|-----------|---------|
-| `readSync`  | `(fd i32, ptr i32, len i32) -> i32` | bytes read from `fd` into `mem[ptr..ptr+len)` |
+| Function    | Signature                           | Meaning                                        |
+| ----------- | ----------------------------------- | ---------------------------------------------- |
+| `readSync`  | `(fd i32, ptr i32, len i32) -> i32` | bytes read from `fd` into `mem[ptr..ptr+len)`  |
 | `writeSync` | `(fd i32, ptr i32, len i32) -> i32` | bytes written from `mem[ptr..ptr+len)` to `fd` |
 
 Only the fd-based synchronous primitives are supported. **Path-based** `fs`
@@ -51,7 +51,7 @@ the linear memory; the **user module imports** it (memory index 0) along with
    the shim's exports.
 
 There is no cycle (the shim never imports anything from the user module). The
-shim reads/writes the user's bytes over the *same* memory, builds the WASI iovec
+shim reads/writes the user's bytes over the _same_ memory, builds the WASI iovec
 in its own reserved scratch, and issues the syscall.
 
 (Since #2633, **all** std-IO under `--link-node-shims` goes through `node:fs`:
@@ -64,10 +64,10 @@ memory; the bespoke `js2wasm:node-process` shim was retired.)
 Compile the user module:
 
 ```sh
-npx js2wasm examples/native-messaging/nm_js2wasm.ts --target wasi --link-node-shims -o out
+npx js2wasm examples/native-messaging/nm_node_fs.ts --target wasi --link-node-shims -o out
 ```
 
-The emitted `out/nm_js2wasm.wasm` imports only `node:fs` (memory + `readSync` +
+The emitted `out/nm_node_fs.wasm` imports only `node:fs` (memory + `readSync` +
 `writeSync`) and carries **no** `wasi_snapshot_preview1` import for the IO path.
 
 (Re)generate the shim:
@@ -88,21 +88,25 @@ committed source. Run the generator once before linking, or call the exported
 import { readFileSync } from "node:fs";
 
 const shimBin = readFileSync("examples/native-messaging/node-fs.wasm");
-const userBin = readFileSync("out/nm_js2wasm.wasm");
+const userBin = readFileSync("out/nm_node_fs.wasm");
 
 // Minimal WASI fd_read/fd_write over the shim-owned memory (or use a real WASI).
 let mem = null;
 const wasi = {
-  fd_write(fd, iovs, n, nwritten) { /* read iovec from mem, write to fd */ },
-  fd_read(fd, iovs, n, nread)     { /* read from fd into mem at iovec ptr */ },
+  fd_write(fd, iovs, n, nwritten) {
+    /* read iovec from mem, write to fd */
+  },
+  fd_read(fd, iovs, n, nread) {
+    /* read from fd into mem at iovec ptr */
+  },
 };
 
 const shim = await WebAssembly.instantiate(shimBin, { wasi_snapshot_preview1: wasi });
 mem = shim.instance.exports.memory;
 const user = await WebAssembly.instantiate(userBin, {
   "node:fs": {
-    memory:    shim.instance.exports.memory,
-    readSync:  shim.instance.exports.readSync,
+    memory: shim.instance.exports.memory,
+    readSync: shim.instance.exports.readSync,
     writeSync: shim.instance.exports.writeSync,
   },
 });
@@ -123,7 +127,7 @@ recompile.
 wasmtime run \
   --preload node:fs=examples/native-messaging/node-fs.wasm \
   --invoke main \
-  out/nm_js2wasm.wasm
+  out/nm_node_fs.wasm
 ```
 
 `--preload <name>=<file>` registers the shim under the import module name

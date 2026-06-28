@@ -22,7 +22,7 @@ import { compile } from "../src/index.js";
 import { buildNodeFsShim } from "../scripts/build-node-fs-shim.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const hostPath = join(here, "..", "examples", "native-messaging", "nm_js2wasm.ts");
+const hostPath = join(here, "..", "examples", "native-messaging", "nm_node_fs.ts");
 const FRAME_CHUNK = 1024 * 1024;
 
 // Minimal raw-byte WASI shim (mirrors issue-1530.test.ts): fd_read drains a
@@ -126,7 +126,7 @@ function parseFrames(bytes: Uint8Array): string[] {
 describe("#2521 Native Messaging host — >1 MiB re-chunking + multi-message sequence", () => {
   it("echoes a <=1 MiB message verbatim in a single frame", async () => {
     const result = await compile(readFileSync(hostPath, "utf-8"), {
-      fileName: "nm_js2wasm.ts",
+      fileName: "nm_node_fs.ts",
       target: "wasi",
       linkNodeShims: true,
     });
@@ -137,7 +137,7 @@ describe("#2521 Native Messaging host — >1 MiB re-chunking + multi-message seq
 
   it("re-chunks a >1 MiB array into multiple <=1 MiB JSON-array frames that reassemble to the original", async () => {
     const result = await compile(readFileSync(hostPath, "utf-8"), {
-      fileName: "nm_js2wasm.ts",
+      fileName: "nm_node_fs.ts",
       target: "wasi",
       linkNodeShims: true,
     });
@@ -162,7 +162,7 @@ describe("#2521 Native Messaging host — >1 MiB re-chunking + multi-message seq
 
   it("processes the reporter's multi-message sequence (big then small) with no desync", async () => {
     const result = await compile(readFileSync(hostPath, "utf-8"), {
-      fileName: "nm_js2wasm.ts",
+      fileName: "nm_node_fs.ts",
       target: "wasi",
       linkNodeShims: true,
     });

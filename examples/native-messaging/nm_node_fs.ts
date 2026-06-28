@@ -1,6 +1,6 @@
 // Native Messaging host, compiled to standalone WASI by js2wasm.
 //
-//   npx js2wasm examples/native-messaging/nm_js2wasm.ts --target wasi -o out
+//   npx js2wasm examples/native-messaging/nm_node_fs.ts --target wasi -o out
 //
 // `--target wasi` ALONE (no `--link-node-shims`) emits a SELF-CONTAINED WASI
 // Preview-1 command module: it imports ONLY `wasi_snapshot_preview1` (fd_read /
@@ -17,7 +17,7 @@
 // `fs.writeSync` are the faithful synchronous primitives (this is also what Javy
 // uses: `Javy.IO.readSync`).
 //
-//   npx js2wasm examples/native-messaging/nm_js2wasm.ts --target wasi --link-node-shims -o out
+//   npx js2wasm examples/native-messaging/nm_node_fs.ts --target wasi --link-node-shims -o out
 //
 // is the VARIANT that lowers the same calls to imported `node:fs` shim calls
 // (`node-fs.wat`, which maps them to WASI fd_read / fd_write) — useful when the

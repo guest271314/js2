@@ -1,7 +1,7 @@
 // Native Messaging host, compiled to standalone WASI by js2wasm — the RAW
 // `wasi_snapshot_preview1` variant.
 //
-//   npx js2wasm examples/native-messaging/nm_wasi.ts --target wasi -o out
+//   npx js2wasm examples/native-messaging/nm_wasi_p1.ts --target wasi -o out
 //
 // This is the MOST honest pure-WASI-Preview-1 expression of the host: it imports
 // `fd_read` / `fd_write` DIRECTLY from `wasi_snapshot_preview1` — the real WASI
@@ -10,7 +10,7 @@
 // module imports ONLY `wasi_snapshot_preview1`, owns + exports its own `memory`,
 // and runs directly under wasmtime.
 //
-// Contrast with the sibling `nm_js2wasm.ts`, which uses `node:fs`
+// Contrast with the sibling `nm_node_fs.ts`, which uses `node:fs`
 // `readSync`/`writeSync(fd, …)` — faithful Node fd-based IO that ALSO runs
 // UNMODIFIED under real `node`. This file does NOT run under Node (it speaks raw
 // WASI syscalls over linear memory); it is the pure-WASI counterpart.
