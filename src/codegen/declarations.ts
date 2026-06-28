@@ -3722,6 +3722,27 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
         }
       }
     }
+    // (#2804) A spread-containing object literal in a NON-SPECIFIC context (no
+    // concrete contextual struct type — e.g. top-level `const b = { ...a, z: 3 }`)
+    // is built as a host `$Object` (externref) by the literals.ts routing, NOT
+    // the closed struct TS infers. The receiving global must be externref to
+    // match (else the host object is ref.cast to the inferred struct → read
+    // NaN/null), and reads route through `__extern_get`, preserving the spread's
+    // runtime insertion-order keys + values. Mirrors the function-local sites
+    // (statements/variables.ts, index.ts walkStmtForLetConst/hoistVarDecl);
+    // inlined to keep the same lockstep predicate as the literals.ts routing.
+    if (decl.initializer.properties.some((p) => ts.isSpreadAssignment(p))) {
+      const spreadCtxType = ctx.checker.getContextualType(decl.initializer);
+      if (
+        !spreadCtxType ||
+        (spreadCtxType.flags & ts.TypeFlags.Any) !== 0 ||
+        (spreadCtxType.flags & ts.TypeFlags.Unknown) !== 0 ||
+        (spreadCtxType.flags & ts.TypeFlags.NonPrimitive) !== 0 ||
+        spreadCtxType.getProperties().length === 0
+      ) {
+        return true;
+      }
+    }
     return false;
   }
 

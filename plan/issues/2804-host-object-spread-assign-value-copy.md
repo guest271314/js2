@@ -1,10 +1,12 @@
 ---
 id: 2804
 title: "host path: object spread `{...a}` & Object.assign drop copied values/keys (closed-struct representation mismatch)"
-status: ready
+status: done
+assignee: ttraenkler/sendev-objspread
 sprint: current
 created: 2026-06-28
 updated: 2026-06-28
+completed: 2026-06-28
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -100,3 +102,63 @@ read on the dynamic path.
 
 - Carved from #2796. #2796 fixed the `for…in` enumeration-timing case; this is
   the residual real codegen representation bug.
+
+## Implementation notes (resolved 2026-06-28, sendev-objspread)
+
+Root-caused both halves to a **representation/path mismatch**, not the
+hypothesised host-mirror gap. Fix keys on the **TS type / chosen representation**,
+never the Wasm kind.
+
+### A — spread `{ ...a, z: 3 }` (wrong key order + NaN values)
+
+The `#2714` routing already sent a spread literal in a NON-SPECIFIC context (no
+contextual type — exactly `const b = { ...a, z: 3 }`) to the host plain-object
+(`$Object`/externref) path. But the **variable** `b`'s slot was still typed as the
+struct TypeScript *infers* (`{z;x;y}`): the host `$Object` was then `ref.test`/
+`ref.cast` to that struct at runtime, the cast **failed**, `b` became null →
+`b.x`/`b.z` read NaN/null. And `Object.keys(b)` took a **compile-time struct-shape
+fast path** that lists the inferred field order (`z,x,y`, own-prop-first), not the
+spread's runtime CopyDataProperties **insertion order** (`x,y,z`).
+
+Fix — make the local/global representation follow the routing decision:
+- Extracted the routing predicate as `objectLiteralSpreadTakesHostPath`
+  (`literals.ts`) — the single source of truth.
+- Force an **externref** slot (+ `externrefAccessorVars` tag) for a host-path
+  spread initializer at **all four** variable-typing sites that pre-date
+  `compileVariableStatement`: `statements/variables.ts`, the var-hoist and the
+  authoritative `walkStmtForLetConst` TDZ pre-hoist in `index.ts`, and the
+  module-global typer `moduleInitForcesExternref` in `declarations.ts` (top-level
+  `const` becomes a global, NOT a function local — this was the one that kept the
+  corpus failing after the first three were fixed).
+- `Object.keys`/`values`/`entries` of an `externrefAccessorVars` var → route to
+  the runtime `__object_*` helper (`object-ops.ts`) so enumeration reflects the
+  live host object's insertion order, not the struct shape.
+- An explicit concrete-struct annotation pins a contextual type → predicate false
+  → struct path retained (#2714 control stays green).
+
+### B — `Object.assign(t, { b }, { c })` (sources dropped from keys)
+
+NOT a copy failure: the host `__object_assign` already copies source keys into the
+struct target's **sidecar** (for-in surfaced `a,b,c`). But the copy is a plain
+dynamic write recording **no descriptor**, and `__object_keys`/`values`/`entries`/
+`getOwnPropertyNames` only surface sidecar keys on a struct that carry a descriptor
+(`#2746`) — so `Object.keys` dropped them while for-in showed them (an existing
+keys-vs-for-in inconsistency). Fix: in `__object_assign` (`runtime.ts`, host),
+record an enumerable writable+configurable descriptor for each newly-copied
+non-static-field key — matching the spec data-property semantics Object.assign's
+`[[Set]]` creates, and making all four enumeration helpers consistent with for-in.
+
+### Validation
+
+- `object/02-spread` + `object/12-assign` now MATCH V8; full diff-test corpus
+  **+2 match / 0 regress** (94/104, object 11/12 — the lone remaining `06-delete`
+  is a pre-existing delete-on-struct issue, untouched here).
+- Host **and** standalone both correct (the runtime.ts change is host-only;
+  standalone uses the native `object-runtime.ts` `__object_assign` + native
+  `$Object`, which already passed — **no new unconditional standalone helper**, so
+  the #2097 floor is unaffected).
+- Green: `#2714` (11), `#2746` (14), `#2076`, `#1336`, `#1630`, `#2011`, `#1239`,
+  `#2127`, `#1901`, `#786`; `tests/issue-2804.test.ts` 20/20 (host+standalone);
+  `tsc` clean. The 9-file object/spread batch is byte-identical pass/fail to clean
+  `main` (the `spread-rest.test.ts` `string_constants`-harness failures are
+  pre-existing and 100% reproduce on `main`, not in any CI gate).

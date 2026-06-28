@@ -13999,6 +13999,24 @@ function hoistVarDecl(ctx: CodegenContext, fctx: FunctionContext, decl: ts.Varia
           }
         }
       }
+      // (#2804) A spread-containing object literal in a NON-SPECIFIC context
+      // (no concrete contextual struct type — e.g. `var b = { ...a, z: 3 }`)
+      // takes the host plain-object path (compileObjectLiteralWithAccessors),
+      // building an externref `$Object`, NOT the closed struct TS infers. The
+      // hoisted slot must be externref to match (else the value is ref.cast to
+      // the inferred struct → read NaN/null). Mirrors the let/const path in
+      // statements/variables.ts (objectLiteralSpreadTakesHostPath); inlined here
+      // to avoid an index↔literals import cycle.
+      if (!initForcesExternref && decl.initializer.properties.some((p) => ts.isSpreadAssignment(p))) {
+        const spreadCtxType = ctx.checker.getContextualType(decl.initializer);
+        const nonSpecificCtx =
+          !spreadCtxType ||
+          (spreadCtxType.flags & ts.TypeFlags.Any) !== 0 ||
+          (spreadCtxType.flags & ts.TypeFlags.Unknown) !== 0 ||
+          (spreadCtxType.flags & ts.TypeFlags.NonPrimitive) !== 0 ||
+          spreadCtxType.getProperties().length === 0;
+        if (nonSpecificCtx) initForcesExternref = true;
+      }
     }
     const wasmType: ValType =
       initForcesExternref || isNullablePrimitiveType(varType)
@@ -14485,16 +14503,42 @@ function walkStmtForLetConst(ctx: CodegenContext, fctx: FunctionContext, stmt: t
           decl.initializer !== undefined &&
           ts.isObjectLiteralExpression(decl.initializer) &&
           decl.initializer.properties.some((p) => ts.isGetAccessorDeclaration(p) || ts.isSetAccessorDeclaration(p));
-        if (initIsAccessorLiteral) {
+        // (#2804) A spread-containing object literal in a NON-SPECIFIC context
+        // (no concrete contextual struct type — e.g. `const b = { ...a, z: 3 }`)
+        // is built as a host `$Object` (externref) by the literals.ts routing,
+        // NOT the closed struct TS infers for the variable. This pre-hoist
+        // allocator is the AUTHORITATIVE slot-typer for let/const (it runs
+        // before compileVariableStatement), so the externref override MUST be
+        // applied here too — otherwise the slot is the inferred struct and the
+        // initializer's externref is ref.cast to it at runtime (cast fails →
+        // `b.x` reads NaN/null). Mirrors statements/variables.ts; inlined to
+        // avoid an index↔literals import cycle.
+        let initIsHostSpreadLiteral = false;
+        if (
+          !initIsAccessorLiteral &&
+          decl.initializer !== undefined &&
+          ts.isObjectLiteralExpression(decl.initializer) &&
+          decl.initializer.properties.some((p) => ts.isSpreadAssignment(p))
+        ) {
+          const spreadCtxType = ctx.checker.getContextualType(decl.initializer);
+          initIsHostSpreadLiteral =
+            !spreadCtxType ||
+            (spreadCtxType.flags & ts.TypeFlags.Any) !== 0 ||
+            (spreadCtxType.flags & ts.TypeFlags.Unknown) !== 0 ||
+            (spreadCtxType.flags & ts.TypeFlags.NonPrimitive) !== 0 ||
+            spreadCtxType.getProperties().length === 0;
+        }
+        if (initIsAccessorLiteral || initIsHostSpreadLiteral) {
           ctx.externrefAccessorVars.add(name);
         }
-        const wasmType: ValType = initIsAccessorLiteral
-          ? { kind: "externref" }
-          : isI32Coerced
-            ? { kind: "i32" }
-            : isNullablePrimitiveType(varType)
-              ? { kind: "externref" }
-              : (inferLetConstInitializerWasmType(ctx, fctx, decl.initializer) ?? resolveWasmType(ctx, varType));
+        const wasmType: ValType =
+          initIsAccessorLiteral || initIsHostSpreadLiteral
+            ? { kind: "externref" }
+            : isI32Coerced
+              ? { kind: "i32" }
+              : isNullablePrimitiveType(varType)
+                ? { kind: "externref" }
+                : (inferLetConstInitializerWasmType(ctx, fctx, decl.initializer) ?? resolveWasmType(ctx, varType));
         allocLocal(fctx, name, wasmType);
         // Only add TDZ flag if static analysis can't prove all accesses are safe
         if (needsTdzFlag(ctx, decl)) {
