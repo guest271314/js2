@@ -43,6 +43,19 @@ built-ins/Date/prototype/setSeconds/arg-ms-to-number.js
 annexB/built-ins/Date/prototype/getYear/not-a-constructor.js
 ```
 
+> **The `toISOString is not a function` cluster is NOT a Date-method gap — it
+> reduces to the structural dispatch issue #2767.** Root-caused 2026-06-28: the
+> ~11 `toISOString` (and ~4 other Date-prototype) failures all use the bare-`var`
+> shape `var date; date = new Date(…); date.toISOString()`. An uninitialized /
+> untyped `var`/`let` is typed `any`/externref, so the nominal-symbol gate in
+> `compileDateMethodCall` (`symName !== "Date"`) bails to the generic dynamic
+> path and the host throws `toISOString is not a function`. The typed form
+> (`const d = new Date(0)`) already works. Fixing #2767 (recover the assigned
+> nominal type for a bare-`var` receiver at the call-dispatch hub) flips this
+> whole Date cluster at once — and the same fix generalizes to DataView /
+> ArrayBuffer / RegExp bare-`var` receivers. **Do the Date `toISOString` residual
+> via #2767, not as a Date-specific patch here.**
+
 **Progress (dev-2046, 2026-06-25):**
 - ✅ **`getYear` (Annex B §B.2.4)** — was MISSING entirely (returned
   undefined/null; `setYear` existed but not the getter). Added to `DATE_METHODS`
