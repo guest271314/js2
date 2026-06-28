@@ -1,7 +1,8 @@
 ---
 id: 2793
 title: "[ARCH][SUBSTRATE] Structural-narrowing struct COPY at call boundary breaks reference semantics (mutation through interface/structural-class param lost)"
-status: ready
+status: blocked
+blocked_reason: "Senior-dev investigation (2026-06-28): no safe localized patch — needs phased substrate work (Gap A anon-literal field order → interfaces-as-externref everywhere → class-structural sibling detection). Routed to architect lane. See '## Senior-dev investigation & design recommendation'."
 sprint: current
 created: 2026-06-28
 updated: 2026-06-28
@@ -163,3 +164,92 @@ narrowed struct copy**:
   (must still value-copy where identity is not observed).
 - Broad-impact → full `merge_group` test262 + standalone-floor authoritative; do
   NOT scoped-sweep.
+
+## Senior-dev investigation & design recommendation (2026-06-28)
+
+**Verdict: confirmed root cause; NO safe localized patch exists — this is a
+substrate change (the issue's `[ARCH][SUBSTRATE]` tag is correct). Routing to the
+architect / substrate lane (#2773) with a validated fix direction + the exact
+gaps that must close.** Investigation done off `origin/main` ed1ef8e.
+
+### The hard constraint (why the call-site alone can't fix it)
+
+The copy lives in `type-coercion.ts coerceType` → `emitSafeStructConversion`
+Case 3 → `emitStructNarrowBody` (~L971), reached when coercing `ref $From →
+ref $To` for two **unrelated** Wasm struct types (`$To`'s fields ⊆ `$From`'s by
+name, `$From` not a declared Wasm subtype of `$To`). The Wasm verifier will not
+accept a `ref $From` where `ref $To` is declared, so the *only* way to SHARE the
+caller's object (not copy) is to **widen the parameter's Wasm type to a common
+supertype** (externref/anyref) — there is no call-site-only fix. Confirmed: the
+param Wasm type is the binding constraint.
+
+### Probe: interface → externref + dynamic dispatch WORKS, but exposes 2 latent gaps
+
+I prototyped the issue's "Preferred" direction (route a plain `interface` value
+type through externref + the existing union/`any` dynamic multi-struct dispatch,
+by returning externref from `resolveWasmType` for interface types and `undefined`
+from `resolveStructName` for them). Measured host **and** standalone:
+
+| Case (host+standalone)                         | main (baseline) | probe         |
+|------------------------------------------------|-----------------|---------------|
+| `#2793` interface mutation-through-param        | FAIL (lost)     | **FIXED**     |
+| return-the-param then mutate (identity)         | FAIL (=1)       | **FIXED (42)**|
+| interface-typed field, mutate via alias         | FAIL (=1)       | **FIXED (99)**|
+| array-of-interface element mutation             | FAIL (=1)       | **FIXED (5)** |
+| second-alias visibility                         | FAIL (=1)       | **FIXED (77)**|
+| reordered-anon read thru interface (#2791 lock) | OK (1020908)    | **REGRESS (1020809)** |
+| non-mutated single-implementer interface read   | OK (4)          | **REGRESS (trap "illegal cast")** |
+
+Takeaways: (1) the direction is **correct** — it fixes `#2793` AND **four more
+currently-silent interface-reference-semantics miscompiles** that share the same
+root cause (so `#2793` is the tip of an iceberg). (2) Naive widening **regresses
+two currently-green reads**, and the WAT shows the regressions are NOT in the new
+path — they are **latent bugs the narrow-copy was masking**:
+
+- **Gap A — anon-literal field order (the copy is load-bearing).** `const b: I =
+  { y: 8, x: 9 }` builds an anon struct in *source* order `[y,x]`, but the
+  structurally-deduped canonical struct order is `[x,y]`; today the narrow-copy
+  into `$I` **reorders by name** and masks this. Remove the copy and the value
+  flows as its own anon struct → a by-name dynamic read of `o.x` returns the
+  wrong slot (got 8, want 9). The literal builder must store in canonical field
+  order independent of the copy.
+- **Gap B — shape-dependent interface resolution.** With a *single* implementer,
+  `getTypeAtLocation(param o: I)` does not resolve through the interface symbol,
+  so the param was NOT widened (WAT: `getV` param stayed `(ref null $I)` and did a
+  monomorphic `struct.get`), while the call site still narrow-copies → the
+  inconsistency surfaces as an illegal cast. Widening must key off the param's
+  **declared type node**, not the checker's (sometimes narrowed) resolved type.
+
+### Why a localized params-only patch is unsound (do NOT ship it)
+
+Widening only the *param* (leaving returns/locals/fields as `ref $I`) creates
+impedance mismatches: `function f(o:I):I{return o}` and `this.field = o`
+(field: `I`) then coerce externref → `ref $I` via a guarded cast that **nulls on
+a non-`$I` runtime value** — trading the mutation miscompile for a
+returns-`null`/store-`null` miscompile. Consistency requires interface types to
+be externref **everywhere** (param + return + local + field). That is the
+substrate change, and it must also fix Gap A/Gap B first.
+
+### Recommended plan (architect / substrate lane, coordinate with #2773)
+
+1. **Phase 1 (prereq, low-risk):** fix Gap A — make anon object-literal
+   construction store fields in the deduped canonical order regardless of source
+   order. Land + validate independently; it is a real latent bug today.
+2. **Phase 2 (interfaces):** make `resolveWasmType` map a plain user `interface`
+   to externref **consistently** (param/return/local/field), keyed off the
+   declared type (fixes Gap B), and force `resolveStructName`/`resolveStructNameForExpr`
+   to `undefined` for interface receivers so all reads/writes use the proven
+   externref dynamic dispatch (`__set_member_*` / multi-struct get). This flips
+   the **interface** half of the `#2791` lock (2 of 4 cases) and the 4 sibling
+   miscompiles above. Broad value-rep change → full `merge_group` + standalone
+   floor authoritative; watch interface-typed **struct fields** (layout/boxing).
+3. **Phase 3 (class-structural, separate + riskier):** the `class A{x}` /
+   `class B{x}` case needs whole-program structural-sibling detection to decide
+   which *class* params to widen (a class with no structural sibling MUST keep
+   its fast monomorphic `ref $A` path — perf). Recommend splitting this into its
+   own issue; it is rarer and orthogonal to the idiomatic interface case that
+   drives `npm-library-support` / dogfood.
+
+Net: the `#2791` lock cannot be fully flipped (all 4) without Phase 3; the
+high-value, idiomatic interface cases flip after Phase 1+2. None of the three is
+a single safe senior-dev patch — they are sequenced substrate PRs.
