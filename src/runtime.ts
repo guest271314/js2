@@ -2253,8 +2253,16 @@ function _instanceofResult(
   const handler = (target as Record<symbol, unknown>)[Symbol.hasInstance];
   if (handler !== undefined && handler !== null && handler !== Function.prototype[Symbol.hasInstance]) {
     // A *custom* @@hasInstance must be callable (GetMethod), else TypeError.
-    const wrappedHandler = _maybeWrapCallableUnknownArity(handler, callbackState);
-    const hfn = typeof wrappedHandler === "function" ? wrappedHandler : handler;
+    // §13.10.2 step 4a mandates the handler be invoked with EXACTLY ONE argument
+    // (V). The property read may already have wrapped the wasm closure at the
+    // method bridge's max arity (=4), which would surface as `arguments.length
+    // === 4` inside the handler. Recover the raw closure and re-bridge at the
+    // known arity 1 so the wasm dispatcher routes via `__call_fn_method_1`
+    // (→ `__argc === 1`) instead of the unknown-arity max bridge (#2764).
+    const rawHandler = typeof handler === "function" ? (_wasmClosureWrapperTargets.get(handler) ?? handler) : handler;
+    const wrappedHandler = _maybeWrapCallable(rawHandler, 1, callbackState);
+    const hfn =
+      typeof wrappedHandler === "function" ? wrappedHandler : typeof handler === "function" ? handler : undefined;
     if (typeof hfn !== "function") return _INSTANCEOF_THROW;
     // step 3: Return ToBoolean(Call(instOfHandler, target, «V»)). `this` is the
     // ORIGINAL target so a WasmGC-struct receiver round-trips to the same ref.
