@@ -82,6 +82,71 @@ function nodeFsWrite(buf: Uint8Array): void {
   }
 }
 
+// Copy the ASCII bytes of a literal `s` into `out` at `pos`; return the new pos.
+function putAscii(out: Uint8Array, pos: number, s: string): number {
+  let i = 0;
+  while (i < s.length) {
+    out[pos + i] = s.charCodeAt(i);
+    i = i + 1;
+  }
+  return pos + s.length;
+}
+
+// Write the decimal ASCII of a non-negative integer `value` into `out` at `pos`;
+// return the new pos. Hand-rolled (no `Number.prototype.toString`): the number→
+// string path (`number_toString_radix`) mis-compiles to invalid Wasm when this
+// file is bundled with the shared core under `--target wasi` — the same node:fs
+// multi-file gap as the seam/cap shapes (#2778 / #2779). Plain f64 arithmetic
+// (`% 10`, `(v - v%10)/10`) is unaffected.
+function putUint(out: Uint8Array, pos: number, value: number): number {
+  if (value === 0) {
+    out[pos] = 48; // '0'
+    return pos + 1;
+  }
+  let digits = 0;
+  let n = value;
+  while (n > 0) {
+    digits = digits + 1;
+    n = (n - (n % 10)) / 10;
+  }
+  let v = value;
+  let i = digits - 1;
+  while (i >= 0) {
+    out[pos + i] = 48 + (v % 10);
+    v = (v - (v % 10)) / 10;
+    i = i - 1;
+  }
+  return pos + digits;
+}
+
+// Debug telemetry to stderr (fd=2) so it never pollutes the stdout protocol
+// stream — one line per input message. The reporter (loopdive/js2#389) noted
+// stderr was the one part that didn't work in his hand-port; this makes it work,
+// and the real-wasmtime smoke test pins the exact line (off-by-one guard).
+function nodeFsLog(declaredLen: number): void {
+  const scratch = new Uint8Array(96); // ample for the fixed text + two integers
+  let p = 0;
+  p = putAscii(scratch, p, "[host] received ");
+  p = putUint(scratch, p, 4 + declaredLen); // total chars on the wire (prefix + body)
+  p = putAscii(scratch, p, " chars, declared body length ");
+  p = putUint(scratch, p, declaredLen);
+  scratch[p] = 10; // '\n'
+  p = p + 1;
+  // Write exactly `p` bytes (writeSync drains buf.length - offset, so size to fit).
+  const bytes = new Uint8Array(p);
+  let k = 0;
+  while (k < p) {
+    bytes[k] = scratch[k];
+    k = k + 1;
+  }
+  let m = 0;
+  while (m < bytes.length) {
+    const w = writeSync(2, bytes, m);
+    if (w <= 0) return;
+    m = m + w;
+  }
+}
+
 export function main(): void {
   // Largest body the browser Native Messaging implementation accepts in one
   // host->extension message, and the size of the single scratch buffer the whole
@@ -97,7 +162,7 @@ export function main(): void {
   const frameChunk = 1024 * 1024;
   // Re-chunk bodies larger than the browser 1 MiB cap into valid <=1 MiB JSON
   // frames; smaller bodies echo verbatim. Streams to EOF / a zero-length frame.
-  runNmHost(nodeFsRead, nodeFsWrite, frameChunk);
+  runNmHost(nodeFsRead, nodeFsWrite, nodeFsLog, frameChunk);
 }
 
 // Invoke the entry point. js2wasm compiles a top-level call into the module's

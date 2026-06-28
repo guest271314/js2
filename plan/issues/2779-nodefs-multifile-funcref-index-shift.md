@@ -29,7 +29,7 @@ Surfaced while doing the #2778 native-messaging dedup (a shared local helper
 imported by `nm_node_fs.ts`). #2771 made the bundle COMPILE; this is the runtime
 follow-up.
 
-## Three triggering shapes (each a clean compile, a runtime fault)
+## Four triggering shapes (each a clean compile, then a runtime/validate fault)
 
 1. **Struct / interface VALUE across the bundle boundary.** Passing an object
    (`{ read, write }`) — or a method extracted from one (`io.read`) — from the
@@ -42,6 +42,12 @@ follow-up.
 3. **A module-level `const` (lowered to a Wasm global) passed as a call argument**
    across the bundle boundary faults; a LOCAL const / inline literal (a plain
    `i32.const` operand) does not.
+4. **The number→string path (`number_toString_radix`)** — e.g. a template literal
+   `` `…${n}…` `` — mis-compiles to **invalid Wasm** in the bundled `node:fs`
+   entry (`WebAssembly.validate` fails: `not enough arguments on the stack for
+   f64.convert_i32_s @ number_toString_radix`). Plain f64 arithmetic is fine, so a
+   hand-rolled decimal formatter (`% 10`, `(v - v%10)/10`) is an unaffected
+   workaround (used by nm_node_fs's fd-2 telemetry).
 
 ## Hypothesis
 

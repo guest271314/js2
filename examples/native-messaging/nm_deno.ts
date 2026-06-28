@@ -70,10 +70,18 @@ function denoWrite(buf: Uint8Array): void {
   }
 }
 
+// No fd-2 telemetry in the verbatim variant (matches the pre-dedup nm_deno). The
+// verbatim path never invokes the diagnostics hook, so this is never called — it
+// exists only to satisfy the shared core's `log` parameter.
+function denoNoLog(declaredLen: number): void {
+  // intentionally empty; `declaredLen` is referenced so strict typecheck is happy
+  void declaredLen;
+}
+
 export function main(): void {
   // Verbatim echo: no browser re-chunk cap (maxFrameSize 0). Each framed message
   // is streamed back byte-for-byte until EOF / a zero-length shutdown frame.
-  runNmHost(denoRead, denoWrite, 0);
+  runNmHost(denoRead, denoWrite, denoNoLog, 0);
 }
 
 // Invoke the entry point. js2wasm compiles a top-level call into the module's

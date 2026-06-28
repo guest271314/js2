@@ -55,13 +55,14 @@ files, so the cross-file `call_ref` / field read faults. Passing standalone
 
 ## Compiler gaps discovered (worked around here; tracked in #2779)
 
-All three are `node:fs`-multi-file (`compileProject`/`compileMultiSource`) +
-`--target wasi` codegen gaps. Each compiles to a clean wasi-only module but FAULTS
-at runtime; the Deno variant (no `node:fs` shim insertion → no index shift) is
-unaffected. Worked around in the example sources so the dedup ships working:
+All four are `node:fs`-multi-file (`compileProject`/`compileMultiSource`) +
+`--target wasi` codegen gaps. Each compiles to a clean wasi-only module but then
+FAULTS at runtime (or fails `WebAssembly.validate`); the Deno variant (no `node:fs`
+shim insertion → no index shift) is unaffected. Worked around in the example
+sources so the dedup ships working:
 
 1. **Struct/interface value across the bundle boundary** → fault. Workaround: the
-   seam passes two function references, not an object.
+   seam passes function references (`read`, `write`, `log`), not an object.
 2. **A shared-module helper returning a nullable reference type** (`Uint8Array |
    null`, e.g. the original `readExactNew`) → fault when bundled into a `node:fs`
    entry. Workaround: every shared reader uses the `boolean`-EOF form
@@ -70,6 +71,11 @@ unaffected. Worked around in the example sources so the dedup ships working:
 3. **A module-level `const` (lowered to a Wasm global) passed as a call argument**
    across the bundle boundary → fault. Workaround: the cap is a LOCAL const inside
    `main()` (compiles to a plain `i32.const` operand).
+4. **The number→string path (`number_toString_radix`)** — e.g. a template literal
+   `` `…${n}…` `` — compiles to INVALID Wasm in the bundled `node:fs` entry.
+   Surfaced restoring nm_node_fs's fd-2 telemetry (`[host] received N chars …`),
+   which the real-wasmtime smoke test asserts. Workaround: a hand-rolled decimal
+   formatter (`% 10`, `(v - v%10)/10`) instead of template-literal interpolation.
 
 These look like a single underlying defect: `node:fs` shim insertion shifts
 function/global/type indices in a multi-file bundle, but some references are not
@@ -85,14 +91,16 @@ WASI module — imports = `{wasi_snapshot_preview1}` ONLY, no `env::*`, with
 versions:
 
 - `nm_deno`: byte-exact verbatim echo at 1 / 64 / 128 MiB.
-- `nm_node_fs`: re-chunk round-trip at 1 KiB → 64 MiB — every emitted frame is a
+- `nm_node_fs`: re-chunk round-trip at 1 KiB → 128 MiB — every emitted frame is a
   valid `[…]` within the 1 MiB cap, and concatenating the frame interiors
-  reconstructs the original array body exactly.
+  reconstructs the original array body exactly; the fd-2 telemetry line is
+  byte-exact under real wasmtime (the `smoke` check).
 
 Pinned by `tests/native-messaging-matrix.test.ts` (1/64/128 MiB matrix),
 `tests/native-messaging-comparison.test.ts` (#2683/#2696 import-section + echo
-harness) and `tests/issue-2521-native-messaging-rechunk.test.ts` (linkNodeShims
-re-chunk). All three route nm_deno/nm_node_fs through `compileProject` (mirroring
+harness), `tests/issue-2521-native-messaging-rechunk.test.ts` (linkNodeShims
+re-chunk), and `examples/native-messaging/smoke-test.sh` (the `smoke` CI check —
+real wasmtime, `--link-node-shims`, asserts stdout frame + fd-2 stderr line). All three route nm_deno/nm_node_fs through `compileProject` (mirroring
 the CLI's #2771 `entryHasRelativeImports` dispatch); the other variants stay on
 single-source `compile()` so their output is byte-identical. The comparison
 harness's variant discovery excludes `nm_sync_framing.ts` (it is the shared core,

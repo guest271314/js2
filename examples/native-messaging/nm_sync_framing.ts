@@ -48,6 +48,15 @@ export type NmRead = (buf: Uint8Array) => number | null;
 /** Write the WHOLE of `buf` to fd 1, draining any partial writes internally. */
 export type NmWrite = (buf: Uint8Array) => void;
 
+/**
+ * Per-frame diagnostics hook (fd 2 telemetry), called once per INPUT message in
+ * the re-chunk path with its declared body length. Kept a callback (not string
+ * work in this host-independent core) so the adapter owns the message text + its
+ * fd-2 writer; the verbatim path never calls it (it emits no telemetry, matching
+ * the pre-dedup nm_deno). A no-op is a valid implementation.
+ */
+export type NmLog = (declaredLen: number) => void;
+
 // 64 KiB streaming window for the verbatim path — the largest body run read /
 // written in one step (invisible to the receiver, which concatenates raw bytes).
 const VERBATIM_WINDOW = 64 * 1024;
@@ -192,7 +201,7 @@ function runVerbatim(read: NmRead, write: NmWrite): void {
 // each one back as valid JSON within the browser `cap`-byte per-message cap. A
 // body that already fits is echoed verbatim; a larger array/string body is split
 // into valid <=cap frames. Streams through a single reused `cap` buffer.
-function runRechunk(read: NmRead, write: NmWrite, cap: number): void {
+function runRechunk(read: NmRead, write: NmWrite, log: NmLog, cap: number): void {
   const maxRun = cap - 2; // leave room for the framing `[`/`]` (or the two `"`)
   const header = new Uint8Array(4);
   const one = new Uint8Array(1);
@@ -203,6 +212,7 @@ function runRechunk(read: NmRead, write: NmWrite, cap: number): void {
     if (!readFillExact(read, header, 0, 4)) break;
     const declaredLen = decodeLength(header);
     if (declaredLen === 0) break;
+    log(declaredLen); // fd-2 telemetry (one line per input message)
 
     if (declaredLen <= cap) {
       // Already a single valid JSON message within the cap — echo verbatim.
@@ -315,13 +325,15 @@ function runRechunk(read: NmRead, write: NmWrite, cap: number): void {
  *                     `<= 0` at EOF. MUST be a standalone function reference (see
  *                     the cross-module-funcref note at the top of this file).
  * @param write        one host `writeSync` (fd 1); writes the whole buffer.
+ * @param log          per-frame fd-2 telemetry hook (re-chunk path only); pass a
+ *                     no-op when the host emits no diagnostics (e.g. nm_deno).
  * @param maxFrameSize `<= 0` → verbatim echo (no cap); `> 0` → re-chunk bodies
  *                     larger than this many bytes into valid <=`maxFrameSize`
  *                     JSON frames (the browser per-message cap).
  */
-export function runNmHost(read: NmRead, write: NmWrite, maxFrameSize: number): void {
+export function runNmHost(read: NmRead, write: NmWrite, log: NmLog, maxFrameSize: number): void {
   if (maxFrameSize > 0) {
-    runRechunk(read, write, maxFrameSize);
+    runRechunk(read, write, log, maxFrameSize);
   } else {
     runVerbatim(read, write);
   }
