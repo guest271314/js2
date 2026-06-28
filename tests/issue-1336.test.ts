@@ -42,3 +42,58 @@ export function test(): number {
     expect((r as any).test()).toBe(6);
   });
 });
+
+// A computed Symbol-keyed object LITERAL (`{ [k]: v }`) previously dropped symbol
+// identity: the #2126 runtime-computed-key write path compiled the key without
+// an `externref` expected-type hint, so the symbol's i32 id was boxed as a
+// NUMBER (`__box_number`) instead of a real JS Symbol (`__box_symbol`). The
+// property landed under string key "<id>", so `o[k]`, getOwnPropertySymbols,
+// Object.assign and spread all missed it. (`defineProperty`-form symbol keys,
+// covered above, already worked.)
+describe("#1336 Symbol-keyed object LITERAL fidelity", () => {
+  it("reads back a symbol-keyed literal property", async () => {
+    const r = await compileToWasm(
+      `export function test(): number { const k = Symbol("k"); const s: any = { [k]: 7 }; return s[k] as number; }`,
+    );
+    expect((r as any).test()).toBe(7);
+  });
+
+  it("registers the literal key as a real Symbol, not a string", async () => {
+    const r1 = await compileToWasm(
+      `export function test(): number { const k = Symbol("k"); const s: any = { [k]: 7 }; return Object.getOwnPropertySymbols(s).length; }`,
+    );
+    expect((r1 as any).test()).toBe(1);
+    const r2 = await compileToWasm(
+      `export function test(): number { const k = Symbol("k"); const s: any = { [k]: 7 }; return Object.getOwnPropertyNames(s).length; }`,
+    );
+    expect((r2 as any).test()).toBe(0);
+  });
+
+  it("Object.assign copies a symbol-keyed literal property", async () => {
+    const r = await compileToWasm(
+      `export function test(): number { const k = Symbol("k"); const s: any = { [k]: 7 }; const t: any = {}; Object.assign(t, s); return t[k] as number; }`,
+    );
+    expect((r as any).test()).toBe(7);
+  });
+
+  it("object spread copies a symbol-keyed literal property", async () => {
+    const r = await compileToWasm(
+      `export function test(): number { const k = Symbol("k"); const s: any = { [k]: 7 }; const t: any = { ...s }; return t[k] as number; }`,
+    );
+    expect((r as any).test()).toBe(7);
+  });
+
+  it("mixed literal: string field and symbol key both survive", async () => {
+    const r = await compileToWasm(
+      `export function test(): number { const k = Symbol("k"); const s: any = { a: 1, [k]: 7 }; return (s.a as number) + Object.getOwnPropertySymbols(s).length; }`,
+    );
+    expect((r as any).test()).toBe(2);
+  });
+
+  it("CONTROL: numeric runtime computed key unchanged", async () => {
+    const r = await compileToWasm(
+      `export function test(): number { const s: any = { [1 + 1]: 7 }; return s[2] as number; }`,
+    );
+    expect((r as any).test()).toBe(7);
+  });
+});
