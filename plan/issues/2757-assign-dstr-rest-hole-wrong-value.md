@@ -141,3 +141,39 @@ compiles to a tuple/empty representation, not the vec path, so `r` is not yet an
 array there (issue point #2); (2) an **OOB non-rest element** in the vec path
 does not yet read `undefined` (issue point #3); (3) **dynamic-object** member
 rest (`[...o.y]` with `o:any={}`) needs `__extern_set` property creation.
+
+## CI-FIX — nested-array-rest undefined/hole invalid-Wasm (PR #2224 merge-group park, agent-af359e7cc95c024c6, 2026-06-28)
+
+PR #2224 was auto-parked by the merge-group bot: net +5 but failed the ratio
+gate (28.6% > 10%) on **2 in-area regressions**, both `compile_error` (INVALID
+WASM) for the PR's own feature — nested array-pattern rest over an
+undefined/hole source:
+`expressions/assignment/dstr/array-rest-nested-array-undefined-{own,hole}.js`.
+
+Two distinct defects in the `[...[x]] = vals` path
+(`src/codegen/expressions/assignment.ts`):
+
+- **(own, `[undefined]`) — double coercion.** `emitArrayDestructureFromLocal`'s
+  identifier-element bind manually `coerceType(elemType → localType)` and THEN
+  called `emitCoercedLocalSet(…, elemType)`, which coerces the (already-coerced)
+  stack value a SECOND time — emitting `f64.convert_i32_s` on an externref when
+  the rest-vec element type differed from the target local's type. Fixed by
+  dropping the redundant pre-coerce (`emitCoercedLocalSet` already coerces
+  `elemType → localType` internally).
+
+- **(hole, `[ , ]`) — stale `$Hole` global.get.** The nested pattern's null
+  guard ran `buildDestructureNullThrow`, which adds a LATE `string_constants`
+  import global, shifting every module-global index. A `$Hole` `global.get`
+  emitted earlier for the hole literal (`var vals = [ , ]`) went one slot stale
+  because `fixupModuleGlobalIndices` walked no in-progress body when
+  `ctx.currentFunc` was transiently null at the string-constant add — leaving
+  `extern.convert_any` consuming an i32 global. The collected rest vec is freshly
+  `struct.new`'d → **provably non-null**, so its null guard is dead code; the new
+  `srcKnownNonNull` parameter skips it for the rest-vec dispatch, removing both
+  the dead code and the late-string-constant trigger.
+
+Differential `language/expressions/assignment/dstr` (368 files, per-file diff vs
+the PR's pre-fix HEAD): **+2 gains, 0 regressions**. `for-of/dstr` and
+`for-await-of` nested-array-undefined siblings all pass; `tests/issue-2757.test.ts`
+9/9. Guards added for the undefined/hole/empty rest sources (valid-Wasm + no-trap;
+value semantics are pinned by the flipped test262 files).

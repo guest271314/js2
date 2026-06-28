@@ -109,3 +109,59 @@ describe("#2757 array assignment-destructuring non-identifier rest targets", () 
     expect((exports as { test: () => number }).test()).toBe(0);
   });
 });
+
+// #2757 (CI-fix, PR #2224 merge-group park) — nested array-pattern rest target
+// over a source whose only element is `undefined` (explicit or a hole). Both
+// cases emitted INVALID Wasm, caught only in the merge group:
+//   (a) `array-rest-nested-array-undefined-own.js` (`vals = [undefined]`): the
+//       nested-pattern identifier bind DOUBLE-coerced the element — a manual
+//       `coerceType(elemType → localType)` then `emitCoercedLocalSet` (which
+//       coerces again) → `f64.convert_i32_s` on an externref. Fixed by dropping
+//       the redundant pre-coerce (`emitCoercedLocalSet` already coerces).
+//   (b) `array-rest-nested-array-undefined-hole.js` (`vals = [ , ]`): the nested
+//       pattern's null guard ran `buildDestructureNullThrow`, adding a LATE
+//       `string_constants` import global that shifted every module-global index;
+//       a `$Hole` `global.get` emitted earlier for the hole literal went one slot
+//       stale → `extern.convert_any` on an i32 global. The rest vec is freshly
+//       `struct.new`'d (provably non-null), so the guard is now skipped.
+// These pin the *invalid-Wasm* regression specifically: `compileToWasm` runs
+// `WebAssembly.validate` on the binary and throws on an invalid module, so a
+// successful compile+run is exactly the contract both defects broke (the
+// value-level `x === undefined` semantics are already covered by the flipped
+// `language/expressions/assignment/dstr/array-rest-nested-array-undefined-*`
+// test262 files; host-side `undefined` marshaling is representation-dependent
+// and orthogonal to this fix).
+describe("#2757 nested array-pattern rest over an undefined/hole source", () => {
+  it("compiles to valid Wasm and runs for an explicit `[undefined]` source (own)", async () => {
+    const exports = await compileToWasm(`
+      export function test(): number {
+        let x: any = null;
+        let vals: any[] = [undefined];
+        let result: any = ([...[x]] = vals);
+        return 0;
+      }`);
+    expect((exports as { test: () => number }).test()).toBe(0);
+  });
+
+  it("compiles to valid Wasm and runs for a hole `[ , ]` source", async () => {
+    const exports = await compileToWasm(`
+      export function test(): number {
+        let x: any = null;
+        let vals: any[] = [ , ];
+        let result: any = ([...[x]] = vals);
+        return 0;
+      }`);
+    expect((exports as { test: () => number }).test()).toBe(0);
+  });
+
+  it("compiles to valid Wasm and runs for an empty `[]` source", async () => {
+    const exports = await compileToWasm(`
+      export function test(): number {
+        let x: any = 7;
+        let vals: any[] = [];
+        [...[x]] = vals;
+        return 0;
+      }`);
+    expect((exports as { test: () => number }).test()).toBe(0);
+  });
+});

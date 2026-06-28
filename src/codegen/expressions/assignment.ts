@@ -1676,7 +1676,10 @@ function compileArrayDestructuringAssignment(
           emitVecArrayLikeObjectDestructure(ctx, fctx, restTarget, tmpRestVec, typeIdx, arrTypeIdx, arrDef!.element);
         } else if (ts.isArrayLiteralExpression(restTarget)) {
           // `[...[x, y]] = vals` — nested array pattern over the collected vec.
-          emitArrayDestructureFromLocal(ctx, fctx, restTarget, tmpRestVec, resultType);
+          // The rest vec is freshly built via `struct.new` (above) → never null,
+          // so skip the null guard (dead code + late string-constant trigger,
+          // see `emitArrayDestructureFromLocal`'s `srcKnownNonNull` note).
+          emitArrayDestructureFromLocal(ctx, fctx, restTarget, tmpRestVec, resultType, true);
         } else if (ts.isPropertyAccessExpression(restTarget) || ts.isElementAccessExpression(restTarget)) {
           // `[...obj.y] = vals` / `[...obj[k]] = vals` — assign the collected
           // vec to a member-expression target.
@@ -2273,6 +2276,18 @@ function emitArrayDestructureFromLocal(
   pattern: ts.ArrayLiteralExpression,
   srcLocal: number,
   srcType: ValType,
+  // (#2757) When the source local is a freshly-built, provably-non-null vec
+  // (the collected rest vec — `[...[x]] = vals` builds it via `struct.new`),
+  // the null guard is dead code. More importantly, `buildDestructureNullThrow`
+  // adds a LATE `string_constants` import global ("Cannot destructure …"),
+  // which shifts every module-global index. If a hole-array literal
+  // (`var vals = [ , ]`) emitted a `$Hole` `global.get` earlier in the SAME
+  // function, that shift can be missed when `ctx.currentFunc` is transiently
+  // null at the string-constant add (the shifter then walks no in-progress
+  // body), leaving the emitted `global.get` one slot stale → invalid Wasm
+  // (`extern.convert_any` on an i32 global). Skipping the unnecessary guard for
+  // a known-non-null source avoids both the dead code and the trigger.
+  srcKnownNonNull = false,
 ): void {
   // Externref: emit null/undefined guard + delegate to externref path (#dstr_null_undefined)
   if (srcType.kind === "externref") {
@@ -2299,7 +2314,8 @@ function emitArrayDestructureFromLocal(
   // declare the local as non-nullable `ref T` even though the value at runtime
   // can be null (e.g. struct fields holding nested tuple refs that may be
   // ref.null T). Widen the local so `ref.is_null` is valid (#1225).
-  const needsNullGuard = (srcType.kind === "ref" || srcType.kind === "ref_null") && pattern.elements.length > 0;
+  const needsNullGuard =
+    !srcKnownNonNull && (srcType.kind === "ref" || srcType.kind === "ref_null") && pattern.elements.length > 0;
   if (needsNullGuard) {
     widenLocalToNullable(fctx, srcLocal);
   }
@@ -2389,10 +2405,15 @@ function emitArrayDestructureFromLocal(
         localIdx = allocLocal(fctx, element.text, elemType);
       }
       emitElemGet(i);
-      const localType = getLocalType(fctx, localIdx);
-      if (localType && !valTypesMatch(elemType, localType)) {
-        coerceType(ctx, fctx, elemType, localType);
-      }
+      // (#2757) Do NOT pre-coerce `elemType → localType` here: `emitCoercedLocalSet`
+      // already coerces the stack value (typed `elemType`) to the local's type
+      // internally. A manual pre-coerce left the stack as `localType` but still
+      // told `emitCoercedLocalSet` the value was `elemType`, so it coerced a
+      // SECOND time — emitting invalid Wasm (`f64.convert_i32_s` on an externref /
+      // `extern.convert_any` on an i32) whenever the rest-vec element type differs
+      // from the target local's type (e.g. `[...[x]] = [undefined]` with
+      // `var x = null`). Single-coerce via `emitCoercedLocalSet` is correct for
+      // both the matching and mismatching cases.
       emitCoercedLocalSet(ctx, fctx, localIdx, elemType);
     } else if (ts.isObjectLiteralExpression(element)) {
       // Nested object pattern: [{ a, b }] = arr (#1225)
