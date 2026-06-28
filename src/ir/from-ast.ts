@@ -3217,8 +3217,12 @@ function coerceReturnValue(value: IrValueId, cx: LowerCtx): IrValueId {
   if (actual.kind === "val" && actual.val.kind === "externref") {
     return value;
   }
-  // Native scalar → externref needs a number-box helper the IR lacks; defer
-  // the whole function to legacy (which boxes via __box_number).
+  // Native scalar → externref needs a box helper the IR lacks; defer the whole
+  // function to legacy. (#2783) Legacy's box is now TYPE-AWARE — `coerceType(i32
+  // → externref)` picks `__box_boolean` / `__box_symbol` / `__box_number` from
+  // the value's brand — so this demote is type-correct for a `boolean`/`symbol`
+  // scalar too, not only a number. The IR still has no box primitive of its own;
+  // it inherits the type-aware box for free via demote-to-legacy.
   const actualVal = asVal(actual);
   // #2782 (hybrid Row 5) — the no-box NUMBER escape edge. An unboxed `f64`
   // number returned into an `any` (externref) result is the canonical "number

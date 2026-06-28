@@ -1,7 +1,8 @@
 ---
 id: 2783
 title: "Hybrid: type-aware box primitive (box keyed on the TS type, not the Wasm kind) + re-enable boolean[] OOB→undefined"
-status: in-progress
+status: done
+completed: 2026-06-28
 assignee: ttraenkler/sendev-box
 sprint: current
 created: 2026-06-28
@@ -33,9 +34,10 @@ coerceType(i32 → externref)  ==>  f64.convert_i32_s ; call __box_number
 ```
 
 But `i32` at the Wasm level is **overloaded**. It backs:
+
 - `number[]` (fast-mode i32 packing),
 - `boolean[]` (a boolean is `i32` 1/0, branded `{ kind:"i32", boolean:true }`),
-- `symbol[]` / symbol-handle arrays (a symbol is an `i32` *handle*/id), and
+- `symbol[]` / symbol-handle arrays (a symbol is an `i32` _handle_/id), and
 - other handle reps.
 
 `__box_number` treats the `i32` as a number, so it turns a boolean `true`
@@ -46,9 +48,9 @@ But `i32` at the Wasm level is **overloaded**. It backs:
   `coerceType(i32→externref)`. That mis-boxed boolean/symbol `i32` elements →
   **two merge_group parks**:
   - `built-ins/Object/values/symbols-omitted.js` — `Object.values({k:sym})[0]
-    === sym` failed (symbol handle boxed as a number);
+=== sym` failed (symbol handle boxed as a number);
   - 21 standalone `built-ins/Array/prototype/map/15.4.4.19-*` — `result[0] ===
-    true` failed (boolean `true` boxed as the number 1; in standalone native
+true` failed (boolean `true` boxed as the number 1; in standalone native
     `===`, `number 1 !== boolean true`).
 - ef2a591 (#2766) therefore **narrowed F1 to the `f64` (`number[]`) element
   ONLY** — `f64` is unambiguously a number, so `__box_number` is always correct
@@ -63,11 +65,11 @@ A box choice **keyed on the TS type, never on the Wasm kind**. The carrier of
 the TS type onto the `ValType` is the existing **brand** field (the same
 mechanism as the `bigint` brand on `i64` and the `boolean` brand on `i32`):
 
-| element TS type | branded ValType            | box helper      |
-|-----------------|----------------------------|-----------------|
-| `number`        | `{ kind:"f64" }` / `i32`   | `__box_number`  |
-| `boolean`       | `{ kind:"i32", boolean }`  | `__box_boolean` |
-| `symbol`        | `{ kind:"i32", symbol }`   | `__box_symbol`  |
+| element TS type | branded ValType           | box helper      |
+| --------------- | ------------------------- | --------------- |
+| `number`        | `{ kind:"f64" }` / `i32`  | `__box_number`  |
+| `boolean`       | `{ kind:"i32", boolean }` | `__box_boolean` |
+| `symbol`        | `{ kind:"i32", symbol }`  | `__box_symbol`  |
 
 The box site (`coerceType(i32 → externref)`) now **reads the brand** and selects
 the right helper instead of unconditionally calling `__box_number`.
@@ -149,6 +151,43 @@ via demote-to-legacy; only the deferral doc-comments are updated.
   `Array/prototype/map/15.4.4.19-*` boolean tests.
 - No net test262 regression in the `merge_group` re-validation.
 
+## Files changed
+
+- `src/ir/types.ts` — add the `symbol?: true` brand to the `i32` `ValType`.
+- `src/codegen/type-coercion.ts` — `coerceType(i32 → externref)` is now
+  type-aware (brand → `__box_boolean` / `__box_symbol` / `__box_number`).
+- `src/codegen/property-access.ts` — `f1ElementBoxType` (brand reconstruction
+  from the receiver TS type); `emitPlainArrayUndefinedOobGet` takes a branded
+  `boxType`; both F1 call sites widen `number[]` (f64) **and** `boolean[]`
+  (branded i32), defer the rest.
+- `src/ir/from-ast.ts` — doc note: legacy's box is now type-aware, so the IR's
+  numeric→externref demote-to-legacy is type-correct for boolean/symbol too.
+- `tests/issue-2783.test.ts` (new), `tests/issue-2760.test.ts` (boolean[] OOB
+  assertion flipped `false`→`undefined`), `plan/log/hybrid-fastpath-audit.md`.
+
 ## Test Results
 
-(filled in during implementation)
+Local (scoped — broad-impact conformance validated by full CI/merge_group):
+
+- `tests/issue-2783.test.ts` (20) + `tests/issue-2760.test.ts` (19) +
+  `tests/issue-2766.test.ts` (15) = **54 green**.
+- Array / coercion / element-access sweep (bounds-elim, OOB, array-methods,
+  externref/class element access, call-arg + relational coercion, #1788,
+  functional-array, standalone-map): **67 green** (6 files skipped — a
+  pre-existing missing `tests/helpers.js` load issue on origin/main, unrelated
+  to codegen).
+- Symbol / `Object.values` / array-method lane (#2105, #864, object-keys-values,
+  symbol-iterator, #2610/#2378 symbol value-read, #1732): **76 green** — the
+  first-park lane (symbol[] deferred, not mis-boxed) intact.
+- `check:ir-fallbacks` OK (no bucket growth); `check:stack-balance` OK
+  (`default-value-lossy` −36, no increases); `tsc --noEmit` clean.
+
+Empirical probes (host + standalone), all correct:
+
+- `boolean[]` OOB → `undefined`; in-bounds → `true`/`false` (boxed via
+  `__box_boolean`, value-correct in standalone native `===`).
+- `number[]` OOB → `undefined` (regression guard).
+- Canaries: `Object.values({k:sym})[0] === sym` (symbol identity preserved);
+  `[1,-1,2].map(x=>x>0)[i] === true/false` (the 2nd-park boolean-map shape);
+  `Array.prototype.map.call(arrayLike, cb)[2] === false` (S2 externref OOB,
+  host — unchanged).
