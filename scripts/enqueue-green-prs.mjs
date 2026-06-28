@@ -35,13 +35,14 @@
 //      almost always has a forming head, was rarely fed, and green PRs stranded
 //      until a human enqueued them. We log the forming head for visibility and
 //      proceed to append the trailing green PRs.
-//   2. GRACE WINDOW — only enqueue a PR whose checks have all been
-//      green for at least GRACE_MINUTES (default 10). "green since" is the most
-//      recent completion across the PR's check runs. A PR green for
-//      less than the window is left for a later cycle. This guarantees the
-//      backstop never races a fresh dev GraphQL enqueue and only catches
-//      genuine strays — devs enqueue immediately, this net is for the rare
-//      strand (queue-drop on main advance, dev exits before enqueuing).
+//   2. GRACE WINDOW — only enqueue a PR whose checks have all been green for at
+//      least GRACE_MINUTES. DEFAULT IS NOW 0 (#2786): this workflow is the SINGLE
+//      PRIMARY enqueuer (dev agents no longer self-enqueue), so there is no fresh
+//      dev enqueue to race and no reason to wait. The `workflow_run`-on-completion
+//      trigger fires right after the required-check workflows finish; with grace 0
+//      every just-green PR is enqueued on that responsive run. (A non-zero grace
+//      would make that run skip every fresh PR as "too fresh" and strand it until
+//      the cron — the bug #2786 fixes.)
 //   3. ALL-CHECKS GREEN — do not rely on mergeStateStatus alone. GitHub reports
 //      UNSTABLE when required checks are green but optional checks are red; the
 //      merge queue can still accept that. This script rejects PRs with any
@@ -87,7 +88,14 @@ import { fileURLToPath } from "node:url";
 
 const REPO = process.env.GH_REPO || "loopdive/js2";
 const DRY = process.argv.includes("--dry-run") || process.env.DRY_RUN === "1";
-const GRACE_MINUTES = Number(process.env.GRACE_MINUTES ?? "10");
+// GRACE default is now 0 (#2786): dev agents no longer self-enqueue, so there is
+// no fresh dev GraphQL enqueue to race. A non-zero grace would make the responsive
+// `workflow_run`-on-completion trigger SKIP every just-green PR (green-duration ~0
+// < grace) — defeating the whole point of the responsive path and stranding the PR
+// until the ~30-min cron. With grace 0 the workflow_run run (which starts ~60s after
+// checks finish — enough for GitHub to settle mergeStateStatus to CLEAN) enqueues
+// immediately. Override via GRACE_MINUTES env for manual sweeps if ever needed.
+const GRACE_MINUTES = Number(process.env.GRACE_MINUTES ?? "0");
 const GRACE_MS = GRACE_MINUTES * 60 * 1000;
 const HOLD_LABELS = new Set(["hold", "do-not-merge", "do not merge", "wip", "blocked"]);
 // mergeStateStatus values we will enqueue. Do NOT include UNSTABLE: that means
