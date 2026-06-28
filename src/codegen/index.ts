@@ -9931,10 +9931,11 @@ export function addUnionImports(ctx: CodegenContext): void {
   });
 
   // __box_symbol: (i32) → externref  (#2792 — boxes a symbol-handle i32 as a JS
-  // Symbol via the identity-stable host symbol cache. The symbol-branded
-  // `coerceType(i32 → externref)` arm and the F1 `symbol[]` OOB read route here;
-  // standalone synthesizes the native equivalent in addUnionImportsAsNativeFuncs.
-  // Same (i32)→externref signature as __box_boolean.)
+  // Symbol via the identity-stable host symbol cache. The F1 `symbol[]` OOB read
+  // routes here (HOST mode only — standalone defers `symbol[]`; see
+  // `f1ElementBoxType`). Same (i32)→externref signature as __box_boolean. Only
+  // reached on the host path; in standalone `addUnionImports` returns before this
+  // block, so no symbol host import ever leaks into a standalone module.)
   addImport(ctx, "env", "__box_symbol", {
     kind: "func",
     typeIdx: boxBoolType,
@@ -10206,22 +10207,8 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
     name: "$BigInt",
     fields: [{ name: "value", type: { kind: "i64", bigint: true }, mutable: false }],
   });
-
-  // (#2792) Standalone `__box_symbol_struct` — carries the i32 symbol handle/id.
-  // A DISTINCT struct from `__box_number_struct` (i32-less) and
-  // `__box_boolean_struct` (also i32 value) so `__any_from_extern` can classify a
-  // boxed symbol as a SYMBOL (tag 7), never a number (tag 1 of #2785's parks was a
-  // symbol handle boxed as a number). Same `value:i32` layout as the boolean box,
-  // but a separate nominal type → `ref.test` discriminates them.
-  const boxSymStructIdx = ctx.mod.types.length;
-  ctx.mod.types.push({
-    kind: "struct",
-    name: "__box_symbol_struct",
-    fields: [{ name: "value", type: { kind: "i32" }, mutable: false }],
-  });
   ctx.nativeBoxNumberTypeIdx = boxNumStructIdx;
   ctx.nativeBoxBooleanTypeIdx = boxBoolStructIdx;
-  ctx.nativeBoxSymbolTypeIdx = boxSymStructIdx;
   ctx.nativeBigIntTypeIdx = bigIntStructIdx;
 
   // 2. Pre-compute func types — addFuncType de-dupes by signature so
@@ -10348,18 +10335,6 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
   registerNative("__box_boolean", i32ToExternref, [
     { op: "local.get", index: 0 },
     { op: "struct.new", typeIdx: boxBoolStructIdx },
-    { op: "extern.convert_any" },
-  ]);
-
-  // 5b. __box_symbol(i32) -> externref  (#2792) — wraps the symbol handle/id in a
-  // `__box_symbol_struct` so it crosses the externref frontier carrying a SYMBOL
-  // identity (`__any_from_extern` classifies it tag 7), not a number. Mirrors
-  // __box_boolean's struct box; the i32 payload is the symbol id, identity-stable
-  // by handle (two boxes of the same id compare === via the tag-7 arm of
-  // __any_strict_eq).
-  registerNative("__box_symbol", i32ToExternref, [
-    { op: "local.get", index: 0 },
-    { op: "struct.new", typeIdx: boxSymStructIdx },
     { op: "extern.convert_any" },
   ]);
 

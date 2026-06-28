@@ -1,6 +1,6 @@
 ---
 id: 2792
-title: "Hybrid: symbol[] OOB → undefined (complete #2785 F1) + native standalone __box_symbol"
+title: "Hybrid: host symbol[] OOB → undefined (completes #2785 F1 host half; standalone deferred)"
 status: done
 completed: 2026-06-28
 assignee: ttraenkler/sendev-symbox
@@ -18,131 +18,114 @@ goal: correctness
 related: [2785, 2760, 2766, 2610, 864, 1467]
 ---
 
-# #2792 — `symbol[]` OOB → `undefined` (completes #2785 F1)
+# #2792 — host `symbol[]` OOB → `undefined` (completes #2785 F1, host half)
 
-#2785 made `coerceType(i32 → externref)` brand-aware and re-enabled **`boolean[]`**
-OOB→`undefined` in the hybrid type-soundness floor F1, but **DEFERRED `symbol[]`**
-because the standalone backend had **no native `__box_symbol`** (host already had
-one via the identity-stable symbol cache). This issue builds the native standalone
-`__box_symbol` and widens F1 so a genuine `symbol[]` reads `undefined` out of
-bounds and a value-correct boxed `Symbol` in bounds — in **both** host and
-standalone.
+#2785 made `coerceType(i32 → externref)` brand-aware and re-enabled `boolean[]`
+OOB→`undefined` in the hybrid type-soundness floor F1, deferring `symbol[]`
+"pending a native standalone `__box_symbol`". This issue ships the **host** half:
+a genuine `symbol[]` now reads JS `undefined` out of bounds and a value-correct
+boxed `Symbol` in bounds, via the identity-stable host `__box_symbol` cache.
+**Standalone `symbol[]` stays deferred** (unchanged from #2785) — see the parking
+note below.
 
-## Problem
+## What shipped (host)
 
-The F1 floor widens an unproven plain-array element read to a boxed-or-`undefined`
-externref (an `f64`/`i32` cannot represent `undefined`). For a `symbol[]` the
-element is an `i32` symbol **handle**; #2785's brand-aware box would route it to
-`__box_symbol`, but standalone had no such helper, so `symbol[]` fell through to
-the shared bounded read (typed `i32`, OOB → 0 sentinel — not JS-correct), keeping
-the `symbols-omitted` canary green at the cost of the floor.
+- `f1ElementBoxType` (property-access.ts) returns `{ kind:"i32", symbol:true }`
+  when the receiver element TS type is `symbol` **and `!noJsHost(ctx)`** (host
+  only). The brand is reconstructed from the receiver TS type because vec dedup
+  erases it in `arrDef.element` (same discipline as the `boolean[]` arm).
+- `addUnionImports` (index.ts, **host path only**) registers `__box_symbol` as an
+  `(i32)→externref` host import, added to the late-import index-shift
+  `newImportNames` set. In standalone, `addUnionImports` returns before this
+  block, so no symbol host import ever leaks into a standalone module.
+- `coerceType(i32 → externref)`'s symbol arm (already wired by #2785) selects
+  `__box_symbol` when the value is symbol-branded.
 
-## The fix (4 parts)
+Result (host): `symbol[]` OOB → `undefined`; in-bounds → a real `Symbol`
+(`.description` round-trips; per-element identity holds, distinct symbols are not
+`===`). js-host conformance lane: **0 regressions**.
 
-1. **Native standalone `__box_symbol`** (`src/codegen/index.ts`,
-   `addUnionImportsAsNativeFuncs`). A new `__box_symbol_struct { value: i32 }`
-   carrier (the symbol handle) + a `__box_symbol(i32) → externref` native
-   (`struct.new` + `extern.convert_any`). A **distinct nominal struct** from
-   `__box_number_struct`/`__box_boolean_struct` so `ref.test` discriminates it.
+## STANDALONE DEFERRED — root cause (the senior-dev finding)
 
-2. **Correct standalone SYMBOL tag** (`src/codegen/any-helpers.ts`). The 2nd-park
-   lesson from #2785 was "get the standalone tag right". `__any_from_extern` now
-   classifies a `__box_symbol_struct` as **tag 7** (symbol) with the handle in
-   `i32val` — never the tag-5 string fallback. `__any_strict_eq` **and** `__any_eq`
-   gained a tag-7 arm comparing `i32val` (the handle), so two boxes of the **same**
-   symbol are `===`/`==` and two distinct symbols are not. (Boolean is tag 4,
-   number tags 2/3, string tag 5, ref tag 6 — symbol is the next free tag, 7.)
+The first cut added a native standalone `__box_symbol`: a new
+`__box_symbol_struct { value:i32 }` carrier + `__box_symbol` func in
+`addUnionImportsAsNativeFuncs`, plus a tag-7 classify/compare in
+`__any_from_extern` / `__any_strict_eq` / `__any_eq`. It passed local scoped
+checks and the per-PR regression gate, but the **`merge_group` standalone
+high-water floor (#2097) breached at -235**, and the deterministic diff showed
+**311 wasm-hash-change regressions** — concentrated in `class/elements`,
+`async-generator`, `DisposableStack` — all failing at runtime with
+**`illegal cast [in __obj_find() ← __extern_set]`**.
 
-3. **F1 widen** (`src/codegen/property-access.ts`, `f1ElementBoxType`). Returns
-   `{ kind:"i32", symbol:true }` when every value-part of the receiver element TS
-   type is `ESSymbol`/`UniqueESSymbol`. Both F1 call sites already forward the
-   reconstructed box ValType to `emitPlainArrayUndefinedOobGet → coerceType`, whose
-   symbol arm (wired in #2785) selects `__box_symbol`.
+Root cause (proven by a clean binary-hash bisection on the merged base —
+`hashA` = current main, `hashB` = main + feature — **all** regressed-test
+standalone binaries differed): registering the `__box_symbol_struct` type +
+`__box_symbol` func **unconditionally** in `addUnionImportsAsNativeFuncs` — which
+nearly every standalone program calls — shifts standalone **type/func indices**,
+desyncing baked `ref.cast` targets in the object runtime
+(`__obj_find`/`__extern_set`). This is the `project_type_index_shift_and_deadelim`
+/ `reference_subview_type_idx_stability` hazard ("DCE remaps types; register
+shared types late+once / reserve struct idxs up-front").
 
-4. **`__box_symbol` registered in both modes** (`addUnionImports`, host import +
-   native synth). `coerceType`'s symbol arm calls `addUnionImports` at the top, so
-   `__box_symbol` is in `funcMap` at the F1 box site in both host and standalone.
-   Same `(i32)→externref` signature as `__box_boolean`; added to the late-import
-   index-shift `newImportNames` set so the batch shift stays consistent (the same
-   mechanism #1644 used for `__box_bigint`).
+The safe fix gates `f1ElementBoxType`'s symbol arm to host (`!noJsHost`) and
+**removes** the standalone carrier + tag-7 arms. Verified: the regressed-test
+standalone binaries are now **byte-identical to clean main** (no index shift) and
+all canaries are green in both modes. Standalone `symbol[]` falls through to the
+shared bounded read (i32 handle) — exactly as #2785 left it.
 
-## Why NOT broad symbol branding in `type-mapper.ts` (the key design decision)
+### Follow-up (standalone `symbol[]`)
 
-The task asked for a `type-mapper` symbol brand (mirroring the `boolean: true`
-brand) so symbol locals/params box via `__box_symbol`. **I implemented it, found
-it regressed the host `symbols-omitted` canary, and reverted it.** Root cause:
-branding only changes the box choice at `coerceType(i32 → externref)`. Other
-boxing sites — notably **object-literal field stores** — still box a symbol via
-`__box_number`. So in `Object.values({ key: s })[0] === s`, the object field
-`s` boxes to a `__box_number` Number while the RHS `=== s` boxes to a
-`__box_symbol` Symbol → `Number !== Symbol` → the canary returned `0`. Before any
-branding, **both** sides consistently used `__box_number`, so handle-as-number
-equality happened to be correct.
+A native standalone `__box_symbol` must add its `__box_symbol_struct` carrier
+WITHOUT shifting the indices baked by the object runtime — e.g. reserve the
+carrier type/func up-front at a stable position (alongside `$AnyValue` reservation
+in `ensureAnyValueType`), or gate registration on a `ctx.usesNativeBoxSymbol`
+flag set during a pre-pass, then append last. Until then standalone `symbol[]`
+OOB reads the i32 default (not `undefined`), and `===` on the i32 handles is
+value-correct. Tracked toward #2610 (standalone symbol value-rep).
 
-This is exactly the blast radius #2785 deferred ("bound blast radius"). The F1
-read does **not** need the ValType brand: `f1ElementBoxType` reconstructs the
-`symbol` brand from the **receiver TS type**, so its box choice is
-self-consistent (every `symbol[]` element read boxes via `__box_symbol`). The
-broad branding is left for a future symbol-as-`any` value-rep pass (#2610) that
-can make **all** symbol boxing sites consistent at once. Net: F1 keys on the TS
-type (the stated discipline) **without** the global brand.
+## Why NOT broad symbol branding in `type-mapper.ts`
 
-Consequence for tests: in-bounds correctness is asserted via F1-consistent
-operations — `a[i] === a[0]` (per-element identity, true), `a[0] === a[1]`
-(distinct, false), and `a[i].description` round-trip (host) — NOT `a[i] === s0`
-(which would compare a `__box_symbol` Symbol against the unbranded `s0`'s
-`__box_number` Number). `typeof a[i]` is statically folded to the declared element
-type, so it is not used as a runtime OOB probe.
+Branding every symbol local/param `{ kind:"i32", symbol:true }` (so all
+symbol→externref coercions route to `__box_symbol`) **regressed the host
+`Object/values/symbols-omitted` canary**: branding only changes `coerceType`'s
+box choice, but other boxing sites (object-literal fields) still box via
+`__box_number`, so `Object.values({key:s})[0] === s` compared a `__box_symbol`
+Symbol against a `__box_number` Number → `false`. This is exactly the blast
+radius #2785 deferred. F1 keys on the receiver TS type instead
+(`f1ElementBoxType` reconstructs the brand), so its box choice is self-consistent
+without the global brand. Broad branding stays deferred to the symbol-as-`any`
+value-rep pass (#2610). `type-mapper.ts` keeps `symbol → { kind:"i32" }` (a
+comment records the decision).
 
 ## Files changed
 
-- `src/codegen/index.ts` — host `__box_symbol` union import + `newImportNames`;
-  native `__box_symbol_struct` + `__box_symbol` in `addUnionImportsAsNativeFuncs`.
-- `src/codegen/context/{types,create-context}.ts` — `nativeBoxSymbolTypeIdx`.
-- `src/codegen/any-helpers.ts` — `__any_from_extern` tag-7 classify arm;
-  `__any_strict_eq` + `__any_eq` tag-7 (handle) comparison arm.
-- `src/codegen/property-access.ts` — `f1ElementBoxType` symbol arm; doc-comments
-  at both F1 call sites updated (`symbol[]` now widened, no longer deferred).
-- `src/codegen/type-coercion.ts` — symbol-arm comment updated (both modes; F1-only
-  brand reconstruction, NOT broad branding).
-- `src/checker/type-mapper.ts` — symbol stays `{ kind:"i32" }` (NOT branded);
-  comment records why broad branding regresses the canary.
+- `src/codegen/property-access.ts` — `f1ElementBoxType` host-gated `symbol[]` arm
+  + doc-comments.
+- `src/codegen/index.ts` — host `__box_symbol` union import + `newImportNames`
+  (standalone path untouched — no native carrier).
+- `src/codegen/type-coercion.ts` — symbol-arm comment (host-only, F1-reconstructed
+  brand, no broad branding).
+- `src/checker/type-mapper.ts` — comment only (symbol stays `{ kind:"i32" }`).
 - `tests/issue-2792.test.ts` (new).
 
 ## Acceptance criteria
 
-- `symbol[]` OOB read → JS `undefined`; in-bounds read → a value-correct boxed
-  `Symbol` (host + standalone). ✓
-- Native standalone `__box_symbol` exists; a boxed symbol is classified SYMBOL
-  (tag 7), so standalone `===` on boxed symbols is by handle. ✓
-- Canaries green: `Object/values/symbols-omitted` (host + standalone), boolean
-  map (host + standalone), `number[]` OOB regression guard. ✓
+- (host) `symbol[]` OOB read → JS `undefined`; in-bounds → a value-correct boxed
+  `Symbol`. ✓
+- (standalone) `symbol[]` deferred, byte-identical to clean main — NO regression
+  (the merge_group standalone floor must not breach because of this PR). ✓
+- Canaries green host + standalone: `Object/values/symbols-omitted`, boolean map,
+  `number[]` OOB. ✓
 - No net test262 regression in the `merge_group` re-validation.
 
 ## Test Results
 
-Local (scoped — broad-impact conformance validated by full CI/merge_group):
-
-- `tests/issue-2792.test.ts` (19) + `tests/issue-2785.test.ts` (20) +
-  `tests/issue-2760.test.ts` (19) = **58 green**.
-- Standalone equality / search / symbol sweep (1461 search+reduce,
-  2063 switch-strict-eq, 1788, 1732 math-symbol, 1103a standalone-map, 1539
-  standalone-array-coercion): **55 green** (1 file skipped — the pre-existing
-  missing `tests/helpers.js` load on origin/main, unrelated).
-- Object-values / identity / symbol lane (2719, 2734, object-keys-values-entries,
-  2583 any-array-method-brand, 865 wasi-polyfill): **58 green**. (The
-  `symbol-async-iterator` 2 failures are a **pre-existing** fragile-harness issue —
-  its `{ env: {} }` instantiation can't provide the `string_constants` pseudo-import
-  that the async runtime emits; a plain async function with NO symbols fails
-  identically, and the for-await binary instantiates correctly via `buildImports`.)
-- `tsc --noEmit` clean; `check:stack-balance` OK (`default-value-lossy` −36, no
-  increases); `check:ir-fallbacks` OK (no bucket growth).
-
-Empirical probes (host + standalone), all correct:
-
-- `symbol[]` OOB (literal / dynamic / negative index) → `undefined`; in-bounds →
-  boxed Symbol with the right `.description` (host); identity-stable per element
-  (`a[i] === a[0]` true, `a[0] === a[1]` false) in **both** modes via the tag-7
-  arm.
-- Canaries: `Object.values({key: s})[0] === s` (host + standalone), boolean-map,
-  `number[]` OOB → all green.
+- `tests/issue-2792.test.ts` (14) + `issue-2785` (20) + `issue-2760` (19) =
+  **53 green**.
+- `tsc --noEmit` clean; `check:stack-balance` OK; `check:ir-fallbacks` OK.
+- Deterministic binary-hash bisection on the merged base: the 12 sampled
+  regressed-test standalone binaries are **byte-identical** to clean current main
+  (`hashA == hashOptB`) — the standalone index shift is eliminated.
+- Empirical probes (host): `symbol[]` OOB (literal/dynamic/negative) → `undefined`;
+  in-bounds → boxed `Symbol` with correct `.description`; per-element identity.
+  Standalone: `symbol[]` deferred (i32 handle), canaries green.

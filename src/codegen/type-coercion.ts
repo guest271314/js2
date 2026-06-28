@@ -1542,15 +1542,15 @@ export function coerceType(
       }
     }
     // symbol → __box_symbol (takes the i32 handle/id directly; identity-stable
-    // via the host symbol cache in host mode, the `__box_symbol_struct` carrier
-    // classified as a SYMBOL — tag 7 — by `__any_from_extern` in standalone).
-    // (#2792) `addUnionImports` above registers `__box_symbol` in BOTH modes
-    // (host import / native synth), so the lookup is present whenever a value is
-    // symbol-branded. The brand is reconstructed only at the F1 `symbol[]` read
-    // site (`f1ElementBoxType`) — symbols are NOT broadly branded in type-mapper
-    // (that mismatched other boxing sites; see the note there). Still guarded:
-    // falls through to the number box if the helper is somehow absent, so the arm
-    // is purely additive and never leaks a host import into a standalone module.
+    // via the host symbol cache). (#2792) HOST mode only: `addUnionImports` above
+    // registers `__box_symbol` as a host import, and the symbol brand is
+    // reconstructed only at the F1 `symbol[]` read site (`f1ElementBoxType`),
+    // which itself fires only in host mode (standalone defers `symbol[]` — a
+    // native `__box_symbol_struct` carrier shifted standalone type/func indices
+    // and broke unrelated tests, see the note there). Symbols are NOT broadly
+    // branded in type-mapper (that mismatched other boxing sites). Still guarded:
+    // falls through to the number box if the helper is absent, so the arm is
+    // purely additive and never leaks a host import into a standalone module.
     if (from.symbol === true) {
       const boxSymIdx = ctx.funcMap.get("__box_symbol");
       if (boxSymIdx !== undefined) {

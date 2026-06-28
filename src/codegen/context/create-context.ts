@@ -197,7 +197,6 @@ export function createCodegenContext(
     wrapperBooleanTypeIdx: -1,
     nativeBoxNumberTypeIdx: -1,
     nativeBoxBooleanTypeIdx: -1,
-    nativeBoxSymbolTypeIdx: -1,
     nativeBigIntTypeIdx: -1,
     funcRefWrapperCache: new Map(),
     pendingInitBody: null,

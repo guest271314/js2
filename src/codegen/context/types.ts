@@ -1545,8 +1545,6 @@ export interface CodegenContext {
   /** Native union-helper carrier type indices, present under WASI/standalone. */
   nativeBoxNumberTypeIdx: number;
   nativeBoxBooleanTypeIdx: number;
-  /** (#2792) Native standalone `__box_symbol_struct` carrier (i32 symbol handle). */
-  nativeBoxSymbolTypeIdx: number;
   nativeBigIntTypeIdx: number;
   /** Cache for function reference wrappers: signature key → ClosureInfo */
   funcRefWrapperCache: Map<string, ClosureInfo>;

@@ -5575,14 +5575,19 @@ export function isSafeBoundsEliminated(fctx: FunctionContext, expr: ts.ElementAc
  *   - `i32` element whose receiver element TS type is genuinely `boolean` →
  *     `{ kind:"i32", boolean:true }` → `__box_boolean`. Re-enables the
  *     `boolean[]` arm #2766 deferred.
- *   - `i32` element whose receiver element TS type is genuinely `symbol` →
- *     `{ kind:"i32", symbol:true }` → `__box_symbol` (#2792). Host uses the
- *     identity-stable symbol cache; standalone uses the native
- *     `__box_symbol_struct` (tag 7), so `symbols-omitted` stays green (that
- *     canary's `Object.values(any)` result is an externref array, so F1 defers
- *     there regardless — the brand fires only for a genuine i32-storage `symbol[]`).
+ *   - (HOST ONLY) `i32` element whose receiver element TS type is genuinely
+ *     `symbol` → `{ kind:"i32", symbol:true }` → `__box_symbol` (#2792), via the
+ *     identity-stable host symbol cache. The brand fires only for a genuine
+ *     i32-storage `symbol[]`; `symbols-omitted` stays green regardless (that
+ *     canary's `Object.values(any)` result is an externref array, so F1 defers).
  *
  * Deferred (returns `null`, unchanged from current main):
+ *   - (STANDALONE) `symbol[]` — a native standalone `__box_symbol` needs a new
+ *     `__box_symbol_struct` carrier; registering one unconditionally in
+ *     `addUnionImportsAsNativeFuncs` shifted standalone type/func indices and
+ *     broke ~311 unrelated tests with `illegal cast` traps in
+ *     `__obj_find`/`__extern_set` (the type-index-shift / DCE-remap hazard).
+ *     Carved to a follow-up; standalone `symbol[]` reads the i32 handle as before.
  *   - `i32` element that is NOT provably boolean or symbol — packed `number[]`
  *     (i32/i8/i16), or any other handle rep;
  *   - `externref` / `ref` / object elements.
@@ -5606,10 +5611,24 @@ function f1ElementBoxType(ctx: CodegenContext, expr: ts.ElementAccessExpression,
   }
   // (#2792) `symbol[]` — every value part is a Symbol. The element is an i32
   // handle; reconstruct the `symbol` brand (erased in `arrDef.element` by vec
-  // dedup) so `coerceType(i32 → externref)` boxes via `__box_symbol`
-  // (host symbol cache / standalone `__box_symbol_struct`) rather than
-  // `__box_number`, which would surface a Number for an OOB-safe symbol read.
-  if (valueParts.every((p) => (p.flags & (ts.TypeFlags.ESSymbol | ts.TypeFlags.UniqueESSymbol)) !== 0)) {
+  // dedup) so `coerceType(i32 → externref)` boxes via `__box_symbol` (the
+  // identity-stable host symbol cache) rather than `__box_number`, which would
+  // surface a Number for an OOB-safe symbol read.
+  //
+  // HOST MODE ONLY. Standalone defers `symbol[]` (returns null → the shared
+  // bounded read, exactly as #2785 left it). A native standalone `__box_symbol`
+  // would need a new `__box_symbol_struct` carrier; registering one
+  // unconditionally in `addUnionImportsAsNativeFuncs` shifted standalone
+  // type/func indices and broke ~311 unrelated standalone tests with
+  // `illegal cast` traps in `__obj_find`/`__extern_set` (the
+  // type-index-shift / DCE-remap hazard — see #2792 notes). The host arm is
+  // index-safe (the js-host lane had zero regressions), so it ships; standalone
+  // `symbol[]` is carved to a follow-up that can add the carrier without the
+  // broad index shift.
+  if (
+    !noJsHost(ctx) &&
+    valueParts.every((p) => (p.flags & (ts.TypeFlags.ESSymbol | ts.TypeFlags.UniqueESSymbol)) !== 0)
+  ) {
     return { kind: "i32", symbol: true };
   }
   return null;

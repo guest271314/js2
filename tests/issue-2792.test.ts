@@ -1,20 +1,28 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 //
-// #2792 — Hybrid F1 `symbol[]` OOB → `undefined`. Completes the #2785 F1 work:
-// #2785 made `coerceType(i32 → externref)` brand-aware and re-enabled
-// `boolean[]` OOB→undefined, but DEFERRED `symbol[]` because standalone had no
-// native `__box_symbol`. This issue adds a native standalone `__box_symbol`
-// (a `__box_symbol_struct` carrier classified as a SYMBOL — tag 7 — by
-// `__any_from_extern`, compared by handle in `__any_strict_eq`/`__any_eq`), and
-// widens F1 so a genuine i32-storage `symbol[]` reads `undefined` out of bounds
-// and a value-correct boxed Symbol in bounds, in BOTH host and standalone.
+// #2792 — Hybrid F1 `symbol[]` OOB → `undefined` (HOST mode). Completes the host
+// half of #2785's deferred `symbol[]` arm: #2785 made `coerceType(i32 →
+// externref)` brand-aware and re-enabled `boolean[]` OOB→undefined, deferring
+// `symbol[]`. This issue widens F1 so a genuine `symbol[]` reads JS `undefined`
+// out of bounds and a value-correct boxed `Symbol` in bounds — in HOST mode,
+// via the identity-stable host `__box_symbol` cache.
 //
-// Key discipline (#2785's "bound blast radius"): symbols are NOT broadly branded
-// in type-mapper — that would mismatch other boxing sites (object-literal fields
-// stay on `__box_number`) and regress the host `symbols-omitted` canary. F1 keys
-// on the receiver TS type (`f1ElementBoxType` reconstructs the brand), so its box
-// choice is self-consistent. The `symbols-omitted` canary's `Object.values(any)`
-// result is an externref array, so F1 defers there regardless.
+// STANDALONE `symbol[]` STAYS DEFERRED (unchanged from #2785). A native
+// standalone `__box_symbol` needs a new `__box_symbol_struct` carrier;
+// registering one unconditionally in `addUnionImportsAsNativeFuncs` shifted
+// standalone type/func indices and broke ~311 unrelated standalone tests with
+// `illegal cast` traps in `__obj_find`/`__extern_set` (the type-index-shift /
+// DCE-remap hazard). So `f1ElementBoxType` returns the symbol brand only when
+// `!noJsHost(ctx)`; standalone `symbol[]` falls through to the shared bounded
+// read (i32 handle), exactly as before. The standalone native carrier is carved
+// to a follow-up that can add it without the broad index shift.
+//
+// Discipline (#2785's "bound blast radius"): symbols are NOT broadly branded in
+// type-mapper — that mismatched other boxing sites (object-literal fields stay on
+// `__box_number`) and regressed the host `symbols-omitted` canary. F1 keys on the
+// receiver TS type (`f1ElementBoxType` reconstructs the brand), so its box choice
+// is self-consistent. The `symbols-omitted` canary's `Object.values(any)` result
+// is an externref array, so F1 defers there regardless.
 import { describe, it, expect } from "vitest";
 import { compile } from "../src/index.js";
 import { buildImports } from "../src/runtime.js";
@@ -31,11 +39,7 @@ async function run(source: string, fn = "test"): Promise<unknown> {
 }
 
 // Standalone harness (empty imports `{}` — a leaked host import fails
-// instantiation; the binary must be valid Wasm). Standalone conflates
-// `undefined` with `null`, so `=== undefined` is satisfied by the native
-// `ref.null.extern` OOB sentinel. The in-bounds element is the native
-// `__box_symbol_struct`, classified as a SYMBOL (tag 7) by `__any_from_extern`,
-// so two reads of the same element compare `===` by handle.
+// instantiation; the binary must be valid Wasm).
 async function runStandalone(source: string, fn = "test"): Promise<number> {
   const r = await compile(source, { target: "standalone" });
   expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
@@ -46,36 +50,30 @@ async function runStandalone(source: string, fn = "test"): Promise<number> {
 
 const ARR = `const s0 = Symbol("a"); const s1 = Symbol("b"); const a: symbol[] = [s0, s1];`;
 
-describe("#2792 — symbol[] OOB → JS `undefined` (the #2785-deferred F1 arm)", () => {
-  describe("symbol[] OOB → undefined", () => {
-    it("host: a[OOB] === undefined (literal index past end)", async () => {
+describe("#2792 — host symbol[] OOB → JS `undefined` (completes #2785's deferred arm)", () => {
+  describe("symbol[] OOB → undefined (host)", () => {
+    it("a[OOB] === undefined (literal index past end)", async () => {
       expect(await run(`export function test(): boolean { ${ARR} return a[4] === undefined; }`)).toBe(1);
     });
 
-    it("host: dynamic OOB index reads undefined", async () => {
+    it("dynamic OOB index reads undefined", async () => {
       expect(await run(`export function test(): boolean { ${ARR} let i = 9; return a[i] === undefined; }`)).toBe(1);
     });
 
-    it("host: negative index reads undefined", async () => {
+    it("negative index reads undefined", async () => {
       expect(await run(`export function test(): boolean { ${ARR} return a[-1] === undefined; }`)).toBe(1);
     });
 
-    it("host: a[OOB] surfaces to JS as undefined (NOT a Number from __box_number)", async () => {
+    it("a[OOB] surfaces to JS as undefined (NOT a Number from __box_number)", async () => {
       // The exact #2785 first-park failure mode: a symbol handle boxed via
       // __box_number surfaced a Number. The OOB read is `undefined` regardless,
       // but this asserts the value identity at the JS boundary.
       expect(await run(`export function test(): any { ${ARR} let i = 7; return a[i]; }`)).toBe(undefined);
     });
-
-    it("standalone: a[OOB] === undefined (undefined ≡ null)", async () => {
-      expect(
-        await runStandalone(`export function test(): boolean { ${ARR} let i = 7; return a[i] === undefined; }`),
-      ).toBe(1);
-    });
   });
 
-  describe("symbol[] in-bounds box preserves the SYMBOL identity", () => {
-    it("host: in-bounds read is a real Symbol with the right description", async () => {
+  describe("symbol[] in-bounds box preserves the SYMBOL identity (host)", () => {
+    it("in-bounds read is a real Symbol with the right description", async () => {
       // Boxed via __box_symbol → the host symbol cache returns the registered
       // Symbol("hi"), so `.description` round-trips (a number box has no
       // `.description`). Strong proof the value is a Symbol, not a Number.
@@ -86,46 +84,30 @@ describe("#2792 — symbol[] OOB → JS `undefined` (the #2785-deferred F1 arm)"
       ).toBe("hi");
     });
 
-    it("host: per-element identity — a[i] === a[0] (same element → same Symbol)", async () => {
+    it("per-element identity — a[i] === a[0] (same element → same cached Symbol)", async () => {
       expect(await run(`export function test(): boolean { ${ARR} let i = 0; return a[i] === a[0]; }`)).toBe(1);
     });
 
-    it("host: distinct elements are NOT === — a[0] !== a[1]", async () => {
+    it("distinct elements are NOT === — a[0] !== a[1]", async () => {
       expect(await run(`export function test(): boolean { ${ARR} let i = 0; return a[i] === a[1]; }`)).toBe(0);
     });
+  });
 
-    it("standalone: in-bounds read is NOT undefined (a valid boxed symbol)", async () => {
-      expect(
-        await runStandalone(`export function test(): boolean { ${ARR} let i = 0; return a[i] === undefined; }`),
-      ).toBe(0);
-    });
-
-    it("standalone: boxed symbol is truthy (used as a condition)", async () => {
-      expect(
-        await runStandalone(`export function test(): number { ${ARR} let i = 0; if (a[i]) { return 10; } return 20; }`),
-      ).toBe(10);
-    });
-
-    it("standalone: per-element identity — a[i] === a[0] (tag-7 handle compare)", async () => {
+  describe("standalone: symbol[] DEFERRED (unchanged from #2785 — must not regress)", () => {
+    it("standalone symbol[] compiles to valid Wasm and reads handles in bounds", async () => {
+      // Standalone defers symbol[] (no native __box_symbol carrier). The element
+      // read falls through to the shared bounded read (i32 handle); === on the
+      // handles is still correct (same element equal, distinct elements not).
       expect(await runStandalone(`export function test(): boolean { ${ARR} let i = 0; return a[i] === a[0]; }`)).toBe(
         1,
       );
-    });
-
-    it("standalone: distinct elements are NOT === — a[0] !== a[1]", async () => {
       expect(await runStandalone(`export function test(): boolean { ${ARR} let i = 0; return a[i] === a[1]; }`)).toBe(
         0,
       );
     });
-
-    it("standalone: second element identity — a[1] === a[1]", async () => {
-      expect(await runStandalone(`export function test(): boolean { ${ARR} let i = 1; return a[i] === a[1]; }`)).toBe(
-        1,
-      );
-    });
   });
 
-  describe("canaries — must stay green (the #2785 parks + the new symbol-as-any guard)", () => {
+  describe("canaries — must stay green host + standalone (the #2785 parks + symbol-as-any guard)", () => {
     it("symbols-omitted: Object.values({key: s})[0] === s (any-array → F1 defers) — host", async () => {
       expect(
         await run(
