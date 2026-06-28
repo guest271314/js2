@@ -1,7 +1,8 @@
 ---
 id: 2769
 title: "[ARCH] for-of typed in-bounds undefined/hole default-init — representation-level carve (split from #2669)"
-status: ready
+status: in-progress
+assignee: ttraenkler/forof769
 created: 2026-06-28
 updated: 2026-06-28
 priority: medium
