@@ -778,6 +778,20 @@ export function compileNestedFunctionDeclaration(
       })),
     );
 
+    // (#2758) Pre-box any by-value capture that a sibling this function CALLS
+    // mutably captures, BEFORE the parameter default-init / destructuring below
+    // can emit that call inside a conditionally-executed default `then`-arm.
+    // Collect callee references from BOTH the body AND the parameter default
+    // initializers — a destructuring default `{ w = counter() }` calls `counter`
+    // from the PARAMETER list, which the body-only `referencedNames` scan misses.
+    {
+      const referencedCalleeNames = new Set<string>(referencedNames);
+      for (const p of stmt.parameters) {
+        collectReferencedIdentifiers(p, referencedCalleeNames, ownLocals);
+      }
+      emitEagerNestedCallCaptureBoxes(ctx, liftedFctx, captures, referencedCalleeNames);
+    }
+
     // Emit default-value initialization for parameters with initializers
     // (offset by number of captures since they are prepended as leading params)
     emitDefaultParamInit(ctx, liftedFctx, stmt, paramTypes, captures.length);
@@ -1228,6 +1242,104 @@ function emitEagerCaptureBoxes(ctx: CodegenContext, fctx: FunctionContext, funcN
     fctx.localMap.set(cap.name, boxedLocalIdx);
     if (!fctx.boxedCaptures) fctx.boxedCaptures = new Map();
     fctx.boxedCaptures.set(cap.name, { refCellTypeIdx, valType: cap.valType });
+  }
+}
+
+/**
+ * (#2758) Eagerly materialize the ref-cell box for a by-VALUE capture of THIS
+ * nested function when a sibling nested function it *calls* mutably captures the
+ * same variable.
+ *
+ * Companion to `emitEagerCaptureBoxes` (#2692). That pass fixes the DECLARING
+ * scope: a var captured by a nested function declared here is boxed at this
+ * function's top. This pass fixes the CALLER scope: when THIS function
+ * (`function f({ w = counter() }) { …; use initCount; }`) merely *calls* a
+ * sibling (`counter`) that mutably captures an outer `var` (`initCount`) which
+ * THIS function ALSO captures and reads, the call-site lazy-box machinery
+ * (`calls.ts` `nestedFuncCaptures` mutable branch) creates the ref cell at the
+ * FIRST capturing call site — and for a destructuring/default param that first
+ * call site sits inside a conditionally-executed buffer (the default's
+ * `then`-arm). When the property is PRESENT the default is skipped, the box is
+ * never created, and the later body read of the captured var
+ * (`assert.sameValue(initCount, 0)`) dereferences the still-null box → the sNaN
+ * sentinel → NaN. That is the `*-id-init-skipped` family (§13.3.3.7: the
+ * initializer must NOT be evaluated when the property value is present, yet the
+ * captured-var read still corrupted).
+ *
+ * Fix: pre-create the box here, BEFORE the parameter default-init / destructuring
+ * emits any capturing call, so the `struct.new`/`local.set` lands in the
+ * UNCONDITIONAL function-top `liftedFctx.body`. The later call site then takes
+ * its already-boxed branch (no second `struct.new`), and the body read
+ * dereferences a live box holding the by-value capture's entry value. Same
+ * `__boxed_<name>` local-naming + lockstep `boxedCaptures` / `localMap` writes
+ * as the call site, so the two stay in sync.
+ *
+ * Scope-narrowing (mirrors #2692): SKIP captures that are already `mutable`
+ * (boxed as a ref-cell param), already a threaded outer cell (`alreadyBoxed`),
+ * or TDZ-flagged (`let`/`const` — eager boxing races their block-scoped
+ * re-declaration, the #2692 for-await regression rationale). Only `var`/param
+ * by-value captures qualify — exactly the captured-counter template. The
+ * ref-cell value type is taken from the CALLEE's recorded mutable-capture
+ * valType so the registered `refCellTypeIdx` matches the one the lazy call site
+ * will look up (guaranteeing its already-boxed branch fires).
+ */
+function emitEagerNestedCallCaptureBoxes(
+  ctx: CodegenContext,
+  liftedFctx: FunctionContext,
+  captures: ReadonlyArray<{
+    name: string;
+    type: ValType;
+    mutable: boolean;
+    alreadyBoxed: boolean;
+    hasTdzFlag: boolean;
+  }>,
+  referencedCalleeNames: ReadonlySet<string>,
+): void {
+  for (const cap of captures) {
+    // Same narrowing as the #2692 eager pass: only plain by-value `var`/param
+    // captures. Mutable → already a box param; alreadyBoxed → outer cell threaded
+    // through; hasTdzFlag → `let`/`const`, eager boxing races the re-declaration.
+    if (cap.mutable || cap.alreadyBoxed || cap.hasTdzFlag) continue;
+    // Find a referenced sibling that mutably captures this same name, and adopt
+    // ITS ref-cell value type so our refCellTypeIdx matches the lazy call-site's.
+    let calleeValType: ValType | undefined;
+    for (const g of referencedCalleeNames) {
+      const gCaps = ctx.nestedFuncCaptures.get(g);
+      if (!gCaps) continue;
+      const m = gCaps.find((c) => c.name === cap.name && c.mutable && c.valType);
+      if (m) {
+        calleeValType = m.valType;
+        break;
+      }
+    }
+    if (!calleeValType) continue;
+    // The box is built from the by-value param via `local.get` (type `cap.type`);
+    // the cell field type must match. Both derive from the SAME outer variable,
+    // so they are equal in practice — guard defensively and skip on any mismatch
+    // (falls back to the prior lazy path rather than emitting an invalid struct).
+    const sameValType =
+      cap.type.kind === calleeValType.kind &&
+      (cap.type.kind !== "ref" && cap.type.kind !== "ref_null"
+        ? true
+        : (cap.type as { typeIdx: number }).typeIdx === (calleeValType as { typeIdx: number }).typeIdx);
+    if (!sameValType) continue;
+    // Don't double-box (a prior pass / sibling already boxed this name).
+    if (liftedFctx.boxedCaptures?.has(cap.name)) continue;
+    const paramIdx = liftedFctx.localMap.get(cap.name);
+    if (paramIdx === undefined) continue;
+    const refCellTypeIdx = getOrRegisterRefCellType(ctx, calleeValType);
+    const boxedLocalIdx = allocLocal(liftedFctx, `__boxed_${cap.name}`, {
+      kind: "ref",
+      typeIdx: refCellTypeIdx,
+    });
+    // `local.set` (not `tee`) — the eager site leaves nothing on the stack; the
+    // later call site re-reads the box via its already-boxed branch.
+    liftedFctx.body.push({ op: "local.get", index: paramIdx });
+    liftedFctx.body.push({ op: "struct.new", typeIdx: refCellTypeIdx });
+    liftedFctx.body.push({ op: "local.set", index: boxedLocalIdx });
+    liftedFctx.localMap.set(cap.name, boxedLocalIdx);
+    if (!liftedFctx.boxedCaptures) liftedFctx.boxedCaptures = new Map();
+    liftedFctx.boxedCaptures.set(cap.name, { refCellTypeIdx, valType: calleeValType });
   }
 }
 
