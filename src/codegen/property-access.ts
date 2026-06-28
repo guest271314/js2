@@ -5417,6 +5417,40 @@ export function isSafeBoundsEliminated(fctx: FunctionContext, expr: ts.ElementAc
 }
 
 /**
+ * (#2766) Gate for the #2760 F1 OOB→`undefined` widening: the element's TS type
+ * must be genuinely number-like / boolean-like.
+ *
+ * F1 boxes the in-bounds element via `coerceType(<wasm kind> → externref)`, which
+ * for an `f64`/`i32` element ALWAYS emits `__box_number`. That is only the
+ * CORRECT box when the element really is a `number`/`boolean`. The element's Wasm
+ * KIND alone is ambiguous: a `symbol[]` is *also* an `i32` array — of symbol
+ * HANDLES — and `Object.values({ k: aSymbol })` produces exactly that. R1's gate
+ * checked only `arrDef.element.kind === "f64" | "i32"`, so it fired on the
+ * symbol-handle array and boxed the handle as a NUMBER, corrupting it (regressed
+ * `built-ins/Object/values/symbols-omitted.js`: `Object.values(...)[0] === sym`).
+ *
+ * So restrict F1 to its stated scope (`number[]` / `boolean[]`) by checking the
+ * element-access expression's TS type. A `symbol` / object / `any` / `unknown`
+ * element (whatever its Wasm kind) falls through to the normal, type-correct read
+ * + box (`__box_symbol`, etc.). Conservative: any checker failure, or any union
+ * member that is not number/boolean-like (after stripping `undefined`/`null`),
+ * returns false — F1 stays off.
+ */
+function f1ElementIsNumberOrBoolean(ctx: CodegenContext, expr: ts.ElementAccessExpression): boolean {
+  let t: ts.Type;
+  try {
+    t = ctx.checker.getTypeAtLocation(expr);
+  } catch {
+    return false;
+  }
+  const parts = t.isUnion?.() ? t.types : [t];
+  const valueParts = parts.filter((p) => (p.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Null)) === 0);
+  if (valueParts.length === 0) return false;
+  const numOrBool = ts.TypeFlags.NumberLike | ts.TypeFlags.BooleanLike;
+  return valueParts.every((p) => (p.flags & numOrBool) !== 0);
+}
+
+/**
  * (#2760 — hybrid type-soundness floor F1) SAFE plain-array OOB read for a
  * PRIMITIVE element (`f64` `number[]` / `i32` `boolean[]`): push the in-bounds
  * element **boxed to externref**, or JS `undefined` when the index is out of
@@ -6412,7 +6446,10 @@ export function compileElementAccessBody(
     const oobUndefined =
       !numericHint &&
       classifyTypedArrayType(ctx.checker.getTypeAtLocation(expr.expression), ctx.checker) === "other" &&
-      !isRegexMatchVec;
+      !isRegexMatchVec &&
+      // (#2766) only a genuine number[]/boolean[] element — never a symbol-handle
+      // (or other non-number) i32/f64 array (e.g. Object.values() of a symbol).
+      f1ElementIsNumberOrBoolean(ctx, expr);
     // Unwrap: struct.get data field, then index into backing array
     fctx.body.push({ op: "struct.get", typeIdx, fieldIdx: 1 }); // get data from vec
     // #1179: hint i32 directly for the index. compileExpression will produce
@@ -6493,7 +6530,10 @@ export function compileElementAccessBody(
   // no regex-match-vec exotic to exclude here.
   const oobUndefinedArr =
     !(expectedType?.kind === "f64" || expectedType?.kind === "i32") &&
-    classifyTypedArrayType(ctx.checker.getTypeAtLocation(expr.expression), ctx.checker) === "other";
+    classifyTypedArrayType(ctx.checker.getTypeAtLocation(expr.expression), ctx.checker) === "other" &&
+    // (#2766) only a genuine number[]/boolean[] element — see the matching gate
+    // at the vec-struct call site above.
+    f1ElementIsNumberOrBoolean(ctx, expr);
   // Compile index and convert to i32 (#1179: hint i32 directly to skip the
   // f64.convert_i32_s + i32.trunc_sat_f64_s round-trip when the index is
   // already an i32 local or integer literal).

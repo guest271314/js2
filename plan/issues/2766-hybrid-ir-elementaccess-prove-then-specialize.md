@@ -194,3 +194,28 @@ green; 137 array/IR-slice tests green; `check:ir-fallbacks` OK (no growth, no
 post-claim demotions); standalone mode SAFE read is valid Wasm and trap-free.
 Broad-impact test262 + standalone-floor validated in `merge_group` (this is a core
 IR change).
+
+### merge_group regression fix (R1 F1 symbol-handle bug)
+
+The first `merge_group` re-validation auto-parked on **one** real regression:
+`built-ins/Object/values/symbols-omitted.js` (`Object.values({key: aSymbol})[0]
+=== aSymbol`), pass→fail. Diagnosis (deterministic, NOT a flake — clean `main`
+passes 10/10, branch failed 10/10; reproduced with `experimentalIR:false`, so the
+cause is the folded-in **R1 legacy F1**, NOT the R2 IR change):
+
+- `Object.values(...)` of a symbol-valued object is a `symbol[]`, which the
+  compiler represents as an **i32 array of symbol HANDLES**. R1's F1 gate checked
+  only the element's Wasm KIND (`arrDef.element.kind === "f64" | "i32"`), so it
+  fired on the symbol-handle array and boxed the handle via
+  `coerceType(i32→externref)` = **`__box_number`** — corrupting the symbol (clean
+  main correctly uses **`__box_symbol`**). The `i32` kind is overloaded
+  (`boolean[]` AND `symbol[]`/other handles are all i32), so the kind check alone
+  can't honor R1's stated "number[]/boolean[] only" scope.
+- **Fix** (`f1ElementIsNumberOrBoolean` in `property-access.ts`): gate both F1
+  call sites on the element-access expression's **TS type** being number-like /
+  boolean-like (stripping `undefined`/`null`). A `symbol` / object / `any` /
+  `unknown` element now falls through to the normal, type-correct read+box. This
+  is strictly a *narrowing* of R1's over-broad gate → it only removes buggy
+  firings and restores `main` behavior for non-number/boolean arrays; it cannot
+  introduce new regressions. Verified: the symbol test passes 10/10, R1's
+  number[]/boolean[] tests still green.
