@@ -1,6 +1,6 @@
 ---
 id: 2794
-title: "[SENIOR-DEV ONLY] acorn parse() residual: var-decl + binary-expression THROW (raise/unexpected) — distinct from the S3 vec-identity class; closes #2681/#2686"
+title: "[SENIOR-DEV ONLY] acorn parse() var-declaration THROW — AST-Node-as-closureBridge + vec read-methods (host-proxy layer); closes #2681"
 status: in-progress
 assignee: ttraenkler/sendev-acorn
 sprint: current
@@ -14,9 +14,9 @@ task_type: bugfix
 area: codegen
 language_feature: value-representation
 goal: acorn-dogfood
-related: [2773, 2681, 2686, 2784, 2664, 2674]
+related: [2773, 2681, 2686, 2784, 2664, 2674, 2800]
 depends_on: [2784]
-blocks: [2681, 2686]
+blocks: [2681]
 ---
 
 # #2794 — acorn `parse()` residual: var-decl + binary-expression THROW
@@ -186,87 +186,34 @@ gap, only *unlocked* by (1). Fix: in `__extern_method_call`, when the receiver i
 a vec, materialize it (`_vecToArray`) and apply `Array.prototype[method]` for
 read-only methods (broad-impact, hot path — needs full CI validation).
 
-### (3) binary-expression — init-time `new X(objLiteral)` mis-reads the ctor's object-literal param [PRIMARY for #2686]
+### (3) binary-expression — CARVED OUT to #2800 (general core-codegen bug, blocks #2686)
 
-`parse("1+2;")` threw `Unexpected token (1:1)` (at the `+`). Root cause:
-`parseExprOp` (`acorn.mjs:2776`) reads `prec = this.type.binop`; for `plusMin`
-this is **undefined** (should be 9), so `prec == null`, the `+` is never
-consumed, and `unexpected()` throws. ALL `conf`-derived TokenType fields are
-wrong (`binop=undefined beforeExpr=false prefix=false startsExpr=false`) while
-`label` (a direct ctor param) is correct.
-
-**Corrected root cause (the earlier `__sget`-dispatcher hypothesis was WRONG —
-ruled out below).** This is NOT the host proxy and NOT `__sget`: the
-**wasm-internal** read `types$1.plusMin.binop` is *also* undefined — the binop
-slot genuinely holds `null`. The value was never stored: `this.binop =
-conf.binop || null` read `conf.binop` as `undefined` at construction (proved by
-storing `(conf.binop === void 0) ? -2 : (conf.binop||-1)` into a spare field and
-reading it back = **-2**). The struct shape is correct (`__struct_field_names`
-shows all 10 fields incl. `binop`); the conf object literal stores binop fine
-when read directly; a plain (non-`new`) function reading `conf.binop` works.
-
-**The decisive bisection (in-acorn, fresh-extract probes in `.tmp/`):** the
-failure is **`new X({field: v})` evaluated at MODULE-INIT time**, in acorn's
-module:
-
-```js
-function VI(label, conf){ this.label = label; this.zz = conf.zz || null; }
-var x = new VI("a", { zz: 9 });        // MODULE TOP-LEVEL → x.zz === null   ✗ BUG
-function mk(){ return new VI("b", { zz: 9 }); }
-//  mk().zz === 9                       // RUNTIME (inside a fn) → correct    ✓
-```
-
-Confirmed in-acorn results: `new VI(...)` at top-level → `null`; the SAME ctor
-called at runtime → `9`; plain-function `f({zz:9})` → `9`; the literal read at
-its own call site (`litG.zz`) → `9`; inside an object-literal initializer
-(`var t = { k: new VI("b",{zz:9}) }`, the exact `types$1` shape) → `null`. So a
-constructor invoked during the module's top-level/init evaluation receives an
-object-literal argument whose fields the ctor body then reads as `undefined`,
-even though the identical ctor + identical literal work at runtime.
-
-**Scale-dependent**: a *standalone* module with the same pattern (even with the
-full acorn token table, helpers, ~33 init-time `new TokenType` calls, and ~10
-extra distinct object-literal struct shapes) reads `binop=9` correctly. The bug
-only manifests inside the full acorn module — so it is an interaction between
-**init-time `new`-call argument lowering** and something at acorn's scale
-(strong suspect: type-index remap/DCE of the conf object-literal struct type in
-the giant top-level init function, cf. `project_type_index_shift_and_deadelim` —
-the init-time `struct.new` for the literal and the ctor's `struct.get` end up
-referencing divergent type indices, so the param arrives as a struct the ctor's
-`conf.<field>` read can't see). Needs a focused codegen dig into how top-level
-`new X(objLiteral)` threads the literal's struct type to the constructor param
-under DCE/type-table pressure — NOT minimally reproducible standalone yet.
-
-**Ruled out for (3)** (do not re-investigate): host proxy / `_wrapForHost`
-(wasm-internal read is also null); `__sget_<field>` per-shape dispatcher
-(`_emitStructFieldGettersInner`, index.ts:2240) — the slot genuinely holds null,
-`__sget` faithfully returns it; `emitNullGuardedStructGet` /
-`findAlternateStructsForField` (property-access.ts) — `conf.binop` never routes
-through it (0 hits); `__extern_get` (never called for `binop`, even at init);
-field-name collision (a unique field name `zzPrecedence` fails identically);
-the empty `{}` void-0 default (giving it a binop-bearing shape doesn't help);
-prototype-method / fnctor-ness (fails with and without); simple object-literal
-struct-table scale (10+ extra shapes standalone still works).
+`parse("1+2;")` throws `Unexpected token (1:1)` (at the `+`) because
+`parseExprOp` reads `prec = this.type.binop === undefined`. Root cause: acorn
+builds `types$1` at module-init via `new TokenType(label, {binop:9,…})`, and
+**a constructor invoked at module-init time reads its object-literal argument's
+fields as null** (`conf.binop === void 0` at construction; the wasm-internal
+slot genuinely holds null). This is **NOT** acorn marshaling — it is a GENERAL
+core-codegen bug (top-level `new X(objLiteral)` arg lowering / type-index
+threading), reproduced with a 4-line in-acorn case, and is **scale-dependent**
+(won't repro in a standalone module). It has been **carved out to #2800**
+(`plan/issues/2800-top-level-new-objliteral-arg-null.md`), which owns the full
+analysis, the minimal repro, the type-index-remap hypothesis, and the ruled-out
+list. #2686 is blocked by #2800, not by this issue. This issue (#2794) now scopes
+**only** the var-declaration host-proxy gaps (1)+(2).
 
 ### Status / recommendation
 
-- **#2681 (var-decl)** root-caused: needs a reliable data-vs-closure
-  discriminator (1) + vec read-method materialization (2). Both in the
-  host-proxy/marshaling layer (`src/runtime.ts`).
-- **#2686 (binary-expr)** root-caused to a precise, in-acorn-minimal trigger
-  (3): init-time `new X(objLiteral)` field-read returns null at acorn's scale.
-  This is a **core codegen** bug (top-level `new`-arg lowering / type-index
-  threading), DISTINCT from the host-proxy layer and from the `__sget`
-  dispatcher (both ruled out). It is NOT the native-typing rewrite. Next step is
-  a focused codegen investigation: dump the type index of the init-time object
-  literal's `struct.new` vs the type the ctor's `conf.<field>` `struct.get`
-  casts to, in the full acorn module; suspect a DCE/dedup remap divergence.
-  Strong architect-spec / dedicated-codegen-session candidate — the cheap
-  bisection is exhausted (standalone won't repro; acorn-down bisection is
-  ~40s/compile).
+- **#2681 (var-decl)** — THIS issue. Needs a reliable data-vs-closure
+  discriminator (1) + vec read-method materialization (2), both in the
+  host-proxy/marshaling layer (`src/runtime.ts`). Acceptance: compiled-acorn
+  `parse("var x = 1;")` → `VariableDeclaration`.
+- **#2686 (binary-expr)** — blocked by **#2800** (carved out). Not in this
+  issue's scope.
 - Banked probes (fresh-extract drivers) under the branch `.tmp/`:
-  `variants{,2,3}.mjs` (the init-vs-runtime bisection), `binop-ctor.mjs`
-  (the `-2` void-0 proof), `tt2/tt3.mjs` (in-acorn clone), `scale-repro.ts`
-  (standalone scale control), `acorn-run.mjs` (watchdog driver).
-- Branch left clean (no source change; all instrumentation reverted). The
-  closureBridge guard for (1) was reverted (regressed genuine closures).
+  `acorn-run.mjs` (watchdog parse driver), `acorn-binkeys.mjs` (field histogram);
+  for #2800: `variants{,2,3}.mjs`, `binop-ctor.mjs`, `tt2/tt3.mjs`,
+  `scale-repro.ts`.
+- The closureBridge guard for (1) was reverted (it regressed genuine closures —
+  `__is_closure` false-negatives). The clean fix is a POSITIVE `__is_data_struct`
+  marker (mirror `__is_vec`); see (1) above.
