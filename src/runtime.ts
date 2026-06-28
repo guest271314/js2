@@ -5379,10 +5379,21 @@ function _wrapForHost(obj: any, exports: Record<string, Function> | undefined): 
       }
       const val = safeGetField(key);
       if (protoMethods === undefined && val === undefined && !hasInSidecar && !hasInFields) return undefined;
+      // (#2714) Reflect the sidecar descriptor's stored enumerable flag so a
+      // `defineProperty(o, k, { enumerable: false })` own prop is reported as
+      // non-enumerable through the host proxy. Native consumers that filter by
+      // enumerability — `Object.assign` -> CopyDataProperties, object spread
+      // `{ ...o }` (both lowered via `__object_assign` over a `_wrapForHost`
+      // source) — must SKIP a non-enumerable own key. Hardcoding
+      // `enumerable: true` here leaked non-enumerable sidecar props into spread
+      // results (`spread-obj-skip-non-enumerable`, #2714). Declared struct
+      // fields and class methods carry no sidecar flags entry and stay
+      // enumerable data props, matching their spec semantics.
+      const scFlags = _wasmPropDescs.get(obj)?.get(_normalizeDescKey(key));
       const desc: PropertyDescriptor = {
         value: val,
         writable: true,
-        enumerable: true,
+        enumerable: scFlags === undefined ? true : !!(scFlags & _SC_ENUMERABLE),
         configurable: true,
       };
       // Mirror onto target so V8's Proxy invariant checker is happy

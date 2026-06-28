@@ -77,4 +77,49 @@ describe("#2714 — object-spread keys are enumerable", () => {
       ),
     ).toBe(5);
   });
+
+  // Regression: the host-path routing (above) lowers `{ ...o }` via
+  // `__object_assign` over a `_wrapForHost` proxy. That proxy's
+  // `getOwnPropertyDescriptor` trap hardcoded `enumerable: true`, so native
+  // `Object.assign`/spread copied a NON-enumerable own source prop. Object
+  // spread must skip non-enumerable own props (ECMA-262 CopyDataProperties).
+  // (spread-obj-skip-non-enumerable, #2714)
+  it("spread SKIPS a non-enumerable own source property", async () => {
+    expect(
+      await run(
+        `export function test(): number {
+          const o: any = {};
+          Object.defineProperty(o, "b", { value: 3, enumerable: false });
+          const r: any = { ...o };
+          return r.hasOwnProperty("b") ? 99 : Object.keys(r).length;
+        }`,
+      ),
+    ).toBe(0);
+  });
+
+  it("Object.assign SKIPS a non-enumerable own source property", async () => {
+    expect(
+      await run(
+        `export function test(): number {
+          const o: any = {};
+          Object.defineProperty(o, "b", { value: 3, enumerable: false });
+          const r: any = Object.assign({}, o);
+          return r.hasOwnProperty("b") ? 99 : Object.keys(r).length;
+        }`,
+      ),
+    ).toBe(0);
+  });
+
+  it("spread STILL copies an enumerable own source property", async () => {
+    expect(
+      await run(
+        `export function test(): number {
+          const o: any = {};
+          Object.defineProperty(o, "a", { value: 7, enumerable: true });
+          const r: any = { ...o };
+          return r.a === 7 && Object.keys(r).length === 1 ? 1 : 99;
+        }`,
+      ),
+    ).toBe(1);
+  });
 });
