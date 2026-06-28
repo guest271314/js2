@@ -1,8 +1,8 @@
 ---
 id: 2801
 title: "[SENIOR-DEV ONLY] compiled-acorn CallExpression `arguments` marshals as `{}` not an array (host vec→array gap)"
-status: in-progress
-assignee: ttraenkler/sendev-acorn-callargs
+status: blocked
+assignee: ttraenkler/unassigned
 sprint: current
 priority: high
 horizon: m
