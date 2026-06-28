@@ -1,9 +1,11 @@
 ---
 id: 2783
 title: "General --link <namespace> dynamic-linking flag (generalize --link-node-shims)"
-status: ready
-sprint: Backlog
+status: done
+sprint: current
 created: 2026-06-28
+completed: 2026-06-28
+assignee: ttraenkler/agent-a957b1b8ea8d85c4a
 priority: medium
 feasibility: hard
 reasoning_effort: high
@@ -13,6 +15,51 @@ language_feature: module-linking
 goal: platform
 related: [2527, 2655, 2657, 2771, 2779, 389]
 ---
+
+## Implementation (S1–S3 landed; S4 deferred)
+
+S1–S3 of the Implementation Plan are landed. **S4 (generalize the codegen
+branch sites) is deliberately deferred** as a follow-up — per the architect's
+verdict it is YAGNI until a *second* concrete lowerable namespace exists.
+
+- **S1 — flag + plumbing.** `--link <ns>` repeatable CLI parser (`--link node:fs`,
+  `--link=node:fs` both accepted); `--link-node-shims` kept as a deprecation
+  alias (emits a soft note) folding to `--link node:fs`. `link?: string[]` added
+  to `CompileOptions` (`src/index.ts`) and `CodegenOptions`
+  (`src/codegen/context/types.ts`). `buildCodegenOptions` (`src/compiler.ts`)
+  normalizes `link` ∪ (`linkNodeShims ? ["node:fs"]`) into one deduped set.
+  `create-context.ts` builds `ctx.linkedNamespaces` (WASI-gated, exactly as the
+  old boolean) and derives `ctx.linkNodeShims = linkedNamespaces.has("node:fs")`
+  so the ~30 existing `ctx.linkNodeShims` read sites are zero-churn and the two
+  can never drift. `--help` updated.
+- **S2 — strict-gate generalization (the one new capability).**
+  `isHostImportAllowed` / `scanForLeakedHostImports`
+  (`src/codegen/host-import-allowlist.ts`) take an optional `linkedNamespaces`
+  set; a `--link`'d namespace's imports now survive the `--no-host-imports` /
+  WASI strict gate (both the per-call `addImport` gate in
+  `src/codegen/registry/imports.ts` and the post-link
+  `assertNoLeakedHostImports` scan in `src/codegen/index.ts`). `env` host
+  bindings stay allowlist-gated (not `--link`-overridable). No lowering added.
+- **S3 — tests + back-compat lock-in.** `tests/issue-2783.test.ts` (10 tests):
+  `--link node:fs` byte-identical to `--link-node-shims`; gate permits an
+  arbitrary namespace (`acme:telemetry`) while rejecting an unlinked one;
+  per-namespace isolation; `env` not overridable; byte-neutral when no `--link`
+  (omitted ≡ `link: []`); deprecation warning fires for `--link-node-shims`;
+  multi-file `compileProject` forwards the `link` policy.
+
+## Test Results
+
+- `tests/issue-2783.test.ts` — 10/10 pass.
+- Regression set (no change): `issue-2633-process-io-to-node-fs`,
+  `issue-2631-node-fs-fd-shim`, `issue-2094-import-leak-scan`,
+  `host-import-allowlist-gate`, `host-import-allowlist-budget`,
+  `issue-1554-cli-flag-exclusion` — 45/45 pass.
+- Back-compat: `--link node:fs` ≡ `--link-node-shims` byte-for-byte (SHA match).
+- Byte-neutral: no-`link` single-source compiles unchanged (empty
+  `linkedNamespaces` → identical gate decisions and derived `linkNodeShims`).
+- `tsc --noEmit` clean; `biome lint` clean; `prettier` clean.
+- test262 smoke batch (addition/if): no new CEs (`other=0`); pre-existing
+  bigint/symbol fails unchanged.
 
 # #2783 — general `--link <namespace>` dynamic-linking flag
 

@@ -1999,7 +1999,10 @@ export function generateModule(
  */
 function assertNoLeakedHostImports(ctx: CodegenContext, mod: WasmModule): void {
   if (!ctx.strictNoHostImports) return;
-  const leaks = scanForLeakedHostImports(mod.imports);
+  // #2783 — pass `ctx.linkedNamespaces` so an arbitrary `--link`'d namespace's
+  // imports survive the strict gate (left as link-time imports for a preloaded
+  // provider) instead of being rejected as leaked host imports.
+  const leaks = scanForLeakedHostImports(mod.imports, ctx.linkedNamespaces);
   for (const leak of leaks) {
     reportErrorNoNode(ctx, buildLeakedHostImportError(leak));
   }

@@ -32,6 +32,13 @@ export function createCodegenContext(
   const nativeStrings =
     options?.nativeStrings ??
     !!(options?.fast || options?.wasi || options?.standalone || strictNoHostImports || options?.utf8Storage);
+  // #2783 — the dynamic-linking set: external namespaces left as link-time
+  // imports (satisfied by a preloaded provider) instead of inline-lowering.
+  // WASI-gated exactly as the old `linkNodeShims` boolean was — ignored for
+  // non-WASI targets. `linkNodeShims` is derived from `node:fs` membership so
+  // the two can never drift. (`compiler.ts` already folded a legacy
+  // `linkNodeShims: true` into `options.link` as `"node:fs"`.)
+  const linkedNamespaces: ReadonlySet<string> = new Set(options?.wasi ? (options?.link ?? []) : []);
   const ctx: CodegenContext = {
     mod,
     checker,
@@ -221,8 +228,11 @@ export function createCodegenContext(
     nullThisTypeErrorReady: false, // (#2025)
     funcClosureGlobals: new Map(),
     wasi: options?.wasi ?? false,
-    // #2625 — the linkable js2wasm:node-<mod> shims only apply under WASI; ignored otherwise.
-    linkNodeShims: !!(options?.wasi && options?.linkNodeShims),
+    // #2783 — namespaces left as link-time imports (WASI-gated above).
+    linkedNamespaces,
+    // #2625/#2783 — the linkable js2wasm:node-<mod> std-IO path only applies under
+    // WASI; derived from `node:fs` membership in the (already WASI-gated) link set.
+    linkNodeShims: linkedNamespaces.has("node:fs"),
     nodeFsReadSyncIdx: -1,
     nodeFsWriteSyncIdx: -1,
     standalone: options?.standalone ?? false,
