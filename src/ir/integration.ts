@@ -227,6 +227,9 @@ export function compileIrPathFunctions(
         // boolean` + `anyStrTypeIdx: number` shortcuts that #1183 added.
         resolver: fromAstResolver,
         allocRegistry,
+        // #2780 (hybrid Row 6): thread the TS checker so `lowerArrayLiteral`
+        // can discharge the widening-escape proof via `getContextualType`.
+        checker: ctx.checker,
       });
       const mainErrors = verifyIrFunction(result.main);
       if (mainErrors.length > 0) {
@@ -324,6 +327,9 @@ export function compileIrPathFunctions(
             classShapes,
             resolver: fromAstResolver,
             allocRegistry,
+            // #2780 (hybrid Row 6): thread the TS checker for the
+            // ArrayLiteral widening-escape proof in method bodies too.
+            checker: ctx.checker,
           });
           const mainErrors = verifyIrFunction(result.main);
           if (mainErrors.length > 0) {
