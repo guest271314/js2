@@ -366,3 +366,7 @@ run, so B2 (sync `run` producer) is unblocked by this finding; only the
   carries a _concrete, named_ prerequisite (toolchain encoding-skew resolution)
   on top of the component-model-producer work. Path 2 (B2–B4) stays **deferred /
   gated on #2525**. Issue remains **`in-progress`** (B0 done; B2–B4 deferred).
+
+## Residual (as of #2199, PO reconcile 2026-06-28)
+
+NOT done — scoping/epic. The referencing PR is the B0 spike (P3 async stream<u8> echo verified under wasmtime 44). Native WASI Preview 3 is a Component-Model epic (async func / stream<T> / future<T>), deferred; only a documentation+verification interop slice is shippable now. priority low, sprint Backlog. Stays in-progress.

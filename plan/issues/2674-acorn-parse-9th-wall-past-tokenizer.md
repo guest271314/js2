@@ -1,11 +1,12 @@
 ---
 id: 2674
 title: "acorn parse() 9th wall PAST tokenization (after #2664 type-write fix) — parseTopLevel/parseStatement array-push loop"
-status: in-progress
+status: done
 assignee: ttraenkler/sd-2674c
 sprint: current
 created: 2026-06-25
-updated: 2026-06-25
+updated: 2026-06-28
+completed: 2026-06-28
 priority: high
 feasibility: hard
 reasoning_effort: high
@@ -566,3 +567,22 @@ never matches) is exactly why, post-#2085, the identifier path reaches
 `unexpected()` and THROWS (#2681) instead of matching the `name` case. The 3 ranked
 fix directions + the banked `.tmp` probes apply to #2681. Recommend porting this
 analysis to #2681 and closing #2674 as resolved-by-#2085.
+
+## CLOSED — re-verified on current `origin/main` (2026-06-28, dev-acorn)
+
+Re-ran the dogfood probe against current `origin/main` (HEAD #2201, post-#2731;
+single-compile multi-input worker, `.tmp/verify-driver.mjs`). The 9th-wall HANG is
+gone — nothing blocks the event loop:
+
+| input | result on current main |
+|---|---|
+| `""` / `";"` | Program returned (bodyLen 0 / 1 EmptyStatement) |
+| `"1"` / `"1;"` / `"true;"` | Program returned — ExpressionStatement with a **Literal** `expression` (the #2687 `expression:null` symptom is no longer observed via the host marshalling either) |
+| `"x"` / `"var x = 1;"` / `"foo(bar);"` | THROW (→ #2681) |
+| `"1 + 2 * 3;"` | THROW (→ #2686) |
+
+Acorn now compiles in ~40s (not the ~290s noted earlier this chain). The
+non-termination this issue tracked is **RESOLVED** (by #2085). The remaining
+throws are tracked separately by #2681 (identifier/var path) and #2686 (binary
+path); their root cause is sharpened in those issues (Parser is NOT reconstructed
+as a `__fnctor_Parser` struct on current main — see #2681). Marking `done`.

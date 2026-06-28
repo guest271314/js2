@@ -789,3 +789,7 @@ already-diagnosed 3 fixes (see the "P1 DISPATCH" section above):
 **Status: S3b PARKED (single-owner follow-up). No S3b code on branch
 `issue-2660-s3b` — it carries only this grounding/reconciliation note as the
 cross-session sync point. sd-s3a standing down.**
+
+## Residual (as of #2199, PO reconcile 2026-06-28)
+
+NOT done — hard infra. S1 (inert A∧B whole-program escape/dynamic-use gate) + S2 (per-fnctor prototype $Object, standalone) landed. The remaining slices — reconstructing new F() instances as $Object behind the gate, the floor-risk full merge_group slice — remain. Stays in-progress.

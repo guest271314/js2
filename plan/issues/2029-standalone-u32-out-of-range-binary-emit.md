@@ -642,3 +642,7 @@ regressed here). A distinct funcMap-returns-undefined producer in the
 generator-native lowering; route as its own slice. Plus the global-index
 regexp-replacer (2) + property-accessor (1) and the for-of/iterator-next
 local-index (1) residuals already noted above.
+
+## Residual (as of #2199, PO reconcile 2026-06-28)
+
+NOT done — umbrella; the headline `u32 out of range: -1` emit-crash class IS resolved (497 → a handful; multiple landed slices: emitSetSubclassProto -1 sentinel, __get_undefined leak, primitive-wrapper refusal, tagged-template localMap rollback, SuppressedError global-sentinel, failed-nested-hoist funcIdx). Remaining separate producers: regexp-replacer global-index (2), property-accessor (1), native-generator funcMap-undefined in annexB RegExp (2), one for-of/iterator-next local-index (1). Deferred: primitive-wrapper native-box subclass; DisposableStack/AsyncDisposableStack ERM substrate (Symbol.dispose value-read + dispose-dispatch, senior-dev). Stays in-progress as the umbrella.

@@ -612,3 +612,7 @@ churn during the migration.
 - **#2580 (any-typed value-read substrate)** and #2585/#2040 (tag-5 classifier)
   overlap the standalone struct-value read; keep this issue's standalone work
   out of scope to avoid colliding with that in-flight substrate work.
+
+## Residual (as of #2199, PO reconcile 2026-06-28)
+
+NOT done — sliced. Slice A (host mode) landed (an auto-park merge_group diagnosis, #2547, trimmed its scope). Slices B (accessor descriptors) + C (Array-exotic length/index, ArraySetLength) remain; the ~788-fail ES5 cluster is not closed. Stays in-progress.

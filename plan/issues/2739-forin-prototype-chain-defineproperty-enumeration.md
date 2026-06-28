@@ -228,3 +228,7 @@ issue if (a)+(b) ship first.
 - `statements/for-in/order-after-define-property.js` — (c), separate sub-task
 - Regression watch: `statements/for-in/` (esp. `order-simple-object` from #2731),
   `built-ins/Object/getPrototypeOf`, `built-ins/Object/setPrototypeOf`.
+
+## Residual (as of #2199, PO reconcile 2026-06-28)
+
+NOT done — sliced. Part (a) (for-in walks a setPrototypeOf prototype chain) landed. The remaining parts — full setPrototypeOf-chain enumeration + defineProperty-driven enumeration ordering on the prototype chain — remain. Stays in-progress.
