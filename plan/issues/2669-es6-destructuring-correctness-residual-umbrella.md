@@ -306,3 +306,19 @@ generator (~871) tails stay under #2566/#2662.
 (array-pattern object/class default null-deref + the `fn-name-class` NamedEvaluation
 cluster) is **done** — recovers the binding/function/method/generator/async/
 for-await `fn-name-class` family. #2757 / #2758 remain ready/architect.
+
+## Carve (2026-06-28) — typed in-bounds undefined/hole for-of default → #2769 (architect)
+
+The **typed in-bounds `undefined`/hole default-init** slice (`for (const [x = 23]
+of [[undefined]])` / `[[,]]` — default never fires because the iterable's inner
+`undefined[]` lowers to `vec_i32` and `undefined` is lost as i32 `0` at
+construction) is carved to **#2769** and routed to **architect**. A dev attempt
+(PR #2226) was closed: widening `undefined[]`→externref in `resolveWasmType` is
+GLOBAL (type-deterministic) so it broke array construction (`array.new_fixed`
+i32.const) + i32/f64 consumers (`.length`/`sort`/`reduceRight`/`for-in`) — +35
+wins and −5 regressions are inseparable in that approach; the correct fix is
+representation-level. Key asymmetry captured in #2769: the identical **binding**
+pattern already passes (TS infers a TUPLE → f64 sNaN sentinel), only the **for-of**
+ARRAY-typed path fails. The #2216 nested-array-default slice stays done. Umbrella
+remains OPEN/`ready` — #2757 (assignment-rest) and #2758 (init-skipped side-effect)
+remain dev/architect-tractable.
