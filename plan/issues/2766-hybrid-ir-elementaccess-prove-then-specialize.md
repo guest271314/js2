@@ -1,11 +1,12 @@
 ---
 id: 2766
 title: "Hybrid IR step 1: ElementAccess prove-then-specialize — vec.get only when in-bounds is proven, else SAFE bounds-checked read"
-status: in-progress
+status: done
 assignee: ttraenkler/sendev-2766
 sprint: current
 created: 2026-06-28
 updated: 2026-06-28
+completed: 2026-06-28
 priority: high
 horizon: m
 feasibility: medium
@@ -117,3 +118,79 @@ FAST-with-proof or SAFE, promote the `ElementAccessExpression` row in
 - Counted-loop / literal-bounded reads still get the fast `vec.get` (no perf
   regression on the proven-safe path).
 - No net test262 regression; ir-fallback budget unbroken.
+
+## Implementation Notes (sendev-2766, 2026-06-28)
+
+**Folds in R1 (#2760).** Per the project-lead decision (1-A), the R1 legacy floor
+fix (`emitPlainArrayUndefinedOobGet` + the two `compileElementAccessBody` call
+sites, primitive-only, numeric-context-suppressed) is **merged into this PR**
+rather than landing separately. `depends_on:[2760]` was dropped. R1's
+`tests/issue-2760.test.ts` (19 tests) come along and stay green.
+
+**Core change — `src/ir/from-ast.ts`:**
+- `lowerElementAccess` no longer emits an unconditional (trapping) `emitVecGet`.
+  It now: **prove → FAST**, else **SAFE**.
+- **FAST** (`isProvenInBoundsIr`): the index is proven in `[0, length)` by the
+  counted-loop proof — kept identical to the legacy `vec.get` (a single unchecked
+  `array.get`, no bounds check; verified structurally: proven sum has
+  `hasStructuredIf=false`, one `array.get`).
+- **SAFE** (`emitSafeVecGet`): `inBounds ? vec.get(idx) : <JS-correct OOB default>`
+  via `emitIfElse` (lazy — `select` would be wrong since it evaluates both arms and
+  the read would still trap). **Crucially the result type is UNCHANGED** from the
+  fast read (the element ValType), so there is **no downstream type cascade** —
+  only runtime semantics change (trap → JS value).
+
+**The proof (`detectCountedLoopSafeIndex` in `lowerForStatement`).** Ports legacy
+`safeIndexedArrays` but is **deliberately STRICTER** (a *real* HI proof, not a
+flag): legacy populated the set from only the `i < arr.length` condition + body
+non-mutation, omitting the lower bound. The IR fast read emits an **unchecked**
+`array.get` that *traps* on OOB, so the proof must also pin `0 <= i`: I additionally
+require a non-negative-literal init **and** a strictly-increasing step (reusing
+legacy `isIncreasingStep` / `loopBodyMutatesIndexOrArray`, now `export`ed). A
+negative-init / decreasing loop therefore falls to the (correct) SAFE read instead
+of being unsoundly trusted. The proof set is threaded onto a body-scoped `LowerCtx`
+(`safeIndexedArrays`), immutably copied so it scopes to the loop and accumulates
+outward through nesting.
+
+**OOB-default element-kind dispatch (mirrors `lowerOptionalExternPropertyAccess`):**
+- `f64` → `f64.const NaN` — `ToNumber(undefined)` is NaN, the JS-correct image in
+  the numeric context the IR retains a primitive read in. **Stays unboxed: no late
+  import is added, so R1's Math.* funcIdx-shift miscompile cannot recur on the IR
+  path** (the whole reason R1 had to suppress widening in numeric context — the IR
+  never needs to, because it never boxes).
+- `i32` → `i32.const 0` (`ToBoolean(undefined)` = false; 0 for i32-specialized).
+- `externref` → `ref.null.extern` — **matches legacy's non-widened externref OOB
+  default (JS `null`)**, NOT `undefined`. This deliberately preserves R1's
+  deferral: full externref OOB→`undefined` trips the map-on-array-like canary
+  `built-ins/Array/prototype/map/15.4.4.19-8-b-2.js` via a separate length bug.
+  Keeping the legacy value keeps that canary green; the trap is still removed.
+- `ref_null` → `ref.null` of the element heap type.
+- other (non-null `ref`, `i64`, packed `i8`/`i16`, `f32`) → demote to legacy
+  (which bounds-checks all kinds, never traps): a null-ish default isn't
+  expressible in an `if`-arm without widening the result to `ref_null`, which would
+  cascade to consumers. **Verified the demote does not grow the ir-fallback budget
+  (gate OK, all deltas 0)** — these element shapes don't reach the resolved-vec
+  read in the playground corpus.
+
+**Why no f64→externref box in the IR** (the constraint that shaped the design):
+the IR has no `__box_number` primitive — a numeric→`any`/externref coercion
+already demotes the whole function to legacy (`coerceReturnValue`, etc.). So a
+`number[]` read whose result must be *observed* as `undefined` (a value context)
+flows to an externref sink → demotes to **legacy F1** (correct, returns real
+`undefined`). The IR only retains numeric-context reads, where `NaN` is the
+JS-correct image. Net: every retained-on-IR path is JS-correct; every
+undefined-observable path is handled by the folded-in legacy F1.
+
+**Scope note (follow-ups):** (a) the literal-index P1 proof (`arr[k]`, `k < known
+len`) is deferred — without static-length tracking in the IR it can't be
+discharged soundly; the SAFE read covers literal indices correctly, just without
+the fast path. (b) The array-destructuring read site (`from-ast.ts` ~`emitVecGet`
+in the destructuring loop) still emits a trapping read for a too-short source —
+distinct path, out of scope here. (c) Full externref OOB→`undefined` is the
+R1-deferred follow-up gated on the map-on-array-like length fix.
+
+**Validation:** `tests/issue-2766.test.ts` (12) + `tests/issue-2760.test.ts` (19)
+green; 137 array/IR-slice tests green; `check:ir-fallbacks` OK (no growth, no
+post-claim demotions); standalone mode SAFE read is valid Wasm and trap-free.
+Broad-impact test262 + standalone-floor validated in `merge_group` (this is a core
+IR change).
