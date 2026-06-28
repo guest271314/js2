@@ -1,8 +1,9 @@
 ---
 id: 2806
 title: "[SENIOR-DEV ONLY] untyped `[]` array literal lowers to a NUMERIC (f64) vec — ref pushes coerce to 0 (drops AST node refs)"
-status: in-progress
+status: done
 assignee: ttraenkler/senior-dev
+completed: 2026-06-28
 sprint: current
 priority: high
 horizon: l
@@ -232,3 +233,89 @@ downstream coercion sites see externref. Broad blast radius → full `merge_grou
 
 Repros banked in `.tmp/`: `repro-variants.mjs` (the decisive void-0 split),
 `repro-voidinit.mjs` (array + scalar), `callargs3.mjs`/`elemdbg.mjs` (acorn).
+
+---
+
+## RESOLUTION (root cause corrected + fix landed)
+
+**The title's "lowers to a NUMERIC (f64) vec" framing and the architect's
+empty-`[]` numeric-override premise were both wrong.** The real root cause is the
+`var x = (void 0)` idiom (acorn's `parseExprList`):
+
+```js
+var elt = (void 0);          // the `void 0` EXPRESSION pins TS type `undefined`
+elt = this.parseMaybeAssign(...);  // a REFERENCE
+elts.push(elt);
+return elts;
+```
+
+Unlike `var x = undefined` / `var x = null` / `var x;` (which TS treats as
+**evolving-any** → `any` → externref), the `void 0` expression pins the binding to
+type `undefined`. `resolveWasmType(undefined)` is numeric (i32), so the `undefined`
+type drops the reference at **three independent codegen sites**, each verified by
+WAT disassembly:
+
+1. **The local slot** — `var elt`'s slot typed i32 → `elt = <ref>` coerces to i32 `0`.
+2. **The array element-kind** — `inferArrayVecType` picked the first non-`any`
+   push-value type (`undefined`) → an i32-backed `elts` vec.
+3. **The function return type** — TS infers `parseExprList`'s return type as
+   `undefined[]`, so the returned vec type was an i32 vec while the local `elts`
+   was an externref vec; `return elts` coerced every pushed ref to i32 `0`.
+
+### Fix (one root rule, applied consistently)
+
+A `void`-expression initializer (`var x = void <expr>`) or a purely
+`undefined`/`void` type is treated as **externref** (the same slot `= undefined`
+gets) everywhere a binding/array/return type is resolved:
+
+- `varBindingNeedsExternrefForUndefined(decl, type)` helper (`src/codegen/index.ts`)
+  — shared by the `var` hoister (`hoistVarDecl`) and the let/const declaration
+  path (`localTypeForDeclaration`, `statements/variables.ts`) so the hoisted slot
+  and the declaration agree (a `var` reuses its hoisted slot).
+- `inferArrayVecType` (`statements/variables.ts`) — `undefined`/`void`/`null`
+  push-value types no longer pin the array element kind to a numeric vec.
+- `resolveWasmType` Array branch (`src/codegen/index.ts`) — a purely
+  `undefined`/`void` array element resolves to an externref vec (fixes the
+  function-return-type site so it matches the externref local).
+
+### Milestone — ACHIEVED
+
+`parse("foo(bar, baz)").arguments` → `[Identifier(bar), Identifier(baz)]`
+end-to-end via the dogfood oracle (closes **#2801**'s arguments blocker). Spot
+checks: `f(1, 2+3)` → `[Literal, BinaryExpression]`; `h([1,2], {x:3})` nested
+`ArrayExpression.elements` carry their node refs; all-numeric arrays still use the
+f64 vec (`range = [pos, 0]` etc. unaffected — only purely undefined/void elements
+change).
+
+### Out of scope / separate classes (do NOT block #2806)
+
+- **`CallExpression.optional` reads `0` not `false`** — a `boolean`-field-boxing
+  class, NOT the void-0 binding type (it did NOT fall out of this fix; confirmed
+  separate). Tracked separately.
+- **Scalar `return <void-0-typed-var>` returns `undefined`** — a `var e = (void 0);
+  e = <ref>; return e` standalone function infers a `void` RETURN TYPE, so the
+  function emits no result and drops the value at the return. This is the
+  function-return-type analogue of the same root and does NOT affect acorn's
+  arguments (`parseExprList` returns an array). Follow-up if it surfaces.
+- **`sourceFile` extra-field** in the dogfood diff — a harness/options field
+  difference, unrelated.
+
+### Path confirmation (direct AST→Wasm, not IR)
+
+acorn compiles via the **direct AST→Wasm path** (`src/codegen/`), not an IR
+partial — proven empirically: the fix lives entirely in `src/codegen/` and it
+fixes acorn's `arguments` end-to-end, which is only possible if `parseExprList`'s
+var-declaration + array-local lowering runs through that path (an IR-handled
+declaration would make these changes no-ops).
+
+## IR-path follow-up (#1530)
+
+This fix lives on the **direct/legacy front-end** (`src/codegen/`) — the one
+#1530 is retiring — because acorn compiles there today. The **same representation
+rule** must be reproduced on the IR path (`src/ir/`) when it adopts
+var-declarations + array-locals for modules this dynamic: a `void`-expression
+initializer (`var x = void <expr>`), and any purely `undefined`/`void` binding
+type, must be treated as **evolving-any / externref** (exactly like
+`var x = undefined`), so a later reference assignment / push / return is not
+coerced to numeric `0`. Without this, the IR path will reintroduce the #2801
+node-ref drop once it owns these node kinds.

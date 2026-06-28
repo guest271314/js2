@@ -11610,9 +11610,31 @@ export function resolveWasmType(ctx: CodegenContext, tsType: ts.Type, _depth = 0
     if (sym?.name === "Array" || sym?.name === "ReadonlyArray") {
       const typeArgs = ctx.checker.getTypeArguments(tsType as ts.TypeReference);
       const elemTsType = typeArgs[0];
-      const elemWasm: ValType = elemTsType
+      let elemWasm: ValType = elemTsType
         ? resolveWasmType(ctx, elemTsType, _depth + 1, _visited)
         : { kind: "externref" };
+      // (#2806) An array whose element type is **purely** `undefined` / `void`
+      // must lower to an externref-element vec, not a numeric (i32) vec — the
+      // same alignment applied to `var x = (void 0)` slots. The canonical source
+      // is acorn's `parseExprList`: `var elt = (void 0); … elt = <nodeRef>;
+      // elts.push(elt); return elts`. TS infers the *function return type* as
+      // `undefined[]`, so the returned vec type would be an i32 vec while the
+      // local `elts` is an externref vec — `return elts` then copies/coerces
+      // each pushed REFERENCE to i32 `0`, dropping the AST node refs (#2801).
+      // Resolving `undefined[]`/`void[]` to externref here keeps the return type
+      // (and any field/param so typed) in lockstep with the externref local.
+      // `never[]` already resolves to externref; this closes the `undefined[]`
+      // gap. Pure undefined/void only (no Number/Boolean/etc.) so `number[]`
+      // (f64) and `boolean[]` (i32) are untouched; `number | undefined` carries
+      // the Union flag, not Undefined, and is left alone.
+      if (
+        elemTsType &&
+        (elemWasm.kind === "i32" || elemWasm.kind === "f64") &&
+        (elemTsType.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void)) !== 0 &&
+        (elemTsType.flags & ~(ts.TypeFlags.Undefined | ts.TypeFlags.Void)) === 0
+      ) {
+        elemWasm = { kind: "externref" };
+      }
       const elemKey =
         elemWasm.kind === "ref" || elemWasm.kind === "ref_null"
           ? `ref_${(elemWasm as { typeIdx: number }).typeIdx}`
@@ -13867,6 +13889,40 @@ export function collectEnumDeclarations(ctx: CodegenContext, sourceFile: ts.Sour
  * variable not yet in localMap, so identifiers are valid before their
  * declaration site (JavaScript var-hoisting semantics).
  */
+/**
+ * (#2806) Does this variable binding require an **externref** slot because its
+ * declared type is (only) `undefined` / `void`?
+ *
+ * Root cause of the compiled-acorn `CallExpression.arguments` drop: acorn writes
+ * `var elt = (void 0); … elt = this.parseMaybeAssign(...); elts.push(elt)`. The
+ * `void 0` EXPRESSION pins the binding to TS type `undefined` — UNLIKE
+ * `var elt = undefined` / `var elt;`, which TS treats as evolving-any (→ `any`,
+ * → externref). `resolveWasmType(undefined)` is a numeric (i32) slot, so a later
+ * REFERENCE assignment is coerced to i32 `0` and the node ref is dropped.
+ *
+ * The fix routes a `void`-expression initializer (and any purely `undefined` /
+ * `void` declared type) through the SAME externref slot that `= undefined`
+ * already gets — a correctness alignment, not new behaviour. Used by BOTH the
+ * `var` hoister and the let/const declaration path so the slot type is uniform
+ * (a `var` reuses its hoisted slot, so both sites MUST agree).
+ */
+export function varBindingNeedsExternrefForUndefined(
+  decl: ts.VariableDeclaration | undefined,
+  varType: ts.Type,
+): boolean {
+  // `var x = (void 0)` / `var x = void <expr>` — strip parens to find the void.
+  let init = decl?.initializer;
+  while (init && ts.isParenthesizedExpression(init)) init = init.expression;
+  if (init && ts.isVoidExpression(init)) return true;
+  // Purely `undefined` / `void` declared type (no other union constituents).
+  // Unions like `number | undefined` carry the Union flag, not Undefined, so
+  // they are left alone; genuine numeric/boolean/string locals are untouched.
+  return (
+    (varType.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void)) !== 0 &&
+    (varType.flags & ~(ts.TypeFlags.Undefined | ts.TypeFlags.Void)) === 0
+  );
+}
+
 export function hoistVarDeclarations(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -14019,7 +14075,7 @@ function hoistVarDecl(ctx: CodegenContext, fctx: FunctionContext, decl: ts.Varia
       }
     }
     const wasmType: ValType =
-      initForcesExternref || isNullablePrimitiveType(varType)
+      initForcesExternref || isNullablePrimitiveType(varType) || varBindingNeedsExternrefForUndefined(decl, varType)
         ? { kind: "externref" as const }
         : resolveWasmType(ctx, varType);
     if (initForcesExternref) ctx.externrefAccessorVars.add(name);

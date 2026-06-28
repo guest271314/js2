@@ -10,7 +10,7 @@ import { allocLocal, getLocalType } from "../context/locals.js";
 import type { CodegenContext, FunctionContext, NullGuardFact, NullishExclusion } from "../context/types.js";
 import { emitCoercedLocalSet, noJsHost } from "../expressions/helpers.js";
 import { emitUndefined } from "../expressions/late-imports.js";
-import { needsTdzFlag, resolveWasmType } from "../index.js";
+import { needsTdzFlag, resolveWasmType, varBindingNeedsExternrefForUndefined } from "../index.js";
 import { objectLiteralSpreadTakesHostPath, resolveComputedKeyExpression } from "../literals.js";
 import { localGlobalIdx } from "../registry/imports.js";
 import { getOrRegisterArrayType, getOrRegisterSubviewType, getOrRegisterVecType } from "../registry/types.js";
@@ -111,25 +111,14 @@ function inferArrayVecType(ctx: CodegenContext, decl: ts.VariableDeclaration): V
  *  that resolveWasmType would produce for the TS return type (e.g. string[]). */
 const HOST_ARRAY_STRING_METHODS = new Set(["split"]);
 
-function localTypeForDeclaration(ctx: CodegenContext, type: ts.Type): ValType {
+function localTypeForDeclaration(ctx: CodegenContext, type: ts.Type, decl?: ts.VariableDeclaration): ValType {
   if (isNullablePrimitiveType(type)) return { kind: "externref" };
-  // (#2806) A variable whose declared type is **purely** `undefined` / `void`
-  // must get an externref slot, not a numeric (i32) one. The canonical source is
-  // `var elt = (void 0)` — the `void 0` expression pins the binding to type
-  // `undefined` (unlike `var elt = undefined`, which TS treats as evolving-any).
-  // Lowering that to an i32 local means a later REFERENCE assignment
-  // (`elt = this.parseMaybeAssign(...)`) is coerced to i32 `0` / dropped — the
-  // root of compiled-acorn's `CallExpression.arguments` dropping its node refs
-  // (#2801). An externref slot holds the `undefined` sentinel AND any later ref.
-  // Gated on a pure undefined/void type so genuine numeric/boolean/string locals
-  // are untouched; unions (`number | undefined`) carry the Union flag, not
-  // Undefined, and are left alone.
-  if (
-    (type.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void)) !== 0 &&
-    (type.flags & ~(ts.TypeFlags.Undefined | ts.TypeFlags.Void)) === 0
-  ) {
-    return { kind: "externref" };
-  }
+  // (#2806) A `var x = (void 0)` / purely `undefined`|`void` binding needs an
+  // externref slot (the same one `= undefined` gets), so a later reference
+  // assignment isn't coerced to numeric `0`. Shared with the var-hoister so the
+  // hoisted slot and this declaration path agree (a `var` reuses its hoisted
+  // slot). See `varBindingNeedsExternrefForUndefined`.
+  if (varBindingNeedsExternrefForUndefined(decl, type)) return { kind: "externref" };
   return resolveWasmType(ctx, type);
 }
 
@@ -815,7 +804,7 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
                         // the target's closure struct (which traps → null binding).
                         decl.initializer && !ctx.standalone && !noJsHost(ctx) && isBindHostCall(decl.initializer)
                         ? { kind: "externref" as const }
-                        : localTypeForDeclaration(ctx, varType)));
+                        : localTypeForDeclaration(ctx, varType, decl)));
 
     // If this var/let/const was already pre-hoisted at function entry, reuse that slot.
     // For let/const: the pre-pass (hoistLetConstWithTdz) always pre-allocates a slot
