@@ -38,6 +38,9 @@
 import { ts, forEachChild } from "../ts-api.js";
 
 import { evaluateConstantCondition } from "../codegen/statements/control-flow.js";
+// #2766 — reuse the legacy counted-loop proof predicates (pure AST analysis, no
+// codegen state) to port the `safeIndexedArrays` in-bounds proof into the IR.
+import { isIncreasingStep, loopBodyMutatesIndexOrArray } from "../codegen/statements/loops.js";
 import { IrFunctionBuilder } from "./builder.js";
 import type { AllocSiteRegistry } from "./alloc-registry.js";
 import type { IrLowerResolver, IrVecLowering } from "./lower.js";
@@ -861,6 +864,16 @@ interface LowerCtx {
    * builders mint stable ids on the same registry as the outer function.
    */
   readonly allocRegistry?: AllocSiteRegistry;
+  /**
+   * #2766 — counted-loop in-bounds proof, ported from legacy
+   * `fctx.safeIndexedArrays`. Holds `"arrayVar:indexVar"` pairs proven
+   * `0 <= index < array.length` for the *current loop body* (a fresh set is
+   * threaded onto the body cx by `lowerForStatement`, so it naturally scopes to
+   * the loop and accumulates outward through nested loops). `lowerElementAccess`
+   * consults it: a proven read keeps the fast unchecked `vec.get`; every
+   * unproven read falls to the SAFE bounds-checked read (no trap).
+   */
+  readonly safeIndexedArrays?: ReadonlySet<string>;
 }
 
 /**
@@ -1911,6 +1924,103 @@ function lowerObjectLiteral(expr: ts.ObjectLiteralExpression, cx: LowerCtx): IrV
 }
 
 /**
+ * #2766 — IR counterpart of legacy `isSafeBoundsEliminated`
+ * (`src/codegen/property-access.ts`). The index `arr[i]` is proven in
+ * `[0, array.length)` iff both `arr` and `i` are simple identifiers and the pair
+ * was recorded by `detectCountedLoopSafeIndex` on the enclosing loop body's cx.
+ */
+function isProvenInBoundsIr(expr: ts.ElementAccessExpression, cx: LowerCtx): boolean {
+  if (!cx.safeIndexedArrays || cx.safeIndexedArrays.size === 0) return false;
+  if (!ts.isIdentifier(expr.expression) || !ts.isIdentifier(expr.argumentExpression)) return false;
+  return cx.safeIndexedArrays.has(expr.expression.text + ":" + expr.argumentExpression.text);
+}
+
+/**
+ * #2766 — the SAFE (hybrid-invariant default) bounds-checked vec read. Emits
+ * `inBounds ? vec.get(idx) : <JS-correct OOB default>` so an out-of-bounds index
+ * NEVER traps — the IR counterpart of #2760's legacy floor F1
+ * (`emitPlainArrayUndefinedOobGet`). The read result type is UNCHANGED from the
+ * fast `emitVecGet` (the element ValType), so there is **no downstream type
+ * cascade**: only the runtime semantics change (trap → JS-correct value).
+ *
+ * Element-kind dispatch for the OOB default (mirrors
+ * `lowerOptionalExternPropertyAccess`'s sentinel table, and legacy's
+ * `emitBoundsCheckedArrayGet(useUndefinedSentinel=false)` type-defaults):
+ *   - `f64`       → `f64.const NaN` — `ToNumber(undefined)` is NaN, the
+ *                   JS-correct image of an OOB read in the numeric context the IR
+ *                   retains a primitive read in. (A `number[]` read whose result
+ *                   must be *observed* as `undefined` flows to an `any`/externref
+ *                   sink, which has no IR box primitive and already demotes the
+ *                   whole function to legacy F1 — so NaN here is never observed
+ *                   as a wrong `undefined`.) Stays UNBOXED: no late import is
+ *                   added, so the R1 Math.* funcIdx-shift miscompile cannot recur.
+ *   - `i32`       → `i32.const 0` — `ToBoolean(undefined)` is false (0) for
+ *                   `boolean[]`; 0 for an i32-specialized numeric read.
+ *   - `externref` → `ref.null.extern` — matches legacy's *non-widened* externref
+ *                   OOB default (JS `null`). Full externref OOB→`undefined` is
+ *                   the documented R1-deferred follow-up (it trips the
+ *                   map-on-array-like canary `15.4.4.19-8-b-2.js` via a separate
+ *                   length bug); matching legacy here keeps that canary green.
+ *   - `ref_null`  → `ref.null` of the element heap type.
+ *   - other (non-null `ref`, `i64`, packed `i8`/`i16`, `f32`, …) → demote to
+ *     legacy (throw): a null-ish default isn't expressible in an `if`-arm without
+ *     widening the result to `ref_null`, which WOULD cascade to consumers (the
+ *     same limitation `lowerOptionalExternPropertyAccess` documents). Legacy
+ *     bounds-checks all element kinds (returns the type-default, never traps), so
+ *     the demote is still trap-free.
+ */
+function emitSafeVecGet(recv: IrValueId, idxI32: IrValueId, elemValType: ValType, cx: LowerCtx): IrValueId {
+  const elemIr = irVal(elemValType);
+  let makeOobDefault: (() => IrValueId) | null = null;
+  switch (elemValType.kind) {
+    case "f64":
+      makeOobDefault = () => cx.builder.emitConst({ kind: "f64", value: NaN }, elemIr);
+      break;
+    case "i32":
+      makeOobDefault = () => cx.builder.emitConst({ kind: "i32", value: 0 }, elemIr);
+      break;
+    case "externref":
+    case "ref_null":
+      makeOobDefault = () => cx.builder.emitConst({ kind: "null", ty: elemIr }, elemIr);
+      break;
+    default:
+      throw new Error(
+        `ir/from-ast: SAFE OOB vec read for element kind '${elemValType.kind}' needs legacy ` +
+          `(no in-arm default without a result-type widen) in ${cx.funcName}`,
+      );
+  }
+
+  // cond = (unsigned) idx < len. `emitVecLen` yields an f64 JS length; convert
+  // back to i32 for the unsigned compare. A negative index wraps to a huge
+  // unsigned value > any length, so it lands in the OOB arm (JS-correct: a plain
+  // array reads a negative index as `undefined`). The comparison uses the SAME
+  // truncated i32 index the read uses, so it agrees with the read exactly.
+  const lenF64 = cx.builder.emitVecLen(recv);
+  const lenI32 = cx.builder.emitUnary("i32.trunc_sat_f64_s", lenF64, irVal({ kind: "i32" }));
+  const cond = cx.builder.emitBinary("i32.lt_u", idxI32, lenI32, irVal({ kind: "i32" }));
+
+  // then arm: in-bounds → the unchecked vec.get (provably safe inside this arm).
+  let thenValue!: IrValueId;
+  const thenBody = cx.builder.collectBodyInstrs(() => {
+    thenValue = cx.builder.emitVecGet(recv, idxI32, elemIr);
+  });
+  // else arm: OOB → the JS-correct default (pure const; no late import).
+  let elseValue!: IrValueId;
+  const elseBody = cx.builder.collectBodyInstrs(() => {
+    elseValue = makeOobDefault!();
+  });
+
+  return cx.builder.emitIfElse({
+    cond,
+    then: thenBody,
+    thenValue,
+    else: elseBody,
+    elseValue,
+    resultType: elemIr,
+  });
+}
+
+/**
  * Lower an element access whose argument is a string literal — sugar
  * for property access on a known shape. Numeric / computed keys are
  * out of slice 2's scope and throw, so the function falls back to
@@ -1952,12 +2062,17 @@ function lowerElementAccess(expr: ts.ElementAccessExpression, cx: LowerCtx): IrV
   // Slice 12 (#1169o) — dynamic element access on a vec receiver.
   // The receiver's ValType must resolve to a vec via the resolver; the
   // index is lowered as f64 (JS Number) and truncated to i32 for the
-  // backend `vec.get`. Negative or out-of-range indices follow Wasm
-  // `array.get` semantics (trap on out-of-bounds, just like the legacy
-  // bounds-checked path) — slice 12 doesn't add an explicit JS-style
-  // `undefined` return for OOB. Functions whose hot path indexes
-  // outside `[0, length)` should already be falling back to legacy via
-  // the array-prototype-method scope (#1169p).
+  // backend `vec.get`.
+  //
+  // (#2766 — hybrid prove-then-specialize) The read is FAST (an unchecked
+  // `vec.get`/`array.get`, which traps on OOB) ONLY when the index is *proven*
+  // in `[0, length)` (the counted-loop proof ported from legacy
+  // `safeIndexedArrays`). Otherwise it falls to the SAFE bounds-checked read
+  // (`emitSafeVecGet`) that returns the JS-correct OOB value instead of
+  // trapping. This retires the old "slice 12 trusts the type / the selector
+  // keeps OOB functions in legacy" assumption: the trapping read was the
+  // sharpest hybrid-invariant violation (strictly worse than legacy, which at
+  // least bounds-checks and returns a sentinel).
   const recvVal = asVal(recvType);
   if (recvVal && (recvVal.kind === "ref" || recvVal.kind === "ref_null")) {
     const vec = cx.resolver?.resolveVec?.(recvVal);
@@ -1987,7 +2102,13 @@ function lowerElementAccess(expr: ts.ElementAccessExpression, cx: LowerCtx): IrV
           `ir/from-ast: element-access index must be number or bool (got ${idxValTy.kind}) in ${cx.funcName}`,
         );
       }
-      return cx.builder.emitVecGet(recv, idxI32, irVal(vec.elementValType));
+      const elemIr = irVal(vec.elementValType);
+      // FAST path — proven in-bounds (counted-loop proof) → unchecked read.
+      if (isProvenInBoundsIr(expr, cx)) {
+        return cx.builder.emitVecGet(recv, idxI32, elemIr);
+      }
+      // SAFE path — index not proven → bounds-checked read, no trap.
+      return emitSafeVecGet(recv, idxI32, vec.elementValType, cx);
     }
   }
 
@@ -3167,6 +3288,84 @@ function lowerWhileStatement(stmt: ts.WhileStatement, cx: LowerCtx): void {
  * instr. The loop variable's binding enters scope before
  * cond/update/body are lowered.
  */
+/**
+ * #2766 — does the `for`'s initializer declare `indexVar` with a non-negative
+ * numeric-literal initializer (`let i = 0`, `let i = 5`, …)? Part of the
+ * counted-loop in-bounds proof's lower-bound half. Conservative: anything that
+ * is not a plain non-negative numeric literal (a prefix `-1`, a computed init,
+ * an index declared outside the loop) returns false → the read falls to the SAFE
+ * lowering rather than being (unsoundly) trusted.
+ */
+function forInitsIndexNonNegative(stmt: ts.ForStatement, indexVar: string): boolean {
+  const init = stmt.initializer;
+  if (!init || !ts.isVariableDeclarationList(init)) return false;
+  for (const decl of init.declarations) {
+    if (ts.isIdentifier(decl.name) && decl.name.text === indexVar) {
+      const ini = decl.initializer;
+      if (ini && ts.isNumericLiteral(ini)) {
+        const v = Number(ini.text.replace(/_/g, ""));
+        return Number.isFinite(v) && v >= 0;
+      }
+      return false;
+    }
+  }
+  return false;
+}
+
+/**
+ * #2766 — the counted-loop in-bounds proof for the IR. Returns the
+ * `"arrayVar:indexVar"` key when the `for` provably keeps its index in
+ * `[0, array.length)` across the whole body, else `null`.
+ *
+ * This is a *real* proof (per the hybrid invariant — a compiler-checked fact,
+ * not the mere presence of a `: number[]` type), and it is intentionally
+ * STRICTER than legacy's `safeIndexedArrays` population (which checked only the
+ * `i < arr.length` condition + body non-mutation): the IR fast path emits an
+ * UNCHECKED `array.get` that *traps* on OOB, so the proof must also pin the lower
+ * bound. We therefore additionally require a non-negative-literal init and a
+ * strictly-increasing step, giving `0 <= i` at entry, `i` only increases, and
+ * the strict `i < arr.length` condition ⇒ `0 <= i < arr.length` at every body
+ * point. Anything not fully proven returns `null` and gets the SAFE read.
+ */
+function detectCountedLoopSafeIndex(stmt: ts.ForStatement): string | null {
+  if (!stmt.condition || !ts.isBinaryExpression(stmt.condition)) return null;
+  const cond = stmt.condition;
+  const op = cond.operatorToken.kind;
+  let indexExpr: ts.Expression | undefined;
+  let lengthExpr: ts.Expression | undefined;
+  // Strict `i < arr.length`
+  if (op === ts.SyntaxKind.LessThanToken) {
+    indexExpr = cond.left;
+    lengthExpr = cond.right;
+  } else if (op === ts.SyntaxKind.GreaterThanToken) {
+    // Strict `arr.length > i`
+    indexExpr = cond.right;
+    lengthExpr = cond.left;
+  } else {
+    return null; // `<=` / `>=` would admit `i == arr.length` (OOB)
+  }
+  if (
+    !indexExpr ||
+    !lengthExpr ||
+    !ts.isIdentifier(indexExpr) ||
+    !ts.isPropertyAccessExpression(lengthExpr) ||
+    !ts.isIdentifier(lengthExpr.name) ||
+    lengthExpr.name.text !== "length" ||
+    !ts.isIdentifier(lengthExpr.expression)
+  ) {
+    return null;
+  }
+  const indexVar = indexExpr.text;
+  const arrayVar = lengthExpr.expression.text;
+  // Lower bound: i starts >= 0 and strictly increases.
+  if (!forInitsIndexNonNegative(stmt, indexVar)) return null;
+  if (!isIncreasingStep(stmt.incrementor, indexVar)) return null;
+  // Stability: body must not reassign i / arr / arr.length, call a method on arr
+  // (could change length), or contain a nested function (could capture+mutate).
+  if (loopBodyMutatesIndexOrArray(stmt.statement, indexVar, arrayVar)) return null;
+  return arrayVar + ":" + indexVar;
+}
+
 function lowerForStatement(stmt: ts.ForStatement, cx: LowerCtx): void {
   if (!stmt.condition) {
     throw new Error(`ir/from-ast: for without cond not in slice 12 (${cx.funcName})`);
@@ -3202,8 +3401,18 @@ function lowerForStatement(stmt: ts.ForStatement, cx: LowerCtx): void {
   }
 
   // 3. Body — collect into a buffer.
+  // (#2766) Counted-loop in-bounds proof (port of legacy `safeIndexedArrays`):
+  // when this `for` is provably `for (let i = <k≥0>; i < arr.length; i++/+=k>0)`
+  // and the body never mutates `i` / `arr` / `arr.length` and has no nested
+  // function, every `arr[i]` in the body is provably `0 <= i < arr.length`, so it
+  // keeps the fast unchecked `vec.get`. Thread the proven pair onto a body-scoped
+  // cx (immutable copy → no leak to siblings; nested loops accumulate outward).
+  const provenPair = detectCountedLoopSafeIndex(stmt);
+  const bodyCx: LowerCtx = provenPair
+    ? { ...innerCx, safeIndexedArrays: new Set([...(innerCx.safeIndexedArrays ?? []), provenPair]) }
+    : innerCx;
   const bodyInstrs = innerCx.builder.collectBodyInstrs(() => {
-    lowerStmt(stmt.statement, innerCx);
+    lowerStmt(stmt.statement, bodyCx);
   });
 
   // 4. Update — collect into a buffer (or empty if absent).

@@ -1,7 +1,9 @@
 ---
 id: 2760
 title: "Hybrid floor F1: plain-array OOB read → JS `undefined` (HI-style #2198/S2 rework, not the shared-helper flip)"
-status: ready
+status: done
+assignee: ttraenkler/senior-dev-2760
+completed: 2026-06-28
 sprint: current
 created: 2026-06-28
 updated: 2026-06-28
@@ -104,3 +106,89 @@ default is too broad (blast radius into typed-array/subview/array-method callers
   subview / array-method internal callers are byte-identical.
 - `built-ins/Array/prototype/map/15.4.4.19-8-b-2.js` is green; no net test262
   regression.
+
+## Implementation notes (senior-dev, 2026-06-28)
+
+**What landed:** OOB→`undefined` for **primitive-element** plain arrays only —
+`number[]` (f64) and `boolean[]` (i32), AND only when the element is read in a
+**non-numeric value context**. The unproven (non-bounds-eliminated) read widens
+its SAFE result to a **boxed-or-undefined externref** (box the in-bounds element;
+OOB → `__get_undefined`, or `ref.null.extern` under standalone where
+`undefined ≡ null`); the proven in-bounds read (`isSafeBoundsEliminated`, the
+counted-loop proof) keeps the **unboxed fast path**. This is the hybrid
+invariant in miniature: SAFE-by-default, FAST only when proven.
+
+**Numeric-hint suppression (the second lesson — Math.\* regression).** The first
+implementation widened *every* unproven primitive read to externref. The
+`equivalence-gate` caught a regression: `Math.pow`/`min`/`max`/`hypot` with array
+element args produced **invalid wasm**. Root cause: a numeric-consuming caller
+like `compileMathCall` captures the host `Math_pow` funcIdx *before* compiling
+its arguments; the externref widening adds a late import *during* arg
+compilation, which shifts that already-captured funcIdx → a stale `call`. Fix:
+**honor the value-context hint** — when the element is read into an `f64`/`i32`
+context, suppress the widening and keep the unboxed read. There `undefined` is
+unobservable anyway (it coerces to `NaN`/`0`, the JS-correct `ToNumber`), and the
+unboxed read adds no imports, so no captured funcIdx shifts. `expectedType` is
+threaded `compileExpressionInner → compileElementAccess →
+compileElementAccessBody`. `=== undefined` / `typeof` / dynamic contexts pass no
+numeric hint, so OOB→`undefined` still fires there. (Generalises the latent
+"caller captures funcIdx before compiling args" fragility into a non-issue for
+this path; the full `merge_group` test262 gate guards any other consumer.)
+
+**Robust imperative boxing.** The helper emits the bounded read
+(`emitBoundsCheckedArrayGet`, OOB→default, never traps) + box (`coerceType`) +
+`undefined` (`emitUndefined`) **imperatively on `fctx.body`** so the late imports
+register through the normal index-shift path; the final `inBounds ? boxed :
+undefined` select-`if` carries only `local.get`. An earlier version that baked
+the box/undefined funcIdxs into detached branch `Instr[]` desynced indices (a
+duplicate `__box_number` import + a wrong arg value) — the same late-import-shift
+hazard, avoided by never baking a funcIdx inside a branch array.
+
+**Where:** a new call-site helper `emitPlainArrayUndefinedOobGet`
+(`src/codegen/property-access.ts`) invoked from the two
+`compileElementAccessBody` plain-array value-read sites (the vec-struct path and
+the raw-array path), gated on `classifyTypedArrayType(...) === "other"` (plain
+array, NOT a typed-array view) and, for the vec-struct path, excluding the
+`$__regexp_match_vec` exotic. The shared `emitBoundsCheckedArrayGet` default is
+**unchanged** — its `$__subview` / typed-array / array-method internal callers
+are byte-identical. This is the HI-style rework the issue asked for, NOT the S2
+shared-helper flip.
+
+**Why externref (`any[]`/`string[]`) OOB→undefined was DEFERRED (the key
+decision):** flipping externref OOB null→undefined regresses the S2 canary
+`built-ins/Array/prototype/map/15.4.4.19-8-b-2.js`. Root cause, traced directly:
+`var testResult = Array.prototype.map.call(obj, cb)` over a plain array-like
+object produces a vec whose runtime **length is 0** (a separate, pre-existing
+map-of-plain-object bug — verified: `(testResult as any).length === 0`), so the
+asserted `testResult[2]` is an **OOB read**. The test passes today only by
+accident: OOB externref → `ref.null.extern` → JS `null`, and the assert
+`testResult[2] === false` coerces `null` to the expected `false`. Returning the
+spec-correct `undefined` removes that accidental coercion (`undefined === false`
+→ false) and the canary fails. Since the hard gate is "no net test262
+regression," externref OOB→undefined is deferred to a follow-up that **first
+fixes the map-of-array-like length bug** (or finds a provenance-based
+discriminator). The behaviour is unchanged for externref arrays (still `null`),
+so `any[]`/`string[]` OOB stays as-is — not a regression, just not yet fixed.
+
+**Also observed (out of scope, noted for follow-up):** `typeof a[OOB]` folds to
+the static element type's string (e.g. `"number"`) at compile time rather than
+`"undefined"` — a separate static-type-trusting `typeof` unsoundness. The
+element *value* is correctly `undefined`; only the `typeof` operator's
+compile-time fold is wrong. Belongs to the same hybrid-soundness family but is a
+distinct site (the `typeof` lowering, not the element read).
+
+**Object-element arrays (`Foo[]`, `ref`/`ref_null` element):** intentionally
+left unchanged. Widening their result to externref would break downstream
+`a[i].field` (loses the struct type → no `struct.get`). Their OOB read keeps the
+typed-null default (which traps on deref ≈ JS TypeError). Correct OOB→undefined
+for object arrays needs the result type to become `Foo | undefined` (externref) —
+that is the IR `prove-then-specialize` work (#2766), not a legacy floor fix.
+
+**Validation:** new `tests/issue-2760.test.ts` (15 cases: primitive OOB→undefined
+host+standalone, in-bounds preserved incl. boolean tag + counted-loop fast path,
+typed-array unchanged, and the map-on-array-like canary guard). Targeted local
+array/destructuring batches + the `tests/equivalence/` suite showed no new
+failures (the only local failures are the pre-existing `tests/helpers.js`
+infra-resolution issue and `fast-arrays > array find` / `array-capacity`, all of
+which fail identically on clean `main`). Broad conformance validated by full CI /
+`merge_group` (test262 regression gate + standalone-floor).

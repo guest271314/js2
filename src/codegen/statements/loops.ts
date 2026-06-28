@@ -235,7 +235,10 @@ function detectI32LoopVar(stmt: ts.ForStatement): { name: string; initValue: num
  *     itself or `arr.length` (when `k < arr.length`), so element writes are
  *     allowed — they're the whole point of the optimisation.
  */
-function loopBodyMutatesIndexOrArray(body: ts.Statement, indexName: string, arrayName: string): boolean {
+// #2766 — exported so the IR `lowerForStatement` (src/ir/from-ast.ts) can reuse
+// the exact same counted-loop non-mutation proof when porting the
+// `safeIndexedArrays` in-bounds proof into the IR.
+export function loopBodyMutatesIndexOrArray(body: ts.Statement, indexName: string, arrayName: string): boolean {
   let mutates = false;
 
   function isAssignmentOp(kind: ts.SyntaxKind): boolean {
@@ -335,7 +338,9 @@ function loopBodyMutatesIndexOrArray(body: ts.Statement, indexName: string, arra
  * Narrower than `detectI32LoopVar`'s incrementor check, which also accepts the
  * decreasing forms.
  */
-function isIncreasingStep(incr: ts.Expression | undefined, name: string): boolean {
+// #2766 — exported so the IR `lowerForStatement` reuses the same strictly-
+// increasing-step check when discharging the counted-loop in-bounds proof.
+export function isIncreasingStep(incr: ts.Expression | undefined, name: string): boolean {
   if (!incr) return false;
   if (ts.isPostfixUnaryExpression(incr) || ts.isPrefixUnaryExpression(incr)) {
     return ts.isIdentifier(incr.operand) && incr.operand.text === name && incr.operator === ts.SyntaxKind.PlusPlusToken;
