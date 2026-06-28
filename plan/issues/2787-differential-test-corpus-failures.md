@@ -104,10 +104,98 @@ The binary validates but throws during instantiation/execution:
 ## Notes
 
 - Relation to **#2143**: that issue added the `WebAssembly.validate` lane to
-  the default pipeline so malformed_wasm is _caught_; this issue is about
+  the default pipeline so malformed*wasm is \_caught*; this issue is about
   _fixing_ the programs it surfaces.
 - Relation to **#1941**: the optimize lane / corpus work.
 - Relation to **loopdive/js2#389**: the external reporter's `--target wasi`
   output is **valid WasmGC** (verified — the `-0x9` `wasm-validate` error is
   an old-wabt limitation, not a js2wasm bug); that is unrelated to these
   diff-test codegen failures, which are on the default WasmGC + JS-host path.
+
+---
+
+## Triage (2026-06-28) — full A/B/C classification + fix plan
+
+Re-ran `scripts/diff-test.ts` against current main. **Current set: 84 match /
+14 mismatch / 6 runtime_error / 0 malformed_wasm** (the 2 malformed cases —
+`array/01-basic.js`, `closures/10-mutual.js` — were fixed by #2259/#2788;
+`closures/10-mutual` now validates and is a `mismatch` instead).
+
+### (B) Harness quirk found + fixed inline — ANSI colour pollution
+
+The diff-test reference lane spawned `node <file>` **inheriting the
+environment**, and this dev container exports `FORCE_COLOR=3`, so Node
+colourises `console.log` output (`\x1b[33m42\x1b[39m`) even when stdout is
+piped. `normalize()` did not strip ANSI, so the V8 reference mismatched the
+plain js2wasm lane on **virtually every numeric/string program — 69 spurious
+mismatches locally** (CI doesn't set FORCE_COLOR, so it saw the true 14). This
+is a **harness-robustness bug, not a compiler bug**. Fixed in this PR:
+`runV8` now spawns with `FORCE_COLOR=0 NO_COLOR=1`, and `normalize()` strips
+ANSI SGR codes as belt-and-suspenders. After the fix the local run matches CI
+(84/14/6) regardless of the ambient colour env.
+
+### (A) Real js2wasm bugs — 20 programs, grouped into clusters
+
+All 20 remaining failures are genuine compiler gaps. Notably, **most map to
+feature issues already marked `done`** — yet they fail in the idiomatic-untyped
+default host path the corpus exercises (object literals as dynamic bags,
+untyped arrows). This is exactly the value differential testing (#1203) adds
+over test262: the "done" features were validated on narrower/typed shapes.
+**PO action: confirm regression vs current main and reopen the cited `done`
+issues where warranted.**
+
+| #   | program                    | kind          | root cause                                                                        | A/B/C | cluster / target issue                                         |
+| --- | -------------------------- | ------------- | --------------------------------------------------------------------------------- | ----- | -------------------------------------------------------------- |
+| 1   | classes/10-toString-impl   | mismatch      | `""+obj` / `${obj}` ignore user `toString()` → `[object Object]`                  | A     | **NEW #2795** (value→string rendering)                         |
+| 2   | builtins/04-symbol         | mismatch      | `Symbol.prototype.toString()` → `[object Object]`                                 | A     | **NEW #2795**                                                  |
+| 3   | closures/10-mutual         | mismatch      | boolean renders as `1` not `true` at console.log boundary                         | A     | **NEW #2795**                                                  |
+| 4   | control/12-for-in-object   | mismatch      | `for..in` over object yields no keys                                              | A     | **NEW #2796** (dyn-object enum/copy); rel #1243/#1271 (done)   |
+| 5   | object/02-spread           | mismatch      | `{...a}` wrong key order + values read back NaN                                   | A     | **NEW #2796**                                                  |
+| 6   | object/12-assign           | mismatch      | `Object.assign` copies no own keys (identity ok)                                  | A     | **NEW #2796**; rel #1336/#1630 (done)                          |
+| 7   | closures/07-arrow-this     | mismatch      | arrow lexical `this` via `.call({})` → NaN                                        | A     | **NEW #2797** (untyped arrow/closure dispatch); rel #11 (done) |
+| 8   | closures/09-callback       | mismatch      | arrow through untyped fn param drops return value → empty                         | A     | **NEW #2797**                                                  |
+| 9   | closures/08-method-chain   | runtime_error | dynamic method dispatch on returned object literal traps (WebAssembly.Exception)  | A     | **NEW #2797**; rel #1382 (done)                                |
+| 10  | builtins/07-promise-basic  | mismatch      | `Promise.resolve().then()` callback never runs (empty even after microtask drain) | A     | #1042 async/await (backlog); rel #1014                         |
+| 11  | builtins/08-promise-chain  | mismatch      | promise chain `.then` callbacks never run                                         | A     | #1042 (backlog)                                                |
+| 12  | builtins/09-async-await    | mismatch      | `await`/async no-op → empty output                                                | A     | #1042 (backlog)                                                |
+| 13  | builtins/01-json-stringify | mismatch      | `JSON.stringify(obj)` / `(array)` → `undefined` (primitives ok)                   | A     | #1324 JSON.stringify (done) — re-verify host path              |
+| 14  | array/11-flat-flatMap      | runtime_error | `arr.flat`/`flatMap` not a function                                               | A     | #1136 flat/flatMap (done) — re-verify host path                |
+| 15  | array/12-from-of           | mismatch      | `Array.from(arrayLike, mapFn)` 2-arg form missing (Array.of/from(string) ok)      | A     | #1160 Array.from (done) — re-verify                            |
+| 16  | builtins/03-map-set        | runtime_error | `new Set([...])` — source not iterable (Symbol.iterator)                          | A     | #1514 Set (done) / iterator protocol — re-verify               |
+| 17  | builtins/12-arraybuffer    | runtime_error | `DataView.setInt32` not a function                                                | A     | #1056 DataView setIntN (done) — re-verify                      |
+| 18  | builtins/14-spread-args    | runtime_error | `f(...arr)` / `Math.max(...arr)` → illegal cast                                   | A     | #1519 spread (done) — re-verify call-arg spread                |
+| 19  | builtins/15-tag-template   | runtime_error | tagged template — `strs.join` not a function (strings array lacks proto methods)  | A     | #109 tagged templates (done) — re-verify                       |
+| 20  | object/06-delete           | mismatch      | `delete o.a` does not remove the property                                         | A     | #1112 delete-via-sentinel (done) / #124 (wont-fix) — re-verify |
+
+### (C) Known-deferred — none
+
+No `eval`/`Proxy`/`with`/Temporal/SharedArrayBuffer programs in the failing set,
+so there is nothing to corpus-exclude as intentionally-unsupported.
+
+### Prioritized fix plan (cheap + high-value first)
+
+1. **#2795 — value→string rendering (toString/@@toPrimitive + boolean)** —
+   `current`, **P1**, ~M. Highest value/cost ratio: one coercion site, 3 corpus
+   programs, broad test262 ToString/ToPrimitive overlap. Do first.
+2. **#2796 — dynamic-object own-key enumerate/copy (for-in, spread, assign)** —
+   `current`, **P1**, ~M. Core ES2015 idioms; likely one shared property-bag
+   iterate+read primitive flips all 3.
+3. **Re-verify the "done"-but-failing builtins** (#1324 JSON.stringify-object,
+   #1136 flat/flatMap, #1160 Array.from(arrayLike,mapFn), #1056 DataView.setInt32,
+   #109 tagged-template `.join`, #1514 Map/Set-from-iterable, #1519 call-arg
+   spread, #1112 delete). These are **single-feature regressions/host-gaps** — PO
+   should reopen each (or file a focused follow-up) rather than re-file from
+   scratch; many are likely small "method not registered on host prototype" or
+   "host-mode path not wired" fixes. Cost: low-to-medium each; high cumulative
+   value (8 programs).
+4. **#1042 — async/await + Promise.then** — `backlog`, larger. Promise callbacks
+   never run (confirmed empty even after a 50ms + microtask drain, so NOT a
+   harness drain bug). State-machine lowering; defer behind the cheap wins.
+5. **#2797 — untyped arrow/closure + dynamic method dispatch** — `Backlog`,
+   **feasibility: hard**. Touches the `any`-receiver / funcref substrate; may
+   need an architect spec. Lowest priority of the new clusters.
+
+Cost summary: #2795 + #2796 (the two `current` clusters) are the cheap,
+high-value front — both ~M, both likely a single shared primitive each. The
+"done-but-failing" re-verifications are a PO reopening sweep. #1042 and #2797
+are the genuinely larger items, correctly deferred to backlog.
