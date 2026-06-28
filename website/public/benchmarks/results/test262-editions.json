@@ -19,9 +19,9 @@
   },
   {
     "edition": "ES2015",
-    "pass": 11432,
-    "fail": 3794,
-    "ce": 171,
+    "pass": 11440,
+    "fail": 3785,
+    "ce": 172,
     "skip": 0,
     "total": 15397,
     "pct": 74
@@ -128,9 +128,9 @@
   {
     "edition": "Proposals",
     "pass": 1491,
-    "fail": 3157,
+    "fail": 3166,
     "ce": 229,
-    "skip": 105,
+    "skip": 96,
     "total": 4982,
     "pct": 30
   }

@@ -38,6 +38,9 @@
 import { ts, forEachChild } from "../ts-api.js";
 
 import { evaluateConstantCondition } from "../codegen/statements/control-flow.js";
+// #2766 — reuse the legacy counted-loop proof predicates (pure AST analysis, no
+// codegen state) to port the `safeIndexedArrays` in-bounds proof into the IR.
+import { isIncreasingStep, loopBodyMutatesIndexOrArray } from "../codegen/statements/loops.js";
 import { IrFunctionBuilder } from "./builder.js";
 import type { AllocSiteRegistry } from "./alloc-registry.js";
 import type { IrLowerResolver, IrVecLowering } from "./lower.js";
@@ -861,6 +864,16 @@ interface LowerCtx {
    * builders mint stable ids on the same registry as the outer function.
    */
   readonly allocRegistry?: AllocSiteRegistry;
+  /**
+   * #2766 — counted-loop in-bounds proof, ported from legacy
+   * `fctx.safeIndexedArrays`. Holds `"arrayVar:indexVar"` pairs proven
+   * `0 <= index < array.length` for the *current loop body* (a fresh set is
+   * threaded onto the body cx by `lowerForStatement`, so it naturally scopes to
+   * the loop and accumulates outward through nested loops). `lowerElementAccess`
+   * consults it: a proven read keeps the fast unchecked `vec.get`; every
+   * unproven read falls to the SAFE bounds-checked read (no trap).
+   */
+  readonly safeIndexedArrays?: ReadonlySet<string>;
 }
 
 /**
@@ -974,6 +987,29 @@ function lowerVarDecl(stmt: ts.VariableStatement, cx: LowerCtx): void {
           `ir/from-ast: local '${name}' annotated as ${describeIrType(annotated)} but initializer is ${describeIrType(inferred)} in ${cx.funcName}`,
         );
       }
+    }
+    // #2782 (hybrid Row 5) — no-box NUMBER-local proof gate. The bindings below
+    // keep an `f64`-typed local UNBOXED (as a `local` SSA value or a numeric
+    // `slot`). Per the Hybrid Invariant that no-box specialization must be
+    // discharged by a proof on the TS *type*, never the lowered Wasm kind:
+    // `number` / `boolean` / `symbol` all collapse to `f64` / `i32`, so the kind
+    // alone cannot tell a genuine numeric local from an `any` / union one the
+    // f64 hint coerced opaquely. Prove the local's TS type is a pure number
+    // (`proveUnboxedNumberLocal`, reusing #2781's `classifyPrimitiveProof`);
+    // anything unprovable — `any` / `unknown` / a MIXED `number | string` union —
+    // demotes to the SAFE boxed legacy lowering (which carries the dynamic tag).
+    // Scoped to `f64` only — the `i32` (predominantly `boolean`) arm needs its
+    // own TS-type proof and is deferred (see #2782). No checker → unchanged
+    // (#2780 / #2781's no-checker arm). `inferred` is the bound representation
+    // here (an `annotated` mismatch already threw above), and `d.name` is an
+    // Identifier (non-identifier decls threw earlier in this loop).
+    if (!proveUnboxedNumberLocal(d.name, inferred, cx)) {
+      throw new Error(
+        `ir/from-ast: local '${name}' is bound as an unboxed f64 but its TS type is not ` +
+          `provably a pure number — keeping the no-box number representation is unsound ` +
+          `(the f64 Wasm kind conflates number / boolean / any); demote to the SAFE boxed ` +
+          `legacy lowering in ${cx.funcName} (#2782)`,
+      );
     }
     // Slice 6 part 2 (#1181): mutable `let` bindings whose name is
     // reassigned anywhere in the function body bind as a `slot`
@@ -1431,6 +1467,59 @@ function lowerExpr(expr: ts.Expression, cx: LowerCtx, hint: IrType): IrValueId {
 }
 
 /**
+ * #2780 (hybrid Row 6) — the widening-escape proof for the ArrayLiteral fast
+ * path. Returns `true` when the literal's result flows into a sink that demands a
+ * WIDER / heterogeneous element type than the homogeneous NARROW vec
+ * `vec.new_fixed` would build — `any[]` / `unknown[]` / a heterogeneous-union
+ * element, or a bare `any` / `unknown` slot. In that case the packed fast path is
+ * UNSOUND: a `vec<f64>` (etc.) handed to an `any`-typed alias could later receive
+ * a string/object element the packed vec cannot hold (e.g. `const a: any[] =
+ * [1,2,3]; a[0] = "x"`). When it returns `true`, codegen must fall to the SAFE
+ * legacy lowering, which boxes each element to the dynamic externref
+ * representation.
+ *
+ * This is a **local** proof (the Hybrid-Invariant point of Row 6): it inspects
+ * only the literal's own TS contextual type — no whole-function dataflow. The
+ * fresh allocation is decidable from the sink type at this single site.
+ *
+ * The comparison reads the TS **type** (`TypeFlags`), never the Wasm ValType
+ * kind: `number[]`, `boolean[]` and `symbol[]` all collapse to the same element
+ * ValType (f64 / i32 / i32) — keying on the kind would misclassify a
+ * boolean-vs-number sink. Note the TS gotcha that the intrinsic `boolean` type is
+ * internally the union `true | false`, so `isUnion()` is `true` for it; it is
+ * excluded via the `Boolean` flag so `boolean[]` stays on the fast path, while a
+ * genuine heterogeneous union (`string | number`) — which does not carry that
+ * flag — is correctly treated as a widening.
+ *
+ * Structural-supertype scalar sinks (`{}[]`, `object[]`) are intentionally NOT
+ * flagged here — Row 6 scopes to `any` / `unknown` / heterogeneous sinks, and
+ * those residuals stay covered by the existing downstream `irTypeEquals` net
+ * (a wider-typed write demotes the function to legacy), exactly as today.
+ */
+function arrayLiteralWideningEscapes(expr: ts.ArrayLiteralExpression, cx: LowerCtx): boolean {
+  const checker = cx.checker;
+  // No checker → cannot prove a sink at this site. The existing element-type
+  // (`irTypeEquals`) checks here plus the downstream demotion net still guard
+  // correctness, so keep the fast path (HI: a missing proof is not a license to
+  // miscompile — there is no narrow-vec build whose escape we are masking,
+  // because every boundary use is still type-checked).
+  if (!checker) return false;
+  const ctxType = checker.getContextualType(expr);
+  if (!ctxType) return false; // consumed at its own narrow type → no widening at this site.
+  // A bare `any` / `unknown` slot (e.g. `const a: any = [1,2,3]`): the literal
+  // escapes into a fully dynamic value.
+  if (ctxType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) return true;
+  // Array / tuple sink: inspect the element type the sink demands.
+  const ctxElem = ctxType.getNumberIndexType();
+  if (!ctxElem) return false; // non-indexable concrete sink → no array widening here.
+  if (ctxElem.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) return true; // any[] / unknown[].
+  // Heterogeneous element union (`(number | string)[]`) the packed vec cannot
+  // hold — but NOT the intrinsic `boolean` (= `true | false`) which is uniform.
+  if (ctxElem.isUnion() && !(ctxElem.flags & ts.TypeFlags.Boolean)) return true;
+  return false;
+}
+
+/**
  * #1804 — lower a fixed-length, non-spread, non-sparse, same-typed array
  * literal to a `vec.new_fixed` IR node. Out of scope (clean fallback to
  * legacy): spread elements (`[...xs]`), elision holes (`[1, , 3]`), mixed
@@ -1440,6 +1529,12 @@ function lowerExpr(expr: ts.Expression, cx: LowerCtx, hint: IrType): IrValueId {
  * the resolver can recover) — covers `const a: number[] = [1,2,3]` and the
  * empty `const a: number[] = []`; otherwise infer from the first element and
  * require every element to share that IrType.
+ *
+ * #2780 (hybrid Row 6) — before the fast `vec.new_fixed`, discharge the
+ * widening-escape proof (`arrayLiteralWideningEscapes`): the packed narrow vec is
+ * only sound when the literal does NOT flow into an `any` / `unknown` /
+ * heterogeneous sink. When it does, demote to the SAFE legacy lowering (which
+ * boxes each element) — this mirrors #2766's prove-then-specialize shape.
  */
 function lowerArrayLiteral(expr: ts.ArrayLiteralExpression, cx: LowerCtx, hint: IrType): IrValueId {
   // Reject spread / sparse — out of scope, keep on legacy.
@@ -1465,6 +1560,33 @@ function lowerArrayLiteral(expr: ts.ArrayLiteralExpression, cx: LowerCtx, hint: 
       throw new Error(`ir/from-ast: resolver cannot register vec for empty literal (${cx.funcName})`);
     }
     return cx.builder.emitVecNewFixed([], hintElemIr, irVal({ kind: "ref", typeIdx: vec.vecStructTypeIdx }));
+  }
+
+  // #2780 (hybrid Row 6) — widening-escape proof, the PRIMARY HI gate (run
+  // before element lowering, mirroring #2766's prove-then-specialize: prove the
+  // specialization is sound, else fall to the SAFE path). `vec.new_fixed` builds
+  // a homogeneous NARROW vec (`vec<f64>` / `vec<i32>` / …). That specialization
+  // is only sound when this non-empty literal does NOT flow into a sink that
+  // demands a WIDER / heterogeneous element type (`any[]` / `unknown[]` / a
+  // union). When it does — a literal passed where an `any[]` is expected
+  // (`g([1,2,3])`, `g(x: any[])`), or an annotated `const a: any[] = [1,2,3]`
+  // were the selector to claim it (today such functions are `body-shape-rejected`
+  // because `lowerVarDecl` only forwards PRIMITIVE type annotations; this gate
+  // keeps the fast path sound if that claim scope ever widens) — demote to the
+  // SAFE legacy lowering, which boxes each element to the dynamic externref
+  // representation. Gating here (before the element-type loop) makes the explicit
+  // HI reason the demotion cause rather than the incidental "mixed-type" throw
+  // that the externref-hint path would otherwise raise; the existing
+  // element-type / hint `irTypeEquals` checks remain as a backstop for any sink
+  // `getContextualType` cannot recover at this site. Empty literals are excluded
+  // (handled above): with a wide hint they already build a correct wide vec, so
+  // there is no narrow build to let escape.
+  if (arrayLiteralWideningEscapes(expr, cx)) {
+    throw new Error(
+      `ir/from-ast: array literal flows into a widening/heterogeneous sink ` +
+        `(any[]/unknown[]/union element) — the packed vec.new_fixed fast path is ` +
+        `unsound here; demote to the SAFE boxed legacy lowering (${cx.funcName})`,
+    );
   }
 
   // Lower each element. Use the hint element type as each element's hint when
@@ -1911,6 +2033,103 @@ function lowerObjectLiteral(expr: ts.ObjectLiteralExpression, cx: LowerCtx): IrV
 }
 
 /**
+ * #2766 — IR counterpart of legacy `isSafeBoundsEliminated`
+ * (`src/codegen/property-access.ts`). The index `arr[i]` is proven in
+ * `[0, array.length)` iff both `arr` and `i` are simple identifiers and the pair
+ * was recorded by `detectCountedLoopSafeIndex` on the enclosing loop body's cx.
+ */
+function isProvenInBoundsIr(expr: ts.ElementAccessExpression, cx: LowerCtx): boolean {
+  if (!cx.safeIndexedArrays || cx.safeIndexedArrays.size === 0) return false;
+  if (!ts.isIdentifier(expr.expression) || !ts.isIdentifier(expr.argumentExpression)) return false;
+  return cx.safeIndexedArrays.has(expr.expression.text + ":" + expr.argumentExpression.text);
+}
+
+/**
+ * #2766 — the SAFE (hybrid-invariant default) bounds-checked vec read. Emits
+ * `inBounds ? vec.get(idx) : <JS-correct OOB default>` so an out-of-bounds index
+ * NEVER traps — the IR counterpart of #2760's legacy floor F1
+ * (`emitPlainArrayUndefinedOobGet`). The read result type is UNCHANGED from the
+ * fast `emitVecGet` (the element ValType), so there is **no downstream type
+ * cascade**: only the runtime semantics change (trap → JS-correct value).
+ *
+ * Element-kind dispatch for the OOB default (mirrors
+ * `lowerOptionalExternPropertyAccess`'s sentinel table, and legacy's
+ * `emitBoundsCheckedArrayGet(useUndefinedSentinel=false)` type-defaults):
+ *   - `f64`       → `f64.const NaN` — `ToNumber(undefined)` is NaN, the
+ *                   JS-correct image of an OOB read in the numeric context the IR
+ *                   retains a primitive read in. (A `number[]` read whose result
+ *                   must be *observed* as `undefined` flows to an `any`/externref
+ *                   sink, which has no IR box primitive and already demotes the
+ *                   whole function to legacy F1 — so NaN here is never observed
+ *                   as a wrong `undefined`.) Stays UNBOXED: no late import is
+ *                   added, so the R1 Math.* funcIdx-shift miscompile cannot recur.
+ *   - `i32`       → `i32.const 0` — `ToBoolean(undefined)` is false (0) for
+ *                   `boolean[]`; 0 for an i32-specialized numeric read.
+ *   - `externref` → `ref.null.extern` — matches legacy's *non-widened* externref
+ *                   OOB default (JS `null`). Full externref OOB→`undefined` is
+ *                   the documented R1-deferred follow-up (it trips the
+ *                   map-on-array-like canary `15.4.4.19-8-b-2.js` via a separate
+ *                   length bug); matching legacy here keeps that canary green.
+ *   - `ref_null`  → `ref.null` of the element heap type.
+ *   - other (non-null `ref`, `i64`, packed `i8`/`i16`, `f32`, …) → demote to
+ *     legacy (throw): a null-ish default isn't expressible in an `if`-arm without
+ *     widening the result to `ref_null`, which WOULD cascade to consumers (the
+ *     same limitation `lowerOptionalExternPropertyAccess` documents). Legacy
+ *     bounds-checks all element kinds (returns the type-default, never traps), so
+ *     the demote is still trap-free.
+ */
+function emitSafeVecGet(recv: IrValueId, idxI32: IrValueId, elemValType: ValType, cx: LowerCtx): IrValueId {
+  const elemIr = irVal(elemValType);
+  let makeOobDefault: (() => IrValueId) | null = null;
+  switch (elemValType.kind) {
+    case "f64":
+      makeOobDefault = () => cx.builder.emitConst({ kind: "f64", value: NaN }, elemIr);
+      break;
+    case "i32":
+      makeOobDefault = () => cx.builder.emitConst({ kind: "i32", value: 0 }, elemIr);
+      break;
+    case "externref":
+    case "ref_null":
+      makeOobDefault = () => cx.builder.emitConst({ kind: "null", ty: elemIr }, elemIr);
+      break;
+    default:
+      throw new Error(
+        `ir/from-ast: SAFE OOB vec read for element kind '${elemValType.kind}' needs legacy ` +
+          `(no in-arm default without a result-type widen) in ${cx.funcName}`,
+      );
+  }
+
+  // cond = (unsigned) idx < len. `emitVecLen` yields an f64 JS length; convert
+  // back to i32 for the unsigned compare. A negative index wraps to a huge
+  // unsigned value > any length, so it lands in the OOB arm (JS-correct: a plain
+  // array reads a negative index as `undefined`). The comparison uses the SAME
+  // truncated i32 index the read uses, so it agrees with the read exactly.
+  const lenF64 = cx.builder.emitVecLen(recv);
+  const lenI32 = cx.builder.emitUnary("i32.trunc_sat_f64_s", lenF64, irVal({ kind: "i32" }));
+  const cond = cx.builder.emitBinary("i32.lt_u", idxI32, lenI32, irVal({ kind: "i32" }));
+
+  // then arm: in-bounds → the unchecked vec.get (provably safe inside this arm).
+  let thenValue!: IrValueId;
+  const thenBody = cx.builder.collectBodyInstrs(() => {
+    thenValue = cx.builder.emitVecGet(recv, idxI32, elemIr);
+  });
+  // else arm: OOB → the JS-correct default (pure const; no late import).
+  let elseValue!: IrValueId;
+  const elseBody = cx.builder.collectBodyInstrs(() => {
+    elseValue = makeOobDefault!();
+  });
+
+  return cx.builder.emitIfElse({
+    cond,
+    then: thenBody,
+    thenValue,
+    else: elseBody,
+    elseValue,
+    resultType: elemIr,
+  });
+}
+
+/**
  * Lower an element access whose argument is a string literal — sugar
  * for property access on a known shape. Numeric / computed keys are
  * out of slice 2's scope and throw, so the function falls back to
@@ -1952,12 +2171,17 @@ function lowerElementAccess(expr: ts.ElementAccessExpression, cx: LowerCtx): IrV
   // Slice 12 (#1169o) — dynamic element access on a vec receiver.
   // The receiver's ValType must resolve to a vec via the resolver; the
   // index is lowered as f64 (JS Number) and truncated to i32 for the
-  // backend `vec.get`. Negative or out-of-range indices follow Wasm
-  // `array.get` semantics (trap on out-of-bounds, just like the legacy
-  // bounds-checked path) — slice 12 doesn't add an explicit JS-style
-  // `undefined` return for OOB. Functions whose hot path indexes
-  // outside `[0, length)` should already be falling back to legacy via
-  // the array-prototype-method scope (#1169p).
+  // backend `vec.get`.
+  //
+  // (#2766 — hybrid prove-then-specialize) The read is FAST (an unchecked
+  // `vec.get`/`array.get`, which traps on OOB) ONLY when the index is *proven*
+  // in `[0, length)` (the counted-loop proof ported from legacy
+  // `safeIndexedArrays`). Otherwise it falls to the SAFE bounds-checked read
+  // (`emitSafeVecGet`) that returns the JS-correct OOB value instead of
+  // trapping. This retires the old "slice 12 trusts the type / the selector
+  // keeps OOB functions in legacy" assumption: the trapping read was the
+  // sharpest hybrid-invariant violation (strictly worse than legacy, which at
+  // least bounds-checks and returns a sentinel).
   const recvVal = asVal(recvType);
   if (recvVal && (recvVal.kind === "ref" || recvVal.kind === "ref_null")) {
     const vec = cx.resolver?.resolveVec?.(recvVal);
@@ -1987,7 +2211,13 @@ function lowerElementAccess(expr: ts.ElementAccessExpression, cx: LowerCtx): IrV
           `ir/from-ast: element-access index must be number or bool (got ${idxValTy.kind}) in ${cx.funcName}`,
         );
       }
-      return cx.builder.emitVecGet(recv, idxI32, irVal(vec.elementValType));
+      const elemIr = irVal(vec.elementValType);
+      // FAST path — proven in-bounds (counted-loop proof) → unchecked read.
+      if (isProvenInBoundsIr(expr, cx)) {
+        return cx.builder.emitVecGet(recv, idxI32, elemIr);
+      }
+      // SAFE path — index not proven → bounds-checked read, no trap.
+      return emitSafeVecGet(recv, idxI32, vec.elementValType, cx);
     }
   }
 
@@ -2990,7 +3220,23 @@ function coerceReturnValue(value: IrValueId, cx: LowerCtx): IrValueId {
   // Native scalar → externref needs a number-box helper the IR lacks; defer
   // the whole function to legacy (which boxes via __box_number).
   const actualVal = asVal(actual);
-  if (actualVal && (actualVal.kind === "f64" || actualVal.kind === "i32" || actualVal.kind === "i64")) {
+  // #2782 (hybrid Row 5) — the no-box NUMBER escape edge. An unboxed `f64`
+  // number returned into an `any` (externref) result is the canonical "number
+  // local / value sinks to an `any` sink" case: the IR keeps numbers unboxed
+  // (no runtime tag), so handing one to the dynamic `any` result without an
+  // explicit box would lose its identity. The IR has no box primitive, so the
+  // SAFE lowering is to demote to legacy (which boxes via `__box_number`). This
+  // is the reachable, claimable counterpart to the `lowerVarDecl` declaration
+  // gate (`proveUnboxedNumberLocal`): together they keep the value unboxed only
+  // while it is provably a pure number AND box it at the proven escape edge.
+  if (actualVal && actualVal.kind === "f64") {
+    throw new Error(
+      `ir/from-ast: unboxed f64 number returned into an 'any' (externref) result — the ` +
+        `no-box number representation is unsound at this escape sink; demote to the SAFE ` +
+        `boxed legacy lowering (boxes via __box_number) in ${cx.funcName} (#2782)`,
+    );
+  }
+  if (actualVal && (actualVal.kind === "i32" || actualVal.kind === "i64")) {
     throw new Error(
       `ir/from-ast: return of numeric ${actualVal.kind} into an 'any' (externref) result ` +
         `needs the box helper — deferring to legacy in ${cx.funcName}`,
@@ -3167,6 +3413,84 @@ function lowerWhileStatement(stmt: ts.WhileStatement, cx: LowerCtx): void {
  * instr. The loop variable's binding enters scope before
  * cond/update/body are lowered.
  */
+/**
+ * #2766 — does the `for`'s initializer declare `indexVar` with a non-negative
+ * numeric-literal initializer (`let i = 0`, `let i = 5`, …)? Part of the
+ * counted-loop in-bounds proof's lower-bound half. Conservative: anything that
+ * is not a plain non-negative numeric literal (a prefix `-1`, a computed init,
+ * an index declared outside the loop) returns false → the read falls to the SAFE
+ * lowering rather than being (unsoundly) trusted.
+ */
+function forInitsIndexNonNegative(stmt: ts.ForStatement, indexVar: string): boolean {
+  const init = stmt.initializer;
+  if (!init || !ts.isVariableDeclarationList(init)) return false;
+  for (const decl of init.declarations) {
+    if (ts.isIdentifier(decl.name) && decl.name.text === indexVar) {
+      const ini = decl.initializer;
+      if (ini && ts.isNumericLiteral(ini)) {
+        const v = Number(ini.text.replace(/_/g, ""));
+        return Number.isFinite(v) && v >= 0;
+      }
+      return false;
+    }
+  }
+  return false;
+}
+
+/**
+ * #2766 — the counted-loop in-bounds proof for the IR. Returns the
+ * `"arrayVar:indexVar"` key when the `for` provably keeps its index in
+ * `[0, array.length)` across the whole body, else `null`.
+ *
+ * This is a *real* proof (per the hybrid invariant — a compiler-checked fact,
+ * not the mere presence of a `: number[]` type), and it is intentionally
+ * STRICTER than legacy's `safeIndexedArrays` population (which checked only the
+ * `i < arr.length` condition + body non-mutation): the IR fast path emits an
+ * UNCHECKED `array.get` that *traps* on OOB, so the proof must also pin the lower
+ * bound. We therefore additionally require a non-negative-literal init and a
+ * strictly-increasing step, giving `0 <= i` at entry, `i` only increases, and
+ * the strict `i < arr.length` condition ⇒ `0 <= i < arr.length` at every body
+ * point. Anything not fully proven returns `null` and gets the SAFE read.
+ */
+function detectCountedLoopSafeIndex(stmt: ts.ForStatement): string | null {
+  if (!stmt.condition || !ts.isBinaryExpression(stmt.condition)) return null;
+  const cond = stmt.condition;
+  const op = cond.operatorToken.kind;
+  let indexExpr: ts.Expression | undefined;
+  let lengthExpr: ts.Expression | undefined;
+  // Strict `i < arr.length`
+  if (op === ts.SyntaxKind.LessThanToken) {
+    indexExpr = cond.left;
+    lengthExpr = cond.right;
+  } else if (op === ts.SyntaxKind.GreaterThanToken) {
+    // Strict `arr.length > i`
+    indexExpr = cond.right;
+    lengthExpr = cond.left;
+  } else {
+    return null; // `<=` / `>=` would admit `i == arr.length` (OOB)
+  }
+  if (
+    !indexExpr ||
+    !lengthExpr ||
+    !ts.isIdentifier(indexExpr) ||
+    !ts.isPropertyAccessExpression(lengthExpr) ||
+    !ts.isIdentifier(lengthExpr.name) ||
+    lengthExpr.name.text !== "length" ||
+    !ts.isIdentifier(lengthExpr.expression)
+  ) {
+    return null;
+  }
+  const indexVar = indexExpr.text;
+  const arrayVar = lengthExpr.expression.text;
+  // Lower bound: i starts >= 0 and strictly increases.
+  if (!forInitsIndexNonNegative(stmt, indexVar)) return null;
+  if (!isIncreasingStep(stmt.incrementor, indexVar)) return null;
+  // Stability: body must not reassign i / arr / arr.length, call a method on arr
+  // (could change length), or contain a nested function (could capture+mutate).
+  if (loopBodyMutatesIndexOrArray(stmt.statement, indexVar, arrayVar)) return null;
+  return arrayVar + ":" + indexVar;
+}
+
 function lowerForStatement(stmt: ts.ForStatement, cx: LowerCtx): void {
   if (!stmt.condition) {
     throw new Error(`ir/from-ast: for without cond not in slice 12 (${cx.funcName})`);
@@ -3202,8 +3526,18 @@ function lowerForStatement(stmt: ts.ForStatement, cx: LowerCtx): void {
   }
 
   // 3. Body — collect into a buffer.
+  // (#2766) Counted-loop in-bounds proof (port of legacy `safeIndexedArrays`):
+  // when this `for` is provably `for (let i = <k≥0>; i < arr.length; i++/+=k>0)`
+  // and the body never mutates `i` / `arr` / `arr.length` and has no nested
+  // function, every `arr[i]` in the body is provably `0 <= i < arr.length`, so it
+  // keeps the fast unchecked `vec.get`. Thread the proven pair onto a body-scoped
+  // cx (immutable copy → no leak to siblings; nested loops accumulate outward).
+  const provenPair = detectCountedLoopSafeIndex(stmt);
+  const bodyCx: LowerCtx = provenPair
+    ? { ...innerCx, safeIndexedArrays: new Set([...(innerCx.safeIndexedArrays ?? []), provenPair]) }
+    : innerCx;
   const bodyInstrs = innerCx.builder.collectBodyInstrs(() => {
-    lowerStmt(stmt.statement, innerCx);
+    lowerStmt(stmt.statement, bodyCx);
   });
 
   // 4. Update — collect into a buffer (or empty if absent).
@@ -3784,6 +4118,105 @@ function lowerPrefixUnary(expr: ts.PrefixUnaryExpression, cx: LowerCtx): IrValue
   }
 }
 
+/**
+ * #2781 (hybrid Row 7) — TS-type-keyed primitive classifier. The reusable
+ * operand-type proof shared by the binary fast paths (and, going forward, rows
+ * 3 packed-`i32` and 5 unboxed-number-locals, which need the same "provably
+ * number / does-not-escape-to-`any`" judgement).
+ *
+ * Returns the provable primitive class of a TS type for the purpose of
+ * discharging a fast-path safety predicate `P`:
+ *   - `"number"`  — provably a pure number: `NumberLike` (`Number |
+ *     NumberLiteral`, incl. numeric enum literals), or a union whose EVERY
+ *     constituent is provably number.
+ *   - `"string"`  — provably a pure string: `StringLike` (`String |
+ *     StringLiteral`), template-literal / string-mapping types (always strings
+ *     at runtime), or an all-string union.
+ *   - `"unprovable"` — `any` / `unknown` / `object` / `boolean` (= the
+ *     `true | false` union of non-number/string literals) / `bigint` /
+ *     `symbol` / `null` / `undefined` / a MIXED `number | string` union /
+ *     intersections / anything else. Only the SAFE dynamic lowering is correct.
+ *
+ * CRITICAL (the Row-7 trap that parked two prior attempts): this keys on the TS
+ * *type*, NEVER the lowered Wasm kind. `number`, `boolean` and `symbol` all
+ * collapse to `i32` / `f64` at the Wasm level, so the kind cannot distinguish a
+ * numeric-add operand from a boolean / `any` one.
+ */
+const STRING_PROOF_FLAGS = ts.TypeFlags.StringLike | ts.TypeFlags.TemplateLiteral | ts.TypeFlags.StringMapping;
+
+function classifyPrimitiveProof(t: ts.Type): "number" | "string" | "unprovable" {
+  // Union (incl. the intrinsic `boolean`, which is internally `true | false`):
+  // every constituent must share the SAME provable class. Any unprovable
+  // constituent, a mixed number/string union, or an empty (`never`) union →
+  // unprovable.
+  if (t.isUnion()) {
+    let acc: "number" | "string" | null = null;
+    for (const c of t.types) {
+      const cc = classifyPrimitiveProof(c);
+      if (cc === "unprovable") return "unprovable";
+      if (acc === null) acc = cc;
+      else if (acc !== cc) return "unprovable";
+    }
+    return acc ?? "unprovable";
+  }
+  const f = t.flags;
+  if (f & ts.TypeFlags.NumberLike) return "number";
+  if (f & STRING_PROOF_FLAGS) return "string";
+  return "unprovable";
+}
+
+/**
+ * #2781 — per-operand wrapper around {@link classifyPrimitiveProof}. Returns
+ * `"no-checker"` when no TS checker is available, so the caller can leave the
+ * existing kind-based dispatch unchanged (mirrors #2780's no-checker arm: with
+ * no checker there is no specialization whose unsoundness we would be masking).
+ */
+function proveAdditiveOperand(node: ts.Expression, cx: LowerCtx): "number" | "string" | "unprovable" | "no-checker" {
+  const checker = cx.checker;
+  if (!checker) return "no-checker";
+  return classifyPrimitiveProof(checker.getTypeAtLocation(node));
+}
+
+/**
+ * #2782 (hybrid Row 5) — the no-box proof for an UNBOXED `f64` NUMBER local.
+ * Reuses {@link classifyPrimitiveProof} (the #2781 operand-type proof) to
+ * discharge the fast-path safety predicate `P` for the "keep a number local
+ * unboxed" specialization.
+ *
+ * `lowerVarDecl` binds a local with the native `f64` representation whenever its
+ * value lowers to (or is annotated) `f64`. Per the Hybrid Invariant that no-box
+ * specialization is only sound when the local's value provably cannot be
+ * anything but a pure number: an unboxed `f64` carries no runtime tag, so at any
+ * later `any` / union / externref use it would be read with the wrong identity
+ * (e.g. `typeof`, `===` against a string, a boxed-`Number` round-trip). When the
+ * local's TS type is NOT provably a pure number — `any` / `unknown` /
+ * `number | string` / etc. — the no-box path is unsound and codegen must demote
+ * to the SAFE boxed legacy lowering (which carries the dynamic tag).
+ *
+ * Returns `true` to KEEP the no-box fast path, `false` to DEMOTE.
+ *
+ * CRITICAL (the trap that parked two prior Row-1 attempts): this keys on the TS
+ * *type* via `classifyPrimitiveProof`, NEVER the lowered Wasm kind. `number`,
+ * `boolean` and `symbol` all collapse to `f64` / `i32`, so the Wasm kind cannot
+ * tell a genuine numeric local from a boolean / `any` one. We therefore scope
+ * this slice to the `f64` representation ONLY: `boolean` (the intrinsic
+ * `true | false` union) is intentionally classified `unprovable` by
+ * `classifyPrimitiveProof`, so gating `i32` locals on it would demote every
+ * boolean local — the `i32`-number arm needs its own TS-type proof and is
+ * deferred (see the issue). `string` / reference locals are unaffected.
+ *
+ * No checker → there is no specialization whose unsoundness we would be masking
+ * (every boundary use is still type-checked), so keep the existing behavior
+ * unchanged (mirrors #2780 / #2781's no-checker arm).
+ */
+function proveUnboxedNumberLocal(name: ts.Identifier, boundType: IrType, cx: LowerCtx): boolean {
+  const bv = asVal(boundType);
+  if (!bv || bv.kind !== "f64") return true; // not the no-box NUMBER representation — out of scope.
+  const checker = cx.checker;
+  if (!checker) return true; // no checker → leave behavior unchanged.
+  return classifyPrimitiveProof(checker.getTypeAtLocation(name)) === "number";
+}
+
 function lowerBinary(expr: ts.BinaryExpression, cx: LowerCtx, hint: IrType): IrValueId {
   const op = expr.operatorToken.kind;
 
@@ -3827,6 +4260,39 @@ function lowerBinary(expr: ts.BinaryExpression, cx: LowerCtx, hint: IrType): IrV
   // recurse into a bare NullKeyword and throw).
   const nullFold = tryFoldNullCompare(expr, op, cx);
   if (nullFold !== null) return nullFold;
+
+  // #2781 (hybrid Row 7) — `+` operand-type proof gate. Run BEFORE operand
+  // lowering (mirrors #2780's pre-element widening gate), so no dead operand
+  // instrs are emitted and the demotion cause is the explicit HI reason rather
+  // than an incidental downstream "mixed string/non-string" / `requireF64`
+  // throw. `+` is string-concat-OR-numeric-add chosen at RUNTIME (ToPrimitive on
+  // each operand, then "if either is a string → concatenate, else add"). The
+  // kind-based dispatch below picks concat-vs-add from the lowered Wasm kind,
+  // but per the Hybrid Invariant a T-directed specialization must be discharged
+  // by a proof on the TS *type*, never the Wasm kind: number / boolean / symbol
+  // all collapse to f64 / i32, so the kind alone cannot tell a genuine
+  // numeric-add operand from an `any` / string / `string | number` one the f64
+  // hint coerced opaquely (the Row-7 trap). Prove BOTH operands number (→ the
+  // unboxed numeric add below) or BOTH string (→ `emitStringConcat`); anything
+  // unprovable — `any` / union / a MIXED number+string pair — demotes to the
+  // SAFE legacy dynamic `+` (`binary-ops.ts` `emitAnyAdd`, ToPrimitive +
+  // string-concat-or-add). No checker → leave the existing kind-based dispatch
+  // unchanged (#2780's no-checker arm). The same operand proof
+  // (`proveAdditiveOperand` / `classifyPrimitiveProof`) is the reusable
+  // infrastructure rows 3 / 5 adopt.
+  if (op === ts.SyntaxKind.PlusToken) {
+    const lProof = proveAdditiveOperand(expr.left, cx);
+    const rProof = proveAdditiveOperand(expr.right, cx);
+    if (lProof !== "no-checker" && rProof !== "no-checker") {
+      if (lProof === "unprovable" || rProof === "unprovable" || lProof !== rProof) {
+        throw new Error(
+          `ir/from-ast: '+' operands not provably both-number or both-string ` +
+            `(${lProof}/${rProof}) — the unboxed numeric-add / string-concat fast ` +
+            `path is unsound here; demote to the SAFE dynamic '+' (emitAnyAdd) in ${cx.funcName}`,
+        );
+      }
+    }
+  }
 
   const lhs = lowerExpr(expr.left, cx, irVal({ kind: "f64" }));
   const rhs = lowerExpr(expr.right, cx, irVal({ kind: "f64" }));
