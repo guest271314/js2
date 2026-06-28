@@ -1,10 +1,11 @@
 ---
 id: 2781
 title: "Hybrid IR step 3: Binary `+` string-or-number proof-gate — unboxed numeric add / string concat only when the operand TS types are PROVEN, else SAFE dynamic `+`"
-status: in-progress
+status: done
 sprint: current
 created: 2026-06-28
 updated: 2026-06-28
+completed: 2026-06-28
 assignee: ttraenkler/sendev-binproof
 priority: medium
 horizon: m

@@ -56,7 +56,7 @@ gated rollout). Bands are for the *fast-path conversion only*; the §(e)
 | 4 | **Monomorphic `struct.get`/`struct.set`** — `src/codegen/property-access.ts:990` `resolveStructName`, `:1392` `emitNullGuardedStructGet` | receiver is exactly that nominal struct layout — TS permits union arms, `any`-widening, covariant fields, divergent-layout subclasses | receiver provably the single nominal type (IR receiver-type narrowing) **and** no union / `any` / covariant / subclass-layout escape; **else** SAFE dynamic property read (or `ref.test`-guarded read, à la row 8) | `undischarged` (subtle) | subtle | **L** | — (spin from this row) |
 | 5 | **Unboxed `f64`/`i32` number locals (no-box)** — IR `src/ir/analysis/escape.ts:92` `analyzeEscape`; legacy numeric-local typing diffuse across `src/codegen/` | a number-typed local stays unboxed and never needs identity/boxing at an `any`/externref sink | escape analysis proving the value never flows to an `any`/union/externref sink without an explicit box | `partial` | easy (pure-numeric) / subtle (any-union boundary) | **M** | — (spin general arm) |
 | 6 | **`ArrayLiteral` → `vec.new_fixed`** — `src/ir/from-ast.ts:1516` `lowerArrayLiteral` (#1804) | all elements share one static type **and** the literal is not later widened to `any`/heterogeneous | **local** proof: fresh allocation, all elements same static type, no widening escape — cheap, no whole-function dataflow | `discharged` (local) | easy | **S** | **#2780** (`arrayLiteralWideningEscapes` gate; FAST only when the contextual sink is not `any`/`unknown`/heterogeneous) |
-| 7 | **`Binary` unboxed arithmetic** — IR `src/ir/from-ast.ts:3787` `lowerBinary`; legacy `src/codegen/binary-ops.ts:254` `compileBinaryExpression` / `:3660` `compileNumericBinaryOp` | both operands are `number` so emit an `f64`/`i32` op, and `+` is a numeric add — TS allows `any`/union/string-coercible operands and `+` can be string concat | operands provably `number` (not `any`/union/string-coercible) and `+` provably not string-`+`; **else** SAFE `emitAnyAdd` (`binary-ops.ts:3296`) / `emitAnyRelational` (`:3469`) | `partial` | easy (annotated-number) / subtle (`+` possibly-string) | **M** | — (spin general arm) |
+| 7 | **`Binary` unboxed arithmetic** — IR `src/ir/from-ast.ts:3787` `lowerBinary`; legacy `src/codegen/binary-ops.ts:254` `compileBinaryExpression` / `:3660` `compileNumericBinaryOp` | both operands are `number` so emit an `f64`/`i32` op, and `+` is a numeric add — TS allows `any`/union/string-coercible operands and `+` can be string concat | operands provably `number` (not `any`/union/string-coercible) and `+` provably not string-`+`; **else** SAFE `emitAnyAdd` (`binary-ops.ts:3296`) / `emitAnyRelational` (`:3469`) | `partial` (`+` arm discharged) | easy (annotated-number) / subtle (`+` possibly-string) | **M** | **#2781** (`+` proof-gate landed; relational/arith general arm reuses the same `classifyPrimitiveProof` helper) |
 | 8 | **`this`-receiver typed read** — `src/codegen/property-access.ts:5443` `emitThisReceiverGuardConvert` | **none** — it does a runtime `ref.test` instead of trusting the static `this` type | runtime `ref.test` guard (the canonical runtime-guard discharge of `P`) | `discharged` (exemplar) | already-HI-compliant | **S** | F3: document as the HI reference pattern |
 | 9 | **Typed-array element read** — `src/codegen/property-access.ts` typed-array site `~:6341` in `compileElementAccessBody`; shared helper `src/codegen/array-methods.ts:386` `emitBoundsCheckedArrayGet` | view-length is the bound and OOB → `undefined` per spec, **but** the read is entangled with the **shared** helper (the S2 blast-radius lesson) | view length is the bound; OOB → `undefined`; **must stay scoped separately from F1's plain-array scope** — do NOT flip the shared helper default | `partial` | easy but entangled | **S–M** | kept separate from #2760 |
 
@@ -143,10 +143,14 @@ the expensive L tail (rows 3, 4) inherits the machinery the S/M rows establish.
    global. `arrayLiteralWideningEscapes` in `lowerArrayLiteral` gates the fast
    `vec.new_fixed` on the literal's TS contextual type: FAST only when the sink
    is not `any`/`unknown`/heterogeneous, else the SAFE boxed legacy lowering.
-3. **Row 7 — Binary `+` string-or-number proof-gate** (M, *needs an issue*).
-   Builds the operand-type-proof / `any`-union-sink detection that rows 3, 5
-   reuse. Proof-gate the unboxed numeric op in IR `lowerBinary`; SAFE-fall to
-   `emitAnyAdd` when a `+` operand could be a string.
+3. **Row 7 — Binary `+` string-or-number proof-gate** (M, **#2781 — landed**).
+   Built the reusable operand-type-proof (`classifyPrimitiveProof` /
+   `proveAdditiveOperand` in `from-ast.ts`) that rows 3, 5 reuse. Proof-gates the
+   `+` fast path in IR `lowerBinary` on the TS *type* (never the Wasm kind): both
+   operands provably `number` → unboxed numeric add; both provably `string` →
+   `emitStringConcat`; otherwise (`any` / union / mixed) demote to the SAFE legacy
+   dynamic `+` (`emitAnyAdd`). The relational/arith general arm can now adopt the
+   same helper without new infrastructure.
 
 After these three, the L tail (rows **3** packed-i32 and **4** monomorphic
 struct) is architect-scoped / senior-dev implementation — the two paths where a
