@@ -178,3 +178,7 @@ re-slice record only. The `wrapHoleSkip`/`shiftEscapingBr` helpers (correct and
 reusable) are recoverable from PR #2080 commit `509351a45` when holes are picked
 up AFTER slice B lands. **Re-sequenced:** fold "A — holes-skip" into / after
 slice B (prototype-chain HasProperty), not before it.
+
+## Residual (as of #2199, PO reconcile 2026-06-28)
+
+NOT done — sliced. Slice A (forEach/filter/some/every hole-skip on the $Vec path) landed. Remaining methods (map/reduce/reduceRight/indexOf/lastIndexOf/slice/splice/concat...) + generic array-like receiver + length coercion (~1017-fail cluster) remain; slice per method. Stays in-progress.

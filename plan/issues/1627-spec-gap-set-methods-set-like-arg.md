@@ -1,7 +1,7 @@
 ---
 id: 1627
 title: "spec gap: Set methods (union/intersection/etc.) accept any set-like argument (101 test262 fails)"
-status: ready
+status: in-progress
 created: 2026-05-08
 updated: 2026-06-19
 priority: medium
@@ -11,7 +11,7 @@ task_type: bugfix
 area: runtime
 language_feature: set
 goal: spec-completeness
-sprint: Backlog
+sprint: current
 renumbered_from: 1352
 parent: 1328
 ---

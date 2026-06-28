@@ -518,3 +518,7 @@ G = §10.5 result-invariants (needs descriptor attributes #797/#1460/#1462) ·
 H = construct/apply trap dispatch (the last two traps; needs the standalone
 dynamic-new path). Plus Stage S0/S1 from the RE-MEASURE section (standalone
 `Proxy.revocable` + missing `Reflect.*` wiring).
+
+## Residual (as of #2199, PO reconcile 2026-06-28)
+
+NOT done — umbrella. The referencing merged PR landed one slice (defineProperty trap, §10.5.6, standalone). The ~10 remaining Proxy traps + invariant checks toward 100% standalone (past host-fallback) remain. Stays in-progress; needs architect spec for the harder traps.

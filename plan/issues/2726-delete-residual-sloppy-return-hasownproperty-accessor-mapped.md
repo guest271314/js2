@@ -140,3 +140,7 @@ flipped fail→pass: `11.4.1-4.a-1`, `11.4.1-4.a-2`, `11.4.1-4-a-4-s` (c),
 `11.4.1-4-a-2-s` (d), plus sibling `Object/freeze/15.2.3.9-2-3` and
 `Object/seal/object-seal-inherited-accessor-properties-are-ignored`.
 Regression test: `tests/issue-2726.test.ts`.
+
+## Residual (as of #2199, PO reconcile 2026-06-28)
+
+NOT done — partially resolved. Groups (c) hasOwnProperty-after-configurable-delete + (d) non-configurable accessor delete are DONE (+6 test262, 0 regressions). Remaining OPEN: (a) sloppy unresolvable-identifier oracle + (b) sloppy global-object model — both STRUCTURAL and need an architect spec first (NOT dev-claimable as-is). (e) mapped-arguments delete → #1726; (f)/(g) re-routed to owning feature issues. Stays ready for (a)/(b) — route to architect before dispatch.

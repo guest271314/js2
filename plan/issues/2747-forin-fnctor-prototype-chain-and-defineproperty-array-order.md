@@ -128,3 +128,7 @@ pre-existing #1472/object-mutability/closed-imports failures are unrelated).
 - Split from #2739 (PR fixes part a). The #1712 read/write prototype channel is
   `_fnctorInstanceCtor` → `_sidecarGet(ctor,"prototype")` (runtime.ts ~74); the
   new setPrototypeOf channel is `_wasmStructProto` (runtime.ts ~49). Unify them.
+
+## Residual (as of #2199, PO reconcile 2026-06-28)
+
+NOT done — carve-out that explicitly does NOT close the issue. Group (d) carve-out (Reflect.setPrototypeOf + __proto__= mirror __host_set_struct) landed. The two remaining halves — constructor-function prototype-chain enumeration (S12.6.4_A6*) + defineProperty array-order — remain, carved due to the #1712 collision risk. Stays in-progress.
