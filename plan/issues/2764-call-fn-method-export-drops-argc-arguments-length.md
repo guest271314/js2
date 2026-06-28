@@ -1,10 +1,12 @@
 ---
 id: 2764
 title: "@@hasInstance handler invoked at unknown-arity (arguments.length wrong) — dispatcher half fixed by #2213; one-line residual"
-status: ready
-sprint: Backlog
+status: done
+sprint: current
 created: 2026-06-28
 updated: 2026-06-28
+completed: 2026-06-28
+assignee: ttraenkler/agent-a2da3f181c62e4768
 priority: medium
 horizon: s
 feasibility: easy
@@ -75,3 +77,19 @@ Confirmed locally on current main (cache cleared): with this change
   `src/codegen/index.ts` `emitClosureMethodCallExportN` (dispatcher, fixed by
   #2213) vs `emitClosureCallExportN` (the reference);
   `src/codegen/statements/nested-declarations.ts` `emitArgumentsVecBody`.
+
+## Resolution (2026-06-28)
+Applied the documented one-liner in `_instanceofResult` (`src/runtime.ts`):
+recover the raw wasm closure from `_wasmClosureWrapperTargets` and re-bridge the
+`@@hasInstance` handler at the spec-mandated known arity 1 (via
+`_maybeWrapCallable(rawHandler, 1, …)` → `__call_fn_method_1` → `__argc === 1`)
+instead of the unknown-arity max bridge.
+
+Verified on current `main` (cache cleared) via the test262 harness:
+- `symbol-hasinstance-invocation.js`: fail → **pass**
+- `symbol-hasinstance-not-callable.js` / `-to-boolean.js` / `-get-err.js`: stay **pass**
+
+Added `tests/issue-2764.test.ts` (5 `assertEquivalent` cases: `arguments.length
+=== 1`, `args[0] === V`, `this === F` + `callCount === 1`, named-param binding,
+ToBoolean-coercion regression) — all green; `tests/issue-2702.test.ts` (8) stays
+green.
