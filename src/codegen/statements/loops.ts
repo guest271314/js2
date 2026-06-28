@@ -1496,6 +1496,62 @@ function compileForOfDestructuring(
         if (!propNameText && ts.isComputedPropertyName(propNameNode)) {
           propNameText = resolveComputedKeyExpression(ctx, propNameNode.expression);
         }
+        // (#2808) Nested sub-pattern in a for-of OBJECT binding head:
+        //   for (const { a: { x }, b: [y] } of arr)
+        // The struct branch previously DROPPED these at the identifier-only
+        // `continue` just below, so a nested object/array sub-pattern never
+        // bound its inner names and — for a null/undefined property value —
+        // never threw. Mirror the array branch (#2669/#2216): extract the
+        // field value, apply the (undefined-only) nested default, then recurse.
+        // `compileForOfDestructuring`'s own RequireObjectCoercible / GetIterator
+        // null guard throws TypeError for a null/undefined nested target
+        // (§13.15.5.5 / §8.5.2 BindingInitialization), so the throw is handled
+        // by the recursion rather than re-emitted here.
+        if (propNameText && (ts.isObjectBindingPattern(element.name) || ts.isArrayBindingPattern(element.name))) {
+          const nestedFieldIdx = fields.findIndex((f) => f.name === propNameText);
+          // A default initializer fires ONLY when the property value is
+          // `undefined` (never `null`) — KeyedBindingInitialization §13.3.3.7
+          // step 3. Restricted to PURE (non-call) defaults: a call default
+          // compiled in a conditionally-skipped arm materialises its capture box
+          // on the not-taken branch (#2692) / over-consumes a generator (#2566),
+          // exactly the for-await regression class the array branch guards against.
+          const nestedInit =
+            element.initializer && !stmt.awaitModifier && !ts.isCallExpression(element.initializer)
+              ? element.initializer
+              : undefined;
+          if (nestedFieldIdx >= 0) {
+            const nestedFieldType = fields[nestedFieldIdx]!.type;
+            const nestedLocal = allocLocal(fctx, `__forof_obj_nested_${fctx.locals.length}`, nestedFieldType);
+            fctx.body.push({ op: "local.get", index: elemLocal });
+            fctx.body.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx: nestedFieldIdx });
+            fctx.body.push({ op: "local.set", index: nestedLocal });
+            if (nestedInit) {
+              emitNestedBindingDefault(ctx, fctx, nestedLocal, nestedFieldType, nestedInit);
+            }
+            compileForOfDestructuring(ctx, fctx, element.name, nestedLocal, nestedFieldType, stmt);
+          } else {
+            // Property absent ⇒ the value is `undefined`.
+            const dfltTsType = ctx.checker.getTypeAtLocation(element);
+            let dfltType = resolveWasmType(ctx, dfltTsType);
+            // For an absent property with no default the value is undefined and
+            // must throw; force a nullable carrier so the recursion's guard fires.
+            if (!nestedInit && dfltType.kind !== "ref_null" && dfltType.kind !== "externref") {
+              dfltType = { kind: "externref" };
+            }
+            const nestedLocal = allocLocal(fctx, `__forof_obj_nested_${fctx.locals.length}`, dfltType);
+            if (nestedInit) {
+              const dt = compileExpression(ctx, fctx, nestedInit, dfltType);
+              if (dt && !valTypesMatch(dt, dfltType)) coerceType(ctx, fctx, dt, dfltType);
+            } else if (dfltType.kind === "ref_null") {
+              fctx.body.push({ op: "ref.null", typeIdx: (dfltType as { typeIdx: number }).typeIdx });
+            } else {
+              fctx.body.push({ op: "ref.null.extern" });
+            }
+            fctx.body.push({ op: "local.set", index: nestedLocal });
+            compileForOfDestructuring(ctx, fctx, element.name, nestedLocal, dfltType, stmt);
+          }
+          continue;
+        }
         if (!ts.isIdentifier(element.name)) continue; // skip non-identifier binding names
         const localName = element.name.text;
         if (!propNameText) continue; // skip truly unresolvable computed property names
