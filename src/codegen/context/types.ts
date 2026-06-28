@@ -850,6 +850,24 @@ export interface CodegenContext {
   holeTypeIdx: number;
   holeGlobalIdx: number | undefined;
   /**
+   * (#2800) The mutable i32 `__in_module_init` flag — 1 for the duration of
+   * `__module_init` (the Wasm `start` section in gc/host mode, which runs INSIDE
+   * `WebAssembly.instantiate`, BEFORE the host wires struct getters via
+   * `__setExports`), 0 otherwise. The delete-aware `any`-receiver READ
+   * (`tryEmitDeleteAwareDynamicGet`) branches on it: while init runs (host
+   * `__extern_get` can't reach `__sget_<field>` → returns undefined for every
+   * struct field), read the slot HOST-FREE via the `__get_member_<name>`
+   * dispatcher; at runtime use the tombstone-aware host `__extern_get`.
+   *
+   * `inModuleInitFlagReads` collects the `global.get` flag-read Instr objects
+   * emitted at read sites (with a placeholder index); `finalizeInModuleInitFlag`
+   * allocates the i32 global AFTER every import settles and patches their
+   * `.index` + records the final slot in `inModuleInitGlobalIdx`. Undefined/empty
+   * for delete-free / standalone / WASI modules (byte-identical).
+   */
+  inModuleInitFlagReads: Instr[] | undefined;
+  inModuleInitGlobalIdx: number | undefined;
+  /**
    * (#2580 M0) Value-rep dynamic-read substrate. Set true by a call site that
    * needs the runtime property-presence read primitives (`__dyn_has` /
    * `__dyn_get`) — e.g. M1's `any`-receiver `.length`. Gates

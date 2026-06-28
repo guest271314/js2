@@ -71,11 +71,11 @@ RUN ARCH=$(dpkg --print-architecture) && \
 
 # wasmtime CLI — runs the warm-runtime perf benchmarks (#1580/#1746) that
 # refresh the committed landing-page benchmark JSON, and the native-messaging
-# smoke test. Pinned to v44 to match CI
+# smoke test. Pinned to v46 to match CI
 # (.github/workflows/native-messaging-smoke.yml); do NOT switch to
-# --all-proposals (v44 rejects stack-switching). Arch-aware: amd64->x86_64,
-# arm64->aarch64.
-ARG WASMTIME_VERSION=v44.0.0
+# --all-proposals (it enables stack-switching, which these modules don't use).
+# Arch-aware: amd64->x86_64, arm64->aarch64.
+ARG WASMTIME_VERSION=v46.0.1
 RUN ARCH=$(dpkg --print-architecture) && \
   case "$ARCH" in \
     amd64) WT_ARCH=x86_64 ;; \
