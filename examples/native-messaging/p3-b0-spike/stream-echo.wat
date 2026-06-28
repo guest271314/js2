@@ -10,7 +10,7 @@
 ;; The P3 echo is a host-driven stream HAND-OFF: read-via-stream() yields the
 ;; stdin readable stream; hand that same stream to write-via-stream(); the HOST
 ;; pumps stdin->stdout; the guest awaits the returned future<result>. The guest
-;; barely touches the bytes (contrast nm_wasi_p1.ts, which hand-marshals iovecs).
+;; barely touches the bytes (contrast nm_js2wasm_wasi_p1.ts, which hand-marshals iovecs).
 ;;
 ;; STATUS — parses with `jco parse`, but does NOT yet run under wasmtime 44:
 ;;   wasmtime rejects the `future<T>`-typed import at DECODE time:

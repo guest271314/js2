@@ -3736,6 +3736,65 @@ function compileForOfArrayFromLocal(
   compileForOfArray(ctx, fctx, stmt, undefined, { vecLocal, vecType });
 }
 
+// (#2769) Does this for-of need the in-bounds undefined/hole sentinel preserved
+// through the OUTER array-literal construction? True ONLY when the subject is a
+// *direct array literal* AND the for-of binding pattern has an element default
+// OR a nested sub-pattern — the exact #2769 template family
+// (`for (const [x = 23] of [[undefined]])`, `[[,]]`, nested-array/obj). When
+// true, compileForOfArray sets the scoped `_forOfPreserveUndefElem` flag around
+// the subject compile so `compileArrayLiteral` re-keys the outer element type to
+// an externref vec (literals.ts), letting the inner undefined/$Hole survive to
+// the existing wantUndefinedSentinel default-check. Plain `for (x of arr)` /
+// non-literal subjects / default-free patterns return false → untouched.
+function forOfDstrNeedsInboundsUndef(stmt: ts.ForOfStatement): boolean {
+  if (!ts.isArrayLiteralExpression(stmt.expression)) return false;
+  // Extract the for-of binding pattern (declaration or assignment form).
+  if (ts.isVariableDeclarationList(stmt.initializer)) {
+    const decl = stmt.initializer.declarations[0];
+    if (decl && (ts.isArrayBindingPattern(decl.name) || ts.isObjectBindingPattern(decl.name))) {
+      return bindingPatternHasDefaultOrNested(decl.name);
+    }
+    return false;
+  }
+  if (ts.isArrayLiteralExpression(stmt.initializer) || ts.isObjectLiteralExpression(stmt.initializer)) {
+    return assignPatternHasDefaultOrNested(stmt.initializer);
+  }
+  return false;
+}
+
+// Declaration-form binding pattern: any element with a default initializer
+// (`[x = 23]`) or a nested array/object sub-pattern (`[[y]]` / `[{z}]`).
+function bindingPatternHasDefaultOrNested(pattern: ts.ArrayBindingPattern | ts.ObjectBindingPattern): boolean {
+  return pattern.elements.some((el) => {
+    if (ts.isOmittedExpression(el)) return false;
+    const be = el as ts.BindingElement;
+    if (be.initializer) return true; // element default
+    return ts.isArrayBindingPattern(be.name) || ts.isObjectBindingPattern(be.name); // nested sub-pattern
+  });
+}
+
+// Assignment-form pattern (`for ([x = 23] of …)` / `for ({a = 1} of …)`): same
+// predicate over the literal AST (`x = 23` is a BinaryExpression with `=`; a
+// nested array/object literal is a sub-pattern).
+function assignPatternHasDefaultOrNested(pattern: ts.ArrayLiteralExpression | ts.ObjectLiteralExpression): boolean {
+  if (ts.isArrayLiteralExpression(pattern)) {
+    return pattern.elements.some((el) => {
+      if (ts.isOmittedExpression(el)) return false;
+      if (ts.isBinaryExpression(el) && el.operatorToken.kind === ts.SyntaxKind.EqualsToken) return true;
+      return ts.isArrayLiteralExpression(el) || ts.isObjectLiteralExpression(el);
+    });
+  }
+  return pattern.properties.some((p) => {
+    if (ts.isShorthandPropertyAssignment(p)) return !!p.objectAssignmentInitializer; // {a = 1}
+    if (ts.isPropertyAssignment(p)) {
+      const init = p.initializer;
+      if (ts.isBinaryExpression(init) && init.operatorToken.kind === ts.SyntaxKind.EqualsToken) return true;
+      return ts.isArrayLiteralExpression(init) || ts.isObjectLiteralExpression(init);
+    }
+    return false;
+  });
+}
+
 /** Compile for...of over an array using index-based loop (existing behavior) */
 function compileForOfArray(
   ctx: CodegenContext,
@@ -3751,7 +3810,17 @@ function compileForOfArray(
   // #1919 — snapshot so a non-array receiver rolls back body + locals + imports
   // before reporting. With `preVec` no compile happens, so rollback is a no-op.
   const snap = snapshotSpeculative(ctx, fctx);
+  // (#2769) Preserve in-bounds undefined/hole identity through the OUTER
+  // array-literal construction for the spec'd for-of-dstr template family. The
+  // flag is scoped tightly to the subject compile (set→compile→restore) so it
+  // can't leak into unrelated array literals; `iterableOverride` (`.values()`
+  // receiver) and `preVec` paths are not direct array literals, so the gate is
+  // false for them.
+  const preserveUndefElem = !preVec && !iterableOverride && forOfDstrNeedsInboundsUndef(stmt);
+  const prevPreserveUndefElem = (ctx as any)._forOfPreserveUndefElem;
+  if (preserveUndefElem) (ctx as any)._forOfPreserveUndefElem = true;
   const vecType = preVec ? preVec.vecType : compileExpression(ctx, fctx, iterableOverride ?? stmt.expression);
+  if (preserveUndefElem) (ctx as any)._forOfPreserveUndefElem = prevPreserveUndefElem;
   if (!vecType || (vecType.kind !== "ref" && vecType.kind !== "ref_null")) {
     rollbackSpeculative(ctx, fctx, snap);
     reportError(ctx, stmt, "for-of requires an array expression");

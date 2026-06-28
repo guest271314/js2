@@ -1,9 +1,9 @@
-// #2748 — bun/tsc/esbuild-transpiled (TYPE-STRIPPED) `nm_deno.js` must compile to
+// #2748 — bun/tsc/esbuild-transpiled (TYPE-STRIPPED) `nm_js2wasm_deno.js` must compile to
 // the SAME pure-WASI-P1 module as the direct `.ts`, not leak `env::__extern_get`.
 //
 // loopdive/js2#389 (latest comment): the reporter's pipeline is
-//   bun build --no-bundle nm_deno.ts --outfile nm_deno.js   # strips TS types
-//   js2wasm nm_deno.js --target wasi
+//   bun build --no-bundle nm_js2wasm_deno.ts --outfile nm_js2wasm_deno.js   # strips TS types
+//   js2wasm nm_js2wasm_deno.js --target wasi
 // The direct `.ts` compile imports ONLY `wasi_snapshot_preview1` and echoes
 // byte-exactly (covered by issue-2684-deno-stdio.test.ts). The transpiled `.js`
 // regressed: its `Uint8Array` PARAM annotations were stripped (`writeFull(out)` /
@@ -45,11 +45,17 @@ function findWasmtime(): string | null {
 }
 const wasmtimeBin = findWasmtime();
 
-const examplePath = join(dirname(fileURLToPath(import.meta.url)), "..", "examples", "native-messaging", "nm_deno.ts");
+const examplePath = join(
+  dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "examples",
+  "native-messaging",
+  "nm_js2wasm_deno.ts",
+);
 
 /**
  * Reproduce `bun build <entry> --outfile out.js`: type-strip AND BUNDLE the entry
- * (inlining the shared `./nm_sync_framing` core, #2778) into a single ESM `.js`
+ * (inlining the shared `./nm_js2wasm_sync_framing` core, #2778) into a single ESM `.js`
  * via esbuild. A transform-only strip would leave the relative import dangling —
  * the post-#2778 reality that made the transpiled-`.js` path regress (#2754).
  */
@@ -66,7 +72,7 @@ async function transpileStrippedBundle(entry: string): Promise<string> {
   return result.outputFiles[0]!.text;
 }
 
-// A hand-written TYPE-STRIPPED equivalent of the nm_deno framed-echo host — the
+// A hand-written TYPE-STRIPPED equivalent of the nm_js2wasm_deno framed-echo host — the
 // `writeFull`/`readExact` params carry NO `Uint8Array` annotation (exactly what a
 // transpiler emits), so the buffers are `any`/externref. This is the deterministic
 // backstop independent of esbuild's exact output.
@@ -131,22 +137,22 @@ function expectPureWasi(wat: string, binary: Uint8Array): void {
   expect(() => new WebAssembly.Module(binary)).not.toThrow();
 }
 
-describe("#2748 — type-stripped Deno nm_deno.js → pure-WASI P1 (no env::__extern_get)", () => {
+describe("#2748 — type-stripped Deno nm_js2wasm_deno.js → pure-WASI P1 (no env::__extern_get)", () => {
   it("the hand-written UNTYPED framed-echo compiles to a pure-WASI module", async () => {
-    const result = await compile(FRAMED_ECHO_UNTYPED, { fileName: "nm_deno.js", target: "wasi" });
+    const result = await compile(FRAMED_ECHO_UNTYPED, { fileName: "nm_js2wasm_deno.js", target: "wasi" });
     expect(result.success, result.success ? "" : result.errors?.[0]?.message).toBe(true);
     expectPureWasi(result.wat ?? "", result.binary!);
   });
 
-  it("the esbuild-transpiled (type-stripped) nm_deno.ts compiles to a pure-WASI module", async () => {
+  it("the esbuild-transpiled (type-stripped) nm_js2wasm_deno.ts compiles to a pure-WASI module", async () => {
     // The reporter's exact pipeline: `bun build` strips TS types AND BUNDLES the
-    // shared `./nm_sync_framing` core (#2778) into one file, then compiles the
+    // shared `./nm_js2wasm_sync_framing` core (#2778) into one file, then compiles the
     // `.js`. A transform-only strip would leave the relative import dangling.
     const code = await transpileStrippedBundle(examplePath);
     expect(code).toContain("Deno.stdin.readSync");
     expect(code).not.toContain(": Uint8Array"); // types really are stripped
-    expect(code).not.toContain("./nm_sync_framing"); // shared core was inlined
-    const result = await compile(code, { fileName: "nm_deno.js", target: "wasi" });
+    expect(code).not.toContain("./nm_js2wasm_sync_framing"); // shared core was inlined
+    const result = await compile(code, { fileName: "nm_js2wasm_deno.js", target: "wasi" });
     expect(result.success, result.success ? "" : result.errors?.[0]?.message).toBe(true);
     expectPureWasi(result.wat ?? "", result.binary!);
   });
@@ -191,16 +197,16 @@ describe("#2748 — type-stripped Deno nm_deno.js → pure-WASI P1 (no env::__ex
     };
 
     it("untyped host round-trips a framed message byte-for-byte (incl. high/null bytes)", async () => {
-      const result = await compile(FRAMED_ECHO_UNTYPED, { fileName: "nm_deno.js", target: "wasi" });
+      const result = await compile(FRAMED_ECHO_UNTYPED, { fileName: "nm_js2wasm_deno.js", target: "wasi" });
       expect(result.success).toBe(true);
       const input = frame([0x00, 0xff, 0x0a, 0x7f, 0x80, 0x41]);
       const out = run(result.binary!, "untyped_echo", input);
       expect(Buffer.compare(out, input)).toBe(0);
     });
 
-    it("esbuild-transpiled nm_deno.js round-trips multiple frames incl. a >window body", async () => {
+    it("esbuild-transpiled nm_js2wasm_deno.js round-trips multiple frames incl. a >window body", async () => {
       const code = await transpileStrippedBundle(examplePath);
-      const result = await compile(code, { fileName: "nm_deno.js", target: "wasi" });
+      const result = await compile(code, { fileName: "nm_js2wasm_deno.js", target: "wasi" });
       expect(result.success, result.success ? "" : result.errors?.[0]?.message).toBe(true);
 
       const small = [0x00, 0xff, 0x0a, 0x7f, 0x80, 0x41];

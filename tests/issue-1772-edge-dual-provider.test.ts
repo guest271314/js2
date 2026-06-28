@@ -104,7 +104,7 @@ describe("#1772 — node:fs same-binary dual-provider compatibility", () => {
   it.runIf(hasWasmtime())(
     "provider (a): node-fs.wat under wasmtime echoes the same bytes; both providers agree",
     () => {
-      const wasmPath = join(tmp, "nm_wasi_p1.wasm");
+      const wasmPath = join(tmp, "nm_js2wasm_wasi_p1.wasm");
       const shimPath = join(tmp, "node-fs.wasm");
       writeFileSync(wasmPath, userBinary);
       writeFileSync(shimPath, buildNodeFsShim());

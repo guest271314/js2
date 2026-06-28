@@ -1,7 +1,7 @@
 // Native Messaging host, compiled to standalone WASI by js2wasm — the **node:fs**
 // synchronous-stdio variant.
 //
-//   npx js2wasm examples/native-messaging/nm_node_fs.ts --target wasi -o out
+//   npx js2wasm examples/native-messaging/nm_js2wasm_node_fs.ts --target wasi -o out
 //
 // `--target wasi` ALONE (no `--link node:fs`) emits a SELF-CONTAINED WASI
 // Preview-1 command module: it imports ONLY `wasi_snapshot_preview1` (fd_read /
@@ -17,7 +17,7 @@
 // `writeSync(1,…)` are fd-based (integer fd 0=stdin, 1=stdout), NOT path-based —
 // no filesystem involved; under real node they call the real fs.
 //
-//   npx js2wasm examples/native-messaging/nm_node_fs.ts --target wasi --link node:fs -o out
+//   npx js2wasm examples/native-messaging/nm_js2wasm_node_fs.ts --target wasi --link node:fs -o out
 //
 // is the VARIANT that lowers the same calls to imported `node:fs` shim calls
 // (`node-fs.wat`, which maps them to WASI fd_read / fd_write) — useful when the
@@ -42,19 +42,19 @@
 // A message that already fits in one frame is echoed verbatim.
 //
 // The Native Messaging FRAMING + browser-cap re-chunk streaming itself lives in
-// the shared, host-independent core `nm_sync_framing.ts` (#2778) — this file is
+// the shared, host-independent core `nm_js2wasm_sync_framing.ts` (#2778) — this file is
 // just the thin node:fs adapter that injects `readSync(0,…)` / `writeSync(1,…)`
 // into the `runNmHost` seam and runs it with a **1 MiB re-chunk cap** (the
 // browser per-host->extension-message limit). The re-chunk is this variant's
 // deliberate demo: a body > 1 MiB streams back through a single reused 1 MiB
 // buffer as a sequence of valid <=1 MiB JSON frames, so resident memory stays
-// flat (~a couple MiB) regardless of message size. `nm_deno.ts` injects Deno
+// flat (~a couple MiB) regardless of message size. `nm_js2wasm_deno.ts` injects Deno
 // stdio with NO cap (verbatim echo) into the SAME core.
 //
 // The seam is two FUNCTION references (`nodeFsRead` / `nodeFsWrite`), not an
 // object: passing a struct value across the bundled-module boundary traps at
 // runtime under `--target wasi` today, while function references cross cleanly
-// (#2778 — see the note atop `nm_sync_framing.ts`).
+// (#2778 — see the note atop `nm_js2wasm_sync_framing.ts`).
 //
 // js2wasm support today (#2631):
 //   - stdin  : readSync(0, buf, { offset, length }) does one binary, incremental
@@ -63,7 +63,7 @@
 //              newline; the partial-write loop drains the whole buffer.
 
 import { readSync, writeSync } from "node:fs";
-import { runNmHost } from "./nm_sync_framing";
+import { runNmHost } from "./nm_js2wasm_sync_framing";
 
 // ONE incremental fd=0 read filling the WHOLE buffer it is handed (offset 0,
 // length = buf.length); returns the byte count (0 at EOF — the core treats
@@ -156,7 +156,7 @@ export function main(): void {
   // lowers to a Wasm GLOBAL, and passing that global as the cap argument across
   // the bundled-module call into the shared core mis-lowers under `--target wasi`
   // → a runtime fault (a clean compile, but a fault) — the same class of node:fs
-  // multi-file index-shift gap noted in `nm_sync_framing.ts` (#2778). A local
+  // multi-file index-shift gap noted in `nm_js2wasm_sync_framing.ts` (#2778). A local
   // const (or an inline literal) compiles to a plain `i32.const` operand and is
   // unaffected.
   const frameChunk = 1024 * 1024;

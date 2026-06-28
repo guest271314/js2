@@ -17,7 +17,7 @@
  * `wasi_snapshot_preview1.fd_read` / `fd_write`, reusing #2655's
  * `ctx.wasiFdReadIdx` / `wasiFdWriteIdx` (no duplicate import) and the
  * iovec/scratch machinery shared with `node-fs-api.ts`. The result: the SAME
- * `nm_deno.ts` source compiles to a self-contained WASI P1 command module
+ * `nm_js2wasm_deno.ts` source compiles to a self-contained WASI P1 command module
  * importing ONLY `wasi_snapshot_preview1`, AND runs unmodified under real Deno.
  *
  * The one intricate part is `readSync`'s `number | null` return. The compiler

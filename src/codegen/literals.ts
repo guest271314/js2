@@ -119,6 +119,25 @@ function _isUndefinedLike(node: ts.Node): boolean {
   );
 }
 
+// (#2769) Is this inner array literal `undefined`/`void`/hole-ONLY — i.e. it
+// would naturally build an externref-backed vec (every element falls into the
+// `_isUndefinedLike`/omitted branch of compileArrayLiteral) BUT
+// `resolveWasmType(its TS type)` lowers it to a numeric (`__vec_i32`/`__vec_f64`)
+// vec, so the OUTER literal coerces it and destroys the undefined/$Hole identity
+// at construction? Used ONLY under the scoped `_forOfPreserveUndefElem` flag.
+//
+// Narrowly the undefined/hole-ONLY case: a HETEROGENEOUS inner like
+// `[10, undefined]` already builds an `__vec_f64` via the existing sNaN-sentinel
+// path (and the OUTER derives `__vec_f64` too → they match, no coercion), so
+// re-keying THAT to externref would instead BREAK it (mismatched vec→vec
+// coercion → NaN). Empty inners (`[]`) are out-of-bounds, handled by the
+// existing default path — also excluded (length 0). Numeric/object literals like
+// `[7]` return false → byte-identical numeric-vec backing.
+function arrayLiteralIsUndefinedOrHoleOnly(arr: ts.ArrayLiteralExpression): boolean {
+  if (arr.elements.length === 0) return false;
+  return arr.elements.every((el) => ts.isOmittedExpression(el) || _isUndefinedLike(el));
+}
+
 /**
  * Ensure that a struct registered for an object literal includes fields for
  * computed property names that TypeScript cannot statically resolve.
@@ -3430,6 +3449,29 @@ export function compileArrayLiteral(
         }
       }
     }
+  }
+  // (#2769) for-of over a direct array LITERAL whose binding pattern has an
+  // element default / nested sub-pattern: the OUTER literal must not coerce an
+  // inner `[undefined]` / `[hole]` array down to a numeric vec (the leaf
+  // `undefined`/`void` maps to i32 → `resolveWasmType(undefined[])` = `__vec_i32`,
+  // so the inner `[undefined]` — built fresh as `__vec_externref` — is COERCED to
+  // `__vec_i32` → `__unbox_number` → `i32.trunc_sat_f64_s` → 0, destroying the
+  // undefined identity at CONSTRUCTION; the vec-destructure then never fires the
+  // default). When the scoped `_forOfPreserveUndefElem` flag is set (set by
+  // compileForOfArray around the subject compile) AND the first element is an
+  // array literal that carries undefined/void/hole, re-key the OUTER element type
+  // to an externref vec so the inner undefined/$Hole survives to the EXISTING
+  // wantUndefinedSentinel / __extern_is_undefined read path. ZERO read-path edits;
+  // NO resolveWasmType change (that is what avoids the PR #2226 global-backing
+  // regressions). The flag is tightly scoped (set→subject→clear), so unrelated
+  // array literals are byte-identical.
+  if (
+    (ctx as any)._forOfPreserveUndefElem &&
+    ts.isArrayLiteralExpression(firstElem) &&
+    arrayLiteralIsUndefinedOrHoleOnly(firstElem)
+  ) {
+    const innerVecIdx = getOrRegisterVecType(ctx, "externref", { kind: "externref" });
+    elemWasm = { kind: "ref_null", typeIdx: innerVecIdx };
   }
   elemKind = elemWasm.kind === "ref" || elemWasm.kind === "ref_null" ? `ref_${elemWasm.typeIdx}` : elemWasm.kind;
   const vecTypeIdx = getOrRegisterVecType(ctx, elemKind, elemWasm);

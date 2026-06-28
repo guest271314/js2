@@ -7021,6 +7021,23 @@ export const WASI_STDIN_BUF_START = 64 * 1024;
 export const WASI_WRITE_SCRATCH_START = 128 * 1024;
 
 /**
+ * #2807 — maximum byte length of a SINGLE `fd_write` iovec. wasmtime (verified
+ * v46.0.1) rejects a one-iovec `fd_write` whose length is at/above ~128 MiB
+ * (empirically the cap is `len <= 0x07FFFFF8`; `len >= 0x07FFFFF9` returns errno
+ * 48 / `ENOMEM` with `nwritten = 0`, identically for a redirected file and a
+ * pipe — wasmtime bounds the guest→host buffer it stages per write, so this is a
+ * fixed structural cap, NOT real memory pressure). Because the `__wasi_write_*`
+ * tails mapped a non-zero errno to "0 bytes", a single `process.stdout.write` of
+ * a ≥128 MiB Native-Messaging body wrote ZERO bytes and the host exited 0 with
+ * no output (the nm_node_process 128-MiB silent-failure of #2807).
+ *
+ * 64 MiB sits a comfortable 2× below the cap and is confirmed to write fully on
+ * both a file and a pipe; the chunk count for even a 256 MiB body is trivial (4),
+ * dwarfed by the per-byte GC→scratch staging copy, so there is no perf cost.
+ */
+export const WASI_FD_WRITE_MAX_CHUNK = 64 * 1024 * 1024;
+
+/**
  * #2655 — DIRECT `readSync` iovec + nread scratch (page 0). The blocking
  * `wasi_snapshot_preview1.fd_read(fd, iovs, iovs_len, nread)` syscall needs a
  * `{ base, len }` iovec (8 bytes) and a `nread` out-slot (4 bytes) in linear
@@ -7068,6 +7085,23 @@ function emitWasiWriteTail(ctx: CodegenContext, fd: number, srcConst: number, le
       { op: "drop" } as Instr, // drop bytes-written
     ];
   }
+  // #2807 — route the direct-WASI write through the chunked `__wasi_fd_write_all`
+  // helper so a ≥128 MiB buffer (a large Native-Messaging frame) is written in
+  // bounded pieces below wasmtime's single-iovec cap, instead of one oversized
+  // fd_write that returns errno 48 and silently drops every byte. The helper is
+  // pre-created at the top of each `__wasi_write_*` helper (and by any inline
+  // caller), so this lookup never pushes a function mid-body — keeping the
+  // outer helper's reserved funcidx stable.
+  const writeAllIdx = ensureWasiFdWriteAllHelper(ctx);
+  if (writeAllIdx >= 0) {
+    return [
+      { op: "i32.const", value: fd } as Instr,
+      { op: "i32.const", value: srcConst } as Instr,
+      { op: "local.get", index: lenLocalIdx } as Instr,
+      { op: "call", funcIdx: writeAllIdx } as Instr,
+      { op: "drop" } as Instr, // drop total bytes-written
+    ];
+  }
   return [
     // iovec.buf = srcConst at memory[0]
     { op: "i32.const", value: 0 } as Instr,
@@ -7085,6 +7119,141 @@ function emitWasiWriteTail(ctx: CodegenContext, fd: number, srcConst: number, le
     { op: "call", funcIdx: ctx.wasiFdWriteIdx } as Instr,
     { op: "drop" } as Instr,
   ];
+}
+
+/**
+ * #2807 — ensure the `__wasi_fd_write_all(fd, ptr, len) -> i32` helper exists and
+ * return its function index (lazy). It writes `len` bytes from linear `ptr` to
+ * `fd` in bounded chunks of at most {@link WASI_FD_WRITE_MAX_CHUNK}, advancing by
+ * the ACTUAL `nwritten` each iteration so a kernel short-write is handled too,
+ * until all bytes are written. Stops on a non-zero errno or a zero-progress write
+ * (never loops forever). Returns the total bytes written.
+ *
+ * This is the single point that defeats wasmtime's ~128 MiB single-`fd_write`
+ * cap (see {@link WASI_FD_WRITE_MAX_CHUNK}). It is a no-op (`-1`) under the
+ * node-shim write path (`ctx.linkNodeShims`) — that path forwards to the shim's
+ * own `writeSync` — and when no direct `fd_write` is registered.
+ *
+ * The iovec at memory[0..7] and nwritten at memory[8..11] are the same page-0
+ * scratch slots the inline tail used; callers stage the data into `ptr` and grow
+ * memory before calling, so this helper only loops the syscall.
+ */
+export function ensureWasiFdWriteAllHelper(ctx: CodegenContext): number {
+  if (!ctx.wasi || ctx.linkNodeShims || ctx.wasiFdWriteIdx === undefined) return -1;
+  const helperName = "__wasi_fd_write_all";
+  const existing = ctx.funcMap.get(helperName);
+  if (existing !== undefined) return existing;
+
+  // params: fd(0), ptr(1), len(2); locals: base(3), remaining(4), total(5),
+  // chunk(6), errno(7), nw(8)
+  const FD = 0;
+  const PTR = 1;
+  const LEN = 2;
+  const BASE = 3;
+  const REMAINING = 4;
+  const TOTAL = 5;
+  const CHUNK = 6;
+  const ERRNO = 7;
+  const NW = 8;
+
+  const funcTypeIdx = addFuncType(ctx, [{ kind: "i32" }, { kind: "i32" }, { kind: "i32" }], [{ kind: "i32" }]);
+  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  ctx.funcMap.set(helperName, funcIdx);
+
+  const loopBody: Instr[] = [
+    // if (remaining <= 0) break out of the block
+    { op: "local.get", index: REMAINING } as Instr,
+    { op: "i32.const", value: 0 } as Instr,
+    { op: "i32.le_s" } as Instr,
+    { op: "br_if", depth: 1 } as Instr,
+    // chunk = min(remaining, MAX_CHUNK) = remaining < MAX ? remaining : MAX
+    { op: "local.get", index: REMAINING } as Instr,
+    { op: "i32.const", value: WASI_FD_WRITE_MAX_CHUNK } as Instr,
+    { op: "local.get", index: REMAINING } as Instr,
+    { op: "i32.const", value: WASI_FD_WRITE_MAX_CHUNK } as Instr,
+    { op: "i32.lt_s" } as Instr,
+    { op: "select" } as Instr,
+    { op: "local.set", index: CHUNK } as Instr,
+    // iovec.buf = base at memory[0]
+    { op: "i32.const", value: 0 } as Instr,
+    { op: "local.get", index: BASE } as Instr,
+    { op: "i32.store", align: 2, offset: 0 } as Instr,
+    // iovec.buf_len = chunk at memory[4]
+    { op: "i32.const", value: 4 } as Instr,
+    { op: "local.get", index: CHUNK } as Instr,
+    { op: "i32.store", align: 2, offset: 0 } as Instr,
+    // errno = fd_write(fd, iovs=0, iovs_len=1, nwritten=8)
+    { op: "local.get", index: FD } as Instr,
+    { op: "i32.const", value: 0 } as Instr,
+    { op: "i32.const", value: 1 } as Instr,
+    { op: "i32.const", value: 8 } as Instr,
+    { op: "call", funcIdx: ctx.wasiFdWriteIdx } as Instr,
+    { op: "local.set", index: ERRNO } as Instr,
+    // if (errno != 0) break — return whatever was written so far
+    { op: "local.get", index: ERRNO } as Instr,
+    { op: "br_if", depth: 1 } as Instr,
+    // nw = memory[8]
+    { op: "i32.const", value: 8 } as Instr,
+    { op: "i32.load", align: 2, offset: 0 } as Instr,
+    { op: "local.set", index: NW } as Instr,
+    // if (nw <= 0) break — no progress, never spin
+    { op: "local.get", index: NW } as Instr,
+    { op: "i32.const", value: 0 } as Instr,
+    { op: "i32.le_s" } as Instr,
+    { op: "br_if", depth: 1 } as Instr,
+    // total += nw
+    { op: "local.get", index: TOTAL } as Instr,
+    { op: "local.get", index: NW } as Instr,
+    { op: "i32.add" } as Instr,
+    { op: "local.set", index: TOTAL } as Instr,
+    // base += nw
+    { op: "local.get", index: BASE } as Instr,
+    { op: "local.get", index: NW } as Instr,
+    { op: "i32.add" } as Instr,
+    { op: "local.set", index: BASE } as Instr,
+    // remaining -= nw
+    { op: "local.get", index: REMAINING } as Instr,
+    { op: "local.get", index: NW } as Instr,
+    { op: "i32.sub" } as Instr,
+    { op: "local.set", index: REMAINING } as Instr,
+    // continue
+    { op: "br", depth: 0 } as Instr,
+  ];
+
+  const body: Instr[] = [
+    // base = ptr
+    { op: "local.get", index: PTR } as Instr,
+    { op: "local.set", index: BASE } as Instr,
+    // remaining = len
+    { op: "local.get", index: LEN } as Instr,
+    { op: "local.set", index: REMAINING } as Instr,
+    // total = 0
+    { op: "i32.const", value: 0 } as Instr,
+    { op: "local.set", index: TOTAL } as Instr,
+    {
+      op: "block",
+      blockType: { kind: "empty" },
+      body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr],
+    } as Instr,
+    { op: "local.get", index: TOTAL } as Instr,
+  ];
+
+  ctx.mod.functions.push({
+    name: helperName,
+    typeIdx: funcTypeIdx,
+    locals: [
+      { name: "base", type: { kind: "i32" } },
+      { name: "remaining", type: { kind: "i32" } },
+      { name: "total", type: { kind: "i32" } },
+      { name: "chunk", type: { kind: "i32" } },
+      { name: "errno", type: { kind: "i32" } },
+      { name: "nw", type: { kind: "i32" } },
+    ],
+    body,
+    exported: false,
+  });
+
+  return funcIdx;
 }
 
 /**
@@ -7699,6 +7868,11 @@ export function ensureWasiWriteAnyStringHelper(ctx: CodegenContext, useStderr: b
   // response in the Native Messaging host (#1723).
   const anyStrTypeIdx = ctx.anyStrTypeIdx >= 0 ? ctx.anyStrTypeIdx : strTypeIdx;
 
+  // #2807 — create the chunked-write helper BEFORE reserving this helper's
+  // funcidx, so the `emitWasiWriteTail` lookup in the body below never pushes a
+  // function mid-build (which would shift this reserved index).
+  ensureWasiFdWriteAllHelper(ctx);
+
   // One param (s=0) ⇒ work-locals start at index 1.
   const layout = wasiStrEncodeLayout(1);
   const funcTypeIdx = addFuncType(ctx, [{ kind: "ref", typeIdx: anyStrTypeIdx }], []);
@@ -7852,6 +8026,10 @@ export function ensureWasiWriteUint8ArrayHelper(
   const I = 3;
   const NEED_PAGES = 4;
 
+  // #2807 — pre-create the chunked-write helper before reserving this funcidx
+  // (see note in ensureWasiWriteAnyStringHelper).
+  ensureWasiFdWriteAllHelper(ctx);
+
   const funcTypeIdx = addFuncType(ctx, [{ kind: "ref", typeIdx: vecTypeIdx }], []);
   const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
   ctx.funcMap.set(helperName, funcIdx);
@@ -7999,6 +8177,10 @@ export function ensureWasiWriteArrayBufferHelper(
   const DATA = 2;
   const I = 3;
   const NEED_PAGES = 4;
+
+  // #2807 — pre-create the chunked-write helper before reserving this funcidx
+  // (see note in ensureWasiWriteAnyStringHelper).
+  ensureWasiFdWriteAllHelper(ctx);
 
   const funcTypeIdx = addFuncType(ctx, [{ kind: "ref", typeIdx: vecTypeIdx }], []);
   const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
@@ -12767,7 +12949,7 @@ function collectExternDeclarations(
       // inline-lowered to poll_oneoff/fd_read by tryWasiTimerCall (calls.ts) when
       // `ctx.wasi`. Registering them as `env.*` host imports here therefore only
       // leaks a spurious "not on the dual-mode allowlist" dropped-import warning
-      // on the otherwise-runnable standalone nm_node_process.ts module
+      // on the otherwise-runnable standalone nm_js2wasm_node_process.ts module
       // (loopdive/js2#389 bug 2). Skip the stub under WASI.
       if (ctx.wasi && WASI_STDIN_REACTOR_INTRINSICS.has(name)) continue;
       // #1663: parseInt / parseFloat have no JS host under WASI / standalone —
@@ -13464,7 +13646,7 @@ function collectDeclaredGlobals(ctx: CodegenContext, libFile: ts.SourceFile, use
     // addImport would drop it AND, because the dropped import leaves no funcMap
     // entry, the `declaredGlobals.set` below never fires either — the whole
     // registration is already a no-op EXCEPT for the spurious "not on the
-    // dual-mode allowlist" warning it emits. nm_node_process.ts trips this via
+    // dual-mode allowlist" warning it emits. nm_js2wasm_node_process.ts trips this via
     // the `String.fromCharCode` receiver in the injected process.stdin prelude
     // (loopdive/js2#389 bug 2: `env.global_String`). Skip it so the standalone
     // module compiles cleanly; bare identity uses already had no host global
