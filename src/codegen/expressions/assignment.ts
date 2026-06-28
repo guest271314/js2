@@ -2666,7 +2666,7 @@ function tryEmitPinnedStructMemberSet(
   // Pre-check the dispatcher is reservable BEFORE emitting any receiver/value
   // side effects, so a decline leaves the body untouched (the
   // emitAlternateStructSetDispatch reserve below is idempotent).
-  if (reserveMemberSetDispatch(ctx, propName, /*strict*/ true) === undefined) return undefined;
+  if (reserveMemberSetDispatch(ctx, propName, /*strict*/ true, fctx) === undefined) return undefined;
 
   // Evaluate the receiver (reference before value), coerce to externref.
   const objResult = compileExpression(ctx, fctx, target.expression);
@@ -6243,17 +6243,25 @@ function compilePropertyCompoundAssignmentExternref(
   });
   fctx.body.push({ op: "local.set", index: keyLocal });
 
-  // Read current value. (#2681/#2686) The WRITE-back below routes through the
-  // #2664 deferred `__set_member_<name>` struct dispatcher (line ~6160), so the
-  // READ MUST be symmetric: a bare `__extern_get` reads the JS-side SIDECAR while
-  // the write hits the native struct SLOT — the two diverge and `this.pos += 1`
-  // never advances (acorn's tokenizer loop hangs forever the moment the upstream
-  // #2681 read-fix lets control reach it). Route the read through the symmetric
-  // `__get_member_<name>` dispatcher (`struct.get` arms + `__extern_get` terminal),
-  // enumerated over the SAME finalize-filled struct-candidate set as the write, so
-  // read and write stay consistent (and consistent with the A3 main-path read).
+  // (#2681/#2686) Is the receiver a PINNED reconstructed-fnctor struct (acorn's
+  // `this.pos`, `this`/flow-mapped)? Only THEN do the compound read+write route
+  // through the `__get_member`/`__set_member` struct dispatchers (slot), staying
+  // symmetric with the pinned simple read/write so `this.pos += 1` advances. For
+  // a GENERAL `any`-receiver (a plain object literal lowered to an anonymous
+  // `$__anon_N` struct), the dispatcher's struct arm would read/write the SLOT and
+  // bypass the delete-tombstone/ordering sidecar semantics (#2179/#2731 — the
+  // `for-in/order-simple-object` regressor), so a general receiver stays on the
+  // bare `__extern_get`/`__extern_set` sidecar.
+  const pinnedCompound =
+    (target.expression.kind === ts.SyntaxKind.ThisKeyword && fctx.thisStructName !== undefined) ||
+    resolveReceiverStruct(ctx, fctx, target.expression) !== undefined;
+
+  // Read current value. When pinned, route through the symmetric
+  // `__get_member_<name>` dispatcher (`struct.get` arms + `__extern_get` terminal)
+  // so read/write stay consistent with the A3 main-path read; otherwise the bare
+  // tombstone-aware `__extern_get`.
   fctx.body.push({ op: "local.get", index: objLocal });
-  const getDispIdx = reserveMemberGetDispatch(ctx, propName, fctx);
+  const getDispIdx = pinnedCompound ? reserveMemberGetDispatch(ctx, propName, fctx) : undefined;
   if (getDispIdx !== undefined) {
     fctx.body.push({ op: "call", funcIdx: getDispIdx });
   } else {
@@ -6326,9 +6334,14 @@ function compilePropertyCompoundAssignmentExternref(
   // getter-only-accessor throw). The dispatcher's terminal else-arm IS the
   // `__extern_set` sidecar; its struct-candidate arms are enumerated at finalize
   // (the full type table), fixing the compile-order candidate freeze (#2664).
-  const cmpdDispatched = emitAlternateStructSetDispatch(ctx, fctx, objLocal, boxedLocal, propName, /*strict*/ false);
+  // (#2681/#2686) Only a PINNED reconstructed-fnctor receiver uses the struct.set
+  // dispatcher (symmetric with the pinned read above); a general any-receiver
+  // (plain object) stays on the bare `__extern_set` sidecar to preserve the
+  // delete-tombstone/ordering semantics (#2179/#2731).
+  const cmpdDispatched =
+    pinnedCompound && emitAlternateStructSetDispatch(ctx, fctx, objLocal, boxedLocal, propName, /*strict*/ false);
   if (!cmpdDispatched) {
-    // Dispatcher could not be reserved — emit the bare host write as before.
+    // Not pinned (or dispatcher not reservable) — emit the bare host write.
     fctx.body.push({ op: "local.get", index: objLocal });
     fctx.body.push({ op: "local.get", index: keyLocal });
     fctx.body.push({ op: "local.get", index: boxedLocal });

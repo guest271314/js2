@@ -36,12 +36,12 @@
  * hazard is mode-independent (acorn dogfoods in gc/host mode).
  */
 import type { Instr, ValType } from "../ir/types.js";
-import type { CodegenContext } from "./context/types.js";
+import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { stringConstantExternrefInstrs } from "./native-strings.js";
 import { findAlternateStructsForField } from "./property-access.js";
 import { addStringConstantGlobal } from "./registry/imports.js";
 import { addFuncType } from "./registry/types.js";
-import { addUnionImportsViaRegistry, ensureLateImport } from "./shared.js";
+import { addUnionImportsViaRegistry, ensureLateImport, flushLateImportShifts } from "./shared.js";
 import { coercionInstrs } from "./type-coercion.js";
 
 /**
@@ -72,7 +72,12 @@ function dispatcherName(propName: string, strict: boolean): string {
  *   - `__box_number`/`__unbox_number` (union imports — the per-struct arms may
  *     unbox the externref value into an f64/i32 field via `coercionInstrs`).
  */
-export function reserveMemberSetDispatch(ctx: CodegenContext, propName: string, strict: boolean): number | undefined {
+export function reserveMemberSetDispatch(
+  ctx: CodegenContext,
+  propName: string,
+  strict: boolean,
+  fctx?: FunctionContext,
+): number | undefined {
   const name = dispatcherName(propName, strict);
   const existing = ctx.funcMap.get(name);
   if (existing !== undefined) return existing;
@@ -92,6 +97,14 @@ export function reserveMemberSetDispatch(ctx: CodegenContext, propName: string, 
   // The fallback's string key + the union box/unbox helpers the arm coercions need.
   addStringConstantGlobal(ctx, propName);
   addUnionImportsViaRegistry(ctx);
+
+  // (#2681) Settle the import shifts staged above BEFORE reserving this
+  // dispatcher's funcIdx — symmetric with `reserveMemberGetDispatch`. Setting
+  // `funcMap[name]` and letting a LATER caller flush re-shifted this just-set
+  // entry by `added` (over-shift), so `fillMemberSetDispatch` wrote the dispatcher
+  // body into the wrong function. Flushing FIRST (when the caller passes `fctx`)
+  // makes the funcIdx final and unshiftable.
+  if (fctx) flushLateImportShifts(ctx, fctx);
 
   const typeIdx = addFuncType(ctx, [{ kind: "externref" }, { kind: "externref" }], [], "$member_set_dispatch_type");
   const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
