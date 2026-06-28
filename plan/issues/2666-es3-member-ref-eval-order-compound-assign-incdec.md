@@ -106,3 +106,7 @@ independent of ToPropertyKey (verified: return the old value, no update) — a
 DISTINCT pre-existing bug. #2675 tracks it; it is likely a clean win once the
 #2659 read/write asymmetry is fully resolved (connects to the acorn #2674
 read-side work). So #2666 stays `in-progress` until #2675 lands the inc/dec half.
+
+## Residual (as of #2199, PO reconcile 2026-06-28)
+
+NOT done — half-sliced. The compound-assignment half `base[prop] op= rhs` (ToPropertyKey-ONCE via __to_property_key) is FIXED (the referencing PR). The prefix/postfix `++`/`--` half is CARVED to #2675 (entangled with the #2659 struct-slot-vs-sidecar read/write asymmetry; obj[k]++ is independently broken on main). Stays in-progress until #2675 lands the inc/dec half.

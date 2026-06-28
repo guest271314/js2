@@ -472,3 +472,7 @@ verdict), and P2-c (compose with #2528, gated). This PR lands **P2-a + P2-b**.
 - **Phase 3 (#2635)** — async members; out of scope here.
 
 **#1772 stays `in-progress`** — P2-c (gated on #2528) and Phase 3 (#2635) remain.
+
+## Residual (as of #2199, PO reconcile 2026-06-28)
+
+NOT done — research/multi-phase. Phases 0 (ABI pin) + 1 (edge.js byte-identical dual-provider proof) done. The referencing PR is Phase 2 scope (no-provider gate + capability-map extension, #2634); the one-ABI provider-swap surface across pure-WASI / edge.js→node / JS+WASI hosts is not fully realized. Stays in-progress.

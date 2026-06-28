@@ -1,8 +1,8 @@
 ---
 id: 2745
 title: "Function.prototype.bind: bound partial-application arguments, bound `.length`/`.name`, construct newTarget forwarding, restricted-property poison"
-status: ready
-sprint: 67
+status: in-progress
+sprint: current
 created: 2026-06-27
 updated: 2026-06-27
 priority: medium
