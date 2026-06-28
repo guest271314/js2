@@ -24,7 +24,7 @@ if (args.includes("--ts7")) {
   process.env.JS2WASM_TS7 = "1";
 }
 
-const { compile } = await import("./index.js");
+const { compile, compileProject, entryHasRelativeImports } = await import("./index.js");
 const { buildDefaultDefines } = await import("./compiler/define-substitution.js");
 
 if (args.includes("--version") || args.includes("-v")) {
@@ -358,7 +358,7 @@ if (!emulateExplicit && !emulateNode && /['"]node:[A-Za-z0-9_./-]+['"]/.test(sou
 const name = basename(absInput, ".ts");
 const dir = outDir ? resolve(outDir) : dirname(absInput);
 
-const result = await compile(source, {
+const compileOptions = {
   ...(optimize ? { optimize } : {}),
   ...(target ? { target } : {}),
   ...(allocator ? { allocator } : {}),
@@ -371,7 +371,19 @@ const result = await compile(source, {
   fileName: absInput,
   ...(strictNoHostImports !== undefined ? { strictNoHostImports } : {}),
   ...(Object.keys(defines).length > 0 ? { define: defines } : {}),
-});
+};
+
+// #2771 — a single-file `compile()` reads exactly ONE file and strips every
+// import, so an entry that imports a relative `./helper` module leaves those
+// bindings unresolved (they lower to bogus `env.*` host imports the WASI gate
+// rejects). When the entry statically imports/`require`s a relative module,
+// route to the multi-file bundler (`compileProject`), which resolves the
+// relative deps from disk through the TS program AND lowers cross-file
+// `node:fs`/WASI fd IO (compileMultiSource, #2771). Entries with no relative
+// import stay on the single-source path — byte-identical to before.
+const result = entryHasRelativeImports(source)
+  ? await compileProject(absInput, compileOptions)
+  : await compile(source, compileOptions);
 
 if (!result.success) {
   for (const e of result.errors) {

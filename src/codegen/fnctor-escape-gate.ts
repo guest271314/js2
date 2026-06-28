@@ -43,7 +43,9 @@
  * share an alias oracle, but the questions they answer are distinct.
  */
 import { ts, forEachChild } from "../ts-api.js";
+import type { FieldDef } from "../ir/types.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
+import { resolveWasmType } from "./index.js";
 
 /** Classification of a `new F()` fnctor allocation site. */
 export type FnctorGateClass =
@@ -98,6 +100,28 @@ export interface FnctorEscapeGateResult {
    * `resolveReceiverStruct`; no lowering reads it, so emitted Wasm is byte-identical.
    */
   readonly receiverStruct: ReadonlyMap<ts.Expression, string>;
+  /**
+   * #2773 S2b — fnctor NAMES that own a `new this()` reconstruct site (a
+   * `new this()` inside a static / prototype method classified as an `F`
+   * reconstruct). The #2773 S1 up-front struct-type reservation
+   * (`reserveFnctorStructTypes`) unions this with {@link approvedNames} so a
+   * `Parser` reconstructed via `new this()` also gets a reserved
+   * `$__fnctor_Parser` slot. **S1 ships this as an EMPTY set** — S1 only READS it
+   * (so the reservation union is a no-op today); S2b populates it. Landing the
+   * field shape here keeps S2b purely additive.
+   */
+  readonly newThisOwnerNames: ReadonlySet<string>;
+  /**
+   * #2773 S1 — fnctor NAME → its function-like declaration (the body-bearer whose
+   * `this.<field> = …` writes derive the `$__fnctor_<Name>` struct shape). Covers
+   * EVERY fnctor `new F()` site seen (not just approved ones) so
+   * `reserveFnctorStructTypes` can resolve a name to the SAME declaration the
+   * on-demand `compileNewFunctionDeclaration` path uses — guaranteeing identical
+   * field derivation. A name with ≥2 distinct declarations keeps the first
+   * (deterministic by source order); ambiguity here only affects WHICH body shapes
+   * the reserved slot (matching the on-demand resolution at the dominant site).
+   */
+  readonly ctorDeclByName: ReadonlyMap<string, ts.FunctionDeclaration | ts.FunctionExpression>;
 }
 
 const EMPTY_RESULT: FnctorEscapeGateResult = {
@@ -105,7 +129,28 @@ const EMPTY_RESULT: FnctorEscapeGateResult = {
   approved: new Set(),
   approvedNames: new Set(),
   receiverStruct: new Map(),
+  newThisOwnerNames: new Set(),
+  ctorDeclByName: new Map(),
 };
+
+/**
+ * Resolve a fnctor symbol to the function-like declaration that supplies its
+ * constructor body — a top-level `function F(){…}`, a `var F = function(){…}`, or
+ * a bare `FunctionExpression`. Returns `undefined` for anything else (arrow, class
+ * — those never reach here via `resolveFnctorSymbol`).
+ */
+function fnctorDeclFromSymbol(sym: ts.Symbol): ts.FunctionDeclaration | ts.FunctionExpression | undefined {
+  for (const decl of sym.getDeclarations() ?? []) {
+    if (ts.isFunctionDeclaration(decl) && decl.body) return decl;
+    if (ts.isFunctionExpression(decl) && decl.body) return decl;
+    if (ts.isVariableDeclaration(decl) && decl.initializer) {
+      let init: ts.Expression = decl.initializer;
+      while (ts.isParenthesizedExpression(init)) init = init.expression;
+      if (ts.isFunctionExpression(init) && init.body) return init;
+    }
+  }
+  return undefined;
+}
 
 /** Max callee-chain depth the single-return struct inference will follow. */
 const RETURN_INFER_MAX_DEPTH = 6;
@@ -553,6 +598,15 @@ export function analyzeFnctorEscapeGate(checker: ts.TypeChecker, sourceFile: ts.
   collect(sourceFile);
   if (newSites.length === 0) return EMPTY_RESULT;
 
+  // #2773 S1 — index fnctor name → declaration (first-seen wins, deterministic by
+  // source order) for the up-front struct-type reservation pass.
+  const ctorDeclByName = new Map<string, ts.FunctionDeclaration | ts.FunctionExpression>();
+  for (const { ctorSym } of newSites) {
+    if (ctorDeclByName.has(ctorSym.name)) continue;
+    const decl = fnctorDeclFromSymbol(ctorSym);
+    if (decl) ctorDeclByName.set(ctorSym.name, decl);
+  }
+
   // 2. Build a per-binding-symbol index of identifier uses across the program,
   //    so a `const c = new F()` instance's uses can be found by symbol identity.
   const usesBySymbol = new Map<ts.Symbol, ts.Identifier[]>();
@@ -646,5 +700,113 @@ export function analyzeFnctorEscapeGate(checker: ts.TypeChecker, sourceFile: ts.
     );
   }
 
-  return { sites, approved, approvedNames, receiverStruct };
+  // #2773 S2b populates this set with `new this()` reconstruct owners; S1 ships
+  // it empty so the up-front reservation union is a no-op today.
+  const newThisOwnerNames = new Set<string>();
+
+  return { sites, approved, approvedNames, receiverStruct, newThisOwnerNames, ctorDeclByName };
+}
+
+/**
+ * #2773 S1 (keystone) — derive the WasmGC field shape of a fnctor's
+ * `$__fnctor_<Name>` struct from its constructor body's `this.<field> = …`
+ * assignments. This is the **single source of truth** for the field set,
+ * EXTRACTED verbatim from the on-demand inline logic that lived in
+ * `compileNewFunctionDeclaration` (new-super.ts) so both the up-front reservation
+ * pass and the legacy on-demand fallback produce the SAME shape — divergent field
+ * order would give `struct.new` a different arity than the reserved type and trap.
+ *
+ * Mirrors the original logic exactly:
+ *   - collects EVERY `this.<field>` LHS across (possibly CHAINED) assignments
+ *     (`this.a = this.b = expr`), recursing into if/else and loop blocks;
+ *   - prefers the RHS type when the LHS is `any` (externref) — the RHS carries the
+ *     concrete type (e.g. number → f64);
+ *   - widens non-null `ref` fields to `ref_null` so `struct.new`'s `ref.null`
+ *     default-init is well-typed (a struct.new can't default a non-null ref).
+ *
+ * @param ctx      codegen context (for the checker + `resolveWasmType`)
+ * @param funcDecl the fnctor's function-like declaration (its body is read)
+ * @returns the ordered field set, or `[]` for a body-less / empty-body fnctor.
+ */
+export function deriveFnctorFields(
+  ctx: CodegenContext,
+  funcDecl: ts.FunctionDeclaration | ts.FunctionExpression,
+): FieldDef[] {
+  const body = funcDecl.body;
+  if (!body) return [];
+
+  const fields: FieldDef[] = [];
+
+  // Record one `this.<field>` slot from an assignment whose LHS is `this.<field>`.
+  // `valueExpr` is the value being assigned to THAT field (for type inference) —
+  // for a chained `this.a = this.b = expr`, the value flowing into `this.a` is the
+  // whole `this.b = expr` sub-assignment (whose result type === expr's type).
+  function recordThisField(lhs: ts.PropertyAccessExpression, valueExpr: ts.Expression): void {
+    const fieldName = lhs.name.text;
+    if (fields.some((f) => f.name === fieldName)) return;
+    // Prefer the RHS type — when `this` is `any`, the LHS type is also `any`
+    // (externref), but the RHS has concrete type info (e.g., number → f64).
+    const lhsType = ctx.checker.getTypeAtLocation(lhs);
+    const rhsType = ctx.checker.getTypeAtLocation(valueExpr);
+    const lhsWasm = resolveWasmType(ctx, lhsType);
+    const rhsWasm = resolveWasmType(ctx, rhsType);
+    const fieldType = lhsWasm.kind === "externref" ? rhsWasm : lhsWasm;
+    fields.push({ name: fieldName, type: fieldType, mutable: true });
+  }
+  // Walk an assignment EXPRESSION, collecting EVERY `this.<field>` LHS in a
+  // (possibly CHAINED) assignment — `this.start = this.end = this.pos`, etc.
+  function collectAssignmentChain(expr: ts.Expression): void {
+    if (
+      ts.isBinaryExpression(expr) &&
+      expr.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      ts.isPropertyAccessExpression(expr.left) &&
+      expr.left.expression.kind === ts.SyntaxKind.ThisKeyword
+    ) {
+      recordThisField(expr.left, expr.right);
+      // The RHS may itself be `this.<field> = …` (chained) — recurse to collect it.
+      collectAssignmentChain(expr.right);
+    }
+  }
+  function collectThisAssignments(stmts: ts.NodeArray<ts.Statement> | readonly ts.Statement[]): void {
+    for (const stmt of stmts) {
+      if (ts.isExpressionStatement(stmt) && ts.isBinaryExpression(stmt.expression)) {
+        collectAssignmentChain(stmt.expression);
+      }
+      // Recurse into if/else blocks
+      if (ts.isIfStatement(stmt)) {
+        if (ts.isBlock(stmt.thenStatement)) {
+          collectThisAssignments(stmt.thenStatement.statements);
+        }
+        if (stmt.elseStatement && ts.isBlock(stmt.elseStatement)) {
+          collectThisAssignments(stmt.elseStatement.statements);
+        }
+      }
+      // Recurse into for/while/do blocks
+      if (
+        (ts.isForStatement(stmt) ||
+          ts.isForInStatement(stmt) ||
+          ts.isForOfStatement(stmt) ||
+          ts.isWhileStatement(stmt) ||
+          ts.isDoStatement(stmt)) &&
+        ts.isBlock(stmt.statement)
+      ) {
+        collectThisAssignments(stmt.statement.statements);
+      }
+    }
+  }
+  collectThisAssignments(body.statements);
+
+  // Widen non-null ref fields to ref_null so struct.new can use ref.null defaults.
+  // (Kept INSIDE the derivation so the reserved field set matches exactly what the
+  // struct.new default-init loop expects — see new-super.ts.)
+  for (const field of fields) {
+    if (field.type.kind === "ref") {
+      field.type = {
+        kind: "ref_null",
+        typeIdx: (field.type as { typeIdx: number }).typeIdx,
+      };
+    }
+  }
+
+  return fields;
 }

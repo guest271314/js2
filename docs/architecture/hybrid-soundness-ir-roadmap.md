@@ -184,6 +184,13 @@ proved "patch the holes" is leaky.
 
 ## (d) Migration-cost sizing — the type-directed fast-path inventory
 
+> **Living checklist (R3 / #2762):** the snapshot table below is tracked, per
+> row, as a dispatchable backlog in
+> [`../../plan/log/hybrid-fastpath-audit.md`](../../plan/log/hybrid-fastpath-audit.md).
+> That doc carries each path's discharged/partial/undischarged proof status, the
+> concrete codegen site, and a "what would discharge `P`" note. **Update the
+> living checklist, not this snapshot, when proof status changes.**
+
 > **This is the lead's key open question:** *how big is "prove every fast path
 > is safe"?* Below is the enumeration. Each row gives the fast path, the safety
 > predicate `P` HI now demands, an **easy vs subtle** classification, and a rough
