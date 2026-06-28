@@ -186,57 +186,87 @@ gap, only *unlocked* by (1). Fix: in `__extern_method_call`, when the receiver i
 a vec, materialize it (`_vecToArray`) and apply `Array.prototype[method]` for
 read-only methods (broad-impact, hot path — needs full CI validation).
 
-### (3) binary-expression — `__sget_binop` returns null for the TokenType shape [PRIMARY for #2686]
+### (3) binary-expression — init-time `new X(objLiteral)` mis-reads the ctor's object-literal param [PRIMARY for #2686]
 
 `parse("1+2;")` threw `Unexpected token (1:1)` (at the `+`). Root cause:
 `parseExprOp` (`acorn.mjs:2776`) reads `prec = this.type.binop`; for `plusMin`
-the host-proxy read of `binop` returns **undefined** (should be 9), so `prec ==
-null`, the operator is never consumed, and `unexpected()` throws. ALL
-`conf`-derived TokenType fields read wrong via the proxy (`binop=undefined
-beforeExpr=false prefix=false startsExpr=false`) while `label` (a direct ctor
-param) reads `"+/-"` correctly. **The value IS stored** — a minimal
-`new TokenType(label, {binop:9,…})` repro reads `binop=9` BOTH wasm-internally
-AND via the wrapExports proxy. The divergence is acorn-specific: in the live
-parse `_resolveHostField` falls through to `__sget_binop(plusMin)` which returns
-`null` (DBG-traced), and the `#1712` nullish-as-MISS heuristic then yields
-`undefined`. I.e. the per-shape `__sget_binop` dispatcher does **not cover
-plusMin's concrete struct shape** in the full module (while `__sget_start` covers
-the Node shape and `__sget_label` resolves via an earlier path), AND the host
-sidecar (`_wasmStructProps`) misses these module-init-time-constructed structs.
-NOT reproducible in a small module — tied to acorn's large struct-type graph
-(suspect layout-canonicalization / dispatcher-coverage in the `__sget_<field>`
-emitter). This is the blocker for EVERY binary expression and is independent of
-(1)/(2).
+this is **undefined** (should be 9), so `prec == null`, the `+` is never
+consumed, and `unexpected()` throws. ALL `conf`-derived TokenType fields are
+wrong (`binop=undefined beforeExpr=false prefix=false startsExpr=false`) while
+`label` (a direct ctor param) is correct.
 
-**Sharper pointer for the codegen fix (3):** `__sget_<field>` is emitted by
-`_emitStructFieldGettersInner` (`src/codegen/index.ts:2240`). It builds a
-`fieldMap: fieldName → [{structTypeIdx, fieldIdx, fieldType}]` from
-`ctx.structFields`/`ctx.structMap`, picks a return mode (extern/f64/i32) per
-bucket, and emits the getter as a `ref.test`-against-each-`structTypeIdx`
-dispatch chain (fall-through → `ref.null.extern`). `__sget_binop(plusMin)`
-returning **null (extern mode, fall-through)** means **plusMin's runtime struct
-type is NOT matched by the `binop` dispatch chain** — i.e. the `structTypeIdx`
-the dispatcher `ref.test`s against ≠ plusMin's actual runtime type. Most likely a
-struct-type identity/coverage problem: either the TokenType type carrying `binop`
-in `ctx.structFields` was **remapped/deduped by DCE** after the getter captured
-its index (cf. `project_type_index_shift_and_deadelim` /
-`reference_subview_type_idx_stability`), or acorn produced **multiple TokenType
-struct shapes** and `binop` was only registered on one. Repro path: dump the
-`binop` fieldMap entries + the post-DCE type index of plusMin's struct and
-compare. (`label` works because it resolves via an earlier host path before
-`__sget`; `start`/`end` work because the Node type IS covered — so the bug is
-TokenType-type-coverage-specific, not a blanket `__sget` failure.)
+**Corrected root cause (the earlier `__sget`-dispatcher hypothesis was WRONG —
+ruled out below).** This is NOT the host proxy and NOT `__sget`: the
+**wasm-internal** read `types$1.plusMin.binop` is *also* undefined — the binop
+slot genuinely holds `null`. The value was never stored: `this.binop =
+conf.binop || null` read `conf.binop` as `undefined` at construction (proved by
+storing `(conf.binop === void 0) ? -2 : (conf.binop||-1)` into a spare field and
+reading it back = **-2**). The struct shape is correct (`__struct_field_names`
+shows all 10 fields incl. `binop`); the conf object literal stores binop fine
+when read directly; a plain (non-`new`) function reading `conf.binop` works.
+
+**The decisive bisection (in-acorn, fresh-extract probes in `.tmp/`):** the
+failure is **`new X({field: v})` evaluated at MODULE-INIT time**, in acorn's
+module:
+
+```js
+function VI(label, conf){ this.label = label; this.zz = conf.zz || null; }
+var x = new VI("a", { zz: 9 });        // MODULE TOP-LEVEL → x.zz === null   ✗ BUG
+function mk(){ return new VI("b", { zz: 9 }); }
+//  mk().zz === 9                       // RUNTIME (inside a fn) → correct    ✓
+```
+
+Confirmed in-acorn results: `new VI(...)` at top-level → `null`; the SAME ctor
+called at runtime → `9`; plain-function `f({zz:9})` → `9`; the literal read at
+its own call site (`litG.zz`) → `9`; inside an object-literal initializer
+(`var t = { k: new VI("b",{zz:9}) }`, the exact `types$1` shape) → `null`. So a
+constructor invoked during the module's top-level/init evaluation receives an
+object-literal argument whose fields the ctor body then reads as `undefined`,
+even though the identical ctor + identical literal work at runtime.
+
+**Scale-dependent**: a *standalone* module with the same pattern (even with the
+full acorn token table, helpers, ~33 init-time `new TokenType` calls, and ~10
+extra distinct object-literal struct shapes) reads `binop=9` correctly. The bug
+only manifests inside the full acorn module — so it is an interaction between
+**init-time `new`-call argument lowering** and something at acorn's scale
+(strong suspect: type-index remap/DCE of the conf object-literal struct type in
+the giant top-level init function, cf. `project_type_index_shift_and_deadelim` —
+the init-time `struct.new` for the literal and the ctor's `struct.get` end up
+referencing divergent type indices, so the param arrives as a struct the ctor's
+`conf.<field>` read can't see). Needs a focused codegen dig into how top-level
+`new X(objLiteral)` threads the literal's struct type to the constructor param
+under DCE/type-table pressure — NOT minimally reproducible standalone yet.
+
+**Ruled out for (3)** (do not re-investigate): host proxy / `_wrapForHost`
+(wasm-internal read is also null); `__sget_<field>` per-shape dispatcher
+(`_emitStructFieldGettersInner`, index.ts:2240) — the slot genuinely holds null,
+`__sget` faithfully returns it; `emitNullGuardedStructGet` /
+`findAlternateStructsForField` (property-access.ts) — `conf.binop` never routes
+through it (0 hits); `__extern_get` (never called for `binop`, even at init);
+field-name collision (a unique field name `zzPrecedence` fails identically);
+the empty `{}` void-0 default (giving it a binop-bearing shape doesn't help);
+prototype-method / fnctor-ness (fails with and without); simple object-literal
+struct-table scale (10+ extra shapes standalone still works).
 
 ### Status / recommendation
 
 - **#2681 (var-decl)** root-caused: needs a reliable data-vs-closure
-  discriminator (1) + vec read-method materialization (2).
-- **#2686 (binary-expr)** root-caused: needs `__sget_<field>` per-shape
-  dispatcher coverage (or sidecar population) for module-init-constructed structs
-  (3).
-- The clean, class-eliminating fix for all three is to **stop routing acorn's
-  Parser/TokenType/Node data through the host proxy** — i.e. give them wasm-native
-  struct types — but that is an architecture-level change beyond this issue.
-- Escalated to tech lead (a 2nd and 3rd distinct residual surfaced; the
-  closureBridge guard regressed genuine closures → reverted). Branch left clean
-  (no source change); analysis + banked probes preserved.
+  discriminator (1) + vec read-method materialization (2). Both in the
+  host-proxy/marshaling layer (`src/runtime.ts`).
+- **#2686 (binary-expr)** root-caused to a precise, in-acorn-minimal trigger
+  (3): init-time `new X(objLiteral)` field-read returns null at acorn's scale.
+  This is a **core codegen** bug (top-level `new`-arg lowering / type-index
+  threading), DISTINCT from the host-proxy layer and from the `__sget`
+  dispatcher (both ruled out). It is NOT the native-typing rewrite. Next step is
+  a focused codegen investigation: dump the type index of the init-time object
+  literal's `struct.new` vs the type the ctor's `conf.<field>` `struct.get`
+  casts to, in the full acorn module; suspect a DCE/dedup remap divergence.
+  Strong architect-spec / dedicated-codegen-session candidate — the cheap
+  bisection is exhausted (standalone won't repro; acorn-down bisection is
+  ~40s/compile).
+- Banked probes (fresh-extract drivers) under the branch `.tmp/`:
+  `variants{,2,3}.mjs` (the init-vs-runtime bisection), `binop-ctor.mjs`
+  (the `-2` void-0 proof), `tt2/tt3.mjs` (in-acorn clone), `scale-repro.ts`
+  (standalone scale control), `acorn-run.mjs` (watchdog driver).
+- Branch left clean (no source change; all instrumentation reverted). The
+  closureBridge guard for (1) was reverted (regressed genuine closures).
