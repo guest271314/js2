@@ -23,7 +23,7 @@ origin: "Stakeholder directive (2026-06-27), #2698 checker track: generalize the
 
 > **Scoping issue (architecture). Do NOT implement from this file alone.** It
 > defines the policy, the empirical OOB finding, and the dev-sized slices.
-> Companion **#2751** evaluates whether the _approach itself_ is sound.
+> Companion **#2755** evaluates whether the _approach itself_ is sound.
 
 ## Why this exists (stakeholder framing — captured precisely)
 
@@ -136,7 +136,7 @@ array** — the element slot _cannot structurally hold `undefined`_. Returning J
 (perf-prohibitive — defeats packed typed arrays), or (b) `noUncheckedIndexedAccess`
 making the type `number | undefined` so the **rep is already nullable/boxed** and
 the codegen knows to emit/branch on `undefined`. That is the deep tension feeding
-**#2751** (is "trust the type" the right model at all?).
+**#2755** (is "trust the type" the right model at all?).
 
 **Codegen obligations:**
 
@@ -230,7 +230,7 @@ tests/equivalence.test.ts` (0 diff) + a sampled `compile()` binary-hash
 | **S3** | senior-dev             | `as`/assertion + `@ts-ignore`/JSON-as-T unchecked-unbox guard: audit `externref→primitive` narrowing sites, `ref.test` + JS-coercion fallback.                                                                                  | medium                          | 3rd                  |
 | **S4** | senior-dev             | Evaluate `exactOptionalPropertyTypes` ON: measure new-error surface on the `.ts` corpus; fix packed-optional-field rep gap (#6) where cheap.                                                                                    | medium                          | 4th                  |
 | **S5** | senior-dev / architect | `noUncheckedIndexedAccess` → `T\|undefined` indexed-read rep. Full representation review. Likely a **separate epic**; honest cost = large; **defer**.                                                                           | large                           | last / deferred      |
-| **S6** | research               | **#2751** — meta-evaluation of whether the _approach_ is sound (separate file).                                                                                                                                                 | n/a                             | parallel             |
+| **S6** | research               | **#2755** — meta-evaluation of whether the _approach_ is sound (separate file).                                                                                                                                                 | n/a                             | parallel             |
 
 ## Acceptance criteria
 
@@ -243,5 +243,5 @@ tests/equivalence.test.ts` (0 diff) + a sampled `compile()` binary-hash
   rationale captured above.
 - The unsoundness-hole catalog (Prong 2) is recorded with a codegen obligation per
   hole; S3 lands the assertion-unbox brand-check.
-- Findings feed **#2751**'s verdict (esp. the OOB result: "trust the type" is
+- Findings feed **#2755**'s verdict (esp. the OOB result: "trust the type" is
   _already_ insufficient for index access today).
