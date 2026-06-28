@@ -2498,7 +2498,7 @@ function emitVecArrayLikeObjectDestructure(
       bindTarget(prop.name, valueType);
     } else if (ts.isPropertyAssignment(prop)) {
       // `{ 0: x }` / `{ "k": x }` / `{ [expr]: x }`.
-      let key =
+      const key =
         ts.isIdentifier(prop.name) || ts.isStringLiteral(prop.name) || ts.isNumericLiteral(prop.name)
           ? prop.name.text
           : ts.isComputedPropertyName(prop.name)
