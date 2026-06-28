@@ -1,8 +1,8 @@
 ---
 id: 2681
 title: "[ARCH] acorn parse() 10th wall — identifier expression-statement throws (unexpected() on a `name` token); root cause = Parser not reconstructed (new this() in static methods), substrate-scoped"
-status: ready
-assignee: ttraenkler/unassigned
+status: in-progress
+assignee: ttraenkler/sendev-acorn
 sprint: current
 created: 2026-06-26
 updated: 2026-06-28
@@ -269,3 +269,81 @@ is required to get past acorn's semantic diagnostics.
 
 **Status: re-tagged `[ARCH]` / substrate-scoped — routed to architect for the
 A-vs-B decision. Not a quick dev slice.**
+
+## Implementation attempt + findings (sendev-acorn, 2026-06-28) — A1–A3 LAND THE SWITCH, BUT acorn HANGS: Fix (A) is INCOMPLETE (the banked ranked-#2 value-rep substrate IS required)
+
+Branch `issue-2681-acorn-new-this` (worktree
+`/workspace/.claude/worktrees/agent-ae75b7409d6e143f8`). Implemented A1–A3 per the
+architect's plan, verified the mechanism on minimal repros, then discovered the
+fix cascades into the broad value-rep substrate the architect explicitly **banked
+as "not landed this budget."**
+
+### What was implemented (all typecheck-clean)
+- **A1** `src/codegen/expressions/new-super.ts` — `new this()` className/symbol
+  fallback via `resolveEnclosingFnctorOwner`, gated on `approvedNames`; the #1679
+  build path uses the owner symbol (`symbol ?? thisFnctorSym`).
+- **A2** `src/codegen/fnctor-escape-gate.ts` — `collect` classifies `new this()`
+  sites (`newThisSites`) as ALWAYS `reconstruct` (clause-B bypass), + owner
+  resolvers `resolveEnclosingFnctorOwner` / `resolveLiftedMethodThisStruct`
+  (the latter approvedNames-gated, NOT structMap-gated, so it is compile-order
+  robust), + `inferReturnStruct`/`buildReceiverStructMap` follow `new this()`.
+- **A3** `closures.ts` sets `liftedFctx.thisStructName`; `property-access.ts`
+  routes pinned-`this`/flow-mapped reads through `__get_member_<name>`
+  (`tryEmitPinnedStructMemberGet`); `assignment.ts` routes the symmetric write
+  (`tryEmitPinnedStructMemberSet`).
+- **Beyond A3 (required, found by tracing the hang):**
+  - compound `this.x += v` (`assignment.ts` Path B) and increment `this.x++`
+    (`unary-updates.ts`) had a READ via bare `__extern_get` (sidecar) but a WRITE
+    via the `__set_member` struct dispatcher → divergence. Routed BOTH reads
+    through `__get_member_<name>` (symmetric with their writes).
+  - **The architect's deferred "ranked #2":** `tryEmitDeleteAwareDynamicGet` /
+    `tryEmitDeleteAwareDynamicSet` (the `any`-receiver path acorn's `delete`
+    triggers) emitted BARE `__extern_get`/`__extern_set_strict`. A bare host read
+    **cannot read a WasmGC struct slot** — it returns the empty JS sidecar. Routed
+    both through the `__get_member_<name>` / `__set_member_<name>` dispatchers
+    (struct arms + tombstone-aware sidecar terminal).
+
+### Verified WORKING (minimal repros, `.tmp/identity*.mjs`)
+- `new Parser(); p.getType()` → 7 (struct identity survives the host method `this`).
+- `p.bump(); p.bump()` (read+write `this.pos` in lifted method) → 45.
+- nested `this.advance(); this.inner()` → 207.
+- Trampoline probe confirms `__current_this` arrives as the native struct
+  (`isStruct=true`), `__fnctor_Parser` is built with ALL 35 fields and registered
+  (`__register_fnctor_instance` ×6), and reads route to the dispatchers (A3 read
+  consumer fires: type 278×, pos 250×, input 226×, …).
+
+### THE WALL — acorn `parse("x")` THROW → HANG (not fixed)
+On real acorn (`tests/dogfood/.acorn`, host/gc mode), `parse("")/";"/"1"/"1;"`
+return a Program, but `parse("x")` / `"var x = 1;"` / `"1 + 2 * 3;"` now **HANG**
+(were a fast `unexpected()` throw). The A1–A3 fix lands the `parseExprAtom` switch
+(no longer throws), but execution proceeds into a non-terminating loop. Host-call
+signature of the hang: `__extern_get` ~1.2M, `__box_number`/`__unbox_number`
+~0.6M each; **`__extern_set` is ABSENT** (writes hit the struct, reads hit the
+sidecar — divergence). Dominant `__extern_get` key: **`flags`** (~150k) on
+`Scope` objects — acorn's `currentVarScope()` backward-walks `this.scopeStack`
+checking `scope.flags & SCOPE_VAR` (acorn.mjs ~3852); `scope.flags` reads as
+`undefined` (sidecar) so the loop never finds the scope and decrements forever.
+
+### Root verdict (sendev-acorn): substrate-scoped, matches the architect's banked ranked-#2/value-rep
+The defect is NOT one read site — it is that **every** field read of **every**
+reconstructed fnctor struct (Parser → TokenType → `Scope` → Node → …) reached via
+an `any`/typed receiver must route through native struct dispatch consistently
+with its write, AND the dispatch's struct candidate set / `ref.test` typeIdx must
+survive the late-registration + DCE type-remap (`project_type_index_shift_and_deadelim`).
+Each fix peels one layer and the next struct's read/write split surfaces. `Scope`
+is typed `Scope` (concrete), so it takes the TYPED read path (frozen-candidate
+`#2674` inline dispatch), whose `ref.test __fnctor_Scope` misses at acorn scale
+even though the struct is built — strongly suggesting a compile-order/DCE typeIdx
+desync of the late `__fnctor_Scope` in the typed read dispatch. This is exactly
+the broad value-rep substrate work the architect wrote was **"banked, not landed
+this budget."**
+
+**Recommendation:** keep the branch (the A1–A3 + symmetric read/write routing are
+correct, directional, and pass minimal repros), but treat the completion as a
+value-rep substrate epic (consistent native dispatch for ALL reconstructed-struct
+field access + finalize-/DCE-stable typeIdx), NOT a bounded #2681/#2686 dev slice.
+The broad `tryEmitDeleteAware*` re-routing also needs full `merge_group` validation
+(delete-module regression surface) before landing. Reusable probes:
+`.tmp/acorn-run.mjs` (single-compile worker watchdog + host-call signature),
+`.tmp/dbg-keys.mjs` (extern_get key histogram), `.tmp/identity*.mjs` (minimal
+struct-identity repros).

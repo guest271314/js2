@@ -70,7 +70,7 @@ import {
 import { localGlobalIdx } from "../registry/imports.js";
 import { ensureLateImport, flushLateImportShifts } from "./late-imports.js";
 import { emitFnctorProtoGet } from "./fnctor-prototype.js"; // (#2660 S3a) reconstruct `new F()` as $Object
-import { resolveFnctorSymbol } from "../fnctor-escape-gate.js"; // (#2660 S3a) canonical fnctor-name key
+import { resolveFnctorSymbol, resolveEnclosingFnctorOwner } from "../fnctor-escape-gate.js"; // (#2660 S3a) canonical fnctor-name key; (#2681/#2686 A1) `new this()` owner
 
 // #2146: resolveEnclosingClassName now lives in shared.ts (imported above).
 
@@ -3668,6 +3668,10 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
   const type = ctx.checker.getTypeAtLocation(expr);
   const symbol = type.getSymbol();
   let className = symbol?.name;
+  // (#2681/#2686 A1) The fnctor symbol for a `new this()` callee, resolved from
+  // the enclosing method's owner fnctor (the type symbol of `new this()` is
+  // `any`/none, so `symbol` is undefined). Used by the #1679 build path below.
+  let thisFnctorSym: ts.Symbol | undefined;
 
   // For class expressions (const C = class { ... }), the symbol name may be
   // the internal anonymous name (e.g. "__class"). Look up the mapped name first,
@@ -3689,6 +3693,25 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       if (mapped && ctx.classSet.has(mapped)) {
         className = mapped;
       }
+    }
+  }
+
+  // (#2681/#2686 A1) `new this(...)` inside a fnctor static/prototype method
+  // whose enclosing owner fnctor is APPROVED for reconstruction (escape gate,
+  // A2). On current main the checker types `new this()` as `any`/no-symbol, so
+  // `className` is undefined and the #1679 arm below is skipped — the fnctor
+  // (acorn's Parser) stays a dynamic `$Object`/host-proxy externref and its
+  // `this.<field>` reads diverge from the native struct (the #2681 switch-default
+  // / #2686 operator-compare throw). Resolve the owner fnctor F here so
+  // `className = F`, routing through the #1679 native-struct build path
+  // (`compileNewFunctionDeclaration` → `__fnctor_F`). Gated on `approvedNames`
+  // so every OTHER `new this()` fnctor keeps its existing host-bridge (#2608) /
+  // dynamic lowering — no regression.
+  if ((!className || !ctx.classSet.has(className)) && expr.expression.kind === ts.SyntaxKind.ThisKeyword) {
+    const owner = resolveEnclosingFnctorOwner(ctx.checker, expr);
+    if (owner && ctx.fnctorEscapeGate?.approvedNames.has(owner.name)) {
+      className = owner.name;
+      thisFnctorSym = owner.sym;
     }
   }
 
@@ -3728,8 +3751,10 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
         return { kind: "ref", typeIdx: cachedFnCtor.structTypeIdx };
       }
     } else {
-      // Build the constructor from the resolved constructor function's declaration.
-      const decls = symbol?.getDeclarations();
+      // Build the constructor from the resolved constructor function's
+      // declaration. (#2681/#2686 A1) For a `new this()` callee the type
+      // `symbol` is undefined — use the owner fnctor symbol resolved above.
+      const decls = (symbol ?? thisFnctorSym)?.getDeclarations();
       if (decls) {
         for (const decl of decls) {
           if (ts.isFunctionDeclaration(decl) && decl.body) {

@@ -146,6 +146,100 @@ export function resolveFnctorSymbol(checker: ts.TypeChecker, calleeExpr: ts.Expr
 }
 
 /**
+ * #2681/#2686 — resolve the fnctor `F` that OWNS the enclosing method a node sits
+ * in, for a `new this(…)` site or a lifted method body. `this` inside a method
+ * `F.method = function(){…}` / `F.prototype.m = function(){…}` / aliased `var pp =
+ * F.prototype; pp.m = function(){…}` binds to `F` (static) or an `F` instance
+ * (prototype). Walks up to the nearest non-arrow function (arrows do not rebind
+ * `this`) and resolves its defining assignment's holder to a fnctor symbol.
+ *
+ * Returns `{ name, sym, viaPrototype }` where `viaPrototype` is true for a
+ * prototype/aliased method (`this` is an INSTANCE — the read-dispatch case) and
+ * false for a direct static method (`this` is the CONSTRUCTOR — the `new this()`
+ * reconstruct case). `undefined` when the enclosing function is not a fnctor
+ * method, or the holder does not resolve to a user fnctor.
+ */
+export function resolveEnclosingFnctorOwner(
+  checker: ts.TypeChecker,
+  node: ts.Node,
+): { name: string; sym: ts.Symbol; viaPrototype: boolean } | undefined {
+  // Walk up to the nearest `this`-rebinding function (FunctionExpression /
+  // FunctionDeclaration). Arrows are transparent to `this`, so a `new this()` in
+  // an arrow refers to the enclosing function's `this` — keep walking through them.
+  let fn: ts.Node | undefined = node;
+  while (fn && !ts.isFunctionExpression(fn) && !ts.isFunctionDeclaration(fn)) {
+    fn = fn.parent;
+  }
+  if (!fn) return undefined;
+  const assign = fn.parent;
+  if (
+    !ts.isBinaryExpression(assign) ||
+    assign.operatorToken.kind !== ts.SyntaxKind.EqualsToken ||
+    assign.right !== fn ||
+    !ts.isPropertyAccessExpression(assign.left)
+  ) {
+    return undefined;
+  }
+  const left = assign.left;
+  // prototype `F.prototype.m = fn` → holder F = left.expression.expression.
+  if (
+    ts.isPropertyAccessExpression(left.expression) &&
+    ts.isIdentifier(left.expression.name) &&
+    left.expression.name.text === "prototype"
+  ) {
+    const sym = resolveFnctorSymbol(checker, left.expression.expression);
+    if (sym) return { name: sym.name, sym, viaPrototype: true };
+    return undefined;
+  }
+  // static `F.method = fn` (holder = F directly) OR aliased `pp.m = fn` where
+  // `var pp = F.prototype` (holder = pp → F, via the alias initializer).
+  const holder = left.expression;
+  const direct = resolveFnctorSymbol(checker, holder);
+  if (direct) return { name: direct.name, sym: direct, viaPrototype: false };
+  if (ts.isIdentifier(holder)) {
+    const hsym = checker.getSymbolAtLocation(holder);
+    for (const decl of hsym?.getDeclarations() ?? []) {
+      if (ts.isVariableDeclaration(decl) && decl.initializer) {
+        let init: ts.Expression = decl.initializer;
+        while (ts.isParenthesizedExpression(init)) init = init.expression;
+        if (ts.isPropertyAccessExpression(init) && ts.isIdentifier(init.name) && init.name.text === "prototype") {
+          const fsym = resolveFnctorSymbol(checker, init.expression);
+          if (fsym) return { name: fsym.name, sym: fsym, viaPrototype: true };
+        }
+      }
+    }
+  }
+  return undefined;
+}
+
+/**
+ * #2681/#2686 A3 — the `__fnctor_<F>` struct name a lifted PROTOTYPE method's
+ * `this` receiver resolves to, when `F` is approved for reconstruction. Sets
+ * `FunctionContext.thisStructName` (closures.ts) so the dynamic `this.<field>`
+ * read dispatch (property-access.ts) routes through the finalize-filled
+ * `__get_member_<name>` dispatcher.
+ *
+ * Deliberately NOT gated on `ctx.structMap.has(__fnctor_<F>)`: the reader method
+ * frequently compiles BEFORE the `new this()` site that registers the struct
+ * (acorn defines `pp.parseExprAtom` long before the static `Parser.parse`). The
+ * dispatcher is reserved at the read site and FILLED at finalize over the
+ * COMPLETE type table, so a struct registered later is still enumerated — pinning
+ * on `approvedNames` (frozen pre-codegen at index.ts) is order-independent and
+ * correct, while a `structMap.has` gate would race the compile order and miss.
+ * Excludes static methods (`viaPrototype === false`) — their `this` is the
+ * constructor function-value, not an instance.
+ */
+export function resolveLiftedMethodThisStruct(
+  ctx: CodegenContext,
+  fn: ts.FunctionExpression | ts.ArrowFunction,
+): string | undefined {
+  const owner = resolveEnclosingFnctorOwner(ctx.checker, fn);
+  if (!owner || !owner.viaPrototype) return undefined;
+  if (!ctx.fnctorEscapeGate?.approvedNames.has(owner.name)) return undefined;
+  return `__fnctor_${owner.name}`;
+}
+
+/**
  * The set of own property names a fnctor constructor assigns to `this` in its
  * body (`this.x = …`). A typed `instance.x` read of one of these lowers to a
  * `struct.get` on the `$__fnctor_<Name>` struct — clause (B)'s hot path.
@@ -440,7 +534,12 @@ function inferReturnStruct(
   if (ret) {
     const r = unwrapExpr(ret);
     if (ts.isNewExpression(r)) {
-      const ctorSym = resolveFnctorSymbol(checker, r.expression);
+      let ctorSym = resolveFnctorSymbol(checker, r.expression);
+      // #2681/#2686 — `return new this()` in a fnctor static method resolves to
+      // the enclosing owner fnctor's struct.
+      if (!ctorSym && r.expression.kind === ts.SyntaxKind.ThisKeyword) {
+        ctorSym = resolveEnclosingFnctorOwner(checker, r)?.sym;
+      }
       if (ctorSym) result = `__fnctor_${ctorSym.name}`;
     } else if (ts.isCallExpression(r)) {
       const callee = resolveCalleeFunction(checker, r, protoIndex);
@@ -473,18 +572,25 @@ function buildReceiverStructMap(
   const visit = (node: ts.Node): void => {
     if (ts.isVariableDeclaration(node) && node.initializer && ts.isIdentifier(node.name)) {
       const init = unwrapExpr(node.initializer);
+      let struct: string | undefined;
       if (ts.isCallExpression(init)) {
         const callee = resolveCalleeFunction(checker, init, protoIndex);
-        const struct = callee
-          ? inferReturnStruct(checker, callee, RETURN_INFER_MAX_DEPTH, memo, protoIndex)
-          : undefined;
-        if (struct) {
-          const bindSym = checker.getSymbolAtLocation(node.name);
-          const uses = bindSym ? (usesBySymbol.get(bindSym) ?? []) : [];
-          for (const use of uses) {
-            if (use === node.name) continue; // the declaration name itself
-            map.set(use, struct);
-          }
+        struct = callee ? inferReturnStruct(checker, callee, RETURN_INFER_MAX_DEPTH, memo, protoIndex) : undefined;
+      } else if (ts.isNewExpression(init)) {
+        // #2681/#2686 — `var p:any = new this()` in a fnctor static method: pin
+        // `p`'s uses to the owner fnctor struct (read-dispatch case (2)).
+        let ctorSym = resolveFnctorSymbol(checker, init.expression);
+        if (!ctorSym && init.expression.kind === ts.SyntaxKind.ThisKeyword) {
+          ctorSym = resolveEnclosingFnctorOwner(checker, init)?.sym;
+        }
+        struct = ctorSym ? `__fnctor_${ctorSym.name}` : undefined;
+      }
+      if (struct) {
+        const bindSym = checker.getSymbolAtLocation(node.name);
+        const uses = bindSym ? (usesBySymbol.get(bindSym) ?? []) : [];
+        for (const use of uses) {
+          if (use === node.name) continue; // the declaration name itself
+          map.set(use, struct);
         }
       }
     }
@@ -543,9 +649,24 @@ export function analyzeFnctorEscapeGate(checker: ts.TypeChecker, sourceFile: ts.
 
   // 1. Collect every `new F()` whose callee is a fnctor.
   const newSites: { newExpr: ts.NewExpression; ctorSym: ts.Symbol }[] = [];
+  // #2681/#2686 — `new this(…)` sites inside a fnctor static/prototype method
+  // (acorn instantiates Parser ONLY this way). The callee is `this`, not an
+  // identifier, so `resolveFnctorSymbol` misses; resolve the enclosing owner
+  // fnctor instead. These are ALWAYS classified `reconstruct` (the instance is
+  // consumed dynamically via `this.<field>` across the fnctor's lifted methods;
+  // the read/write dispatch (#2664/#2674 + A3) routes those onto the native
+  // struct, so clause B's `__extern_get`-regression concern does not apply).
+  const newThisSites = new Set<ts.NewExpression>();
   const collect = (node: ts.Node): void => {
     if (ts.isNewExpression(node)) {
-      const ctorSym = resolveFnctorSymbol(checker, node.expression);
+      let ctorSym = resolveFnctorSymbol(checker, node.expression);
+      if (!ctorSym && node.expression.kind === ts.SyntaxKind.ThisKeyword) {
+        const owner = resolveEnclosingFnctorOwner(checker, node);
+        if (owner) {
+          ctorSym = owner.sym;
+          newThisSites.add(node);
+        }
+      }
       if (ctorSym) newSites.push({ newExpr: node, ctorSym });
     }
     forEachChild(node, collect);
@@ -616,9 +737,14 @@ export function analyzeFnctorEscapeGate(checker: ts.TypeChecker, sourceFile: ts.
 
     // Clause (B) is absolute: ANY typed own-field consumer ⇒ keep-typed (never
     // reconstruct — hot-path protection). Only then does clause (A) gate the
-    // reconstruct/keep-static split.
+    // reconstruct/keep-static split. EXCEPTION (#2681/#2686): a `new this()`
+    // site is always `reconstruct` — the parser instance is consumed
+    // dynamically via `this.<field>` across the fnctor's lifted methods, and A1
+    // (native struct) + A3 (struct read-dispatch) keep its typed-field reads on
+    // `struct.get`, so clause B's `__extern_get`-regression does not apply.
     let cls: FnctorGateClass;
-    if (sawTyped) cls = "keep-typed";
+    if (newThisSites.has(newExpr)) cls = "reconstruct";
+    else if (sawTyped) cls = "keep-typed";
     else if (sawDynamic) cls = "reconstruct";
     else cls = "keep-static";
 

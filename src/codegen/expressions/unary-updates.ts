@@ -28,6 +28,7 @@ import {
   emitBoundsGuardedArraySet,
   resolveInheritedStaticProp,
 } from "../property-access.js";
+import { reserveMemberGetDispatch } from "../member-get-dispatch.js"; // (#2681/#2686) symmetric struct read for inc/dec
 import { coerceType, compileExpression, skipTransparentExpressions } from "../shared.js";
 import { compileStringLiteral } from "../string-ops.js";
 import { defaultValueInstrs } from "../type-coercion.js";
@@ -223,19 +224,29 @@ function emitExternrefMemberIncDec(
   const keyLocal = allocLocal(fctx, `__incdec_ekey_${fctx.locals.length}`, { kind: "externref" });
   fctx.body.push({ op: "local.set", index: keyLocal });
 
-  // Read current value: __extern_get(obj, key) -> externref  (slot-consistent:
-  // _safeGet returns the struct slot for a typed receiver).
+  // Read current value. (#2681/#2686) MUST be symmetric with the struct.set
+  // write-back below: a bare `__extern_get` reads the JS-side SIDECAR while the
+  // write hits the native struct SLOT, so `this.pos++` diverges and acorn's
+  // tokenizer loop never advances (hang). Route through the `__get_member_<name>`
+  // dispatcher (`struct.get` arms + `__extern_get` terminal) — the same
+  // finalize-filled candidate set the write dispatcher uses — so read and write
+  // stay consistent.
   fctx.body.push({ op: "local.get", index: objLocal });
-  fctx.body.push({ op: "local.get", index: keyLocal });
-  const getIdx = ensureLateImport(
-    ctx,
-    "__extern_get",
-    [{ kind: "externref" }, { kind: "externref" }],
-    [{ kind: "externref" }],
-  );
-  flushLateImportShifts(ctx, fctx);
-  if (getIdx !== undefined) {
-    fctx.body.push({ op: "call", funcIdx: getIdx });
+  const getDispIdx = reserveMemberGetDispatch(ctx, propName, fctx);
+  if (getDispIdx !== undefined) {
+    fctx.body.push({ op: "call", funcIdx: getDispIdx });
+  } else {
+    fctx.body.push({ op: "local.get", index: keyLocal });
+    const getIdx = ensureLateImport(
+      ctx,
+      "__extern_get",
+      [{ kind: "externref" }, { kind: "externref" }],
+      [{ kind: "externref" }],
+    );
+    flushLateImportShifts(ctx, fctx);
+    if (getIdx !== undefined) {
+      fctx.body.push({ op: "call", funcIdx: getIdx });
+    }
   }
 
   // Unbox to f64 (ToNumber on the current value, matching `x += 1`).

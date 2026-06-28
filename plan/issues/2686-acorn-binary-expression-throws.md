@@ -1,8 +1,8 @@
 ---
 id: 2686
 title: "[ARCH] acorn parse() — binary-expression statement throws (parse(\"1 + 2 * 3;\") → WebAssembly.Exception); same root as #2681 (Parser not reconstructed), substrate-scoped"
-status: ready
-assignee: ttraenkler/unassigned
+status: in-progress
+assignee: ttraenkler/sendev-acorn
 sprint: current
 created: 2026-06-26
 updated: 2026-06-28
