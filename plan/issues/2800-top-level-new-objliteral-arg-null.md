@@ -1,8 +1,8 @@
 ---
 id: 2800
 title: "[SENIOR-DEV ONLY] top-level `new X(objLiteral)` reads the literal arg's fields as null at module-init (type-index remap)"
-status: ready
-assignee: ttraenkler/unassigned
+status: done
+assignee: ttraenkler/senior-developer
 sprint: current
 priority: high
 horizon: l
@@ -10,6 +10,7 @@ feasibility: hard
 reasoning_effort: max
 created: 2026-06-28
 updated: 2026-06-28
+completed: 2026-06-28
 task_type: bugfix
 area: codegen
 language_feature: object-literals
@@ -124,3 +125,83 @@ from the constructor param's expected type.
 void-0 proof), `tt2.mjs`/`tt3.mjs` (in-acorn clone, unique-field variant),
 `scale-repro.ts` + `objlit-repro.ts` (standalone scale controls),
 `acorn-run.mjs` (watchdog parse driver).
+
+## Resolution (2026-06-28)
+
+**The hypothesis (type-index remap / DCE divergence) was WRONG.** Empirically
+disproven: `__sget_binop(conf)` returns the correct value for all 15 acorn
+`binop()` confs POST-instantiation, but `__extern_get(conf, "binop")` returns
+`undefined` AT CONSTRUCTION — same object, same slot. The struct slot is read
+correctly; the divergence is purely temporal.
+
+### Real root cause — host-init timing, not type indices
+
+`conf.binop` (an `any`-typed-receiver read) in acorn's `TokenType` ctor compiles
+to a **bare host `__extern_get`**, because acorn uses `delete` somewhere, which
+sets `ctx.moduleUsesDelete`, routing every `any`-receiver read through
+`tryEmitDeleteAwareDynamicGet` (`src/codegen/property-access.ts`) — the
+tombstone-aware host read (#2179). That host helper reads a WasmGC struct field
+via `callbackState.getExports()?.[`__sget_<field>`]`.
+
+In **gc/host** mode, `__module_init` runs via the Wasm **`start` section**
+(`src/codegen/declarations.ts` — `ctx.mod.startFuncIdx = initFuncIdx`), which
+executes **inside `WebAssembly.instantiate`**, BEFORE the host wires the exports
+via `__setExports`. So during init `getExports()` is `undefined` → `__extern_get`
+returns `undefined` for every struct field → `this.binop = conf.binop || null`
+stores `null` for every `types$1` TokenType → `parseExprOp` reads `prec == null`
+→ `unexpected()` → "Unexpected token" on the first binary expression. The
+IDENTICAL `new TokenType(...)` at RUNTIME (after `__setExports`) works.
+
+Scale-dependence was a red herring: standalone repros either don't trigger
+`moduleUsesDelete` or don't read the field at init through the host helper.
+
+### Fix — `__in_module_init` flag gate (read side)
+
+A mutable i32 global `__in_module_init`, set to 1 for the duration of
+`__module_init` and 0 otherwise. `tryEmitDeleteAwareDynamicGet` branches on it:
+
+- **init (flag=1):** read the slot via the HOST-FREE `__get_member_<name>`
+  dispatcher (`ref.test`+`struct.get` over the complete finalize-time candidate
+  set; #2674) — no exports needed, and nothing has been `delete`d yet so the
+  tombstone is moot for a freshly-built object;
+- **runtime (flag=0):** keep the tombstone-aware host `__extern_get` (#2179
+  preserved).
+
+gc/host only (`!ctx.wasi`). The flag global is allocated at FINALIZE — after all
+import globals settle — and the recorded read `global.get` placeholders are
+patched to its final index, sidestepping the live-baked-index shift hazard
+(string-constant imports shift the module-global range through closure bodies the
+per-add fixup can miss). The flag is allocated + reads patched **even when there
+is no `__module_init`** (a module whose only delete-aware reads live inside
+functions): the flag stays 0 → every gated read takes the runtime arm
+(pre-#2800 behaviour), and the placeholder index never survives to trip
+`if[0] expected i32` validation.
+
+Files: `src/codegen/property-access.ts` (`tryEmitDeleteAwareDynamicGet` gate),
+`src/codegen/registry/imports.ts` (`recordInModuleInitFlagRead`),
+`src/codegen/index.ts` (`finalizeInModuleInitFlag`),
+`src/codegen/context/types.ts` + `create-context.ts` (ctx fields).
+Guard: `tests/issue-2800-toplevel-new-objlit-init-read.test.ts`.
+
+### Verified
+
+- compiled-acorn `parse("1 + 2 * 3;")` → `ExpressionStatement` whose `expression`
+  is a `BinaryExpression` with the CORRECT precedence (`+` at the top, `*` as the
+  right child) — **unblocks #2686**. `a + b * c - d;`, `f(x) + g(y);` likewise.
+- the issue's minimal repro (no `delete`) reads `9` (always did standalone — that
+  path never hit the host helper);
+- #2179 delete-tombstone read still returns `undefined`; #2731/#2674/#2130
+  delete-dispatch suites green.
+
+### Known follow-up (out of scope here)
+
+The symmetric WRITE side has the same root cause: a ctor's `this.<f> = …` on an
+`any`-typed `this` routes through `tryEmitDeleteAwareDynamicSet` → host
+`__extern_set_strict` → `__sset_<f>`, which is also unreachable at init, so the
+field write is silently dropped (the struct keeps its default). acorn does NOT
+hit this — its `TokenType` ctor writes `this` via host-free `struct.set` (`this`
+resolves to a concrete fnctor struct) — so it is not needed to unblock #2686. A
+symmetric `__set_member_<name>` flag-gate was prototyped and reverted (a funcIdx
+desync needs more care); track as a dedicated follow-up issue. Affects only a
+delete-using module that does a top-level `new X(objLiteral)` whose ctor writes an
+`any`-typed `this` via the host setter.

@@ -82,7 +82,12 @@ import {
 } from "./array-object-proto.js";
 import { isBuiltinSubtype, isBuiltinTypeName } from "./builtin-tags.js";
 import { getOrRegisterErrorStructType, isWasiErrorName } from "./registry/error-types.js";
-import { addStringConstantGlobal, ensureExnTag, localGlobalIdx } from "./registry/imports.js";
+import {
+  addStringConstantGlobal,
+  ensureExnTag,
+  localGlobalIdx,
+  recordInModuleInitFlagRead,
+} from "./registry/imports.js";
 import { getOrRegisterDvWindowType } from "./dataview-native.js"; // (#2159/#38) DataView windowing
 import {
   getArrTypeIdxFromVec,
@@ -2327,19 +2332,65 @@ function tryEmitDeleteAwareDynamicGet(
     [{ kind: "externref" }, { kind: "externref" }],
     [{ kind: "externref" }],
   );
-  flushLateImportShifts(ctx, fctx);
   if (getIdx === undefined) return undefined;
 
-  // Evaluate the receiver, coerce to externref, then __extern_get(obj, "prop").
+  // (#2800) MODULE-INIT correctness. gc/host runs `__module_init` via the Wasm
+  // `start` section, which executes INSIDE `WebAssembly.instantiate` — BEFORE the
+  // host wires the struct getters via `__setExports`. The host `__extern_get`
+  // reads a WasmGC struct field through `callbackState.getExports()?.__sget_<f>`,
+  // so at init it sees no exports and returns `undefined` for EVERY struct field.
+  // Every top-level `new X(objLiteral)` then stores null for fields read off its
+  // object-literal argument (acorn's `this.binop = conf.binop || null` in the
+  // `types$1` TokenType table → every operator's precedence becomes null →
+  // "Unexpected token" on the first binary expression), while the IDENTICAL read
+  // at RUNTIME works. Reserve the deferred-fill `__get_member_<name>` dispatcher
+  // (a HOST-FREE ref.test+struct.get over the complete finalize-time candidate
+  // set, with `__extern_get` as its own terminal) and branch on the
+  // `__in_module_init` flag: during init read the slot via the dispatcher (no
+  // exports needed; nothing has been `delete`d yet, so the tombstone is moot), at
+  // runtime keep the tombstone-aware host `__extern_get`. Falls back to the bare
+  // host read when the dispatcher/flag can't be set up (byte-identical legacy).
+  // The `__in_module_init` gate is a gc/host concern only: the host start-section
+  // timing is what breaks `__extern_get`'s struct read at init. WASI/standalone
+  // have no host `__extern_get` (and this whole function is already gated
+  // `!ctx.standalone`); keep WASI on the legacy bare read so `__module_init`'s
+  // lazy-init guard wrap stays untouched.
+  const getMemberIdx = ctx.wasi ? undefined : reserveMemberGetDispatch(ctx, propName, fctx);
+  addStringConstantGlobal(ctx, propName);
+  flushLateImportShifts(ctx, fctx);
+
+  // Evaluate the receiver, coerce to externref.
   const objResult = compileExpression(ctx, fctx, expr.expression);
   if (objResult && objResult.kind !== "externref") {
     coerceType(ctx, fctx, objResult, { kind: "externref" });
   } else if (!objResult) {
     fctx.body.push({ op: "ref.null.extern" } as Instr);
   }
-  addStringConstantGlobal(ctx, propName);
-  fctx.body.push(...stringConstantExternrefInstrs(ctx, propName));
-  fctx.body.push({ op: "call", funcIdx: getIdx } as Instr);
+
+  if (getMemberIdx === undefined) {
+    // No dispatcher available — legacy bare tombstone-aware host read.
+    fctx.body.push(...stringConstantExternrefInstrs(ctx, propName));
+    fctx.body.push({ op: "call", funcIdx: getIdx } as Instr);
+    return { kind: "externref" };
+  }
+
+  // `__in_module_init ? __get_member_<name>(recv) : __extern_get(recv, "prop")`.
+  // The flag-read `global.get` index is a PLACEHOLDER patched at finalize by
+  // `finalizeInModuleInitFlag` (after all import globals settle).
+  const flagGet = recordInModuleInitFlagRead(ctx);
+  const recvLocal = allocLocal(fctx, `__dadg_recv_${fctx.locals.length}`, { kind: "externref" });
+  fctx.body.push({ op: "local.set", index: recvLocal } as Instr);
+  fctx.body.push(flagGet);
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "val", type: { kind: "externref" } as ValType },
+    then: [{ op: "local.get", index: recvLocal } as Instr, { op: "call", funcIdx: getMemberIdx } as Instr],
+    else: [
+      { op: "local.get", index: recvLocal } as Instr,
+      ...stringConstantExternrefInstrs(ctx, propName),
+      { op: "call", funcIdx: getIdx } as Instr,
+    ],
+  } as Instr);
   return { kind: "externref" };
 }
 
