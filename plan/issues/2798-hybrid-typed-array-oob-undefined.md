@@ -151,4 +151,3 @@ unmodified base** (origin/main), so they are NOT regressions from this change:
 
 Broad impact (typed-array element reads, used widely) is validated by the
 `merge_group` full test262 + the #2097 absolute standalone floor.
-
