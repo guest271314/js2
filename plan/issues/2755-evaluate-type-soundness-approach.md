@@ -1,10 +1,12 @@
 ---
 id: 2755
 title: "Decide the type-soundness approach: trust-the-type-and-patch vs JS-semantics-first"
-status: ready
+status: done
 sprint: current
 created: 2026-06-28
 updated: 2026-06-28
+completed: 2026-06-28
+decision: hybrid
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -134,15 +136,63 @@ speculative refactor that risks the perf story this compiler is built on. The
 hybrid keeps A's speed where it's *provably* safe and gets B's
 correctness-by-default everywhere else.
 
-## Decision needed (owner: project lead / PO)
+## Decision (RECORDED — 2026-06-28, project lead)
 
-- [ ] Pick: **A**, **B**, or the **hybrid** above (or amend).
-- [ ] Given the pick, set the disposition of the open soundness PRs/issues:
-  - **#2198 (S2 code)** — currently parked with a real regression. Fix-on-branch
-    under the chosen direction, or close/supersede.
-  - **#2195 (spec docs, adds #2754)** — the "sound TS settings" spec. Keep,
-    revise to match the chosen direction, or close.
-  - **#2754 / #2698** — re-scope Prong 2 to the chosen direction.
+- [x] **Picked: the HYBRID.** Adopt Direction B as the *default/invariant* and
+  keep Direction A's type-directed fast paths only as a *proven-safe*
+  optimization.
+
+  > **The hybrid invariant (HI):** *"A TS type may only change the emitted Wasm
+  > when the value provably cannot violate it at runtime; otherwise lower the
+  > JS-correct way."* Correctness is the default; **specialization must be
+  > proven**. Keep type-directed fast paths only where provably safe.
+
+  The merged implementation roadmap is
+  [`docs/architecture/hybrid-soundness-ir-roadmap.md`](../../docs/architecture/hybrid-soundness-ir-roadmap.md).
+  It binds this soundness decision to the **#1530 IR-migration** finish line:
+  the legacy direct AST→Wasm path is the "trust-the-type" approach we are
+  retiring; the typed IR (`src/ir/`) is the chokepoint where "prove-then-
+  specialize" belongs, so the IR fallback is redefined as *"fall to the SAFE
+  JS-correct default, never the legacy trust-the-type path."*
+
+- [x] **Dispositions of the open soundness PRs/issues:**
+  - **PR #2198 (S1+S2 code)** — **keep S1** (sound flags, corpus-neutral);
+    **rework S2 under HI**. Do **NOT** re-land the shared-helper
+    `useUndefinedSentinel` flip (it leaked into the generic
+    `Array.prototype.map`-on-array-like path — the deciding data point that
+    "patch-the-holes" is leaky). Instead make OOB-correctness **fall out of the
+    safe default element-read path** at the `compileElementAccessBody` call sites
+    (`property-access.ts:6303,6352`), scoped to the dynamic plain-array value
+    read so typed-array / subview / array-method internal callers keep their own
+    correct OOB semantics. The map-on-array-like case
+    (`built-ins/Array/prototype/map/15.4.4.19-8-b-2.js`) must be green. Tracked
+    as roadmap floor fix **F1** → follow-up issue **R1** (see below).
+  - **PR #2195 / issue #2754 (the "sound TS settings" spec)** — **revise to the
+    HI framing**: Prong 1 stays as-is; Prong 2 is reframed from "enumerate &
+    patch the holes" to "SAFE JS-correct default + proof-gated specialization."
+    The roadmap doc above is the authority for Prong 2.
+  - **#2698 (checker track) — Prong 2 re-scoped to HI.** The codegen Prong-2 work
+    is now governed by the roadmap doc, not a standalone open-ended hole catalog.
+
+### Follow-up issues created (sprint: current, status: ready)
+
+These make the first roadmap steps dispatchable (see the roadmap's "Sequencing
+summary & follow-up issues" table):
+
+- **R1 — #2760**: floor fix F1 (plain-array OOB → JS `undefined`, HI-style; the
+  #2198/S2 rework, NOT the shared-helper flip) + F2 hole-read audit + F3 doc.
+- **R2 — #2766**: first IR step — `ElementAccessExpression` under HI: port the
+  `safeIndexedArrays` counted-loop in-bounds proof into the IR so `vec.get`
+  fires only when in-bounds is proven; otherwise emit the SAFE bounds-checked
+  read (F1 reused as the IR SAFE lowering).
+- **R3 — #2762**: migration-cost audit as a living checklist — annotate every
+  type-directed fast path (roadmap §(d)) with its discharged/undischarged proof
+  status; this is the backlog generator for the M/L specialization items.
+
+The `substrate/value-identity` workstream (roadmap §(e): acorn #2681/#2686 +
+#1627 class-instance tail + #2740 instanceof clusters) and the sibling
+`substrate/closure-box` (#2758 under #2692) are tracked under their own lineages,
+not folded together — see the roadmap's §(e) architect verdict.
 
 ## Notes
 
