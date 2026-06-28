@@ -5723,6 +5723,102 @@ function emitPlainArrayUndefinedOobGet(
   } as Instr);
 }
 
+/**
+ * (#2795 — hybrid type-soundness audit Row 9) SAFE typed-array OOB read: push the
+ * in-bounds element **boxed to a JS number externref**, or JS `undefined` when
+ * the index is out of bounds (the *view length* is the bound, per the
+ * integer-indexed exotic object semantics — TC39 §10.4.5 `[[Get]]` of an
+ * out-of-range CanonicalNumericIndexString returns `undefined`).
+ *
+ * **Dedicated sibling of `emitPlainArrayUndefinedOobGet`, NOT a reuse.** Row 9
+ * was deliberately carved out of #2760's plain-array F1 (`oobUndefined` requires
+ * `classifyTypedArrayType(...) === "other"`). A typed-array read is *entangled*
+ * with the shared `emitBoundsCheckedArrayGet` helper (#2198 S2 blast radius), so
+ * this stays a **call-site-owned** policy — the shared helper default is
+ * untouched, and `emitPlainArrayUndefinedOobGet` is left byte-identical. Three
+ * reasons it cannot reuse the plain-array helper:
+ *   1. **Signedness** — a packed `i8`/`i16` element reads with view-name-driven
+ *      `array.get_s`/`array.get_u`. `emitPlainArrayUndefinedOobGet` calls the
+ *      shared helper WITHOUT `signedness`, whose storage-kind heuristic
+ *      (i8→get_u, i16→get_s) miscompiles `Int8Array` / `Uint16Array`. We thread
+ *      `signedness` (the view name's, via `typedArrayPackedSignedness`) here.
+ *   2. **Unsigned i32** — `Uint32Array` reads the full 32 bits as an UNSIGNED JS
+ *      number (`f64.convert_i32_u`), not the signed conversion the box path uses.
+ *   3. Typed-array elements are always `number` (the recognized views exclude
+ *      BigInt64Array/BigUint64Array), so the box is plain `__box_number` —
+ *      standalone-native (identical to R1's `number[]` floor), needing NO new
+ *      carrier (unlike #2792's `symbol[]`). Ships host + standalone.
+ *
+ * Stack in:  [arrayref(non-null backing $arr), i32 index]
+ * Stack out: [externref]
+ */
+function emitTypedArrayUndefinedOobGet(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  arrTypeIdx: number,
+  // Storage kind of the packed/boxed element (i8/i16/i32 for integer views, f32
+  // defensive, f64 for float views and host-mode integer views).
+  elementType: ValType,
+  // View-name-driven signedness (`"s"` Int*, `"u"` Uint*); undefined for float
+  // views. Drives both the bounded read's extension AND the i32→f64 conversion.
+  signedness: "s" | "u" | undefined,
+): void {
+  // Save index + array ref (consumed by the bounds test AND the bounded read).
+  const idxLocal = allocLocal(fctx, `__taoob_idx_${fctx.locals.length}`, { kind: "i32" });
+  const arrLocal = allocLocal(fctx, `__taoob_arr_${fctx.locals.length}`, { kind: "ref", typeIdx: arrTypeIdx });
+  fctx.body.push({ op: "local.set", index: idxLocal });
+  fctx.body.push({ op: "local.set", index: arrLocal });
+
+  // (1) inBounds = (unsigned) idx < array.len — a negative index wraps to a huge
+  // unsigned value > any length, so it falls into the OOB (undefined) arm.
+  const inBoundsLocal = allocLocal(fctx, `__taoob_in_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "local.get", index: idxLocal });
+  fctx.body.push({ op: "local.get", index: arrLocal });
+  fctx.body.push({ op: "array.len" });
+  fctx.body.push({ op: "i32.lt_u" } as Instr);
+  fctx.body.push({ op: "local.set", index: inBoundsLocal });
+
+  // (2) Bounded native read (OOB → type-default, never traps) WITH the view-name
+  // signedness so a packed i8/i16 read sign/zero-extends correctly. Emitted
+  // imperatively so the box/undefined late-imports register and index-shift
+  // through the normal path (same discipline as emitPlainArrayUndefinedOobGet).
+  fctx.body.push({ op: "local.get", index: arrLocal });
+  fctx.body.push({ op: "local.get", index: idxLocal });
+  emitBoundsCheckedArrayGet(fctx, arrTypeIdx, elementType, ctx, false, signedness);
+
+  // Convert the storage value to a JS number (f64). i8/i16 are already
+  // sign/zero-extended into a small-range i32 by the read, so `convert_i32_s` is
+  // correct for both signed and unsigned narrow views. i32 storage is the full
+  // 32 bits: unsigned for `Uint32Array` (`signedness === "u"`), signed for
+  // `Int32Array`. f32 promotes; f64 is already a number.
+  if (elementType.kind === "i8" || elementType.kind === "i16") {
+    fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+  } else if (elementType.kind === "i32") {
+    fctx.body.push({ op: signedness === "u" ? "f64.convert_i32_u" : "f64.convert_i32_s" } as Instr);
+  } else if (elementType.kind === "f32") {
+    fctx.body.push({ op: "f64.promote_f32" } as Instr);
+  }
+  // Box the f64 to an externref number (host `__box_number`; standalone native).
+  coerceType(ctx, fctx, { kind: "f64" }, { kind: "externref" });
+  const boxedLocal = allocLocal(fctx, `__taoob_box_${fctx.locals.length}`, { kind: "externref" });
+  fctx.body.push({ op: "local.set", index: boxedLocal });
+
+  // (3) `undefined` into a local (host `__get_undefined`, or `ref.null.extern`
+  // under standalone where undefined ≡ null — both via emitUndefined).
+  emitUndefined(ctx, fctx);
+  const undefLocal = allocLocal(fctx, `__taoob_undef_${fctx.locals.length}`, { kind: "externref" });
+  fctx.body.push({ op: "local.set", index: undefLocal });
+
+  // (4) result = inBounds ? boxedValue : undefined. Pure local.get branches.
+  fctx.body.push({ op: "local.get", index: inBoundsLocal });
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "val" as const, type: { kind: "externref" } },
+    then: [{ op: "local.get", index: boxedLocal } as Instr],
+    else: [{ op: "local.get", index: undefLocal } as Instr],
+  } as Instr);
+}
+
 // ── Element access ───────────────────────────────────────────────────
 
 /**
@@ -6707,10 +6803,18 @@ export function compileElementAccessBody(
     // typed result and are deferred (`f1BoxType === null`).
     const isRegexMatchVec = typeDef.fields.length >= 4 && typeDef.fields[2]?.name === "index";
     const numericHint = expectedType?.kind === "f64" || expectedType?.kind === "i32";
-    const oobUndefined =
-      !numericHint &&
-      classifyTypedArrayType(ctx.checker.getTypeAtLocation(expr.expression), ctx.checker) === "other" &&
-      !isRegexMatchVec;
+    const taClass = classifyTypedArrayType(ctx.checker.getTypeAtLocation(expr.expression), ctx.checker);
+    const oobUndefined = !numericHint && taClass === "other" && !isRegexMatchVec;
+    // (#2795 — hybrid audit Row 9) A genuine typed-array VIEW OOB element read
+    // returns JS `undefined` (the view length is the bound). Mutually exclusive
+    // with the plain-array F1 arm above (`taClass !== "other"` vs `=== "other"`).
+    // Suppressed in a numeric context (`numericHint`) — the consumer wants a
+    // number, so keep the unboxed read — exactly like the plain-array F1 (the R1
+    // Math.* lesson). The element is boxed as a JS NUMBER via the dedicated
+    // call-site helper (`emitTypedArrayUndefinedOobGet`); the shared
+    // `emitBoundsCheckedArrayGet` default and `emitPlainArrayUndefinedOobGet`
+    // both stay byte-identical (the #2198 S2 blast-radius discipline).
+    const oobUndefinedTypedArray = !numericHint && taClass !== "other";
     // (#2785/#2792) The type-aware box ValType for the F1 widen (null = defer).
     // Boxes `number[]` (f64), `boolean[]` (branded i32), and `symbol[]` (branded
     // i32) correctly; defers packed-number / other i32 / externref. Computed even
@@ -6766,6 +6870,17 @@ export function compileElementAccessBody(
       // (bounds-checked, never traps).
       emitPlainArrayUndefinedOobGet(ctx, fctx, arrTypeIdx, arrDef.element, f1BoxType);
       return { kind: "externref" };
+    } else if (oobUndefinedTypedArray) {
+      // (#2795 Row 9) Typed-array OOB → JS `undefined`, in-bounds → the element
+      // boxed as a JS number. f64/i32 cannot represent `undefined`, so the
+      // JS-correct lowering of an unproven typed-array read is the
+      // boxed-or-undefined externref. Bounds-eliminated reads above keep the
+      // unboxed fast path; only the unproven read pays the box. The helper
+      // threads the view-name signedness (so `Int8Array`/`Uint16Array`/
+      // `Uint32Array` read with the right extension) and boxes as a number —
+      // dedicated, so the shared helper / plain-array helper are untouched.
+      emitTypedArrayUndefinedOobGet(ctx, fctx, arrTypeIdx, arrDef.element, taSignedness);
+      return { kind: "externref" };
     } else {
       // (#2001 S1) Pass `ctx` so the in-bounds `$Hole → undefined` read-boundary
       // mapping fires for an externref-element (`any[]`) vec. (#2593) Thread the
@@ -6793,12 +6908,15 @@ export function compileElementAccessBody(
 
   // (#2593) View-name-driven signedness for a packed i8/i16 typed-array element.
   const taSignednessArr = typedArrayViewSignedness(ctx, expr.expression);
-  // (#2760 F1) Plain-array OOB → JS `undefined` policy (typed-array views keep
-  // their own OOB semantics). A raw array type has no struct fields, so there is
-  // no regex-match-vec exotic to exclude here.
-  const oobUndefinedArr =
-    !(expectedType?.kind === "f64" || expectedType?.kind === "i32") &&
-    classifyTypedArrayType(ctx.checker.getTypeAtLocation(expr.expression), ctx.checker) === "other";
+  // (#2760 F1) Plain-array OOB → JS `undefined` policy. A raw array type has no
+  // struct fields, so there is no regex-match-vec exotic to exclude here.
+  const numericHintArr = expectedType?.kind === "f64" || expectedType?.kind === "i32";
+  const taClassArr = classifyTypedArrayType(ctx.checker.getTypeAtLocation(expr.expression), ctx.checker);
+  const oobUndefinedArr = !numericHintArr && taClassArr === "other";
+  // (#2795 Row 9) Typed-array VIEW OOB → JS `undefined` (mirrors the vec-struct
+  // call site above). Mutually exclusive with the plain-array arm
+  // (`taClassArr !== "other"`); suppressed in a numeric context.
+  const oobUndefinedTypedArrayArr = !numericHintArr && taClassArr !== "other";
   // (#2785) Type-aware box ValType for the F1 widen (null = defer) — matches the
   // vec-struct call site above.
   const f1BoxTypeArr = f1ElementBoxType(ctx, expr, typeDef.element);
@@ -6835,6 +6953,11 @@ export function compileElementAccessBody(
     // (`f1BoxTypeArr === null`) and fall through to the unchanged shared-helper
     // read below. See the full note at the vec-struct call site above.
     emitPlainArrayUndefinedOobGet(ctx, fctx, typeIdx, typeDef.element, f1BoxTypeArr);
+    return { kind: "externref" };
+  } else if (oobUndefinedTypedArrayArr) {
+    // (#2795 Row 9) Typed-array OOB → JS `undefined`, in-bounds → the element
+    // boxed as a JS number. See the full note at the vec-struct call site.
+    emitTypedArrayUndefinedOobGet(ctx, fctx, typeIdx, typeDef.element, taSignednessArr);
     return { kind: "externref" };
   } else {
     // (#2001 S1) Pass `ctx` for the in-bounds `$Hole → undefined` mapping.
