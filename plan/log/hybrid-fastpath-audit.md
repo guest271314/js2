@@ -182,12 +182,12 @@ IR-adoption steps (§(b) of the roadmap), **not** a big-bang rewrite.
 
 ## See also
 
-- [`docs/architecture/hybrid-soundness-ir-roadmap.md`](../../docs/architecture/hybrid-soundness-ir-roadmap.md)
+- [hybrid-soundness-ir-roadmap.md](../../docs/architecture/hybrid-soundness-ir-roadmap.md)
   §(d) — the inventory this checklist tracks; §(a) — the Hybrid Invariant.
-- [`plan/issues/2762-hybrid-fastpath-safety-audit-checklist.md`](../issues/2762-hybrid-fastpath-safety-audit-checklist.md)
-  — this doc's tracking issue (R3).
-- [`plan/issues/2760-hybrid-floor-plain-array-oob-undefined.md`](../issues/2760-hybrid-floor-plain-array-oob-undefined.md)
-  — R1 floor fix (the SAFE lowering rows 1/2 reuse).
-- [`plan/issues/2766-hybrid-ir-elementaccess-prove-then-specialize.md`](../issues/2766-hybrid-ir-elementaccess-prove-then-specialize.md)
-  — R2, the row-1 follow-up.
-- [`plan/log/ir-adoption.md`](./ir-adoption.md) — per-AST-kind IR status & ratchet.
+- [#2762](../issues/2762-hybrid-fastpath-safety-audit-checklist.md) — this doc's
+  tracking issue (R3).
+- [#2760](../issues/2760-hybrid-floor-plain-array-oob-undefined.md) — R1 floor
+  fix (the SAFE lowering rows 1/2 reuse).
+- [#2766](../issues/2766-hybrid-ir-elementaccess-prove-then-specialize.md) — R2,
+  the row-1 follow-up.
+- [ir-adoption.md](./ir-adoption.md) — per-AST-kind IR status & ratchet.
