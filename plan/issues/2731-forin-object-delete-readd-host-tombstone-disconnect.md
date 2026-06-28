@@ -1,7 +1,7 @@
 ---
 id: 2731
 title: "for-in/$Object: delete routes to host __delete_property tombstone disconnected from native $Object storage — delete+re-add never re-appears"
-status: ready
+status: done
 sprint: Backlog
 goal: test262-conformance
 feasibility: hard
@@ -11,8 +11,26 @@ es_edition: ES5
 language_feature: for-in
 task_type: bug
 created: 2026-06-26
-updated: 2026-06-26
+updated: 2026-06-28
+completed: 2026-06-27
 ---
+
+> **DONE (PO reconcile 2026-06-28, as of #2199).** Closed by **PR #2170**
+> (`fix(#2731): symmetric delete-aware property write routing`, merged
+> 2026-06-27, commit `3aadd4a4`) — the file was left `status: ready` because the
+> authoring dev did not flip it post-merge (the classic merged-but-ready drift the
+> reconciler surfaced). PR #2170 implemented the architect spec's **PART 1**
+> (codegen `tryEmitDeleteAwareDynamicSet` → reroute the re-add write through
+> `__extern_set_strict`/`_safeSet`, clearing the tombstone) **and PART 2** (runtime
+> `_wasmStructShadowedFields` so a deleted-then-readded field enumerates at
+> insertion-order END), **host-mode** scope, with the gate deliberately widened to
+> shape-inferred object literals (which is what the actual test262 cases use).
+> `#1830` (integer-index keys) landed separately. Scoped acceptance met:
+> `delete o.x; o.x=9` re-appears (`o.x===9`, `"x" in o`, enumerated last);
+> `order-simple-object → 0,1,2,p2,p4,p1`. **The standalone delete-without-readd
+> tombstone gap was explicitly de-scoped to the #2580 substrate / a follow-up — do
+> NOT reopen #2731 for it.**
+
 # #2731 — $Object delete tombstone is disconnected from native storage (delete+re-add never re-appears)
 
 ## Problem

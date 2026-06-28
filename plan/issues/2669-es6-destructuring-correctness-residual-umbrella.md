@@ -268,6 +268,10 @@ PASS via fresh single-file runs; 12 sync improvements re-verified PASS.
 This slice keeps the umbrella OPEN (status stays `ready`) — it burns down the
 nested-array-default codegen corner, not the iterator-protocol tail.
 
+## Residual (as of #2199, PO reconcile 2026-06-28)
+
+NOT done — broad umbrella. The referencing PR landed the nested-array default-init codegen family (3 defects). The umbrella stays OPEN: iterator-close, defaults, holes, rest across for-of / assignment / binding / params (~696 fails) need further concrete slices carved.
+
 ## CARVE (sd-dstr-objdefault, 2026-06-28) — verify-first re-sweep on current main (#2201)
 
 Re-swept the **1745** non-pass `/dstr/` tests from the fresh s67 baseline against
@@ -297,3 +301,8 @@ closure-box. Different files → safe to parallelize. #2756 and #2758 both touch
 default-init concept but in **different files/paths** (binding default arm vs param
 closure-box) — mild care, not a hard serialize. The custom-iterable (~358) and
 generator (~871) tails stay under #2566/#2662.
+
+**Update (#2756 landed, 2026-06-28):** the largest clean slice **#2756**
+(array-pattern object/class default null-deref + the `fn-name-class` NamedEvaluation
+cluster) is **done** — recovers the binding/function/method/generator/async/
+for-await `fn-name-class` family. #2757 / #2758 remain ready/architect.

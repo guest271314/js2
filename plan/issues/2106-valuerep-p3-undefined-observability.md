@@ -588,3 +588,7 @@ complete, properly-sequenced sweep in a fresh PR with the full producer+consumer
 site set flipped together, validated via merge_group BEFORE enqueue (route to
 architect to enumerate the full producer/consumer site list first). The hold on
 #2025 must stay until this is resolved.
+
+## Residual (as of #2199, PO reconcile 2026-06-28)
+
+NOT done — the referencing merged PR was a REVERT (PR #2025 auto-parked: standalone floor breach, NET -1245 test262 rows), so it is floor-neutral undo, NOT progress. S1 (standalone tag-1 $undefined singleton) still requires the FULL ~40-site producer+consumer sweep (architect re-spec) — no narrow floor-saving subset exists. S2 (sNaN carve-out), S3 (number|undefined→externref), S4 (union-collapse reversal), typeof-null→object all remain. Stays in-progress; resume-only for a senior-dev at max effort.

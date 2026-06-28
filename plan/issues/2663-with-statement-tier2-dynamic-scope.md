@@ -563,3 +563,7 @@ call $__extern_has                 ;; -> i32  (own+proto, value-independent)
   value-independence fix (use `__extern_has`, not `__dyn_has`'s non-null proxy) is
   Tier 2's own change, not a #2580 dependency.
 - **#1387** (Tier 1) — extended, not replaced.
+
+## Residual (as of #2199, PO reconcile 2026-06-28)
+
+NOT done — sliced feature. Slices 1-2 (HasBinding-gated read + assignment) + Slice 4 (@@unscopables HasBinding, host-mode) landed. Slice 3 (HasBinding-gated read-then-write: compound-assign + inc/dec, e.g. unscopables-inc-dec.js) remains; the 294 WithStatement tests are only partially de-skipped. Stays in-progress.
