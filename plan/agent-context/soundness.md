@@ -15,7 +15,7 @@ direction (#2755). This is pointers + framing, not a spec._
 - **#2750 S1** (`.js` → `strict: true`) — DONE, merged (PR #2205). Corpus-neutral.
 - **#2750 S2** — PARKED. Lives on **PR #2198** (`hold` label, bot-park). Do NOT
   re-enqueue #2198 as-is; the rework should supersede it (close #2198, new PR).
-- **#2754** spec (`plan/issues/2754-sound-ts-settings-ts-and-js.md`) on PR #2195,
+- **#2754** "sound TS settings" spec — lives on PR #2195 (not yet on `main`),
   parked/`hold`, CI-clean (dup-id fixed). Its prescription should be revised to
   the hybrid framing before it lands.
 
