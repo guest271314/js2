@@ -12,15 +12,15 @@ script. This directory contains:
 
 ```
 examples/native-messaging/
-  nm_wasi_p1.ts       ← host via RAW wasi_snapshot_preview1 fd_read/fd_write
-  nm_node_fs.ts       ← host via synchronous node:fs readSync/writeSync
-  nm_node_process.ts  ← host via async process.stdin Readable + process.stdout.write
-  nm_deno.ts          ← host via the Deno stdio surface (lands separately)
-  nm_wasi_p3.ts       ← host via the WASI Preview 3 spike (lands separately)
+  nm_js2wasm_wasi_p1.ts       ← host via RAW wasi_snapshot_preview1 fd_read/fd_write
+  nm_js2wasm_node_fs.ts       ← host via synchronous node:fs readSync/writeSync
+  nm_js2wasm_node_process.ts  ← host via async process.stdin Readable + process.stdout.write
+  nm_js2wasm_deno.ts          ← host via the Deno stdio surface (lands separately)
+  nm_js2wasm_wasi_p3.ts       ← host via the WASI Preview 3 spike (lands separately)
   README.md           ← this file
-  nm_node_fs.json     ← Native host manifest template
+  nm_js2wasm_node_fs.json     ← Native host manifest template
   manifest.json       ← Web extension manifest
-  nm_node_fs.sh       ← wasmtime/wasmer wrapper the browser invokes
+  nm_js2wasm_node_fs.sh       ← wasmtime/wasmer wrapper the browser invokes
   background.js       ← MV3 Web extension background `ServiceWorker` script
 ```
 
@@ -35,16 +35,16 @@ What differs is the API each reaches for to touch stdio — and therefore the wa
 imports it emits, whether the read loop is synchronous or event-driven, and which
 runtimes can launch the result. The original report ([loopdive/js2#389](https://github.com/loopdive/js2/issues/389))
 asked for a host that runs under a WASI runtime, "not chasing Node.js" — the raw
-`nm_wasi_p1.ts` is that answer; the others show the same protocol expressed through
+`nm_js2wasm_wasi_p1.ts` is that answer; the others show the same protocol expressed through
 progressively higher-level (and more Node-shaped) surfaces.
 
 | Variant                                      | Host surface                                    | Source import                                                                              | Sync or async                                                  | Emitted wasm imports                                                                       | Runs natively under                                       | Compiles to                                                         |
 | -------------------------------------------- | ----------------------------------------------- | ------------------------------------------------------------------------------------------ | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------ | --------------------------------------------------------- | ------------------------------------------------------------------- |
-| [`nm_wasi_p1.ts`](./nm_wasi_p1.ts)           | Raw WASI Preview 1 syscalls over linear memory  | `wasi_snapshot_preview1` (`fd_read`/`fd_write`) + `wasm:memory` (intrinsic, lowers inline) | **sync** — blocking `fd_read`/`fd_write` loop                  | only `wasi_snapshot_preview1`                                                              | `wasmtime` / `wasmer` / `wazero`                          | standalone WASI P1 command module (owns + exports its own `memory`) |
-| [`nm_node_fs.ts`](./nm_node_fs.ts)           | Node synchronous `node:fs` fd IO                | `node:fs` (`readSync`/`writeSync`)                                                         | **sync** — `readSync`/`writeSync` read-until loop              | only `wasi_snapshot_preview1` (inlined); or a `node:fs` interface with `--link node:fs` | `wasmtime` **and** unmodified under real `node`           | standalone WASI P1 command module (or a `node:fs`-linkable module)  |
-| [`nm_node_process.ts`](./nm_node_process.ts) | Node async streaming stdio                      | `process.stdin` (global) Readable + `process.stdout.write`                                 | **async** — event-driven `'data'`/`'end'`, incremental framing | only `wasi_snapshot_preview1`                                                              | `wasmtime` (drives the injected fd0 reactor / event loop) | standalone WASI P1 command module with an event loop                |
-| [`nm_deno.ts`](./nm_deno.ts)                 | Deno stdio surface (`Deno.stdin`/`Deno.stdout`) | _(lands separately)_                                                                       | sync (`readSync`/`writeSync`)                                  | _(WASI-targeted; filled in when it lands)_                                                 | Deno / a WASI runtime                                     | standalone WASI module                                              |
-| [`nm_wasi_p3.ts`](./nm_wasi_p3.ts)           | WASI Preview 3 async streams                    | _(lands separately)_                                                                       | **async** — P3 stream reads                                    | WASI Preview 3 component interfaces                                                        | a Preview-3 / component-capable runner                    | WASI Preview 3 component                                            |
+| [`nm_js2wasm_wasi_p1.ts`](./nm_js2wasm_wasi_p1.ts)           | Raw WASI Preview 1 syscalls over linear memory  | `wasi_snapshot_preview1` (`fd_read`/`fd_write`) + `wasm:memory` (intrinsic, lowers inline) | **sync** — blocking `fd_read`/`fd_write` loop                  | only `wasi_snapshot_preview1`                                                              | `wasmtime` / `wasmer` / `wazero`                          | standalone WASI P1 command module (owns + exports its own `memory`) |
+| [`nm_js2wasm_node_fs.ts`](./nm_js2wasm_node_fs.ts)           | Node synchronous `node:fs` fd IO                | `node:fs` (`readSync`/`writeSync`)                                                         | **sync** — `readSync`/`writeSync` read-until loop              | only `wasi_snapshot_preview1` (inlined); or a `node:fs` interface with `--link node:fs` | `wasmtime` **and** unmodified under real `node`           | standalone WASI P1 command module (or a `node:fs`-linkable module)  |
+| [`nm_js2wasm_node_process.ts`](./nm_js2wasm_node_process.ts) | Node async streaming stdio                      | `process.stdin` (global) Readable + `process.stdout.write`                                 | **async** — event-driven `'data'`/`'end'`, incremental framing | only `wasi_snapshot_preview1`                                                              | `wasmtime` (drives the injected fd0 reactor / event loop) | standalone WASI P1 command module with an event loop                |
+| [`nm_js2wasm_deno.ts`](./nm_js2wasm_deno.ts)                 | Deno stdio surface (`Deno.stdin`/`Deno.stdout`) | _(lands separately)_                                                                       | sync (`readSync`/`writeSync`)                                  | _(WASI-targeted; filled in when it lands)_                                                 | Deno / a WASI runtime                                     | standalone WASI module                                              |
+| [`nm_js2wasm_wasi_p3.ts`](./nm_js2wasm_wasi_p3.ts)           | WASI Preview 3 async streams                    | _(lands separately)_                                                                       | **async** — P3 stream reads                                    | WASI Preview 3 component interfaces                                                        | a Preview-3 / component-capable runner                    | WASI Preview 3 component                                            |
 
 The bottom two rows are pre-filled descriptively; the comparison test
 **discovers** variant files on disk and picks them up automatically as they land,
@@ -52,7 +52,7 @@ running each that lowers to a standalone WASI command module and asserting the
 byte-identical echo (the P3 component variant, which needs its own runner, is
 skipped gracefully).
 
-> **Why `nm_node_process.ts` writes a `Uint8Array`, not a string.** Its
+> **Why `nm_js2wasm_node_process.ts` writes a `Uint8Array`, not a string.** Its
 > `process.stdin` `'data'` chunks arrive as strings (one char per raw byte), but
 > the framed response is written via `process.stdout.write(uint8Array)` so the
 > binary 4-byte length prefix and any high body byte go out verbatim — a string
@@ -119,7 +119,7 @@ does not need to allocate the full request body at once.
 
 ## The host source
 
-[`nm_node_fs.ts`](./nm_node_fs.ts) follows the reference-host shape
+[`nm_js2wasm_node_fs.ts`](./nm_js2wasm_node_fs.ts) follows the reference-host shape
 guest271314 uses across runtimes:
 
 - **`readMessageLength()` / `readFrameBody()`** — read the 4-byte
@@ -155,13 +155,13 @@ From the repo root (works immediately after `pnpm install`, no build step):
 ```bash
 mkdir -p examples/native-messaging/out
 # Standalone, runs directly under wasmtime — imports ONLY wasi_snapshot_preview1:
-npx tsx src/cli.ts examples/native-messaging/nm_node_fs.ts --target wasi -o examples/native-messaging/out
+npx tsx src/cli.ts examples/native-messaging/nm_js2wasm_node_fs.ts --target wasi -o examples/native-messaging/out
 ```
 
 (Once the package is built — `pnpm run build` — or installed from npm, you can
-use the `js2wasm` bin directly: `npx js2wasm nm_node_fs.ts --target wasi -o out`.)
+use the `js2wasm` bin directly: `npx js2wasm nm_js2wasm_node_fs.ts --target wasi -o out`.)
 
-This produces `out/nm_node_fs.wasm`, a self-contained WASI Preview-1 command
+This produces `out/nm_js2wasm_node_fs.wasm`, a self-contained WASI Preview-1 command
 module: the `node:fs` `readSync`/`writeSync` calls lower **inline** to
 `wasi_snapshot_preview1` `fd_read`/`fd_write`, so the module imports ONLY
 `wasi_snapshot_preview1`, owns + exports its own `memory`, and runs directly under
@@ -173,7 +173,7 @@ module: the `node:fs` `readSync`/`writeSync` calls lower **inline** to
 syscalls:
 
 ```bash
-npx tsx src/cli.ts examples/native-messaging/nm_node_fs.ts --target wasi --link node:fs -o examples/native-messaging/out
+npx tsx src/cli.ts examples/native-messaging/nm_js2wasm_node_fs.ts --target wasi --link node:fs -o examples/native-messaging/out
 ```
 
 The result declares **what** host API it needs (`node:fs`), not how it's
@@ -188,18 +188,18 @@ an external `node:fs` provider; for a drop-in standalone host, prefer `--target
 wasi` alone above.
 
 > The `-o` flag is an **output directory**, not a filename. js2wasm names the
-> output after the input basename (`nm_node_fs.wasm`).
+> output after the input basename (`nm_js2wasm_node_fs.wasm`).
 
-### What is `out/nm_node_fs.imports.js`?
+### What is `out/nm_js2wasm_node_fs.imports.js`?
 
-Alongside `nm_node_fs.wasm`, js2wasm emits **`nm_node_fs.imports.js`** (plus `nm_node_fs.d.ts`).
+Alongside `nm_js2wasm_node_fs.wasm`, js2wasm emits **`nm_js2wasm_node_fs.imports.js`** (plus `nm_js2wasm_node_fs.d.ts`).
 It is the **generated host-imports glue** a compiled module needs when you
 instantiate it from a JavaScript host. It re-exports `createImports`,
 `instantiateBytes`, and `instantiateFromUrl` from the `js2wasm` runtime package,
 wiring up the module's import manifest and string pool:
 
 ```js
-import { instantiateBytes } from "./out/nm_node_fs.imports.js";
+import { instantiateBytes } from "./out/nm_js2wasm_node_fs.imports.js";
 const { instance } = await instantiateBytes(wasmBytes, deps, options);
 instance.exports.main();
 ```
@@ -207,8 +207,8 @@ instance.exports.main();
 For **this** example it is **not used at runtime**: the Native Messaging host
 is a fully standalone `--target wasi` module whose only imports are the WASI
 preview1 syscalls (`fd_read`/`fd_write`), which the runtime — `wasmtime`,
-`wasmer`, `wazero`, or Node's WASI — supplies directly. So the `nm_node_fs.sh`
-wrapper launches `nm_node_fs.wasm` under a WASI runtime and `nm_node_fs.imports.js` is
+`wasmer`, `wazero`, or Node's WASI — supplies directly. So the `nm_js2wasm_node_fs.sh`
+wrapper launches `nm_js2wasm_node_fs.wasm` under a WASI runtime and `nm_js2wasm_node_fs.imports.js` is
 never imported.
 
 The glue file is emitted unconditionally by the compiler because the **same
@@ -219,7 +219,7 @@ WASI path it is a harmless extra artifact you can ignore or delete.
 
 ## Run it under a WASI runtime
 
-`nm_node_fs.sh` wraps the runtime invocation. `wasmtime` is **not bundled** with this
+`nm_js2wasm_node_fs.sh` wraps the runtime invocation. `wasmtime` is **not bundled** with this
 repo — install it from <https://wasmtime.dev> (or use `wasmer` /
 [wazero](https://github.com/tetratelabs/wazero); see
 [`../wasi/README.md`](../wasi/README.md) for the full runtime matrix and how to
@@ -230,7 +230,7 @@ message. The 4-byte prefix below (`\x0d\x00\x00\x00`) declares a 13-byte body
 `{"ping":true}`:
 
 ```bash
-printf '\x0d\x00\x00\x00{"ping":true}' | ./examples/native-messaging/nm_node_fs.sh
+printf '\x0d\x00\x00\x00{"ping":true}' | ./examples/native-messaging/nm_js2wasm_node_fs.sh
 ```
 
 You'll see the host's stderr diagnostic (received-length + decoded body
@@ -282,17 +282,17 @@ the compiled module's linear memory below a 512 MiB cap.
 
 > If you don't have a WASI runtime installed, you can still confirm the module
 > is valid the same way the [`../wasi/README.md`](../wasi/README.md) Node
-> snippet does — `WebAssembly.compile(readFileSync('out/nm_node_fs.wasm'))` — and
+> snippet does — `WebAssembly.compile(readFileSync('out/nm_js2wasm_node_fs.wasm'))` — and
 > drive it against js2wasm's own `buildWasiPolyfill()` for a JS-side
 > round-trip.
 
 ## Wire it into the browser
 
-1. **Build** `out/nm_node_fs.wasm` (above) and make sure `nm_node_fs.sh` is executable
-   (`chmod +x nm_node_fs.sh`).
+1. **Build** `out/nm_js2wasm_node_fs.wasm` (above) and make sure `nm_js2wasm_node_fs.sh` is executable
+   (`chmod +x nm_js2wasm_node_fs.sh`).
 
-2. **Edit `nm_node_fs.json`**:
-   - `path` → the **absolute** path to `nm_node_fs.sh` (browsers require an absolute
+2. **Edit `nm_js2wasm_node_fs.json`**:
+   - `path` → the **absolute** path to `nm_js2wasm_node_fs.sh` (browsers require an absolute
      path and does not set a predictable working directory), and make sure the file is
      set to executable.
    - `allowed_origins` → `chrome-extension://YOUR_EXTENSION_ID/` for the
@@ -303,20 +303,20 @@ the compiled module's linear memory below a 512 MiB cap.
 
    | Platform | Manifest location                                                                                                                             |
    | -------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-   | Linux    | `~/.config/google-chrome/NativeMessagingHosts/nm_node_fs.json`                                                                                |
-   | macOS    | `~/Library/Application Support/Google/Chrome/NativeMessagingHosts/nm_node_fs.json`                                                            |
-   | Windows  | a registry key `HKCU\Software\Google\Chrome\NativeMessagingHosts\nm_node_fs` whose default value is the absolute path to the manifest `.json` |
+   | Linux    | `~/.config/google-chrome/NativeMessagingHosts/nm_js2wasm_node_fs.json`                                                                                |
+   | macOS    | `~/Library/Application Support/Google/Chrome/NativeMessagingHosts/nm_js2wasm_node_fs.json`                                                            |
+   | Windows  | a registry key `HKCU\Software\Google\Chrome\NativeMessagingHosts\nm_js2wasm_node_fs` whose default value is the absolute path to the manifest `.json` |
 
    The manifest **filename** must match the host `name` field
-   (`nm_node_fs`). On Windows, `nm_node_fs.sh` won't run directly —
-   use a `run.bat` (`@echo off` + `wasmtime "%~dp0out\nm_node_fs.wasm"`) and point
+   (`nm_js2wasm_node_fs`). On Windows, `nm_js2wasm_node_fs.sh` won't run directly —
+   use a `run.bat` (`@echo off` + `wasmtime "%~dp0out\nm_js2wasm_node_fs.wasm"`) and point
    `path` at the `.bat`.
 
 4. **Connect from the extension.** With the `nativeMessaging` permission in the
    extension manifest:
 
    ```js
-   const port = chrome.runtime.connectNative("nm_node_fs");
+   const port = chrome.runtime.connectNative("nm_js2wasm_node_fs");
    port.onMessage.addListener((msg) => console.log("from host:", msg));
    port.onDisconnect.addListener((_) => {
      console.log("host disconnected");

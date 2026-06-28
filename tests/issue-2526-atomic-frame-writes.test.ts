@@ -12,7 +12,7 @@ import { compile } from "../src/index.js";
 import { buildNodeFsShim } from "../scripts/build-node-fs-shim.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const hostPath = join(here, "..", "examples", "native-messaging", "nm_node_fs.ts");
+const hostPath = join(here, "..", "examples", "native-messaging", "nm_js2wasm_node_fs.ts");
 const FRAME_CHUNK = 1024 * 1024;
 
 // WASI shim that records the SIZE of every fd=1 write (not just the bytes).
@@ -96,7 +96,7 @@ function frame(jsonBody: string): Uint8Array {
 describe("#2526 Native Messaging host — atomic frame writes", () => {
   it("writes a small (<=1 MiB) message as one fd_write (no bare 4-byte length write)", async () => {
     const r = await compile(readFileSync(hostPath, "utf-8"), {
-      fileName: "nm_node_fs.ts",
+      fileName: "nm_js2wasm_node_fs.ts",
       target: "wasi",
       link: ["node:fs"],
     });
@@ -109,7 +109,7 @@ describe("#2526 Native Messaging host — atomic frame writes", () => {
 
   it("writes each re-chunked frame of a >1 MiB message atomically (writes == frames, none is 4 bytes)", async () => {
     const r = await compile(readFileSync(hostPath, "utf-8"), {
-      fileName: "nm_node_fs.ts",
+      fileName: "nm_js2wasm_node_fs.ts",
       target: "wasi",
       link: ["node:fs"],
     });

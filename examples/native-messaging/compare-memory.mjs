@@ -27,8 +27,8 @@
 //   # auto-download the linux build for the host arch
 //   node examples/native-messaging/compare-memory.mjs --download 44.0.2,45.0.0
 //
-// Sources default to nm_node_fs.ts (this repo's host) and, if present,
-// nm_node_fs_guest.ts. Override with --source LABEL=FILE (repeatable).
+// Sources default to nm_js2wasm_node_fs.ts (this repo's host) and, if present,
+// nm_js2wasm_node_fs_guest.ts. Override with --source LABEL=FILE (repeatable).
 
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -315,8 +315,8 @@ async function main() {
 
     // Resolve sources.
     if (opts.sources.length === 0) {
-      opts.sources.push({ label: "ours", file: join(SCRIPT_DIR, "nm_node_fs.ts") });
-      const guest = join(SCRIPT_DIR, "nm_node_fs_guest.ts");
+      opts.sources.push({ label: "ours", file: join(SCRIPT_DIR, "nm_js2wasm_node_fs.ts") });
+      const guest = join(SCRIPT_DIR, "nm_js2wasm_node_fs_guest.ts");
       if (existsSync(guest)) opts.sources.push({ label: "his", file: guest });
     }
 

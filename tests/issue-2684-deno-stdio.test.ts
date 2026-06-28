@@ -116,16 +116,16 @@ export function main(): void { writeSync(1, "hi\\n"); }
     expect(wat).not.toContain("Deno");
   });
 
-  it("the nm_deno.ts example compiles to a pure-WASI P1 module", async () => {
+  it("the nm_js2wasm_deno.ts example compiles to a pure-WASI P1 module", async () => {
     const examplePath = join(
       dirname(fileURLToPath(import.meta.url)),
       "..",
       "examples",
       "native-messaging",
-      "nm_deno.ts",
+      "nm_js2wasm_deno.ts",
     );
     const src = readFileSync(examplePath, "utf-8");
-    const result = await compile(src, { fileName: "nm_deno.ts", target: "wasi" });
+    const result = await compile(src, { fileName: "nm_js2wasm_deno.ts", target: "wasi" });
     expect(result.success, result.success ? "" : result.errors?.[0]?.message).toBe(true);
     const wat = result.wat ?? "";
     const imports = [...wat.matchAll(/\(import "([^"]+)" "[^"]+"/g)].map((m) => m[1]);
@@ -167,16 +167,16 @@ export function main(): void { writeSync(1, "hi\\n"); }
       expect(out.length).toBe(0);
     });
 
-    it("the nm_deno.ts example round-trips multiple frames incl. a >window body", async () => {
+    it("the nm_js2wasm_deno.ts example round-trips multiple frames incl. a >window body", async () => {
       const examplePath = join(
         dirname(fileURLToPath(import.meta.url)),
         "..",
         "examples",
         "native-messaging",
-        "nm_deno.ts",
+        "nm_js2wasm_deno.ts",
       );
       const src = readFileSync(examplePath, "utf-8");
-      const result = await compile(src, { fileName: "nm_deno.ts", target: "wasi" });
+      const result = await compile(src, { fileName: "nm_js2wasm_deno.ts", target: "wasi" });
       expect(result.success).toBe(true);
 
       const frame = (body: number[]): Buffer => {
@@ -190,7 +190,7 @@ export function main(): void { writeSync(1, "hi\\n"); }
       const big: number[] = [];
       for (let i = 0; i < 150000; i++) big.push((i * 7 + 3) & 0xff); // > 64 KiB window
       const input = Buffer.concat([frame(small), frame(big)]);
-      const out = run(result.binary!, "nm_deno", input);
+      const out = run(result.binary!, "nm_js2wasm_deno", input);
       expect(Buffer.compare(out, input)).toBe(0);
     });
   });
