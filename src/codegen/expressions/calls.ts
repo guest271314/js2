@@ -72,6 +72,7 @@ import {
   hoistLetConstWithTdz,
   hoistVarDeclarations,
   nativeStringType,
+  reserveVecMethodHelper,
   resolveWasmType,
   STRING_METHODS,
   TYPED_ARRAY_NAMES,
@@ -11088,6 +11089,121 @@ function compileCallExpression(
           fctx.body.push({ op: "local.get", index: argsVecLocal });
           fctx.body.push({ op: "call", funcIdx: dispatchResolvedIdx });
           return { kind: "externref" };
+        }
+
+        // (#2784 S3) Native-vec-aware method dispatch. A `.push`/`.pop` on an
+        // `any`/externref receiver that is actually a NATIVE vec (a reconstructed-
+        // fnctor `T[]` field read as externref — acorn's `this.scopeStack`) MUST use
+        // the WASM `__vec_push`/`__vec_pop` (which mutate the native array), NOT the
+        // host `__extern_method_call` bridge. The host cannot introspect the opaque
+        // WasmGC vec-struct, so a host `.push` lands the element in a JS-side array
+        // that the native `[i]` read (`__vec_get`) never sees — a read/write STORAGE
+        // SPLIT that loses the stored struct's identity (the #2784 NaN/hang). Guard:
+        // `ref.test` the registered vec carriers; on hit call the native op, else
+        // fall through to the host bridge in the `else` arm. Host/gc mode only (acorn
+        // dogfoods there); standalone keeps the existing path (a noted follow-up).
+        if (!ctx.standalone && (methodName === "push" || methodName === "pop") && ctx.vecTypeMap.size > 0) {
+          // (#2784 S3) Add ALL late imports FIRST and flush, so the index space is
+          // settled BEFORE reserving the native-vec helper funcIdx (a function push,
+          // which does not itself shift). Reserving the helper before these imports
+          // would leave its baked funcIdx stale after the import shift.
+          const mcIdx = ensureLateImport(
+            ctx,
+            "__extern_method_call",
+            [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
+            [{ kind: "externref" }],
+          );
+          const arrNewIdx = ensureLateImport(ctx, "__js_array_new", [], [{ kind: "externref" }]);
+          const arrPushIdx = ensureLateImport(
+            ctx,
+            "__js_array_push",
+            [{ kind: "externref" }, { kind: "externref" }],
+            [],
+          );
+          const boxNumIdx =
+            methodName === "push"
+              ? ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }])
+              : undefined;
+          addStringConstantGlobal(ctx, methodName);
+          flushLateImportShifts(ctx, fctx);
+          // Reserve the helper AFTER the imports settle — its funcIdx is now final.
+          // (Its body is filled in the finalize vec-export pass.)
+          const vecOpIdx = reserveVecMethodHelper(ctx, methodName === "push" ? "push" : "pop");
+          if (
+            vecOpIdx !== undefined &&
+            mcIdx !== undefined &&
+            arrNewIdx !== undefined &&
+            arrPushIdx !== undefined &&
+            (methodName === "pop" || boxNumIdx !== undefined)
+          ) {
+            // Receiver → externref → recvLocal.
+            const recvT = compileExpression(ctx, fctx, propAccess.expression, { kind: "externref" });
+            if (recvT && recvT.kind !== "externref") coerceType(ctx, fctx, recvT, { kind: "externref" });
+            else if (!recvT) fctx.body.push({ op: "ref.null.extern" } as Instr);
+            const recvLocal = allocLocal(fctx, `__nvm_recv_${fctx.locals.length}`, { kind: "externref" });
+            fctx.body.push({ op: "local.set", index: recvLocal } as Instr);
+            // push's single element → argLocal (evaluate side effects once, up front).
+            let argLocal: number | undefined;
+            if (methodName === "push") {
+              const a = expr.arguments[0];
+              if (a) {
+                const at = compileExpression(ctx, fctx, a, { kind: "externref" });
+                if (at && at.kind !== "externref") coerceType(ctx, fctx, at, { kind: "externref" });
+                else if (!at) fctx.body.push({ op: "ref.null.extern" } as Instr);
+              } else {
+                fctx.body.push({ op: "ref.null.extern" } as Instr);
+              }
+              argLocal = allocLocal(fctx, `__nvm_arg_${fctx.locals.length}`, { kind: "externref" });
+              fctx.body.push({ op: "local.set", index: argLocal } as Instr);
+            }
+            // isVec = OR of ref.test over every registered vec carrier.
+            const anyTmp = allocLocal(fctx, `__nvm_any_${fctx.locals.length}`, { kind: "anyref" } as ValType);
+            fctx.body.push({ op: "local.get", index: recvLocal } as Instr);
+            fctx.body.push({ op: "any.convert_extern" } as Instr);
+            fctx.body.push({ op: "local.set", index: anyTmp } as Instr);
+            let emitted = false;
+            for (const vi of new Set(ctx.vecTypeMap.values())) {
+              fctx.body.push({ op: "local.get", index: anyTmp } as Instr);
+              fctx.body.push({ op: "ref.test", typeIdx: vi } as Instr);
+              if (emitted) fctx.body.push({ op: "i32.or" } as Instr);
+              emitted = true;
+            }
+            // THEN (native vec op) — emit then splice into a detached arm.
+            const thenStart = fctx.body.length;
+            if (methodName === "push") {
+              fctx.body.push({ op: "local.get", index: recvLocal } as Instr);
+              fctx.body.push({ op: "local.get", index: argLocal! } as Instr);
+              fctx.body.push({ op: "call", funcIdx: vecOpIdx } as Instr); // -> i32 new length
+              fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+              fctx.body.push({ op: "call", funcIdx: boxNumIdx! } as Instr); // -> externref
+            } else {
+              fctx.body.push({ op: "local.get", index: recvLocal } as Instr);
+              fctx.body.push({ op: "call", funcIdx: vecOpIdx } as Instr); // -> externref
+            }
+            const thenInstrs = fctx.body.splice(thenStart);
+            // ELSE (host bridge) — build the args array, then __extern_method_call.
+            const elseStart = fctx.body.length;
+            fctx.body.push({ op: "call", funcIdx: arrNewIdx } as Instr);
+            const argsLocal = allocLocal(fctx, `__nvm_args_${fctx.locals.length}`, { kind: "externref" });
+            fctx.body.push({ op: "local.set", index: argsLocal } as Instr);
+            if (methodName === "push") {
+              fctx.body.push({ op: "local.get", index: argsLocal } as Instr);
+              fctx.body.push({ op: "local.get", index: argLocal! } as Instr);
+              fctx.body.push({ op: "call", funcIdx: arrPushIdx } as Instr);
+            }
+            fctx.body.push({ op: "local.get", index: recvLocal } as Instr);
+            fctx.body.push(...stringConstantExternrefInstrs(ctx, methodName));
+            fctx.body.push({ op: "local.get", index: argsLocal } as Instr);
+            fctx.body.push({ op: "call", funcIdx: mcIdx } as Instr);
+            const elseInstrs = fctx.body.splice(elseStart);
+            fctx.body.push({
+              op: "if",
+              blockType: { kind: "val", type: { kind: "externref" } as ValType },
+              then: thenInstrs,
+              else: elseInstrs,
+            } as Instr);
+            return { kind: "externref" };
+          }
         }
 
         // (#799 WI3) Generic host-delegated method call for any/externref receivers.

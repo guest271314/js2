@@ -39,6 +39,7 @@ import { emitSymbolDescLoad } from "./symbol-native.js";
 import {
   addUnionImports,
   classifyTypedArrayType,
+  reserveVecMethodHelper,
   resolveWasmType,
   TYPED_ARRAY_NAMES,
   typedArrayPackedSignedness,
@@ -6241,6 +6242,71 @@ export function compileElementAccessBody(
 ): ValType | null {
   // Externref element access: obj[key] → host import __extern_get(obj, externref) → externref
   if (objType.kind === "externref") {
+    // (#2784 S3) Native-vec-aware element read. A numeric `recv[i]` on an
+    // `any`/externref receiver that is actually a NATIVE vec (a reconstructed-
+    // fnctor `T[]` field read as externref — acorn's `this.scopeStack[i]`) MUST use
+    // the WASM `__vec_get` (native `array.get`), NOT the host `__extern_get`. The
+    // host can't read the opaque WasmGC vec, so a host string-keyed read of a
+    // native vec returns null → the element's struct identity is lost (the #2784
+    // storage split, symmetric with the `.push` fix in calls.ts). Guard: ref.test
+    // the vec carriers; on hit call `__vec_get(recv, i32(idx))`, else the host
+    // `__extern_get(recv, boxed-idx)`. Host/gc only (standalone's `__extern_get_idx`
+    // already ref.tests `$ObjVec`); numeric index only (a string key is a genuine
+    // property, never a vec index).
+    if (!ctx.standalone && ctx.vecTypeMap.size > 0 && isNumericIndexExpression(ctx, expr.argumentExpression)) {
+      const vecGetIdx = ctx.funcMap.get("__vec_get");
+      const extGetIdx = ensureLateImport(
+        ctx,
+        "__extern_get",
+        [{ kind: "externref" }, { kind: "externref" }],
+        [{ kind: "externref" }],
+      );
+      const boxNumIdx = ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
+      flushLateImportShifts(ctx, fctx);
+      const vgIdx = vecGetIdx ?? reserveVecMethodHelper(ctx, "get");
+      if (vgIdx !== undefined && extGetIdx !== undefined && boxNumIdx !== undefined) {
+        // recv externref is on the stack → recvLocal.
+        const recvLocal = allocLocal(fctx, `__nve_recv_${fctx.locals.length}`, { kind: "externref" });
+        fctx.body.push({ op: "local.set", index: recvLocal } as Instr);
+        // index → f64 → idxLocal (numeric index; reused as i32 for vec, boxed for host).
+        compileExpression(ctx, fctx, expr.argumentExpression, { kind: "f64" });
+        const idxLocal = allocLocal(fctx, `__nve_idx_${fctx.locals.length}`, { kind: "f64" });
+        fctx.body.push({ op: "local.set", index: idxLocal } as Instr);
+        // isVec = OR of ref.test over the registered vec carriers.
+        const anyTmp = allocLocal(fctx, `__nve_any_${fctx.locals.length}`, { kind: "anyref" } as ValType);
+        fctx.body.push({ op: "local.get", index: recvLocal } as Instr);
+        fctx.body.push({ op: "any.convert_extern" } as Instr);
+        fctx.body.push({ op: "local.set", index: anyTmp } as Instr);
+        let emitted = false;
+        for (const vi of new Set(ctx.vecTypeMap.values())) {
+          fctx.body.push({ op: "local.get", index: anyTmp } as Instr);
+          fctx.body.push({ op: "ref.test", typeIdx: vi } as Instr);
+          if (emitted) fctx.body.push({ op: "i32.or" } as Instr);
+          emitted = true;
+        }
+        // THEN: __vec_get(recv, i32(idx)).
+        const thenStart = fctx.body.length;
+        fctx.body.push({ op: "local.get", index: recvLocal } as Instr);
+        fctx.body.push({ op: "local.get", index: idxLocal } as Instr);
+        fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
+        fctx.body.push({ op: "call", funcIdx: vgIdx } as Instr);
+        const thenInstrs = fctx.body.splice(thenStart);
+        // ELSE: __extern_get(recv, box(idx)).
+        const elseStart = fctx.body.length;
+        fctx.body.push({ op: "local.get", index: recvLocal } as Instr);
+        fctx.body.push({ op: "local.get", index: idxLocal } as Instr);
+        fctx.body.push({ op: "call", funcIdx: boxNumIdx } as Instr);
+        fctx.body.push({ op: "call", funcIdx: extGetIdx } as Instr);
+        const elseInstrs = fctx.body.splice(elseStart);
+        fctx.body.push({
+          op: "if",
+          blockType: { kind: "val", type: { kind: "externref" } as ValType },
+          then: thenInstrs,
+          else: elseInstrs,
+        } as Instr);
+        return { kind: "externref" };
+      }
+    }
     // (#2166 PR-C2) A NUMERIC index on a standalone externref must go through
     // `__extern_get_idx(v, f64)`, not the string-keyed `__extern_get`. The
     // wrapped value can be an `$ObjVec` (the externref array vector produced by
