@@ -1816,23 +1816,15 @@ export function compileStringBinaryOp(
       }
     }
   } else if (op === ts.SyntaxKind.PlusToken && leftType && (leftType.kind === "ref" || leftType.kind === "ref_null")) {
-    // #2022 — `+` is a ToPrimitive(default) site. Convert the struct ref to an
-    // externref (bare extern.convert_any) and route it through
-    // `__extern_to_string_default`, which runs valueOf-first ToPrimitive on the
-    // wasmGC struct. (Was `coerceType(..., "string")`, which walks
-    // @@toPrimitive("string")/toString — the wrong hint for `+`.)
-    coerceType(ctx, fctx, leftType, { kind: "externref" });
-    const toStrIdx = ensureLateImport(
-      ctx,
-      "__extern_to_string_default",
-      [{ kind: "externref" }],
-      [{ kind: "externref" }],
-    );
-    flushLateImportShifts(ctx, fctx);
-    const finalIdx = ctx.funcMap.get("__extern_to_string_default") ?? toStrIdx;
-    if (finalIdx !== undefined) {
-      fctx.body.push({ op: "call", funcIdx: finalIdx });
-    }
+    // #2022 — `+` is a ToPrimitive(default) site. Delegate to the coercion
+    // engine's default-hint ToString: it routes opaque structs through the
+    // valueOf-first host helper `__extern_to_string_default`, EXCEPT a nominal
+    // struct whose only ToPrimitive method is `toString` (no valueOf /
+    // @@toPrimitive), which it dispatches IN-WASM so it also works during the
+    // module START function (#2795 — `"" + new C()` at top level previously
+    // printed "[object Object]" because the host helper couldn't reach
+    // `__call_toString` before `setExports`).
+    emitToString(ctx, fctx, leftType, leftTsType, "default");
   }
   // For equality/inequality ops: String wrapper objects (new String("x")) are externrefs
   // but NOT wasm:js-string strings — the `equals` builtin would throw a WebAssembly trap.
@@ -1899,21 +1891,11 @@ export function compileStringBinaryOp(
     rightType &&
     (rightType.kind === "ref" || rightType.kind === "ref_null")
   ) {
-    // #2022 — `+` is a ToPrimitive(default) site. Convert the struct ref to an
-    // externref and route through `__extern_to_string_default` (valueOf-first)
-    // rather than `coerceType(..., "string")` (toString-first, wrong for `+`).
-    coerceType(ctx, fctx, rightType, { kind: "externref" });
-    const toStrIdx = ensureLateImport(
-      ctx,
-      "__extern_to_string_default",
-      [{ kind: "externref" }],
-      [{ kind: "externref" }],
-    );
-    flushLateImportShifts(ctx, fctx);
-    const finalIdx = ctx.funcMap.get("__extern_to_string_default") ?? toStrIdx;
-    if (finalIdx !== undefined) {
-      fctx.body.push({ op: "call", funcIdx: finalIdx });
-    }
+    // #2022 / #2795 — see the symmetric left-operand branch above. Delegate to
+    // the coercion engine's default-hint ToString so a toString-only nominal
+    // struct dispatches in-wasm (START-safe) while valueOf/@@toPrimitive classes
+    // keep the host valueOf-first helper.
+    emitToString(ctx, fctx, rightType, rightTsType, "default");
   }
   // Unwrap right-side String wrapper for equality/inequality (same as left above)
   const isRightStringWrapper =
