@@ -4079,6 +4079,65 @@ function lowerPrefixUnary(expr: ts.PrefixUnaryExpression, cx: LowerCtx): IrValue
   }
 }
 
+/**
+ * #2781 (hybrid Row 7) — TS-type-keyed primitive classifier. The reusable
+ * operand-type proof shared by the binary fast paths (and, going forward, rows
+ * 3 packed-`i32` and 5 unboxed-number-locals, which need the same "provably
+ * number / does-not-escape-to-`any`" judgement).
+ *
+ * Returns the provable primitive class of a TS type for the purpose of
+ * discharging a fast-path safety predicate `P`:
+ *   - `"number"`  — provably a pure number: `NumberLike` (`Number |
+ *     NumberLiteral`, incl. numeric enum literals), or a union whose EVERY
+ *     constituent is provably number.
+ *   - `"string"`  — provably a pure string: `StringLike` (`String |
+ *     StringLiteral`), template-literal / string-mapping types (always strings
+ *     at runtime), or an all-string union.
+ *   - `"unprovable"` — `any` / `unknown` / `object` / `boolean` (= the
+ *     `true | false` union of non-number/string literals) / `bigint` /
+ *     `symbol` / `null` / `undefined` / a MIXED `number | string` union /
+ *     intersections / anything else. Only the SAFE dynamic lowering is correct.
+ *
+ * CRITICAL (the Row-7 trap that parked two prior attempts): this keys on the TS
+ * *type*, NEVER the lowered Wasm kind. `number`, `boolean` and `symbol` all
+ * collapse to `i32` / `f64` at the Wasm level, so the kind cannot distinguish a
+ * numeric-add operand from a boolean / `any` one.
+ */
+const STRING_PROOF_FLAGS = ts.TypeFlags.StringLike | ts.TypeFlags.TemplateLiteral | ts.TypeFlags.StringMapping;
+
+function classifyPrimitiveProof(t: ts.Type): "number" | "string" | "unprovable" {
+  // Union (incl. the intrinsic `boolean`, which is internally `true | false`):
+  // every constituent must share the SAME provable class. Any unprovable
+  // constituent, a mixed number/string union, or an empty (`never`) union →
+  // unprovable.
+  if (t.isUnion()) {
+    let acc: "number" | "string" | null = null;
+    for (const c of t.types) {
+      const cc = classifyPrimitiveProof(c);
+      if (cc === "unprovable") return "unprovable";
+      if (acc === null) acc = cc;
+      else if (acc !== cc) return "unprovable";
+    }
+    return acc ?? "unprovable";
+  }
+  const f = t.flags;
+  if (f & ts.TypeFlags.NumberLike) return "number";
+  if (f & STRING_PROOF_FLAGS) return "string";
+  return "unprovable";
+}
+
+/**
+ * #2781 — per-operand wrapper around {@link classifyPrimitiveProof}. Returns
+ * `"no-checker"` when no TS checker is available, so the caller can leave the
+ * existing kind-based dispatch unchanged (mirrors #2780's no-checker arm: with
+ * no checker there is no specialization whose unsoundness we would be masking).
+ */
+function proveAdditiveOperand(node: ts.Expression, cx: LowerCtx): "number" | "string" | "unprovable" | "no-checker" {
+  const checker = cx.checker;
+  if (!checker) return "no-checker";
+  return classifyPrimitiveProof(checker.getTypeAtLocation(node));
+}
+
 function lowerBinary(expr: ts.BinaryExpression, cx: LowerCtx, hint: IrType): IrValueId {
   const op = expr.operatorToken.kind;
 
@@ -4122,6 +4181,39 @@ function lowerBinary(expr: ts.BinaryExpression, cx: LowerCtx, hint: IrType): IrV
   // recurse into a bare NullKeyword and throw).
   const nullFold = tryFoldNullCompare(expr, op, cx);
   if (nullFold !== null) return nullFold;
+
+  // #2781 (hybrid Row 7) — `+` operand-type proof gate. Run BEFORE operand
+  // lowering (mirrors #2780's pre-element widening gate), so no dead operand
+  // instrs are emitted and the demotion cause is the explicit HI reason rather
+  // than an incidental downstream "mixed string/non-string" / `requireF64`
+  // throw. `+` is string-concat-OR-numeric-add chosen at RUNTIME (ToPrimitive on
+  // each operand, then "if either is a string → concatenate, else add"). The
+  // kind-based dispatch below picks concat-vs-add from the lowered Wasm kind,
+  // but per the Hybrid Invariant a T-directed specialization must be discharged
+  // by a proof on the TS *type*, never the Wasm kind: number / boolean / symbol
+  // all collapse to f64 / i32, so the kind alone cannot tell a genuine
+  // numeric-add operand from an `any` / string / `string | number` one the f64
+  // hint coerced opaquely (the Row-7 trap). Prove BOTH operands number (→ the
+  // unboxed numeric add below) or BOTH string (→ `emitStringConcat`); anything
+  // unprovable — `any` / union / a MIXED number+string pair — demotes to the
+  // SAFE legacy dynamic `+` (`binary-ops.ts` `emitAnyAdd`, ToPrimitive +
+  // string-concat-or-add). No checker → leave the existing kind-based dispatch
+  // unchanged (#2780's no-checker arm). The same operand proof
+  // (`proveAdditiveOperand` / `classifyPrimitiveProof`) is the reusable
+  // infrastructure rows 3 / 5 adopt.
+  if (op === ts.SyntaxKind.PlusToken) {
+    const lProof = proveAdditiveOperand(expr.left, cx);
+    const rProof = proveAdditiveOperand(expr.right, cx);
+    if (lProof !== "no-checker" && rProof !== "no-checker") {
+      if (lProof === "unprovable" || rProof === "unprovable" || lProof !== rProof) {
+        throw new Error(
+          `ir/from-ast: '+' operands not provably both-number or both-string ` +
+            `(${lProof}/${rProof}) — the unboxed numeric-add / string-concat fast ` +
+            `path is unsound here; demote to the SAFE dynamic '+' (emitAnyAdd) in ${cx.funcName}`,
+        );
+      }
+    }
+  }
 
   const lhs = lowerExpr(expr.left, cx, irVal({ kind: "f64" }));
   const rhs = lowerExpr(expr.right, cx, irVal({ kind: "f64" }));
