@@ -38,6 +38,7 @@ import { emitUndefined, patchStructNewForAddedField } from "./expressions/late-i
 import { emitSymbolDescLoad } from "./symbol-native.js";
 import {
   addUnionImports,
+  classifyTypedArrayType,
   resolveWasmType,
   TYPED_ARRAY_NAMES,
   typedArrayPackedSignedness,
@@ -5415,6 +5416,81 @@ export function isSafeBoundsEliminated(fctx: FunctionContext, expr: ts.ElementAc
   return fctx.safeIndexedArrays.has(arrayVar + ":" + indexVar);
 }
 
+/**
+ * (#2760 — hybrid type-soundness floor F1) SAFE plain-array OOB read for a
+ * PRIMITIVE element (`f64` `number[]` / `i32` `boolean[]`): push the in-bounds
+ * element **boxed to externref**, or JS `undefined` when the index is out of
+ * bounds. An `f64`/`i32` cannot represent `undefined`, so the JS-correct (SAFE)
+ * lowering of a read whose index is NOT provably in-bounds is the
+ * boxed-or-undefined externref — never the type-default sentinel (sNaN / 0).
+ * Per the hybrid invariant, the unboxed fast path is kept for the *proven*
+ * in-bounds read (`isSafeBoundsEliminated`, the counted-loop proof) at the call
+ * site; only the unproven read pays the box.
+ *
+ * **Call-site-owned policy, NOT a shared-helper flip.** The shared
+ * `emitBoundsCheckedArrayGet` default is deliberately left untouched — its
+ * `$__subview`, typed-array, and array-method internal callers keep their own
+ * OOB semantics. Flipping the shared `useUndefinedSentinel` default was the S2
+ * leak that regressed `Array.prototype.map`-on-array-like (#2198). This helper
+ * is reached only from the two `compileElementAccessBody` plain-array value-read
+ * call sites, gated on a genuine (non-typed-array) array receiver.
+ *
+ * Stack in:  [arrayref(non-null $arr), i32 index]
+ * Stack out: [externref]
+ */
+function emitPlainArrayUndefinedOobGet(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  arrTypeIdx: number,
+  elementType: ValType,
+): void {
+  // Save index + array ref (consumed by the bounds test AND the bounded read).
+  const idxLocal = allocLocal(fctx, `__oobu_idx_${fctx.locals.length}`, { kind: "i32" });
+  const arrLocal = allocLocal(fctx, `__oobu_arr_${fctx.locals.length}`, { kind: "ref", typeIdx: arrTypeIdx });
+  fctx.body.push({ op: "local.set", index: idxLocal });
+  fctx.body.push({ op: "local.set", index: arrLocal });
+
+  // (1) inBounds = (unsigned) idx < array.len. A negative index wraps to a huge
+  // unsigned value > any length, so it falls into the OOB (undefined) arm too.
+  const inBoundsLocal = allocLocal(fctx, `__oobu_in_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "local.get", index: idxLocal });
+  fctx.body.push({ op: "local.get", index: arrLocal });
+  fctx.body.push({ op: "array.len" });
+  fctx.body.push({ op: "i32.lt_u" } as Instr);
+  fctx.body.push({ op: "local.set", index: inBoundsLocal });
+
+  // (2) Bounded native read (OOB → type-default, never traps), then box to
+  // externref — emitted IMPERATIVELY on `fctx.body` so the box / undefined
+  // late-imports (`__box_number`/`__box_boolean`/`__get_undefined`) register and
+  // index-shift through the normal path. (An earlier version baked these funcIdxs
+  // into detached branch `Instr[]`, which desynced indices — a duplicate
+  // `__box_number` import and a wrong Math.pow arg value.) The branches of the
+  // final select below carry ONLY `local.get`, so nothing inside them can shift.
+  fctx.body.push({ op: "local.get", index: arrLocal });
+  fctx.body.push({ op: "local.get", index: idxLocal });
+  emitBoundsCheckedArrayGet(fctx, arrTypeIdx, elementType, ctx, false);
+  const nativeValueType: ValType =
+    elementType.kind === "i8" || elementType.kind === "i16" ? { kind: "i32" } : elementType;
+  coerceType(ctx, fctx, nativeValueType, { kind: "externref" });
+  const boxedLocal = allocLocal(fctx, `__oobu_box_${fctx.locals.length}`, { kind: "externref" });
+  fctx.body.push({ op: "local.set", index: boxedLocal });
+
+  // (3) `undefined` into a local (host `__get_undefined`, or `ref.null.extern`
+  // under standalone where undefined ≡ null — both via emitUndefined).
+  emitUndefined(ctx, fctx);
+  const undefLocal = allocLocal(fctx, `__oobu_undef_${fctx.locals.length}`, { kind: "externref" });
+  fctx.body.push({ op: "local.set", index: undefLocal });
+
+  // (4) result = inBounds ? boxedValue : undefined. Pure local.get branches.
+  fctx.body.push({ op: "local.get", index: inBoundsLocal });
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "val" as const, type: { kind: "externref" } },
+    then: [{ op: "local.get", index: boxedLocal } as Instr],
+    else: [{ op: "local.get", index: undefLocal } as Instr],
+  } as Instr);
+}
+
 // ── Element access ───────────────────────────────────────────────────
 
 /**
@@ -5676,6 +5752,9 @@ export function compileElementAccess(
   ctx: CodegenContext,
   fctx: FunctionContext,
   expr: ts.ElementAccessExpression,
+  // (#2760 F1) value-context hint — forwarded to compileElementAccessBody so the
+  // primitive OOB→undefined widening is suppressed in a numeric (f64/i32) context.
+  expectedType?: ValType,
 ): ValType | null {
   // Optional chaining: a?.[i] (#2050). Short-circuits on a nullish base — the
   // index expression must NOT evaluate and the result must be undefined-
@@ -5900,7 +5979,7 @@ export function compileElementAccess(
     }
     // After the null check (or provably non-null), the value is guaranteed non-null
     const nonNullObjType: ValType = { kind: "ref", typeIdx: (objType as any).typeIdx };
-    return compileElementAccessBody(ctx, fctx, expr, nonNullObjType);
+    return compileElementAccessBody(ctx, fctx, expr, nonNullObjType, expectedType);
   }
 
   // Null-guard for externref: null[x] and undefined[x] throw TypeError (#775)
@@ -5910,7 +5989,7 @@ export function compileElementAccess(
     }
   }
 
-  return compileElementAccessBody(ctx, fctx, expr, objType);
+  return compileElementAccessBody(ctx, fctx, expr, objType, expectedType);
 }
 
 /**
@@ -5951,6 +6030,15 @@ export function compileElementAccessBody(
   fctx: FunctionContext,
   expr: ts.ElementAccessExpression,
   objType: ValType,
+  // (#2760 F1) The value-context hint the caller is reading this element into.
+  // When it is a NUMERIC kind (f64/i32) the primitive OOB→undefined widening is
+  // suppressed: in a numeric context `undefined` is not observable anyway (it
+  // coerces to NaN/0, which is the JS-correct `ToNumber(undefined)`), and — more
+  // importantly — widening would box→externref and add a late import *during*
+  // argument compilation, shifting a funcIdx a numeric-consuming caller may have
+  // already captured (e.g. `Math.pow(a[i], …)` grabs `Math_pow` before compiling
+  // its args). Keeping the unboxed f64/i32 in numeric context avoids that.
+  expectedType?: ValType,
 ): ValType | null {
   // Externref element access: obj[key] → host import __extern_get(obj, externref) → externref
   if (objType.kind === "externref") {
@@ -6309,6 +6397,22 @@ export function compileElementAccessBody(
     // zero-extend), NOT the storage kind — a signed Int8Array and an unsigned
     // Uint8Array share `i8` storage but read with opposite extension.
     const taSignedness = typedArrayViewSignedness(ctx, expr.expression);
+    // (#2760 — hybrid floor F1) An OOB read of a genuine PLAIN array reads JS
+    // `undefined`, not the type-default sentinel. The policy applies only to a
+    // real array receiver: NOT a typed-array view (kept on its own OOB semantics
+    // — the S2 blast radius) and NOT the `$__regexp_match_vec` exotic (its
+    // index/input/groups fields are property reads with their own spec
+    // semantics; deferred). This F1 slice widens ONLY the PRIMITIVE element kinds
+    // (`number[]` f64 / `boolean[]` i32) — see the element-kind dispatch below;
+    // object-element (`ref`) arrays keep their typed result, and externref
+    // (`any[]`/`string[]`) OOB→undefined is deferred (it trips the
+    // map-on-array-like canary via a pre-existing length bug).
+    const isRegexMatchVec = typeDef.fields.length >= 4 && typeDef.fields[2]?.name === "index";
+    const numericHint = expectedType?.kind === "f64" || expectedType?.kind === "i32";
+    const oobUndefined =
+      !numericHint &&
+      classifyTypedArrayType(ctx.checker.getTypeAtLocation(expr.expression), ctx.checker) === "other" &&
+      !isRegexMatchVec;
     // Unwrap: struct.get data field, then index into backing array
     fctx.body.push({ op: "struct.get", typeIdx, fieldIdx: 1 }); // get data from vec
     // #1179: hint i32 directly for the index. compileExpression will produce
@@ -6334,6 +6438,29 @@ export function compileElementAccessBody(
       // (#2001 S1) Even bounds-eliminated externref reads must map a `$Hole`
       // slot back to `undefined` — the loop guard proves in-bounds, not present.
       if (ctx.usesArrayHoles && arrDef.element.kind === "externref") emitHoleToUndefined(ctx, fctx);
+    } else if (oobUndefined && (arrDef.element.kind === "f64" || arrDef.element.kind === "i32")) {
+      // (#2760 F1) Plain-array OOB → `undefined` for a PRIMITIVE element
+      // (`number[]` f64 / `boolean[]` i32): widen the SAFE result to externref
+      // (box the in-bounds value, OOB → undefined). f64/i32 cannot represent
+      // `undefined`, so the JS-correct lowering of an unproven read is the
+      // boxed-or-undefined externref. Bounds-eliminated reads keep the unboxed
+      // fast path above; only the unproven read pays the box. Call-site-owned
+      // policy — the shared `emitBoundsCheckedArrayGet` default is untouched (its
+      // subview / typed-array / array-method callers are byte-identical; flipping
+      // the shared default was the S2 leak).
+      //
+      // EXTERNREF elements (`any[]`/`string[]`) are intentionally NOT widened to
+      // OOB→undefined here yet: that change trips the canary
+      // `built-ins/Array/prototype/map/15.4.4.19-8-b-2.js`, whose `testResult[2]`
+      // read is an OOB read on a length-0 map-of-array-like result (a separate,
+      // pre-existing map-on-plain-object bug) and passes today only because the
+      // OOB externref default (`null`) coerces to the asserted `false`. Returning
+      // the spec-correct `undefined` exposes that latent bug → a net regression.
+      // Externref OOB→undefined is deferred to a follow-up that first fixes the
+      // map-on-array-like length bug (tracked in the issue file). Externref reads
+      // fall through to the unchanged shared-helper call below.
+      emitPlainArrayUndefinedOobGet(ctx, fctx, arrTypeIdx, arrDef.element);
+      return { kind: "externref" };
     } else {
       // (#2001 S1) Pass `ctx` so the in-bounds `$Hole → undefined` read-boundary
       // mapping fires for an externref-element (`any[]`) vec. (#2593) Thread the
@@ -6361,6 +6488,12 @@ export function compileElementAccessBody(
 
   // (#2593) View-name-driven signedness for a packed i8/i16 typed-array element.
   const taSignednessArr = typedArrayViewSignedness(ctx, expr.expression);
+  // (#2760 F1) Plain-array OOB → JS `undefined` policy (typed-array views keep
+  // their own OOB semantics). A raw array type has no struct fields, so there is
+  // no regex-match-vec exotic to exclude here.
+  const oobUndefinedArr =
+    !(expectedType?.kind === "f64" || expectedType?.kind === "i32") &&
+    classifyTypedArrayType(ctx.checker.getTypeAtLocation(expr.expression), ctx.checker) === "other";
   // Compile index and convert to i32 (#1179: hint i32 directly to skip the
   // f64.convert_i32_s + i32.trunc_sat_f64_s round-trip when the index is
   // already an i32 local or integer literal).
@@ -6384,6 +6517,15 @@ export function compileElementAccessBody(
     // (#2001 S1) Map a `$Hole` slot back to `undefined` on bounds-eliminated
     // externref reads too (in-bounds ≠ present).
     if (ctx.usesArrayHoles && typeDef.element.kind === "externref") emitHoleToUndefined(ctx, fctx);
+  } else if (oobUndefinedArr && (typeDef.element.kind === "f64" || typeDef.element.kind === "i32")) {
+    // (#2760 F1) Plain-array OOB → `undefined` for a PRIMITIVE element
+    // (`number[]`/`boolean[]`): widen to a boxed-or-undefined externref.
+    // Bounds-eliminated reads above keep the unboxed fast path. Externref
+    // elements are NOT widened here (see the matching note at the vec-struct call
+    // site — externref OOB→undefined trips the map-on-array-like canary via a
+    // pre-existing length bug; deferred).
+    emitPlainArrayUndefinedOobGet(ctx, fctx, typeIdx, typeDef.element);
+    return { kind: "externref" };
   } else {
     // (#2001 S1) Pass `ctx` for the in-bounds `$Hole → undefined` mapping.
     // (#2593) Thread the view-name signedness for packed i8/i16 reads.

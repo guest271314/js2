@@ -1255,11 +1255,14 @@ function compileExpressionInner(
   if (ts.isElementAccessExpression(expr)) {
     // (#2128) Same getter-dispatch re-sync as the property-access arm above.
     if (fctx.persistentCallbackWritebacks && fctx.persistentCallbackWritebacks.length > 0) {
-      const readResult = compileElementAccess(ctx, fctx, expr);
+      const readResult = compileElementAccess(ctx, fctx, expr, expectedType);
       fctx.body.push(...fctx.persistentCallbackWritebacks.map((instr) => structuredClone(instr)));
       return readResult;
     }
-    return compileElementAccess(ctx, fctx, expr);
+    // (#2760 F1) Forward the value-context hint so the primitive OOB→undefined
+    // widening is suppressed in a numeric (f64/i32) context (avoids boxing + a
+    // late-import shift under a funcIdx already captured by a numeric caller).
+    return compileElementAccess(ctx, fctx, expr, expectedType);
   }
 
   if (ts.isObjectLiteralExpression(expr)) {
