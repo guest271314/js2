@@ -317,6 +317,34 @@ export function ensureAnyFromExternHelper(ctx: CodegenContext): number | undefin
         { op: "return" },
       ],
     },
+    // (#2792) Symbol box (tag 7): a `__box_symbol_struct` carries an i32 symbol
+    // handle. Classify it as a SYMBOL with the handle in `i32val` so the tag-7
+    // arm of `__any_strict_eq` compares two symbols by handle (=== is true iff
+    // the same id) — never the string-fallback path (which would mis-compare two
+    // distinct boxes of the SAME symbol). Mirrors the boolean (tag 4) arm; guarded
+    // on the struct having been registered (always is, by
+    // addUnionImportsAsNativeFuncs, before this helper is built).
+    ...(ctx.nativeBoxSymbolTypeIdx >= 0
+      ? ([
+          { op: "local.get", index: 1 },
+          { op: "ref.test", typeIdx: ctx.nativeBoxSymbolTypeIdx },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [
+              { op: "i32.const", value: 7 },
+              { op: "local.get", index: 1 },
+              { op: "ref.cast", typeIdx: ctx.nativeBoxSymbolTypeIdx },
+              { op: "struct.get", typeIdx: ctx.nativeBoxSymbolTypeIdx, fieldIdx: 0 },
+              { op: "f64.const", value: 0 },
+              { op: "ref.null", typeIdx: EQ_HEAP_TYPE },
+              { op: "ref.null.extern" },
+              { op: "struct.new", typeIdx: anyTypeIdx },
+              { op: "return" },
+            ],
+          },
+        ] as Instr[])
+      : []),
     ...fallbackStringAny,
   ];
 
@@ -1685,10 +1713,34 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
                                 // string path keeps #2579 boxed-string-eq + #2583 search.
                                 then: tag5StringEqThen(),
                                 else: [
-                                  // null/undefined (tag < 2): both same tag → equal
+                                  // (#2792) tag 7 (symbol): two boxed symbols are
+                                  // equal iff they share the same handle (id) — true
+                                  // for both `==` and `===` (no symbol coercion). The
+                                  // tags are already equal here (the tagA != tagB
+                                  // short-circuit ran), so compare `i32val` (the
+                                  // handle). Without this a symbol box falls into the
+                                  // null/undefined arm below and mis-compares two
+                                  // distinct boxes of the SAME symbol.
                                   { op: "local.get", index: 2 },
-                                  { op: "i32.const", value: 2 },
-                                  { op: "i32.lt_s" },
+                                  { op: "i32.const", value: 7 },
+                                  { op: "i32.eq" },
+                                  {
+                                    op: "if",
+                                    blockType: { kind: "val", type: { kind: "i32" } },
+                                    then: [
+                                      { op: "local.get", index: 0 },
+                                      { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 1 },
+                                      { op: "local.get", index: 1 },
+                                      { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 1 },
+                                      { op: "i32.eq" },
+                                    ],
+                                    else: [
+                                      // null/undefined (tag < 2): both same tag → equal
+                                      { op: "local.get", index: 2 },
+                                      { op: "i32.const", value: 2 },
+                                      { op: "i32.lt_s" },
+                                    ],
+                                  },
                                 ],
                               },
                             ],
@@ -1861,10 +1913,34 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
                                 // string path keeps #2579 boxed-string-eq + #2583 search.
                                 then: tag5StringEqThen(),
                                 else: [
-                                  // null/undefined (tag < 2): both same tag → equal
+                                  // (#2792) tag 7 (symbol): two boxed symbols are
+                                  // equal iff they share the same handle (id) — true
+                                  // for both `==` and `===` (no symbol coercion). The
+                                  // tags are already equal here (the tagA != tagB
+                                  // short-circuit ran), so compare `i32val` (the
+                                  // handle). Without this a symbol box falls into the
+                                  // null/undefined arm below and mis-compares two
+                                  // distinct boxes of the SAME symbol.
                                   { op: "local.get", index: 2 },
-                                  { op: "i32.const", value: 2 },
-                                  { op: "i32.lt_s" },
+                                  { op: "i32.const", value: 7 },
+                                  { op: "i32.eq" },
+                                  {
+                                    op: "if",
+                                    blockType: { kind: "val", type: { kind: "i32" } },
+                                    then: [
+                                      { op: "local.get", index: 0 },
+                                      { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 1 },
+                                      { op: "local.get", index: 1 },
+                                      { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 1 },
+                                      { op: "i32.eq" },
+                                    ],
+                                    else: [
+                                      // null/undefined (tag < 2): both same tag → equal
+                                      { op: "local.get", index: 2 },
+                                      { op: "i32.const", value: 2 },
+                                      { op: "i32.lt_s" },
+                                    ],
+                                  },
                                 ],
                               },
                             ],

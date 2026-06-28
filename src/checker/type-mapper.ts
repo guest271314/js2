@@ -65,7 +65,18 @@ export function mapTsTypeToWasm(type: ts.Type, checker: ts.TypeChecker, fast?: b
     return { kind: "externref" };
   }
 
-  // Symbol types (ESSymbol, UniqueESSymbol) → i32 (unique counter ID)
+  // Symbol types (ESSymbol, UniqueESSymbol) → i32 (unique counter ID).
+  // (#2792) NOT broadly `symbol`-branded here. Branding every symbol local/param
+  // would route ALL symbol→externref coercions through `__box_symbol`, but other
+  // boxing sites (object-literal fields, etc.) still box via `__box_number`. That
+  // mismatch regressed the host `Object/values/symbols-omitted` canary
+  // (`Object.values({key: s})[0] === s` compared a __box_symbol Symbol against a
+  // __box_number Number → false), confirming #2785's reason for deferring broad
+  // branding ("bound blast radius"). The F1 `symbol[]` OOB→undefined read keys on
+  // the TS type instead — `f1ElementBoxType` reconstructs the `symbol` brand at
+  // the read site, so its box choice is self-consistent without branding the
+  // ValType. A future symbol-as-any value-rep pass (#2610) can make ALL symbol
+  // boxing consistent, at which point this can be branded.
   if ((type.flags & ts.TypeFlags.ESSymbol) !== 0 || (type.flags & ts.TypeFlags.UniqueESSymbol) !== 0) {
     return { kind: "i32" };
   }

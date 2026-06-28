@@ -1542,14 +1542,15 @@ export function coerceType(
       }
     }
     // symbol → __box_symbol (takes the i32 handle/id directly; identity-stable
-    // via the host symbol cache). HOST only — standalone has no native
-    // `__box_symbol` yet (#2785 fast-follow), so route to it only when it is
-    // ALREADY registered (the symbol read/literal path pulls it). This keeps the
-    // arm purely additive: a symbol-branded value never silently leaks a host
-    // import into a standalone module, and falls through to the number box if
-    // the helper is absent. The arm is dormant until symbols are branded (the
-    // array-read F1 site defers `symbol[]`); wiring it here makes the primitive
-    // complete so the fast-follow only has to brand + ensure the helper.
+    // via the host symbol cache in host mode, the `__box_symbol_struct` carrier
+    // classified as a SYMBOL — tag 7 — by `__any_from_extern` in standalone).
+    // (#2792) `addUnionImports` above registers `__box_symbol` in BOTH modes
+    // (host import / native synth), so the lookup is present whenever a value is
+    // symbol-branded. The brand is reconstructed only at the F1 `symbol[]` read
+    // site (`f1ElementBoxType`) — symbols are NOT broadly branded in type-mapper
+    // (that mismatched other boxing sites; see the note there). Still guarded:
+    // falls through to the number box if the helper is somehow absent, so the arm
+    // is purely additive and never leaks a host import into a standalone module.
     if (from.symbol === true) {
       const boxSymIdx = ctx.funcMap.get("__box_symbol");
       if (boxSymIdx !== undefined) {
