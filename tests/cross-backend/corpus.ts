@@ -112,13 +112,42 @@ export const CROSS_BACKEND_CORPUS: readonly CrossBackendProgram[] = [
       { fn: "compoundNan", args: [] },
     ],
   },
-  // NOTE: a Uint8Array ToUint8 store cross-backend entry is deliberately NOT
-  // added here — the WasmGC backend has a separate, pre-existing bug where
-  // `new Uint8Array(1)` element stores skip ToUint8 entirely (`u[0]=257` reads
-  // back 257, `u[0]=NaN` reads back NaN), so the two backends diverge for an
-  // unrelated reason. The linear ToUint8 fix is covered directly against the JS
-  // oracle in tests/issue-2715.test.ts; the WasmGC store bug is tracked
-  // separately (follow-up issue).
+  {
+    // #2729 — Uint8Array element store ToUint8 (§7.1.10): the assigned value is
+    // wrapped to a byte (truncate toward zero, modulo 256; NaN/±Infinity → 0)
+    // before storage. The linear backend was fixed in #2715; the WasmGC backend
+    // (#2729) used to store the raw f64 (`u[0]=257`→257, `u[0]=NaN`→NaN). This
+    // entry — removed in #2715 because of that divergence — is restored now both
+    // backends agree.
+    name: "numeric/uint8-store-touint8",
+    category: "numeric",
+    source: `
+      export function wrapOver(): number { const u = new Uint8Array(1); u[0] = 257; return u[0]; }
+      export function wrap256(): number { const u = new Uint8Array(1); u[0] = 256; return u[0]; }
+      export function wrapNeg(): number { const u = new Uint8Array(1); u[0] = -1; return u[0]; }
+      export function wrapNeg257(): number { const u = new Uint8Array(1); u[0] = -257; return u[0]; }
+      export function truncFrac(): number { const u = new Uint8Array(1); u[0] = 3.7; return u[0]; }
+      export function truncBig(): number { const u = new Uint8Array(1); u[0] = 511.5; return u[0]; }
+      export function nanZero(): number { const u = new Uint8Array(1); u[0] = 0 / 0; return u[0]; }
+      export function infZero(): number { const u = new Uint8Array(1); u[0] = 1 / 0; return u[0]; }
+      export function negInfZero(): number { const u = new Uint8Array(1); u[0] = -1 / 0; return u[0]; }
+      export function bigWrap(): number { const u = new Uint8Array(1); u[0] = 1e20; return u[0]; }
+      export function inRange(): number { const u = new Uint8Array(1); u[0] = 200; return u[0]; }
+    `,
+    calls: [
+      { fn: "wrapOver", args: [] },
+      { fn: "wrap256", args: [] },
+      { fn: "wrapNeg", args: [] },
+      { fn: "wrapNeg257", args: [] },
+      { fn: "truncFrac", args: [] },
+      { fn: "truncBig", args: [] },
+      { fn: "nanZero", args: [] },
+      { fn: "infZero", args: [] },
+      { fn: "negInfZero", args: [] },
+      { fn: "bigWrap", args: [] },
+      { fn: "inRange", args: [] },
+    ],
+  },
   {
     // Math.trunc is not yet lowered by the linear backend (Unsupported method
     // call: .trunc()). Tracked here so the gap is visible and the flag drops
