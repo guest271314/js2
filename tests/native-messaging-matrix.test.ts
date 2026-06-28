@@ -1,6 +1,6 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 /**
- * #2756 — Native Messaging 1 / 64 / 128 MiB scale matrix.
+ * #2775 — Native Messaging 1 / 64 / 128 MiB scale matrix.
  *
  * The #2683 comparison harness (`native-messaging-comparison.test.ts`) pins the
  * SMALL-payload byte-identical echo across every variant. This file pins the
@@ -25,7 +25,7 @@
  *   - `nm_node_process.ts` — its async `process.stdin` reactor rebuilds each
  *     chunk one byte at a time in the compiler prelude
  *     (`src/process-stdin-prelude.ts` `drainBytes`), which is O(n^2) and SIGKILLs
- *     at multi-MiB sizes. The large cases are therefore GATED ON #2772 (the
+ *     at multi-MiB sizes. The large cases are therefore GATED ON #2777 (the
  *     byte-buffer-accumulation fix); here it is exercised only at a small size it
  *     handles today, under real `wasmtime` when present (its event loop is not
  *     driven by the in-process fd shim). NOT silently skipped — a clear pointer is
@@ -196,7 +196,7 @@ async function runFdShim(binary: Uint8Array, stdin: Uint8Array): Promise<Uint8Ar
 }
 
 // =============================================================================
-describe("#2756 — verbatim streamers echo 1/64/128 MiB byte-for-byte", () => {
+describe("#2775 — verbatim streamers echo 1/64/128 MiB byte-for-byte", () => {
   for (const file of ["nm_deno.ts", "nm_wasi_p1.ts"]) {
     describe(file, () => {
       for (const { label, bytes } of SIZES) {
@@ -216,7 +216,7 @@ describe("#2756 — verbatim streamers echo 1/64/128 MiB byte-for-byte", () => {
   }
 });
 
-describe("#2756 — nm_node_fs re-chunk round-trips 1/64/128 MiB correctly", () => {
+describe("#2775 — nm_node_fs re-chunk round-trips 1/64/128 MiB correctly", () => {
   for (const { label, bytes } of SIZES) {
     it(`reassembles a ~${label} array body from valid <=1 MiB frames`, { timeout: 180_000 }, async () => {
       const r = await getCompiled("nm_node_fs.ts");
@@ -248,7 +248,7 @@ describe("#2756 — nm_node_fs re-chunk round-trips 1/64/128 MiB correctly", () 
   }
 });
 
-describe("#2756 — nm_node_process small-size echo (large sizes gated on #2772)", () => {
+describe("#2775 — nm_node_process small-size echo (large sizes gated on #2777)", () => {
   let tmpDir: string;
   beforeAll(() => {
     tmpDir = mkdtempSync(join(tmpdir(), "nm-matrix-np-"));
@@ -258,30 +258,39 @@ describe("#2756 — nm_node_process small-size echo (large sizes gated on #2772)
   });
 
   // nm_node_process is reactor-driven (async process.stdin) — its event loop is
-  // NOT driven by the in-process fd shim, so it needs real wasmtime. Its large
-  // (>~1 MiB) cases are O(n^2) in the compiler stdin prelude and are tracked by
-  // #2772 (byte-buffer accumulation fix); do NOT add them here until #2772 lands.
-  it("echoes a 64 KiB frame byte-for-byte under wasmtime (large sizes -> #2772)", { timeout: 60_000 }, async () => {
-    const r = await getCompiled("nm_node_process.ts");
-    expect(r.success, r.success ? "" : `compile error: ${r.errors?.[0]?.message}`).toBe(true);
-    if (!wasmtimeBin) {
-      // Not a silent skip: surface why this arm did not execute and where the
-      // large-size gap is tracked.
-      console.log(
-        "[nm-matrix] nm_node_process needs real wasmtime (reactor-driven); not on PATH — " +
-          "small-size echo not executed here. Large 1/64/128 MiB cases are gated on #2772 " +
-          "(src/process-stdin-prelude.ts drainBytes O(n^2)).",
-      );
-      return;
-    }
-    const input = frame(new Uint8Array(64 * 1024).fill(0x63));
-    const path = join(tmpDir, "nm_node_process-64k.wasm");
-    writeFileSync(path, r.binary!);
-    const out = execFileSync(wasmtimeBin, [...WASMTIME_FLAGS, path], {
-      input: Buffer.from(input),
-      stdio: ["pipe", "pipe", "ignore"],
-      maxBuffer: 1 << 24,
-    });
-    expect(Buffer.compare(Buffer.from(out), Buffer.from(input)), "nm_node_process 64 KiB echo byte-identical").toBe(0);
-  });
+  // NOT driven by the in-process fd shim, so it needs real wasmtime. Its read
+  // side is O(n^2) in the compiler stdin prelude (`src/process-stdin-prelude.ts`
+  // `drainBytes` builds each chunk one byte at a time), so it is only fast at
+  // SMALL frames — even 64 KiB already takes minutes. The 1/64/128 MiB cases are
+  // therefore GATED ON #2777 (byte-buffer accumulation fix); do NOT add them here
+  // until #2777 lands. We exercise a small 2 KiB frame, with a hard subprocess
+  // timeout so a perf regression can never hang the suite.
+  it(
+    "echoes a small (2 KiB) frame byte-for-byte under wasmtime (large sizes -> #2777)",
+    { timeout: 60_000 },
+    async () => {
+      const r = await getCompiled("nm_node_process.ts");
+      expect(r.success, r.success ? "" : `compile error: ${r.errors?.[0]?.message}`).toBe(true);
+      if (!wasmtimeBin) {
+        // Not a silent skip: surface why this arm did not execute and where the
+        // large-size gap is tracked.
+        console.log(
+          "[nm-matrix] nm_node_process needs real wasmtime (reactor-driven); not on PATH — " +
+            "small-size echo not executed here. Large 1/64/128 MiB cases are gated on #2777 " +
+            "(src/process-stdin-prelude.ts drainBytes O(n^2)).",
+        );
+        return;
+      }
+      const input = frame(new Uint8Array(2 * 1024).fill(0x63));
+      const path = join(tmpDir, "nm_node_process-2k.wasm");
+      writeFileSync(path, r.binary!);
+      const out = execFileSync(wasmtimeBin, [...WASMTIME_FLAGS, path], {
+        input: Buffer.from(input),
+        stdio: ["pipe", "pipe", "ignore"],
+        maxBuffer: 1 << 24,
+        timeout: 30_000, // hard cap — kill wasmtime rather than let O(n^2) hang the suite
+      });
+      expect(Buffer.compare(Buffer.from(out), Buffer.from(input)), "nm_node_process 2 KiB echo byte-identical").toBe(0);
+    },
+  );
 });

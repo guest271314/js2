@@ -1,5 +1,5 @@
 ---
-id: 2772
+id: 2777
 title: "process.stdin reactor prelude builds each 'data' chunk byte-by-byte (O(n^2)) — SIGKILLs nm_node_process at multi-MiB"
 status: ready
 created: 2026-06-28
@@ -10,11 +10,11 @@ task_type: bug
 area: codegen
 language_feature: process.stdin, async-reactor
 goal: spec-completeness
-related: [2756, 2752, 389]
+related: [2775, 2752, 389]
 sprint: Backlog
 ---
 
-# #2772 — `process.stdin` prelude assembles chunks in O(n^2)
+# #2777 — `process.stdin` prelude assembles chunks in O(n^2)
 
 The compiler's injected `process.stdin` Readable prelude
 (`src/process-stdin-prelude.ts`) assembles each `'data'` chunk ONE BYTE AT A TIME
@@ -33,7 +33,7 @@ Each `this.chunk = this.chunk + String.fromCharCode(b)` copies the entire growin
 string, so draining an `N`-byte chunk is **O(N^2)**. A single large Native
 Messaging frame delivered in one drain is therefore quadratic, which is why
 `examples/native-messaging/nm_node_process.ts` SIGKILLs even at 1 MiB and is
-excluded from the multi-MiB CI matrix (#2756).
+excluded from the multi-MiB CI matrix (#2775).
 
 This is a COMPILER-LEVEL issue (the prelude), not the example. The example's own
 `buffered = buffered + chunk` / `.substring()` compounds it, but the prelude is

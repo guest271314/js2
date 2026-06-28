@@ -1,8 +1,8 @@
 ---
-id: 2756
+id: 2775
 title: "Native Messaging examples: rename to host scheme + 1/64/128 MiB CI matrix (shared sync-framing dedup deferred to #2771)"
 status: done
-assignee: ttraenkler/dev-2756-nm-refactor
+assignee: ttraenkler/dev-2775-nm-refactor
 completed: 2026-06-28
 created: 2026-06-27
 priority: medium
@@ -10,11 +10,11 @@ feasibility: medium
 task_type: refactor
 area: examples
 goal: developer-experience
-related: [389, 2655, 2657, 2684, 2752, 2757, 2771, 2772]
+related: [389, 2655, 2657, 2684, 2752, 2776, 2771, 2777]
 sprint: current
 ---
 
-# #2756 — Native Messaging examples: rename to host scheme + scale matrix
+# #2775 — Native Messaging examples: rename to host scheme + scale matrix
 
 The `examples/native-messaging/` directory carries the SAME Native Messaging
 echo host implemented against several host surfaces (loopdive/js2#389). The file
@@ -52,7 +52,7 @@ no external runtime.
   valid `[…]` within the 1 MiB cap, and concatenating the frame interiors
   reconstructs the original array body byte-for-byte.
 - `nm_node_process` — exercised only at a small size it handles today (under real
-  wasmtime, reactor-driven); its large cases are GATED ON #2772 (the O(n^2)
+  wasmtime, reactor-driven); its large cases are GATED ON #2777 (the O(n^2)
   prelude fix). Not silently skipped — a clear pointer is logged when wasmtime is
   unavailable.
 
@@ -94,6 +94,6 @@ non-global name.)
       module importing ONLY `wasi_snapshot_preview1`.
 - [x] 1/64/128 MiB matrix runs on every CI run (verbatim byte-exact for
       deno/wasi_p1; re-chunk round-trip for node_fs).
-- [x] `nm_node_process` large cases gated on #2772 with a clear pointer; small
+- [x] `nm_node_process` large cases gated on #2777 with a clear pointer; small
       size exercised.
 - [x] Dedup blocker documented; deferred to #2771.

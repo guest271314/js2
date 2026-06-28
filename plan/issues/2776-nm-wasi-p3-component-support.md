@@ -1,5 +1,5 @@
 ---
-id: 2757
+id: 2776
 title: "WASI Preview 3 / Component Model support — compile nm_wasi_p3 to a working P3 component with async stream<u8>"
 status: backlog
 created: 2026-06-27
@@ -10,11 +10,11 @@ task_type: feature
 area: examples, codegen
 language_feature: wasi-p3, component-model, async-stream
 goal: standalone-wasi
-related: [389, 2657, 2756]
+related: [389, 2657, 2775]
 sprint: Backlog
 ---
 
-# #2757 — WASI Preview 3 / Component Model support
+# #2776 — WASI Preview 3 / Component Model support
 
 `examples/native-messaging/nm_wasi_p3.ts` is currently a SOURCE-REFERENCE arm: it
 describes the WASI Preview 3 (0.3) async `stream<u8>` echo host the comparison
