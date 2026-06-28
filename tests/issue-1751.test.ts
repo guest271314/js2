@@ -7,7 +7,7 @@ import { compile } from "../src/index.js";
 
 // #2633 — the hallucinated `process.stdin.read` surface was removed; the
 // inline-WASI native-messaging shape now exercises the stdout-write + exit path
-// (synchronous stdin moved to `node:fs` `readSync` under --link-node-shims).
+// (synchronous stdin moved to `node:fs` `readSync` under --link node:fs).
 const NATIVE_MESSAGING_DECL = `declare const process: {
   stdout: { write(c: Uint8Array | string): boolean };
   exit(code: number): void;

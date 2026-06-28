@@ -22,16 +22,23 @@ S1–S3 of the Implementation Plan are landed. **S4 (generalize the codegen
 branch sites) is deliberately deferred** as a follow-up — per the architect's
 verdict it is YAGNI until a *second* concrete lowerable namespace exists.
 
+**Stakeholder decision (no alias):** the `--link-node-shims` CLI flag and the
+`linkNodeShims` INPUT option are **removed entirely**, not deprecated.
+`--link node:fs` (CLI) / `link: ["node:fs"]` (programmatic) is the only spelling.
+All in-repo callers (tests, `examples/native-messaging/*`, `scripts/`, docs) were
+migrated to the new spelling.
+
 - **S1 — flag + plumbing.** `--link <ns>` repeatable CLI parser (`--link node:fs`,
-  `--link=node:fs` both accepted); `--link-node-shims` kept as a deprecation
-  alias (emits a soft note) folding to `--link node:fs`. `link?: string[]` added
-  to `CompileOptions` (`src/index.ts`) and `CodegenOptions`
-  (`src/codegen/context/types.ts`). `buildCodegenOptions` (`src/compiler.ts`)
-  normalizes `link` ∪ (`linkNodeShims ? ["node:fs"]`) into one deduped set.
-  `create-context.ts` builds `ctx.linkedNamespaces` (WASI-gated, exactly as the
-  old boolean) and derives `ctx.linkNodeShims = linkedNamespaces.has("node:fs")`
-  so the ~30 existing `ctx.linkNodeShims` read sites are zero-churn and the two
-  can never drift. `--help` updated.
+  `--link=node:fs` both accepted); the removed `--link-node-shims` flag now errors
+  as an unknown option. `link?: string[]` added to `CompileOptions`
+  (`src/index.ts`) and `CodegenOptions` (`src/codegen/context/types.ts`); the
+  `linkNodeShims` input fields were dropped from both. `buildCodegenOptions`
+  (`src/compiler.ts`) dedupes `options.link`. `create-context.ts` builds
+  `ctx.linkedNamespaces` (WASI-gated) and derives the INTERNAL convenience
+  boolean `ctx.linkNodeShims = linkedNamespaces.has("node:fs")` so the ~30
+  existing `ctx.linkNodeShims` codegen read sites are zero-churn and the two can
+  never drift (`ctx.linkNodeShims` is no longer a user-facing option — just an
+  internal derived getter). `--help` updated.
 - **S2 — strict-gate generalization (the one new capability).**
   `isHostImportAllowed` / `scanForLeakedHostImports`
   (`src/codegen/host-import-allowlist.ts`) take an optional `linkedNamespaces`
@@ -40,26 +47,35 @@ verdict it is YAGNI until a *second* concrete lowerable namespace exists.
   `src/codegen/registry/imports.ts` and the post-link
   `assertNoLeakedHostImports` scan in `src/codegen/index.ts`). `env` host
   bindings stay allowlist-gated (not `--link`-overridable). No lowering added.
-- **S3 — tests + back-compat lock-in.** `tests/issue-2783.test.ts` (10 tests):
-  `--link node:fs` byte-identical to `--link-node-shims`; gate permits an
-  arbitrary namespace (`acme:telemetry`) while rejecting an unlinked one;
-  per-namespace isolation; `env` not overridable; byte-neutral when no `--link`
-  (omitted ≡ `link: []`); deprecation warning fires for `--link-node-shims`;
-  multi-file `compileProject` forwards the `link` policy.
+- **S3 — tests + migration.** `tests/issue-2783.test.ts`: `--link node:fs`
+  selects the import-and-link std-IO path; gate permits an arbitrary namespace
+  (`acme:telemetry`) while rejecting an unlinked one; per-namespace isolation;
+  `env` not overridable; byte-neutral when no `--link` (omitted ≡ `link: []`);
+  the removed `--link-node-shims` flag is rejected by the CLI; multi-file
+  `compileProject` forwards the `link` policy. Every `linkNodeShims: true` /
+  `--link-node-shims` caller across `tests/`, `examples/`, `scripts/`, `docs/`
+  migrated to `link: ["node:fs"]` / `--link node:fs`.
 
 ## Test Results
 
-- `tests/issue-2783.test.ts` — 10/10 pass.
-- Regression set (no change): `issue-2633-process-io-to-node-fs`,
-  `issue-2631-node-fs-fd-shim`, `issue-2094-import-leak-scan`,
+- `tests/issue-2783.test.ts` — pass.
+- `examples/native-messaging/smoke-test.sh` (now `--link node:fs`) — **PASS under
+  real wasmtime 44.0.0** (byte-exact Native Messaging round-trip). The real-link
+  gate.
+- Regression set unchanged: `issue-2633`, `issue-2631`, `issue-2094`,
   `host-import-allowlist-gate`, `host-import-allowlist-budget`,
-  `issue-1554-cli-flag-exclusion` — 45/45 pass.
-- Back-compat: `--link node:fs` ≡ `--link-node-shims` byte-for-byte (SHA match).
-- Byte-neutral: no-`link` single-source compiles unchanged (empty
-  `linkedNamespaces` → identical gate decisions and derived `linkNodeShims`).
-- `tsc --noEmit` clean; `biome lint` clean; `prettier` clean.
-- test262 smoke batch (addition/if): no new CEs (`other=0`); pre-existing
-  bigint/symbol fails unchanged.
+  `issue-1554-cli-flag-exclusion` pass.
+- Byte-neutral: `--link node:fs` output unchanged from the old
+  `linkNodeShims: true` (same create-context derivation; `node:fs` stays in
+  `ALWAYS_ALLOWED_IMPORT_MODULES`). No-`link` single-source compiles unchanged.
+- Pre-existing/unrelated: the heavy Native Messaging runtime tests (#1530, #1753,
+  #1767, #2526, #1768, #1886) fail identically on clean `origin/main` in this
+  container (large-memory/wasmtime env), so they are NOT a #2783 regression.
+- `tsc --noEmit` clean (also confirms no caller still passes the removed option);
+  `biome lint` clean; `prettier` clean.
+- No remaining input-side `--link-node-shims` / `linkNodeShims:`-as-input in
+  `src`/`tests`/`examples`/`scripts`/`docs` (grep clean; historical `plan/`
+  issue records intentionally preserved).
 
 # #2783 — general `--link <namespace>` dynamic-linking flag
 

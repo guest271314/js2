@@ -66,23 +66,14 @@ export interface CodegenOptions {
   /** WASI target: emit WASI imports (fd_write, proc_exit) instead of JS host imports */
   wasi?: boolean;
   /**
-   * #2524 / #2633 — route std-IO through a separately compiled, linkable
-   * `node:fs` shim instead of inlining the `wasi_snapshot_preview1.fd_read`/
-   * `fd_write` glue. When set (WASI only), the user module imports
-   * `readSync`/`writeSync` plus its linear memory from `node:fs` and carries NO
+   * #2783 — the dynamic-linking axis: namespaces to leave as link-time imports
+   * (satisfied by a preloaded provider) instead of inline-lowering. `["node:fs"]`
+   * routes std-IO through the `node:fs` shim (the user module imports
+   * `readSync`/`writeSync` + its linear memory from `node:fs` and carries NO
    * `wasi_snapshot_preview1` import for the stream IO path; console.log /
-   * process.std*.write lower to `writeSync(1|2, …)`. `node-fs.wasm` implements
-   * the interface over WASI. The bespoke `js2wasm:node-process` shim was retired
-   * (#2633). Default off — the inline fd_read/fd_write path stays as fallback.
-   *
-   * @deprecated (#2783) Folded into `link` as `"node:fs"` by `buildCodegenOptions`.
-   */
-  linkNodeShims?: boolean;
-  /**
-   * #2783 — general dynamic-linking axis. Namespaces to leave as link-time
-   * imports (satisfied by a preloaded provider) instead of inline-lowering.
-   * `linkNodeShims: true` is folded in here as `"node:fs"`. WASI-gated in
-   * `create-context.ts` (ignored for non-WASI targets).
+   * process.std*.write lower to `writeSync(1|2, …)`; `node-fs.wasm` implements
+   * the interface over WASI). WASI-gated in `create-context.ts` (ignored for
+   * non-WASI targets). Default empty — the inline fd_read/fd_write path stays.
    */
   link?: string[];
   /** Standalone target (#1470): pure WasmGC, no JS host imports and no WASI
@@ -1737,10 +1728,12 @@ export interface CodegenContext {
    * `node:fs` `readSync`/`writeSync` calls (over a shim-owned, imported linear
    * memory) instead of inline `fd_read`/`fd_write`. console.log/warn/error and
    * process.std*.write lower to `writeSync(1|2, …)`; the bespoke
-   * `js2wasm:node-process` shim was retired (#2633). See `linkNodeShims` in
-   * `CodegenOptions`.
+   * `js2wasm:node-process` shim was retired (#2633). Driven by the `link` set
+   * (`["node:fs"]`).
    *
-   * #2783 — now a **derived** value: `linkedNamespaces.has("node:fs")`. The two
+   * #2783 — an INTERNAL convenience boolean, **derived** from
+   * `linkedNamespaces.has("node:fs")` (there is no user-facing `linkNodeShims`
+   * option anymore — `link: string[]` is the only input). The two
    * are computed together in `create-context.ts` from the same (WASI-gated)
    * `link` set so they can never drift. Keeping this boolean lets the ~30
    * existing `ctx.linkNodeShims` read sites stay zero-churn while the underlying

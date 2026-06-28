@@ -11,7 +11,7 @@
  * `node:fs` module (under a JS host) are other providers.
  *
  * The shim OWNS + exports the linear memory; a user module compiled with
- * `--link-node-shims` that uses ONLY node:fs (no process/console IO) IMPORTS
+ * `--link node:fs` that uses ONLY node:fs (no process/console IO) IMPORTS
  * that memory (memory index 0) plus the two IO functions, so the shim can
  * read/write the user's bytes over the SAME memory with no instantiation cycle
  * (the shim imports only `wasi_snapshot_preview1`).

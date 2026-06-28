@@ -34,10 +34,9 @@ export function createCodegenContext(
     !!(options?.fast || options?.wasi || options?.standalone || strictNoHostImports || options?.utf8Storage);
   // #2783 — the dynamic-linking set: external namespaces left as link-time
   // imports (satisfied by a preloaded provider) instead of inline-lowering.
-  // WASI-gated exactly as the old `linkNodeShims` boolean was — ignored for
-  // non-WASI targets. `linkNodeShims` is derived from `node:fs` membership so
-  // the two can never drift. (`compiler.ts` already folded a legacy
-  // `linkNodeShims: true` into `options.link` as `"node:fs"`.)
+  // WASI-gated — ignored for non-WASI targets. The internal `ctx.linkNodeShims`
+  // convenience boolean is derived from `node:fs` membership (below) so the ~30
+  // codegen read-sites stay zero-churn and the two can never drift.
   const linkedNamespaces: ReadonlySet<string> = new Set(options?.wasi ? (options?.link ?? []) : []);
   const ctx: CodegenContext = {
     mod,
