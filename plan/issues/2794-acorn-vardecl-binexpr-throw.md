@@ -1,8 +1,8 @@
 ---
 id: 2794
 title: "[SENIOR-DEV ONLY] acorn parse() residual: var-decl + binary-expression THROW (raise/unexpected) — distinct from the S3 vec-identity class; closes #2681/#2686"
-status: ready
-assignee: ttraenkler/unassigned
+status: in-progress
+assignee: ttraenkler/sendev-acorn
 sprint: current
 priority: high
 horizon: l
@@ -127,3 +127,97 @@ probe; the runner forks a worker with a per-input watchdog.**
 - The #2674 `__get_member_<name>` / #2664 `__set_member_<name>` finalize-filled
   dispatchers and the S2/S2b pinned read/write paths are the substrate the fix
   builds on — the residual is a value/field that still escapes them.
+
+## Root-cause analysis (sendev-acorn, 2026-06-28) — branch `issue-2794-acorn-vardecl-binexpr`
+
+**The residual is NOT one bug — it is a cluster of THREE distinct host-proxy /
+marshaling gaps.** All three share the same *upstream* cause: acorn's Parser /
+TokenType / AST-Node data is **`any`/externref-typed** (acorn is prototype-based
+`function X(){}; pp.m = function(){}` with dynamic property access), so every
+`this.<field>` / `node.<field>` access during a compiled-wasm parse routes
+through the JS **host proxy** (`_wrapForHost` / `__extern_get` /
+`__extern_method_call` / `__sget_<field>` in `src/runtime.ts`). Each *value
+shape* that crosses must be presented faithfully (vec→array, node→object,
+closure→bridge). The S3 fix (#2784) handled the vec case (`__is_vec` guard); the
+three residuals below are more of the same class.
+
+Method used (all confirmed empirically; probes banked in the branch `.tmp/`):
+patched acorn's `raise()` to log its message before throwing, then narrowed with
+field-level `console.log` instrumentation and a minimal `new TokenType(...)`
+repro. NB: source-level `console.log` PERTURBS method-lifting/`this`-threading
+(adding one shifts the failure) — trust the *clean* raise-probe + the
+`_resolveHostField`/`__extern_get` host-side `DBG2794` traces over injected logs.
+
+### (1) var-declaration — AST Node masked as `closureBridge` [PRIMARY for #2681]
+
+`parse("var x;")` threw `Binding rvalue` from `checkLValSimple` (acorn
+`acorn.mjs:2371`). Root cause: `checkLValSimple` does `switch (expr.type)` over a
+**string** field, but `expr` (= `decl.id`, the Identifier node) arrived as the
+host **`closureBridge` FUNCTION** (`typeof expr === "function"`, `expr.type ===
+undefined`, `expr.name === "closureBridge"`). The `_wrapForHost` get-handler
+(`src/runtime.ts` ~5224-5308) wraps *any* non-vec wasm-struct field value as a
+`closureBridge` whenever generic `__call_fn_N` exports exist — it never verifies
+the value is actually a closure. So a plain DATA struct (AST Node) is misclassified.
+`parse("x")` works only because identifiers fall to the `default` arm of every
+`switch` (identity irrelevant); `checkLValSimple` is the FIRST site that needs a
+string-`===` / case match to be TRUE.
+
+**Attempted fix (REVERTED — regresses):** gating the bridge on
+`__is_closure(val) === 1` (mirroring the `__is_vec` guard) DID fix the node case
+(var-decl advanced past `checkLValSimple`), **but `__is_closure` FALSE-NEGATIVES
+on genuine closures** (a plain `() => n+1` arrow field read `__is_closure === 0`,
+so the guard wrongly diverted it to an object proxy → `box.fn is not a function`).
+The comment at `index.ts:4848` warns of false-POSITIVES; this is the inverse.
+So `__is_closure` is **not a reliable data-vs-closure discriminator** in either
+direction. A correct fix needs EITHER (a) a reliable positive `__is_data_struct`
+/ named-struct discriminator emitted in codegen (like `__is_vec`), OR (b) fixing
+`collectClosureBaseWrapperTypeIdxs`/`__is_closure` to catch ALL closure types
+(incl. capture-less arrow closures) so it can be the gate.
+
+### (2) var-declaration — vec read-methods (`indexOf`) unhandled [blocks #2681 after (1)]
+
+With (1) patched, `parse("var x;")` advanced to `declareName`
+(`acorn.mjs:3802`) → `scope.lexical.indexOf(name)` → `TypeError: indexOf is not
+a function`. `__extern_method_call` (`src/runtime.ts` ~9890) special-cases only
+`push`/`pop` on a vec receiver (via `__vec_push`/`__vec_pop`, unwrapping the
+proxy); **read methods (`indexOf`, `includes`, `slice`, `join`, …) are not
+materialized**, so a vec read-method on a nested scope array fails. Pre-existing
+gap, only *unlocked* by (1). Fix: in `__extern_method_call`, when the receiver is
+a vec, materialize it (`_vecToArray`) and apply `Array.prototype[method]` for
+read-only methods (broad-impact, hot path — needs full CI validation).
+
+### (3) binary-expression — `__sget_binop` returns null for the TokenType shape [PRIMARY for #2686]
+
+`parse("1+2;")` threw `Unexpected token (1:1)` (at the `+`). Root cause:
+`parseExprOp` (`acorn.mjs:2776`) reads `prec = this.type.binop`; for `plusMin`
+the host-proxy read of `binop` returns **undefined** (should be 9), so `prec ==
+null`, the operator is never consumed, and `unexpected()` throws. ALL
+`conf`-derived TokenType fields read wrong via the proxy (`binop=undefined
+beforeExpr=false prefix=false startsExpr=false`) while `label` (a direct ctor
+param) reads `"+/-"` correctly. **The value IS stored** — a minimal
+`new TokenType(label, {binop:9,…})` repro reads `binop=9` BOTH wasm-internally
+AND via the wrapExports proxy. The divergence is acorn-specific: in the live
+parse `_resolveHostField` falls through to `__sget_binop(plusMin)` which returns
+`null` (DBG-traced), and the `#1712` nullish-as-MISS heuristic then yields
+`undefined`. I.e. the per-shape `__sget_binop` dispatcher does **not cover
+plusMin's concrete struct shape** in the full module (while `__sget_start` covers
+the Node shape and `__sget_label` resolves via an earlier path), AND the host
+sidecar (`_wasmStructProps`) misses these module-init-time-constructed structs.
+NOT reproducible in a small module — tied to acorn's large struct-type graph
+(suspect layout-canonicalization / dispatcher-coverage in the `__sget_<field>`
+emitter). This is the blocker for EVERY binary expression and is independent of
+(1)/(2).
+
+### Status / recommendation
+
+- **#2681 (var-decl)** root-caused: needs a reliable data-vs-closure
+  discriminator (1) + vec read-method materialization (2).
+- **#2686 (binary-expr)** root-caused: needs `__sget_<field>` per-shape
+  dispatcher coverage (or sidecar population) for module-init-constructed structs
+  (3).
+- The clean, class-eliminating fix for all three is to **stop routing acorn's
+  Parser/TokenType/Node data through the host proxy** — i.e. give them wasm-native
+  struct types — but that is an architecture-level change beyond this issue.
+- Escalated to tech lead (a 2nd and 3rd distinct residual surfaced; the
+  closureBridge guard regressed genuine closures → reverted). Branch left clean
+  (no source change); analysis + banked probes preserved.
