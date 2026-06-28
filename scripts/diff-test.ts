@@ -84,9 +84,22 @@ interface Summary {
   results: FileResult[];
 }
 
-/** Normalize stdout for comparison. Strips trailing whitespace per line. */
+// #2787 — strip ANSI SGR escape sequences (e.g. `\x1b[33m…\x1b[39m`) before
+// comparing. Node's `console.log` colourises primitives (numbers yellow, etc.)
+// when `FORCE_COLOR` is set in the environment — which it is in some dev
+// containers (this repo's devcontainer exports `FORCE_COLOR=3`). The js2wasm
+// lane buffers plain strings and never colourises, so an un-stripped reference
+// spuriously mismatches on virtually every numeric/string program (69 false
+// mismatches locally vs 14 real ones in CI, where FORCE_COLOR is unset). The
+// reference lane (`runV8`) also forces colour OFF in its env; this strip is
+// belt-and-suspenders so the harness is robust regardless of the ambient env.
+// biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI escapes are control characters by definition.
+const ANSI_SGR = /\x1b\[[0-9;]*m/g;
+
+/** Normalize stdout for comparison. Strips ANSI colour codes + trailing whitespace per line. */
 function normalize(s: string): string {
   return s
+    .replace(ANSI_SGR, "")
     .split("\n")
     .map((line) => line.replace(/\s+$/, ""))
     .join("\n")
@@ -122,6 +135,13 @@ function runV8(file: string): { stdout: string; error?: string; ms: number } {
       encoding: "utf-8",
       timeout: 5000,
       stdio: ["ignore", "pipe", "pipe"],
+      // #2787 — force colour OFF for the reference lane so `console.log` never
+      // emits ANSI SGR codes (the dev container sets FORCE_COLOR=3, which makes
+      // Node colourise even when stdout is piped). `FORCE_COLOR=0` overrides the
+      // ambient value; `NO_COLOR` is a secondary guard. Without this the
+      // reference output is polluted with `\x1b[33m…\x1b[39m` and mismatches the
+      // plain js2wasm lane on nearly every numeric/string program.
+      env: { ...process.env, FORCE_COLOR: "0", NO_COLOR: "1" },
     });
     return { stdout, ms: Date.now() - t0 };
   } catch (e: unknown) {
