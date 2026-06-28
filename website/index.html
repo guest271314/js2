@@ -1173,6 +1173,25 @@
         min-width: 160px;
         justify-content: flex-end;
       }
+      .feat-edition-passbar-count {
+        font-family: var(--mono);
+        font-size: 11px;
+        letter-spacing: 0.04em;
+        color: rgba(255, 255, 255, 0.46);
+        white-space: nowrap;
+        text-transform: none;
+      }
+      .feat-tables-note {
+        margin-top: 1rem;
+        max-width: 60ch;
+        font-size: 13px;
+        line-height: 1.55;
+        color: var(--fg-faint);
+      }
+      .feat-tables-note-mono {
+        font-family: var(--mono);
+        font-size: 12px;
+      }
       .feat-edition-passbar-track {
         display: block;
         width: 92px;
@@ -1589,6 +1608,12 @@
           <p>
             Which JS language features compile to WebAssembly today, which still rely on host support, and which are
             still on the roadmap. Status is derived from ECMAScript Test262 pass rates and known compiler limitations.
+          </p>
+          <p class="feat-tables-note">
+            Each edition's percentage and <span class="feat-tables-note-mono">pass / total</span> count cover
+            <strong>every</strong> Test262 test in that edition. The feature rows below are illustrative
+            examples — a hand-picked subset, not a complete breakdown — so their individual counts are not meant
+            to sum to the edition total.
           </p>
           <p style="margin-top: 1.25rem">
             <a class="btn-outline" href="./benchmarks/report.html">Compatibility Test Report</a>
@@ -5480,6 +5505,7 @@ console.log(instance.exports.run()); // &rarr; 55</pre
             bar = document.createElement("span");
             bar.className = "feat-edition-passbar";
             bar.innerHTML = `
+              <span class="feat-edition-passbar-count"></span>
               <span class="feat-edition-passbar-track">
                 <span class="feat-edition-passbar-fill"></span>
               </span>
@@ -5560,6 +5586,7 @@ console.log(instance.exports.run()); // &rarr; 55</pre
               const bar = ensureEditionPassBar(ensured.el);
               const fill = bar.querySelector(".feat-edition-passbar-fill");
               const text = bar.querySelector(".feat-edition-passbar-text");
+              const count = bar.querySelector(".feat-edition-passbar-count");
               const pct = Math.max(0, Math.min(100, Number(bucket.pct ?? 0)));
               const title = `${bucket.pass.toLocaleString()} pass, ${bucket.fail.toLocaleString()} fail, ${bucket.ce.toLocaleString()} CE, ${bucket.skip.toLocaleString()} skip (${bucket.total.toLocaleString()} total)`;
               if (fill instanceof HTMLElement) {
@@ -5569,6 +5596,14 @@ console.log(instance.exports.run()); // &rarr; 55</pre
               if (text instanceof HTMLElement) {
                 text.textContent = `${pct}%`;
                 text.title = title;
+              }
+              // B (edition-card relabel): show the edition-wide population the
+              // header % is measured over — ALL test262 tests classified into
+              // this edition by frontmatter, NOT the sum of the illustrative
+              // feature rows below (which bucket by file path and don't add up).
+              if (count instanceof HTMLElement) {
+                count.textContent = `${bucket.pass.toLocaleString()} / ${bucket.total.toLocaleString()}`;
+                count.title = title;
               }
               bar.title = title;
             });
