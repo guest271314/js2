@@ -277,6 +277,29 @@ export interface CompileOptions {
    *  Default: false (calls to fs.readFileSync / fs.writeFileSync raise a compile error). */
   allowFs?: boolean;
   /**
+   * (#2796) Differential-test-harness fidelity flag. In the default JS-host
+   * (WasmGC) target, top-level module code runs via the wasm `start` section —
+   * i.e. DURING `WebAssembly.instantiate`, BEFORE the host can call
+   * `setExports(instance.exports)`. Top-level code that introspects WasmGC
+   * structs (`for…in` / `Object.keys` over a runtime-shaped object) needs the
+   * `__struct_field_names` / `__sget_*` exports, which only exist once the
+   * instance is constructed — so during the start section they resolve to
+   * nothing and a `for…in` enumerates zero keys. The standalone/WASI path does
+   * NOT hit this: it runs top-level code via an explicitly-called `_start`
+   * export AFTER instantiation, when every export is reachable.
+   *
+   * When `true`, emit the top-level `__module_init` as an EXPORT and do NOT run
+   * it via the wasm `start` section, so the host can invoke
+   * `instance.exports.__module_init()` AFTER wiring `setExports` — symmetric
+   * with the standalone `_start` model. The differential-test harness
+   * (`scripts/diff-test.ts`) sets this so the HOST lane runs top-level code with
+   * the same fully-wired runtime the standalone lane uses, rather than tripping
+   * over an exports-timing artifact of the harness. Default `false` →
+   * byte-identical output (top-level runs in the wasm `start` section) for every
+   * other consumer (website, playground, test262, library users).
+   */
+  deferTopLevelInit?: boolean;
+  /**
    * #2783 — general `--link <namespace>` dynamic-linking axis (the ONLY
    * link-vs-inline control; the old `linkNodeShims` boolean was removed). Each
    * listed namespace is left as a **link-time import** (satisfied at

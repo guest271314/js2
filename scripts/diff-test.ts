@@ -165,7 +165,20 @@ async function runJs2wasm(file: string): Promise<{
   } catch (e: unknown) {
     return { stdout: "", error: `read failed: ${(e as Error).message}`, ms: Date.now() - t0, outcome: "runtime_error" };
   }
-  const r = await compile(source, OPTIMIZE ? { fileName: file, optimize: true } : { fileName: file });
+  // (#2796) `deferTopLevelInit` makes the compiler export `__module_init` and
+  // skip the wasm `start` section, so the HOST lane runs top-level code AFTER
+  // `setExports` wires `__struct_field_names` / `__sget_*`. Without this the
+  // host lane ran top-level enumeration (`for…in` / `Object.keys` over a
+  // runtime-shaped object) during `WebAssembly.instantiate`, before any export
+  // was reachable — so a top-level `for…in` enumerated zero keys, a HARNESS
+  // exports-timing artifact (the standalone lane never hits it, since it runs
+  // top-level code via an explicitly-called `_start` export post-instantiate).
+  const r = await compile(
+    source,
+    OPTIMIZE
+      ? { fileName: file, optimize: true, deferTopLevelInit: true }
+      : { fileName: file, deferTopLevelInit: true },
+  );
   if (!r.success) {
     return {
       stdout: "",
@@ -191,8 +204,11 @@ async function runJs2wasm(file: string): Promise<{
     };
   }
   // Monkey-patch console.log so we capture the side effects of top-level code
-  // execution that runs during `WebAssembly.instantiate` (the module's start
-  // section invokes the compiled top-level statements).
+  // execution. With `deferTopLevelInit` (#2796) the compiled top-level
+  // statements are NOT invoked by the wasm `start` section during
+  // instantiation; the harness calls the exported `__module_init()` explicitly
+  // AFTER `setExports`, so struct-introspection exports are wired when top-level
+  // code runs (symmetric with the standalone `_start` model).
   const lines: string[] = [];
   const origLog = console.log;
   const origError = console.error;
@@ -206,6 +222,11 @@ async function runJs2wasm(file: string): Promise<{
     const built = buildImports(r.imports, {}, r.stringPool);
     const { instance } = await instantiateWasm(r.binary, built.env, built.string_constants);
     built.setExports?.(instance.exports as Record<string, Function>);
+    // (#2796) Run the deferred top-level code now that `setExports` has wired
+    // the struct-introspection exports. A program with NO top-level statements
+    // emits no `__module_init` export, so this is a no-op for those.
+    const moduleInit = (instance.exports as Record<string, unknown>).__module_init;
+    if (typeof moduleInit === "function") (moduleInit as () => void)();
   } catch (e: unknown) {
     console.log = origLog;
     console.error = origError;

@@ -235,6 +235,9 @@ export function createCodegenContext(
     nodeFsReadSyncIdx: -1,
     nodeFsWriteSyncIdx: -1,
     standalone: options?.standalone ?? false,
+    // (#2796) Diff-test-harness fidelity — export __module_init + skip the wasm
+    // start section so the host runs top-level code after setExports.
+    deferTopLevelInit: options?.deferTopLevelInit ?? false,
     // #682 — native standalone RegExp engine hook. Standalone mode enables the
     // reduced literal-substring backend; broader QuickJS libregexp ABI linking
     // remains the follow-up path for near-JS parity.

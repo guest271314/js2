@@ -82,6 +82,13 @@ export interface CodegenOptions {
    *  `__unbox_string` JS-host string imports. Used so the compiled module is
    *  runnable under pure-Wasm engines (wasmtime, wasmer) without a JS host. */
   standalone?: boolean;
+  /** (#2796) Diff-test-harness fidelity: in JS-host mode, export the top-level
+   *  `__module_init` and do NOT run it via the wasm `start` section, so the host
+   *  invokes it AFTER `setExports` (symmetric with the standalone `_start`
+   *  model). Default false → top-level runs in the start section. See
+   *  `CompileOptions.deferTopLevelInit`. WASI is unaffected (it already exports
+   *  `_start`). */
+  deferTopLevelInit?: boolean;
   /**
    * Experimental: route a narrow set of functions through the middle-end IR
    * (see `src/ir/`). Defaults to **on** since #1131 (the front-end driver
@@ -1659,6 +1666,11 @@ export interface CodegenContext {
    *  `__unbox_string`, `__str_from_mem`, `__str_to_mem`,
    *  `__str_extern_len`). Implies `nativeStrings === true`. */
   standalone: boolean;
+  /** (#2796) Diff-test-harness fidelity: in JS-host mode, export the top-level
+   *  `__module_init` and do NOT wire the wasm `start` section to it, so the host
+   *  runs it after `setExports` (symmetric with the standalone `_start` model).
+   *  Default false. WASI is unaffected. */
+  deferTopLevelInit: boolean;
   /** (#2179) True when the module body contains any `delete` of a property or
    *  element access (e.g. `delete o.a` / `delete o[k]`). Pre-scanned once at
    *  module setup. When true, `any`/`unknown`-typed property READS in JS-host
