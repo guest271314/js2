@@ -1,6 +1,6 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 /**
- * #2807 — `nm_node_process` (async `process.stdin`) echoed ZERO bytes for a
+ * #2807 — `nm_js2wasm_node_process` (async `process.stdin`) echoed ZERO bytes for a
  * framed body ≥ ~128 MiB under REAL wasmtime, while the in-process matrix shim
  * passed. Root cause: it builds the WHOLE response frame and writes it in ONE
  * `process.stdout.write`, and wasmtime (v46) REJECTS a single `fd_write` whose
@@ -10,7 +10,7 @@
  * The fix chunks every WASI `fd_write` into pieces of at most
  * {@link WASI_FD_WRITE_MAX_CHUNK} (`__wasi_fd_write_all`). The #2775 matrix shim
  * bulk-copies each iovec in one JS slice, so it can't model wasmtime's cap and
- * MASKED this. This test drives `nm_node_process` through a reactor shim whose
+ * MASKED this. This test drives `nm_js2wasm_node_process` through a reactor shim whose
  * `fd_write` FAITHFULLY rejects an oversized single iovec exactly the way
  * wasmtime does — so a regression to a single full-frame write fails HERE, on
  * every CI run, with no wasmtime binary required (the real-wasmtime guard lives
@@ -47,7 +47,7 @@ function frame(body: Uint8Array): Uint8Array {
 }
 
 /**
- * Reactor shim for `nm_node_process`, with a wasmtime-FAITHFUL capped `fd_write`:
+ * Reactor shim for `nm_js2wasm_node_process`, with a wasmtime-FAITHFUL capped `fd_write`:
  * a single iovec whose length exceeds {@link MODELLED_CAP} is rejected with errno
  * 48 and `nwritten` left at 0 (exactly wasmtime's behaviour), instead of being
  * bulk-copied. Tracks the largest single fd1 write seen so the test can assert
@@ -163,7 +163,7 @@ async function runReactorShimCapped(
   return { out, maxWrite, rejected };
 }
 
-describe("#2807 — nm_node_process echoes a >chunk frame under a wasmtime-faithful fd_write cap", () => {
+describe("#2807 — nm_js2wasm_node_process echoes a >chunk frame under a wasmtime-faithful fd_write cap", () => {
   it(
     "chunks the write so no single fd_write exceeds the cap, and echoes byte-exact",
     { timeout: 180_000 },
@@ -172,10 +172,14 @@ describe("#2807 — nm_node_process echoes a >chunk frame under a wasmtime-faith
       // single chunk would itself be rejected by real wasmtime.
       expect(WASI_FD_WRITE_MAX_CHUNK).toBeLessThan(WASMTIME_REAL_CAP);
 
-      const src = readFileSync(join(NM_DIR, "nm_node_process.ts"), "utf-8");
-      const r = await compile(src, { fileName: "nm_node_process.ts", target: "wasi", skipSemanticDiagnostics: true });
+      const src = readFileSync(join(NM_DIR, "nm_js2wasm_node_process.ts"), "utf-8");
+      const r = await compile(src, {
+        fileName: "nm_js2wasm_node_process.ts",
+        target: "wasi",
+        skipSemanticDiagnostics: true,
+      });
       expect(r.success, r.success ? "" : `compile error: ${r.errors?.[0]?.message}`).toBe(true);
-      expect(WebAssembly.validate(r.binary!), "nm_node_process.ts must validate").toBe(true);
+      expect(WebAssembly.validate(r.binary!), "nm_js2wasm_node_process.ts must validate").toBe(true);
 
       // One chunk + a remainder: the OLD single-shot write would be one
       // (chunk + remainder) iovec — rejected by the modelled cap → zero output.
