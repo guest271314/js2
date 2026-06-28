@@ -24,22 +24,36 @@
 import { ts, forEachChild } from "../ts-api.js";
 
 /**
- * Return true if `expr` provably produces a 32-bit signed integer at runtime,
- * given that `i32Locals` is the set of locals already known to hold i32.
+ * Return true if `expr` provably produces a **canonical** signed-32-bit integer
+ * at runtime — a value `v ∈ ℤ ∩ [-2^31, 2^31)` whose f64 image is bit-identical
+ * to `v` (so `v` is not `-0`, not fractional, not NaN/±Inf, not `|v| ≥ 2^31`).
+ * `i32Locals` is the set of locals already known to hold i32.
  *
- * Recognised i32-safe forms (mirrors `isI32SafeExpr` in function-body.ts but
- * is intentionally narrower — we err on the side of disqualification):
- *   - integer numeric literal in [-2^31, 2^31)
- *   - identifier referencing a known-i32 local
- *   - bitwise `|`, `&`, `^`, `<<`, `>>` (always produce int32 per ECMAScript)
- *   - comparison ops (return boolean = i32)
- *   - unary `+` / `-` / `~` of an i32-safe operand
- *   - `+` / `-` / `*` of two i32-safe operands (overflow wraps; receiver is i32)
- *   - parenthesised / `as`-cast / non-null-asserted i32-safe expr
+ * The "canonical" property is the soundness contract for #2787: when EVERY write
+ * to a packed array yields a canonical i32, the i32-stored value read back as f64
+ * equals what the f64 backing would have stored, so NO read can observe a
+ * distinction i32 erases. That discharges the read-side proof obligation in the
+ * hybrid fast-path audit (Row 3) for free — there is no distinction to observe.
  *
- * Note: `>>>` is intentionally excluded — it produces uint32 which can sit
- * above 2^31 and would be reinterpreted as a negative i32 on store. The
- * conservative choice is to disqualify (the array would then stay f64).
+ * Recognised canonical-i32 forms (mirrors `isI32SafeExpr` in function-body.ts;
+ * intentionally narrow — we err on the side of disqualification):
+ *   - integer numeric literal in [-2^31, 2^31)  (always +0, never -0)
+ *   - identifier referencing a known-i32 local  (physically i32 ⇒ canonical)
+ *   - bitwise `|`, `&`, `^`, `<<`, `>>`  (ECMAScript defines these to yield a
+ *     value that equals ToInt32 of itself ⇒ canonical regardless of operands)
+ *   - comparison ops (return boolean = i32 0/1)
+ *   - `~x` (canonical int32) and unary `+x` of an i32-safe operand
+ *   - unary `-<non-zero integer literal>` only (a `-1`-style sentinel) — NOT
+ *     `-x` / `-(expr)`, which can be `-0` (#2787)
+ *   - parenthesised / `as`-cast / non-null-asserted canonical-i32 expr
+ *
+ * Deliberately EXCLUDED (would break canonicality → MISCOMPILE if packed):
+ *   - `+` / `-` / `*` arithmetic — f64 result stored via `i32.trunc_sat_f64_s`,
+ *     which SATURATES on overflow rather than yielding the spec-correct f64
+ *     (#2787, mirrors the #1236 scalar-local fix). Wrap-canonicalising patterns
+ *     like `(a*b) | 0` still qualify via the top-level bitwise op.
+ *   - `>>>` — produces uint32 which can sit above 2^31, reinterpreted as a
+ *     negative i32 on store.
  */
 export function isI32SafeExprForArray(
   expr: ts.Expression | undefined,
@@ -70,8 +84,23 @@ export function isI32SafeExprForArray(
 
   if (ts.isPrefixUnaryExpression(expr)) {
     const op = expr.operator;
-    if (op === ts.SyntaxKind.PlusToken || op === ts.SyntaxKind.MinusToken || op === ts.SyntaxKind.TildeToken) {
+    // `~x` always yields a canonical int32; unary `+x` is the identity on an
+    // i32-safe operand. Both preserve the canonical-i32 invariant.
+    if (op === ts.SyntaxKind.PlusToken || op === ts.SyntaxKind.TildeToken) {
       return isI32SafeExprForArray(expr.operand, i32Locals, depth + 1);
+    }
+    // #2787: unary `-` can produce negative zero. i32 cannot represent `-0`
+    // (it collapses to `+0`), so storing `-0` and then observing the sign of
+    // zero on read (`1 / x`, `Object.is(x, -0)`) diverges from the always-correct
+    // f64 backing. Admit ONLY `-<non-zero integer literal>` — a constant sentinel
+    // like `-1`, whose value is a canonical i32 with no `-0` hazard. This is a
+    // strict subset of the prior `isI32SafeExprForArray(operand)` acceptance, so
+    // it can only demote (never newly promote). `-x` over an identifier (which
+    // could hold 0) and `-(expr)` demote to the f64 array.
+    if (op === ts.SyntaxKind.MinusToken) {
+      if (!ts.isNumericLiteral(expr.operand)) return false;
+      if (!isI32SafeExprForArray(expr.operand, i32Locals, depth + 1)) return false;
+      return Number(expr.operand.text.replace(/_/g, "")) !== 0;
     }
     return false;
   }
@@ -101,12 +130,19 @@ export function isI32SafeExprForArray(
     ) {
       return true;
     }
-    // +, -, *: safe when both operands are i32-safe (overflow wraps mod 2^32)
+    // #2787 (mirrors the #1236 scalar-local fix): `+`, `-`, `*` of two number
+    // operands are evaluated as f64 in codegen (JS spec: `number op number` is
+    // f64), then stored into the i32 backing via `i32.trunc_sat_f64_s`. That
+    // saturates rather than wraps on overflow, so e.g. `arr[i] = a * b` with
+    // `a*b = 2.5e9` stores 2147483647 instead of the spec-correct 2500000000 —
+    // a MISCOMPILE the f64 backing does not have. We cannot statically bound the
+    // operands to prove no overflow, so demote: any `+`/`-`/`*` write keeps the
+    // array f64. The common wrap-canonicalising patterns `(a*b) | 0` / `(a+b) &
+    // MASK` are unaffected — their TOP-level op is bitwise, which returns true
+    // above without recursing, and `| 0` makes the value a canonical int32 that
+    // matches both backings.
     if (op === ts.SyntaxKind.PlusToken || op === ts.SyntaxKind.MinusToken || op === ts.SyntaxKind.AsteriskToken) {
-      return (
-        isI32SafeExprForArray(expr.left, i32Locals, depth + 1) &&
-        isI32SafeExprForArray(expr.right, i32Locals, depth + 1)
-      );
+      return false;
     }
     return false;
   }
@@ -322,17 +358,23 @@ export function collectI32SpecializedArrays(
       candidates.has(node.left.expression.text)
     ) {
       const arrName = node.left.expression.text;
-      // Bitwise compounds (|=, &=, ^=, <<=, >>=) keep the value in i32 — safe.
-      // Arithmetic compounds (+=, -=, *=) require the existing element + RHS to
-      // both be i32-safe. The element is by construction i32 if we promote, so
-      // we only need RHS to be i32-safe.
+      // Bitwise compounds (|=, &=, ^=, <<=, >>=) keep the value in a canonical
+      // int32 — safe (the result equals its f64 image, so both backings agree).
+      // #2787 (mirrors #1236): arithmetic compounds (+=, -=, *=) desugar to
+      // `arr[i] = arr[i] + E`, whose f64 arithmetic is stored back through
+      // `i32.trunc_sat_f64_s` — saturating on overflow rather than producing the
+      // spec-correct f64. e.g. `arr[0] += 2e9` after `arr[0] = 2e9` stores
+      // 2147483647 instead of 4000000000. We cannot statically prove no overflow
+      // (the live element value is unknown), so demote the whole array to f64.
+      // `>>>=` is likewise excluded (uint32 can exceed 2^31). Only the five
+      // canonical-int32 bitwise/signed-shift compounds survive.
       const isBitwiseCompound =
         node.operatorToken.kind === ts.SyntaxKind.BarEqualsToken ||
         node.operatorToken.kind === ts.SyntaxKind.AmpersandEqualsToken ||
         node.operatorToken.kind === ts.SyntaxKind.CaretEqualsToken ||
         node.operatorToken.kind === ts.SyntaxKind.LessThanLessThanEqualsToken ||
         node.operatorToken.kind === ts.SyntaxKind.GreaterThanGreaterThanEqualsToken;
-      if (!isBitwiseCompound && !isI32SafeExprForArray(node.right, i32Locals)) {
+      if (!isBitwiseCompound) {
         disqualified.add(arrName);
       }
     }
