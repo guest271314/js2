@@ -3520,8 +3520,19 @@ function emitClosureCallExportN(ctx: CodegenContext, arity: number): void {
     // [1..arity]; the closure declares `closureArity ≤ arity` formals. The
     // receive-side (emitArgumentsVecBody) reads __argc + __extras_argv to
     // build `arguments` with all `arity` slots populated.
+    //
+    // (#2745) `__argc` follows the CLAMPED-to-formals convention that
+    // `emitArgumentsVecBody` (`totalLen = argc + extrasLen`),
+    // `maybeSetArgcForKnownCall` (`min(actual, paramCount)`) and the inline
+    // array-method plumbing all use: it is the count of FORMAL params filled
+    // (`closureArity`), NOT the raw dispatcher arity. The overflow args go to
+    // `__extras_argv`, so `arguments.length = argc + extrasLen = arity`. Setting
+    // `__argc = arity` here instead double-counted the extras (e.g. an arity-0
+    // closure called via `__call_fn_3` reported `arguments.length === 6`), which
+    // broke bound-function over-arity forwarding (the bound `[[Call]]` prepends
+    // partial args, so the target sees more args than its declared formals).
     const setupInstrs: Instr[] = [
-      { op: "i32.const", value: arity } as Instr,
+      { op: "i32.const", value: entry.closureArity } as Instr,
       { op: "global.set", index: argcGlobalIdx } as Instr,
     ];
     if (arity > entry.closureArity) {
@@ -3755,6 +3766,16 @@ function emitClosureMethodCallExportN(ctx: CodegenContext, arity: number): void 
   addUnionImports(ctx);
   const boxNumberIdx = ctx.funcMap.get("__box_number");
   const currentThisGlobalIdx = ensureCurrentThisGlobal(ctx);
+  // (#2745) Same #820l argc/extras plumbing as `emitClosureCallExportN`, so a
+  // method-dispatched closure's `arguments` object observes over-arity args
+  // (the receiver-bound bound-function `[[Call]]` / `[[Construct]]` path, and
+  // any `o.m(...extra)` method call). Without this the method dispatch left
+  // `__argc`/`__extras_argv` untouched, so a bound target reading
+  // `arguments[i]` past its formals (e.g. `func.bind(obj)` then `newFunc(1)`)
+  // never saw the extra args.
+  const argcGlobalIdx = ensureArgcGlobal(ctx);
+  const { globalIdx: extrasArgvGlobalIdx, vecTypeIdx: extrasVecTypeIdx } = ensureExtrasArgvGlobal(ctx);
+  const extrasArrTypeIdx = getArrTypeIdxFromVec(ctx, extrasVecTypeIdx);
 
   const params: ValType[] = [];
   for (let i = 0; i < totalParams; i++) params.push({ kind: "externref" });
@@ -3813,7 +3834,30 @@ function emitClosureMethodCallExportN(ctx: CodegenContext, arity: number): void 
       argInstrs.push(...buildArgConversion(i + 2, paramType));
     }
 
+    // (#2745) #820l argc/extras plumbing (clamped-to-formals convention; see
+    // emitClosureCallExportN). User args are at locals [2..arity+1]; formal i is
+    // at local i+2, extras are args[closureArity..arity) at locals
+    // [closureArity+2 .. arity+2).
+    const setupInstrs: Instr[] = [
+      { op: "i32.const", value: entry.closureArity } as Instr,
+      { op: "global.set", index: argcGlobalIdx } as Instr,
+    ];
+    if (arity > entry.closureArity) {
+      const extrasCount = arity - entry.closureArity;
+      setupInstrs.push({ op: "i32.const", value: extrasCount } as Instr);
+      for (let i = entry.closureArity; i < arity; i++) {
+        setupInstrs.push({ op: "local.get", index: i + 2 } as Instr);
+      }
+      setupInstrs.push({ op: "array.new_fixed", typeIdx: extrasArrTypeIdx, length: extrasCount } as Instr);
+      setupInstrs.push({ op: "struct.new", typeIdx: extrasVecTypeIdx } as Instr);
+      setupInstrs.push({ op: "global.set", index: extrasArgvGlobalIdx } as Instr);
+    } else {
+      setupInstrs.push({ op: "ref.null", typeIdx: extrasVecTypeIdx } as Instr);
+      setupInstrs.push({ op: "global.set", index: extrasArgvGlobalIdx } as Instr);
+    }
+
     const callBody: Instr[] = [
+      ...setupInstrs,
       { op: "local.get", index: anyLocal } as Instr,
       { op: "ref.cast", typeIdx: entry.selfTypeIdx } as Instr,
       ...argInstrs,

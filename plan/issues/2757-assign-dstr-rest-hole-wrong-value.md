@@ -2,6 +2,7 @@
 id: 2757
 title: "Assignment-destructuring (expressions/assignment): rest element + undefined/hole binds wrong value / 'array too large' trap"
 status: ready
+assignee: ttraenkler/unassigned
 created: 2026-06-28
 updated: 2026-06-28
 priority: high
@@ -66,9 +67,47 @@ binds the underlying value rather than `undefined`.
 - No regression in passing assignment-destructuring cases.
 - Guard test `tests/issue-2757.test.ts`.
 
-## Note
+## PARTIAL LANDED — vec-rest length clamp (dev-acorn, 2026-06-28)
 
-Verify-first on current main before implementing — confirm the exact failing
-subset is non-generator/non-custom-iterable (deep-trace the rest length math).
-Owner-claim is released on the orphan ref (reserved only to allocate the id) —
-claim it fresh via `claim-issue.mjs 2757 ttraenkler/<you> --branch …`.
+Shipped the trap-hardening slice (focused PR `fix(codegen): clamp vec-rest length
+in array assignment-destructuring (#2757 partial)`):
+
+- **`src/codegen/expressions/assignment.ts` (array-rest branch, ~line 1578):** the
+  rest array was sized `src.length - i` (i = rest element's pattern index) and
+  passed straight to `array.new_default`. For a source shorter than the non-rest
+  prefix that count is NEGATIVE; `array.new_default` reads the size UNSIGNED → a
+  ~4-billion-element request → "requested new array is too large" trap. Now floored
+  at 0 (`i32.lt_s` + `if` → 0) so a short/empty source yields an empty rest. Guard:
+  `tests/issue-2757.test.ts` (no-trap + normal-rest-still-collects).
+
+## REMAINING (the actual test262 acceptance — fresh dev, precise map)
+
+Verify-first established that the two named cases are blocked by a DIFFERENT
+defect than the trap, precisely localized in `src/codegen/expressions/assignment.ts`:
+
+1. **THE BLOCKER — `assignment.ts:1556`: the array-rest branch only handles an
+   IDENTIFIER rest target.** `if (ts.isIdentifier(restTarget))` wraps the entire
+   rest build+bind. The named cases use an **object-pattern rest target**
+   (`[...{ 0: x, length }] = vals`), so `restTarget` is an `ObjectLiteralExpression`
+   → the branch is skipped → `x`/`length` are never bound (the `assert.sameValue(x,
+   undefined)` fail). **Fix:** build the rest vec into a TEMP local (the existing
+   build already produces `struct.new typeIdx` — redirect its final `local.set` to a
+   temp), then dispatch on the target kind exactly like the non-rest elements do
+   (lines ~1663-1682): `ts.isObjectLiteralExpression` → `emitObjectDestructureFromLocal`,
+   `ts.isArrayLiteralExpression` → `emitArrayDestructureFromLocal`,
+   property/element access → `emitAssignToTarget`, identifier → the current
+   `local.set restLocalIdx`. Keep the identifier path byte-identical to avoid
+   churning the working cases.
+2. **Secondary — `assignment.ts:1660` "rest on tuples is not supported."** A small
+   literal source like `[1]` compiles to a TUPLE struct (fixed-size), not a vec, so
+   `isVecStruct` is false and the rest path is skipped entirely. The named cases use
+   a VARIABLE source (`vals: any[]` → vec) so they DO hit the vec path; this tuple
+   note is only relevant for literal sources and is a separate, lower-priority tail.
+3. **Also observed (own follow-up if it persists):** an OOB *non-rest* element in
+   the vec path does NOT read `undefined` (`[a, b, ...r] = [1 as any]` left `b`
+   non-undefined). `emitElementGet`/`emitBoundsCheckedArrayGet` should yield
+   `undefined` for an out-of-range index in assignment destructuring.
+
+Validate on the FULL `merge_group` / test262 floor — the `expressions/assignment/dstr`
+cluster is 149 cases and the rest-bind refactor is broad-impact; a dev cannot
+validate it with scoped local checks.

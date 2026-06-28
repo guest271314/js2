@@ -3938,16 +3938,27 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
           : (s1Callee as ts.NonNullExpression).expression;
     }
     if (ts.isIdentifier(s1Callee) && !noJsHost(ctx) && resolvesToNonConstructableValue(ctx, s1Callee)) {
-      // Evaluate `f` to an externref value (the held callee).
+      // Evaluate `f` to an externref value (the held callee), stash in a local.
       const calleeTy = compileExpression(ctx, fctx, s1Callee, { kind: "externref" });
       if (calleeTy && calleeTy.kind !== "externref") {
         coerceType(ctx, fctx, calleeTy, { kind: "externref" });
       } else if (calleeTy === null) {
         fctx.body.push({ op: "ref.null.extern" });
       }
-      // argsArray — null externref (the A7 cases never reach construction; the
-      // TypeError is thrown by the IsConstructor check before args are used).
-      fctx.body.push({ op: "ref.null.extern" });
+      const calleeLocal = allocLocal(fctx, `__ctor_callee_${fctx.locals.length}`, { kind: "externref" });
+      fctx.body.push({ op: "local.set", index: calleeLocal });
+
+      // (#2745 b) Build a JS array of the call-site args. A `.bind()` result is
+      // a constructable bound function when its target is a constructor, and
+      // `new boundFn(...)` must apply the bound + call args (and forward
+      // newTarget). The non-constructable A7 cases (arrow / prototype-method /
+      // `.call`/`.apply` value) still throw at the `__construct` IsConstructor
+      // check — before the args are used — so passing real args is harmless for
+      // them and is the spec-correct evaluation order (args evaluated, then
+      // Construct). The previous null-args path silently constructed bound
+      // functions with ZERO args (test262 `15.3.4.5.2-4-*`).
+      const arrNewIdx = ensureLateImport(ctx, "__js_array_new", [], [{ kind: "externref" }]);
+      const arrPushIdx = ensureLateImport(ctx, "__js_array_push", [{ kind: "externref" }, { kind: "externref" }], []);
       const funcIdx = ensureLateImport(
         ctx,
         "__construct",
@@ -3955,14 +3966,30 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
         [{ kind: "externref" }],
       );
       flushLateImportShifts(ctx, fctx);
-      if (funcIdx !== undefined) {
-        fctx.body.push({ op: "call", funcIdx });
+      const finalArrNew = ctx.funcMap.get("__js_array_new") ?? arrNewIdx;
+      const finalArrPush = ctx.funcMap.get("__js_array_push") ?? arrPushIdx;
+      const finalConstruct = ctx.funcMap.get("__construct") ?? funcIdx;
+      if (finalArrNew !== undefined && finalArrPush !== undefined && finalConstruct !== undefined) {
+        fctx.body.push({ op: "call", funcIdx: finalArrNew });
+        const argvLocal = allocLocal(fctx, `__ctor_argv_${fctx.locals.length}`, { kind: "externref" });
+        fctx.body.push({ op: "local.set", index: argvLocal });
+        for (const arg of args) {
+          fctx.body.push({ op: "local.get", index: argvLocal });
+          const aTy = compileExpression(ctx, fctx, ts.isSpreadElement(arg) ? arg.expression : arg, {
+            kind: "externref",
+          });
+          if (aTy && aTy.kind !== "externref") {
+            coerceType(ctx, fctx, aTy, { kind: "externref" });
+          } else if (aTy === null) {
+            fctx.body.push({ op: "ref.null.extern" });
+          }
+          fctx.body.push({ op: "call", funcIdx: finalArrPush });
+        }
+        fctx.body.push({ op: "local.get", index: calleeLocal });
+        fctx.body.push({ op: "local.get", index: argvLocal });
+        fctx.body.push({ op: "call", funcIdx: finalConstruct });
         return { kind: "externref" };
       }
-      // Import unavailable (shouldn't happen in JS-host): drop callee+args and
-      // fall through to the existing unknown-ctor path below.
-      fctx.body.push({ op: "drop" });
-      fctx.body.push({ op: "drop" });
     }
 
     // (#1632b-2 / #1528a residual) `new C(args)` where `C` is a runtime FUNCTION

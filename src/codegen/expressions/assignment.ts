@@ -1579,7 +1579,22 @@ function compileArrayDestructuringAssignment(
           fctx.body.push({ op: "struct.get", typeIdx, fieldIdx: 0 }); // length
           fctx.body.push({ op: "i32.const", value: i });
           fctx.body.push({ op: "i32.sub" } as Instr);
+          // (#2757) Clamp `length - i` to >= 0. When the source has FEWER
+          // elements than the non-rest prefix (e.g. `[a, ...r] = []` → 0 - 1),
+          // the count is negative; `array.new_default` reads the size as
+          // UNSIGNED → requests a ~4-billion-element array → "requested new
+          // array is too large" trap. A short/empty source must yield an empty
+          // rest array, so floor the count at 0.
           fctx.body.push({ op: "local.tee", index: tmpLen });
+          fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+          fctx.body.push({ op: "i32.lt_s" } as Instr);
+          fctx.body.push({
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [{ op: "i32.const", value: 0 } as Instr, { op: "local.set", index: tmpLen } as Instr],
+            else: [],
+          } as Instr);
+          fctx.body.push({ op: "local.get", index: tmpLen });
 
           fctx.body.push({
             op: "array.new_default",
