@@ -56,7 +56,48 @@ host-backed array (`arr.push(structRef)`) and read back must NOT be re-proxied t
 a host externref — it must round-trip the same struct identity (so a parser that
 `this.scopeStack.push(scope)` then re-reads `scope.flags` sees the native slot)."*
 
-## Fix direction
+## EXACT re-proxy site PINNED (sendev-substrate, 2026-06-28, post-regression-fix)
+
+Traced on the minimal `.tmp/s3-repro.mjs` WAT (a `Scope`-fnctor pushed into a
+`Parser.scopeStack` native vec, then `topFlags()` reads `st[st.length-1].flags`).
+The defect is a **read/write storage split**, not a `ref.test`/typeIdx issue:
+
+- `scopeStack` lowers to a **native** WasmGC vec-struct `(ref null 2)` whose data
+  array is `$__arr_externref` — NOT a host array. So storing a `$__fnctor_Scope`
+  ref needs only `extern.convert_any` (identity-preserving).
+- BUT `this.scopeStack.push(s)` in the lifted method **routes through the HOST
+  method-call bridge** `__extern_method_call(vec_externref, "push", [s])` (func 6):
+  `this.scopeStack` is read via `__get_member_scopeStack` as an **externref**, and
+  `.push` on an `externref`/`any` receiver defaults to the host method dispatch
+  (`__js_array_new` + `__js_array_push` to build the args, then
+  `__extern_method_call`). The host receives the vec as an **opaque externref** it
+  cannot natively `array.set` into.
+- The READ-back `st[st.length-1]` uses the **native** `__vec_get` (`any.convert_extern;
+  ref.test (ref 2); struct.get 2 1; array.get`). So the host-pushed element and the
+  native-read element live in **different storage** → the Scope never appears in the
+  native array → `__vec_get` returns a stale/wrong externref → `s.flags`'s
+  `ref.test (ref $__fnctor_Scope)` MISSES → `__extern_get("flags")` → `undefined` →
+  `NaN` (host-call trace: `__extern_get:3 __get_undefined:4`, NO `__js_array_push`
+  into the native vec the read uses).
+
+**So the "re-proxy" is really a method-dispatch split**: native-vec WRITE (`.push`)
+goes host-side, native-vec READ (`[i]`) goes WASM-side; they don't share storage.
+
+## Fix direction (REVISED per the pinned site)
+
+The real fix is **native-vec-aware method dispatch**: when a `.push`/`.pop`/etc. is
+called on a receiver that is (or may be) a **native vec** read as externref, route
+it to the WASM `__vec_push`/`__vec_pop` (which `any.convert_extern; ref.test` the
+vec-struct and `array.set` natively) instead of the host `__extern_method_call`.
+The host CANNOT introspect the opaque WasmGC vec-struct, so this must be a WASM-side
+dispatch (mirror the `__get_member`/`__set_member` finalize-filled dispatcher
+pattern: a `__vec_method_<name>` dispatcher that `ref.test`s the vec-struct and
+calls `__vec_push` on a hit, falling through to `__extern_method_call` for genuine
+host arrays). Alternatively, propagate the static `T[]` type of the struct field
+through `this.scopeStack` so `.push` lowers to `__vec_push` directly (narrower, but
+needs the lifted-method `this`-field type to survive the externref erasure).
+
+### Original (superseded) fix direction
 
 Preserve native struct identity across the host-array round-trip. Pin the exact
 re-proxy site first (instrument `__extern_get` / `__js_array_push` / the `$Object`
