@@ -79,22 +79,19 @@ describe("#2760 F1 — plain-array OOB read → JS `undefined` (primitive elemen
     });
   });
 
-  // #2766 — boolean[] OOB→undefined is DEFERRED. F1 boxes the in-bounds element
-  // via `coerceType(i32→externref)` = `__box_number`, which is only correct for a
-  // genuine number. `i32` is overloaded (boolean[] AND symbol-handle arrays), so
-  // F1 was narrowed to the `f64` (number[]) element only — boxing a boolean (or
-  // symbol-handle) i32 as a number corrupted it (regressed
-  // `Object/values/symbols-omitted.js` + 21 standalone `Array/prototype/map`
-  // boolean tests). Until F1 boxes per the element's semantic type
-  // (`__box_boolean`/`__box_symbol`), an OOB boolean[] read returns the
-  // bounds-checked type-default (`false`) — never traps, matches pre-F1 main.
-  describe("host — boolean[] OOB is the type-default (undefined-widening deferred, #2766)", () => {
-    it("a[OOB] is the bounds-checked default `false`, NOT a trap (=== undefined deferred)", async () => {
-      // The point is trap-freedom + no symbol/boolean i32 corruption; spec-correct
-      // OOB→undefined for boolean[] is the documented follow-up.
+  // #2785 — boolean[] OOB→undefined is now RE-ENABLED. The type-aware box keys
+  // the box helper on the element's SEMANTIC type (reconstructed from the
+  // receiver TS type, since the brand is erased in `arrDef.element`): a
+  // `boolean[]` element boxes via `__box_boolean`, not the type-blind
+  // `__box_number` that corrupted it (boolean `true` → the number 1). So an OOB
+  // boolean[] read now returns JS `undefined` like `number[]`. `symbol[]` stays
+  // deferred (no native standalone `__box_symbol` yet) — full coverage in
+  // `tests/issue-2785.test.ts`.
+  describe("host — boolean[] OOB → undefined (re-enabled by the type-aware box, #2785)", () => {
+    it("a[OOB] === undefined (was the type-default `false`, deferred under #2766)", async () => {
       expect(
         await run(`export function test(): boolean { const a: boolean[] = [true, false]; return a[4] === undefined; }`),
-      ).toBe(0); // false === undefined → 0 (deferred; was 1 under the over-broad F1)
+      ).toBe(1); // OOB boolean[] read now reads JS undefined (#2785)
     });
   });
 

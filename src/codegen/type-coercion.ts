@@ -1521,9 +1521,43 @@ export function coerceType(
     fctx.body.push({ op: "ref.null.extern" });
     return;
   }
-  // i32 → externref (box as number to preserve value)
+  // i32 → externref. TYPE-AWARE box (#2785): the box helper is chosen by the
+  // i32's BRAND (its TS type), NEVER by the bare Wasm kind. `i32` is overloaded
+  // — it backs `number`, `boolean` (1/0), and symbol HANDLES (ids) — and a
+  // type-blind `__box_number` corrupts the non-numbers (boolean `true` → the
+  // number 1; a symbol handle → a number). This was the root cause of the two
+  // R1 merge_group parks (#2760/#2766) and forced F1's f64-only narrowing.
   if (from.kind === "i32" && to.kind === "externref") {
     addUnionImports(ctx);
+    // boolean → __box_boolean (takes the i32 directly; preserves the boolean
+    // TAG so a boxed boolean compares value-correctly — in standalone native
+    // `===`, `__box_boolean_struct` is classified as a boolean, distinct from a
+    // number, so `boxedBool === true` holds, whereas `__box_number` would tag it
+    // a number and `1 !== true`). Registered by addUnionImports in both modes.
+    if (from.boolean === true) {
+      const boxBoolIdx = ctx.funcMap.get("__box_boolean");
+      if (boxBoolIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx: boxBoolIdx });
+        return;
+      }
+    }
+    // symbol → __box_symbol (takes the i32 handle/id directly; identity-stable
+    // via the host symbol cache). HOST only — standalone has no native
+    // `__box_symbol` yet (#2785 fast-follow), so route to it only when it is
+    // ALREADY registered (the symbol read/literal path pulls it). This keeps the
+    // arm purely additive: a symbol-branded value never silently leaks a host
+    // import into a standalone module, and falls through to the number box if
+    // the helper is absent. The arm is dormant until symbols are branded (the
+    // array-read F1 site defers `symbol[]`); wiring it here makes the primitive
+    // complete so the fast-follow only has to brand + ensure the helper.
+    if (from.symbol === true) {
+      const boxSymIdx = ctx.funcMap.get("__box_symbol");
+      if (boxSymIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx: boxSymIdx });
+        return;
+      }
+    }
+    // number (or unbranded i32) → __box_number (convert i32 → f64 first).
     const funcIdx = ctx.funcMap.get("__box_number");
     if (funcIdx !== undefined) {
       fctx.body.push({ op: "f64.convert_i32_s" });

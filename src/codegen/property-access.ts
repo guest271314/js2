@@ -5417,6 +5417,52 @@ export function isSafeBoundsEliminated(fctx: FunctionContext, expr: ts.ElementAc
 }
 
 /**
+ * (#2785) The TYPE-AWARE box ValType for an F1 plain-array OOB→`undefined` read,
+ * reconstructed from the RECEIVER's TS element type. The boolean/symbol BRAND is
+ * structural-only and is ERASED in `arrDef.element` (arrays dedupe by structure,
+ * so `number[]` / `boolean[]` / `symbol[]` all share one `$vec_i32` struct — the
+ * storage kind alone cannot tell them apart). So the box helper must be chosen
+ * from the element's SEMANTIC type, recovered here from the TS type (the same
+ * discipline `arrayElementIsBoolean` uses for `Array.prototype.join`).
+ *
+ * Returns the branded ValType F1 should box with, or `null` to DEFER (fall
+ * through to the unchanged shared-helper read — bounds-checked type-default OOB,
+ * never traps).
+ *
+ * Widened (F1 fires):
+ *   - `f64` element → `{ kind:"f64" }` — `number[]`, unambiguous → `__box_number`
+ *     (the existing, byte-identical path).
+ *   - `i32` element whose receiver element TS type is genuinely `boolean` →
+ *     `{ kind:"i32", boolean:true }` → `__box_boolean`. Re-enables the
+ *     `boolean[]` arm #2766 deferred.
+ *
+ * Deferred (returns `null`, unchanged from current main):
+ *   - `i32` element that is NOT provably boolean — `symbol[]` (standalone has no
+ *     native `__box_symbol` yet, #2785 fast-follow; keeps `symbols-omitted`
+ *     green), packed `number[]` (i32/i8/i16), or any other handle rep;
+ *   - `externref` / `ref` / object elements.
+ * Conservative: any checker failure, or a union whose non-nullish members are
+ * not ALL boolean, defers.
+ */
+function f1ElementBoxType(ctx: CodegenContext, expr: ts.ElementAccessExpression, elementType: ValType): ValType | null {
+  if (elementType.kind === "f64") return { kind: "f64" };
+  if (elementType.kind !== "i32") return null;
+  let t: ts.Type;
+  try {
+    t = ctx.checker.getTypeAtLocation(expr);
+  } catch {
+    return null;
+  }
+  const parts = t.isUnion?.() ? t.types : [t];
+  const valueParts = parts.filter((p) => (p.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Null)) === 0);
+  if (valueParts.length === 0) return null;
+  if (valueParts.every((p) => (p.flags & ts.TypeFlags.BooleanLike) !== 0)) {
+    return { kind: "i32", boolean: true };
+  }
+  return null;
+}
+
+/**
  * (#2760 — hybrid type-soundness floor F1) SAFE plain-array OOB read for a
  * PRIMITIVE element (`f64` `number[]` / `i32` `boolean[]`): push the in-bounds
  * element **boxed to externref**, or JS `undefined` when the index is out of
@@ -5443,6 +5489,16 @@ function emitPlainArrayUndefinedOobGet(
   fctx: FunctionContext,
   arrTypeIdx: number,
   elementType: ValType,
+  // (#2785) The TYPE-AWARE box ValType. The array's storage kind (`elementType`)
+  // is structurally dedup'd (so a `boolean[]` and a `number[]` share one
+  // `$vec_i32` struct — the `boolean` brand is ERASED in `arrDef.element`), but
+  // the box helper MUST be chosen by the element's SEMANTIC type. The call site
+  // reconstructs the brand from the receiver TS type (`f1ElementBoxType`) and
+  // passes it here as `boxType` (e.g. `{ kind:"i32", boolean:true }` for a
+  // `boolean[]`), which `coerceType` reads to pick `__box_boolean` over
+  // `__box_number`. Defaults to `elementType` (the byte-identical f64/number
+  // path), so existing callers are unchanged.
+  boxType: ValType = elementType,
 ): void {
   // Save index + array ref (consumed by the bounds test AND the bounded read).
   const idxLocal = allocLocal(fctx, `__oobu_idx_${fctx.locals.length}`, { kind: "i32" });
@@ -5469,9 +5525,13 @@ function emitPlainArrayUndefinedOobGet(
   fctx.body.push({ op: "local.get", index: arrLocal });
   fctx.body.push({ op: "local.get", index: idxLocal });
   emitBoundsCheckedArrayGet(fctx, arrTypeIdx, elementType, ctx, false);
-  const nativeValueType: ValType =
-    elementType.kind === "i8" || elementType.kind === "i16" ? { kind: "i32" } : elementType;
-  coerceType(ctx, fctx, nativeValueType, { kind: "externref" });
+  // The value on the stack has the STORAGE kind (`elementType`, i8/i16 widened
+  // to i32 by the read). Box it via the SEMANTIC `boxType` (which carries the
+  // boolean/symbol brand) — its `.kind` agrees with the stack value's kind
+  // (f64→f64, boolean i32→i32), so `coerceType`'s `from.kind` lines up while the
+  // brand drives the helper choice (#2785).
+  const boxFrom: ValType = boxType.kind === "i8" || boxType.kind === "i16" ? { kind: "i32" } : boxType;
+  coerceType(ctx, fctx, boxFrom, { kind: "externref" });
   const boxedLocal = allocLocal(fctx, `__oobu_box_${fctx.locals.length}`, { kind: "externref" });
   fctx.body.push({ op: "local.set", index: boxedLocal });
 
@@ -6402,18 +6462,22 @@ export function compileElementAccessBody(
     // real array receiver: NOT a typed-array view (kept on its own OOB semantics
     // — the S2 blast radius) and NOT the `$__regexp_match_vec` exotic (its
     // index/input/groups fields are property reads with their own spec
-    // semantics; deferred). This F1 slice widens ONLY the `number[]` (f64)
-    // element kind — see the element-kind dispatch below; `i32` elements
-    // (boolean[] / symbol-handle / other handle reps), object-element (`ref`)
-    // arrays, and externref (`any[]`/`string[]`) all keep their typed result and
-    // are deferred (#2766 narrowed F1 to f64 after kind-based `__box_number`
-    // boxing corrupted symbol + boolean i32 elements).
+    // semantics; deferred). This F1 slice widens the PRIMITIVE element kinds the
+    // type-aware box (#2785) can box correctly — `number[]` (f64) and `boolean[]`
+    // (branded i32), via `f1ElementBoxType` below. Other `i32` elements
+    // (`symbol[]` / packed-number / other handle reps), object-element (`ref`)
+    // arrays, and externref (`any[]`/`string[]`) keep their typed result and are
+    // deferred (`f1BoxType === null`).
     const isRegexMatchVec = typeDef.fields.length >= 4 && typeDef.fields[2]?.name === "index";
     const numericHint = expectedType?.kind === "f64" || expectedType?.kind === "i32";
     const oobUndefined =
       !numericHint &&
       classifyTypedArrayType(ctx.checker.getTypeAtLocation(expr.expression), ctx.checker) === "other" &&
       !isRegexMatchVec;
+    // (#2785) The type-aware box ValType for the F1 widen (null = defer). Boxes
+    // `number[]` (f64) and `boolean[]` (branded i32) correctly; defers symbol[] /
+    // other i32 / externref. Computed even when `oobUndefined` is false (cheap).
+    const f1BoxType = f1ElementBoxType(ctx, expr, arrDef.element);
     // Unwrap: struct.get data field, then index into backing array
     fctx.body.push({ op: "struct.get", typeIdx, fieldIdx: 1 }); // get data from vec
     // #1179: hint i32 directly for the index. compileExpression will produce
@@ -6439,32 +6503,27 @@ export function compileElementAccessBody(
       // (#2001 S1) Even bounds-eliminated externref reads must map a `$Hole`
       // slot back to `undefined` — the loop guard proves in-bounds, not present.
       if (ctx.usesArrayHoles && arrDef.element.kind === "externref") emitHoleToUndefined(ctx, fctx);
-    } else if (oobUndefined && arrDef.element.kind === "f64") {
-      // (#2760 F1, narrowed by #2766) Plain-array OOB → `undefined` for a genuine
-      // `number[]` (f64) element: widen the SAFE result to externref (box the
-      // in-bounds value via `__box_number`, OOB → undefined). f64 cannot represent
-      // `undefined`, so the JS-correct lowering of an unproven read is the
-      // boxed-or-undefined externref. Bounds-eliminated reads keep the unboxed
-      // fast path above; only the unproven read pays the box. Call-site-owned
-      // policy — the shared `emitBoundsCheckedArrayGet` default is untouched (its
-      // subview / typed-array / array-method callers are byte-identical; flipping
-      // the shared default was the S2 leak).
+    } else if (oobUndefined && f1BoxType !== null) {
+      // (#2760 F1, #2785 type-aware box) Plain-array OOB → `undefined` for a
+      // PRIMITIVE element: widen the SAFE result to externref (box the in-bounds
+      // value, OOB → undefined). f64/i32 cannot represent `undefined`, so the
+      // JS-correct lowering of an unproven read is the boxed-or-undefined
+      // externref. Bounds-eliminated reads keep the unboxed fast path above; only
+      // the unproven read pays the box. Call-site-owned policy — the shared
+      // `emitBoundsCheckedArrayGet` default is untouched (its subview /
+      // typed-array / array-method callers are byte-identical; flipping the
+      // shared default was the S2 leak).
       //
-      // #2766 — F1 is restricted to the f64 (number[]) element ONLY. An `i32`
-      // element is NOT widened here: `i32` is overloaded — it backs `boolean[]`
-      // AND symbol-handle arrays (`symbol[]`, e.g. `Object.values({k: aSymbol})`)
-      // AND other handle reps — and `emitPlainArrayUndefinedOobGet` boxes the
-      // in-bounds value via `coerceType(i32→externref)` = `__box_number`, which
-      // is only correct for an actual number. Boxing a boolean/symbol-handle i32
-      // as a number corrupts it (regressed `Object/values/symbols-omitted.js`
-      // and 21 standalone `Array/prototype/map/15.4.4.19-*` boolean tests where
-      // `result[0] === true` failed because `true` was boxed as the number 1).
-      // i32 (boolean[]) OOB→undefined is DEFERRED until F1 boxes per the element's
-      // semantic type (`__box_boolean` / `__box_symbol` / …) instead of the
-      // kind-based `__box_number`; until then i32 reads fall through to the
-      // unchanged shared-helper call below (bounds-checked, type-default OOB —
-      // never traps, matches pre-F1 main). EXTERNREF elements stay deferred too.
-      emitPlainArrayUndefinedOobGet(ctx, fctx, arrTypeIdx, arrDef.element);
+      // #2785 — the element is boxed by its SEMANTIC type, not its Wasm kind:
+      // `f1BoxType` (reconstructed from the receiver TS type, since the brand is
+      // erased in `arrDef.element`) is `{f64}` for `number[]` (`__box_number`) or
+      // `{i32, boolean}` for `boolean[]` (`__box_boolean`). This re-enables the
+      // `boolean[]` arm #2766 deferred — boxing a boolean as `__box_number` made
+      // it the number 1, regressing the standalone map tests
+      // (`result[0] === true`). `symbol[]` and other i32/object/externref
+      // elements stay deferred (`f1BoxType === null`) and fall through to the
+      // unchanged shared-helper read below (bounds-checked, never traps).
+      emitPlainArrayUndefinedOobGet(ctx, fctx, arrTypeIdx, arrDef.element, f1BoxType);
       return { kind: "externref" };
     } else {
       // (#2001 S1) Pass `ctx` so the in-bounds `$Hole → undefined` read-boundary
@@ -6499,6 +6558,9 @@ export function compileElementAccessBody(
   const oobUndefinedArr =
     !(expectedType?.kind === "f64" || expectedType?.kind === "i32") &&
     classifyTypedArrayType(ctx.checker.getTypeAtLocation(expr.expression), ctx.checker) === "other";
+  // (#2785) Type-aware box ValType for the F1 widen (null = defer) — matches the
+  // vec-struct call site above.
+  const f1BoxTypeArr = f1ElementBoxType(ctx, expr, typeDef.element);
   // Compile index and convert to i32 (#1179: hint i32 directly to skip the
   // f64.convert_i32_s + i32.trunc_sat_f64_s round-trip when the index is
   // already an i32 local or integer literal).
@@ -6522,17 +6584,16 @@ export function compileElementAccessBody(
     // (#2001 S1) Map a `$Hole` slot back to `undefined` on bounds-eliminated
     // externref reads too (in-bounds ≠ present).
     if (ctx.usesArrayHoles && typeDef.element.kind === "externref") emitHoleToUndefined(ctx, fctx);
-  } else if (oobUndefinedArr && typeDef.element.kind === "f64") {
-    // (#2760 F1, narrowed by #2766) Plain-array OOB → `undefined` for a genuine
-    // `number[]` (f64) element only: widen to a boxed-or-undefined externref.
-    // Bounds-eliminated reads above keep the unboxed fast path. `i32` elements
-    // (boolean[] / symbol-handle / other handle reps) are NOT widened — F1's
-    // `coerceType(i32→externref)`=`__box_number` mis-boxes a non-number i32 (see
-    // the full note at the vec-struct call site above; regressed symbol + 21
-    // standalone boolean map tests). Externref elements stay deferred too. Both
-    // fall through to the unchanged shared-helper call below (bounds-checked,
-    // never traps).
-    emitPlainArrayUndefinedOobGet(ctx, fctx, typeIdx, typeDef.element);
+  } else if (oobUndefinedArr && f1BoxTypeArr !== null) {
+    // (#2760 F1, #2785 type-aware box) Plain-array OOB → `undefined` for a
+    // PRIMITIVE element: widen to a boxed-or-undefined externref, boxed by the
+    // element's SEMANTIC type (`f1BoxTypeArr`: `{f64}` number[] → `__box_number`,
+    // `{i32, boolean}` boolean[] → `__box_boolean`). Bounds-eliminated reads above
+    // keep the unboxed fast path. `symbol[]` / other i32 / object / externref
+    // elements stay deferred (`f1BoxTypeArr === null`) and fall through to the
+    // unchanged shared-helper read below. See the full note at the vec-struct
+    // call site above.
+    emitPlainArrayUndefinedOobGet(ctx, fctx, typeIdx, typeDef.element, f1BoxTypeArr);
     return { kind: "externref" };
   } else {
     // (#2001 S1) Pass `ctx` for the in-bounds `$Hole → undefined` mapping.
