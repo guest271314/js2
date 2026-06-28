@@ -570,7 +570,17 @@ function compileObjectLiteralWithAccessors(
         // pass it to __extern_set as the externref key. The host coerces a
         // non-string key (e.g. a boxed number) per ToPropertyKey.
         fctx.body.push({ op: "local.get", index: objLocal });
-        const keyType = compileExpression(ctx, fctx, prop.name.expression);
+        // (#1336) Pass the `externref` expected-type hint so an ESSymbol-typed
+        // key (a user `Symbol()`, lowered to a bare i32 id) is boxed into a REAL
+        // JS Symbol via `__box_symbol` — matching the element-READ path
+        // (property-access.ts → compileExpression(..., {kind:"externref"}),
+        // expressions.ts:753 ESSymbolLike arm). Without the hint the manual
+        // `coerceType(i32→externref)` below boxed the id as a NUMBER
+        // (`__box_number`), so `{ [k]: v }` landed under string key "<id>" and
+        // symbol identity was lost (getOwnPropertySymbols empty; `o[k]`,
+        // Object.assign, spread all missed it). A non-symbol runtime key
+        // (number/string) is unaffected — the hint boxes those exactly as before.
+        const keyType = compileExpression(ctx, fctx, prop.name.expression, { kind: "externref" });
         if (!keyType) {
           fctx.body.push({ op: "ref.null.extern" });
         } else if (keyType.kind !== "externref") {
@@ -652,7 +662,17 @@ function compileObjectLiteralWithAccessors(
         // (#2126) Runtime computed method key — same as the PropertyAssignment
         // branch: evaluate the key expression and pass it as the externref key.
         fctx.body.push({ op: "local.get", index: objLocal });
-        const keyType = compileExpression(ctx, fctx, prop.name.expression);
+        // (#1336) Pass the `externref` expected-type hint so an ESSymbol-typed
+        // key (a user `Symbol()`, lowered to a bare i32 id) is boxed into a REAL
+        // JS Symbol via `__box_symbol` — matching the element-READ path
+        // (property-access.ts → compileExpression(..., {kind:"externref"}),
+        // expressions.ts:753 ESSymbolLike arm). Without the hint the manual
+        // `coerceType(i32→externref)` below boxed the id as a NUMBER
+        // (`__box_number`), so `{ [k]: v }` landed under string key "<id>" and
+        // symbol identity was lost (getOwnPropertySymbols empty; `o[k]`,
+        // Object.assign, spread all missed it). A non-symbol runtime key
+        // (number/string) is unaffected — the hint boxes those exactly as before.
+        const keyType = compileExpression(ctx, fctx, prop.name.expression, { kind: "externref" });
         if (!keyType) {
           fctx.body.push({ op: "ref.null.extern" });
         } else if (keyType.kind !== "externref") {
