@@ -10310,6 +10310,46 @@ assert._isSameValue = isSameValue;
             const wrappedTarget = _wrapForHost(target, exports);
             const wrappedSources = (sources ?? []).map((s) => (_isWasmStruct(s) ? _wrapForHost(s, exports) : s));
             Object.assign(wrappedTarget, ...wrappedSources);
+            // (#2804) Object.assign performs CopyDataProperties via [[Set]] (§7.3.25),
+            // so each copied own enumerable source key becomes an ENUMERABLE own data
+            // property on the target. The proxy `set` trap above writes the value to
+            // the struct's sidecar (`_wasmStructProps`) but, being a plain dynamic
+            // write, records NO descriptor entry — and `__object_keys` /
+            // `__object_values` / `__object_entries` / `__getOwnPropertyNames` only
+            // surface sidecar keys on a STRUCT target that carry a descriptor (#2746).
+            // So the copied keys landed in the value store yet vanished from
+            // enumeration (`Object.keys` dropped Object.assign's source keys — the
+            // #2804 bug; for-in already surfaced them). Record an enumerable
+            // writable+configurable descriptor for each newly-copied non-static-field
+            // key so the enumeration helpers list them, matching the spec data-property
+            // semantics and the for-in result. Existing struct fields enumerate from
+            // the shape; keys with an existing descriptor (e.g. a defineProperty'd
+            // non-enumerable prop) are left untouched.
+            const targetDescs = _getSidecarDescs(target);
+            const staticFieldNames = new Set(_getStructFieldNames(target, exports) ?? []);
+            for (const ws of wrappedSources) {
+              if (ws == null || (typeof ws !== "object" && typeof ws !== "function")) continue;
+              let keys: (string | symbol)[];
+              try {
+                keys = Reflect.ownKeys(ws);
+              } catch {
+                continue;
+              }
+              for (const k of keys) {
+                let enumerable: boolean;
+                try {
+                  enumerable = Object.getOwnPropertyDescriptor(ws, k)?.enumerable === true;
+                } catch {
+                  enumerable = false;
+                }
+                if (!enumerable) continue;
+                if (typeof k === "string" && staticFieldNames.has(k)) continue;
+                const nk = _normalizeDescKey(k);
+                if (!targetDescs.has(nk)) {
+                  targetDescs.set(nk, _SC_WRITABLE | _SC_ENUMERABLE | _SC_CONFIGURABLE | _SC_DEFINED);
+                }
+              }
+            }
             return target;
           }
           // Non-struct target: wrap only wasmGC sources so their property

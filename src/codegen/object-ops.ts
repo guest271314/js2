@@ -3846,8 +3846,20 @@ export function compileObjectKeysOrValues(
     return { kind: "externref" };
   }
 
+  // (#2804) When the argument is a variable that holds a HOST `$Object`
+  // (externref) rather than a closed struct — e.g. `const b = { ...a, z: 3 }`,
+  // whose spread routes it to the host plain-object path and tags it in
+  // `externrefAccessorVars` — the compile-time struct fast path below is WRONG:
+  // it would enumerate the keys in the var's INFERRED STRUCT field order (TS
+  // lists spread-merged own props first, e.g. `z,x,y`), but the live host object
+  // carries the runtime CopyDataProperties INSERTION order (`x,y,z`). Force the
+  // runtime `__object_keys`/`values`/`entries` helper (the `!structName` arm)
+  // so enumeration reflects the actual object, matching V8. Keyed on the SAME
+  // `externrefAccessorVars` tag the variable sites set, so the representation
+  // (externref host object) and the enumeration path stay in lockstep.
+  const argIsHostObjectVar = ts.isIdentifier(arg) && ctx.externrefAccessorVars.has(arg.text);
   // Resolve struct name from the argument type
-  const structName = resolveStructName(ctx, argType);
+  const structName = argIsHostObjectVar ? undefined : resolveStructName(ctx, argType);
   if (!structName) {
     // Check if the type is an empty object literal (not any/unknown) — if so,
     // compile away to an empty array since there's nothing to enumerate.

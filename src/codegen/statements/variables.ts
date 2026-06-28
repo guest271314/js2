@@ -11,7 +11,7 @@ import type { CodegenContext, FunctionContext, NullGuardFact, NullishExclusion }
 import { emitCoercedLocalSet, noJsHost } from "../expressions/helpers.js";
 import { emitUndefined } from "../expressions/late-imports.js";
 import { needsTdzFlag, resolveWasmType } from "../index.js";
-import { resolveComputedKeyExpression } from "../literals.js";
+import { objectLiteralSpreadTakesHostPath, resolveComputedKeyExpression } from "../literals.js";
 import { localGlobalIdx } from "../registry/imports.js";
 import { getOrRegisterArrayType, getOrRegisterSubviewType, getOrRegisterVecType } from "../registry/types.js";
 import { coerceType, compileExpression, valTypesMatch } from "../shared.js";
@@ -718,7 +718,22 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
         }
         return false;
       });
-    if (initIsAccessorLiteral) {
+    // (#2804) A spread-containing object literal initializer that takes the host
+    // plain-object path (no concrete contextual struct type — e.g.
+    // `const b = { ...a, z: 3 }`) builds a host `$Object` (externref), NOT the
+    // closed struct TypeScript INFERS for the variable. The local must therefore
+    // be an externref so the value isn't ref.cast to that inferred struct (which
+    // fails at runtime → `b.x` reads NaN/null), and reads route through
+    // `__extern_get` — preserving the spread's runtime insertion-order keys +
+    // values. Uses the SAME predicate as the literals.ts routing so the local
+    // representation and the value representation stay in lockstep. An explicit
+    // concrete-struct annotation pins a contextual type → predicate false →
+    // struct path retained (#2714 control).
+    const initIsHostSpreadLiteral =
+      decl.initializer !== undefined &&
+      ts.isObjectLiteralExpression(decl.initializer) &&
+      objectLiteralSpreadTakesHostPath(ctx, decl.initializer);
+    if (initIsAccessorLiteral || initIsHostSpreadLiteral) {
       ctx.externrefAccessorVars.add(name);
     }
 
@@ -736,38 +751,39 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
       isProxyConstruction(decl.initializer) &&
       ts.isIdentifier(decl.name) &&
       !proxyResultEscapesToCall(decl, decl.name.text);
-    const wasmType: ValType = initIsAccessorLiteral
-      ? { kind: "externref" as const }
-      : isI32CoercedLocal
-        ? { kind: "i32" }
-        : isI32SpecializedArray
-          ? { kind: "ref_null" as const, typeIdx: getOrRegisterVecType(ctx, "i32", { kind: "i32" }) }
-          : widenedTypeIdx !== undefined
-            ? { kind: "ref_null" as const, typeIdx: widenedTypeIdx }
-            : (subarraySubviewType ??
-              inferredVecType ??
-              standaloneRegExpMatchArrayType ??
-              (decl.initializer && isStringMethodReturningHostArray(ctx, decl.initializer)
-                ? { kind: "externref" as const }
-                : decl.initializer && isPromiseHostCall(ctx, decl.initializer)
+    const wasmType: ValType =
+      initIsAccessorLiteral || initIsHostSpreadLiteral
+        ? { kind: "externref" as const }
+        : isI32CoercedLocal
+          ? { kind: "i32" }
+          : isI32SpecializedArray
+            ? { kind: "ref_null" as const, typeIdx: getOrRegisterVecType(ctx, "i32", { kind: "i32" }) }
+            : widenedTypeIdx !== undefined
+              ? { kind: "ref_null" as const, typeIdx: widenedTypeIdx }
+              : (subarraySubviewType ??
+                inferredVecType ??
+                standaloneRegExpMatchArrayType ??
+                (decl.initializer && isStringMethodReturningHostArray(ctx, decl.initializer)
                   ? { kind: "externref" as const }
-                  : // (#2615) `new Proxy(target, handler)` returns a host/native
-                    // Proxy externref. The checker types it as the TARGET's
-                    // struct (ProxyConstructor returns T), so the default slot
-                    // would `ref.test` the Proxy against that struct, fail, null
-                    // it, and trap every read via a direct `struct.get`. Force an
-                    // externref local so reads route through `__extern_get` (the
-                    // only path that runs the Proxy MOP / trap). Both modes emit
-                    // a Proxy externref, so this is mode-agnostic.
-                    initIsProxy
+                  : decl.initializer && isPromiseHostCall(ctx, decl.initializer)
                     ? { kind: "externref" as const }
-                    : // (#1337) `fn.bind(...)` / `Function.prototype.bind.call(...)`
-                      // returns a host bound-function externref in JS-host mode;
-                      // force an externref local so the value isn't ref.cast to
-                      // the target's closure struct (which traps → null binding).
-                      decl.initializer && !ctx.standalone && !noJsHost(ctx) && isBindHostCall(decl.initializer)
+                    : // (#2615) `new Proxy(target, handler)` returns a host/native
+                      // Proxy externref. The checker types it as the TARGET's
+                      // struct (ProxyConstructor returns T), so the default slot
+                      // would `ref.test` the Proxy against that struct, fail, null
+                      // it, and trap every read via a direct `struct.get`. Force an
+                      // externref local so reads route through `__extern_get` (the
+                      // only path that runs the Proxy MOP / trap). Both modes emit
+                      // a Proxy externref, so this is mode-agnostic.
+                      initIsProxy
                       ? { kind: "externref" as const }
-                      : localTypeForDeclaration(ctx, varType)));
+                      : // (#1337) `fn.bind(...)` / `Function.prototype.bind.call(...)`
+                        // returns a host bound-function externref in JS-host mode;
+                        // force an externref local so the value isn't ref.cast to
+                        // the target's closure struct (which traps → null binding).
+                        decl.initializer && !ctx.standalone && !noJsHost(ctx) && isBindHostCall(decl.initializer)
+                        ? { kind: "externref" as const }
+                        : localTypeForDeclaration(ctx, varType)));
 
     // If this var/let/const was already pre-hoisted at function entry, reuse that slot.
     // For let/const: the pre-pass (hoistLetConstWithTdz) always pre-allocates a slot

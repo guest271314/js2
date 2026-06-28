@@ -911,6 +911,45 @@ function _hasRuntimeComputedKey(ctx: CodegenContext, expr: ts.ObjectLiteralExpre
   return false;
 }
 
+/**
+ * (#2714 / #2804) True when a spread-containing object literal must be built via
+ * the host plain-object (`$Object`/externref) path rather than a closed struct,
+ * because its evaluation context does not pin a CONCRETE object SHAPE the struct
+ * path could faithfully build/enumerate: `any` / `unknown` / `object`, NO
+ * contextual type at all, or a shapeless object type with zero own properties
+ * (e.g. the `object` param of `Object.keys`).
+ *
+ * This is the single source of truth for the routing decision below AND for the
+ * variable-declaration local typing (statements/variables.ts, index.ts var
+ * hoist). Keeping them in lockstep is what fixes #2804: `const b = { ...a, z: 3 }`
+ * (no annotation) has NO contextual type, so the literal takes the host path —
+ * but the receiving variable's INFERRED type is a concrete struct `{x;y;z}`, so
+ * without this shared predicate the local was typed as that struct while the
+ * initializer produced a host `$Object`, and the externref→struct coercion
+ * (ref.test/ref.cast) failed at runtime → `b.x` read NaN / null. The variable
+ * sites consult this predicate and force an externref local so the local
+ * representation matches the host-object value (and `b.x` routes through
+ * `__extern_get`, preserving the spread's insertion-order keys + values, which
+ * the struct path cannot — its field order follows TS's own-prop-first inferred
+ * type, not the runtime CopyDataProperties insertion order).
+ *
+ * A CONCRETE annotated target (`const x: { a: number } = { ...o }`, ≥1 property)
+ * has a specific contextual type → returns false → keeps the struct path so
+ * typed consumers still receive a struct (#2714 control).
+ */
+export function objectLiteralSpreadTakesHostPath(ctx: CodegenContext, expr: ts.ObjectLiteralExpression): boolean {
+  if (expr.properties.length === 0) return false;
+  if (!expr.properties.some((p) => ts.isSpreadAssignment(p))) return false;
+  const spreadCtxType = ctx.checker.getContextualType(expr);
+  return (
+    !spreadCtxType ||
+    (spreadCtxType.flags & ts.TypeFlags.Any) !== 0 ||
+    (spreadCtxType.flags & ts.TypeFlags.Unknown) !== 0 ||
+    (spreadCtxType.flags & ts.TypeFlags.NonPrimitive) !== 0 ||
+    spreadCtxType.getProperties().length === 0
+  );
+}
+
 export function compileObjectLiteral(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -960,23 +999,11 @@ export function compileObjectLiteral(
   // { ...o }`), keep the struct path so typed consumers still get a struct.
   // (Assigning to an `any`/untyped variable already worked via the host path;
   // this generalizes the same routing to the direct-call-argument position.)
-  if (expr.properties.length > 0 && expr.properties.some((p) => ts.isSpreadAssignment(p))) {
-    const spreadCtxType = ctx.checker.getContextualType(expr);
-    // Non-specific = the contextual type does not pin a concrete object SHAPE the
-    // struct path could build/enumerate: `any`/`unknown`/`object`, no contextual
-    // type at all, OR a shapeless object type with zero own properties (e.g. the
-    // `object` param of `Object.keys`, whose contextual type carries no fields).
-    // A CONCRETE target (`const x: { a: number } = { ...o }`) has ≥1 property and
-    // keeps the struct path so typed consumers still receive a struct.
-    const nonSpecificCtx =
-      !spreadCtxType ||
-      (spreadCtxType.flags & ts.TypeFlags.Any) !== 0 ||
-      (spreadCtxType.flags & ts.TypeFlags.Unknown) !== 0 ||
-      (spreadCtxType.flags & ts.TypeFlags.NonPrimitive) !== 0 ||
-      spreadCtxType.getProperties().length === 0;
-    if (nonSpecificCtx) {
-      return compileObjectLiteralWithAccessors(ctx, fctx, expr);
-    }
+  // (#2804) Routes through the shared `objectLiteralSpreadTakesHostPath`
+  // predicate so the variable-declaration local typing (variables.ts / index.ts)
+  // can make the IDENTICAL decision and force a matching externref local.
+  if (objectLiteralSpreadTakesHostPath(ctx, expr)) {
+    return compileObjectLiteralWithAccessors(ctx, fctx, expr);
   }
 
   // If this empty object literal is the initializer of a variable with widened
