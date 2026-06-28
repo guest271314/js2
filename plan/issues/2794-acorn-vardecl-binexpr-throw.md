@@ -1,7 +1,7 @@
 ---
 id: 2794
 title: "[SENIOR-DEV ONLY] acorn parse() var-declaration THROW — AST-Node-as-closureBridge + vec read-methods (host-proxy layer); closes #2681"
-status: in-progress
+status: done
 assignee: ttraenkler/sendev-acorn
 sprint: current
 priority: high
@@ -10,6 +10,7 @@ feasibility: hard
 reasoning_effort: high
 created: 2026-06-28
 updated: 2026-06-28
+completed: 2026-06-28
 task_type: bugfix
 area: codegen
 language_feature: value-representation
@@ -217,3 +218,47 @@ list. #2686 is blocked by #2800, not by this issue. This issue (#2794) now scope
 - The closureBridge guard for (1) was reverted (it regressed genuine closures —
   `__is_closure` false-negatives). The clean fix is a POSITIVE `__is_data_struct`
   marker (mirror `__is_vec`); see (1) above.
+
+## Resolution (implemented — DONE)
+
+Both var-declaration host-proxy gaps fixed. Compiled-acorn now parses
+`var x;` / `var x = 1;` / `var x = 1, y = 2;` / `let z = 5;` / `const k = 7;`
+to a `VariableDeclaration` whose AST is **structurally EQUAL to node-acorn**
+(differential diff via the dogfood oracle, ignoring positions + the benign
+`sourceFile` marshaling field). `parse("x")` / `foo(bar, baz)` still parse;
+`1 + 2 * 3;` remains blocked by **#2800** (out of scope).
+
+**(1) Positive `__is_data_struct` discriminator** — `emitIsDataStructExport`
+(`src/codegen/index.ts`, emitted after `emitIsClosureExport` in both finalize
+paths). `ref.test`-chain over the data-struct set (mirrors
+`_emitStructFieldGettersInner`'s set + skip-list: `structFields` minus
+`Wrapper*`/`$AnyValue`/`__vec_*`/`__arr_*`). Closures live only in
+`closureInfoByTypeIdx`, never in `structFields`, so a closure answers **0** and a
+genuine data struct **1** — no false-negative failure mode (the reason the
+`__is_closure` gate was unusable). `_wrapForHost`'s get-trap
+(`src/runtime.ts` ~5246) now diverts a `__is_data_struct === 1` field value to an
+OBJECT proxy instead of masking it as a callable `closureBridge`. Verified
+(`tests/issue-2794.test.ts`): `inner` (data) → `is_data_struct=1`/`is_closure=0`
++ presents as an object with readable fields; `cb` (closure) →
+`is_data_struct=0`/`is_closure=1` + stays callable (no regression).
+
+**(2) Vec read-only methods** — `_VEC_PRIMITIVE_READ_METHODS`
+(`indexOf`/`lastIndexOf`/`includes`/`join`) handled in `__extern_method_call`
+(`src/runtime.ts` ~9905): on a positive `__is_vec` receiver, materialize the vec
+to a real JS array (`__vec_len`/`__vec_get`, elements via `wrapHostValue`) and
+apply the native method. Scoped to primitive-returning, callback-free methods so
+the result round-trips cleanly (array-returning `slice`/`concat` deferred —
+separate representation concern). Before the fix `scope.lexical.indexOf(name)` in
+acorn's `declareName` threw `TypeError: indexOf is not a function`.
+
+Regression check: targeted local batch (host-proxy / closure / set-algebra /
+getters / json / #1712 fnctor-dispatch). The only failures
+(`issue-1712-capture-closure-dispatch`, `getters-setters`) are **pre-existing on
+clean `origin/main`** (verified by swapping in the unmodified source) — NOT
+introduced here. Broad test262 conformance validated by CI.
+
+Out-of-scope observations (NOT fixed here): `foo(bar, baz)`'s `arguments` field
+marshals as `{}` rather than an array (a separate CallExpression vec-marshaling
+gap); a nested-`any`-vec multi-push then `join` can drop the first element (an
+S3-class vec-identity edge) — acorn's real var-decl path does not hit it (the AST
+diffs EQUAL).
