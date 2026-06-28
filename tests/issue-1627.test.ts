@@ -7,10 +7,12 @@
 // to bridge wasmGC structs through `_wrapForHost` so their sidecar properties
 // (`size`, `has`, `keys`) are visible to native JS access.
 
+import { existsSync } from "fs";
 import { describe, expect, it } from "vitest";
 
 import { compile } from "../src/index.js";
 import { buildImports } from "../src/runtime.js";
+import { runTest262File } from "./test262-runner.js";
 
 const ENV_STUB = {
   console_log_number: () => {},
@@ -185,4 +187,53 @@ describe("#1627 — Set methods accept set-like arguments", () => {
     `;
     expect(await runTest(src)).toBe(0);
   });
+});
+
+// ── GetSetRecord argument-validation flips (the actual #1627 host-mode fix) ──
+//
+// The receiver crosses to the host as a real JS `Set`, so native V8's
+// `Set.prototype[m]` runs the spec `GetSetRecord(other)` on the WasmGC-struct
+// argument. The historical bridge wrapped the arg with the `_wrapForHost` proxy,
+// whose generic `__call_fn_N` fallback masks EVERY struct field as a callable
+// `closureBridge` — so a non-callable `has = {}` looked callable (no TypeError)
+// and a `{valueOf(){…}}` size looked like a function (never ToNumber-coerced).
+//
+// The scoped `_setLikeRecordForHost` adapter (runtime.ts), used ONLY by the 7
+// set-algebra methods, reads each GetSetRecord field RAW (via the extracted
+// `_resolveHostField`) and presents non-closure structs as plain (non-callable)
+// objects, so native GetSetRecord's `IsCallable(has)`/`IsCallable(keys)` throws
+// and `ToNumber(size)` coercion fire per spec. These test262 files flip
+// fail→pass with the adapter.
+//
+// Out of scope (documented follow-up — separate root cause): class-instance
+// set-likes (`allows-set-like-class`, `set-like-class-{order,mutation}`), the
+// array-with-props case (`set-like-array`), and `set-like-iter-return` — those
+// need the host to resolve anonymous-class-instance prototype members / array
+// dynamic props / iterator `return`, not this adapter.
+const TEST262 = "/workspace/test262";
+const SET_PROTO = `${TEST262}/test/built-ins/Set/prototype`;
+const SET_METHODS = [
+  "union",
+  "intersection",
+  "difference",
+  "symmetricDifference",
+  "isSubsetOf",
+  "isSupersetOf",
+  "isDisjointFrom",
+];
+const VALIDATION_CASES = ["has-is-callable.js", "keys-is-callable.js", "size-is-a-number.js"];
+
+const maybe = existsSync(TEST262) ? describe : describe.skip;
+
+maybe("#1627 — GetSetRecord validation on object-literal set-like args (host mode)", () => {
+  for (const meth of SET_METHODS) {
+    for (const rel of VALIDATION_CASES) {
+      const file = `${SET_PROTO}/${meth}/${rel}`;
+      if (!existsSync(file)) continue; // not every method ships every case
+      it(`${meth}/${rel}`, async () => {
+        const r = await runTest262File(file, "built-ins/Set");
+        expect(r.status, `reason: ${(r as { reason?: string }).reason ?? ""}`).toBe("pass");
+      });
+    }
+  }
 });

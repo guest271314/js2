@@ -1,9 +1,11 @@
 ---
 id: 1336
 title: "spec gap: Object.assign drops getters / Symbol keys (27 of 38 test262 fails)"
-status: ready
+status: done
+assignee: ttraenkler/sendev-soundness
 created: 2026-05-08
-updated: 2026-06-19
+updated: 2026-06-28
+completed: 2026-06-28
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -11,7 +13,7 @@ task_type: bugfix
 area: codegen, runtime
 language_feature: object
 goal: spec-completeness
-sprint: Backlog
+sprint: current
 parent: 1328
 ---
 # #1336 — Object.assign: getter invocation + Symbol-key copying
@@ -132,3 +134,61 @@ fails without those compiler changes.
 ## Frontmatter reconcile (2026-06-12)
 
 Was `in-progress` with no open PR, no active agent, and no Suspended Work section (session died sprints 42-52). Reset to `ready` during the sprint-62 issue review; re-validate against current main before claiming (#2148).
+
+## Verify-first re-scope + fix (2026-06-28, sendev-soundness)
+
+**Re-probed against current `origin/main` (de24f6c). The issue's 2026-05-08
+framing is partly stale: getter invocation now WORKS.** Probe results before the
+fix:
+
+| case | before | note |
+|------|--------|------|
+| `Object.assign(t, {get a(){return 42}})` → `t.a` | **42 ✓** | getters already invoked (prior `_wrapForHost` work) |
+| getter throw aborts iteration | **✓** | already correct |
+| `Object.defineProperty(o, sym, {value})` → `o[sym]` | **✓** | defineProperty-form symbol keys already work |
+| `const s = {[k]: 7}` (k=Symbol) → `s[k]` | **NaN ✗** | the real remaining gap |
+| `{[k]:7}` → `Object.getOwnPropertySymbols(s).length` | **0 ✗** | key not a real Symbol |
+| `{[k]:7}` → `Object.getOwnPropertyNames(s).length` | **1 ✗** | landed under STRING key |
+| `Object.assign`/spread of `{[k]:7}` | **NaN ✗** | source never had the symbol |
+
+### Root cause (precise)
+
+The gap is **upstream of Object.assign** — a computed **Symbol-keyed object
+LITERAL** drops symbol identity. A user `Symbol()` lowers to a bare **i32**
+counter id (`compileSymbolCall`, literals.ts). The #2126 runtime-computed-key
+WRITE path (`literals.ts` ~:573 data, ~:655 method) compiled the key with
+`compileExpression(ctx, fctx, prop.name.expression)` — **no expected-type
+hint** — then a manual `coerceType(i32 → externref)`, which boxes the id as a
+**NUMBER** (`__box_number`). So `{ [k]: 7 }` did `__extern_set(obj, 100, 7)` →
+the property landed under string key `"100"`. The element-READ path
+(`property-access.ts` → `compileExpression(..., {kind:"externref"})`) DOES box an
+`ESSymbolLike` i32 via `__box_symbol` (expressions.ts:753-762), so write/read
+disagreed → `o[k]` missed it; `getOwnPropertySymbols` saw nothing; `Object.assign`
+and spread (which CopyDataProperties off the real own-symbol set) had nothing to
+copy. Element-WRITE `o[k] = v` already passed the hint and was correct.
+
+### Fix (surgical, ~1 line × 2 sites)
+
+`src/codegen/literals.ts` — pass the `{ kind: "externref" }` expected-type hint to
+`compileExpression` at both #2126 computed-key sites (data property + method), so
+an ESSymbol key boxes via `__box_symbol` (a real JS Symbol), matching the
+read/write paths. Non-symbol runtime keys (number/string) are unaffected — the
+hint boxes those exactly as the prior `coerceType` did.
+
+After the fix all probe cases pass: `s[k]`=7, `getOwnPropertySymbols`=1,
+`getOwnPropertyNames`=0, `Object.assign`/spread copy the symbol, mixed
+string+symbol literals keep both, and controls (getter invoke, plain copy,
+numeric computed key) are unchanged.
+
+### Tests / checks
+- `tests/issue-1336.test.ts` — extended to 8 cases (2 prior + 6 new
+  symbol-literal cases incl. assign/spread/mixed + numeric-key control). All pass.
+- Regression sweep (suites importing the compiler directly): `computed-props`,
+  `issue-computed-props`, `object-literals`, `iterators`,
+  `issue-2029-disposablestack-static-read-standalone`, `issue-2151-spread-literal`
+  — all green. (`object-literal-getters-setters` / `computed-property-class`
+  error on a pre-existing `./helpers.js` module-resolution quirk in this shallow
+  worktree — reproduced with the fix stashed; unrelated to this change.)
+- `prettier`, `biome lint`, `tsc --noEmit` clean.
+- test262 `built-ins/Object/assign` delta confirmed by CI (the symbol-key bucket;
+  getters were already passing). Real test262 conformance is the CI gate.
