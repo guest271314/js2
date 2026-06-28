@@ -106,6 +106,29 @@ RUN ARCH=$(dpkg --print-architecture) && \
   chmod +x /usr/local/bin/deno && \
   /usr/local/bin/deno --version
 
+# bun — reproduces the loopdive/js2#389 reporter's exact toolchain: he
+# `bun build`s the native-messaging TS to .js, then compiles that .js with
+# js2wasm. Baking bun into the image lets CI/agents replay that transpile-to-JS
+# flow, which exercises a different, looser-typed compiler path than the direct
+# .ts route (e.g. `Deno.stdin.readSync`'s `number | null` return collapsing once
+# the type annotation is stripped). Ships a release .zip (unzip is in the apt
+# block above). Arch-aware: amd64->x64, arm64->aarch64.
+ARG BUN_VERSION=bun-v1.3.14
+RUN ARCH=$(dpkg --print-architecture) && \
+  case "$ARCH" in \
+    amd64) BUN_ARCH=x64 ;; \
+    arm64) BUN_ARCH=aarch64 ;; \
+    *) echo "unsupported arch: $ARCH" && exit 1 ;; \
+  esac && \
+  BUN_ZIP="bun-linux-${BUN_ARCH}.zip" && \
+  wget -O /tmp/bun.zip "https://github.com/oven-sh/bun/releases/download/${BUN_VERSION}/${BUN_ZIP}" && \
+  unzip -o /tmp/bun.zip -d /tmp/bun && \
+  mv "/tmp/bun/bun-linux-${BUN_ARCH}/bun" /usr/local/bin/bun && \
+  rm -rf /tmp/bun.zip /tmp/bun && \
+  chmod +x /usr/local/bin/bun && \
+  ln -sf /usr/local/bin/bun /usr/local/bin/bunx && \
+  /usr/local/bin/bun --version
+
 COPY .tmux.conf /home/node/.tmux.conf
 RUN chown node:node /home/node/.tmux.conf
 
