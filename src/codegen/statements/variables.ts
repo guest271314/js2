@@ -42,6 +42,20 @@ function inferArrayVecType(ctx: CodegenContext, decl: ts.VariableDeclaration): V
 
   let inferredElemType: ts.Type | null = null;
 
+  // (#2806) A write whose value type is purely `undefined` / `void` / `null`
+  // must NOT pin the array's element kind to a numeric (i32) vec. The canonical
+  // source is acorn's `var elt = (void 0); elt = <nodeRef>; elts.push(elt)`:
+  // the binding's DECLARED type is `undefined`, but the runtime value is an AST
+  // node reference. Letting `undefined` resolve the element type to i32 lowers
+  // `elts` to an i32 vec, so every pushed reference coerces to i32 `0` — silently
+  // dropping the node refs (#2801, the compiled-acorn `arguments` bug). Skip such
+  // writes exactly like `any` (let a later concrete write pin the kind; if none,
+  // the caller falls through to `any[]` → externref). Genuine numeric pushes
+  // (`number`/`boolean` literals) still pin f64/i32 and keep the fast path.
+  const isUnpinnableWriteType = (t: ts.Type): boolean =>
+    (t.flags & (ts.TypeFlags.Any | ts.TypeFlags.Undefined | ts.TypeFlags.Void | ts.TypeFlags.Null)) !== 0 &&
+    (t.flags & ~(ts.TypeFlags.Any | ts.TypeFlags.Undefined | ts.TypeFlags.Void | ts.TypeFlags.Null)) === 0;
+
   function visit(node: ts.Node) {
     if (inferredElemType) return;
 
@@ -54,7 +68,7 @@ function inferArrayVecType(ctx: CodegenContext, decl: ts.VariableDeclaration): V
       node.left.expression.text === varName
     ) {
       const valType = ctx.checker.getTypeAtLocation(node.right);
-      if (!(valType.flags & ts.TypeFlags.Any)) {
+      if (!isUnpinnableWriteType(valType)) {
         inferredElemType = valType;
         return;
       }
@@ -70,7 +84,7 @@ function inferArrayVecType(ctx: CodegenContext, decl: ts.VariableDeclaration): V
       node.arguments.length >= 1
     ) {
       const valType = ctx.checker.getTypeAtLocation(node.arguments[0]!);
-      if (!(valType.flags & ts.TypeFlags.Any)) {
+      if (!isUnpinnableWriteType(valType)) {
         inferredElemType = valType;
         return;
       }
@@ -98,7 +112,25 @@ function inferArrayVecType(ctx: CodegenContext, decl: ts.VariableDeclaration): V
 const HOST_ARRAY_STRING_METHODS = new Set(["split"]);
 
 function localTypeForDeclaration(ctx: CodegenContext, type: ts.Type): ValType {
-  return isNullablePrimitiveType(type) ? { kind: "externref" } : resolveWasmType(ctx, type);
+  if (isNullablePrimitiveType(type)) return { kind: "externref" };
+  // (#2806) A variable whose declared type is **purely** `undefined` / `void`
+  // must get an externref slot, not a numeric (i32) one. The canonical source is
+  // `var elt = (void 0)` — the `void 0` expression pins the binding to type
+  // `undefined` (unlike `var elt = undefined`, which TS treats as evolving-any).
+  // Lowering that to an i32 local means a later REFERENCE assignment
+  // (`elt = this.parseMaybeAssign(...)`) is coerced to i32 `0` / dropped — the
+  // root of compiled-acorn's `CallExpression.arguments` dropping its node refs
+  // (#2801). An externref slot holds the `undefined` sentinel AND any later ref.
+  // Gated on a pure undefined/void type so genuine numeric/boolean/string locals
+  // are untouched; unions (`number | undefined`) carry the Union flag, not
+  // Undefined, and are left alone.
+  if (
+    (type.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void)) !== 0 &&
+    (type.flags & ~(ts.TypeFlags.Undefined | ts.TypeFlags.Void)) === 0
+  ) {
+    return { kind: "externref" };
+  }
+  return resolveWasmType(ctx, type);
 }
 
 function stripInferenceWrapper(expr: ts.Expression): ts.Expression {

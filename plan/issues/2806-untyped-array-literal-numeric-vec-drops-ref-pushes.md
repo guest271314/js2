@@ -1,8 +1,8 @@
 ---
 id: 2806
 title: "[SENIOR-DEV ONLY] untyped `[]` array literal lowers to a NUMERIC (f64) vec — ref pushes coerce to 0 (drops AST node refs)"
-status: ready
-assignee: ttraenkler/unassigned
+status: in-progress
+assignee: ttraenkler/senior-dev
 sprint: current
 priority: high
 horizon: l
@@ -134,3 +134,101 @@ test262 buckets.
 
 - **Blocks #2801** (its acceptance can't be met until node arrays preserve refs).
 - Sibling representation work: #2784 (vec-identity), #2794 (vec read-methods).
+
+---
+
+## Implementation Plan (architect arch-arrayrep — CANDIDATE, superseded by Step-0; see below)
+
+**Reframing (architect):** empty `[]` already defaults to `externref`
+(`literals.ts:3126`). The generic evolving-local array is already ref-safe. The
+bug is a NUMERIC OVERRIDE: when the contextual/location type resolves to
+`Array<number>`, `emptyElemKind` becomes f64/i32, the vec is f64-backed, and
+pushed AST-node refs coerce to `f64 0`. The fix must make actual ref writes WIN
+over the inferred-numeric kind — not merely default to externref.
+
+Policy as specified:
+- **(B) push-flow override** at the empty-`[]` site (~`literals.ts:3140`): after
+  `emptyElemKind` is computed, if it is primitive numeric (`f64`/`i32`), scan the
+  containing function for writes to this array's binding via a
+  `classifyArrayWriteElemKind(ctx, expr) → "ref"|"numeric"|"mixed"|"unknown"`
+  helper (reuse the forward-walk infra at `detectCountedPushLoopSize` ~2782 /
+  `detectCountedFillLoopBound` ~2867). If any write stores a reference, or
+  numeric+ref mixed → override `emptyElemKind = "externref"`. All-numeric /
+  no-writes → keep numeric (preserve `var a=[]; a.push(1)` fast path).
+- **(A′) bounded allowJs fallback** in `resolveWasmType`'s Array branch
+  (`index.ts` ~11610): only if the numeric comes from the binding/field/return
+  `Array<number>`, and only under `ctx.allowJs`/`skipSemanticDiagnostics` with a
+  WIDENED/inferred `number` element — prefer `externref`. Gated strictly so
+  annotated TS `number[]` stays f64. (B) and (A′) must pick the SAME kind for a
+  given binding or `struct.new` mismatches the local/field type → validation
+  failure.
+
+## Step-0 findings (instrument-verified — SUPERSEDE the plan above)
+
+The (B)+(A′) premise does **not** hold on current `main` (post-#2275). Instrumented
+`emptyElemKind`, the push-site element kind, and the host read for the real acorn
+compile + minimal repros:
+
+1. **Empty `[]` is already externref everywhere.** All **71** empty-`[]` literals
+   in acorn — including `parseExprList`'s `arguments` array (`acorn.mjs:3613`) —
+   resolve `emptyElemKind=externref`. **Zero** are f64/i32. So (B) (which only
+   fires when `emptyElemKind` is numeric) is a **no-op**, and (A′) does not apply
+   (the element type is not inferred-`number`).
+
+2. **The f64/`0` comes from the binding's inferred element type, not the
+   literal.** `parseExprList`'s `elts.push(elt)` (`acorn.mjs:3630`) compiles with
+   `elemKind=i32` because `elts` infers `undefined[]`
+   (`resolveWasmType` Array branch: `elemTs=undefined elemFlags=32768`). Each
+   pushed AST-node ref coerces to i32 `0`. `__vec_get` faithfully returns
+   `number 0`.
+
+3. **Root cause = the `var elt = (void 0)` idiom.** acorn's `parseExprList`:
+   `var elt = (void 0); ... elt = this.parseMaybeAssign(...); elts.push(elt)`.
+   The `void 0` EXPRESSION pins the binding to TS type `undefined` (unlike
+   `var elt = undefined`, which TS treats as **evolving-any**). Minimal repro
+   (`.tmp/repro-variants.mjs`) confirms the split decisively:
+   `var e=(void 0); e=ref; return e` → **undefined/0** (BROKEN);
+   `var e=undefined` / `=null` / `var e;` (no init) → **object** (all WORK).
+   Only the `void 0` form breaks. This also explains the issue's `body`-vs-
+   `arguments` split: `Program.body` pushes a directly-typed ref (works);
+   `CallExpression.arguments` flows through the `var elt = void 0` intermediate
+   (drops the ref).
+
+4. The `undefined` declared type then drops the ref at **multiple** codegen
+   sites that each consult it independently: the local slot type
+   (`localTypeForDeclaration`), the array element-kind inference
+   (`inferArrayVecType` — picks the first non-`any` push value type =
+   `undefined` → i32 vec), and at least one more value-coercion boundary (the
+   array element STILL reads `0` even after the slot + vec are forced to
+   externref — the value is lost at the assignment/return/push-arg coercion,
+   not yet fully isolated). `call.optional` reading `0` not `false` is the same
+   class (a `boolean` local/field carrying `0`).
+
+### Partial fixes landed on this branch (correct but INSUFFICIENT alone)
+
+- `inferArrayVecType` (`statements/variables.ts`): a write whose value type is
+  purely `undefined`/`void`/`null` no longer pins the array element kind to a
+  numeric vec (treated like `any`). → the `arguments` vec is now externref.
+- `localTypeForDeclaration` (`statements/variables.ts`): a variable whose
+  declared type is purely `undefined`/`void` gets an externref slot (matching
+  `never`, `null`). → the `var elt = (void 0)` local is now externref.
+
+With both, the vec + the local are externref, yet the host still reads `0` —
+so a third value-coercion site remains. The complete fix needs the
+`var x = (void 0)` binding to be treated as **evolving-any / externref
+uniformly** across declaration + assignment + reads + return + push-arg (i.e.
+make `void 0`-init behave like `undefined`-init, which already works
+end-to-end). That is a cross-cutting representation change, broader than the
+empty-array (B)+(A′) scope.
+
+### Recommendation (ESCALATED to tech lead)
+
+The architect's (B)+(A′) plan does not address the real root cause and would be a
+no-op. Recommend a re-spec targeting the `var x = (void 0)` idiom: recognise a
+`void`-expression initializer at the variable declaration and route the binding
+through the same evolving-any path that `var x = undefined` already uses, so all
+downstream coercion sites see externref. Broad blast radius → full `merge_group`
++ standalone-floor; watch `built-ins/Array/**` + TypedArray buckets.
+
+Repros banked in `.tmp/`: `repro-variants.mjs` (the decisive void-0 split),
+`repro-voidinit.mjs` (array + scalar), `callargs3.mjs`/`elemdbg.mjs` (acorn).
