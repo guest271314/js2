@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-06-28T16:17:49.071Z",
-  "baseline_generated_at": "2026-06-28T16:17:49.072Z",
-  "baseline_sha": "ed1ef8e2972cc6a9cb5e043bec896cd00b59a2de",
+  "timestamp": "2026-06-28T16:36:11.571Z",
+  "baseline_generated_at": "2026-06-28T16:36:11.571Z",
+  "baseline_sha": "6b5e4b66274e5c9cb086f9008fb8432bfd5dc814",
   "oracle_version": 1,
   "mode": {
     "target": "standalone",
@@ -1180,8 +1180,8 @@
         },
         "error_categories": {
           "runtime_error": 2463,
-          "illegal_cast": 14,
           "wasm_compile": 82,
+          "illegal_cast": 14,
           "null_deref": 51,
           "other": 184,
           "assertion_fail": 773,
@@ -1190,15 +1190,15 @@
         },
         "sample_files": [
           "test/built-ins/Temporal/Now/zonedDateTimeISO/return-value.js",
-          "test/built-ins/Temporal/ZonedDateTime/prototype/eraYear/prop-desc.js",
           "test/built-ins/Temporal/PlainDateTime/subclass.js",
+          "test/built-ins/Temporal/ZonedDateTime/prototype/eraYear/prop-desc.js",
           "test/built-ins/Temporal/PlainDateTime/prototype/month/prop-desc.js",
-          "test/built-ins/Temporal/PlainMonthDay/refisoyear-undefined.js"
+          "test/built-ins/Temporal/Instant/prototype/toString/timezone-wrong-type.js"
         ],
         "sample_signatures": [
           "runtime_error:Cannot convert object to primitive value",
-          "illegal_cast:illegal cast [in __str_to_number() ← test]",
           "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: extern.convert_any[#] expected type shared anyref, found array.get of type i64 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $instance",
+          "illegal_cast:illegal cast [in __str_to_number() ← test]",
           "null_deref:L#:## dereferencing a null pointer [in test()]",
           "other:L#:## Temporal.PlainDate argument must be a string or property bag, not object"
         ]
@@ -1543,14 +1543,14 @@
           "test/built-ins/Reflect/enumerate/undefined.js",
           "test/built-ins/DataView/custom-proto-access-throws.js",
           "test/built-ins/Reflect/set/not-a-constructor.js",
-          "test/built-ins/Reflect/getOwnPropertyDescriptor/not-a-constructor.js"
+          "test/built-ins/Reflect/get/return-value.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(Reflect.has(o1, 'p'), true, 'true from own property');",
           "other:L#:## Codegen error: Reflect.hasOwnProperty not supported in standalone mode (## Phase C).",
           "other:L#:## Codegen error: Reflect.construct not supported in standalone mode (## Phase C).",
           "other:L#:## Codegen error: Reflect.set built-in static property value read is not supported in --target standalone (## / ## S6-b). Add a native built-in method closure for this pair.",
-          "other:L#:## Codegen error: Reflect.getOwnPropertyDescriptor built-in static property value read is not supported in --target standalone (## / ## S6-b). Add a native built-in method closure for this pair."
+          "assertion_fail:returned # — assert ## at L#: assert.sameValue( Reflect.get(o, 'p1'), 'value #', 'Return value from data descriptor' );"
         ]
       },
       {
@@ -1793,8 +1793,8 @@
         "error_categories": {
           "assertion_fail": 924,
           "other": 164,
-          "runtime_error": 355,
           "wasm_compile": 21,
+          "runtime_error": 355,
           "promise_error": 89,
           "negative_test_fail": 5,
           "illegal_cast": 2,
@@ -1804,15 +1804,15 @@
           "test/language/expressions/object/cpn-obj-lit-computed-property-name-from-multiplicative-expression-mult.js",
           "test/language/expressions/object/literal-property-name-bigint.js",
           "test/built-ins/String/fromCharCode/S15.5.3.2_A3_T2.js",
-          "test/built-ins/Object/defineProperties/15.2.3.7-5-b-247.js",
-          "test/built-ins/Object/isExtensible/15.2.3.13-2-1.js"
+          "test/built-ins/Object/create/properties-arg-to-object-bigint.js",
+          "test/built-ins/Object/defineProperties/15.2.3.7-5-b-247.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert.sameValue( o[# * #], # );",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(o[\"#\"], true, \"the property name must be the string representation of the numeric value.\");",
           "other:L#:## Codegen error: String.fromCharCode built-in static property value read is not supported in --target standalone (## / ## S6-b). Add a native built-in method closure for this pair.",
-          "runtime_error:Cannot convert object to primitive value",
-          "assertion_fail:returned # — assert ## at L#: assert(Object.isExtensible(global));"
+          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: extern.convert_any[#] expected type shared anyref, found i64.const of type i64 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $proto ex",
+          "runtime_error:Cannot convert object to primitive value"
         ]
       },
       {
@@ -2152,14 +2152,14 @@
           "test/language/arguments-object/10.6-13-a-2.js",
           "test/language/arguments-object/10.6-13-a-3.js",
           "test/language/arguments-object/10.6-2gs.js",
-          "test/language/arguments-object/10.5-7-b-4-s.js",
-          "test/language/arguments-object/10.6-13-c-1-s.js"
+          "test/language/arguments-object/10.6-13-c-1-s.js",
+          "test/language/arguments-object/10.5-7-b-4-s.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert(called, 'called !== true');",
           "assertion_fail:returned # — assert ## at L#: assert.throws(TypeError, function() { f_10_6_1_gs(); });",
-          "assertion_fail:returned # — assert ## at L#: assert(_10_5_7_b_4_fun(#, #), '_10_5_7_b_4_fun(#, #) !== true');",
           "assertion_fail:returned # — assert ## at L#: assert.throws(TypeError, function() { arguments.callee; });",
+          "assertion_fail:returned # — assert ## at L#: assert(_10_5_7_b_4_fun(#, #), '_10_5_7_b_4_fun(#, #) !== true');",
           "assertion_fail:returned # — assert ## at L#: assert.throws(TypeError, function() { \"use strict\"; delete args[#]; });"
         ]
       },
