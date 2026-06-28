@@ -1,7 +1,8 @@
 ---
 id: 2795
 title: "Hybrid Row 9: typed-array element OOB → undefined (call-site policy, shared helper untouched)"
-status: in-progress
+status: done
+completed: 2026-06-28
 assignee: ttraenkler/sendev-taoob
 sprint: current
 created: 2026-06-28
@@ -22,7 +23,7 @@ related: [2760, 2766, 2785, 2792, 2593, 2762]
 The last row of the hybrid fast-path safety-predicate audit
 (`plan/log/hybrid-fastpath-audit.md` Row 9). A typed-array
 (`Uint8Array`/`Int32Array`/`Float64Array`/…) out-of-bounds element read must
-return JS `undefined` — the *view length* is the bound, per the integer-indexed
+return JS `undefined` — the _view length_ is the bound, per the integer-indexed
 exotic object semantics (TC39 §10.4.5 `[[Get]]` with an out-of-range
 CanonicalNumericIndexString returns `undefined`). Today the typed-array read site
 in `compileElementAccessBody` (`src/codegen/property-access.ts`) returns a
@@ -46,20 +47,20 @@ A **dedicated call-site helper** `emitTypedArrayUndefinedOobGet`, sibling to
 R1's `emitPlainArrayUndefinedOobGet`. It is reached only from the two
 `compileElementAccessBody` value-read call sites, gated on a genuine typed-array
 receiver (`classifyTypedArrayType(...) !== "other"`). Three reasons it is a
-*separate* helper rather than a reuse of `emitPlainArrayUndefinedOobGet`:
+_separate_ helper rather than a reuse of `emitPlainArrayUndefinedOobGet`:
 
 1. **Signedness.** A packed `i8`/`i16` typed-array element reads with
    view-name-driven sign/zero extension (`array.get_s` for `Int8/Int16`,
    `array.get_u` for `Uint8/Uint8Clamped/Uint16`). `emitPlainArrayUndefinedOobGet`
-   calls the shared helper *without* `signedness`, whose storage-kind heuristic
+   calls the shared helper _without_ `signedness`, whose storage-kind heuristic
    (i8→get_u, i16→get_s) would **miscompile** `Int8Array` (wants get_s) and
    `Uint16Array` (wants get_u). The typed-array helper threads `taSignedness`.
-2. **Unsigned i32.** `Uint32Array` reads the full 32 bits as an *unsigned* JS
+2. **Unsigned i32.** `Uint32Array` reads the full 32 bits as an _unsigned_ JS
    number (0..2³²−1) — `f64.convert_i32_u`, not the signed conversion the plain
    box path uses.
 3. **Audit guidance.** Row 9 says the typed-array policy "must stay scoped
    separately from F1's plain-array scope." A dedicated helper keeps both
-   `emitPlainArrayUndefinedOobGet` *and* the shared `emitBoundsCheckedArrayGet`
+   `emitPlainArrayUndefinedOobGet` _and_ the shared `emitBoundsCheckedArrayGet`
    byte-identical.
 
 The helper mirrors R1's proven floor-safe primitive sequence (the same
@@ -112,10 +113,42 @@ and byte-identical — the R1 Math.pow lesson.
   `emitBoundsCheckedArrayGet` and `emitPlainArrayUndefinedOobGet` untouched.
 - Standalone OOB === undefined (undefined ≡ null), in-bounds preserved, valid
   Wasm with empty imports.
-- Numeric-context typed-array reads (Math.* args) stay unboxed/correct.
+- Numeric-context typed-array reads (Math.\* args) stay unboxed/correct.
 - The #2760 scope-boundary canary is updated (Int32Array OOB now `undefined`).
 
 ## Test Results
 
-(filled in below after implementation)
-</content>
+`tests/issue-2795.test.ts` (host + standalone) — all green:
+
+- Host OOB → `undefined`: `Uint8Array`/`Int32Array`/`Float64Array`/`Int8Array`/
+  `Uint16Array`/`Uint32Array` (literal, negative, dynamic index).
+- Host in-bounds correctness: `Uint8Array` (zero-ext), `Int8Array` (signed −5),
+  `Int32Array` (−123456), `Uint32Array` (unsigned 4000000000), `Float64Array`
+  (3.5).
+- Numeric-context unboxed: OOB element in arithmetic → NaN; `Math.max` args
+  correct; counted-loop sum keeps the unboxed fast path.
+- Standalone: OOB === undefined (≡ null), in-bounds preserved, valid Wasm with
+  empty imports.
+- Shared-helper / plain-array F1 (#2760) still scoped — `number[]` OOB unchanged.
+
+Canaries green (unchanged by this change): `issue-2760`, `issue-2785`,
+`issue-2792`, `issue-2729`, `issue-2715`, `issue-2593`, `issue-2648`,
+`issue-1787`, `issue-1670`, `issue-1910`, `array-methods`,
+`functional-array-methods`, `issue-2357` (subarray aliasing), `issue-2649`
+(subview length), `issue-2001` (array holes). The #2760 scope-boundary canary
+was updated to assert the new typed-array OOB → `undefined` behavior.
+
+Two unrelated pre-existing failures were confirmed to fail **identically on the
+unmodified base** (origin/main), so they are NOT regressions from this change:
+
+- `tests/typed-array-basic.test.ts` (11/11) — its minimal `{ env }` instantiate
+  harness omits the `string_constants` module the compiler emits for f64-backed
+  typed arrays (a harness gap; the failing cases include `.length`-only programs
+  with no element access).
+- `tests/issue-2766.test.ts` "symbol element identity survives
+  Object.values()[i]" — fails on base too (a `symbol[]` read through the
+  plain-array F1 arm, untouched here).
+
+Broad impact (typed-array element reads, used widely) is validated by the
+`merge_group` full test262 + the #2097 absolute standalone floor.
+
