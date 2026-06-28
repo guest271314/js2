@@ -29,7 +29,7 @@ import { ts, forEachChild } from "../ts-api.js";
  * to `v` (so `v` is not `-0`, not fractional, not NaN/±Inf, not `|v| ≥ 2^31`).
  * `i32Locals` is the set of locals already known to hold i32.
  *
- * The "canonical" property is the soundness contract for #2787: when EVERY write
+ * The "canonical" property is the soundness contract for #2789: when EVERY write
  * to a packed array yields a canonical i32, the i32-stored value read back as f64
  * equals what the f64 backing would have stored, so NO read can observe a
  * distinction i32 erases. That discharges the read-side proof obligation in the
@@ -44,13 +44,13 @@ import { ts, forEachChild } from "../ts-api.js";
  *   - comparison ops (return boolean = i32 0/1)
  *   - `~x` (canonical int32) and unary `+x` of an i32-safe operand
  *   - unary `-<non-zero integer literal>` only (a `-1`-style sentinel) — NOT
- *     `-x` / `-(expr)`, which can be `-0` (#2787)
+ *     `-x` / `-(expr)`, which can be `-0` (#2789)
  *   - parenthesised / `as`-cast / non-null-asserted canonical-i32 expr
  *
  * Deliberately EXCLUDED (would break canonicality → MISCOMPILE if packed):
  *   - `+` / `-` / `*` arithmetic — f64 result stored via `i32.trunc_sat_f64_s`,
  *     which SATURATES on overflow rather than yielding the spec-correct f64
- *     (#2787, mirrors the #1236 scalar-local fix). Wrap-canonicalising patterns
+ *     (#2789, mirrors the #1236 scalar-local fix). Wrap-canonicalising patterns
  *     like `(a*b) | 0` still qualify via the top-level bitwise op.
  *   - `>>>` — produces uint32 which can sit above 2^31, reinterpreted as a
  *     negative i32 on store.
@@ -89,7 +89,7 @@ export function isI32SafeExprForArray(
     if (op === ts.SyntaxKind.PlusToken || op === ts.SyntaxKind.TildeToken) {
       return isI32SafeExprForArray(expr.operand, i32Locals, depth + 1);
     }
-    // #2787: unary `-` can produce negative zero. i32 cannot represent `-0`
+    // #2789: unary `-` can produce negative zero. i32 cannot represent `-0`
     // (it collapses to `+0`), so storing `-0` and then observing the sign of
     // zero on read (`1 / x`, `Object.is(x, -0)`) diverges from the always-correct
     // f64 backing. Admit ONLY `-<non-zero integer literal>` — a constant sentinel
@@ -130,7 +130,7 @@ export function isI32SafeExprForArray(
     ) {
       return true;
     }
-    // #2787 (mirrors the #1236 scalar-local fix): `+`, `-`, `*` of two number
+    // #2789 (mirrors the #1236 scalar-local fix): `+`, `-`, `*` of two number
     // operands are evaluated as f64 in codegen (JS spec: `number op number` is
     // f64), then stored into the i32 backing via `i32.trunc_sat_f64_s`. That
     // saturates rather than wraps on overflow, so e.g. `arr[i] = a * b` with
@@ -360,7 +360,7 @@ export function collectI32SpecializedArrays(
       const arrName = node.left.expression.text;
       // Bitwise compounds (|=, &=, ^=, <<=, >>=) keep the value in a canonical
       // int32 — safe (the result equals its f64 image, so both backings agree).
-      // #2787 (mirrors #1236): arithmetic compounds (+=, -=, *=) desugar to
+      // #2789 (mirrors #1236): arithmetic compounds (+=, -=, *=) desugar to
       // `arr[i] = arr[i] + E`, whose f64 arithmetic is stored back through
       // `i32.trunc_sat_f64_s` — saturating on overflow rather than producing the
       // spec-correct f64. e.g. `arr[0] += 2e9` after `arr[0] = 2e9` stores

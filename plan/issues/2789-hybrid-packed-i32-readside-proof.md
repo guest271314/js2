@@ -1,5 +1,5 @@
 ---
-id: 2787
+id: 2789
 title: "Hybrid fast-path Row 3: packed-i32 array read-side soundness — demote overflow/-0 writes to f64 (miscompile fix)"
 status: done
 sprint: current
@@ -18,7 +18,7 @@ goal: correctness
 related: [2762, 1197, 1236, 1126]
 ---
 
-# #2787 — Packed-i32 array read-side soundness (hybrid fast-path audit Row 3)
+# #2789 — Packed-i32 array read-side soundness (hybrid fast-path audit Row 3)
 
 ## Problem
 
@@ -125,11 +125,11 @@ verified by probe.
   `+`/`-`/`*`; `-0`-safe unary minus) and the arithmetic-compound disqualifier
   in `collectI32SpecializedArrays`. Doc comments updated to state the
   canonical-i32 contract.
-- `tests/issue-2787.test.ts` — runtime + WAT-level proofs.
+- `tests/issue-2789.test.ts` — runtime + WAT-level proofs.
 
 ## Test Results
 
-`npx vitest run tests/issue-2787.test.ts` → 18/18 pass. Covers:
+`npx vitest run tests/issue-2789.test.ts` → 18/18 pass. Covers:
 
 - the four previously-miscompiled cases (`*`/`+`/`-` overflow, `+=` overflow)
   now returning the spec-correct f64 value;

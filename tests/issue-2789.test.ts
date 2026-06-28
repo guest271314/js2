@@ -1,6 +1,6 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 //
-// Issue #2787 — packed-i32 array read-side soundness (hybrid fast-path audit
+// Issue #2789 — packed-i32 array read-side soundness (hybrid fast-path audit
 // Row 3). `collectI32SpecializedArrays` / `isI32SafeExprForArray`
 // (src/codegen/array-element-typing.ts) lower a `number[]` to an `array<mut i32>`
 // when every write looked "i32-safe". But the write check ACCEPTED `+`/`-`/`*`
@@ -48,7 +48,7 @@ function isI32Backed(wat: string): boolean {
   return /\$__vec_i32\b/.test(wat);
 }
 
-describe("#2787 — packed-i32 array read-side soundness", () => {
+describe("#2789 — packed-i32 array read-side soundness", () => {
   describe("previously MISCOMPILED: overflow now uses the f64 backing", () => {
     it("`arr.push(a * b)` with a*b = 2.5e9 returns 2500000000, not i32 saturation", async () => {
       const exports = await compileAndInstantiate(`
