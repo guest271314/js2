@@ -135,6 +135,26 @@ in preference order: a runtime `ref.test`-guarded struct read (row 8's pattern �
 SAFE but not free) when the receiver is _probably_ the nominal type, and the
 fully-dynamic property read (SAFE-always) otherwise. **L.**
 
+> **Update 2026-06-28 (#2791): split into read (discharged) + write (re-scoped).**
+> A verify-first investigation (23 adversarial probes, host + standalone) found
+> the **READ** side is already HI-compliant — `emitNullGuardedStructGet` /
+> `emitExternrefToStructGet` route every ref/externref receiver through the
+> runtime `ref.test` multi-struct dispatch (#778/#2674), and the one monomorphic
+> shortcut is Wasm-type-proven. (c) covariant-mutable-field divergence and (d)
+> divergent-layout subclasses are **structurally impossible**: every subclass is
+> laid out `[...parentFields, ...ownFields]` as a Wasm subtype
+> (`class-bodies.ts:759/815`), so the parent's fields are a strict prefix.
+> The genuine **silent miscompile** is a **structural-narrowing struct COPY at
+> the call-argument boundary** (`type-coercion.ts`
+> `getStructNarrowInfo`/`emitStructNarrowBody`): passing a value to a param of a
+> _different_ nominal struct type (a structurally-compatible distinct class, or
+> an `interface`) materializes a fresh `struct.new` copy, so a mutating callee
+> updates the copy, not the caller's object. This is **NOT** the Row-4 lane
+> (`resolveStructName`/`emitNullGuardedStructGet`) and no in-lane gate can fix it
+> (the receiver is already disconnected). Recommend: flip the read side to
+> `discharged`; file the write miscompile as its own type-coercion/param-typing
+> issue. Full analysis + repro tests in **#2791**.
+
 ### Row 5 — Unboxed number locals, any/union boundary — **#2782 (f64 arm landed)**
 
 Pure-numeric locals are already easy (no sink → no box). The subtle arm is a
