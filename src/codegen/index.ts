@@ -9930,6 +9930,17 @@ export function addUnionImports(ctx: CodegenContext): void {
     typeIdx: boxBoolType,
   });
 
+  // __box_symbol: (i32) → externref  (#2792 — boxes a symbol-handle i32 as a JS
+  // Symbol via the identity-stable host symbol cache. The F1 `symbol[]` OOB read
+  // routes here (HOST mode only — standalone defers `symbol[]`; see
+  // `f1ElementBoxType`). Same (i32)→externref signature as __box_boolean. Only
+  // reached on the host path; in standalone `addUnionImports` returns before this
+  // block, so no symbol host import ever leaks into a standalone module.)
+  addImport(ctx, "env", "__box_symbol", {
+    kind: "func",
+    typeIdx: boxBoolType,
+  });
+
   // __box_bigint: (i64) → externref  (#1644 — boxes a branded-bigint i64 as a
   // JS bigint; JS-BigInt-integration makes the host body identity)
   const boxBigType = addFuncType(ctx, [{ kind: "i64" }], [{ kind: "externref" }]);
@@ -9974,6 +9985,7 @@ export function addUnionImports(ctx: CodegenContext): void {
       "__unbox_boolean",
       "__box_number",
       "__box_boolean",
+      "__box_symbol",
       "__box_bigint",
       "__to_bigint",
       "__bigint_ctor",
