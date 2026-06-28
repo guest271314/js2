@@ -19,10 +19,10 @@
  *      fd_write, no node:fs / no env), owns+exports `memory`, and round-trips a
  *      framed message byte-correctly (incl. high + null bytes) under a fd shim;
  *   2. `store32/load32/store8/load8` lower inline (NOT as imports);
- *   3. the full `examples/native-messaging/nm_wasi.ts` host echoes a framed
+ *   3. the full `examples/native-messaging/nm_wasi_p1.ts` host echoes a framed
  *      Native-Messaging message byte-correctly under REAL wasmtime (gated on
  *      `findWasmtime()`), incl. a multi-window body;
- *   4. the existing `node:fs` example (`nm_js2wasm.ts`) still compiles unchanged.
+ *   4. the existing `node:fs` example (`nm_node_fs.ts`) still compiles unchanged.
  */
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -250,12 +250,12 @@ describe("#2657 raw fd echo — round-trip under a fd shim", () => {
   });
 });
 
-describe("#2657 nm_wasi.ts example — real Native-Messaging host", () => {
-  const examplePath = join(__dirname, "..", "examples", "native-messaging", "nm_wasi.ts");
+describe("#2657 nm_wasi_p1.ts example — real Native-Messaging host", () => {
+  const examplePath = join(__dirname, "..", "examples", "native-messaging", "nm_wasi_p1.ts");
 
   it("compiles under --target wasi importing ONLY wasi_snapshot_preview1", async () => {
     const src = readFileSync(examplePath, "utf-8");
-    const r = await compile(src, { fileName: "nm_wasi.ts", target: "wasi", skipSemanticDiagnostics: true });
+    const r = await compile(src, { fileName: "nm_wasi_p1.ts", target: "wasi", skipSemanticDiagnostics: true });
     expect(r.success, r.success ? "" : r.errors?.[0]?.message).toBe(true);
     expect(importModules(r.wat!)).toEqual(new Set(["wasi_snapshot_preview1"]));
     expect(r.wat!).not.toContain("node:fs");
@@ -265,7 +265,7 @@ describe("#2657 nm_wasi.ts example — real Native-Messaging host", () => {
 
   it("echoes a small framed JSON message byte-correctly under a fd shim", async () => {
     const src = readFileSync(examplePath, "utf-8");
-    const binary = await compileWasi(src, "nm_wasi");
+    const binary = await compileWasi(src, "nm_wasi_p1");
     const body = new TextEncoder().encode('["hello",null,42]');
     const input = frame(body);
     const out = await runWithFdShim(binary, input);
@@ -274,7 +274,7 @@ describe("#2657 nm_wasi.ts example — real Native-Messaging host", () => {
 
   it("echoes a multi-window body (> 64 KiB streams through the fixed window)", async () => {
     const src = readFileSync(examplePath, "utf-8");
-    const binary = await compileWasi(src, "nm_wasi");
+    const binary = await compileWasi(src, "nm_wasi_p1");
     // 150 KiB body with a deterministic byte pattern incl. nulls + high bytes.
     const n = 150 * 1024;
     const body = new Uint8Array(n);
@@ -287,8 +287,8 @@ describe("#2657 nm_wasi.ts example — real Native-Messaging host", () => {
 
   it.runIf(wasmtimeBin)("runs under REAL wasmtime: byte-correct framed echo", async () => {
     const src = readFileSync(examplePath, "utf-8");
-    const binary = await compileWasi(src, "nm_wasi_wasmtime");
-    const path = join(tmpDir, "nm_wasi.wasm");
+    const binary = await compileWasi(src, "nm_wasi_p1_wasmtime");
+    const path = join(tmpDir, "nm_wasi_p1.wasm");
     writeFileSync(path, binary);
     const body = Uint8Array.from([0x5b, 0x00, 0xff, 0x80, 0x41, 0x5d]); // [ \0 \xff \x80 A ]
     const input = frame(body);
@@ -298,9 +298,9 @@ describe("#2657 nm_wasi.ts example — real Native-Messaging host", () => {
 });
 
 describe("#2657 — node:fs variant unchanged", () => {
-  it("the existing nm_js2wasm.ts example still compiles under --target wasi", async () => {
-    const src = readFileSync(join(__dirname, "..", "examples", "native-messaging", "nm_js2wasm.ts"), "utf-8");
-    const r = await compile(src, { fileName: "nm_js2wasm.ts", target: "wasi", skipSemanticDiagnostics: true });
+  it("the existing nm_node_fs.ts example still compiles under --target wasi", async () => {
+    const src = readFileSync(join(__dirname, "..", "examples", "native-messaging", "nm_node_fs.ts"), "utf-8");
+    const r = await compile(src, { fileName: "nm_node_fs.ts", target: "wasi", skipSemanticDiagnostics: true });
     expect(r.success, r.success ? "" : r.errors?.[0]?.message).toBe(true);
     // The node:fs variant declares WHAT it needs as `node:fs`; it must NOT have
     // grown a raw `wasi_snapshot_preview1` direct import path by accident.
