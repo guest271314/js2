@@ -1,11 +1,11 @@
 ---
 id: 2686
-title: "acorn parse() — binary-expression statement throws (parse(\"1 + 2 * 3;\") → WebAssembly.Exception)"
+title: "[ARCH] acorn parse() — binary-expression statement throws (parse(\"1 + 2 * 3;\") → WebAssembly.Exception); same root as #2681 (Parser not reconstructed), substrate-scoped"
 status: ready
 assignee: ttraenkler/unassigned
 sprint: current
 created: 2026-06-26
-updated: 2026-06-26
+updated: 2026-06-28
 priority: medium
 feasibility: hard
 reasoning_effort: high
@@ -59,3 +59,20 @@ single acorn compile ~290s — reuse one compile).
 - Compiled-acorn `parse("1 + 2 * 3;")` returns a BinaryExpression AST matching
   node-acorn.
 - Full merge_group / test262 (codegen-adjacent).
+
+## SAME ROOT AS #2681 — substrate-scoped (2026-06-28, dev-acorn)
+
+Re-verified on current `origin/main` (#2201): `parse("1 + 2 * 3;")` still THROWS.
+Confirmed SAME root cause as #2681 — see #2681's `## ROOT CAUSE SHARPENED +
+SUPERSEDED` section for the full analysis. In short: acorn's `Parser` is NOT
+reconstructed as a `__fnctor_Parser` struct on current main (no such struct exists
+in the acorn WAT), because acorn only ever does `new this(...)` inside the static
+`Parser.parse`/etc — never `new Parser()` — so the fnctor escape-gate never
+classifies it. The parser instance stays a dynamic `$Object`, so `this.type` reads
+via `__extern_get` lose the `__fnctor_TokenType` identity; the operator-precedence
+path's token-type comparisons (`this.type === types$1.<op>` in `parseExprOp`) then
+fail the same way the #2681 identifier switch does → `unexpected()`/throw.
+
+Fix is one of the two substrate paths in #2681 (A: escape-gate reconstruct
+`new this()` sites; B: `$Object` reader struct-value identity) — architect call,
+NOT a quick dev slice. Re-tagged `[ARCH]`. Likely closes together with #2681.

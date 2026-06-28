@@ -1,11 +1,11 @@
 ---
 id: 2681
-title: "acorn parse() 10th wall — identifier expression-statement throws (unexpected() on a `name` token) after the #2664 arity-dispatch fix"
+title: "[ARCH] acorn parse() 10th wall — identifier expression-statement throws (unexpected() on a `name` token); root cause = Parser not reconstructed (new this() in static methods), substrate-scoped"
 status: ready
 assignee: ttraenkler/unassigned
 sprint: current
 created: 2026-06-26
-updated: 2026-06-26
+updated: 2026-06-28
 priority: high
 feasibility: hard
 reasoning_effort: high
@@ -190,3 +190,82 @@ architect/senior-dev-scoped; #2731 changes none of the inputs.
   AST — the #1712 differential needs #2687 fixed too. **TRUE #1712 GAP is larger
   than "just identifiers throw": even literal expression statements return
   `expression: null`.**
+
+## ROOT CAUSE SHARPENED + SUPERSEDED on current `origin/main` (2026-06-28, dev-acorn)
+
+Re-verified against current `origin/main` (HEAD #2201, post-#2731). `parse("x")`,
+`parse("var x = 1;")`, `parse("foo(bar);")` still THROW. The prior analysis (and
+the architect verdict) assumed acorn's `Parser` is a reconstructed
+`$__fnctor_Parser` struct (the "type 90" framing). **That is NO LONGER TRUE on
+current main** — and this changes the fix.
+
+### The decisive structural finding
+Dumped the full acorn WAT (emitWat) on current main and grepped the type section:
+- **There is NO `__fnctor_Parser` struct at all.** The fnctors that ARE
+  reconstructed: `__fnctor_Node`, `__fnctor_Token`, `__fnctor_TokenType`,
+  `__fnctor_Scope`, `__fnctor_Position`, `__fnctor_SourceLocation`,
+  `__fnctor_TokContext`, `__fnctor_RegExpValidationState`,
+  `__fnctor_DestructuringErrors`, `__fnctor_BranchID`. **Parser is the one that is
+  not.**
+- **Why:** acorn instantiates the parser ONLY via `new this(options, input)`
+  inside the STATIC methods `Parser.parse` / `parseExpressionAt` / `tokenizer`
+  (acorn.mjs:672/676/682) — there is **no `new Parser(...)` anywhere**. The fnctor
+  escape-gate (`analyzeFnctorEscapeGate`) classifies a fnctor for reconstruction
+  only at a `new <identifier>()` site; `new this()` has callee `this` →
+  `resolveFnctorSymbol(this)` is `undefined` → Parser is never seen as a
+  reconstruct site → it stays a **dynamic `$Object`**.
+- **Consequence (the actual #2681/#2686 mechanism):** `this.<field>` reads on the
+  parser instance go through the `$Object` / `__extern_get` host path, which
+  returns a value whose identity DIVERGES from the stored `__fnctor_TokenType`
+  struct. So `switch (this.type) { case types$1.<name>: … }` (the case labels
+  `types$1.name` read the raw `__fnctor_TokenType` structs) never matches its
+  discriminant → falls to `default → unexpected()` → THROW (#2681); the operator
+  path throws the same way (#2686).
+
+### Two candidate substrate fixes — both architect-scoped (NOT a dev slice)
+- **(A) escape-gate reconstruct of `new this()` in a static/prototype method.**
+  Teach `analyzeFnctorEscapeGate` to recognize `new this(...)` inside a function
+  assigned to `F.method = function(){…}` (resolve the enclosing method's owner `F`
+  — the same prototype/static-holder analysis used by the alias resolver) as an
+  `F` reconstruct site, so Parser gets a `__fnctor_Parser` struct. Then the read
+  path (below) + the existing write-mirror (`_safeSet`/`__sset_<key>`/#2664) close
+  the loop. **Broad escape-gate change** — reconstruction approval is the #2660
+  substrate, regression risk that needs full `merge_group` CI; it also must handle
+  the 35+ Parser fields and the `Object.defineProperties(Parser.prototype, …)`
+  accessors.
+- **(B) `$Object` dynamic reader preserves native struct-value identity.** Make
+  `__extern_get` / the `$Object` reader return the SAME `__fnctor_*` struct
+  externref that was stored, so `this.type` round-trips the TokenType identity even
+  while Parser stays a `$Object`. This is the foundational value-rep substrate item
+  (cf. `project_s64_value_rep_substrate_next`, "$Object dynamic reader drops native
+  values") and overlaps the value-rep / IR-migration scope — **A-vs-B is an
+  architect call.**
+
+### Banked: #2660 PART-2 read-dispatch wiring (correct, but INERT for Parser here)
+Prototyped (then reverted — NOT shipped) the designed #2660 PART-2 wiring:
+1. `resolveLiftedMethodThisStruct(ctx, arrow)` (in `expressions/fnctor-prototype.ts`)
+   — resolves a function-expression's `this` to `__fnctor_<F>` when it is a
+   `F.prototype.m = fn` / `var pp = F.prototype; pp.m = fn` method (handles the
+   aliased acorn `pp$N` form).
+2. `compileArrowAsClosure` (closures.ts) sets `liftedFctx.thisStructName` from it.
+3. A consumer in `compilePropertyAccess` (property-access.ts, BEFORE
+   `tryEmitDeleteAwareDynamicGet`) routes a resolved-`this` / flow-mapped read
+   through the deferred `__get_member_<name>` dispatcher (#2075) — finalize-time
+   struct-candidate resolution, `__extern_get` fallback.
+
+Verified it ENGAGES at acorn scale (the consumer fired 1704× with
+`thisStruct=__fnctor_Parser`, e.g. `prop=type`), and `__get_member_type` was
+emitted with a ref.test chain over `__fnctor_Node`/`__fnctor_Token`/`__anon_33`.
+But it is **INERT for the parser** precisely because `__fnctor_Parser` is never
+registered (finding above), so the Parser receiver matches none of the dispatcher's
+candidate `ref.test`s and falls back to the broken `__extern_get`. This wiring
+becomes load-bearing the moment fix (A) gives Parser a struct — keep it for the
+implementer of (A). It does NOT close #2681/#2686 on its own.
+
+Reusable probes banked: `.tmp/verify-driver.mjs` + `.tmp/verify-worker.mjs`
+(single-compile multi-input acorn `parse()` driver, worker-thread watchdog — acorn
+compiles in ~40s on this box now). `compile(..., { skipSemanticDiagnostics: true })`
+is required to get past acorn's semantic diagnostics.
+
+**Status: re-tagged `[ARCH]` / substrate-scoped — routed to architect for the
+A-vs-B decision. Not a quick dev slice.**
