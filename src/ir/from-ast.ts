@@ -988,6 +988,29 @@ function lowerVarDecl(stmt: ts.VariableStatement, cx: LowerCtx): void {
         );
       }
     }
+    // #2782 (hybrid Row 5) — no-box NUMBER-local proof gate. The bindings below
+    // keep an `f64`-typed local UNBOXED (as a `local` SSA value or a numeric
+    // `slot`). Per the Hybrid Invariant that no-box specialization must be
+    // discharged by a proof on the TS *type*, never the lowered Wasm kind:
+    // `number` / `boolean` / `symbol` all collapse to `f64` / `i32`, so the kind
+    // alone cannot tell a genuine numeric local from an `any` / union one the
+    // f64 hint coerced opaquely. Prove the local's TS type is a pure number
+    // (`proveUnboxedNumberLocal`, reusing #2781's `classifyPrimitiveProof`);
+    // anything unprovable — `any` / `unknown` / a MIXED `number | string` union —
+    // demotes to the SAFE boxed legacy lowering (which carries the dynamic tag).
+    // Scoped to `f64` only — the `i32` (predominantly `boolean`) arm needs its
+    // own TS-type proof and is deferred (see #2782). No checker → unchanged
+    // (#2780 / #2781's no-checker arm). `inferred` is the bound representation
+    // here (an `annotated` mismatch already threw above), and `d.name` is an
+    // Identifier (non-identifier decls threw earlier in this loop).
+    if (!proveUnboxedNumberLocal(d.name, inferred, cx)) {
+      throw new Error(
+        `ir/from-ast: local '${name}' is bound as an unboxed f64 but its TS type is not ` +
+          `provably a pure number — keeping the no-box number representation is unsound ` +
+          `(the f64 Wasm kind conflates number / boolean / any); demote to the SAFE boxed ` +
+          `legacy lowering in ${cx.funcName} (#2782)`,
+      );
+    }
     // Slice 6 part 2 (#1181): mutable `let` bindings whose name is
     // reassigned anywhere in the function body bind as a `slot`
     // ScopeBinding instead of `local`. The slot is a Wasm-local that
@@ -3197,7 +3220,23 @@ function coerceReturnValue(value: IrValueId, cx: LowerCtx): IrValueId {
   // Native scalar → externref needs a number-box helper the IR lacks; defer
   // the whole function to legacy (which boxes via __box_number).
   const actualVal = asVal(actual);
-  if (actualVal && (actualVal.kind === "f64" || actualVal.kind === "i32" || actualVal.kind === "i64")) {
+  // #2782 (hybrid Row 5) — the no-box NUMBER escape edge. An unboxed `f64`
+  // number returned into an `any` (externref) result is the canonical "number
+  // local / value sinks to an `any` sink" case: the IR keeps numbers unboxed
+  // (no runtime tag), so handing one to the dynamic `any` result without an
+  // explicit box would lose its identity. The IR has no box primitive, so the
+  // SAFE lowering is to demote to legacy (which boxes via `__box_number`). This
+  // is the reachable, claimable counterpart to the `lowerVarDecl` declaration
+  // gate (`proveUnboxedNumberLocal`): together they keep the value unboxed only
+  // while it is provably a pure number AND box it at the proven escape edge.
+  if (actualVal && actualVal.kind === "f64") {
+    throw new Error(
+      `ir/from-ast: unboxed f64 number returned into an 'any' (externref) result — the ` +
+        `no-box number representation is unsound at this escape sink; demote to the SAFE ` +
+        `boxed legacy lowering (boxes via __box_number) in ${cx.funcName} (#2782)`,
+    );
+  }
+  if (actualVal && (actualVal.kind === "i32" || actualVal.kind === "i64")) {
     throw new Error(
       `ir/from-ast: return of numeric ${actualVal.kind} into an 'any' (externref) result ` +
         `needs the box helper — deferring to legacy in ${cx.funcName}`,
@@ -4136,6 +4175,46 @@ function proveAdditiveOperand(node: ts.Expression, cx: LowerCtx): "number" | "st
   const checker = cx.checker;
   if (!checker) return "no-checker";
   return classifyPrimitiveProof(checker.getTypeAtLocation(node));
+}
+
+/**
+ * #2782 (hybrid Row 5) — the no-box proof for an UNBOXED `f64` NUMBER local.
+ * Reuses {@link classifyPrimitiveProof} (the #2781 operand-type proof) to
+ * discharge the fast-path safety predicate `P` for the "keep a number local
+ * unboxed" specialization.
+ *
+ * `lowerVarDecl` binds a local with the native `f64` representation whenever its
+ * value lowers to (or is annotated) `f64`. Per the Hybrid Invariant that no-box
+ * specialization is only sound when the local's value provably cannot be
+ * anything but a pure number: an unboxed `f64` carries no runtime tag, so at any
+ * later `any` / union / externref use it would be read with the wrong identity
+ * (e.g. `typeof`, `===` against a string, a boxed-`Number` round-trip). When the
+ * local's TS type is NOT provably a pure number — `any` / `unknown` /
+ * `number | string` / etc. — the no-box path is unsound and codegen must demote
+ * to the SAFE boxed legacy lowering (which carries the dynamic tag).
+ *
+ * Returns `true` to KEEP the no-box fast path, `false` to DEMOTE.
+ *
+ * CRITICAL (the trap that parked two prior Row-1 attempts): this keys on the TS
+ * *type* via `classifyPrimitiveProof`, NEVER the lowered Wasm kind. `number`,
+ * `boolean` and `symbol` all collapse to `f64` / `i32`, so the Wasm kind cannot
+ * tell a genuine numeric local from a boolean / `any` one. We therefore scope
+ * this slice to the `f64` representation ONLY: `boolean` (the intrinsic
+ * `true | false` union) is intentionally classified `unprovable` by
+ * `classifyPrimitiveProof`, so gating `i32` locals on it would demote every
+ * boolean local — the `i32`-number arm needs its own TS-type proof and is
+ * deferred (see the issue). `string` / reference locals are unaffected.
+ *
+ * No checker → there is no specialization whose unsoundness we would be masking
+ * (every boundary use is still type-checked), so keep the existing behavior
+ * unchanged (mirrors #2780 / #2781's no-checker arm).
+ */
+function proveUnboxedNumberLocal(name: ts.Identifier, boundType: IrType, cx: LowerCtx): boolean {
+  const bv = asVal(boundType);
+  if (!bv || bv.kind !== "f64") return true; // not the no-box NUMBER representation — out of scope.
+  const checker = cx.checker;
+  if (!checker) return true; // no checker → leave behavior unchanged.
+  return classifyPrimitiveProof(checker.getTypeAtLocation(name)) === "number";
 }
 
 function lowerBinary(expr: ts.BinaryExpression, cx: LowerCtx, hint: IrType): IrValueId {
