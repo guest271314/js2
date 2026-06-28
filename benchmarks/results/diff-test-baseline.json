@@ -1,40 +1,41 @@
 {
   "total": 104,
-  "match": 69,
-  "mismatch": 23,
+  "match": 92,
+  "mismatch": 10,
   "compile_error": 0,
-  "runtime_error": 12,
+  "runtime_error": 2,
   "v8_error": 0,
+  "malformed_wasm": 0,
   "by_category": {
     "array": {
       "total": 15,
-      "match": 7,
-      "mismatch": 6,
-      "error": 2
+      "match": 14,
+      "mismatch": 1,
+      "error": 0
     },
     "builtins": {
       "total": 15,
-      "match": 6,
-      "mismatch": 5,
-      "error": 4
+      "match": 10,
+      "mismatch": 4,
+      "error": 1
     },
     "classes": {
       "total": 10,
-      "match": 6,
-      "mismatch": 4,
+      "match": 10,
+      "mismatch": 0,
       "error": 0
     },
     "closures": {
       "total": 10,
-      "match": 5,
+      "match": 7,
       "mismatch": 2,
-      "error": 3
+      "error": 1
     },
     "control": {
       "total": 12,
-      "match": 10,
-      "mismatch": 1,
-      "error": 1
+      "match": 12,
+      "mismatch": 0,
+      "error": 0
     },
     "numeric": {
       "total": 15,
@@ -44,18 +45,18 @@
     },
     "object": {
       "total": 12,
-      "match": 8,
-      "mismatch": 4,
+      "match": 9,
+      "mismatch": 3,
       "error": 0
     },
     "string": {
       "total": 15,
-      "match": 12,
-      "mismatch": 1,
-      "error": 2
+      "match": 15,
+      "mismatch": 0,
+      "error": 0
     }
   },
-  "duration_s": 41.646,
+  "duration_s": 28.387,
   "results": [
     {
       "file": "array/01-basic.js",
@@ -64,29 +65,28 @@
       "js2wasm_stdout": "3\n1\n3",
       "match": true,
       "outcome": "match",
-      "ms_v8": 33,
-      "ms_js2wasm": 1540
+      "ms_v8": 22,
+      "ms_js2wasm": 583
     },
     {
       "file": "array/02-push-pop.js",
       "category": "array",
       "v8_stdout": "3\n3\n2\n1,2\n",
-      "js2wasm_stdout": "",
-      "match": false,
-      "outcome": "runtime_error",
-      "error": "runtime: WebAssembly.instantiate(): Compiling function #5:\"__module_init\" failed: call[0] expected type f64, found local.get of type externref @+702",
-      "ms_v8": 34,
-      "ms_js2wasm": 781
+      "js2wasm_stdout": "3\n3\n2\n1,2",
+      "match": true,
+      "outcome": "match",
+      "ms_v8": 40,
+      "ms_js2wasm": 258
     },
     {
       "file": "array/03-shift-unshift.js",
       "category": "array",
       "v8_stdout": "0,1,2,3\n0\n1,2,3\n",
-      "js2wasm_stdout": "1,2,3\n1\n2,3",
-      "match": false,
-      "outcome": "mismatch",
-      "ms_v8": 35,
-      "ms_js2wasm": 472
+      "js2wasm_stdout": "0,1,2,3\n0\n1,2,3",
+      "match": true,
+      "outcome": "match",
+      "ms_v8": 53,
+      "ms_js2wasm": 205
     },
     {
       "file": "array/04-map.js",
@@ -95,8 +95,8 @@
       "js2wasm_stdout": "2,4,6\n0,1,2",
       "match": true,
       "outcome": "match",
-      "ms_v8": 31,
-      "ms_js2wasm": 391
+      "ms_v8": 33,
+      "ms_js2wasm": 188
     },
     {
       "file": "array/05-filter.js",
@@ -105,18 +105,18 @@
       "js2wasm_stdout": "3,4,5\n2,4",
       "match": true,
       "outcome": "match",
-      "ms_v8": 32,
-      "ms_js2wasm": 403
+      "ms_v8": 25,
+      "ms_js2wasm": 193
     },
     {
       "file": "array/06-reduce.js",
       "category": "array",
       "v8_stdout": "10\n24\nabc\n",
-      "js2wasm_stdout": "10\n24\n10\n24\nNaN",
-      "match": false,
-      "outcome": "mismatch",
-      "ms_v8": 32,
-      "ms_js2wasm": 662
+      "js2wasm_stdout": "10\n24\nabc",
+      "match": true,
+      "outcome": "match",
+      "ms_v8": 28,
+      "ms_js2wasm": 220
     },
     {
       "file": "array/07-find-some-every.js",
@@ -125,8 +125,8 @@
       "js2wasm_stdout": "3\nfalse\ntrue\n2",
       "match": true,
       "outcome": "match",
-      "ms_v8": 33,
-      "ms_js2wasm": 346
+      "ms_v8": 31,
+      "ms_js2wasm": 218
     },
     {
       "file": "array/08-includes-indexOf.js",
@@ -135,39 +135,38 @@
       "js2wasm_stdout": "1\n-1\ntrue\n1",
       "match": true,
       "outcome": "match",
-      "ms_v8": 33,
-      "ms_js2wasm": 325
+      "ms_v8": 28,
+      "ms_js2wasm": 194
     },
     {
       "file": "array/09-slice-splice.js",
       "category": "array",
       "v8_stdout": "2,3,4\n1,9,4\n",
-      "js2wasm_stdout": "2,3,4\n1,4",
-      "match": false,
-      "outcome": "mismatch",
-      "ms_v8": 32,
-      "ms_js2wasm": 297
+      "js2wasm_stdout": "2,3,4\n1,9,4",
+      "match": true,
+      "outcome": "match",
+      "ms_v8": 23,
+      "ms_js2wasm": 232
     },
     {
       "file": "array/10-sort-reverse.js",
       "category": "array",
       "v8_stdout": "1,2,3\n3,2,1\n3,2,1\nabc\n",
-      "js2wasm_stdout": "1,2,3\n1,2,3\n3,2,1\n",
-      "match": false,
-      "outcome": "mismatch",
-      "ms_v8": 32,
-      "ms_js2wasm": 372
+      "js2wasm_stdout": "1,2,3\n3,2,1\n3,2,1\nabc",
+      "match": true,
+      "outcome": "match",
+      "ms_v8": 25,
+      "ms_js2wasm": 184
     },
     {
       "file": "array/11-flat-flatMap.js",
       "category": "array",
       "v8_stdout": "1,2,3,4\n1,2,3,4\n1,2,2,4,3,6\n",
-      "js2wasm_stdout": "",
-      "match": false,
-      "outcome": "runtime_error",
-      "error": "runtime: Cannot convert object to primitive value",
-      "ms_v8": 32,
-      "ms_js2wasm": 654
+      "js2wasm_stdout": "1,2,3,4\n1,2,3,4\n1,2,2,4,3,6",
+      "match": true,
+      "outcome": "match",
+      "ms_v8": 31,
+      "ms_js2wasm": 185
     },
     {
       "file": "array/12-from-of.js",
@@ -176,8 +175,8 @@
       "js2wasm_stdout": "1,2,3\na,b,c\n",
       "match": false,
       "outcome": "mismatch",
-      "ms_v8": 31,
-      "ms_js2wasm": 463
+      "ms_v8": 22,
+      "ms_js2wasm": 395
     },
     {
       "file": "array/13-spread-destructure.js",
@@ -186,8 +185,8 @@
       "js2wasm_stdout": "1,2,3,4,5\n1\n2,3,4,5",
       "match": true,
       "outcome": "match",
-      "ms_v8": 37,
-      "ms_js2wasm": 337
+      "ms_v8": 51,
+      "ms_js2wasm": 253
     },
     {
       "file": "array/14-fill.js",
@@ -196,28 +195,28 @@
       "js2wasm_stdout": "0,0,0,0\n1,9,9,4",
       "match": true,
       "outcome": "match",
-      "ms_v8": 33,
-      "ms_js2wasm": 374
+      "ms_v8": 34,
+      "ms_js2wasm": 305
     },
     {
       "file": "array/15-join-tostring.js",
       "category": "array",
       "v8_stdout": "1,2,3\n123\n1,2,3\n\n",
-      "js2wasm_stdout": "1null2null3\n123\n[object Array]\n[object Array]",
-      "match": false,
-      "outcome": "mismatch",
-      "ms_v8": 32,
-      "ms_js2wasm": 294
+      "js2wasm_stdout": "1,2,3\n123\n1,2,3\n",
+      "match": true,
+      "outcome": "match",
+      "ms_v8": 31,
+      "ms_js2wasm": 215
     },
     {
       "file": "builtins/01-json-stringify.js",
       "category": "builtins",
       "v8_stdout": "{\"a\":1,\"b\":\"two\"}\n[1,2,3]\n\"hello\"\n42\nnull\n",
-      "js2wasm_stdout": "undefined\nundefined\n\"hello\"\n42\nnull",
-      "match": false,
-      "outcome": "mismatch",
-      "ms_v8": 32,
-      "ms_js2wasm": 326
+      "js2wasm_stdout": "{\"a\":1,\"b\":\"two\"}\n[1,2,3]\n\"hello\"\n42\nnull",
+      "match": true,
+      "outcome": "match",
+      "ms_v8": 43,
+      "ms_js2wasm": 313
     },
     {
       "file": "builtins/02-json-parse.js",
@@ -226,29 +225,28 @@
       "js2wasm_stdout": "1\n2,3\n42\nnull",
       "match": true,
       "outcome": "match",
-      "ms_v8": 33,
-      "ms_js2wasm": 345
+      "ms_v8": 68,
+      "ms_js2wasm": 295
     },
     {
       "file": "builtins/03-map-set.js",
       "category": "builtins",
       "v8_stdout": "1\ntrue\n2\n3\ntrue\n",
-      "js2wasm_stdout": "1\ntrue\n2\n1\ntrue\n2",
-      "match": false,
-      "outcome": "runtime_error",
-      "error": "runtime: object is not iterable (cannot read property Symbol(Symbol.iterator))",
-      "ms_v8": 32,
-      "ms_js2wasm": 362
+      "js2wasm_stdout": "1\ntrue\n2\n3\ntrue",
+      "match": true,
+      "outcome": "match",
+      "ms_v8": 35,
+      "ms_js2wasm": 310
     },
     {
       "file": "builtins/04-symbol.js",
       "category": "builtins",
       "v8_stdout": "symbol\nSymbol(desc)\ndesc\n",
-      "js2wasm_stdout": "symbol\n[object Object]\nnull",
+      "js2wasm_stdout": "symbol\n[object Object]\ndesc",
       "match": false,
       "outcome": "mismatch",
-      "ms_v8": 31,
-      "ms_js2wasm": 658
+      "ms_v8": 29,
+      "ms_js2wasm": 266
     },
     {
       "file": "builtins/05-date.js",
@@ -257,8 +255,8 @@
       "js2wasm_stdout": "0\n1970\n0\n0",
       "match": true,
       "outcome": "match",
-      "ms_v8": 34,
-      "ms_js2wasm": 411
+      "ms_v8": 39,
+      "ms_js2wasm": 243
     },
     {
       "file": "builtins/06-regexp.js",
@@ -267,8 +265,8 @@
       "js2wasm_stdout": "true\nhello,world\na*b*c*",
       "match": true,
       "outcome": "match",
-      "ms_v8": 32,
-      "ms_js2wasm": 332
+      "ms_v8": 36,
+      "ms_js2wasm": 296
     },
     {
       "file": "builtins/07-promise-basic.js",
@@ -277,8 +275,8 @@
       "js2wasm_stdout": "",
       "match": false,
       "outcome": "mismatch",
-      "ms_v8": 33,
-      "ms_js2wasm": 327
+      "ms_v8": 42,
+      "ms_js2wasm": 280
     },
     {
       "file": "builtins/08-promise-chain.js",
@@ -287,8 +285,8 @@
       "js2wasm_stdout": "",
       "match": false,
       "outcome": "mismatch",
-      "ms_v8": 33,
-      "ms_js2wasm": 324
+      "ms_v8": 48,
+      "ms_js2wasm": 212
     },
     {
       "file": "builtins/09-async-await.js",
@@ -297,8 +295,8 @@
       "js2wasm_stdout": "",
       "match": false,
       "outcome": "mismatch",
-      "ms_v8": 33,
-      "ms_js2wasm": 338
+      "ms_v8": 99,
+      "ms_js2wasm": 373
     },
     {
       "file": "builtins/10-error-classes.js",
@@ -307,8 +305,8 @@
       "js2wasm_stdout": "true\ntype problem\ntrue",
       "match": true,
       "outcome": "match",
-      "ms_v8": 31,
-      "ms_js2wasm": 352
+      "ms_v8": 272,
+      "ms_js2wasm": 1226
     },
     {
       "file": "builtins/11-typed-array.js",
@@ -317,19 +315,18 @@
       "js2wasm_stdout": "3\n10,20,30\n100",
       "match": true,
       "outcome": "match",
-      "ms_v8": 36,
-      "ms_js2wasm": 353
+      "ms_v8": 31,
+      "ms_js2wasm": 297
     },
     {
       "file": "builtins/12-arraybuffer.js",
       "category": "builtins",
       "v8_stdout": "12345678\n18\n",
-      "js2wasm_stdout": "",
-      "match": false,
-      "outcome": "runtime_error",
-      "error": "runtime: WebAssembly.instantiate(): Compiling function #8:\"__module_init\" failed: call[0] expected type f64, found call of type externref @+844",
-      "ms_v8": 33,
-      "ms_js2wasm": 335
+      "js2wasm_stdout": "12345678\n18",
+      "match": true,
+      "outcome": "match",
+      "ms_v8": 40,
+      "ms_js2wasm": 204
     },
     {
       "file": "builtins/13-iterator.js",
@@ -338,30 +335,29 @@
       "js2wasm_stdout": "0,1,2,3,4",
       "match": true,
       "outcome": "match",
-      "ms_v8": 35,
-      "ms_js2wasm": 342
+      "ms_v8": 52,
+      "ms_js2wasm": 208
     },
     {
       "file": "builtins/14-spread-args.js",
       "category": "builtins",
       "v8_stdout": "10\n60\n5\n",
-      "js2wasm_stdout": "10\n10",
+      "js2wasm_stdout": "10",
       "match": false,
       "outcome": "runtime_error",
       "error": "runtime: illegal cast",
-      "ms_v8": 32,
-      "ms_js2wasm": 363
+      "ms_v8": 27,
+      "ms_js2wasm": 183
     },
     {
       "file": "builtins/15-tag-template.js",
       "category": "builtins",
       "v8_stdout": "hello | world |::1,2\n",
-      "js2wasm_stdout": "",
-      "match": false,
-      "outcome": "runtime_error",
-      "error": "runtime: join is not a function",
-      "ms_v8": 32,
-      "ms_js2wasm": 331
+      "js2wasm_stdout": "hello | world |::1,2",
+      "match": true,
+      "outcome": "match",
+      "ms_v8": 34,
+      "ms_js2wasm": 167
     },
     {
       "file": "classes/01-basic.js",
@@ -370,28 +366,28 @@
       "js2wasm_stdout": "3,4",
       "match": true,
       "outcome": "match",
-      "ms_v8": 33,
-      "ms_js2wasm": 351
+      "ms_v8": 39,
+      "ms_js2wasm": 190
     },
     {
       "file": "classes/02-inheritance.js",
       "category": "classes",
       "v8_stdout": "dog rex\n",
-      "js2wasm_stdout": "dog null",
-      "match": false,
-      "outcome": "mismatch",
-      "ms_v8": 33,
-      "ms_js2wasm": 408
+      "js2wasm_stdout": "dog rex",
+      "match": true,
+      "outcome": "match",
+      "ms_v8": 31,
+      "ms_js2wasm": 229
     },
     {
       "file": "classes/03-static.js",
       "category": "classes",
       "v8_stdout": "1\n2\n2\n",
-      "js2wasm_stdout": "NaN\nNaN\n0",
-      "match": false,
-      "outcome": "mismatch",
-      "ms_v8": 34,
-      "ms_js2wasm": 388
+      "js2wasm_stdout": "1\n2\n2",
+      "match": true,
+      "outcome": "match",
+      "ms_v8": 38,
+      "ms_js2wasm": 210
     },
     {
       "file": "classes/04-getter-setter.js",
@@ -400,8 +396,8 @@
       "js2wasm_stdout": "10",
       "match": true,
       "outcome": "match",
-      "ms_v8": 32,
-      "ms_js2wasm": 342
+      "ms_v8": 52,
+      "ms_js2wasm": 214
     },
     {
       "file": "classes/05-method.js",
@@ -410,18 +406,18 @@
       "js2wasm_stdout": "16\n27",
       "match": true,
       "outcome": "match",
-      "ms_v8": 33,
-      "ms_js2wasm": 319
+      "ms_v8": 22,
+      "ms_js2wasm": 168
     },
     {
       "file": "classes/06-instanceof.js",
       "category": "classes",
       "v8_stdout": "true\ntrue\ntrue\n",
-      "js2wasm_stdout": "true\ntrue\nfalse",
-      "match": false,
-      "outcome": "mismatch",
-      "ms_v8": 34,
-      "ms_js2wasm": 374
+      "js2wasm_stdout": "true\ntrue\ntrue",
+      "match": true,
+      "outcome": "match",
+      "ms_v8": 28,
+      "ms_js2wasm": 183
     },
     {
       "file": "classes/07-prototype-call.js",
@@ -430,8 +426,8 @@
       "js2wasm_stdout": "hi world\nhi test",
       "match": true,
       "outcome": "match",
-      "ms_v8": 33,
-      "ms_js2wasm": 324
+      "ms_v8": 25,
+      "ms_js2wasm": 221
     },
     {
       "file": "classes/08-fields.js",
@@ -440,8 +436,8 @@
       "js2wasm_stdout": "1\nx\n1,2,3",
       "match": true,
       "outcome": "match",
-      "ms_v8": 42,
-      "ms_js2wasm": 664
+      "ms_v8": 37,
+      "ms_js2wasm": 197
     },
     {
       "file": "classes/09-super-constructor.js",
@@ -450,18 +446,18 @@
       "js2wasm_stdout": "1,2",
       "match": true,
       "outcome": "match",
-      "ms_v8": 38,
-      "ms_js2wasm": 392
+      "ms_v8": 23,
+      "ms_js2wasm": 234
     },
     {
       "file": "classes/10-toString-impl.js",
       "category": "classes",
       "v8_stdout": "$42\nval=$7\n",
-      "js2wasm_stdout": "[object Object]\nval=$7",
-      "match": false,
-      "outcome": "mismatch",
-      "ms_v8": 32,
-      "ms_js2wasm": 316
+      "js2wasm_stdout": "$42\nval=$7",
+      "match": true,
+      "outcome": "match",
+      "ms_v8": 22,
+      "ms_js2wasm": 196
     },
     {
       "file": "closures/01-basic.js",
@@ -470,8 +466,8 @@
       "js2wasm_stdout": "8\n15",
       "match": true,
       "outcome": "match",
-      "ms_v8": 34,
-      "ms_js2wasm": 374
+      "ms_v8": 21,
+      "ms_js2wasm": 251
     },
     {
       "file": "closures/02-counter.js",
@@ -480,8 +476,8 @@
       "js2wasm_stdout": "1\n2\n3",
       "match": true,
       "outcome": "match",
-      "ms_v8": 35,
-      "ms_js2wasm": 347
+      "ms_v8": 30,
+      "ms_js2wasm": 182
     },
     {
       "file": "closures/03-iife.js",
@@ -490,8 +486,8 @@
       "js2wasm_stdout": "42\n12",
       "match": true,
       "outcome": "match",
-      "ms_v8": 32,
-      "ms_js2wasm": 316
+      "ms_v8": 20,
+      "ms_js2wasm": 211
     },
     {
       "file": "closures/04-shared-state.js",
@@ -500,19 +496,18 @@
       "js2wasm_stdout": "2",
       "match": true,
       "outcome": "match",
-      "ms_v8": 34,
-      "ms_js2wasm": 339
+      "ms_v8": 38,
+      "ms_js2wasm": 376
     },
     {
       "file": "closures/05-loop-capture.js",
       "category": "closures",
       "v8_stdout": "0,1,2\n",
-      "js2wasm_stdout": "",
-      "match": false,
-      "outcome": "runtime_error",
-      "error": "runtime: dereferencing a null pointer",
+      "js2wasm_stdout": "0,1,2",
+      "match": true,
+      "outcome": "match",
       "ms_v8": 34,
-      "ms_js2wasm": 343
+      "ms_js2wasm": 249
     },
     {
       "file": "closures/06-nested.js",
@@ -521,8 +516,8 @@
       "js2wasm_stdout": "3",
       "match": true,
       "outcome": "match",
-      "ms_v8": 33,
-      "ms_js2wasm": 315
+      "ms_v8": 21,
+      "ms_js2wasm": 225
     },
     {
       "file": "closures/07-arrow-this.js",
@@ -531,8 +526,8 @@
       "js2wasm_stdout": "NaN",
       "match": false,
       "outcome": "mismatch",
-      "ms_v8": 32,
-      "ms_js2wasm": 306
+      "ms_v8": 24,
+      "ms_js2wasm": 238
     },
     {
       "file": "closures/08-method-chain.js",
@@ -541,30 +536,29 @@
       "js2wasm_stdout": "",
       "match": false,
       "outcome": "runtime_error",
-      "error": "runtime: dereferencing a null pointer",
-      "ms_v8": 34,
-      "ms_js2wasm": 367
+      "error": "runtime: [object WebAssembly.Exception]",
+      "ms_v8": 30,
+      "ms_js2wasm": 310
     },
     {
       "file": "closures/09-callback.js",
       "category": "closures",
       "v8_stdout": "1,4,9\n",
-      "js2wasm_stdout": "null,null,null",
+      "js2wasm_stdout": ",,",
       "match": false,
       "outcome": "mismatch",
-      "ms_v8": 32,
-      "ms_js2wasm": 352
+      "ms_v8": 39,
+      "ms_js2wasm": 248
     },
     {
       "file": "closures/10-mutual.js",
       "category": "closures",
       "v8_stdout": "true\ntrue\n",
-      "js2wasm_stdout": "",
-      "match": false,
-      "outcome": "runtime_error",
-      "error": "runtime: WebAssembly.instantiate(): Compiling function #3:\"__module_init\" failed: call[0] expected type externref, found call of type i32 @+217",
-      "ms_v8": 37,
-      "ms_js2wasm": 320
+      "js2wasm_stdout": "true\ntrue",
+      "match": true,
+      "outcome": "match",
+      "ms_v8": 26,
+      "ms_js2wasm": 272
     },
     {
       "file": "control/01-if-else.js",
@@ -573,8 +567,8 @@
       "js2wasm_stdout": "yes\nmiddle",
       "match": true,
       "outcome": "match",
-      "ms_v8": 32,
-      "ms_js2wasm": 304
+      "ms_v8": 30,
+      "ms_js2wasm": 233
     },
     {
       "file": "control/02-for.js",
@@ -583,8 +577,8 @@
       "js2wasm_stdout": "10\n5\n4\n3\n2\n1",
       "match": true,
       "outcome": "match",
-      "ms_v8": 33,
-      "ms_js2wasm": 318
+      "ms_v8": 29,
+      "ms_js2wasm": 266
     },
     {
       "file": "control/03-while.js",
@@ -593,8 +587,8 @@
       "js2wasm_stdout": "0\n1\n2\n5\n4\n3",
       "match": true,
       "outcome": "match",
-      "ms_v8": 35,
-      "ms_js2wasm": 318
+      "ms_v8": 27,
+      "ms_js2wasm": 200
     },
     {
       "file": "control/04-break-continue.js",
@@ -603,8 +597,8 @@
       "js2wasm_stdout": "1\n3",
       "match": true,
       "outcome": "match",
-      "ms_v8": 34,
-      "ms_js2wasm": 316
+      "ms_v8": 57,
+      "ms_js2wasm": 226
     },
     {
       "file": "control/05-labeled-break.js",
@@ -613,8 +607,8 @@
       "js2wasm_stdout": "0,0\n0,1\n0,2\n1,0",
       "match": true,
       "outcome": "match",
-      "ms_v8": 36,
-      "ms_js2wasm": 342
+      "ms_v8": 31,
+      "ms_js2wasm": 218
     },
     {
       "file": "control/06-switch.js",
@@ -623,8 +617,8 @@
       "js2wasm_stdout": "one\ntwo-or-three\ntwo-or-three\nother",
       "match": true,
       "outcome": "match",
-      "ms_v8": 36,
-      "ms_js2wasm": 314
+      "ms_v8": 40,
+      "ms_js2wasm": 191
     },
     {
       "file": "control/07-try-catch.js",
@@ -633,8 +627,8 @@
       "js2wasm_stdout": "caught:boom\nafter",
       "match": true,
       "outcome": "match",
-      "ms_v8": 33,
-      "ms_js2wasm": 382
+      "ms_v8": 51,
+      "ms_js2wasm": 302
     },
     {
       "file": "control/08-try-finally.js",
@@ -643,8 +637,8 @@
       "js2wasm_stdout": "finally\n1",
       "match": true,
       "outcome": "match",
-      "ms_v8": 34,
-      "ms_js2wasm": 667
+      "ms_v8": 29,
+      "ms_js2wasm": 251
     },
     {
       "file": "control/09-ternary.js",
@@ -653,19 +647,18 @@
       "js2wasm_stdout": "big\n20",
       "match": true,
       "outcome": "match",
-      "ms_v8": 33,
-      "ms_js2wasm": 350
+      "ms_v8": 30,
+      "ms_js2wasm": 208
     },
     {
       "file": "control/10-logical-ops.js",
       "category": "control",
       "v8_stdout": "yes\nfallback\ndefault\n0\nfallback\n",
-      "js2wasm_stdout": "",
-      "match": false,
-      "outcome": "runtime_error",
-      "error": "runtime: WebAssembly.instantiate(): Compiling function #4:\"__module_init\" failed: call[0] expected type f64, found call of type externref @+348",
-      "ms_v8": 33,
-      "ms_js2wasm": 309
+      "js2wasm_stdout": "yes\nfallback\ndefault\n0\nfallback",
+      "match": true,
+      "outcome": "match",
+      "ms_v8": 45,
+      "ms_js2wasm": 201
     },
     {
       "file": "control/11-for-of-array.js",
@@ -674,18 +667,18 @@
       "js2wasm_stdout": "10\n20\n30",
       "match": true,
       "outcome": "match",
-      "ms_v8": 32,
-      "ms_js2wasm": 307
+      "ms_v8": 39,
+      "ms_js2wasm": 249
     },
     {
       "file": "control/12-for-in-object.js",
       "category": "control",
       "v8_stdout": "a,b\n",
-      "js2wasm_stdout": "",
-      "match": false,
-      "outcome": "mismatch",
-      "ms_v8": 33,
-      "ms_js2wasm": 306
+      "js2wasm_stdout": "a,b",
+      "match": true,
+      "outcome": "match",
+      "ms_v8": 29,
+      "ms_js2wasm": 161
     },
     {
       "file": "numeric/01-basic-arithmetic.js",
@@ -694,8 +687,8 @@
       "js2wasm_stdout": "3\n7\n20\n5\n2",
       "match": true,
       "outcome": "match",
-      "ms_v8": 33,
-      "ms_js2wasm": 306
+      "ms_v8": 56,
+      "ms_js2wasm": 168
     },
     {
       "file": "numeric/02-float-precision.js",
@@ -704,8 +697,8 @@
       "js2wasm_stdout": "0.30000000000000004\n2.25\n0.3333333333333333",
       "match": true,
       "outcome": "match",
-      "ms_v8": 33,
-      "ms_js2wasm": 305
+      "ms_v8": 29,
+      "ms_js2wasm": 148
     },
     {
       "file": "numeric/03-negative-zero.js",
@@ -714,8 +707,8 @@
       "js2wasm_stdout": "true\nfalse\n-Infinity",
       "match": true,
       "outcome": "match",
-      "ms_v8": 34,
-      "ms_js2wasm": 339
+      "ms_v8": 25,
+      "ms_js2wasm": 187
     },
     {
       "file": "numeric/04-infinity.js",
@@ -724,8 +717,8 @@
       "js2wasm_stdout": "Infinity\n-Infinity\nInfinity\n-Infinity\ntrue",
       "match": true,
       "outcome": "match",
-      "ms_v8": 34,
-      "ms_js2wasm": 298
+      "ms_v8": 31,
+      "ms_js2wasm": 174
     },
     {
       "file": "numeric/05-nan-propagation.js",
@@ -735,7 +728,7 @@
       "match": true,
       "outcome": "match",
       "ms_v8": 35,
-      "ms_js2wasm": 298
+      "ms_js2wasm": 180
     },
     {
       "file": "numeric/06-integer-overflow.js",
@@ -744,8 +737,8 @@
       "js2wasm_stdout": "9007199254740991\n9007199254740992\nfalse",
       "match": true,
       "outcome": "match",
-      "ms_v8": 35,
-      "ms_js2wasm": 321
+      "ms_v8": 41,
+      "ms_js2wasm": 210
     },
     {
       "file": "numeric/07-math-sqrt.js",
@@ -755,7 +748,7 @@
       "match": true,
       "outcome": "match",
       "ms_v8": 33,
-      "ms_js2wasm": 329
+      "ms_js2wasm": 235
     },
     {
       "file": "numeric/08-math-trig.js",
@@ -764,8 +757,8 @@
       "js2wasm_stdout": "0\n1\n0\ntrue\ntrue",
       "match": true,
       "outcome": "match",
-      "ms_v8": 33,
-      "ms_js2wasm": 322
+      "ms_v8": 38,
+      "ms_js2wasm": 220
     },
     {
       "file": "numeric/09-math-min-max.js",
@@ -774,8 +767,8 @@
       "js2wasm_stdout": "1\n3\nInfinity\n-Infinity\n-10",
       "match": true,
       "outcome": "match",
-      "ms_v8": 32,
-      "ms_js2wasm": 331
+      "ms_v8": 47,
+      "ms_js2wasm": 211
     },
     {
       "file": "numeric/10-math-floor-ceil-round.js",
@@ -784,8 +777,8 @@
       "js2wasm_stdout": "3\n4\n4\n3\n-4",
       "match": true,
       "outcome": "match",
-      "ms_v8": 33,
-      "ms_js2wasm": 321
+      "ms_v8": 46,
+      "ms_js2wasm": 228
     },
     {
       "file": "numeric/11-bitwise.js",
@@ -794,8 +787,8 @@
       "js2wasm_stdout": "1\n7\n6\n-6\n16\n4\n4294967295",
       "match": true,
       "outcome": "match",
-      "ms_v8": 34,
-      "ms_js2wasm": 298
+      "ms_v8": 58,
+      "ms_js2wasm": 243
     },
     {
       "file": "numeric/12-comparison.js",
@@ -804,8 +797,8 @@
       "js2wasm_stdout": "true\ntrue\ntrue\ntrue\nfalse\nfalse",
       "match": true,
       "outcome": "match",
-      "ms_v8": 33,
-      "ms_js2wasm": 307
+      "ms_v8": 48,
+      "ms_js2wasm": 183
     },
     {
       "file": "numeric/13-typeof-number.js",
@@ -814,8 +807,8 @@
       "js2wasm_stdout": "number\nnumber\nnumber\nnumber\nnumber",
       "match": true,
       "outcome": "match",
-      "ms_v8": 32,
-      "ms_js2wasm": 293
+      "ms_v8": 102,
+      "ms_js2wasm": 196
     },
     {
       "file": "numeric/14-tostring-radix.js",
@@ -825,7 +818,7 @@
       "match": true,
       "outcome": "match",
       "ms_v8": 32,
-      "ms_js2wasm": 391
+      "ms_js2wasm": 173
     },
     {
       "file": "numeric/15-parse-int-float.js",
@@ -834,8 +827,8 @@
       "js2wasm_stdout": "42\n255\n3\n3.14\n1000\nNaN",
       "match": true,
       "outcome": "match",
-      "ms_v8": 34,
-      "ms_js2wasm": 339
+      "ms_v8": 49,
+      "ms_js2wasm": 240
     },
     {
       "file": "object/01-literal.js",
@@ -844,18 +837,18 @@
       "js2wasm_stdout": "1\n2\na,b,c",
       "match": true,
       "outcome": "match",
-      "ms_v8": 43,
-      "ms_js2wasm": 404
+      "ms_v8": 38,
+      "ms_js2wasm": 185
     },
     {
       "file": "object/02-spread.js",
       "category": "object",
       "v8_stdout": "x,y,z\n1\n3\n",
-      "js2wasm_stdout": "z,x,y\n1\n3",
+      "js2wasm_stdout": "z,x,y\nNaN\nNaN",
       "match": false,
       "outcome": "mismatch",
-      "ms_v8": 34,
-      "ms_js2wasm": 350
+      "ms_v8": 46,
+      "ms_js2wasm": 185
     },
     {
       "file": "object/03-destructure.js",
@@ -864,18 +857,18 @@
       "js2wasm_stdout": "1\n2\n99",
       "match": true,
       "outcome": "match",
-      "ms_v8": 34,
-      "ms_js2wasm": 294
+      "ms_v8": 32,
+      "ms_js2wasm": 296
     },
     {
       "file": "object/04-keys-values-entries.js",
       "category": "object",
       "v8_stdout": "a,b\n1,2\na=1,b=2\n",
-      "js2wasm_stdout": "a,b\na,b\n1,2\n",
-      "match": false,
-      "outcome": "mismatch",
-      "ms_v8": 34,
-      "ms_js2wasm": 361
+      "js2wasm_stdout": "a,b\n1,2\na=1,b=2",
+      "match": true,
+      "outcome": "match",
+      "ms_v8": 39,
+      "ms_js2wasm": 228
     },
     {
       "file": "object/05-in-operator.js",
@@ -884,8 +877,8 @@
       "js2wasm_stdout": "true\nfalse\ntrue",
       "match": true,
       "outcome": "match",
-      "ms_v8": 34,
-      "ms_js2wasm": 301
+      "ms_v8": 27,
+      "ms_js2wasm": 162
     },
     {
       "file": "object/06-delete.js",
@@ -894,8 +887,8 @@
       "js2wasm_stdout": "a,b\n1",
       "match": false,
       "outcome": "mismatch",
-      "ms_v8": 34,
-      "ms_js2wasm": 327
+      "ms_v8": 31,
+      "ms_js2wasm": 175
     },
     {
       "file": "object/07-property-shorthand.js",
@@ -904,8 +897,8 @@
       "js2wasm_stdout": "30",
       "match": true,
       "outcome": "match",
-      "ms_v8": 34,
-      "ms_js2wasm": 301
+      "ms_v8": 38,
+      "ms_js2wasm": 195
     },
     {
       "file": "object/08-computed-keys.js",
@@ -914,8 +907,8 @@
       "js2wasm_stdout": "1\n2",
       "match": true,
       "outcome": "match",
-      "ms_v8": 32,
-      "ms_js2wasm": 309
+      "ms_v8": 48,
+      "ms_js2wasm": 183
     },
     {
       "file": "object/09-nested.js",
@@ -924,8 +917,8 @@
       "js2wasm_stdout": "42\n43",
       "match": true,
       "outcome": "match",
-      "ms_v8": 35,
-      "ms_js2wasm": 310
+      "ms_v8": 28,
+      "ms_js2wasm": 268
     },
     {
       "file": "object/10-typeof.js",
@@ -934,8 +927,8 @@
       "js2wasm_stdout": "object\nobject\nundefined",
       "match": true,
       "outcome": "match",
-      "ms_v8": 33,
-      "ms_js2wasm": 290
+      "ms_v8": 39,
+      "ms_js2wasm": 196
     },
     {
       "file": "object/11-equality.js",
@@ -944,18 +937,18 @@
       "js2wasm_stdout": "false\ntrue\nfalse",
       "match": true,
       "outcome": "match",
-      "ms_v8": 34,
-      "ms_js2wasm": 297
+      "ms_v8": 37,
+      "ms_js2wasm": 196
     },
     {
       "file": "object/12-assign.js",
       "category": "object",
       "v8_stdout": "a,b,c\ntrue\n",
-      "js2wasm_stdout": "\ntrue",
+      "js2wasm_stdout": "a\ntrue",
       "match": false,
       "outcome": "mismatch",
-      "ms_v8": 34,
-      "ms_js2wasm": 354
+      "ms_v8": 30,
+      "ms_js2wasm": 196
     },
     {
       "file": "string/01-concat.js",
@@ -964,19 +957,18 @@
       "js2wasm_stdout": "hello world\na1\n1a",
       "match": true,
       "outcome": "match",
-      "ms_v8": 34,
-      "ms_js2wasm": 295
+      "ms_v8": 35,
+      "ms_js2wasm": 192
     },
     {
       "file": "string/02-length.js",
       "category": "string",
       "v8_stdout": "5\n0\n5\n",
-      "js2wasm_stdout": "",
-      "match": false,
-      "outcome": "runtime_error",
-      "error": "runtime: WebAssembly.instantiate(): Compiling function #2:\"__module_init\" failed: f64.convert_i32_s[0] expected type i32, found f64.convert_i32_s of type f64 @+165",
-      "ms_v8": 34,
-      "ms_js2wasm": 289
+      "js2wasm_stdout": "5\n0\n5",
+      "match": true,
+      "outcome": "match",
+      "ms_v8": 25,
+      "ms_js2wasm": 169
     },
     {
       "file": "string/03-charAt.js",
@@ -985,8 +977,8 @@
       "js2wasm_stdout": "h\no\n\n104",
       "match": true,
       "outcome": "match",
-      "ms_v8": 35,
-      "ms_js2wasm": 291
+      "ms_v8": 36,
+      "ms_js2wasm": 218
     },
     {
       "file": "string/04-slice.js",
@@ -995,8 +987,8 @@
       "js2wasm_stdout": "hello\nworld\nworld\nello",
       "match": true,
       "outcome": "match",
-      "ms_v8": 36,
-      "ms_js2wasm": 298
+      "ms_v8": 28,
+      "ms_js2wasm": 187
     },
     {
       "file": "string/05-substring.js",
@@ -1005,8 +997,8 @@
       "js2wasm_stdout": "hello\nworld\nel",
       "match": true,
       "outcome": "match",
-      "ms_v8": 34,
-      "ms_js2wasm": 291
+      "ms_v8": 27,
+      "ms_js2wasm": 214
     },
     {
       "file": "string/06-indexOf.js",
@@ -1015,8 +1007,8 @@
       "js2wasm_stdout": "6\n-1\n1\n3",
       "match": true,
       "outcome": "match",
-      "ms_v8": 34,
-      "ms_js2wasm": 283
+      "ms_v8": 27,
+      "ms_js2wasm": 174
     },
     {
       "file": "string/07-includes.js",
@@ -1025,8 +1017,8 @@
       "js2wasm_stdout": "true\nfalse\ntrue\ntrue\ntrue",
       "match": true,
       "outcome": "match",
-      "ms_v8": 34,
-      "ms_js2wasm": 297
+      "ms_v8": 26,
+      "ms_js2wasm": 178
     },
     {
       "file": "string/08-toUpperLower.js",
@@ -1035,8 +1027,8 @@
       "js2wasm_stdout": "HELLO WORLD\nhello world\näbc",
       "match": true,
       "outcome": "match",
-      "ms_v8": 35,
-      "ms_js2wasm": 293
+      "ms_v8": 32,
+      "ms_js2wasm": 166
     },
     {
       "file": "string/09-split.js",
@@ -1045,8 +1037,8 @@
       "js2wasm_stdout": "a|b|c\nh-e-l-l-o\na/b/c",
       "match": true,
       "outcome": "match",
-      "ms_v8": 33,
-      "ms_js2wasm": 388
+      "ms_v8": 36,
+      "ms_js2wasm": 172
     },
     {
       "file": "string/10-replace.js",
@@ -1055,8 +1047,8 @@
       "js2wasm_stdout": "hello there\nbaa\nbbb",
       "match": true,
       "outcome": "match",
-      "ms_v8": 34,
-      "ms_js2wasm": 298
+      "ms_v8": 28,
+      "ms_js2wasm": 192
     },
     {
       "file": "string/11-trim.js",
@@ -1065,19 +1057,18 @@
       "js2wasm_stdout": "hello\nhello  \n  hello\nhi",
       "match": true,
       "outcome": "match",
-      "ms_v8": 33,
-      "ms_js2wasm": 309
+      "ms_v8": 26,
+      "ms_js2wasm": 143
     },
     {
       "file": "string/12-repeat-pad.js",
       "category": "string",
       "v8_stdout": "ababab\n005\n5..\n0\n",
-      "js2wasm_stdout": "",
-      "match": false,
-      "outcome": "runtime_error",
-      "error": "runtime: WebAssembly.instantiate(): Compiling function #6:\"__module_init\" failed: f64.convert_i32_s[0] expected type i32, found f64.convert_i32_s of type f64 @+366",
-      "ms_v8": 34,
-      "ms_js2wasm": 335
+      "js2wasm_stdout": "ababab\n005\n5..\n0",
+      "match": true,
+      "outcome": "match",
+      "ms_v8": 24,
+      "ms_js2wasm": 205
     },
     {
       "file": "string/13-template-literal.js",
@@ -1086,8 +1077,8 @@
       "js2wasm_stdout": "hello world, n=42\nmulti\nline",
       "match": true,
       "outcome": "match",
-      "ms_v8": 34,
-      "ms_js2wasm": 412
+      "ms_v8": 37,
+      "ms_js2wasm": 178
     },
     {
       "file": "string/14-comparison.js",
@@ -1096,18 +1087,18 @@
       "js2wasm_stdout": "true\ntrue\ntrue\ntrue\ntrue",
       "match": true,
       "outcome": "match",
-      "ms_v8": 34,
-      "ms_js2wasm": 322
+      "ms_v8": 28,
+      "ms_js2wasm": 165
     },
     {
       "file": "string/15-fromCharCode.js",
       "category": "string",
       "v8_stdout": "Hi\nA\n中\n",
-      "js2wasm_stdout": "H\nA\n中",
-      "match": false,
-      "outcome": "mismatch",
-      "ms_v8": 34,
-      "ms_js2wasm": 341
+      "js2wasm_stdout": "Hi\nA\n中",
+      "match": true,
+      "outcome": "match",
+      "ms_v8": 41,
+      "ms_js2wasm": 202
     }
   ]
 }

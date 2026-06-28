@@ -84,9 +84,22 @@ interface Summary {
   results: FileResult[];
 }
 
-/** Normalize stdout for comparison. Strips trailing whitespace per line. */
+// #2787 — strip ANSI SGR escape sequences (e.g. `\x1b[33m…\x1b[39m`) before
+// comparing. Node's `console.log` colourises primitives (numbers yellow, etc.)
+// when `FORCE_COLOR` is set in the environment — which it is in some dev
+// containers (this repo's devcontainer exports `FORCE_COLOR=3`). The js2wasm
+// lane buffers plain strings and never colourises, so an un-stripped reference
+// spuriously mismatches on virtually every numeric/string program (69 false
+// mismatches locally vs 14 real ones in CI, where FORCE_COLOR is unset). The
+// reference lane (`runV8`) also forces colour OFF in its env; this strip is
+// belt-and-suspenders so the harness is robust regardless of the ambient env.
+// biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI escapes are control characters by definition.
+const ANSI_SGR = /\x1b\[[0-9;]*m/g;
+
+/** Normalize stdout for comparison. Strips ANSI colour codes + trailing whitespace per line. */
 function normalize(s: string): string {
   return s
+    .replace(ANSI_SGR, "")
     .split("\n")
     .map((line) => line.replace(/\s+$/, ""))
     .join("\n")
@@ -122,6 +135,13 @@ function runV8(file: string): { stdout: string; error?: string; ms: number } {
       encoding: "utf-8",
       timeout: 5000,
       stdio: ["ignore", "pipe", "pipe"],
+      // #2787 — force colour OFF for the reference lane so `console.log` never
+      // emits ANSI SGR codes (the dev container sets FORCE_COLOR=3, which makes
+      // Node colourise even when stdout is piped). `FORCE_COLOR=0` overrides the
+      // ambient value; `NO_COLOR` is a secondary guard. Without this the
+      // reference output is polluted with `\x1b[33m…\x1b[39m` and mismatches the
+      // plain js2wasm lane on nearly every numeric/string program.
+      env: { ...process.env, FORCE_COLOR: "0", NO_COLOR: "1" },
     });
     return { stdout, ms: Date.now() - t0 };
   } catch (e: unknown) {
@@ -145,7 +165,20 @@ async function runJs2wasm(file: string): Promise<{
   } catch (e: unknown) {
     return { stdout: "", error: `read failed: ${(e as Error).message}`, ms: Date.now() - t0, outcome: "runtime_error" };
   }
-  const r = await compile(source, OPTIMIZE ? { fileName: file, optimize: true } : { fileName: file });
+  // (#2796) `deferTopLevelInit` makes the compiler export `__module_init` and
+  // skip the wasm `start` section, so the HOST lane runs top-level code AFTER
+  // `setExports` wires `__struct_field_names` / `__sget_*`. Without this the
+  // host lane ran top-level enumeration (`for…in` / `Object.keys` over a
+  // runtime-shaped object) during `WebAssembly.instantiate`, before any export
+  // was reachable — so a top-level `for…in` enumerated zero keys, a HARNESS
+  // exports-timing artifact (the standalone lane never hits it, since it runs
+  // top-level code via an explicitly-called `_start` export post-instantiate).
+  const r = await compile(
+    source,
+    OPTIMIZE
+      ? { fileName: file, optimize: true, deferTopLevelInit: true }
+      : { fileName: file, deferTopLevelInit: true },
+  );
   if (!r.success) {
     return {
       stdout: "",
@@ -171,8 +204,11 @@ async function runJs2wasm(file: string): Promise<{
     };
   }
   // Monkey-patch console.log so we capture the side effects of top-level code
-  // execution that runs during `WebAssembly.instantiate` (the module's start
-  // section invokes the compiled top-level statements).
+  // execution. With `deferTopLevelInit` (#2796) the compiled top-level
+  // statements are NOT invoked by the wasm `start` section during
+  // instantiation; the harness calls the exported `__module_init()` explicitly
+  // AFTER `setExports`, so struct-introspection exports are wired when top-level
+  // code runs (symmetric with the standalone `_start` model).
   const lines: string[] = [];
   const origLog = console.log;
   const origError = console.error;
@@ -186,6 +222,11 @@ async function runJs2wasm(file: string): Promise<{
     const built = buildImports(r.imports, {}, r.stringPool);
     const { instance } = await instantiateWasm(r.binary, built.env, built.string_constants);
     built.setExports?.(instance.exports as Record<string, Function>);
+    // (#2796) Run the deferred top-level code now that `setExports` has wired
+    // the struct-introspection exports. A program with NO top-level statements
+    // emits no `__module_init` export, so this is a no-op for those.
+    const moduleInit = (instance.exports as Record<string, unknown>).__module_init;
+    if (typeof moduleInit === "function") (moduleInit as () => void)();
   } catch (e: unknown) {
     console.log = origLog;
     console.error = origError;

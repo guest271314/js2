@@ -2084,9 +2084,83 @@ export function inferNumericReturnTypes(ctx: CodegenContext, sourceFile: ts.Sour
     }
   }
 
+  // (#2795) Among the numeric kernels, identify the PURELY-BOOLEAN ones — every
+  // `return` is a boolean-valued expression (literal `true`/`false`, a
+  // comparison, `!x`, a boolean `&&`/`||`/`?:`, or a recursive call to another
+  // boolean kernel). These promote to a boolean-BRANDED i32 instead of f64, so
+  // when the result is later boxed into an `any`/externref slot (e.g. passed to
+  // the host `console.log` of a mutually-recursive predicate) it crosses as the
+  // JS boolean `true`/`false` rather than the number 1/0 (#2795 closures/10-mutual).
+  // A boolean kernel's body still produces i32 0/1, so the brand is the only
+  // change; arithmetic kernels keep f64.
+  const isBooleanExpr = (expr: ts.Expression, depth = 0): boolean => {
+    if (depth > MAX_NUMERIC_DEPTH) return false;
+    if (ts.isParenthesizedExpression(expr)) return isBooleanExpr(expr.expression, depth + 1);
+    if (ts.isAsExpression(expr) || ts.isTypeAssertionExpression(expr) || ts.isNonNullExpression(expr)) {
+      return isBooleanExpr(expr.expression, depth + 1);
+    }
+    if (expr.kind === ts.SyntaxKind.TrueKeyword || expr.kind === ts.SyntaxKind.FalseKeyword) return true;
+    if (ts.isPrefixUnaryExpression(expr)) {
+      // `!x` is boolean regardless of operand type.
+      return expr.operator === ts.SyntaxKind.ExclamationToken;
+    }
+    if (ts.isBinaryExpression(expr)) {
+      const op = expr.operatorToken.kind;
+      // Relational / equality operators yield boolean.
+      if (
+        op === ts.SyntaxKind.LessThanToken ||
+        op === ts.SyntaxKind.LessThanEqualsToken ||
+        op === ts.SyntaxKind.GreaterThanToken ||
+        op === ts.SyntaxKind.GreaterThanEqualsToken ||
+        op === ts.SyntaxKind.EqualsEqualsToken ||
+        op === ts.SyntaxKind.ExclamationEqualsToken ||
+        op === ts.SyntaxKind.EqualsEqualsEqualsToken ||
+        op === ts.SyntaxKind.ExclamationEqualsEqualsToken ||
+        op === ts.SyntaxKind.InstanceOfKeyword ||
+        op === ts.SyntaxKind.InKeyword
+      ) {
+        return true;
+      }
+      // `&&` / `||` are boolean only when BOTH operands are boolean.
+      if (op === ts.SyntaxKind.AmpersandAmpersandToken || op === ts.SyntaxKind.BarBarToken) {
+        return isBooleanExpr(expr.left, depth + 1) && isBooleanExpr(expr.right, depth + 1);
+      }
+      return false;
+    }
+    if (ts.isConditionalExpression(expr)) {
+      return isBooleanExpr(expr.whenTrue, depth + 1) && isBooleanExpr(expr.whenFalse, depth + 1);
+    }
+    if (ts.isCallExpression(expr) && ts.isIdentifier(expr.expression)) {
+      // A recursive/mutual call to a fellow boolean kernel stays boolean.
+      if (boolean.has(expr.expression.text)) return true;
+      // `Boolean(x)` yields boolean.
+      if (expr.expression.text === "Boolean") return true;
+      return false;
+    }
+    return false;
+  };
+
+  // Boolean kernels are a subset of the numeric kernels — seed with all of them
+  // and shrink by the same fixpoint discipline (a candidate stays boolean only
+  // while every return is boolean under the optimistic assumption that the other
+  // candidates are boolean too).
+  const boolean = new Set<string>(numeric);
+  let bChanged = true;
+  let bSafety = boolean.size + 1;
+  while (bChanged && bSafety-- > 0) {
+    bChanged = false;
+    for (const fnName of [...boolean]) {
+      const info = fnInfo.get(fnName)!;
+      if (!info.returns.every((r) => isBooleanExpr(r))) {
+        boolean.delete(fnName);
+        bChanged = true;
+      }
+    }
+  }
+
   const result = new Map<string, ValType>();
   for (const fnName of numeric) {
-    result.set(fnName, { kind: "f64" });
+    result.set(fnName, boolean.has(fnName) ? { kind: "i32", boolean: true } : { kind: "f64" });
   }
   return result;
 }
@@ -4427,6 +4501,18 @@ export function compileDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
     // both would cause init to run twice (once during instantiation, once
     // when the host calls `_start`).
 
+    // (#2796) Diff-test-harness fidelity: when `deferTopLevelInit` is set (and
+    // we are NOT in WASI mode), export `__module_init` and do NOT wire the wasm
+    // `start` section to it. Top-level code that introspects WasmGC structs
+    // (`for…in` / `Object.keys` on a runtime-shaped object) needs the
+    // `__struct_field_names` / `__sget_*` exports, which only exist AFTER the
+    // instance is constructed — so running it via the `start` section (DURING
+    // instantiation, before `setExports`) enumerates zero keys. Exporting it and
+    // letting the host call it after `setExports` is symmetric with the
+    // standalone/WASI `_start` model and gives the diff-test HOST lane the same
+    // fully-wired runtime the standalone lane has. The export's func index is
+    // shifted alongside every other export by the late-import shift logic.
+    const exportModuleInit = ctx.deferTopLevelInit && !ctx.wasi;
     const initTypeIdx = addFuncType(ctx, [], [], "__module_init_type");
     const initFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
     ctx.mod.functions.push({
@@ -4434,15 +4520,23 @@ export function compileDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
       typeIdx: initTypeIdx,
       locals: compiledInitFctx.locals,
       body: compiledInitFctx.body,
-      exported: false,
+      exported: exportModuleInit,
     });
+    if (exportModuleInit) {
+      ctx.mod.exports.push({
+        name: "__module_init",
+        desc: { kind: "func", index: initFuncIdx },
+      });
+    }
 
-    if (!ctx.wasi) {
+    if (!ctx.wasi && !exportModuleInit) {
       // Use Wasm start section — init runs automatically on instantiation.
       ctx.mod.startFuncIdx = initFuncIdx;
     }
     // else: WASI path — addWasiStartExport will export `_start` calling
-    // `__module_init`, and the host will invoke it explicitly.
+    // `__module_init`, and the host will invoke it explicitly. And under
+    // `deferTopLevelInit` (#2796) the JS host calls the exported `__module_init`
+    // directly after `setExports`.
   }
 }
 

@@ -1887,6 +1887,11 @@ export function generateModule(
     // non-vec structs — JS cannot tell them apart without this probe).
     emitIsClosureExport(ctx);
 
+    // #2794: emit __is_data_struct(externref) -> i32 — POSITIVE data-vs-closure
+    // discriminator so `_wrapForHost` only bridges genuine closures and never
+    // masks a data struct (AST Node / class instance / object literal) as callable.
+    emitIsDataStructExport(ctx);
+
     // #1896: teach standalone __typeof_function/__typeof_object to recognise
     // closure wrapper structs (closures registered after the typeof helpers were
     // synthesised mid-compile). Edits the helper bodies in place — no funcIdx churn.
@@ -4140,6 +4145,83 @@ function emitIsClosureExport(ctx: CodegenContext): void {
 }
 
 /**
+ * Emit `__is_data_struct(externref) -> i32` (#2794). Returns 1 when the value is
+ * a registered **named DATA struct** (a class instance, an object literal, an AST
+ * Node — anything the host can read fields off via `__sget_<field>`), 0 otherwise.
+ *
+ * This is the POSITIVE data-vs-closure discriminator the `_wrapForHost` proxy
+ * needs (mirrors the proven `__is_vec`): its `get` trap masks ANY non-vec wasm
+ * struct field value as a callable `closureBridge` whenever generic `__call_fn_N`
+ * dispatchers exist, which wrongly presented acorn's `decl.id` (an Identifier
+ * Node) as a function — `expr.type` read `undefined` and var-declaration parses
+ * threw "Binding rvalue". `__is_closure` cannot gate the bridge because it
+ * FALSE-NEGATIVES on some genuine closures (a capture-less arrow read 0 → would
+ * be wrongly diverted to an object proxy → "not a function"). A POSITIVE
+ * data-struct marker has no such failure mode: closure wrapper structs are NOT
+ * registered in `structFields` (they live only in `closureInfoByTypeIdx`), so a
+ * `ref.test` against the data-struct set returns 0 for every closure and 1 only
+ * for genuine data. The set mirrors `_emitStructFieldGettersInner` exactly (the
+ * same skip-list), so a struct presents as an object iff the host already has
+ * field getters for it. No-op when the module has no eligible data structs.
+ */
+function emitIsDataStructExport(ctx: CodegenContext): void {
+  const mod = ctx.mod;
+
+  // Collect data-struct type indices (deduped), mirroring the getter emitter's
+  // skip-list so the marker and the `__sget_<field>` getters cover one set.
+  const dataTypeIdxs: number[] = [];
+  const seen = new Set<number>();
+  for (const [structName] of ctx.structFields) {
+    if (
+      structName.startsWith("Wrapper") ||
+      structName === "$AnyValue" ||
+      structName.startsWith("__vec_") ||
+      structName.startsWith("__arr_")
+    )
+      continue;
+    const typeIdx = ctx.structMap.get(structName);
+    if (typeIdx === undefined || seen.has(typeIdx)) continue;
+    const typeDef = mod.types[typeIdx];
+    if (!typeDef || typeDef.kind !== "struct") continue;
+    seen.add(typeIdx);
+    dataTypeIdxs.push(typeIdx);
+  }
+  if (dataTypeIdxs.length === 0) return;
+
+  const isDataTypeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i32" }], "$is_data_struct_type");
+  const funcIdx = ctx.numImportFuncs + mod.functions.length;
+
+  const body: Instr[] = [
+    { op: "local.get", index: 0 },
+    { op: "any.convert_extern" } as Instr,
+    { op: "local.set", index: 1 } as Instr,
+  ];
+  for (const dataType of dataTypeIdxs) {
+    body.push({ op: "local.get", index: 1 } as Instr);
+    body.push({ op: "ref.test", typeIdx: dataType } as Instr);
+    body.push({
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [{ op: "i32.const", value: 1 } as Instr, { op: "return" } as Instr],
+    } as Instr);
+  }
+  body.push({ op: "i32.const", value: 0 } as Instr);
+
+  mod.functions.push({
+    name: "__is_data_struct",
+    typeIdx: isDataTypeIdx,
+    locals: [{ name: "__any", type: { kind: "anyref" } }],
+    body,
+    exported: true,
+  } as WasmFunction);
+
+  mod.exports.push({
+    name: "__is_data_struct",
+    desc: { kind: "func", index: funcIdx },
+  });
+}
+
+/**
  * #1896 — teach the standalone/WASI native `__typeof_function` and
  * `__typeof_object` helpers to recognise closure wrapper structs.
  *
@@ -5942,6 +6024,9 @@ export function generateMultiModule(
 
     // #1504: emit __is_closure for wrapExports discrimination.
     emitIsClosureExport(ctx);
+
+    // #2794: POSITIVE data-vs-closure discriminator (see generateModule path).
+    emitIsDataStructExport(ctx);
 
     // #1896: teach standalone __typeof_function/__typeof_object to recognise
     // closure wrapper structs (edits helper bodies in place — no funcIdx churn).

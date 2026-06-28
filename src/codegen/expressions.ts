@@ -906,12 +906,17 @@ function compileExpressionInner(
 
   if (expr.kind === ts.SyntaxKind.TrueKeyword) {
     fctx.body.push({ op: "i32.const", value: 1 });
-    return { kind: "i32" };
+    // (#2795) Brand the i32 as a boolean so a later i32→externref box (e.g. a
+    // conditional/return that unifies `true` with an `any` operand, as in a
+    // mutually-recursive boolean kernel) picks `__box_boolean` and the value
+    // crosses to the host as `true`, not the number 1. Mirrors the #2016/#2030
+    // boolean brand carried by i32 comparison predicates.
+    return { kind: "i32", boolean: true };
   }
 
   if (expr.kind === ts.SyntaxKind.FalseKeyword) {
     fctx.body.push({ op: "i32.const", value: 0 });
-    return { kind: "i32" };
+    return { kind: "i32", boolean: true };
   }
 
   if (expr.kind === ts.SyntaxKind.NullKeyword) {

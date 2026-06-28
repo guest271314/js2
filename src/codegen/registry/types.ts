@@ -10,21 +10,24 @@ import type { CodegenContext } from "../context/types.js";
 
 /** Build a cache key for a function type signature (params + results). */
 function funcTypeKey(params: ValType[], results: ValType[]): string {
-  let key = "";
-  for (let i = 0; i < params.length; i++) {
-    const p = params[i]!;
-    if (i > 0) key += ",";
-    key += p.kind;
-    if (p.kind === "ref" || p.kind === "ref_null") key += ":" + (p as { typeIdx: number }).typeIdx;
-  }
-  key += "|";
-  for (let i = 0; i < results.length; i++) {
-    const r = results[i]!;
-    if (i > 0) key += ",";
-    key += r.kind;
-    if (r.kind === "ref" || r.kind === "ref_null") key += ":" + (r as { typeIdx: number }).typeIdx;
-  }
-  return key;
+  const part = (v: ValType): string => {
+    let s = v.kind;
+    if (v.kind === "ref" || v.kind === "ref_null") s += ":" + (v as { typeIdx: number }).typeIdx;
+    // (#2795) An `i32` Wasm slot backs `number`, `boolean` (1/0) and symbol
+    // HANDLES, which box to the host DIFFERENTLY (`__box_number` vs
+    // `__box_boolean` vs `__box_symbol`). The brand rides on the ValType but the
+    // bare `kind` is identical, so a brand-blind dedup collapses e.g. a
+    // `(f64)->boolean` signature onto a previously-registered `(f64)->number`
+    // one — and `getWasmFuncReturnType` then hands callers a PLAIN i32, so a
+    // boolean-returning recursive kernel's result boxed as the number 1 instead
+    // of `true` (#2795 closures/10-mutual). Keep branded i32 signatures distinct.
+    else if (v.kind === "i32") {
+      if ((v as { boolean?: true }).boolean) s += ":bool";
+      else if ((v as { symbol?: true }).symbol) s += ":sym";
+    }
+    return s;
+  };
+  return params.map(part).join(",") + "|" + results.map(part).join(",");
 }
 
 export function addFuncType(ctx: CodegenContext, params: ValType[], results: ValType[], name?: string): number {

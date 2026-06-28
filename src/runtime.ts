@@ -2384,6 +2384,22 @@ const _PROTO_CB_SLOTS: Record<string, { argIdx: number; arity: number }> = {
 };
 
 /**
+ * (#2794) Array.prototype READ-ONLY methods that return a PRIMITIVE (number /
+ * boolean / string) and take NO callback. When a compiled program reads an
+ * instance array field through dynamic `this` dispatch
+ * (`this.scopeStack[i].lexical.indexOf(name)` in acorn's `declareName`), the
+ * receiver reaches `__extern_method_call` as an opaque WasmGC vec struct that
+ * the host cannot index natively — only `push`/`pop` were wired (via
+ * `__vec_push`/`__vec_pop`). These methods are served by MATERIALIZING the vec
+ * to a real JS array (`__vec_len` + `__vec_get`) and applying the native method.
+ * Restricted to primitive-returning, callback-free methods so the result
+ * round-trips cleanly back into Wasm (an array-returning method like `slice`
+ * would hand a host JS array back to Wasm, which is a separate representation
+ * concern — out of scope here).
+ */
+const _VEC_PRIMITIVE_READ_METHODS = new Set(["indexOf", "lastIndexOf", "includes", "join"]);
+
+/**
  * (#1382) Materialize a Wasm vec into a real JS array via the `__vec_len`
  * + `__vec_get` exports. Non-vec values pass through:
  *   - JS arrays returned as-is.
@@ -5242,6 +5258,25 @@ function _wrapForHost(obj: any, exports: Record<string, Function> | undefined): 
           }
         } catch {
           // fall through to the closure-bridge heuristics
+        }
+        // (#2794) Positive data-vs-closure discriminator. A struct field VALUE
+        // that is a registered DATA struct (AST Node, class instance, object
+        // literal) must be presented as an OBJECT proxy, not masked as a callable
+        // `closureBridge` just because the module exports generic `__call_fn_N`
+        // dispatchers. Without this, acorn's `decl.id` (an Identifier Node) read
+        // back through this proxy arrived in `checkLValSimple` as a closureBridge
+        // function (`expr.type === undefined`) and every var-declaration parse
+        // threw "Binding rvalue". `__is_data_struct` is a POSITIVE marker (no
+        // false-negative failure mode, unlike `__is_closure`): closure wrapper
+        // structs are never in the data-struct set, so a genuine closure answers
+        // 0 here and still reaches the bridge paths below.
+        try {
+          const isDataFn = exports.__is_data_struct as ((v: any) => number) | undefined;
+          if (typeof isDataFn === "function" && isDataFn(val) === 1) {
+            return _wrapForHost(val, exports);
+          }
+        } catch {
+          // discriminator unavailable — fall through to the closure-bridge heuristics
         }
         // Resolve the export key — for string keys use directly, for well-known
         // symbols use the @@name form (e.g. Symbol.toPrimitive → "@@toPrimitive") (#1090)
@@ -9880,6 +9915,37 @@ assert._isSameValue = isSameValue;
                     if (ok) return newLen;
                   } else if (method === "pop" && typeof exports.__vec_pop === "function") {
                     return (exports.__vec_pop as (v: any) => any)(rawVec);
+                  }
+                }
+                // (#2794) Read-only, primitive-returning Array methods on an
+                // opaque vec receiver (e.g. acorn `declareName`'s
+                // `scope.lexical.indexOf(name)`). `__vec_mut_supported` gates only
+                // push/pop; reads just need `__vec_len`/`__vec_get`. Confirm it is
+                // genuinely a vec via the POSITIVE `__is_vec` discriminator, then
+                // materialize to a real JS array and apply the native method.
+                if (
+                  _VEC_PRIMITIVE_READ_METHODS.has(method) &&
+                  typeof exports.__vec_len === "function" &&
+                  typeof exports.__vec_get === "function"
+                ) {
+                  const isVecFn = exports.__is_vec as ((v: any) => number) | undefined;
+                  let isVec = false;
+                  try {
+                    isVec = typeof isVecFn === "function" && isVecFn(rawVec) === 1;
+                  } catch {
+                    isVec = false;
+                  }
+                  if (isVec) {
+                    const len = (exports.__vec_len as (v: any) => number)(rawVec);
+                    if (typeof len === "number" && len >= 0) {
+                      const getFn = exports.__vec_get as (v: any, i: number) => any;
+                      const arr = new Array(len);
+                      for (let i = 0; i < len; i++) arr[i] = wrapHostValue(getFn(rawVec, i));
+                      const nativeFn = (Array.prototype as Record<string, any>)[method];
+                      if (typeof nativeFn === "function") {
+                        return nativeFn.apply(arr, wrappedArgs);
+                      }
+                    }
                   }
                 }
               }
