@@ -312,7 +312,7 @@ The shepherd owns the queue end-to-end:
 - **Monitor `merge_group` results** and handle parks/ejections per the auto-park rules below.
 - **Escalate real regressions** to the lead (regressions >10, single bucket >50, or a genuine merged-baseline regression behind a bot park-hold); ordinary drift/flake is the shepherd's to resolve, not an escalation.
 
-This promotes what was an ad-hoc lead chore (and the `feedback_dedicated_pr_shepherd` memory note) into a protocol role. The lead steps in only on the shepherd's escalations.
+The lead steps in only on the shepherd's escalations, and runs the sweep itself only when no shepherd is staffed.
 
 #### Auto-park handling rules (`auto-park-bot:merge-group-failure`)
 
