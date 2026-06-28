@@ -25,6 +25,7 @@ import { emitWasiErrorConstructor } from "./registry/error-types.js"; // (#2025)
 import { pushBody } from "./context/bodies.js";
 import { reportError } from "./context/errors.js";
 import { reportSilentFallback } from "./fallback-telemetry.js";
+import { resolveLiftedMethodThisStruct } from "./fnctor-escape-gate.js"; // (#2681/#2686 A3) lifted-method `this`→struct
 import { allocLocal, allocTempLocal, getLocalType } from "./context/locals.js";
 import type { ClosureInfo, CodegenContext, FunctionContext } from "./context/types.js";
 import {
@@ -1895,6 +1896,14 @@ export function compileArrowAsClosure(
     // (with no other binding) to read that global. Named functions / methods
     // are NOT lifted here and keep `undefined`/globalObject `this`.
     readsCurrentThis: true,
+    // (#2681/#2686 A3) When this lifted closure is a fnctor PROTOTYPE method of an
+    // approved-for-reconstruction fnctor (`F.prototype.m = fn` / aliased `var pp =
+    // F.prototype; pp.m = fn`), pin its `this` receiver to `__fnctor_F` so the
+    // dynamic `this.<field>` read dispatch (property-access.ts) routes through the
+    // finalize-filled `__get_member_<name>` struct dispatcher instead of the
+    // host-proxy `__extern_get` (whose externref identity diverges from the stored
+    // native struct → the #2681/#2686 throw).
+    thisStructName: resolveLiftedMethodThisStruct(ctx, arrow),
   };
 
   // (#1384) Track liftedFctx.body in liveBodies BEFORE any emission so

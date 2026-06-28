@@ -104,6 +104,19 @@ export function reserveMemberGetDispatch(
   addStringConstantGlobal(ctx, propName);
   addUnionImportsViaRegistry(ctx);
 
+  // (#2681) Settle the index-space shift the imports above staged BEFORE reserving
+  // this dispatcher's funcIdx. Previously the flush ran AFTER `funcMap.set(name,
+  // funcIdx)`, so `flushLateImportShifts` re-shifted the JUST-SET entry by `added`
+  // (an OVER-shift): `funcMap[name]` then pointed `added` slots PAST the real
+  // dispatcher, so `fillMemberGetDispatch` wrote the dispatcher body into the
+  // WRONG function (e.g. `__module_init` — a 0-param fn → `local.tee 1` out of
+  // range) and every baked `call funcIdx` targeted it. Flushing FIRST settles
+  // `numImportFuncs`, so the funcIdx computed below is final and the entry is
+  // never shifted again. (The earlier shift already reached the caller's `fctx`
+  // body + every PRE-EXISTING funcMap entry; nothing the dispatcher bakes runs
+  // before this point.) All callers pass `fctx`.
+  if (fctx) flushLateImportShifts(ctx, fctx);
+
   const typeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "externref" }], "$member_get_dispatch_type");
   const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
   ctx.mod.functions.push({
@@ -115,10 +128,6 @@ export function reserveMemberGetDispatch(
   });
   ctx.funcMap.set(name, funcIdx);
   (ctx.memberGetDispatchNames ??= new Set<string>()).add(propName);
-  // Settle the index-space shift the imports above staged, against the caller's
-  // function body, BEFORE the caller bakes `funcIdx` into a detached array and
-  // runs a follow-on coercion (#2043 hardening — see the doc-comment above).
-  if (fctx) flushLateImportShifts(ctx, fctx);
   return funcIdx;
 }
 

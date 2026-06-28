@@ -30,6 +30,9 @@ import {
 import { getSubviewArrTypeIdx, isSubviewTypeIdx } from "../registry/types.js"; // (#2357/#47) subview write
 import { buildDestructureNullThrow, patternIteratorStepCount } from "../destructuring-params.js";
 import { resolveComputedKeyExpression } from "../literals.js";
+import { resolveReceiverStruct } from "../fnctor-escape-gate.js"; // (#2681/#2686 A3) pinned-struct write dispatch
+import { reserveMemberSetDispatch } from "../member-set-dispatch.js"; // (#2681/#2686 A3) pre-check set dispatcher
+import { reserveMemberGetDispatch } from "../member-get-dispatch.js"; // (#2681/#2686) symmetric struct read for compound
 import {
   emitAlternateStructSetDispatch,
   emitNullGuardedStructGet,
@@ -2630,6 +2633,70 @@ function emitExternrefBackedOwnFieldWrite(
   return { kind: "externref" };
 }
 
+/**
+ * (#2681/#2686 A3 — write side) Route a pinned-struct `recv.<field> = v` WRITE
+ * through the #2664 deferred `__set_member_<name>` dispatcher
+ * (`emitAlternateStructSetDispatch`), so writes hit the native struct slot in
+ * lockstep with the A3 read dispatch. Caller has established `recv` resolves to a
+ * registered/approved `__fnctor_<F>` struct. Returns the assignment value type
+ * (`externref`), or `undefined` to let the normal write path handle it (reserved
+ * accessor / method-typed write / no struct candidate).
+ */
+function tryEmitPinnedStructMemberSet(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  target: ts.PropertyAccessExpression,
+  value: ts.Expression,
+): ValType | undefined {
+  if (ts.isPrivateIdentifier(target.name)) return undefined;
+  const propName = target.name.text;
+  if (
+    propName === "length" ||
+    propName === "constructor" ||
+    propName === "__proto__" ||
+    propName === "prototype" ||
+    propName === "name"
+  ) {
+    return undefined;
+  }
+  // A method/function-typed write keeps its closure/funcref lowering.
+  const accessType = ctx.checker.getTypeAtLocation(target);
+  if (accessType.getCallSignatures && accessType.getCallSignatures().length > 0) return undefined;
+
+  // Pre-check the dispatcher is reservable BEFORE emitting any receiver/value
+  // side effects, so a decline leaves the body untouched (the
+  // emitAlternateStructSetDispatch reserve below is idempotent).
+  if (reserveMemberSetDispatch(ctx, propName, /*strict*/ true, fctx) === undefined) return undefined;
+
+  // Evaluate the receiver (reference before value), coerce to externref.
+  const objResult = compileExpression(ctx, fctx, target.expression);
+  if (objResult && objResult.kind !== "externref") {
+    coerceType(ctx, fctx, objResult, { kind: "externref" });
+  } else if (!objResult) {
+    fctx.body.push({ op: "ref.null.extern" } as Instr);
+  }
+  const objLocal = allocLocal(fctx, `__pset_obj_${fctx.locals.length}`, { kind: "externref" });
+  fctx.body.push({ op: "local.set", index: objLocal });
+
+  // Evaluate the value, coerce/box to externref.
+  const valResult = compileExpression(ctx, fctx, value);
+  if (valResult && valResult.kind !== "externref") {
+    coerceType(ctx, fctx, valResult, { kind: "externref" });
+  } else if (!valResult) {
+    fctx.body.push({ op: "ref.null.extern" } as Instr);
+  }
+  const valLocal = allocLocal(fctx, `__pset_val_${fctx.locals.length}`, { kind: "externref" });
+  fctx.body.push({ op: "local.set", index: valLocal });
+
+  // #2664 deferred set dispatcher: native `struct.set` arms (incl. the
+  // late-registered `__fnctor_<F>`) + `__extern_set_strict` sidecar terminal.
+  const dispatched = emitAlternateStructSetDispatch(ctx, fctx, objLocal, valLocal, propName, /*strict*/ true);
+  if (!dispatched) return undefined; // no struct candidate yet — fall through to the normal write path
+  // `=` evaluates to the assigned value.
+  fctx.body.push({ op: "local.get", index: valLocal });
+  return { kind: "externref" };
+}
+
 function compilePropertyAssignment(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -2891,6 +2958,32 @@ function compilePropertyAssignment(
       fctx.body.push({ op: "local.get", index: newLenTmp });
       if (!ctx.fast) fctx.body.push({ op: "f64.convert_i32_s" });
       return ctx.fast ? { kind: "i32" } : { kind: "f64" };
+    }
+  }
+
+  // (#2681/#2686 A3 — write side, MUST mirror the read side) When the receiver is
+  // a pinned `__fnctor_<F>` struct (a lifted fnctor-prototype method's `this`, or a
+  // single-return-inferred local), route the `recv.<field> = v` WRITE through the
+  // #2664 deferred `__set_member_<name>` dispatcher (native `struct.set` arms +
+  // `__extern_set_strict` sidecar terminal) — symmetric to the read dispatch in
+  // compilePropertyAccess. WITHOUT this, the write below falls into
+  // `tryEmitDeleteAwareDynamicSet` (acorn uses `delete` → an `any`-receiver write
+  // goes to the bare `__extern_set_strict` SIDECAR), while the A3 read goes to the
+  // native struct slot — reads and writes DIVERGE so `this.pos += 1` never advances
+  // and the tokenizer loops forever (the hang the read-only fix exposed). Both
+  // dispatchers are finalize-filled over the COMPLETE struct table, so at runtime
+  // a struct instance hits the slot on BOTH sides and a genuine proxy hits the
+  // sidecar on BOTH sides — consistent either way. Runs BEFORE the delete-aware
+  // write so it wins for pinned receivers.
+  {
+    const pinnedThis =
+      target.expression.kind === ts.SyntaxKind.ThisKeyword && fctx.thisStructName !== undefined
+        ? fctx.thisStructName
+        : undefined;
+    const pinned = pinnedThis ?? resolveReceiverStruct(ctx, fctx, target.expression);
+    if (pinned !== undefined) {
+      const pinnedSet = tryEmitPinnedStructMemberSet(ctx, fctx, target, value);
+      if (pinnedSet !== undefined) return pinnedSet;
     }
   }
 
@@ -6150,18 +6243,39 @@ function compilePropertyCompoundAssignmentExternref(
   });
   fctx.body.push({ op: "local.set", index: keyLocal });
 
-  // Read current value: __extern_get(obj, key) -> externref
+  // (#2681/#2686) Is the receiver a PINNED reconstructed-fnctor struct (acorn's
+  // `this.pos`, `this`/flow-mapped)? Only THEN do the compound read+write route
+  // through the `__get_member`/`__set_member` struct dispatchers (slot), staying
+  // symmetric with the pinned simple read/write so `this.pos += 1` advances. For
+  // a GENERAL `any`-receiver (a plain object literal lowered to an anonymous
+  // `$__anon_N` struct), the dispatcher's struct arm would read/write the SLOT and
+  // bypass the delete-tombstone/ordering sidecar semantics (#2179/#2731 — the
+  // `for-in/order-simple-object` regressor), so a general receiver stays on the
+  // bare `__extern_get`/`__extern_set` sidecar.
+  const pinnedCompound =
+    (target.expression.kind === ts.SyntaxKind.ThisKeyword && fctx.thisStructName !== undefined) ||
+    resolveReceiverStruct(ctx, fctx, target.expression) !== undefined;
+
+  // Read current value. When pinned, route through the symmetric
+  // `__get_member_<name>` dispatcher (`struct.get` arms + `__extern_get` terminal)
+  // so read/write stay consistent with the A3 main-path read; otherwise the bare
+  // tombstone-aware `__extern_get`.
   fctx.body.push({ op: "local.get", index: objLocal });
-  fctx.body.push({ op: "local.get", index: keyLocal });
-  const getIdx = ensureLateImport(
-    ctx,
-    "__extern_get",
-    [{ kind: "externref" }, { kind: "externref" }],
-    [{ kind: "externref" }],
-  );
-  flushLateImportShifts(ctx, fctx);
-  if (getIdx === undefined) return null;
-  fctx.body.push({ op: "call", funcIdx: getIdx });
+  const getDispIdx = pinnedCompound ? reserveMemberGetDispatch(ctx, propName, fctx) : undefined;
+  if (getDispIdx !== undefined) {
+    fctx.body.push({ op: "call", funcIdx: getDispIdx });
+  } else {
+    fctx.body.push({ op: "local.get", index: keyLocal });
+    const getIdx = ensureLateImport(
+      ctx,
+      "__extern_get",
+      [{ kind: "externref" }, { kind: "externref" }],
+      [{ kind: "externref" }],
+    );
+    flushLateImportShifts(ctx, fctx);
+    if (getIdx === undefined) return null;
+    fctx.body.push({ op: "call", funcIdx: getIdx });
+  }
 
   // Ensure union imports (including __unbox_number, __box_number) are registered
   addUnionImports(ctx);
@@ -6220,9 +6334,14 @@ function compilePropertyCompoundAssignmentExternref(
   // getter-only-accessor throw). The dispatcher's terminal else-arm IS the
   // `__extern_set` sidecar; its struct-candidate arms are enumerated at finalize
   // (the full type table), fixing the compile-order candidate freeze (#2664).
-  const cmpdDispatched = emitAlternateStructSetDispatch(ctx, fctx, objLocal, boxedLocal, propName, /*strict*/ false);
+  // (#2681/#2686) Only a PINNED reconstructed-fnctor receiver uses the struct.set
+  // dispatcher (symmetric with the pinned read above); a general any-receiver
+  // (plain object) stays on the bare `__extern_set` sidecar to preserve the
+  // delete-tombstone/ordering semantics (#2179/#2731).
+  const cmpdDispatched =
+    pinnedCompound && emitAlternateStructSetDispatch(ctx, fctx, objLocal, boxedLocal, propName, /*strict*/ false);
   if (!cmpdDispatched) {
-    // Dispatcher could not be reserved — emit the bare host write as before.
+    // Not pinned (or dispatcher not reservable) — emit the bare host write.
     fctx.body.push({ op: "local.get", index: objLocal });
     fctx.body.push({ op: "local.get", index: keyLocal });
     fctx.body.push({ op: "local.get", index: boxedLocal });
