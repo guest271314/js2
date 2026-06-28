@@ -23,7 +23,7 @@ import type { Instr, ValType } from "../ir/types.js";
 import { ts } from "../ts-api.js";
 import { allocLocal } from "./context/locals.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
-import { ensureLinearU8AllocHelper } from "./index.js";
+import { ensureLinearU8AllocHelper, ensureWasiFdWriteAllHelper } from "./index.js";
 import {
   getLinearU8Buffer as lookupLinearU8Buffer,
   isLinearU8SafeBinding,
@@ -444,6 +444,23 @@ export function tryEmitLinearU8StdWrite(
     fctx.body.push({ op: "local.get", index: buf.ptrLocalIdx } as Instr);
     fctx.body.push({ op: "local.get", index: buf.lenLocalIdx } as Instr);
     fctx.body.push({ op: "call", funcIdx: writeSinkIdx } as Instr);
+    fctx.body.push({ op: "drop" } as Instr);
+    return true;
+  }
+
+  // #2807 — route through the chunked `__wasi_fd_write_all` helper so a
+  // ≥128 MiB linear-backed frame (the nm_node_process large-message echo) is
+  // split into pieces below wasmtime's single-iovec fd_write cap. A single
+  // oversized fd_write returns errno 48 with nwritten 0, which the drop here
+  // would silently swallow → zero output, exit 0 (#2807). The helper reads
+  // straight from `ptr` for each chunk (still zero-copy) and returns total
+  // bytes written (dropped to match the stack contract).
+  const writeAllIdx = ensureWasiFdWriteAllHelper(ctx);
+  if (writeAllIdx >= 0) {
+    fctx.body.push({ op: "i32.const", value: fd } as Instr);
+    fctx.body.push({ op: "local.get", index: buf.ptrLocalIdx } as Instr);
+    fctx.body.push({ op: "local.get", index: buf.lenLocalIdx } as Instr);
+    fctx.body.push({ op: "call", funcIdx: writeAllIdx } as Instr);
     fctx.body.push({ op: "drop" } as Instr);
     return true;
   }
