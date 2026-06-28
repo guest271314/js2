@@ -44,12 +44,12 @@ jobs:
 
       - name: Install wasmtime (pinned)
         run: |
-          # Pin a current release for reproducibility. v44 is what the example
+          # Pin a current release for reproducibility. v46 is what the example
           # was verified against; it supports the GC / function-references /
           # tail-call / exceptions proposals the module uses via the explicit
           # -W flags the smoke script enables. (Do NOT bump to all-proposals:
-          # wasmtime 44 rejects stack-switching, which all-proposals turns on.)
-          WASMTIME_VERSION=v44.0.0
+          # it turns on stack-switching, which these modules don't use.)
+          WASMTIME_VERSION=v46.0.1
           curl -L "https://github.com/bytecodealliance/wasmtime/releases/download/${WASMTIME_VERSION}/wasmtime-${WASMTIME_VERSION}-x86_64-linux.tar.xz" \
             | tar xJ
           echo "$PWD/wasmtime-${WASMTIME_VERSION}-x86_64-linux" >> "$GITHUB_PATH"
