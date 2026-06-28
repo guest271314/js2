@@ -1,5 +1,5 @@
 // Shared, host-INDEPENDENT Native Messaging synchronous framing/streaming core
-// (#2778). Both `nm_deno.ts` (Deno `readSync`/`writeSync`) and `nm_node_fs.ts`
+// (#2778). Both `nm_js2wasm_deno.ts` (Deno `readSync`/`writeSync`) and `nm_js2wasm_node_fs.ts`
 // (`node:fs` `readSync`/`writeSync`) are now THIN adapters that inject their
 // host's synchronous stdio into the `runNmHost` seam below and call into this one
 // core. This file has ZERO host API surface — it touches `Uint8Array` only, so it
@@ -23,11 +23,11 @@
 //
 // Two framing modes, selected by `maxFrameSize`:
 //
-//   - `maxFrameSize <= 0` → VERBATIM streamer (the `nm_deno` demo): each framed
+//   - `maxFrameSize <= 0` → VERBATIM streamer (the `nm_js2wasm_deno` demo): each framed
 //     message is echoed back byte-for-byte (prefix + body), streamed through a
 //     fixed window so resident memory stays flat regardless of body size.
 //
-//   - `maxFrameSize > 0`  → browser-cap RE-CHUNK streamer (the `nm_node_fs`
+//   - `maxFrameSize > 0`  → browser-cap RE-CHUNK streamer (the `nm_js2wasm_node_fs`
 //     demo): a body LARGER than the cap is split into a sequence of valid
 //     `<=maxFrameSize` JSON frames (`[run]` for an array body, `"run"` for a
 //     string body) whose interiors, concatenated by the receiver, reproduce the
@@ -53,7 +53,7 @@ export type NmWrite = (buf: Uint8Array) => void;
  * the re-chunk path with its declared body length. Kept a callback (not string
  * work in this host-independent core) so the adapter owns the message text + its
  * fd-2 writer; the verbatim path never calls it (it emits no telemetry, matching
- * the pre-dedup nm_deno). A no-op is a valid implementation.
+ * the pre-dedup nm_js2wasm_deno). A no-op is a valid implementation.
  */
 export type NmLog = (declaredLen: number) => void;
 
@@ -160,7 +160,7 @@ function streamLargeString(
   return true;
 }
 
-// VERBATIM port loop (the `nm_deno` demo): read framed messages and echo each one
+// VERBATIM port loop (the `nm_js2wasm_deno` demo): read framed messages and echo each one
 // back byte-for-byte until EOF. The body streams through a fixed window; a frame
 // larger than the window is echoed in window-sized runs (the receiver
 // concatenates raw bytes, so prefix + body are byte-identical to the input).
@@ -197,7 +197,7 @@ function runVerbatim(read: NmRead, write: NmWrite): void {
   }
 }
 
-// RE-CHUNK port loop (the `nm_node_fs` demo): read framed JSON messages and echo
+// RE-CHUNK port loop (the `nm_js2wasm_node_fs` demo): read framed JSON messages and echo
 // each one back as valid JSON within the browser `cap`-byte per-message cap. A
 // body that already fits is echoed verbatim; a larger array/string body is split
 // into valid <=cap frames. Streams through a single reused `cap` buffer.
@@ -326,7 +326,7 @@ function runRechunk(read: NmRead, write: NmWrite, log: NmLog, cap: number): void
  *                     the cross-module-funcref note at the top of this file).
  * @param write        one host `writeSync` (fd 1); writes the whole buffer.
  * @param log          per-frame fd-2 telemetry hook (re-chunk path only); pass a
- *                     no-op when the host emits no diagnostics (e.g. nm_deno).
+ *                     no-op when the host emits no diagnostics (e.g. nm_js2wasm_deno).
  * @param maxFrameSize `<= 0` → verbatim echo (no cap); `> 0` → re-chunk bodies
  *                     larger than this many bytes into valid <=`maxFrameSize`
  *                     JSON frames (the browser per-message cap).

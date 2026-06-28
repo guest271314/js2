@@ -147,11 +147,11 @@ describe("#2735 — stdin reactor non-EOF termination", () => {
 
   // ── Compile-only invariants (always run, no runtime needed) ──────────────
 
-  it("nm_node_process.ts still lowers to a standalone module importing only wasi_snapshot_preview1", async () => {
+  it("nm_js2wasm_node_process.ts still lowers to a standalone module importing only wasi_snapshot_preview1", async () => {
     // The destroy() → __wasiStdinStop() lowering must NOT leak an `env.*` host
     // import (a regression of the #2696 zero-env-leak guarantee).
-    const src = readFileSync(join(NM_DIR, "nm_node_process.ts"), "utf-8");
-    const r = await compileWasi(src, "nm_node_process_imports");
+    const src = readFileSync(join(NM_DIR, "nm_js2wasm_node_process.ts"), "utf-8");
+    const r = await compileWasi(src, "nm_js2wasm_node_process_imports");
     expect(r.success, r.success ? "" : `compile error: ${r.errors?.[0]?.message}`).toBe(true);
     expect(WebAssembly.validate(r.binary!)).toBe(true);
     expect([...importModules(r.wat!)]).toEqual(["wasi_snapshot_preview1"]);
@@ -177,7 +177,7 @@ describe("#2735 — stdin reactor non-EOF termination", () => {
       { timeout: 30_000 },
       async () => {
         const binPath = await buildToDisk(
-          readFileSync(join(NM_DIR, "nm_node_process.ts"), "utf-8"),
+          readFileSync(join(NM_DIR, "nm_js2wasm_node_process.ts"), "utf-8"),
           "nm_open_shutdown",
         );
         const input = new Uint8Array([...requestFrame, ...shutdownFrame]);
@@ -205,7 +205,7 @@ describe("#2735 — stdin reactor non-EOF termination", () => {
 
   maybe("under wasmtime (stdin CLOSED — EOF path stays green)", () => {
     it("EOF-closed stdin still echoes the frame and exits", { timeout: 30_000 }, async () => {
-      const binPath = await buildToDisk(readFileSync(join(NM_DIR, "nm_node_process.ts"), "utf-8"), "nm_eof_close");
+      const binPath = await buildToDisk(readFileSync(join(NM_DIR, "nm_js2wasm_node_process.ts"), "utf-8"), "nm_eof_close");
       // Same input, but the parent CLOSES stdin → the reactor's existing EOF
       // trigger fires. This must remain unaffected by the new escape hatch.
       const input = new Uint8Array([...requestFrame, ...shutdownFrame]);
@@ -215,7 +215,7 @@ describe("#2735 — stdin reactor non-EOF termination", () => {
     });
 
     it("a bounded buffer with no shutdown frame still exits on EOF", { timeout: 30_000 }, async () => {
-      const binPath = await buildToDisk(readFileSync(join(NM_DIR, "nm_node_process.ts"), "utf-8"), "nm_eof_plain");
+      const binPath = await buildToDisk(readFileSync(join(NM_DIR, "nm_js2wasm_node_process.ts"), "utf-8"), "nm_eof_plain");
       const res = await runWasmtimeStdin(binPath, requestFrame, { keepOpen: false, timeoutMs: 15_000 });
       expect(res.timedOut).toBe(false);
       expect(Array.from(res.stdout)).toEqual(Array.from(requestFrame));

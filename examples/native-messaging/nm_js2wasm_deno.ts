@@ -1,7 +1,7 @@
 // Native Messaging host, compiled to standalone WASI by js2wasm — the **Deno**
 // synchronous-stdio variant.
 //
-//   npx js2wasm examples/native-messaging/nm_deno.ts --target wasi -o out
+//   npx js2wasm examples/native-messaging/nm_js2wasm_deno.ts --target wasi -o out
 //
 // `--target wasi` emits a SELF-CONTAINED WASI Preview-1 command module: it
 // imports ONLY `wasi_snapshot_preview1` (fd_read / fd_write), owns + exports its
@@ -13,7 +13,7 @@
 // `Deno.stdout.writeSync` — so the SAME file ALSO runs UNMODIFIED under real
 // `deno` (which provides the `Deno` namespace):
 //
-//   deno run --allow-read --allow-write examples/native-messaging/nm_deno.ts
+//   deno run --allow-read --allow-write examples/native-messaging/nm_js2wasm_deno.ts
 //
 // Deno's stdio primitives are fd-based and synchronous, mapping 1:1 to WASI:
 //
@@ -26,24 +26,24 @@
 // `=== null` works in the standalone module exactly as it does under real Deno.
 //
 // The Native Messaging FRAMING + verbatim streaming itself lives in the shared,
-// host-independent core `nm_sync_framing.ts` (#2778) — this file is just the thin
+// host-independent core `nm_js2wasm_sync_framing.ts` (#2778) — this file is just the thin
 // Deno adapter that injects `Deno.stdin.readSync` / `Deno.stdout.writeSync` into
 // the `runNmHost` seam and runs it with NO re-chunk cap (verbatim byte echo).
-// `nm_node_fs.ts` is the same core injected with `node:fs` IO and a 1 MiB cap;
-// `nm_wasi_p1.ts` is the raw `wasi_snapshot_preview1` `fd_read`/`fd_write` form.
+// `nm_js2wasm_node_fs.ts` is the same core injected with `node:fs` IO and a 1 MiB cap;
+// `nm_js2wasm_wasi_p1.ts` is the raw `wasi_snapshot_preview1` `fd_read`/`fd_write` form.
 // All compile to the SAME pure-WASI-P1 shape; they differ only in which runtime's
 // source-level API they additionally run under, unmodified.
 //
 // The seam is two FUNCTION references (`denoRead` / `denoWrite`), not an object:
 // passing a struct value across the bundled-module boundary traps at runtime
 // under `--target wasi` today, while function references cross cleanly (#2778 —
-// see the note atop `nm_sync_framing.ts`).
+// see the note atop `nm_js2wasm_sync_framing.ts`).
 //
 // Native Messaging protocol: each message is a 4-byte little-endian length prefix
 // followed by a UTF-8 JSON body, exchanged over fd 0 (stdin) / fd 1 (stdout). See
 //   https://developer.chrome.com/docs/extensions/develop/concepts/native-messaging
 
-import { runNmHost } from "./nm_sync_framing";
+import { runNmHost } from "./nm_js2wasm_sync_framing";
 
 // ONE Deno `readSync`: fills the whole buffer it is handed and returns the count,
 // or `null` at EOF (the core treats `null` / `<= 0` as EOF).
@@ -70,7 +70,7 @@ function denoWrite(buf: Uint8Array): void {
   }
 }
 
-// No fd-2 telemetry in the verbatim variant (matches the pre-dedup nm_deno). The
+// No fd-2 telemetry in the verbatim variant (matches the pre-dedup nm_js2wasm_deno). The
 // verbatim path never invokes the diagnostics hook, so this is never called — it
 // exists only to satisfy the shared core's `log` parameter.
 function denoNoLog(declaredLen: number): void {

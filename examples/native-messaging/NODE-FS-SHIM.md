@@ -64,10 +64,10 @@ memory; the bespoke `js2wasm:node-process` shim was retired.)
 Compile the user module:
 
 ```sh
-npx js2wasm examples/native-messaging/nm_node_fs.ts --target wasi --link node:fs -o out
+npx js2wasm examples/native-messaging/nm_js2wasm_node_fs.ts --target wasi --link node:fs -o out
 ```
 
-The emitted `out/nm_node_fs.wasm` imports only `node:fs` (memory + `readSync` +
+The emitted `out/nm_js2wasm_node_fs.wasm` imports only `node:fs` (memory + `readSync` +
 `writeSync`) and carries **no** `wasi_snapshot_preview1` import for the IO path.
 
 (Re)generate the shim:
@@ -88,7 +88,7 @@ committed source. Run the generator once before linking, or call the exported
 import { readFileSync } from "node:fs";
 
 const shimBin = readFileSync("examples/native-messaging/node-fs.wasm");
-const userBin = readFileSync("out/nm_node_fs.wasm");
+const userBin = readFileSync("out/nm_js2wasm_node_fs.wasm");
 
 // Minimal WASI fd_read/fd_write over the shim-owned memory (or use a real WASI).
 let mem = null;
@@ -127,7 +127,7 @@ recompile.
 wasmtime run \
   --preload node:fs=examples/native-messaging/node-fs.wasm \
   --invoke main \
-  out/nm_node_fs.wasm
+  out/nm_js2wasm_node_fs.wasm
 ```
 
 `--preload <name>=<file>` registers the shim under the import module name

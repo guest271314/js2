@@ -1,6 +1,6 @@
 {
   "name": "nm-node-fs",
-  "short_name": "nm_node_fs",
+  "short_name": "nm_js2wasm_node_fs",
   "version": "1.0",
   "manifest_version": 3,
   "permissions": ["nativeMessaging"],

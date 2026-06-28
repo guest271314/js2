@@ -1,19 +1,19 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 /**
  * #2754 — a `bun build` / esbuild **type-stripped + bundled** `.js` of the
- * SYNCHRONOUS Native-Messaging hosts (`nm_deno.ts`, `nm_node_fs.ts`) must
+ * SYNCHRONOUS Native-Messaging hosts (`nm_js2wasm_deno.ts`, `nm_js2wasm_node_fs.ts`) must
  * round-trip a framed message exactly the way the direct `.ts` does. This is
  * loopdive/js2#389's exact pipeline:
  *
- *   bun build examples/native-messaging/nm_deno.ts --outfile nm_deno.js  # strips types + bundles
- *   js2wasm nm_deno.js --target wasi
+ *   bun build examples/native-messaging/nm_js2wasm_deno.ts --outfile nm_js2wasm_deno.js  # strips types + bundles
+ *   js2wasm nm_js2wasm_deno.js --target wasi
  *
  * The transpiled `.js` had broken THREE times because only the `.ts` path was
- * tested. The most recent regression (#2778's shared-`nm_sync_framing` core)
+ * tested. The most recent regression (#2778's shared-`nm_js2wasm_sync_framing` core)
  * surfaced as a **zero-output** miscompile: the host compiled clean to a pure
  * WASI module, instantiated, and exited 0 having read/written NOTHING.
  *
- * Root cause (#2754): once `nm_deno`/`nm_node_fs` inject their `readSync`/
+ * Root cause (#2754): once `nm_js2wasm_deno`/`nm_js2wasm_node_fs` inject their `readSync`/
  * `writeSync` as FUNCTION REFERENCES across the shared-core seam (`runNmHost(read,
  * write, …)`), stripping the types makes those params `any`. A call on an
  * `any`-typed value reaches the inline dynamic-dispatch path, which builds its
@@ -25,7 +25,7 @@
  * nothing. Pre-registering function-value wrappers before body codegen fixes it.
  *
  * This test type-strips AND BUNDLES (the reporter's real flow — not a
- * transform-only strip, which would leave the `./nm_sync_framing` import
+ * transform-only strip, which would leave the `./nm_js2wasm_sync_framing` import
  * dangling) **in-process via esbuild** (a devDep — no `bun` needed at test time),
  * compiles under `--target wasi`, drives the module through an in-process raw-fd
  * shim (so it runs on EVERY CI run, not only where `wasmtime` is installed), and
@@ -86,8 +86,8 @@ function jsonArrayBody(approx: number): Buffer {
 // ---- transpile (type-strip + bundle) the reporter's exact way -----------------
 /**
  * Reproduce `bun build <file> --outfile out.js`: BUNDLE the entry (inlining the
- * shared `./nm_sync_framing` core) and STRIP the TS types, in-process via esbuild.
- * `node:fs` is kept external (bun does the same), so `nm_node_fs` retains its
+ * shared `./nm_js2wasm_sync_framing` core) and STRIP the TS types, in-process via esbuild.
+ * `node:fs` is kept external (bun does the same), so `nm_js2wasm_node_fs` retains its
  * `import { readSync, writeSync } from "node:fs"` for the compiler's node:fs
  * sync-IO recognition.
  */
@@ -105,7 +105,7 @@ async function transpileStrippedBundle(file: string): Promise<string> {
   // The types REALLY are stripped (the seam params lose their annotations).
   expect(code).not.toContain(": Uint8Array");
   // The shared core was inlined (no dangling relative import).
-  expect(code).not.toContain("./nm_sync_framing");
+  expect(code).not.toContain("./nm_js2wasm_sync_framing");
   return code;
 }
 
@@ -196,9 +196,9 @@ async function compileStrippedJs(file: string): Promise<Uint8Array> {
 
 // =============================================================================
 describe("#2754 — bun/esbuild type-stripped+bundled sync NM hosts round-trip under WASI", () => {
-  // nm_deno = VERBATIM streamer: every framed message echoes back byte-for-byte.
-  it("nm_deno: stripped .js echoes a multi-frame stream byte-exact (incl. a 1 MiB body), matching .ts", async () => {
-    const [tsBin, jsBin] = await Promise.all([compileTs("nm_deno.ts"), compileStrippedJs("nm_deno.ts")]);
+  // nm_js2wasm_deno = VERBATIM streamer: every framed message echoes back byte-for-byte.
+  it("nm_js2wasm_deno: stripped .js echoes a multi-frame stream byte-exact (incl. a 1 MiB body), matching .ts", async () => {
+    const [tsBin, jsBin] = await Promise.all([compileTs("nm_js2wasm_deno.ts"), compileStrippedJs("nm_js2wasm_deno.ts")]);
 
     const small = new Uint8Array([0x00, 0xff, 0x0a, 0x7f, 0x80, 0x41]);
     const big = new Uint8Array(1 * MiB);
@@ -218,10 +218,10 @@ describe("#2754 — bun/esbuild type-stripped+bundled sync NM hosts round-trip u
     expect(Buffer.compare(Buffer.from(jsOut), Buffer.from(tsOut)), "stripped .js must match the .ts path").toBe(0);
   });
 
-  // nm_node_fs = re-chunk streamer: a body <= the 1 MiB cap echoes verbatim; a
+  // nm_js2wasm_node_fs = re-chunk streamer: a body <= the 1 MiB cap echoes verbatim; a
   // larger array body is re-chunked into valid <=1 MiB JSON frames.
-  it("nm_node_fs: stripped .js echoes under-cap frames byte-exact, matching .ts", async () => {
-    const [tsBin, jsBin] = await Promise.all([compileTs("nm_node_fs.ts"), compileStrippedJs("nm_node_fs.ts")]);
+  it("nm_js2wasm_node_fs: stripped .js echoes under-cap frames byte-exact, matching .ts", async () => {
+    const [tsBin, jsBin] = await Promise.all([compileTs("nm_js2wasm_node_fs.ts"), compileStrippedJs("nm_js2wasm_node_fs.ts")]);
 
     const small = new Uint8Array(Buffer.from("[1,2,3]", "ascii"));
     const end = new Uint8Array([0x5b, 0x5d]); // "[]"
@@ -235,8 +235,8 @@ describe("#2754 — bun/esbuild type-stripped+bundled sync NM hosts round-trip u
     expect(Buffer.compare(Buffer.from(jsOut), Buffer.from(tsOut)), "stripped .js must match the .ts path").toBe(0);
   });
 
-  it("nm_node_fs: stripped .js re-chunks a >1 MiB array body into valid frames, matching .ts", async () => {
-    const [tsBin, jsBin] = await Promise.all([compileTs("nm_node_fs.ts"), compileStrippedJs("nm_node_fs.ts")]);
+  it("nm_js2wasm_node_fs: stripped .js re-chunks a >1 MiB array body into valid frames, matching .ts", async () => {
+    const [tsBin, jsBin] = await Promise.all([compileTs("nm_js2wasm_node_fs.ts"), compileStrippedJs("nm_js2wasm_node_fs.ts")]);
 
     const body = new Uint8Array(jsonArrayBody(2 * MiB)); // > the 1 MiB browser cap
     const input = frame(body);

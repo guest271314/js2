@@ -7,7 +7,7 @@
  * call), moving init into a standalone `__module_init`. But `addWasiStartExport`
  * was left preferring `__module_init` unconditionally as the `_start` target,
  * so a `--target wasi` program WITH a user `main` (e.g. the Native Messaging
- * host, examples/native-messaging/nm_node_fs.ts) wrapped ONLY `__module_init`
+ * host, examples/native-messaging/nm_js2wasm_node_fs.ts) wrapped ONLY `__module_init`
  * in `_start`: top-level globals were initialised but the user `main()` never
  * ran. Under real wasmtime the program produced no stdout — the
  * native-messaging smoke check went red (FAIL: stdout frame mismatch).
