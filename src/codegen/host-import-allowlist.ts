@@ -429,6 +429,7 @@ export function lookupAllowlistEntry(name: string): HostImportAllowlistEntry | u
 export function isHostImportAllowed(
   module: string,
   name: string,
+  linkedNamespaces?: ReadonlySet<string>,
 ):
   | { allowed: true }
   | { allowed: false; reason: "non-env-host-module" }
@@ -442,6 +443,16 @@ export function isHostImportAllowed(
     return { allowed: false, reason: "env-not-on-allowlist" };
   }
   if (ALWAYS_ALLOWED_IMPORT_MODULES.has(module)) {
+    return { allowed: true };
+  }
+  // #2783 — a namespace the user explicitly `--link`'d is left as a link-time
+  // import (satisfied by a preloaded provider), so it is permitted past the
+  // strict gate even though it is not on the built-in always-allowed set. This
+  // is what lets an ARBITRARY external namespace (e.g. `acme:telemetry`) survive
+  // `--no-host-imports` / WASI strict mode: `--link` turns "reject the import"
+  // into "leave it for link-time satisfaction". `env` is deliberately NOT
+  // overridable this way — those are JS-host bindings, gated by the allowlist.
+  if (linkedNamespaces?.has(module)) {
     return { allowed: true };
   }
   // Any other module (wasm:js-string, string_constants, ...) is host-only.
@@ -507,14 +518,19 @@ export interface LeakedHostImport {
  * `module` / `name` fields are read, so the caller may pass any shape carrying
  * those two strings. Duplicate `module.name` pairs are de-duplicated.
  */
-export function scanForLeakedHostImports(imports: ReadonlyArray<{ module: string; name: string }>): LeakedHostImport[] {
+export function scanForLeakedHostImports(
+  imports: ReadonlyArray<{ module: string; name: string }>,
+  linkedNamespaces?: ReadonlySet<string>,
+): LeakedHostImport[] {
   const leaks: LeakedHostImport[] = [];
   const seen = new Set<string>();
   for (const imp of imports) {
     const key = `${imp.module} ${imp.name}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    const decision = isHostImportAllowed(imp.module, imp.name);
+    // #2783 — `--link`'d namespaces (`ctx.linkedNamespaces`) are left as
+    // link-time imports and must survive the strict gate, not be flagged leaks.
+    const decision = isHostImportAllowed(imp.module, imp.name, linkedNamespaces);
     if (!decision.allowed) {
       leaks.push({ module: imp.module, name: imp.name, reason: decision.reason });
     }

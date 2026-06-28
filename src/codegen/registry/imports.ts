@@ -48,7 +48,11 @@ export function addImport(ctx: CodegenContext, module: string, name: string, des
     );
   }
   if (ctx.strictNoHostImports) {
-    const decision = isHostImportAllowed(module, name);
+    // #2783 — pass `ctx.linkedNamespaces` so an arbitrary `--link`'d namespace's
+    // import is actually REGISTERED (left as a link-time import for a preloaded
+    // provider) rather than dropped-and-degraded here. Dropping it would leave a
+    // stale funcMap index and the program could never satisfy the linked symbol.
+    const decision = isHostImportAllowed(module, name, ctx.linkedNamespaces);
     if (!decision.allowed) {
       const message = buildStrictHostImportError(module, name);
       // #1921 — this per-call gate *drops* the import and lets codegen
