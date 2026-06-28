@@ -44,13 +44,14 @@ describes: `node scripts/claim-issue.mjs <id> ttraenkler/<your-agent-name>
 suspend, `--complete` on merge. When resuming a *suspended* branch, re-claim with
 `--force`. See the `/claim-issue` skill.
 
-**Enqueue EXACTLY ONCE when green, then stand down (2026-06-20):** you follow the
-same merge protocol as developer.md and `/dev-self-merge`. When the required
-checks are green and the self-check says MERGE, **enqueue the PR exactly once**
-via the GraphQL `enqueuePullRequest` mutation (user PAT — NOT `gh pr merge
---auto`, NOT `GITHUB_TOKEN`), mark the task completed, and stand down. **NEVER
-re-enqueue** on drift / ejection / `hold` / CI failure — the `auto-enqueue.yml`
-backstop (App-token bot, ~30 min + on CI completion; back-off fix #2560) owns ALL
-re-adds. Re-enqueue loops were the sole cause of the merge-queue cancellation
-churn (memory `project_merge_queue_requeue_cancels_run`); escalate to the tech
-lead rather than looping.
+**Stand down when green; the workflow enqueues (#2786):** you follow the same
+merge protocol as developer.md and `/dev-self-merge`. When the required checks
+are green and the self-check says MERGE, mark the task completed and **stand
+down. You do NOT enqueue.** The server-side `auto-enqueue.yml` workflow
+(`workflow_run`-on-completion, grace 0) is the single enqueuer — it enqueues
+every just-green PR without depending on your watcher surviving (the old
+dev-enqueue model stranded green PRs when the watcher died, #2225/#2247). **NEVER
+enqueue or re-enqueue from an agent** — the workflow owns ALL adds/re-adds. Re-enqueue
+loops were the sole cause of the merge-queue cancellation churn (memory
+`project_merge_queue_requeue_cancels_run`); escalate to the tech lead rather than
+touching the queue.

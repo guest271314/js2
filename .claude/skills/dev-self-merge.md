@@ -1,55 +1,44 @@
 ---
 name: dev-self-merge
-description: Regression self-check for a green PR. Reads CI JSON, applies the hard criteria, outputs MERGE (enqueue ONCE, then stand down) or ESCALATE. Auto-enqueue is the backstop.
+description: Regression self-check for a green PR. Reads CI JSON, applies the hard criteria, outputs MERGE (mark task completed, stand down — server-side auto-enqueue enqueues, #2786) or ESCALATE. Devs do NOT enqueue.
 ---
 
 # /dev-self-merge \<N\>
 
-> **Devs self-enqueue EXACTLY ONCE when green, then stand down (2026-06-20).**
-> When all required checks are green and this self-check passes, the dev enqueues
-> the PR **once** via the GraphQL `enqueuePullRequest` mutation (Step 5), marks
-> the task completed, and stands down. This skill's outcomes are **MERGE**
-> (enqueue once, then stand down) or **ESCALATE** (to tech lead). After that one
-> enqueue the PR is handed off — the dev does NOT touch the queue again.
+> **Devs DO NOT enqueue. On a passing self-check, mark the task completed and
+> stand down — the server-side `auto-enqueue.yml` workflow enqueues (#2786).**
+> This skill's outcomes are **MERGE** (regression self-check passes → mark the
+> task completed and stand down; you do NOT touch the merge queue) or **ESCALATE**
+> (to tech lead). The PR is enqueued by the server-side workflow, not by you.
 >
-> **Enqueue PROACTIVELY — the moment the three required checks are green.**
-> The required checks are `cheap gate (main-ancestor + lint)`, `merge shard
-> reports`, and `quality`. Enqueue as soon as **those three** pass — do NOT wait
-> for the full equivalence-shard matrix to finish, do NOT wait for a background
-> watcher to "settle everything", and do NOT leave the enqueue to the
-> `auto-enqueue` backstop (it's sparse and only catches strays). Actively
-> enqueuing your own PR the instant it's mergeable is the dev's job; a PR that
-> sits green-but-un-enqueued is a process failure. The tech lead also sweeps +
-> enqueues green PRs every loop (see CLAUDE.md "Tech lead discipline").
+> **Why devs no longer enqueue (#2786).** The old model had the dev one-shot
+> enqueue when green, with a background CI watcher to do it after stand-down. But
+> that watcher is a child of the dev process — it **died with the agent**, so a
+> green PR whose dev had stood down **stranded un-enqueued** (#2225, #2247). The
+> fix moves enqueue to the one actor that is long-lived and outside agent
+> lifecycle: the GitHub Actions workflow. Its `workflow_run`-on-completion trigger
+> fires right after the required-check workflows finish, and its grace window is
+> now 0 (#2786), so it enqueues every just-green PR within ~one workflow-startup —
+> no dependence on any agent surviving. The required checks are `cheap gate
+> (main-ancestor + lint)`, `merge shard reports`, and `quality`.
 >
-> **Enqueue EXACTLY ONCE — never re-enqueue.** The `auto-enqueue.yml` backstop
-> (App-token bot identity, sweeps green PRs on every CI completion + ~30-min
-> cron) owns ALL re-adds for any PR that strands, drifts, or gets ejected; the
-> `merge_group` required checks (the regression-gate, #1943, re-validates against
-> the merged state — the hard block) and `auto-park` (#2547, labels any PR that
-> fails the merge_group re-run `hold`) backstop the rest.
+> **The merge queue then re-validates on the merged state.** `merge_group` re-runs
+> the required checks (the regression-gate #1943 — the hard block), and `auto-park`
+> (#2547) labels any PR that fails the merge_group re-run `hold`. The workflow's
+> single trailing-add enqueue never loops, so it cannot cause the re-enqueue
+> "cancellation churn" (memory `project_merge_queue_requeue_cancels_run`) that
+> poll-loop re-adds caused on 2026-06-20.
 >
-> **Why exactly-once and not a loop.** The ~3.5h "cancellation churn" of
-> 2026-06-20 (memory `project_merge_queue_requeue_cancels_run`) came from devs
-> **re-enqueuing on a poll loop** — every re-add changes queue membership, makes
-> GitHub rebuild the merge group, and **CANCELS the in-flight `merge_group` run**
-> for the current head. A single one-shot enqueue does not loop, so it cannot
-> churn. The earlier "agents never enqueue" experiment (Option 1) overcorrected:
-> auto-enqueue's deliberately-sparse ~30-min cron is too slow to be the
-> *primary* enqueuer, so green PRs sat un-enqueued for long idle stretches. The
-> back-off fix #2560 (merged) makes auto-enqueue a reliable *backstop*, so
-> one-shot-enqueue-then-stand-down is the right balance.
+> **Backstops, not the mechanism:** the workflow's ~30-min cron, and the tech
+> lead's per-loop open-PR sweep (CLAUDE.md "Tech lead discipline") — both catch
+> the rare stray the responsive `workflow_run` run misses (e.g. a PR the queue
+> dropped on main-advance). Neither is the primary path.
 >
-> **Auth: use the user PAT for the enqueue, NOT `GITHUB_TOKEN`.** An enqueue
-> authenticated with `GITHUB_TOKEN` suppresses the `merge_group` event
-> ("workflows can't trigger workflows") and wedges the queue (memory
-> `project_merge_queue_wedge_github_token`). The dev's interactive `gh` auth (a
-> PAT) is correct here; the *backstop* uses the App token.
->
-> **SECURITY — internal/trusted dev agents only.** Dev-self-enqueue applies to
-> internal dev agents. **External contributor PRs** still go through
-> auto-enqueue's author-trust gate (or a deliberate maintainer enqueue) and a
-> green `cla-check` — never self-enqueue someone else's PR.
+> **SECURITY — the workflow's author-trust gate is now load-bearing.** With no
+> dev enqueue, the workflow is the single enqueuer; it only enqueues PRs whose
+> `authorAssociation` is OWNER/MEMBER/COLLABORATOR. **External contributor PRs**
+> are never auto-enqueued — they require a deliberate maintainer enqueue plus a
+> green `cla-check`.
 
 ## Waiting for CI — background the watcher, PIPELINE the next slice (do NOT idle)
 
@@ -89,7 +78,7 @@ After the run exits:
 
 | Outcome                                                    | Action                                                                                                                                                                                                                    |
 | ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **All required checks green**                              | Proceed to Step 0 (or directly to Step 1 if the CI feed JSON is present) for the self-check; on MERGE, enqueue ONCE (Step 5)                                                                                               |
+| **All required checks green**                              | Proceed to Step 0 (or directly to Step 1 if the CI feed JSON is present) for the self-check; on MERGE, mark the task completed and stand down — the server-side workflow enqueues (Step 5, #2786)                          |
 | **Drift** (mergeable_state becomes `BEHIND` while waiting) | Do NOT re-enqueue. `update-branch`/`auto-refresh-prs` auto-rebases BEHIND PRs and the `auto-enqueue` backstop re-sweeps. A clean fast-forward (`git fetch origin && git merge origin/main && git push`) is optional; never re-enqueue after — the backstop owns re-adds |
 | **CI failure** (any required check `FAILURE`)              | Diagnose with full PR context — the agent KNOWS what it changed. Fix locally, `git push`, loop back to wait-for-CI                                                                                                        |
 | **Long wait** (>10 min)                                    | Emit a `TaskUpdate` noting the unusual wait but keep waiting                                                                                                                                                              |
@@ -125,9 +114,9 @@ gh pr view <N> --json statusCheckRollup \
           failed: [.[] | select(.conclusion == "FAILURE" or .conclusion == "failure")] | length }'
 ```
 
-- If `failed == 0` and `total > 0`: output **MERGE** — enqueue once (Step 5), then stand down.
+- If `failed == 0` and `total > 0`: output **MERGE** — mark the task completed and stand down (Step 5); the server-side workflow enqueues.
 - If `failed > 0`: output **ESCALATE — basic CI failed. Check which checks failed.**
-- If `total == 0` (no checks at all): output **MERGE** — workflow-only, no CI gates apply; enqueue once (Step 5) or have the tech lead admin-merge a CI-only change.
+- If `total == 0` (no checks at all): output **MERGE** — workflow-only, no CI gates apply; stand down (Step 5) — the workflow enqueues, or the tech lead admin-merges a CI-only change.
 
 If `src/**` changes exist but no status file: CI is still in-flight. Wait.
 
@@ -141,7 +130,7 @@ git show origin/main:.claude/ci-status/pr-<N>.json
 If `test262_skipped: true` in the JSON, this was a test-only / docs-only PR
 (no `src/**` changes). Skip Steps 3–4 entirely:
 
-- `conclusion == "success"` → **MERGE** (go to Step 5, enqueue once)
+- `conclusion == "success"` → **MERGE** (go to Step 5, stand down — workflow enqueues)
 - `conclusion != "success"` → **ESCALATE — basic CI failed on a non-src PR.**
 
 Extract: `head_sha`, `net_per_test`, `regressions`, `regressions_real`,
@@ -245,9 +234,9 @@ Stop.
 > constants; they are byte-identical by construction. Because the gate runs
 > both on the PR and again in the `merge_group` (against the merged state), a
 > regression cannot slip through whether the dev runs this self-check or not.
-> So this skill is a **pre-enqueue gate**: a clean result means MERGE (enqueue
-> the PR ONCE — Step 5 — then stand down); a failing criterion means ESCALATE
-> to tech lead instead of enqueuing.
+> So this skill is a **pre-enqueue gate**: a clean result means MERGE (mark the
+> task completed and stand down — Step 5; the server-side workflow enqueues); a
+> failing criterion means ESCALATE to tech lead instead.
 
 ## Step 3 — criteria (in order, stop at first failure)
 
@@ -256,7 +245,7 @@ Stop.
 | 1   | `net_per_test > 0`                                                                                          | **ESCALATE — net_per_test is not positive (value: N). PR caused more regressions than improvements.** |
 | 2   | `R == 0 OR R / improvements < 0.10`, where `R = regressions_wasm_change ?? regressions_real ?? regressions` | **ESCALATE — regression ratio is N% (R/improvements), exceeds 10% threshold.**                        |
 | 3   | No bucket > 50 regressions (see Step 4)                                                                     | **ESCALATE — bucket "\<path\>" has N regressions, exceeds 50-test limit.**                            |
-| 4   | All above pass                                                                                              | **MERGE** — enqueue the PR ONCE (Step 5), then stand down. (The merge_group re-runs this same gate.)  |
+| 4   | All above pass                                                                                              | **MERGE** — mark the task completed and stand down (Step 5); the workflow enqueues. (merge_group re-runs this same gate.)  |
 
 `R` (criterion 2) prefers `regressions_wasm_change` if the feed has it
 (post-#1222 CI). This filters out byte-identical-binary pass→fail flips,
@@ -270,7 +259,7 @@ above the 10% threshold. Compute it in shell with:
 R=$(jq -r '.regressions_wasm_change // .regressions_real // .regressions' .claude/ci-status/pr-<N>.json)
 ```
 
-If `regressions` is `null` in the feed (older CI format without per-test tracking): treat criterion 2 as **pass** and skip criterion 3 (no data to bucket). Result is MERGE (enqueue once) if criterion 1 holds.
+If `regressions` is `null` in the feed (older CI format without per-test tracking): treat criterion 2 as **pass** and skip criterion 3 (no data to bucket). Result is MERGE (stand down; workflow enqueues) if criterion 1 holds.
 
 ## Step 4 — bucket regressions (only if regressions > 0)
 
@@ -317,29 +306,20 @@ EOF
 
 Any bucket with count > 50 → **ESCALATE** with the bucket name and count (criterion 3 above).
 
-## Step 5 — enqueue the PR ONCE, then stand down
+## Step 5 — mark task completed, then stand down (do NOT enqueue)
 
-All criteria passed → result is **MERGE**. **Add the PR to the merge queue via
-the GraphQL `enqueuePullRequest` mutation — exactly once** (do NOT use
-`gh pr merge --auto`: it only arms on a check-state *transition*, so on an
-already-green `CLEAN` PR it silently no-ops and the PR is never queued):
+All criteria passed → result is **MERGE**. **You do NOT enqueue (#2786).** The
+server-side `auto-enqueue.yml` workflow is the single enqueuer: its
+`workflow_run`-on-completion trigger fires right after the required-check
+workflows finish and (grace 0) enqueues your just-green PR within ~one
+workflow-startup — without depending on you or any watcher surviving. Trying to
+enqueue yourself is the old model that stranded green PRs when the dev's watcher
+died on stand-down (#2225, #2247).
 
-```bash
-PRID=$(gh pr view <N> --json id -q .id)
-gh api graphql -f query='mutation($id:ID!){ enqueuePullRequest(input:{pullRequestId:$id}){ clientMutationId } }' -f id="$PRID"
+So on MERGE: **mark your task completed and stand down. Do not touch the merge
+queue at all** — no `enqueuePullRequest`, no `gh pr merge --auto`, no re-enqueue.
 
-# VERIFY it actually landed in the queue — do NOT trust a silent success:
-gh api graphql -f query='{ repository(owner:"loopdive",name:"js2"){ mergeQueue(branch:"main"){ entries(first:50){ nodes { pullRequest { number } } } } } }' \
-  | grep -q "\"number\":<N>" && echo "queued ✓" || echo "NOT queued — the auto-enqueue backstop will re-sweep within ~30 min; do NOT re-enqueue in a loop"
-```
-
-> **Use the user PAT for this enqueue, NOT `GITHUB_TOKEN`.** A `GITHUB_TOKEN`
-> enqueue suppresses the `merge_group` event ("workflows can't trigger
-> workflows") and wedges the queue (memory
-> `project_merge_queue_wedge_github_token`). The dev's interactive `gh` auth is a
-> PAT and is correct here. The *backstop* uses an App token.
-
-Once enqueued, GitHub will:
+Once the workflow enqueues, GitHub will:
 
 1. Place the PR on a temp branch (`gh-readonly-queue/main/pr-<N>-...`)
 2. Re-run the required checks (`cheap gate`, `merge shard reports`, `quality` —
@@ -348,20 +328,17 @@ Once enqueued, GitHub will:
 3. Fast-forward main if checks pass; `auto-refresh-prs.yml` then merges
    `origin/main` into every other open PR branch
 4. If the `merge_group` re-run fails, `auto-park` (#2547) labels the PR `hold` so
-   it can't re-churn the queue — fix it, remove the label, and the
-   `auto-enqueue` backstop re-sweeps
+   it can't re-churn the queue — fix it on the branch, remove the label, and the
+   workflow re-enqueues
 
-> **Enqueue EXACTLY ONCE — NEVER re-enqueue, NEVER loop.** This single
-> `enqueuePullRequest` is the only enqueue you perform for this PR. Do **NOT**
-> re-enqueue on drift, ejection, a `hold` label, or a later CI failure —
-> re-enqueue **loops** were the sole cause of the merge-queue cancellation churn
-> (every re-add changes queue membership → GitHub rebuilds the merge group →
-> CANCELS the in-flight `merge_group` run; ~3.5h on 2026-06-20, memory
-> `project_merge_queue_requeue_cancels_run`). The **`auto-enqueue.yml` backstop**
-> (App-token bot, every ~30 min + on every CI completion) owns ALL re-adds for
-> any PR that strands, drifts, or gets ejected — back-off fix #2560 (merged)
-> makes it reliable. If something looks genuinely wrong, **escalate to the tech
-> lead** — never loop the enqueue yourself.
+> **Never enqueue or re-enqueue from a dev.** The single trailing-add enqueue is
+> the workflow's job; re-enqueue **loops** were the sole cause of the merge-queue
+> cancellation churn (every re-add changes queue membership → GitHub rebuilds the
+> merge group → CANCELS the in-flight `merge_group` run; ~3.5h on 2026-06-20,
+> memory `project_merge_queue_requeue_cancels_run`). The workflow's single
+> trailing-add never loops. If a green PR somehow sits un-enqueued (the rare stray
+> the responsive run missed), the ~30-min cron and the tech lead's per-loop sweep
+> catch it. If something looks genuinely wrong, **escalate to the tech lead**.
 
 **The issue file already carries `status: done`.** Under self-merge there is no
 separate post-merge observer who can commit a status flip, and once the queue
@@ -372,8 +349,9 @@ are rare, and the gate already verified what the queue re-verifies). Do NOT open
 the PR at `in-review` and plan a later flip — that is exactly what orphans issues
 at `in-review` (see #1602/#1603/#1606).
 
-**Once enqueued, your job for this PR is done — STAND DOWN.** Do not wait for the
-actual merge, and do not re-enqueue. Proceed immediately:
+**On a passing self-check (MERGE), your job for this PR is done — STAND DOWN.**
+Do not enqueue, do not wait for the merge, do not re-enqueue. The server-side
+workflow takes it from here. Proceed immediately:
 
 1. (Status already `done` in the merged PR — no separate flip needed.)
 2. `TaskUpdate taskId=<your-task> status=completed`

@@ -9,6 +9,14 @@ name: Auto-enqueue green PRs
 # PRs with any visible failing/pending check. Drafts and PRs labelled
 # hold/do-not-merge/wip are skipped.
 #
+# PRIMARY, NOT BACKSTOP (#2786): this workflow is now the SINGLE primary
+# enqueuer. Dev agents no longer self-enqueue (their backgrounded CI watcher
+# died with the agent on stand-down, stranding green PRs — #2225/#2247), and the
+# script's grace window is now 0 so the `workflow_run`-on-completion trigger
+# below enqueues every just-green PR within ~one workflow-startup. The 30-min
+# cron and the tech-lead's per-loop sweep are belt-and-suspenders backstops, not
+# the mechanism.
+#
 # SERIAL-QUEUE INTERACTION (#1758): the merge queue is SERIAL
 # (max_entries_to_build=1). An unconditional, high-frequency enqueue sweep races
 # GitHub's `merge_group` formation — poking the serial head WHILE a merge group
@@ -32,7 +40,10 @@ name: Auto-enqueue green PRs
 # concurrency guard so two sweeps never overlap.
 
 on:
-  # Responsive: fire right after the workflows that produce required checks finish.
+  # PRIMARY (responsive): fire right after the workflows that produce the required
+  # checks finish. These two workflow names cover ALL required checks — `cheap gate`
+  # + `merge shard reports` (Test262 Sharded) and `quality` (CI). With grace 0
+  # (#2786) this run enqueues every just-green PR; it is the primary enqueue path.
   workflow_run:
     workflows: ["Test262 Sharded", "CI"]
     types: [completed]
