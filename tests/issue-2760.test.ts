@@ -151,14 +151,14 @@ describe("#2760 F1 — plain-array OOB read → JS `undefined` (primitive elemen
     });
   });
 
-  describe("typed-array OOB → undefined is now handled separately (#2795 Row 9)", () => {
-    it("Int32Array OOB === undefined (was out-of-F1-scope; now widened by #2795)", async () => {
-      // #2795 (hybrid audit Row 9) extended the OOB→undefined policy to genuine
+  describe("typed-array OOB → undefined is now handled separately (#2798 Row 9)", () => {
+    it("Int32Array OOB === undefined (was out-of-F1-scope; now widened by #2798)", async () => {
+      // #2798 (hybrid audit Row 9) extended the OOB→undefined policy to genuine
       // typed-array VIEWS via a DEDICATED call-site helper
       // (`emitTypedArrayUndefinedOobGet`) — the shared `emitBoundsCheckedArrayGet`
       // default and #2760's `emitPlainArrayUndefinedOobGet` both stay
       // byte-identical. So a typed-array OOB read now reads JS `undefined` like a
-      // plain array. Full coverage lives in `tests/issue-2795.test.ts`.
+      // plain array. Full coverage lives in `tests/issue-2798.test.ts`.
       expect(
         await run(
           `export function test(): boolean { const a = new Int32Array(3); let i = 9; return a[i] === undefined; }`,

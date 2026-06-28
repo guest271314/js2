@@ -5724,7 +5724,7 @@ function emitPlainArrayUndefinedOobGet(
 }
 
 /**
- * (#2795 — hybrid type-soundness audit Row 9) SAFE typed-array OOB read: push the
+ * (#2798 — hybrid type-soundness audit Row 9) SAFE typed-array OOB read: push the
  * in-bounds element **boxed to a JS number externref**, or JS `undefined` when
  * the index is out of bounds (the *view length* is the bound, per the
  * integer-indexed exotic object semantics — TC39 §10.4.5 `[[Get]]` of an
@@ -6805,7 +6805,7 @@ export function compileElementAccessBody(
     const numericHint = expectedType?.kind === "f64" || expectedType?.kind === "i32";
     const taClass = classifyTypedArrayType(ctx.checker.getTypeAtLocation(expr.expression), ctx.checker);
     const oobUndefined = !numericHint && taClass === "other" && !isRegexMatchVec;
-    // (#2795 — hybrid audit Row 9) A genuine typed-array VIEW OOB element read
+    // (#2798 — hybrid audit Row 9) A genuine typed-array VIEW OOB element read
     // returns JS `undefined` (the view length is the bound). Mutually exclusive
     // with the plain-array F1 arm above (`taClass !== "other"` vs `=== "other"`).
     // Suppressed in a numeric context (`numericHint`) — the consumer wants a
@@ -6871,7 +6871,7 @@ export function compileElementAccessBody(
       emitPlainArrayUndefinedOobGet(ctx, fctx, arrTypeIdx, arrDef.element, f1BoxType);
       return { kind: "externref" };
     } else if (oobUndefinedTypedArray) {
-      // (#2795 Row 9) Typed-array OOB → JS `undefined`, in-bounds → the element
+      // (#2798 Row 9) Typed-array OOB → JS `undefined`, in-bounds → the element
       // boxed as a JS number. f64/i32 cannot represent `undefined`, so the
       // JS-correct lowering of an unproven typed-array read is the
       // boxed-or-undefined externref. Bounds-eliminated reads above keep the
@@ -6913,7 +6913,7 @@ export function compileElementAccessBody(
   const numericHintArr = expectedType?.kind === "f64" || expectedType?.kind === "i32";
   const taClassArr = classifyTypedArrayType(ctx.checker.getTypeAtLocation(expr.expression), ctx.checker);
   const oobUndefinedArr = !numericHintArr && taClassArr === "other";
-  // (#2795 Row 9) Typed-array VIEW OOB → JS `undefined` (mirrors the vec-struct
+  // (#2798 Row 9) Typed-array VIEW OOB → JS `undefined` (mirrors the vec-struct
   // call site above). Mutually exclusive with the plain-array arm
   // (`taClassArr !== "other"`); suppressed in a numeric context.
   const oobUndefinedTypedArrayArr = !numericHintArr && taClassArr !== "other";
@@ -6955,7 +6955,7 @@ export function compileElementAccessBody(
     emitPlainArrayUndefinedOobGet(ctx, fctx, typeIdx, typeDef.element, f1BoxTypeArr);
     return { kind: "externref" };
   } else if (oobUndefinedTypedArrayArr) {
-    // (#2795 Row 9) Typed-array OOB → JS `undefined`, in-bounds → the element
+    // (#2798 Row 9) Typed-array OOB → JS `undefined`, in-bounds → the element
     // boxed as a JS number. See the full note at the vec-struct call site.
     emitTypedArrayUndefinedOobGet(ctx, fctx, typeIdx, typeDef.element, taSignednessArr);
     return { kind: "externref" };

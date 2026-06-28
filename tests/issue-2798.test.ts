@@ -1,6 +1,6 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 //
-// #2795 — Hybrid type-soundness audit Row 9: a typed-array (Uint8Array /
+// #2798 — Hybrid type-soundness audit Row 9: a typed-array (Uint8Array /
 // Int32Array / Float64Array / …) OUT-OF-BOUNDS element read returns JS
 // `undefined`. The *view length* is the bound, per the integer-indexed exotic
 // object semantics (TC39 §10.4.5 `[[Get]]` of an out-of-range
@@ -46,7 +46,7 @@ async function runStandalone(source: string, fn = "test"): Promise<number> {
   return (instance.exports as Record<string, () => number>)[fn]() as number;
 }
 
-describe("#2795 Row 9 — typed-array OOB element read → JS `undefined`", () => {
+describe("#2798 Row 9 — typed-array OOB element read → JS `undefined`", () => {
   describe("host — OOB reads undefined across the integer + float views", () => {
     it("Uint8Array OOB === undefined (literal index past end)", async () => {
       expect(

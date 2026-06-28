@@ -1,5 +1,5 @@
 ---
-id: 2795
+id: 2798
 title: "Hybrid Row 9: typed-array element OOB → undefined (call-site policy, shared helper untouched)"
 status: done
 completed: 2026-06-28
@@ -18,7 +18,7 @@ goal: correctness
 related: [2760, 2766, 2785, 2792, 2593, 2762]
 ---
 
-# #2795 — typed-array element OOB read → `undefined` (hybrid audit Row 9)
+# #2798 — typed-array element OOB read → `undefined` (hybrid audit Row 9)
 
 The last row of the hybrid fast-path safety-predicate audit
 (`plan/log/hybrid-fastpath-audit.md` Row 9). A typed-array
@@ -118,7 +118,7 @@ and byte-identical — the R1 Math.pow lesson.
 
 ## Test Results
 
-`tests/issue-2795.test.ts` (host + standalone) — all green:
+`tests/issue-2798.test.ts` (host + standalone) — all green:
 
 - Host OOB → `undefined`: `Uint8Array`/`Int32Array`/`Float64Array`/`Int8Array`/
   `Uint16Array`/`Uint32Array` (literal, negative, dynamic index).
