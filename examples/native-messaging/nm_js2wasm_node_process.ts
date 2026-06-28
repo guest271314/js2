@@ -25,17 +25,26 @@
 // Because the read side is event-driven, the framed protocol is parsed
 // incrementally: buffer incoming `'data'` chunks, and whenever the buffer holds a
 // complete frame (the 4-byte little-endian length prefix plus that many body
-// bytes), echo the whole frame — prefix + body — straight back as one
-// `process.stdout.write`, then advance past it. A `'data'` chunk can carry a
+// bytes), echo it back, then advance past it. A `'data'` chunk can carry a
 // partial frame, exactly one frame, or several; the incremental parser handles
 // all three. The leftover tail (a partial next frame) stays buffered until the
 // following chunk completes it.
+//
+// On the WRITE side the echo is re-chunked to the 1 MiB browser cap (#2808): a
+// body within the cap is echoed verbatim — prefix + body — as one
+// `process.stdout.write`; a body LARGER than the cap is split into a sequence of
+// valid <=1 MiB JSON frames (`[run]` for an array body, `"run"` for a string
+// body) whose interiors, concatenated by the receiver, reproduce the original
+// body. This matches the sibling `nm_js2wasm_node_fs` re-chunker, keeps every
+// host->extension message within the real Chrome 1 MiB cap, and bounds resident
+// memory on the write side. See the FRAME_CAP / `rechunk*` helpers below.
 //
 // Native Messaging protocol: each message is a 4-byte little-endian length prefix
 // followed by a UTF-8 JSON body, exchanged over stdin (fd 0) / stdout (fd 1). See
 //   https://developer.chrome.com/docs/extensions/develop/concepts/native-messaging
 //
-// This variant echoes a framed message verbatim, byte-for-byte. NOTE: `process`
+// This variant echoes a framed message back, re-chunked to the 1 MiB browser cap
+// (verbatim when it already fits). NOTE: `process`
 // is referenced as the Node **global** (not `import process from "node:process"`).
 // The prelude injection that backs `process.stdin` deliberately leaves a
 // user-declared/-imported `process` binding alone, so the faithful global surface
@@ -66,6 +75,98 @@ let tail: number = 0;
 // Set once a zero-length frame (clean shutdown) is seen, matching the sibling
 // variants which treat a declared length of 0 as end-of-stream.
 let stopped: boolean = false;
+
+// Browser per-host->extension-message cap: 1 MiB (#2808). A real Chrome Native-
+// Messaging host may send AT MOST 1 MiB per host->extension message, so a body
+// larger than this isn't even valid on that surface. Like the sibling
+// `nm_js2wasm_node_fs.ts` re-chunker, a >1 MiB response body is split on the
+// WRITE side into a sequence of valid <=1 MiB JSON frames whose interiors,
+// concatenated by the receiver, reproduce the original body; a body that already
+// fits is echoed verbatim. This also BOUNDS resident memory on the write side
+// (per-frame 1 MiB out buffers instead of one full-size frame) and brings this
+// async host in line with `nm_js2wasm_deno` / `nm_js2wasm_wasi_p1` (64 KiB
+// window) and `nm_js2wasm_node_fs` (1 MiB re-chunk) — it was the lone variant
+// that built the WHOLE frame and wrote it in ONE process.stdout.write, the
+// shape that hit wasmtime's single-fd_write cap in #2807.
+const FRAME_CAP: number = 1024 * 1024;
+const COMMA: number = 44; // ,
+const OPEN_BRACKET: number = 91; // [
+const CLOSE_BRACKET: number = 93; // ]
+const DQUOTE: number = 34; // "
+
+// Emit ONE re-chunked JSON frame: 4-byte LE length prefix + `open` + the run
+// `buf[srcStart..srcStart+runLen)` + `close`, built whole and written in ONE
+// process.stdout.write (atomic framing — a streaming receiver must never see a
+// prefix split from its body; #2526). `open`/`close` are `[`/`]` for an array
+// body or `"`/`"` for a string body. The 4-byte prefix declares the JSON body
+// length (`open` + run + `close`), which stays <= FRAME_CAP because the caller
+// keeps `runLen <= FRAME_CAP - 2`.
+function emitRun(srcStart: number, runLen: number, open: number, close: number): void {
+  const bodyLen = runLen + 2; // delimiter + run + delimiter
+  const out = new Uint8Array(4 + bodyLen);
+  out[0] = bodyLen & 0xff;
+  out[1] = (bodyLen >> 8) & 0xff;
+  out[2] = (bodyLen >> 16) & 0xff;
+  out[3] = (bodyLen >> 24) & 0xff;
+  out[4] = open;
+  let k = 0;
+  while (k < runLen) {
+    out[5 + k] = buf[srcStart + k];
+    k = k + 1;
+  }
+  out[4 + runLen + 1] = close;
+  process.stdout.write(out);
+}
+
+// Re-chunk a large JSON ARRAY body `[elem,...,elem]` into valid <=FRAME_CAP
+// `[run]` frames, split at COMMA boundaries so each frame is itself a valid JSON
+// array; the receiver concatenates the interiors (re-inserting one comma between
+// frames) to reproduce the original array. `ip0` is the first interior byte
+// (after the leading `[`), `interiorLen` the interior byte count (body length
+// minus the outer `[` and `]`). Mirrors the final-batch drain of the shared
+// `nm_js2wasm_sync_framing` core's re-chunker (which streams the same split);
+// the whole body is already buffered here, so the split is a pure in-memory walk.
+function rechunkArray(ip0: number, interiorLen: number): void {
+  const maxRun = FRAME_CAP - 2; // leave room for the framing `[` / `]`
+  let startPos = 0;
+  while (startPos < interiorLen) {
+    let stop = startPos + maxRun;
+    if (stop >= interiorLen) {
+      stop = interiorLen; // final frame ends exactly at the interior end
+    } else {
+      // Back up to the last comma within [startPos, startPos+maxRun) so each
+      // frame holds whole elements; exclude that comma (it's the separator).
+      let c = stop;
+      while (c > startPos && buf[ip0 + c - 1] !== COMMA) c = c - 1;
+      if (c > startPos) stop = c - 1;
+      // else: no comma in the window — a single element exceeds the cap; emit
+      // maxRun raw (degenerate, only for elements > ~FRAME_CAP bytes), matching
+      // the shared core.
+    }
+    emitRun(ip0 + startPos, stop - startPos, OPEN_BRACKET, CLOSE_BRACKET);
+    startPos = stop;
+    if (startPos < interiorLen && buf[ip0 + startPos] === COMMA) startPos = startPos + 1;
+  }
+}
+
+// Re-chunk a large JSON STRING body `"chars..."` into valid <=FRAME_CAP `"run"`
+// frames; the receiver concatenates the interiors to reproduce the original
+// string. A fixed `maxRun` split keeps each frame within the cap (no comma
+// boundaries to honor, unlike the array path). `ip0` is the first interior byte
+// (after the leading `"`), `interiorLen` = body length minus the two `"`. (The
+// fixed-run split must not bisect a `\`-escape; for the reported workload the
+// body is plain printable characters, so a fixed split is valid — same caveat as
+// the shared core's emitStringRun.)
+function rechunkString(ip0: number, interiorLen: number): void {
+  const maxRun = FRAME_CAP - 2; // leave room for the two framing `"`
+  let startPos = 0;
+  while (startPos < interiorLen) {
+    let runLen = maxRun;
+    if (interiorLen - startPos < runLen) runLen = interiorLen - startPos;
+    emitRun(ip0 + startPos, runLen, DQUOTE, DQUOTE);
+    startPos = startPos + runLen;
+  }
+}
 
 // Append a `'data'` chunk's raw bytes into `buf` — O(chunk). The prelude (#2777)
 // delivers each chunk as a FLAT string, so `chunk.charCodeAt(k)` is O(1). Grows
@@ -133,20 +234,37 @@ function drain(): void {
     const frameLen = 4 + len;
     if (tail - head < frameLen) return; // body not fully arrived yet
 
-    // Re-frame prefix + body into one raw-byte buffer. The prefix is rebuilt from
-    // the decoded length (identical bytes); the body bytes are a straight O(1)
-    // typed-array copy out of `buf`.
-    const out = new Uint8Array(frameLen);
-    out[0] = len & 0xff;
-    out[1] = (len >> 8) & 0xff;
-    out[2] = (len >> 16) & 0xff;
-    out[3] = (len >> 24) & 0xff;
-    let i = 0;
-    while (i < len) {
-      out[4 + i] = buf[head + 4 + i];
-      i = i + 1;
+    if (len <= FRAME_CAP) {
+      // Body already within the 1 MiB browser cap — echo the frame VERBATIM
+      // (prefix + body) in ONE write. Re-frame prefix + body into one raw-byte
+      // buffer: the prefix is rebuilt from the decoded length (identical bytes);
+      // the body bytes are a straight O(1) typed-array copy out of `buf`.
+      const out = new Uint8Array(frameLen);
+      out[0] = len & 0xff;
+      out[1] = (len >> 8) & 0xff;
+      out[2] = (len >> 16) & 0xff;
+      out[3] = (len >> 24) & 0xff;
+      let i = 0;
+      while (i < len) {
+        out[4 + i] = buf[head + 4 + i];
+        i = i + 1;
+      }
+      process.stdout.write(out);
+    } else {
+      // Body exceeds the 1 MiB browser cap — RE-CHUNK into valid <=1 MiB JSON
+      // frames (#2808), matching the `nm_js2wasm_node_fs` re-chunker. Peek the
+      // first body byte to pick the shape: `"` → a JSON string split into `"run"`
+      // frames; otherwise a JSON array split into `[run]` frames at comma
+      // boundaries. The interior excludes the outer `[`/`]` (or the two `"`):
+      // it starts at `head + 5` and is `len - 2` bytes long.
+      const ip0 = head + 5;
+      const interiorLen = len - 2;
+      if (buf[head + 4] === DQUOTE) {
+        rechunkString(ip0, interiorLen);
+      } else {
+        rechunkArray(ip0, interiorLen);
+      }
     }
-    process.stdout.write(out);
 
     // Drop the echoed frame; keep any trailing partial frame for the next chunk.
     head = head + frameLen;
