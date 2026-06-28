@@ -1,8 +1,8 @@
 ---
 id: 2794
-title: "[SENIOR-DEV ONLY] acorn parse() residual: var-decl + binary-expression THROW (raise/unexpected) — distinct from the S3 vec-identity class; closes #2681/#2686"
-status: ready
-assignee: ttraenkler/unassigned
+title: "[SENIOR-DEV ONLY] acorn parse() var-declaration THROW — AST-Node-as-closureBridge + vec read-methods (host-proxy layer); closes #2681"
+status: done
+assignee: ttraenkler/sendev-acorn
 sprint: current
 priority: high
 horizon: l
@@ -10,13 +10,14 @@ feasibility: hard
 reasoning_effort: high
 created: 2026-06-28
 updated: 2026-06-28
+completed: 2026-06-28
 task_type: bugfix
 area: codegen
 language_feature: value-representation
 goal: acorn-dogfood
-related: [2773, 2681, 2686, 2784, 2664, 2674]
+related: [2773, 2681, 2686, 2784, 2664, 2674, 2800]
 depends_on: [2784]
-blocks: [2681, 2686]
+blocks: [2681]
 ---
 
 # #2794 — acorn `parse()` residual: var-decl + binary-expression THROW
@@ -127,3 +128,137 @@ probe; the runner forks a worker with a per-input watchdog.**
 - The #2674 `__get_member_<name>` / #2664 `__set_member_<name>` finalize-filled
   dispatchers and the S2/S2b pinned read/write paths are the substrate the fix
   builds on — the residual is a value/field that still escapes them.
+
+## Root-cause analysis (sendev-acorn, 2026-06-28) — branch `issue-2794-acorn-vardecl-binexpr`
+
+**The residual is NOT one bug — it is a cluster of THREE distinct host-proxy /
+marshaling gaps.** All three share the same *upstream* cause: acorn's Parser /
+TokenType / AST-Node data is **`any`/externref-typed** (acorn is prototype-based
+`function X(){}; pp.m = function(){}` with dynamic property access), so every
+`this.<field>` / `node.<field>` access during a compiled-wasm parse routes
+through the JS **host proxy** (`_wrapForHost` / `__extern_get` /
+`__extern_method_call` / `__sget_<field>` in `src/runtime.ts`). Each *value
+shape* that crosses must be presented faithfully (vec→array, node→object,
+closure→bridge). The S3 fix (#2784) handled the vec case (`__is_vec` guard); the
+three residuals below are more of the same class.
+
+Method used (all confirmed empirically; probes banked in the branch `.tmp/`):
+patched acorn's `raise()` to log its message before throwing, then narrowed with
+field-level `console.log` instrumentation and a minimal `new TokenType(...)`
+repro. NB: source-level `console.log` PERTURBS method-lifting/`this`-threading
+(adding one shifts the failure) — trust the *clean* raise-probe + the
+`_resolveHostField`/`__extern_get` host-side `DBG2794` traces over injected logs.
+
+### (1) var-declaration — AST Node masked as `closureBridge` [PRIMARY for #2681]
+
+`parse("var x;")` threw `Binding rvalue` from `checkLValSimple` (acorn
+`acorn.mjs:2371`). Root cause: `checkLValSimple` does `switch (expr.type)` over a
+**string** field, but `expr` (= `decl.id`, the Identifier node) arrived as the
+host **`closureBridge` FUNCTION** (`typeof expr === "function"`, `expr.type ===
+undefined`, `expr.name === "closureBridge"`). The `_wrapForHost` get-handler
+(`src/runtime.ts` ~5224-5308) wraps *any* non-vec wasm-struct field value as a
+`closureBridge` whenever generic `__call_fn_N` exports exist — it never verifies
+the value is actually a closure. So a plain DATA struct (AST Node) is misclassified.
+`parse("x")` works only because identifiers fall to the `default` arm of every
+`switch` (identity irrelevant); `checkLValSimple` is the FIRST site that needs a
+string-`===` / case match to be TRUE.
+
+**Attempted fix (REVERTED — regresses):** gating the bridge on
+`__is_closure(val) === 1` (mirroring the `__is_vec` guard) DID fix the node case
+(var-decl advanced past `checkLValSimple`), **but `__is_closure` FALSE-NEGATIVES
+on genuine closures** (a plain `() => n+1` arrow field read `__is_closure === 0`,
+so the guard wrongly diverted it to an object proxy → `box.fn is not a function`).
+The comment at `index.ts:4848` warns of false-POSITIVES; this is the inverse.
+So `__is_closure` is **not a reliable data-vs-closure discriminator** in either
+direction. A correct fix needs EITHER (a) a reliable positive `__is_data_struct`
+/ named-struct discriminator emitted in codegen (like `__is_vec`), OR (b) fixing
+`collectClosureBaseWrapperTypeIdxs`/`__is_closure` to catch ALL closure types
+(incl. capture-less arrow closures) so it can be the gate.
+
+### (2) var-declaration — vec read-methods (`indexOf`) unhandled [blocks #2681 after (1)]
+
+With (1) patched, `parse("var x;")` advanced to `declareName`
+(`acorn.mjs:3802`) → `scope.lexical.indexOf(name)` → `TypeError: indexOf is not
+a function`. `__extern_method_call` (`src/runtime.ts` ~9890) special-cases only
+`push`/`pop` on a vec receiver (via `__vec_push`/`__vec_pop`, unwrapping the
+proxy); **read methods (`indexOf`, `includes`, `slice`, `join`, …) are not
+materialized**, so a vec read-method on a nested scope array fails. Pre-existing
+gap, only *unlocked* by (1). Fix: in `__extern_method_call`, when the receiver is
+a vec, materialize it (`_vecToArray`) and apply `Array.prototype[method]` for
+read-only methods (broad-impact, hot path — needs full CI validation).
+
+### (3) binary-expression — CARVED OUT to #2800 (general core-codegen bug, blocks #2686)
+
+`parse("1+2;")` throws `Unexpected token (1:1)` (at the `+`) because
+`parseExprOp` reads `prec = this.type.binop === undefined`. Root cause: acorn
+builds `types$1` at module-init via `new TokenType(label, {binop:9,…})`, and
+**a constructor invoked at module-init time reads its object-literal argument's
+fields as null** (`conf.binop === void 0` at construction; the wasm-internal
+slot genuinely holds null). This is **NOT** acorn marshaling — it is a GENERAL
+core-codegen bug (top-level `new X(objLiteral)` arg lowering / type-index
+threading), reproduced with a 4-line in-acorn case, and is **scale-dependent**
+(won't repro in a standalone module). It has been **carved out to #2800**
+(`plan/issues/2800-top-level-new-objliteral-arg-null.md`), which owns the full
+analysis, the minimal repro, the type-index-remap hypothesis, and the ruled-out
+list. #2686 is blocked by #2800, not by this issue. This issue (#2794) now scopes
+**only** the var-declaration host-proxy gaps (1)+(2).
+
+### Status / recommendation
+
+- **#2681 (var-decl)** — THIS issue. Needs a reliable data-vs-closure
+  discriminator (1) + vec read-method materialization (2), both in the
+  host-proxy/marshaling layer (`src/runtime.ts`). Acceptance: compiled-acorn
+  `parse("var x = 1;")` → `VariableDeclaration`.
+- **#2686 (binary-expr)** — blocked by **#2800** (carved out). Not in this
+  issue's scope.
+- Banked probes (fresh-extract drivers) under the branch `.tmp/`:
+  `acorn-run.mjs` (watchdog parse driver), `acorn-binkeys.mjs` (field histogram);
+  for #2800: `variants{,2,3}.mjs`, `binop-ctor.mjs`, `tt2/tt3.mjs`,
+  `scale-repro.ts`.
+- The closureBridge guard for (1) was reverted (it regressed genuine closures —
+  `__is_closure` false-negatives). The clean fix is a POSITIVE `__is_data_struct`
+  marker (mirror `__is_vec`); see (1) above.
+
+## Resolution (implemented — DONE)
+
+Both var-declaration host-proxy gaps fixed. Compiled-acorn now parses
+`var x;` / `var x = 1;` / `var x = 1, y = 2;` / `let z = 5;` / `const k = 7;`
+to a `VariableDeclaration` whose AST is **structurally EQUAL to node-acorn**
+(differential diff via the dogfood oracle, ignoring positions + the benign
+`sourceFile` marshaling field). `parse("x")` / `foo(bar, baz)` still parse;
+`1 + 2 * 3;` remains blocked by **#2800** (out of scope).
+
+**(1) Positive `__is_data_struct` discriminator** — `emitIsDataStructExport`
+(`src/codegen/index.ts`, emitted after `emitIsClosureExport` in both finalize
+paths). `ref.test`-chain over the data-struct set (mirrors
+`_emitStructFieldGettersInner`'s set + skip-list: `structFields` minus
+`Wrapper*`/`$AnyValue`/`__vec_*`/`__arr_*`). Closures live only in
+`closureInfoByTypeIdx`, never in `structFields`, so a closure answers **0** and a
+genuine data struct **1** — no false-negative failure mode (the reason the
+`__is_closure` gate was unusable). `_wrapForHost`'s get-trap
+(`src/runtime.ts` ~5246) now diverts a `__is_data_struct === 1` field value to an
+OBJECT proxy instead of masking it as a callable `closureBridge`. Verified
+(`tests/issue-2794.test.ts`): `inner` (data) → `is_data_struct=1`/`is_closure=0`
++ presents as an object with readable fields; `cb` (closure) →
+`is_data_struct=0`/`is_closure=1` + stays callable (no regression).
+
+**(2) Vec read-only methods** — `_VEC_PRIMITIVE_READ_METHODS`
+(`indexOf`/`lastIndexOf`/`includes`/`join`) handled in `__extern_method_call`
+(`src/runtime.ts` ~9905): on a positive `__is_vec` receiver, materialize the vec
+to a real JS array (`__vec_len`/`__vec_get`, elements via `wrapHostValue`) and
+apply the native method. Scoped to primitive-returning, callback-free methods so
+the result round-trips cleanly (array-returning `slice`/`concat` deferred —
+separate representation concern). Before the fix `scope.lexical.indexOf(name)` in
+acorn's `declareName` threw `TypeError: indexOf is not a function`.
+
+Regression check: targeted local batch (host-proxy / closure / set-algebra /
+getters / json / #1712 fnctor-dispatch). The only failures
+(`issue-1712-capture-closure-dispatch`, `getters-setters`) are **pre-existing on
+clean `origin/main`** (verified by swapping in the unmodified source) — NOT
+introduced here. Broad test262 conformance validated by CI.
+
+Out-of-scope observations (NOT fixed here): `foo(bar, baz)`'s `arguments` field
+marshals as `{}` rather than an array (a separate CallExpression vec-marshaling
+gap); a nested-`any`-vec multi-push then `join` can drop the first element (an
+S3-class vec-identity edge) — acorn's real var-decl path does not hit it (the AST
+diffs EQUAL).
