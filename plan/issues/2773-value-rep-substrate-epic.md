@@ -155,7 +155,7 @@ S1–S3 by separate devs (different files), but each is still broad-impact.
   symmetric read/write + compound + delete-aware routing, all typecheck-clean,
   minimal repros pass. S2/S2b **rebase this branch onto a merged S1**, they do not
   re-author it.
-- **Findings + probes** in that worktree: `plan/issues/2681-*.md` `## Implementation
+- **Findings + probes** in that worktree: the #2681 issue file's `## Implementation
   attempt + findings`; `.tmp/acorn-run.mjs` (single-compile worker watchdog +
   host-call signature), `.tmp/dbg-keys.mjs` (extern_get key histogram),
   `.tmp/identity*.mjs` (struct-identity repros). **Read these before touching S1–S3.**
@@ -426,8 +426,8 @@ design changes.**
 # SLICE S4 — full spec — plain-array OOB → `undefined` (consumer-scoped externref-or-undefined result rep) — #2760
 
 **Role: senior-dev. Broad-impact: full `merge_group` + standalone-floor.** Builds
-directly on dev-rescue's #2760 re-spec (`plan/issues/2760-*.md` `## ⚠️ Re-spec
-required`) — do NOT redo that investigation. Closes #2760, unblocks #2766.
+directly on dev-rescue's #2760 re-spec (the #2760 issue file's `## ⚠️ Re-spec
+required` section) — do NOT redo that investigation. Closes #2760, unblocks #2766.
 
 ## Root cause (re-confirmed by dev-rescue, do not re-verify)
 
