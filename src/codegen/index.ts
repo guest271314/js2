@@ -4486,6 +4486,37 @@ function fields_type_kind(ctx: CodegenContext, structTypeIdx: number, fieldIdx: 
  * For each registered vec type, emits ref.test/ref.cast dispatch to extract
  * the length or the indexed element, boxing the result to externref.
  */
+/**
+ * (#2784 S3) Reserve a `__vec_push` / `__vec_pop` helper funcIdx UP FRONT so the
+ * native-vec method dispatch (calls.ts) can bake the call at compile time — the
+ * helper bodies are only built in the finalize `emitVecAccessExports` pass, which
+ * runs AFTER the method-call site compiles. Pushes a valid placeholder body +
+ * export + funcMap entry (shift-tracked); the finalize pass FILLS the body in
+ * place (fill-or-build in `_emitVecAccessExportsInner`). Idempotent.
+ */
+export function reserveVecMethodHelper(ctx: CodegenContext, kind: "push" | "pop" | "get"): number {
+  const name = kind === "push" ? "__vec_push" : kind === "pop" ? "__vec_pop" : "__vec_get";
+  const existing = ctx.funcMap.get(name);
+  if (existing !== undefined) return existing;
+  const typeIdx =
+    kind === "push"
+      ? addFuncType(ctx, [{ kind: "externref" }, { kind: "externref" }], [{ kind: "i32" }], "$__vec_push_type")
+      : kind === "pop"
+        ? addFuncType(ctx, [{ kind: "externref" }], [{ kind: "externref" }], "$__vec_pop_type")
+        : addFuncType(ctx, [{ kind: "externref" }, { kind: "i32" }], [{ kind: "externref" }], "$__vec_get_type");
+  const idx = ctx.numImportFuncs + ctx.mod.functions.length;
+  // Placeholder body must match the declared result type.
+  const placeholder: Instr[] =
+    kind === "push" ? [{ op: "i32.const", value: 0 } as Instr] : [{ op: "ref.null.extern" } as Instr];
+  ctx.mod.functions.push({ name, typeIdx, locals: [], body: placeholder, exported: true } as any);
+  ctx.mod.exports.push({ name, desc: { kind: "func", index: idx } });
+  ctx.funcMap.set(name, idx);
+  // Mark that the finalize vec-export pass must run (so the placeholder gets filled
+  // even in a module that otherwise wouldn't emit vec helpers).
+  ctx.usesVecValue = true;
+  return idx;
+}
+
 function emitVecAccessExports(ctx: CodegenContext): void {
   // Emit vec access exports when the runtime may need to introspect WasmGC arrays:
   // - for-of iteration on non-array types (__iterator)
@@ -4759,26 +4790,38 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
     }
     body.push(...current);
 
-    mod.functions.push({
-      name: "__vec_get",
-      typeIdx: getTypeIdx,
-      // local 2 = __any (anyref). (#2001 S1 regress) When the module has holes,
-      // local 3 = __hole_scratch (externref) backs the `$Hole → undefined`
-      // read-boundary map (`local.tee 3` above). Declared ONLY then, so a
-      // hole-free module's `__vec_get` is byte-identical to pre-fix.
-      locals: holeMapInVecGet
-        ? [
-            { name: "__any", type: { kind: "anyref" } },
-            { name: "__hole_scratch", type: { kind: "externref" } },
-          ]
-        : [{ name: "__any", type: { kind: "anyref" } }],
-      body,
-      exported: true,
-    } as any);
-    mod.exports.push({
-      name: "__vec_get",
-      desc: { kind: "func", index: getFuncIdx },
-    });
+    // local 2 = __any (anyref). (#2001 S1 regress) When the module has holes,
+    // local 3 = __hole_scratch (externref) backs the `$Hole → undefined`
+    // read-boundary map (`local.tee 3` above). Declared ONLY then, so a
+    // hole-free module's `__vec_get` is byte-identical to pre-fix.
+    const getLocals = holeMapInVecGet
+      ? [
+          { name: "__any", type: { kind: "anyref" } as ValType },
+          { name: "__hole_scratch", type: { kind: "externref" } as ValType },
+        ]
+      : [{ name: "__any", type: { kind: "anyref" } as ValType }];
+    // (#2784 S3) FILL-or-build (see __vec_push). The native-vec element-read guard
+    // (property-access.ts) reserves a `__vec_get` placeholder before this finalize
+    // pass; fill it in place if reserved.
+    const reservedGet = ctx.funcMap.get("__vec_get");
+    if (reservedGet !== undefined) {
+      const fn = mod.functions[reservedGet - ctx.numImportFuncs]! as { locals: typeof getLocals; body: Instr[] };
+      fn.locals = getLocals;
+      fn.body = body;
+    } else {
+      mod.functions.push({
+        name: "__vec_get",
+        typeIdx: getTypeIdx,
+        locals: getLocals,
+        body,
+        exported: true,
+      } as any);
+      mod.exports.push({
+        name: "__vec_get",
+        desc: { kind: "func", index: getFuncIdx },
+      });
+      ctx.funcMap.set("__vec_get", getFuncIdx);
+    }
   }
 
   // (#1712) Generic host-side vec MUTATORS. Compiled acorn mutates instance
@@ -5002,14 +5045,27 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
       ];
     }
     body.push(...current);
-    mod.functions.push({
-      name: "__vec_push",
-      typeIdx: pushTypeIdx,
-      locals,
-      body,
-      exported: true,
-    } as any);
-    mod.exports.push({ name: "__vec_push", desc: { kind: "func", index: pushFuncIdx } });
+    // (#2784 S3) FILL-or-build. The native-vec method dispatch (calls.ts) compiles
+    // BEFORE this finalize pass, so it RESERVES a `__vec_push` placeholder up front
+    // (`reserveVecMethodHelper`) and bakes that funcIdx. If reserved, fill the
+    // placeholder's body in place (index/export already set at reserve); else build
+    // fresh and register in funcMap (shift-tracked) so a same-pass lookup resolves.
+    const reservedPush = ctx.funcMap.get("__vec_push");
+    if (reservedPush !== undefined) {
+      const fn = mod.functions[reservedPush - ctx.numImportFuncs]! as { locals: typeof locals; body: Instr[] };
+      fn.locals = locals;
+      fn.body = body;
+    } else {
+      mod.functions.push({
+        name: "__vec_push",
+        typeIdx: pushTypeIdx,
+        locals,
+        body,
+        exported: true,
+      } as any);
+      mod.exports.push({ name: "__vec_push", desc: { kind: "func", index: pushFuncIdx } });
+      ctx.funcMap.set("__vec_push", pushFuncIdx);
+    }
   }
 
   // __vec_pop(externref) -> externref (boxed last element; null.extern when
@@ -5090,14 +5146,23 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
       ];
     }
     body.push(...current);
-    mod.functions.push({
-      name: "__vec_pop",
-      typeIdx: popTypeIdx,
-      locals,
-      body,
-      exported: true,
-    } as any);
-    mod.exports.push({ name: "__vec_pop", desc: { kind: "func", index: popFuncIdx } });
+    // (#2784 S3) FILL-or-build (see __vec_push above).
+    const reservedPop = ctx.funcMap.get("__vec_pop");
+    if (reservedPop !== undefined) {
+      const fn = mod.functions[reservedPop - ctx.numImportFuncs]! as { locals: typeof locals; body: Instr[] };
+      fn.locals = locals;
+      fn.body = body;
+    } else {
+      mod.functions.push({
+        name: "__vec_pop",
+        typeIdx: popTypeIdx,
+        locals,
+        body,
+        exported: true,
+      } as any);
+      mod.exports.push({ name: "__vec_pop", desc: { kind: "func", index: popFuncIdx } });
+      ctx.funcMap.set("__vec_pop", popFuncIdx);
+    }
   }
 }
 
