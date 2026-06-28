@@ -55,7 +55,7 @@ gated rollout). Bands are for the *fast-path conversion only*; the §(e)
 | 3 | **Packed-`i32` arrays** — `src/codegen/array-element-typing.ts:212` `collectI32SpecializedArrays`, `:44` `isI32SafeExprForArray` | every value stored is an i32-safe integer **and** no read needs the f64 NaN / fractional / `>2³¹` distinction — `number[]` guarantees none of this (`as`, `any`, fractional literal, big magnitude) | whole-function flow proving **every** write i32-safe **and** **no** read observes a distinction i32 erases; a wrong `P` **MISCOMPILES** | `undischarged` (subtle) | subtle | **L** | — (spin from this row) |
 | 4 | **Monomorphic `struct.get`/`struct.set`** — `src/codegen/property-access.ts:990` `resolveStructName`, `:1392` `emitNullGuardedStructGet` | receiver is exactly that nominal struct layout — TS permits union arms, `any`-widening, covariant fields, divergent-layout subclasses | receiver provably the single nominal type (IR receiver-type narrowing) **and** no union / `any` / covariant / subclass-layout escape; **else** SAFE dynamic property read (or `ref.test`-guarded read, à la row 8) | `undischarged` (subtle) | subtle | **L** | — (spin from this row) |
 | 5 | **Unboxed `f64`/`i32` number locals (no-box)** — IR `src/ir/analysis/escape.ts:92` `analyzeEscape`; legacy numeric-local typing diffuse across `src/codegen/` | a number-typed local stays unboxed and never needs identity/boxing at an `any`/externref sink | escape analysis proving the value never flows to an `any`/union/externref sink without an explicit box | `partial` | easy (pure-numeric) / subtle (any-union boundary) | **M** | — (spin general arm) |
-| 6 | **`ArrayLiteral` → `vec.new_fixed`** — `src/ir/from-ast.ts:1444` `lowerArrayLiteral` (#1804) | all elements share one static type **and** the literal is not later widened to `any`/heterogeneous | **local** proof: fresh allocation, all elements same static type, no widening escape — cheap, no whole-function dataflow | `partial` (local) | easy | **S** | — (spin from this row) |
+| 6 | **`ArrayLiteral` → `vec.new_fixed`** — `src/ir/from-ast.ts:1516` `lowerArrayLiteral` (#1804) | all elements share one static type **and** the literal is not later widened to `any`/heterogeneous | **local** proof: fresh allocation, all elements same static type, no widening escape — cheap, no whole-function dataflow | `discharged` (local) | easy | **S** | **#2780** (`arrayLiteralWideningEscapes` gate; FAST only when the contextual sink is not `any`/`unknown`/heterogeneous) |
 | 7 | **`Binary` unboxed arithmetic** — IR `src/ir/from-ast.ts:3787` `lowerBinary`; legacy `src/codegen/binary-ops.ts:254` `compileBinaryExpression` / `:3660` `compileNumericBinaryOp` | both operands are `number` so emit an `f64`/`i32` op, and `+` is a numeric add — TS allows `any`/union/string-coercible operands and `+` can be string concat | operands provably `number` (not `any`/union/string-coercible) and `+` provably not string-`+`; **else** SAFE `emitAnyAdd` (`binary-ops.ts:3296`) / `emitAnyRelational` (`:3469`) | `partial` | easy (annotated-number) / subtle (`+` possibly-string) | **M** | — (spin general arm) |
 | 8 | **`this`-receiver typed read** — `src/codegen/property-access.ts:5443` `emitThisReceiverGuardConvert` | **none** — it does a runtime `ref.test` instead of trusting the static `this` type | runtime `ref.test` guard (the canonical runtime-guard discharge of `P`) | `discharged` (exemplar) | already-HI-compliant | **S** | F3: document as the HI reference pattern |
 | 9 | **Typed-array element read** — `src/codegen/property-access.ts` typed-array site `~:6341` in `compileElementAccessBody`; shared helper `src/codegen/array-methods.ts:386` `emitBoundsCheckedArrayGet` | view-length is the bound and OOB → `undefined` per spec, **but** the read is entangled with the **shared** helper (the S2 blast-radius lesson) | view length is the bound; OOB → `undefined`; **must stay scoped separately from F1's plain-array scope** — do NOT flip the shared helper default | `partial` | easy but entangled | **S–M** | kept separate from #2760 |
@@ -137,11 +137,12 @@ the expensive L tail (rows 3, 4) inherits the machinery the S/M rows establish.
    fallback) and the canonical end-to-end exemplar. Port `safeIndexedArrays`
    into the IR; `vec.get` only when in-bounds is proven, else the SAFE
    bounds-checked `undefined` read. **No new issue needed — track #2766.**
-2. **Row 6 — ArrayLiteral widening-escape check** (S, *needs an issue*).
+2. **Row 6 — ArrayLiteral widening-escape check** (S, **#2780 — landed**).
    Smallest blast radius, a *local* proof on a fresh allocation, no
    whole-function dataflow. The clean second exemplar that a proof need not be
-   global. Add the "not later widened to `any`/heterogeneous" check to
-   `lowerArrayLiteral`.
+   global. `arrayLiteralWideningEscapes` in `lowerArrayLiteral` gates the fast
+   `vec.new_fixed` on the literal's TS contextual type: FAST only when the sink
+   is not `any`/`unknown`/heterogeneous, else the SAFE boxed legacy lowering.
 3. **Row 7 — Binary `+` string-or-number proof-gate** (M, *needs an issue*).
    Builds the operand-type-proof / `any`-union-sink detection that rows 3, 5
    reuse. Proof-gate the unboxed numeric op in IR `lowerBinary`; SAFE-fall to
@@ -190,4 +191,6 @@ IR-adoption steps (§(b) of the roadmap), **not** a big-bang rewrite.
   fix (the SAFE lowering rows 1/2 reuse).
 - [#2766](../issues/2766-hybrid-ir-elementaccess-prove-then-specialize.md) — R2,
   the row-1 follow-up.
+- [#2780](../issues/2780-hybrid-ir-arrayliteral-widening-escape.md) — the row-6
+  follow-up (ArrayLiteral widening-escape gate).
 - [ir-adoption.md](./ir-adoption.md) — per-AST-kind IR status & ratchet.

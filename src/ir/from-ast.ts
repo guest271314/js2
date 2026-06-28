@@ -1444,6 +1444,59 @@ function lowerExpr(expr: ts.Expression, cx: LowerCtx, hint: IrType): IrValueId {
 }
 
 /**
+ * #2780 (hybrid Row 6) — the widening-escape proof for the ArrayLiteral fast
+ * path. Returns `true` when the literal's result flows into a sink that demands a
+ * WIDER / heterogeneous element type than the homogeneous NARROW vec
+ * `vec.new_fixed` would build — `any[]` / `unknown[]` / a heterogeneous-union
+ * element, or a bare `any` / `unknown` slot. In that case the packed fast path is
+ * UNSOUND: a `vec<f64>` (etc.) handed to an `any`-typed alias could later receive
+ * a string/object element the packed vec cannot hold (e.g. `const a: any[] =
+ * [1,2,3]; a[0] = "x"`). When it returns `true`, codegen must fall to the SAFE
+ * legacy lowering, which boxes each element to the dynamic externref
+ * representation.
+ *
+ * This is a **local** proof (the Hybrid-Invariant point of Row 6): it inspects
+ * only the literal's own TS contextual type — no whole-function dataflow. The
+ * fresh allocation is decidable from the sink type at this single site.
+ *
+ * The comparison reads the TS **type** (`TypeFlags`), never the Wasm ValType
+ * kind: `number[]`, `boolean[]` and `symbol[]` all collapse to the same element
+ * ValType (f64 / i32 / i32) — keying on the kind would misclassify a
+ * boolean-vs-number sink. Note the TS gotcha that the intrinsic `boolean` type is
+ * internally the union `true | false`, so `isUnion()` is `true` for it; it is
+ * excluded via the `Boolean` flag so `boolean[]` stays on the fast path, while a
+ * genuine heterogeneous union (`string | number`) — which does not carry that
+ * flag — is correctly treated as a widening.
+ *
+ * Structural-supertype scalar sinks (`{}[]`, `object[]`) are intentionally NOT
+ * flagged here — Row 6 scopes to `any` / `unknown` / heterogeneous sinks, and
+ * those residuals stay covered by the existing downstream `irTypeEquals` net
+ * (a wider-typed write demotes the function to legacy), exactly as today.
+ */
+function arrayLiteralWideningEscapes(expr: ts.ArrayLiteralExpression, cx: LowerCtx): boolean {
+  const checker = cx.checker;
+  // No checker → cannot prove a sink at this site. The existing element-type
+  // (`irTypeEquals`) checks here plus the downstream demotion net still guard
+  // correctness, so keep the fast path (HI: a missing proof is not a license to
+  // miscompile — there is no narrow-vec build whose escape we are masking,
+  // because every boundary use is still type-checked).
+  if (!checker) return false;
+  const ctxType = checker.getContextualType(expr);
+  if (!ctxType) return false; // consumed at its own narrow type → no widening at this site.
+  // A bare `any` / `unknown` slot (e.g. `const a: any = [1,2,3]`): the literal
+  // escapes into a fully dynamic value.
+  if (ctxType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) return true;
+  // Array / tuple sink: inspect the element type the sink demands.
+  const ctxElem = ctxType.getNumberIndexType();
+  if (!ctxElem) return false; // non-indexable concrete sink → no array widening here.
+  if (ctxElem.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) return true; // any[] / unknown[].
+  // Heterogeneous element union (`(number | string)[]`) the packed vec cannot
+  // hold — but NOT the intrinsic `boolean` (= `true | false`) which is uniform.
+  if (ctxElem.isUnion() && !(ctxElem.flags & ts.TypeFlags.Boolean)) return true;
+  return false;
+}
+
+/**
  * #1804 — lower a fixed-length, non-spread, non-sparse, same-typed array
  * literal to a `vec.new_fixed` IR node. Out of scope (clean fallback to
  * legacy): spread elements (`[...xs]`), elision holes (`[1, , 3]`), mixed
@@ -1453,6 +1506,12 @@ function lowerExpr(expr: ts.Expression, cx: LowerCtx, hint: IrType): IrValueId {
  * the resolver can recover) — covers `const a: number[] = [1,2,3]` and the
  * empty `const a: number[] = []`; otherwise infer from the first element and
  * require every element to share that IrType.
+ *
+ * #2780 (hybrid Row 6) — before the fast `vec.new_fixed`, discharge the
+ * widening-escape proof (`arrayLiteralWideningEscapes`): the packed narrow vec is
+ * only sound when the literal does NOT flow into an `any` / `unknown` /
+ * heterogeneous sink. When it does, demote to the SAFE legacy lowering (which
+ * boxes each element) — this mirrors #2766's prove-then-specialize shape.
  */
 function lowerArrayLiteral(expr: ts.ArrayLiteralExpression, cx: LowerCtx, hint: IrType): IrValueId {
   // Reject spread / sparse — out of scope, keep on legacy.
@@ -1478,6 +1537,33 @@ function lowerArrayLiteral(expr: ts.ArrayLiteralExpression, cx: LowerCtx, hint: 
       throw new Error(`ir/from-ast: resolver cannot register vec for empty literal (${cx.funcName})`);
     }
     return cx.builder.emitVecNewFixed([], hintElemIr, irVal({ kind: "ref", typeIdx: vec.vecStructTypeIdx }));
+  }
+
+  // #2780 (hybrid Row 6) — widening-escape proof, the PRIMARY HI gate (run
+  // before element lowering, mirroring #2766's prove-then-specialize: prove the
+  // specialization is sound, else fall to the SAFE path). `vec.new_fixed` builds
+  // a homogeneous NARROW vec (`vec<f64>` / `vec<i32>` / …). That specialization
+  // is only sound when this non-empty literal does NOT flow into a sink that
+  // demands a WIDER / heterogeneous element type (`any[]` / `unknown[]` / a
+  // union). When it does — a literal passed where an `any[]` is expected
+  // (`g([1,2,3])`, `g(x: any[])`), or an annotated `const a: any[] = [1,2,3]`
+  // were the selector to claim it (today such functions are `body-shape-rejected`
+  // because `lowerVarDecl` only forwards PRIMITIVE type annotations; this gate
+  // keeps the fast path sound if that claim scope ever widens) — demote to the
+  // SAFE legacy lowering, which boxes each element to the dynamic externref
+  // representation. Gating here (before the element-type loop) makes the explicit
+  // HI reason the demotion cause rather than the incidental "mixed-type" throw
+  // that the externref-hint path would otherwise raise; the existing
+  // element-type / hint `irTypeEquals` checks remain as a backstop for any sink
+  // `getContextualType` cannot recover at this site. Empty literals are excluded
+  // (handled above): with a wide hint they already build a correct wide vec, so
+  // there is no narrow build to let escape.
+  if (arrayLiteralWideningEscapes(expr, cx)) {
+    throw new Error(
+      `ir/from-ast: array literal flows into a widening/heterogeneous sink ` +
+        `(any[]/unknown[]/union element) — the packed vec.new_fixed fast path is ` +
+        `unsound here; demote to the SAFE boxed legacy lowering (${cx.funcName})`,
+    );
   }
 
   // Lower each element. Use the hint element type as each element's hint when
