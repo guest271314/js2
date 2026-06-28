@@ -119,30 +119,23 @@ function _isUndefinedLike(node: ts.Node): boolean {
   );
 }
 
-// (#2769) Does an inner array literal carry an `undefined`/`void`/hole element
-// whose identity must survive construction? Used ONLY under the scoped
-// `_forOfPreserveUndefElem` flag (for-of over a direct array literal whose
-// binding pattern has an element default / nested sub-pattern). Returns true
-// when the literal is syntactically hole/undefined-bearing, OR its inferred TS
-// element type carries `Undefined|Void` (covers `nested-array/obj-undefined-own`
-// templates). Numeric/object literals like `[7]` return false → keep their
-// existing numeric-vec backing (no perturbation; the default correctly does NOT
-// fire for an in-bounds present value).
-function arrayLiteralCarriesUndefined(ctx: CodegenContext, arr: ts.ArrayLiteralExpression): boolean {
-  // Syntactic: any element is a hole (`[,]`) or an explicit `undefined`-like.
-  if (arr.elements.some((el) => ts.isOmittedExpression(el) || _isUndefinedLike(el))) return true;
-  // Typed: the literal's inferred element type(s) carry Undefined|Void.
-  const t = ctx.checker.getTypeAtLocation(arr);
-  const elemTypes = ctx.checker.getTypeArguments(t as ts.TypeReference);
-  const carries = (et: ts.Type | undefined): boolean => {
-    if (!et) return false;
-    if ((et.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void)) !== 0) return true;
-    if (et.isUnion?.()) {
-      return (et as ts.UnionType).types.some((m) => (m.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void)) !== 0);
-    }
-    return false;
-  };
-  return elemTypes.some(carries);
+// (#2769) Is this inner array literal `undefined`/`void`/hole-ONLY — i.e. it
+// would naturally build an externref-backed vec (every element falls into the
+// `_isUndefinedLike`/omitted branch of compileArrayLiteral) BUT
+// `resolveWasmType(its TS type)` lowers it to a numeric (`__vec_i32`/`__vec_f64`)
+// vec, so the OUTER literal coerces it and destroys the undefined/$Hole identity
+// at construction? Used ONLY under the scoped `_forOfPreserveUndefElem` flag.
+//
+// Narrowly the undefined/hole-ONLY case: a HETEROGENEOUS inner like
+// `[10, undefined]` already builds an `__vec_f64` via the existing sNaN-sentinel
+// path (and the OUTER derives `__vec_f64` too → they match, no coercion), so
+// re-keying THAT to externref would instead BREAK it (mismatched vec→vec
+// coercion → NaN). Empty inners (`[]`) are out-of-bounds, handled by the
+// existing default path — also excluded (length 0). Numeric/object literals like
+// `[7]` return false → byte-identical numeric-vec backing.
+function arrayLiteralIsUndefinedOrHoleOnly(arr: ts.ArrayLiteralExpression): boolean {
+  if (arr.elements.length === 0) return false;
+  return arr.elements.every((el) => ts.isOmittedExpression(el) || _isUndefinedLike(el));
 }
 
 /**
@@ -3475,7 +3468,7 @@ export function compileArrayLiteral(
   if (
     (ctx as any)._forOfPreserveUndefElem &&
     ts.isArrayLiteralExpression(firstElem) &&
-    arrayLiteralCarriesUndefined(ctx, firstElem)
+    arrayLiteralIsUndefinedOrHoleOnly(firstElem)
   ) {
     const innerVecIdx = getOrRegisterVecType(ctx, "externref", { kind: "externref" });
     elemWasm = { kind: "ref_null", typeIdx: innerVecIdx };
