@@ -79,13 +79,19 @@ Options:
                     is ON by default; this restores the pre-#1950 behaviour.
                     (No-op when binaryen/wasm-opt is unavailable — that path
                     already degrades to a one-line note, never a failure.)
-  --link-node-shims (WASI, #2625/#2633) Emit the per-module linkable node:<mod>
-                    shims instead of inlining the host APIs. Std-IO goes through
-                    node:fs: the module imports readSync/writeSync + its memory
-                    from node:fs (no wasi_snapshot_preview1 for stream IO) and
-                    links node-fs.wasm. console.log / process.std*.write lower to
-                    writeSync(1|2, …); stdin is readSync(0, …). Off by default —
-                    the inline fd_read/fd_write path is self-contained.
+  --link <ns>       (WASI, #2783) Leave the external namespace <ns> as link-time
+                    imports (repeatable) instead of inline-lowering it. Satisfied
+                    at instantiation by a preloaded provider module (e.g.
+                    'wasmtime --preload <ns>=provider.wasm'). Any namespace works
+                    (leave-as-import is universal); '--link node:fs' additionally
+                    selects the import-and-link std-IO path: the module imports
+                    readSync/writeSync + its memory from node:fs (no
+                    wasi_snapshot_preview1 for stream IO) and links node-fs.wasm.
+                    console.log / process.std*.write lower to writeSync(1|2, ...),
+                    stdin is readSync(0, ...). Off by default — every namespace is
+                    inline-lowered into a self-contained module.
+  --link-node-shims DEPRECATED (#2783): alias for '--link node:fs'. Emits a
+                    deprecation note. Use '--link node:fs' instead.
   --emulate <env>   Emulate a host runtime's globals so they type-check without
                     @types/node. 'node' = ambient process/etc.; 'none' = off.
                     Auto-enabled (type-level only) when the source imports a
@@ -156,9 +162,11 @@ let utf8Storage = false;
 // default (strict-on under `--target wasi`); `true` / `false` = explicit
 // override from `--no-host-imports` / `--allow-host-imports`.
 let strictNoHostImports: boolean | undefined;
-// #2625 — emit the per-module linkable js2wasm:node-<mod> shims (WASI only);
-// default false keeps the self-contained inline fd_read/fd_write path.
-let linkNodeShims = false;
+// #2783 — general dynamic-linking axis: namespaces to leave as link-time
+// imports (satisfied by a preloaded provider) instead of inline-lowering.
+// `--link-node-shims` is a deprecated alias for `--link node:fs`. WASI only;
+// default empty keeps the self-contained inline path for every namespace.
+const linkedNamespaces = new Set<string>();
 // #2603 — `--emulate node`: opt into Node API emulation (ambient `process` typing).
 // `emulateExplicit` records that the user passed `--emulate`/`--no-emulate`, so a
 // `node:` import won't auto-enable over an explicit choice.
@@ -236,11 +244,24 @@ for (let i = 0; i < args.length; i++) {
     quiet = true;
   } else if (arg === "--utf8-storage") {
     utf8Storage = true;
+  } else if (arg === "--link" || arg.startsWith("--link=")) {
+    // #2783 — general `--link <namespace>` (repeatable): leave `<namespace>::*`
+    // as link-time imports for instantiation-time satisfaction instead of
+    // inline-lowering. Any external namespace works ("leave-as-import" is
+    // universal); `node:fs` additionally selects the import-and-link std-IO
+    // path. WASI only (ignored otherwise, mirroring the old linkNodeShims gate).
+    const ns = arg.startsWith("--link=") ? arg.slice("--link=".length) : args[++i];
+    if (!ns) {
+      console.error("--link requires a namespace argument (e.g. --link node:fs)");
+      process.exit(1);
+    }
+    linkedNamespaces.add(ns);
   } else if (arg === "--link-node-shims") {
-    // #2625 — emit the per-module linkable js2wasm:node-<mod> shims instead of
-    // inlining the host APIs (WASI only). Off by default; the self-contained
-    // inline fd_read/fd_write path stays.
-    linkNodeShims = true;
+    // #2783 — deprecated alias for `--link node:fs`. Kept working; emits a soft
+    // deprecation note. (#2625 originally introduced the per-module node:<mod>
+    // shims; the lower-vs-import decision is now the general `--link` axis.)
+    console.error("warning: --link-node-shims is deprecated; use --link node:fs instead.");
+    linkedNamespaces.add("node:fs");
   } else if (arg === "--emulate" || arg.startsWith("--emulate=")) {
     // #2603 — opt into (or out of) Node API emulation. `--emulate node` gives the
     // checker an ambient `process` typing so Node globals type-check without
@@ -365,7 +386,7 @@ const compileOptions = {
   ...(emitWit ? { wit: witPackageName ? { packageName: witPackageName } : true } : {}),
   ...(allowFs ? { allowFs: true } : {}),
   ...(utf8Storage ? { utf8Storage: true } : {}),
-  ...(linkNodeShims ? { linkNodeShims: true } : {}),
+  ...(linkedNamespaces.size ? { link: [...linkedNamespaces] } : {}),
   ...(emulateNode ? { emulateNode: true } : {}),
   ...(platform ? { platform } : {}),
   fileName: absInput,
