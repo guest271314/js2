@@ -928,6 +928,37 @@ export function compileObjectLiteral(
     return compileObjectLiteralWithAccessors(ctx, fctx, expr);
   }
 
+  // (#2714) A spread-containing literal evaluated in a NON-SPECIFIC contextual
+  // type (`any`/`unknown`/`object`, or no contextual type) must take the host
+  // plain-object path, like the empty-`{}` any-context arm below. The struct
+  // path lays out fields from the literal's STATIC type only, so spread-copied
+  // keys (which are dynamic — CopyDataProperties at runtime) are absent from the
+  // key list `Object.keys` walks; and an INLINE spread source consumed directly
+  // (e.g. `Object.keys({ ...{ a, b } })`, whose contextual type is the `object`
+  // param of `Object.keys`) underflows the struct-spread assembly's `struct.new`.
+  // When a CONCRETE struct type is expected (e.g. `const x: { a: number } =
+  // { ...o }`), keep the struct path so typed consumers still get a struct.
+  // (Assigning to an `any`/untyped variable already worked via the host path;
+  // this generalizes the same routing to the direct-call-argument position.)
+  if (expr.properties.length > 0 && expr.properties.some((p) => ts.isSpreadAssignment(p))) {
+    const spreadCtxType = ctx.checker.getContextualType(expr);
+    // Non-specific = the contextual type does not pin a concrete object SHAPE the
+    // struct path could build/enumerate: `any`/`unknown`/`object`, no contextual
+    // type at all, OR a shapeless object type with zero own properties (e.g. the
+    // `object` param of `Object.keys`, whose contextual type carries no fields).
+    // A CONCRETE target (`const x: { a: number } = { ...o }`) has ≥1 property and
+    // keeps the struct path so typed consumers still receive a struct.
+    const nonSpecificCtx =
+      !spreadCtxType ||
+      (spreadCtxType.flags & ts.TypeFlags.Any) !== 0 ||
+      (spreadCtxType.flags & ts.TypeFlags.Unknown) !== 0 ||
+      (spreadCtxType.flags & ts.TypeFlags.NonPrimitive) !== 0 ||
+      spreadCtxType.getProperties().length === 0;
+    if (nonSpecificCtx) {
+      return compileObjectLiteralWithAccessors(ctx, fctx, expr);
+    }
+  }
+
   // If this empty object literal is the initializer of a variable with widened
   // properties (from pre-pass), register the struct with those extra fields and
   // compile as a struct.new with default values for the widened fields.
