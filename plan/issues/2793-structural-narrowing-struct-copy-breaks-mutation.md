@@ -253,3 +253,66 @@ substrate change, and it must also fix Gap A/Gap B first.
 Net: the `#2791` lock cannot be fully flipped (all 4) without Phase 3; the
 high-value, idiomatic interface cases flip after Phase 1+2. None of the three is
 a single safe senior-dev patch — they are sequenced substrate PRs.
+
+### Captured repros (cold-start — tracked here, not yet split into own issues)
+
+The investigation repros are inlined below so the next-window owner can reproduce
+from this file alone (the `.tmp/*.mjs` probes are gitignored). Compile each with
+`compile(src, { standalone })` and run `exports.test()`; all four **sibling
+miscompiles** are silently wrong on `origin/main` TODAY (same root cause as the
+headline `#2793` case — the structural-narrowing copy), host AND standalone:
+
+```ts
+// (1) return-the-param identity — main: 1   correct: 42
+interface I { v: number; }
+class A implements I { v: number; constructor(){this.v=1;} }
+function id(o: I): I { return o; }
+export function test(): number { const a=new A(); const r=id(a); r.v=42; return a.v; }
+
+// (2) interface-typed field, mutate via alias — main: 1   correct: 99
+interface I { v: number; }
+class A implements I { v: number; constructor(){this.v=1;} }
+class Box { h: I; constructor(h: I){ this.h=h; } }
+function bump(b: Box){ b.h.v = 99; }
+export function test(): number { const a=new A(); const b=new Box(a); bump(b); return a.v; }
+
+// (3) array-of-interface element mutation — main: 1   correct: 5
+interface I { v: number; }
+class A implements I { v: number; constructor(){this.v=1;} }
+function bump(arr: I[]){ arr[0].v = 5; }
+export function test(): number { const a=new A(); const arr:I[]=[a]; bump(arr); return a.v; }
+
+// (4) second-alias visibility — main: 1   correct: 77
+interface I { v: number; }
+class A implements I { v: number; constructor(){this.v=1;} }
+function setV(o: I, x: number){ o.v = x; }
+export function test(): number { const a=new A(); const b=a; setV(a,77); return b.v; }
+```
+
+The two probe-exposed regressions to watch (currently GREEN on `origin/main` —
+the narrow-copy masks them; the fix MUST keep them green):
+
+```ts
+// Gap A — anon-literal field order. main: 1020908 (correct). Interface→externref
+// probe regressed it to 1020809 because the copy currently reorders fields by
+// name; without it, `{ y:8, x:9 }` flows as a source-order anon struct and a
+// by-name dynamic read of `o.x` returns the wrong slot. FIX: store anon literals
+// in canonical (deduped) field order.
+interface I { x: number; y: number; }
+function sum(o: I): number { return o.x*100 + o.y; }
+export function test(): number { const a:I={x:1,y:2}; const b:I={y:8,x:9}; return sum(a)*10000+sum(b); }
+
+// Gap B — shape-dependent interface resolution. main: 4 (correct). With a SINGLE
+// implementer, getTypeAtLocation(param o:I) does not resolve through the interface
+// symbol, so a probe keyed off the resolved type left the param a monomorphic
+// `ref $I` while the call site still narrow-copies → illegal-cast trap. FIX: key
+// the widening off the param's DECLARED type node, not the checker's resolved type.
+interface I { v: number; }
+class A implements I { a: number; v: number; constructor(){this.a=3;this.v=4;} }
+function getV(o: I): number { return o.v; }
+export function test(): number { return getV(new A()); }
+```
+
+These six + the headline `#2793` param-mutation case are all tracked under THIS
+issue (no separate issue files filed). The architect/substrate owner may split
+Phase 3 (class-structural) into its own issue when scoping the next window.
