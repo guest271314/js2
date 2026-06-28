@@ -1,7 +1,8 @@
 ---
 id: 2766
 title: "Hybrid IR step 1: ElementAccess prove-then-specialize — vec.get only when in-bounds is proven, else SAFE bounds-checked read"
-status: ready
+status: in-progress
+assignee: ttraenkler/sendev-2766
 sprint: current
 created: 2026-06-28
 updated: 2026-06-28
@@ -14,7 +15,6 @@ area: codegen, ir
 language_feature: array-index
 goal: correctness
 related: [2755, 2760, 1530, 1131, 1804]
-depends_on: [2760]
 ---
 
 # #2766 — Hybrid IR step 1: ElementAccess prove-then-specialize
