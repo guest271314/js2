@@ -1,10 +1,11 @@
 ---
 id: 2791
 title: "Hybrid audit Row 4 — monomorphic struct.get/set soundness (read discharged; real miscompile is structural-narrowing copy, not Row 4)"
-status: blocked
+status: done
 sprint: current
 created: 2026-06-28
 updated: 2026-06-28
+completed: 2026-06-28
 priority: medium
 horizon: m
 feasibility: hard
@@ -15,7 +16,6 @@ language_feature: structural-typing
 goal: correctness
 parent: 2762
 assignee: "ttraenkler/senior-dev-row4"
-blocked_by: scope-decision
 ---
 
 # Row 4 — Monomorphic `struct.get`/`struct.set` proof (hybrid fast-path audit)
@@ -175,13 +175,18 @@ broad-impact validation (full merge_group test262 + standalone-floor) required.
 
 - Flip `hybrid-fastpath-audit.md` Row 4 **read side** to `discharged` (runtime
   `ref.test` multi-dispatch + WasmGC prefix-subtyping; covariant/divergent-
-  subclass moot by construction). Cite #778/#2674.
+  subclass moot by construction). Cite #778/#2674. **Done in this PR.**
 - File the structural-narrowing-copy miscompile as its own
   architect-scoped issue (root cause `type-coercion.ts emitStructNarrowBody` +
-  param typing), NOT a Row-4 follow-up.
+  param typing), NOT a Row-4 follow-up. **Filed as #2793** (`[ARCH][SUBSTRATE]`,
+  `depends_on: #2773`).
 
-## Status
+## Resolution (lead decision 2026-06-28)
 
-`blocked` on a lead scope decision (authorize the out-of-lane type-coercion /
-param-typing fix vs. hand to architect). No code change shipped — see "Why no
-in-lane fix exists".
+`status: done`. Lead approved (a)+(iii): Row 4 **read** side is `discharged`
+(this PR flips the audit row), and this issue **lands as the findings + read-
+discharge lock + `it.fails` write-miscompile lock** — no code fix is needed in
+the Row-4 lane. The genuine write miscompile (structural-narrowing copy) is
+**out of lane** and tracked separately in **#2793**, routed to the architect /
+substrate lane (overlaps #2773). The `it.fails` cases in
+`tests/issue-2791.test.ts` will flag #2793's fix the moment it lands.
