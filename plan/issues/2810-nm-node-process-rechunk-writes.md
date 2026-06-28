@@ -1,5 +1,5 @@
 ---
-id: 2808
+id: 2810
 title: "nm_js2wasm_node_process: re-chunk host->extension writes to the ≤1 MiB browser cap (like nm_js2wasm_node_fs)"
 status: done
 assignee: ttraenkler/agent-ad343

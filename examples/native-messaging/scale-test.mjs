@@ -12,7 +12,7 @@
 // bulk-copies each `fd_write` iovec in one JS array slice, so it happily "writes"
 // a 256 MiB buffer that REAL wasmtime rejects. wasmtime (v46) fails a single
 // `fd_write` whose iovec length is ≥ ~128 MiB with errno 48 and `nwritten = 0`;
-// the `nm_node_process` host (which builds the WHOLE response frame and writes it
+// the `nm_js2wasm_node_process` host (which builds the WHOLE response frame and writes it
 // in ONE `process.stdout.write`) therefore echoed ZERO bytes and exited 0 at
 // ≥128 MiB — invisible to the shim-based tests. This driver runs the compiled
 // modules under the ACTUAL `wasmtime` binary at sizes that straddle the cap, so
@@ -20,7 +20,7 @@
 //
 // It ALSO bundles with **bun** (not esbuild): bun's DEFAULT browser target
 // silently stubs `node:fs` → `{}` (a false zero-output), so the variants that
-// speak `node:fs` MUST be built `--target node`; `nm_wasi_p1` keeps its
+// speak `node:fs` MUST be built `--target node`; `nm_js2wasm_wasi_p1` keeps its
 // `wasi_snapshot_preview1` / `wasm:memory` intrinsic imports external.
 //
 // Requires `bun` and `wasmtime` on PATH (the native-messaging-smoke CI job
@@ -78,7 +78,7 @@ function patternBody(bytes) {
 }
 
 // A valid JSON-array body `[null,null,…]` of ~`approx` bytes (the #389 payload
-// shape the nm_node_fs re-chunker splits on).
+// shape the nm_js2wasm_node_fs re-chunker splits on).
 function jsonArrayBody(approx) {
   const m = Math.max(1, Math.floor((approx - 6) / 5) + 1);
   const total = 2 + 4 + 5 * (m - 1);
@@ -153,22 +153,29 @@ const VARIANTS = [
     js2wasmExtra: [],
     preload: null,
     // Re-chunks bodies > 1 MiB into valid <=1 MiB JSON frames on the WRITE side
-    // (#2808) — formerly THE #2807 variant that built the whole frame and issued
+    // (#2810) — formerly THE #2807 variant that built the whole frame and issued
     // one >128 MiB fd_write; now bounded like nm_js2wasm_node_fs.
     mode: "rechunk",
   },
-  { name: "nm_deno", src: "nm_deno.ts", bunExtra: [], js2wasmExtra: [], preload: null, mode: "verbatim" },
   {
-    name: "nm_wasi_p1",
-    src: "nm_wasi_p1.ts",
+    name: "nm_js2wasm_deno",
+    src: "nm_js2wasm_deno.ts",
+    bunExtra: [],
+    js2wasmExtra: [],
+    preload: null,
+    mode: "verbatim",
+  },
+  {
+    name: "nm_js2wasm_wasi_p1",
+    src: "nm_js2wasm_wasi_p1.ts",
     bunExtra: ["--external", "wasi_snapshot_preview1", "--external", "wasm:memory"],
     js2wasmExtra: [],
     preload: null,
     mode: "verbatim",
   },
   {
-    name: "nm_node_fs",
-    src: "nm_node_fs.ts",
+    name: "nm_js2wasm_node_fs",
+    src: "nm_js2wasm_node_fs.ts",
     bunExtra: [],
     js2wasmExtra: ["--link", "node:fs"],
     preload: () => `node:fs=${SHIM}`,

@@ -1,6 +1,6 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 /**
- * #2807 — `nm_node_process` (async `process.stdin`) echoed ZERO bytes for a
+ * #2807 — `nm_js2wasm_node_process` (async `process.stdin`) echoed ZERO bytes for a
  * framed body ≥ ~128 MiB under REAL wasmtime, while the in-process matrix shim
  * passed. Root cause: it builds the WHOLE response frame and writes it in ONE
  * `process.stdout.write`, and wasmtime (v46) REJECTS a single `fd_write` whose
@@ -10,7 +10,7 @@
  * The fix chunks every WASI `fd_write` into pieces of at most
  * {@link WASI_FD_WRITE_MAX_CHUNK} (`__wasi_fd_write_all`). The #2775 matrix shim
  * bulk-copies each iovec in one JS slice, so it can't model wasmtime's cap and
- * MASKED this. This test drives `nm_node_process` through a reactor shim whose
+ * MASKED this. This test drives `nm_js2wasm_node_process` through a reactor shim whose
  * `fd_write` FAITHFULLY rejects an oversized single iovec exactly the way
  * wasmtime does — so a regression to a single full-frame write fails HERE, on
  * every CI run, with no wasmtime binary required (the real-wasmtime guard lives
@@ -50,7 +50,7 @@ const MiB = 1024 * 1024;
 
 // A valid JSON-array body `[null,null,…]` of ~`approx` bytes — the loopdive/js2#389
 // payload shape the re-chunker splits on. nm_js2wasm_node_process now re-chunks a
-// body > 1 MiB into a sequence of valid <=1 MiB `[run]` frames (#2808), so the
+// body > 1 MiB into a sequence of valid <=1 MiB `[run]` frames (#2810), so the
 // #2807 coverage drives a JSON body (not arbitrary bytes) and asserts re-chunk
 // round-trip rather than a single byte-exact echo.
 function jsonArrayBody(approx: number): Uint8Array {
@@ -94,7 +94,7 @@ function reassembleArrayFrames(frames: Uint8Array[]): Buffer {
 }
 
 /**
- * Reactor shim for `nm_node_process`, with a wasmtime-FAITHFUL capped `fd_write`:
+ * Reactor shim for `nm_js2wasm_node_process`, with a wasmtime-FAITHFUL capped `fd_write`:
  * a single iovec whose length exceeds {@link MODELLED_CAP} is rejected with errno
  * 48 and `nwritten` left at 0 (exactly wasmtime's behaviour), instead of being
  * bulk-copied. Tracks the largest single fd1 write seen so the test can assert
@@ -210,7 +210,7 @@ async function runReactorShimCapped(
   return { out, maxWrite, rejected };
 }
 
-describe("#2808 — nm_js2wasm_node_process re-chunks to <=1 MiB frames under a wasmtime-faithful fd_write cap", () => {
+describe("#2810 — nm_js2wasm_node_process re-chunks to <=1 MiB frames under a wasmtime-faithful fd_write cap", () => {
   it(
     "re-chunks a >1 MiB JSON body into valid <=1 MiB frames that reassemble byte-exact, with no fd_write over the cap",
     { timeout: 180_000 },
@@ -245,7 +245,7 @@ describe("#2808 — nm_js2wasm_node_process re-chunks to <=1 MiB frames under a 
       expect(out.length, "must not emit zero bytes (the #2807 silent failure)").toBeGreaterThan(0);
       expect(maxWrite, "every single fd_write stays within the chunk cap").toBeLessThanOrEqual(WASI_FD_WRITE_MAX_CHUNK);
 
-      // #2808 re-chunk round-trip: every emitted frame body is within the 1 MiB
+      // #2810 re-chunk round-trip: every emitted frame body is within the 1 MiB
       // browser cap, and the frame interiors reassemble to the original body.
       const frames = parseFrames(out);
       expect(frames.length, "the >1 MiB body must be split into multiple frames").toBeGreaterThan(1);

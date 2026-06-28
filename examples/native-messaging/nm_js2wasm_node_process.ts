@@ -30,7 +30,7 @@
 // all three. The leftover tail (a partial next frame) stays buffered until the
 // following chunk completes it.
 //
-// On the WRITE side the echo is re-chunked to the 1 MiB browser cap (#2808): a
+// On the WRITE side the echo is re-chunked to the 1 MiB browser cap (#2810): a
 // body within the cap is echoed verbatim — prefix + body — as one
 // `process.stdout.write`; a body LARGER than the cap is split into a sequence of
 // valid <=1 MiB JSON frames (`[run]` for an array body, `"run"` for a string
@@ -76,7 +76,7 @@ let tail: number = 0;
 // variants which treat a declared length of 0 as end-of-stream.
 let stopped: boolean = false;
 
-// Browser per-host->extension-message cap: 1 MiB (#2808). A real Chrome Native-
+// Browser per-host->extension-message cap: 1 MiB (#2810). A real Chrome Native-
 // Messaging host may send AT MOST 1 MiB per host->extension message, so a body
 // larger than this isn't even valid on that surface. Like the sibling
 // `nm_js2wasm_node_fs.ts` re-chunker, a >1 MiB response body is split on the
@@ -252,7 +252,7 @@ function drain(): void {
       process.stdout.write(out);
     } else {
       // Body exceeds the 1 MiB browser cap — RE-CHUNK into valid <=1 MiB JSON
-      // frames (#2808), matching the `nm_js2wasm_node_fs` re-chunker. Peek the
+      // frames (#2810), matching the `nm_js2wasm_node_fs` re-chunker. Peek the
       // first body byte to pick the shape: `"` → a JSON string split into `"run"`
       // frames; otherwise a JSON array split into `[run]` frames at comma
       // boundaries. The interior excludes the outer `[`/`]` (or the two `"`):
