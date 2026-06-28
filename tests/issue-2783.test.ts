@@ -1,19 +1,20 @@
 // #2783 — general `--link <namespace>` dynamic-linking flag (S1–S3).
 //
-// Generalizes the single `--link-node-shims` boolean into an orthogonal,
-// per-namespace axis: `--link <ns>` (repeatable) leaves `<ns>::*` as link-time
-// imports (satisfied by a preloaded provider) instead of inline-lowering it.
-// `--link-node-shims` becomes a deprecated alias for `--link node:fs`.
+// Replaces the single `linkNodeShims` boolean with an orthogonal, per-namespace
+// axis: `--link <ns>` (repeatable) / `link: string[]` leaves `<ns>::*` as
+// link-time imports (satisfied by a preloaded provider) instead of
+// inline-lowering it. There is NO `--link-node-shims` alias — `--link node:fs`
+// (CLI) / `link: ["node:fs"]` (programmatic) is the only spelling.
 //
 // Coverage:
-//  S1/S3 (a) — `--link node:fs` is BYTE-IDENTICAL to `--link-node-shims`
-//              (the rename/generalization is pure; back-compat lock-in).
+//  S1     (a) — `--link node:fs` selects the import-and-link std-IO path
+//              (node:fs memory + writeSync imports; no wasi_snapshot_preview1).
 //  S2     (b) — the strict-gate generalization: an ARBITRARY `--link`'d
 //              namespace's imports survive the `--no-host-imports` / WASI
 //              strict gate instead of being rejected (the one genuinely-new
 //              capability). Tested at the gate (`isHostImportAllowed` /
 //              `scanForLeakedHostImports`).
-//  S3     (c) — deprecation warning fires for `--link-node-shims`.
+//  S3     (c) — the removed `--link-node-shims` flag is rejected by the CLI.
 //  S3     (d) — multi-file (`compileProject`) honors `link`.
 //  S3     (e) — byte-neutral when no `--link` is passed (existing single-source
 //              compiles are unchanged).
@@ -28,26 +29,15 @@ import { isHostImportAllowed, scanForLeakedHostImports } from "../src/codegen/ho
 
 const ECHO = `export function main(): void { console.log("hello, link"); }`;
 
-describe("#2783 S1/S3 — `--link node:fs` ≡ `--link-node-shims` (back-compat byte-identical)", () => {
-  it("produces byte-identical output to the deprecated alias", async () => {
-    const viaAlias = await compile(ECHO, { fileName: "x.ts", target: "wasi", linkNodeShims: true });
-    const viaLink = await compile(ECHO, { fileName: "x.ts", target: "wasi", link: ["node:fs"] });
-    expect(viaAlias.success, viaAlias.errors.map((e) => e.message).join("\n")).toBe(true);
-    expect(viaLink.success, viaLink.errors.map((e) => e.message).join("\n")).toBe(true);
-    expect(Buffer.compare(Buffer.from(viaLink.binary), Buffer.from(viaAlias.binary))).toBe(0);
-    // And both select the import-and-link std-IO path (node:fs writeSync import).
-    expect(viaLink.wat ?? "").toContain('(import "node:fs" "writeSync"');
-  });
-
-  it("`linkNodeShims: true` and `link: ['node:fs']` both leave node:fs as imports", async () => {
-    for (const opts of [{ linkNodeShims: true }, { link: ["node:fs"] }]) {
-      const r = await compile(ECHO, { fileName: "x.ts", target: "wasi", ...opts });
-      expect(r.success).toBe(true);
-      const wat = r.wat ?? "";
-      expect(wat).toContain('(import "node:fs" "memory" (memory');
-      expect(wat).toContain('(import "node:fs" "writeSync"');
-      expect(wat).not.toContain("wasi_snapshot_preview1");
-    }
+describe("#2783 S1 — `--link node:fs` selects the import-and-link std-IO path", () => {
+  it("`link: ['node:fs']` leaves node:fs (memory + writeSync) as imports", async () => {
+    const r = await compile(ECHO, { fileName: "x.ts", target: "wasi", link: ["node:fs"] });
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    const wat = r.wat ?? "";
+    expect(wat).toContain('(import "node:fs" "memory" (memory');
+    expect(wat).toContain('(import "node:fs" "writeSync"');
+    // No wasi_snapshot_preview1 import survives for the stream IO path.
+    expect(wat).not.toContain("wasi_snapshot_preview1");
   });
 });
 
@@ -111,14 +101,12 @@ describe("#2783 S3 — byte-neutral when no `--link` is passed", () => {
   });
 });
 
-describe("#2783 S3 — deprecation warning for `--link-node-shims`", () => {
+describe("#2783 S3 — the removed `--link-node-shims` flag and the `--link` CLI", () => {
   function runCli(extraArgs: string): { stderr: string; status: number } {
     const dir = mkdtempSync(path.join(tmpdir(), "issue-2783-cli-"));
     const inFile = path.join(dir, "input.ts");
     writeFileSync(inFile, ECHO);
-    // spawnSync (not execSync): capture stderr regardless of exit code — the
-    // deprecation note is written to stderr even on a successful (status 0)
-    // compile, which execSync's return value would discard.
+    // spawnSync (not execSync): capture stderr regardless of exit code.
     const args = [
       path.resolve("src/cli.ts"),
       inFile,
@@ -132,13 +120,13 @@ describe("#2783 S3 — deprecation warning for `--link-node-shims`", () => {
     return { stderr: r.stderr ?? "", status: r.status ?? 1 };
   }
 
-  it("emits a deprecation note for --link-node-shims and still compiles", () => {
-    const { stderr, status } = runCli("--link-node-shims");
-    expect(status).toBe(0);
-    expect(stderr).toMatch(/--link-node-shims is deprecated; use --link node:fs/);
+  it("the removed --link-node-shims flag is rejected as unknown", () => {
+    const { status } = runCli("--link-node-shims");
+    // The CLI's unknown-flag handler exits non-zero; the alias no longer exists.
+    expect(status).not.toBe(0);
   });
 
-  it("--link node:fs compiles with NO deprecation note", () => {
+  it("--link node:fs compiles cleanly (no deprecation note)", () => {
     const { stderr, status } = runCli("--link node:fs");
     expect(status).toBe(0);
     expect(stderr).not.toMatch(/deprecated/);

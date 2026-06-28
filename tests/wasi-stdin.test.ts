@@ -4,9 +4,9 @@ import { buildWasiPolyfill } from "../src/runtime.js";
 
 // #2633 — synchronous stdin is `node:fs` `readSync(0, …)` (the hallucinated
 // `process.stdin.read` surface was removed). `readSync`/`writeSync` are
-// supported under `--link-node-shims`; the shim owns the WASI fd_read/fd_write.
+// supported under `--link node:fs`; the shim owns the WASI fd_read/fd_write.
 describe("WASI stdin via fd_read (#1653/#2633)", () => {
-  it("imports node:fs readSync when readSync(0, …) is used (--link-node-shims)", async () => {
+  it("imports node:fs readSync when readSync(0, …) is used (--link node:fs)", async () => {
     const result = await compile(
       `
       import { readSync, writeSync } from "node:fs";
@@ -16,7 +16,7 @@ describe("WASI stdin via fd_read (#1653/#2633)", () => {
         writeSync(1, buf);
       }
       `,
-      { target: "wasi", linkNodeShims: true },
+      { target: "wasi", link: ["node:fs"] },
     );
     expect(result.success, result.errors.map((e) => e.message).join("\n")).toBe(true);
     // The user module imports the node:fs interface; the shim owns fd_read.

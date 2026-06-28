@@ -64,7 +64,7 @@ function runCaptureWrites(binary: Uint8Array, stdin: Uint8Array): { sizes: numbe
     },
   };
   // #2631 — the example now uses node:fs readSync/writeSync via the node:fs
-  // shim (--link-node-shims). Instantiate the shim FIRST (it owns the memory and
+  // shim (--link node:fs). Instantiate the shim FIRST (it owns the memory and
   // makes the fd_read/fd_write WASI calls), then the user module importing
   // {memory, readSync, writeSync} from the shim. fd=1 writes are still issued by
   // the shim's writeSync over the shared memory, so the size capture is unchanged.
@@ -98,7 +98,7 @@ describe("#2526 Native Messaging host — atomic frame writes", () => {
     const r = await compile(readFileSync(hostPath, "utf-8"), {
       fileName: "nm_node_fs.ts",
       target: "wasi",
-      linkNodeShims: true,
+      link: ["node:fs"],
     });
     expect(r.success).toBe(true);
     const { sizes } = runCaptureWrites(r.binary, frame(JSON.stringify([1, 2, 3])));
@@ -111,7 +111,7 @@ describe("#2526 Native Messaging host — atomic frame writes", () => {
     const r = await compile(readFileSync(hostPath, "utf-8"), {
       fileName: "nm_node_fs.ts",
       target: "wasi",
-      linkNodeShims: true,
+      link: ["node:fs"],
     });
     expect(r.success).toBe(true);
     const N = 209715 * 2; // ~2 MiB → multiple re-chunked frames

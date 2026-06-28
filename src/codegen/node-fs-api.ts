@@ -5,7 +5,7 @@
  * This keeps Node-shaped host API support out of the generic call-expression
  * compiler. It recognizes the synchronous std-IO surface — `node:fs`
  * `readSync`/`writeSync(fd, buf, …)` and `process.stdout`/`stderr.write` — and
- * lowers them to WASI syscalls (or, under `--link-node-shims`, to the imported
+ * lowers them to WASI syscalls (or, under `--link node:fs`, to the imported
  * `node:fs` shim). It also rejects the hallucinated `process.stdin.read(buf,
  * offset)` with a clear pointer to `node:fs` `readSync`.
  */
@@ -223,7 +223,7 @@ function matchProcessStdinRead(fctx: FunctionContext, expr: ts.CallExpression): 
 // fd-based (integer fd 0/1/2), NOT path-based: they map 1:1 to fd_read/fd_write
 // with NO filesystem. The path-based `fs` family (readFileSync(path)) stays on
 // the --allow-fs path and is rejected in standalone WASI. Since #2633 these are
-// also the sole std-IO substrate under `--link-node-shims`: console.log /
+// also the sole std-IO substrate under `--link node:fs`: console.log /
 // process.std*.write lower to `writeSync(1|2, …)`, and the bespoke
 // `js2wasm:node-process` shim was retired.
 //
@@ -244,7 +244,7 @@ export function tryCompileNodeFsCall(
   expr: ts.CallExpression,
 ): InnerResult | undefined {
   // The "no provider" gate (#1772 P2-a) fires under `--target wasi` regardless of
-  // `--link-node-shims`, so it must sit AFTER the `!ctx.wasi` guard but BEFORE the
+  // `--link node:fs`, so it must sit AFTER the `!ctx.wasi` guard but BEFORE the
   // combined `!ctx.linkNodeShims` short-circuit and the readSync/writeSync match.
   if (!ctx.wasi) return undefined;
 
@@ -288,7 +288,7 @@ export function tryCompileNodeFsCall(
   }
 
   // #2655 — fd-based readSync/writeSync lower via EITHER the `node:fs` shim
-  // (`--link-node-shims`: the imported `(fd,ptr,len) -> i32` shim funcs) OR the
+  // (`--link node:fs`: the imported `(fd,ptr,len) -> i32` shim funcs) OR the
   // DIRECT WASI Preview-1 path (`!ctx.linkNodeShims`: the
   // `wasi_snapshot_preview1.fd_read`/`fd_write` syscalls). The direct path makes
   // a standalone stdio program a self-contained WASI P1 command module importing

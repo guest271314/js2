@@ -9,7 +9,7 @@ to WASI `fd_read` / `fd_write` with **no filesystem**. (The earlier example used
 `read` — loopdive/js2#389. `fs.readSync`/`fs.writeSync` are also what Javy uses:
 `Javy.IO.readSync`.)
 
-`--link-node-shims` keeps the syscall implementation **out of codegen**: the
+`--link node:fs` keeps the syscall implementation **out of codegen**: the
 compiler only wires `import { readSync, writeSync } from "node:fs"` to imports of
 a stable **`node:fs`** interface. The module declares **what** host API it needs
 (`node:fs`), not **how** it's satisfied — that is a link-time concern. The same
@@ -54,7 +54,7 @@ There is no cycle (the shim never imports anything from the user module). The
 shim reads/writes the user's bytes over the _same_ memory, builds the WASI iovec
 in its own reserved scratch, and issues the syscall.
 
-(Since #2633, **all** std-IO under `--link-node-shims` goes through `node:fs`:
+(Since #2633, **all** std-IO under `--link node:fs` goes through `node:fs`:
 console.log / process.stdout/stderr.write lower to `writeSync(1|2, …)` and
 synchronous stdin is `readSync(0, …)`. `node:fs` owns the single shared linear
 memory; the bespoke `js2wasm:node-process` shim was retired.)
@@ -64,7 +64,7 @@ memory; the bespoke `js2wasm:node-process` shim was retired.)
 Compile the user module:
 
 ```sh
-npx js2wasm examples/native-messaging/nm_node_fs.ts --target wasi --link-node-shims -o out
+npx js2wasm examples/native-messaging/nm_node_fs.ts --target wasi --link node:fs -o out
 ```
 
 The emitted `out/nm_node_fs.wasm` imports only `node:fs` (memory + `readSync` +

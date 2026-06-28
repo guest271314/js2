@@ -76,7 +76,7 @@ describe("#1772 — node:fs same-binary dual-provider compatibility", () => {
     const result = await compile(FRAMED_ECHO, {
       fileName: "nm.ts",
       target: "wasi",
-      linkNodeShims: true,
+      link: ["node:fs"],
     });
     expect(result.success, JSON.stringify(result.errors)).toBe(true);
     userBinary = result.binary;

@@ -31,7 +31,7 @@ describe("#2647 — plumb --allow-fs into the node:fs no-provider gate", () => {
     const result = await compile(readFileSyncSrc, {
       fileName: "x.ts",
       target: "wasi",
-      linkNodeShims: true,
+      link: ["node:fs"],
     });
     expect(result.success).toBe(false);
     const msgs = (result.errors ?? []).map((e) => e.message).join("\n");
@@ -44,7 +44,7 @@ describe("#2647 — plumb --allow-fs into the node:fs no-provider gate", () => {
     const result = await compile(readFileSyncSrc, {
       fileName: "x.ts",
       target: "wasi",
-      linkNodeShims: true,
+      link: ["node:fs"],
       allowFs: true,
     });
     // The capability map resolves the path-based member through the `js-host-fs`
@@ -53,7 +53,7 @@ describe("#2647 — plumb --allow-fs into the node:fs no-provider gate", () => {
     expect(msgs).not.toMatch(NO_PROVIDER_RE);
   });
 
-  it("the flag toggles the gate WITHOUT --link-node-shims too (gate keys off --target wasi)", async () => {
+  it("the flag toggles the gate WITHOUT --link node:fs too (gate keys off --target wasi)", async () => {
     // allowFs off → error fires.
     const off = await compile(readFileSyncSrc, { fileName: "x.ts", target: "wasi" });
     const offMsgs = (off.errors ?? []).map((e) => e.message).join("\n");
@@ -79,7 +79,7 @@ export function main(): void {
       const result = await compile(src, {
         fileName: "x.ts",
         target: "wasi",
-        linkNodeShims: true,
+        link: ["node:fs"],
         allowFs,
       });
       expect(result.success).toBe(true);

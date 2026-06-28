@@ -90,8 +90,6 @@ Options:
                     console.log / process.std*.write lower to writeSync(1|2, ...),
                     stdin is readSync(0, ...). Off by default — every namespace is
                     inline-lowered into a self-contained module.
-  --link-node-shims DEPRECATED (#2783): alias for '--link node:fs'. Emits a
-                    deprecation note. Use '--link node:fs' instead.
   --emulate <env>   Emulate a host runtime's globals so they type-check without
                     @types/node. 'node' = ambient process/etc.; 'none' = off.
                     Auto-enabled (type-level only) when the source imports a
@@ -164,8 +162,9 @@ let utf8Storage = false;
 let strictNoHostImports: boolean | undefined;
 // #2783 — general dynamic-linking axis: namespaces to leave as link-time
 // imports (satisfied by a preloaded provider) instead of inline-lowering.
-// `--link-node-shims` is a deprecated alias for `--link node:fs`. WASI only;
-// default empty keeps the self-contained inline path for every namespace.
+// `--link node:fs` is the spelling for what was once `--link-node-shims` (that
+// alias was removed, not deprecated). WASI only; default empty keeps the
+// self-contained inline path for every namespace.
 const linkedNamespaces = new Set<string>();
 // #2603 — `--emulate node`: opt into Node API emulation (ambient `process` typing).
 // `emulateExplicit` records that the user passed `--emulate`/`--no-emulate`, so a
@@ -249,19 +248,13 @@ for (let i = 0; i < args.length; i++) {
     // as link-time imports for instantiation-time satisfaction instead of
     // inline-lowering. Any external namespace works ("leave-as-import" is
     // universal); `node:fs` additionally selects the import-and-link std-IO
-    // path. WASI only (ignored otherwise, mirroring the old linkNodeShims gate).
+    // path. WASI only (ignored otherwise).
     const ns = arg.startsWith("--link=") ? arg.slice("--link=".length) : args[++i];
     if (!ns) {
       console.error("--link requires a namespace argument (e.g. --link node:fs)");
       process.exit(1);
     }
     linkedNamespaces.add(ns);
-  } else if (arg === "--link-node-shims") {
-    // #2783 — deprecated alias for `--link node:fs`. Kept working; emits a soft
-    // deprecation note. (#2625 originally introduced the per-module node:<mod>
-    // shims; the lower-vs-import decision is now the general `--link` axis.)
-    console.error("warning: --link-node-shims is deprecated; use --link node:fs instead.");
-    linkedNamespaces.add("node:fs");
   } else if (arg === "--emulate" || arg.startsWith("--emulate=")) {
     // #2603 — opt into (or out of) Node API emulation. `--emulate node` gives the
     // checker an ambient `process` typing so Node globals type-check without

@@ -7,7 +7,7 @@
 // `fs.writeSync(fd, …)` — fd-based (integer fd 0/1/2), NOT path-based, mapping
 // 1:1 to WASI fd_read / fd_write with no filesystem.
 //
-// Under `--target wasi` + `linkNodeShims: true`, a module that imports
+// Under `--target wasi` + `link: ["node:fs"]`, a module that imports
 // `{ readSync, writeSync } from "node:fs"` emits wasm imports against module
 // `"node:fs"` (the declared interface, not the shim that satisfies it) and
 // carries NO direct `wasi_snapshot_preview1` fd_read/fd_write import for that
@@ -115,7 +115,7 @@ export function main(): void {
 
 describe("#2631 — node:fs fd-based readSync/writeSync shim", () => {
   it("emits node:fs imports (memory + readSync/writeSync), no direct wasi fd_read/fd_write", async () => {
-    const result = await compile(FRAMED_ECHO, { fileName: "x.ts", target: "wasi", linkNodeShims: true });
+    const result = await compile(FRAMED_ECHO, { fileName: "x.ts", target: "wasi", link: ["node:fs"] });
     expect(result.success).toBe(true);
     const wat = result.wat ?? "";
     // Imports the node:fs interface: memory + the IO functions it uses.
@@ -132,7 +132,7 @@ describe("#2631 — node:fs fd-based readSync/writeSync shim", () => {
   });
 
   it("links node-fs.wasm and round-trips a framed message byte-for-byte", async () => {
-    const result = await compile(FRAMED_ECHO, { fileName: "x.ts", target: "wasi", linkNodeShims: true });
+    const result = await compile(FRAMED_ECHO, { fileName: "x.ts", target: "wasi", link: ["node:fs"] });
     expect(result.success).toBe(true);
     // frame: len=5 (LE) + a body with non-printable / high bytes.
     const frame = Uint8Array.from([0x05, 0x00, 0x00, 0x00, 0x00, 0xff, 0x0a, 0x7f, 0x80]);
@@ -161,7 +161,7 @@ export function main(): void {
   while (n < out.length) { const w = writeSync(1, out, n); if (w <= 0) break; n = n + w; }
 }
 `;
-    const result = await compile(src, { fileName: "x.ts", target: "wasi", linkNodeShims: true });
+    const result = await compile(src, { fileName: "x.ts", target: "wasi", link: ["node:fs"] });
     expect(result.success).toBe(true);
     // stdin has 5 bytes available, but we only ever request 3.
     const stdin = Uint8Array.from([0x41, 0x42, 0x43, 0x44, 0x45]);
@@ -183,7 +183,7 @@ export function main(): void {
   while (m < b.length) { const w = writeSync(1, b, m); if (w <= 0) break; m = m + w; }
 }
 `;
-    const result = await compile(src, { fileName: "x.ts", target: "wasi", linkNodeShims: true });
+    const result = await compile(src, { fileName: "x.ts", target: "wasi", link: ["node:fs"] });
     expect(result.success).toBe(true);
     const { stdout, stderr } = linkAndRun(result.binary, new Uint8Array(0));
     expect(Array.from(stdout)).toEqual([0x6f, 0x6b]); // "ok" only on fd=1
@@ -197,7 +197,7 @@ export function main(): string {
   return readFileSync("/etc/hostname", "utf-8");
 }
 `;
-    const result = await compile(src, { fileName: "x.ts", target: "wasi", linkNodeShims: true });
+    const result = await compile(src, { fileName: "x.ts", target: "wasi", link: ["node:fs"] });
     expect(result.success).toBe(false);
     const msgs = (result.errors ?? []).map((e) => e.message).join("\n");
     expect(msgs).toMatch(/readFileSync/);
@@ -207,12 +207,12 @@ export function main(): string {
     expect(msgs).toMatch(/(un)?available under `?--target wasi`?|no filesystem|filesystem provider|#2631/);
   });
 
-  it("linkNodeShims is ignored for non-WASI targets (no node:fs shim import)", async () => {
+  it("link: ['node:fs'] is ignored for non-WASI targets (no node:fs shim import)", async () => {
     const src = `
 import { readSync, writeSync } from "node:fs";
 export function noop(): void {}
 `;
-    const result = await compile(src, { fileName: "x.ts", linkNodeShims: true });
+    const result = await compile(src, { fileName: "x.ts", link: ["node:fs"] });
     // Non-WASI: the node:fs fd-shim path does not apply.
     expect(result.wat ?? "").not.toContain('(import "node:fs" "readSync"');
   });
