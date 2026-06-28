@@ -323,3 +323,7 @@ byte-neutral harness can be scaffolded against S3).
 - **#2696 file overlap**: S4 edits `node-fs-api.ts`; must land after #2696.
 - **Browser packaging**: real-types loading is meaningless in the browser without
   S5; until then `--target node` in-browser falls back to the mirror.
+
+## Residual (as of #2199, PO reconcile 2026-06-28)
+
+NOT done — architecture scoping issue. The referencing PR landed the #2736/#2734 axis-unification FOUNDATION (--platform → --target {wasi,node,deno,web}). The actual #2698 slices remain: S1 (real @types/node under --target node), S2 (real Deno lib under --target deno), S3 (link-satisfaction registry keyed on hostMode), S4 (link-time used+unsatisfiable gate), S5/S6. Do NOT implement from this file alone; S1/S3/S4 are senior-dev. Stays ready.
