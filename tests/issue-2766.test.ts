@@ -160,4 +160,38 @@ describe("#2766 — IR ElementAccess prove-then-specialize", () => {
       ).toBe(25);
     });
   });
+
+  describe("R1 F1 i32-element corruption guard (#2766 — F1 narrowed to f64/number[])", () => {
+    // The folded-in #2760 F1 OOB→undefined widening boxed the in-bounds element
+    // via coerceType(i32→externref) = __box_number. `i32` is overloaded: it backs
+    // boolean[] AND symbol-handle arrays. Boxing a non-number i32 as a number
+    // corrupted it. These guard the two real test262 regressions the merge_group
+    // caught (Object/values/symbols-omitted.js + 21 Array/prototype/map boolean
+    // tests) by exercising the same element-read paths directly.
+    it("symbol element identity survives Object.values()[i] (was boxed as __box_number)", async () => {
+      expect(
+        await run(
+          `export function test(): boolean { const s = Symbol("v"); const o = { k: s }; const vs = Object.values(o); return vs[0] === s; }`,
+        ),
+      ).toBe(1);
+    });
+
+    it("boolean map result reads are true/false, not numbers (host)", async () => {
+      expect(
+        await run(
+          `export function test(): boolean { const r = [1, -1, 2].map((x: number) => x > 0); return r[0] === true && r[1] === false && r[2] === true; }`,
+        ),
+      ).toBe(1);
+    });
+
+    it("boolean map result reads are true/false in STANDALONE (the regressed lane)", async () => {
+      const r = await compile(
+        `export function test(): boolean { const r = [1, -1, 2].map((x: number) => x > 0); return r[0] === true && r[1] === false && r[2] === true; }`,
+        { target: "standalone" },
+      );
+      expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+      const { instance } = await WebAssembly.instantiate(r.binary, {});
+      expect((instance.exports.test as () => number)()).toBe(1);
+    });
+  });
 });

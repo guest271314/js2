@@ -211,11 +211,43 @@ cause is the folded-in **R1 legacy F1**, NOT the R2 IR change):
   main correctly uses **`__box_symbol`**). The `i32` kind is overloaded
   (`boolean[]` AND `symbol[]`/other handles are all i32), so the kind check alone
   can't honor R1's stated "number[]/boolean[] only" scope.
-- **Fix** (`f1ElementIsNumberOrBoolean` in `property-access.ts`): gate both F1
-  call sites on the element-access expression's **TS type** being number-like /
-  boolean-like (stripping `undefined`/`null`). A `symbol` / object / `any` /
-  `unknown` element now falls through to the normal, type-correct read+box. This
-  is strictly a *narrowing* of R1's over-broad gate → it only removes buggy
-  firings and restores `main` behavior for non-number/boolean arrays; it cannot
-  introduce new regressions. Verified: the symbol test passes 10/10, R1's
-  number[]/boolean[] tests still green.
+- **Fix (attempt 1, superseded):** gated F1 on the element-access TS type being
+  number-like/boolean-like. This fixed the symbol case but KEPT boolean[].
+
+### Second merge_group park — same root cause, boolean i32 (the deeper fix)
+
+After attempt 1 the `merge_group` re-parked on **`merge shard reports` only**
+(`check for test262 regressions` now PASSED — symbol fixed). The remaining failure
+was the **STANDALONE lane** (`#1897` guard): **net -21**, all 21 in
+`built-ins/Array/prototype/map/15.4.4.19-*` — `boolean[]` map results where
+`result[0] === true` failed because R1's F1 boxed the boolean `true` (i32 1) via
+`__box_number` → the number `1`, and standalone's native strict `===` gives
+`1 !== true`. (js-host stayed green: in host the map result is an externref array,
+so F1 never fired there — a host/standalone representation difference.) Confirmed
+deterministic + `experimentalIR:false` → again the folded-in **R1 legacy F1**, not
+the R2 IR change.
+
+The root cause is the SAME systemic flaw: `i32` is overloaded (`boolean[]` AND
+symbol-handle AND other handle reps), and `emitPlainArrayUndefinedOobGet` boxes
+the in-bounds value with `coerceType(i32→externref)` = `__box_number` — only
+correct for an actual number. Allowing boolean (attempt 1) still mis-boxed it.
+
+- **Fix (final):** narrow F1 to the **`f64` (number[]) element ONLY** — drop `i32`
+  from both `compileElementAccessBody` F1 branches (removed the TS-type helper;
+  `f64` is unambiguously a number, so `__box_number` is always correct). `i32`
+  elements (boolean[] / symbol-handle / other) and externref/object elements all
+  fall through to the unchanged shared-helper read (bounds-checked, type-default
+  OOB — never traps, matches pre-F1 `main`). `boolean[]` OOB→`undefined` is now
+  **deferred** (was buggy in standalone anyway) until F1 boxes per the element's
+  semantic type (`__box_boolean`/`__box_symbol`) — a follow-up for #2760.
+- **Verified:** all 21 standalone map tests + the symbol test pass; **standalone
+  diff vs baseline across map/Object.values/keys/entries = 0 new pass→fail
+  regressions**; R1 number[] tests + R2 tests green (the boolean[]-OOB R1 test was
+  updated to assert the deferred type-default); `check:ir-fallbacks` +
+  `check:stack-balance` + biome + tsc clean. Local guard tests added to
+  `tests/issue-2766.test.ts` (symbol identity + boolean map reads, host +
+  standalone).
+
+> **Note for #2760 rework:** R1's F1 boolean[]/symbol support needs a type-aware
+> box (use the element's correct box fn, not the kind-based `coerceType`) before
+> re-widening i32 elements. Filed as the follow-up scope above.

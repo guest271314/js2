@@ -79,11 +79,22 @@ describe("#2760 F1 — plain-array OOB read → JS `undefined` (primitive elemen
     });
   });
 
-  describe("host — boolean[] OOB reads undefined", () => {
-    it("a[OOB] === undefined", async () => {
+  // #2766 — boolean[] OOB→undefined is DEFERRED. F1 boxes the in-bounds element
+  // via `coerceType(i32→externref)` = `__box_number`, which is only correct for a
+  // genuine number. `i32` is overloaded (boolean[] AND symbol-handle arrays), so
+  // F1 was narrowed to the `f64` (number[]) element only — boxing a boolean (or
+  // symbol-handle) i32 as a number corrupted it (regressed
+  // `Object/values/symbols-omitted.js` + 21 standalone `Array/prototype/map`
+  // boolean tests). Until F1 boxes per the element's semantic type
+  // (`__box_boolean`/`__box_symbol`), an OOB boolean[] read returns the
+  // bounds-checked type-default (`false`) — never traps, matches pre-F1 main.
+  describe("host — boolean[] OOB is the type-default (undefined-widening deferred, #2766)", () => {
+    it("a[OOB] is the bounds-checked default `false`, NOT a trap (=== undefined deferred)", async () => {
+      // The point is trap-freedom + no symbol/boolean i32 corruption; spec-correct
+      // OOB→undefined for boolean[] is the documented follow-up.
       expect(
         await run(`export function test(): boolean { const a: boolean[] = [true, false]; return a[4] === undefined; }`),
-      ).toBe(1);
+      ).toBe(0); // false === undefined → 0 (deferred; was 1 under the over-broad F1)
     });
   });
 
