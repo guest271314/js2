@@ -37,7 +37,7 @@ import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { compile } from "../src/index.js";
+import { compile, compileProject, entryHasRelativeImports } from "../src/index.js";
 
 const NM_DIR = join(__dirname, "..", "examples", "native-messaging");
 const MiB = 1024 * 1024;
@@ -68,8 +68,14 @@ const compileCache = new Map<string, Awaited<ReturnType<typeof compile>>>();
 async function getCompiled(file: string): Promise<Awaited<ReturnType<typeof compile>>> {
   let r = compileCache.get(file);
   if (!r) {
-    const src = await readFile(join(NM_DIR, file), "utf-8");
-    r = await compile(src, { fileName: file, target: "wasi", skipSemanticDiagnostics: true });
+    const path = join(NM_DIR, file);
+    const src = await readFile(path, "utf-8");
+    // Mirror the CLI's routing (#2771): nm_deno / nm_node_fs statically import the
+    // shared `./nm_sync_framing` core (#2778), so they must go through the
+    // multi-file bundler; the others stay on the single-source path.
+    r = entryHasRelativeImports(src)
+      ? await compileProject(path, { target: "wasi", skipSemanticDiagnostics: true })
+      : await compile(src, { fileName: file, target: "wasi", skipSemanticDiagnostics: true });
     compileCache.set(file, r);
   }
   return r;
