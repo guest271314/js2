@@ -11,7 +11,7 @@
  * #2633 — synchronous std-IO moved off the hallucinated `process.stdin.read`
  * surface onto `node:fs` fd-based `readSync(0, …)` / `writeSync(1, …)` (the
  * faithful Node primitives), so these tests now drive the linear I/O path via
- * `node:fs` under `--link-node-shims` (the node-fs shim owns the WASI fd_*).
+ * `node:fs` under `--link node:fs` (the node-fs shim owns the WASI fd_*).
  *
  * These tests guard:
  *   1. The emitted module is VALID wasm (the eager-allocator index-shift bug
@@ -35,21 +35,21 @@ import { buildNodeFsShim } from "../scripts/build-node-fs-shim.mjs";
 // { offset })` fills the buffer; `writeSync(1, buf)` echoes it.
 const FS_IO = `import { readSync, writeSync } from "node:fs";`;
 
-/** Compile `source` with --target wasi --link-node-shims; throw on compile error. */
+/** Compile `source` with --target wasi --link node:fs; throw on compile error. */
 async function compileWasi(source: string): Promise<Uint8Array> {
-  const result = await compile(source, { fileName: "test.ts", target: "wasi", linkNodeShims: true });
+  const result = await compile(source, { fileName: "test.ts", target: "wasi", link: ["node:fs"] });
   if (!result.success) {
     throw new Error(`compile failed: ${result.errors?.map((e) => e.message).join("; ") ?? "unknown"}`);
   }
   return result.binary;
 }
 
-/** Compile to WAT (emitText) under --link-node-shims; throw on compile error. */
+/** Compile to WAT (emitText) under --link node:fs; throw on compile error. */
 async function compileWat(source: string): Promise<string> {
   const result = await compile(source, {
     fileName: "test.ts",
     target: "wasi",
-    linkNodeShims: true,
+    link: ["node:fs"],
     emitText: true,
   } as never);
   if (!result.success) {

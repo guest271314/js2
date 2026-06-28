@@ -1,7 +1,9 @@
 ---
 id: 2788
 title: "malformed_wasm: __module_init call type mismatch (array/01-basic, closures/10-mutual)"
-status: ready
+status: done
+assignee: ttraenkler/sdev-2788-malformed
+completed: 2026-06-28
 sprint: current
 created: 2026-06-28
 updated: 2026-06-28
@@ -120,3 +122,69 @@ inside a regular function body.
 - #2143 added the default-pipeline `WebAssembly.validate` lane that catches
   exactly this class of "compiler said success but the module is malformed"
   bug.
+
+## Implementation notes (resolution)
+
+**Root cause (single, shared between both cases).** `compileConsoleCall`
+(`src/codegen/expressions/builtins.ts`) selects the host import variant
+(`console_${method}_{number|bool|string|externref}`) from the argument's
+**static TS type**, then compiled the argument with **no expected-type hint** and
+emitted the call. When the argument's *emitted* ValType did not match the
+selected import's parameter ValType, the operand was left mistyped → invalid
+wasm. The two corpus failures are mirror images of this one skew:
+
+- **`array/01-basic` (the regression).** `console.log(a[i])` for a `number[]`.
+  The TS type is `number` → `console_log_number` (f64 param). But #2760 (the
+  bounds-checked OOB→undefined element read) widens an *unproven* primitive
+  element read to a boxed-or-undefined **externref**, and that widening only
+  self-suppresses when a numeric `expectedType` is threaded into the element
+  access (#2760 did this for `Math.*`, not for `console.log`). So the read
+  produced `if (result externref)` where the call wanted f64 →
+  `call[0] expected type f64, found if of type externref`. This is what flipped
+  the file from `match` → `malformed_wasm`.
+- **`closures/10-mutual`.** `console.log(isEven(n))` for a mutually-recursive
+  boolean kernel. TS can't resolve the circular return type → reports `any` →
+  `console_log_externref` (externref param). But the compiler lowers `isEven` to
+  return a **primitive scalar** — f64 via `inferNumericReturnTypes`' implicit-any
+  promotion on the legacy path, and i32 on the default IR path (the IR selector
+  re-types the kernel to its true boolean i32 *after* `__module_init` has already
+  compiled the legacy call). Either way a raw scalar reached an `externref`
+  parameter → `call[0] expected type externref, found call of type {f64,i32}`.
+  (The legacy-vs-IR signature skew is incidental; the bug reproduces with
+  `experimentalIR:false` too — the fix is robust to both.)
+
+**Fix.** In `compileConsoleCall`, coerce each argument to the selected import's
+parameter ValType using the existing coercion machinery (no special-case
+lowering):
+
+- number variant → compile the arg with `expectedType {kind:"f64"}` (the #2760
+  hint suppresses the element-read widening at the source, so the read emits an
+  unboxed f64 directly — no box/unbox round-trip);
+- bool variant → `expectedType {kind:"i32"}`;
+- externref variant → compile the arg **without** an `expectedType` hint, then
+  `coerceType(result, externref)` **only when `result` is a primitive scalar**
+  (f64/i32/i64). This is the load-bearing nuance: threading
+  `expectedType:externref` into the element/array path would route an *array*
+  operand through the iterable adapter (`__make_iterable`) and change the printed
+  output. Ref/externref operands already match the param and are left untouched.
+
+**Byte-neutrality.** Verified SHA-identical output vs `origin/main` for every
+already-valid `console.log` shape (number/bool/string literals & vars, object,
+array, template, concat, `any`-returning fn). The only byte change is at the
+two call sites that were *already invalid* before the fix — coercion can only
+turn a mismatched operand into a matching one, so it cannot regress a
+previously-valid module.
+
+**Scope boundary.** `array/01-basic` now prints `3,1,3` (fully `match`).
+`closures/10-mutual` now emits **valid wasm** but prints `1`/`0` rather than
+`true`/`false`, because the boolean kernel's i32 result carries no boolean brand
+at module-init time (TS reports `any`; `inferNumericReturnTypes` treats booleans
+as numeric). That residual is *valid wasm, wrong output* — explicitly **#2787**'s
+lane, not this issue's ("scoped to the 2 invalid-module codegen bugs only"). The
+diff-test delta gate only fails on `match → non-match`; `closures/10-mutual` was
+`runtime_error` in the baseline (never `match`), so moving it to a mismatch is
+not a gate regression and it leaves the malformed lane as required.
+
+**Regression test:** `tests/issue-2788.test.ts` pins validity for both shapes
+under IR on/off, the `3,1,3` array output, and the array-operand byte-path
+guard.

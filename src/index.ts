@@ -277,37 +277,23 @@ export interface CompileOptions {
    *  Default: false (calls to fs.readFileSync / fs.writeFileSync raise a compile error). */
   allowFs?: boolean;
   /**
-   * #2625 / #2633 — emit the per-module linkable `node:<mod>` shims instead of
-   * inlining the host APIs. WASI-only (ignored for other targets). When set,
-   * std-IO is routed through `node:fs`: the user module imports `readSync`/
-   * `writeSync` plus its linear memory from `node:fs` and carries no
-   * `wasi_snapshot_preview1` import for stream IO; console.log / process.std*.write
-   * lower to `writeSync(1|2, …)` and synchronous stdin is `readSync(0, …)`. Link
-   * against `node-fs.wasm` (or `--preload node:fs=node-fs.wasm` under wasmtime).
-   * Default off — the self-contained inline `fd_read`/`fd_write` path stays. The
-   * bespoke `js2wasm:node-process` shim (`process.stdin.read`/`stdout_write`/…)
-   * was retired in #2633; `process.stdin.read(buf, offset)` is no longer a
-   * recognised API (it matched no real Node surface — use `node:fs` `readSync`).
+   * #2783 — general `--link <namespace>` dynamic-linking axis (the ONLY
+   * link-vs-inline control; the old `linkNodeShims` boolean was removed). Each
+   * listed namespace is left as a **link-time import** (satisfied at
+   * instantiation by a preloaded provider module, e.g.
+   * `wasmtime --preload node:fs=node-fs.wasm`) instead of being inline-lowered to
+   * a self-contained module. "Leave-as-import" is the universal capability (any
+   * external namespace can be a wasm import); "inline-lower" is the special
+   * capability the compiler only has for a known few (`node:fs` fd IO). So for an
+   * arbitrary namespace `link: ["acme:telemetry"]` simply permits its imports
+   * past the strict `--no-host-imports` / WASI gate; for `node:fs` it
+   * additionally selects the import-and-link std-IO path (the user module imports
+   * `readSync`/`writeSync` + its linear memory from `node:fs` and carries no
+   * `wasi_snapshot_preview1` import for stream IO; console.log /
+   * process.std*.write lower to `writeSync(1|2, …)`, stdin is `readSync(0, …)`).
    *
-   * @deprecated (#2783) Use `link: ["node:fs"]` instead. Kept as a back-compat
-   * alias: `buildCodegenOptions` folds `linkNodeShims === true` into the `link`
-   * set as `"node:fs"`, so the observable behaviour is byte-identical.
-   */
-  linkNodeShims?: boolean;
-  /**
-   * #2783 — general `--link <namespace>` dynamic-linking axis. Each listed
-   * namespace is left as a **link-time import** (satisfied at instantiation by a
-   * preloaded provider module, e.g. `wasmtime --preload node:fs=node-fs.wasm`)
-   * instead of being inline-lowered to a self-contained module. "Leave-as-import"
-   * is the universal capability (any external namespace can be a wasm import);
-   * "inline-lower" is the special capability the compiler only has for a known
-   * few (`node:fs` fd IO). So for an arbitrary namespace `--link <ns>` simply
-   * permits its imports past the strict `--no-host-imports` / WASI gate; for
-   * `node:fs` it additionally selects the import-and-link codegen path.
-   *
-   * WASI-gated (mirrors `linkNodeShims`): ignored for non-WASI targets.
-   * `linkNodeShims: true` is folded in as `"node:fs"`. Default empty — every
-   * namespace stays standalone / inline-lowered.
+   * WASI-gated: ignored for non-WASI targets. Default empty — every namespace
+   * stays standalone / inline-lowered. CLI: `--link <ns>` (repeatable).
    */
   link?: string[];
   /**

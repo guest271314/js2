@@ -125,7 +125,7 @@ export function main(): void {
   const fd = openSync("/etc/hostname", "r");
 }
 `;
-    const result = await compile(src, { fileName: "x.ts", target: "wasi", linkNodeShims: true });
+    const result = await compile(src, { fileName: "x.ts", target: "wasi", link: ["node:fs"] });
     expect(result.success).toBe(false);
     const msgs = (result.errors ?? []).map((e) => e.message).join("\n");
     // Precise, deliberate — names the member and the target, not an opaque crash.
@@ -162,7 +162,7 @@ export function main(): void {
   while (n < r) { const w = writeSync(1, buf, n); if (w <= 0) break; n = n + w; }
 }
 `;
-    const result = await compile(src, { fileName: "x.ts", target: "wasi", linkNodeShims: true });
+    const result = await compile(src, { fileName: "x.ts", target: "wasi", link: ["node:fs"] });
     expect(result.success).toBe(true);
     const wat = result.wat ?? "";
     expect(wat).toContain('(import "node:fs" "readSync"');

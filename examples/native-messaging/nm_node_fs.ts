@@ -3,7 +3,7 @@
 //
 //   npx js2wasm examples/native-messaging/nm_node_fs.ts --target wasi -o out
 //
-// `--target wasi` ALONE (no `--link-node-shims`) emits a SELF-CONTAINED WASI
+// `--target wasi` ALONE (no `--link node:fs`) emits a SELF-CONTAINED WASI
 // Preview-1 command module: it imports ONLY `wasi_snapshot_preview1` (fd_read /
 // fd_write), owns + exports its own `memory`, and runs directly under a WASI
 // host such as wasmtime — no node:fs shim, no Node runtime (#2655). This is the
@@ -17,7 +17,7 @@
 // `writeSync(1,…)` are fd-based (integer fd 0=stdin, 1=stdout), NOT path-based —
 // no filesystem involved; under real node they call the real fs.
 //
-//   npx js2wasm examples/native-messaging/nm_node_fs.ts --target wasi --link-node-shims -o out
+//   npx js2wasm examples/native-messaging/nm_node_fs.ts --target wasi --link node:fs -o out
 //
 // is the VARIANT that lowers the same calls to imported `node:fs` shim calls
 // (`node-fs.wat`, which maps them to WASI fd_read / fd_write) — useful when the

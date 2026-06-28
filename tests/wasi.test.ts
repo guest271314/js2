@@ -246,7 +246,7 @@ describe("WASI: fd_read — stdin polyfill", () => {
           writeSync(1, buf);
         }
       `,
-      { target: "wasi", linkNodeShims: true },
+      { target: "wasi", link: ["node:fs"] },
     );
     expect(used.success, used.errors.map((e) => e.message).join("\n")).toBe(true);
     expect(used.wat).toContain('(import "node:fs" "readSync"');

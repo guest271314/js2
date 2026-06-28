@@ -716,11 +716,10 @@ function buildCodegenOptions(
     utf8Storage: options.utf8Storage,
     testRuntime: options.testRuntime,
     wasi: options.target === "wasi",
-    // #2783 — normalize the dynamic-linking axis into a single deduped `link`
-    // set. The deprecated `linkNodeShims: true` alias folds in as `"node:fs"`,
-    // so any programmatic caller (and the CLI's `--link-node-shims` alias) keeps
-    // working byte-identically while the underlying state generalizes.
-    link: [...new Set([...(options.link ?? []), ...(options.linkNodeShims ? ["node:fs"] : [])])],
+    // #2783 — the dynamic-linking axis: namespaces to leave as link-time imports
+    // (deduped). `link: ["node:fs"]` is the only spelling; the old `linkNodeShims`
+    // boolean was removed.
+    link: [...new Set(options.link ?? [])],
     standalone: options.target === "standalone",
     strictNoHostImports: options.strictNoHostImports,
     // (#2119) thread module-strictness inference uniformly across all drivers.

@@ -86,7 +86,7 @@ Mirrors `examples/native-messaging/node-fs.wat`:
    issues the syscall; `edge.js` reads/writes the `[ptr, ptr+len)` range directly
    from JS (no scratch needed).
 
-Since #2633, **all** std-IO under `--link-node-shims` flows through `node:fs`:
+Since #2633, **all** std-IO under `--link node:fs` flows through `node:fs`:
 `console.log`/`warn`/`error` and `process.stdout`/`stderr.write` lower to
 `writeSync(1|2, …)`, and synchronous stdin is `readSync(0, …)`. `node:fs` owns
 the single shared linear memory; the bespoke `js2wasm:node-process` shim — and

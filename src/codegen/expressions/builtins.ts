@@ -13,7 +13,7 @@ import { ensureLateImport, flushLateImportShifts } from "../expressions/late-imp
 import { addFuncType, ensureWasiWriteAnyStringHelper } from "../index.js";
 import { ensureNativeStringExternBridge } from "../native-strings.js";
 import type { InnerResult } from "../shared.js";
-import { compileExpression, VOID_RESULT } from "../shared.js";
+import { coerceType, compileExpression, VOID_RESULT } from "../shared.js";
 import { compileStringLiteral } from "../string-ops.js";
 import { emitThrowRangeError, emitThrowTypeError } from "./helpers.js";
 import { isStaticNaN, tryStaticToNumber } from "./misc.js";
@@ -33,9 +33,9 @@ function compileConsoleCall(
 
   for (const arg of expr.arguments) {
     const argType = ctx.checker.getTypeAtLocation(arg);
-    compileExpression(ctx, fctx, arg);
 
     if (isStringType(argType)) {
+      compileExpression(ctx, fctx, arg);
       // Fast mode: flatten + marshal native string to externref before passing to host
       if (ctx.nativeStrings && ctx.nativeStrTypeIdx >= 0) {
         ensureNativeStringExternBridge(ctx);
@@ -54,17 +54,42 @@ function compileConsoleCall(
         fctx.body.push({ op: "call", funcIdx });
       }
     } else if (isBooleanType(argType)) {
+      // (#2788) Coerce the argument to the console import's param ValType (i32).
+      // The static-type-selected variant fixes the import signature; passing the
+      // expected ValType makes compileExpression reconcile any mismatch (e.g. a
+      // boxed value) to i32 rather than leaving an invalid-typed operand.
+      compileExpression(ctx, fctx, arg, { kind: "i32" });
       const funcIdx = ctx.funcMap.get(`console_${method}_bool`);
       if (funcIdx !== undefined) {
         fctx.body.push({ op: "call", funcIdx });
       }
     } else if (isNumberType(argType)) {
+      // (#2788) Coerce to f64 — fixes `console.log(a[i])` where the bounds-checked
+      // element read (#2760) widened a `number[]` element to an `externref`
+      // (OOB→undefined) but the `console_${method}_number` import expects f64.
+      compileExpression(ctx, fctx, arg, { kind: "f64" });
       const funcIdx = ctx.funcMap.get(`console_${method}_number`);
       if (funcIdx !== undefined) {
         fctx.body.push({ op: "call", funcIdx });
       }
     } else {
-      // externref: DOM objects, class instances, anything else
+      // externref: DOM objects, class instances, anything else.
+      const res = compileExpression(ctx, fctx, arg);
+      // (#2788) When `f`'s TS return type is `any` this externref variant is
+      // selected, but the compiled function may return a primitive scalar
+      // (f64/i32/i64) — e.g. a recursive boolean/numeric kernel whose return TS
+      // can't resolve (mutual recursion → implicit any). A raw scalar operand to
+      // `console_${method}_externref` (externref param) is invalid wasm, so box
+      // it to externref here. Ref/externref results already match the param and
+      // must NOT be re-coerced via an `expectedType` hint: that would route an
+      // array through the iterable adapter (`__make_iterable`) and change the
+      // printed output. Only scalars need bridging.
+      if (res && typeof res === "object" && "kind" in res) {
+        const k = (res as ValType).kind;
+        if (k === "f64" || k === "i32" || k === "i64") {
+          coerceType(ctx, fctx, res as ValType, { kind: "externref" });
+        }
+      }
       const funcIdx = ctx.funcMap.get(`console_${method}_externref`);
       if (funcIdx !== undefined) {
         fctx.body.push({ op: "call", funcIdx });

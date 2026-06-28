@@ -25,7 +25,7 @@ const hostPath = join(here, "..", "examples", "native-messaging", "nm_node_fs.ts
 describe("#1530 Native Messaging host example", () => {
   it("compiles examples/native-messaging/nm_node_fs.ts under --target wasi", async () => {
     const src = readFileSync(hostPath, "utf-8");
-    const result = await compile(src, { fileName: "nm_node_fs.ts", target: "wasi", linkNodeShims: true });
+    const result = await compile(src, { fileName: "nm_node_fs.ts", target: "wasi", link: ["node:fs"] });
     expect(result.success).toBe(true);
     expect(result.binary.length).toBeGreaterThan(0);
   });
@@ -36,7 +36,7 @@ describe("#1530 Native Messaging host example", () => {
     // interface) and NOT wasi_snapshot_preview1 fd_read/fd_write directly. The
     // shim (node-fs.wat) maps node:fs → WASI; the user module stays host-agnostic.
     const src = readFileSync(hostPath, "utf-8");
-    const result = await compile(src, { fileName: "nm_node_fs.ts", target: "wasi", linkNodeShims: true });
+    const result = await compile(src, { fileName: "nm_node_fs.ts", target: "wasi", link: ["node:fs"] });
     expect(result.success).toBe(true);
     expect(result.wat).toContain('(import "node:fs" "readSync"'); // fs.readSync(0, …)
     expect(result.wat).toContain('(import "node:fs" "writeSync"'); // fs.writeSync(1|2, …)
@@ -50,7 +50,7 @@ describe("#1530 Native Messaging host example", () => {
 
   it("produces a binary that WebAssembly accepts", async () => {
     const src = readFileSync(hostPath, "utf-8");
-    const result = await compile(src, { fileName: "nm_node_fs.ts", target: "wasi", linkNodeShims: true });
+    const result = await compile(src, { fileName: "nm_node_fs.ts", target: "wasi", link: ["node:fs"] });
     expect(result.success).toBe(true);
     // Throws on an invalid module; passing means the structure/types are sound.
     expect(() => new WebAssembly.Module(result.binary)).not.toThrow();
@@ -201,7 +201,7 @@ export function main(): void {
 
   it("compiles the shipped example and round-trips it byte-exactly", async () => {
     const src = readFileSync(hostPath, "utf-8");
-    const result = await compile(src, { fileName: "nm_node_fs.ts", target: "wasi", linkNodeShims: true });
+    const result = await compile(src, { fileName: "nm_node_fs.ts", target: "wasi", link: ["node:fs"] });
     expect(result.success).toBe(true);
 
     // The shipped host echoes the received body verbatim (byte-for-byte, no
@@ -227,7 +227,7 @@ export function main(): void {
   // assert the response is the exact same 1 MiB body with the right prefix.
   it("echoes a 1 MiB framed body byte-exactly (#389 large-message regression)", async () => {
     const src = readFileSync(hostPath, "utf-8");
-    const result = await compile(src, { fileName: "nm_node_fs.ts", target: "wasi", linkNodeShims: true });
+    const result = await compile(src, { fileName: "nm_node_fs.ts", target: "wasi", link: ["node:fs"] });
     expect(result.success).toBe(true);
 
     const SIZE = 1024 * 1024; // 1 MiB
@@ -266,7 +266,7 @@ export function main(): void {
   // exceeds the 1 MiB cap, and the flattened elements equal the inputs in order.
   it("re-chunks large JSON arrays into valid <=1 MiB JSON frames across one session (#389)", async () => {
     const src = readFileSync(hostPath, "utf-8");
-    const result = await compile(src, { fileName: "nm_node_fs.ts", target: "wasi", linkNodeShims: true });
+    const result = await compile(src, { fileName: "nm_node_fs.ts", target: "wasi", link: ["node:fs"] });
     expect(result.success).toBe(true);
 
     const CHUNK = 1024 * 1024;

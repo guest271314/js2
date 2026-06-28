@@ -59,7 +59,7 @@ function linkAndRun(userBinary: Uint8Array): { stdout: Uint8Array; stderr: Uint8
 }
 
 async function compileWasi(src: string) {
-  return compile(src, { fileName: "x.ts", target: "wasi", linkNodeShims: true });
+  return compile(src, { fileName: "x.ts", target: "wasi", link: ["node:fs"] });
 }
 
 describe("#2639 — node:fs writeSync string + DataView codegen", () => {

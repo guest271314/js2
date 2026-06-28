@@ -6038,7 +6038,7 @@ function collectConsoleImports(ctx: CodegenContext, sourceFile: ts.SourceFile): 
 
 /**
  * #2633 — does the source use stream-write IO that lowers, under
- * `--link-node-shims`, to `node:fs` `writeSync` (console.log/warn/error,
+ * `--link node:fs`, to `node:fs` `writeSync` (console.log/warn/error,
  * process.stdout/stderr.write)? Drives the node:fs import registration in
  * `registerWasiImports`: even a program that never `import`s `node:fs`
  * explicitly needs the `node:fs` `writeSync` import the moment it writes to a
@@ -6093,7 +6093,7 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
   // the write scratch in page 2 (WASI_WRITE_SCRATCH_START), well above any
   // data segment, and reserve 3 pages so both regions always exist.
   if (ctx.linkNodeShims) {
-    // #2633 — std-IO under `--link-node-shims` is satisfied entirely by the
+    // #2633 — std-IO under `--link node:fs` is satisfied entirely by the
     // `node:fs` interface (fd-based `readSync`/`writeSync`), the faithful
     // synchronous Node primitives. The bespoke `js2wasm:node-process` shim
     // (`stdout_write`/`stderr_write`/`stdin_read`) was retired: its functions
@@ -6204,7 +6204,7 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
   // #2684 — Deno synchronous stdio usage (`Deno.stdin.readSync` /
   // `Deno.{stdout,stderr}.writeSync`). Tracked separately from needsFdRead/Write
   // so the linkNodeShims recompute below can't drop the syscalls a Deno program
-  // needs (Deno lowers to the DIRECT WASI path regardless of --link-node-shims,
+  // needs (Deno lowers to the DIRECT WASI path regardless of --link node:fs,
   // exactly like the raw-wasi import path). Re-asserted after that recompute.
   let denoUsesReadSync = false;
   let denoUsesWriteSync = false;
@@ -6402,7 +6402,7 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
     needsFdRead = needsStdinReactor;
   } else {
     // #2655 — DIRECT WASI Preview-1 path: a standalone `--target wasi` module
-    // (no `--link-node-shims`) that imports `readSync`/`writeSync` from node:fs
+    // (no `--link node:fs`) that imports `readSync`/`writeSync` from node:fs
     // lowers fd-based `readSync(fd, buf, …)` / `writeSync(fd, buf, …)` straight to
     // `wasi_snapshot_preview1.fd_read` / `fd_write` (a plain BLOCKING read — NOT
     // the async reactor's non-blocking fd_read + poll_oneoff). `needsFdRead` is
@@ -6427,7 +6427,7 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
   // #2684 — Deno synchronous stdio lowers to the DIRECT WASI fd_read/fd_write
   // path (deno-api.ts), so its syscall imports must be registered regardless of
   // the shim/direct recompute above (mirrors the raw-wasi re-assertion). A Deno
-  // program under --link-node-shims is nonsensical, but this keeps the direct
+  // program under --link node:fs is nonsensical, but this keeps the direct
   // path's imports from being dropped either way.
   if (denoUsesReadSync) needsFdRead = true;
   if (denoUsesWriteSync) needsFdWrite = true;
@@ -7567,7 +7567,7 @@ export function ensureWasiWriteAnyStringHelper(ctx: CodegenContext, useStderr: b
  * it to the *runtime* fd. This backs the STRING overload of `node:fs`
  * `writeSync(fd, str, position?, encoding?)`, where the fd is an arbitrary
  * integer (not just stdout/stderr). Two modes (#2655):
- *   - shim (`--link-node-shims`): `writeSync(fd, ptr, len)` returns the byte count.
+ *   - shim (`--link node:fs`): `writeSync(fd, ptr, len)` returns the byte count.
  *   - direct (standalone `--target wasi`): build a `{ base=ptr, len }` iovec at
  *     memory[0..7], call `fd_write(fd, iovs=0, 1, nwritten=8)`, load nwritten.
  */
@@ -9930,6 +9930,17 @@ export function addUnionImports(ctx: CodegenContext): void {
     typeIdx: boxBoolType,
   });
 
+  // __box_symbol: (i32) → externref  (#2792 — boxes a symbol-handle i32 as a JS
+  // Symbol via the identity-stable host symbol cache. The F1 `symbol[]` OOB read
+  // routes here (HOST mode only — standalone defers `symbol[]`; see
+  // `f1ElementBoxType`). Same (i32)→externref signature as __box_boolean. Only
+  // reached on the host path; in standalone `addUnionImports` returns before this
+  // block, so no symbol host import ever leaks into a standalone module.)
+  addImport(ctx, "env", "__box_symbol", {
+    kind: "func",
+    typeIdx: boxBoolType,
+  });
+
   // __box_bigint: (i64) → externref  (#1644 — boxes a branded-bigint i64 as a
   // JS bigint; JS-BigInt-integration makes the host body identity)
   const boxBigType = addFuncType(ctx, [{ kind: "i64" }], [{ kind: "externref" }]);
@@ -9974,6 +9985,7 @@ export function addUnionImports(ctx: CodegenContext): void {
       "__unbox_boolean",
       "__box_number",
       "__box_boolean",
+      "__box_symbol",
       "__box_bigint",
       "__to_bigint",
       "__bigint_ctor",
@@ -13348,7 +13360,7 @@ function registerNodeBuiltinImports(ctx: CodegenContext, builtins: NodeBuiltinIm
       // program uses the fd-based synchronous primitives readSync / writeSync:
       // those are stripped by import preprocessing and lowered by node-fs-api.ts
       // (tryCompileNodeFsCall) to EITHER imported `node:fs` shim calls
-      // (--link-node-shims) OR direct `wasi_snapshot_preview1.fd_read`/`fd_write`
+      // (--link node:fs) OR direct `wasi_snapshot_preview1.fd_read`/`fd_write`
       // syscalls (standalone --target wasi, #2655). Either way the `fs` builtin
       // import itself is consumed at compile time and must not error here.
       // Path-based fs usage is rejected at the call site (PATH_BASED_FS_FNS in

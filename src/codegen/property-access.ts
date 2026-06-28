@@ -5575,14 +5575,24 @@ export function isSafeBoundsEliminated(fctx: FunctionContext, expr: ts.ElementAc
  *   - `i32` element whose receiver element TS type is genuinely `boolean` →
  *     `{ kind:"i32", boolean:true }` → `__box_boolean`. Re-enables the
  *     `boolean[]` arm #2766 deferred.
+ *   - (HOST ONLY) `i32` element whose receiver element TS type is genuinely
+ *     `symbol` → `{ kind:"i32", symbol:true }` → `__box_symbol` (#2792), via the
+ *     identity-stable host symbol cache. The brand fires only for a genuine
+ *     i32-storage `symbol[]`; `symbols-omitted` stays green regardless (that
+ *     canary's `Object.values(any)` result is an externref array, so F1 defers).
  *
  * Deferred (returns `null`, unchanged from current main):
- *   - `i32` element that is NOT provably boolean — `symbol[]` (standalone has no
- *     native `__box_symbol` yet, #2785 fast-follow; keeps `symbols-omitted`
- *     green), packed `number[]` (i32/i8/i16), or any other handle rep;
+ *   - (STANDALONE) `symbol[]` — a native standalone `__box_symbol` needs a new
+ *     `__box_symbol_struct` carrier; registering one unconditionally in
+ *     `addUnionImportsAsNativeFuncs` shifted standalone type/func indices and
+ *     broke ~311 unrelated tests with `illegal cast` traps in
+ *     `__obj_find`/`__extern_set` (the type-index-shift / DCE-remap hazard).
+ *     Carved to a follow-up; standalone `symbol[]` reads the i32 handle as before.
+ *   - `i32` element that is NOT provably boolean or symbol — packed `number[]`
+ *     (i32/i8/i16), or any other handle rep;
  *   - `externref` / `ref` / object elements.
  * Conservative: any checker failure, or a union whose non-nullish members are
- * not ALL boolean, defers.
+ * not ALL boolean (or not ALL symbol), defers.
  */
 function f1ElementBoxType(ctx: CodegenContext, expr: ts.ElementAccessExpression, elementType: ValType): ValType | null {
   if (elementType.kind === "f64") return { kind: "f64" };
@@ -5598,6 +5608,28 @@ function f1ElementBoxType(ctx: CodegenContext, expr: ts.ElementAccessExpression,
   if (valueParts.length === 0) return null;
   if (valueParts.every((p) => (p.flags & ts.TypeFlags.BooleanLike) !== 0)) {
     return { kind: "i32", boolean: true };
+  }
+  // (#2792) `symbol[]` — every value part is a Symbol. The element is an i32
+  // handle; reconstruct the `symbol` brand (erased in `arrDef.element` by vec
+  // dedup) so `coerceType(i32 → externref)` boxes via `__box_symbol` (the
+  // identity-stable host symbol cache) rather than `__box_number`, which would
+  // surface a Number for an OOB-safe symbol read.
+  //
+  // HOST MODE ONLY. Standalone defers `symbol[]` (returns null → the shared
+  // bounded read, exactly as #2785 left it). A native standalone `__box_symbol`
+  // would need a new `__box_symbol_struct` carrier; registering one
+  // unconditionally in `addUnionImportsAsNativeFuncs` shifted standalone
+  // type/func indices and broke ~311 unrelated standalone tests with
+  // `illegal cast` traps in `__obj_find`/`__extern_set` (the
+  // type-index-shift / DCE-remap hazard — see #2792 notes). The host arm is
+  // index-safe (the js-host lane had zero regressions), so it ships; standalone
+  // `symbol[]` is carved to a follow-up that can add the carrier without the
+  // broad index shift.
+  if (
+    !noJsHost(ctx) &&
+    valueParts.every((p) => (p.flags & (ts.TypeFlags.ESSymbol | ts.TypeFlags.UniqueESSymbol)) !== 0)
+  ) {
+    return { kind: "i32", symbol: true };
   }
   return null;
 }
@@ -6668,20 +6700,21 @@ export function compileElementAccessBody(
     // — the S2 blast radius) and NOT the `$__regexp_match_vec` exotic (its
     // index/input/groups fields are property reads with their own spec
     // semantics; deferred). This F1 slice widens the PRIMITIVE element kinds the
-    // type-aware box (#2785) can box correctly — `number[]` (f64) and `boolean[]`
-    // (branded i32), via `f1ElementBoxType` below. Other `i32` elements
-    // (`symbol[]` / packed-number / other handle reps), object-element (`ref`)
-    // arrays, and externref (`any[]`/`string[]`) keep their typed result and are
-    // deferred (`f1BoxType === null`).
+    // type-aware box (#2785) can box correctly — `number[]` (f64), `boolean[]`
+    // (branded i32), and `symbol[]` (branded i32, #2792) — via `f1ElementBoxType`
+    // below. Other `i32` elements (packed-number / other handle reps),
+    // object-element (`ref`) arrays, and externref (`any[]`/`string[]`) keep their
+    // typed result and are deferred (`f1BoxType === null`).
     const isRegexMatchVec = typeDef.fields.length >= 4 && typeDef.fields[2]?.name === "index";
     const numericHint = expectedType?.kind === "f64" || expectedType?.kind === "i32";
     const oobUndefined =
       !numericHint &&
       classifyTypedArrayType(ctx.checker.getTypeAtLocation(expr.expression), ctx.checker) === "other" &&
       !isRegexMatchVec;
-    // (#2785) The type-aware box ValType for the F1 widen (null = defer). Boxes
-    // `number[]` (f64) and `boolean[]` (branded i32) correctly; defers symbol[] /
-    // other i32 / externref. Computed even when `oobUndefined` is false (cheap).
+    // (#2785/#2792) The type-aware box ValType for the F1 widen (null = defer).
+    // Boxes `number[]` (f64), `boolean[]` (branded i32), and `symbol[]` (branded
+    // i32) correctly; defers packed-number / other i32 / externref. Computed even
+    // when `oobUndefined` is false (cheap).
     const f1BoxType = f1ElementBoxType(ctx, expr, arrDef.element);
     // Unwrap: struct.get data field, then index into backing array
     fctx.body.push({ op: "struct.get", typeIdx, fieldIdx: 1 }); // get data from vec
@@ -6719,15 +6752,18 @@ export function compileElementAccessBody(
       // typed-array / array-method callers are byte-identical; flipping the
       // shared default was the S2 leak).
       //
-      // #2785 — the element is boxed by its SEMANTIC type, not its Wasm kind:
-      // `f1BoxType` (reconstructed from the receiver TS type, since the brand is
-      // erased in `arrDef.element`) is `{f64}` for `number[]` (`__box_number`) or
-      // `{i32, boolean}` for `boolean[]` (`__box_boolean`). This re-enables the
-      // `boolean[]` arm #2766 deferred — boxing a boolean as `__box_number` made
-      // it the number 1, regressing the standalone map tests
-      // (`result[0] === true`). `symbol[]` and other i32/object/externref
-      // elements stay deferred (`f1BoxType === null`) and fall through to the
-      // unchanged shared-helper read below (bounds-checked, never traps).
+      // #2785/#2792 — the element is boxed by its SEMANTIC type, not its Wasm
+      // kind: `f1BoxType` (reconstructed from the receiver TS type, since the
+      // brand is erased in `arrDef.element`) is `{f64}` for `number[]`
+      // (`__box_number`), `{i32, boolean}` for `boolean[]` (`__box_boolean`), or
+      // `{i32, symbol}` for `symbol[]` (`__box_symbol`). #2785 re-enabled the
+      // `boolean[]` arm #2766 deferred (boxing a boolean as `__box_number` made it
+      // the number 1, regressing the standalone map tests); #2792 completes the
+      // `symbol[]` arm now that a native standalone `__box_symbol` exists (a symbol
+      // handle boxed as `__box_number` would surface a Number). Packed-number /
+      // other i32 / object / externref elements stay deferred (`f1BoxType ===
+      // null`) and fall through to the unchanged shared-helper read below
+      // (bounds-checked, never traps).
       emitPlainArrayUndefinedOobGet(ctx, fctx, arrTypeIdx, arrDef.element, f1BoxType);
       return { kind: "externref" };
     } else {
@@ -6790,14 +6826,14 @@ export function compileElementAccessBody(
     // externref reads too (in-bounds ≠ present).
     if (ctx.usesArrayHoles && typeDef.element.kind === "externref") emitHoleToUndefined(ctx, fctx);
   } else if (oobUndefinedArr && f1BoxTypeArr !== null) {
-    // (#2760 F1, #2785 type-aware box) Plain-array OOB → `undefined` for a
+    // (#2760 F1, #2785/#2792 type-aware box) Plain-array OOB → `undefined` for a
     // PRIMITIVE element: widen to a boxed-or-undefined externref, boxed by the
     // element's SEMANTIC type (`f1BoxTypeArr`: `{f64}` number[] → `__box_number`,
-    // `{i32, boolean}` boolean[] → `__box_boolean`). Bounds-eliminated reads above
-    // keep the unboxed fast path. `symbol[]` / other i32 / object / externref
-    // elements stay deferred (`f1BoxTypeArr === null`) and fall through to the
-    // unchanged shared-helper read below. See the full note at the vec-struct
-    // call site above.
+    // `{i32, boolean}` boolean[] → `__box_boolean`, `{i32, symbol}` symbol[] →
+    // `__box_symbol`). Bounds-eliminated reads above keep the unboxed fast path.
+    // Packed-number / other i32 / object / externref elements stay deferred
+    // (`f1BoxTypeArr === null`) and fall through to the unchanged shared-helper
+    // read below. See the full note at the vec-struct call site above.
     emitPlainArrayUndefinedOobGet(ctx, fctx, typeIdx, typeDef.element, f1BoxTypeArr);
     return { kind: "externref" };
   } else {

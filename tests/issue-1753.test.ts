@@ -24,7 +24,7 @@ async function compileHost(): Promise<Uint8Array> {
   if (!hostBinary) {
     hostBinary = (async () => {
       const src = readFileSync(hostPath, "utf-8");
-      const result = await compile(src, { fileName: "nm_node_fs.ts", target: "wasi", linkNodeShims: true });
+      const result = await compile(src, { fileName: "nm_node_fs.ts", target: "wasi", link: ["node:fs"] });
       expect(result.success, result.success ? "" : result.errors.map((e) => e.message).join("\n")).toBe(true);
       expect(() => new WebAssembly.Module(result.binary)).not.toThrow();
       return result.binary;
