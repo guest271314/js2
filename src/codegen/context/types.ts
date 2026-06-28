@@ -74,8 +74,17 @@ export interface CodegenOptions {
    * process.std*.write lower to `writeSync(1|2, …)`. `node-fs.wasm` implements
    * the interface over WASI. The bespoke `js2wasm:node-process` shim was retired
    * (#2633). Default off — the inline fd_read/fd_write path stays as fallback.
+   *
+   * @deprecated (#2783) Folded into `link` as `"node:fs"` by `buildCodegenOptions`.
    */
   linkNodeShims?: boolean;
+  /**
+   * #2783 — general dynamic-linking axis. Namespaces to leave as link-time
+   * imports (satisfied by a preloaded provider) instead of inline-lowering.
+   * `linkNodeShims: true` is folded in here as `"node:fs"`. WASI-gated in
+   * `create-context.ts` (ignored for non-WASI targets).
+   */
+  link?: string[];
   /** Standalone target (#1470): pure WasmGC, no JS host imports and no WASI
    *  runtime. Implies `nativeStrings: true` and refuses to emit any
    *  `wasm:js-string` namespace or `env::__concat_*` / `__extern_toString` /
@@ -1728,8 +1737,23 @@ export interface CodegenContext {
    * process.std*.write lower to `writeSync(1|2, …)`; the bespoke
    * `js2wasm:node-process` shim was retired (#2633). See `linkNodeShims` in
    * `CodegenOptions`.
+   *
+   * #2783 — now a **derived** value: `linkedNamespaces.has("node:fs")`. The two
+   * are computed together in `create-context.ts` from the same (WASI-gated)
+   * `link` set so they can never drift. Keeping this boolean lets the ~30
+   * existing `ctx.linkNodeShims` read sites stay zero-churn while the underlying
+   * state generalizes to an arbitrary set of linked namespaces.
    */
   linkNodeShims: boolean;
+  /**
+   * #2783 — the set of external namespaces left as **link-time imports** for
+   * this compile (WASI-gated; empty for non-WASI targets). `node:fs` membership
+   * additionally drives the import-and-link std-IO codegen path (see
+   * `linkNodeShims`, derived from this set). For an arbitrary namespace,
+   * membership only permits its imports past the strict `--no-host-imports` /
+   * WASI leaked-host-import gate (`assertNoLeakedHostImports`).
+   */
+  linkedNamespaces: ReadonlySet<string>;
   /** #2631/#2633: func index of the imported `node:fs::readSync` (fd,ptr,len)->i32 (-1 = not registered). */
   nodeFsReadSyncIdx: number;
   /** #2631/#2633: func index of the imported `node:fs::writeSync` (fd,ptr,len)->i32 (-1 = not registered). */
