@@ -13900,27 +13900,27 @@ export function collectEnumDeclarations(ctx: CodegenContext, sourceFile: ts.Sour
  * → externref). `resolveWasmType(undefined)` is a numeric (i32) slot, so a later
  * REFERENCE assignment is coerced to i32 `0` and the node ref is dropped.
  *
- * The fix routes a `void`-expression initializer (and any purely `undefined` /
- * `void` declared type) through the SAME externref slot that `= undefined`
- * already gets — a correctness alignment, not new behaviour. Used by BOTH the
- * `var` hoister and the let/const declaration path so the slot type is uniform
- * (a `var` reuses its hoisted slot, so both sites MUST agree).
+ * The fix routes a `void`-expression initializer through the SAME externref slot
+ * that `= undefined` already gets — a correctness alignment, not new behaviour.
+ * Used by BOTH the `var` hoister and the let/const declaration path so the slot
+ * type is uniform (a `var` reuses its hoisted slot, so both sites MUST agree).
+ *
+ * IMPORTANT — trigger on the `void`-EXPRESSION INITIALIZER ONLY, not on a bare
+ * "purely `undefined`/`void` declared type". A binding can be `undefined`-typed
+ * for unrelated reasons (e.g. `const afterA = obj.a` reading an optional
+ * `a?: number` after `delete obj.a`), and those MUST stay a numeric slot — the
+ * delete / optional-property machinery encodes `undefined` as an f64 sNaN
+ * sentinel and relies on the local being f64/i32 so `afterA === undefined`
+ * detects the sentinel. Forcing those to externref boxes the sentinel via
+ * `__box_number` and breaks the `=== undefined` check (regressed
+ * delete-sentinel #1112). The `void 0` expression is the precise, narrow signal
+ * for the acorn evolving-local idiom.
  */
-export function varBindingNeedsExternrefForUndefined(
-  decl: ts.VariableDeclaration | undefined,
-  varType: ts.Type,
-): boolean {
+export function varBindingNeedsExternrefForUndefined(decl: ts.VariableDeclaration | undefined): boolean {
   // `var x = (void 0)` / `var x = void <expr>` — strip parens to find the void.
   let init = decl?.initializer;
   while (init && ts.isParenthesizedExpression(init)) init = init.expression;
-  if (init && ts.isVoidExpression(init)) return true;
-  // Purely `undefined` / `void` declared type (no other union constituents).
-  // Unions like `number | undefined` carry the Union flag, not Undefined, so
-  // they are left alone; genuine numeric/boolean/string locals are untouched.
-  return (
-    (varType.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void)) !== 0 &&
-    (varType.flags & ~(ts.TypeFlags.Undefined | ts.TypeFlags.Void)) === 0
-  );
+  return init !== undefined && ts.isVoidExpression(init);
 }
 
 export function hoistVarDeclarations(
@@ -14075,7 +14075,7 @@ function hoistVarDecl(ctx: CodegenContext, fctx: FunctionContext, decl: ts.Varia
       }
     }
     const wasmType: ValType =
-      initForcesExternref || isNullablePrimitiveType(varType) || varBindingNeedsExternrefForUndefined(decl, varType)
+      initForcesExternref || isNullablePrimitiveType(varType) || varBindingNeedsExternrefForUndefined(decl)
         ? { kind: "externref" as const }
         : resolveWasmType(ctx, varType);
     if (initForcesExternref) ctx.externrefAccessorVars.add(name);

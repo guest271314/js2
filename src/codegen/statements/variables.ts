@@ -113,12 +113,14 @@ const HOST_ARRAY_STRING_METHODS = new Set(["split"]);
 
 function localTypeForDeclaration(ctx: CodegenContext, type: ts.Type, decl?: ts.VariableDeclaration): ValType {
   if (isNullablePrimitiveType(type)) return { kind: "externref" };
-  // (#2806) A `var x = (void 0)` / purely `undefined`|`void` binding needs an
-  // externref slot (the same one `= undefined` gets), so a later reference
-  // assignment isn't coerced to numeric `0`. Shared with the var-hoister so the
-  // hoisted slot and this declaration path agree (a `var` reuses its hoisted
-  // slot). See `varBindingNeedsExternrefForUndefined`.
-  if (varBindingNeedsExternrefForUndefined(decl, type)) return { kind: "externref" };
+  // (#2806) A `var x = (void 0)` binding needs an externref slot (the same one
+  // `= undefined` gets), so a later reference assignment isn't coerced to numeric
+  // `0`. Shared with the var-hoister so the hoisted slot and this declaration path
+  // agree (a `var` reuses its hoisted slot). NARROW: void-EXPRESSION initializer
+  // only — a bare `undefined`-typed binding (e.g. an optional-property read) must
+  // stay numeric for the delete/undefined f64-sentinel machinery (#1112). See
+  // `varBindingNeedsExternrefForUndefined`.
+  if (varBindingNeedsExternrefForUndefined(decl)) return { kind: "externref" };
   return resolveWasmType(ctx, type);
 }
 
