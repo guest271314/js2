@@ -1,8 +1,9 @@
 ---
 id: 2784
 title: "[SENIOR-DEV ONLY] S3 of #2773 — array-element / host-boundary native struct identity (re-proxy loss closes acorn parse) — closes #2681/#2686"
-status: ready
-assignee: ttraenkler/unassigned
+status: done
+completed: 2026-06-28
+assignee: ttraenkler/sendev-substrate
 sprint: current
 priority: high
 horizon: l
@@ -14,10 +15,21 @@ task_type: bugfix
 area: codegen
 language_feature: value-representation
 goal: value-rep-substrate
-related: [2773, 2681, 2686, 2660, 1712]
+related: [2773, 2681, 2686, 2660, 1712, 2794]
 depends_on: [2773]
 blocks: [2681, 2686]
 ---
+
+> **DONE (PR #2260, 2026-06-28).** The S3 native-vec-aware method + element dispatch
+> shipped: `.push`/`.pop` → `__vec_push`/`__vec_pop` and numeric `recv[i]` →
+> `__vec_get` via a runtime `ref.test` vec guard (host/gc), with reserve-then-fill
+> plumbing for the finalize-built helpers. This closed the scopeStack storage-split
+> → compiled acorn `parse("x")` → ExpressionStatement/Identifier and
+> `parse("foo(bar,baz)")` → CallExpression. The over-scoped "closes #2681/#2686"
+> framing was wrong: a DISTINCT residual (var-decl + binary-expression THROW, a
+> `raise`/`unexpected` in the expr/stmt-parse path, NOT the vec class) keeps
+> #2681/#2686 open — carved to **#2794**.
+
 
 # #2784 — S3 of #2773: array-element / host-boundary native struct identity
 
