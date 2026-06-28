@@ -12789,7 +12789,7 @@ function collectExternDeclarations(
       // inline-lowered to poll_oneoff/fd_read by tryWasiTimerCall (calls.ts) when
       // `ctx.wasi`. Registering them as `env.*` host imports here therefore only
       // leaks a spurious "not on the dual-mode allowlist" dropped-import warning
-      // on the otherwise-runnable standalone nm_node_process.ts module
+      // on the otherwise-runnable standalone nm_js2wasm_node_process.ts module
       // (loopdive/js2#389 bug 2). Skip the stub under WASI.
       if (ctx.wasi && WASI_STDIN_REACTOR_INTRINSICS.has(name)) continue;
       // #1663: parseInt / parseFloat have no JS host under WASI / standalone —
@@ -13486,7 +13486,7 @@ function collectDeclaredGlobals(ctx: CodegenContext, libFile: ts.SourceFile, use
     // addImport would drop it AND, because the dropped import leaves no funcMap
     // entry, the `declaredGlobals.set` below never fires either — the whole
     // registration is already a no-op EXCEPT for the spurious "not on the
-    // dual-mode allowlist" warning it emits. nm_node_process.ts trips this via
+    // dual-mode allowlist" warning it emits. nm_js2wasm_node_process.ts trips this via
     // the `String.fromCharCode` receiver in the injected process.stdin prelude
     // (loopdive/js2#389 bug 2: `env.global_String`). Skip it so the standalone
     // module compiles cleanly; bare identity uses already had no host global

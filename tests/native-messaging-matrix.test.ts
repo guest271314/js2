@@ -15,16 +15,16 @@
  * runtime — the matrix therefore runs in every CI shard, not only where
  * `wasmtime` happens to be installed.
  *
- *   - `nm_deno.ts`    / `nm_wasi_p1.ts`  — VERBATIM streamers: a frame of any size
+ *   - `nm_js2wasm_deno.ts`    / `nm_js2wasm_wasi_p1.ts`  — VERBATIM streamers: a frame of any size
  *     is echoed back byte-for-byte through a fixed window. Asserted byte-EXACT at
  *     1 / 64 / 128 MiB.
- *   - `nm_node_fs.ts` — re-chunks a body LARGER than the browser 1 MiB cap into a
+ *   - `nm_js2wasm_node_fs.ts` — re-chunks a body LARGER than the browser 1 MiB cap into a
  *     sequence of valid <=1 MiB JSON frames (its documented design). A single
  *     >1 MiB frame does NOT come back byte-identical, so it is asserted on
  *     ROUND-TRIP correctness instead: every emitted frame is <=1 MiB and a valid
  *     `[…]`, and concatenating the frame interiors reconstructs the original
  *     array body exactly. Tested at 1 / 64 / 128 MiB.
- *   - `nm_node_process.ts` — async `process.stdin` reactor. #2777 replaced the
+ *   - `nm_js2wasm_node_process.ts` — async `process.stdin` reactor. #2777 replaced the
  *     prelude's per-byte chunk build (and the example's growing-cons-rope
  *     `buffered`) with amortized-growth BYTE buffers, making the read side O(n);
  *     it now echoes 1 / 64 / 128 MiB byte-EXACT under the in-process reactor shim
@@ -43,7 +43,7 @@ const SIZES: { label: string; bytes: number }[] = [
   { label: "64 MiB", bytes: 64 * MiB },
   { label: "128 MiB", bytes: 128 * MiB },
 ];
-// The browser per-host->extension-message cap nm_node_fs re-chunks to stay under.
+// The browser per-host->extension-message cap nm_js2wasm_node_fs re-chunks to stay under.
 const FRAME_CAP = 1 * MiB;
 
 // ---- compile cache -----------------------------------------------------------
@@ -53,8 +53,8 @@ async function getCompiled(file: string): Promise<Awaited<ReturnType<typeof comp
   if (!r) {
     const path = join(NM_DIR, file);
     const src = await readFile(path, "utf-8");
-    // Mirror the CLI's routing (#2771): nm_deno / nm_node_fs statically import the
-    // shared `./nm_sync_framing` core (#2778), so they must go through the
+    // Mirror the CLI's routing (#2771): nm_js2wasm_deno / nm_js2wasm_node_fs statically import the
+    // shared `./nm_js2wasm_sync_framing` core (#2778), so they must go through the
     // multi-file bundler; the others stay on the single-source path.
     r = entryHasRelativeImports(src)
       ? await compileProject(path, { target: "wasi", skipSemanticDiagnostics: true })
@@ -94,7 +94,7 @@ function parseFrames(stream: Uint8Array): Uint8Array[] {
 /**
  * Build a valid JSON-array body `[null,null,…,null]` of approximately `approx`
  * bytes, as a lean Buffer (no giant intermediate JS string). Used to exercise
- * nm_node_fs's >1 MiB re-chunk path with a realistic browser payload (the #389
+ * nm_js2wasm_node_fs's >1 MiB re-chunk path with a realistic browser payload (the #389
  * reporter's `Array(n).fill(null)`).
  */
 function jsonArrayBody(approx: number): Buffer {
@@ -186,7 +186,7 @@ async function runFdShim(binary: Uint8Array, stdin: Uint8Array): Promise<Uint8Ar
 
 // ---- in-process async-reactor shim (bulk copies) -----------------------------
 /**
- * Drive the `nm_node_process` ASYNC `process.stdin` reactor in-process — the
+ * Drive the `nm_js2wasm_node_process` ASYNC `process.stdin` reactor in-process — the
  * event-loop analogue of {@link runFdShim} for the synchronous variants. The
  * compiled module's `_start` runs a synchronous run loop that calls
  * `poll_oneoff` (fd0 FD_READ + clock subscriptions), then `__rl_stdin_drain`
@@ -304,7 +304,7 @@ async function runReactorShim(binary: Uint8Array, stdin: Uint8Array): Promise<Ui
 
 // =============================================================================
 describe("#2775 — verbatim streamers echo 1/64/128 MiB byte-for-byte", () => {
-  for (const file of ["nm_deno.ts", "nm_wasi_p1.ts"]) {
+  for (const file of ["nm_js2wasm_deno.ts", "nm_js2wasm_wasi_p1.ts"]) {
     describe(file, () => {
       for (const { label, bytes } of SIZES) {
         it(`echoes a ${label} frame byte-identically`, { timeout: 180_000 }, async () => {
@@ -323,10 +323,10 @@ describe("#2775 — verbatim streamers echo 1/64/128 MiB byte-for-byte", () => {
   }
 });
 
-describe("#2775 — nm_node_fs re-chunk round-trips 1/64/128 MiB correctly", () => {
+describe("#2775 — nm_js2wasm_node_fs re-chunk round-trips 1/64/128 MiB correctly", () => {
   for (const { label, bytes } of SIZES) {
     it(`reassembles a ~${label} array body from valid <=1 MiB frames`, { timeout: 180_000 }, async () => {
-      const r = await getCompiled("nm_node_fs.ts");
+      const r = await getCompiled("nm_js2wasm_node_fs.ts");
       expect(r.success, r.success ? "" : `compile error: ${r.errors?.[0]?.message}`).toBe(true);
       const body = jsonArrayBody(bytes);
       const out = await runFdShim(r.binary!, frame(body));
@@ -355,8 +355,8 @@ describe("#2775 — nm_node_fs re-chunk round-trips 1/64/128 MiB correctly", () 
   }
 });
 
-describe("#2777 — nm_node_process echoes 1/64/128 MiB byte-for-byte (async reactor)", () => {
-  // nm_node_process is reactor-driven (async `process.stdin`), so it is driven by
+describe("#2777 — nm_js2wasm_node_process echoes 1/64/128 MiB byte-for-byte (async reactor)", () => {
+  // nm_js2wasm_node_process is reactor-driven (async `process.stdin`), so it is driven by
   // the in-process {@link runReactorShim} (poll_oneoff/fd_read/fd_write) rather
   // than the synchronous {@link runFdShim}. Before #2777 its read side was O(n^2)
   // — the prelude built each chunk byte-by-byte and the example re-flattened its
@@ -366,15 +366,15 @@ describe("#2777 — nm_node_process echoes 1/64/128 MiB byte-for-byte (async rea
   // EVERY CI run, byte-identical, matching the other three streaming variants.
   for (const { label, bytes } of SIZES) {
     it(`echoes a ${label} frame byte-identically`, { timeout: 180_000 }, async () => {
-      const r = await getCompiled("nm_node_process.ts");
+      const r = await getCompiled("nm_js2wasm_node_process.ts");
       expect(r.success, r.success ? "" : `compile error: ${r.errors?.[0]?.message}`).toBe(true);
-      expect(WebAssembly.validate(r.binary!), "nm_node_process.ts must validate").toBe(true);
+      expect(WebAssembly.validate(r.binary!), "nm_js2wasm_node_process.ts must validate").toBe(true);
       const input = frame(new Uint8Array(bytes).fill(0x61));
       const out = await runReactorShim(r.binary!, input);
-      expect(out.length, `nm_node_process ${label} echo length`).toBe(input.length);
+      expect(out.length, `nm_js2wasm_node_process ${label} echo length`).toBe(input.length);
       expect(
         Buffer.compare(Buffer.from(out), Buffer.from(input)),
-        `nm_node_process ${label} must be byte-identical`,
+        `nm_js2wasm_node_process ${label} must be byte-identical`,
       ).toBe(0);
     });
   }

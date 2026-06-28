@@ -16,7 +16,7 @@ import { dirname, resolve } from "node:path";
 import { runWithEdge } from "./edge.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const wasmPath = process.argv[2] ? resolve(process.argv[2]) : resolve(here, "out", "nm_node_fs.wasm");
+const wasmPath = process.argv[2] ? resolve(process.argv[2]) : resolve(here, "out", "nm_js2wasm_node_fs.wasm");
 
 const userBinary = readFileSync(wasmPath);
 await runWithEdge(userBinary, { entry: "main" });

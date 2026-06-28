@@ -235,7 +235,7 @@ export function buildVecFromExternref(
   // (`__box_number`, a defined func) and only THEN registered `__array_from_iter`
   // / `__extern_get_idx`, shifting `boxIdx` by one onto `__str_to_number` — which
   // emitted `call $__str_to_number` with an f64 index argument where an externref
-  // is required, producing invalid Wasm (loopdive/js2#389 bug 3, nm_wasi_p3.ts:
+  // is required, producing invalid Wasm (loopdive/js2#389 bug 3, nm_js2wasm_wasi_p3.ts:
   // `type mismatch: expected externref, found f64`). Mirror
   // buildTupleFromIterableFallback's register-all-then-freeze discipline.
   ensureLateImport(ctx, "__extern_length", [{ kind: "externref" }], [{ kind: "f64" }]);

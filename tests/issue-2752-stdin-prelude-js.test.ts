@@ -37,7 +37,7 @@
  *      parsed as TS).
  *
  * The runtime gate (the unblocking criterion for loopdive/js2#389 + the v0.57.0
- * publish): the type-stripped `nm_node_process.js` echoes a framed message
+ * publish): the type-stripped `nm_js2wasm_node_process.js` echoes a framed message
  * byte-exact AND exits cleanly under wasmtime with stdin held OPEN + the in-band
  * zero-length shutdown frame (`process.stdin.destroy()`).
  */
@@ -171,13 +171,13 @@ main();
 describe("#2752 — type-stripped process.stdin program compiles + runs", () => {
   // ── Compile-only invariants (always run, no runtime needed) ──────────────
 
-  it("the esbuild-transpiled (type-stripped) nm_node_process.ts compiles to a pure-WASI module", async () => {
+  it("the esbuild-transpiled (type-stripped) nm_js2wasm_node_process.ts compiles to a pure-WASI module", async () => {
     // The reporter's exact pipeline: strip TS types, then compile the `.js`.
-    const tsSrc = readFileSync(join(NM_DIR, "nm_node_process.ts"), "utf-8");
+    const tsSrc = readFileSync(join(NM_DIR, "nm_js2wasm_node_process.ts"), "utf-8");
     const { code } = await esbuild.transform(tsSrc, { loader: "ts", format: "esm" });
     expect(code).toContain("process.stdin");
     expect(code).not.toContain(": string"); // types really are stripped
-    const r = await compile(code, { fileName: "nm_node_process.js", target: "wasi" });
+    const r = await compile(code, { fileName: "nm_js2wasm_node_process.js", target: "wasi" });
     expect(r.success, r.success ? "" : `compile error: ${r.errors?.[0]?.message}`).toBe(true);
     expect(WebAssembly.validate(r.binary!)).toBe(true);
     // No `env::*` host-import leak; pure WASI P1 — same module shape as the `.ts`.
@@ -216,9 +216,9 @@ describe("#2752 — type-stripped process.stdin program compiles + runs", () => 
     });
 
     async function buildStripped(name: string): Promise<string> {
-      const tsSrc = readFileSync(join(NM_DIR, "nm_node_process.ts"), "utf-8");
+      const tsSrc = readFileSync(join(NM_DIR, "nm_js2wasm_node_process.ts"), "utf-8");
       const { code } = await esbuild.transform(tsSrc, { loader: "ts", format: "esm" });
-      const r = await compile(code, { fileName: "nm_node_process.js", target: "wasi" });
+      const r = await compile(code, { fileName: "nm_js2wasm_node_process.js", target: "wasi" });
       expect(r.success, r.success ? "" : `compile error: ${r.errors?.[0]?.message}`).toBe(true);
       expect(WebAssembly.validate(r.binary!), "binary must validate").toBe(true);
       const path = join(tmpDir, `${name}.wasm`);

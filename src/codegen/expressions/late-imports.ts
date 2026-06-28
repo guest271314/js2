@@ -425,7 +425,7 @@ export function ensureLateImport(
   // predated the now-proven standalone path; leaving WASI on the host import
   // leaked an unsatisfiable `env::__extern_get` / `env::__extern_is_undefined`
   // the moment an `any`/externref receiver reached a dynamic `.length` / indexed
-  // read — exactly the bun/tsc-transpiled `nm_deno.js` symptom (the `Uint8Array`
+  // read — exactly the bun/tsc-transpiled `nm_js2wasm_deno.js` symptom (the `Uint8Array`
   // param types were stripped, so `out.length` / `out[i]` lower through the
   // polymorphic dyn-read dispatch whose host-object MISS arm calls
   // `__extern_get`). The Deno `fd_read`/`fd_write` stdio lowering itself already

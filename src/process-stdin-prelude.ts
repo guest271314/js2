@@ -184,7 +184,7 @@ class __Js2wasmReadable {
   // of building each 'data' chunk via per-byte string concatenation. Building the
   // chunk by \`this.chunk = this.chunk + String.fromCharCode(b)\` made a large
   // frame's read side quadratic (the consumer then re-flattened the growing
-  // cons-rope on every charCodeAt/substring), which SIGKILLed nm_node_process at
+  // cons-rope on every charCodeAt/substring), which SIGKILLed nm_js2wasm_node_process at
   // multi-MiB. The bytes now live in \`buf[head..tail)\`; the chunk STRING the
   // Node 'data' contract delivers is materialised ONCE per emit/read from that
   // slice (a single flatten), so consumers receive a FLAT string and their

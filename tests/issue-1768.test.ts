@@ -14,11 +14,11 @@ import ts from "typescript";
 import { compile } from "../src/index.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const hostPath = join(here, "..", "examples", "native-messaging", "nm_node_fs.ts");
+const hostPath = join(here, "..", "examples", "native-messaging", "nm_js2wasm_node_fs.ts");
 
 async function compileWasiJs(source: string, linkNodeFs = false) {
   return await compile(source, {
-    fileName: "nm_node_fs.js",
+    fileName: "nm_js2wasm_node_fs.js",
     allowJs: true,
     target: "wasi",
     optimize: 0,

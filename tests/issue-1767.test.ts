@@ -14,7 +14,7 @@ import { compile } from "../src/index.js";
 import { buildNodeFsShim } from "../scripts/build-node-fs-shim.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const hostPath = join(here, "..", "examples", "native-messaging", "nm_node_fs.ts");
+const hostPath = join(here, "..", "examples", "native-messaging", "nm_js2wasm_node_fs.ts");
 const ONE_MIB = 1024 * 1024;
 const ARRAY_ELEMENTS_PER_MIB = 209715;
 const REPORTED_ARRAY_ELEMENTS = ARRAY_ELEMENTS_PER_MIB * 64;
@@ -29,7 +29,7 @@ async function compileHost(): Promise<Uint8Array> {
   if (!hostBinary) {
     hostBinary = (async () => {
       const src = readFileSync(hostPath, "utf-8");
-      const result = await compile(src, { fileName: "nm_node_fs.ts", target: "wasi", link: ["node:fs"] });
+      const result = await compile(src, { fileName: "nm_js2wasm_node_fs.ts", target: "wasi", link: ["node:fs"] });
       expect(result.success, result.success ? "" : result.errors.map((e) => e.message).join("\n")).toBe(true);
       expect(() => new WebAssembly.Module(result.binary)).not.toThrow();
       return result.binary;

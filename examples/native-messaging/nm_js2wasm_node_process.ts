@@ -1,11 +1,11 @@
 // Native Messaging host, compiled to standalone WASI by js2wasm — the
 // **`node:process` async-stream** variant.
 //
-//   npx js2wasm examples/native-messaging/nm_node_process.ts --target wasi -o out
+//   npx js2wasm examples/native-messaging/nm_js2wasm_node_process.ts --target wasi -o out
 //
 // This is the faithful Node `process.stdin` / `process.stdout` expression of the
-// host. Where the sibling `nm_node_fs.ts` uses the SYNCHRONOUS `node:fs`
-// `readSync`/`writeSync(fd, …)` primitives, and `nm_wasi_p1.ts` speaks RAW
+// host. Where the sibling `nm_js2wasm_node_fs.ts` uses the SYNCHRONOUS `node:fs`
+// `readSync`/`writeSync(fd, …)` primitives, and `nm_js2wasm_wasi_p1.ts` speaks RAW
 // `wasi_snapshot_preview1` syscalls over linear memory, THIS variant uses the
 // real Node **streaming** stdio surface:
 //

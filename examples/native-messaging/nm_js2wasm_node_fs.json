@@ -1,7 +1,7 @@
 {
-  "name": "nm_node_fs",
+  "name": "nm_js2wasm_node_fs",
   "description": "js2wasm Native Messaging host (WASI)",
-  "path": "/ABSOLUTE/PATH/TO/examples/native-messaging/nm_node_fs.sh",
+  "path": "/ABSOLUTE/PATH/TO/examples/native-messaging/nm_js2wasm_node_fs.sh",
   "type": "stdio",
   "allowed_origins": ["chrome-extension://YOUR_EXTENSION_ID_HERE/"]
 }
