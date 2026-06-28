@@ -52,26 +52,74 @@
 // after the same subscription drop.) Feeding the host a bounded buffer that hits
 // EOF still exits via the `'end'` path, exactly as before.
 
-// The buffered, not-yet-echoed input. Each char's code is a raw input byte
-// (0–255), so `charCodeAt` recovers the byte and `length` counts bytes.
-let buffered: string = "";
+// The buffered, not-yet-echoed input, held as a raw BYTE buffer (#2777). An
+// earlier version kept this as a growing STRING (`buffered = buffered + chunk`)
+// and recovered bytes with `buffered.charCodeAt(i)` / `buffered.substring(...)`.
+// js2wasm native strings are cons-ropes, so every `charCodeAt`/`substring` over
+// the growing buffer re-flattened the WHOLE buffer — O(n) per access, O(n^2) for
+// a multi-MiB frame (which SIGKILLed this host). A `Uint8Array` gives O(1)
+// indexed reads, so parsing is linear. `tail - head` is the live byte count;
+// `head` advances past echoed frames and both reset to 0 once fully drained.
+let buf: Uint8Array = new Uint8Array(1024);
+let head: number = 0;
+let tail: number = 0;
 // Set once a zero-length frame (clean shutdown) is seen, matching the sibling
 // variants which treat a declared length of 0 as end-of-stream.
 let stopped: boolean = false;
 
-// Decode the little-endian uint32 the browser wrote as the first 4 buffered bytes.
-function decodeLength(s: string): number {
-  return s.charCodeAt(0) + s.charCodeAt(1) * 256 + s.charCodeAt(2) * 65536 + s.charCodeAt(3) * 16777216;
+// Append a `'data'` chunk's raw bytes into `buf` — O(chunk). The prelude (#2777)
+// delivers each chunk as a FLAT string, so `chunk.charCodeAt(k)` is O(1). Grows
+// the backing array with amortized doubling, reclaiming the consumed prefix
+// (`head > 0`) first so a long-lived stream does not grow without bound.
+function append(chunk: string): void {
+  const n = chunk.length;
+  if (tail + n > buf.length) {
+    if (head > 0) {
+      const m = tail - head;
+      let i = 0;
+      while (i < m) {
+        buf[i] = buf[head + i];
+        i = i + 1;
+      }
+      head = 0;
+      tail = m;
+    }
+    if (tail + n > buf.length) {
+      let cap = buf.length;
+      while (cap < tail + n) {
+        cap = cap * 2;
+      }
+      const nb = new Uint8Array(cap);
+      let j = 0;
+      while (j < tail) {
+        nb[j] = buf[j];
+        j = j + 1;
+      }
+      buf = nb;
+    }
+  }
+  let k = 0;
+  while (k < n) {
+    buf[tail] = chunk.charCodeAt(k) & 0xff;
+    tail = tail + 1;
+    k = k + 1;
+  }
 }
 
-// Echo every complete frame currently in `buffered`, advancing past each. A frame
-// is the 4-byte LE prefix + `len` body bytes; we re-emit prefix + body as raw
-// bytes in ONE `process.stdout.write` (atomic framing — a streaming receiver must
-// never see a prefix split from its body).
+// Decode the little-endian uint32 the browser wrote as the first 4 buffered
+// bytes (at the current `head`).
+function decodeLength(): number {
+  return buf[head] + buf[head + 1] * 256 + buf[head + 2] * 65536 + buf[head + 3] * 16777216;
+}
+
+// Echo every complete frame currently buffered, advancing `head` past each. A
+// frame is the 4-byte LE prefix + `len` body bytes; we re-emit prefix + body as
+// raw bytes in ONE `process.stdout.write` (atomic framing — a streaming receiver
+// must never see a prefix split from its body).
 function drain(): void {
   while (!stopped) {
-    if (buffered.length < 4) return; // need the full length prefix first
-    const len = decodeLength(buffered);
+    if (tail - head < 4) return; // need the full length prefix first
+    const len = decodeLength();
     if (len === 0) {
       stopped = true; // zero-length frame = clean shutdown
       // #2735: in-band shutdown. The peer (a long-lived Native-Messaging port)
@@ -83,11 +131,11 @@ function drain(): void {
       return;
     }
     const frameLen = 4 + len;
-    if (buffered.length < frameLen) return; // body not fully arrived yet
+    if (tail - head < frameLen) return; // body not fully arrived yet
 
     // Re-frame prefix + body into one raw-byte buffer. The prefix is rebuilt from
-    // the decoded length (identical bytes); the body bytes are copied out of the
-    // buffered chunk via their char codes.
+    // the decoded length (identical bytes); the body bytes are a straight O(1)
+    // typed-array copy out of `buf`.
     const out = new Uint8Array(frameLen);
     out[0] = len & 0xff;
     out[1] = (len >> 8) & 0xff;
@@ -95,13 +143,17 @@ function drain(): void {
     out[3] = (len >> 24) & 0xff;
     let i = 0;
     while (i < len) {
-      out[4 + i] = buffered.charCodeAt(4 + i) & 0xff;
+      out[4 + i] = buf[head + 4 + i];
       i = i + 1;
     }
     process.stdout.write(out);
 
     // Drop the echoed frame; keep any trailing partial frame for the next chunk.
-    buffered = buffered.substring(frameLen);
+    head = head + frameLen;
+    if (head >= tail) {
+      head = 0;
+      tail = 0;
+    }
   }
 }
 
@@ -119,11 +171,11 @@ function main(): void {
   // callbacks after `_start` returns.
   process.stdin.on("data", (chunk: string) => {
     if (stopped) return;
-    buffered = buffered + chunk;
+    append(chunk);
     drain();
   });
   process.stdin.on("end", () => {
-    // EOF: anything left in `buffered` is an incomplete frame and is dropped,
+    // EOF: anything left buffered is an incomplete frame and is dropped,
     // matching the sibling variants which stop on a short/truncated read.
   });
 }
