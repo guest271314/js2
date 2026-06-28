@@ -1934,6 +1934,13 @@ export function generateModule(
     // dead-elim/freeze so the helper funcIdx values are stable.
     ensureDynReadHelpers(ctx);
 
+    // (#2800) Allocate + wire the `__in_module_init` flag global now that every
+    // import global has settled (final absolute index), patching the recorded
+    // delete-aware read `global.get` placeholders and wrapping `__module_init`.
+    // Runs before dead-elim (which never prunes/remaps live globals) and the
+    // index freeze. No-op unless a gc/host delete-aware read recorded the flag.
+    finalizeInModuleInitFlag(ctx);
+
     markLeafStructsFinal(mod, ctx.wasi);
 
     // Dead import and type elimination pass
@@ -2049,6 +2056,70 @@ function drainStackBalanceTelemetry(ctx: CodegenContext, fileLabel: string): voi
  *      addWasiStartExport and already calls `__module_init`).
  * Runs once — guarded by `ctx.moduleInitGuardApplied`.
  */
+/**
+ * (#2800) Finalize the `__in_module_init` flag, if any delete-aware `any`-receiver
+ * read recorded one. The flag reads 1 while `__module_init` runs, 0 otherwise;
+ * the read site (`tryEmitDeleteAwareDynamicGet`) branches on it — gc/host runs
+ * `__module_init` via the Wasm `start` section INSIDE `WebAssembly.instantiate`,
+ * before the host wires struct getters (`__setExports`), so the host
+ * `__extern_get`'s `__sget_<field>` struct-read fallback returns undefined for
+ * every field at init. The flag steers the read to the host-free
+ * `__get_member_<name>` dispatcher during init and back to the tombstone-aware
+ * host read at runtime.
+ *
+ * Allocates the i32 flag global HERE — after every import global has settled —
+ * so its absolute index is final, then patches each recorded read's placeholder
+ * `global.get` index to it (sidestepping the live-baked-index hazard where a
+ * later string-constant import shifts the module-global range through closure
+ * bodies the per-add fixup can miss) and wraps `__module_init` with set-1 /
+ * set-0 around its body. MUST run AFTER the last import-global addition and BEFORE
+ * the index-space freeze. No-op when no read recorded the flag (delete-free /
+ * standalone / WASI modules stay byte-identical). gc/host has no module-init
+ * idempotency guard (the Wasm `start` section runs the body exactly once), so the
+ * simple prologue/epilogue wrap is sufficient; WASI/standalone never reach here
+ * (the read site only records the flag when `!ctx.wasi`).
+ */
+function finalizeInModuleInitFlag(ctx: CodegenContext): void {
+  const reads = ctx.inModuleInitFlagReads;
+  if (!reads || reads.length === 0) return;
+
+  // Allocate the flag global now that the import-global range is final, and
+  // patch every recorded read's PLACEHOLDER index to the final slot. This MUST
+  // happen even when there is no `__module_init` (a module whose only
+  // delete-aware reads live inside ordinary functions, never at top level) —
+  // otherwise the placeholder index 0 survives and points at the first import
+  // global (an externref string constant), tripping `if[0] expected i32`
+  // validation. With no init the flag simply stays 0, so every gated read takes
+  // the runtime (host `__extern_get`) arm — exactly the pre-#2800 behaviour.
+  const flagIdx = ctx.numImportGlobals + ctx.mod.globals.length;
+  ctx.mod.globals.push({
+    name: "__in_module_init",
+    type: { kind: "i32" },
+    mutable: true,
+    init: [{ op: "i32.const", value: 0 }],
+  });
+  ctx.inModuleInitGlobalIdx = flagIdx;
+  for (const r of reads) (r as { index: number }).index = flagIdx;
+
+  // Wrap __module_init (when present): flag = 1 for the body, 0 on completion.
+  let initArrayIdx = -1;
+  for (let i = 0; i < ctx.mod.functions.length; i++) {
+    if (ctx.mod.functions[i]!.name === "__module_init") {
+      initArrayIdx = i;
+      break;
+    }
+  }
+  if (initArrayIdx < 0) return;
+  const initFn = ctx.mod.functions[initArrayIdx]!;
+  initFn.body = [
+    { op: "i32.const", value: 1 } as Instr,
+    { op: "global.set", index: flagIdx } as Instr,
+    ...initFn.body,
+    { op: "i32.const", value: 0 } as Instr,
+    { op: "global.set", index: flagIdx } as Instr,
+  ];
+}
+
 function applyModuleInitGuard(ctx: CodegenContext): void {
   if (ctx.moduleInitGuardApplied) return;
 
@@ -5912,6 +5983,13 @@ export function generateMultiModule(
     // which M0 never sets, so this is a no-op in M0 → byte-identical. Runs before
     // dead-elim/freeze so the helper funcIdx values are stable.
     ensureDynReadHelpers(ctx);
+
+    // (#2800) Allocate + wire the `__in_module_init` flag global now that every
+    // import global has settled (final absolute index), patching the recorded
+    // delete-aware read `global.get` placeholders and wrapping `__module_init`.
+    // Runs before dead-elim (which never prunes/remaps live globals) and the
+    // index freeze. No-op unless a gc/host delete-aware read recorded the flag.
+    finalizeInModuleInitFlag(ctx);
 
     markLeafStructsFinal(mod, ctx.wasi);
 

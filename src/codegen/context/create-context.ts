@@ -93,6 +93,8 @@ export function createCodegenContext(
     suppressVecUsageFlag: false, // (#2083) true only during the two prereg calls below
     holeTypeIdx: -1, // (#2001 S1) $Hole struct type; lazily registered
     holeGlobalIdx: undefined, // (#2001 S1) $__hole singleton global
+    inModuleInitFlagReads: undefined, // (#2800) recorded __in_module_init flag reads
+    inModuleInitGlobalIdx: undefined, // (#2800) __in_module_init flag global (set at finalize)
     usesDynRead: false, // (#2580 M0) set by a __dyn_has/__dyn_get call site (M1+); M0 adds none
     dynReadHelpersEmitted: false, // (#2580 M0) ensureDynReadHelpers idempotence latch
     classThrowsOnEval: new Set(),
