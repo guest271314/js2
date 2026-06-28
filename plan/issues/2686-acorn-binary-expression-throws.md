@@ -1,8 +1,8 @@
 ---
 id: 2686
 title: "[ARCH] acorn parse() — binary-expression statement throws (parse(\"1 + 2 * 3;\") → WebAssembly.Exception); same root as #2681 (Parser not reconstructed), substrate-scoped"
-status: ready
-assignee: ttraenkler/unassigned
+status: in-progress
+assignee: ttraenkler/sendev-substrate
 sprint: current
 created: 2026-06-26
 updated: 2026-06-28
@@ -76,3 +76,15 @@ fail the same way the #2681 identifier switch does → `unexpected()`/throw.
 Fix is one of the two substrate paths in #2681 (A: escape-gate reconstruct
 `new this()` sites; B: `$Object` reader struct-value identity) — architect call,
 NOT a quick dev slice. Re-tagged `[ARCH]`. Likely closes together with #2681.
+
+## Update — S2/S2b landed (sendev-substrate, 2026-06-28); #2686 still OPEN pending S3
+
+Path (A) is now implemented: S2b's `new this()` escape-gate reconstruct gives
+`Parser` a `$__fnctor_Parser` struct (verified registered in the acorn WAT — was
+absent), and S2's read/write dispatch symmetry routes its field access through the
+`__get_member_<name>` / `__set_member_<name>` dispatchers on S1's pass-invariant
+typeIdx. BUT `parse("1 + 2 * 3;")` still hangs (the same `currentVarScope()`/
+`scope.flags` loop as #2681). The remaining cause is the value-rep / host-boundary
+identity loss (**epic S3**), NOT a typeIdx desync (S1 fixed that). Full mechanism +
+S3 fix direction: see #2681's `## S2/S2b landed on a MERGED S1` section and the
+#2773 epic S3 spec. **Closes together with #2681 once S3 lands.**

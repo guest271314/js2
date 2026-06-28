@@ -108,6 +108,7 @@ import { coercionInstrs, defaultValueInstrs } from "./type-coercion.js";
 import { tryEmitJsonParseElementAccess, tryEmitJsonParsePropertyAccess } from "./json-standalone.js";
 import { reserveMemberSetDispatch } from "./member-set-dispatch.js";
 import { reserveMemberGetDispatch } from "./member-get-dispatch.js";
+import { resolveReceiverStruct } from "./fnctor-escape-gate.js"; // (#2681/#2686 A3) pinned-struct read dispatch
 import { reserveAccessorGetDriver } from "./accessor-driver.js";
 import { S5C_STRUCT_ACCESSOR_CLOSURE } from "./struct-accessor-closure.js";
 import { tryCompileTemporalPropertyAccess } from "./temporal-native.js";
@@ -1350,7 +1351,7 @@ export function emitAlternateStructSetDispatch(
   // is the `__extern_set_strict` (strict) / `__extern_set` (non-strict) sidecar —
   // so the caller need NOT emit its own fallback. The MUTABLE-only filter and the
   // immutable boxed-wrapper (#2657) handling live in the fill.
-  const dispIdx = reserveMemberSetDispatch(ctx, propName, strict);
+  const dispIdx = reserveMemberSetDispatch(ctx, propName, strict, fctx);
   if (dispIdx === undefined) return false;
   // recv is externref; the dispatcher does `any.convert_extern` + `ref.test`
   // internally and forwards the externref recv to the sidecar fallback.
@@ -2194,6 +2195,89 @@ function emitGuardedNativeStringLength(
  * reserved accessor (`length`/`constructor`/`__proto__`/`prototype`), and never
  * when the receiver resolves to a concrete (non-`any`) struct/class/array type.
  */
+/**
+ * (#2681/#2686 A3) Route a pinned-struct dynamic `recv.<field>` READ through the
+ * finalize-filled `__get_member_<name>` dispatcher (member-get-dispatch.ts). The
+ * caller has already established that `recv` resolves to a registered/approved
+ * `__fnctor_<F>` struct (a lifted-method `this`, or a single-return-inferred
+ * local). Returns `externref` when it routed the read, or `undefined` to let the
+ * normal dispatch handle it (reserved accessor / method-typed access).
+ *
+ * Funcidx discipline (member-get-dispatch.ts header): the receiver is compiled
+ * FIRST so its own late-import additions settle, THEN the dispatcher is reserved
+ * (which flushes its index-shift against `fctx`), THEN the call is baked — no
+ * import addition between reserve and the baked `funcIdx`, and the `call`
+ * instruction lives in the tracked `fctx.body` so any later module-wide shift
+ * reaches it.
+ */
+function tryEmitPinnedStructMemberGet(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.PropertyAccessExpression,
+  propName: string,
+): ValType | undefined {
+  // Reserved accessors have dedicated lowerings (array length, proto walk,
+  // constructor identity) — never reroute them.
+  if (
+    propName === "length" ||
+    propName === "constructor" ||
+    propName === "__proto__" ||
+    propName === "prototype" ||
+    propName === "name"
+  ) {
+    return undefined;
+  }
+  // A method/function-typed access keeps its closure/funcref lowering (calls.ts /
+  // the dispatch-on-call path); `__get_member_<name>` would box it as a value.
+  const accessType = ctx.checker.getTypeAtLocation(expr);
+  if (accessType.getCallSignatures && accessType.getCallSignatures().length > 0) return undefined;
+
+  // Commit: compile the receiver to an externref exactly once, leaving it ON THE
+  // WASM STACK across the dispatcher reservation. The receiver is compiled FIRST
+  // so its OWN late-import additions settle before the dispatcher funcIdx is
+  // reserved/baked; the reservation does NOT touch the value stack (it only
+  // registers funcs/imports + flushes funcIdx shifts against `fctx.body`), so the
+  // receiver value survives the reserve without needing a scratch local. (#2681
+  // fix: the earlier `allocTempLocal` + `local.set/get` stashing orphaned its
+  // scratch slot when this read was emitted inside a SWAPPED/speculative body
+  // — `local index out of range` in `__module_init`. A stack-resident receiver
+  // has no local to orphan.)
+  const objResult = compileExpression(ctx, fctx, expr.expression);
+  if (objResult && objResult.kind !== "externref") {
+    coerceType(ctx, fctx, objResult, { kind: "externref" });
+  } else if (!objResult) {
+    fctx.body.push({ op: "ref.null.extern" } as Instr);
+  }
+
+  const getDispIdx = reserveMemberGetDispatch(ctx, propName, fctx);
+  if (getDispIdx === undefined) {
+    // Dispatcher unavailable (no `__extern_get` import registerable) — degrade to
+    // a plain dynamic read of the (already-evaluated, stack-resident) receiver.
+    // Standalone / host both register the dispatcher in practice, so this is
+    // defensive only. Receiver is on the stack → push the prop key, then call
+    // `__extern_get(recv, prop)`.
+    const getIdx = ensureLateImport(
+      ctx,
+      "__extern_get",
+      [{ kind: "externref" }, { kind: "externref" }],
+      [{ kind: "externref" }],
+    );
+    flushLateImportShifts(ctx, fctx);
+    if (getIdx === undefined) {
+      fctx.body.push({ op: "drop" } as Instr);
+      fctx.body.push({ op: "ref.null.extern" } as Instr);
+      return { kind: "externref" };
+    }
+    addStringConstantGlobal(ctx, propName);
+    fctx.body.push(...stringConstantExternrefInstrs(ctx, propName));
+    fctx.body.push({ op: "call", funcIdx: getIdx } as Instr);
+    return { kind: "externref" };
+  }
+  // Receiver is on the stack; the dispatcher takes (recv) → call directly.
+  fctx.body.push({ op: "call", funcIdx: getDispIdx } as Instr);
+  return { kind: "externref" };
+}
+
 function tryEmitDeleteAwareDynamicGet(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -2224,6 +2308,18 @@ function tryEmitDeleteAwareDynamicGet(
   const accessType = ctx.checker.getTypeAtLocation(expr);
   if (accessType.getCallSignatures && accessType.getCallSignatures().length > 0) return undefined;
 
+  // (#2681/#2686) Reads to a RECONSTRUCTED-fnctor receiver (acorn's Parser/Node —
+  // `this`/flow-mapped) are routed through the `__get_member_<name>` struct
+  // dispatcher by an EARLIER pinned-read path (`tryEmitPinnedStructMemberGet`,
+  // compilePropertyAccess), so those hit the native slot. This delete-aware path
+  // is the GENERAL `any`-receiver read in a delete-using module, where the
+  // receiver is typically a PLAIN object literal lowered to an anonymous
+  // `$__anon_N` struct. Routing THAT through the dispatcher's `struct.get` arm
+  // would read the field SLOT directly, IGNORING the delete tombstone — the exact
+  // #2179 bug this path exists to fix (`delete o.a; o.a` must read `undefined`,
+  // not the stale slot). So the general delete-aware read MUST stay on the bare
+  // tombstone-aware `__extern_get`; only the narrowly-pinned reconstructed-fnctor
+  // read uses the slot dispatcher.
   const getIdx = ensureLateImport(
     ctx,
     "__extern_get",
@@ -2334,8 +2430,21 @@ export function tryEmitDeleteAwareDynamicSet(
   fctx.body.push({ op: "local.set", index: valLocal });
 
   // __extern_set_strict(obj, "prop", val) → _safeSet (clears tombstone, writes
-  // sidecar, mirrors __sset_<key>). Bare call — NOT the struct.set dispatcher,
-  // whose native arm is exactly what bypassed _safeSet.
+  // sidecar, mirrors __sset_<key>). Bare call — NOT the struct.set dispatcher.
+  //
+  // (#2681/#2686) An EARLIER pinned-write path (`tryEmitPinnedStructMemberSet`,
+  // assignment.ts) already routes writes to a RECONSTRUCTED-fnctor receiver
+  // (acorn's Parser/Node — `this`/flow-mapped) through the `__set_member_<name>`
+  // struct dispatcher, so those hit the native slot symmetrically with the pinned
+  // READ. This delete-aware path is the GENERAL `any`-receiver write in a
+  // delete-using module, where the receiver is typically a PLAIN object literal
+  // lowered to an anonymous `$__anon_N` struct. Routing THAT through the
+  // dispatcher's `struct.set` arm overwrites the field SLOT in place, which
+  // bypasses the delete+re-add ORDERING the JS-host sidecar tracks
+  // (`delete o.p; o.p = v` must re-insert `p` at the END — `for-in` order, #2179/
+  // #2731). So the general delete-aware write MUST stay on the bare sidecar
+  // `_safeSet`; only the narrowly-pinned reconstructed-fnctor write uses the slot
+  // dispatcher. (The broad reroute here regressed `for-in/order-simple-object`.)
   fctx.body.push({ op: "local.get", index: objLocal });
   addStringConstantGlobal(ctx, propName);
   fctx.body.push(...stringConstantExternrefInstrs(ctx, propName));
@@ -2592,6 +2701,36 @@ export function compilePropertyAccess(
   {
     const fnctorProto = tryEmitFnctorPrototypeRead(ctx, fctx, expr, propName);
     if (fnctorProto !== undefined) return fnctorProto;
+  }
+
+  // (#2681/#2686 A3) Pinned-struct dynamic member READ. When the receiver is the
+  // `this` of a lifted fnctor-PROTOTYPE method (`fctx.thisStructName`, set by
+  // `resolveLiftedMethodThisStruct`), or a local bound from a single-return-
+  // inferable fnctor `new`/call (the `receiverStruct` flow-map), route the
+  // dynamic `recv.<field>` read through the finalize-filled `__get_member_<name>`
+  // dispatcher. The dispatcher reads the native struct slot — returning the SAME
+  // `__fnctor_*` struct externref the field stored — so `this.type === types.name`
+  // is a native `ref.eq` and matches. Without this, acorn's Parser instance reads
+  // `this.type` via the host-proxy `__extern_get`, whose externref identity
+  // diverges from the stored native `__fnctor_TokenType` → the `switch` falls to
+  // `default → unexpected()` (#2681) / the operator compare fails (#2686) → throw.
+  // The dispatcher keeps `__extern_get` as its terminal, so accessor / genuinely-
+  // dynamic props (`Object.defineProperties(Parser.prototype, …)`) still resolve.
+  // Runs BEFORE the delete-aware read so it covers BOTH delete and delete-free
+  // modules. The `this`-receiver branch intentionally bypasses
+  // `resolveReceiverStruct`'s `structMap.has` gate: a reader method often compiles
+  // before the `new this()` site registers the struct, but the dispatcher is
+  // finalize-filled so a later-registered struct is still enumerated.
+  {
+    const pinnedThis =
+      expr.expression.kind === ts.SyntaxKind.ThisKeyword && fctx.thisStructName !== undefined
+        ? fctx.thisStructName
+        : undefined;
+    const pinned = pinnedThis ?? resolveReceiverStruct(ctx, fctx, expr.expression);
+    if (pinned !== undefined) {
+      const routed = tryEmitPinnedStructMemberGet(ctx, fctx, expr, propName);
+      if (routed !== undefined) return routed;
+    }
   }
 
   // (#2179) Tombstone-aware read for `any`/`unknown` receivers in delete-using

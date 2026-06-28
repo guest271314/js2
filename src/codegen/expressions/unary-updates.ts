@@ -28,6 +28,8 @@ import {
   emitBoundsGuardedArraySet,
   resolveInheritedStaticProp,
 } from "../property-access.js";
+import { reserveMemberGetDispatch } from "../member-get-dispatch.js"; // (#2681/#2686) symmetric struct read for inc/dec
+import { resolveReceiverStruct } from "../fnctor-escape-gate.js"; // (#2681/#2686) pinned reconstructed-fnctor receiver gate
 import { coerceType, compileExpression, skipTransparentExpressions } from "../shared.js";
 import { compileStringLiteral } from "../string-ops.js";
 import { defaultValueInstrs } from "../type-coercion.js";
@@ -213,6 +215,13 @@ function emitExternrefMemberIncDec(
   propName: string,
   f64Op: "f64.add" | "f64.sub",
   mode: "prefix" | "postfix",
+  // (#2681/#2686) True only when the receiver is a PINNED reconstructed-fnctor
+  // struct (acorn's `this.pos`). Only then do read+write route through the
+  // `__get_member`/`__set_member` struct dispatchers (slot), symmetric with the
+  // pinned simple read/write. A general any-receiver (plain object → anonymous
+  // `$__anon_N` struct) stays on the bare `__extern_get`/`__extern_set` sidecar so
+  // the delete-tombstone semantics (#2179/#2731) hold.
+  pinned: boolean,
 ): ValType {
   // Key string for __extern_get / __extern_set.
   addStringConstantGlobal(ctx, propName);
@@ -223,19 +232,29 @@ function emitExternrefMemberIncDec(
   const keyLocal = allocLocal(fctx, `__incdec_ekey_${fctx.locals.length}`, { kind: "externref" });
   fctx.body.push({ op: "local.set", index: keyLocal });
 
-  // Read current value: __extern_get(obj, key) -> externref  (slot-consistent:
-  // _safeGet returns the struct slot for a typed receiver).
+  // Read current value. (#2681/#2686) MUST be symmetric with the struct.set
+  // write-back below: a bare `__extern_get` reads the JS-side SIDECAR while the
+  // write hits the native struct SLOT, so `this.pos++` diverges and acorn's
+  // tokenizer loop never advances (hang). Route through the `__get_member_<name>`
+  // dispatcher (`struct.get` arms + `__extern_get` terminal) — the same
+  // finalize-filled candidate set the write dispatcher uses — so read and write
+  // stay consistent.
   fctx.body.push({ op: "local.get", index: objLocal });
-  fctx.body.push({ op: "local.get", index: keyLocal });
-  const getIdx = ensureLateImport(
-    ctx,
-    "__extern_get",
-    [{ kind: "externref" }, { kind: "externref" }],
-    [{ kind: "externref" }],
-  );
-  flushLateImportShifts(ctx, fctx);
-  if (getIdx !== undefined) {
-    fctx.body.push({ op: "call", funcIdx: getIdx });
+  const getDispIdx = pinned ? reserveMemberGetDispatch(ctx, propName, fctx) : undefined;
+  if (getDispIdx !== undefined) {
+    fctx.body.push({ op: "call", funcIdx: getDispIdx });
+  } else {
+    fctx.body.push({ op: "local.get", index: keyLocal });
+    const getIdx = ensureLateImport(
+      ctx,
+      "__extern_get",
+      [{ kind: "externref" }, { kind: "externref" }],
+      [{ kind: "externref" }],
+    );
+    flushLateImportShifts(ctx, fctx);
+    if (getIdx !== undefined) {
+      fctx.body.push({ op: "call", funcIdx: getIdx });
+    }
   }
 
   // Unbox to f64 (ToNumber on the current value, matching `x += 1`).
@@ -280,9 +299,10 @@ function emitExternrefMemberIncDec(
   // terminal else-arm IS the `__extern_set` sidecar; its struct-candidate arms
   // are enumerated at finalize (the full type table), fixing the compile-order
   // candidate freeze (#2664).
-  const dispatched = emitAlternateStructSetDispatch(ctx, fctx, objLocal, boxedLocal, propName, /*strict*/ false);
+  const dispatched =
+    pinned && emitAlternateStructSetDispatch(ctx, fctx, objLocal, boxedLocal, propName, /*strict*/ false);
   if (!dispatched) {
-    // Dispatcher could not be reserved — emit the bare host write as before.
+    // Not pinned (or dispatcher not reservable) — emit the bare host write.
     fctx.body.push({ op: "local.get", index: objLocal });
     fctx.body.push({ op: "local.get", index: keyLocal });
     fctx.body.push({ op: "local.get", index: boxedLocal });
@@ -384,17 +404,18 @@ function emitExternrefElementIncDec(
     [],
   );
   flushLateImportShifts(ctx, fctx);
-  const litName = ts.isStringLiteral(keyExpr) ? keyExpr.text : undefined;
-  let dispatched = false;
-  if (litName !== undefined) {
-    dispatched = emitAlternateStructSetDispatch(ctx, fctx, baseLocal, boxedLocal, litName, /*strict*/ false);
-  }
-  if (!dispatched) {
-    fctx.body.push({ op: "local.get", index: baseLocal });
-    fctx.body.push({ op: "local.get", index: keyLocal });
-    fctx.body.push({ op: "local.get", index: boxedLocal });
-    if (setIdx !== undefined) fctx.body.push({ op: "call", funcIdx: setIdx });
-  }
+  // (#2681/#2686) The element-form READ above uses the BARE tombstone-aware
+  // `__extern_get` (sidecar), so the write MUST match it — a struct.set dispatcher
+  // here would write the SLOT while the read saw the sidecar (asymmetric), and for
+  // a plain object (anonymous `$__anon_N` struct) it would also bypass the
+  // delete-tombstone/ordering semantics (#2179/#2731). `o["x"]++` on a
+  // reconstructed fnctor is not an acorn pattern (acorn uses `this.x++`, handled
+  // by the pinned-gated `emitExternrefMemberIncDec`). So always write via the bare
+  // `__extern_set` sidecar — symmetric with the read.
+  fctx.body.push({ op: "local.get", index: baseLocal });
+  fctx.body.push({ op: "local.get", index: keyLocal });
+  fctx.body.push({ op: "local.get", index: boxedLocal });
+  if (setIdx !== undefined) fctx.body.push({ op: "call", funcIdx: setIdx });
 
   // Return NEW (prefix) / OLD (postfix). §13.4.
   fctx.body.push({ op: "local.get", index: mode === "postfix" ? oldTmp : newTmp });
@@ -467,6 +488,12 @@ function compileMemberIncDec(
       // the symmetric struct.set dispatch so a typed-struct receiver hits the
       // same slot the READ uses). Only kicks in when we can box the receiver to
       // externref; otherwise fall back to the historical NaN behaviour.
+      // (#2681/#2686) Pin to the struct dispatcher ONLY for a reconstructed-fnctor
+      // receiver (acorn's `this.pos++`); a general any-receiver stays on the
+      // tombstone-aware sidecar. Computed before the receiver is consumed.
+      const incDecPinned =
+        (operand.expression.kind === ts.SyntaxKind.ThisKeyword && fctx.thisStructName !== undefined) ||
+        resolveReceiverStruct(ctx, fctx, operand.expression) !== undefined;
       const objResult = compileExpression(ctx, fctx, operand.expression);
       if (objResult) {
         const objLocal = allocLocal(fctx, `__incdec_eobj_${fctx.locals.length}`, { kind: "externref" });
@@ -474,7 +501,7 @@ function compileMemberIncDec(
           coerceType(ctx, fctx, objResult, { kind: "externref" });
         }
         fctx.body.push({ op: "local.set", index: objLocal });
-        return emitExternrefMemberIncDec(ctx, fctx, objLocal, propName, f64Op, mode);
+        return emitExternrefMemberIncDec(ctx, fctx, objLocal, propName, f64Op, mode, incDecPinned);
       }
       // Could not compile the receiver — graceful NaN (incrementing an
       // unresolvable property is NaN in JS).

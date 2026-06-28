@@ -421,6 +421,34 @@ design changes.**
 
 **S1 status: complete. S2/S2b rebase `origin/issue-2681-acorn-new-this` on top.**
 
+## S2 + S2b — Implementation notes (sendev-substrate, 2026-06-28) — LANDED as substrate
+
+Branch `issue-2681-s2-acorn` (merge of sr-acorn `ebc464375` onto merged S1).
+
+- **Merge:** `fnctor-escape-gate.ts` auto-merged (sr-acorn's `new this()` resolvers
+  + reconstruct classification alongside S1's `deriveFnctorFields`/`ctorDeclByName`/
+  `newThisOwnerNames`); only `new-super.ts`'s import line conflicted. The 4 S2 files
+  S1 didn't touch (`closures`/`assignment`/`unary-updates`/`property-access`) came
+  in clean.
+- **S2b** fills the empty S1 `newThisOwnerNames` placeholder from each
+  reconstruct-classified `new this()` owner ⇒ `reserveFnctorStructTypes` reserves a
+  pass-invariant `$__fnctor_Parser` (absent on main).
+- **S2** = sr-acorn's read/write/compound/delete-aware dispatch symmetry, now
+  load-bearing on stable typeIdx.
+- **Validated:** typecheck exit 0; identity 7/45/207; acorn WAT now has
+  `$__fnctor_Parser` + `__get_member_*`; `parse("1")`/`parse("1;")` attach the
+  `Literal` (closes the **#2687** `expression:null` gap for literals).
+- **Did NOT close #2681/#2686** — `parse("x")` still hangs. S1 already stabilized
+  `$__fnctor_Scope`'s typeIdx, so the residual cause is **S3** (host/array-boundary
+  identity loss), now spec'd as a standalone slice **#2784**.
+
+**S2/S2b status: complete (substrate). Next: S3 = #2784 (closes #2681/#2686).**
+
+> **S3 moved to its own dispatchable issue: #2784** —
+> `plan/issues/2784-s3-array-host-boundary-struct-identity.md` (full pinned
+> root-cause + fix direction). It supersedes the one-line S3 row in the slice
+> table above.
+
 ---
 
 # SLICE S4 — full spec — plain-array OOB → `undefined` (consumer-scoped externref-or-undefined result rep) — #2760
