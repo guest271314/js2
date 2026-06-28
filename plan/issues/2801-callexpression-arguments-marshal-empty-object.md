@@ -1,7 +1,7 @@
 ---
 id: 2801
 title: "[SENIOR-DEV ONLY] compiled-acorn CallExpression `arguments` marshals as `{}` not an array (host vec→array gap)"
-status: ready
+status: blocked
 assignee: ttraenkler/unassigned
 sprint: current
 priority: high
@@ -14,8 +14,8 @@ task_type: bugfix
 area: codegen
 language_feature: value-representation
 goal: acorn-dogfood
-related: [2794, 2784, 2664, 2674]
-depends_on: [2794]
+related: [2794, 2784, 2664, 2674, 2806]
+depends_on: [2794, 2806]
 blocks: []
 ---
 
@@ -94,3 +94,52 @@ an empty object proxy. Candidate causes to pin (instrument, don't guess):
 - Depends on **#2794** (the `__is_data_struct` discriminator + vec read-methods).
   Branch fresh from `origin/main` AFTER #2794 (PR #2264) merges so this builds on
   that fix.
+
+## Implementation Notes (sendev-acorn-callargs, 2026-06-28)
+
+Instrument-first investigation (probes in `.tmp/callargs*.mjs`,
+`.tmp/elemdbg.mjs`) found the bug is **two distinct layers**, not one:
+
+### Layer 1 — host vec→array marshaling (FIXED, branch `issue-2801-callexpr-arguments-marshal`)
+
+The candidate "vec not recognized on read-back" was correct. The flow:
+
+- `Program.body` reaches the host as a **host-backed JS array** (`isArray=true,
+  isWasm=false`) whose elements are `_wrapForHost` proxies of the AST nodes — so
+  `ast.body` walked fine and looked like the bug was call-specific.
+- But it is **not** call-specific: `ArrayExpression.elements` is `{}` too. Any
+  array read **through** the `_wrapForHost` proxy chain (i.e. a nested array
+  field, not the top-level body) hit the get-handler vec branch
+  (`__is_vec(val)===1 → _wrapForHost(val)`), which returns the **generic object
+  proxy** of the vec. That proxy has no `length`/index surface → marshals as
+  `{}` (`Array.isArray` false, `length` undefined). `_structToPlainObject` is
+  only ever called for the top-level `Program` (confirmed by instrumentation);
+  the nested CallExpression/ArrayExpression nodes are lazy proxies, so the
+  marshaling decision is made entirely in `_wrapForHost`.
+- **Fix**: `_wrapVecForHost` in `src/runtime.ts` — a Proxy with a real `[]`
+  target (`Array.isArray` true) whose traps serve `length` + numeric indices
+  LIVE from the vec (`__vec_len`/`__vec_get`), reverse-mapped to the raw vec so
+  `__extern_method_call` (`scopeStack.push` → `__vec_push`) still works. Routed
+  at the top of `_wrapForHost` on the positive `__is_vec` discriminator. After
+  this, `arguments`/`elements` present as real JS arrays with correct length.
+
+### Layer 2 — vec element representation (NOT fixed — escalated; the real blocker)
+
+With Layer 1 in place, `arguments` is `[0, 0]`, not the two Identifier nodes.
+Decisive probe (`DBG2801` in `_wrapVecForHost.elemAt`):
+`__vec_get(argsVec, 0)` returns `number 0` (`rawTypeof=number, rawIsWasm=false`,
+`__vec_mut_supported=1`, `__vec_len=2`). So the `arguments` vec is a **real,
+growable vec whose backing-array element kind is numeric (f64)** — when acorn
+pushes AST node references they are coerced to f64 `0`. `__vec_get` faithfully
+returns `0`; `call.optional` likewise reads `0` not `false`.
+
+Origin: `compileArrayLiteral` empty-array path (`src/codegen/literals.ts`
+~3087-3162) resolves `emptyElemKind` from the contextual/`getTypeAtLocation`
+type of the `[]` literal. acorn is plain JS (no annotations); the
+`arguments`/`elements` array literals resolve to a **numeric** element kind
+(while `body` happens to resolve to a host externref array — hence the split).
+This is a vec **element-representation / type-inference** issue at the
+array-literal lowering site, a different substrate class from host marshaling,
+with broad blast radius (touches every untyped/evolving array). It needs an
+architect decision + full `merge_group` validation. **#2801 acceptance is
+blocked on Layer 2.** Layer 1 is committed as standalone, correct progress.

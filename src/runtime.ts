@@ -5182,9 +5182,136 @@ function _setLikeRecordForHost(
   return { size: fixField("size"), has: fixField("has"), keys: fixField("keys") };
 }
 
+// (#2801) Parse a property key into a canonical array index (uint32), or
+// `undefined` if it is not one. Mirrors the spec's CanonicalNumericIndexString
+// + array-index range so only genuine element keys (`"0"`, `"1"`, …) route to
+// `__vec_get`, while `"length"`, `"01"`, `"-1"`, `"1.5"` fall through to the
+// Array.prototype method path.
+function _asArrayIndex(key: string): number | undefined {
+  if (key === "0") return 0;
+  // Reject leading-zero / sign / non-digit forms — canonical indices only.
+  if (key.length === 0 || key.charCodeAt(0) === 48 /* '0' */) return undefined;
+  const n = Number(key);
+  if (Number.isInteger(n) && n >= 0 && n < 4294967295 && String(n) === key) return n;
+  return undefined;
+}
+
+// (#2801) Present a WasmGC vec (array) to the host as a REAL JS array view.
+//
+// Root cause this fixes: when a host reads an array-typed field through the
+// `_wrapForHost` proxy (e.g. acorn `CallExpression.arguments`,
+// `ArrayExpression.elements`), the value is a WasmGC vec struct. The previous
+// code wrapped it with the *generic* object proxy (`_wrapForHost`), which has
+// no `length` / numeric-index surface, so it marshalled as an empty object
+// `{}` (`Array.isArray` false, `length` undefined) — the parsed AST was
+// structurally wrong. A vec must instead present as an array.
+//
+// This returns a Proxy whose TARGET is a real `[]` (so `Array.isArray` is
+// true and `instanceof Array` holds) and whose traps serve `length` + numeric
+// indices LIVE from the underlying vec (`__vec_len` / `__vec_get`, elements
+// recursively `_wrapForHost`-wrapped). Native generic Array.prototype methods
+// (`map`, `forEach`, `slice`, `indexOf`, iteration, spread, `JSON.stringify`)
+// work because they read `length` + indices through these traps. The proxy is
+// registered in `_hostProxyReverse` → raw vec, so the existing
+// `__extern_method_call` mutation path (`scopeStack.push(...)` →
+// `_unwrapForHost` → `__vec_push`) still recovers the live vec and grows it;
+// because reads are live (not a snapshot), a later push is reflected.
+function _wrapVecForHost(vec: any, exports: Record<string, Function>): any {
+  const cached = _hostProxyCache.get(vec);
+  if (cached) return cached;
+  const lenFn = exports.__vec_len as ((v: any) => number) | undefined;
+  const getFn = exports.__vec_get as ((v: any, i: number) => any) | undefined;
+  // Defensive: if the read exports are missing, fall back to the generic
+  // object proxy rather than producing a broken array view.
+  if (typeof lenFn !== "function" || typeof getFn !== "function") return undefined;
+  const liveLen = (): number => {
+    try {
+      const n = lenFn(vec);
+      return typeof n === "number" && n >= 0 ? n : 0;
+    } catch {
+      return 0;
+    }
+  };
+  const elemAt = (i: number): any => {
+    try {
+      return _wrapForHost(getFn(vec, i), exports);
+    } catch {
+      return undefined;
+    }
+  };
+  const target: any[] = [];
+  const handler: ProxyHandler<any[]> = {
+    get(_t, key) {
+      if (key === "length") return liveLen();
+      if (typeof key === "string") {
+        const idx = _asArrayIndex(key);
+        if (idx !== undefined) return idx < liveLen() ? elemAt(idx) : undefined;
+      }
+      // Array.prototype methods, Symbol.iterator, constructor, etc. — read from
+      // the array target; native generics operate via the length/index traps.
+      return (target as Record<string | symbol, any>)[key as any];
+    },
+    has(_t, key) {
+      if (key === "length") return true;
+      if (typeof key === "string") {
+        const idx = _asArrayIndex(key);
+        if (idx !== undefined) return idx < liveLen();
+      }
+      return key in target;
+    },
+    ownKeys() {
+      const n = liveLen();
+      const keys: (string | symbol)[] = [];
+      for (let i = 0; i < n; i++) keys.push(String(i));
+      keys.push("length");
+      return keys;
+    },
+    getOwnPropertyDescriptor(_t, key) {
+      if (key === "length") {
+        return { value: liveLen(), writable: true, enumerable: false, configurable: false };
+      }
+      if (typeof key === "string") {
+        const idx = _asArrayIndex(key);
+        if (idx !== undefined && idx < liveLen()) {
+          return { value: elemAt(idx), writable: true, enumerable: true, configurable: true };
+        }
+      }
+      return undefined;
+    },
+    // Host-side writes are not part of the AST-read contract and the vec has no
+    // general element-setter export; accept silently (keep the target clean) so
+    // a stray host write neither throws nor leaves a phantom element. acorn's
+    // own mutations go through `__extern_method_call` (unwrap → `__vec_push`).
+    set() {
+      return true;
+    },
+  };
+  const proxy = new Proxy(target, handler);
+  _hostProxyCache.set(vec, proxy);
+  _hostProxyReverse.set(proxy, vec);
+  return proxy;
+}
+
 function _wrapForHost(obj: any, exports: Record<string, Function> | undefined): any {
   if (obj == null || typeof obj !== "object") return obj;
   if (!_isWasmStruct(obj)) return obj;
+
+  // (#2801) A WasmGC vec must present to the host as a real JS array, not a
+  // generic object proxy (which marshalled as `{}`). Detect via the positive
+  // `__is_vec` discriminator and route to the array-backed view. Done before
+  // the generic-proxy path so every consumer (struct field reads, set-algebra
+  // adapters, spread) sees array semantics uniformly.
+  if (exports) {
+    try {
+      const isVecFn = exports.__is_vec as ((v: any) => number) | undefined;
+      if (typeof isVecFn === "function" && isVecFn(obj) === 1) {
+        const vecView = _wrapVecForHost(obj, exports);
+        if (vecView !== undefined) return vecView;
+      }
+    } catch {
+      // discriminator unavailable — fall through to the generic object proxy
+    }
+  }
 
   const cached = _hostProxyCache.get(obj);
   if (cached) return cached;
