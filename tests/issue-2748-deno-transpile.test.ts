@@ -45,7 +45,13 @@ function findWasmtime(): string | null {
 }
 const wasmtimeBin = findWasmtime();
 
-const examplePath = join(dirname(fileURLToPath(import.meta.url)), "..", "examples", "native-messaging", "nm_js2wasm_deno.ts");
+const examplePath = join(
+  dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "examples",
+  "native-messaging",
+  "nm_js2wasm_deno.ts",
+);
 
 /**
  * Reproduce `bun build <entry> --outfile out.js`: type-strip AND BUNDLE the entry

@@ -205,7 +205,10 @@ describe("#2735 — stdin reactor non-EOF termination", () => {
 
   maybe("under wasmtime (stdin CLOSED — EOF path stays green)", () => {
     it("EOF-closed stdin still echoes the frame and exits", { timeout: 30_000 }, async () => {
-      const binPath = await buildToDisk(readFileSync(join(NM_DIR, "nm_js2wasm_node_process.ts"), "utf-8"), "nm_eof_close");
+      const binPath = await buildToDisk(
+        readFileSync(join(NM_DIR, "nm_js2wasm_node_process.ts"), "utf-8"),
+        "nm_eof_close",
+      );
       // Same input, but the parent CLOSES stdin → the reactor's existing EOF
       // trigger fires. This must remain unaffected by the new escape hatch.
       const input = new Uint8Array([...requestFrame, ...shutdownFrame]);
@@ -215,7 +218,10 @@ describe("#2735 — stdin reactor non-EOF termination", () => {
     });
 
     it("a bounded buffer with no shutdown frame still exits on EOF", { timeout: 30_000 }, async () => {
-      const binPath = await buildToDisk(readFileSync(join(NM_DIR, "nm_js2wasm_node_process.ts"), "utf-8"), "nm_eof_plain");
+      const binPath = await buildToDisk(
+        readFileSync(join(NM_DIR, "nm_js2wasm_node_process.ts"), "utf-8"),
+        "nm_eof_plain",
+      );
       const res = await runWasmtimeStdin(binPath, requestFrame, { keepOpen: false, timeoutMs: 15_000 });
       expect(res.timedOut).toBe(false);
       expect(Array.from(res.stdout)).toEqual(Array.from(requestFrame));

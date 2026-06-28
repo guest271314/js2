@@ -198,7 +198,10 @@ async function compileStrippedJs(file: string): Promise<Uint8Array> {
 describe("#2754 — bun/esbuild type-stripped+bundled sync NM hosts round-trip under WASI", () => {
   // nm_js2wasm_deno = VERBATIM streamer: every framed message echoes back byte-for-byte.
   it("nm_js2wasm_deno: stripped .js echoes a multi-frame stream byte-exact (incl. a 1 MiB body), matching .ts", async () => {
-    const [tsBin, jsBin] = await Promise.all([compileTs("nm_js2wasm_deno.ts"), compileStrippedJs("nm_js2wasm_deno.ts")]);
+    const [tsBin, jsBin] = await Promise.all([
+      compileTs("nm_js2wasm_deno.ts"),
+      compileStrippedJs("nm_js2wasm_deno.ts"),
+    ]);
 
     const small = new Uint8Array([0x00, 0xff, 0x0a, 0x7f, 0x80, 0x41]);
     const big = new Uint8Array(1 * MiB);
@@ -221,7 +224,10 @@ describe("#2754 — bun/esbuild type-stripped+bundled sync NM hosts round-trip u
   // nm_js2wasm_node_fs = re-chunk streamer: a body <= the 1 MiB cap echoes verbatim; a
   // larger array body is re-chunked into valid <=1 MiB JSON frames.
   it("nm_js2wasm_node_fs: stripped .js echoes under-cap frames byte-exact, matching .ts", async () => {
-    const [tsBin, jsBin] = await Promise.all([compileTs("nm_js2wasm_node_fs.ts"), compileStrippedJs("nm_js2wasm_node_fs.ts")]);
+    const [tsBin, jsBin] = await Promise.all([
+      compileTs("nm_js2wasm_node_fs.ts"),
+      compileStrippedJs("nm_js2wasm_node_fs.ts"),
+    ]);
 
     const small = new Uint8Array(Buffer.from("[1,2,3]", "ascii"));
     const end = new Uint8Array([0x5b, 0x5d]); // "[]"
@@ -236,7 +242,10 @@ describe("#2754 — bun/esbuild type-stripped+bundled sync NM hosts round-trip u
   });
 
   it("nm_js2wasm_node_fs: stripped .js re-chunks a >1 MiB array body into valid frames, matching .ts", async () => {
-    const [tsBin, jsBin] = await Promise.all([compileTs("nm_js2wasm_node_fs.ts"), compileStrippedJs("nm_js2wasm_node_fs.ts")]);
+    const [tsBin, jsBin] = await Promise.all([
+      compileTs("nm_js2wasm_node_fs.ts"),
+      compileStrippedJs("nm_js2wasm_node_fs.ts"),
+    ]);
 
     const body = new Uint8Array(jsonArrayBody(2 * MiB)); // > the 1 MiB browser cap
     const input = frame(body);

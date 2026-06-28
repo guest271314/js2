@@ -221,7 +221,9 @@ describe("#2683 Native Messaging comparison harness — every variant compiles",
   // allowed to be a SOURCE-REFERENCE arm that does not yet produce a runnable
   // standalone binary (e.g. the WASI P3 component variant) — the byte-identical
   // test gates those out — but the compiler must not crash on it.
-  for (const file of variants.filter((f) => !["nm_js2wasm_wasi_p1.ts", "nm_js2wasm_node_fs.ts", "nm_js2wasm_node_process.ts"].includes(f))) {
+  for (const file of variants.filter(
+    (f) => !["nm_js2wasm_wasi_p1.ts", "nm_js2wasm_node_fs.ts", "nm_js2wasm_node_process.ts"].includes(f),
+  )) {
     it(`${file} compiles under --target wasi (runnable or source-reference)`, async () => {
       const r = await compileVariant(file);
       expect(r, `${file} produced no compile result`).toBeDefined();
@@ -387,7 +389,12 @@ describe("#2696 — Native Messaging #389 reporter payloads", () => {
   // Every working variant present on disk. nm_js2wasm_wasi_p3.ts is intentionally absent
   // (skipped below). nm_js2wasm_deno.ts is included; it is skipped per-test if it has not
   // landed / is not a runnable standalone module.
-  const WORKING = ["nm_js2wasm_wasi_p1.ts", "nm_js2wasm_node_fs.ts", "nm_js2wasm_deno.ts", "nm_js2wasm_node_process.ts"];
+  const WORKING = [
+    "nm_js2wasm_wasi_p1.ts",
+    "nm_js2wasm_node_fs.ts",
+    "nm_js2wasm_deno.ts",
+    "nm_js2wasm_node_process.ts",
+  ];
 
   for (const file of WORKING) {
     describe(file, () => {
