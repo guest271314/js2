@@ -548,6 +548,53 @@ function detectNodeFsImports(source: string): Set<string> {
 }
 
 /**
+ * #2771 — does the entry source statically import (or `require`) a RELATIVE
+ * module (`./x` / `../x`)? The single-source `compile()` path reads exactly one
+ * file and strips every import in `preprocessImports`, so a relative import is
+ * silently unresolved — its bindings lower to bogus `env.*` host imports (which
+ * the WASI strict-no-host gate then rejects). The CLI uses this to route such an
+ * entry to the multi-file bundler (`compileProject`), which resolves the
+ * relative deps through the TS program. Package / `node:` / bare-specifier
+ * imports are NOT relative and stay on the single-source path (byte-neutral).
+ */
+export function entryHasRelativeImports(source: string): boolean {
+  const sf = ts.createSourceFile("__detect_rel__.ts", source, ts.ScriptTarget.Latest, true);
+  const isRelativeSpec = (spec: string): boolean => spec.startsWith("./") || spec.startsWith("../");
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    if (found) return;
+    // `import … from "./x"` / `import "./x"` and `export … from "./x"`.
+    if (
+      (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
+      node.moduleSpecifier &&
+      ts.isStringLiteral(node.moduleSpecifier) &&
+      isRelativeSpec(node.moduleSpecifier.text)
+    ) {
+      found = true;
+      return;
+    }
+    // `require("./x")` (CJS) and dynamic `import("./x")`.
+    if (ts.isCallExpression(node)) {
+      const callee = node.expression;
+      const isRequire = ts.isIdentifier(callee) && callee.text === "require";
+      const isDynImport = callee.kind === ts.SyntaxKind.ImportKeyword;
+      if (
+        (isRequire || isDynImport) &&
+        node.arguments.length > 0 &&
+        ts.isStringLiteral(node.arguments[0]) &&
+        isRelativeSpec(node.arguments[0].text)
+      ) {
+        found = true;
+        return;
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+  return found;
+}
+
+/**
  * #2657 — the source-import module string for js2wasm's raw linear-memory access
  * intrinsics (`store32`/`load32`/`store8`/`load8`). These are NOT WASI host
  * functions — they lower to inline `i32.store`/`i32.load`/`i32.store8`/
@@ -1353,13 +1400,40 @@ export async function compileMultiSource(
   for (const [name, content] of Object.entries(files)) {
     sourcesContent.set(name, content);
   }
+  // #2771 — detect WASI fd-IO surfaces across EVERY bundled file (entry + its
+  // relative `./*.ts` deps), not just the entry. The multi path resolves cross-
+  // file imports through the TS program and never runs `preprocessImports`, so
+  // before this it left `wasiNodeFsFuncs`/`wasiRawImports`/`wasiMemAccessors`
+  // undefined — a `node:fs` `readSync`/`writeSync` (or a raw
+  // `wasi_snapshot_preview1` fd call) living in a SHARED helper file silently
+  // lowered to a host `env.*` import (rejected by the WASI strict-no-host gate)
+  // instead of a WASI `fd_read`/`fd_write`. We union the same string scanners the
+  // single-source path uses (`detectNodeFsImports` / `detectRawWasiImports`) over
+  // the CJS-rewritten file map so codegen lowers those calls module-wide. The
+  // unions are empty for any program that imports none of these modules, so
+  // existing multi-file compiles stay byte-identical. (`nodeBuiltins`/`jsxRuntime`
+  // are a separate, larger preprocessImports-parity change — tracked alongside
+  // #2138.)
+  const wasiNodeFsFuncs = new Set<string>();
+  const wasiRawImports = new Set<string>();
+  const wasiMemAccessors = new Set<string>();
+  for (const content of Object.values(processedFiles)) {
+    for (const name of detectNodeFsImports(content)) wasiNodeFsFuncs.add(name);
+    const { rawWasi, memAccessors } = detectRawWasiImports(content);
+    for (const name of rawWasi) wasiRawImports.add(name);
+    for (const name of memAccessors) wasiMemAccessors.add(name);
+  }
   return applyOptimize(
     runPipeline({
       userSourceFiles: multiAst.sourceFiles,
       entryAst,
       multiAst,
       errors,
-      codegenOptions: buildCodegenOptions(options, emitSourceMap),
+      codegenOptions: buildCodegenOptions(options, emitSourceMap, {
+        wasiNodeFsFuncs,
+        wasiRawImports,
+        wasiMemAccessors,
+      }),
       sourcesContent,
       diagnosticAnchor: multiAst.entryFile,
       options,

@@ -560,6 +560,7 @@ export function createIncrementalCompiler(defaultOptions?: CompileOptions): {
   };
 }
 
+export { entryHasRelativeImports } from "./compiler.js";
 export { getBarePackageName, ModuleResolver, resolveAllImports } from "./resolve.js";
 export { preloadLibFiles } from "./checker/index.js";
 export { getEntryExportNames, treeshake } from "./treeshake.js";
