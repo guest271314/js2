@@ -3218,7 +3218,7 @@ function coerceReturnValue(value: IrValueId, cx: LowerCtx): IrValueId {
     return value;
   }
   // Native scalar → externref needs a box helper the IR lacks; defer the whole
-  // function to legacy. (#2783) Legacy's box is now TYPE-AWARE — `coerceType(i32
+  // function to legacy. (#2785) Legacy's box is now TYPE-AWARE — `coerceType(i32
   // → externref)` picks `__box_boolean` / `__box_symbol` / `__box_number` from
   // the value's brand — so this demote is type-correct for a `boolean`/`symbol`
   // scalar too, not only a number. The IR still has no box primitive of its own;

@@ -5417,7 +5417,7 @@ export function isSafeBoundsEliminated(fctx: FunctionContext, expr: ts.ElementAc
 }
 
 /**
- * (#2783) The TYPE-AWARE box ValType for an F1 plain-array OOB→`undefined` read,
+ * (#2785) The TYPE-AWARE box ValType for an F1 plain-array OOB→`undefined` read,
  * reconstructed from the RECEIVER's TS element type. The boolean/symbol BRAND is
  * structural-only and is ERASED in `arrDef.element` (arrays dedupe by structure,
  * so `number[]` / `boolean[]` / `symbol[]` all share one `$vec_i32` struct — the
@@ -5438,7 +5438,7 @@ export function isSafeBoundsEliminated(fctx: FunctionContext, expr: ts.ElementAc
  *
  * Deferred (returns `null`, unchanged from current main):
  *   - `i32` element that is NOT provably boolean — `symbol[]` (standalone has no
- *     native `__box_symbol` yet, #2783 fast-follow; keeps `symbols-omitted`
+ *     native `__box_symbol` yet, #2785 fast-follow; keeps `symbols-omitted`
  *     green), packed `number[]` (i32/i8/i16), or any other handle rep;
  *   - `externref` / `ref` / object elements.
  * Conservative: any checker failure, or a union whose non-nullish members are
@@ -5489,7 +5489,7 @@ function emitPlainArrayUndefinedOobGet(
   fctx: FunctionContext,
   arrTypeIdx: number,
   elementType: ValType,
-  // (#2783) The TYPE-AWARE box ValType. The array's storage kind (`elementType`)
+  // (#2785) The TYPE-AWARE box ValType. The array's storage kind (`elementType`)
   // is structurally dedup'd (so a `boolean[]` and a `number[]` share one
   // `$vec_i32` struct — the `boolean` brand is ERASED in `arrDef.element`), but
   // the box helper MUST be chosen by the element's SEMANTIC type. The call site
@@ -5529,7 +5529,7 @@ function emitPlainArrayUndefinedOobGet(
   // to i32 by the read). Box it via the SEMANTIC `boxType` (which carries the
   // boolean/symbol brand) — its `.kind` agrees with the stack value's kind
   // (f64→f64, boolean i32→i32), so `coerceType`'s `from.kind` lines up while the
-  // brand drives the helper choice (#2783).
+  // brand drives the helper choice (#2785).
   const boxFrom: ValType = boxType.kind === "i8" || boxType.kind === "i16" ? { kind: "i32" } : boxType;
   coerceType(ctx, fctx, boxFrom, { kind: "externref" });
   const boxedLocal = allocLocal(fctx, `__oobu_box_${fctx.locals.length}`, { kind: "externref" });
@@ -6463,7 +6463,7 @@ export function compileElementAccessBody(
     // — the S2 blast radius) and NOT the `$__regexp_match_vec` exotic (its
     // index/input/groups fields are property reads with their own spec
     // semantics; deferred). This F1 slice widens the PRIMITIVE element kinds the
-    // type-aware box (#2783) can box correctly — `number[]` (f64) and `boolean[]`
+    // type-aware box (#2785) can box correctly — `number[]` (f64) and `boolean[]`
     // (branded i32), via `f1ElementBoxType` below. Other `i32` elements
     // (`symbol[]` / packed-number / other handle reps), object-element (`ref`)
     // arrays, and externref (`any[]`/`string[]`) keep their typed result and are
@@ -6474,7 +6474,7 @@ export function compileElementAccessBody(
       !numericHint &&
       classifyTypedArrayType(ctx.checker.getTypeAtLocation(expr.expression), ctx.checker) === "other" &&
       !isRegexMatchVec;
-    // (#2783) The type-aware box ValType for the F1 widen (null = defer). Boxes
+    // (#2785) The type-aware box ValType for the F1 widen (null = defer). Boxes
     // `number[]` (f64) and `boolean[]` (branded i32) correctly; defers symbol[] /
     // other i32 / externref. Computed even when `oobUndefined` is false (cheap).
     const f1BoxType = f1ElementBoxType(ctx, expr, arrDef.element);
@@ -6504,7 +6504,7 @@ export function compileElementAccessBody(
       // slot back to `undefined` — the loop guard proves in-bounds, not present.
       if (ctx.usesArrayHoles && arrDef.element.kind === "externref") emitHoleToUndefined(ctx, fctx);
     } else if (oobUndefined && f1BoxType !== null) {
-      // (#2760 F1, #2783 type-aware box) Plain-array OOB → `undefined` for a
+      // (#2760 F1, #2785 type-aware box) Plain-array OOB → `undefined` for a
       // PRIMITIVE element: widen the SAFE result to externref (box the in-bounds
       // value, OOB → undefined). f64/i32 cannot represent `undefined`, so the
       // JS-correct lowering of an unproven read is the boxed-or-undefined
@@ -6514,7 +6514,7 @@ export function compileElementAccessBody(
       // typed-array / array-method callers are byte-identical; flipping the
       // shared default was the S2 leak).
       //
-      // #2783 — the element is boxed by its SEMANTIC type, not its Wasm kind:
+      // #2785 — the element is boxed by its SEMANTIC type, not its Wasm kind:
       // `f1BoxType` (reconstructed from the receiver TS type, since the brand is
       // erased in `arrDef.element`) is `{f64}` for `number[]` (`__box_number`) or
       // `{i32, boolean}` for `boolean[]` (`__box_boolean`). This re-enables the
@@ -6558,7 +6558,7 @@ export function compileElementAccessBody(
   const oobUndefinedArr =
     !(expectedType?.kind === "f64" || expectedType?.kind === "i32") &&
     classifyTypedArrayType(ctx.checker.getTypeAtLocation(expr.expression), ctx.checker) === "other";
-  // (#2783) Type-aware box ValType for the F1 widen (null = defer) — matches the
+  // (#2785) Type-aware box ValType for the F1 widen (null = defer) — matches the
   // vec-struct call site above.
   const f1BoxTypeArr = f1ElementBoxType(ctx, expr, typeDef.element);
   // Compile index and convert to i32 (#1179: hint i32 directly to skip the
@@ -6585,7 +6585,7 @@ export function compileElementAccessBody(
     // externref reads too (in-bounds ≠ present).
     if (ctx.usesArrayHoles && typeDef.element.kind === "externref") emitHoleToUndefined(ctx, fctx);
   } else if (oobUndefinedArr && f1BoxTypeArr !== null) {
-    // (#2760 F1, #2783 type-aware box) Plain-array OOB → `undefined` for a
+    // (#2760 F1, #2785 type-aware box) Plain-array OOB → `undefined` for a
     // PRIMITIVE element: widen to a boxed-or-undefined externref, boxed by the
     // element's SEMANTIC type (`f1BoxTypeArr`: `{f64}` number[] → `__box_number`,
     // `{i32, boolean}` boolean[] → `__box_boolean`). Bounds-eliminated reads above

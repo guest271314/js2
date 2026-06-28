@@ -76,7 +76,7 @@ shared SAFE lowering F1 (#2760) builds (planned helper, e.g.
 floor fix in legacy reused as the IR's SAFE lowering, fast path proof-gated.
 **Already has an issue: #2766** (depends on #2760).
 
-#### The F1 box must be TYPE-AWARE (#2783 — landed; unblocks the i32 arms)
+#### The F1 box must be TYPE-AWARE (#2785 — landed; unblocks the i32 arms)
 
 F1's OOB→`undefined` widening boxes the in-bounds element via
 `coerceType(<wasm kind> → externref)`. That box was **type-blind** —
@@ -85,12 +85,12 @@ is overloaded with (boolean `true` → number 1; symbol handle → a number). Th
 cost **two R1 merge_group parks** and forced #2766 to narrow F1 to the `f64`
 (`number[]`) element ONLY, deferring `boolean[]`/`symbol[]`.
 
-**#2783 builds the type-aware box** — `coerceType(i32 → externref)` now picks the
+**#2785 builds the type-aware box** — `coerceType(i32 → externref)` now picks the
 helper from the value's BRAND (`boolean → __box_boolean`, `symbol →
 __box_symbol`, else `__box_number`). The brand is structural-only and is **erased
 in `arrDef.element`** (arrays dedupe by structure), so the F1 call sites
 reconstruct it from the receiver TS element type (`f1ElementBoxType`).
-**Landed in #2783:** `boolean[]` OOB→`undefined` re-enabled (host + standalone).
+**Landed in #2785:** `boolean[]` OOB→`undefined` re-enabled (host + standalone).
 **Fast-follow (still deferred):**
 
 - `symbol[]` OOB→`undefined` at the array-read site — needs a **native
@@ -250,7 +250,7 @@ IR-adoption steps (§(b) of the roadmap), **not** a big-bang rewrite.
   fix (the SAFE lowering rows 1/2 reuse).
 - [#2766](../issues/2766-hybrid-ir-elementaccess-prove-then-specialize.md) — R2,
   the row-1 follow-up.
-- [#2783](../issues/2783-hybrid-type-aware-box-primitive.md) — the **type-aware
+- [#2785](../issues/2785-hybrid-type-aware-box-primitive.md) — the **type-aware
   box primitive** (box keyed on the TS type, not the Wasm kind); re-enables F1's
   `boolean[]` OOB→`undefined` that #2766 deferred. Unblocks the i32 arms.
 - [#2780](../issues/2780-hybrid-ir-arrayliteral-widening-escape.md) — the row-6

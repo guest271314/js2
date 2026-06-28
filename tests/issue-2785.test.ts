@@ -1,6 +1,6 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 //
-// #2783 — Type-aware box primitive: the box helper at `coerceType(i32 →
+// #2785 — Type-aware box primitive: the box helper at `coerceType(i32 →
 // externref)` is chosen by the value's BRAND (its TS type), never by the bare
 // Wasm kind. `i32` is overloaded (number / boolean / symbol-handle), so a
 // type-blind `__box_number` turns a boolean `true` (i32 1) into the number 1 and
@@ -43,7 +43,7 @@ async function runStandalone(source: string, fn = "test"): Promise<number> {
   return (instance.exports as Record<string, () => number>)[fn]() as number;
 }
 
-describe("#2783 — type-aware box primitive (box keyed on the TS type, not the Wasm kind)", () => {
+describe("#2785 — type-aware box primitive (box keyed on the TS type, not the Wasm kind)", () => {
   describe("boolean[] OOB → JS `undefined` (the re-enabled #2766-deferred arm)", () => {
     it("host: a[OOB] === undefined (literal index past end)", async () => {
       expect(

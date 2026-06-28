@@ -1,5 +1,5 @@
 ---
-id: 2783
+id: 2785
 title: "Hybrid: type-aware box primitive (box keyed on the TS type, not the Wasm kind) + re-enable boolean[] OOB→undefined"
 status: done
 completed: 2026-06-28
@@ -18,7 +18,7 @@ goal: correctness
 related: [2760, 2766, 2782, 2105, 1788, 864]
 ---
 
-# #2783 — Type-aware box primitive (box keyed on the TS type, not the Wasm kind)
+# #2785 — Type-aware box primitive (box keyed on the TS type, not the Wasm kind)
 
 The foundational enabler that unblocks the deferred i32-arms across the hybrid
 lane. It cost **two R1 parks** and forced f64-only / deferred scoping on #2760
@@ -162,14 +162,14 @@ via demote-to-legacy; only the deferral doc-comments are updated.
   (branded i32), defer the rest.
 - `src/ir/from-ast.ts` — doc note: legacy's box is now type-aware, so the IR's
   numeric→externref demote-to-legacy is type-correct for boolean/symbol too.
-- `tests/issue-2783.test.ts` (new), `tests/issue-2760.test.ts` (boolean[] OOB
+- `tests/issue-2785.test.ts` (new), `tests/issue-2760.test.ts` (boolean[] OOB
   assertion flipped `false`→`undefined`), `plan/log/hybrid-fastpath-audit.md`.
 
 ## Test Results
 
 Local (scoped — broad-impact conformance validated by full CI/merge_group):
 
-- `tests/issue-2783.test.ts` (20) + `tests/issue-2760.test.ts` (19) +
+- `tests/issue-2785.test.ts` (20) + `tests/issue-2760.test.ts` (19) +
   `tests/issue-2766.test.ts` (15) = **54 green**.
 - Array / coercion / element-access sweep (bounds-elim, OOB, array-methods,
   externref/class element access, call-arg + relational coercion, #1788,

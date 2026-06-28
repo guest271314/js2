@@ -1521,7 +1521,7 @@ export function coerceType(
     fctx.body.push({ op: "ref.null.extern" });
     return;
   }
-  // i32 → externref. TYPE-AWARE box (#2783): the box helper is chosen by the
+  // i32 → externref. TYPE-AWARE box (#2785): the box helper is chosen by the
   // i32's BRAND (its TS type), NEVER by the bare Wasm kind. `i32` is overloaded
   // — it backs `number`, `boolean` (1/0), and symbol HANDLES (ids) — and a
   // type-blind `__box_number` corrupts the non-numbers (boolean `true` → the
@@ -1543,7 +1543,7 @@ export function coerceType(
     }
     // symbol → __box_symbol (takes the i32 handle/id directly; identity-stable
     // via the host symbol cache). HOST only — standalone has no native
-    // `__box_symbol` yet (#2783 fast-follow), so route to it only when it is
+    // `__box_symbol` yet (#2785 fast-follow), so route to it only when it is
     // ALREADY registered (the symbol read/literal path pulls it). This keeps the
     // arm purely additive: a symbol-branded value never silently leaks a host
     // import into a standalone module, and falls through to the number box if

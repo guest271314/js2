@@ -79,19 +79,19 @@ describe("#2760 F1 — plain-array OOB read → JS `undefined` (primitive elemen
     });
   });
 
-  // #2783 — boolean[] OOB→undefined is now RE-ENABLED. The type-aware box keys
+  // #2785 — boolean[] OOB→undefined is now RE-ENABLED. The type-aware box keys
   // the box helper on the element's SEMANTIC type (reconstructed from the
   // receiver TS type, since the brand is erased in `arrDef.element`): a
   // `boolean[]` element boxes via `__box_boolean`, not the type-blind
   // `__box_number` that corrupted it (boolean `true` → the number 1). So an OOB
   // boolean[] read now returns JS `undefined` like `number[]`. `symbol[]` stays
   // deferred (no native standalone `__box_symbol` yet) — full coverage in
-  // `tests/issue-2783.test.ts`.
-  describe("host — boolean[] OOB → undefined (re-enabled by the type-aware box, #2783)", () => {
+  // `tests/issue-2785.test.ts`.
+  describe("host — boolean[] OOB → undefined (re-enabled by the type-aware box, #2785)", () => {
     it("a[OOB] === undefined (was the type-default `false`, deferred under #2766)", async () => {
       expect(
         await run(`export function test(): boolean { const a: boolean[] = [true, false]; return a[4] === undefined; }`),
-      ).toBe(1); // OOB boolean[] read now reads JS undefined (#2783)
+      ).toBe(1); // OOB boolean[] read now reads JS undefined (#2785)
     });
   });
 
