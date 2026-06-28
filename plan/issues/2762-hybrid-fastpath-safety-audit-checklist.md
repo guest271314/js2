@@ -1,10 +1,11 @@
 ---
 id: 2762
 title: "Hybrid migration-cost audit: type-directed fast-path safety-predicate checklist (living doc)"
-status: ready
+status: done
 sprint: current
 created: 2026-06-28
 updated: 2026-06-28
+completed: 2026-06-28
 priority: high
 horizon: s
 feasibility: easy
@@ -17,6 +18,15 @@ related: [2755, 2760, 2766, 1530]
 ---
 
 # #2762 — Hybrid migration-cost audit: fast-path safety-predicate checklist
+
+> **Deliverable produced (R3, 2026-06-28):** the living checklist lives at
+> [`plan/log/hybrid-fastpath-audit.md`](../log/hybrid-fastpath-audit.md). It
+> covers all ~9 fast-path families with, per row: the unsound assumption, the
+> proof `P` that makes it HI-safe, the discharged/partial/undischarged status,
+> the easy/subtle class + S/M/L effort, the concrete codegen site
+> (`file:approx-symbol`), and a "what would discharge `P`" note for every
+> subtle/undischarged row. The roadmap §(d) is cross-linked to it. This issue
+> file is the *tracking record*; maintain the table in the living doc, not here.
 
 Makes the migration-cost sizing from the hybrid roadmap
 ([`docs/architecture/hybrid-soundness-ir-roadmap.md`](../../docs/architecture/hybrid-soundness-ir-roadmap.md),
