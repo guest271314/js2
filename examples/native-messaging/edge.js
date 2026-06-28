@@ -1,6 +1,6 @@
 // edge.js — a JS provider for the `node:fs` host-import interface (#1772 Phase 1).
 //
-// A js2wasm module compiled with `--target wasi --link-node-shims` imports its
+// A js2wasm module compiled with `--target wasi --link node:fs` imports its
 // fd-based synchronous IO from `node:fs`:
 //
 //   (import "node:fs" "memory"    (memory …))

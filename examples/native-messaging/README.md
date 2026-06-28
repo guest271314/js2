@@ -41,7 +41,7 @@ progressively higher-level (and more Node-shaped) surfaces.
 | Variant                                      | Host surface                                    | Source import                                                                              | Sync or async                                                  | Emitted wasm imports                                                                       | Runs natively under                                       | Compiles to                                                         |
 | -------------------------------------------- | ----------------------------------------------- | ------------------------------------------------------------------------------------------ | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------ | --------------------------------------------------------- | ------------------------------------------------------------------- |
 | [`nm_wasi_p1.ts`](./nm_wasi_p1.ts)           | Raw WASI Preview 1 syscalls over linear memory  | `wasi_snapshot_preview1` (`fd_read`/`fd_write`) + `wasm:memory` (intrinsic, lowers inline) | **sync** — blocking `fd_read`/`fd_write` loop                  | only `wasi_snapshot_preview1`                                                              | `wasmtime` / `wasmer` / `wazero`                          | standalone WASI P1 command module (owns + exports its own `memory`) |
-| [`nm_node_fs.ts`](./nm_node_fs.ts)           | Node synchronous `node:fs` fd IO                | `node:fs` (`readSync`/`writeSync`)                                                         | **sync** — `readSync`/`writeSync` read-until loop              | only `wasi_snapshot_preview1` (inlined); or a `node:fs` interface with `--link-node-shims` | `wasmtime` **and** unmodified under real `node`           | standalone WASI P1 command module (or a `node:fs`-linkable module)  |
+| [`nm_node_fs.ts`](./nm_node_fs.ts)           | Node synchronous `node:fs` fd IO                | `node:fs` (`readSync`/`writeSync`)                                                         | **sync** — `readSync`/`writeSync` read-until loop              | only `wasi_snapshot_preview1` (inlined); or a `node:fs` interface with `--link node:fs` | `wasmtime` **and** unmodified under real `node`           | standalone WASI P1 command module (or a `node:fs`-linkable module)  |
 | [`nm_node_process.ts`](./nm_node_process.ts) | Node async streaming stdio                      | `process.stdin` (global) Readable + `process.stdout.write`                                 | **async** — event-driven `'data'`/`'end'`, incremental framing | only `wasi_snapshot_preview1`                                                              | `wasmtime` (drives the injected fd0 reactor / event loop) | standalone WASI P1 command module with an event loop                |
 | [`nm_deno.ts`](./nm_deno.ts)                 | Deno stdio surface (`Deno.stdin`/`Deno.stdout`) | _(lands separately)_                                                                       | sync (`readSync`/`writeSync`)                                  | _(WASI-targeted; filled in when it lands)_                                                 | Deno / a WASI runtime                                     | standalone WASI module                                              |
 | [`nm_wasi_p3.ts`](./nm_wasi_p3.ts)           | WASI Preview 3 async streams                    | _(lands separately)_                                                                       | **async** — P3 stream reads                                    | WASI Preview 3 component interfaces                                                        | a Preview-3 / component-capable runner                    | WASI Preview 3 component                                            |
@@ -81,16 +81,16 @@ buffer-filling `read`; loopdive/js2#389). The same source now (a) compiles via
 js2wasm to standalone WASI **and** (b) runs **unmodified** under real `node`.
 
 **To get a module you can run directly under `wasmtime`, compile with `--target
-wasi` ALONE** (no `--link-node-shims`): the `node:fs` `readSync`/`writeSync` calls
+wasi` ALONE** (no `--link node:fs`): the `node:fs` `readSync`/`writeSync` calls
 lower **inline** to `wasi_snapshot_preview1` `fd_read`/`fd_write`, so the emitted
 module imports ONLY `wasi_snapshot_preview1` and owns its own memory (#2655). This
 is the runnable standalone path the loopdive/js2#389 reporter wanted.
 
-`--link-node-shims` is a **separate modular-linking variant**, NOT a
+`--link node:fs` is a **separate modular-linking variant**, NOT a
 run-directly-under-bare-wasmtime flag: it makes the module _import_ a stable
 `node:fs` interface (`readSync`/`writeSync` + its `memory`) that you then **link**
 against [`node-fs.wat`](./node-fs.wat) (which maps them to WASI `fd_read`/
-`fd_write`) — or satisfy from a JS host's real `node:fs`. A `--link-node-shims`
+`fd_write`) — or satisfy from a JS host's real `node:fs`. A `--link node:fs`
 module run under bare `wasmtime` with no link step fails with `unknown import:
 node:fs::readSync` (loopdive/js2#389 bug 2) — that is expected; link it first. See
 [`NODE-FS-SHIM.md`](./NODE-FS-SHIM.md) for the link step.
@@ -167,20 +167,20 @@ module: the `node:fs` `readSync`/`writeSync` calls lower **inline** to
 `wasi_snapshot_preview1`, owns + exports its own `memory`, and runs directly under
 `wasmtime` with no link step (#2655).
 
-**Optional modular-linking variant — `--link-node-shims`.** Adding
-`--link-node-shims` instead makes the module _import_ a stable `node:fs` interface
+**Optional modular-linking variant — `--link node:fs`.** Adding
+`--link node:fs` instead makes the module _import_ a stable `node:fs` interface
 (`readSync`/`writeSync` + the shared linear `memory`) rather than inlining the
 syscalls:
 
 ```bash
-npx tsx src/cli.ts examples/native-messaging/nm_node_fs.ts --target wasi --link-node-shims -o examples/native-messaging/out
+npx tsx src/cli.ts examples/native-messaging/nm_node_fs.ts --target wasi --link node:fs -o examples/native-messaging/out
 ```
 
 The result declares **what** host API it needs (`node:fs`), not how it's
 satisfied — so you must **link** it against `node-fs.wasm` (built from
 [`node-fs.wat`](./node-fs.wat), which maps `node:fs` → WASI `fd_read`/`fd_write`),
 a native WASI host, or the real `node:fs` module under a JS host BEFORE it can
-run. Running a `--link-node-shims` module directly under bare `wasmtime` with no
+run. Running a `--link node:fs` module directly under bare `wasmtime` with no
 link step fails with `unknown import: node:fs::readSync` (loopdive/js2#389 bug 2)
 — that is by design; link it first. See [`NODE-FS-SHIM.md`](./NODE-FS-SHIM.md) for
 the link step. Use this variant only when you want the same binary to link against
@@ -331,10 +331,10 @@ the compiled module's linear memory below a 512 MiB cap.
    raw bytes on stdin and produces correctly framed bytes on stdout via
    `process.stdout.write` (a `Uint8Array` prefix + the JSON body).
 
-## Linkable `node:fs` shim (`--link-node-shims`, #2625/#2633)
+## Linkable `node:fs` shim (`--link node:fs`, #2625/#2633)
 
 By default the stdin/stdout glue is inlined as `wasi_snapshot_preview1.fd_read`
-/ `fd_write` in every module. With `--target wasi --link-node-shims`, the module
+/ `fd_write` in every module. With `--target wasi --link node:fs`, the module
 instead imports a stable `node:fs` interface (fd-based `readSync`/`writeSync`,
 plus its linear memory) and links against a small, separately-compiled
 `node-fs.wasm` that implements that interface over WASI — proving the modular

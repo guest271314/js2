@@ -28,7 +28,7 @@ export function main(): void {
     const result = await compile(src, {
       fileName: "x.ts",
       target: "wasi",
-      linkNodeShims: true,
+      link: ["node:fs"],
     });
     expect(result.success).toBe(false);
     const msgs = (result.errors ?? []).map((e) => e.message).join("\n");
@@ -40,15 +40,15 @@ export function main(): void {
     expect(msgs).toMatch(/--target wasi/);
   });
 
-  it("the gate also fires WITHOUT --link-node-shims (it keys off --target wasi)", async () => {
+  it("the gate also fires WITHOUT --link node:fs (it keys off --target wasi)", async () => {
     const src = `
 import { readFileSync } from "node:fs";
 export function main(): void {
   const data = readFileSync("/etc/hostname");
 }
 `;
-    // No linkNodeShims: the gate must still fire (it sits after the !ctx.wasi
-    // guard but before the !ctx.linkNodeShims short-circuit).
+    // No `link`: the gate must still fire (it sits after the !ctx.wasi
+    // guard but before the internal !ctx.linkNodeShims short-circuit).
     const result = await compile(src, { fileName: "x.ts", target: "wasi" });
     expect(result.success).toBe(false);
     const msgs = (result.errors ?? []).map((e) => e.message).join("\n");
@@ -69,7 +69,7 @@ export function main(): void {
     const result = await compile(src, {
       fileName: "x.ts",
       target: "wasi",
-      linkNodeShims: true,
+      link: ["node:fs"],
     });
     expect(result.success).toBe(true);
   });
@@ -99,7 +99,7 @@ export function main(): number {
     const result = await compile(src, {
       fileName: "x.ts",
       target: "wasi",
-      linkNodeShims: true,
+      link: ["node:fs"],
     });
     // The local function is unrelated to node:fs; the gate keys off the
     // node:fs import set, so it must not fire here.

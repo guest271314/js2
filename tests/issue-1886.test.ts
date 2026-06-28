@@ -75,11 +75,11 @@ async function compileWat(source: string): Promise<string> {
   return (result as unknown as { wat?: string }).wat ?? "";
 }
 
-// #2633 — node:fs readSync/writeSync are supported under --link-node-shims; the
+// #2633 — node:fs readSync/writeSync are supported under --link node:fs; the
 // node-fs shim owns the shared memory + WASI fd_*. These helpers compile + run a
 // user module that drives the linear I/O path through that shim.
 async function compileWasiShim(source: string): Promise<Uint8Array> {
-  const result = await compile(source, { fileName: "test.ts", target: "wasi", linkNodeShims: true });
+  const result = await compile(source, { fileName: "test.ts", target: "wasi", link: ["node:fs"] });
   if (!result.success) {
     throw new Error(`compile failed: ${result.errors?.map((e) => e.message).join("; ") ?? "unknown"}`);
   }
@@ -90,7 +90,7 @@ async function compileWat2(source: string): Promise<string> {
   const result = await compile(source, {
     fileName: "test.ts",
     target: "wasi",
-    linkNodeShims: true,
+    link: ["node:fs"],
     emitText: true,
   } as never);
   if (!result.success) {

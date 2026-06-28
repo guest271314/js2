@@ -3,14 +3,14 @@
 // loopdive/js2#389: the Native Messaging host reporter runs directly under a
 // WASI host (wasmtime) and is explicitly "not chasing Node.js". They want a
 // SELF-CONTAINED WASI P1 command module that imports ONLY
-// `wasi_snapshot_preview1` — no node:fs shim (`--link-node-shims`), no Node
+// `wasi_snapshot_preview1` — no node:fs shim (`--link node:fs`), no Node
 // runtime. #2631/#2633 gave the shim path; this adds the direct path: fd-based
 // `readSync(0, …)` / `writeSync(1, …)` lower straight to
 // `wasi_snapshot_preview1.fd_read` / `fd_write` (a plain BLOCKING read — NOT the
 // async reactor's non-blocking fd_read + poll_oneoff), and the command module
 // owns + exports its own `memory`.
 //
-// The `--link-node-shims` path (the "same file also runs unmodified under real
+// The `--link node:fs` path (the "same file also runs unmodified under real
 // node via node:fs" story) is unchanged — covered by issue-2631-node-fs-fd-shim.
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -87,10 +87,10 @@ describe("#2655 — direct WASI P1 readSync/writeSync (no shim)", () => {
     expect(() => new WebAssembly.Module(result.binary)).not.toThrow();
   });
 
-  // Sanity: the SAME source still compiles under --link-node-shims to the shim
+  // Sanity: the SAME source still compiles under --link node:fs to the shim
   // imports (the node-runtime variant), proving the dual mode coexists.
-  it("--link-node-shims still emits the node:fs shim imports (dual mode preserved)", async () => {
-    const result = await compile(FRAMED_ECHO, { fileName: "x.ts", target: "wasi", linkNodeShims: true });
+  it("--link node:fs still emits the node:fs shim imports (dual mode preserved)", async () => {
+    const result = await compile(FRAMED_ECHO, { fileName: "x.ts", target: "wasi", link: ["node:fs"] });
     expect(result.success).toBe(true);
     const wat = result.wat ?? "";
     expect(wat).toContain('(import "node:fs" "readSync"');

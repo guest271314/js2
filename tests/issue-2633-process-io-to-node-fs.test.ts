@@ -1,8 +1,8 @@
 // #2633 — std-IO routes through `node:fs` (fd-based readSync/writeSync) under
-// `--link-node-shims`; the bespoke `js2wasm:node-process` shim is retired and
+// `--link node:fs`; the bespoke `js2wasm:node-process` shim is retired and
 // the hallucinated `process.stdin.read(buf, offset)` is no longer recognised.
 //
-// Under `--target wasi --link-node-shims`, a module that writes to stdout/stderr
+// Under `--target wasi --link node:fs`, a module that writes to stdout/stderr
 // (console.log/warn/error, process.stdout/stderr.write) imports the `node:fs`
 // interface (writeSync) plus its linear memory from `node:fs` and carries NO
 // `wasi_snapshot_preview1` import and NO `js2wasm:node-process` import for the
@@ -78,7 +78,7 @@ function linkAndRun(userBinary: Uint8Array): Uint8Array {
 
 describe("#2633 — std-IO via node:fs (node-process shim retired)", () => {
   it("process.stdout.write lowers to node:fs writeSync, NOT js2wasm:node-process", async () => {
-    const result = await compile(ECHO_WRITE, { fileName: "x.ts", target: "wasi", linkNodeShims: true });
+    const result = await compile(ECHO_WRITE, { fileName: "x.ts", target: "wasi", link: ["node:fs"] });
     expect(result.success, result.errors.map((e) => e.message).join("\n")).toBe(true);
     const wat = result.wat ?? "";
     // Imports the node:fs interface: memory + writeSync.
@@ -96,18 +96,18 @@ describe("#2633 — std-IO via node:fs (node-process shim retired)", () => {
     expect(() => new WebAssembly.Module(result.binary)).not.toThrow();
   });
 
-  it("console.log lowers to node:fs writeSync(1, …) under --link-node-shims", async () => {
+  it("console.log lowers to node:fs writeSync(1, …) under --link node:fs", async () => {
     const src = `export function main(): void { console.log("hi"); }`;
-    const result = await compile(src, { fileName: "x.ts", target: "wasi", linkNodeShims: true });
+    const result = await compile(src, { fileName: "x.ts", target: "wasi", link: ["node:fs"] });
     expect(result.success, result.errors.map((e) => e.message).join("\n")).toBe(true);
     const wat = result.wat ?? "";
     expect(wat).toContain('(import "node:fs" "writeSync"');
     expect(wat).not.toContain("js2wasm:node-process");
   });
 
-  it("console.error lowers to node:fs writeSync(2, …) under --link-node-shims", async () => {
+  it("console.error lowers to node:fs writeSync(2, …) under --link node:fs", async () => {
     const src = `export function main(): void { console.error("boom"); }`;
-    const result = await compile(src, { fileName: "x.ts", target: "wasi", linkNodeShims: true });
+    const result = await compile(src, { fileName: "x.ts", target: "wasi", link: ["node:fs"] });
     expect(result.success, result.errors.map((e) => e.message).join("\n")).toBe(true);
     const wat = result.wat ?? "";
     expect(wat).toContain('(import "node:fs" "writeSync"');
@@ -132,7 +132,7 @@ describe("#2633 — std-IO via node:fs (node-process shim retired)", () => {
         const buf = new Uint8Array(4);
         process.stdin.read(buf, 0);
       }`;
-    const result = await compile(src, { fileName: "x.ts", target: "wasi", linkNodeShims: true });
+    const result = await compile(src, { fileName: "x.ts", target: "wasi", link: ["node:fs"] });
     expect(result.success).toBe(false);
     const msg = result.errors.map((e) => e.message).join("\n");
     expect(msg).toContain("process.stdin.read");
@@ -153,15 +153,15 @@ describe("#2633 — std-IO via node:fs (node-process shim retired)", () => {
   });
 
   it("links node-fs.wasm and round-trips process.stdout.write byte-for-byte", async () => {
-    const result = await compile(ECHO_WRITE, { fileName: "x.ts", target: "wasi", linkNodeShims: true });
+    const result = await compile(ECHO_WRITE, { fileName: "x.ts", target: "wasi", link: ["node:fs"] });
     expect(result.success, result.errors.map((e) => e.message).join("\n")).toBe(true);
     const out = linkAndRun(result.binary);
     expect(Array.from(out)).toEqual([0x05, 0x00, 0x00, 0x00, 0x00, 0xff, 0x0a, 0x7f, 0x80]);
   });
 
-  it("linkNodeShims is ignored for non-WASI targets (no node shim imports)", async () => {
+  it("link: ['node:fs'] is ignored for non-WASI targets (no node shim imports)", async () => {
     const src = `export function add(a: number, b: number): number { return a + b; }`;
-    const result = await compile(src, { fileName: "x.ts", linkNodeShims: true });
+    const result = await compile(src, { fileName: "x.ts", link: ["node:fs"] });
     expect(result.success).toBe(true);
     expect(result.wat ?? "").not.toContain("js2wasm:node-process");
     expect(result.wat ?? "").not.toContain('(import "node:fs"');

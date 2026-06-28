@@ -129,7 +129,7 @@ describe("#2521 Native Messaging host — >1 MiB re-chunking + multi-message seq
     // routing); single-source `compile()` would strip the relative import.
     const result = await compileProject(hostPath, {
       target: "wasi",
-      linkNodeShims: true,
+      link: ["node:fs"],
       skipSemanticDiagnostics: true,
     });
     expect(result.success).toBe(true);
@@ -143,7 +143,7 @@ describe("#2521 Native Messaging host — >1 MiB re-chunking + multi-message seq
     // routing); single-source `compile()` would strip the relative import.
     const result = await compileProject(hostPath, {
       target: "wasi",
-      linkNodeShims: true,
+      link: ["node:fs"],
       skipSemanticDiagnostics: true,
     });
     expect(result.success).toBe(true);
@@ -171,7 +171,7 @@ describe("#2521 Native Messaging host — >1 MiB re-chunking + multi-message seq
     // routing); single-source `compile()` would strip the relative import.
     const result = await compileProject(hostPath, {
       target: "wasi",
-      linkNodeShims: true,
+      link: ["node:fs"],
       skipSemanticDiagnostics: true,
     });
     expect(result.success).toBe(true);
