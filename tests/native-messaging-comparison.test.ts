@@ -36,7 +36,7 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "n
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { compile } from "../src/index.js";
+import { compile, compileProject, entryHasRelativeImports } from "../src/index.js";
 
 // wasmtime feature flags for the WasmGC + exception-handling binaries js2wasm
 // emits (structs/arrays + the exception tag).
@@ -58,10 +58,15 @@ const wasmtimeBin = findWasmtime();
 
 const NM_DIR = join(__dirname, "..", "examples", "native-messaging");
 
-/** The host-surface variants present on disk (any `nm_<surface>.ts`), sorted. */
+/**
+ * The host-surface variants present on disk (any `nm_<surface>.ts`), sorted.
+ * `nm_sync_framing.ts` is the SHARED host-independent framing core (#2778), not a
+ * host variant — it has no entry/`main` and never does fd IO itself — so it is
+ * excluded from the variant matrix (the host adapters that import it are tested).
+ */
 function discoverVariants(): string[] {
   return readdirSync(NM_DIR)
-    .filter((f) => /^nm_.*\.ts$/.test(f))
+    .filter((f) => /^nm_.*\.ts$/.test(f) && f !== "nm_sync_framing.ts")
     .sort();
 }
 
@@ -97,8 +102,16 @@ function frame(body: Uint8Array): Uint8Array {
 }
 
 async function compileVariant(file: string): Promise<Awaited<ReturnType<typeof compile>>> {
-  const src = readFileSync(join(NM_DIR, file), "utf-8");
-  return compile(src, { fileName: file, target: "wasi", skipSemanticDiagnostics: true });
+  const path = join(NM_DIR, file);
+  const src = readFileSync(path, "utf-8");
+  // Mirror the CLI's routing (#2771): an entry that statically imports a RELATIVE
+  // module (e.g. nm_deno / nm_node_fs → `./nm_sync_framing`) must go through the
+  // multi-file bundler so the shared core is pulled in and `node:fs` / raw-WASI
+  // lowering runs module-wide. Entries with no relative import (nm_wasi_p1 /
+  // nm_node_process / nm_wasi_p3) stay on the single-source path — byte-identical.
+  return entryHasRelativeImports(src)
+    ? compileProject(path, { target: "wasi", skipSemanticDiagnostics: true })
+    : compile(src, { fileName: file, target: "wasi", skipSemanticDiagnostics: true });
 }
 
 /**
