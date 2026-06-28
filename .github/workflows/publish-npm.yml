@@ -73,15 +73,21 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # No `version:` here on purpose — package.json pins pnpm via the
+      # "packageManager" field, and passing both makes pnpm/action-setup@v4
+      # fail with ERR_PNPM_BAD_PM_VERSION (it killed the v0.56.0 and v0.57.0
+      # publish runs). Let action-setup read the pinned version instead.
       - uses: pnpm/action-setup@v4
-        with:
-          version: 10
 
       - uses: actions/setup-node@v6
         with:
           node-version: 20
           registry-url: "https://registry.npmjs.org"
           cache: "pnpm"
+
+      # OIDC trusted publishing requires npm >= 11.5.1; Node 20 ships npm 10.x.
+      - name: Upgrade npm for OIDC trusted publishing
+        run: npm install -g npm@latest
 
       - name: Install deps
         run: pnpm install --frozen-lockfile
@@ -92,24 +98,30 @@ jobs:
       - name: Pack @loopdive/js2 (dry-run preview)
         run: npm pack --dry-run
 
+      # Tokenless OIDC trusted publishing — no NODE_AUTH_TOKEN. npm authenticates
+      # to npmjs via the GitHub Actions OIDC token (id-token: write is granted at
+      # the workflow level), using the trusted publisher configured for
+      # @loopdive/js2. Provenance is attested automatically under OIDC.
       - name: Publish @loopdive/js2
         if: github.event_name == 'push' || inputs.dry-run == 'false'
         run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
+      # DISABLED: the unscoped js2wasm proxy is unpublished, has no trusted
+      # publisher, and pins @loopdive/js2 at a stale 0.52.0. Re-enable (and add
+      # its own trusted publisher + a dep bump) once you want `npm install
+      # js2wasm` to resolve. See loopdive/js2#389.
       - name: Publish js2wasm proxy
-        if: github.event_name == 'push' || inputs.dry-run == 'false'
+        if: false
         working-directory: packages/js2wasm
         run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   publish-jsr:
     name: JSR publish (@loopdive/js2)
     runs-on: ubuntu-latest
     needs: publish-npm
-    if: github.event_name == 'push' || inputs.dry-run == 'false'
+    # DISABLED: JSR publishing needs its own OIDC link (jsr.io ↔ this repo) set
+    # up separately. Re-enable once the JSR package + GitHub link are configured.
+    if: false
     steps:
       - uses: actions/checkout@v5
 

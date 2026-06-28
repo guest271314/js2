@@ -235,6 +235,37 @@ function isAnonymousFunctionDefinition(expr: ts.Expression): boolean {
   return false;
 }
 
+/**
+ * (#2756) ES §15.7.14 ClassDefinitionEvaluation defines a class's static
+ * elements AFTER the optional SetFunctionName(F, className) step, so a class that
+ * declares its own `static name` member (method / property / accessor) ends up
+ * with that member as `F.name` — the NamedEvaluation-supplied binding name is
+ * OVERRIDDEN. Likewise a *named* class expression keeps its own name. This
+ * compiler synthesises `<id>.name` statically from the binding initializer; for
+ * such classes that synthesis must NOT return the binding identifier text. Used
+ * to gate the NamedEvaluation synthesis sites below (matches test262
+ * `*-init-fn-name-class` whose `xCls2 = class { static name() {} }` asserts
+ * `xCls2.name !== 'xCls2'`).
+ */
+function classExpressionDefinesOwnName(expr: ts.Expression): boolean {
+  let e: ts.Expression = expr;
+  while (ts.isParenthesizedExpression(e)) e = e.expression;
+  if (!ts.isClassExpression(e)) return false;
+  if (e.name) return true; // named class expression keeps its own name
+  return e.members.some((m) => {
+    if (
+      !ts.isPropertyDeclaration(m) &&
+      !ts.isMethodDeclaration(m) &&
+      !ts.isGetAccessorDeclaration(m) &&
+      !ts.isSetAccessorDeclaration(m)
+    ) {
+      return false;
+    }
+    const isStatic = m.modifiers?.some((mod) => mod.kind === ts.SyntaxKind.StaticKeyword) ?? false;
+    return isStatic && m.name !== undefined && ts.isIdentifier(m.name) && m.name.text === "name";
+  });
+}
+
 const LOGICAL_ASSIGNMENT_TOKENS = new Set<ts.SyntaxKind>([
   ts.SyntaxKind.AmpersandAmpersandEqualsToken,
   ts.SyntaxKind.BarBarEqualsToken,
@@ -3876,9 +3907,11 @@ export function compilePropertyAccess(
           if (decl.initializer) {
             let initExpr: ts.Expression = decl.initializer;
             while (ts.isParenthesizedExpression(initExpr)) initExpr = initExpr.expression;
-            if (isAnonymousFunctionDefinition(decl.initializer)) {
+            if (isAnonymousFunctionDefinition(decl.initializer) && !classExpressionDefinesOwnName(decl.initializer)) {
               // SingleNameBinding NamedEvaluation: anonymous fn/class inherits
-              // the binding identifier's text as its .name.
+              // the binding identifier's text as its .name. (#2756) A class with
+              // its own `static name` member overrides the binding name, so skip
+              // synthesis there and fall through to the real property read.
               resolvedName = expr.expression.text;
             } else if (ts.isFunctionExpression(initExpr) && initExpr.name) {
               // Named function expression keeps its own name (the binding
@@ -3933,8 +3966,13 @@ export function compilePropertyAccess(
             if (decl && (ts.isBindingElement(decl) || ts.isVariableDeclaration(decl)) && decl.initializer) {
               initExpr = decl.initializer;
             }
-            if (initExpr !== undefined && !isAnonymousFunctionDefinition(initExpr)) {
-              // Covered form — .name is "" (or whatever the inner fn already has)
+            if (
+              initExpr !== undefined &&
+              (!isAnonymousFunctionDefinition(initExpr) || classExpressionDefinesOwnName(initExpr))
+            ) {
+              // Covered form — .name is "" (or whatever the inner fn already has).
+              // (#2756) A class with its own `static name` member overrides the
+              // NamedEvaluation binding name, so it is NOT the binding text either.
               addStringConstantGlobal(ctx, "");
               return compileStringLiteral(ctx, fctx, "");
             }

@@ -105,3 +105,7 @@ no regressions in currently-passing tests.
   Unicode-substrate slice; BigInt-argument coercion tests (blocked).
 - Spec: ES2023 §22.1.3 String.prototype methods; `RequireObjectCoercible` §7.2.1,
   `ToString` §7.1.17.
+
+## Residual (as of #2199, PO reconcile 2026-06-28)
+
+NOT done — group carve-out. Group (d) (builtin function .length non-enumerable + a test-runner fix) landed. The headline ToString(this) generic-receiver coercion for String.prototype methods (charAt/charCodeAt/indexOf/slice/substring/concat...) + remaining groups remain. Stays in-progress.

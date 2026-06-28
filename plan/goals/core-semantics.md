@@ -223,7 +223,7 @@ missing return values, incorrect type coercion, wrong control flow, broken scope
 | **2010** | {...null} / {...undefined} in an object literal silently drops ALL named properties (externref fallback skips PropertyAssignment) | 61 | done | high |
 | **2011** | object-literal getter/setter closures capture copies — writes through accessors never reach the outer scope, getter pairs don't share state | 63 | done | high |
 | **2012** | Object.freeze: no strict-mode TypeError on write, isFrozen false — tracking only fires for identifier args, struct receivers get no integrity bit | 63 | done | medium |
-| **2013** | JSON.parse reviver argument silently ignored (parse arm compiles only arguments[0]; host import drops it) | 64 | blocked | medium |
+| **2013** | JSON.parse reviver argument silently ignored (parse arm compiles only arguments[0]; host import drops it) | 65 | done | medium |
 | **2014** | numeric-key element access on any-typed object returns undefined though the property exists (o[2] vs o['2']) | 61 | done | medium |
 | **2015** | method call using `this` on an any-typed object-literal receiver throws bare WebAssembly.Exception (__extern_method_call this-routing) | 62 | done | medium |
 | **2016** | hasOwnProperty result stringifies as '1'/'0' instead of 'true'/'false' (i32 result lacks boolean brand) | 61 | done | low |
@@ -245,7 +245,7 @@ missing return values, incorrect type coercion, wrong control flow, broken scope
 | **2033** | custom iterables ([Symbol.iterator]): spread emits invalid wasm (CE), destructuring reads NaN — only for-of consults the protocol | 63 | done | high |
 | **2034** | Number.isNaN/isInteger/isFinite coerce their argument via f64 hint — Number.isNaN('foo') returns true (should be false, no coercion) | 61 | done | medium |
 | **2035** | generator return value leaks into iteration: spread/for-of/Array.from/yield* include it; final {value, done:true} never materializes | 63 | done | high |
-| **2044** | architect decision: BigInt value representation — i64-bigint-brand ValType vs TS-type-driven boxing (gates #1644 slices, implicated in #2039 i64 ABI bucket) | 64 | blocked | high |
+| **2044** | architect decision: BigInt value representation — i64-bigint-brand ValType vs TS-type-driven boxing (gates #1644 slices, implicated in #2039 i64 ABI bucket) | 67 | blocked | high |
 | **2049** | o?.m(args) never routed to optional-call codegen: args evaluated on nullish receiver, null class receiver traps | 61 | done | high |
 | **2050** | a?.[i] compiled as plain a[i]: index side effects fire and no undefined result on nullish base | 61 | done | high |
 | **2051** | short-circuited ?. produces the type's default value (0 / \"null\") instead of undefined | 63 | done | high |
@@ -268,7 +268,7 @@ missing return values, incorrect type coercion, wrong control flow, broken scope
 | **2084** | module-global object access: reads re-emit null-check+throw per access (survives -O); writes have NO check and trap instead of TypeError | 62 | done | low |
 | **2085** | array HOF predicate truthiness: buildTruthyCheck treats NaN and boxed 0/'' as truthy — contradicts ensureI32Condition's own spec matrix | 62 | done | medium |
 | **2086** | single implicit-derived-ctor synthesis shared by all three representation paths (externref / WasmGC struct / standalone) | 62 | done | high |
-| **2087** | capture-machinery unification: object-literal accessors must use the canonical boxedCaptures ref-cell path | 64 | ready | high |
+| **2087** | capture-machinery unification: object-literal accessors must use the canonical boxedCaptures ref-cell path | Backlog | backlog | low |
 | **2088** | per-builtin representation scaffold (element accessor + coercion), starting with fromCharCode + join | 63 | done | high |
 | **2091** | REGEX_STEP_CAP overflow silently reports no-match — must throw RangeError | 63 | done | medium |
 | **2100** | architect spec: deep-marshaling contract at the host boundary (vec ⇄ array, closure ⇄ callback, struct ⇄ object) | 62 | done | high |
@@ -276,7 +276,7 @@ missing return values, incorrect type coercion, wrong control flow, broken scope
 | **2102** | shared throwJsError(kind, msg) lowering + trap-site audit — runtime checks must throw catchable JS errors, not Wasm traps | 63 | done | high |
 | **2104** | value-rep P1: canonical JsTag module (src/codegen/value-tags.ts) + boxToAny consolidation with jsType hint | 62 | done | high |
 | **2105** | value-rep P2: boolean brand rollout — ~20 producer + ~12 consumer sites onto {kind:'i32', boolean:true} | 62 | done | high |
-| **2106** | value-rep P3: undefined observability — UNDEF_F64 sentinel, union-collapse reversal (flagged), standalone $undefined singleton | 64 | in-progress | high |
+| **2106** | value-rep P3: undefined observability — UNDEF_F64 sentinel, union-collapse reversal (flagged), standalone $undefined singleton | 67 | in-progress | high |
 | **2109** | BigInt mixed loose-equality uses parseFloat instead of StringToNumber (accepts trailing garbage, rejects 0x forms) | Backlog | ready | low |
 | **2111** | module code (always strict) gets a mapped arguments object: parameter writes leak into arguments[i] | 61 | wont-fix | medium |
 | **2114** | String.fromCharCode/fromCodePoint silently drop all arguments after the first (host backend; native fromCodePoint too) | 61 | wont-fix | high |
@@ -288,9 +288,16 @@ missing return values, incorrect type coercion, wrong control flow, broken scope
 | **2152** | Array HOF callbacks ignore thisArg; callback `this` is always undefined | 62 | done | high |
 | **2154** | WASI _start wraps only __module_init, never calls a user main() — #1411/#1978 regression (native-messaging smoke red) | 62 | done | high |
 | **2174** | standalone: `arguments` captured by a nested function under async emits invalid Wasm (__closure fallthru i32 vs externref) | Backlog | done | high |
-| **2181** | defineBuiltin(name, {elementKinds, lower}) scaffold — unify per-representation element-load/ToString/null handling | 64 | ready | medium |
+| **2181** | defineBuiltin(name, {elementKinds, lower}) scaffold — unify per-representation element-load/ToString/null handling | 67 | ready | medium |
 | **2184** | linear backend: &&/\|\| yield 0/1 constants instead of operand values (needs result-type unification) | 63 | done | medium |
 | **2502** | Array.prototype.sort on an externref-element array emits invalid Wasm (__isort_externref f64.gt on externref) — 28 test262 | 64 | done | medium |
+| **2544** | nested destructuring-param default object emits struct.new one operand short of the field-unified type — invalid Wasm (24 test262) | 64 | done | medium |
+| **2545** | nested destructuring-param default: outer-default object fires → inner fields read 0/undefined instead of the default object's values | 64 | done | medium |
+| **2554** | IR path drops tail calls on top-level recursive functions → deep-recursion stack overflow (regression vs legacy) | 64 | done | high |
+| **2565** | nested destructuring-param default object emits struct.new one operand short of the $shape-bearing type — invalid Wasm (24 test262) | 64 | done | medium |
+| **2567** | destructuring-param default whose initializer calls a function emits C_method one operand short for the call — invalid Wasm (4 test262) | Backlog | done | low |
+| **2570** | lazy/suspending async-generator runtime — yield* execution order (eager-buffer drains before first .next()) | Backlog | ready | medium |
+| **2729** | WasmGC backend: new Uint8Array(n) element store skips ToUint8 (u[0]=257 reads 257, u[0]=NaN reads NaN) | Backlog | ready | medium |
 
 <!-- AUTOGENERATED:GOAL-ISSUES-END -->
 

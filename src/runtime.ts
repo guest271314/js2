@@ -2253,8 +2253,16 @@ function _instanceofResult(
   const handler = (target as Record<symbol, unknown>)[Symbol.hasInstance];
   if (handler !== undefined && handler !== null && handler !== Function.prototype[Symbol.hasInstance]) {
     // A *custom* @@hasInstance must be callable (GetMethod), else TypeError.
-    const wrappedHandler = _maybeWrapCallableUnknownArity(handler, callbackState);
-    const hfn = typeof wrappedHandler === "function" ? wrappedHandler : handler;
+    // §13.10.2 step 4a mandates the handler be invoked with EXACTLY ONE argument
+    // (V). The property read may already have wrapped the wasm closure at the
+    // method bridge's max arity (=4), which would surface as `arguments.length
+    // === 4` inside the handler. Recover the raw closure and re-bridge at the
+    // known arity 1 so the wasm dispatcher routes via `__call_fn_method_1`
+    // (→ `__argc === 1`) instead of the unknown-arity max bridge (#2764).
+    const rawHandler = typeof handler === "function" ? (_wasmClosureWrapperTargets.get(handler) ?? handler) : handler;
+    const wrappedHandler = _maybeWrapCallable(rawHandler, 1, callbackState);
+    const hfn =
+      typeof wrappedHandler === "function" ? wrappedHandler : typeof handler === "function" ? handler : undefined;
     if (typeof hfn !== "function") return _INSTANCEOF_THROW;
     // step 3: Return ToBoolean(Call(instOfHandler, target, «V»)). `this` is the
     // ORIGINAL target so a WasmGC-struct receiver round-trips to the same ref.
@@ -4527,15 +4535,46 @@ function _safeSet(
   //     default) must silently no-op, not throw (S8.5_A9, S8.12.4_A1, S8.6.1_A1).
   //     A non-writable data-property write that the engine itself surfaces under
   //     a genuinely-strict caller is still propagated by the catch arm below.
-  if (strict && (typeof key === "string" || typeof key === "symbol")) {
-    const ownDesc = Object.getOwnPropertyDescriptor(obj, key as PropertyKey);
-    if (ownDesc && ownDesc.get && !ownDesc.set) {
-      throw new TypeError(`Cannot set property ${String(key)} of #<Object> which has only a getter`);
+  // (#2745 d) An ACCESSOR property resolved along the prototype chain whose
+  // [[Set]] is present (e.g. the %ThrowTypeError% poison on a bound function's
+  // inherited `caller`/`arguments`, §10.4.1 / §10.2.4) — its setter exception
+  // must propagate, not be swallowed by the catch below. Resolved here so the
+  // write can run and any throw be re-raised.
+  let strictAccessorWrite = false;
+  if (strict && (typeof key === "string" || typeof key === "symbol") && !_isUserProxy(obj)) {
+    // Walk obj + prototype chain for the property descriptor, bailing on any
+    // user Proxy link so we never fire a Proxy MOP trap (#2017 kept the check
+    // own-only for exactly this reason; the explicit proxy guard lets us look
+    // up the chain safely now).
+    let cur: any = obj;
+    let desc: PropertyDescriptor | undefined;
+    while (cur != null && (typeof cur === "object" || typeof cur === "function")) {
+      if (_isUserProxy(cur)) {
+        desc = undefined;
+        break;
+      }
+      const d = Object.getOwnPropertyDescriptor(cur, key as PropertyKey);
+      if (d) {
+        desc = d;
+        break;
+      }
+      cur = Object.getPrototypeOf(cur);
+    }
+    if (desc && (desc.get || desc.set)) {
+      if (!desc.set) {
+        // Getter-only accessor (own or inherited) → strict [[Set]] throws.
+        throw new TypeError(`Cannot set property ${String(key)} of #<Object> which has only a getter`);
+      }
+      // Accessor WITH a setter — invoke it via the write below; propagate throws.
+      strictAccessorWrite = true;
     }
   }
   try {
     obj[key] = val;
   } catch (e) {
+    // (#2745 d) A genuine accessor-setter exception (e.g. the bound-function
+    // poison pill) must reach the user's try/catch — never divert to sidecar.
+    if (strictAccessorWrite) throw e;
     // #2180/#2617 — writing to a revoked proxy throws TypeError; a tracked user
     // Proxy's `set` trap may also throw (abrupt completion) or the host engine
     // may raise the §10.5.9 strict-write invariant TypeError. Propagate both
@@ -4995,6 +5034,138 @@ function _ownStructKeys(obj: any, exports: Record<string, Function> | undefined)
   return _orderOwnKeysSpec(keys); // (#2131) array-index keys first, ascending
 }
 
+/**
+ * Resolve the RAW host-visible value of property `key` on a WasmGC struct,
+ * applying the same precedence the `_wrapForHost` proxy uses (accessor getter →
+ * sidecar → `__sget_` struct-field getter → well-known-symbol sidecar →
+ * vivified prototype) but WITHOUT the proxy `get` trap's closure-bridge
+ * wrapping. `_wrapForHost` calls this and then applies its bridge on top; other
+ * callers (e.g. GetSetRecord, which must distinguish a genuine callable from a
+ * non-callable object — #1627) need the unmasked underlying value. Returns
+ * `undefined` when nothing resolves.
+ */
+function _resolveHostField(obj: any, key: any, exports: Record<string, Function> | undefined): any {
+  // #1336 — accessor properties (Object.defineProperty(obj, k, {get})) must
+  // INVOKE the getter, not return a descriptor. Sidecar stores the descriptor
+  // function under `__get_<k>` (string) or in `_wasmStructAccessors` (symbol).
+  // #1935 — return `_MISS` ONLY when no getter is actually callable; a getter
+  // that runs and returns `undefined` is a genuine HIT that shadows the field.
+  const invokeGetter = (g: any): any => {
+    if (g == null) return _MISS;
+    if (typeof g === "function") return (g as Function).call(obj);
+    if (typeof g === "object" && _isWasmStruct(g) && exports) {
+      const callFn0 = exports["__call_fn_0"];
+      if (typeof callFn0 === "function") return callFn0(g);
+    }
+    return _MISS;
+  };
+  if (typeof key === "string") {
+    const wasmSc = _wasmStructProps.get(obj);
+    const getter = wasmSc?.[`__get_${key}` as string];
+    if (getter !== undefined) {
+      const v = invokeGetter(getter);
+      if (v !== _MISS) return v;
+    }
+  } else if (typeof key === "symbol") {
+    const accessor = _wasmStructAccessors.get(obj)?.get(key);
+    if (accessor?.get !== undefined) {
+      const v = invokeGetter(accessor.get);
+      if (v !== _MISS) return v;
+    }
+  }
+  // Sidecar first (handles both string and symbol keys)
+  const sc = _sidecarGet(obj, key);
+  if (sc !== undefined) return sc;
+  // Wasm struct field getter
+  if (exports && (typeof key === "string" || typeof key === "number")) {
+    const getter = exports[`__sget_${String(key)}`];
+    if (typeof getter === "function") {
+      try {
+        // (#1712) Treat a nullish result as a MISS, not a hit: the
+        // __sget_<name> per-shape dispatcher yields null/undefined when the
+        // receiver's struct shape doesn't carry the field at all.
+        const v = getter(obj);
+        if (v !== undefined && v !== null) return v;
+      } catch {
+        /* not a field of this struct type */
+      }
+    }
+  }
+  // Well-known symbol → @@name sidecar fallback (#1443).
+  if (typeof key === "symbol") {
+    const wasmKey = _symbolToWasm.get(key);
+    if (wasmKey !== undefined) {
+      const v = _sidecarGet(obj, wasmKey);
+      if (v !== undefined) return v;
+    }
+  }
+  // (#1712) fnctor instances: resolve through the constructor's vivified
+  // prototype object. Accessors run with the live-mirror proxy as the receiver.
+  const protoDesc = _fnctorProtoLookup(obj, key, exports);
+  if (protoDesc) {
+    if (process.env.DEBUG_1712)
+      console.error(
+        "[protoHook]",
+        String(key),
+        "valType=",
+        typeof protoDesc.value,
+        "exports?",
+        exports != null,
+        "is_closure?",
+        typeof exports?.__is_closure,
+      );
+    if (protoDesc.get) return protoDesc.get.call(_hostProxyCache.get(obj) ?? obj);
+    return _maybeWrapCallableUnknownArity(protoDesc.value, { getExports: () => exports });
+  }
+  return undefined;
+}
+
+/**
+ * (#1627) Build a clean, GetSetRecord-faithful set-like object from a WasmGC
+ * struct argument to a Set set-algebra method. The default `_wrapForHost` proxy
+ * masks EVERY wasm-struct field value as a callable `closureBridge` (the generic
+ * `__call_fn_N` fallback) — so native V8's GetSetRecord wrongly sees a
+ * non-callable object (`has = {}`) as callable and a `{valueOf}` size object as
+ * a function instead of a coercible object. This adapter reads each of the three
+ * GetSetRecord fields RAW and presents it faithfully:
+ *   - genuine closure  → the working proxy bridge (callable, generator-aware),
+ *   - non-closure wasm struct (`{}`, `{valueOf(){…}}`) → a `_wrapForHost` proxy
+ *     OBJECT (typeof "object", non-callable, exposes valueOf/toString),
+ *   - primitive / undefined → as-is.
+ * Native `Set.prototype[m]` then runs its own spec GetSetRecord on this object,
+ * so the callability throws + size ToNumber coercion happen per spec. Scoped to
+ * the 7 set-algebra methods only — no change to `_wrapForHost`'s own behaviour.
+ */
+function _setLikeRecordForHost(
+  arg: any,
+  exports: Record<string, Function> | undefined,
+  state: { getExports: () => Record<string, Function> | undefined } | undefined,
+): any {
+  const proxy = _wrapForHost(arg, exports);
+  const isClosureFn = exports?.__is_closure as ((v: any) => number) | undefined;
+  const fixField = (key: string): any => {
+    const raw = _resolveHostField(arg, key, exports);
+    if (raw != null && typeof raw === "object" && _isWasmStruct(raw)) {
+      let isClosure = false;
+      if (typeof isClosureFn === "function") {
+        try {
+          isClosure = isClosureFn(raw) === 1;
+        } catch {
+          /* discriminator unavailable — fall through to proxy */
+        }
+      }
+      // A non-closure wasm struct must NOT be presented as a function: expose it
+      // as a plain object so GetSetRecord throws on `has`/`keys` (non-callable)
+      // and coerces `size` via its valueOf/toString.
+      if (!isClosure) return _wrapForHost(raw, exports);
+    }
+    // Genuine closure or primitive/undefined: the existing proxy bridge already
+    // handles these correctly (callable closureBridge / raw value).
+    return proxy[key];
+  };
+  return { size: fixField("size"), has: fixField("has"), keys: fixField("keys") };
+}
+
 function _wrapForHost(obj: any, exports: Record<string, Function> | undefined): any {
   if (obj == null || typeof obj !== "object") return obj;
   if (!_isWasmStruct(obj)) return obj;
@@ -5004,98 +5175,9 @@ function _wrapForHost(obj: any, exports: Record<string, Function> | undefined): 
 
   const target: Record<string | symbol, any> = Object.create(null);
 
-  const safeGetField = (key: any): any => {
-    // #1336 — accessor properties (Object.defineProperty(obj, k, {get})) must
-    // INVOKE the getter, not return a descriptor. Sidecar stores the descriptor
-    // function under `__get_<k>` (string) or in `_wasmStructAccessors` (symbol).
-    // Note: getters defined in a TS object literal compile to a Wasm closure
-    // (typeof === "object"); call those via __call_fn_0 export.
-    // #1935 — return `_MISS` ONLY when no getter is actually callable. When a
-    // getter runs, its result (even `undefined`) is a genuine HIT and is
-    // returned as-is; the caller must distinguish `_MISS` from `undefined` so a
-    // getter that returns `undefined` shadows the underlying field per spec,
-    // instead of silently falling through to the sidecar/struct value.
-    const invokeGetter = (g: any): any => {
-      if (g == null) return _MISS;
-      if (typeof g === "function") return (g as Function).call(obj);
-      if (typeof g === "object" && _isWasmStruct(g) && exports) {
-        const callFn0 = exports["__call_fn_0"];
-        if (typeof callFn0 === "function") return callFn0(g);
-      }
-      return _MISS;
-    };
-    if (typeof key === "string") {
-      const wasmSc = _wasmStructProps.get(obj);
-      const getter = wasmSc?.[`__get_${key}` as string];
-      if (getter !== undefined) {
-        const v = invokeGetter(getter);
-        if (v !== _MISS) return v;
-      }
-    } else if (typeof key === "symbol") {
-      const accessor = _wasmStructAccessors.get(obj)?.get(key);
-      if (accessor?.get !== undefined) {
-        const v = invokeGetter(accessor.get);
-        if (v !== _MISS) return v;
-      }
-    }
-    // Sidecar first (handles both string and symbol keys)
-    const sc = _sidecarGet(obj, key);
-    if (sc !== undefined) return sc;
-    // Wasm struct field getter
-    if (exports && (typeof key === "string" || typeof key === "number")) {
-      const getter = exports[`__sget_${String(key)}`];
-      if (typeof getter === "function") {
-        try {
-          // (#1712) Treat a nullish result as a MISS, not a hit: the
-          // __sget_<name> per-shape dispatcher yields null/undefined when the
-          // receiver's struct shape doesn't carry the field at all (fnctor
-          // ctor-shape instances vs the wider checker shape that generated
-          // the export). Returning it unconditionally short-circuited the
-          // vivified-prototype fallback below and made every prototype
-          // method on a fnctor instance unreachable whenever the checker
-          // shape had synthesized a same-named field.
-          const v = getter(obj);
-          if (v !== undefined && v !== null) return v;
-        } catch {
-          /* not a field of this struct type */
-        }
-      }
-    }
-    // Well-known symbol → @@name sidecar fallback. Object literals like
-    // `{ [Symbol.replace]: fn }` mostly arrive as dynamic property
-    // assignments (`obj[Symbol.replace] = fn`) per ECMA-262 test patterns;
-    // those routes through `_safeSet` which mirrors to the sidecar (#1443).
-    if (typeof key === "symbol") {
-      const wasmKey = _symbolToWasm.get(key);
-      if (wasmKey !== undefined) {
-        const v = _sidecarGet(obj, wasmKey);
-        if (v !== undefined) return v;
-      }
-    }
-    // (#1712) fnctor instances: resolve through the constructor's vivified
-    // prototype object. Accessors run with the live-mirror proxy as the
-    // receiver so getter bodies reading `this.<field>` reach the struct.
-    // Values stored during the module START function were written before
-    // exports existed, so the write-side closure wrap no-op'd — wrap raw
-    // closure structs here, at read time, instead.
-    const protoDesc = _fnctorProtoLookup(obj, key, exports);
-    if (protoDesc) {
-      if (process.env.DEBUG_1712)
-        console.error(
-          "[protoHook]",
-          String(key),
-          "valType=",
-          typeof protoDesc.value,
-          "exports?",
-          exports != null,
-          "is_closure?",
-          typeof exports?.__is_closure,
-        );
-      if (protoDesc.get) return protoDesc.get.call(_hostProxyCache.get(obj) ?? obj);
-      return _maybeWrapCallableUnknownArity(protoDesc.value, { getExports: () => exports });
-    }
-    return undefined;
-  };
+  // (#1627) Resolution precedence lives in the module-level `_resolveHostField`
+  // so callers that need the unmasked raw value (GetSetRecord) can reuse it.
+  const safeGetField = (key: any): any => _resolveHostField(obj, key, exports);
 
   // #1047 — if `obj` was registered as a class prototype, surface only the
   // method names in the allowlist. Otherwise fall back to the struct-field
@@ -7339,7 +7421,15 @@ function resolveImport(
         return (self: any, ...args: any[]) => {
           if (self == null) return undefined;
           const exports = callbackState?.getExports();
-          const wrappedArgs = args.map((a) => (_isWasmStruct(a) ? _wrapForHost(a, exports) : a));
+          // (#1627) A wasm-struct set-like argument is presented through a
+          // GetSetRecord-faithful adapter rather than the raw `_wrapForHost`
+          // proxy: the proxy masks every struct field as a callable, defeating
+          // native GetSetRecord's `has`/`keys` IsCallable throws and `size`
+          // ToNumber coercion. The adapter exposes only size/has/keys, with
+          // non-closure objects kept non-callable so native validation fires.
+          const wrappedArgs = args.map((a) =>
+            _isWasmStruct(a) ? _setLikeRecordForHost(a, exports, callbackState) : a,
+          );
           const fn = self[m] ?? _sidecarGet(self, m);
           if (typeof fn === "function") return fn.call(self, ...wrappedArgs);
           return undefined;
@@ -10314,72 +10404,95 @@ assert._isSameValue = isSameValue;
       if (name === "__bind_function")
         return (target: any, thisArg: any, argsArray: any, nameHint: any, lengthHint: number): any => {
           let callable: any = target;
-          if (_isWasmStruct(target)) {
-            const arity = typeof lengthHint === "number" && lengthHint >= 0 ? lengthHint : 0;
-            const wrapped = _wrapWasmClosure(target, arity, callbackState);
-            if (wrapped) {
-              callable = wrapped;
-              // Stamp hints onto the wrapper so the bound function inherits
-              // them via the host's own `Function.prototype.bind` (which
-              // computes `name = "bound " + target.name` and copies
-              // `length = max(0, target.length - boundArgs.length)`).
-              try {
-                if (typeof nameHint === "string" && nameHint.length > 0) {
-                  Object.defineProperty(callable, "name", {
-                    value: nameHint,
-                    configurable: true,
-                  });
-                }
-                if (typeof lengthHint === "number" && lengthHint >= 0) {
-                  Object.defineProperty(callable, "length", {
-                    value: lengthHint,
-                    configurable: true,
-                  });
-                }
-              } catch {
-                /* readonly host envs — ignore, bound fn just inherits wrapper defaults */
+          if (_isWasmStruct(target) && callbackState) {
+            // (#2745 a/b) Bridge the Wasm-closure target with a dedicated
+            // VARIADIC wrapper that forwards EVERY effective argument to the
+            // closure with a correct `arguments` object. A bound function's
+            // `[[Call]]` prepends the bound partial args (and `[[Construct]]`
+            // also runs the body), so the wrapper can receive more args than
+            // the target's declared arity — every one must reach the closure's
+            // `arguments`. The old fixed-arity `_wrapWasmClosure(target,
+            // lengthHint)` bridge truncated to `lengthHint` formals, so a target
+            // reading `arguments[i]` past its formals (e.g. `function(){ return
+            // arguments[0]; }`, arity 0) never saw the bound/call args.
+            //
+            // Dispatch rules:
+            //   • `n = max(args.length, realArity)` — high enough that the
+            //     closure (arity ≈ realArity) is matched by the dispatcher AND
+            //     every passed arg is forwarded; clamped to an emitted arity.
+            //   • Receiver-bound (`this` is a real object: an explicit object
+            //     `boundThis`, or the fresh `[[Construct]]` object) →
+            //     `__call_fn_method_n` (threads `this` via `__current_this`).
+            //   • Otherwise (`undefined`/`null`/`globalThis` this) →
+            //     `__call_fn_n` (plain dispatch).
+            //   Both dispatchers now carry the #820l argc/extras plumbing
+            //   (clamped-to-formals `__argc`), so `arguments` is exact.
+            const realArity = typeof lengthHint === "number" && lengthHint >= 0 ? lengthHint : 0;
+            const captured = target;
+            const cbState = callbackState;
+            const boundBridge = function boundWasmTargetBridge(this: any, ...args: any[]): any {
+              const ex = cbState.getExports();
+              if (!ex) {
+                throw new TypeError("Function.prototype.bind: target closure is not callable");
               }
-            } else if (callbackState) {
-              // (#1337) Exports aren't bound yet — this happens for
-              // module-level `const bound = fn.bind(...)`, which runs during
-              // instantiation *before* `setExports`. We can't build the
-              // `__call_fn_<arity>` bridge now, but we can build a JS function
-              // that resolves it lazily at call time (exports are populated by
-              // then) and stamp the spec metadata immediately so deferred
-              // `.name` / `.length` reads are correct. Without this the bound
-              // value degraded to the raw wasm-struct (an object), so
-              // `bound.name` / `bound.length` / `bound()` all failed.
-              const arity2 = typeof lengthHint === "number" && lengthHint >= 0 ? lengthHint : 0;
-              const captured = target;
-              const lazyBridge = function lazyWasmClosureBridge(...args: any[]): any {
-                const ex = callbackState.getExports();
-                const callFn = ex?.[`__call_fn_${arity2}`];
-                if (typeof callFn !== "function") {
-                  throw new TypeError("Function.prototype.bind: target closure is not callable");
-                }
-                const padded: any[] = [];
-                for (let i = 0; i < arity2; i++) padded.push(args[i]);
-                return callFn(captured, ...padded);
-              };
-              callable = lazyBridge;
-              try {
-                if (typeof nameHint === "string" && nameHint.length > 0) {
-                  Object.defineProperty(callable, "name", { value: nameHint, configurable: true });
-                }
-                if (typeof lengthHint === "number" && lengthHint >= 0) {
-                  Object.defineProperty(callable, "length", { value: lengthHint, configurable: true });
-                }
-              } catch {
-                /* readonly host envs — bound fn inherits wrapper defaults */
+              const useMethod = this !== undefined && this !== null && this !== globalThis;
+              const prefix = useMethod ? "__call_fn_method_" : "__call_fn_";
+              // Choose dispatch arity: prefer max(args.length, realArity), clamp
+              // DOWN to an emitted dispatcher; if that drops below realArity,
+              // bump UP to the lowest emitted dispatcher ≥ realArity so the
+              // target closure is still matched.
+              let n = Math.max(args.length, realArity);
+              while (n > 0 && typeof ex[`${prefix}${n}`] !== "function") n--;
+              if (n < realArity) {
+                let up = realArity;
+                while (up <= 12 && typeof ex[`${prefix}${up}`] !== "function") up++;
+                if (typeof ex[`${prefix}${up}`] === "function") n = up;
               }
-            } else {
-              // No callbackState at all (e.g. caller used raw `buildImports`
-              // without setExports support). Degrade gracefully to
-              // identity-bind: return the original target so callers that
-              // only need a non-null function value continue to work.
-              // Pre-#1632a behaviour for this hostless path.
-              return target;
+              let callFn = ex[`${prefix}${n}`];
+              let viaMethod = useMethod;
+              if (typeof callFn !== "function") {
+                // Method dispatcher of this arity missing — fall back to plain.
+                callFn = ex[`__call_fn_${n}`];
+                viaMethod = false;
+              }
+              if (typeof callFn !== "function") {
+                throw new TypeError("Function.prototype.bind: target closure is not callable");
+              }
+              const padded: any[] = [];
+              for (let i = 0; i < n; i++) padded.push(args[i]);
+              if (viaMethod) {
+                const rawThis = this !== null && typeof this === "object" ? _unwrapForHost(this) : this;
+                return callFn(_isWasmStruct(rawThis) ? rawThis : this, captured, ...padded);
+              }
+              return callFn(captured, ...padded);
+            };
+            callable = boundBridge;
+            // Stamp hints onto the wrapper so the bound function inherits
+            // them via the host's own `Function.prototype.bind` (which
+            // computes `name = "bound " + target.name` and copies
+            // `length = max(0, target.length - boundArgs.length)`).
+            try {
+              if (typeof nameHint === "string" && nameHint.length > 0) {
+                Object.defineProperty(callable, "name", {
+                  value: nameHint,
+                  configurable: true,
+                });
+              }
+              if (typeof lengthHint === "number" && lengthHint >= 0) {
+                Object.defineProperty(callable, "length", {
+                  value: lengthHint,
+                  configurable: true,
+                });
+              }
+            } catch {
+              /* readonly host envs — ignore, bound fn just inherits wrapper defaults */
             }
+          } else if (_isWasmStruct(target)) {
+            // No callbackState at all (e.g. caller used raw `buildImports`
+            // without setExports support). Degrade gracefully to identity-bind:
+            // return the original target so callers that only need a non-null
+            // function value continue to work. Pre-#1632a behaviour.
+            return target;
           }
           if (typeof callable !== "function") {
             // Non-callable receiver (typed-struct that isn't a closure, or

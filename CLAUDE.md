@@ -47,7 +47,7 @@ TypeScript-to-WebAssembly compiler using WasmGC.
 - Test262 runner (preferred): `pnpm run test:262` — vitest-based, auto-worktree, disk cache, default 3 forks. Use `TEST262_WORKERS=5` for solo runs (no dev agents).
 - Test262 runner history: `runs/index.json` is appended by the vitest runner after each run. `benchmarks/results/report.html` reads this for the trend graph.
 - Backlog: `plan/issues/backlog/backlog.md`
-- Sprints: `plan/issues/sprints/{N}.md` — planning, task queue, results, retrospective (living doc updated during sprint)
+- Sprints (rolling budget-window model, #2751): live work is tagged `sprint: current` and forms one long, priority-ordered, over-provisioned TaskList (auto-synced by `scripts/sync-current-tasklist.mjs`). A numbered `plan/issues/sprints/{N}.md` is the **frozen retrospective record** written by `scripts/freeze-sprint.mjs` at token-budget rollover (≥99% spent or ≤1h left): done `current` issues are re-tagged `sprint: {N}`, not-done ones roll forward as `current`. See `plan/issues/SCHEMA.md` and #2751.
 - Issues: **flat** at `plan/issues/<id>-<slug>.md` (#1616). The on-disk
   location is stable; sprint membership and status live **only** in
   frontmatter, never in the directory:
@@ -206,7 +206,7 @@ Spawn dedicated agents when:
 
 - Multiple tasks need the same role concurrently (e.g., 3 devs)
 - The role needs sustained back-and-forth with the user (e.g., PO during planning)
-- The role accumulates context that's hard to capture in a skill (e.g., SM during retro discussion)
+- The role accumulates context that's hard to capture in a skill (e.g., PO during a multi-issue planning discussion)
 
 **Pick the right spawn mode (this matters for lifecycle):**
 
@@ -215,7 +215,7 @@ Spawn dedicated agents when:
 
 Default rule: if the agent's job is "produce one document and exit," it's a subagent. If the agent's job is "stay on the task queue and grab the next thing," it's a teammate. Misusing teammates for one-shot work causes pane exhaustion because they idle forever waiting for orchestration that never comes (confirmed via Claude Code docs — see [[feedback_agent_self_termination]]).
 
-**Worktree isolation on spawn (REQUIRED for writers).** The lead runs as an un-isolated background job in `/workspace`. A background-isolation guard (`worktree.bgIsolation` in `.claude/settings.json`) blocks file writes from background-spawned agents that aren't isolated. The agent-def `isolation: worktree` frontmatter (set on developer/senior-developer/architect/product-owner/scrum-master) is honored for plain **subagent** spawns but is **NOT auto-applied to teammate spawns** (`team_name` set) — so **always pass `isolation: "worktree"` explicitly on every teammate `Agent` spawn**. That gives each teammate a harness-managed worktree, satisfying the guard with it ON. `bgIsolation` is **`"worktree"` (guard ON)** as of 2026-05-29 — the temporary `"none"` unblock has been removed now that teammate spawns pass `isolation: worktree` explicitly. So every background-spawned writer MUST carry explicit `isolation: "worktree"` or its file writes are blocked. Valid `bgIsolation` values are only `"worktree"` (default/on) and `"none"` — there is no auto mode (Claude Code v2.1.143+).
+**Worktree isolation on spawn (REQUIRED for writers).** The lead runs as an un-isolated background job in `/workspace`. A background-isolation guard (`worktree.bgIsolation` in `.claude/settings.json`) blocks file writes from background-spawned agents that aren't isolated. The agent-def `isolation: worktree` frontmatter (set on developer/senior-developer/architect/product-owner) is honored for plain **subagent** spawns but is **NOT auto-applied to teammate spawns** (`team_name` set) — so **always pass `isolation: "worktree"` explicitly on every teammate `Agent` spawn**. That gives each teammate a harness-managed worktree, satisfying the guard with it ON. `bgIsolation` is **`"worktree"` (guard ON)** as of 2026-05-29 — the temporary `"none"` unblock has been removed now that teammate spawns pass `isolation: worktree` explicitly. So every background-spawned writer MUST carry explicit `isolation: "worktree"` or its file writes are blocked. Valid `bgIsolation` values are only `"worktree"` (default/on) and `"none"` — there is no auto mode (Claude Code v2.1.143+).
 
 **IMPORTANT: Always use team name `"js2wasm"`** — this is the single permanent team. Never create ad-hoc team names (e.g. `"wasi-conflicts"`, `"s52-wave2"`). One team, one task queue, always.
 
@@ -240,7 +240,7 @@ Default rule: if the agent's job is "produce one document and exit," it's a suba
 | Need to validate 1-2 issues                    | Invoke `/smoke-test-issue` skill                                                                                                             |
 | Sprint planning (collaborative, multi-issue)   | Spawn PO + Architect agents                                                                                                                  |
 | Hard issue needs design                        | Invoke `/architect-spec` skill, or spawn architect if multiple issues                                                                        |
-| Sprint retro (discussion with user)            | Spawn SM agent                                                                                                                               |
+| Sprint retro / process improvement             | Tech lead runs it directly (no SM agent)                                                                                                     |
 | Planning agents done, user not talking to them | Write context summary → terminate                                                                                                            |
 | Planning agents done, user IS talking to them  | Keep alive until user signals done                                                                                                           |
 | Dev between tasks                              | Keep alive — wait for CI, self-merge if green, then claim next task from TaskList                                                            |
@@ -263,18 +263,21 @@ Developers (×3)
   ↑ signal completion → tech lead merges → broadcast rebase
 PR-queue Shepherd
   ↔ owns the merge queue end-to-end: enqueues green PRs, handles parks/ejections
-Scrum Master
-  ↔ reviews sprint → proposes process changes to PO + tech lead
+Tech Lead (also)
+  ↔ owns process improvement / retrospectives (formerly Scrum Master)
 ```
 
-| Role                  | Agent                                             | Owns                                | Reads from                                             | Writes to                                          |
-| --------------------- | ------------------------------------------------- | ----------------------------------- | ------------------------------------------------------ | -------------------------------------------------- |
-| **Product Owner**     | `.claude/agents/product-owner.md`                 | Backlog, issue creation, priorities | test262 results, dependency graph                      | `plan/issues/`, `plan/log/dependency-graph.md`     |
-| **Architect**         | `.claude/agents/architect.md`                     | Implementation specs                | Issue files, compiler source                           | `## Implementation Plan` in issue files            |
-| **Tech Lead**         | (orchestrator)                                    | Task queue, merges, test runs       | Issue files, agent messages                            | `main` branch, task list                           |
-| **Developer**         | `.claude/agents/developer.md`                     | Code changes in worktree            | Issue file + impl spec, checklists                     | Source code, test files, issue status              |
-| **PR-queue Shepherd** | `.claude/agents/developer.md` (standing teammate) | The merge queue end-to-end          | Open PRs, CI/`merge_group` results, park-hold comments | Enqueue mutations, `[CI-FIX]` tasks, escalations   |
-| **Scrum Master**      | `.claude/agents/scrum-master.md`                  | Process improvement                 | Done issues, git history, messages                     | `plan/retrospectives/`, checklist edits (proposed) |
+| Role                  | Agent                                             | Owns                                | Reads from                                             | Writes to                                        |
+| --------------------- | ------------------------------------------------- | ----------------------------------- | ------------------------------------------------------ | ------------------------------------------------ |
+| **Product Owner**     | `.claude/agents/product-owner.md`                 | Backlog, issue creation, priorities | test262 results, dependency graph                      | `plan/issues/`, `plan/log/dependency-graph.md`   |
+| **Architect**         | `.claude/agents/architect.md`                     | Implementation specs                | Issue files, compiler source                           | `## Implementation Plan` in issue files          |
+| **Tech Lead**         | (orchestrator)                                    | Task queue, merges, test runs       | Issue files, agent messages                            | `main` branch, task list                         |
+| **Developer**         | `.claude/agents/developer.md`                     | Code changes in worktree            | Issue file + impl spec, checklists                     | Source code, test files, issue status            |
+| **PR-queue Shepherd** | `.claude/agents/developer.md` (standing teammate) | The merge queue end-to-end          | Open PRs, CI/`merge_group` results, park-hold comments | Enqueue mutations, `[CI-FIX]` tasks, escalations |
+
+Process improvement / retrospectives are owned by the **Tech Lead** (the standing
+Scrum Master role is retired) — see "Process improvement & retrospectives" in
+`.claude/agents/tech-lead.md`.
 
 **Interaction flow:**
 
@@ -287,11 +290,11 @@ Sprint planning:
 
 During sprint: 5. **Dev** reads issue (with impl plan) → implements → follows checklists → signals completion 6. **Dev** invokes `/test-and-merge` skill → merges main into branch → equiv tests → if pass: ff-only to main → post-merge cleanup. If fail: fixes on branch. 7. **PO** accepts/rejects completed work against acceptance criteria
 
-End of sprint: 8. **Tech lead** runs full test262 → records results 9. **SM** reviews sprint → proposes process improvements 10. **PO** grooms backlog for next sprint
+End of sprint: 8. **Tech lead** runs full test262 → records results 9. **Tech lead** runs the retrospective → applies process improvements (formerly SM) 10. **PO** grooms backlog for next sprint
 
 **Tech lead discipline:**
 
-- **Populate TaskList** at sprint start from the issues with `sprint: {N}` frontmatter (flat `plan/issues/<id>-<slug>.md`) and immediately whenever new issues are added mid-sprint. Empty queue = agents spin idle.
+- **Keep the TaskList full from `sprint: current`** (rolling budget-window model, #2751). The TaskList is no longer a per-sprint fixed list — it is a long, priority-ordered, **over-provisioned** queue auto-synced from every `sprint: current` + actionable (`ready`/`in-progress`) issue by `scripts/sync-current-tasklist.mjs` (wired into the `post-file-edit` + SessionStart hooks). To enqueue work, set an issue's `sprint: current` (and `priority:` high/medium/low → `[P1]`/`[P2]`/`[P3]` subject tag, `horizon:` xl/l/m/s → `[XL]`…`[S]` size tag); the sync upserts it. Keep more queued than a budget window can consume so it can't run dry; at rollover run `node scripts/freeze-sprint.mjs` to freeze the window. Empty queue = agents spin idle.
 - **Reconcile the TaskList against issue-status every loop / session start** — `node scripts/reconcile-tasklist.mjs` (also wired as a SessionStart hook, `--quiet`). It reads the on-disk task stores (`~/.claude/tasks/{<session-uuid>,js2wasm}/*.json`) and reports every non-`completed` task whose **target issue** (first `#NNNN` in the subject) is already `done`/`wont-fix`; apply `TaskUpdate status=completed` for each (or `--apply` for a best-effort direct rewrite of dead-session task files). **Why this exists / root cause of stale tasks:** a task's flip to `completed` is a manual `TaskUpdate` nobody is structurally forced to make — (1) PRs merge _asynchronously_ in the queue after the authoring dev has moved on; (2) PO/lead **tracking-tasks** get completed via the _issue file_ (`status: done` in the impl PR — the source of truth) with no agent owning the TaskList twin; (3) tasks live in **two stores** (per-session + team `js2wasm`) that don't reconcile each other. So `issue status` (accurate) and `TaskList status` (stale) drift silently. The reconciler derives done-ness from the authoritative issue frontmatter and closes the loop. Devs should also flip their own task to `completed` at **enqueue** time (enqueue ⇒ will-merge), not "after merge" (by then they're gone).
 - Batch doc/plan commits on main AFTER all pending agent merges, not between them (doc commits force agents to re-merge main)
 - Complete post-merge issue cleanup (set `status: done` in sprint dir issue file, update dep graph) after each merge
@@ -338,7 +341,8 @@ Sprint planning is a collaborative process, not a solo tech lead activity:
 - **Owner pins + scope are how the auto-dispatcher is steered.** The native agent-teams auto-dispatcher only auto-offers tasks with **no `owner`**, and it does **not** read role. So the tech lead encodes routing in two places the dispatcher/agents actually honor:
   - **Set `owner` immediately** on any task pinned to a specific agent (e.g. an in-flight `[CONFLICT]` for a named senior-dev, or a one-PR migration). An ownerless `in_progress` task is the #1 mis-route cause — the dispatcher re-offers it. Reconcile (`TaskUpdate status=completed` the moment a PR merges) so stale entries never get re-offered.
   - **Tag role/scope in the subject** so agents can self-gate: `[SENIOR-DEV ONLY]`, `[CONFLICT]` (senior-dev), `arch(...)`/`[ARCH]` (architect), `po:`/`[PO]` (product owner), `[PARKED …]`/`[PAUSE]` (not ready). Plain `fix(...)`/`refactor(...)`/`dev:` = developer-claimable. Agents skip tasks owned by others or tagged outside their lane (see the pre-claim gate in `developer.md`/`senior-developer.md`).
-- **Dev loop**: claim task from TaskList → **branch from latest `origin/main` and push the branch to origin immediately (the moment the task goes in-progress)** → implement → push PR → wait for CI → self-merge if green → mark completed → claim next task.
+- **Dev loop**: **check budget fit** (`node scripts/budget-status.mjs --pick`) → claim an adequately-sized task from TaskList → **branch from latest `origin/main` and push the branch to origin immediately (the moment the task goes in-progress)** → implement → push PR → wait for CI → self-merge if green → mark completed → claim next task.
+- **Pull-time budget/parallelism awareness (#2751)**: before claiming, run `node scripts/budget-status.mjs --pick`. It reports the **remaining token budget**, the current **parallelism** (active agents), the **per-agent share**, and the largest task **horizon** (`XL`/`L`/`M`/`S`, from the issue's `horizon:` field, shown as a `[XL]`…`[S]` subject tag) you should pull. Claim the highest-priority task whose horizon fits. This prefers **long-horizon tasks at the start of a budget window** (large per-agent share → big rocks first) and avoids starting an oversized task late, where it would strand at the window's budget freeze; `S` tasks remain available as tail filler. With more agents active, each share shrinks → pull smaller tasks. (Budget source: the statusline caches the weekly rate-limit — the "wkly" % and "d left" it displays — to `~/.claude/js2wasm-budget.json`, which `budget-status`/`freeze-sprint` read automatically; `JS2WASM_BUDGET_REMAINING_PCT`/`JS2WASM_BUDGET_PCT` override it; with neither it assumes a fresh window.)
 - **Pull-main-first + push-on-in-progress (the branch is a live sync point)**: when an agent moves a task to **in-progress** it MUST (1) pull/merge latest `origin/main` into its worktree branch FIRST — never start on a stale base — and (2) **push that branch to origin immediately** (an initial / WIP / grounding commit is fine). Do **not** work local-only for a long window before the first push: an unpushed branch is invisible, so staleness and collisions hide until the PR finally surfaces (e.g. a ~30-min local-only window before the PR appeared). Pushing early makes the branch a **live sync point** other agents can see and rebase against, and makes the assignment concrete. Keep merging `origin/main` as work proceeds. This is additive to — not a replacement for — the merge-before-PR step and the floor/CI discipline below.
 - **Dev self-enqueue ONCE, then stand down (2026-06-20)**: when `.claude/ci-status/pr-<N>.json` has matching SHA, `net_per_test > 0`, ratio <10%, no bucket >50 — the dev **enqueues the PR EXACTLY ONCE** via the GraphQL `enqueuePullRequest` mutation: `PRID=$(gh pr view <N> --json id -q .id); gh api graphql -f query='mutation($id:ID!){enqueuePullRequest(input:{pullRequestId:$id}){clientMutationId}}' -f id="$PRID"`, verifies the PR appears in the queue, marks the task completed, and stands down. Use the **user PAT** for this enqueue — NOT `GITHUB_TOKEN` (which suppresses the `merge_group` event and wedges the queue), and NOT `gh pr merge <N> --auto` (which only arms on a check-state _transition_, so on an already-green `CLEAN` PR it silently no-ops and the PR is never queued — stranded a 9-PR backlog on 2026-05-29; never pass `--merge`/strategy flags either). **NEVER re-enqueue** on drift / ejection / `hold` / CI failure — re-enqueue **loops** were the sole cause of the ~3.5h merge-queue cancellation churn on 2026-06-20 (every re-add rebuilds the merge group and CANCELS the in-flight `merge_group` run; memory `project_merge_queue_requeue_cancels_run`); a single one-shot enqueue does not loop, so it cannot churn. Escalate to tech lead only when criteria fail. `--admin --merge` is reserved for workflow-only / hotfix bypass. See `.claude/skills/dev-self-merge.md`. **Backstop (not primary):** `.github/workflows/auto-enqueue.yml` (`scripts/enqueue-green-prs.mjs`, App-token bot identity) runs on every CI completion + every ~30 min and auto-enqueues any open, non-draft, mergeable PR not already in the queue — it owns ALL re-adds for PRs that strand, drift, or get ejected. The back-off fix #2560 (enqueue trailing PRs while a head forms) makes it a reliable backstop. Its ~30-min cron is too sparse to be the _primary_ enqueuer (the "agents never enqueue" experiment left green PRs un-enqueued for long idle stretches), which is why the dev does the one-shot enqueue and the cron only backstops. Manual `node scripts/enqueue-green-prs.mjs` forces a sweep now. Drafts and PRs labelled `hold`/`do-not-merge`/`wip` are never auto-enqueued. **Security:** dev-self-enqueue is for internal/trusted dev agents only — external contributor PRs still go through auto-enqueue's author-trust gate (or a deliberate maintainer enqueue) plus a green `cla-check`.
 - **Tech lead reading ci-status files**: always verify `head_sha` matches current PR HEAD (`gh pr view N --json headRefOid`) before interpreting `net_per_test` or regression counts. A SHA mismatch means CI ran on a stale commit — the numbers are misleading. Also check `baseline_staleness_commits` > 0 as a secondary signal.
@@ -402,7 +406,7 @@ The issue frontmatter `status:` field tracks where an issue is, set by whichever
 3. Update `plan/issues/backlog/backlog.md` if the issue was listed there
 
 <!-- AUTO:conformance-start -->
-**test262 conformance**: 32,456 / 43,135 (75.2 %)
+**test262 conformance**: 32,659 / 43,135 (75.7 %)
 <!-- AUTO:conformance-end -->
 
 ### Sprint History

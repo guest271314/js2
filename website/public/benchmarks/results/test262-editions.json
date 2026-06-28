@@ -1,8 +1,8 @@
 [
   {
     "edition": "≤ ES3",
-    "pass": 265,
-    "fail": 9,
+    "pass": 266,
+    "fail": 8,
     "ce": 0,
     "skip": 0,
     "total": 274,
@@ -10,17 +10,17 @@
   },
   {
     "edition": "ES5",
-    "pass": 9874,
-    "fail": 3077,
+    "pass": 9959,
+    "fail": 2992,
     "ce": 135,
     "skip": 0,
     "total": 13086,
-    "pct": 75
+    "pct": 76
   },
   {
     "edition": "ES2015",
-    "pass": 11375,
-    "fail": 3851,
+    "pass": 11432,
+    "fail": 3794,
     "ce": 171,
     "skip": 0,
     "total": 15397,
@@ -46,12 +46,12 @@
   },
   {
     "edition": "ES2018",
-    "pass": 3575,
-    "fail": 648,
+    "pass": 3615,
+    "fail": 608,
     "ce": 28,
     "skip": 0,
     "total": 4251,
-    "pct": 84
+    "pct": 85
   },
   {
     "edition": "ES2019",
@@ -109,21 +109,21 @@
   },
   {
     "edition": "ES2025",
-    "pass": 940,
-    "fail": 333,
+    "pass": 959,
+    "fail": 314,
     "ce": 2,
     "skip": 0,
     "total": 1275,
-    "pct": 74
+    "pct": 75
   },
   {
     "edition": "ES2026",
-    "pass": 172,
-    "fail": 172,
+    "pass": 173,
+    "fail": 171,
     "ce": 5,
     "skip": 0,
     "total": 349,
-    "pct": 49
+    "pct": 50
   },
   {
     "edition": "Proposals",

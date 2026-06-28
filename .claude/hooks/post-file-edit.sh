@@ -15,4 +15,15 @@ case "$FILE" in
     ;;
 esac
 
+# Forward-sync the rolling sprint queue (#2751): when an issue file is edited,
+# keep its team-TaskList entry in lockstep (create/update if `sprint: current`).
+# Incremental single-issue path — fast; never fails the edit.
+case "$FILE" in
+  */plan/issues/*.md)
+    REPO_ROOT="${CLAUDE_PROJECT_DIR:-/workspace}" \
+      node "${CLAUDE_PROJECT_DIR:-/workspace}/scripts/sync-current-tasklist.mjs" \
+      --issue "$FILE" --quiet 2>/dev/null || true
+    ;;
+esac
+
 exit 0

@@ -267,3 +267,58 @@ PASS via fresh single-file runs; 12 sync improvements re-verified PASS.
 
 This slice keeps the umbrella OPEN (status stays `ready`) — it burns down the
 nested-array-default codegen corner, not the iterator-protocol tail.
+
+## Residual (as of #2199, PO reconcile 2026-06-28)
+
+NOT done — broad umbrella. The referencing PR landed the nested-array default-init codegen family (3 defects). The umbrella stays OPEN: iterator-close, defaults, holes, rest across for-of / assignment / binding / params (~696 fails) need further concrete slices carved.
+
+## CARVE (sd-dstr-objdefault, 2026-06-28) — verify-first re-sweep on current main (#2201)
+
+Re-swept the **1745** non-pass `/dstr/` tests from the fresh s67 baseline against
+current `origin/main` (#2201). Three prior sub-issues are **done** (#1642
+IteratorClose, #1556 param struct, #2692 closure-box var/param), one **blocked**
+(#2566 generator over-consume, blocked_by #2662 eager-buffer host generator). The
+umbrella's earlier "dominant cluster = closure-box" premise is now mostly resolved
+by #2692. Partition of the residual:
+
+- **~871** use a **generator source/default** (`function* g()` / `yield` in the
+  destructured value) → **#2566** (blocked on #2662). NOT carved.
+- **~358** use a **custom iterable** (`obj[Symbol.iterator]` → `{next,return}`),
+  signature `it.next is not a function` / `-iter-no-close` / `-iter-close`. Correct
+  no-over-consume semantics need **lazy iterator stepping** → shares the **#2662 /
+  #2566** blocker. NOT carved as a ready dev slice (substrate-gated); tracked here.
+- **~516** plain array/obj source → **clean, non-blocked codegen slices**, carved:
+
+| sub-issue | 1-line | est. recover |
+|-----------|--------|-------------|
+| **#2756** (taken: sd-dstr-objdefault) | array-pattern identifier element with an **object-literal / class-expression default** null-derefs (`[c={a:1}]=[]` traps; the `fn-name-class` family). Array-literal & object-*pattern* defaults already work. | **~120–180** |
+| **#2757** | **assignment**-destructuring (`expressions/assignment/dstr/`) rest element + undefined/hole binds wrong value / "array too large" trap. Independent file. | **~40–60** |
+| **#2758** | object/array-pattern **default-init side-effect on init-skipped** (`obj-ptrn-id-init-skipped`: present falsy values fire the default / corrupt `initCount`). Closure-box param-path residual — **route architect** (#1177/#2692 regression history). | **~40–96** |
+
+Independence: #2756 = `statements/destructuring.ts` default arm; #2757 =
+`expressions/*` assignment lowering; #2758 = `destructuring-params.ts` + `calls.ts`
+closure-box. Different files → safe to parallelize. #2756 and #2758 both touch the
+default-init concept but in **different files/paths** (binding default arm vs param
+closure-box) — mild care, not a hard serialize. The custom-iterable (~358) and
+generator (~871) tails stay under #2566/#2662.
+
+**Update (#2756 landed, 2026-06-28):** the largest clean slice **#2756**
+(array-pattern object/class default null-deref + the `fn-name-class` NamedEvaluation
+cluster) is **done** — recovers the binding/function/method/generator/async/
+for-await `fn-name-class` family. #2757 / #2758 remain ready/architect.
+
+## Carve (2026-06-28) — typed in-bounds undefined/hole for-of default → #2769 (architect)
+
+The **typed in-bounds `undefined`/hole default-init** slice (`for (const [x = 23]
+of [[undefined]])` / `[[,]]` — default never fires because the iterable's inner
+`undefined[]` lowers to `vec_i32` and `undefined` is lost as i32 `0` at
+construction) is carved to **#2769** and routed to **architect**. A dev attempt
+(PR #2226) was closed: widening `undefined[]`→externref in `resolveWasmType` is
+GLOBAL (type-deterministic) so it broke array construction (`array.new_fixed`
+i32.const) + i32/f64 consumers (`.length`/`sort`/`reduceRight`/`for-in`) — +35
+wins and −5 regressions are inseparable in that approach; the correct fix is
+representation-level. Key asymmetry captured in #2769: the identical **binding**
+pattern already passes (TS infers a TUPLE → f64 sNaN sentinel), only the **for-of**
+ARRAY-typed path fails. The #2216 nested-array-default slice stays done. Umbrella
+remains OPEN/`ready` — #2757 (assignment-rest) and #2758 (init-skipped side-effect)
+remain dev/architect-tractable.
