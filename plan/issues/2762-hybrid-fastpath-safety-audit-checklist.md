@@ -13,7 +13,7 @@ task_type: architecture
 area: codegen, ir
 language_feature: none
 goal: maintainability
-related: [2755, 2760, 2761, 1530]
+related: [2755, 2760, 2766, 1530]
 ---
 
 # #2762 — Hybrid migration-cost audit: fast-path safety-predicate checklist
@@ -50,7 +50,7 @@ Produce and maintain a per-fast-path table (in this issue, or a dedicated
 Seed it from roadmap §(d):
 
 1. IR `vec.get` element read — `from-ast.ts:1919/1990` — `P`: index ∈ [0,len) —
-   **partial** (being addressed by #2761) — counted-loop/literal proof — M.
+   **partial** (being addressed by #2766) — counted-loop/literal proof — M.
 2. Legacy bounds-eliminated read — `property-access.ts:5371,6333` — `P`:
    counted-loop bound — **discharged** — `safeIndexedArrays` — S.
 3. Packed-`i32` arrays — `array-element-typing.ts:44,212` — `P`: all writes

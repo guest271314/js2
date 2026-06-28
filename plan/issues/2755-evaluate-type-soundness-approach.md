@@ -181,7 +181,7 @@ summary & follow-up issues" table):
 
 - **R1 — #2760**: floor fix F1 (plain-array OOB → JS `undefined`, HI-style; the
   #2198/S2 rework, NOT the shared-helper flip) + F2 hole-read audit + F3 doc.
-- **R2 — #2761**: first IR step — `ElementAccessExpression` under HI: port the
+- **R2 — #2766**: first IR step — `ElementAccessExpression` under HI: port the
   `safeIndexedArrays` counted-loop in-bounds proof into the IR so `vec.get`
   fires only when in-bounds is proven; otherwise emit the SAFE bounds-checked
   read (F1 reused as the IR SAFE lowering).

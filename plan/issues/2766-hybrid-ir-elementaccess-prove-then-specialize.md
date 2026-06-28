@@ -1,5 +1,5 @@
 ---
-id: 2761
+id: 2766
 title: "Hybrid IR step 1: ElementAccess prove-then-specialize — vec.get only when in-bounds is proven, else SAFE bounds-checked read"
 status: ready
 sprint: current
@@ -17,7 +17,7 @@ related: [2755, 2760, 1530, 1131, 1804]
 depends_on: [2760]
 ---
 
-# #2761 — Hybrid IR step 1: ElementAccess prove-then-specialize
+# #2766 — Hybrid IR step 1: ElementAccess prove-then-specialize
 
 First IR-adoption step of the hybrid roadmap
 ([`docs/architecture/hybrid-soundness-ir-roadmap.md`](../../docs/architecture/hybrid-soundness-ir-roadmap.md),
