@@ -332,8 +332,8 @@ as `sprint: current`, `status: ready`.
   linear) axes.
 - [`../../plan/log/ir-adoption.md`](../../plan/log/ir-adoption.md) — per-kind IR
   status & ratchet.
-- [`../../plan/issues/2755-evaluate-type-soundness-approach.md`](../../plan/issues/2755-evaluate-type-soundness-approach.md)
-  — the decision.
+- [`#2755`](../../plan/issues/2755-evaluate-type-soundness-approach.md) — the
+  decision.
 - #1530 — phase out the IR demote-to-warning channel (now: fall to SAFE, not
   legacy-trust).
 - #2681 / #2686 / #1627 / #2740 — the substrate-convergence evidence.
