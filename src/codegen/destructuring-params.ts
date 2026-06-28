@@ -1609,8 +1609,30 @@ export function destructureParamArray(
           if (isDecl) emitLocalTdzInit(fctx, localName);
           continue;
         }
+        // (#2756) An identifier element with a default whose tuple FIELD is a
+        // nullable ref (`ref`/`ref_null`) must run the null→default check BEFORE
+        // any field→local coercion. The old path coerced the raw field up front;
+        // for a `ref_null`→`ref` (non-null) local that coercion is a
+        // `ref.as_non_null`, which TRAPS on a wasm-null (empty/absent) slot
+        // *before* the default could fire — e.g. `let [c = {a:1}] = []` (an empty
+        // array compiles to a 1-tuple with a null `_0`). `emitDefaultValueCheck`
+        // tees the field, checks `ref.is_null`, applies the default in the
+        // missing arm, and coerces to the local type ONLY in the value-present
+        // arm — so a null/absent element flows to the default instead of trapping.
+        // Numeric/array-literal defaults were already safe (f64 sentinel / vec
+        // ref handled elsewhere); this targets the object/class heap-default case
+        // (the fn-name-class test262 cluster). Non-ref fields keep the prior path.
+        const refFieldWithDefault =
+          ts.isBindingElement(element) &&
+          element.initializer !== undefined &&
+          (fieldType.kind === "ref" || fieldType.kind === "ref_null");
         fctx.body.push({ op: "local.get", index: paramIdx });
         fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: i });
+        if (refFieldWithDefault) {
+          emitDefaultValueCheck(ctx, fctx, fieldType, localIdx, element.initializer!, localType);
+          if (isDecl) emitLocalTdzInit(fctx, localName);
+          continue;
+        }
         // Coerce struct field type to local's declared type if they differ (#658)
         if (localType && !valTypesMatch(fieldType, localType)) {
           coerceType(ctx, fctx, fieldType, localType);
