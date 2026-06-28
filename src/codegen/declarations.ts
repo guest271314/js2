@@ -3623,7 +3623,22 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
   // Fourth: collect module-level variable declarations as wasm globals
   /** Register a single module-level global variable with the given name and wasm type. */
   function registerModuleGlobal(name: string, wasmType: ValType): void {
-    if (ctx.funcMap.has(name)) return; // skip if shadowed by function
+    // Skip if shadowed by a *user* function — but NOT by a wasm:js-string
+    // builtin import (#2669). `addStringImports` registers `concat`, `length`,
+    // `equals`, `substring`, `charCodeAt` into `ctx.funcMap` (and mirrors them
+    // in `ctx.jsStringImports`). Those builtin names are not user bindings, so a
+    // module-level variable that merely *collides* with one — e.g. the test262
+    // `let length = "outer"` dstr template (`ary-ptrn-rest-obj-prop-id` family),
+    // or any captured `let concat`/`equals`/`substring`/`charCodeAt` — must still
+    // be promoted to a `$__mod_<name>` global. Otherwise it stays a
+    // `__module_init` local, invisible to every other function: reads from a
+    // nested/exported function return null. The bare `funcMap.has` gate
+    // conflated the two. Discriminate by index: when the funcMap entry IS the
+    // js-string builtin (no genuine user function shadows the name), fall
+    // through and register the global; a real user function of the same name
+    // keeps the original skip behaviour.
+    const fnIdx = ctx.funcMap.get(name);
+    if (fnIdx !== undefined && fnIdx !== ctx.jsStringImports.get(name)) return; // shadowed by a user function
     if (ctx.moduleGlobals.has(name)) return; // skip if already registered
     if (ctx.classSet.has(name)) return; // skip class expression variables
 

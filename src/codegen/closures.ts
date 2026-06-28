@@ -376,7 +376,12 @@ export function promoteAccessorCapturesToGlobals(
     if (name === "this") continue;
 
     // Skip if it's a known function name (not a variable capture)
-    if (ctx.funcMap.has(name)) continue;
+    // #2669: skip names bound to a *user* function (a function reference, not a
+    // captured variable) — but NOT a wasm:js-string builtin import
+    // (concat/length/equals/substring/charCodeAt), which lives in funcMap yet
+    // must not block capture of a same-named outer local (e.g. the test262
+    // `let length = "outer"` dstr template). Discriminate by index.
+    if (ctx.funcMap.has(name) && ctx.funcMap.get(name) !== ctx.jsStringImports.get(name)) continue;
 
     // Get the local's type
     const localType =
@@ -1693,7 +1698,12 @@ export function compileArrowAsClosure(
       }
     }
     if (localIdx === undefined) continue;
-    if (ctx.funcMap.has(name)) continue;
+    // #2669: skip names bound to a *user* function (a function reference, not a
+    // captured variable) — but NOT a wasm:js-string builtin import
+    // (concat/length/equals/substring/charCodeAt), which lives in funcMap yet
+    // must not block capture of a same-named outer local (e.g. the test262
+    // `let length = "outer"` dstr template). Discriminate by index.
+    if (ctx.funcMap.has(name) && ctx.funcMap.get(name) !== ctx.jsStringImports.get(name)) continue;
     // Skip if the name is the arrow's own parameter (including destructuring bindings)
     if (isOwnParamName(arrow, name)) continue;
     // Skip if the name is a named function expression's own name (self-reference)
@@ -2707,7 +2717,12 @@ export function compileArrowAsCallback(
   for (const name of referencedNames) {
     const localIdx = fctx.localMap.get(name);
     if (localIdx === undefined) continue;
-    if (ctx.funcMap.has(name)) continue;
+    // #2669: skip names bound to a *user* function (a function reference, not a
+    // captured variable) — but NOT a wasm:js-string builtin import
+    // (concat/length/equals/substring/charCodeAt), which lives in funcMap yet
+    // must not block capture of a same-named outer local (e.g. the test262
+    // `let length = "outer"` dstr template). Discriminate by index.
+    if (ctx.funcMap.has(name) && ctx.funcMap.get(name) !== ctx.jsStringImports.get(name)) continue;
     // Skip if the name is the arrow's own parameter (including destructuring bindings)
     if (isOwnParamName(arrow, name)) continue;
     const type =
