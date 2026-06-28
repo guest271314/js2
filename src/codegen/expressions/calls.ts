@@ -770,24 +770,53 @@ function isNumberMethodReceiver(ctx: CodegenContext, receiverType: ts.Type): boo
 }
 
 /**
+ * (#2767) Nominal types whose bare-`var` receiver recovery is VERIFIED safe —
+ * the substituted `receiverType` routes into a dispatch path whose
+ * externref→ref value-recovery is properly guarded and whose method/property
+ * lowering is correct for the recovered struct.
+ *
+ * This safelist is load-bearing, not a perf refinement: the #2228 `merge_group`
+ * test262 gate proved that substituting WITHOUT it regresses non-Date receivers
+ * (Promise.finally → illegal cast in the recovered closure; RegExp `re.test` /
+ * SharedArrayBuffer `.grow` → wrong native dispatch; super call-spread → invalid
+ * Wasm). Those gates route the recovered struct through an UNGUARDED `ref.cast`
+ * or a partial native path. Date's recovery is guarded + correct (the measured
+ * wins: toISOString ×2, annexB setYear ×3). Expand this set ONE type at a time,
+ * each gated behind a full `merge_group` validation (tracked on #2768).
+ */
+const SAFE_BARE_VAR_RECOVERY_NOMINALS: ReadonlySet<string> = new Set(["Date"]);
+
+/**
  * (#2767) Recover the nominal `ts.Type` a bare-`var`/`let` identifier holds when
  * the TS checker reports `any` (no annotation, no initializer — the
  * "evolving-any" case the checker does NOT narrow across statements, so
  * `var d; d = new Date(0); d.toISOString()` types the receiver `any`/externref
  * and the nominal-symbol dispatch gate bails to the generic dynamic path).
  *
- * Conservative-closed: returns a type ONLY when the binding's initializer (if
- * any) AND every `<ident> = <rhs>` assignment to the same binding symbol in the
- * source file resolve to the SAME nominal symbol. Any divergence, any RHS that
- * resolves to no nominal symbol, or zero assignments ⇒ undefined (keep the
- * existing dynamic path — never substitute a wrong struct). Mirrors the
- * symbol-scan in `symbolBindsAsyncFunction` (expressions.ts:262).
+ * Conservative-closed on THREE rules so it never substitutes a type the runtime
+ * value may not be:
+ *   1. every declaration of the symbol is a plain `var`/`let` VariableDeclaration
+ *      — excludes PARAMETERS / catch / binding-element bindings whose value
+ *      arrives from outside the scanned assignments (a param reassigned
+ *      `p = new X()` in the body must NOT be assumed to always hold an `X`;
+ *      that drove the Promise.finally illegal-cast regression);
+ *   2. the initializer (if any) AND every `<ident> = <rhs>` assignment to the
+ *      symbol resolve to the SAME nominal symbol — any divergence, any
+ *      non-nominal RHS, or zero assignments ⇒ undefined;
+ *   3. that nominal symbol is on the verified `SAFE_BARE_VAR_RECOVERY_NOMINALS`
+ *      safelist (the #2228 merge_group gate showed an unrestricted substitution
+ *      misdispatches non-Date receivers).
+ * Mirrors the symbol-scan in `symbolBindsAsyncFunction` (expressions.ts:262).
  */
 function resolveAssignedNominalType(ctx: CodegenContext, ident: ts.Identifier): ts.Type | undefined {
   const sym = ctx.checker.getSymbolAtLocation(ident);
   if (!sym) return undefined;
+  const decls = sym.declarations ?? [];
+  // Rule 1: only plain var/let bindings (no params / catch / destructuring
+  // elements — their value can arrive un-scanned from outside the assignments).
+  if (decls.length === 0 || !decls.every((d) => ts.isVariableDeclaration(d))) return undefined;
   const rhsTypes: ts.Type[] = [];
-  for (const d of sym.declarations ?? []) {
+  for (const d of decls) {
     if (ts.isVariableDeclaration(d) && d.initializer) {
       rhsTypes.push(ctx.checker.getTypeAtLocation(d.initializer));
     }
@@ -813,6 +842,8 @@ function resolveAssignedNominalType(ctx: CodegenContext, ident: ts.Identifier): 
     if (name === undefined) name = nm;
     else if (name !== nm) return undefined; // divergent nominal types → union → bail
   }
+  // Rule 3: only substitute for a nominal whose recovery is verified safe.
+  if (!name || !SAFE_BARE_VAR_RECOVERY_NOMINALS.has(name)) return undefined;
   return rhsTypes[0];
 }
 

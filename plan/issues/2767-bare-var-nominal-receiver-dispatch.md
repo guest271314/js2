@@ -328,3 +328,36 @@ Validation (host mode, current main base):
 Property **reads/writes** on a bare-`var` nominal receiver (`d.field`, `d.x = …`)
 remain dynamic — out of scope per the spec's scope note (separate follow-on
 through `member-get-dispatch.ts` / `member-set-dispatch.ts`).
+
+## merge_group regression → Date-only safelist (agent-dev, 2026-06-28)
+
+The first PR (#2228) passed all PR-level checks + the scoped Date sweep but
+**failed the `merge_group` test262 regression gate**: 6 regressions / 5
+improvements (net -1). The merged-state delta showed the substitution is unsound
+for NON-Date receivers — exactly the broad-impact risk of substituting
+`receiverType` across ~10 dispatch gates:
+
+| regressed file | category | cause |
+| --- | --- | --- |
+| Promise/prototype/finally/{rejected,resolved}-observable-then-calls-PromiseResolve | illegal_cast ×2 | recovered closure receiver → unguarded `ref.cast` |
+| language/literals/regexp/y-assertion-start (`re.test`) | assertion_fail | native RegExp dispatch on recovered receiver returns wrong value |
+| SharedArrayBuffer/prototype/grow/this-is-not-resizable | assertion_fail | `.grow()` native path skips the TypeError |
+| language/expressions/super/call-spread-obj-spread-order | wasm_compile | invalid Wasm in the recovered super-spread path |
+| DisposableStack/prototype/dispose/throws-error-as-is… | assertion_fail | recovered dispatch path partial |
+
+All **5 improvements were Date** (`toISOString` ×2, annexB `setYear` ×3); **all 6
+regressions were non-Date**. Fix: the architect's "optional extra guard" is now
+**required** — `resolveAssignedNominalType` gates on
+`SAFE_BARE_VAR_RECOVERY_NOMINALS` (Date only) plus a var/let-only declaration
+rule (excludes parameters/closure bindings — the Promise.finally illegal-cast
+driver). With Date-only every non-Date receiver reverts to the exact pre-#2767
+dynamic path (= baseline pass), so the measured net is **+5 / 0 regressions**.
+
+Re-validated: all 11 acceptance tests pass; the 6 previously-regressed test262
+files all pass; the 5 Date improvements all pass; Date.prototype sweep fail 26 →
+24 with an empty newly-failing diff vs clean baseline.
+
+**Per-type safelist expansion** (harden each nominal's externref→ref recovery,
+then add it to the safelist, validated per-type via full CI / merge_group) is
+tracked on **#2768** — the 6 regressing files above are the exact per-type
+recovery bugs to fix.

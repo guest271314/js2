@@ -60,11 +60,23 @@ describe("#2767 bare-var nominal receiver method dispatch", () => {
     expect(ex.test()).toBe(0);
   });
 
-  it("generalizes to DataView method dispatch via a bare var", async () => {
-    const ex = (await compileToWasm(
-      `export function test(): number { var dv; dv = new DataView(new ArrayBuffer(8)); dv.setInt32(0, 42); return dv.getInt32(0); }`,
-    )) as { test: () => number };
-    expect(ex.test()).toBe(42);
+  // Non-Date nominal receivers are intentionally NOT recovered yet: the #2228
+  // merge_group gate showed an unrestricted substitution regresses RegExp /
+  // Promise / SharedArrayBuffer / super because their externref→ref recovery is
+  // unguarded or their native dispatch is partial. The substitution is gated on
+  // the verified `SAFE_BARE_VAR_RECOVERY_NOMINALS` safelist (Date only); per-type
+  // hardening + safelist expansion is tracked on #2768. A bare-var RegExp
+  // receiver therefore stays on the pre-#2767 dynamic path (no regression).
+  it("non-safelisted nominal (RegExp) bare-var stays dynamic — no misdispatch", async () => {
+    // RegExp is NOT safelisted, so the receiver is not recovered and stays on
+    // the pre-#2767 dynamic path. That path returns a truthy `1` here (rather
+    // than a boxed `true`) — a pre-existing quirk #2768 will harden, NOT a
+    // regression this change introduces. The point is only that the match still
+    // succeeds (truthy) and nothing misdispatches/traps.
+    const ex = (await compileToWasm(`export function test(): any { var r; r = /a/g; return r.test("a"); }`)) as {
+      test: () => unknown;
+    };
+    expect(Boolean(ex.test())).toBe(true);
   });
 
   // --- safety / no-misdispatch guards (the conservative all-assignments-agree rule) ---
