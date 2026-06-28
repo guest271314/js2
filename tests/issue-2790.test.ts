@@ -1,6 +1,6 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 //
-// #2788 — Hybrid IR: the i32 arm of the no-box NUMBER-local proof gate (the
+// #2790 — Hybrid IR: the i32 arm of the no-box NUMBER-local proof gate (the
 // fast-follow #2782 explicitly DEFERRED, unblocked by #2785).
 //
 // #2782 added `proveUnboxedNumberLocal` in `lowerVarDecl` (`src/ir/from-ast.ts`)
@@ -10,7 +10,7 @@
 // escape edge — `coerceType(i32 → externref)` now boxes by the TS brand
 // (`boolean` → `__box_boolean`, `symbol` → `__box_symbol`, else `__box_number`).
 //
-// #2788 extends the declaration gate to the `i32` representation. The `i32`
+// #2790 extends the declaration gate to the `i32` representation. The `i32`
 // kind hosts TWO sound, brand-determinable primitives that may be kept unboxed:
 //   - a `number` (`arr.length`, a native-`i32` typed number) — boxes
 //     `__box_number` on escape;
@@ -79,7 +79,7 @@ async function compileFn(
   };
 }
 
-describe("#2788 — IR no-box NUMBER-local proof gate, i32 arm", () => {
+describe("#2790 — IR no-box NUMBER-local proof gate, i32 arm", () => {
   // ── The i32-boolean trap: a boolean (i32) must NOT be caught by the NUMBER gate
   describe("i32 boolean — recognised as boolean, NOT demoted by the number gate", () => {
     it("a `boolean` local stays unboxed (i32), NO no-box-number demotion", async () => {

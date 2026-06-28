@@ -1,5 +1,5 @@
 ---
-id: 2788
+id: 2790
 title: "Hybrid IR — no-box NUMBER-local proof gate, i32 arm (#2782 fast-follow, unblocked by #2785)"
 status: done
 sprint: current
@@ -78,7 +78,7 @@ bucket. The fix keys on the TS *type*: a `boolean` is recognised by a SEPARATE
 - The **escape side already exists**: `coerceReturnValue`'s `i32`/`i64` escape
   sink demotes an unboxed scalar flowing into an `any` result to legacy, where
   #2785's type-aware box picks `__box_boolean` / `__box_number` by brand. No
-  change needed there — #2788 is the declaration-gate counterpart.
+  change needed there — #2790 is the declaration-gate counterpart.
 
 ## Why it is correctness-neutral / regression-free
 
@@ -107,7 +107,7 @@ auto-protects when the claim scope widens. Demote-to-safe is value-correct.
 
 ## Tests
 
-`tests/issue-2788.test.ts` — the i32 boolean trap guard (boolean not
+`tests/issue-2790.test.ts` — the i32 boolean trap guard (boolean not
 number-demoted), the HEADLINE boolean-escape → `__box_boolean` correctness, the
 i32/f64 number-escape → `__box_number` correctness, TS-type keying (no
 cross-corruption), and the #2782 f64 arm intact.

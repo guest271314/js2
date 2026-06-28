@@ -988,14 +988,14 @@ function lowerVarDecl(stmt: ts.VariableStatement, cx: LowerCtx): void {
         );
       }
     }
-    // #2782 (hybrid Row 5) + #2788 (i32 arm) — no-box NUMBER-local proof gate.
+    // #2782 (hybrid Row 5) + #2790 (i32 arm) — no-box NUMBER-local proof gate.
     // The bindings below keep an `f64` / `i32`-typed local UNBOXED (as a `local`
     // SSA value or a numeric `slot`). Per the Hybrid Invariant that no-box
     // specialization must be discharged by a proof on the TS *type*, never the
     // lowered Wasm kind: `number` / `boolean` / `symbol` all collapse to `f64` /
     // `i32`, so the kind alone cannot tell a genuine numeric local from an `any`
     // / union one a scalar hint coerced opaquely. Prove the local's TS type is a
-    // pure number — or (i32 only, #2788) a pure `boolean`, the other sound
+    // pure number — or (i32 only, #2790) a pure `boolean`, the other sound
     // tag-determinable i32 brand that boxes via `__box_boolean` (#2785) —
     // (`proveUnboxedNumberLocal`, reusing #2781's `classifyPrimitiveProof`);
     // anything unprovable — `any` / `unknown` / a MIXED `number | string` union —
@@ -1009,7 +1009,7 @@ function lowerVarDecl(stmt: ts.VariableStatement, cx: LowerCtx): void {
         `ir/from-ast: local '${name}' is bound as an unboxed ${boundKind} but its TS type is not ` +
           `provably a pure number${boundKind === "i32" ? " or boolean" : ""} — keeping the no-box ` +
           `number representation is unsound (the ${boundKind} Wasm kind conflates number / boolean / ` +
-          `any); demote to the SAFE boxed legacy lowering in ${cx.funcName} (#2782/#2788)`,
+          `any); demote to the SAFE boxed legacy lowering in ${cx.funcName} (#2782/#2790)`,
       );
     }
     // Slice 6 part 2 (#1181): mutable `let` bindings whose name is
@@ -4183,7 +4183,7 @@ function proveAdditiveOperand(node: ts.Expression, cx: LowerCtx): "number" | "st
 }
 
 /**
- * #2788 — is `t` provably a pure `boolean` (the intrinsic `true | false` union,
+ * #2790 — is `t` provably a pure `boolean` (the intrinsic `true | false` union,
  * a `true` / `false` literal, or a union thereof)? Mirrors the recursive shape
  * of {@link classifyPrimitiveProof}, but for the boolean brand — which that
  * function deliberately reports as `"unprovable"` (a `boolean` is NOT a number,
@@ -4205,7 +4205,7 @@ function isProvablyBoolean(t: ts.Type): boolean {
 }
 
 /**
- * #2782 (hybrid Row 5) + #2788 (i32 arm) — the no-box proof for an UNBOXED
+ * #2782 (hybrid Row 5) + #2790 (i32 arm) — the no-box proof for an UNBOXED
  * NUMBER local. Reuses {@link classifyPrimitiveProof} (the #2781 operand-type
  * proof) to discharge the fast-path safety predicate `P` for the "keep a number
  * local unboxed" specialization.
@@ -4232,7 +4232,7 @@ function isProvablyBoolean(t: ts.Type): boolean {
  *   - `f64` (#2782): keep ONLY when the TS type is provably a pure `number`;
  *     anything else (`any` / `number | string` opaquely coerced by the f64 hint)
  *     is unsound → demote.
- *   - `i32` (#2788): the `i32` representation hosts TWO sound, brand-determinable
+ *   - `i32` (#2790): the `i32` representation hosts TWO sound, brand-determinable
  *     primitives — a `number` (e.g. `arr.length`, a native-`i32` typed number;
  *     boxes via `__box_number`) AND a `boolean` (boxes via `__box_boolean` since
  *     #2785 made `coerceType(i32 → externref)` brand-aware). Keep BOTH unboxed;
@@ -4260,7 +4260,7 @@ function proveUnboxedNumberLocal(name: ts.Identifier, boundType: IrType, cx: Low
   // f64 hosts only the number brand: a non-number f64 was opaquely coerced and
   // is unsound to keep unboxed → demote.
   if (bv.kind === "f64") return false;
-  // i32 arm (#2788): the OTHER sound i32 brand is a provable `boolean`, kept
+  // i32 arm (#2790): the OTHER sound i32 brand is a provable `boolean`, kept
   // unboxed and boxed via `__box_boolean` (#2785) at the escape edge. Anything
   // else i32 (`any` / mixed union — no determinable brand) → demote.
   return isProvablyBoolean(tsType);
