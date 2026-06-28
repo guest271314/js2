@@ -89,6 +89,7 @@ import {
   getRunLoopFuncIdxForWasiStart,
 } from "./async-scheduler.js";
 import {
+  brandExternMethodResult,
   ensureLateImport,
   flushLateImportShifts,
   registerAddStringImports,
@@ -12654,7 +12655,11 @@ function collectExternClass(ctx: CodegenContext, decl: ts.ClassDeclaration, name
           if (!p.questionToken && !p.initializer) requiredParams++;
         }
         const retType = ctx.checker.getReturnTypeOfSignature(sig);
-        const results: ValType[] = isVoidType(retType) ? [] : [mapTsTypeToWasm(retType, ctx.checker)];
+        // (#2770, S5b) Brand a boolean extern-method result at registration so the
+        // direct `methodInfo.results[0]` consumption path (extern.ts) is honest.
+        const results: ValType[] = isVoidType(retType)
+          ? []
+          : [brandExternMethodResult(ctx, retType, mapTsTypeToWasm(retType, ctx.checker))];
         info.methods.set(methodName, { params, results, requiredParams });
       }
     }
@@ -12806,7 +12811,11 @@ function collectInterfaceMembers(
           if (!p.questionToken && !p.initializer) requiredParams++;
         }
         const retType = ctx.checker.getReturnTypeOfSignature(sig);
-        const results: ValType[] = isVoidType(retType) ? [] : [mapTsTypeToWasm(retType, ctx.checker)];
+        // (#2770, S5b) Brand a boolean extern-method result at registration so the
+        // direct `methodInfo.results[0]` consumption path (extern.ts) is honest.
+        const results: ValType[] = isVoidType(retType)
+          ? []
+          : [brandExternMethodResult(ctx, retType, mapTsTypeToWasm(retType, ctx.checker))];
         info.methods.set(methodName, { params, results, requiredParams });
       }
     }

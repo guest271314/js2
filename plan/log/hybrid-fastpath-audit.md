@@ -76,6 +76,34 @@ shared SAFE lowering F1 (#2760) builds (planned helper, e.g.
 floor fix in legacy reused as the IR's SAFE lowering, fast path proof-gated.
 **Already has an issue: #2766** (depends on #2760).
 
+#### The F1 box must be TYPE-AWARE (#2785 — landed; unblocks the i32 arms)
+
+F1's OOB→`undefined` widening boxes the in-bounds element via
+`coerceType(<wasm kind> → externref)`. That box was **type-blind** —
+`i32 → __box_number` always — which corrupts the non-number `i32`s the carrier
+is overloaded with (boolean `true` → number 1; symbol handle → a number). This
+cost **two R1 merge_group parks** and forced #2766 to narrow F1 to the `f64`
+(`number[]`) element ONLY, deferring `boolean[]`/`symbol[]`.
+
+**#2785 builds the type-aware box** — `coerceType(i32 → externref)` now picks the
+helper from the value's BRAND (`boolean → __box_boolean`, `symbol →
+__box_symbol`, else `__box_number`). The brand is structural-only and is **erased
+in `arrDef.element`** (arrays dedupe by structure), so the F1 call sites
+reconstruct it from the receiver TS element type (`f1ElementBoxType`).
+**Landed in #2785:** `boolean[]` OOB→`undefined` re-enabled (host + standalone).
+**Fast-follow (still deferred):**
+
+- `symbol[]` OOB→`undefined` at the array-read site — needs a **native
+  standalone `__box_symbol`** (host already works); until then `symbol[]` falls
+  through (keeps `Object/values/symbols-omitted.js` green). The primitive's
+  symbol arm is already wired in `coerceType`.
+- broad symbol branding in `type-mapper.ts` (symbol locals/params/returns
+  coerced to `externref`).
+- the **Row 5 i32-number-local** box arm (#2782) — now unblocked by the
+  type-aware box.
+- `coercionInstrs` (the #1917 coercion-table path) brand routing — parallel to
+  the imperative `coerceType` fix.
+
 ### Row 3 — Packed-`i32` arrays (miscompile risk)
 
 A sound proof requires **both**:
@@ -222,6 +250,9 @@ IR-adoption steps (§(b) of the roadmap), **not** a big-bang rewrite.
   fix (the SAFE lowering rows 1/2 reuse).
 - [#2766](../issues/2766-hybrid-ir-elementaccess-prove-then-specialize.md) — R2,
   the row-1 follow-up.
+- [#2785](../issues/2785-hybrid-type-aware-box-primitive.md) — the **type-aware
+  box primitive** (box keyed on the TS type, not the Wasm kind); re-enables F1's
+  `boolean[]` OOB→`undefined` that #2766 deferred. Unblocks the i32 arms.
 - [#2780](../issues/2780-hybrid-ir-arrayliteral-widening-escape.md) — the row-6
   follow-up (ArrayLiteral widening-escape gate).
 - [ir-adoption.md](./ir-adoption.md) — per-AST-kind IR status & ratchet.

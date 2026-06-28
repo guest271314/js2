@@ -1,11 +1,13 @@
 ---
 id: 2770
 title: "dynamic builtin boolean-method on a bare-var/dynamic receiver boxes the i32 result as a NUMBER not a boolean (set.has/map.has/re.test → 1 not true)"
-status: ready
+status: done
+assignee: ttraenkler/sendev-s5b-bool-brand
 sprint: current
 priority: high
 created: 2026-06-28
 updated: 2026-06-28
+completed: 2026-06-28
 feasibility: medium
 reasoning_effort: high
 task_type: bugfix
@@ -103,3 +105,48 @@ box-the-result change → **routing to architect for a spec** (which result site
 to brand, the shared helper signature, over-boxing guards, and the full-CI
 validation plan). The precise root cause + the divergent `Set_has`(externref) vs
 `Map_has`(i32) routing above give the architect a complete starting point.
+
+## Implementation note (S5b of #2773, senior-dev, 2026-06-28)
+
+**Why the per-call-site wrap is the load-bearing fix (and a registration-only
+fix is NOT sufficient).** `getWasmFuncReturnType` (`expressions/helpers.ts`)
+reads the result ValType back from the registered **func type** in
+`ctx.mod.types`. Func types are deduped by `funcTypeKey`
+(`registry/types.ts`), which keys results on **`r.kind` only** — so a branded
+`{kind:"i32",boolean:true}` result func type collapses onto a pre-existing
+*unbranded* `(externref,externref)->i32` type. The brand therefore never
+survives into the func type, and every dispatch-result site
+(`getWasmFuncReturnType(ctx, idx) ?? resolveWasmType(ctx, retType)`) reads back a
+bare i32. This is exactly why dev-rescue's localized registration-only attempt
+failed for the bare-var case. The fix re-derives the brand from the **call's TS
+return type** at each result site, independent of the deduped func type.
+
+**The fix has three parts:**
+1. **Shared helper** `brandExternMethodResult(ctx, tsReturnType, valType)` in
+   `src/codegen/shared.ts` (the acyclic sink — avoids the
+   `calls.ts ↔ property-access.ts` import cycle). Re-tags a **bare** i32 whose
+   declared return type is *exactly* `boolean` (via `isStrictBooleanReturnType`,
+   which checks `TypeFlags.Boolean | BooleanLiteral` so `number`,
+   `boolean | undefined` unions, and `void` are rejected). Over-box guards:
+   leaves f64 / externref / ref / already-`boolean:true` untouched; idempotent.
+2. **Per-call-site wrap** at all **14** extern-method-result sites in
+   `expressions/calls.ts` (the `getWasmFuncReturnType(...) ?? resolveWasmType(ctx,
+   retType)` family — `finalStaticIdx`, `finalMethodIdx`, `finalStructMethodIdx`,
+   `finalFuncIdx`, `funcIdx`, `finalCallIdx`, and the `callReturnType =` arms).
+   Each already has `const retType = checker.getReturnTypeOfSignature(sig)` in
+   scope, so the wrap is `brandExternMethodResult(ctx, retType, <expr>)`.
+3. **Registration brand** at the two extern-method-decl sites in `index.ts`
+   (`collectExternClass` ~12657 and `collectInterfaceMembers` ~12809, the Map/Set
+   `declare var`/interface path) so the direct `methodInfo.results[0]` consumption
+   path in `extern.ts` is honest at source. (The `registerBuiltinExternClasses`
+   fallback already registers boolean methods as **externref**, which boxes
+   correctly — left unchanged; branding it to i32 would break the host import
+   signature.)
+
+This **subsumes** the RegExp `.test` case (#2770 acceptance: `re.test` → boolean;
+test262 `language/literals/regexp/y-assertion-start.js`) and covers the ES2025
+Set predicates `isSubsetOf`/`isSupersetOf`/`isDisjointFrom`. Over-boxing verified
+absent: `map.get`/`map.size`/`indexOf` stay numbers. Tests in
+`tests/issue-2770.test.ts` (11 cases) + tsc clean + #2016/#2030 boolean-brand and
+collection suites green locally; conformance validated on full `merge_group` +
+standalone-floor (broad-impact result path, never a scoped sweep).

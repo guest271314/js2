@@ -8,10 +8,12 @@
  * are designed to scale, on EVERY CI run (no `it.skip`). It lives in its own file
  * so the multi-MiB buffers do not bloat the equivalence shards.
  *
- * The synchronous streaming variants run under an in-process raw-fd shim that
- * uses BULK `Uint8Array` copies (no per-byte JS loop), so a 128 MiB echo
- * completes in seconds with no external runtime — the matrix therefore runs in
- * every CI shard, not only where `wasmtime` happens to be installed.
+ * The synchronous streaming variants run under an in-process raw-fd shim
+ * ({@link runFdShim}) and the async `process.stdin` variant under an in-process
+ * reactor shim ({@link runReactorShim}); both use BULK `Uint8Array` copies (no
+ * per-byte JS loop), so a 128 MiB echo completes in seconds with no external
+ * runtime — the matrix therefore runs in every CI shard, not only where
+ * `wasmtime` happens to be installed.
  *
  *   - `nm_deno.ts`    / `nm_wasi_p1.ts`  — VERBATIM streamers: a frame of any size
  *     is echoed back byte-for-byte through a fixed window. Asserted byte-EXACT at
@@ -22,21 +24,16 @@
  *     ROUND-TRIP correctness instead: every emitted frame is <=1 MiB and a valid
  *     `[…]`, and concatenating the frame interiors reconstructs the original
  *     array body exactly. Tested at 1 / 64 / 128 MiB.
- *   - `nm_node_process.ts` — its async `process.stdin` reactor rebuilds each
- *     chunk one byte at a time in the compiler prelude
- *     (`src/process-stdin-prelude.ts` `drainBytes`), which is O(n^2) and SIGKILLs
- *     at multi-MiB sizes. The large cases are therefore GATED ON #2777 (the
- *     byte-buffer-accumulation fix); here it is exercised only at a small size it
- *     handles today, under real `wasmtime` when present (its event loop is not
- *     driven by the in-process fd shim). NOT silently skipped — a clear pointer is
- *     logged when `wasmtime` is unavailable.
+ *   - `nm_node_process.ts` — async `process.stdin` reactor. #2777 replaced the
+ *     prelude's per-byte chunk build (and the example's growing-cons-rope
+ *     `buffered`) with amortized-growth BYTE buffers, making the read side O(n);
+ *     it now echoes 1 / 64 / 128 MiB byte-EXACT under the in-process reactor shim
+ *     on EVERY CI run, matching the other three variants (previously the large
+ *     cases were gated on #2777 because the O(n^2) read SIGKILLed at multi-MiB).
  */
-import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { compile, compileProject, entryHasRelativeImports } from "../src/index.js";
 
 const NM_DIR = join(__dirname, "..", "examples", "native-messaging");
@@ -48,20 +45,6 @@ const SIZES: { label: string; bytes: number }[] = [
 ];
 // The browser per-host->extension-message cap nm_node_fs re-chunks to stay under.
 const FRAME_CAP = 1 * MiB;
-
-const WASMTIME_FLAGS = ["-W", "gc=y,function-references=y,exceptions=y"];
-function findWasmtime(): string | null {
-  for (const cand of ["wasmtime", "/usr/local/bin/wasmtime"]) {
-    try {
-      execFileSync(cand, ["--version"], { stdio: "ignore" });
-      return cand;
-    } catch {
-      /* try next */
-    }
-  }
-  return null;
-}
-const wasmtimeBin = findWasmtime();
 
 // ---- compile cache -----------------------------------------------------------
 const compileCache = new Map<string, Awaited<ReturnType<typeof compile>>>();
@@ -201,6 +184,124 @@ async function runFdShim(binary: Uint8Array, stdin: Uint8Array): Promise<Uint8Ar
   return out;
 }
 
+// ---- in-process async-reactor shim (bulk copies) -----------------------------
+/**
+ * Drive the `nm_node_process` ASYNC `process.stdin` reactor in-process — the
+ * event-loop analogue of {@link runFdShim} for the synchronous variants. The
+ * compiled module's `_start` runs a synchronous run loop that calls
+ * `poll_oneoff` (fd0 FD_READ + clock subscriptions), then `__rl_stdin_drain`
+ * (`fd_read`), then the Readable pump, until fd0 hits EOF (a 0-byte read) or the
+ * program calls `process.stdin.destroy()`. We supply:
+ *   - `poll_oneoff` — report the fd0 FD_READ event ready while stdin remains,
+ *     else the clock event (mirrors `buildWasiPolyfill`'s poll shim, but inlined
+ *     here so we can also capture raw fd1 bytes).
+ *   - `fd_read` — feed fd0 from `stdin` (≤ remaining), 0 bytes = EOF.
+ *   - `fd_write` — capture fd1 raw bytes via bulk `Uint8Array` copies.
+ *   - `fd_fdstat_set_flags` / `clock_time_get` / `proc_exit` — no-ops.
+ * Re-reads the memory view on every syscall so a mid-run `memory.grow` (which
+ * detaches the old buffer) is handled. With the #2777 O(n) byte-buffer
+ * accumulation it runs a 128 MiB echo in seconds with no external runtime, so
+ * the matrix runs in every CI shard — not only where `wasmtime` is installed.
+ */
+async function runReactorShim(binary: Uint8Array, stdin: Uint8Array): Promise<Uint8Array> {
+  let inPos = 0;
+  const chunks: Uint8Array[] = [];
+  let outLen = 0;
+  const ref: { mem?: WebAssembly.Memory } = {};
+  const wasi = {
+    fd_read(_fd: number, iovs: number, iovsLen: number, nread: number): number {
+      const v = new DataView(ref.mem!.buffer);
+      const mem = new Uint8Array(ref.mem!.buffer);
+      let total = 0;
+      for (let i = 0; i < iovsLen; i++) {
+        const buf = v.getUint32(iovs + i * 8, true);
+        const len = v.getUint32(iovs + i * 8 + 4, true);
+        if (len === 0) continue;
+        const n = Math.min(len, stdin.length - inPos);
+        if (n <= 0) break;
+        mem.set(stdin.subarray(inPos, inPos + n), buf);
+        inPos += n;
+        total += n;
+        if (n < len) break; // partial fill = drained
+      }
+      v.setUint32(nread, total, true);
+      return 0;
+    },
+    fd_write(fd: number, iovs: number, iovsLen: number, nwritten: number): number {
+      const v = new DataView(ref.mem!.buffer);
+      const mem = new Uint8Array(ref.mem!.buffer);
+      let total = 0;
+      for (let i = 0; i < iovsLen; i++) {
+        const buf = v.getUint32(iovs + i * 8, true);
+        const len = v.getUint32(iovs + i * 8 + 4, true);
+        if (fd === 1 && len > 0) {
+          chunks.push(mem.slice(buf, buf + len)); // copy out of (possibly-reused) memory
+          outLen += len;
+        }
+        total += len;
+      }
+      v.setUint32(nwritten, total, true);
+      return 0;
+    },
+    poll_oneoff(inPtr: number, outPtr: number, nsubs: number, neventsOut: number): number {
+      const v = new DataView(ref.mem!.buffer);
+      type Sub = { type: number; fd: number; userdata: bigint };
+      const subs: Sub[] = [];
+      for (let s = 0; s < nsubs; s++) {
+        const off = inPtr + s * 48;
+        const userdata = v.getBigUint64(off, true);
+        const tag = v.getUint8(off + 8); // 0=CLOCK, 1=FD_READ
+        const fd = tag === 1 ? v.getUint32(off + 16, true) : -1;
+        subs.push({ type: tag, fd, userdata });
+      }
+      const fd0Readable = stdin.length - inPos > 0;
+      const fd0Sub = subs.find((x) => x.type === 1 && x.fd === 0);
+      const clockSub = subs.find((x) => x.type === 0);
+      const fired: Sub[] = [];
+      if (fd0Sub && fd0Readable) fired.push(fd0Sub);
+      else if (clockSub) fired.push(clockSub);
+      else if (fd0Sub)
+        fired.push(fd0Sub); // not readable → 0-byte (EOF) read ends the sub
+      else if (subs.length > 0) fired.push(subs[0]!);
+      let n = 0;
+      for (const ev of fired) {
+        const eoff = outPtr + n * 32;
+        for (let i = 0; i < 32; i++) v.setUint8(eoff + i, 0);
+        v.setBigUint64(eoff, ev.userdata, true);
+        v.setUint16(eoff + 8, 0, true); // errno
+        v.setUint8(eoff + 10, ev.type); // type
+        n++;
+      }
+      v.setUint32(neventsOut, n, true);
+      return 0;
+    },
+    fd_fdstat_set_flags(): number {
+      return 0;
+    },
+    clock_time_get(): number {
+      return 0;
+    },
+    proc_exit(): void {},
+    random_get(): number {
+      return 0;
+    },
+  };
+  const { instance } = await WebAssembly.instantiate(binary, {
+    wasi_snapshot_preview1: wasi as unknown as WebAssembly.ModuleImports,
+    env: {},
+  });
+  ref.mem = instance.exports.memory as WebAssembly.Memory;
+  const start = (instance.exports._start ?? instance.exports.main) as () => void;
+  start();
+  const out = new Uint8Array(outLen);
+  let o = 0;
+  for (const c of chunks) {
+    out.set(c, o);
+    o += c.length;
+  }
+  return out;
+}
+
 // =============================================================================
 describe("#2775 — verbatim streamers echo 1/64/128 MiB byte-for-byte", () => {
   for (const file of ["nm_deno.ts", "nm_wasi_p1.ts"]) {
@@ -254,49 +355,27 @@ describe("#2775 — nm_node_fs re-chunk round-trips 1/64/128 MiB correctly", () 
   }
 });
 
-describe("#2775 — nm_node_process small-size echo (large sizes gated on #2777)", () => {
-  let tmpDir: string;
-  beforeAll(() => {
-    tmpDir = mkdtempSync(join(tmpdir(), "nm-matrix-np-"));
-  });
-  afterAll(() => {
-    if (tmpDir) rmSync(tmpDir, { recursive: true, force: true });
-  });
-
-  // nm_node_process is reactor-driven (async process.stdin) — its event loop is
-  // NOT driven by the in-process fd shim, so it needs real wasmtime. Its read
-  // side is O(n^2) in the compiler stdin prelude (`src/process-stdin-prelude.ts`
-  // `drainBytes` builds each chunk one byte at a time), so it is only fast at
-  // SMALL frames — even 64 KiB already takes minutes. The 1/64/128 MiB cases are
-  // therefore GATED ON #2777 (byte-buffer accumulation fix); do NOT add them here
-  // until #2777 lands. We exercise a small 2 KiB frame, with a hard subprocess
-  // timeout so a perf regression can never hang the suite.
-  it(
-    "echoes a small (2 KiB) frame byte-for-byte under wasmtime (large sizes -> #2777)",
-    { timeout: 60_000 },
-    async () => {
+describe("#2777 — nm_node_process echoes 1/64/128 MiB byte-for-byte (async reactor)", () => {
+  // nm_node_process is reactor-driven (async `process.stdin`), so it is driven by
+  // the in-process {@link runReactorShim} (poll_oneoff/fd_read/fd_write) rather
+  // than the synchronous {@link runFdShim}. Before #2777 its read side was O(n^2)
+  // — the prelude built each chunk byte-by-byte and the example re-flattened its
+  // growing cons-rope `buffered` on every charCodeAt/substring — so it SIGKILLed
+  // at multi-MiB and the large sizes were gated. The #2777 byte-buffer
+  // accumulation makes it O(n), so it now runs the FULL 1/64/128 MiB sweep on
+  // EVERY CI run, byte-identical, matching the other three streaming variants.
+  for (const { label, bytes } of SIZES) {
+    it(`echoes a ${label} frame byte-identically`, { timeout: 180_000 }, async () => {
       const r = await getCompiled("nm_node_process.ts");
       expect(r.success, r.success ? "" : `compile error: ${r.errors?.[0]?.message}`).toBe(true);
-      if (!wasmtimeBin) {
-        // Not a silent skip: surface why this arm did not execute and where the
-        // large-size gap is tracked.
-        console.log(
-          "[nm-matrix] nm_node_process needs real wasmtime (reactor-driven); not on PATH — " +
-            "small-size echo not executed here. Large 1/64/128 MiB cases are gated on #2777 " +
-            "(src/process-stdin-prelude.ts drainBytes O(n^2)).",
-        );
-        return;
-      }
-      const input = frame(new Uint8Array(2 * 1024).fill(0x63));
-      const path = join(tmpDir, "nm_node_process-2k.wasm");
-      writeFileSync(path, r.binary!);
-      const out = execFileSync(wasmtimeBin, [...WASMTIME_FLAGS, path], {
-        input: Buffer.from(input),
-        stdio: ["pipe", "pipe", "ignore"],
-        maxBuffer: 1 << 24,
-        timeout: 30_000, // hard cap — kill wasmtime rather than let O(n^2) hang the suite
-      });
-      expect(Buffer.compare(Buffer.from(out), Buffer.from(input)), "nm_node_process 2 KiB echo byte-identical").toBe(0);
-    },
-  );
+      expect(WebAssembly.validate(r.binary!), "nm_node_process.ts must validate").toBe(true);
+      const input = frame(new Uint8Array(bytes).fill(0x61));
+      const out = await runReactorShim(r.binary!, input);
+      expect(out.length, `nm_node_process ${label} echo length`).toBe(input.length);
+      expect(
+        Buffer.compare(Buffer.from(out), Buffer.from(input)),
+        `nm_node_process ${label} must be byte-identical`,
+      ).toBe(0);
+    });
+  }
 });

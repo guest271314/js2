@@ -392,6 +392,51 @@ export function isAnyValue(type: ValType, ctx: CodegenContext): boolean {
   );
 }
 
+/**
+ * True only when a declared TS return type is *exactly* `boolean` (or a boolean
+ * literal `true`/`false`). Strict by design (#2770): a `boolean | undefined`
+ * union, `number`, etc. carry the outer `Union`/`Number` flag — NOT the
+ * `Boolean` flag — so they are rejected. This gates the boolean-result branding
+ * below so only genuine boolean returns are re-tagged.
+ */
+function isStrictBooleanReturnType(t: ts.Type): boolean {
+  return (t.flags & (ts.TypeFlags.Boolean | ts.TypeFlags.BooleanLiteral)) !== 0;
+}
+
+/**
+ * (#2770, S5b of #2773) Brand an extern-method result ValType as a *boolean*
+ * when the method's declared TS return type is exactly `boolean`, so the
+ * `any`/return coercion boxes it via `__box_boolean` (→ `true`/`false`) instead
+ * of `__box_number` (→ `1`/`0`).
+ *
+ * Why a per-call-site wrap (not just registration): a boolean extern method's
+ * func type carries an `i32` result, and `funcTypeKey` (registry/types.ts) keys
+ * results on `.kind` only — so a branded `{i32,boolean:true}` result func type
+ * dedups to a pre-existing *unbranded* `…->i32` type. `getWasmFuncReturnType`
+ * then reads back the deduped unbranded i32 and the brand is lost at every
+ * `getWasmFuncReturnType(ctx, idx) ?? resolveWasmType(ctx, retType)` dispatch
+ * site. Re-branding from the call's TS return type here recovers it regardless
+ * of dedup. (Registration is also branded so the direct `methodInfo.results[0]`
+ * path in extern.ts is honest at source.)
+ *
+ * Over-boxing guards — idempotent, never widens:
+ *  - only a *bare* `i32` is touched (f64/externref/ref/ref_null pass through);
+ *  - an already `{i32,boolean:true}` value short-circuits (idempotent);
+ *  - only an *exactly*-`boolean` declared return is branded (numbers, unions,
+ *    `void`, etc. pass through unchanged — `map.get`/`indexOf`/`.size` stay
+ *    numbers).
+ */
+export function brandExternMethodResult(
+  _ctx: CodegenContext,
+  tsReturnType: ts.Type | undefined,
+  valType: ValType,
+): ValType {
+  if (!tsReturnType) return valType;
+  if (valType.kind !== "i32" || (valType as { boolean?: boolean }).boolean) return valType;
+  if (!isStrictBooleanReturnType(tsReturnType)) return valType;
+  return { kind: "i32", boolean: true };
+}
+
 // ── ensureAnyHelpers ──────────────────────────────────────────────────
 
 type EnsureAnyHelpersFn = (ctx: CodegenContext) => void;

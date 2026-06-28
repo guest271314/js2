@@ -144,7 +144,15 @@ export interface FieldDef {
 }
 
 export type ValType =
-  | { kind: "i32"; boolean?: true }
+  // (#1788) `boolean` and (#2785) `symbol` are structural-only BRANDS on the
+  // overloaded `i32` carrier (the same idea as `bigint` on `i64`): every
+  // `.kind === "i32"` check still matches, so branded values keep bare-i32
+  // codegen. The brand is consulted at the BOX site (`coerceType(i32 →
+  // externref)`) to pick the type-correct helper — `__box_boolean` /
+  // `__box_symbol` instead of `__box_number` — so a boolean (`i32` 1) is not
+  // boxed as the number 1 and a symbol HANDLE (`i32` id) is not boxed as a
+  // number. Keep both brands optional + inert.
+  | { kind: "i32"; boolean?: true; symbol?: true }
   | { kind: "i64"; bigint?: boolean }
   | { kind: "f32" }
   | { kind: "f64" }

@@ -180,7 +180,18 @@ declare function __wasiStdinSetReader(cb: () => void): void;
 declare function __wasiStdinStop(): void;
 
 class __Js2wasmReadable {
-  private chunk: string = "";
+  // #2777 — accumulate drained bytes in an amortized-growth byte buffer instead
+  // of building each 'data' chunk via per-byte string concatenation. Building the
+  // chunk by \`this.chunk = this.chunk + String.fromCharCode(b)\` made a large
+  // frame's read side quadratic (the consumer then re-flattened the growing
+  // cons-rope on every charCodeAt/substring), which SIGKILLed nm_node_process at
+  // multi-MiB. The bytes now live in \`buf[head..tail)\`; the chunk STRING the
+  // Node 'data' contract delivers is materialised ONCE per emit/read from that
+  // slice (a single flatten), so consumers receive a FLAT string and their
+  // charCodeAt/substring over it is O(1)/O(k), not a re-flatten per access.
+  private buf: Uint8Array = new Uint8Array(64);
+  private head: number = 0;
+  private tail: number = 0;
   private dataCbs: ((c: string) => void)[] = [];
   private endCbs: (() => void)[] = [];
   private readableCbs: (() => void)[] = [];
@@ -192,17 +203,60 @@ class __Js2wasmReadable {
   private eofReadableFired: boolean = false;
   private destroyed: boolean = false;
 
+  // Buffered byte count.
+  private avail(): number { return this.tail - this.head; }
+
+  // Ensure room for \`extra\` more bytes at \`tail\`: first reclaim any consumed
+  // prefix (head > 0), then amortized-double the backing array until it fits.
+  private ensure(extra: number): void {
+    if (this.tail + extra <= this.buf.length) { return; }
+    if (this.head > 0) {
+      const m = this.tail - this.head;
+      let i = 0;
+      while (i < m) { this.buf[i] = this.buf[this.head + i]; i = i + 1; }
+      this.head = 0;
+      this.tail = m;
+      if (this.tail + extra <= this.buf.length) { return; }
+    }
+    let cap = this.buf.length;
+    if (cap < 16) { cap = 16; }
+    while (cap < this.tail + extra) { cap = cap * 2; }
+    const nb = new Uint8Array(cap);
+    let j = 0;
+    while (j < this.tail) { nb[j] = this.buf[j]; j = j + 1; }
+    this.buf = nb;
+  }
+
+  // Materialise buf[start..end) as a FLAT string (one char per byte). The
+  // trailing substring(0, len) forces a SINGLE flatten of the cons-rope built by
+  // the per-byte concat, so the delivered chunk is flat — a consumer's
+  // charCodeAt/substring over it is then O(1)/O(k), never a re-flatten per call.
+  private slice(start: number, end: number): string {
+    let s = "";
+    let i = start;
+    while (i < end) { s = s + String.fromCharCode(this.buf[i]); i = i + 1; }
+    return s.substring(0, end - start);
+  }
+
+  // Append all currently-buffered stdin bytes into \`buf\` — O(n), no string ops.
   private drainBytes(): number {
     let n = 0;
     let b = __wasiStdinReadByte();
-    while (b >= 0) { this.chunk = this.chunk + String.fromCharCode(b); n = n + 1; b = __wasiStdinReadByte(); }
+    while (b >= 0) {
+      this.ensure(1);
+      this.buf[this.tail] = b;
+      this.tail = this.tail + 1;
+      n = n + 1;
+      b = __wasiStdinReadByte();
+    }
     return n;
   }
 
   private emitChunk(): void {
-    if (this.chunk.length === 0) return;
-    const out = this.chunk;
-    this.chunk = "";
+    if (this.tail <= this.head) { return; }
+    const out = this.slice(this.head, this.tail);
+    this.head = 0;
+    this.tail = 0;
     for (let i = 0; i < this.dataCbs.length; i = i + 1) { this.dataCbs[i](out); }
   }
 
@@ -215,7 +269,7 @@ class __Js2wasmReadable {
     // 'readable' fires when new bytes arrived OR when the stream has just reached
     // EOF with bytes still buffered (Node emits a final 'readable' at end-of-
     // stream so the consumer can read the last partial chunk before 'end').
-    const eofFlush = atEof && !this.eofReadableFired && this.chunk.length > 0;
+    const eofFlush = atEof && !this.eofReadableFired && this.avail() > 0;
     if (got > 0 || eofFlush) {
       if (eofFlush) { this.eofReadableFired = true; }
       for (let i = 0; i < this.readableCbs.length; i = i + 1) { this.readableCbs[i](); }
@@ -224,7 +278,7 @@ class __Js2wasmReadable {
     // 'end' only after fd EOF AND the stream's own buffer is fully delivered
     // (a paused stream withholds bytes in this.chunk, so EOF alone is not the
     // end of the readable side -- matches Node).
-    if (atEof && this.chunk.length === 0 && !this.ended) {
+    if (atEof && this.avail() === 0 && !this.ended) {
       this.ended = true;
       for (let i = 0; i < this.endCbs.length; i = i + 1) { this.endCbs[i](); }
     }
@@ -267,24 +321,27 @@ class __Js2wasmReadable {
     if (this.destroyed) { return null; }
     // Pull any freshly-ready bytes so a paused .read() sees the latest buffer.
     this.drainBytes();
-    const avail = this.chunk.length;
+    const avail = this.avail();
     if (size === undefined || size < 0) {
       if (avail === 0) { return null; }
-      const all = this.chunk;
-      this.chunk = "";
+      const all = this.slice(this.head, this.tail);
+      this.head = 0;
+      this.tail = 0;
       return all;
     }
     if (avail < size) {
       if (__wasiStdinEof() && avail > 0) {
-        const rest = this.chunk;
-        this.chunk = "";
+        const rest = this.slice(this.head, this.tail);
+        this.head = 0;
+        this.tail = 0;
         return rest;
       }
       return null;
     }
-    const head = this.chunk.substring(0, size);
-    this.chunk = this.chunk.substring(size);
-    return head;
+    const out = this.slice(this.head, this.head + size);
+    this.head = this.head + size;
+    if (this.head >= this.tail) { this.head = 0; this.tail = 0; }
+    return out;
   }
 
   pause(): __Js2wasmReadable { this.paused = true; return this; }
