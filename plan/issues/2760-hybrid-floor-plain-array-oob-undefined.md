@@ -110,13 +110,39 @@ default is too broad (blast radius into typed-array/subview/array-method callers
 ## Implementation notes (senior-dev, 2026-06-28)
 
 **What landed:** OOB→`undefined` for **primitive-element** plain arrays only —
-`number[]` (f64) and `boolean[]` (i32). The unproven (non-bounds-eliminated)
-read widens its SAFE result to a **boxed-or-undefined externref** (box the
-in-bounds element; OOB → `__get_undefined`, or `ref.null.extern` under
-standalone where `undefined ≡ null`); the proven in-bounds read
-(`isSafeBoundsEliminated`, the counted-loop proof) keeps the **unboxed fast
-path**. This is the hybrid invariant in miniature: SAFE-by-default, FAST only
-when proven.
+`number[]` (f64) and `boolean[]` (i32), AND only when the element is read in a
+**non-numeric value context**. The unproven (non-bounds-eliminated) read widens
+its SAFE result to a **boxed-or-undefined externref** (box the in-bounds element;
+OOB → `__get_undefined`, or `ref.null.extern` under standalone where
+`undefined ≡ null`); the proven in-bounds read (`isSafeBoundsEliminated`, the
+counted-loop proof) keeps the **unboxed fast path**. This is the hybrid
+invariant in miniature: SAFE-by-default, FAST only when proven.
+
+**Numeric-hint suppression (the second lesson — Math.\* regression).** The first
+implementation widened *every* unproven primitive read to externref. The
+`equivalence-gate` caught a regression: `Math.pow`/`min`/`max`/`hypot` with array
+element args produced **invalid wasm**. Root cause: a numeric-consuming caller
+like `compileMathCall` captures the host `Math_pow` funcIdx *before* compiling
+its arguments; the externref widening adds a late import *during* arg
+compilation, which shifts that already-captured funcIdx → a stale `call`. Fix:
+**honor the value-context hint** — when the element is read into an `f64`/`i32`
+context, suppress the widening and keep the unboxed read. There `undefined` is
+unobservable anyway (it coerces to `NaN`/`0`, the JS-correct `ToNumber`), and the
+unboxed read adds no imports, so no captured funcIdx shifts. `expectedType` is
+threaded `compileExpressionInner → compileElementAccess →
+compileElementAccessBody`. `=== undefined` / `typeof` / dynamic contexts pass no
+numeric hint, so OOB→`undefined` still fires there. (Generalises the latent
+"caller captures funcIdx before compiling args" fragility into a non-issue for
+this path; the full `merge_group` test262 gate guards any other consumer.)
+
+**Robust imperative boxing.** The helper emits the bounded read
+(`emitBoundsCheckedArrayGet`, OOB→default, never traps) + box (`coerceType`) +
+`undefined` (`emitUndefined`) **imperatively on `fctx.body`** so the late imports
+register through the normal index-shift path; the final `inBounds ? boxed :
+undefined` select-`if` carries only `local.get`. An earlier version that baked
+the box/undefined funcIdxs into detached branch `Instr[]` desynced indices (a
+duplicate `__box_number` import + a wrong arg value) — the same late-import-shift
+hazard, avoided by never baking a funcIdx inside a branch array.
 
 **Where:** a new call-site helper `emitPlainArrayUndefinedOobGet`
 (`src/codegen/property-access.ts`) invoked from the two

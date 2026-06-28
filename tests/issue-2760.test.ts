@@ -180,4 +180,38 @@ describe("#2760 F1 — plain-array OOB read → JS `undefined` (primitive elemen
       ).toBe(1);
     });
   });
+
+  describe("numeric-context regression guard — Math.* with array element args", () => {
+    // The first cut widened every unproven primitive read to externref, which
+    // broke `Math.pow`/`max`/`hypot` (the numeric caller captures `Math_pow`'s
+    // funcIdx before compiling args; the widening's late import shifted it →
+    // invalid wasm). The numeric-hint suppression keeps these unboxed.
+    it("Math.pow with array element arg (number[]) is valid and correct", async () => {
+      expect(
+        await run(`export function test(): number { const b: number[] = [2, 7]; return Math.pow(b[0], 3); }`),
+      ).toBe(8);
+    });
+
+    it("Math.pow with new Array() element arg (evolving number[])", async () => {
+      expect(
+        await run(`export function test(): number { var b = new Array(); b[0] = 2; return Math.pow(b[0], 3); }`),
+      ).toBe(8);
+    });
+
+    it("Math.max with two array element args", async () => {
+      expect(
+        await run(`export function test(): number { const a: number[] = [3, 5]; return Math.max(a[0], a[1]); }`),
+      ).toBe(5);
+    });
+
+    it("OOB element in a numeric context coerces to NaN (undefined → ToNumber)", async () => {
+      // In a numeric context `a[OOB]` is unobservable as undefined; it coerces to
+      // NaN, which is the JS-correct `Math.pow(undefined, 3)` result.
+      expect(
+        await run(
+          `export function test(): boolean { const a: number[] = [2]; let i = 9; let v = Math.pow(a[i], 3); return v !== v; }`,
+        ),
+      ).toBe(1);
+    });
+  });
 });
