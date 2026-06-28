@@ -34,7 +34,7 @@ import {
   noJsHost,
   resolveDeclaringClassForPrivateName,
 } from "./expressions/helpers.js";
-import { emitUndefined, ensureGetUndefined, patchStructNewForAddedField } from "./expressions/late-imports.js";
+import { emitUndefined, patchStructNewForAddedField } from "./expressions/late-imports.js";
 import { emitSymbolDescLoad } from "./symbol-native.js";
 import {
   addUnionImports,
@@ -5444,66 +5444,50 @@ function emitPlainArrayUndefinedOobGet(
   arrTypeIdx: number,
   elementType: ValType,
 ): void {
-  // Save index + array ref (consumed in both the bounds test and the read arm).
+  // Save index + array ref (consumed by the bounds test AND the bounded read).
   const idxLocal = allocLocal(fctx, `__oobu_idx_${fctx.locals.length}`, { kind: "i32" });
   const arrLocal = allocLocal(fctx, `__oobu_arr_${fctx.locals.length}`, { kind: "ref", typeIdx: arrTypeIdx });
   fctx.body.push({ op: "local.set", index: idxLocal });
   fctx.body.push({ op: "local.set", index: arrLocal });
 
-  // Register the late imports both arms need and flush index shifts BEFORE
-  // building the if-block, so the funcIdxs baked into the branch Instr[] are
-  // stable (the emitBoundsCheckedArrayGet late-import discipline). `__box_*` /
-  // `__get_undefined` route through addUnionImports natively under standalone.
-  const undefinedFuncIdx = ensureGetUndefined(ctx); // undefined under standalone (undefined≡null)
-  const isBool = elementType.kind === "i32" && (elementType as { boolean?: boolean }).boolean === true;
-  const boxNumberIdx = !isBool
-    ? ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }])
-    : undefined;
-  const boxBoolIdx = isBool
-    ? ensureLateImport(ctx, "__box_boolean", [{ kind: "i32" }], [{ kind: "externref" }])
-    : undefined;
-  flushLateImportShifts(ctx, fctx);
-
-  // Condition: (unsigned) idx < array.len — a negative index wraps to a huge
+  // (1) inBounds = (unsigned) idx < array.len. A negative index wraps to a huge
   // unsigned value > any length, so it falls into the OOB (undefined) arm too.
+  const inBoundsLocal = allocLocal(fctx, `__oobu_in_${fctx.locals.length}`, { kind: "i32" });
   fctx.body.push({ op: "local.get", index: idxLocal });
   fctx.body.push({ op: "local.get", index: arrLocal });
   fctx.body.push({ op: "array.len" });
   fctx.body.push({ op: "i32.lt_u" } as Instr);
+  fctx.body.push({ op: "local.set", index: inBoundsLocal });
 
-  // then: in-bounds → array.get element, boxed to externref. A boolean i32 MUST
-  // box via __box_boolean (so its runtime tag reads `true`/`false`, not 1/0); a
-  // numeric i32 widens to f64 first, then __box_number.
-  const thenInstrs: Instr[] = [
-    { op: "local.get", index: arrLocal } as Instr,
-    { op: "local.get", index: idxLocal } as Instr,
-    { op: "array.get", typeIdx: arrTypeIdx } as Instr,
-  ];
-  if (isBool) {
-    if (boxBoolIdx !== undefined) thenInstrs.push({ op: "call", funcIdx: boxBoolIdx } as Instr);
-    else thenInstrs.push({ op: "drop" } as Instr, { op: "ref.null.extern" } as Instr);
-  } else if (elementType.kind === "i32") {
-    if (boxNumberIdx !== undefined)
-      thenInstrs.push({ op: "f64.convert_i32_s" } as Instr, { op: "call", funcIdx: boxNumberIdx } as Instr);
-    else thenInstrs.push({ op: "drop" } as Instr, { op: "ref.null.extern" } as Instr);
-  } else {
-    // f64 element
-    if (boxNumberIdx !== undefined) thenInstrs.push({ op: "call", funcIdx: boxNumberIdx } as Instr);
-    else thenInstrs.push({ op: "drop" } as Instr, { op: "ref.null.extern" } as Instr);
-  }
+  // (2) Bounded native read (OOB → type-default, never traps), then box to
+  // externref — emitted IMPERATIVELY on `fctx.body` so the box / undefined
+  // late-imports (`__box_number`/`__box_boolean`/`__get_undefined`) register and
+  // index-shift through the normal path. (An earlier version baked these funcIdxs
+  // into detached branch `Instr[]`, which desynced indices — a duplicate
+  // `__box_number` import and a wrong Math.pow arg value.) The branches of the
+  // final select below carry ONLY `local.get`, so nothing inside them can shift.
+  fctx.body.push({ op: "local.get", index: arrLocal });
+  fctx.body.push({ op: "local.get", index: idxLocal });
+  emitBoundsCheckedArrayGet(fctx, arrTypeIdx, elementType, ctx, false);
+  const nativeValueType: ValType =
+    elementType.kind === "i8" || elementType.kind === "i16" ? { kind: "i32" } : elementType;
+  coerceType(ctx, fctx, nativeValueType, { kind: "externref" });
+  const boxedLocal = allocLocal(fctx, `__oobu_box_${fctx.locals.length}`, { kind: "externref" });
+  fctx.body.push({ op: "local.set", index: boxedLocal });
 
-  // else: OOB → JS `undefined` (host import) / `ref.null.extern` under standalone
-  // (where undefined is conflated with null — same convention as emitUndefined).
-  const elseInstrs: Instr[] =
-    undefinedFuncIdx !== undefined
-      ? [{ op: "call", funcIdx: undefinedFuncIdx } as Instr]
-      : [{ op: "ref.null.extern" } as Instr];
+  // (3) `undefined` into a local (host `__get_undefined`, or `ref.null.extern`
+  // under standalone where undefined ≡ null — both via emitUndefined).
+  emitUndefined(ctx, fctx);
+  const undefLocal = allocLocal(fctx, `__oobu_undef_${fctx.locals.length}`, { kind: "externref" });
+  fctx.body.push({ op: "local.set", index: undefLocal });
 
+  // (4) result = inBounds ? boxedValue : undefined. Pure local.get branches.
+  fctx.body.push({ op: "local.get", index: inBoundsLocal });
   fctx.body.push({
     op: "if",
     blockType: { kind: "val" as const, type: { kind: "externref" } },
-    then: thenInstrs,
-    else: elseInstrs,
+    then: [{ op: "local.get", index: boxedLocal } as Instr],
+    else: [{ op: "local.get", index: undefLocal } as Instr],
   } as Instr);
 }
 
@@ -5768,6 +5752,9 @@ export function compileElementAccess(
   ctx: CodegenContext,
   fctx: FunctionContext,
   expr: ts.ElementAccessExpression,
+  // (#2760 F1) value-context hint — forwarded to compileElementAccessBody so the
+  // primitive OOB→undefined widening is suppressed in a numeric (f64/i32) context.
+  expectedType?: ValType,
 ): ValType | null {
   // Optional chaining: a?.[i] (#2050). Short-circuits on a nullish base — the
   // index expression must NOT evaluate and the result must be undefined-
@@ -5992,7 +5979,7 @@ export function compileElementAccess(
     }
     // After the null check (or provably non-null), the value is guaranteed non-null
     const nonNullObjType: ValType = { kind: "ref", typeIdx: (objType as any).typeIdx };
-    return compileElementAccessBody(ctx, fctx, expr, nonNullObjType);
+    return compileElementAccessBody(ctx, fctx, expr, nonNullObjType, expectedType);
   }
 
   // Null-guard for externref: null[x] and undefined[x] throw TypeError (#775)
@@ -6002,7 +5989,7 @@ export function compileElementAccess(
     }
   }
 
-  return compileElementAccessBody(ctx, fctx, expr, objType);
+  return compileElementAccessBody(ctx, fctx, expr, objType, expectedType);
 }
 
 /**
@@ -6043,6 +6030,15 @@ export function compileElementAccessBody(
   fctx: FunctionContext,
   expr: ts.ElementAccessExpression,
   objType: ValType,
+  // (#2760 F1) The value-context hint the caller is reading this element into.
+  // When it is a NUMERIC kind (f64/i32) the primitive OOB→undefined widening is
+  // suppressed: in a numeric context `undefined` is not observable anyway (it
+  // coerces to NaN/0, which is the JS-correct `ToNumber(undefined)`), and — more
+  // importantly — widening would box→externref and add a late import *during*
+  // argument compilation, shifting a funcIdx a numeric-consuming caller may have
+  // already captured (e.g. `Math.pow(a[i], …)` grabs `Math_pow` before compiling
+  // its args). Keeping the unboxed f64/i32 in numeric context avoids that.
+  expectedType?: ValType,
 ): ValType | null {
   // Externref element access: obj[key] → host import __extern_get(obj, externref) → externref
   if (objType.kind === "externref") {
@@ -6412,7 +6408,9 @@ export function compileElementAccessBody(
     // (`any[]`/`string[]`) OOB→undefined is deferred (it trips the
     // map-on-array-like canary via a pre-existing length bug).
     const isRegexMatchVec = typeDef.fields.length >= 4 && typeDef.fields[2]?.name === "index";
+    const numericHint = expectedType?.kind === "f64" || expectedType?.kind === "i32";
     const oobUndefined =
+      !numericHint &&
       classifyTypedArrayType(ctx.checker.getTypeAtLocation(expr.expression), ctx.checker) === "other" &&
       !isRegexMatchVec;
     // Unwrap: struct.get data field, then index into backing array
@@ -6494,6 +6492,7 @@ export function compileElementAccessBody(
   // their own OOB semantics). A raw array type has no struct fields, so there is
   // no regex-match-vec exotic to exclude here.
   const oobUndefinedArr =
+    !(expectedType?.kind === "f64" || expectedType?.kind === "i32") &&
     classifyTypedArrayType(ctx.checker.getTypeAtLocation(expr.expression), ctx.checker) === "other";
   // Compile index and convert to i32 (#1179: hint i32 directly to skip the
   // f64.convert_i32_s + i32.trunc_sat_f64_s round-trip when the index is
