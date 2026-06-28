@@ -4501,6 +4501,18 @@ export function compileDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
     // both would cause init to run twice (once during instantiation, once
     // when the host calls `_start`).
 
+    // (#2796) Diff-test-harness fidelity: when `deferTopLevelInit` is set (and
+    // we are NOT in WASI mode), export `__module_init` and do NOT wire the wasm
+    // `start` section to it. Top-level code that introspects WasmGC structs
+    // (`for…in` / `Object.keys` on a runtime-shaped object) needs the
+    // `__struct_field_names` / `__sget_*` exports, which only exist AFTER the
+    // instance is constructed — so running it via the `start` section (DURING
+    // instantiation, before `setExports`) enumerates zero keys. Exporting it and
+    // letting the host call it after `setExports` is symmetric with the
+    // standalone/WASI `_start` model and gives the diff-test HOST lane the same
+    // fully-wired runtime the standalone lane has. The export's func index is
+    // shifted alongside every other export by the late-import shift logic.
+    const exportModuleInit = ctx.deferTopLevelInit && !ctx.wasi;
     const initTypeIdx = addFuncType(ctx, [], [], "__module_init_type");
     const initFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
     ctx.mod.functions.push({
@@ -4508,15 +4520,23 @@ export function compileDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
       typeIdx: initTypeIdx,
       locals: compiledInitFctx.locals,
       body: compiledInitFctx.body,
-      exported: false,
+      exported: exportModuleInit,
     });
+    if (exportModuleInit) {
+      ctx.mod.exports.push({
+        name: "__module_init",
+        desc: { kind: "func", index: initFuncIdx },
+      });
+    }
 
-    if (!ctx.wasi) {
+    if (!ctx.wasi && !exportModuleInit) {
       // Use Wasm start section — init runs automatically on instantiation.
       ctx.mod.startFuncIdx = initFuncIdx;
     }
     // else: WASI path — addWasiStartExport will export `_start` calling
-    // `__module_init`, and the host will invoke it explicitly.
+    // `__module_init`, and the host will invoke it explicitly. And under
+    // `deferTopLevelInit` (#2796) the JS host calls the exported `__module_init`
+    // directly after `setExports`.
   }
 }
 

@@ -721,6 +721,9 @@ function buildCodegenOptions(
     // boolean was removed.
     link: [...new Set(options.link ?? [])],
     standalone: options.target === "standalone",
+    // (#2796) Diff-test-harness fidelity — defer top-level init to an export so
+    // the host runs it after setExports (symmetric with standalone `_start`).
+    deferTopLevelInit: options.deferTopLevelInit,
     strictNoHostImports: options.strictNoHostImports,
     // (#2119) thread module-strictness inference uniformly across all drivers.
     inferModuleStrictArguments: options.inferModuleStrictArguments,

@@ -1,7 +1,8 @@
 ---
 id: 2796
 title: "diff-test host path: dynamic-object own-key enumerate/copy — for-in empty, spread loses values, Object.assign loses keys"
-status: ready
+status: done
+completed: 2026-06-28
 sprint: current
 created: 2026-06-28
 updated: 2026-06-28
@@ -12,9 +13,37 @@ task_type: bug
 area: codegen
 language_feature: objects
 goal: trustworthiness
-related: [2787, 1243, 1271, 1336, 1630]
+related: [2787, 1243, 1271, 1336, 1630, 2804]
 origin: "2026-06-28 — #2787 differential-corpus triage (cluster A2)"
 ---
+
+## Resolution (2026-06-28)
+
+Root-caused the three corpus cases as TWO distinct problems:
+
+- **`for…in` (control/12-for-in-object.js) — a HARNESS exports-timing artifact,
+  now FIXED.** The host diff-test lane ran top-level code via the wasm `start`
+  section — DURING `WebAssembly.instantiate`, BEFORE `setExports` wires the
+  `__struct_field_names` / `__sget_*` exports the `for…in` enumeration needs — so
+  a top-level `for…in` enumerated zero keys. The standalone lane never hit this
+  (it runs top-level code via an explicitly-called `_start` export AFTER
+  instantiation). Added the `deferTopLevelInit` compile option: in JS-host mode
+  it exports `__module_init` and skips the wasm `start` section, so the host runs
+  top-level code AFTER `setExports` (symmetric with `_start`). `scripts/diff-test.ts`
+  now uses it. The for-in codegen itself was already correct — it works whenever
+  the struct-introspection exports are reachable. **Net diff-test corpus impact:
+  +23 programs flip mismatch/runtime_error → match (86→92 of 104), 0 regressions**
+  — the exports-timing artifact had been silently mis-attributing ~23 correct
+  programs (top-level array/JSON/Map/struct ops) as host-vs-V8 mismatches.
+  Tests: `tests/issue-2796.test.ts`.
+
+- **object spread `{...a}` + `Object.assign` (object/02, object/12) — a genuine
+  codegen representation bug, CARVED to #2804.** These stay broken even with the
+  runtime fully wired (spread reads `b.x` back as NaN / wrong key order; assign
+  drops source keys): the spread result is built as a dynamic `$Object` while TS
+  narrows it to a closed struct, and the host `__object_assign` mirror does not
+  surface closed-struct sources' own data properties. Tracked separately in
+  #2804 (not an enumeration-timing issue).
 
 # #2796 — Host-path dynamic-object own-key enumeration & copy
 
