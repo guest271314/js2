@@ -3,7 +3,7 @@ import { ts, forEachChild } from "../ts-api.js";
 import { emitToBoolean } from "./coercion-engine.js";
 import { emitWasiErrorConstructor } from "./registry/error-types.js";
 import { analyzeLinearUint8 } from "./linear-uint8-analysis.js";
-import { analyzeFnctorEscapeGate } from "./fnctor-escape-gate.js";
+import { analyzeFnctorEscapeGate, deriveFnctorFields } from "./fnctor-escape-gate.js";
 import { isLinearU8RepresentableNew } from "./linear-uint8-signatures.js";
 import type { MultiTypedAST, TypedAST } from "../checker/index.js";
 import {
@@ -1144,6 +1144,19 @@ export function generateModule(
     if (sourceContainsClass(ast.sourceFile)) {
       reserveObjVecArrType(ctx);
     }
+
+    // (#2773 S1 KEYSTONE) Reserve every reconstructed-fnctor `$__fnctor_<Name>`
+    // struct type up-front, here — at the SAME deterministic point in every
+    // codegen pass — so the type index is identical across the hoist pass (which
+    // bakes a typed-receiver `ref.test $__fnctor_<Name>` / sizes a hoisted local)
+    // and the emit pass (which emits the matching `struct.new`). On-demand
+    // registration at the `new F()` site lands at a pass-dependent index,
+    // de-syncing the two. Gated on a non-empty approved set ⇒ byte-identical no-op
+    // for fnctor-free modules. Both targets (the fnctor struct path is
+    // target-independent). MUST run after the gate is built (above, line ~1081)
+    // and after the subview / ObjVecArr reservations so the type-table prefix is
+    // already stable.
+    reserveFnctorStructTypes(ctx);
 
     // $AnyValue struct type is now registered lazily via ensureAnyValueType()
 
@@ -6910,6 +6923,76 @@ export function reserveObjVecArrType(ctx: CodegenContext): void {
     mutable: true,
   });
   ctx.reservedObjVecArrTypeIdx = idx;
+}
+
+/**
+ * #2773 S1 (KEYSTONE) — reserve every reconstructed-fnctor `$__fnctor_<Name>`
+ * struct type at the deterministic up-front type-init phase (the same stable
+ * point as `reserveTypedArraySubviewTypes` / `reserveObjVecArrType`), so the type
+ * index is IDENTICAL across the hoist pass and the emit pass.
+ *
+ * ROOT CAUSE this fixes: the on-demand registration at the `new F()` call site
+ * (`compileNewFunctionDeclaration`, new-super.ts — `ctx.mod.types.length`) assigns
+ * the index at a NON-deterministic mid-compile point that depends on which
+ * function the compiler reached first. The two-pass type numbering then desyncs:
+ * a typed-receiver `ref.test $__fnctor_<Name>` baked in the hoist pass misses the
+ * emit-pass `struct.new` index, and a read site compiled before the `new` site is
+ * excluded from `findAlternateStructsForField`'s candidate set. Reserving up-front
+ * collapses BOTH facets — the index is pass-invariant AND the candidate set is
+ * complete at every read site. This is the one thing the #2674 finalize
+ * dispatcher cannot retroactively fix (it can't rewrite a baked typeIdx).
+ *
+ * Two sub-passes — the ORDER is load-bearing:
+ *   (1) reserve ALL indices + names FIRST (placeholder struct, `structMap`,
+ *       `typeIdxToStructName`, `fnctorReservedTypeIdx`), so a cross-fnctor ref
+ *       field in sub-pass 2 (a `Parser` field typed `Scope` →
+ *       `(ref null $__fnctor_Scope)`) resolves against an already-registered
+ *       `structMap` entry. Do NOT collapse the two sub-passes.
+ *   (2) FILL each placeholder's fields via the shared `deriveFnctorFields`
+ *       (single source of truth — identical to the on-demand derivation) and
+ *       record `structFields` for candidate-set completeness.
+ *
+ * Determinism: the name set is SORTED, and the call-site position is fixed, so the
+ * reserved index is identical across the hoist pass and the emit pass (the entire
+ * point of the slice). Gated on a non-empty approved set ⇒ fnctor-free modules are
+ * byte-identical (a true no-op). Runs in BOTH host and standalone — the on-demand
+ * struct path is target-independent. A reserved-but-never-constructed placeholder
+ * is unreferenced ⇒ `dead-elimination` prunes + renumbers it cleanly.
+ */
+export function reserveFnctorStructTypes(ctx: CodegenContext): void {
+  const gate = ctx.fnctorEscapeGate;
+  if (!gate) return;
+  // The set of fnctor names whose struct slot to reserve: the reconstruct-approved
+  // names plus (S2b) the `new this()` reconstruct owners. `newThisOwnerNames` is
+  // empty in S1, so this is exactly `approvedNames` today.
+  const names = [...new Set([...gate.approvedNames, ...gate.newThisOwnerNames])].sort();
+  if (names.length === 0) return; // no-op gate ⇒ byte-identical for fnctor-free code
+
+  // SUB-PASS 1 — reserve every index + name FIRST (placeholder, empty fields) so
+  // cross-fnctor ref fields in sub-pass 2 resolve against a registered structMap.
+  for (const name of names) {
+    const decl = gate.ctorDeclByName.get(name);
+    if (!decl || !decl.body) continue; // unresolved / body-less ⇒ skip (legacy fallback handles it)
+    const structName = `__fnctor_${name}`;
+    if (ctx.structMap.has(structName)) continue; // idempotent within a pass
+    const idx = ctx.mod.types.length;
+    ctx.mod.types.push({ kind: "struct", name: structName, fields: [] });
+    ctx.structMap.set(structName, idx);
+    ctx.typeIdxToStructName.set(idx, structName);
+    ctx.fnctorReservedTypeIdx.set(name, idx);
+  }
+
+  // SUB-PASS 2 — fill fields now that ALL names + indices exist.
+  for (const name of names) {
+    const idx = ctx.fnctorReservedTypeIdx.get(name);
+    if (idx === undefined) continue;
+    const decl = gate.ctorDeclByName.get(name);
+    if (!decl) continue;
+    const fields = deriveFnctorFields(ctx, decl);
+    const ty = ctx.mod.types[idx];
+    if (ty && ty.kind === "struct") ty.fields = fields; // FILL IN PLACE — index unchanged
+    ctx.structFields.set(`__fnctor_${name}`, fields); // candidate-set completeness
+  }
 }
 
 export function ensureLinearU8AllocHelper(ctx: CodegenContext): number {
