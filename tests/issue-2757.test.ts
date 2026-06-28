@@ -43,3 +43,69 @@ describe("#2757 array assignment-destructuring rest-length clamp", () => {
     expect((exports as { test: () => number }).test()).toBe(0);
   });
 });
+
+// #2757 — object/array/member rest TARGETS in array assignment-destructuring.
+//
+// Previously the array-rest branch only handled an IDENTIFIER rest target
+// (`[a, ...r] = x`); an object-pattern, array-pattern or member-expression rest
+// target silently dropped every binding. The collected rest vec is now bound by
+// dispatching on the target kind, with array-like semantics for an object
+// pattern (numeric key → element index, `length` → vec length). Mirrors the
+// test262 `language/expressions/assignment/dstr/array-rest-nested-*` cluster.
+describe("#2757 array assignment-destructuring non-identifier rest targets", () => {
+  it("object-pattern rest: numeric key + length (array-rest-nested-obj-undefined-own)", async () => {
+    // `[...{ 0: x, length }] = [undefined]` ⇒ x === undefined, length === 1
+    const exports = await compileToWasm(`
+      export function test(): number {
+        let x: any = null;
+        let length: any;
+        let vals: any[] = [undefined];
+        [...{ 0: x, length }] = vals;
+        if (x !== undefined) return 1;
+        if (length !== 1) return 2;
+        return 0;
+      }`);
+    expect((exports as { test: () => number }).test()).toBe(0);
+  });
+
+  it("object-pattern rest: hole reads undefined (array-rest-nested-obj-undefined-hole)", async () => {
+    // `[...{ 0: x, length }] = [ , ]` ⇒ x === undefined, length === 1
+    const exports = await compileToWasm(`
+      export function test(): number {
+        let x: any = null;
+        let length: any;
+        let vals: any[] = [ , ];
+        [...{ 0: x, length }] = vals;
+        if (x !== undefined) return 1;
+        if (length !== 1) return 2;
+        return 0;
+      }`);
+    expect((exports as { test: () => number }).test()).toBe(0);
+  });
+
+  it("object-pattern rest: numeric index binds the element (array-rest-nested-obj)", async () => {
+    // `[...{ 1: x }] = [1, 2, 3]` ⇒ x === 2
+    const exports = await compileToWasm(`
+      export function test(): number {
+        let x: any;
+        let vals: any[] = [1, 2, 3];
+        [...{ 1: x }] = vals;
+        if (x !== 2) return 1;
+        return 0;
+      }`);
+    expect((exports as { test: () => number }).test()).toBe(0);
+  });
+
+  it("array-pattern rest target binds nested elements (array-rest-nested-array)", async () => {
+    // `[...[x]] = [1, 2, 3]` ⇒ x === 1
+    const exports = await compileToWasm(`
+      export function test(): number {
+        let x: any;
+        let vals: any[] = [1, 2, 3];
+        [...[x]] = vals;
+        if (x !== 1) return 1;
+        return 0;
+      }`);
+    expect((exports as { test: () => number }).test()).toBe(0);
+  });
+});

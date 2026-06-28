@@ -1553,25 +1553,15 @@ function compileArrayDestructuringAssignment(
     if (ts.isSpreadElement(element)) {
       if (isVecStruct) {
         const restTarget = element.expression;
-        if (ts.isIdentifier(restTarget)) {
-          const restName = restTarget.text;
-          let restLocalIdx = fctx.localMap.get(restName);
-          if (restLocalIdx === undefined) {
-            restLocalIdx = allocLocal(fctx, restName, resultType);
-          } else {
-            // If the rest local was pre-allocated as externref (e.g. var y;),
-            // allocate a fresh local with the correct vec type and redirect
-            // the name mapping. The old externref slot becomes dead.
-            // Cannot change type in-place: earlier __get_undefined() init
-            // targets externref and would cause illegal cast (#962, #971).
-            const existingSlotIdx = restLocalIdx - fctx.params.length;
-            if (existingSlotIdx >= 0) {
-              const slot = fctx.locals[existingSlotIdx];
-              if (slot && slot.type.kind === "externref") {
-                restLocalIdx = allocLocal(fctx, restName, resultType);
-              }
-            }
-          }
+
+        // Collect the remaining source elements into a FRESH vec of `resultType`
+        // (same shape as the source), held in a temp local. We then dispatch on
+        // the rest TARGET kind exactly like the non-rest elements below. Earlier
+        // this branch only handled an IDENTIFIER rest target, so object-pattern,
+        // array-pattern and member-expression rest targets — `[...{0:x,length}]`,
+        // `[...[x]]`, `[...obj.y]` — silently dropped every binding (#2757).
+        const tmpRestVec = allocLocal(fctx, `__rest_vec_${fctx.locals.length}`, resultType);
+        {
           const tmpLen = allocLocal(fctx, `__rest_len_${fctx.locals.length}`, {
             kind: "i32",
           });
@@ -1654,7 +1644,43 @@ function compileArrayDestructuringAssignment(
           fctx.body.push({ op: "local.get", index: tmpLen });
           fctx.body.push({ op: "local.get", index: tmpRestArr });
           fctx.body.push({ op: "struct.new", typeIdx } as Instr);
+          fctx.body.push({ op: "local.set", index: tmpRestVec });
+        }
+
+        // Dispatch on the rest target kind (mirrors the non-rest element
+        // dispatch below). The collected vec lives in `tmpRestVec`.
+        if (ts.isIdentifier(restTarget)) {
+          const restName = restTarget.text;
+          let restLocalIdx = fctx.localMap.get(restName);
+          if (restLocalIdx === undefined) {
+            restLocalIdx = allocLocal(fctx, restName, resultType);
+          } else {
+            // If the rest local was pre-allocated as externref (e.g. var y;),
+            // allocate a fresh local with the correct vec type and redirect
+            // the name mapping. The old externref slot becomes dead.
+            // Cannot change type in-place: earlier __get_undefined() init
+            // targets externref and would cause illegal cast (#962, #971).
+            const existingSlotIdx = restLocalIdx - fctx.params.length;
+            if (existingSlotIdx >= 0) {
+              const slot = fctx.locals[existingSlotIdx];
+              if (slot && slot.type.kind === "externref") {
+                restLocalIdx = allocLocal(fctx, restName, resultType);
+              }
+            }
+          }
+          fctx.body.push({ op: "local.get", index: tmpRestVec });
           fctx.body.push({ op: "local.set", index: restLocalIdx });
+        } else if (ts.isObjectLiteralExpression(restTarget)) {
+          // `[...{ 0: x, length }] = vals` — destructure the collected vec
+          // through an object pattern using array-like semantics (#2757).
+          emitVecArrayLikeObjectDestructure(ctx, fctx, restTarget, tmpRestVec, typeIdx, arrTypeIdx, arrDef!.element);
+        } else if (ts.isArrayLiteralExpression(restTarget)) {
+          // `[...[x, y]] = vals` — nested array pattern over the collected vec.
+          emitArrayDestructureFromLocal(ctx, fctx, restTarget, tmpRestVec, resultType);
+        } else if (ts.isPropertyAccessExpression(restTarget) || ts.isElementAccessExpression(restTarget)) {
+          // `[...obj.y] = vals` / `[...obj[k]] = vals` — assign the collected
+          // vec to a member-expression target.
+          emitAssignToTarget(ctx, fctx, restTarget, tmpRestVec, resultType);
         }
       }
       // Rest on tuples is not supported (would need type conversion)
@@ -2399,6 +2425,95 @@ function emitArrayDestructureFromLocal(
     });
   } else {
     fctx.body.push(...adflInstrs);
+  }
+}
+
+/**
+ * (#2757) Destructure a VEC (array-like) source through an OBJECT pattern rest
+ * target — `[...{ 0: x, length }] = vals`. The rest element collects the
+ * remaining source elements into a fresh vec; an object pattern applied to an
+ * array is evaluated as an ordinary object (ECMA-262 §13.15.5.5), so:
+ *   - the `length` key reads the vec's length field,
+ *   - a numeric key `N` reads element N (out-of-range → `undefined`),
+ *   - any other key is absent on the array-like and binds `undefined`.
+ * `emitObjectDestructureFromLocal` cannot be reused here because it does nominal
+ * struct-field lookups by name, and a vec struct (`{length, data}`) is not
+ * registered in `typeIdxToStructName` — numeric keys would never resolve.
+ */
+function emitVecArrayLikeObjectDestructure(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  pattern: ts.ObjectLiteralExpression,
+  srcLocal: number,
+  vecTypeIdx: number,
+  arrTypeIdx: number,
+  elemType: ValType,
+): void {
+  // Push the array-like property value for `key` onto the stack; return its type.
+  const readKey = (key: string): ValType => {
+    if (key === "length") {
+      fctx.body.push({ op: "local.get", index: srcLocal });
+      fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 });
+      return { kind: "i32" };
+    }
+    // Numeric index → bounds-checked element read (OOB → undefined sentinel).
+    const idx = Number(key);
+    fctx.body.push({ op: "local.get", index: srcLocal });
+    fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 }); // data array
+    fctx.body.push({ op: "i32.const", value: idx | 0 });
+    emitBoundsCheckedArrayGet(fctx, arrTypeIdx, elemType, ctx, true);
+    return elemType.kind === "i8" || elemType.kind === "i16" ? { kind: "i32" } : elemType;
+  };
+
+  // The value is on the stack; bind it to `targetExpr` (identifier / nested
+  // pattern / member expression).
+  const bindTarget = (targetExpr: ts.Expression, valueType: ValType): void => {
+    const tmpVal = allocLocal(fctx, `__rest_obj_val_${fctx.locals.length}`, valueType);
+    fctx.body.push({ op: "local.set", index: tmpVal });
+    if (ts.isIdentifier(targetExpr)) {
+      let localIdx = fctx.localMap.get(targetExpr.text);
+      if (localIdx === undefined) {
+        localIdx = allocLocal(fctx, targetExpr.text, valueType);
+      }
+      fctx.body.push({ op: "local.get", index: tmpVal });
+      // `emitCoercedLocalSet` coerces from the stack type (`valueType`) to the
+      // local's declared type itself — do NOT pre-coerce here (that would leave
+      // an already-converted value and double-convert, e.g. `f64.convert_i32_s`
+      // applied to a boxed externref).
+      emitCoercedLocalSet(ctx, fctx, localIdx, valueType);
+    } else if (ts.isObjectLiteralExpression(targetExpr)) {
+      emitObjectDestructureFromLocal(ctx, fctx, targetExpr, tmpVal, valueType);
+    } else if (ts.isArrayLiteralExpression(targetExpr)) {
+      emitArrayDestructureFromLocal(ctx, fctx, targetExpr, tmpVal, valueType);
+    } else if (ts.isPropertyAccessExpression(targetExpr) || ts.isElementAccessExpression(targetExpr)) {
+      emitAssignToTarget(ctx, fctx, targetExpr, tmpVal, valueType);
+    }
+    // else: unsupported target — value already consumed into tmpVal; skip.
+  };
+
+  for (const prop of pattern.properties) {
+    if (ts.isShorthandPropertyAssignment(prop)) {
+      // `{ length }` — key === target identifier.
+      const valueType = readKey(prop.name.text);
+      bindTarget(prop.name, valueType);
+    } else if (ts.isPropertyAssignment(prop)) {
+      // `{ 0: x }` / `{ "k": x }` / `{ [expr]: x }`.
+      let key =
+        ts.isIdentifier(prop.name) || ts.isStringLiteral(prop.name) || ts.isNumericLiteral(prop.name)
+          ? prop.name.text
+          : ts.isComputedPropertyName(prop.name)
+            ? resolveComputedKeyExpression(ctx, prop.name.expression)
+            : undefined;
+      if (key === undefined) continue; // unresolvable key — skip
+      // Strip a default initializer (`{ 0: x = d }`); the default arm is a
+      // narrow tail not yet handled — bind the raw value rather than dropping.
+      let targetExpr = prop.initializer;
+      if (ts.isBinaryExpression(targetExpr) && targetExpr.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+        targetExpr = targetExpr.left;
+      }
+      const valueType = readKey(key);
+      bindTarget(targetExpr, valueType);
+    }
   }
 }
 
