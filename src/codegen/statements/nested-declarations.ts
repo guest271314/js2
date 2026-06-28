@@ -294,7 +294,11 @@ export function compileNestedFunctionDeclaration(
     if (name === "this" || name === "super") continue;
     const localIdx = fctx.localMap.get(name);
     if (localIdx === undefined) continue;
-    if (ctx.funcMap.has(name)) continue;
+    // #2669: skip names bound to a *user* function — but NOT a wasm:js-string
+    // builtin import (concat/length/equals/substring/charCodeAt), which lives in
+    // funcMap yet must not block capture of a same-named outer local (the
+    // test262 `let length = "outer"` dstr template captured by a nested fn).
+    if (ctx.funcMap.has(name) && ctx.funcMap.get(name) !== ctx.jsStringImports.get(name)) continue;
     const type =
       localIdx < fctx.params.length
         ? fctx.params[localIdx]!.type
@@ -792,14 +796,29 @@ export function compileNestedFunctionDeclaration(
       emitEagerNestedCallCaptureBoxes(ctx, liftedFctx, captures, referencedCalleeNames);
     }
 
-    // Emit default-value initialization for parameters with initializers
-    // (offset by number of captures since they are prepended as leading params)
-    emitDefaultParamInit(ctx, liftedFctx, stmt, paramTypes, captures.length);
+    // #2669: the user parameters are preceded by BOTH the value-capture params
+    // AND the TDZ-flag-box params (layout above:
+    //   [valueCap_0..N-1, tdzFlagBox_0..K-1, userParam_0..]).
+    // The leading offset for default-init / destructuring / arguments must be
+    // `captures.length + tdzFlaggedCaptures.length`, NOT just `captures.length`.
+    // Using `captures.length` alone (ignoring the K TDZ-flag boxes) made a
+    // capturing function with a *destructuring* param read the wrong param slot
+    // — e.g. `let length="outer"; function f([...{length:z}]){ ...length... }`
+    // (a TDZ-flagged `let`/read capture) destructured a TDZ i32-flag cell as the
+    // array argument → invalid Wasm (`any.convert_extern` on a non-externref).
+    // `var` write-only captures have no TDZ flag (K=0) so they were unaffected,
+    // which is why `callCount`-style tests compiled while the `length`-read dstr
+    // family trapped.
+    const leadingParamCount = captures.length + tdzFlaggedCaptures.length;
 
-    // Destructure parameters with binding patterns (offset by captures)
+    // Emit default-value initialization for parameters with initializers
+    // (offset by all prepended leading params — value captures + TDZ flag boxes)
+    emitDefaultParamInit(ctx, liftedFctx, stmt, paramTypes, leadingParamCount);
+
+    // Destructure parameters with binding patterns (offset by leading params)
     for (let pi = 0; pi < stmt.parameters.length; pi++) {
       const param = stmt.parameters[pi]!;
-      const paramIdx = captures.length + pi;
+      const paramIdx = leadingParamCount + pi;
       if (ts.isObjectBindingPattern(param.name)) {
         destructureParamObject(ctx, liftedFctx, paramIdx, param.name, paramTypes[pi]!);
       } else if (ts.isArrayBindingPattern(param.name)) {
@@ -813,7 +832,7 @@ export function compileNestedFunctionDeclaration(
     if (stmt.body && bodyUsesArguments(stmt.body)) {
       const unmapped =
         isStrictFunction(stmt, ctx.inferModuleStrictArguments) || !isSimpleParameterList(stmt.parameters);
-      emitArgumentsObject(ctx, liftedFctx, paramTypes, captures.length, unmapped);
+      emitArgumentsObject(ctx, liftedFctx, paramTypes, leadingParamCount, unmapped);
     }
 
     if (isGenerator) {
@@ -1390,7 +1409,11 @@ export function hoistFunctionDeclarations(
         if (name === "this" || name === "super") continue;
         if (ownLocals.has(name)) continue;
         if (siblingFuncNames.has(name)) continue;
-        if (ctx.funcMap.has(name)) continue;
+        // #2669: skip names bound to a *user* function — but NOT a wasm:js-string
+        // builtin import (concat/length/equals/substring/charCodeAt), which lives in
+        // funcMap yet must not block capture of a same-named outer local (the
+        // test262 `let length = "outer"` dstr template captured by a nested fn).
+        if (ctx.funcMap.has(name) && ctx.funcMap.get(name) !== ctx.jsStringImports.get(name)) continue;
         if (fctx.localMap.has(name)) {
           capturesOuter = true;
           break;
