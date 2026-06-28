@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-06-28T15:13:43.521Z",
-  "baseline_generated_at": "2026-06-28T15:13:43.522Z",
-  "baseline_sha": "86345ddf5f72be562b6ddf5ef93fa89b712aadb1",
+  "timestamp": "2026-06-28T16:36:11.571Z",
+  "baseline_generated_at": "2026-06-28T16:36:11.571Z",
+  "baseline_sha": "6b5e4b66274e5c9cb086f9008fb8432bfd5dc814",
   "oracle_version": 1,
   "mode": {
     "target": "standalone",
@@ -10,8 +10,8 @@
   },
   "summary": {
     "total": 43136,
-    "pass": 24566,
-    "fail": 12672,
+    "pass": 24564,
+    "fail": 12674,
     "compile_error": 5874,
     "compile_timeout": 6,
     "skip": 18,
@@ -20,8 +20,8 @@
     "by_category": {
       "standard": {
         "total": 42050,
-        "pass": 24042,
-        "fail": 12241,
+        "pass": 24040,
+        "fail": 12243,
         "compile_error": 5743,
         "compile_timeout": 6,
         "skip": 18,
@@ -53,8 +53,8 @@
       },
       "official": {
         "total": 43136,
-        "pass": 24566,
-        "fail": 12672,
+        "pass": 24564,
+        "fail": 12674,
         "compile_error": 5874,
         "compile_timeout": 6,
         "skip": 18,
@@ -64,8 +64,8 @@
       },
       "full": {
         "total": 48118,
-        "pass": 25706,
-        "fail": 13691,
+        "pass": 25704,
+        "fail": 13693,
         "compile_error": 8591,
         "compile_timeout": 7,
         "skip": 123,
@@ -77,8 +77,8 @@
   },
   "official_summary": {
     "total": 43136,
-    "pass": 24566,
-    "fail": 12672,
+    "pass": 24564,
+    "fail": 12674,
     "compile_error": 5874,
     "compile_timeout": 6,
     "skip": 18,
@@ -87,8 +87,8 @@
   },
   "full_summary": {
     "total": 48118,
-    "pass": 25706,
-    "fail": 13691,
+    "pass": 25704,
+    "fail": 13693,
     "compile_error": 8591,
     "compile_timeout": 7,
     "skip": 123,
@@ -97,8 +97,8 @@
   },
   "strict_summary": {
     "total": 40627,
-    "pass": 23372,
-    "fail": 11828,
+    "pass": 23370,
+    "fail": 11830,
     "compile_error": 5403,
     "compile_timeout": 6,
     "skip": 18,
@@ -128,8 +128,8 @@
     },
     "standard": {
       "total": 42050,
-      "pass": 24042,
-      "fail": 12241,
+      "pass": 24040,
+      "fail": 12243,
       "compile_error": 5743,
       "compile_timeout": 6,
       "skip": 18,
@@ -301,8 +301,8 @@
     {
       "name": "built-ins/DataView",
       "path": "built-ins/DataView",
-      "pass": 163,
-      "fail": 207,
+      "pass": 161,
+      "fail": 209,
       "compile_error": 191,
       "compile_timeout": 0,
       "skip": 0,
@@ -1080,7 +1080,7 @@
     }
   ],
   "error_categories": {
-    "assertion_fail": 9246,
+    "assertion_fail": 9248,
     "illegal_cast": 1806,
     "negative_test_fail": 78,
     "null_deref": 391,
@@ -1101,8 +1101,8 @@
   },
   "root_cause_map": {
     "target": "standalone",
-    "total_non_pass_non_skip": 22289,
-    "classified": 22289,
+    "total_non_pass_non_skip": 22291,
+    "classified": 22291,
     "unclassified_threshold": null,
     "buckets": [
       {
@@ -1426,23 +1426,23 @@
           "total": 424
         },
         "error_categories": {
-          "assertion_fail": 128,
           "runtime_error": 181,
+          "assertion_fail": 128,
           "other": 16,
           "illegal_cast": 49,
           "wasm_compile": 20,
           "null_deref": 30
         },
         "sample_files": [
-          "test/built-ins/RegExp/from-regexp-like-get-ctor-err.js",
           "test/built-ins/RegExp/prototype/flags/coercion-ignoreCase.js",
+          "test/built-ins/RegExp/from-regexp-like-get-ctor-err.js",
           "test/annexB/built-ins/RegExp/legacy-accessors/leftContext/this-not-regexp-constructor.js",
           "test/language/literals/regexp/S7.8.5_A2.3_T4.js",
           "test/built-ins/Proxy/has/trap-is-missing-target-is-proxy.js"
         ],
         "sample_signatures": [
-          "assertion_fail:returned # — assert ## at L#: throw new Test262Error();",
           "runtime_error:Cannot convert object to primitive value",
+          "assertion_fail:returned # — assert ## at L#: throw new Test262Error();",
           "other:L#:## Codegen error: '__get_builtin' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get/struct",
           "runtime_error:L#:## Cannot convert object to primitive value",
           "assertion_fail:returned # — assert ## at L#: assert(Reflect.has(regExpProxy, \"ignoreCase\"));"
@@ -1635,18 +1635,18 @@
         "id": "class-prototype-private-descriptor",
         "issues": ["#1591", "#1365", "#1364"],
         "label": "Class element, prototype, private-name, and descriptor reconciliation gaps",
-        "count": 5547,
+        "count": 5549,
         "statuses": {
           "pass": 0,
-          "fail": 3682,
+          "fail": 3684,
           "compile_error": 1862,
           "compile_timeout": 3,
           "skip": 0,
-          "total": 5547
+          "total": 5549
         },
         "error_categories": {
           "runtime_error": 1484,
-          "assertion_fail": 2924,
+          "assertion_fail": 2926,
           "other": 498,
           "illegal_cast": 178,
           "wasm_compile": 267,
@@ -1793,8 +1793,8 @@
         "error_categories": {
           "assertion_fail": 924,
           "other": 164,
-          "runtime_error": 355,
           "wasm_compile": 21,
+          "runtime_error": 355,
           "promise_error": 89,
           "negative_test_fail": 5,
           "illegal_cast": 2,
@@ -1804,15 +1804,15 @@
           "test/language/expressions/object/cpn-obj-lit-computed-property-name-from-multiplicative-expression-mult.js",
           "test/language/expressions/object/literal-property-name-bigint.js",
           "test/built-ins/String/fromCharCode/S15.5.3.2_A3_T2.js",
-          "test/built-ins/Object/defineProperties/15.2.3.7-5-b-247.js",
-          "test/built-ins/Object/create/properties-arg-to-object-bigint.js"
+          "test/built-ins/Object/create/properties-arg-to-object-bigint.js",
+          "test/built-ins/Object/defineProperties/15.2.3.7-5-b-247.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert.sameValue( o[# * #], # );",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(o[\"#\"], true, \"the property name must be the string representation of the numeric value.\");",
           "other:L#:## Codegen error: String.fromCharCode built-in static property value read is not supported in --target standalone (## / ## S6-b). Add a native built-in method closure for this pair.",
-          "runtime_error:Cannot convert object to primitive value",
-          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: extern.convert_any[#] expected type shared anyref, found i64.const of type i64 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $proto ex"
+          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: extern.convert_any[#] expected type shared anyref, found i64.const of type i64 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $proto ex",
+          "runtime_error:Cannot convert object to primitive value"
         ]
       },
       {
@@ -1872,16 +1872,16 @@
         "sample_files": [
           "test/annexB/language/global-code/if-decl-no-else-global-skip-early-err-try.js",
           "test/annexB/language/global-code/switch-case-global-no-skip-try.js",
+          "test/annexB/language/global-code/switch-case-global-update.js",
           "test/annexB/language/expressions/assignmenttargettype/callexpression-as-for-of-lhs.js",
-          "test/annexB/language/comments/single-line-html-close-first-line-3.js",
-          "test/annexB/language/global-code/switch-case-global-update.js"
+          "test/annexB/language/comments/single-line-html-close-first-line-3.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert.throws(ReferenceError, function() { f; }, 'An initialized binding is not created following evaluation');",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue( f, undefined, 'Initialized binding created prior to evaluation' );",
+          "assertion_fail:returned # — assert ## at L#: assert.sameValue(typeof f, 'function');",
           "runtime_error:L#:## Invalid left-hand side in for-in/for-of",
-          "other:L#:## ';' expected.",
-          "assertion_fail:returned # — assert ## at L#: assert.sameValue(typeof f, 'function');"
+          "other:L#:## ';' expected."
         ]
       },
       {
@@ -2298,7 +2298,7 @@
           "test/language/module-code/instn-star-props-circular.js",
           "test/language/module-code/top-level-await/syntax/early-does-not-propagate-to-fn-declaration-params.js",
           "test/language/module-code/instn-star-props-dflt-keep-indirect.js",
-          "test/language/module-code/parse-err-hoist-lex-fun.js"
+          "test/language/module-code/top-level-await/new-await-parens.js"
         ],
         "sample_signatures": [
           "other:[object WebAssembly.Exception]",

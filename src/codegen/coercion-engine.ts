@@ -220,6 +220,34 @@ export function emitToString(
     // path (#2022) converts via the default-hint host helper; templates /
     // String() walk @@toPrimitive("string")/toString through coerceType.
     if (hint === "default") {
+      // (#2795) Start-function safety: the `__extern_to_string_default` host
+      // helper runs OrdinaryToPrimitive on the WasmGC struct via the host's
+      // `getExports()` — but TOP-LEVEL code (`"" + new C()` at module scope)
+      // executes inside the wasm START section, BEFORE the host wires
+      // `setExports`. With exports unavailable the helper cannot dispatch
+      // `__call_toString`, so it falls back to "[object Object]" (verified:
+      // `console.log("" + new Money(42))` printed "[object Object]" while the
+      // template-literal form, which dispatches toString IN-WASM, printed "$42").
+      //
+      // For a statically-known nominal struct whose ONLY user ToPrimitive method
+      // is `toString` (no `valueOf`, no `@@toPrimitive`), §7.1.1.1 makes the
+      // DEFAULT hint behave identically to the STRING hint (valueOf is absent →
+      // toString runs either way). So dispatch toString IN-WASM via the string-
+      // hint coerceType path, which works during START. Classes that DO carry
+      // `valueOf`/`@@toPrimitive` keep the host default-hint helper (it honours
+      // the valueOf-first ordering #2022 requires); they hit the start-timing gap
+      // only at module scope, which is rarer than a plain custom `toString`.
+      const refTypeIdx = (valType as { typeIdx?: number }).typeIdx;
+      const structName = refTypeIdx !== undefined ? ctx.typeIdxToStructName.get(refTypeIdx) : undefined;
+      if (
+        structName !== undefined &&
+        ctx.funcMap.get(`${structName}_toString`) !== undefined &&
+        ctx.funcMap.get(`${structName}_valueOf`) === undefined &&
+        ctx.funcMap.get(`${structName}_@@toPrimitive`) === undefined
+      ) {
+        coerceType(ctx, fctx, valType, { kind: "externref" }, "string");
+        return { kind: "externref" };
+      }
       coerceType(ctx, fctx, valType, { kind: "externref" });
       const toStrIdx = ensureLateImport(
         ctx,
