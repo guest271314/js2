@@ -15,10 +15,9 @@
 // size round-trips the whole sequence with no desync — demonstrating the stream
 // is correct and the #389 failure is the harness's 1:1 assumption, not the host.
 import { describe, it, expect } from "vitest";
-import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { compile } from "../src/index.js";
+import { compileProject } from "../src/index.js";
 import { buildNodeFsShim } from "../scripts/build-node-fs-shim.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -125,10 +124,13 @@ function parseFrames(bytes: Uint8Array): string[] {
 
 describe("#2521 Native Messaging host — >1 MiB re-chunking + multi-message sequence", () => {
   it("echoes a <=1 MiB message verbatim in a single frame", async () => {
-    const result = await compile(readFileSync(hostPath, "utf-8"), {
-      fileName: "nm_node_fs.ts",
+    // nm_node_fs now imports the shared `./nm_sync_framing` core (#2778), so it
+    // must compile through the multi-file bundler (mirrors the CLI's #2771
+    // routing); single-source `compile()` would strip the relative import.
+    const result = await compileProject(hostPath, {
       target: "wasi",
       linkNodeShims: true,
+      skipSemanticDiagnostics: true,
     });
     expect(result.success).toBe(true);
     const frames = parseFrames(runWasiRaw(result.binary, frame(JSON.stringify([1, 2, 3]))));
@@ -136,10 +138,13 @@ describe("#2521 Native Messaging host — >1 MiB re-chunking + multi-message seq
   });
 
   it("re-chunks a >1 MiB array into multiple <=1 MiB JSON-array frames that reassemble to the original", async () => {
-    const result = await compile(readFileSync(hostPath, "utf-8"), {
-      fileName: "nm_node_fs.ts",
+    // nm_node_fs now imports the shared `./nm_sync_framing` core (#2778), so it
+    // must compile through the multi-file bundler (mirrors the CLI's #2771
+    // routing); single-source `compile()` would strip the relative import.
+    const result = await compileProject(hostPath, {
       target: "wasi",
       linkNodeShims: true,
+      skipSemanticDiagnostics: true,
     });
     expect(result.success).toBe(true);
     const N = 209715 * 2; // ~2 MiB JSON body — strictly above the 1 MiB cap
@@ -161,10 +166,13 @@ describe("#2521 Native Messaging host — >1 MiB re-chunking + multi-message seq
   });
 
   it("processes the reporter's multi-message sequence (big then small) with no desync", async () => {
-    const result = await compile(readFileSync(hostPath, "utf-8"), {
-      fileName: "nm_node_fs.ts",
+    // nm_node_fs now imports the shared `./nm_sync_framing` core (#2778), so it
+    // must compile through the multi-file bundler (mirrors the CLI's #2771
+    // routing); single-source `compile()` would strip the relative import.
+    const result = await compileProject(hostPath, {
       target: "wasi",
       linkNodeShims: true,
+      skipSemanticDiagnostics: true,
     });
     expect(result.success).toBe(true);
     const N = 209715 * 2; // ~2 MiB
