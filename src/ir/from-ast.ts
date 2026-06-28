@@ -988,27 +988,28 @@ function lowerVarDecl(stmt: ts.VariableStatement, cx: LowerCtx): void {
         );
       }
     }
-    // #2782 (hybrid Row 5) — no-box NUMBER-local proof gate. The bindings below
-    // keep an `f64`-typed local UNBOXED (as a `local` SSA value or a numeric
-    // `slot`). Per the Hybrid Invariant that no-box specialization must be
-    // discharged by a proof on the TS *type*, never the lowered Wasm kind:
-    // `number` / `boolean` / `symbol` all collapse to `f64` / `i32`, so the kind
-    // alone cannot tell a genuine numeric local from an `any` / union one the
-    // f64 hint coerced opaquely. Prove the local's TS type is a pure number
+    // #2782 (hybrid Row 5) + #2790 (i32 arm) — no-box NUMBER-local proof gate.
+    // The bindings below keep an `f64` / `i32`-typed local UNBOXED (as a `local`
+    // SSA value or a numeric `slot`). Per the Hybrid Invariant that no-box
+    // specialization must be discharged by a proof on the TS *type*, never the
+    // lowered Wasm kind: `number` / `boolean` / `symbol` all collapse to `f64` /
+    // `i32`, so the kind alone cannot tell a genuine numeric local from an `any`
+    // / union one a scalar hint coerced opaquely. Prove the local's TS type is a
+    // pure number — or (i32 only, #2790) a pure `boolean`, the other sound
+    // tag-determinable i32 brand that boxes via `__box_boolean` (#2785) —
     // (`proveUnboxedNumberLocal`, reusing #2781's `classifyPrimitiveProof`);
     // anything unprovable — `any` / `unknown` / a MIXED `number | string` union —
     // demotes to the SAFE boxed legacy lowering (which carries the dynamic tag).
-    // Scoped to `f64` only — the `i32` (predominantly `boolean`) arm needs its
-    // own TS-type proof and is deferred (see #2782). No checker → unchanged
-    // (#2780 / #2781's no-checker arm). `inferred` is the bound representation
-    // here (an `annotated` mismatch already threw above), and `d.name` is an
-    // Identifier (non-identifier decls threw earlier in this loop).
+    // No checker → unchanged (#2780 / #2781's no-checker arm). `inferred` is the
+    // bound representation here (an `annotated` mismatch already threw above),
+    // and `d.name` is an Identifier (non-identifier decls threw earlier).
     if (!proveUnboxedNumberLocal(d.name, inferred, cx)) {
+      const boundKind = asVal(inferred)?.kind === "i32" ? "i32" : "f64";
       throw new Error(
-        `ir/from-ast: local '${name}' is bound as an unboxed f64 but its TS type is not ` +
-          `provably a pure number — keeping the no-box number representation is unsound ` +
-          `(the f64 Wasm kind conflates number / boolean / any); demote to the SAFE boxed ` +
-          `legacy lowering in ${cx.funcName} (#2782)`,
+        `ir/from-ast: local '${name}' is bound as an unboxed ${boundKind} but its TS type is not ` +
+          `provably a pure number${boundKind === "i32" ? " or boolean" : ""} — keeping the no-box ` +
+          `number representation is unsound (the ${boundKind} Wasm kind conflates number / boolean / ` +
+          `any); demote to the SAFE boxed legacy lowering in ${cx.funcName} (#2782/#2790)`,
       );
     }
     // Slice 6 part 2 (#1181): mutable `let` bindings whose name is
@@ -4182,32 +4183,68 @@ function proveAdditiveOperand(node: ts.Expression, cx: LowerCtx): "number" | "st
 }
 
 /**
- * #2782 (hybrid Row 5) — the no-box proof for an UNBOXED `f64` NUMBER local.
- * Reuses {@link classifyPrimitiveProof} (the #2781 operand-type proof) to
- * discharge the fast-path safety predicate `P` for the "keep a number local
- * unboxed" specialization.
+ * #2790 — is `t` provably a pure `boolean` (the intrinsic `true | false` union,
+ * a `true` / `false` literal, or a union thereof)? Mirrors the recursive shape
+ * of {@link classifyPrimitiveProof}, but for the boolean brand — which that
+ * function deliberately reports as `"unprovable"` (a `boolean` is NOT a number,
+ * so it must never enter the *number* no-box path). Used by the `i32`-arm of
+ * {@link proveUnboxedNumberLocal} to recognise the OTHER sound no-box `i32`
+ * brand: an unboxed `boolean` carries no runtime tag either, but #2785 made the
+ * escape box brand-aware (`coerceType(i32 → externref)` picks `__box_boolean`
+ * for a boolean-branded scalar), so a provably-boolean `i32` local is sound to
+ * keep unboxed and boxes correctly on escape. `any` / `unknown` / a mixed union
+ * are NOT provably boolean → not recognised here → demoted.
+ */
+function isProvablyBoolean(t: ts.Type): boolean {
+  if (t.isUnion()) {
+    // Every constituent must itself be provably boolean; an empty (`never`)
+    // union is not (mirrors classifyPrimitiveProof's `acc ?? unprovable`).
+    return t.types.length > 0 && t.types.every(isProvablyBoolean);
+  }
+  return (t.flags & ts.TypeFlags.BooleanLike) !== 0;
+}
+
+/**
+ * #2782 (hybrid Row 5) + #2790 (i32 arm) — the no-box proof for an UNBOXED
+ * NUMBER local. Reuses {@link classifyPrimitiveProof} (the #2781 operand-type
+ * proof) to discharge the fast-path safety predicate `P` for the "keep a number
+ * local unboxed" specialization.
  *
- * `lowerVarDecl` binds a local with the native `f64` representation whenever its
- * value lowers to (or is annotated) `f64`. Per the Hybrid Invariant that no-box
- * specialization is only sound when the local's value provably cannot be
- * anything but a pure number: an unboxed `f64` carries no runtime tag, so at any
- * later `any` / union / externref use it would be read with the wrong identity
- * (e.g. `typeof`, `===` against a string, a boxed-`Number` round-trip). When the
- * local's TS type is NOT provably a pure number — `any` / `unknown` /
- * `number | string` / etc. — the no-box path is unsound and codegen must demote
- * to the SAFE boxed legacy lowering (which carries the dynamic tag).
+ * `lowerVarDecl` binds a local with a native, UNBOXED scalar representation
+ * whenever its value lowers to (or is annotated) `f64` / `i32`. Per the Hybrid
+ * Invariant that no-box specialization is only sound when the local's value
+ * provably cannot be anything but a pure number: an unboxed scalar carries no
+ * runtime tag, so at any later `any` / union / externref use it would be read
+ * with the wrong identity (e.g. `typeof`, `===` against a string, a
+ * boxed-`Number` round-trip). When the local's TS type is NOT provably a pure
+ * number — `any` / `unknown` / `number | string` / etc. — the no-box path is
+ * unsound and codegen must demote to the SAFE boxed legacy lowering (which
+ * carries the dynamic tag).
  *
  * Returns `true` to KEEP the no-box fast path, `false` to DEMOTE.
  *
  * CRITICAL (the trap that parked two prior Row-1 attempts): this keys on the TS
  * *type* via `classifyPrimitiveProof`, NEVER the lowered Wasm kind. `number`,
  * `boolean` and `symbol` all collapse to `f64` / `i32`, so the Wasm kind cannot
- * tell a genuine numeric local from a boolean / `any` one. We therefore scope
- * this slice to the `f64` representation ONLY: `boolean` (the intrinsic
- * `true | false` union) is intentionally classified `unprovable` by
- * `classifyPrimitiveProof`, so gating `i32` locals on it would demote every
- * boolean local — the `i32`-number arm needs its own TS-type proof and is
- * deferred (see the issue). `string` / reference locals are unaffected.
+ * tell a genuine numeric local from a boolean / `any` one.
+ *
+ * Scope by representation:
+ *   - `f64` (#2782): keep ONLY when the TS type is provably a pure `number`;
+ *     anything else (`any` / `number | string` opaquely coerced by the f64 hint)
+ *     is unsound → demote.
+ *   - `i32` (#2790): the `i32` representation hosts TWO sound, brand-determinable
+ *     primitives — a `number` (e.g. `arr.length`, a native-`i32` typed number;
+ *     boxes via `__box_number`) AND a `boolean` (boxes via `__box_boolean` since
+ *     #2785 made `coerceType(i32 → externref)` brand-aware). Keep BOTH unboxed;
+ *     demote only a genuinely-unprovable `i32` local (`any` / `unknown` / a mixed
+ *     union — no determinable brand for the escape box). CRITICAL: a `boolean` is
+ *     recognised by {@link isProvablyBoolean}, NOT by the number proof — it must
+ *     never enter the *number* no-box path (which would box it via
+ *     `__box_number`, corrupting it). Demoting every boolean (the naive
+ *     "gate i32 on `classifyPrimitiveProof === 'number'`" trap that deferred this
+ *     arm in #2782) would route every boolean-local function to legacy and grow
+ *     an IR-fallback bucket — explicitly avoided here.
+ *   - `i64` (bigint) / reference / string locals are out of scope (unaffected).
  *
  * No checker → there is no specialization whose unsoundness we would be masking
  * (every boundary use is still type-checked), so keep the existing behavior
@@ -4215,10 +4252,18 @@ function proveAdditiveOperand(node: ts.Expression, cx: LowerCtx): "number" | "st
  */
 function proveUnboxedNumberLocal(name: ts.Identifier, boundType: IrType, cx: LowerCtx): boolean {
   const bv = asVal(boundType);
-  if (!bv || bv.kind !== "f64") return true; // not the no-box NUMBER representation — out of scope.
+  if (!bv || (bv.kind !== "f64" && bv.kind !== "i32")) return true; // not a no-box scalar NUMBER representation — out of scope.
   const checker = cx.checker;
   if (!checker) return true; // no checker → leave behavior unchanged.
-  return classifyPrimitiveProof(checker.getTypeAtLocation(name)) === "number";
+  const tsType = checker.getTypeAtLocation(name);
+  if (classifyPrimitiveProof(tsType) === "number") return true; // provable number — keep (boxes __box_number on escape).
+  // f64 hosts only the number brand: a non-number f64 was opaquely coerced and
+  // is unsound to keep unboxed → demote.
+  if (bv.kind === "f64") return false;
+  // i32 arm (#2790): the OTHER sound i32 brand is a provable `boolean`, kept
+  // unboxed and boxed via `__box_boolean` (#2785) at the escape edge. Anything
+  // else i32 (`any` / mixed union — no determinable brand) → demote.
+  return isProvablyBoolean(tsType);
 }
 
 function lowerBinary(expr: ts.BinaryExpression, cx: LowerCtx, hint: IrType): IrValueId {
