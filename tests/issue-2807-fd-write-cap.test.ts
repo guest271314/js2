@@ -173,7 +173,11 @@ describe("#2807 — nm_js2wasm_node_process echoes a >chunk frame under a wasmti
       expect(WASI_FD_WRITE_MAX_CHUNK).toBeLessThan(WASMTIME_REAL_CAP);
 
       const src = readFileSync(join(NM_DIR, "nm_js2wasm_node_process.ts"), "utf-8");
-      const r = await compile(src, { fileName: "nm_js2wasm_node_process.ts", target: "wasi", skipSemanticDiagnostics: true });
+      const r = await compile(src, {
+        fileName: "nm_js2wasm_node_process.ts",
+        target: "wasi",
+        skipSemanticDiagnostics: true,
+      });
       expect(r.success, r.success ? "" : `compile error: ${r.errors?.[0]?.message}`).toBe(true);
       expect(WebAssembly.validate(r.binary!), "nm_js2wasm_node_process.ts must validate").toBe(true);
 
