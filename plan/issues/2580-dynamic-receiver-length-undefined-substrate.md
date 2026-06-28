@@ -2382,3 +2382,7 @@ senior-dev (value-rep lane, max reasoning) takes **B-f0 → B-f1** as the first 
 pair (inert scaffold + zero-own-field standalone canary), floor-validated,
 stop-the-line on any typed-fnctor eject. Hold B-f2/B-f3/B-f4 behind B-f1's floor
 result. Issue stays `in-progress`.
+
+## Residual (as of #2199, PO reconcile 2026-06-28)
+
+NOT done — hard value-rep substrate. M3 B-protoextend (inherited Object.prototype index read in generic array-method dispatch) landed. The bulk lever — generic Array.prototype.{reduce,filter,map,...}.call on an Array-LIKE object reading obj.length + obj[i] with HasProperty-skip (~993 fails) — remains. Stays in-progress.

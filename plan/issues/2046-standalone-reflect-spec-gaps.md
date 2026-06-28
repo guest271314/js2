@@ -359,3 +359,7 @@ primitive-proto TypeError guards, and the apply-still-refused pin.
 - **`Reflect.apply`** — needs a call/spread native analog.
 - **Real receiver plumbing** (explicit-receiver get/set) — senior/deferred,
   #1888 Slice 5.
+
+## Residual (as of #2199, PO reconcile 2026-06-28)
+
+NOT done — multi-PR. PR-A/PR-B/PR-C landed (getPrototypeOf/setPrototypeOf routed to natives, receiver arg, ToPropertyKey, deleteProperty freeze/configurable). Remaining per the file "## Remaining (out of this PR)": accessor-invocation receiver handling, coordinated with #1888 Slice 5 accessor work. Stays in-progress.
