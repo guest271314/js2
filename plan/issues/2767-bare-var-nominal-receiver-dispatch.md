@@ -1,9 +1,11 @@
 ---
 id: 2767
 title: "nominal value assigned into an uninitialized/untyped var loses its type → method dispatch goes dynamic and fails (var d; d = new Date(0); d.toISOString())"
-status: ready
+status: done
 sprint: current
 priority: high
+assignee: ttraenkler/agent-dev
+completed: 2026-06-28
 created: 2026-06-28
 updated: 2026-06-28
 feasibility: medium
@@ -26,17 +28,30 @@ loses its nominal type, so method dispatch on it falls to the generic dynamic
 path and fails. Verified repros on current main (host mode):
 
 ```ts
-const d = new Date(0); d.toISOString();          // "…Z" ✓ (typed binding)
-var d;   d = new Date(0); d.toISOString();        // ✗ "toISOString is not a function"
-var d: any; d = new Date(0); d.toISOString();     // ✗ same
-var d, x; d = new Date(0); d.toISOString();       // ✗ same
-var d; if (true) { d = new Date(0); } d.toISOString(); // ✗ same
-let d;   d = new Date(0); d.toISOString();        // ✗ same
+const d = new Date(0);
+d.toISOString(); // "…Z" ✓ (typed binding)
+var d;
+d = new Date(0);
+d.toISOString(); // ✗ "toISOString is not a function"
+var d: any;
+d = new Date(0);
+d.toISOString(); // ✗ same
+var d, x;
+d = new Date(0);
+d.toISOString(); // ✗ same
+var d;
+if (true) {
+  d = new Date(0);
+}
+d.toISOString(); // ✗ same
+let d;
+d = new Date(0);
+d.toISOString(); // ✗ same
 ```
 
 This is a **residual of the already-DONE dispatch infra** #1888 / #1030 / #1022 /
 #2151 (do NOT re-open those — the base any-receiver vtable path is closed). The
-residual is purely the *type-flow* gap: a binding declared without an initializer
+residual is purely the _type-flow_ gap: a binding declared without an initializer
 and without an annotation is typed `any`/externref by the TS checker, and the
 nominal-receiver method dispatch never engages for it.
 
@@ -54,7 +69,7 @@ symbol:
 - `src/codegen/expressions/builtins.ts:1361-1362` (`compileDateMethodCall`):
   ```ts
   const symName = receiverType.getSymbol()?.name;
-  if (symName !== "Date") return undefined;   // ← bails for any/externref
+  if (symName !== "Date") return undefined; // ← bails for any/externref
   ```
 
 The SAME `receiverType.getSymbol()?.name` gate guards Date, DataView
@@ -69,13 +84,13 @@ raw WasmGC struct the host method table doesn't know.
 **Why the checker can't help (measured, not assumed).** Probing the real TS
 checker with the project lib (`.tmp/probe-checker2.mjs`):
 
-| source                                   | `getTypeAtLocation(recv)` | symbol   |
-| ---------------------------------------- | ------------------------- | -------- |
-| `const d = new Date(0); d.toISOString()` | `Date`                    | `Date`   |
-| `var d; d = new Date(0); d.toISOString()`| `any`                     | (none)   |
-| `var d: any; …`                          | `any`                     | (none)   |
-| `var d; if(true){ d = new Date(0);} …`   | `any`                     | (none)   |
-| `let d; d = new Date(0); …`              | `any`                     | (none)   |
+| source                                    | `getTypeAtLocation(recv)` | symbol |
+| ----------------------------------------- | ------------------------- | ------ |
+| `const d = new Date(0); d.toISOString()`  | `Date`                    | `Date` |
+| `var d; d = new Date(0); d.toISOString()` | `any`                     | (none) |
+| `var d: any; …`                           | `any`                     | (none) |
+| `var d; if(true){ d = new Date(0);} …`    | `any`                     | (none) |
+| `let d; d = new Date(0); …`               | `any`                     | (none) |
 
 TS's "evolving-any" narrowing does **not** propagate the assigned `Date` type to
 the later `d.toISOString()` receiver — it reports `any`. So the fix must live in
@@ -87,8 +102,8 @@ technique already used by `symbolBindsAsyncFunction` at
 and held `new Date(0)` (stored via `extern.convert_any` of the `$Date` struct),
 `coerceType(externref → ref $Date)` already emits `any.convert_extern` +
 `ref.test`/`ref.cast` (`src/codegen/type-coercion.ts:1466`). And
-`compileDateMethodCall` already compiles its receiver *with the expected
-`dateRefType`* (`builtins.ts:1422`), so the recovery fires automatically once the
+`compileDateMethodCall` already compiles its receiver _with the expected
+`dateRefType`_ (`builtins.ts:1422`), so the recovery fires automatically once the
 dispatch decision is made. The Date struct is the same GC object across the
 externref roundtrip in both modes — confirmed: the current failure is the host
 `__extern_method_call` receiving that very struct.
@@ -114,6 +129,7 @@ logic is required.
 ## Implementation Plan
 
 ### Root cause (1 line)
+
 A `var`/`let` declared without initializer/annotation is typed `any` → externref,
 so the nominal-symbol gate at the method-call dispatch hub bails to dynamic
 dispatch even though the slot demonstrably holds a single nominal struct.
@@ -138,7 +154,7 @@ dispatch even though the slot demonstrably holds a single nominal struct.
 
    Substituting `receiverType` wholesale is correct: every downstream gate
    (Date, DataView, ArrayBuffer, `isExternalDeclaredClass`, `isGeneratorType`,
-   wrappers, …) then sees the true nominal type, and Date already runs *before*
+   wrappers, …) then sees the true nominal type, and Date already runs _before_
    the extern-class dispatch, so ordering is preserved.
 
 3. New helper (put it near the other receiver helpers in this file, e.g. next to
@@ -157,10 +173,7 @@ dispatch even though the slot demonstrably holds a single nominal struct.
     * (keep the existing dynamic path — never a wrong struct). Mirrors the
     * symbol-scan in `symbolBindsAsyncFunction` (expressions.ts:262).
     */
-   function resolveAssignedNominalType(
-     ctx: CodegenContext,
-     ident: ts.Identifier,
-   ): ts.Type | undefined {
+   function resolveAssignedNominalType(ctx: CodegenContext, ident: ts.Identifier): ts.Type | undefined {
      const sym = ctx.checker.getSymbolAtLocation(ident);
      if (!sym) return undefined;
      const rhsTypes: ts.Type[] = [];
@@ -186,9 +199,9 @@ dispatch even though the slot demonstrably holds a single nominal struct.
      let name: string | undefined;
      for (const t of rhsTypes) {
        const nm = t.getSymbol()?.name;
-       if (!nm) return undefined;                 // a non-nominal RHS (any / number / …) → bail
+       if (!nm) return undefined; // a non-nominal RHS (any / number / …) → bail
        if (name === undefined) name = nm;
-       else if (name !== nm) return undefined;     // divergent nominal types → union → bail
+       else if (name !== nm) return undefined; // divergent nominal types → union → bail
      }
      // Optional extra guard: only accept names this backend lowers natively /
      // has a struct for — a native builtin (Date/RegExp/DataView/ArrayBuffer/
@@ -201,7 +214,9 @@ dispatch even though the slot demonstrably holds a single nominal struct.
    ```
 
 ### Wasm IR pattern
+
 No new emission. The dispatch decision change reuses:
+
 - `compileDateMethodCall` receiver compile with `dateRefType`
   (`builtins.ts:1422`), and
 - `coerceType` externref→ref struct (`type-coercion.ts:1466`):
@@ -213,6 +228,7 @@ No new emission. The dispatch decision change reuses:
   ```
 
 ### Edge cases (all verified in the experiment)
+
 - **Reassignment, same type** (`d = new Date(); d = new Date()`) → still one
   nominal symbol → engages. ✓
 - **Conditional assignment** (`if (c) d = new Date()`) → engages (the slot can
@@ -230,10 +246,11 @@ No new emission. The dispatch decision change reuses:
   reached on null it would trap rather than throw a JS TypeError — acceptable and
   pre-existing, and this change does not introduce it (zero-assignment ⇒ no hint).
 - **`@@toPrimitive` / generic-receiver cases dev-rescue flagged → OUT OF SCOPE.**
-  Those are a *different* gap (generic method protocol on an any receiver, not the
+  Those are a _different_ gap (generic method protocol on an any receiver, not the
   bare-`var` type-flow). Keep them on their own issue; do not fold them here.
 
 ### Scope note (follow-on, not required for the toISOString win)
+
 This spec fixes the **call** dispatch hub (`compileCallExpression` member-call
 path). Property **reads** (`d.field`) and **writes** (`d.x = …`) on a bare-`var`
 nominal receiver compute their own `receiverType` in the member-get / member-set
@@ -243,25 +260,28 @@ recovery through `member-get-dispatch.ts` / `member-set-dispatch.ts`. Track as a
 separate slice — do not expand this issue's blast radius.
 
 ### Performance
-`resolveAssignedNominalType` walks the source file once per *bare-var* receiver
+
+`resolveAssignedNominalType` walks the source file once per _bare-var_ receiver
 (gated behind the cheap `!getSymbol()?.name` check, so it runs only for the rare
 any-typed identifier receiver — exactly as `symbolBindsAsyncFunction` already
 does). If a hot file shows up, memoize per binding-symbol on a
 `ctx`-scoped `Map<ts.Symbol, ts.Type | null>`; not required for correctness.
 
 ## Impact (measured)
+
 - **Direct, high-confidence:** the **11** `built-ins/Date/prototype/toISOString/*`
   bare-`var` cases (`grep -lE '^var date' …/toISOString` = 11; the cluster takes
   the UTC `else` branch → `date.toISOString()` "Z" check) plus the **4** other
   Date-prototype bare-`var` cases. ⇒ **~10-15 test262 cases**.
 - **Structural / broader:** a whole-test262 heuristic (`var <id>;` + `<id> = new
-  X(` + `<id>.method(`) matches **105 files**, top constructors DataView (43),
+X(` + `<id>.method(`) matches **105 files**, top constructors DataView (43),
   TypedArray (41), Date (4), ArrayBuffer/SharedArrayBuffer, Intl. Many `TA`/`DV`
-  hits are *constructor-aliases* (not instance dispatch) or are blocked by other
+  hits are _constructor-aliases_ (not instance dispatch) or are blocked by other
   gaps, so treat 105 as the upper envelope, not the realistic count — but it
   confirms the pattern is broad and this is the right structural place to fix it.
 
 ## Classification
+
 - **Dev-tractable after this spec.** Single localized change (one helper + a
   2-line substitution at the dispatch hub), reusing two existing mechanisms
   (`coerceType` externref→ref, `compileDateMethodCall`). No new Wasm emission, no
@@ -274,9 +294,37 @@ does). If a hot file shows up, memoize per binding-symbol on a
   assignments," which is precisely the currently-broken set.
 
 ## Acceptance criteria
+
 1. All five repros above return the correct `toISOString()` value in host mode.
 2. `built-ins/Date/prototype/toISOString` bare-`var` cases flip pass.
 3. No regression in generic any-receiver dispatch (`const o: any = { m(){…} };
-   o.m()`), in typed-receiver dispatch, or in the standalone any-receiver path
+o.m()`), in typed-receiver dispatch, or in the standalone any-receiver path
    (#2151).
 4. Full-CI / `merge_group` green (broad-impact).
+
+## Resolution (agent-dev, 2026-06-28)
+
+Implemented exactly as specced. `src/codegen/expressions/calls.ts`:
+
+- Added `resolveAssignedNominalType(ctx, ident)` (next to `isNumberMethodReceiver`)
+  — mirrors `symbolBindsAsyncFunction`'s symbol-scan; returns the shared nominal
+  `ts.Type` only when the binding initializer + every `<ident> = <rhs>`
+  assignment agree on one nominal symbol; bails (undefined) on a non-nominal RHS,
+  divergent symbols, or zero assignments.
+- At the call-dispatch hub (`const receiverType` → `let receiverType`), when the
+  static type resolves no nominal symbol and the receiver is a bare identifier,
+  substitutes the recovered type so the downstream Date/DataView/ArrayBuffer/
+  RegExp/wrapper gates engage.
+
+Validation (host mode, current main base):
+
+- All 11 acceptance repros pass (`tests/issue-2767.test.ts`), incl. DataView
+  generalization and the divergent-bail + generic-any-object no-regression guards.
+- Date.prototype test262 sweep (485 files): fail 26 → 24 on the identical base
+  (clean `calls.ts` vs fix), **+2 flips** (`toISOString/15.9.5.43-0-11`, `-12`),
+  **zero regressions** (empty newly-failing diff). The broader DataView/
+  ArrayBuffer/RegExp bare-`var` envelope is measured by full CI / merge_group.
+
+Property **reads/writes** on a bare-`var` nominal receiver (`d.field`, `d.x = …`)
+remain dynamic — out of scope per the spec's scope note (separate follow-on
+through `member-get-dispatch.ts` / `member-set-dispatch.ts`).

@@ -770,6 +770,53 @@ function isNumberMethodReceiver(ctx: CodegenContext, receiverType: ts.Type): boo
 }
 
 /**
+ * (#2767) Recover the nominal `ts.Type` a bare-`var`/`let` identifier holds when
+ * the TS checker reports `any` (no annotation, no initializer — the
+ * "evolving-any" case the checker does NOT narrow across statements, so
+ * `var d; d = new Date(0); d.toISOString()` types the receiver `any`/externref
+ * and the nominal-symbol dispatch gate bails to the generic dynamic path).
+ *
+ * Conservative-closed: returns a type ONLY when the binding's initializer (if
+ * any) AND every `<ident> = <rhs>` assignment to the same binding symbol in the
+ * source file resolve to the SAME nominal symbol. Any divergence, any RHS that
+ * resolves to no nominal symbol, or zero assignments ⇒ undefined (keep the
+ * existing dynamic path — never substitute a wrong struct). Mirrors the
+ * symbol-scan in `symbolBindsAsyncFunction` (expressions.ts:262).
+ */
+function resolveAssignedNominalType(ctx: CodegenContext, ident: ts.Identifier): ts.Type | undefined {
+  const sym = ctx.checker.getSymbolAtLocation(ident);
+  if (!sym) return undefined;
+  const rhsTypes: ts.Type[] = [];
+  for (const d of sym.declarations ?? []) {
+    if (ts.isVariableDeclaration(d) && d.initializer) {
+      rhsTypes.push(ctx.checker.getTypeAtLocation(d.initializer));
+    }
+  }
+  const sf = ident.getSourceFile();
+  const visit = (n: ts.Node): void => {
+    if (
+      ts.isBinaryExpression(n) &&
+      n.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      ts.isIdentifier(n.left) &&
+      ctx.checker.getSymbolAtLocation(n.left) === sym
+    ) {
+      rhsTypes.push(ctx.checker.getTypeAtLocation(n.right));
+    }
+    forEachChild(n, visit);
+  };
+  visit(sf);
+  if (rhsTypes.length === 0) return undefined;
+  let name: string | undefined;
+  for (const t of rhsTypes) {
+    const nm = t.getSymbol()?.name;
+    if (!nm) return undefined; // a non-nominal RHS (any / number / …) → bail
+    if (name === undefined) name = nm;
+    else if (name !== nm) return undefined; // divergent nominal types → union → bail
+  }
+  return rhsTypes[0];
+}
+
+/**
  * (#2160 number-wrapper) Emit the receiver of a Number.prototype method as an
  * f64 on the stack.
  *
@@ -8743,7 +8790,16 @@ function compileCallExpression(
     }
 
     // Check if receiver is an externref object
-    const receiverType = ctx.checker.getTypeAtLocation(propAccess.expression);
+    let receiverType = ctx.checker.getTypeAtLocation(propAccess.expression);
+    // (#2767) When the static type resolves NO nominal symbol and the receiver
+    // is a bare identifier (the evolving-`any` `var d; d = new Date(0)` case),
+    // recover the effective nominal type from the binding's assignments so the
+    // nominal-symbol dispatch gates below (Date, DataView, ArrayBuffer, RegExp,
+    // wrappers, …) engage instead of falling to the failing generic path.
+    if (!receiverType.getSymbol()?.name && ts.isIdentifier(propAccess.expression)) {
+      const recovered = resolveAssignedNominalType(ctx, propAccess.expression);
+      if (recovered) receiverType = recovered;
+    }
 
     // TextEncoder/TextDecoder under no-JS-host targets. These are standard
     // Web/Node APIs, but WASI/standalone cannot rely on env.TextEncoder_* host
