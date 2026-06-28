@@ -1801,6 +1801,17 @@ export interface CodegenContext {
    */
   fnctorEscapeGate?: import("../fnctor-escape-gate.js").FnctorEscapeGateResult;
   /**
+   * #2773 S1 (keystone) — fnctor name → reserved `$__fnctor_<Name>` struct type
+   * index. Populated up-front by `reserveFnctorStructTypes` (index.ts) at the
+   * deterministic type-init phase so the index is IDENTICAL across the hoist pass
+   * and the emit pass (the on-demand registration at the `new F()` site landed at
+   * a pass-dependent index → `ref.test`/`struct.get` desync). When a name is
+   * present here, `compileNewFunctionDeclaration` FILLS the reserved slot in place
+   * instead of pushing a new type (which would re-shift every downstream typeIdx).
+   * Empty for fnctor-free modules ⇒ byte-identical no-op.
+   */
+  fnctorReservedTypeIdx: Map<string, number>;
+  /**
    * #1886 Slice B — Func index of the lazily-emitted
    * `__lin_u8_alloc(len:i32)->i32` bump allocator for linear-backed Uint8Array
    * buffers (`undefined` = not yet emitted). Allocates from a dedicated page-4

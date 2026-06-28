@@ -39,6 +39,8 @@ export function createCodegenContext(
     structMap: new Map(),
     typeIdxToStructName: new Map(),
     structFields: new Map(),
+    fnctorReservedTypeIdx: new Map(), // #2773 S1 — up-front fnctor struct-type slots
+
     numImportFuncs: 0,
     jsStringImports: new Map(),
     currentFunc: null,
