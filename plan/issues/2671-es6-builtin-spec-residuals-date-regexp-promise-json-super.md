@@ -186,6 +186,40 @@ built-ins/Promise/all/invoke-resolve-error-close.js
 built-ins/Promise/prototype/then/S25.4.5.3_A1.1_T2.js
 ```
 
+**Progress (agent-af359e7cc95c024c6, 2026-06-28): GetCapabilitiesExecutor
+functions — `Promise.resolve`/`Promise.reject` capability-ctor sites — SHIPPED
+(+6 test262).**
+
+Verified-first through the real worker harness (`compile` + `__setExports` +
+`wrapExports`). Root cause: V8's `Promise.resolve.call(C)` / `Promise.reject.call(C)`
+run PromiseResolve(C) → NewPromiseCapability(C) → `Construct(C, «executor»)`,
+exactly like the four aggregators. When `C` is a user
+`function NotPromise(executor){ executor(fn1, fn2); }` (lowered to a WasmGC
+closure), the `executor(...)` call must wrap its closure arguments into
+host-callable functions through the `__call_function` host helper — otherwise
+V8's NewPromiseCapability throws "Promise resolve or reject function is not
+callable" (the wasm closures reach V8 as opaque structs). The codegen gate
+`calleeIsCapabilityCtorParam` (src/codegen/expressions/calls.ts) scanned only
+`Promise.{all,allSettled,race,any}.call(<fn>, …)`, so the `resolve`/`reject`
+capability sites fell through and the executor's closure args were never wrapped.
+- Fix: add `resolve`/`reject` to the scanned combinator set (one-line, additive,
+  JS-host-only — the `emitBoundFunctionCall` route is already gated by
+  `!ctx.standalone && !noJsHost(ctx)`, so standalone/WASI is untouched).
+- Flips **6** `built-ins/Promise/executor-function-*` files: `-extensible`,
+  `-length` (length 2), `-name` (""), `-not-a-constructor` (no own `.prototype`),
+  `-prototype` (`[[Prototype]]` === Function.prototype), `-property-order`
+  (length,name). Top-level `built-ins/Promise` survey: 46→52 pass, 0 regressions;
+  `resolve/` (26/4) and `reject/` (12/3) subdirs byte-identical vs pristine main
+  (baseline-toggle differential). `tests/promise-combinators.test.ts`'s 2
+  pre-existing failures are unrelated (present with the change reverted).
+- Guard: `tests/issue-2671-promise-executor.test.ts` (14/14).
+- ⏳ Remaining Promise: the `resolve-element-function-*` family
+  (`Promise.all.call(NotPromise, [thenable])`) is a SEPARATE, deeper marshaling
+  chain — the host must call a wasm-struct thenable's `then` method and store the
+  native resolve-element function back into a wasm `var`; `thenable.then` is never
+  invoked today (`resolveElementFunction` stays undefined). Not in this slice.
+  Also: invoke-resolve error-close paths, `then` spec asserts.
+
 ### JSON (44)
 
 reviver/replacer with non-configurable / define-prop-err properties

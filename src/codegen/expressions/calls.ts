@@ -1752,7 +1752,13 @@ function calleeIsCapabilityCtorParam(ctx: CodegenContext, expr: ts.Expression): 
   }
   if (fnName === undefined) return false;
   // Scan the source file for `Promise.<combinator>.call(<fnName>, …)`.
-  const COMBINATORS = new Set(["all", "allSettled", "race", "any"]);
+  // (#2671) `Promise.resolve` / `Promise.reject` are ALSO capability-ctor
+  // sites: V8's `Promise.resolve.call(C)` → PromiseResolve(C) →
+  // NewPromiseCapability(C) → `Construct(C, «GetCapabilitiesExecutor»)`. The
+  // user fn's `executor` param therefore receives a host executor and must
+  // wrap its closure args host-callable through `__call_function`, exactly
+  // like the four aggregators (executor-function-* test262 family).
+  const COMBINATORS = new Set(["all", "allSettled", "race", "any", "resolve", "reject"]);
   const sf = decl.getSourceFile();
   let found = false;
   const visit = (node: ts.Node): void => {

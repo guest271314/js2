@@ -46,6 +46,24 @@ sentinel. Under the hybrid invariant (HI) this is exactly the pattern we retire:
   floor fix from **#2760** (F1) as the IR SAFE lowering — do **not** re-introduce
   a trapping read as the fallback.
 
+> **R1 handoff (from #2760, landed).** The legacy SAFE lowering to reuse is the
+> helper `emitPlainArrayUndefinedOobGet` in `src/codegen/property-access.ts`
+> (bounded read → box → `inBounds ? boxed : undefined`, emitted imperatively so
+> no funcIdx is baked inside a branch). It is invoked as a **call-site-owned
+> policy** from the two `compileElementAccessBody` plain-array read sites (the
+> vec-struct path and the raw-array path), gated on
+> `classifyTypedArrayType(...) === "other"`. Three carry-over lessons for the IR
+> port: (1) the shared `emitBoundsCheckedArrayGet` default stays untouched — do
+> not flip it (the S2 leak); (2) F1 widened **primitive** elements only
+> (`number[]`/`boolean[]`) — externref `any[]`/`string[]` OOB→undefined is
+> still DEFERRED here (it trips the map-on-array-like canary
+> `15.4.4.19-8-b-2.js` via a pre-existing length-0 map result), and object
+> (`ref`) arrays keep their typed result; (3) the widening is suppressed under a
+> **numeric value-context hint** (`expectedType` f64/i32) — there `undefined`
+> coerces to NaN (JS-correct) and, critically, keeping it unboxed avoids a late
+> import shifting a funcIdx a numeric caller already captured (the Math.pow
+> regression). The IR port should carry the same numeric-context discipline.
+
 ### Proof primitive — port `safeIndexedArrays` into the IR
 - Legacy already has the proof: `isSafeBoundsEliminated`
   (`src/codegen/property-access.ts:5371`) + `fctx.safeIndexedArrays`, populated
