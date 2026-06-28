@@ -14,10 +14,10 @@
 // └────────────────────────────────────────────────────────────────────────────┘
 //
 // Contrast the siblings:
-//   * `nm_wasi.ts`    — WASI **Preview 1**: hand-marshals iovecs through linear
+//   * `nm_wasi_p1.ts`    — WASI **Preview 1**: hand-marshals iovecs through linear
 //                       memory in an explicit `fd_read`/`fd_write` loop. Runs
 //                       today under wasmtime via `--target wasi`.
-//   * `nm_js2wasm.ts` — `node:fs` `readSync`/`writeSync(fd, …)`; runs under Node.
+//   * `nm_node_fs.ts` — `node:fs` `readSync`/`writeSync(fd, …)`; runs under Node.
 //   * `nm_wasi_p3.ts` — WASI **Preview 3**: the host drives the byte copy over a
 //                       native `stream<u8>`; the guest just plumbs the stream and
 //                       awaits. The async-lifted entry suspends/resumes via the
@@ -71,7 +71,7 @@ declare function writeViaStream(data: StreamU8): WriteFuture;
 // host pump. No 4-byte-prefix bookkeeping is needed at the syscall layer — a
 // Native Messaging frame is an opaque byte run, and the host copies it through
 // the stream byte-for-byte (prefix + body, including high/null bytes), so the
-// receiver reconstructs framing from the raw bytes exactly as in `nm_wasi.ts`.
+// receiver reconstructs framing from the raw bytes exactly as in `nm_wasi_p1.ts`.
 
 export async function run(): Promise<void> {
   // Obtain the stdin readable stream. The paired read-future is left to the host

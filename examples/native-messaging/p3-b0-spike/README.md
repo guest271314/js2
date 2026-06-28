@@ -53,5 +53,5 @@ run():
 
 The host drives the stdin→stdout copy and the async-lifted `run` suspends at the
 await — exactly the incremental loop-borrow #2646 needs, with no asyncify and no
-pre-drain. Contrast `../nm_wasi.ts` (P1), which hand-marshals iovecs through
+pre-drain. Contrast `../nm_wasi_p1.ts` (P1), which hand-marshals iovecs through
 linear memory in an explicit `fd_read`/`fd_write` loop.

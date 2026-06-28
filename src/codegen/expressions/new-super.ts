@@ -70,7 +70,7 @@ import {
 import { localGlobalIdx } from "../registry/imports.js";
 import { ensureLateImport, flushLateImportShifts } from "./late-imports.js";
 import { emitFnctorProtoGet } from "./fnctor-prototype.js"; // (#2660 S3a) reconstruct `new F()` as $Object
-import { resolveFnctorSymbol } from "../fnctor-escape-gate.js"; // (#2660 S3a) canonical fnctor-name key
+import { deriveFnctorFields, resolveFnctorSymbol } from "../fnctor-escape-gate.js"; // (#2660 S3a) canonical fnctor-name key; (#2773 S1) shared field derivation
 
 // #2146: resolveEnclosingClassName now lives in shared.ts (imported above).
 
@@ -1060,100 +1060,44 @@ function compileNewFunctionDeclaration(
     // bespoke struct lowering below (status quo, safe).
   }
 
-  // 1. Analyze the function body for `this.prop = value` assignments
-  const fields: FieldDef[] = [];
-  // Record one `this.<field>` slot from an assignment whose LHS is `this.<field>`.
-  // `valueExpr` is the value being assigned to THAT field (for type inference) —
-  // for a chained `this.a = this.b = expr`, the value flowing into `this.a` is the
-  // whole `this.b = expr` sub-assignment (whose result type === expr's type).
-  function recordThisField(lhs: ts.PropertyAccessExpression, valueExpr: ts.Expression): void {
-    const fieldName = lhs.name.text;
-    if (fields.some((f) => f.name === fieldName)) return;
-    // Prefer the RHS type — when `this` is `any`, the LHS type is also `any`
-    // (externref), but the RHS has concrete type info (e.g., number → f64).
-    const lhsType = ctx.checker.getTypeAtLocation(lhs);
-    const rhsType = ctx.checker.getTypeAtLocation(valueExpr);
-    const lhsWasm = resolveWasmType(ctx, lhsType);
-    const rhsWasm = resolveWasmType(ctx, rhsType);
-    const fieldType = lhsWasm.kind === "externref" ? rhsWasm : lhsWasm;
-    fields.push({ name: fieldName, type: fieldType, mutable: true });
-  }
-  // Walk an assignment EXPRESSION, collecting EVERY `this.<field>` LHS in a
-  // (possibly CHAINED) assignment. acorn's Parser ctor uses chained assignments
-  // heavily — `this.start = this.end = this.pos`,
-  // `this.lastTokEndLoc = this.lastTokStartLoc = null`,
-  // `this.yieldPos = this.awaitPos = this.awaitIdentPos = 0` — so the inner
-  // targets (`end`, `lastTokStartLoc`, `awaitPos`, `awaitIdentPos`, …) MUST be
-  // collected too. Missing them gave `$__fnctor_Parser` a SHORTER field set than
-  // the fields the parser later READS (`base.end`, `this.lastTokEnd`), so reads
-  // resolved to the wrong slot / fell through to `__extern_get` → `undefined` and
-  // `parseSubscripts`/expression-parse looped forever (the 9th acorn wall, #2674).
-  function collectAssignmentChain(expr: ts.Expression): void {
-    if (
-      ts.isBinaryExpression(expr) &&
-      expr.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
-      ts.isPropertyAccessExpression(expr.left) &&
-      expr.left.expression.kind === ts.SyntaxKind.ThisKeyword
-    ) {
-      recordThisField(expr.left, expr.right);
-      // The RHS may itself be `this.<field> = …` (chained) — recurse to collect it.
-      collectAssignmentChain(expr.right);
-    }
-  }
-  function collectThisAssignments(stmts: ts.NodeArray<ts.Statement> | readonly ts.Statement[]): void {
-    for (const stmt of stmts) {
-      if (ts.isExpressionStatement(stmt) && ts.isBinaryExpression(stmt.expression)) {
-        collectAssignmentChain(stmt.expression);
-      }
-      // Recurse into if/else blocks
-      if (ts.isIfStatement(stmt)) {
-        if (ts.isBlock(stmt.thenStatement)) {
-          collectThisAssignments(stmt.thenStatement.statements);
-        }
-        if (stmt.elseStatement && ts.isBlock(stmt.elseStatement)) {
-          collectThisAssignments(stmt.elseStatement.statements);
-        }
-      }
-      // Recurse into for/while/do blocks
-      if (
-        (ts.isForStatement(stmt) ||
-          ts.isForInStatement(stmt) ||
-          ts.isForOfStatement(stmt) ||
-          ts.isWhileStatement(stmt) ||
-          ts.isDoStatement(stmt)) &&
-        ts.isBlock(stmt.statement)
-      ) {
-        collectThisAssignments(stmt.statement.statements);
-      }
-    }
-  }
-  collectThisAssignments(body.statements);
-
-  // Empty constructors (no this.prop assignments) — create an empty struct.
-  // Many test262 tests define `var Con = function() {}; new Con()` to test
-  // prototype-based inheritance. We emit a minimal struct + constructor.
-
-  // Widen non-null ref fields to ref_null so struct.new can use ref.null defaults
-  for (const field of fields) {
-    if (field.type.kind === "ref") {
-      field.type = {
-        kind: "ref_null",
-        typeIdx: (field.type as { typeIdx: number }).typeIdx,
-      };
-    }
-  }
-
-  // 2. Create a struct type for the function constructor
+  // 1. Derive the fnctor's field shape from the ctor body's `this.<field> = …`
+  // writes. (#2773 S1) The derivation is the SHARED single source of truth
+  // `deriveFnctorFields` (fnctor-escape-gate.ts) — extracted verbatim from the
+  // logic that used to live inline here — so the up-front reservation pass and
+  // this on-demand path produce the SAME field set/order. Empty constructors yield
+  // `[]` → a minimal struct (the `var Con = function(){}; new Con()` prototype
+  // test262 pattern). The chained-assignment + if/loop recursion and the
+  // `ref → ref_null` widening (so `struct.new` can default a ref field) live
+  // INSIDE the shared helper.
   const structName = `__fnctor_${funcName}`;
-  const structTypeIdx = ctx.mod.types.length;
-  ctx.mod.types.push({
-    kind: "struct",
-    name: structName,
-    fields,
-  });
-  ctx.structMap.set(structName, structTypeIdx);
-  ctx.typeIdxToStructName.set(structTypeIdx, structName);
-  ctx.structFields.set(structName, fields);
+
+  // 2. Reserve-or-register the struct type. (#2773 S1) When the escape gate
+  // approved this fnctor, its `$__fnctor_<Name>` slot was reserved UP-FRONT at the
+  // deterministic type-init phase (reserveFnctorStructTypes, index.ts) — its index
+  // is pass-invariant, and `structMap` / `typeIdxToStructName` / `structFields` are
+  // already populated with the SAME field shape. Trust the reserved index and pull
+  // the reserved `fields` for the struct.new init loop below — do NOT push a new
+  // type (that would re-shift every downstream typeIdx and re-introduce the
+  // hoist-vs-emit desync this slice exists to kill). Otherwise (a fnctor the gate
+  // didn't approve) keep the legacy on-demand registration as a defensive fallback.
+  let structTypeIdx = ctx.fnctorReservedTypeIdx.get(funcName);
+  let fields: FieldDef[];
+  if (structTypeIdx !== undefined) {
+    // Reserved up-front — copy the reserved field set (same FieldDef objects, same
+    // order) so the struct.new field-init loop matches the reserved type's arity.
+    fields = [...ctx.structFields.get(structName)!];
+  } else {
+    fields = deriveFnctorFields(ctx, funcDecl);
+    structTypeIdx = ctx.mod.types.length;
+    ctx.mod.types.push({
+      kind: "struct",
+      name: structName,
+      fields,
+    });
+    ctx.structMap.set(structName, structTypeIdx);
+    ctx.typeIdxToStructName.set(structTypeIdx, structName);
+    ctx.structFields.set(structName, fields);
+  }
 
   // 3. Build the constructor function
   // Constructor params match the function declaration params
@@ -3938,16 +3882,27 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
           : (s1Callee as ts.NonNullExpression).expression;
     }
     if (ts.isIdentifier(s1Callee) && !noJsHost(ctx) && resolvesToNonConstructableValue(ctx, s1Callee)) {
-      // Evaluate `f` to an externref value (the held callee).
+      // Evaluate `f` to an externref value (the held callee), stash in a local.
       const calleeTy = compileExpression(ctx, fctx, s1Callee, { kind: "externref" });
       if (calleeTy && calleeTy.kind !== "externref") {
         coerceType(ctx, fctx, calleeTy, { kind: "externref" });
       } else if (calleeTy === null) {
         fctx.body.push({ op: "ref.null.extern" });
       }
-      // argsArray — null externref (the A7 cases never reach construction; the
-      // TypeError is thrown by the IsConstructor check before args are used).
-      fctx.body.push({ op: "ref.null.extern" });
+      const calleeLocal = allocLocal(fctx, `__ctor_callee_${fctx.locals.length}`, { kind: "externref" });
+      fctx.body.push({ op: "local.set", index: calleeLocal });
+
+      // (#2745 b) Build a JS array of the call-site args. A `.bind()` result is
+      // a constructable bound function when its target is a constructor, and
+      // `new boundFn(...)` must apply the bound + call args (and forward
+      // newTarget). The non-constructable A7 cases (arrow / prototype-method /
+      // `.call`/`.apply` value) still throw at the `__construct` IsConstructor
+      // check — before the args are used — so passing real args is harmless for
+      // them and is the spec-correct evaluation order (args evaluated, then
+      // Construct). The previous null-args path silently constructed bound
+      // functions with ZERO args (test262 `15.3.4.5.2-4-*`).
+      const arrNewIdx = ensureLateImport(ctx, "__js_array_new", [], [{ kind: "externref" }]);
+      const arrPushIdx = ensureLateImport(ctx, "__js_array_push", [{ kind: "externref" }, { kind: "externref" }], []);
       const funcIdx = ensureLateImport(
         ctx,
         "__construct",
@@ -3955,14 +3910,30 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
         [{ kind: "externref" }],
       );
       flushLateImportShifts(ctx, fctx);
-      if (funcIdx !== undefined) {
-        fctx.body.push({ op: "call", funcIdx });
+      const finalArrNew = ctx.funcMap.get("__js_array_new") ?? arrNewIdx;
+      const finalArrPush = ctx.funcMap.get("__js_array_push") ?? arrPushIdx;
+      const finalConstruct = ctx.funcMap.get("__construct") ?? funcIdx;
+      if (finalArrNew !== undefined && finalArrPush !== undefined && finalConstruct !== undefined) {
+        fctx.body.push({ op: "call", funcIdx: finalArrNew });
+        const argvLocal = allocLocal(fctx, `__ctor_argv_${fctx.locals.length}`, { kind: "externref" });
+        fctx.body.push({ op: "local.set", index: argvLocal });
+        for (const arg of args) {
+          fctx.body.push({ op: "local.get", index: argvLocal });
+          const aTy = compileExpression(ctx, fctx, ts.isSpreadElement(arg) ? arg.expression : arg, {
+            kind: "externref",
+          });
+          if (aTy && aTy.kind !== "externref") {
+            coerceType(ctx, fctx, aTy, { kind: "externref" });
+          } else if (aTy === null) {
+            fctx.body.push({ op: "ref.null.extern" });
+          }
+          fctx.body.push({ op: "call", funcIdx: finalArrPush });
+        }
+        fctx.body.push({ op: "local.get", index: calleeLocal });
+        fctx.body.push({ op: "local.get", index: argvLocal });
+        fctx.body.push({ op: "call", funcIdx: finalConstruct });
         return { kind: "externref" };
       }
-      // Import unavailable (shouldn't happen in JS-host): drop callee+args and
-      // fall through to the existing unknown-ctor path below.
-      fctx.body.push({ op: "drop" });
-      fctx.body.push({ op: "drop" });
     }
 
     // (#1632b-2 / #1528a residual) `new C(args)` where `C` is a runtime FUNCTION

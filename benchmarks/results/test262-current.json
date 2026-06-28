@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-06-27T16:34:23.796Z",
-  "baseline_generated_at": "2026-06-27T16:34:23.796Z",
-  "baseline_sha": "36a2cf594c11685ccbccda38153c2e8a5eaf000f",
+  "timestamp": "2026-06-28T05:42:15.324Z",
+  "baseline_generated_at": "2026-06-28T05:42:15.324Z",
+  "baseline_sha": "1825ff085634d63dd05da3a53abfbe08225e3d71",
   "oracle_version": 1,
   "mode": {
     "target": "gc",
@@ -10,8 +10,8 @@
   },
   "summary": {
     "total": 43135,
-    "pass": 32456,
-    "fail": 10195,
+    "pass": 32659,
+    "fail": 9992,
     "compile_error": 387,
     "compile_timeout": 79,
     "skip": 18,
@@ -20,8 +20,8 @@
     "by_category": {
       "standard": {
         "total": 42049,
-        "pass": 31852,
-        "fail": 9735,
+        "pass": 32052,
+        "fail": 9535,
         "compile_error": 365,
         "compile_timeout": 79,
         "skip": 18,
@@ -31,8 +31,8 @@
       },
       "annex_b": {
         "total": 1086,
-        "pass": 604,
-        "fail": 460,
+        "pass": 607,
+        "fail": 457,
         "compile_error": 22,
         "compile_timeout": 0,
         "skip": 0,
@@ -53,8 +53,8 @@
       },
       "official": {
         "total": 43135,
-        "pass": 32456,
-        "fail": 10195,
+        "pass": 32659,
+        "fail": 9992,
         "compile_error": 387,
         "compile_timeout": 79,
         "skip": 18,
@@ -64,8 +64,8 @@
       },
       "full": {
         "total": 48117,
-        "pass": 33947,
-        "fail": 13352,
+        "pass": 34150,
+        "fail": 13149,
         "compile_error": 615,
         "compile_timeout": 80,
         "skip": 123,
@@ -77,8 +77,8 @@
   },
   "official_summary": {
     "total": 43135,
-    "pass": 32456,
-    "fail": 10195,
+    "pass": 32659,
+    "fail": 9992,
     "compile_error": 387,
     "compile_timeout": 79,
     "skip": 18,
@@ -87,8 +87,8 @@
   },
   "full_summary": {
     "total": 48117,
-    "pass": 33947,
-    "fail": 13352,
+    "pass": 34150,
+    "fail": 13149,
     "compile_error": 615,
     "compile_timeout": 80,
     "skip": 123,
@@ -97,8 +97,8 @@
   },
   "strict_summary": {
     "total": 40626,
-    "pass": 31085,
-    "fail": 9161,
+    "pass": 31288,
+    "fail": 8958,
     "compile_error": 284,
     "compile_timeout": 78,
     "skip": 18,
@@ -108,8 +108,8 @@
   "scope_summaries": {
     "annex_b": {
       "total": 1086,
-      "pass": 604,
-      "fail": 460,
+      "pass": 607,
+      "fail": 457,
       "compile_error": 22,
       "compile_timeout": 0,
       "skip": 0,
@@ -128,8 +128,8 @@
     },
     "standard": {
       "total": 42049,
-      "pass": 31852,
-      "fail": 9735,
+      "pass": 32052,
+      "fail": 9535,
       "compile_error": 365,
       "compile_timeout": 79,
       "skip": 18,
@@ -141,8 +141,8 @@
     {
       "name": "annexB/built-ins",
       "path": "annexB/built-ins",
-      "pass": 174,
-      "fail": 63,
+      "pass": 177,
+      "fail": 60,
       "compile_error": 4,
       "compile_timeout": 0,
       "skip": 0,
@@ -181,8 +181,8 @@
     {
       "name": "built-ins/Array",
       "path": "built-ins/Array",
-      "pass": 1738,
-      "fail": 1316,
+      "pass": 1737,
+      "fail": 1317,
       "compile_error": 17,
       "compile_timeout": 10,
       "skip": 0,
@@ -311,8 +311,8 @@
     {
       "name": "built-ins/Date",
       "path": "built-ins/Date",
-      "pass": 528,
-      "fail": 66,
+      "pass": 530,
+      "fail": 64,
       "compile_error": 0,
       "compile_timeout": 0,
       "skip": 0,
@@ -401,8 +401,8 @@
     {
       "name": "built-ins/Function",
       "path": "built-ins/Function",
-      "pass": 234,
-      "fail": 272,
+      "pass": 253,
+      "fail": 253,
       "compile_error": 3,
       "compile_timeout": 0,
       "skip": 0,
@@ -471,8 +471,8 @@
     {
       "name": "built-ins/Iterator",
       "path": "built-ins/Iterator",
-      "pass": 263,
-      "fail": 243,
+      "pass": 264,
+      "fail": 242,
       "compile_error": 4,
       "compile_timeout": 0,
       "skip": 0,
@@ -551,8 +551,8 @@
     {
       "name": "built-ins/Object",
       "path": "built-ins/Object",
-      "pass": 2358,
-      "fail": 1042,
+      "pass": 2359,
+      "fail": 1041,
       "compile_error": 11,
       "compile_timeout": 0,
       "skip": 0,
@@ -581,8 +581,8 @@
     {
       "name": "built-ins/Promise",
       "path": "built-ins/Promise",
-      "pass": 508,
-      "fail": 139,
+      "pass": 514,
+      "fail": 133,
       "compile_error": 3,
       "compile_timeout": 2,
       "skip": 0,
@@ -631,8 +631,8 @@
     {
       "name": "built-ins/Set",
       "path": "built-ins/Set",
-      "pass": 328,
-      "fail": 52,
+      "pass": 346,
+      "fail": 34,
       "compile_error": 3,
       "compile_timeout": 0,
       "skip": 0,
@@ -841,8 +841,8 @@
     {
       "name": "language/computed-property-names",
       "path": "language/computed-property-names",
-      "pass": 23,
-      "fail": 17,
+      "pass": 24,
+      "fail": 16,
       "compile_error": 8,
       "compile_timeout": 0,
       "skip": 0,
@@ -891,8 +891,8 @@
     {
       "name": "language/expressions",
       "path": "language/expressions",
-      "pass": 8563,
-      "fail": 2162,
+      "pass": 8609,
+      "fail": 2116,
       "compile_error": 265,
       "compile_timeout": 28,
       "skip": 18,
@@ -1051,8 +1051,8 @@
     {
       "name": "language/statements",
       "path": "language/statements",
-      "pass": 7163,
-      "fail": 2045,
+      "pass": 7270,
+      "fail": 1938,
       "compile_error": 97,
       "compile_timeout": 32,
       "skip": 0,
@@ -1080,18 +1080,18 @@
     }
   ],
   "error_categories": {
-    "assertion_fail": 7100,
+    "assertion_fail": 6922,
     "illegal_cast": 90,
     "negative_test_fail": 78,
-    "null_deref": 209,
+    "null_deref": 196,
     "oob": 39,
-    "other": 3904,
-    "promise_error": 58,
-    "range_error": 31,
-    "runtime_error": 1191,
-    "type_error": 292,
+    "other": 3905,
+    "promise_error": 51,
+    "range_error": 32,
+    "runtime_error": 1189,
+    "type_error": 293,
     "unreachable": 26,
-    "wasm_compile": 949
+    "wasm_compile": 943
   },
   "hard_errors": {},
   "skip_reasons": {

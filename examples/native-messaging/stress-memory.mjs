@@ -20,7 +20,7 @@ const WASMTIME_FLAGS = ["-W", "gc=y,function-references=y,tail-call=y,exceptions
 function usage() {
   console.log(`Usage: node examples/native-messaging/stress-memory.mjs [options]
 
-Builds examples/native-messaging/nm_js2wasm.ts, runs it under wasmtime, streams
+Builds examples/native-messaging/nm_node_fs.ts, runs it under wasmtime, streams
 <=1 MiB Native Messaging request frames into stdin, drains framed stdout, and
 samples the wasmtime child RSS.
 
@@ -28,7 +28,7 @@ Options:
   --array-elements N          Send JSON.stringify(Array(N)); default ${DEFAULT_ARRAY_ELEMENTS}
   --reported-64mib           Shortcut for --array-elements ${REPORTED_ARRAY_ELEMENTS}
   --bytes N                  Send N raw patterned bytes instead of a JSON array body
-  --wasm PATH                Use an existing nm_js2wasm.wasm instead of building
+  --wasm PATH                Use an existing nm_node_fs.wasm instead of building
   --wasmtime PATH            Runtime binary; default "wasmtime"
   --sample-ms N              RSS sample interval; default 100
   --timeout-ms N             Kill wasmtime if it runs too long; default 180000
@@ -379,11 +379,11 @@ function buildCompilerCli(repoRoot, outDir) {
 }
 
 function buildWasm(repoRoot, outDir) {
-  console.error("== Compiling examples/native-messaging/nm_js2wasm.ts --target wasi ==");
+  console.error("== Compiling examples/native-messaging/nm_node_fs.ts --target wasi ==");
   const cli = buildCompilerCli(repoRoot, outDir);
   const result = spawnSync(
     process.execPath,
-    [cli, "examples/native-messaging/nm_js2wasm.ts", "--target", "wasi", "-o", outDir, "--quiet"],
+    [cli, "examples/native-messaging/nm_node_fs.ts", "--target", "wasi", "-o", outDir, "--quiet"],
     {
       cwd: repoRoot,
       stdio: "inherit",
@@ -391,7 +391,7 @@ function buildWasm(repoRoot, outDir) {
   );
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`compiler exited with status ${result.status}`);
-  const wasm = join(outDir, "nm_js2wasm.wasm");
+  const wasm = join(outDir, "nm_node_fs.wasm");
   if (!existsSync(wasm)) throw new Error(`${wasm} was not produced`);
   return wasm;
 }
