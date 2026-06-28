@@ -51,6 +51,7 @@ import {
   collectWrittenIdentifiers,
   compileArrowAsClosure,
   compileArrowFunction,
+  getFuncSignature,
   getOrCreateFuncRefWrapperTypes,
 } from "../closures.js";
 import { popBody, pushBody } from "../context/bodies.js";
@@ -2491,6 +2492,71 @@ function isGlobalEvalIdentifier(ident: ts.Identifier, checker: ts.TypeChecker): 
 }
 
 /**
+ * (#2754) Eagerly register the funcref-wrapper closure types for every no-capture
+ * `function` DECLARATION that is referenced as a VALUE (passed as an argument,
+ * assigned, returned — anything other than a direct call/`new` callee) somewhere
+ * in the source file.
+ *
+ * Why: the inline dynamic-dispatch path (`tryEmitInlineDynamicCall`) builds its
+ * `ref.test`/`call_ref` arms from `ctx.closureInfoByTypeIdx` — the wrappers
+ * registered SO FAR. A top-level function's wrapper is otherwise registered only
+ * LAZILY, at the value site that references it (`emitFuncRefAsClosure`). When that
+ * site lives in a later-compiled function (e.g. `main` calling
+ * `runNmHost(denoRead, …)`) but the param is invoked from an earlier-compiled
+ * body (`read(tmp)` inside `readFillExact`), the dispatch sees ZERO candidates and
+ * silently lowers the call to `ref.null.extern` — the function value is never
+ * invoked. Pre-registering the wrapper TYPE here (the trampoline is still emitted
+ * lazily at the value site; `getOrCreateFuncRefWrapperTypes` is signature-cached,
+ * so both sites share one type) makes the candidate visible regardless of compile
+ * order.
+ *
+ * Idempotent (guarded by a per-module flag) and scoped to no-capture function
+ * declarations actually used as values, so it is a no-op for programs without
+ * function-valued declarations.
+ */
+function ensureFuncValueWrappersRegistered(ctx: CodegenContext, sf: ts.SourceFile): void {
+  const flag = ctx as unknown as { __funcValueWrappersRegistered?: boolean };
+  if (flag.__funcValueWrappersRegistered) return;
+  flag.__funcValueWrappersRegistered = true;
+
+  const usedAsValue = new Set<string>();
+  const visit = (node: ts.Node): void => {
+    if (ts.isIdentifier(node)) {
+      const p = node.parent;
+      const isCallee = p && ts.isCallExpression(p) && p.expression === node;
+      const isNewCallee = p && ts.isNewExpression(p) && p.expression === node;
+      const isOwnName =
+        p &&
+        (ts.isFunctionDeclaration(p) || ts.isFunctionExpression(p)) &&
+        (p as ts.FunctionLikeDeclaration).name === node;
+      if (!isCallee && !isNewCallee && !isOwnName) {
+        const sym = ctx.checker.getSymbolAtLocation(node);
+        const decl = sym?.valueDeclaration;
+        if (decl && ts.isFunctionDeclaration(decl) && decl.name) {
+          usedAsValue.add(decl.name.text);
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+
+  for (const name of usedAsValue) {
+    const funcIdx = ctx.funcMap.get(name);
+    if (funcIdx === undefined) continue;
+    // Captured functions register a CUSTOM capture-struct subtype at their value
+    // site (emitFuncRefAsClosure's capture path); the runtime value is that
+    // struct, not the bare base wrapper, so pre-registering only the base wrapper
+    // here would not match. Leave those to the lazy value-site path.
+    const caps = ctx.nestedFuncCaptures.get(name);
+    if (caps && caps.length > 0) continue;
+    const sig = getFuncSignature(ctx, funcIdx);
+    if (!sig) continue;
+    getOrCreateFuncRefWrapperTypes(ctx, sig.params, sig.results);
+  }
+}
+
+/**
  * #1063 Part B: inline dynamic-dispatch for an identifier callee whose static
  * type is `any` (externref) but which may hold a wrapped closure struct at
  * runtime (e.g. `function outer(op: any) { return function (x) { return op(x); } }`).
@@ -2533,6 +2599,23 @@ function tryEmitInlineDynamicCall(
   isKnownVariable: boolean,
 ): InnerResult | null {
   if (!isKnownVariable) return null;
+
+  // (#2754) A call on an `any`-typed value (e.g. a callable PARAMETER whose
+  // type annotation was stripped by a `bun build` / esbuild transpile) reaches
+  // this dynamic-dispatch path. The dispatch is built from the funcref-wrapper
+  // closure types registered SO FAR (`ctx.closureInfoByTypeIdx`). But a top-level
+  // `function foo(){…}` only gets its wrapper registered LAZILY at the value site
+  // that references it as a value (`runNmHost(denoRead, …)`), which is often a
+  // LATER-compiled function (e.g. `main`). So when an earlier-compiled body calls
+  // the param (`read(tmp)`), there are ZERO candidates and the call silently
+  // lowers to `ref.null.extern` — the value is never invoked (the #2754 zero-
+  // output Native-Messaging miscompile; the typed `.ts` path is unaffected because
+  // a typed funcref param emits a direct `call_ref`). Eagerly register the
+  // funcref wrappers for every no-capture function declaration referenced as a
+  // value so the dispatch sees them regardless of compile order. Idempotent +
+  // gated on a flag, so it runs once per module; a no-op for programs with no
+  // function-valued declarations (byte-neutral on the typed corpus).
+  ensureFuncValueWrappersRegistered(ctx, expr.getSourceFile());
 
   const arity = expr.arguments.length;
 

@@ -1,10 +1,11 @@
 ---
 id: 2754
 title: "Sound TS checker settings for .ts AND .js + codegen defensive-correctness where TS is deliberately unsound (#2698 track)"
-status: ready
+status: done
 created: 2026-06-27
-updated: 2026-06-27
-assignee: ""
+updated: 2026-06-28
+completed: 2026-06-28
+assignee: "ttraenkler/sendev-2754"
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -38,7 +39,24 @@ codegen can **silently miscompile**.
 OFF, so `Deno.stdin.readSync(): number | null` collapsed to `number`. The EOF
 guard `r === null` then **constant-folded to `false`** → a silent **infinite-loop
 miscompile**. #2748 force-set `strictNullChecks:true` for `.js` as a _point fix_
-(`src/checker/index.ts:680`). #2754 **generalizes** that point fix.
+(`src/checker/index.ts:680`); #2750 S1 then promoted single-file `.js` to the full
+`strict` umbrella. #2754 **generalizes** that point fix.
+
+> **UPDATE 2026-06-28 — the live transpiled-`.js` symptom CHANGED and was a
+> DIFFERENT root cause (now fixed; see "Implementation notes" at the bottom).**
+> With `strictNullChecks` already on (#2748/#2750), the reporter's bundled
+> type-stripped `nm_deno.js` / `nm_node_fs.js` no longer hang — they **emit ZERO
+> bytes and exit 0** (read/echo nothing). That is NOT the `number|null` collapse
+> (bug C). After #2778 extracted the shared `nm_sync_framing` core, the hosts
+> inject their `readSync`/`writeSync` as **function references** across the
+> `runNmHost(read, write, …)` seam. Stripping the types makes those params `any`,
+> so `read(tmp)` reaches the inline dynamic-dispatch path — whose dispatch arms are
+> built from the funcref-wrapper closure types registered _so far_. A top-level
+> `function denoRead(){}` registers its wrapper only **lazily at the value site**
+> (`main`), compiled AFTER the body that invokes the param, so the dispatch saw
+> **zero candidates** and lowered `read(tmp)` to a literal `ref.null.extern` — the
+> function value was never invoked. Fixed by pre-registering function-value
+> funcref wrappers before body codegen.
 
 **But this is TWO-pronged, not "turn on every strict flag."** TS is _deliberately_
 unsound in places no strict flag reaches (`a[OOB]` typed `T`, `as any`, JSON-as-T,
@@ -245,3 +263,57 @@ tests/equivalence.test.ts` (0 diff) + a sampled `compile()` binary-hash
   hole; S3 lands the assertion-unbox brand-check.
 - Findings feed **#2755**'s verdict (esp. the OOB result: "trust the type" is
   _already_ insufficient for index access today).
+
+## Implementation notes (2026-06-28 — transpiled-`.js` zero-output fix)
+
+This PR fixes the **concrete live bug** the reporter hit (loopdive/js2#389): a
+`bun build` / esbuild **type-stripped + bundled** `.js` of the SYNCHRONOUS
+Native-Messaging hosts (`nm_deno.ts`, `nm_node_fs.ts`) compiled clean to a pure
+WASI module, instantiated, and **echoed nothing (exit 0)** — while the direct
+`.ts` path round-trips byte-exact. (The broader Prong-1 matrix S1 already landed
+in #2750; the Prong-2 catalog slices S3–S6 remain as documented/deferred.)
+
+### Root cause (empirically pinned — NOT bug C, NOT bug B)
+
+- The `.ts` path lowers `read(tmp)` (where `read: NmRead`) to a **direct
+  `call_ref`** from the static funcref type — works.
+- The bundled type-stripped `.js` makes the seam params (`read`/`write`/`log`)
+  `any`. `read(tmp)` then reaches `tryEmitInlineDynamicCall` (`#1063`), whose
+  `ref.test`/`call_ref` dispatch arms are built from the funcref-wrapper closure
+  types in `ctx.closureInfoByTypeIdx` **registered so far**.
+- A top-level `function denoRead(){}` only registers its wrapper **lazily** at the
+  value site that passes it (`main` → `runNmHost(denoRead, …)`), which is compiled
+  _after_ `readFillExact`/`runVerbatim`. So at `read(tmp)`'s compile time there were
+  **zero candidates** → the call lowered to a literal `ref.null.extern`. `r` was
+  therefore always `null` → `if (r === null) return false` fired on the first read
+  → the host echoed nothing. (Instrumentation confirmed `closureInfoByTypeIdx`
+  empty at the call site; a runtime trace showed **zero** `fd_read`/`fd_write`
+  calls — `denoRead` was never invoked, ruling out a buffer no-op / bug B.)
+
+### Fix
+
+`src/codegen/expressions/calls.ts` — `ensureFuncValueWrappersRegistered(ctx, sf)`,
+called once (flag-guarded) from `tryEmitInlineDynamicCall`. It scans the source
+file for **no-capture `function` declarations referenced as a value** (anything
+other than a direct call/`new` callee) and pre-registers their funcref-wrapper
+closure types via `getOrCreateFuncRefWrapperTypes` (signature-cached, so the lazy
+value-site `emitFuncRefAsClosure` shares the same type; the trampoline is still
+emitted lazily there). This makes the candidate visible to the dynamic dispatch
+regardless of compile order. Captured functions are left to the lazy path (their
+runtime value is a custom capture-struct subtype, not the bare wrapper).
+
+Scoped to the `any`-typed dynamic-call path, so it is a no-op for typed `.ts`
+calls (verified byte-neutral against the closure/dynamic-dispatch suites).
+
+### Verification
+
+- `printf <frame> | wasmtime … x.js.wasm` on the reporter's exact
+  `esbuild --bundle` output: **byte-exact echo** (was empty on baseline).
+- Both hosts round-trip a 1 MiB + multi-frame stream byte-exact, matching the
+  `.ts` path (`nm_node_fs` re-chunks a >1 MiB body identically to `.ts`).
+- New CI test `tests/issue-2754-transpiled-nm-roundtrip.test.ts` (in-process
+  esbuild bundle + fd shim — runs every CI run, no `bun`/`wasmtime` needed).
+- The stale #2748 runtime tests were updated to **bundle** (post-#2778 they used
+  a transform-only strip that left `./nm_sync_framing` dangling); they pass again.
+- `.devcontainer/Dockerfile` gains a pinned arch-aware `bun` block so devs can
+  replay the reporter's `bun build` flow locally.
