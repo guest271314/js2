@@ -1,20 +1,18 @@
 ---
 name: feedback-dedicated-pr-shepherd
-description: "During an ACTIVE sprint, always spawn a dedicated standing PR-queue shepherd teammate scoped to the team's OWN PRs (reversal of the sprint-64 lead-does-it-himself rule)"
+description: "During an active sprint, always staff a dedicated standing PR-queue shepherd teammate as the PRIMARY merge-queue enqueuer, scoped to the team's OWN PRs; the lead runs the sweep itself only when none is staffed."
 metadata: 
   node_type: memory
   type: feedback
   originSessionId: 75ffdde9-6b72-447e-992f-f6b025616c19
 ---
 
-**CURRENT RULE (stakeholder, 2026-06-28):** when a sprint is on, **always spawn a
-dedicated standing PR-queue shepherd** teammate for the PRs your team opened. Spawn it
-as part of bringing a sprint up, not on-demand after PRs strand.
-
-This **reverses** the earlier sprint-64 (2026-06-19) correction that said shepherding was
-the lead's own job and a dedicated shepherd was over-delegation. The stakeholder changed
-their mind on 2026-06-28 after seeing green PRs (#2235, #2236) strand un-enqueued waiting
-on the `auto-enqueue` backstop cron — exactly the gap a standing shepherd closes.
+**RULE:** when a sprint is on, **always spawn a dedicated standing PR-queue shepherd**
+teammate for the PRs your team opened. Spawn it as part of bringing the sprint up, not
+on-demand after PRs strand. It is the **primary** enqueuer; the `auto-enqueue` cron is
+only a backstop. When no shepherd is staffed, the lead runs the sweep itself instead
+(see [[feedback_lead_shepherds_prs]]) — the queue must always have an active owner,
+because the enqueue role going unfilled between sessions is exactly what strands green PRs.
 
 **Scope: the team's OWN PRs only** — PRs this session's agents authored. Do NOT shepherd
 PRs from other parallel driver sessions (they shepherd their own); the merge queue itself

@@ -1,15 +1,15 @@
 ---
 name: feedback-lead-shepherds-prs
-description: Tech lead ALWAYS shepherds open PRs to the merge queue + merged each loop; held/failing PRs go to the TOP of the tasklist for the next dev to fix; each agent ACTIVELY enqueues its own PR the moment the required checks are green — auto-enqueue is only a backstop.
+description: When no dedicated PR-shepherd is staffed, the tech lead runs the PR sweep itself each loop (enqueue every green PR); held/failing PRs go to the TOP of the tasklist for the next dev; each agent ACTIVELY enqueues its own PR the moment required checks are green — auto-enqueue is only a backstop.
 metadata: 
   node_type: memory
   type: feedback
   originSessionId: 75ffdde9-6b72-447e-992f-f6b025616c19
 ---
 
-User directive (2026-06-22): As tech lead, ALWAYS shepherd the open PRs — sweep them every loop, enqueue every green (CLEAN, non-hold, non-draft) PR into the merge queue one-shot, and drive them to merged. The auto-enqueue cron is a BACKSTOP only, not the primary.
+The **primary** queue owner is a dedicated standing PR-shepherd (see [[feedback_dedicated_pr_shepherd]]). **When no shepherd is staffed, the tech lead runs the sweep itself** — sweep the open PRs every loop, enqueue every green (CLEAN, non-hold, non-draft) PR into the merge queue one-shot, and drive them to merged. The auto-enqueue cron is a BACKSTOP only, not the primary.
 
-**Why:** PRs were stranding un-enqueued — agents waited on CI/watchers that ended before checks settled, and the sparse ~30-min auto-enqueue cron left green PRs idle. The lead AND the authoring agent must both actively enqueue.
+**Why:** PRs strand un-enqueued whenever the queue has no active owner — agents wait on CI/watchers that end before checks settle, and the sparse ~30-min auto-enqueue cron leaves green PRs idle. So the queue always needs a live owner (shepherd, or lead as fallback), AND the authoring agent must self-enqueue its own PR.
 
 **How to apply:**
 - Each loop: `gh pr list --state open` → enqueue every CLEAN, non-`hold`, non-draft PR not already in the queue (one-shot GraphQL `enqueuePullRequest`, user PAT). NEVER re-enqueue (loop hazard, see [[project_merge_queue_requeue_cancels_run]]).
