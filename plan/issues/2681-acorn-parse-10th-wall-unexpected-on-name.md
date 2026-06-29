@@ -1,7 +1,8 @@
 ---
 id: 2681
 title: "[ARCH] acorn parse() 10th wall — identifier expression-statement throws (unexpected() on a `name` token); root cause = Parser not reconstructed (new this() in static methods), substrate-scoped"
-status: in-progress
+status: done
+completed: 2026-06-29
 assignee: ttraenkler/sendev-substrate
 sprint: current
 created: 2026-06-26
@@ -19,6 +20,14 @@ origin: "Surfaced by dev-acorn fixing #2664 (under-applied dynamic method dispat
 ---
 
 # #2681 — acorn `parse()` 10th wall: identifier path throws `unexpected()` on a `name` token
+
+> **Resolution (2026-06-29).** Resolved by the acorn Parser-reconstruction
+> substrate chain (#2264/#2272/#2275/#2301). Verified on freshly-compiled pinned
+> acorn@8.16.0 (`skipSemanticDiagnostics: true`): `parse("x")` → `ExpressionStatement`
+> and `parse("var x = 1;")` → `VariableDeclaration` (both previously threw a
+> `WebAssembly.Exception`). The identifier `name`-token wall is gone. (The next,
+> separate wall — function/arrow bodies throw `illegal cast` at
+> `__set_member_labels` — is tracked under the still-open #1712.)
 
 ## Context (the acorn dogfood chain)
 
