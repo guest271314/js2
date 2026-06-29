@@ -3990,6 +3990,15 @@ function compileCallExpression(
     // the reflective `.call`/`.apply`/`.bind` forms keep their dedicated handlers.
     {
       const mName = propAccess.name.text;
+      // Fire ONLY for the descriptor-literal mistype (the acorn getter case): the
+      // fctx `this` is dynamic (not a concrete struct ref) AND TS typed it as an
+      // `__anon` descriptor object. A genuine typed method (concrete `this`) or a
+      // static-method `this` (TS = a real `typeof C` struct, needed for static /
+      // private dispatch) is NEVER intercepted — mirrors the L5 read-side rule.
+      const tsThisName =
+        propAccess.expression.kind === ts.SyntaxKind.ThisKeyword
+          ? resolveStructName(ctx, ctx.checker.getTypeAtLocation(propAccess.expression))
+          : undefined;
       if (
         !noJsHost(ctx) &&
         propAccess.expression.kind === ts.SyntaxKind.ThisKeyword &&
@@ -3997,7 +4006,8 @@ function compileCallExpression(
         mName !== "apply" &&
         mName !== "bind" &&
         resolveThisStructName(ctx, fctx) === undefined &&
-        resolveStructName(ctx, ctx.checker.getTypeAtLocation(propAccess.expression)) !== undefined
+        tsThisName !== undefined &&
+        tsThisName.startsWith("__anon")
       ) {
         const dynThisResult = emitWrapperDynamicMethodCall(ctx, fctx, propAccess.expression, mName, expr);
         if (dynThisResult !== null) return dynThisResult;

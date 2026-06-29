@@ -216,3 +216,23 @@ oracle, `ignorePositions`) at three source states — all WAT/runtime-grounded:
   marshalled back across the host boundary, (b) booleans marshalled as i32 `0/1`. These
   are AST-marshalling concerns, orthogonal to parse correctness (the compiled parser
   builds the right tree). Recommend a dedicated `wrapExports` marshalling issue.
+
+### Predicate narrowing (post-park hardening of L5/L6)
+PR2's first merge_group run auto-parked on `check for test262 regressions` (net -8:
+cluster of `static private-accessor-name/static-private-*` + 3 flaky `top-level-await`).
+Diagnosis: the original L5 **unconditionally** returned `resolveThisStructName` for a
+`this` receiver, which forced a static method's `this.#priv` (TS `typeof C`, a genuine
+struct, but the class object is externref so `resolveThisStructName` is undefined) onto
+the dynamic path and broke brand-checked private dispatch. The exact failing test
+(`static-private-name-common`) could NOT be reproduced locally on pure L4+L5 (passes),
+and the cluster carried flaky TLA + the report's own drift-signature flag — so the park
+was most likely baseline-drift/flake. Regardless, L5/L6 were **narrowed** to the precise
+descriptor-lie case the architect identified:
+- **L5**: for a `this` receiver, (1) concrete fctx struct → use it; (2) dynamic fctx +
+  genuine non-`__anon` TS struct → KEEP the TS struct (static-method/private dispatch
+  preserved); (3) dynamic fctx + `__anon` descriptor TS type → undefined → dynamic.
+- **L6**: only fires when the fctx `this` is dynamic AND TS typed it as an `__anon`
+  descriptor. Genuine-struct and static `this` method calls are never intercepted.
+Re-verified after narrowing: acorn `return` still parses; var-descriptor accessor probe
+still 2/55; `static-private-accessor` repro returns `"get string"`. Blast radius is now
+minimal (only the runtime-getter `__anon`-`this` case).

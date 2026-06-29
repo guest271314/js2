@@ -1070,6 +1070,30 @@ export function resolveStructNameForExpr(
   if (ts.isIdentifier(bareIdent) && ctx.externrefAccessorVars.has(bareIdent.text)) {
     return undefined;
   }
+  // (#2838 L5) `this`-receiver: prefer the runtime truth over a LYING TS type, but
+  // ONLY for the descriptor-literal mistype — never for a genuine struct. Inside a
+  // runtime-installed accessor getter (`Object.defineProperties(Proto, { f:{ get:
+  // function(){ return this.flags } } })`) TS contextually types the getter's `this`
+  // as the descriptor literal object (`{configurable:boolean}` → `__anon_N`), so
+  // `resolveStructName` would lower `this.<x>` against that WRONG struct and read a
+  // default slot (the round-5/6 "getter fires but returns 0/null" bug). Precise
+  // 3-way rule:
+  //   1. fctx `this` local is a concrete struct ref → use it (the runtime truth;
+  //      AGREES with a genuine typed method, so no behavior change there).
+  //   2. fctx `this` is dynamic (externref) AND TS typed it as a real (non-`__anon`)
+  //      struct → KEEP the TS struct. This is the static-method case (`this` = the
+  //      class object, externref, but TS `typeof C` resolves a genuine struct that
+  //      private-member / static dispatch needs) — must NOT be forced dynamic.
+  //   3. fctx `this` is dynamic AND TS typed it as an `__anon` descriptor literal
+  //      (the lie) → return undefined → fully dynamic (host MOP consults the
+  //      runtime-installed accessor). This is the acorn getter case.
+  if (bareIdent.kind === ts.SyntaxKind.ThisKeyword) {
+    const fctxThis = resolveThisStructName(ctx, fctx);
+    if (fctxThis !== undefined) return fctxThis;
+    const tsName = resolveStructName(ctx, ctx.checker.getTypeAtLocation(expression));
+    if (tsName !== undefined && !tsName.startsWith("__anon")) return tsName;
+    return undefined;
+  }
   // (#2837) A member access on a chain rooted at a growable-object-literal var
   // (`o.inner` / `o.inner.get`) operates on a nested externref `$Object` →
   // force the externref host path so out-of-shape writes/reads land.
@@ -5494,10 +5518,29 @@ export function compilePropertyAccess(
   // Does NOT apply to class instances (ctx.classSet) to avoid disrupting typed field access (#856).
   {
     const structObjType = resolveWasmType(ctx, objType);
+    // (#2838 L4) Route a field-absent read on a typed function-constructor
+    // (`__fnctor_*`) or inferred anon-object (`__anon*`) struct receiver through
+    // this host-MOP / sidecar path as well — so a prototype accessor installed at
+    // runtime via `Object.defineProperties(C.prototype, …)` is consulted
+    // (`_fnctorProtoLookup` inside `__extern_get`). Previously only `!typeName`
+    // (untyped) WasmGC structs reached here; a `__fnctor_`/`__anon` typed receiver
+    // fell through to the default-`0` emit, so the runtime-installed getter never
+    // fired (the acorn `this.<accessor>` wall). This is the LAST resort — the
+    // static field fast path and the auto-register path (when the field is on the
+    // TS type) both run first, so the hot struct-field read is untouched and only
+    // genuinely-absent fields take the MOP route. Class structs stay excluded
+    // (#856 — typed field access). Gated on a JS host (the standalone path keeps
+    // its existing default; the native equivalent rides on the #1888 open-object
+    // runtime).
+    const fnctorOrAnonMop =
+      !!typeName &&
+      !ctx.classSet.has(typeName) &&
+      (typeName.startsWith("__fnctor_") || typeName.startsWith("__anon")) &&
+      !noJsHost(ctx);
     const isWasmStruct =
       (structObjType.kind === "ref" || structObjType.kind === "ref_null") &&
       (structObjType as { typeIdx: number }).typeIdx !== undefined &&
-      !typeName; // typeName is set for user-class structs handled above; skip those
+      (!typeName || fnctorOrAnonMop); // typeName set ⇒ user-class structs handled above; allow fnctor/anon (#2838 L4)
     if (isWasmStruct) {
       const getIdx856 = ensureLateImport(
         ctx,
