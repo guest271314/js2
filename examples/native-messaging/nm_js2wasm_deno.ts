@@ -50,7 +50,7 @@
 // followed by a UTF-8 JSON body, exchanged over fd 0 (stdin) / fd 1 (stdout). See
 //   https://developer.chrome.com/docs/extensions/develop/concepts/native-messaging
 
-import { runNmHost } from "./nm_js2wasm_sync_framing";
+import { runNmHost } from "./nm_js2wasm_sync_framing.ts";
 
 // ONE Deno `readSync`: fills the whole buffer it is handed and returns the count,
 // or `null` at EOF (the core treats `null` / `<= 0` as EOF).
