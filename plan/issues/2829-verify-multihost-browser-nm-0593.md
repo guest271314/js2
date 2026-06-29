@@ -1,13 +1,32 @@
 ---
 id: 2829
 title: Retest all four native-messaging hosts in Chrome on 0.59.3
-status: ready
+status: done
 sprint: current
 priority: high
 area: examples
 task_type: bug
-related: [389, 2814, 2807]
+related: [389, 2814, 2807, 2832, 2839, 2840]
 ---
+
+## Resolution (verified — all four work)
+
+Retested via `examples/native-messaging/scale-test.mjs` under real wasmtime 46
+and end-to-end on the final 0.59.5 tree. **All four hosts work**; the reporter's
+"only node_fs works" was a pre-0.59.2 build:
+
+- `nm_js2wasm_deno`, `nm_js2wasm_wasi_p1`, `nm_js2wasm_node_fs` — round-trip
+  byte-exact at 1/64/128/256 MiB, bounded memory. The `"Error communicating with
+  the native messaging host"` was the pre-#2814 verbatim echo of a single
+  >1 MiB frame (Chrome drops any host→extension message >1 MB); #2814's re-chunk
+  fixed it.
+- `nm_js2wasm_node_process` — the ~98%-memory blowup was the unbounded read side
+  (RSS ~8× frame: ~530 MB @ 64 MiB). Fixed by #2832 (read-side streaming) →
+  flat ~35 MB. The `.js` standalone compile (`__vec_from_extern` externref) was
+  fixed by #2839; the `.ts`-direct compile (`#1886`) by #2840.
+
+All shipped in 0.59.4/0.59.5. Closing as done.
+
 
 # Verify all four native-messaging hosts work in the browser on 0.59.3
 
