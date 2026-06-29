@@ -798,34 +798,37 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
     // isHoistedLetConst path below (value-slot == capture-slot). Fires only when
     // the name is currently absent from localMap (i.e. it WAS shadow-removed).
     //
-    // (#2814 narrowing) Skip the reuse when the name is captured MUTABLY by any
-    // nested function. A mutable capture is threaded through a shared ref cell
-    // (boxed), and the box re-points `localMap` regardless of which raw slot the
-    // `let` uses — so collapsing the duplicate slot buys nothing there but DOES
-    // perturb the async-CPS lowering: a block-`let` mutated inside a for-await-of
-    // (`let iterCount = 0; async function fn(){ for await(...){ iterCount++ } }`)
-    // regressed 43 `for-await-of/async-*-decl-dstr-*` tests in the merge_group
-    // because the reuse changed the slot the continuation state machine spills.
-    // The Bug-C cluster (`length` read-only) and every test262 case this PR
-    // recovers capture IMMUTABLY, so gating on mutability keeps the +win and
-    // makes every regressed (mutable-capture) test byte-identical to baseline.
+    // (#2814 narrowing) Skip the reuse when the name is captured by a CPS-lowered
+    // nested function — an `async` and/or generator function declaration. Those
+    // spill captured locals into a continuation state struct rather than reading
+    // a raw outer slot, and collapsing the block-let's duplicate slot perturbs
+    // that lowering: the full-test262 merge_group caught 43 regressions, ALL in
+    // `for-await-of/async-{func,gen}-decl-dstr-*`, where the captured loop-state
+    // vars (`nextCount`/`iterCount`/`iterator`/…) are read inside a for-await-of
+    // continuation. Crucially these are captured BOTH mutably AND immutably, so a
+    // mutability gate is insufficient — the discriminator is the *capturer* being
+    // async/generator. Plain (non-CPS) function declarations — the Bug-C cluster
+    // (sync `function f`) and the recovered for-of/for `iter-close` cases — keep
+    // the reuse. Skipping CPS captures makes every regressed test byte-identical
+    // to baseline; the async/generator cluster recovery is deferred to the
+    // architect follow-up (#2818) alongside the class-method context.
     const isLetConstDecl = !!(
       decl.parent.flags &
       (ts.NodeFlags.Let | ts.NodeFlags.Const | ts.NodeFlags.Using | ts.NodeFlags.AwaitUsing)
     );
     if (isLetConstDecl && !fctx.localMap.has(name)) {
       const preHoisted = fctx.preHoistedLetConstSlots?.get(decl);
-      let mutablyCaptured = false;
-      for (const caps of ctx.nestedFuncCaptures.values()) {
-        for (const c of caps) {
-          if (c.name === name && c.mutable) {
-            mutablyCaptured = true;
-            break;
-          }
+      let cpsCaptured = false;
+      for (const [capturerName, caps] of ctx.nestedFuncCaptures) {
+        const capturerIsCps =
+          (ctx.asyncFunctions?.has(capturerName) ?? false) || (ctx.generatorFunctions?.has(capturerName) ?? false);
+        if (!capturerIsCps) continue;
+        if (caps.some((c) => c.name === name)) {
+          cpsCaptured = true;
+          break;
         }
-        if (mutablyCaptured) break;
       }
-      if (!mutablyCaptured && preHoisted !== undefined && preHoisted.valueSlot >= fctx.params.length) {
+      if (!cpsCaptured && preHoisted !== undefined && preHoisted.valueSlot >= fctx.params.length) {
         fctx.localMap.set(name, preHoisted.valueSlot);
         if (preHoisted.flagSlot !== undefined) {
           if (!fctx.tdzFlagLocals) fctx.tdzFlagLocals = new Map();
