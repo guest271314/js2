@@ -1,5 +1,5 @@
 ---
-id: 2814
+id: 2820
 title: "Bug C: block-scoped let captured by hoisted FunctionDeclaration reads null (duplicate-local desync)"
 parent: 2669
 related: [2811, 1205, 1607, 1177]
@@ -19,7 +19,7 @@ sprint: current
 horizon: m
 ---
 
-# #2814 — Bug C: block-scoped `let` captured by a hoisted FunctionDeclaration reads null
+# #2820 — Bug C: block-scoped `let` captured by a hoisted FunctionDeclaration reads null
 
 Carved out of #2811 (parent #2669). Keystone for the remaining ~57 of the
 `ary-ptrn-rest-obj-prop-id` cluster (function-declaration / class-method
@@ -182,7 +182,7 @@ No capture-resolution change → the reverted-attempt failure mode cannot recur.
 - Controls stay green: arrow/fn-expr/var/fn-scope captures, genuine shadowing
   (`let`/param/var), nested same-name shadowing, #1607 TDZ self-ref, #1177 async
   TDZ throw.
-- `tests/issue-2814.test.ts`: bug repros + representative cluster slice + broad
+- `tests/issue-2820.test.ts`: bug repros + representative cluster slice + broad
   regression-control set.
 
 ## Scope landed here vs. carved (IMPORTANT)
@@ -218,7 +218,7 @@ captured-globals promotion ordering and is sized as its own change.
 
 ## Test Results (fresh single-file, host/gc lane)
 
-- `tests/issue-2814.test.ts` — **15/15 PASS**: 8 Bug-C repros (plain block,
+- `tests/issue-2820.test.ts` — **15/15 PASS**: 8 Bug-C repros (plain block,
   string value, try-block cluster shape, post-construction mutation,
   builtin-named `length` block-capture [A+C], `const` binding, two-fn-decls
   sharing the capture) + 7 regression controls (arrow / fn-expr / fn-scope /
@@ -241,3 +241,35 @@ captured-globals promotion ordering and is sized as its own change.
     IR/binaryen + host-bridge `__call_fn`): `ir-let-const-equivalence`,
     `issue-1690b`, `var-hoisting-scope`, `illegal-cast-closures-585`,
     `issue-1712` (23 fail both ways → my delta = 0).
+
+## merge_group regression (full-test262) + narrowing fix
+
+The first revision (unconditional reuse) was CLEAN at PR level but the
+`merge_group` full-test262 re-validation caught a **real** regression
+(`check for test262 regressions`): **net −14 (29 improvements − 43 regressions)**,
+all 43 with a **wasm-hash change** (not flake). The 43 were
+**`for-await-of/async-{func,gen}-decl-dstr-*`** (+ one `async-generator-interleaved`):
+a block-`let` captured by a hoisted **async / generator** function declaration.
+Those capturers are CPS-lowered — they spill captures into a continuation state
+struct — so collapsing the block-let's duplicate slot perturbs the state machine
+(`assertion_fail` ×42, `null_deref` ×1). The reverted-localMap-first attempt
+broke the SAME async-CPS neighborhood; both slot-axis directions touch it.
+
+**Fix — narrow the reuse:** reuse the pre-hoisted slot ONLY when the name is
+captured by ≥1 **plain (non-CPS) function declaration** AND by **zero**
+async/generator declarations (`ctx.asyncFunctions` / `ctx.generatorFunctions`).
+An UNcaptured block-let needs no reuse (the desync requires a hoisted-fn capture),
+so it is left alone too — which keeps non-Bug-C functions byte-identical to
+baseline.
+
+**Verification (local, deterministic):**
+- **42 / 43** regressed paths recompile **byte-identical to baseline** (SHA over
+  the wrapped binary) — regression eliminated by construction.
+- The 43rd (`async-generator-interleaved`, only `expected` — a const captured
+  solely by a sync fn — still reuses) was driven locally through its microtask
+  chain: **un-gated → `dereferencing a null pointer`; baseline & gated → returns
+  1, no unhandled rejection.** Causation confirmed, regression gone.
+- The **+6** sync fn-family recovery still holds (`function/dstr/…`, `dflt-…`,
+  `for-of/for …iter-close` all PASS with the gate); `tests/issue-2820.test.ts`
+  15/15. The async/generator cluster recovery is deferred to the architect
+  follow-up (#2818).

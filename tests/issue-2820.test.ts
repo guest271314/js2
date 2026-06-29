@@ -4,7 +4,7 @@ import { compile } from "../src/index.js";
 import { buildImports } from "../src/runtime.js";
 
 /**
- * #2814 (carved from #2811 / parent #2669) — Bug C: a block-scoped `let`/`const`
+ * #2820 (carved from #2811 / parent #2669) — Bug C: a block-scoped `let`/`const`
  * captured by a *hoisted FunctionDeclaration* read null.
  *
  * Root cause (duplicate-local desync):
@@ -47,7 +47,7 @@ async function run(source: string): Promise<number> {
   return (instance.exports as { test: () => number }).test();
 }
 
-describe("#2814 Bug C — block-scoped let captured by a hoisted FunctionDeclaration", () => {
+describe("#2820 Bug C — block-scoped let captured by a hoisted FunctionDeclaration", () => {
   it("plain block: `{ let s; function f(){return s;} f(); }` reads the let, not null", async () => {
     expect(
       await run(
@@ -133,7 +133,7 @@ describe("#2814 Bug C — block-scoped let captured by a hoisted FunctionDeclara
   });
 });
 
-describe("#2814 regression controls — must stay correct", () => {
+describe("#2820 regression controls — must stay correct", () => {
   it("arrow capturing a block-let (already worked via the #1177 name-scan)", async () => {
     expect(
       await run(

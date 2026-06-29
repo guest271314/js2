@@ -2,7 +2,7 @@
 id: 2818
 title: "Bug C (class-method half): block-scoped let captured by a class method reads null (captured-globals promotion ordering)"
 parent: 2669
-related: [2814, 2811, 1672]
+related: [2820, 2811, 1672]
 status: ready
 created: 2026-06-29
 priority: high
@@ -20,11 +20,11 @@ architect_spec: needed
 
 # #2818 — Bug C (class-method half): block-scoped `let` captured by a class method reads null
 
-Carved from #2814 (the function-declaration half of Bug C, fixed there) and
+Carved from #2820 (the function-declaration half of Bug C, fixed there) and
 #2811 / parent #2669. This is the **class-method context** of the
 `ary-ptrn-rest-obj-prop-id` cluster — the `meth-…` / `gen-meth-…` /
 `private-meth-…` (and their `-dflt` / `-static`) members, which dominate the
-remaining cluster fails. It is a **distinct** bug from #2814's duplicate-local
+remaining cluster fails. It is a **distinct** bug from #2820's duplicate-local
 desync.
 
 ## Reproduction (host/gc lane, single file)
@@ -44,7 +44,7 @@ Controls that PASS:
 - `let s` at **function scope** (not in a block) → "outer" (promotion fires;
   `$C_m` reads `global.get __captured_s`).
 - the same with a hoisted **function declaration** instead of a class → "outer"
-  (fixed by #2814).
+  (fixed by #2820).
 
 ## Root cause (verified)
 
@@ -74,7 +74,7 @@ WAT confirms: in the failing case `$C_m` has no `global.get`, and `$test` has no
 
 This is a **class-collection-ordering + captured-globals** interaction, in the
 delicate promotion subsystem (#1672 stale-global-sync hazards), NOT the
-duplicate-local desync. #2814's producer-side slot reuse correctly collapses the
+duplicate-local desync. #2820's producer-side slot reuse correctly collapses the
 duplicate local but does not help here because the method never attempts the
 capture.
 
@@ -106,6 +106,6 @@ async-generator methods, private methods, and the TDZ flag promotion
   (string + numeric), and the arrow-inside-method variant too.
 - The `meth-…` / `gen-meth-…` / `private-meth-…` cluster members return 1 (pass).
 - No regression in fn-scope class-method capture (#1672 / accessor-captures),
-  the #2814 function-declaration fix, or TDZ throws.
+  the #2820 function-declaration fix, or TDZ throws.
 - `tests/issue-2818.test.ts` with the repros + a class-method cluster slice +
   fn-scope-capture regression controls.
