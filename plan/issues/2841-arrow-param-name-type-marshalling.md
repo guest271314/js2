@@ -140,9 +140,13 @@ is a cached lazy wrapper, no copy).
 
 - [x] `background.js` uncapped differential: ZERO non-quirk divergences.
 - [x] arrow/expr params carry correct `name`+`type`; decl params stay correct.
-- [~] `edge.js` ZERO non-quirk: arrow-param half verified (with #2325 stacked);
-  the remaining `edge.js` non-quirk is the spurious `attributes: []` →
-  carved to **#2849** (distinct codegen bug, also blocked behind #2325).
+- [x] `edge.js` arrow/expr params: ALL cleared. With #2325 now merged to `main`,
+  edge.js parses and the uncapped differential shows **4** non-quirk
+  divergences, ALL the spurious `attributes: []` (every one of the 62 arrow/expr
+  params + all other prior divergences are gone; the 276 boolean mismatches are
+  the accepted bool-as-i32 quirk). The remaining 4 `attributes` are carved to
+  **#2849** (distinct dynamic-property type-inference codegen bug). edge.js will
+  reach 0 non-quirk once #2849 lands.
 - [x] 0 test262 regressions expected (host-marshalling, additive); full
   merge_group + standalone-floor on CI.
 
