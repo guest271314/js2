@@ -241,7 +241,7 @@ describe("#1043 — process.env.NODE_ENV compile-time substitution + DCE", () =>
         }`,
       );
       execSync(
-        `npx -y tsx ${JSON.stringify(path.resolve("src/cli.ts"))} ${JSON.stringify(inFile)} --define 'process.env.NODE_ENV="production"' --no-dts`,
+        `npx -y tsx ${JSON.stringify(path.resolve("src/cli.ts"))} ${JSON.stringify(inFile)} -o ${JSON.stringify(dir)} --define 'process.env.NODE_ENV="production"' --no-dts`,
         { cwd: process.cwd(), stdio: "pipe" },
       );
       const watFile = path.join(dir, "input.wat");
@@ -269,7 +269,7 @@ describe("#1043 — process.env.NODE_ENV compile-time substitution + DCE", () =>
         }`,
       );
       execSync(
-        `npx -y tsx ${JSON.stringify(path.resolve("src/cli.ts"))} ${JSON.stringify(inFile)} --mode production --no-dts`,
+        `npx -y tsx ${JSON.stringify(path.resolve("src/cli.ts"))} ${JSON.stringify(inFile)} -o ${JSON.stringify(dir)} --mode production --no-dts`,
         {
           cwd: process.cwd(),
           stdio: "pipe",
