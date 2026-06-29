@@ -1162,6 +1162,33 @@ export function compileObjectLiteral(
     }
   }
 
+  // (#2837) A NON-EMPTY object literal initializing a variable that the detection
+  // pre-pass (collectGrowableObjectLiterals) marked growable — i.e. it later
+  // receives an OUT-OF-SHAPE property write (direct unknown key, or a nested
+  // depth-≥2 write onto a descriptor object, the acorn
+  // `prototypeAccessors.inFunction.get = fn` idiom). Build it as an open `$Object`
+  // via the EXISTING recursive externref builder rather than a closed struct
+  // (whose unknown-field writes lower to `drop` and reads to `ref.null extern`).
+  // NOT standalone-gated: `compileObjectLiteralAsExternref` works in host mode
+  // (`__new_plain_object` + `__extern_set`), which is the mode the NM differential
+  // compiles in; the #1901 `ctx.standalone` gate above is a DECISION gate for the
+  // any-context route, not a builder limitation. Placed BEFORE the closed-struct
+  // contextType resolution so a marked var never reaches `compileObjectLiteralForStruct`.
+  // The builder recurses on nested object-literal values (literals.ts:298), so the
+  // nested descriptor objects are built growable automatically. The local typing in
+  // variables.ts makes the binding externref in lockstep. If the builder declines
+  // (methods/accessors/computed keys), fall through to the existing paths.
+  if (
+    expr.properties.length > 0 &&
+    ts.isVariableDeclaration(expr.parent) &&
+    ts.isIdentifier(expr.parent.name) &&
+    ctx.growableObjectLiteralVars.has(expr.parent.name.text)
+  ) {
+    const growableResult = compileObjectLiteralAsExternref(ctx, fctx, expr);
+    if (growableResult) return growableResult;
+    // builder declined — fall through to the struct paths below.
+  }
+
   const contextType = ctx.checker.getContextualType(expr);
   if (!contextType) {
     // #1606: `getTypeAtLocation` can crash inside TypeScript's `checkObjectLiteral`

@@ -2133,6 +2133,63 @@ function _wrapWasmClosureUnknownArity(
  * The wrapper is cached per (closure, arity), which preserves accessor
  * descriptor identity for `Object.getOwnPropertyDescriptor(...).get`.
  */
+/**
+ * (#2837) True if `val` is a raw wasm closure (a WasmGC struct the runtime can
+ * wrap into a host callable), i.e. not already a JS function. Used to detect
+ * descriptor get/set fields that need wrapping before a native
+ * `Object.defineProperties` (which rejects `[object Object]` getters/setters).
+ */
+function _isWasmClosureValue(
+  val: any,
+  callbackState?: { getExports: () => Record<string, Function> | undefined },
+): boolean {
+  if (val == null || typeof val !== "object") return false;
+  const exports = callbackState?.getExports();
+  const isClosureFn = exports?.__is_closure as ((v: any) => number) | undefined;
+  if (typeof isClosureFn === "function") {
+    try {
+      return isClosureFn(val) === 1;
+    } catch {
+      /* fall through */
+    }
+  }
+  return _isWasmStruct(val);
+}
+
+/**
+ * (#2837) True if `descsObj` carries at least one accessor descriptor whose
+ * `get`/`set` is a raw wasm closure. Such a descriptors object (e.g. a host
+ * `$Object` built by `__new_plain_object` and populated via `__extern_set` — the
+ * acorn `prototypeAccessors` idiom) cannot go through native
+ * `Object.defineProperties` (it throws "Getter must be a function"); it must take
+ * the manual per-key path that wraps the closures to host callables.
+ */
+function _descsHaveWasmClosureAccessor(
+  descsObj: any,
+  getField: (o: any, k: string) => any,
+  getKeys: (o: any) => (string | symbol)[],
+  callbackState?: { getExports: () => Record<string, Function> | undefined },
+): boolean {
+  if (descsObj == null || typeof descsObj !== "object") return false;
+  let keys: (string | symbol)[];
+  try {
+    keys = getKeys(descsObj);
+  } catch {
+    return false;
+  }
+  for (const key of keys) {
+    const rawDesc = getField(descsObj, key as string);
+    if (rawDesc == null || typeof rawDesc !== "object") continue;
+    if (
+      _isWasmClosureValue(getField(rawDesc, "get"), callbackState) ||
+      _isWasmClosureValue(getField(rawDesc, "set"), callbackState)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function _maybeWrapCallable(
   val: any,
   arity: number,
@@ -9658,6 +9715,25 @@ assert._isSameValue = isSameValue;
               } else {
                 Object.defineProperty(obj, key, desc);
               }
+            }
+            return obj;
+          }
+          // (#2837) A host `$Object` descsObj (built by `__new_plain_object`,
+          // populated via `__extern_set` — the acorn `prototypeAccessors` idiom)
+          // can carry accessor descriptors whose get/set are RAW wasm closures.
+          // Native `Object.defineProperties` rejects those ("Getter must be a
+          // function"). Route through the manual per-key path that wraps wasm
+          // closures to host callables (no-op for real JS functions). Gated on
+          // detection so the common host-literal path is byte-identical.
+          if (_descsHaveWasmClosureAccessor(descsObj, getField, getKeys, callbackState)) {
+            const keys = getKeys(descsObj);
+            const gathered: { key: string | symbol; desc: PropertyDescriptor }[] = [];
+            for (const key of keys) {
+              const rawDesc = getField(descsObj, key as string);
+              gathered.push({ key, desc: _toPropertyDescriptorValidate(rawDesc, getField, wrap, hasField) });
+            }
+            for (const { key, desc } of gathered) {
+              Object.defineProperty(obj, key, desc);
             }
             return obj;
           }
