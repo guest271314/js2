@@ -678,6 +678,62 @@ export function buildDenoEnvDtsForSource(source: string): string | undefined {
   return /\bDeno\b/.test(source) ? DENO_STDIO_DECLS : undefined;
 }
 
+/** The `Deno` stdio streams js2wasm natively lowers (deno-api.ts). */
+const DENO_STDIO_STREAMS = new Set(["stdin", "stdout", "stderr"]);
+
+/** Innermost AST node whose span contains `pos` (used to inspect a diagnostic site). */
+function findNodeAtPosition(sf: ts.SourceFile, pos: number): ts.Node | undefined {
+  function recurse(node: ts.Node): ts.Node | undefined {
+    if (pos < node.getStart(sf) || pos >= node.getEnd()) return undefined;
+    return ts.forEachChild(node, recurse) ?? node;
+  }
+  return recurse(sf);
+}
+
+/**
+ * #2815 — js2wasm natively recognizes the ambient `Deno.{stdin,stdout,stderr}`
+ * synchronous-stdio surface and lowers it to WASI fd IO (src/codegen/deno-api.ts),
+ * so the checker's TS2304 "Cannot find name 'Deno'" on that recognized shape is
+ * pure noise — the same class as the `process` TS2580 that loopdive/js2#389 asked
+ * about (downgraded in #1951/#2603) and the ambient `Deno` d.ts the single-source
+ * path injects (#2684). The multi-file paths (analyzeMultiSource / analyzeFiles)
+ * don't inject that d.ts, so the warning still leaks for a real Deno program that
+ * imports a shared core (the reporter's exact case).
+ *
+ * Returns true ONLY when the flagged `Deno` identifier is the root object of a
+ * recognized `Deno.{stdin,stdout,stderr}` property access — so a genuinely-unknown
+ * reference (a bare `Deno`, or `Deno.notAThing`) still surfaces its TS2304. This
+ * is the scoped suppression #2815 asks for, NOT a blanket identifier silence.
+ */
+function isRecognizedDenoStdioNotFound(diag: ts.Diagnostic): boolean {
+  if (diag.code !== 2304) return false;
+  const text = typeof diag.messageText === "string" ? diag.messageText : diag.messageText.messageText;
+  if (!text.includes("'Deno'")) return false;
+  const sf = diag.file;
+  if (!sf || diag.start === undefined) return false;
+  const node = findNodeAtPosition(sf, diag.start);
+  if (!node || !ts.isIdentifier(node) || node.text !== "Deno") return false;
+  const parent = node.parent;
+  return (
+    parent !== undefined &&
+    ts.isPropertyAccessExpression(parent) &&
+    parent.expression === node &&
+    DENO_STDIO_STREAMS.has(parent.name.text)
+  );
+}
+
+/**
+ * #2815 — drop the benign TS2304 "Cannot find name 'Deno'" diagnostics that flag
+ * the natively-lowered `Deno.{stdin,stdout,stderr}` stdio surface. Used by the
+ * multi-file analyze paths, which (unlike the single-source path, #2684) do not
+ * inject the ambient `Deno` d.ts. Path-agnostic and precisely scoped via
+ * `isRecognizedDenoStdioNotFound`; leaves every other diagnostic untouched.
+ */
+function filterRecognizedDenoStdioDiagnostics(diagnostics: ts.Diagnostic[]): ts.Diagnostic[] {
+  if (!diagnostics.some(isRecognizedDenoStdioNotFound)) return diagnostics;
+  return diagnostics.filter((d) => !isRecognizedDenoStdioNotFound(d));
+}
+
 /**
  * Parse and type-check a TS or JS source file.
  * In-memory CompilerHost – no filesystem needed.
@@ -1039,7 +1095,9 @@ export function analyzeMultiSource(
   const semanticDiagnostics = analyzeOptions?.skipSemanticDiagnostics
     ? ([] as ts.Diagnostic[])
     : program.getSemanticDiagnostics();
-  const diagnostics = [...syntacticDiagnostics, ...semanticDiagnostics];
+  // #2815 — drop the benign "Cannot find name 'Deno'" on the natively-lowered
+  // Deno stdio surface (this path injects no ambient `Deno` d.ts, unlike #2684).
+  const diagnostics = filterRecognizedDenoStdioDiagnostics([...syntacticDiagnostics, ...semanticDiagnostics]);
 
   const entrySourceFile = program.getSourceFile(normalizedEntry)!;
 
@@ -1134,7 +1192,9 @@ export function analyzeFiles(entryPath: string, analyzeOptions?: AnalyzeOptions)
   const semanticDiagnostics = analyzeOptions?.skipSemanticDiagnostics
     ? ([] as ts.Diagnostic[])
     : program.getSemanticDiagnostics();
-  const diagnostics = [...syntacticDiagnostics, ...semanticDiagnostics];
+  // #2815 — drop the benign "Cannot find name 'Deno'" on the natively-lowered
+  // Deno stdio surface (this path injects no ambient `Deno` d.ts, unlike #2684).
+  const diagnostics = filterRecognizedDenoStdioDiagnostics([...syntacticDiagnostics, ...semanticDiagnostics]);
 
   const entrySourceFile = program.getSourceFile(resolvedEntry);
   if (!entrySourceFile) {
