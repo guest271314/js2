@@ -308,7 +308,25 @@ export function analyzeLinearUint8(
         // aliases an existing buffer that is NOT linear-backed (#2045 B.3b), and
         // an init from any other expression (a returned/aliased array) is left
         // to the escape checks. Either way it stays on the GC path.
-        if (sym && isNewUint8Array(node.initializer) && isLengthCtorUint8Array(checker, node.initializer)) {
+        // #2840 — only a FUNCTION-LOCAL `new Uint8Array(...)` is linear-backable.
+        // The codegen lowering (`tryEmitLinearU8New`) allocates the `(ptr,len)`
+        // pair as locals of the function it appears in and registers them in that
+        // function's per-function `fctx.linearU8Buffers`. A MODULE-SCOPE binding
+        // (a top-level `const win = new Uint8Array(...)`) is compiled in the
+        // module-init frame: its `(ptr,len)` locals would be trapped in module-init
+        // and unreachable from every other function that references the binding
+        // (e.g. the nm_node_process state machine's `onData`/`emitFrame` helpers),
+        // AND the module-global GC storage is skipped — so the binding becomes
+        // wholly inaccessible. Seeding it linear-safe then makes a helper arg
+        // thread to a `(ptr,len)` the call site cannot supply, hitting the "not
+        // backed by linear memory" reportError (#1886). Module-scope bindings stay
+        // on the GC path (a wasm global), exactly as the `.js`/dynamic path does.
+        if (
+          sym &&
+          isNewUint8Array(node.initializer) &&
+          isLengthCtorUint8Array(checker, node.initializer) &&
+          isInsideFunction(node)
+        ) {
           safe.add(sym);
           newLocalSyms.add(sym);
         }
@@ -536,6 +554,26 @@ function canRewriteLinearParams(node: FnDecl, exported: boolean): boolean {
  */
 function isDirectCalleePosition(id: ts.Identifier): boolean {
   return ts.isCallExpression(id.parent) && id.parent.expression === id;
+}
+
+/**
+ * #2840 — true iff `node` lives inside a function body (its `(ptr,len)` linear
+ * backing would be function-locals). A binding whose nearest enclosing scope is
+ * the module (no function-like ancestor) becomes a wasm global and CANNOT be
+ * linear-backed by the current per-function codegen, so it must stay on the GC
+ * path. We treat any function-like ancestor (declaration / expression / arrow /
+ * method / accessor / constructor) as "inside a function".
+ */
+function isInsideFunction(node: ts.Node): boolean {
+  let p: ts.Node | undefined = node.parent;
+  while (p) {
+    if (ts.isFunctionDeclaration(p) || ts.isFunctionExpression(p) || ts.isArrowFunction(p)) return true;
+    if (ts.isMethodDeclaration(p) || ts.isConstructorDeclaration(p)) return true;
+    if (ts.isGetAccessorDeclaration(p) || ts.isSetAccessorDeclaration(p)) return true;
+    if (ts.isSourceFile(p)) return false;
+    p = p.parent;
+  }
+  return false;
 }
 
 /** True if this identifier is its own declaration name (not a use). */
