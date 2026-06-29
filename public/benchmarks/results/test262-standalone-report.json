@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-06-29T06:48:29.726Z",
-  "baseline_generated_at": "2026-06-29T06:48:29.726Z",
-  "baseline_sha": "f3e4f84cfdc59d6825cbf050b643dbacdba7d7b5",
+  "timestamp": "2026-06-29T06:58:38.956Z",
+  "baseline_generated_at": "2026-06-29T06:58:38.956Z",
+  "baseline_sha": "a8120dc591134529606dc7aac4ac3bacc524a318",
   "oracle_version": 1,
   "mode": {
     "target": "standalone",
@@ -1080,7 +1080,7 @@
     }
   ],
   "error_categories": {
-    "assertion_fail": 9184,
+    "assertion_fail": 9182,
     "illegal_cast": 1837,
     "negative_test_fail": 78,
     "null_deref": 389,
@@ -1088,7 +1088,7 @@
     "other": 2563,
     "promise_error": 217,
     "range_error": 16,
-    "runtime_error": 6781,
+    "runtime_error": 6783,
     "type_error": 18,
     "unreachable": 4,
     "wasm_compile": 1077
@@ -1180,8 +1180,8 @@
         },
         "error_categories": {
           "runtime_error": 2476,
-          "illegal_cast": 14,
           "wasm_compile": 70,
+          "illegal_cast": 14,
           "null_deref": 51,
           "other": 184,
           "assertion_fail": 773,
@@ -1192,12 +1192,12 @@
           "test/built-ins/Temporal/ZonedDateTime/prototype/eraYear/prop-desc.js",
           "test/built-ins/Temporal/PlainDateTime/subclass.js",
           "test/built-ins/Temporal/PlainDateTime/prototype/month/prop-desc.js",
-          "test/built-ins/Temporal/PlainMonthDay/refisoyear-undefined.js"
+          "test/built-ins/Temporal/Instant/prototype/toString/timezone-wrong-type.js"
         ],
         "sample_signatures": [
           "runtime_error:Cannot convert object to primitive value",
-          "illegal_cast:illegal cast [in __str_to_number() ← test]",
           "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: extern.convert_any[#] expected type shared anyref, found array.get of type i64 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $instance",
+          "illegal_cast:illegal cast [in __str_to_number() ← test]",
           "null_deref:L#:## dereferencing a null pointer [in test()]",
           "other:L#:## Temporal.PlainDate argument must be a string or property bag, not object"
         ]
@@ -1556,19 +1556,19 @@
         "id": "standalone-iterator-protocol",
         "issues": ["#1665", "#681", "#1718"],
         "label": "Generic iterator protocol still needs a pure-Wasm standalone path",
-        "count": 3009,
+        "count": 3011,
         "statuses": {
           "pass": 0,
-          "fail": 2325,
+          "fail": 2327,
           "compile_error": 683,
           "compile_timeout": 1,
           "skip": 0,
-          "total": 3009
+          "total": 3011
         },
         "error_categories": {
           "wasm_compile": 278,
           "assertion_fail": 1512,
-          "runtime_error": 389,
+          "runtime_error": 391,
           "other": 261,
           "illegal_cast": 492,
           "null_deref": 43,
@@ -1792,8 +1792,8 @@
         "error_categories": {
           "assertion_fail": 924,
           "other": 164,
-          "runtime_error": 355,
           "wasm_compile": 21,
+          "runtime_error": 355,
           "promise_error": 89,
           "negative_test_fail": 5,
           "illegal_cast": 2,
@@ -1803,15 +1803,15 @@
           "test/language/expressions/object/cpn-obj-lit-computed-property-name-from-multiplicative-expression-mult.js",
           "test/language/expressions/object/literal-property-name-bigint.js",
           "test/built-ins/String/fromCharCode/S15.5.3.2_A3_T2.js",
-          "test/built-ins/Object/defineProperties/15.2.3.7-5-b-247.js",
-          "test/built-ins/Object/isExtensible/15.2.3.13-2-1.js"
+          "test/built-ins/Object/create/properties-arg-to-object-bigint.js",
+          "test/built-ins/Object/defineProperties/15.2.3.7-5-b-247.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert.sameValue( o[# * #], # );",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(o[\"#\"], true, \"the property name must be the string representation of the numeric value.\");",
           "other:L#:## Codegen error: String.fromCharCode built-in static property value read is not supported in --target standalone (## / ## S6-b). Add a native built-in method closure for this pair.",
-          "runtime_error:Cannot convert object to primitive value",
-          "assertion_fail:returned # — assert ## at L#: assert(Object.isExtensible(global));"
+          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: extern.convert_any[#] expected type shared anyref, found i64.const of type i64 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $proto ex",
+          "runtime_error:Cannot convert object to primitive value"
         ]
       },
       {
@@ -2063,17 +2063,17 @@
         "id": "map-set-weak-collections",
         "issues": ["#1103"],
         "label": "Wasm-native Map/Set/Weak collection semantics",
-        "count": 27,
+        "count": 25,
         "statuses": {
           "pass": 0,
-          "fail": 23,
+          "fail": 21,
           "compile_error": 4,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 27
+          "total": 25
         },
         "error_categories": {
-          "assertion_fail": 19,
+          "assertion_fail": 17,
           "wasm_compile": 4,
           "null_deref": 2,
           "runtime_error": 1,
@@ -2297,7 +2297,7 @@
           "test/language/module-code/instn-star-props-circular.js",
           "test/language/module-code/top-level-await/syntax/early-does-not-propagate-to-fn-declaration-params.js",
           "test/language/module-code/instn-star-props-dflt-keep-indirect.js",
-          "test/language/module-code/parse-err-hoist-lex-fun.js"
+          "test/language/module-code/top-level-await/new-await-parens.js"
         ],
         "sample_signatures": [
           "other:[object WebAssembly.Exception]",
@@ -2375,8 +2375,8 @@
           "negative_test_fail:expected parse/early SyntaxError but compiled and instantiated successfully",
           "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: local.tee[#] expected type externref, found f64.convert_i32_s of type f64 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $y f64) (local",
           "assertion_fail:returned # — assert ## at L#: assert(foo.call(undefined));",
-          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: local.tee[#] expected type externref, found f64.sub of type f64 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $y f64) (local $z f64) (",
-          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: local.tee[#] expected type externref, found f64.lt of type i32 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $y f64) (local $z f64) (l"
+          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: local.tee[#] expected type externref, found f64.lt of type i32 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $y f64) (local $z f64) (l",
+          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: local.tee[#] expected type externref, found f64.sub of type f64 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $y f64) (local $z f64) ("
         ]
       },
       {

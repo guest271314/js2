@@ -97,14 +97,14 @@
   },
   "language/expressions": {
     "ES5": {
-      "pass": 2896,
-      "fail": 547,
+      "pass": 2922,
+      "fail": 521,
       "ce": 38,
       "skip": 0
     },
     "ES2015": {
-      "pass": 2088,
-      "fail": 737,
+      "pass": 2102,
+      "fail": 723,
       "ce": 50,
       "skip": 0
     },
@@ -121,8 +121,8 @@
       "skip": 0
     },
     "ES2018": {
-      "pass": 1182,
-      "fail": 186,
+      "pass": 1192,
+      "fail": 176,
       "ce": 12,
       "skip": 0
     },
@@ -151,6 +151,14 @@
       "skip": 0
     }
   },
+  "built-ins/ArrayIteratorPrototype": {
+    "ES2015": {
+      "pass": 17,
+      "fail": 10,
+      "ce": 0,
+      "skip": 0
+    }
+  },
   "annexB/language": {
     "ES5": {
       "pass": 406,
@@ -167,14 +175,6 @@
     "ES2026": {
       "pass": 13,
       "fail": 13,
-      "ce": 0,
-      "skip": 0
-    }
-  },
-  "built-ins/ArrayIteratorPrototype": {
-    "ES2015": {
-      "pass": 17,
-      "fail": 10,
       "ce": 0,
       "skip": 0
     }
@@ -543,14 +543,14 @@
   },
   "language/statements": {
     "ES5": {
-      "pass": 2059,
-      "fail": 515,
+      "pass": 2083,
+      "fail": 491,
       "ce": 56,
       "skip": 0
     },
     "ES2015": {
-      "pass": 2111,
-      "fail": 568,
+      "pass": 2113,
+      "fail": 566,
       "ce": 48,
       "skip": 0
     },
@@ -567,8 +567,8 @@
       "skip": 0
     },
     "ES2018": {
-      "pass": 1675,
-      "fail": 267,
+      "pass": 1741,
+      "fail": 201,
       "ce": 14,
       "skip": 0
     },
@@ -693,6 +693,20 @@
       "skip": 0
     }
   },
+  "built-ins/AsyncFromSyncIteratorPrototype": {
+    "ES5": {
+      "pass": 0,
+      "fail": 1,
+      "ce": 0,
+      "skip": 0
+    },
+    "ES2018": {
+      "pass": 23,
+      "fail": 13,
+      "ce": 1,
+      "skip": 0
+    }
+  },
   "built-ins/Number": {
     "ES5": {
       "pass": 146,
@@ -722,20 +736,6 @@
       "pass": 30,
       "fail": 0,
       "ce": 0,
-      "skip": 0
-    }
-  },
-  "built-ins/AsyncFromSyncIteratorPrototype": {
-    "ES5": {
-      "pass": 0,
-      "fail": 1,
-      "ce": 0,
-      "skip": 0
-    },
-    "ES2018": {
-      "pass": 23,
-      "fail": 13,
-      "ce": 1,
       "skip": 0
     }
   },
@@ -921,6 +921,20 @@
       "skip": 0
     }
   },
+  "language/types": {
+    "ES5": {
+      "pass": 86,
+      "fail": 19,
+      "ce": 0,
+      "skip": 0
+    },
+    "ES2015": {
+      "pass": 4,
+      "fail": 4,
+      "ce": 0,
+      "skip": 0
+    }
+  },
   "language/identifier-resolution": {
     "ES5": {
       "pass": 3,
@@ -937,20 +951,6 @@
     "ES2022": {
       "pass": 1,
       "fail": 0,
-      "ce": 0,
-      "skip": 0
-    }
-  },
-  "language/types": {
-    "ES5": {
-      "pass": 86,
-      "fail": 19,
-      "ce": 0,
-      "skip": 0
-    },
-    "ES2015": {
-      "pass": 4,
-      "fail": 4,
       "ce": 0,
       "skip": 0
     }
@@ -1091,8 +1091,8 @@
       "skip": 0
     },
     "ES2015": {
-      "pass": 47,
-      "fail": 39,
+      "pass": 48,
+      "fail": 38,
       "ce": 2,
       "skip": 0
     },
@@ -1283,40 +1283,10 @@
       "skip": 0
     }
   },
-  "built-ins/SharedArrayBuffer": {
-    "ES2017": {
-      "pass": 29,
-      "fail": 31,
-      "ce": 0,
-      "skip": 0
-    },
-    "ES2022": {
-      "pass": 23,
-      "fail": 21,
-      "ce": 0,
-      "skip": 0
-    }
-  },
   "built-ins/FinalizationRegistry": {
     "ES2021": {
       "pass": 20,
       "fail": 27,
-      "ce": 0,
-      "skip": 0
-    }
-  },
-  "built-ins/encodeURIComponent": {
-    "ES2015": {
-      "pass": 22,
-      "fail": 9,
-      "ce": 0,
-      "skip": 0
-    }
-  },
-  "language/future-reserved-words": {
-    "ES5": {
-      "pass": 54,
-      "fail": 1,
       "ce": 0,
       "skip": 0
     }
@@ -1343,6 +1313,28 @@
       "skip": 0
     }
   },
+  "built-ins/SharedArrayBuffer": {
+    "ES2017": {
+      "pass": 29,
+      "fail": 31,
+      "ce": 0,
+      "skip": 0
+    },
+    "ES2022": {
+      "pass": 23,
+      "fail": 21,
+      "ce": 0,
+      "skip": 0
+    }
+  },
+  "language/future-reserved-words": {
+    "ES5": {
+      "pass": 54,
+      "fail": 1,
+      "ce": 0,
+      "skip": 0
+    }
+  },
   "language/asi": {
     "ES5": {
       "pass": 98,
@@ -1353,6 +1345,14 @@
     "ES2015": {
       "pass": 1,
       "fail": 0,
+      "ce": 0,
+      "skip": 0
+    }
+  },
+  "built-ins/encodeURIComponent": {
+    "ES2015": {
+      "pass": 22,
+      "fail": 9,
       "ce": 0,
       "skip": 0
     }

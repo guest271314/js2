@@ -10,17 +10,17 @@
   },
   {
     "edition": "ES5",
-    "pass": 9970,
-    "fail": 2979,
+    "pass": 10020,
+    "fail": 2929,
     "ce": 137,
     "skip": 0,
     "total": 13086,
-    "pct": 76
+    "pct": 77
   },
   {
     "edition": "ES2015",
-    "pass": 11525,
-    "fail": 3699,
+    "pass": 11542,
+    "fail": 3682,
     "ce": 173,
     "skip": 0,
     "total": 15397,
@@ -46,12 +46,12 @@
   },
   {
     "edition": "ES2018",
-    "pass": 3713,
-    "fail": 510,
+    "pass": 3789,
+    "fail": 434,
     "ce": 28,
     "skip": 0,
     "total": 4251,
-    "pct": 87
+    "pct": 89
   },
   {
     "edition": "ES2019",
