@@ -13,7 +13,7 @@ function compileAndCapture(extraArgs: string): string {
   const inFile = path.join(dir, "input.ts");
   writeFileSync(inFile, `export function test(): number { return 42; }`);
   return execSync(
-    `npx -y tsx ${JSON.stringify(path.resolve("src/cli.ts"))} ${JSON.stringify(inFile)} --no-dts ${extraArgs}`,
+    `npx -y tsx ${JSON.stringify(path.resolve("src/cli.ts"))} ${JSON.stringify(inFile)} -o ${JSON.stringify(dir)} --no-dts ${extraArgs}`,
     { cwd: process.cwd(), stdio: "pipe" },
   ).toString();
 }

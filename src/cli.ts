@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 import { createRequire } from "node:module";
 import { readFileSync, writeFileSync } from "node:fs";
-import { basename, dirname, resolve } from "node:path";
+import { basename, resolve } from "node:path";
 
 declare const __JS2WASM_CLI_VERSION__: string | undefined;
 
@@ -38,7 +38,7 @@ if (args.length === 0 || args.includes("--help") || args.includes("-h")) {
 Compile a TypeScript file to WebAssembly (GC proposal).
 
 Options:
-  -o, --out <dir>   Output directory (default: same as input)
+  -o, --out <dir>   Output directory (default: the current working directory)
   --target <t>      Host/output target — the single host axis (#2736):
                       web   (default) WasmGC / JS-host browser surface (DOM
                             ambient globals in scope);
@@ -369,8 +369,14 @@ if (!emulateExplicit && !emulateNode && /['"]node:[A-Za-z0-9_./-]+['"]/.test(sou
   console.error("note: auto-enabled Node API emulation (found a `node:` import). Pass --emulate none to disable.");
 }
 
-const name = basename(absInput, ".ts");
-const dir = outDir ? resolve(outDir) : dirname(absInput);
+// #2816 — strip the source extension (not just `.ts`) so a `.js`/`.mjs`/...
+// input produces `<name>.wasm`, never `<name>.js.wasm`.
+const name = basename(absInput).replace(/\.(ts|mts|cts|js|mjs|cjs)$/i, "");
+// #2816 — default output to the CWD, not the input's directory. The examples
+// ship INSIDE the installed package, so a bare `js2wasm node_modules/.../ex.ts`
+// used to dump artifacts into `node_modules` (loopdive/js2#389). Writing to the
+// CWD keeps output in the user's working tree; `-o <dir>` still overrides.
+const dir = outDir ? resolve(outDir) : process.cwd();
 
 const compileOptions = {
   ...(optimize ? { optimize } : {}),

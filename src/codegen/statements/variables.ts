@@ -808,6 +808,64 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
                         ? { kind: "externref" as const }
                         : localTypeForDeclaration(ctx, varType, decl)));
 
+    // (#2814) Bug C: re-align a block-scoped let/const with its OWN pre-hoisted
+    // slot. `saveBlockScopedShadows` removed this name's localMap (and TDZ-flag)
+    // entry on block entry, so without this it re-allocates a FRESH slot — but a
+    // hoisted FunctionDeclaration that captured this name recorded its capture
+    // against the PRE-HOISTED slot (the hoisted-fn capture path has no name-scan
+    // fallback). The fresh slot then desyncs from the capture's slot, which stays
+    // uninitialised → the closure reads null. When the pre-pass recorded a slot
+    // for THIS exact declaration (only happens when the name had no
+    // outer/param/var shadow — genuine shadows are *skipped* by the pre-pass and
+    // never recorded), re-register it so the declaration reuses it via the
+    // isHoistedLetConst path below (value-slot == capture-slot). Fires only when
+    // the name is currently absent from localMap (i.e. it WAS shadow-removed).
+    //
+    // (#2814 narrowing) Reuse the pre-hoisted slot ONLY when the name is captured
+    // by at least one PLAIN (non-CPS) nested function declaration and by NO
+    // CPS-lowered (`async` / generator) one. Rationale:
+    //   • The Bug-C desync only manifests when a hoisted FunctionDeclaration
+    //     CAPTURES the block-let (it pins the capture to the pre-hoist slot). For
+    //     an UNcaptured block-let the reuse fixes nothing and only perturbs which
+    //     raw slot it lands in — so we don't reuse it (keeps non-Bug-C functions
+    //     byte-identical to baseline).
+    //   • A CPS capturer (async / generator) spills captures into a continuation
+    //     state struct; collapsing the duplicate slot perturbs that lowering. The
+    //     full-test262 merge_group caught 43 regressions, ALL in
+    //     `for-await-of/async-{func,gen}-decl-dstr-*`, where loop-state vars
+    //     (`nextCount`/`iterCount`/`iterator`/…) are read inside a for-await-of
+    //     continuation — captured BOTH mutably and immutably, so a mutability gate
+    //     is insufficient; the *capturer* being async/generator is the signal. If
+    //     ANY CPS function captures the name, skip the reuse (the mutable boxed
+    //     cell, when present, already threads the value correctly).
+    // Plain sync `function f` capturers — the Bug-C cluster and the recovered
+    // for-of/for `iter-close` cases — keep the reuse. The async/generator cluster
+    // recovery is deferred to the architect follow-up (#2818).
+    const isLetConstDecl = !!(
+      decl.parent.flags &
+      (ts.NodeFlags.Let | ts.NodeFlags.Const | ts.NodeFlags.Using | ts.NodeFlags.AwaitUsing)
+    );
+    if (isLetConstDecl && !fctx.localMap.has(name)) {
+      const preHoisted = fctx.preHoistedLetConstSlots?.get(decl);
+      let capturedByPlainFn = false;
+      let cpsCaptured = false;
+      for (const [capturerName, caps] of ctx.nestedFuncCaptures) {
+        if (!caps.some((c) => c.name === name)) continue;
+        if ((ctx.asyncFunctions?.has(capturerName) ?? false) || (ctx.generatorFunctions?.has(capturerName) ?? false)) {
+          cpsCaptured = true;
+          break;
+        }
+        capturedByPlainFn = true;
+      }
+      if (capturedByPlainFn && !cpsCaptured && preHoisted !== undefined && preHoisted.valueSlot >= fctx.params.length) {
+        fctx.localMap.set(name, preHoisted.valueSlot);
+        if (preHoisted.flagSlot !== undefined) {
+          if (!fctx.tdzFlagLocals) fctx.tdzFlagLocals = new Map();
+          fctx.tdzFlagLocals.set(name, preHoisted.flagSlot);
+        }
+      }
+    }
+
     // If this var/let/const was already pre-hoisted at function entry, reuse that slot.
     // For let/const: the pre-pass (hoistLetConstWithTdz) always pre-allocates a slot
     // regardless of whether a TDZ flag is also allocated, so we check only the localMap.

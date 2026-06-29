@@ -12,7 +12,7 @@ function runCli(extraArgs: string): { stdout: string; stderr: string; status: nu
   const dir = mkdtempSync(path.join(tmpdir(), "issue-1554-cli-"));
   const inFile = path.join(dir, "input.ts");
   writeFileSync(inFile, `export function test(): number { return 42; }`);
-  const cmd = `npx -y tsx ${JSON.stringify(path.resolve("src/cli.ts"))} ${JSON.stringify(inFile)} --no-dts --quiet ${extraArgs}`;
+  const cmd = `npx -y tsx ${JSON.stringify(path.resolve("src/cli.ts"))} ${JSON.stringify(inFile)} -o ${JSON.stringify(dir)} --no-dts --quiet ${extraArgs}`;
   try {
     const stdout = execSync(cmd, { cwd: process.cwd(), stdio: ["ignore", "pipe", "pipe"] }).toString();
     return { stdout, stderr: "", status: 0 };

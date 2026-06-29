@@ -110,6 +110,8 @@ describe("#2783 S3 — the removed `--link-node-shims` flag and the `--link` CLI
     const args = [
       path.resolve("src/cli.ts"),
       inFile,
+      "-o",
+      dir,
       "--target",
       "wasi",
       "--no-dts",
