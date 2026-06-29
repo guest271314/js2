@@ -1049,6 +1049,11 @@ export function resolveStructNameForExpr(
   ctx: CodegenContext,
   fctx: FunctionContext,
   expression: ts.Expression,
+  // (#2838 L5) The member being accessed off `expression`, when known. A PRIVATE
+  // identifier (`this.#x`) must keep its exact static struct resolution (brand-
+  // checked WasmGC private dispatch — the host MOP can never see it), so the L5
+  // `__anon`-`this` override is suppressed for private accesses.
+  accessedMember?: ts.MemberName,
 ): string | undefined {
   // (#1239) Variables initialised by an object literal containing get/set
   // accessor declarations are stored as externref plain JS objects. The
@@ -1069,6 +1074,52 @@ export function resolveStructNameForExpr(
   }
   if (ts.isIdentifier(bareIdent) && ctx.externrefAccessorVars.has(bareIdent.text)) {
     return undefined;
+  }
+  // (#2838 L5) `this`-receiver: override the TS type with the runtime truth ONLY
+  // for the descriptor-literal LIE — otherwise behave EXACTLY as the original path
+  // below (no behavior change for any genuine struct, class instance, or static
+  // receiver). Inside a runtime-installed accessor getter
+  // (`Object.defineProperties(Proto, { f:{ get: function(){ return this.flags } } })`)
+  // TS contextually types the getter's `this` as the descriptor literal object
+  // (`{configurable:boolean}` → `__anon_N`), so `resolveStructName` would lower
+  // `this.<x>` against that WRONG struct and read a default slot (the round-5/6
+  // "getter fires but returns 0/null" bug). When — and only when — the TS type of
+  // `this` resolves to such an `__anon` descriptor, use the fctx `this` local's
+  // actual ref type instead (a dynamic getter's local is externref →
+  // `resolveThisStructName` undefined → fully dynamic host MOP, which consults the
+  // runtime-installed accessor). For every other `this` (class instance methods,
+  // STATIC methods whose `this` is the class object, real fnctor methods) this
+  // guard does NOT trigger and the unchanged original resolution runs — critical
+  // for brand-checked private/static class-element dispatch, which must keep its
+  // exact struct resolution.
+  // (#2838 L5) `this`-receiver: override the TS type with the runtime truth ONLY
+  // for the descriptor-literal LIE on a PUBLIC member — otherwise behave EXACTLY
+  // as the original path below. Inside a runtime-installed accessor getter/setter
+  // (`Object.defineProperties(Proto, { f:{ get/set: function(){ … this.x … } } })`)
+  // TS contextually types `this` as the descriptor literal object
+  // (`{configurable:boolean}` → `__anon_N`), so `resolveStructName` would lower
+  // `this.<x>` against that WRONG struct and read/write a default slot (the
+  // round-5/6 "getter fires but returns 0/null" bug, and the setter-write analog).
+  // When the TS type of `this` resolves to such an `__anon` descriptor, use the
+  // fctx `this` local's actual ref type instead (a dynamic accessor's local is
+  // externref → `resolveThisStructName` undefined → fully dynamic host MOP). This
+  // is SUPPRESSED for a private member (`this.#x`): a static/instance method whose
+  // `this` also TS-resolves to `__anon` must keep its exact struct resolution so
+  // brand-checked private dispatch is not diverted to the host MOP (which cannot
+  // see private elements). Every non-`__anon` `this` falls through unchanged.
+  if (bareIdent.kind === ts.SyntaxKind.ThisKeyword && !(accessedMember && ts.isPrivateIdentifier(accessedMember))) {
+    const tsName = resolveStructName(ctx, ctx.checker.getTypeAtLocation(expression));
+    // Match ONLY the descriptor-literal anon struct (`__anon_<n>`), NOT an
+    // anonymous CLASS struct (`__anonClass_<n>`). A class with static private
+    // elements TS-resolves `this` to `__anonClass_0`; that is a genuine struct
+    // whose brand-checked private/static dispatch must keep its exact resolution —
+    // matching it diverted the static private setter `this.#x = v` to the host MOP
+    // (`__extern_set_strict`), the #2325 regression. Descriptor literals are
+    // `__anon_<n>` (the acorn `prototypeAccessors` getter's `this`).
+    if (tsName !== undefined && tsName.startsWith("__anon_")) {
+      return resolveThisStructName(ctx, fctx);
+    }
+    // else: fall through to the original behavior unchanged.
   }
   // (#2837) A member access on a chain rooted at a growable-object-literal var
   // (`o.inner` / `o.inner.get`) operates on a nested externref `$Object` →
@@ -4800,7 +4851,7 @@ export function compilePropertyAccess(
   }
 
   // Handle getter accessor on user-defined classes
-  const typeName = resolveStructNameForExpr(ctx, fctx, expr.expression);
+  const typeName = resolveStructNameForExpr(ctx, fctx, expr.expression, expr.name);
   if (typeName) {
     const accessorKey = `${typeName}_${propName}`;
     // (#1888 S5c / C3) Migrated struct accessor → route through the host-free
@@ -5494,10 +5545,29 @@ export function compilePropertyAccess(
   // Does NOT apply to class instances (ctx.classSet) to avoid disrupting typed field access (#856).
   {
     const structObjType = resolveWasmType(ctx, objType);
+    // (#2838 L4) Route a field-absent read on a typed function-constructor
+    // (`__fnctor_*`) or inferred anon-object (`__anon*`) struct receiver through
+    // this host-MOP / sidecar path as well — so a prototype accessor installed at
+    // runtime via `Object.defineProperties(C.prototype, …)` is consulted
+    // (`_fnctorProtoLookup` inside `__extern_get`). Previously only `!typeName`
+    // (untyped) WasmGC structs reached here; a `__fnctor_`/`__anon` typed receiver
+    // fell through to the default-`0` emit, so the runtime-installed getter never
+    // fired (the acorn `this.<accessor>` wall). This is the LAST resort — the
+    // static field fast path and the auto-register path (when the field is on the
+    // TS type) both run first, so the hot struct-field read is untouched and only
+    // genuinely-absent fields take the MOP route. Class structs stay excluded
+    // (#856 — typed field access). Gated on a JS host (the standalone path keeps
+    // its existing default; the native equivalent rides on the #1888 open-object
+    // runtime).
+    const fnctorOrAnonMop =
+      !!typeName &&
+      !ctx.classSet.has(typeName) &&
+      (typeName.startsWith("__fnctor_") || typeName.startsWith("__anon")) &&
+      !noJsHost(ctx);
     const isWasmStruct =
       (structObjType.kind === "ref" || structObjType.kind === "ref_null") &&
       (structObjType as { typeIdx: number }).typeIdx !== undefined &&
-      !typeName; // typeName is set for user-class structs handled above; skip those
+      (!typeName || fnctorOrAnonMop); // typeName set ⇒ user-class structs handled above; allow fnctor/anon (#2838 L4)
     if (isWasmStruct) {
       const getIdx856 = ensureLateImport(
         ctx,
