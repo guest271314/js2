@@ -756,7 +756,17 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
       decl.initializer !== undefined &&
       ts.isObjectLiteralExpression(decl.initializer) &&
       objectLiteralSpreadTakesHostPath(ctx, decl.initializer);
-    if (initIsAccessorLiteral || initIsHostSpreadLiteral) {
+    // (#2837) A non-empty object literal that the detection pre-pass marked
+    // growable (later out-of-shape / nested write) is built as an externref
+    // `$Object`; the local must be externref so reads/writes route through
+    // `__extern_get`/`__extern_set` (via the same `externrefAccessorVars` hook the
+    // member dispatch consults), matching the value representation.
+    const initIsGrowableObjectLiteral =
+      decl.initializer !== undefined &&
+      ts.isObjectLiteralExpression(decl.initializer) &&
+      ts.isIdentifier(decl.name) &&
+      ctx.growableObjectLiteralVars.has(decl.name.text);
+    if (initIsAccessorLiteral || initIsHostSpreadLiteral || initIsGrowableObjectLiteral) {
       ctx.externrefAccessorVars.add(name);
     }
 
@@ -775,7 +785,7 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
       ts.isIdentifier(decl.name) &&
       !proxyResultEscapesToCall(decl, decl.name.text);
     const wasmType: ValType =
-      initIsAccessorLiteral || initIsHostSpreadLiteral
+      initIsAccessorLiteral || initIsHostSpreadLiteral || initIsGrowableObjectLiteral
         ? { kind: "externref" as const }
         : isI32CoercedLocal
           ? { kind: "i32" }
@@ -952,6 +962,16 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
           // externref here is safe — and required, otherwise the Proxy externref
           // is `ref.test`-coerced into the struct slot (fails → null → trap on
           // every read). Same rationale as the accessor-literal branch above.
+          localSlot.type = wasmType;
+        } else if (initIsGrowableObjectLiteral && existingIsRef && wasmType.kind === "externref") {
+          // (#2837) A `var o = {c:1}` later written out-of-shape was pre-hoisted as
+          // the inferred closed struct, but the literal is built as an externref
+          // `$Object` (so the out-of-shape write lands). Narrow the hoisted ref slot
+          // to externref — required, otherwise the $Object is `ref.test`-coerced into
+          // the struct slot (fails → null → every read/write lost). Same rationale as
+          // the accessor-literal / Proxy branches above (hoist pass emits no init for
+          // ref-typed locals, so ref → externref is safe). The default re-type guard
+          // below treats externref as "primitive" and would refuse this narrowing.
           localSlot.type = wasmType;
         } else if (standaloneRegExpMatchArrayType !== null && existingIsExternref && newIsRef) {
           localSlot.type = wasmType;

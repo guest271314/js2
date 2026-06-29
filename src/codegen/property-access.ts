@@ -1011,6 +1011,37 @@ export function resolveStructName(ctx: CodegenContext, tsType: ts.Type): string 
 }
 
 /**
+ * (#2837) True if `expr` is a property-access chain whose ROOT identifier is a
+ * growable-object-literal var. Such a var is an externref `$Object`, so reading a
+ * member off it (`o.inner`) yields a nested externref `$Object` too — therefore a
+ * further member access (`o.inner.get = fn`, the acorn descriptor write) must ALSO
+ * route through the externref host path, not the receiver's static struct type
+ * (which would `struct.set`/`drop` the out-of-shape field). Scoped to
+ * `growableObjectLiteralVars` (not all externref vars) to keep the #2837 change
+ * from perturbing unrelated accessor/Proxy member dispatch.
+ */
+function chainRootIsGrowable(ctx: CodegenContext, expr: ts.Expression): boolean {
+  let e: ts.Expression = expr;
+  for (;;) {
+    while (
+      ts.isParenthesizedExpression(e) ||
+      ts.isAsExpression(e) ||
+      ts.isNonNullExpression(e) ||
+      ts.isSatisfiesExpression(e) ||
+      ts.isTypeAssertionExpression(e)
+    ) {
+      e = (e as ts.ParenthesizedExpression | ts.AsExpression | ts.NonNullExpression).expression;
+    }
+    if (ts.isPropertyAccessExpression(e)) {
+      e = e.expression;
+      continue;
+    }
+    break;
+  }
+  return ts.isIdentifier(e) && ctx.growableObjectLiteralVars.has(e.text);
+}
+
+/**
  * Resolve a struct name for a property access/assignment target expression,
  * with fallbacks for widened variables and `this` in function constructors.
  */
@@ -1037,6 +1068,12 @@ export function resolveStructNameForExpr(
     bareIdent = (bareIdent as ts.ParenthesizedExpression | ts.AsExpression | ts.NonNullExpression).expression;
   }
   if (ts.isIdentifier(bareIdent) && ctx.externrefAccessorVars.has(bareIdent.text)) {
+    return undefined;
+  }
+  // (#2837) A member access on a chain rooted at a growable-object-literal var
+  // (`o.inner` / `o.inner.get`) operates on a nested externref `$Object` →
+  // force the externref host path so out-of-shape writes/reads land.
+  if (chainRootIsGrowable(ctx, expression)) {
     return undefined;
   }
   const objType = ctx.checker.getTypeAtLocation(expression);
@@ -1080,6 +1117,11 @@ export function resolveEffectiveStructName(
       bare = (bare as ts.ParenthesizedExpression | ts.AsExpression | ts.NonNullExpression).expression;
     }
     if (ts.isIdentifier(bare) && ctx.externrefAccessorVars.has(bare.text)) {
+      return undefined;
+    }
+    // (#2837) member access on a chain rooted at a growable-object-literal var
+    // → nested externref `$Object`, force the host path.
+    if (chainRootIsGrowable(ctx, expression)) {
       return undefined;
     }
   }

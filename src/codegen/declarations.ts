@@ -2288,6 +2288,218 @@ export function collectEmptyObjectWidening(
   scanStatements(sourceFile.statements);
 }
 
+/**
+ * (#2837) Detection pre-pass: mark variables initialized by a NON-EMPTY object
+ * literal that later receive an OUT-OF-SHAPE property write, so `compileObjectLiteral`
+ * (literals.ts) routes them through the recursive externref `$Object` builder
+ * instead of a closed struct (whose unknown-field writes lower to `drop`).
+ *
+ * Two trigger rules (mirroring the issue's WAT-grounded isolation):
+ *   - **Direct:**  `V.k = …` where `k` is NOT a property name in `V`'s literal shape.
+ *   - **Nested (the acorn trigger):** any assignment whose LHS is a property-access
+ *     chain rooted at `V` with depth ≥ 2 (`V.a.b… = …`) — e.g.
+ *     `prototypeAccessors.inFunction.get = fn` onto the nested `{configurable:true}`
+ *     descriptor. Conservative over-approximation: a depth-≥2 write to an
+ *     already-in-shape nested field also marks `V` (it is being deep-mutated;
+ *     growable is correct, only marginally slower).
+ *
+ * Consumer-safety guard (avoids the #1897 closed-struct-consumer regression):
+ * a marked var becomes an externref `$Object`, so a consumer that requires the
+ * closed-struct representation (a `struct.get` numeric read used in arithmetic, or
+ * a pass into a CONCRETE nominal-struct-typed parameter / return / assignment)
+ * would null-deref or mis-coerce. When such a consumer is detected, do NOT mark
+ * (leave the pre-existing closed-struct lowering — the var keeps working for its
+ * struct consumers; it just retains the dropped-write bug, which is acceptable —
+ * it is not the acorn blocker). When in doubt, prefer NOT marking.
+ *
+ * Runs BEFORE collectDeclarations (alongside `collectEmptyObjectWidening`) so the
+ * variable's representation decision is made before its type is resolved.
+ */
+export function collectGrowableObjectLiterals(
+  ctx: CodegenContext,
+  checker: ts.TypeChecker,
+  sourceFile: ts.SourceFile,
+): void {
+  // A literal property name we can build onto a $Object (data prop, statically-known key).
+  function literalShapeNames(obj: ts.ObjectLiteralExpression): Set<string> | null {
+    const names = new Set<string>();
+    for (const p of obj.properties) {
+      if (ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p)) {
+        const nm = p.name;
+        if (ts.isIdentifier(nm) || ts.isStringLiteral(nm) || ts.isNumericLiteral(nm)) {
+          names.add(nm.text);
+        } else {
+          return null; // computed / symbol key — externref builder may decline; skip marking
+        }
+      } else {
+        return null; // spread / method / accessor — not a pure data literal
+      }
+    }
+    return names;
+  }
+
+  // Resolve a property-access chain's root identifier + depth. Returns null if the
+  // base is not ultimately a plain identifier (e.g. a call result).
+  function chainRoot(pae: ts.PropertyAccessExpression): { root: string; depth: number } | null {
+    let e: ts.Expression = pae;
+    let depth = 0;
+    while (ts.isPropertyAccessExpression(e)) {
+      depth++;
+      e = e.expression;
+    }
+    if (ts.isIdentifier(e)) return { root: e.text, depth };
+    return null;
+  }
+
+  // Does a contextual type at a use site REQUIRE the closed-struct representation?
+  // True only for a CONCRETE nominal struct (named own properties, not any/unknown/
+  // `object`, not a pure string-index dictionary). any/object/index-sig consumers
+  // (e.g. `Object.defineProperties`' PropertyDescriptorMap param) are SAFE.
+  function typeRequiresStruct(t: ts.Type | undefined): boolean {
+    if (!t) return false;
+    if (t.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.NonPrimitive)) return false;
+    if (t.flags & (ts.TypeFlags.StringLike | ts.TypeFlags.NumberLike | ts.TypeFlags.BooleanLike)) return false;
+    // A pure string-index dictionary (no named own props) is an open object → safe.
+    const props = t.getProperties();
+    const hasStringIndex = !!checker.getIndexInfoOfType(t, ts.IndexKind.String);
+    if (props.length === 0 && hasStringIndex) return false;
+    if (props.length === 0) return false; // empty/object-ish → safe
+    return true; // concrete shape with named props → struct consumer
+  }
+
+  function scanStatements(stmts: readonly ts.Statement[]): void {
+    for (const stmt of stmts) {
+      if (ts.isVariableStatement(stmt)) {
+        for (const decl of stmt.declarationList.declarations) {
+          if (!ts.isIdentifier(decl.name)) continue;
+          if (!decl.initializer || !ts.isObjectLiteralExpression(decl.initializer)) continue;
+          if (decl.initializer.properties.length === 0) continue; // empty handled by widening
+          const varName = decl.name.text;
+          const shape = literalShapeNames(decl.initializer);
+          if (!shape) continue; // not a pure data literal → skip (externref builder would decline)
+
+          let grows = false;
+          let poisoned = false;
+
+          const visit = (node: ts.Node): void => {
+            // Out-of-shape write rooted at varName.
+            if (
+              ts.isBinaryExpression(node) &&
+              node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+              ts.isPropertyAccessExpression(node.left)
+            ) {
+              const info = chainRoot(node.left);
+              if (info && info.root === varName) {
+                if (info.depth >= 2) {
+                  grows = true; // nested deep-mutation (the acorn descriptor case)
+                } else if (info.depth === 1 && !shape.has(node.left.name.text)) {
+                  grows = true; // direct out-of-shape field add
+                }
+              }
+            }
+            // Consumer-safety: a numeric/arithmetic read of a field off varName needs
+            // the struct `struct.get` f64 contract (#1897) → poison.
+            if (
+              ts.isBinaryExpression(node) &&
+              isArithmeticOperator(node.operatorToken.kind) &&
+              (isFieldReadOf(node.left, varName) || isFieldReadOf(node.right, varName))
+            ) {
+              poisoned = true;
+            }
+            if (
+              ts.isPrefixUnaryExpression(node) &&
+              (node.operator === ts.SyntaxKind.MinusToken || node.operator === ts.SyntaxKind.PlusToken) &&
+              isFieldReadOf(node.operand, varName)
+            ) {
+              poisoned = true;
+            }
+            // Consumer-safety: varName flows into a CONCRETE-struct-typed position
+            // (call/new argument, return, or assignment target) → poison.
+            if (ts.isIdentifier(node) && node.text === varName && isValueUseOfIdentifier(node)) {
+              if (typeRequiresStruct(checker.getContextualType(node))) {
+                poisoned = true;
+              }
+            }
+            // (#2837 regression fix) Consumer-safety: `delete V.k`, element/bracket
+            // access `V[expr]`, and `for (k in V)` lower against V's STATIC struct
+            // type (`ref.cast` to the inferred struct + `struct.set`/enumerate).
+            // Routing V to externref `$Object` would make those casts `illegal cast`
+            // (the consumers don't consult `externrefAccessorVars`). Such objects are
+            // ALREADY handled correctly by the existing dynamic-consumer machinery
+            // (they passed pre-fix), so do NOT mark them growable — leave them on the
+            // struct path, byte-identical. acorn's `prototypeAccessors` has none of
+            // these (consumed only by `Object.defineProperties`), so it stays marked.
+            if (
+              ts.isDeleteExpression(node) &&
+              ts.isPropertyAccessExpression(node.expression) &&
+              ts.isIdentifier(node.expression.expression) &&
+              node.expression.expression.text === varName
+            ) {
+              poisoned = true;
+            }
+            if (
+              ts.isElementAccessExpression(node) &&
+              ts.isIdentifier(node.expression) &&
+              node.expression.text === varName
+            ) {
+              poisoned = true;
+            }
+            if (ts.isForInStatement(node) && ts.isIdentifier(node.expression) && node.expression.text === varName) {
+              poisoned = true;
+            }
+            forEachChild(node, visit);
+          };
+          for (const s of stmts) visit(s);
+          if (grows && !poisoned) {
+            ctx.growableObjectLiteralVars.add(varName);
+          }
+        }
+      }
+      if (ts.isFunctionDeclaration(stmt) && stmt.body) {
+        scanStatements(stmt.body.statements);
+      }
+      if (ts.isTryStatement(stmt)) {
+        scanStatements(stmt.tryBlock.statements);
+        if (stmt.catchClause) scanStatements(stmt.catchClause.block.statements);
+        if (stmt.finallyBlock) scanStatements(stmt.finallyBlock.statements);
+      }
+    }
+  }
+
+  scanStatements(sourceFile.statements);
+}
+
+/** (#2837) `V.field` (depth-1 property read) where the chain root is `varName`. */
+function isFieldReadOf(expr: ts.Expression, varName: string): boolean {
+  if (!ts.isPropertyAccessExpression(expr)) return false;
+  return ts.isIdentifier(expr.expression) && expr.expression.text === varName;
+}
+
+/** (#2837) Arithmetic binary operators whose operands need the f64 struct contract. */
+function isArithmeticOperator(kind: ts.SyntaxKind): boolean {
+  return (
+    kind === ts.SyntaxKind.MinusToken ||
+    kind === ts.SyntaxKind.AsteriskToken ||
+    kind === ts.SyntaxKind.SlashToken ||
+    kind === ts.SyntaxKind.PercentToken ||
+    kind === ts.SyntaxKind.AsteriskAsteriskToken
+  );
+}
+
+/** (#2837) The identifier is used as a value (arg / return / RHS), not as an
+ * assignment target or the base of its own property-write. */
+function isValueUseOfIdentifier(id: ts.Identifier): boolean {
+  const p = id.parent;
+  if (ts.isCallExpression(p) || ts.isNewExpression(p)) {
+    return (p.arguments?.indexOf(id) ?? -1) >= 0;
+  }
+  if (ts.isReturnStatement(p)) return true;
+  if (ts.isBinaryExpression(p) && p.operatorToken.kind === ts.SyntaxKind.EqualsToken && p.right === id) {
+    return true;
+  }
+  return false;
+}
+
 /** Returns true if an Object.defineProperty descriptor ObjectLiteral is an accessor descriptor
  * with an ACTUAL function getter or setter that needs the sidecar/extern path.
  * Descriptors with `get: undefined` or `set: undefined` are NOT treated as accessor descriptors —
@@ -3770,6 +3982,18 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
    */
   function moduleGlobalWasmType(decl: ts.VariableDeclaration, varType: ts.Type): ValType {
     if (moduleInitForcesExternref(decl) && ts.isIdentifier(decl.name)) {
+      ctx.externrefAccessorVars.add(decl.name.text);
+      return { kind: "externref" };
+    }
+    // (#2837) A module-level `var V = {non-empty literal}` marked growable by the
+    // detection pre-pass (later out-of-shape / nested write, e.g. acorn's
+    // `prototypeAccessors.inFunction.get = fn`) is built as an externref `$Object`
+    // by the literals.ts routing, so the receiving GLOBAL must be externref too —
+    // else the $Object is stored into a struct-typed global, the out-of-shape /
+    // nested write is dropped, and the getter is never installed. Mirrors the
+    // accessor-literal override above and the function-local sites
+    // (statements/variables.ts).
+    if (ts.isIdentifier(decl.name) && ctx.growableObjectLiteralVars.has(decl.name.text)) {
       ctx.externrefAccessorVars.add(decl.name.text);
       return { kind: "externref" };
     }

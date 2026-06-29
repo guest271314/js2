@@ -1524,6 +1524,23 @@ export interface CodegenContext {
    */
   objectHashConsumerVars: Set<string>;
   /**
+   * (#2837) Variable names initialized by a NON-EMPTY object literal that later
+   * receives an OUT-OF-SHAPE property write (a direct `V.k=` with `k` not in the
+   * literal's static shape, or a nested depth-≥2 write `V.a.b…=` onto a nested
+   * descriptor object — the acorn `prototypeAccessors.inFunction.get = fn`
+   * idiom). A non-empty literal is otherwise lowered to a CLOSED struct whose
+   * field set is frozen at the literal shape, so such a write lowers to
+   * `drop` and the read to `ref.null extern` (the getter is never installed →
+   * `inFunction` reads 0 → every `return` throws). Membership routes the literal
+   * through the existing recursive externref `$Object` builder
+   * (`compileObjectLiteralAsExternref`) and types the local externref (via
+   * `externrefAccessorVars`), so every access goes through `__extern_get`/`set`.
+   * Populated by `collectGrowableObjectLiterals` (declarations.ts); a
+   * consumer-safety guard keeps struct-typed-consumer vars OFF this set to avoid
+   * the #1897 closed-struct-consumer regression.
+   */
+  growableObjectLiteralVars: Set<string>;
+  /**
    * (#1239) Variable names whose initializer is an object literal carrying
    * `get`/`set` accessors. Such variables are stored as plain JS host
    * objects (via `__new_plain_object` + `__defineProperty_accessor`) and

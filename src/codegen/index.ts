@@ -122,6 +122,7 @@ import {
   collectDeclarations,
   inferNumericReturnTypes,
   collectEmptyObjectWidening,
+  collectGrowableObjectLiterals,
   compileDeclarations,
   createUnifiedCollectorState,
   finalizeUnifiedCollector,
@@ -1219,6 +1220,9 @@ export function generateModule(
     // Pre-pass: detect empty object literals that get properties assigned later
     // Must run before import collectors so that widened types are known
     collectEmptyObjectWidening(ctx, ast.checker, ast.sourceFile);
+    // (#2837) Detect NON-empty object literals later written out-of-shape (incl.
+    // nested depth-2 descriptors) → route them to the externref $Object builder.
+    collectGrowableObjectLiterals(ctx, ast.checker, ast.sourceFile);
 
     // Register only the extern class imports actually used in source code
     collectUsedExternImports(ctx, ast.sourceFile);
@@ -5900,6 +5904,8 @@ export function generateMultiModule(
     // Must run before import collectors so that widened types are known
     for (const sf of multiAst.sourceFiles) {
       collectEmptyObjectWidening(ctx, multiAst.checker, sf);
+      // (#2837) see single-file path above.
+      collectGrowableObjectLiterals(ctx, multiAst.checker, sf);
     }
 
     // Single-pass collection of all source imports for each file (#592)
