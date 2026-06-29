@@ -7,6 +7,14 @@
 //   js2wasm <variant>.js --target wasi [--link node:fs]
 //   wasmtime <variant>.wasm  < framed-input  > echoed-output
 //
+// As of #2814 ALL FOUR hosts RE-CHUNK: a body larger than the per-host frame cap
+// is streamed back as a sequence of valid <=1 MiB JSON frames whose interiors,
+// reassembled by the receiver, reproduce the input — no host echoes a single
+// >1 MiB frame (the real Chrome host->extension cap). The node hosts cap at 1 MiB;
+// the raw-WASI `nm_js2wasm_wasi_p1` caps at 64 KiB (its fixed 3-page linear memory
+// has no memory.grow), still comfortably <= 1 MiB. The round-trip check (every
+// frame body <=1 MiB; reassembled interiors == input) is identical for all four.
+//
 // WHY THIS EXISTS (the #2807 coverage hole): the in-process WASI shim used by
 // `tests/native-messaging-matrix.test.ts` / `issue-2754-transpiled-nm-roundtrip`
 // bulk-copies each `fd_write` iovec in one JS array slice, so it happily "writes"
@@ -163,7 +171,9 @@ const VARIANTS = [
     bunExtra: [],
     js2wasmExtra: [],
     preload: null,
-    mode: "verbatim",
+    // Re-chunks bodies > 1 MiB into valid <=1 MiB JSON frames via the shared
+    // nm_js2wasm_sync_framing core (#2814) — formerly a verbatim echo.
+    mode: "rechunk",
   },
   {
     name: "nm_js2wasm_wasi_p1",
@@ -171,7 +181,11 @@ const VARIANTS = [
     bunExtra: ["--external", "wasi_snapshot_preview1", "--external", "wasm:memory"],
     js2wasmExtra: [],
     preload: null,
-    mode: "verbatim",
+    // Re-chunks bodies > its 64 KiB linear-memory cap into valid <=1 MiB JSON
+    // frames in raw linear memory (#2814) — formerly a verbatim echo. The raw-WASI
+    // module owns a fixed 3-page memory (no memory.grow), so its cap is 64 KiB,
+    // comfortably <= the 1 MiB browser limit the round-trip check asserts.
+    mode: "rechunk",
   },
   {
     name: "nm_js2wasm_node_fs",
@@ -269,4 +283,6 @@ if (failures > 0) {
   console.error(`\n${failures} scale check(s) FAILED.`);
   process.exit(1);
 }
-console.log("\nPASS: all four Native-Messaging variants echo byte-exact under real wasmtime at every size.");
+console.log(
+  "\nPASS: all four Native-Messaging variants re-chunk to valid <=1 MiB JSON frames under real wasmtime at every size (no host echoes a single >1 MiB frame).",
+);

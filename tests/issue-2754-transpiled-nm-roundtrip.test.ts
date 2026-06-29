@@ -196,7 +196,10 @@ async function compileStrippedJs(file: string): Promise<Uint8Array> {
 
 // =============================================================================
 describe("#2754 — bun/esbuild type-stripped+bundled sync NM hosts round-trip under WASI", () => {
-  // nm_js2wasm_deno = VERBATIM streamer: every framed message echoes back byte-for-byte.
+  // nm_js2wasm_deno re-chunks bodies > the 1 MiB browser cap (#2814); a body <= the cap
+  // (here: small + an exactly-1 MiB body) echoes back byte-for-byte. This case stays
+  // at/under the cap so the stream is a byte-exact echo, which still pins the #2754
+  // stripped-bundle round-trip.
   it("nm_js2wasm_deno: stripped .js echoes a multi-frame stream byte-exact (incl. a 1 MiB body), matching .ts", async () => {
     const [tsBin, jsBin] = await Promise.all([
       compileTs("nm_js2wasm_deno.ts"),

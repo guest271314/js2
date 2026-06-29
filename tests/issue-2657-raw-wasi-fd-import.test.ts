@@ -143,6 +143,37 @@ function frame(body: Uint8Array): Uint8Array {
   return out;
 }
 
+/** Split a framed stream back into its body frames (4-byte LE prefix + body). */
+function parseFrames(stream: Uint8Array): Uint8Array[] {
+  const frames: Uint8Array[] = [];
+  let p = 0;
+  while (p + 4 <= stream.length) {
+    const len = stream[p]! + stream[p + 1]! * 256 + stream[p + 2]! * 65536 + stream[p + 3]! * 16777216;
+    p += 4;
+    if (p + len > stream.length) break;
+    frames.push(stream.subarray(p, p + len));
+    p += len;
+  }
+  return frames;
+}
+
+/** A valid JSON-array body `[null,null,…,null]` of approximately `approx` bytes. */
+function jsonArrayBody(approx: number): Buffer {
+  const m = Math.max(1, Math.floor((approx - 6) / 5) + 1);
+  const total = 2 + 4 + 5 * (m - 1);
+  const buf = Buffer.alloc(total);
+  let p = 0;
+  buf[p++] = 0x5b; // [
+  buf.write("null", p, "ascii");
+  p += 4;
+  for (let i = 1; i < m; i++) {
+    buf.write(",null", p, "ascii");
+    p += 5;
+  }
+  buf[p++] = 0x5d; // ]
+  return buf;
+}
+
 /** A minimal raw-fd echo: read a framed message and write it back verbatim. */
 const RAW_ECHO_SRC = `
 import { fd_read, fd_write } from "wasi_snapshot_preview1";
@@ -272,17 +303,32 @@ describe("#2657 nm_js2wasm_wasi_p1.ts example — real Native-Messaging host", (
     expect(Array.from(out)).toEqual(Array.from(input));
   });
 
-  it("echoes a multi-window body (> 64 KiB streams through the fixed window)", async () => {
+  it("re-chunks a multi-window (> 64 KiB) array body into valid <=1 MiB JSON frames", async () => {
     const src = readFileSync(examplePath, "utf-8");
     const binary = await compileWasi(src, "nm_js2wasm_wasi_p1");
-    // 150 KiB body with a deterministic byte pattern incl. nulls + high bytes.
-    const n = 150 * 1024;
-    const body = new Uint8Array(n);
-    for (let i = 0; i < n; i++) body[i] = (i * 31 + (i >> 7)) & 0xff;
+    // A ~150 KiB valid JSON array body, larger than the host's 64 KiB re-chunk cap
+    // (#2814): the raw-WASI host streams it back as a sequence of valid <=1 MiB
+    // `[run]` frames whose interiors, reassembled with one comma between frames,
+    // reproduce the original array body. (The host owns a fixed 3-page memory with
+    // no memory.grow, so it caps frames at 64 KiB — comfortably <= the 1 MiB
+    // browser cap.)
+    const body = jsonArrayBody(150 * 1024);
     const input = frame(body);
     const out = await runWithFdShim(binary, input);
-    expect(out.length).toBe(input.length);
-    expect(Array.from(out)).toEqual(Array.from(input));
+    const frames = parseFrames(out);
+    // A > 64 KiB body MUST come back re-chunked into multiple <=1 MiB frames.
+    expect(frames.length, "must re-chunk into multiple frames").toBeGreaterThan(1);
+    const parts: Buffer[] = [];
+    for (let i = 0; i < frames.length; i++) {
+      const f = frames[i]!;
+      expect(f.length, "frame must be <= 1 MiB (browser cap)").toBeLessThanOrEqual(1024 * 1024);
+      expect(f[0], "frame must open with '['").toBe(0x5b);
+      expect(f[f.length - 1], "frame must close with ']'").toBe(0x5d);
+      if (i > 0) parts.push(Buffer.from([0x2c])); // ,
+      parts.push(Buffer.from(f.subarray(1, f.length - 1)));
+    }
+    const recon = Buffer.concat([Buffer.from([0x5b]), Buffer.concat(parts), Buffer.from([0x5d])]);
+    expect(Buffer.compare(recon, body), "reassembled array must equal the input").toBe(0);
   });
 
   it.runIf(wasmtimeBin)("runs under REAL wasmtime: byte-correct framed echo", async () => {
