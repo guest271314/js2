@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-06-29T03:34:18.555Z",
-  "baseline_generated_at": "2026-06-29T03:34:18.555Z",
-  "baseline_sha": "23431cbd380af7d4982771767e5f5e62edd1662b",
+  "timestamp": "2026-06-29T04:25:01.497Z",
+  "baseline_generated_at": "2026-06-29T04:25:01.497Z",
+  "baseline_sha": "5a8122c2ada23995efa7455f8c26a251093d51c3",
   "oracle_version": 1,
   "mode": {
     "target": "standalone",
@@ -10,8 +10,8 @@
   },
   "summary": {
     "total": 43136,
-    "pass": 24649,
-    "fail": 12624,
+    "pass": 24648,
+    "fail": 12625,
     "compile_error": 5839,
     "compile_timeout": 6,
     "skip": 18,
@@ -20,8 +20,8 @@
     "by_category": {
       "standard": {
         "total": 42050,
-        "pass": 24125,
-        "fail": 12193,
+        "pass": 24124,
+        "fail": 12194,
         "compile_error": 5708,
         "compile_timeout": 6,
         "skip": 18,
@@ -53,8 +53,8 @@
       },
       "official": {
         "total": 43136,
-        "pass": 24649,
-        "fail": 12624,
+        "pass": 24648,
+        "fail": 12625,
         "compile_error": 5839,
         "compile_timeout": 6,
         "skip": 18,
@@ -64,8 +64,8 @@
       },
       "full": {
         "total": 48118,
-        "pass": 25789,
-        "fail": 13642,
+        "pass": 25788,
+        "fail": 13643,
         "compile_error": 8557,
         "compile_timeout": 7,
         "skip": 123,
@@ -77,8 +77,8 @@
   },
   "official_summary": {
     "total": 43136,
-    "pass": 24649,
-    "fail": 12624,
+    "pass": 24648,
+    "fail": 12625,
     "compile_error": 5839,
     "compile_timeout": 6,
     "skip": 18,
@@ -87,8 +87,8 @@
   },
   "full_summary": {
     "total": 48118,
-    "pass": 25789,
-    "fail": 13642,
+    "pass": 25788,
+    "fail": 13643,
     "compile_error": 8557,
     "compile_timeout": 7,
     "skip": 123,
@@ -97,8 +97,8 @@
   },
   "strict_summary": {
     "total": 40627,
-    "pass": 23448,
-    "fail": 11787,
+    "pass": 23447,
+    "fail": 11788,
     "compile_error": 5368,
     "compile_timeout": 6,
     "skip": 18,
@@ -128,8 +128,8 @@
     },
     "standard": {
       "total": 42050,
-      "pass": 24125,
-      "fail": 12193,
+      "pass": 24124,
+      "fail": 12194,
       "compile_error": 5708,
       "compile_timeout": 6,
       "skip": 18,
@@ -991,8 +991,8 @@
     {
       "name": "language/module-code",
       "path": "language/module-code",
-      "pass": 449,
-      "fail": 145,
+      "pass": 448,
+      "fail": 146,
       "compile_error": 28,
       "compile_timeout": 0,
       "skip": 0,
@@ -1081,7 +1081,7 @@
   ],
   "error_categories": {
     "assertion_fail": 9184,
-    "illegal_cast": 1836,
+    "illegal_cast": 1837,
     "negative_test_fail": 78,
     "null_deref": 389,
     "oob": 36,
@@ -1101,8 +1101,8 @@
   },
   "root_cause_map": {
     "target": "standalone",
-    "total_non_pass_non_skip": 22206,
-    "classified": 22206,
+    "total_non_pass_non_skip": 22207,
+    "classified": 22207,
     "unclassified_threshold": null,
     "buckets": [
       {
@@ -1189,8 +1189,8 @@
         },
         "sample_files": [
           "test/built-ins/Temporal/Now/zonedDateTimeISO/return-value.js",
-          "test/built-ins/Temporal/PlainDateTime/subclass.js",
           "test/built-ins/Temporal/ZonedDateTime/prototype/eraYear/prop-desc.js",
+          "test/built-ins/Temporal/PlainDateTime/subclass.js",
           "test/built-ins/Temporal/PlainDateTime/prototype/month/prop-desc.js",
           "test/built-ins/Temporal/Instant/prototype/toString/timezone-wrong-type.js"
         ],
@@ -1425,23 +1425,23 @@
           "total": 424
         },
         "error_categories": {
-          "assertion_fail": 128,
           "runtime_error": 181,
+          "assertion_fail": 128,
           "other": 16,
           "illegal_cast": 49,
           "wasm_compile": 20,
           "null_deref": 30
         },
         "sample_files": [
-          "test/built-ins/RegExp/from-regexp-like-get-ctor-err.js",
           "test/built-ins/RegExp/prototype/flags/coercion-ignoreCase.js",
+          "test/built-ins/RegExp/from-regexp-like-get-ctor-err.js",
           "test/annexB/built-ins/RegExp/legacy-accessors/leftContext/this-not-regexp-constructor.js",
           "test/language/literals/regexp/S7.8.5_A2.3_T4.js",
           "test/built-ins/Proxy/has/trap-is-missing-target-is-proxy.js"
         ],
         "sample_signatures": [
-          "assertion_fail:returned # — assert ## at L#: throw new Test262Error();",
           "runtime_error:Cannot convert object to primitive value",
+          "assertion_fail:returned # — assert ## at L#: throw new Test262Error();",
           "other:L#:## Codegen error: '__get_builtin' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get/struct",
           "runtime_error:L#:## Cannot convert object to primitive value",
           "assertion_fail:returned # — assert ## at L#: assert(Reflect.has(regExpProxy, \"ignoreCase\"));"
@@ -1864,23 +1864,23 @@
         },
         "error_categories": {
           "assertion_fail": 194,
-          "runtime_error": 11,
           "other": 10,
+          "runtime_error": 11,
           "wasm_compile": 3
         },
         "sample_files": [
           "test/annexB/language/global-code/if-decl-no-else-global-skip-early-err-try.js",
           "test/annexB/language/global-code/switch-case-global-no-skip-try.js",
-          "test/annexB/language/expressions/assignmenttargettype/callexpression-as-for-of-lhs.js",
+          "test/annexB/language/global-code/switch-case-global-update.js",
           "test/annexB/language/comments/single-line-html-close-first-line-3.js",
-          "test/annexB/language/global-code/switch-case-global-update.js"
+          "test/annexB/language/expressions/assignmenttargettype/callexpression-as-for-of-lhs.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert.throws(ReferenceError, function() { f; }, 'An initialized binding is not created following evaluation');",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue( f, undefined, 'Initialized binding created prior to evaluation' );",
-          "runtime_error:L#:## Invalid left-hand side in for-in/for-of",
+          "assertion_fail:returned # — assert ## at L#: assert.sameValue(typeof f, 'function');",
           "other:L#:## ';' expected.",
-          "assertion_fail:returned # — assert ## at L#: assert.sameValue(typeof f, 'function');"
+          "runtime_error:L#:## Invalid left-hand side in for-in/for-of"
         ]
       },
       {
@@ -2276,20 +2276,20 @@
         "id": "module-semantics",
         "issues": ["#1046", "#1527"],
         "label": "Module semantics and harness export shape",
-        "count": 78,
+        "count": 79,
         "statuses": {
           "pass": 0,
-          "fail": 72,
+          "fail": 73,
           "compile_error": 6,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 78
+          "total": 79
         },
         "error_categories": {
           "other": 38,
           "assertion_fail": 18,
           "negative_test_fail": 20,
-          "illegal_cast": 1,
+          "illegal_cast": 2,
           "wasm_compile": 1
         },
         "sample_files": [
