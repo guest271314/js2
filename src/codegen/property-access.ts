@@ -2909,7 +2909,7 @@ export function compilePropertyAccess(
     // read its byteOffset / byteLength fields; for the bare vec, byteOffset = 0
     // and byteLength = vec.length (one i32 per byte ⇒ length IS the byte count).
     if (isDataView && noJsHost(ctx) && propName !== "BYTES_PER_ELEMENT") {
-      const vecTypeIdx = getOrRegisterVecType(ctx, "i32_byte", { kind: "i32" });
+      const vecTypeIdx = getOrRegisterVecType(ctx, "i32_byte", { kind: "i8" });
       const dvWinTypeIdx = getOrRegisterDvWindowType(ctx);
       const fieldIdx = propName === "byteOffset" ? 1 : 2;
       const recvType = compileExpression(ctx, fctx, expr.expression);
@@ -2972,7 +2972,7 @@ export function compilePropertyAccess(
         // (i8/i16/i32_byte), not just Uint8Array. Casting an Int32Array (i32_byte)
         // receiver to an f64 vec read the wrong field-0 → wrong byteLength.
         const storage = isBuffer
-          ? { key: "i32_byte", type: { kind: "i32" } as ValType }
+          ? { key: "i32_byte", type: { kind: "i8" } as ValType } // (#2835) packed byte buffer
           : typedArrayVecStorage(ctx, recvName!);
         const elemKey = storage.key;
         const elemType: ValType = storage.type;
@@ -3036,7 +3036,7 @@ export function compilePropertyAccess(
     const bufIsTypedArr = bufRecvName !== undefined && TYPED_ARRAY_BYTES_PER_ELEMENT[bufRecvName] !== undefined;
     const bufIsDataView = bufRecvName === "DataView";
     if (bufIsTypedArr || bufIsDataView) {
-      const byteVecTypeIdx = getOrRegisterVecType(ctx, "i32_byte", { kind: "i32" });
+      const byteVecTypeIdx = getOrRegisterVecType(ctx, "i32_byte", { kind: "i8" });
       const byteArrTypeIdx = getArrTypeIdxFromVec(ctx, byteVecTypeIdx);
       if (byteArrTypeIdx >= 0) {
         const byteLenLocal = allocLocal(fctx, `__tabuf_len_${fctx.locals.length}`, { kind: "i32" });

@@ -117,8 +117,10 @@ export function tryCompileNodeProcessCall(
   const isArrayBufferArg = argSymName === "ArrayBuffer" || argSymName === "SharedArrayBuffer";
   const elemKey: "i8_byte" | "i32_byte" | "f64" =
     noJsHost(ctx) && argSymName === "Uint8Array" ? "i8_byte" : isArrayBufferArg ? "i32_byte" : "f64";
+  // (#2835) Both `i8_byte` (Uint8Array) and `i32_byte` (ArrayBuffer byte buffer)
+  // are now packed `i8` arrays — the byte-buffer rep cut to 1 byte/element.
   const elemType: ValType =
-    elemKey === "i8_byte" ? { kind: "i8" } : elemKey === "i32_byte" ? { kind: "i32" } : { kind: "f64" };
+    elemKey === "i8_byte" ? { kind: "i8" } : elemKey === "i32_byte" ? { kind: "i8" } : { kind: "f64" };
   const vecTypeIdx = getOrRegisterVecType(ctx, elemKey, elemType);
   const argType = compileExpression(ctx, fctx, argExpr);
   flushLateImportShifts(ctx, fctx);

@@ -4427,9 +4427,10 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     }
   }
 
-  // new ArrayBuffer(byteLength) → vec struct with i32 elements (1 byte per element)
+  // new ArrayBuffer(byteLength) → vec struct with packed i8 elements (1 byte per
+  // element, (#2835) — 4× smaller than the former i32-per-byte backing)
   if (className === "ArrayBuffer") {
-    const elemType: ValType = { kind: "i32" };
+    const elemType: ValType = { kind: "i8" };
     const vecTypeIdx = getOrRegisterVecType(ctx, "i32_byte", elemType);
     const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
     const args = expr.arguments ?? [];
@@ -4481,7 +4482,7 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
 
   // new DataView(buffer) / new DataView(buffer, byteOffset) / new DataView(buffer, byteOffset, byteLength)
   if (className === "DataView") {
-    const elemType: ValType = { kind: "i32" };
+    const elemType: ValType = { kind: "i8" }; // (#2835) packed byte buffer
     const vecTypeIdx = getOrRegisterVecType(ctx, "i32_byte", elemType);
     const args = expr.arguments ?? [];
 
@@ -4938,7 +4939,7 @@ function emitTypedArrayFromByteBuffer(
   dstVecTypeIdx: number,
   dstArrTypeIdx: number,
 ): boolean {
-  const srcVecTypeIdx = getOrRegisterVecType(ctx, "i32_byte", { kind: "i32" });
+  const srcVecTypeIdx = getOrRegisterVecType(ctx, "i32_byte", { kind: "i8" }); // (#2835) packed byte buffer
   const srcArrTypeIdx = getArrTypeIdxFromVec(ctx, srcVecTypeIdx);
   if (srcArrTypeIdx < 0 || dstArrTypeIdx < 0) return false;
 
@@ -5016,7 +5017,8 @@ function emitTypedArrayFromByteBuffer(
     { op: "local.get", index: iLocal } as Instr,
     { op: "local.get", index: srcArrLocal } as Instr,
     { op: "local.get", index: iLocal } as Instr,
-    { op: "array.get", typeIdx: srcArrTypeIdx } as Instr,
+    // (#2835) packed i8 source byte → unsigned read.
+    { op: "array.get_u", typeIdx: srcArrTypeIdx } as Instr,
     { op: "i32.const", value: 0xff } as Instr,
     { op: "i32.and" } as Instr,
     ...(dstElemKind === "f64" ? ([{ op: "f64.convert_i32_u" } as Instr] as Instr[]) : []),
