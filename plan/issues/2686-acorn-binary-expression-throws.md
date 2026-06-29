@@ -1,7 +1,8 @@
 ---
 id: 2686
 title: "[ARCH] acorn parse() — binary-expression statement throws (parse(\"1 + 2 * 3;\") → WebAssembly.Exception); same root as #2681 (Parser not reconstructed), substrate-scoped"
-status: in-progress
+status: done
+completed: 2026-06-29
 assignee: ttraenkler/sendev-substrate
 sprint: current
 created: 2026-06-26
@@ -19,6 +20,14 @@ origin: "Surfaced re-verifying the acorn dogfood after #2085 fixed the 9th-wall 
 ---
 
 # #2686 — acorn `parse()`: binary-expression statement throws
+
+> **Resolution (2026-06-29).** Resolved by the acorn Parser-reconstruction
+> substrate chain (#2264/#2272/#2275/#2301) — same root as #2681. Verified on
+> freshly-compiled pinned acorn@8.16.0 (`skipSemanticDiagnostics: true`):
+> `parse("1 + 2 * 3;")` → `ExpressionStatement` (no throw), where it previously
+> threw a `WebAssembly.Exception`. The `parseExprOp` operator-precedence path now
+> runs end-to-end. (The remaining function/arrow-body wall is tracked under the
+> still-open #1712.)
 
 ## Context (the acorn dogfood chain → #1712)
 

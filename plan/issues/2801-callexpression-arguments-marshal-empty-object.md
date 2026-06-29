@@ -1,7 +1,8 @@
 ---
 id: 2801
 title: "[SENIOR-DEV ONLY] compiled-acorn CallExpression `arguments` marshals as `{}` not an array (host vec→array gap)"
-status: blocked
+status: done
+completed: 2026-06-29
 assignee: ttraenkler/unassigned
 sprint: current
 priority: high
@@ -20,6 +21,14 @@ blocks: []
 ---
 
 # #2801 — compiled-acorn CallExpression `arguments` marshals as `{}` not an array
+
+> **Resolution (2026-06-29).** Resolved by the untyped-array-representation fix
+> #2806 + #2809 (route acorn's `void 0`-pinned evolving `undefined[]` to an
+> externref vec so pushed AST-node refs survive instead of coercing to `0`).
+> Verified on freshly-compiled pinned acorn@8.16.0 (`skipSemanticDiagnostics:
+> true`): `parse("foo(bar,baz)").arguments` → `["Identifier","Identifier"]` (a
+> real JS array of nodes, no longer `{}`/`[0,0]`). The substrate enablement from
+> the #2264/#2272/#2275/#2301 chain (call-expression parsing) is also in place.
 
 **Carved out of #2794.** Compiled acorn parses a call expression to the right
 top-level shape, but the `arguments` array of the `CallExpression` node comes
