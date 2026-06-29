@@ -464,6 +464,23 @@ export interface FunctionContext {
   /** Map from let/const local variable name → local index of its i32 TDZ flag (0 = uninitialized) */
   tdzFlagLocals?: Map<string, number>;
   /**
+   * (#2814) Per-declaration record of the value (and optional TDZ-flag) slot that
+   * `walkStmtForLetConst` pre-allocated for a `let`/`const` at the *function*
+   * level. Keyed by the declaration node so it is unique to that exact binding.
+   *
+   * Used by `compileVariableStatement` to fix the duplicate-local desync (Bug C):
+   * a block-scoped `let` captured by a *hoisted FunctionDeclaration* records its
+   * capture against this pre-hoisted slot, but `saveBlockScopedShadows` then
+   * deletes the slot on block entry and the `let` re-allocates a fresh one — so
+   * the capture reads the stale (never-written) slot → null. When the slot is the
+   * block-let's OWN pre-hoisted slot (the pre-pass only allocates a name absent
+   * from `localMap` ⇒ no genuine outer/param/var shadow), the declaration reuses
+   * it instead of re-allocating, re-aligning value-slot == capture-slot.
+   * Genuine shadows are *skipped* by the pre-pass, so they are never recorded
+   * here and keep re-allocating a fresh slot (correct lexical shadowing).
+   */
+  preHoistedLetConstSlots?: Map<ts.VariableDeclaration, { valueSlot: number; flagSlot?: number }>;
+  /**
    * (#2200 Annex B B.3.3 Phase 1) Block-nested `function F` declarations whose
    * web-compat outer var-binding is *cancelled* by an intervening lexical
    * (`let`/`const`/class) shadow or a same-named parameter. Maps the function

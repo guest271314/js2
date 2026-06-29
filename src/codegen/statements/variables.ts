@@ -785,6 +785,33 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
                         ? { kind: "externref" as const }
                         : localTypeForDeclaration(ctx, varType)));
 
+    // (#2814) Bug C: re-align a block-scoped let/const with its OWN pre-hoisted
+    // slot. `saveBlockScopedShadows` removed this name's localMap (and TDZ-flag)
+    // entry on block entry, so without this it re-allocates a FRESH slot — but a
+    // hoisted FunctionDeclaration that captured this name recorded its capture
+    // against the PRE-HOISTED slot (the hoisted-fn capture path has no name-scan
+    // fallback). The fresh slot then desyncs from the capture's slot, which stays
+    // uninitialised → the closure reads null. When the pre-pass recorded a slot
+    // for THIS exact declaration (only happens when the name had no
+    // outer/param/var shadow — genuine shadows are *skipped* by the pre-pass and
+    // never recorded), re-register it so the declaration reuses it via the
+    // isHoistedLetConst path below (value-slot == capture-slot). Fires only when
+    // the name is currently absent from localMap (i.e. it WAS shadow-removed).
+    const isLetConstDecl = !!(
+      decl.parent.flags &
+      (ts.NodeFlags.Let | ts.NodeFlags.Const | ts.NodeFlags.Using | ts.NodeFlags.AwaitUsing)
+    );
+    if (isLetConstDecl && !fctx.localMap.has(name)) {
+      const preHoisted = fctx.preHoistedLetConstSlots?.get(decl);
+      if (preHoisted !== undefined && preHoisted.valueSlot >= fctx.params.length) {
+        fctx.localMap.set(name, preHoisted.valueSlot);
+        if (preHoisted.flagSlot !== undefined) {
+          if (!fctx.tdzFlagLocals) fctx.tdzFlagLocals = new Map();
+          fctx.tdzFlagLocals.set(name, preHoisted.flagSlot);
+        }
+      }
+    }
+
     // If this var/let/const was already pre-hoisted at function entry, reuse that slot.
     // For let/const: the pre-pass (hoistLetConstWithTdz) always pre-allocates a slot
     // regardless of whether a TDZ flag is also allocated, so we check only the localMap.
