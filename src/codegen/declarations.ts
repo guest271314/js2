@@ -2420,6 +2420,33 @@ export function collectGrowableObjectLiterals(
                 poisoned = true;
               }
             }
+            // (#2837 regression fix) Consumer-safety: `delete V.k`, element/bracket
+            // access `V[expr]`, and `for (k in V)` lower against V's STATIC struct
+            // type (`ref.cast` to the inferred struct + `struct.set`/enumerate).
+            // Routing V to externref `$Object` would make those casts `illegal cast`
+            // (the consumers don't consult `externrefAccessorVars`). Such objects are
+            // ALREADY handled correctly by the existing dynamic-consumer machinery
+            // (they passed pre-fix), so do NOT mark them growable — leave them on the
+            // struct path, byte-identical. acorn's `prototypeAccessors` has none of
+            // these (consumed only by `Object.defineProperties`), so it stays marked.
+            if (
+              ts.isDeleteExpression(node) &&
+              ts.isPropertyAccessExpression(node.expression) &&
+              ts.isIdentifier(node.expression.expression) &&
+              node.expression.expression.text === varName
+            ) {
+              poisoned = true;
+            }
+            if (
+              ts.isElementAccessExpression(node) &&
+              ts.isIdentifier(node.expression) &&
+              node.expression.text === varName
+            ) {
+              poisoned = true;
+            }
+            if (ts.isForInStatement(node) && ts.isIdentifier(node.expression) && node.expression.text === varName) {
+              poisoned = true;
+            }
             forEachChild(node, visit);
           };
           for (const s of stmts) visit(s);

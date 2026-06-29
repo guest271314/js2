@@ -2166,25 +2166,44 @@ function _isWasmClosureValue(
  */
 function _descsHaveWasmClosureAccessor(
   descsObj: any,
-  getField: (o: any, k: string) => any,
-  getKeys: (o: any) => (string | symbol)[],
   callbackState?: { getExports: () => Record<string, Function> | undefined },
 ): boolean {
   if (descsObj == null || typeof descsObj !== "object") return false;
-  let keys: (string | symbol)[];
+  // NON-INVOKING scan: read via `Object.getOwnPropertyDescriptor` (never fires a
+  // getter), NOT `getField` (which WOULD invoke host getters — that double-invoke
+  // perturbed `Object/defineProperties` tests with Error-object descriptors and
+  // ToPrimitive side effects, #2837 regression). Only a DATA descriptor whose
+  // stored value is a nested descriptor object with a wasm-closure get/set (our
+  // `$Object` shape, populated via `__extern_set`) qualifies; an ACCESSOR
+  // descriptor (a real host getter, e.g. the Error test's `prop`) is skipped
+  // without invocation, so arbitrary host descriptor objects take the native path
+  // unchanged.
+  let keys: string[];
   try {
-    keys = getKeys(descsObj);
+    keys = Object.getOwnPropertyNames(descsObj);
   } catch {
     return false;
   }
   for (const key of keys) {
-    const rawDesc = getField(descsObj, key as string);
+    let outer: PropertyDescriptor | undefined;
+    try {
+      outer = Object.getOwnPropertyDescriptor(descsObj, key);
+    } catch {
+      continue;
+    }
+    if (!outer || !("value" in outer)) continue; // accessor / no stored value → skip (no invoke)
+    const rawDesc = outer.value;
     if (rawDesc == null || typeof rawDesc !== "object") continue;
-    if (
-      _isWasmClosureValue(getField(rawDesc, "get"), callbackState) ||
-      _isWasmClosureValue(getField(rawDesc, "set"), callbackState)
-    ) {
-      return true;
+    for (const acc of ["get", "set"] as const) {
+      let inner: PropertyDescriptor | undefined;
+      try {
+        inner = Object.getOwnPropertyDescriptor(rawDesc, acc);
+      } catch {
+        continue;
+      }
+      if (inner && "value" in inner && _isWasmClosureValue(inner.value, callbackState)) {
+        return true;
+      }
     }
   }
   return false;
@@ -9725,7 +9744,7 @@ assert._isSameValue = isSameValue;
           // function"). Route through the manual per-key path that wraps wasm
           // closures to host callables (no-op for real JS functions). Gated on
           // detection so the common host-literal path is byte-identical.
-          if (_descsHaveWasmClosureAccessor(descsObj, getField, getKeys, callbackState)) {
+          if (_descsHaveWasmClosureAccessor(descsObj, callbackState)) {
             const keys = getKeys(descsObj);
             const gathered: { key: string | symbol; desc: PropertyDescriptor }[] = [];
             for (const key of keys) {
