@@ -57,5 +57,16 @@ jobs:
       - name: Verify wasmtime is on PATH
         run: wasmtime --version
 
+      - name: Install bun (the reporter's bundler — loopdive/js2#389)
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
       - name: Native Messaging round-trip smoke test
         run: ./examples/native-messaging/smoke-test.sh
+
+      - name: Native Messaging real-wasmtime SCALE test (all 4 variants, #2807)
+        # bun-bundles each variant the reporter's way and round-trips it under
+        # real wasmtime at 1/64/128/256 MiB. This catches the #2807 ≥128 MiB
+        # silent fd_write failure that the in-process-shim unit tests mask.
+        run: node examples/native-messaging/scale-test.mjs

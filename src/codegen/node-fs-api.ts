@@ -19,6 +19,7 @@ import { emitDataViewToWriteScratch } from "./dataview-native.js";
 import { noJsHost } from "./expressions/helpers.js";
 import { flushLateImportShifts } from "./expressions/late-imports.js";
 import {
+  ensureWasiFdWriteAllHelper,
   ensureWasiWriteAnyStringFdHelper,
   ensureWasiWriteAnyStringHelper,
   ensureWasiWriteArrayBufferHelper,
@@ -398,6 +399,19 @@ export function emitFdWriteRuntime(
     fctx.body.push({ op: "local.get", index: ptrLocal } as Instr);
     fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
     fctx.body.push({ op: "call", funcIdx: sinkIdx } as Instr);
+    return;
+  }
+  // #2807 — write via the chunked `__wasi_fd_write_all` helper so a ≥128 MiB
+  // buffer is split below wasmtime's single-iovec fd_write cap (errno 48 /
+  // silent 0-byte write otherwise). Returns total bytes written (i32), matching
+  // the inline path's stack contract. Falls back to the inline single fd_write
+  // when the helper is unavailable.
+  const writeAllIdx = ensureWasiFdWriteAllHelper(ctx);
+  if (writeAllIdx >= 0) {
+    fctx.body.push({ op: "local.get", index: fdLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: ptrLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
+    fctx.body.push({ op: "call", funcIdx: writeAllIdx } as Instr);
     return;
   }
   // iovec.base = ptr at memory[0]; iovec.len = len at memory[4].
