@@ -1,7 +1,8 @@
 ---
 id: 2838
 title: "[SENIOR-DEV ONLY] dynamic prototype-accessor dispatch on statically-typed receivers — `Object.defineProperties(Proto, {get})` getters never fire on `this.field` (acorn `return` wall)"
-status: ready
+status: in-progress
+assignee: sendev-2838
 sprint: current
 priority: high
 horizon: l
@@ -114,3 +115,28 @@ standalone-floor.**
 - Repro infra (branch `issue-2837-objrep` `.tmp/`): `bb-instr.mjs`,
   `bb-instr2.mjs` (getter-never-invoked proof), `bb-probe2.mjs` (return trigger).
 - Diagnosed after #2837 on compiled acorn@8.16.0, 2026-06-29 (sendev round 5).
+
+---
+
+## Implementation (sendev-2838, 2026-06-29) — 3-PR epic per architect round-7
+
+Driving the full 6-layer stack to acorn-`return`-parses (and on to the edge.js
+NM differential). Chunked into 3 PRs to isolate the broad L6 dispatch change.
+
+### PR1 — L3: `wasmClosureBridge` method-`this` arity fallback (this branch)
+`src/runtime.ts`, `_wrapWasmClosure` → `wasmClosureBridge` (~2009). When the
+exact `__call_fn_method_${arity}` dispatcher is ABSENT, fall back to the highest
+available `__call_fn_method_M` (M from 8 down to arity), padding args to M. The
+wasm method-dispatch arm hands each closure exactly its own declared arity, so a
+higher-M dispatch still threads `this` correctly. LAZY bridge ⇒ module-init-safe
+(resolves exports at call time, after `Object.defineProperties` runs pre-`__setExports`).
+This is the round-5/6 drafted-and-reverted fix, re-applied. **Verified
+non-regressing**: closure/accessor + class-method/dispatch suites
+(`illegal-cast-closures-585`, `issue-1712*`, `getters-setters`,
+`accessor-side-effects`, `class-method-calls`, `class-methods`,
+`computed-setter-class`, `issue-1364a`, `issue-1672`, `issue-2174`) produce
+**identical** pass/fail counts with and without the change. L3 alone does not fix
+acorn — it is the isolated prerequisite for L6.
+
+### PR2 — L4+L5: member-read host-MOP routing + `this`-truth (next)
+### PR3 — L6: `effectiveReceiverType` method-call dispatch redesign (the wall)

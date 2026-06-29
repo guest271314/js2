@@ -2016,10 +2016,40 @@ function _wrapWasmClosure(
     // dropped (JS spec for fewer/more args than declared params).
     const padded: any[] = [];
     for (let i = 0; i < arity; i++) padded.push(args[i]);
-    const methodCallFn = exports?.[`__call_fn_method_${arity}`];
-    if (typeof methodCallFn === "function" && this !== undefined && this !== globalThis) {
-      const rawThis = this !== null && typeof this === "object" ? _unwrapForHost(this) : this;
-      return methodCallFn(_isWasmStruct(rawThis) ? rawThis : this, closure, ...padded);
+    if (this !== undefined && this !== globalThis) {
+      // (#2838 L3) Method-`this` dispatch. Prefer the exact-arity method
+      // dispatcher; when it is ABSENT, fall back to the HIGHEST available
+      // `__call_fn_method_M` (M from 8 down to `arity`), padding the args to M.
+      // The wasm method-dispatch arm hands each closure exactly its own declared
+      // arity (extra positional args are dropped — emitClosureMethodCallExportN
+      // in index.ts), so dispatching at a higher M still invokes THIS closure at
+      // its real arity while threading `this` via `__current_this`. Without this
+      // fallback, a getter/setter closure wrapped at fixed arity 0/1 whose exact
+      // `__call_fn_method_${arity}` happens not to be emitted silently lost its
+      // receiver (`this` inert) and fell back to the plain `__call_fn_${arity}`
+      // path. This is the LAZY bridge (it resolves exports at call time), so it
+      // is module-init-safe: `Object.defineProperties` runs before
+      // `__setExports`, and the availability check happens only when the wrapped
+      // accessor is actually invoked post-instantiation. Mirrors the dynamic
+      // bridge's `methodMaxArity` logic (`_wrapWasmClosureUnknownArity`).
+      let methodArity = -1;
+      if (typeof exports?.[`__call_fn_method_${arity}`] === "function") {
+        methodArity = arity;
+      } else if (exports) {
+        for (let a = 8; a >= arity; a--) {
+          if (typeof exports[`__call_fn_method_${a}`] === "function") {
+            methodArity = a;
+            break;
+          }
+        }
+      }
+      if (methodArity >= 0) {
+        const methodCallFn = exports![`__call_fn_method_${methodArity}`]!;
+        const methodPadded: any[] = [];
+        for (let i = 0; i < methodArity; i++) methodPadded.push(args[i]);
+        const rawThis = this !== null && typeof this === "object" ? _unwrapForHost(this) : this;
+        return methodCallFn(_isWasmStruct(rawThis) ? rawThis : this, closure, ...methodPadded);
+      }
     }
     return callFn(closure, ...padded);
   };
