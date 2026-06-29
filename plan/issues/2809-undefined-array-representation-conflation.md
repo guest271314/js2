@@ -1,8 +1,8 @@
 ---
 id: 2809
 title: "[SENIOR-DEV ONLY] undefined[] representation conflation — acorn's void-0 evolving array vs genuine undefined[]"
-status: ready
-assignee: ttraenkler/unassigned
+status: in-progress
+assignee: ttraenkler/senior-developer
 sprint: current
 priority: high
 horizon: l
@@ -186,3 +186,192 @@ fall back to (a). Either way, preserve #1 + #2.
 - Memory: `reference_2379_new_array_n_boxed_any_elem_rep` /
   `reference_2379_new_array_n_arraymethod_invalid_cast` — the representation-scale
   precedent.
+
+## Implementation Plan
+
+**Architect verdict: implement Option 2 (uniform `undefined[]`/`void[]` →
+externref-boxed-undefined). Option 1 (distinguish at inference / per-path
+wasm-type overrides) was empirically DISPROVEN for full acorn — see below.**
+`reasoning_effort: max`, senior-dev only.
+
+### Why Option 1 fails (verified on current main, 2026-06-29)
+
+The conflation is irreducible **at the TS type level**: acorn's evolving array
+and genuine `Array(undefined,undefined)` / `[undefined,undefined]` / sparse
+`[,,,]` all resolve to the *identical* `ts.Type` `undefined[]`. The `void 0`
+signal is purely **syntactic/local** — it never reaches the structural type, so
+`resolveWasmType(undefined[])` cannot tell them apart. Option 1 therefore has to
+fix the **value-carrying positions** (locals, returns, params, fields) one
+registration-path at a time.
+
+I built and ran Option 1 end-to-end (keep #1+#2, drop #3, add a narrowly-gated
+function-**return-type** override that fires only when a returned identifier is
+bound to an empty-array-literal evolving local). Results:
+
+- Minimal repro (top-level `export function parseExprList(){ var elts=[]; var
+  elt=(void 0); elt=ref; elts.push(elt); return elts; }`) → **FIXED**
+  (`[Identifier, Identifier]`), and genuine `Array(undefined,undefined).length`
+  stayed `2`, `return [undefined,undefined]` / `return Array(undefined,undefined)`
+  correctly stayed numeric (override did not fire). Blast radius looked ~zero.
+- **BUT real acorn (`tests/dogfood/.acorn/.../acorn.mjs`, 147 s compile) still
+  returned `arguments: [0,0]`.** Root cause: acorn's `parseExprList` is a
+  **prototype method assigned to a function expression** (`pp.parseExprList =
+  function(...){…}`), NOT a top-level `FunctionDeclaration`. Its result type is
+  registered on a different code path, so the declaration-path override never
+  fires. To make Option 1 cover acorn you would have to replicate the override
+  across **every** function-like + field registration path (FunctionDeclaration,
+  FunctionExpression, prototype method, ArrowFunction, object/struct field, param)
+  and never miss one — any gap silently coerces a ref to `0`. That is exactly the
+  uniformity #3 already provides type-side for free. Option 1 is fragile and
+  higher-effort than Option 2.
+
+Conclusion: **keep #3 (uniform type→externref) and align the construction/access
+side to match it.** Type and value then agree at every boundary with no
+per-path coverage table to maintain.
+
+### Root cause (Option 2 framing)
+
+#3 makes `resolveWasmType(undefined[]/void[])` an **externref vec** uniformly
+(variable types, return types, params, fields, `.length`). But every
+**construction** site computes its element representation from the *scalar*
+element type via `resolveWasmType(undefinedElem)` = `i32`/`f64`, NOT from the
+array type's vec element. So construction builds a numeric vec while consumers
+resolve the value to an externref vec → mismatch (`array.new_fixed[0] expected
+type externref, f64`, wrong `.length`, null-deref). The unifying fix: **every
+construction/hole/method site must derive its element representation from the
+array type's resolved vec (the #3-governed externref vec), pushing
+`emitUndefined` / externref-undefined for `undefined`/holes when the vec element
+is externref — never the f64 sNaN sentinel.**
+
+### Keep (the clean #2806 foundation — do not touch)
+
+- **#1** `varBindingNeedsExternrefForUndefined` (`src/codegen/index.ts`) + uses in
+  `hoistVarDecl` and `localTypeForDeclaration` (`statements/variables.ts`).
+- **#2** `inferArrayVecType` unpinnable-write-type rule (`statements/variables.ts`).
+- **#3** `resolveWasmType` Array branch (`src/codegen/index.ts`, the
+  `sym==="Array"` block, ~line 11610 on the branch): pure `undefined`/`void`
+  element → externref vec. **This stays — it is the uniform type-side anchor.**
+
+### Changes — align construction/access to the externref vec
+
+Each site below currently diverges by resolving the **scalar** element. The fix
+is the same shape used in the landed `compileArrayConstructorCall` prototype:
+detect `pureUndefinedVoidElem` (element flags are only `Undefined`/`Void`) and
+force `elemWasm = { kind: "externref" }` so the pushed values, the
+`array.new_fixed`/`array.new_default` type, and the vec struct all agree with #3.
+
+**Site A — `Array(...)` (non-`new`). DONE on the branch (keep).**
+`src/codegen/literals.ts` `compileArrayConstructorCall` (~3957): the
+`pureUndefinedVoidElem → externref` branch. Verified: `Array(undefined,
+undefined).length === 2`. ✓
+
+**Site B — `new Array(elem, …)`. `src/codegen/expressions/new-super.ts`, the
+`if (className === "Array")` block (~line 4744; line 4780 on current main).**
+The bug: `vecTypeIdx` is taken from `resolveWasmType(ctx, exprType)` (externref
+vec via #3, line ~4776) but `elemWasm = elemTsType ? resolveWasmType(ctx,
+elemTsType) : {f64}` (line ~4780) resolves the **scalar** undefined → `f64`, so
+`array.new_fixed` pushes f64 into the externref array → the verified
+`CompileError: array.new_fixed[0] expected type externref, f64`. **Fix:** after
+computing `elemWasm`, apply the same `pureUndefinedVoidElem` guard (using
+`typeArgs[0]`) → `elemWasm = {kind:"externref"}` (vecTypeIdx already externref).
+Also ensure the per-arg compile pushes each arg with `expectedType = elemWasm`
+(externref → ref/box path), and any padding/default uses `emitUndefined`, not the
+f64 sNaN. This fixes regressed tests S15.4.2.1_A2.1_T1 (T2) and unblocks sort
+(T3 — its failure was the `new Array` construction, not sort itself).
+
+**Site C — sparse / hole array literals `[, , ,]` and `[undefined, …]`.
+`src/codegen/literals.ts` `compileArrayLiteral` (~3080) and the hole path
+(`emitHoleSentinel` / the `_isUndefinedLike` + `expectedType.kind === "f64"`
+sNaN branch, ~2764).** When the literal's vec element is externref (all-hole /
+all-undefined → #3 externref vec), holes and `undefined` elements must be emitted
+as externref-undefined (`emitUndefined`) — the existing tuple path at ~2780
+already does this for `expectedType.kind === "externref"`; the **vec** literal
+path must do the same instead of the f64 sNaN sentinel. This fixes the
+reduceRight sparse case (T4: `15.4.4.22-8-c-4.js`); verify holes remain
+**absent** for `HasProperty` (reduceRight/forEach must skip holes), i.e. the
+hole sentinel for an externref vec must still be recognized as a hole by the
+iteration/HasProperty path (`array-holes.ts`), not as a present `undefined`.
+
+**Site D — array methods that rebuild the backing array for an `undefined[]`
+receiver.** `src/codegen/array-methods.ts`: `sort`/`toSorted`
+(`compileArrayToSorted` ~3336, `array.new_default` ~3262), and any method using
+`array.new*`/element copy. These read the receiver's vec type; once B/C build
+externref vecs they should largely follow, but **audit every `array.new_fixed` /
+`array.new_default` / element load-store in sort/reduce/reduceRight/concat/slice/
+splice/copyWithin for the externref-element case** — the canonical failure
+signal is `array.new_fixed[N] expected type externref, …`. Spec test: `new
+Array(undefined,undefined).sort()` (T3) and the reduceRight test (T4).
+
+**Site E — indexed read/write of an `undefined[]`.** The generic element-access
+path should already handle an externref vec (it keys off the vec type), but add a
+scoped check: `var a = Array(undefined,undefined); a[0]` and `a[0] = x` must read
+back `undefined` / store correctly. Low risk; verify, don't pre-emptively change.
+
+### Wasm IR pattern (the invariant to hold at every site)
+
+```wasm
+;; vec element type (from #3) === value pushed === array.new_* element type
+;; undefined[] / void[]  ⇒  $vec_externref { (field $len i32) (field $data (ref $arr_externref)) }
+;; undefined value / hole ⇒ call $__get_undefined   (NOT i64.const 0x7FF00000DEADC0DE ; f64.reinterpret_i64)
+```
+
+The sNaN f64 sentinel is ONLY for f64-vec/scalar undefined; for an externref vec
+the undefined/hole sentinel is the host-undefined singleton via `emitUndefined`.
+
+### Edge cases
+
+- **Genuine evolving undefined returned** (`function f(){ var a=[];
+  a.push(undefined); return a; }`): verified CORRECT under externref — boxed
+  undefined preserves `a[0] === undefined`. No special-casing needed.
+- **`number[]` / `boolean[]`**: element flags carry Number/Boolean, not pure
+  Undefined/Void → guard does not fire → stay f64/i32. Verified `Array(0,1,0,1)`
+  and `[1,2]` untouched.
+- **`number | undefined` (union)**: carries the Union flag, NOT pure Undefined →
+  must NOT become an externref-of-boxed vec via these guards (it has its own
+  union representation). Guard's `& ~(Undefined|Void) === 0` test already excludes
+  it; keep that exact predicate at every site.
+- **delete/optional-property f64-sNaN sentinel (#1112)**: unaffected — those are
+  scalar `undefined`-typed bindings (no array), gated by #1's void-EXPRESSION-only
+  rule. Do not widen #1.
+- **Holes vs present-undefined for HasProperty**: reduceRight/forEach/every/some
+  must still SKIP holes (§ spec). Ensure the externref hole sentinel is
+  distinguishable from a stored externref-undefined where the spec requires it
+  (array-holes.ts). This is the subtle one — test `15.4.4.22-8-c-4.js` and a
+  `forEach` over `[,,,]` (callback must not run).
+- **Mixed `[undefined, 1]`**: element type is `number` (or `number|undefined`),
+  not pure undefined → stays numeric/union; not in scope.
+
+### Test plan (gate: ZERO regressions — the ratio gate requires clean, not net-positive)
+
+Scoped local (dev, fast):
+1. `parse("foo(bar,baz)").arguments` → `[Identifier, Identifier]` via the acorn
+   dogfood harness (`tests/dogfood/acorn-harness.mjs`) — the milestone MUST hold.
+2. The 4 regressed tests must PASS:
+   - `built-ins/Array/S15.4.1_A2.1_T1.js` (`Array(undefined,undefined).length===2`)
+   - `built-ins/Array/S15.4.2.1_A2.1_T1.js` (`new Array(undefined,undefined)`)
+   - `built-ins/Array/prototype/sort/S15.4.4.11_A1.3_T1.js`
+   - `built-ins/Array/prototype/reduceRight/15.4.4.22-8-c-4.js`
+3. `tests/issue-2806.test.ts` stays green.
+4. Quick smoke (the probes used to validate this spec, banked in the architect's
+   `.tmp/probe-opt2.mjs`): `Array(undefined,undefined).length`, `new
+   Array(undefined,undefined).length`, `.sort().length`, sparse-`[,,,]`
+   reduceRight visit-count (0), numeric `Array(0,1,0,1)` / `[1,2]` unchanged.
+
+Full CI (REQUIRED — representation-scale, reference_2379): full `merge_group` +
+standalone-floor. Watch `built-ins/Array/**`, `built-ins/Array/prototype/**`, and
+TypedArray buckets. **Do not enqueue on net-positive-with-regressions** — the
+ratio gate (≥10% = 5/12 last time) requires a clean run. Budget 1–2 merge_group
+rounds to chase any straggler `array.new_*` divergence (the canonical signal:
+`array.new_fixed[N] expected type externref, …`).
+
+### Blast radius + classification
+
+- **Files:** `literals.ts` (Site A done + Site C), `expressions/new-super.ts`
+  (Site B), `array-methods.ts` (Site D audit), `array-holes.ts` (hole-sentinel
+  for externref), plus the preserved #1/#2/#3. ~4–5 files, all in the array
+  construction/access lane.
+- **Class:** representation-scale change (reference_2379 hazard) — **senior-dev,
+  `reasoning_effort: max`**, validate on full `merge_group`, not a scoped sweep.
+- **Base branch:** build on the preserved `issue-2806-untyped-array-ref-vec`
+  (commit `babfff3ce`, has #1+#2+#3 + Site A). Add Sites B–D; re-merge
+  `origin/main`; enqueue only on a clean merge_group.
