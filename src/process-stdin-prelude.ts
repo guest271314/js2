@@ -344,6 +344,18 @@ class __Js2wasmReadable {
     return out;
   }
 
+  // setEncoding(encoding): faithful Node Readable surface. In Node a stream with
+  // NO explicit encoding delivers raw \`Buffer\` 'data' chunks; calling
+  // \`setEncoding("latin1")\` (or "utf8", etc.) switches it to deliver decoded
+  // STRING chunks instead. This prelude has no Buffer mode — it ALWAYS materialises
+  // each chunk as a one-char-per-byte (latin1-equivalent) string via
+  // \`String.fromCharCode\` — so under standalone Wasm \`setEncoding\` is a faithful
+  // no-op that simply returns \`this\`. Exposing it lets a single source call
+  // \`process.stdin.setEncoding("latin1")\` so the SAME program runs under REAL node
+  // (where it switches the real stream to latin1 string chunks, so byte-reading
+  // consumers like \`charCodeAt\` work) AND compiles to Wasm unchanged (#2834).
+  setEncoding(encoding?: string): __Js2wasmReadable { return this; }
+
   pause(): __Js2wasmReadable { this.paused = true; return this; }
 
   resume(): __Js2wasmReadable {
