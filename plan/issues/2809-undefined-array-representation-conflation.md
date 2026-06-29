@@ -1,8 +1,10 @@
 ---
 id: 2809
 title: "[SENIOR-DEV ONLY] undefined[] representation conflation — acorn's void-0 evolving array vs genuine undefined[]"
-status: in-progress
+status: done
+completed: 2026-06-29
 assignee: ttraenkler/senior-developer
+supersedes: 2284
 sprint: current
 priority: high
 horizon: l
@@ -375,3 +377,57 @@ rounds to chase any straggler `array.new_*` divergence (the canonical signal:
 - **Base branch:** build on the preserved `issue-2806-untyped-array-ref-vec`
   (commit `babfff3ce`, has #1+#2+#3 + Site A). Add Sites B–D; re-merge
   `origin/main`; enqueue only on a clean merge_group.
+
+## Resolution (2026-06-29, branch `issue-2809-rep-final`)
+
+All five sites resolved; the four regressed test262 cases pass, the acorn
+milestone holds, and numeric arrays are untouched.
+
+- **#1 / #2 / #3** (the #2806 foundation), **Site A** (`Array(...)`), **Site B**
+  (`new Array(...)`) — preserved from the base branch
+  `issue-2809-array-rep-impl` (commit `39e8d7e2`). Verified still correct.
+- **Site C — the only remaining code change.** The spec framed Site C as a
+  *construction* fix in `literals.ts`, but the literal hole path already emitted
+  the `$Hole` sentinel correctly (#2001 S1). The real regression was downstream
+  in **`compileArrayReduceRight`** (`src/codegen/array-methods.ts`): a sparse
+  `[,,,]` externref vec with **no initial value** trapped
+  ("dereferencing a null pointer").
+
+  **Root cause (reference_1461 class — late-import funcIdx shift, NOT a
+  representation bug).** The no-init seed (`acc = data[len-1]`) and the
+  per-iteration element load map a `$Hole`→`undefined` via
+  `holeToUndefinedInstrs`, which runs `emitUndefined` into a **detached** body.
+  `emitUndefined`'s internal `flushLateImportShifts` therefore patches that
+  detached array, not the real `fctx.body` holding the callback closure's
+  `ref.func`. When `__get_undefined` is *first* registered there, the
+  late-import funcIdx shift is silently consumed and the closure `ref.func` is
+  left pointing at the wrong (pre-shift) function — so `call_ref` dereferences a
+  stale/null funcref and traps. An *explicit* `[undefined, undefined]` array did
+  NOT regress, because it registers `__get_undefined` during construction
+  (before the closure is emitted) — that asymmetry was the diagnostic key.
+
+  **Fix:** pre-ensure `__get_undefined` + flush against the real body at the top
+  of `compileArrayReduceRight`, *before* `setupArrayCallback` emits the closure
+  `ref.func`. The later `holeToUndefinedInstrs` registrations are then idempotent
+  (no further shift). Surgical: it relocates the function's existing pre-ensure
+  block earlier. An earlier exploration also widened the reduce/reduceRight
+  accumulator to externref for externref vecs, but the funcIdx fix alone is
+  sufficient, so that change was reverted to keep the blast radius minimal.
+- **Site D** (sort/toSorted backing) and **Site E** (indexed read/write) —
+  **verified, no change needed.** `new Array(undefined,undefined).sort()` already
+  builds an externref vec via Site B and passes; indexed reads of
+  `Array(undefined,…)` behave byte-identically to `main` (so any divergence there
+  is pre-existing, not a regression of this work).
+
+### Test Results (local)
+
+- 4 regressed test262 tests PASS: `S15.4.1_A2.1_T1`, `S15.4.2.1_A2.1_T1`,
+  `prototype/sort/S15.4.4.11_A1.3_T1`, `prototype/reduceRight/15.4.4.22-8-c-4`.
+- acorn milestone HOLDS: compiled-acorn `parse("foo(bar,baz)").arguments` →
+  `["Identifier","Identifier"]` (full pinned acorn, 85 s compile).
+- `tests/issue-2806.test.ts` green (5/5); new `tests/issue-2809.test.ts` green
+  (6/6); broad array-method smoke (numeric reduce/reduceRight/sort/map/filter,
+  string reduce, `Array`/`new Array(undefined,…)` length) clean.
+
+Supersedes #2284 (the PARKED #2806 PR). Closes the #2801/#2806 acorn-arguments
+milestone path. Full `merge_group` + standalone-floor validation on the PR.
