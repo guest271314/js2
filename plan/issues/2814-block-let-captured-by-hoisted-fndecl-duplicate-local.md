@@ -3,7 +3,8 @@ id: 2814
 title: "Bug C: block-scoped let captured by hoisted FunctionDeclaration reads null (duplicate-local desync)"
 parent: 2669
 related: [2811, 1205, 1607, 1177]
-status: in-progress
+status: done
+completed: 2026-06-29
 assignee: ttraenkler/bugC
 created: 2026-06-29
 priority: high
@@ -184,6 +185,59 @@ No capture-resolution change → the reverted-attempt failure mode cannot recur.
 - `tests/issue-2814.test.ts`: bug repros + representative cluster slice + broad
   regression-control set.
 
-## Test Results
+## Scope landed here vs. carved (IMPORTANT)
 
-(filled during implementation)
+Investigation showed the cluster's "remaining 57" splits into **two distinct
+bugs** with different capture mechanisms — only the first is the duplicate-local
+desync this PR fixes:
+
+1. **Function-declaration context (FIXED here).** Nested `function f` captures
+   the outer local via lifted leading params (`nestedFuncCaptures`). The
+   duplicate-local desync is the root, and the producer-side slot reuse fixes it.
+   Reliable per-process verdicts: `function/dstr/ary-ptrn-rest-obj-prop-id.js`
+   and `…/dflt-…` flip **FAIL→PASS**; generator/async-func-decl variants share
+   the same hoisted-fn path.
+
+2. **Class-method context (CARVED → #2818).** Class methods capture an
+   outer local by promoting it to a global (`__captured_<name>`), driven by
+   `promoteAccessorCapturesToGlobals` in `compileNestedClassDeclaration`
+   (`statements/nested-declarations.ts:125`). For a **block-nested** class the
+   body is compiled/collected BEFORE the block-let initialises, so
+   `compileNestedClassDeclaration` hits its already-collected early-return
+   (`:99`) and the promotion loop never runs → the method body resolves the name
+   to the `ref.null.extern` fallback (returns null). This is a
+   class-collection-ordering + captured-globals issue, NOT the duplicate-local
+   desync — a separate, more entangled subsystem (#1672 territory). Repro:
+   `{ let s="outer"; class C { m(){ return s; } } new C().m(); }` → null (also
+   fails for an arrow inside the method — the global channel never fires). The
+   `meth-…`/`gen-meth-…` cluster members stay FAIL(6) until that lands.
+
+The decision to carve #2 follows the design-first mandate: the function-decl fix
+is precise and low-blast-radius; the class-method fix touches the delicate
+captured-globals promotion ordering and is sized as its own change.
+
+## Test Results (fresh single-file, host/gc lane)
+
+- `tests/issue-2814.test.ts` — **15/15 PASS**: 8 Bug-C repros (plain block,
+  string value, try-block cluster shape, post-construction mutation,
+  builtin-named `length` block-capture [A+C], `const` binding, two-fn-decls
+  sharing the capture) + 7 regression controls (arrow / fn-expr / fn-scope /
+  block-`var` captures, genuine fn-scope-shadow, genuine param-shadow, #1607 TDZ
+  self-ref, nested same-name shadow).
+- Real cluster member `function/dstr/ary-ptrn-rest-obj-prop-id.js`: **FAIL→PASS**
+  (returned the failing assert index 6 → now 1). `dflt-…` likewise.
+- **Deterministic per-process count over the 44 non-class fn-family cluster
+  files: baseline (origin/main + #2289) = 29 PASS → with this fix = 35 PASS
+  (+6).** The 9 still-failing are top-level binding-form (`const`/`let`/`var-…`)
+  and `async-*-dstr-*` members that fail at assertion #2 (`w`), a separate
+  rest-into-object-pattern / async destructuring bug — NOT the closure-capture
+  desync this PR addresses.
+- Class-method members (`meth-…`, `gen-meth-…`): still FAIL(6) — carved (#2818).
+- Regression suites — **no delta** vs. the merged base (origin/main + #2289):
+  - GREEN with fix: `issue-1177`, `issue-723-tdz`, `issue-1607`,
+    `issue-2200-annexb-block-fn-hoist`, `issue-2811`, `issue-1128-dstr-tdz`,
+    `tdz-reference-error` (56/56).
+  - Pre-existing-FAIL on the base, **identical** with/without the fix (env-only:
+    IR/binaryen + host-bridge `__call_fn`): `ir-let-const-equivalence`,
+    `issue-1690b`, `var-hoisting-scope`, `illegal-cast-closures-585`,
+    `issue-1712` (23 fail both ways → my delta = 0).
