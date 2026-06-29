@@ -225,7 +225,18 @@ export function buildVecFromExternref(
   // never leaking `env::__array_from_iter`. (Generators / custom @@iterator
   // standalone materialization is a separate slice — those don't reach an
   // $ObjVec source.) The JS-host path is unchanged.
-  const useNativeObjVec = ctx.standalone;
+  //
+  // WASI is host-free at runtime too (the module runs under raw wasmtime — see
+  // `examples/native-messaging/scale-test.mjs`), so it must take the SAME native
+  // reader path: `__extern_get_idx` / `__extern_get` / `__box_number` /
+  // `__unbox_number` are all emitted as DEFINED funcs under WASI, but
+  // `__array_from_iter` is only ever a host import — emitting it makes the WASI
+  // module fail instantiation (`unknown import: env::__array_from_iter`). #2311
+  // gated this on `ctx.standalone` alone, which left the WASI nm_js2wasm_node_*
+  // hosts importing `__array_from_iter` (loopdive/js2#389 / #2311 regression);
+  // `ctx.standalone || ctx.wasi` is the established host-free idiom used
+  // throughout codegen (and elsewhere in this file). (#2839)
+  const useNativeObjVec = ctx.standalone || ctx.wasi;
   // #2696 — register EVERY late import (helper) FIRST, flush ONCE, then read the
   // funcIdx values from funcMap. ensureLateImport for a NEW env import shifts the
   // index of every DEFINED helper func (the native `__box_number` /
@@ -276,7 +287,17 @@ export function buildVecFromExternref(
     if (et.kind === "f64" && unboxIdx !== undefined) {
       return [{ op: "call", funcIdx: unboxIdx } as Instr];
     }
-    if (et.kind === "i32" && unboxIdx !== undefined) {
+    // i8/i16 are PACKED array element kinds (Uint8Array, Int8Array, Uint16Array,
+    // …). Their value-position representation is i32: a packed `array.set`
+    // truncates the i32 modulo the storage width (8/16 bits), so the unbox→i32
+    // path is identical to the i32 arm here. Signedness is irrelevant on WRITE —
+    // it only governs the READ op (`array.get_s`/`array.get_u`), driven
+    // elsewhere by the view name. Without this arm the externref falls through
+    // to the empty `return []`, leaving an externref on the stack where the
+    // packed `array.set` expects i32 → `array.set must have the proper type`
+    // (loopdive/js2#389 / #2311 regression — buildElemCoerce only handled
+    // f64/i32/externref/ref). (#2839)
+    if ((et.kind === "i32" || et.kind === "i8" || et.kind === "i16") && unboxIdx !== undefined) {
       return [{ op: "call", funcIdx: unboxIdx } as Instr, { op: "i32.trunc_sat_f64_s" }];
     }
     if (et.kind === "externref") return [];
