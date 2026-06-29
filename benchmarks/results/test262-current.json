@@ -1,31 +1,31 @@
 {
-  "timestamp": "2026-06-29T09:58:04.679Z",
-  "baseline_generated_at": "2026-06-29T09:58:04.679Z",
-  "baseline_sha": "e4d66771d2c47df0fc005db15616a7777b9f7725",
+  "timestamp": "2026-06-29T11:28:45.759Z",
+  "baseline_generated_at": "2026-06-29T11:28:45.759Z",
+  "baseline_sha": "9d78d7b10320e5f4c833fbd96db2ddea2537e17f",
   "oracle_version": 1,
   "mode": {
     "target": "gc",
-    "include_proposals": 1,
-    "label": "official test262 + proposals"
+    "include_proposals": 0,
+    "label": "official test262 (default scope)"
   },
   "summary": {
     "total": 43135,
     "pass": 33017,
-    "fail": 9617,
+    "fail": 9619,
     "compile_error": 401,
-    "compile_timeout": 82,
+    "compile_timeout": 80,
     "skip": 18,
-    "compilable": 42634,
+    "compilable": 42636,
     "stale": 0,
     "by_category": {
       "standard": {
         "total": 42049,
         "pass": 32410,
-        "fail": 9160,
+        "fail": 9162,
         "compile_error": 379,
-        "compile_timeout": 82,
+        "compile_timeout": 80,
         "skip": 18,
-        "compilable": 41570,
+        "compilable": 41572,
         "stale": 0,
         "label": "ECMAScript current standard"
       },
@@ -43,33 +43,33 @@
       "proposal": {
         "total": 4982,
         "pass": 1491,
-        "fail": 3178,
+        "fail": 3169,
         "compile_error": 216,
         "compile_timeout": 1,
-        "skip": 96,
-        "compilable": 4669,
+        "skip": 105,
+        "compilable": 4660,
         "stale": 0,
         "label": "TC39 proposals"
       },
       "official": {
         "total": 43135,
         "pass": 33017,
-        "fail": 9617,
+        "fail": 9619,
         "compile_error": 401,
-        "compile_timeout": 82,
+        "compile_timeout": 80,
         "skip": 18,
-        "compilable": 42634,
+        "compilable": 42636,
         "stale": 0,
         "label": "standard + annex_b (default)"
       },
       "full": {
         "total": 48117,
         "pass": 34508,
-        "fail": 12795,
+        "fail": 12788,
         "compile_error": 617,
-        "compile_timeout": 83,
-        "skip": 114,
-        "compilable": 47303,
+        "compile_timeout": 81,
+        "skip": 123,
+        "compilable": 47296,
         "stale": 0,
         "label": "standard + annex_b + proposals"
       }
@@ -78,31 +78,31 @@
   "official_summary": {
     "total": 43135,
     "pass": 33017,
-    "fail": 9617,
+    "fail": 9619,
     "compile_error": 401,
-    "compile_timeout": 82,
+    "compile_timeout": 80,
     "skip": 18,
-    "compilable": 42634,
+    "compilable": 42636,
     "stale": 0
   },
   "full_summary": {
     "total": 48117,
     "pass": 34508,
-    "fail": 12795,
+    "fail": 12788,
     "compile_error": 617,
-    "compile_timeout": 83,
-    "skip": 114,
-    "compilable": 47303,
+    "compile_timeout": 81,
+    "skip": 123,
+    "compilable": 47296,
     "stale": 0
   },
   "strict_summary": {
     "total": 40626,
     "pass": 31638,
-    "fail": 8592,
+    "fail": 8594,
     "compile_error": 297,
-    "compile_timeout": 81,
+    "compile_timeout": 79,
     "skip": 18,
-    "compilable": 40230,
+    "compilable": 40232,
     "stale": 0
   },
   "scope_summaries": {
@@ -119,21 +119,21 @@
     "proposal": {
       "total": 4982,
       "pass": 1491,
-      "fail": 3178,
+      "fail": 3169,
       "compile_error": 216,
       "compile_timeout": 1,
-      "skip": 96,
-      "compilable": 4669,
+      "skip": 105,
+      "compilable": 4660,
       "stale": 0
     },
     "standard": {
       "total": 42049,
       "pass": 32410,
-      "fail": 9160,
+      "fail": 9162,
       "compile_error": 379,
-      "compile_timeout": 82,
+      "compile_timeout": 80,
       "skip": 18,
-      "compilable": 41570,
+      "compilable": 41572,
       "stale": 0
     }
   },
@@ -182,9 +182,9 @@
       "name": "built-ins/Array",
       "path": "built-ins/Array",
       "pass": 1755,
-      "fail": 1295,
+      "fail": 1297,
       "compile_error": 18,
-      "compile_timeout": 13,
+      "compile_timeout": 11,
       "skip": 0,
       "total": 3081
     },
@@ -712,10 +712,10 @@
       "name": "built-ins/Temporal",
       "path": "built-ins/Temporal",
       "pass": 1295,
-      "fail": 3164,
+      "fail": 3155,
       "compile_error": 64,
       "compile_timeout": 1,
-      "skip": 0,
+      "skip": 9,
       "total": 4524
     },
     {
@@ -1080,14 +1080,14 @@
     }
   ],
   "error_categories": {
-    "assertion_fail": 6571,
+    "assertion_fail": 6569,
     "illegal_cast": 89,
     "negative_test_fail": 78,
     "null_deref": 186,
     "oob": 51,
-    "other": 3913,
+    "other": 3917,
     "promise_error": 50,
-    "range_error": 41,
+    "range_error": 32,
     "runtime_error": 1177,
     "type_error": 286,
     "unreachable": 26,
@@ -1096,6 +1096,7 @@
   "hard_errors": {},
   "skip_reasons": {
     "dynamic-import + sloppy-script var/fn redecl + fixture path (#1696)": 18,
+    "Proposal excluded from default scope: proposal feature: Temporal": 9,
     "proposal feature: import defer (no test harness)": 96
   }
 }
