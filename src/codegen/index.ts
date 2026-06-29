@@ -207,8 +207,16 @@ const TYPED_ARRAY_PACKED_STORAGE: Readonly<Record<string, { key: string; type: V
   Uint8ClampedArray: { key: "i8_byte", type: { kind: "i8" } },
   Int16Array: { key: "i16_byte", type: { kind: "i16" } },
   Uint16Array: { key: "i16_byte", type: { kind: "i16" } },
-  Int32Array: { key: "i32_byte", type: { kind: "i32" } },
-  Uint32Array: { key: "i32_byte", type: { kind: "i32" } },
+  // (#2835) Int32/Uint32 ELEMENT storage uses a DEDICATED `i32_elem` vec key —
+  // SPLIT from the `i32_byte` key that backs the ArrayBuffer/DataView BYTE buffer.
+  // Both shapes are `struct { length: i32, data: array(mut i32) }` today (PR-1 is a
+  // pure refactor, no rep change), but they are semantically distinct: an
+  // `i32_elem` slot holds a full 32-bit element, an `i32_byte` slot holds one byte
+  // (0..255). Keeping them as one type blocked #2835 PR-2 from packing the byte
+  // buffer to `array(mut i8)` — that would truncate every Int32/Uint32 element.
+  // The split isolates the byte-buffer rep so PR-2 can repack `i32_byte` → i8 safely.
+  Int32Array: { key: "i32_elem", type: { kind: "i32" } },
+  Uint32Array: { key: "i32_elem", type: { kind: "i32" } },
 };
 
 export function typedArrayVecStorage(ctx: CodegenContext, name: string): { key: string; type: ValType } {
@@ -4876,7 +4884,11 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
         ((arrElemDef.element as ValType).kind === "externref" || (arrElemDef.element as ValType).kind === "ref_extern");
       // Skip numeric element types if __box_number is not available
       if (
-        (elemKey === "f64" || elemKey === "i32" || elemKey === "i32_byte" || elemKey === "i8_byte") &&
+        (elemKey === "f64" ||
+          elemKey === "i32" ||
+          elemKey === "i32_byte" ||
+          elemKey === "i32_elem" || // (#2835) Int32/Uint32 element storage (split from i32_byte)
+          elemKey === "i8_byte") &&
         boxNumIdx === undefined
       )
         continue;
@@ -4913,10 +4925,17 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
       } else if (elemKey === "i32" && boxNumIdx !== undefined) {
         boxInstrs = [{ op: "f64.convert_i32_s" } as Instr, { op: "call", funcIdx: boxNumIdx } as Instr];
       } else if (
-        (elemKey === "i32_byte" || elemKey === "i8_byte" || elemKey === "i16_byte") &&
+        (elemKey === "i32_byte" ||
+          elemKey === "i32_elem" || // (#2835) Int32/Uint32 element storage — same dynamic read as i32_byte pre-split
+          elemKey === "i8_byte" ||
+          elemKey === "i16_byte") &&
         boxNumIdx !== undefined
       ) {
         // ArrayBuffer/DataView/typed-array byte elements — convert unsigned then box.
+        // (#2835) `i32_elem` (Int32/Uint32 element storage, split from `i32_byte`)
+        // reads via the SAME generic arm i32_byte used before the split (plain
+        // `array.get` below — it is NOT packed — then unsigned i32→f64 box), so the
+        // dynamic-read behaviour is byte-for-byte preserved.
         // (#2593) i16_byte joins here: the GENERIC dynamic-read path (`__vec_get`,
         // for an `any`-typed read of a typed-array vec) reads the packed element
         // zero-extended; the per-VIEW signedness for the typed `a[i]` read site is
@@ -5412,7 +5431,11 @@ function _emitVecSetByteExportInner(ctx: CodegenContext): void {
         { op: "f64.convert_i32_u" } as Instr,
         { op: "array.set", typeIdx: arrTypeIdx } as Instr,
       ];
-    } else if (elemKey === "i32" || elemKey === "i32_byte") {
+    } else if (elemKey === "i32" || elemKey === "i32_byte" || elemKey === "i32_elem") {
+      // (#2835) `i32_elem` (Int32/Uint32 element storage, split from `i32_byte`)
+      // takes the same direct `array.set` byte-write i32_byte used before the split
+      // (the i32 slot is wide enough for a byte) — preserves crypto.getRandomValues
+      // / wrapExports byte population into Int32/Uint32 vecs unchanged.
       writeInstrs = [
         { op: "local.get", index: 3 } as Instr,
         { op: "ref.cast", typeIdx: vecTypeIdx } as Instr,
@@ -7320,16 +7343,30 @@ export function reserveLinearU8AllocType(ctx: CodegenContext): void {
  * their indices are deterministic across codegen passes (see the call site in
  * `generateModule`). Covers the element kinds standalone TypedArrays use for their
  * backing arrays: `i8_byte` (Int8/Uint8/Uint8Clamped), `i16_byte`
- * (Int16/Uint16), `i32_byte` (Int32/Uint32), and `f64` (the float views). (#2593
- * added the i16/i32 byte views — before that only integer Uint8Array was packed.)
- * `getOrRegisterSubviewType` only forces the backing ARRAY type (uniquely deduped
- * per element kind) — it does NOT register or reorder the vec struct, so plain
- * typed-array resolution is unaffected. Idempotent.
+ * (Int16/Uint16), `i32_elem` (Int32/Uint32 element storage), and `f64` (the float
+ * views). (#2593 added the i16/i32 byte views — before that only integer Uint8Array
+ * was packed.) `getOrRegisterSubviewType` only forces the backing ARRAY type
+ * (uniquely deduped per element kind) — it does NOT register or reorder the vec
+ * struct, so plain typed-array resolution is unaffected. Idempotent.
+ *
+ * (#2835) Int32/Uint32 ELEMENT storage moved from the `i32_byte` key to a dedicated
+ * `i32_elem` key (split from the ArrayBuffer/DataView byte buffer — see
+ * `TYPED_ARRAY_PACKED_STORAGE`). So the Int32/Uint32 `subarray` subview is now keyed
+ * `i32_elem` and reserved here; an `Int32Array.subarray()` (whose receiver vec is
+ * `__vec_i32_elem`) resolves `getOrRegisterSubviewType(ctx, "i32_elem", …)` to this
+ * PRE-RESERVED, idx-stable slot (hoist == emit), avoiding the #2357 body-time-index
+ * desync. The byte buffer (`i32_byte`) has NO `subarray` view, so it is NOT reserved
+ * here; the ArrayBuffer/DataView byte vec registers lazily at its use sites exactly
+ * as before (it resolves directly to its vec — no subview substitution — so its
+ * lazy registration is symmetric across the hoist/emit passes and needs no eager
+ * slot). PR-2 will flip the `i32_byte` element type to i8 at its registration point.
+ * (memory: project_type_index_shift_and_deadelim — only types whose lazy registration
+ * could DESYNC across passes need an eager slot; the byte vec does not.)
  */
 export function reserveTypedArraySubviewTypes(ctx: CodegenContext): void {
   getOrRegisterSubviewType(ctx, "i8_byte", { kind: "i8" });
   getOrRegisterSubviewType(ctx, "i16_byte", { kind: "i16" }); // (#2593) Int16/Uint16
-  getOrRegisterSubviewType(ctx, "i32_byte", { kind: "i32" }); // (#2593) Int32/Uint32
+  getOrRegisterSubviewType(ctx, "i32_elem", { kind: "i32" }); // (#2835) Int32/Uint32 element storage (split from i32_byte)
   getOrRegisterSubviewType(ctx, "f64", { kind: "f64" });
 }
 
