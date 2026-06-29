@@ -1,7 +1,8 @@
 ---
 id: 2835
 title: "Pack $__vec_i32_byte byte backing as array(mut i8) — 4× smaller DataView/ArrayBuffer/Uint8Array GC footprint"
-status: ready
+status: in-progress
+assignee: ttraenkler/sendev-2835
 sprint: Backlog
 created: 2026-06-29
 updated: 2026-06-29
@@ -342,3 +343,91 @@ array.get_u $__arr_i8_byte ;; was: array.get $__arr_i32_byte + (i32.const 0xff; 
 - Standalone floor: `node:fs` writeSync(fd, DataView/Uint8Array), Native-Messaging
   frame round-trip (the #2832 64 MiB path) — confirm the 4× memory reduction and
   no value corruption.
+
+---
+
+## PR-1 implementation notes (the split — NO rep change)
+
+**Status: PR-1 of 2 landed via this PR.** This PR does ONLY Phase 1 (split the
+overloaded key). PR-2 does the i8 packing and closes the issue.
+
+### What changed (the split design used)
+
+The `i32_byte` vec key was overloaded for two semantically distinct uses
+(byte buffer vs Int32/Uint32 element storage). I split off a **new `i32_elem`
+key** for the element-storage use and left `i32_byte` exclusively the
+ArrayBuffer/DataView byte buffer. Both still resolve to
+`struct { length: i32, data: array(mut i32) }` — **pure refactor, no rep change**.
+
+The split pivots on **one source-of-truth edit** plus a handful of generic-helper
+arms that must treat the new key identically to how `i32_byte` was treated
+pre-split:
+
+1. **`src/codegen/index.ts` `TYPED_ARRAY_PACKED_STORAGE`** — `Int32Array`/
+   `Uint32Array` map to key `i32_elem` (was `i32_byte`). This is the **single
+   source of truth**: every typed-array type resolution (`resolveWasmType`,
+   the IR `resolvePositionType`), every constructor (`new Int32Array(...)`,
+   `Int32Array.of/from`), `byteLength`, and view materialisation routes through
+   `typedArrayVecStorage`, so this one edit re-routes them all automatically.
+   The ArrayBuffer/DataView byte-buffer sites hard-code `i32_byte` and are
+   untouched.
+2. **`__vec_get` (skip-check + box arm)** and **`emitVecSetByteExport`** — added
+   `i32_elem` alongside `i32_byte` so the generic dynamic read/byte-write of an
+   `i32_elem` vec is **byte-for-byte identical** to the pre-split `i32_byte`
+   behaviour (plain `array.get`, unsigned i32→f64 box; direct `array.set`).
+   `__vec_pop` needed no change — `i32_elem` falls into its default (signed,
+   plain `array.get`) arm exactly as `i32_byte` did there.
+3. **`reserveTypedArraySubviewTypes`** — the Int32/Uint32 `subarray` subview is
+   now keyed `i32_elem` (1:1 swap of the old `i32_byte` subview). An
+   `Int32Array.subarray()` receiver is `__vec_i32_elem`, so it resolves the
+   subview by stripping the struct-name prefix → `i32_elem`, which MUST hit a
+   PRE-RESERVED idx-stable slot (the #2357 hoist/emit desync hazard). The byte
+   buffer has no `subarray` view and resolves directly to its vec, so it does
+   NOT need an eager slot and registers lazily as before.
+4. **`object-runtime.ts` `NON_ARRAY_BYTE_VEC_ELEM_KINDS`** — added `i32_elem`.
+   This set drives `Array.isArray` (§7.2.2) ONLY. Pre-split, Int32/Uint32 were
+   `i32_byte` (already in the set → `Array.isArray === false`, spec-correct: a
+   TypedArray is not an Array). Adding `i32_elem` preserves that exactly;
+   omitting it would have regressed `Array.isArray(new Int32Array(1))` to `true`.
+   **(The architect's Phase-1 note said "leave i32_elem out" — that reasoning
+   conflated general array-likeness with `IsArray`; this set is IsArray-only and
+   does not affect element access / `.length` / iteration.)**
+
+### Why this is safe (no behaviour change)
+
+- `i32_elem` only ever materialises in **standalone/WASI** mode (`typedArrayVecStorage`
+  returns the packed keys only there; JS-host keeps Int32Array on `f64`), which
+  bounds the blast radius and leaves JS-host paths inert.
+- The generic helpers read the element kind from the **type table**
+  (`getVecInfo`/`getArrTypeIdxFromVec`), not the key string, so `i32_elem`
+  (i32 element) is handled identically to `i32_byte` (i32 element) wherever
+  element-kind drives codegen.
+- `emitTypedArrayFromByteBuffer` (`new Int32Array(arrayBuffer)`) already takes
+  separate src/dst vec params and registers the `i32_byte` source independently —
+  it copies `i32_byte` → `i32_elem` correctly (both i32-element; logic unchanged).
+
+### Verification
+
+- `tsc --noEmit` clean.
+- DataView/ArrayBuffer/typed-array suites green (`issue-38`, `issue-2199`,
+  `issue-2199b`, `issue-2639`, `issue-1654`, `issue-2593`, `issue-2648`,
+  `issue-1670`, `issue-1787`): 40+ tests pass.
+- Standalone end-to-end probe: Int32/Uint32 32-bit element fidelity, `subarray`
+  windowing, DataView byte round-trip, and Int32Array+DataView coexistence all
+  match the base commit exactly.
+- Pre-existing failures confirmed identical on the base commit (so NOT introduced
+  here): the container's default string backend emits `string_constants` imports
+  that some JS-host test harnesses don't stub; a base-commit
+  `Uint8Array.subarray` WASI write failure; and a Uint32 write-saturation
+  limitation (#2593-deferred wrapping).
+
+### Out-of-scope pre-existing bug found (flag, NOT fixed here)
+
+The Native-Messaging `nm_js2wasm_node_process` scale-test fails to compile on
+**origin/main** (independent of this PR): `__vec_from_extern_<N>` validation error
+`expected i32, found externref`. Root cause: `buildVecFromExternref`'s
+`buildElemCoerce` (`src/codegen/type-coercion.ts`) handles `f64`/`i32`/`externref`/
+`ref` element kinds but **not `i8`/`i16`**, so the materializer for a `Uint8Array`
+(`i8_byte`) vec field pushes an externref into an `i8` array. node_fs (the other
+byte-buffer NM host) passes. This is a separate latent issue (the NM scale-test is
+not a CI gate) and is unrelated to the #2835 key split — worth its own issue.

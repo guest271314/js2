@@ -7322,20 +7322,28 @@ export function fillApplyClosure(ctx: CodegenContext): void {
 }
 
 /**
- * (#2047) Byte-backed vec carriers that are NEVER JS arrays and must report
+ * (#2047) Non-array vec carriers that are NEVER JS arrays and must report
  * `Array.isArray === false` per ES §7.2.2:
  *   - `i32_byte` — ArrayBuffer / DataView backing store.
+ *   - `i32_elem` — native (standalone/WASI) `Int32Array`/`Uint32Array` element
+ *     storage. (#2835) Split from `i32_byte`: before the split Int32/Uint32 shared
+ *     the `i32_byte` key, so they were ALREADY excluded here (Array.isArray === false,
+ *     spec-correct — a TypedArray is not an Array). Keeping `i32_elem` in this set
+ *     preserves that exactly; omitting it would regress `Array.isArray(new
+ *     Int32Array(1))` to `true`. This set drives ONLY `__extern_is_array`, not
+ *     element access / `.length` / iteration, so excluding the carrier does not
+ *     affect Int32Array's array-like behaviour — only its IsArray result.
  *   - `i8_byte`  — native (standalone/WASI) `Uint8Array` packed-byte storage.
  * The codebase already excludes `i32_byte` vecs from array treatment elsewhere
  * (`type-coercion.ts` — the `__make_iterable` shim skips it), so this filter is
- * consistent precedent. NOTE: other TypedArrays (Float64Array, Int32Array, …)
+ * consistent precedent. NOTE: the FLOAT TypedArrays (Float32Array, Float64Array)
  * share the generic `f64` vec carrier with `number[]`, so a struct-level
  * `ref.test` cannot distinguish them without a brand bit — `__vec_f64` is kept
  * IN the carrier list and `Array.isArray(new Float64Array(1))` remains a known
  * residual false-positive tracked for a brand-bit follow-up. Only the
- * exclusively-non-array `_byte` carriers can be filtered cleanly.
+ * exclusively-non-array packed carriers can be filtered cleanly.
  */
-const NON_ARRAY_BYTE_VEC_ELEM_KINDS: ReadonlySet<string> = new Set(["i32_byte", "i8_byte"]);
+const NON_ARRAY_BYTE_VEC_ELEM_KINDS: ReadonlySet<string> = new Set(["i32_byte", "i32_elem", "i8_byte"]);
 
 function isNonArrayByteVecName(name: string): boolean {
   // Matches `__vec_i32_byte` / `__vec_i8_byte`. Only `__vec_*` structs reach
