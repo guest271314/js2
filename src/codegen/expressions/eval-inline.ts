@@ -25,6 +25,17 @@ import { coerceType, compileExpression, compileStatement } from "../shared.js";
 import { emitUndefined } from "./late-imports.js";
 
 /**
+ * Synthetic file name for the foreign `SourceFile` an inlined `eval("<literal>")`
+ * body is parsed into (see `inlineStaticEval` below). The TypeScript checker has
+ * NO bindings for nodes in this file, so `getSymbolAtLocation` returns
+ * `undefined` for every identifier — symbol-presence cannot be used to classify
+ * resolvability inside an eval body. Consumers that rely on that oracle (e.g.
+ * the unresolvable-`delete` flip in typeof-delete.ts, #2726 group (a)) must
+ * detect and skip eval-body nodes via this sentinel.
+ */
+export const EVAL_SOURCE_FILENAME = "<eval>.ts";
+
+/**
  * Recursively resolve a compile-time-constant string from an expression.
  * Returns the string value, or null if the expression is not a constant.
  */
@@ -84,7 +95,13 @@ export function tryStaticEvalInline(
 
   // Parse the eval source as a Script with parent pointers set so the
   // nested codegen paths (which walk upward via node.parent) work.
-  const sf = ts.createSourceFile("<eval>.ts", src, ts.ScriptTarget.Latest, /* setParentNodes */ true, ts.ScriptKind.JS);
+  const sf = ts.createSourceFile(
+    EVAL_SOURCE_FILENAME,
+    src,
+    ts.ScriptTarget.Latest,
+    /* setParentNodes */ true,
+    ts.ScriptKind.JS,
+  );
 
   // If the parse produced diagnostics we're looking at malformed eval source.
   // Real JS would throw SyntaxError at runtime — for now, fall through to the

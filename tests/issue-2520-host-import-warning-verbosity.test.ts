@@ -22,7 +22,7 @@ function compileAndCapture(extraArgs: string): string {
     `export function f(x: any): boolean { return x === Uint8Array || x === Int8Array || x === Float64Array; }`,
   );
   return execSync(
-    `npx -y tsx ${JSON.stringify(path.resolve("src/cli.ts"))} ${JSON.stringify(inFile)} --no-dts --target wasi ${extraArgs} 2>&1`,
+    `npx -y tsx ${JSON.stringify(path.resolve("src/cli.ts"))} ${JSON.stringify(inFile)} -o ${JSON.stringify(dir)} --no-dts --target wasi ${extraArgs} 2>&1`,
     { cwd: process.cwd(), stdio: "pipe" },
   ).toString();
 }
