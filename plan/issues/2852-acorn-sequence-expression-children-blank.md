@@ -1,5 +1,5 @@
 ---
-id: 2845
+id: 2852
 title: "compiled-acorn marshals SequenceExpression `expressions[]` child nodes BLANK (all fields dropped across host boundary)"
 status: ready
 sprint: current
@@ -15,7 +15,7 @@ related: [1712, 2841, 2851]
 umbrella: 1712
 ---
 
-# #2845 — compiled-acorn marshals SequenceExpression `expressions[]` children blank
+# #2852 — compiled-acorn marshals SequenceExpression `expressions[]` children blank
 
 Surfaced by the wider acorn differential corpus
 (`tests/dogfood/acorn-corpus.mjs`, #1712 umbrella). Compiled-acorn **parses**

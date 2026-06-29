@@ -41,8 +41,8 @@ as **#2848**) now **parse correctly** — #2848 is resolved.
 | corpus/spread-rest.js              | equal±quirks | now parses                                                 |
 | corpus/templates.js                | **REAL ×21** | TemplateElement `quasis[]` blank → **#2851**               |
 | corpus/escapes-unicode.js          | **REAL ×3**  | template quasis blank → **#2851**                          |
-| corpus/operators.js                | **REAL ×9**  | SequenceExpression children blank → **#2845**              |
-| corpus/sequence-misc.js            | **REAL ×23** | SequenceExpression children blank → **#2845**              |
+| corpus/operators.js                | **REAL ×9**  | SequenceExpression children blank → **#2852**              |
+| corpus/sequence-misc.js            | **REAL ×23** | SequenceExpression children blank → **#2852**              |
 | corpus/arrow-params.js             | **REAL ×19** | `params[]` (id/destructure/default/rest) blank → **#2841** |
 | corpus/literals.js                 | **REAL ×2**  | BigInt literal → f64 corruption → **#2846**                |
 | real/background.js                 | **REAL ×2**  | fn-expr `params[]` name/type dropped → **#2841**           |
@@ -54,7 +54,7 @@ as **#2848**) now **parse correctly** — #2848 is resolved.
 | issue     | gap                                                                                            | priority | status                 |
 | --------- | ---------------------------------------------------------------------------------------------- | -------- | ---------------------- |
 | **#2851** | TemplateLiteral `quasis[]` TemplateElement nodes marshalled BLANK (type/value/tail dropped)    | high     | ready                  |
-| **#2845** | SequenceExpression `expressions[]` child nodes marshalled BLANK (all fields dropped)           | high     | ready                  |
+| **#2852** | SequenceExpression `expressions[]` child nodes marshalled BLANK (all fields dropped)           | high     | ready                  |
 | **#2846** | BigInt literal corrupted — parsed/marshalled as float64 (value + `bigint` string wrong)        | high     | ready                  |
 | **#2847** | Cosmetic marshalling quirks — spurious `sourceFile: null` + booleans as i32 0/1 (ONE issue)    | low      | ready                  |
 | **#2850** | regex literals with character classes `[…]`/`\d` or named groups `(?<n>…)` throw in validation | high     | ready                  |
@@ -75,7 +75,7 @@ as **#2848**) now **parse correctly** — #2848 is resolved.
 A concurrent claim was that `#2329` closed the template-quasis + sequence-expr
 gaps. The re-run **disproves** this: `corpus/templates.js` (×21),
 `corpus/sequence-misc.js` (×23), and `corpus/literals.js` (BigInt) are **still
-REAL**. #2851/#2845/#2846 remain `ready`.
+REAL**. #2851/#2852/#2846 remain `ready`.
 
 ### Verified NOT present on current main
 
@@ -87,7 +87,7 @@ REAL**. #2851/#2845/#2846 remain `ready`.
 
 The dominant grouped signatures are `missing-field @ .type` (×58) and
 `missing-field @ .name` (×35), spanning #2841 (`params[]`), #2851 (`quasis[]`),
-and #2845 (`expressions[]`). All three are "node-typed **elements of a specific
+and #2852 (`expressions[]`). All three are "node-typed **elements of a specific
 array property** come back without their fields" — one likely shared
 `wrapExports` array-of-struct marshalling fix. Cross-referenced in each issue so
 a dev can consolidate.

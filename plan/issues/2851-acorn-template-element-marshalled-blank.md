@@ -11,7 +11,7 @@ task_type: bugfix
 area: codegen, runtime
 language_feature: template-literals
 goal: acorn-dogfood
-related: [1712, 2841, 2845]
+related: [1712, 2841, 2852]
 umbrella: 1712
 ---
 
@@ -56,12 +56,12 @@ compiled-acorn: `quasis: [ {}, {} ]` (each element blank; only the cosmetic
 A host-marshalling gap: `TemplateElement` nodes reached as **array elements**
 of `quasis` are not read field-by-field. This is plausibly the **same
 marshalling mechanism** as #2841 (arrow/fn-expr `params[]` Identifier nodes lose
-`name`/`type`) and #2845 (SequenceExpression `expressions[]` children blank) —
+`name`/`type`) and #2852 (SequenceExpression `expressions[]` children blank) —
 all three are "node-typed elements of a specific array property come back
 without their fields." Investigate `wrapExports` / the struct→JS node
 marshalling for array-of-struct fields, and whether `TemplateElement`'s
 `value: {raw, cooked}` nested object struct is the trip. May share a fix with
-#2841/#2845.
+#2841/#2852.
 
 ## Acceptance
 
