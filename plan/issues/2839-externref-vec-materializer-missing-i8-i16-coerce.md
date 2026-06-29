@@ -75,9 +75,34 @@ dynamic/externref value is materialized into a **packed byte/short vec**
   **no** `env::__array_from_iter` import.
 - `node examples/native-messaging/scale-test.mjs` (NM_SCALE_SIZES_MIB
   "1 64 128 256") — all four hosts round-trip byte-exact at every size.
-- `npm test -- tests/issue-2735*.test.ts tests/issue-2752*.test.ts` — green.
+- `tests/issue-2752*.test.ts` — green.
 - Typed-array / Uint8Array / DataView suites — no regression to the
   i32/f64/externref arms.
-- Full CI (test262 shards + quality + native-messaging-smoke) validates.
+- Full CI (test262 shards + quality + native-messaging-smoke) validates. The
+  `native-messaging-smoke` job (which runs the scale-test under real wasmtime —
+  the exact #389 reporter pipeline) goes green.
+
+### Note — pre-existing `#1886` on the RAW-`.ts` compile path (separate bug)
+
+`tests/issue-2735*` has 4 wasmtime-gated cases that compile the **raw**
+`nm_js2wasm_node_process.ts` directly via `compile(..., { target: "wasi" })`
+(no bun bundle). These fail with `Codegen error: linear Uint8Array helper
+argument is not backed by linear memory (#1886)` — a defect in the **linear-Uint8
+escape analysis** (`src/codegen/expressions/calls.ts`), a different subsystem
+from this issue's externref→vec materializer (`type-coercion.ts`). This error:
+
+- is **pre-existing on `origin/main`** (verified: identical failure with this
+  fix reverted), fires earlier in codegen than the i8 validation error, and so
+  masked it on the raw-`.ts` path;
+- was **not** introduced by this fix, and is **not** in this issue's scope
+  (#2311 never touched the linear-Uint8 subsystem);
+- does **not** gate required CI — the cases are wrapped in
+  `maybe = wasmtimeBin ? describe : describe.skip`, so the `quality` vitest job
+  (no wasmtime) skips them; they only run locally when wasmtime is on PATH.
+
+The **bun-bundled** path — the real #389 reporter pipeline and the
+`native-messaging-smoke` CI job — is fully fixed (all 4 NM variants × 4 sizes
+round-trip byte-exact). The raw-`.ts` `#1886` escape failure should be tracked
+as a **separate follow-up** against the linear-Uint8 analysis.
 </content>
 </invoke>
