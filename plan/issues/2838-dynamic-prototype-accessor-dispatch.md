@@ -138,5 +138,28 @@ non-regressing**: closure/accessor + class-method/dispatch suites
 **identical** pass/fail counts with and without the change. L3 alone does not fix
 acorn — it is the isolated prerequisite for L6.
 
-### PR2 — L4+L5: member-read host-MOP routing + `this`-truth (next)
+### PR2 — L4+L5: member-read host-MOP routing + `this`-truth (this branch, stacked on PR1)
+- **L5** (`property-access.ts`, `resolveStructNameForExpr` ~1070): for a `ThisKeyword`
+  receiver, return `resolveThisStructName(ctx, fctx)` (the fctx `this` local's actual
+  ref type) instead of the TS-contextual type. Inside a runtime-installed accessor
+  getter TS types `this` as the descriptor literal (`__anon_N`), so the old path
+  lowered `this.<x>` against the wrong struct and read a default slot. The fctx local
+  is the runtime truth: a dynamic getter's local is externref → undefined → fully
+  dynamic (host MOP); a genuine typed method's local is the correct struct (truth
+  AGREES → no change).
+- **L4** (`property-access.ts`, the `#856` sidecar/MOP block ~5512): relax its
+  `!typeName` gate so a `__fnctor_*`/`__anon*` typed receiver also reaches the
+  existing `extern.convert_any` + `__extern_get` path (which consults
+  `_fnctorProtoLookup` for runtime-installed prototype accessors). Positioned as the
+  LAST resort (after the static fast path + auto-register), so the hot struct-field
+  read is untouched; only genuinely-absent fields take the MOP route. Gated on
+  `!noJsHost` — standalone keeps its existing default.
+- **Verified**: the `this-thread.mjs` var-descriptor accessor probe flips from
+  `null`/`null` to the correct `2`/`55` (getter `return this.flags` now reads the real
+  receiver). **Non-regressing**: identical failing sets vs L3-only baseline across
+  closure/accessor, fnctor/this/proto, and class-method suites; additionally clears
+  the flaky `#1742` this-receiver-vec read. L4+L5 do NOT yet parse acorn `return` —
+  the runtime-installed METHOD-call dispatch (`new C().read()`, `this.currentVarScope()`)
+  is the remaining L6 wall.
+
 ### PR3 — L6: `effectiveReceiverType` method-call dispatch redesign (the wall)
