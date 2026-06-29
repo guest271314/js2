@@ -42,7 +42,7 @@ import { findAlternateStructsForField } from "./property-access.js";
 import { addStringConstantGlobal } from "./registry/imports.js";
 import { addFuncType } from "./registry/types.js";
 import { addUnionImportsViaRegistry, ensureLateImport, flushLateImportShifts } from "./shared.js";
-import { coercionInstrs } from "./type-coercion.js";
+import { buildVecFromExternMaterializer, coercionInstrs, getVecInfo } from "./type-coercion.js";
 
 /**
  * Mangle a property name + fallback strictness into the reserved dispatcher name.
@@ -204,5 +204,66 @@ export function fillMemberSetDispatch(ctx: CodegenContext): void {
       { op: "local.set", index: 2 } as Instr, // __any
       ...buildSetDispatch(0),
     ];
+  }
+}
+
+/**
+ * (#2831) FINALIZE sub-pass — reserve ONE host-externref → wasm-vec materializer
+ * `__vec_from_extern_<vecTypeIdx>` per DISTINCT vec-typed struct field that a
+ * dynamic write can target, BEFORE the value-coercion fills bake.
+ *
+ * Why a separate up-front pass: the materializer body (`buildVecFromExternref`)
+ * `ensureLateImport`s its helpers and `flushLateImportShifts` — registering an
+ * import after the index-space freeze, or mid-`fill*`, shifts already-baked func
+ * indices (the addUnionImports hazard the reserve-then-fill pattern exists to
+ * avoid). Reserving here — where shifts are still legal and this pass OWNS them —
+ * lets `coercionInstrs` (member-set-dispatch + inline) and `buildSetterStore`
+ * (`__sset_*`) merely `call` the materializer (read-only over funcMap), with NO
+ * funcIdx churn at fill. Must run BEFORE `emitStructFieldSetters`,
+ * `fillMemberSetDispatch`, and `fillMemberGetDispatch`.
+ *
+ * Scope: every MUTABLE vec-typed field reachable from
+ *   (a) the member-set dispatcher candidates (`findAlternateStructsForField`),
+ *       i.e. the dynamic `any`-receiver write path (the acorn `this.x = []` trap);
+ *   (b) the `__sset_<field>` exported host setters (the same mutable struct
+ *       fields the `_safeSet` MOP-write path narrows).
+ * No-op when no vec-typed write target exists ⇒ byte-identical.
+ */
+export function reserveVecFieldMaterializers(ctx: CodegenContext): void {
+  const targetVecIdxs = new Set<number>();
+  const consider = (ft: ValType | undefined): void => {
+    if (!ft || (ft.kind !== "ref" && ft.kind !== "ref_null")) return;
+    const idx = (ft as { typeIdx: number }).typeIdx;
+    if (getVecInfo(ctx, idx)) targetVecIdxs.add(idx);
+  };
+
+  // (a) member-set dispatcher candidates — the dynamic any-receiver write path.
+  for (const key of ctx.memberSetDispatchNames ?? []) {
+    const sep = key.lastIndexOf("\0");
+    const propName = sep >= 0 ? key.slice(0, sep) : key;
+    for (const cand of findAlternateStructsForField(ctx, propName, -1)) {
+      if (cand.mutable) consider(cand.fieldType);
+    }
+  }
+
+  // (b) `__sset_<field>` exported host setters — mirror the field-enumeration
+  // skip rules of `_emitStructFieldSettersInner` (mutable, non-`$`, non-carrier).
+  for (const [structName, fields] of ctx.structFields) {
+    if (
+      structName.startsWith("Wrapper") ||
+      structName === "$AnyValue" ||
+      structName.startsWith("__vec_") ||
+      structName.startsWith("__arr_")
+    ) {
+      continue;
+    }
+    for (const field of fields) {
+      if (!field || !field.type || !field.name || field.name.startsWith("$") || !field.mutable) continue;
+      consider(field.type);
+    }
+  }
+
+  for (const vecIdx of targetVecIdxs) {
+    buildVecFromExternMaterializer(ctx, vecIdx);
   }
 }

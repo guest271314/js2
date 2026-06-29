@@ -47,7 +47,7 @@ import { scanForArrayHoles, ensureHoleType } from "./array-holes.js"; // (#2001 
 import { ensureDynReadHelpers } from "./dyn-read.js"; // (#2580 M0)
 import { ensureNativeIteratorRuntime, fillNativeIteratorUserArms } from "./iterator-native.js";
 import { fillClosedMethodDispatch } from "./closed-method-dispatch.js";
-import { fillMemberSetDispatch } from "./member-set-dispatch.js";
+import { fillMemberSetDispatch, reserveVecFieldMaterializers } from "./member-set-dispatch.js";
 import { fillMemberGetDispatch } from "./member-get-dispatch.js";
 import { emitUndefined, ensureGetUndefined, reconcileNativeStrFinalizeShift } from "./expressions/late-imports.js";
 import { fillProtoIteratorDriver } from "./expressions/proto-override.js";
@@ -1679,6 +1679,13 @@ export function generateModule(
     // that genuinely collide are touched; everything else is byte-identical.
     resolveSameShapeFieldNameCollisions(ctx);
 
+    // (#2831) Reserve the per-target-vec host-externref → wasm-vec materializers
+    // BEFORE the setter/dispatch emitters bake their value coercions. This pass
+    // OWNS its import shifts (reserve-then-fill); the three setter emitters then
+    // only `call` the materializer (no funcIdx churn). Must precede
+    // emitStructFieldSetters + fillMemberSetDispatch + fillMemberGetDispatch.
+    reserveVecFieldMaterializers(ctx);
+
     // Emit exported struct field getter helpers for the runtime.
     // These allow JS host imports to read WasmGC struct fields that are
     // otherwise opaque to JS (V8 returns undefined for direct property access).
@@ -2583,7 +2590,7 @@ function _emitStructFieldSettersInner(ctx: CodegenContext): void {
     const funcIdx = ctx.numImportFuncs + mod.functions.length;
     const anyLocal = 2; // locals after the two params (local 0 = obj, local 1 = val)
 
-    const funcBody = buildSetterNestedIfElse(entries, anyLocal, valMode);
+    const funcBody = buildSetterNestedIfElse(ctx, entries, anyLocal, valMode);
 
     mod.functions.push({
       name: funcName,
@@ -2602,6 +2609,7 @@ function _emitStructFieldSettersInner(ctx: CodegenContext): void {
 
 /** Build nested if/else for struct field setter dispatch. */
 function buildSetterNestedIfElse(
+  ctx: CodegenContext,
   entries: { typeIdx: number; fieldIdx: number; fieldType: ValType; shapeId?: number; shapeFieldIdx?: number }[],
   anyLocal: number,
   valMode: "extern" | "f64" | "i32",
@@ -2618,7 +2626,7 @@ function buildSetterNestedIfElse(
 
   for (let i = entries.length - 1; i >= 0; i--) {
     const entry = entries[i]!;
-    let thenBranch = buildSetterStore(entry, anyLocal, valMode);
+    let thenBranch = buildSetterStore(ctx, entry, anyLocal, valMode);
 
     // (#2009) Colliding struct: `ref.test typeIdx` matched, but same-shape
     // canonicalization means the instance might be a DIFFERENT struct that
@@ -2656,6 +2664,7 @@ function buildSetterNestedIfElse(
 
 /** Build the "then" branch that stores `val` (local 1) into a struct field. */
 function buildSetterStore(
+  ctx: CodegenContext,
   entry: { typeIdx: number; fieldIdx: number; fieldType: ValType },
   anyLocal: number,
   valMode: "extern" | "f64" | "i32",
@@ -2672,6 +2681,23 @@ function buildSetterStore(
   then.push({ op: "local.get", index: 1 } as Instr);
 
   if (valMode === "extern") {
+    // (#2831) Vec-typed field: the inbound externref may be a HOST-marshalled
+    // array (or any externref), NOT a wasm vec — the prior unguarded
+    // `any.convert_extern; ref.cast(_null) $vec` traps `illegal cast` (or, under
+    // the `_safeSet` try/catch, degrades to a SILENTLY-DROPPED cross-rep write).
+    // Route through the reserved host-aware materializer instead, which builds a
+    // fresh vec of the exact target type on the slot (empty/non-empty/host/
+    // same-rep/null uniformly). Value (local 1, externref) is already on stack.
+    // Name-based lookup (funcMap stays in lockstep across late-import shifts);
+    // undefined pre-reserve ⇒ falls back to the guarded cast below.
+    const vecMatName = ft.kind === "ref" || ft.kind === "ref_null" ? ctx.vecFromExternMap?.get(ft.typeIdx) : undefined;
+    const vecMatIdx = vecMatName !== undefined ? ctx.funcMap.get(vecMatName) : undefined;
+    if (vecMatIdx !== undefined) {
+      then.push({ op: "call", funcIdx: vecMatIdx } as Instr);
+      if (ft.kind === "ref") then.push({ op: "ref.as_non_null" } as Instr);
+      then.push({ op: "struct.set", typeIdx: entry.typeIdx, fieldIdx: entry.fieldIdx } as Instr);
+      return then;
+    }
     // Field kinds are restricted by isRefKind above to: ref / ref_null /
     // anyref / externref / ref_extern. externref & ref_extern need no
     // conversion; everything else converts externref → anyref first, then
@@ -5996,6 +6022,12 @@ export function generateMultiModule(
       for (const [k, v] of ctx.exportSignatures) obj[k] = v;
       mod.exportSignatures = obj;
     }
+
+    // (#2831) Reserve the host-externref → wasm-vec materializers before the
+    // `__sset_*` setters bake their value coercions (mirrors the generateModule
+    // path). No member-set-dispatch in this multi-source path, so only the
+    // `__sset_*` (b) enumeration contributes; no-op without a vec write target.
+    reserveVecFieldMaterializers(ctx);
 
     // Emit exported struct field getter helpers for the runtime (mirrors
     // generateModule path — #1308 surfaced that multi-source projects

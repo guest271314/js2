@@ -14,7 +14,7 @@ import type { ClosureInfo, CodegenContext, FunctionContext, OptionalParamInfo } 
 import { addUnionImports, ensureAnyHelpers, ensureAnyToExternHelper, isAnyValue } from "./index.js";
 import { ensureAnyToStringHelper, stringConstantExternrefInstrs } from "./native-strings.js";
 import { addStringConstantGlobal } from "./registry/imports.js";
-import { getArrTypeIdxFromVec } from "./registry/types.js";
+import { addFuncType, getArrTypeIdxFromVec } from "./registry/types.js";
 import { ensureLateImport, flushLateImportShifts, materializeStructAsObject, registerCoerceType } from "./shared.js";
 
 /**
@@ -401,6 +401,117 @@ export function buildVecFromExternref(
     { op: "local.get", index: arrLocal } as Instr,
     { op: "struct.new", typeIdx: vecTypeIdx } as Instr,
   ];
+}
+
+/**
+ * (#2831) Reserve (or fetch) the per-target-vec materializer
+ * `__vec_from_extern_<vecTypeIdx>(val: externref) -> (ref null $vec)` and record
+ * its NAME in `ctx.vecFromExternMap`. Returns the helper name (so callers resolve
+ * the funcIdx via `funcMap` at emit time, immune to later import shifts), or
+ * `undefined` if `vecTypeIdx` is not a vec struct or the index space is frozen.
+ *
+ * The body is the host-externref → wasm-vec conversion, guarded so it is safe at
+ * a dynamic any-receiver write where the inbound value is an OPAQUE host
+ * externref (a `[]` already marshalled by `__make_iterable`), not a wasm vec:
+ *
+ *   1. `null`/`undefined` input            → `ref.null $vec` (store null on the
+ *      slot; do NOT route to the sidecar — keeps reads+writes on the same rep).
+ *   2. already this exact vec rep (a wasm  → `ref.cast $vec` (identity-preserving
+ *      vec boxed via `extern.convert_any`)   short-circuit; no rebuild/copy).
+ *   3. otherwise (host array / cross-rep)  → `buildVecFromExternref`: read
+ *      `__extern_length` + per-element `__extern_get`, element-coerce, and
+ *      `struct.new` a FRESH vec of the exact target type.
+ *
+ * This is the read-consistent inverse of `__make_iterable`; the produced value is
+ * stored by `struct.set` directly on the slot (no sidecar ⇒ no #2664 desync, no
+ * unguarded `ref.cast` ⇒ no #2831 `illegal cast` trap).
+ *
+ * Built with a REAL FunctionContext so `buildVecFromExternref` owns its
+ * `ensureLateImport` + single `flushLateImportShifts` — this MUST be called from
+ * the pre-fill reserve pass (`reserveVecFieldMaterializers`), where index shifts
+ * are still permitted, NOT from inside any `fill*` (which must be funcIdx-stable).
+ */
+/**
+ * (#2831) Resolve the funcIdx of the reserved `__vec_from_extern_<vecTypeIdx>`
+ * materializer for `vecTypeIdx`, or `undefined` if none was reserved. Name-based
+ * (via `funcMap`) so it stays correct across late-import index shifts. Returns
+ * `undefined` pre-reserve, so coercion call sites fall back to their guarded cast.
+ */
+export function vecFromExternFuncIdx(ctx: CodegenContext, vecTypeIdx: number): number | undefined {
+  const name = ctx.vecFromExternMap?.get(vecTypeIdx);
+  if (name === undefined) return undefined;
+  return ctx.funcMap.get(name);
+}
+
+export function buildVecFromExternMaterializer(ctx: CodegenContext, vecTypeIdx: number): string | undefined {
+  const name = `__vec_from_extern_${vecTypeIdx}`;
+  if (ctx.funcMap.get(name) !== undefined) return name; // idempotent
+  if (ctx.indexSpaceFrozen) return undefined; // cannot register a defining func / import past the freeze
+  const vecInfo = getVecInfo(ctx, vecTypeIdx);
+  if (!vecInfo) return undefined;
+
+  const resultType: ValType = { kind: "ref_null", typeIdx: vecTypeIdx };
+  // Synthetic FunctionContext: one externref param (the value), returns ref_null
+  // vec. buildVecFromExternref allocLocals on this fctx and reads param slot 0.
+  const fctx: FunctionContext = {
+    name,
+    params: [{ name: "val", type: { kind: "externref" } }],
+    locals: [],
+    localMap: new Map<string, number>(),
+    returnType: resultType,
+    body: [],
+    blockDepth: 0,
+    breakStack: [],
+    continueStack: [],
+    labelMap: new Map(),
+    savedBodies: [],
+  };
+
+  // The cross-rep / host-array conversion (registers its late imports + flushes
+  // against fctx; produces ref_null $vec). Built first so its locals are
+  // allocated before the short-circuit temp below.
+  const matInstrs = buildVecFromExternref(ctx, fctx, 0, vecTypeIdx, vecInfo);
+  const tmpAny = allocLocal(fctx, `__vfe_any_${fctx.locals.length}`, { kind: "anyref" } as ValType);
+
+  const body: Instr[] = [
+    // (1) null/undefined guard.
+    { op: "local.get", index: 0 } as Instr,
+    { op: "ref.is_null" } as Instr,
+    {
+      op: "if",
+      blockType: { kind: "val", type: resultType },
+      then: [{ op: "ref.null", typeIdx: vecTypeIdx } as Instr],
+      else: [
+        // (2) same-rep short-circuit: a wasm vec of this exact type, boxed via
+        // extern.convert_any, is cast straight through (identity preserved). The
+        // value is non-null here, so the non-null ref.test/ref.cast pair is safe.
+        { op: "local.get", index: 0 } as Instr,
+        { op: "any.convert_extern" } as Instr,
+        { op: "local.tee", index: tmpAny } as Instr,
+        { op: "ref.test", typeIdx: vecTypeIdx } as Instr,
+        {
+          op: "if",
+          blockType: { kind: "val", type: resultType },
+          then: [{ op: "local.get", index: tmpAny } as Instr, { op: "ref.cast", typeIdx: vecTypeIdx } as Instr],
+          // (3) host externref / cross-rep → materialize a fresh exact-type vec.
+          else: matInstrs,
+        } as Instr,
+      ],
+    } as Instr,
+  ];
+
+  const typeIdx = addFuncType(ctx, [{ kind: "externref" }], [resultType], "$vec_from_extern_type");
+  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  ctx.mod.functions.push({
+    name,
+    typeIdx,
+    locals: fctx.locals,
+    body,
+    exported: false,
+  });
+  ctx.funcMap.set(name, funcIdx);
+  (ctx.vecFromExternMap ??= new Map<number, string>()).set(vecTypeIdx, name);
+  return name;
 }
 
 /**
@@ -2994,6 +3105,16 @@ export function coercionInstrs(ctx: CodegenContext, from: ValType, to: ValType, 
   // externref → ref_null: any.convert_extern + guarded ref.cast_null
   if (from.kind === "externref" && to.kind === "ref_null") {
     const toIdx = (to as { typeIdx: number }).typeIdx;
+    // (#2831) Vec-typed target: the inbound externref may be a HOST value (a `[]`
+    // already marshalled by `__make_iterable` at a dynamic any-receiver write),
+    // NOT a wasm vec. A bare/guarded ref.cast either TRAPS (no fctx) or silently
+    // returns null → DROPPED write (the #2664 desync). Route through the reserved
+    // per-vec materializer (host-externref-aware; empty/non-empty/host/same-rep/
+    // null uniformly → fresh vec of the exact type, on the slot). Only once
+    // `reserveVecFieldMaterializers` has populated the map (finalize); pre-finalize
+    // callers keep the guarded-cast path below (byte-identical).
+    const vecMatIdx = vecFromExternFuncIdx(ctx, toIdx);
+    if (vecMatIdx !== undefined) return [{ op: "call", funcIdx: vecMatIdx } as Instr];
     if (fctx) {
       const tmp = allocTempLocal(fctx, { kind: "anyref" } as ValType);
       const result: Instr[] = [
@@ -3017,6 +3138,13 @@ export function coercionInstrs(ctx: CodegenContext, from: ValType, to: ValType, 
   // externref → ref: any.convert_extern + guarded ref.cast
   if (from.kind === "externref" && to.kind === "ref") {
     const toIdx = (to as { typeIdx: number }).typeIdx;
+    // (#2831) Vec-typed non-null target — same materializer routing as the
+    // ref_null arm above; the materializer returns ref_null $vec, so assert
+    // non-null for the (ref $vec) field type (a null write traps, matching the
+    // non-null field contract — never silently dropped).
+    const vecMatIdx = vecFromExternFuncIdx(ctx, toIdx);
+    if (vecMatIdx !== undefined)
+      return [{ op: "call", funcIdx: vecMatIdx } as Instr, { op: "ref.as_non_null" } as Instr];
     if (fctx) {
       const tmp = allocTempLocal(fctx, { kind: "anyref" } as ValType);
       const result: Instr[] = [
