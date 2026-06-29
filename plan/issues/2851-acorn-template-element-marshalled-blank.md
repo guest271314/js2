@@ -1,5 +1,5 @@
 ---
-id: 2844
+id: 2851
 title: "compiled-acorn marshals TemplateLiteral `quasis[]` TemplateElement nodes BLANK (type/value/tail dropped across host boundary)"
 status: ready
 sprint: current
@@ -15,7 +15,7 @@ related: [1712, 2841, 2845]
 umbrella: 1712
 ---
 
-# #2844 — compiled-acorn marshals `quasis[]` TemplateElement nodes blank
+# #2851 — compiled-acorn marshals `quasis[]` TemplateElement nodes blank
 
 Surfaced by the wider acorn differential corpus (`tests/dogfood/acorn-corpus.mjs`,
 under the #1712 umbrella). Compiled-acorn **parses** template literals without

@@ -24,8 +24,8 @@ sessions). Each divergence is classified **QUIRK** (cosmetic host-marshalling:
 | corpus/optional-nullish.js         | equal±quirks | `?.` / `??` / `?.[ ]` / `?.()` — clean                                       |
 | corpus/imports-exports.module.js   | equal±quirks | named/default/namespace/`export *` — clean (**no** spurious `attributes:[]`) |
 | corpus/import-attributes.module.js | equal±quirks | `import … with { type:"json" }` — clean                                      |
-| corpus/templates.js                | **REAL ×21** | TemplateElement `quasis[]` blank → **#2844**                                 |
-| corpus/escapes-unicode.js          | **REAL ×3**  | template quasis blank → **#2844**                                            |
+| corpus/templates.js                | **REAL ×21** | TemplateElement `quasis[]` blank → **#2851**                                 |
+| corpus/escapes-unicode.js          | **REAL ×3**  | template quasis blank → **#2851**                                            |
 | corpus/operators.js                | **REAL ×9**  | SequenceExpression children blank → **#2845**                                |
 | corpus/sequence-misc.js            | **REAL ×23** | SequenceExpression children blank → **#2845**                                |
 | corpus/literals.js                 | **REAL ×2**  | BigInt literal → f64 corruption → **#2846**                                  |
@@ -61,7 +61,7 @@ _additional_ non-`return` throw walls were isolated and filed as **#2848**
 
 | issue     | gap                                                                                            | priority |
 | --------- | ---------------------------------------------------------------------------------------------- | -------- |
-| **#2844** | TemplateLiteral `quasis[]` TemplateElement nodes marshalled BLANK (type/value/tail dropped)    | high     |
+| **#2851** | TemplateLiteral `quasis[]` TemplateElement nodes marshalled BLANK (type/value/tail dropped)    | high     |
 | **#2845** | SequenceExpression `expressions[]` child nodes marshalled BLANK (all fields dropped)           | high     |
 | **#2846** | BigInt literal corrupted — parsed/marshalled as float64 (value + `bigint` string wrong)        | high     |
 | **#2847** | Cosmetic marshalling quirks — spurious `sourceFile: null` + booleans as i32 0/1 (ONE issue)    | low      |
@@ -87,7 +87,7 @@ _additional_ non-`return` throw walls were isolated and filed as **#2848**
 
 ## Suspected shared root cause (marshalling family)
 
-#2841 (`params[]`), #2844 (`quasis[]`), #2845 (`expressions[]`) are all
+#2841 (`params[]`), #2851 (`quasis[]`), #2845 (`expressions[]`) are all
 "node-typed **elements of a specific array property** come back without their
 fields." They may share one `wrapExports` array-of-struct marshalling fix —
 cross-referenced in each issue so a dev can consolidate.

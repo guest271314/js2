@@ -11,7 +11,7 @@ task_type: bugfix
 area: codegen, runtime
 language_feature: sequence-expression
 goal: acorn-dogfood
-related: [1712, 2841, 2844]
+related: [1712, 2841, 2851]
 umbrella: 1712
 ---
 
@@ -59,12 +59,12 @@ cosmetic `sourceFile`/i32-bool quirks remain — see #2847).
 ## Suspected root cause
 
 Host-marshalling gap on **node-typed elements of the `expressions` array**.
-Likely the same mechanism as #2841 (`params[]`) and #2844 (`quasis[]`) — "node
+Likely the same mechanism as #2841 (`params[]`) and #2851 (`quasis[]`) — "node
 elements of a specific array property come back without their fields." The
 distinguishing feature here is that the elements are arbitrary expression nodes
 (Literal, CallExpression, Identifier, UpdateExpression), so the marshaller is
 not reading struct fields for array-element node values at all. May share a fix
-with #2841/#2844.
+with #2841/#2851.
 
 ## Acceptance
 
