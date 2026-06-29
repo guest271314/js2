@@ -20,7 +20,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { compile } from "../src/index.js";
+import { compile, compileProject } from "../src/index.js";
 
 const WASMTIME_FLAGS = ["run", "-W", "gc=y,function-references=y,exceptions=y"];
 
@@ -167,7 +167,7 @@ export function main(): void { writeSync(1, "hi\\n"); }
       expect(out.length).toBe(0);
     });
 
-    it("the nm_js2wasm_deno.ts example round-trips multiple frames incl. a >window body", async () => {
+    it("the nm_js2wasm_deno.ts example round-trips multiple frames (a sub-cap body echoes verbatim)", async () => {
       const examplePath = join(
         dirname(fileURLToPath(import.meta.url)),
         "..",
@@ -175,9 +175,13 @@ export function main(): void { writeSync(1, "hi\\n"); }
         "native-messaging",
         "nm_js2wasm_deno.ts",
       );
-      const src = readFileSync(examplePath, "utf-8");
-      const result = await compile(src, { fileName: "nm_js2wasm_deno.ts", target: "wasi" });
-      expect(result.success).toBe(true);
+      // The deno example statically imports the shared `./nm_js2wasm_sync_framing`
+      // core, so it MUST go through the multi-file bundler (compileProject) — a
+      // single-file `compile` leaves `runNmHost` as an unsatisfiable `env.*` host
+      // import and the module never echoes. (Mirrors the CLI's relative-import
+      // routing, #2771.)
+      const result = await compileProject(examplePath, { target: "wasi", skipSemanticDiagnostics: true });
+      expect(result.success, result.success ? "" : result.errors?.[0]?.message).toBe(true);
 
       const frame = (body: number[]): Buffer => {
         const n = body.length;
@@ -187,8 +191,12 @@ export function main(): void { writeSync(1, "hi\\n"); }
         ]);
       };
       const small = [0x00, 0xff, 0x0a, 0x7f, 0x80, 0x41];
+      // 150 KiB body — below the deno host's 1 MiB browser-cap re-chunk threshold
+      // (#2814), so it is echoed VERBATIM (prefix + body) byte-for-byte. (A body
+      // LARGER than 1 MiB would be re-chunked into <=1 MiB JSON frames instead; the
+      // re-chunk round-trip is covered by the matrix + comparison tests.)
       const big: number[] = [];
-      for (let i = 0; i < 150000; i++) big.push((i * 7 + 3) & 0xff); // > 64 KiB window
+      for (let i = 0; i < 150000; i++) big.push((i * 7 + 3) & 0xff);
       const input = Buffer.concat([frame(small), frame(big)]);
       const out = run(result.binary!, "nm_js2wasm_deno", input);
       expect(Buffer.compare(out, input)).toBe(0);
