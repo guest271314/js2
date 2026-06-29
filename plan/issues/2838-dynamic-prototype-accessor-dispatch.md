@@ -162,4 +162,57 @@ acorn — it is the isolated prerequisite for L6.
   the runtime-installed METHOD-call dispatch (`new C().read()`, `this.currentVarScope()`)
   is the remaining L6 wall.
 
-### PR3 — L6: `effectiveReceiverType` method-call dispatch redesign (the wall)
+### PR3 — L6: dynamic-`this` method-call dispatch (this branch) — BREAKS THE ACORN RETURN WALL
+- **Root cause (WAT-grounded)**: a method call whose receiver is `this`, where the
+  runtime `this` is dynamic (acorn's getter body runs with `__current_this` set, the
+  fctx `this` local is NOT a concrete struct ref) but TS contextually typed `this` as
+  the descriptor literal `__anon_N`. The static dispatch arms in `compileCallExpression`
+  resolve the receiver against that WRONG nominal type; none match the real method, so
+  the call degraded to a member-get-then-DROP (`__extern_get(this,"m"); drop; ref.null`)
+  — the method never ran and returned null. `this.currentVarScope()` inside acorn's
+  `inFunction` getter hit exactly this, so `inFunction`/`allowReturn` read 0 and every
+  `return` raised `'return' outside of function`.
+- **Fix** (`calls.ts`, top of the property-access call branch ~3964): when the receiver
+  is `this`, `resolveThisStructName(ctx,fctx)` is undefined (runtime `this` dynamic) yet
+  `resolveStructName` of the TS type IS a struct (the lie), route the call through the
+  existing `emitWrapperDynamicMethodCall` → `__extern_method_call(recv,name,args)`, which
+  binds the receiver via `__current_this` and walks the runtime prototype chain
+  (`_fnctorProtoLookup`). Precise predicate: a genuine typed method (truth AGREES →
+  struct defined) is never intercepted; a truly-`any`/module-level `this` (no struct
+  either way) is left to the existing fallback. `.call`/`.apply`/`.bind` excluded by
+  name; JS-host only.
+- **ACCEPTANCE — MET (real acorn, compiled, not synthetic)**: `setup-acorn` →
+  `compile(acornSource,{skipSemanticDiagnostics:true})` → instantiate → `wrapExports` →
+  `parse("function f(){return 1}")` now returns a `Program` AST (previously threw
+  `[object WebAssembly.Exception]` = acorn's own `'return' outside of function`).
+  `(a)=>{return a}` and `var x=1` also parse. **The acorn `return` wall is broken.**
+- **Non-regressing**: identical failing sets vs the pre-L6 (L4+L5) baseline across
+  closure/accessor, fnctor/this/proto, and class-method suites (per-test JSON diff).
+  The predicate never fires for typed class/fnctor methods (concrete-struct `this`).
+
+### edge.js NM differential verdict (round-8)
+Ran the real-world differential (`nm-diff.mjs`: compiled-acorn `parse()` vs node-acorn
+oracle, `ignorePositions`) at three source states — all WAT/runtime-grounded:
+
+| target | pure-main (L3) | L4+L5 | L4+L5+**L6** |
+|---|---|---|---|
+| sanity `foo(bar,baz)` | nonQuirk 0 | 0 | **0** |
+| **background.js** | **nonQuirk 2** | 2 | **2** (identical — NO regression) |
+| **edge.js** | THREW (`return` wall) | THREW | **PARSES**, nonQuirk-class 76 |
+
+- **edge.js advanced from THROW → parses** to a structurally-equivalent AST. All 76
+  residual divergences are **pre-existing `wrapExports` marshalling quirks**, NOT parse
+  defects: 62 are the function-parameter field-marshalling quirk (the param Identifier
+  node is present but its `type`/`name` sub-fields aren't read back — the same quirk that
+  produces background.js's pre-existing 2, and the node-count deficit 1190→1160 ≈ the 30
+  unread param `type` fields), and 14 are the boolean→number representation quirk
+  (`Literal.value` `true`→`1`, ForOf `.await` `false`→`0`) — the same family as the
+  already-tolerated `optional/computed/generator/async` boolean quirks.
+- **background.js stays equal — proven**: nonQuirk count is IDENTICAL (2) at pure-main,
+  L4+L5, and L4+L5+L6. The 2 are pre-existing marshalling quirks caused by NONE of this
+  epic's changes. No regression.
+- **Round-8 follow-up (separate from this parse epic)**: the residual is a `wrapExports`
+  marshalling representation gap — (a) function-parameter Identifier `type`/`name` not
+  marshalled back across the host boundary, (b) booleans marshalled as i32 `0/1`. These
+  are AST-marshalling concerns, orthogonal to parse correctness (the compiled parser
+  builds the right tree). Recommend a dedicated `wrapExports` marshalling issue.

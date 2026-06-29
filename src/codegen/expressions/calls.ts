@@ -112,7 +112,14 @@ import {
 } from "../property-access.js";
 import { emitToNumber, emitToString } from "../coercion-engine.js";
 import type { InnerResult } from "../shared.js";
-import { brandExternMethodResult, coerceType, compileExpression, valTypesMatch, VOID_RESULT } from "../shared.js";
+import {
+  brandExternMethodResult,
+  coerceType,
+  compileExpression,
+  resolveThisStructName,
+  valTypesMatch,
+  VOID_RESULT,
+} from "../shared.js";
 // (#2193 PR-B) reflective `m.call(thisArg, …)` on a `$NativeProto` member-closure value.
 import { ensureArrayNativeProtoGlue, ensureObjectNativeProtoGlue } from "../array-object-proto.js";
 import {
@@ -3961,6 +3968,41 @@ function compileCallExpression(
   // Handle property access calls: console.log, Math.xxx, extern methods
   if (ts.isPropertyAccessExpression(expr.expression)) {
     const propAccess = expr.expression;
+
+    // (#2838 L6) Dynamic-`this` method-call dispatch. When the receiver is `this`
+    // and the runtime `this` is DYNAMIC (the fctx `this` local is not a concrete
+    // struct ref — e.g. inside a runtime-installed accessor getter whose body runs
+    // with `__current_this` set, NOT a real typed method) BUT TypeScript has
+    // contextually typed `this` as a concrete struct/object (acorn's getter `this`
+    // is typed as the descriptor literal `__anon_N`), the static method-dispatch
+    // arms below resolve the receiver against that WRONG nominal type. None match
+    // the real method, so the call silently degrades to a member-get-then-drop
+    // (returns null) and the method never runs — the acorn `this.currentVarScope()`
+    // wall (L6). Route such calls through `__extern_method_call`, which binds the
+    // receiver via `__current_this` and walks the runtime prototype chain
+    // (`_fnctorProtoLookup`) — exactly what the any/externref-receiver fallback
+    // already does for a correctly-`any`-typed receiver. The predicate is precise:
+    // `resolveThisStructName` (the fctx local's actual ref type) is undefined
+    // (dynamic), yet `resolveStructName` of the TS type IS a struct (the lie) — so
+    // a genuine typed class/fnctor method (truth AGREES → struct name defined) is
+    // never intercepted, and a truly-`any`/module-level `this` (no struct either
+    // way) is left to the existing fallback. JS-host only (the dynamic MOP path);
+    // the reflective `.call`/`.apply`/`.bind` forms keep their dedicated handlers.
+    {
+      const mName = propAccess.name.text;
+      if (
+        !noJsHost(ctx) &&
+        propAccess.expression.kind === ts.SyntaxKind.ThisKeyword &&
+        mName !== "call" &&
+        mName !== "apply" &&
+        mName !== "bind" &&
+        resolveThisStructName(ctx, fctx) === undefined &&
+        resolveStructName(ctx, ctx.checker.getTypeAtLocation(propAccess.expression)) !== undefined
+      ) {
+        const dynThisResult = emitWrapperDynamicMethodCall(ctx, fctx, propAccess.expression, mName, expr);
+        if (dynThisResult !== null) return dynThisResult;
+      }
+    }
 
     const standaloneRegExpExec = tryCompileStandaloneRegExpExec(ctx, fctx, expr, propAccess);
     if (standaloneRegExpExec !== undefined) return standaloneRegExpExec;
