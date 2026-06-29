@@ -1,7 +1,8 @@
 ---
 id: 2848
 title: "compiled-acorn THROWS parsing `new.target`, `yield <expr>`, and `for await…of` — additional parser-execution walls beyond the #2838 return wall"
-status: ready
+status: done
+completed: 2026-06-30
 sprint: current
 priority: medium
 horizon: m
@@ -11,10 +12,19 @@ task_type: bugfix
 area: codegen, runtime
 language_feature: meta-property, generators
 goal: acorn-dogfood
-related: [1712, 2838, 2837]
+related: [1712, 2838, 2837, 2325]
 depends_on: [2838]
 umbrella: 1712
 ---
+
+> **RESOLVED 2026-06-30 (verified, not separately fixed).** These three
+> constructs were filed from the corpus's pre-return-wall run. A re-run of
+> `tests/dogfood/acorn-corpus.mjs` after the **#2838 / #2325** return-wall +
+> dynamic-prototype-accessor-dispatch family landed shows `corpus/new-target.js`,
+> `corpus/generators-async.js`, and `corpus/for-await.module.js` all
+> **`equal±quirks`** — they parse correctly. As suspected, they were the same
+> dynamic-dispatch family as the `return` wall and cleared with it. Kept as a
+> regression record; the repros below are good regression pins.
 
 # #2848 — compiled-acorn throws on `new.target` and `yield <expr>`
 
