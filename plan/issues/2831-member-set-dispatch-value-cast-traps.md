@@ -1,7 +1,8 @@
 ---
 id: 2831
 title: "[SENIOR-DEV ONLY] member-WRITE dispatcher `__set_member_<name>` traps `illegal cast` on the value coercion — compiled acorn cannot parse ANY function/arrow body"
-status: in-progress
+status: done
+completed: 2026-06-29
 assignee: ttraenkler/sendev-2831
 sprint: current
 priority: high
@@ -404,3 +405,65 @@ insufficient (host-marshalled value → dropped write).
   member-set-dispatch (#2664) — but the change **substitutes one conversion for a
   safe existing one** (`buildVecFromExternref`), not a coercion-engine rewrite, so
   it does **not** meet the bar for a deeper engine rework.
+
+## Implementation Notes (sendev-2831, 2026-06-29) — DONE
+
+Implemented Option A exactly. Files changed:
+- `src/codegen/type-coercion.ts` — `buildVecFromExternMaterializer(ctx, vecIdx)`
+  (reserves `__vec_from_extern_<vecIdx>(externref)->(ref null $vec)` built from a
+  real synthetic `FunctionContext` + `buildVecFromExternref`, with a null guard
+  and a same-rep `ref.test` identity short-circuit) and `vecFromExternFuncIdx`
+  (name-based funcMap resolve). The two `externref→ref`/`ref_null` arms of
+  `coercionInstrs` now return `[call materializer]` (+`ref.as_non_null` for the
+  non-null arm) when `ctx.vecFromExternMap` has the target — which auto-fixes
+  BOTH the member-set-dispatch fill (it calls `coercionInstrs`) and the inline
+  static-write path.
+- `src/codegen/member-set-dispatch.ts` — `reserveVecFieldMaterializers(ctx)`
+  (the up-front reserve-then-fill pass; enumerates distinct mutable vec-typed
+  field types from the dispatcher candidates AND the `__sset` struct fields).
+- `src/codegen/index.ts` — wired `reserveVecFieldMaterializers` into BOTH
+  finalize paths before `emitStructFieldSetters`/`fill*`; `buildSetterStore`
+  (`__sset_*`) emits `call materializer` for vec fields (threaded `ctx`).
+- `src/codegen/context/types.ts` — `vecFromExternMap?: Map<number,string>`.
+- `tests/issue-2831-vec-from-extern-materializer.test.ts` — 6 unit tests.
+
+**Why name-based, not funcIdx (the load-bearing decision):** the materializer is
+reserved early in finalize; later fill passes (member-get-dispatch, etc.) still
+register late imports and shift func indices. Storing the funcIdx in the map
+would go stale. Storing the NAME and resolving via `funcMap` at each emit site is
+immune (funcMap is kept in lockstep by every shift, and baked calls are walked by
+`shiftLateImportIndices`). This is the #1461/#2193 late-funcIdx-shift hazard.
+
+### Verification (local)
+- The 3 function repros on freshly-compiled acorn@8.16.0:
+  `function f(){}` → **PARSE OK**, `async function f(){}` → **PARSE OK**.
+  `var g=(x)=>x;` → **no longer `illegal cast`** (the #2831 wall is cleared) but
+  advances to the NEXT wall (below).
+- NM differential: `foo(bar,baz)` is structurally equal modulo the known quirks
+  (always-null `sourceFile`, boolean-as-i32 `optional`). `background.js`/`edge.js`
+  now reach the SAME next wall (arrow params), not the illegal cast.
+- `tests/issue-2831-*` (6) + #2664/#2806/#2809 non-regression all green; typecheck
+  + prettier + biome clean.
+
+### NEXT WALL (newly exposed — routes to a follow-up, NOT #2831)
+Arrow functions **with ≥1 parameter** throw acorn's own
+`SyntaxError: "Assigning to rvalue"` (a `toAssignable` divergence in arrow-param
+reinterpretation). Isolation:
+- `() => 1` (zero params) → **OK**
+- `x => x`, `(x) => x`, `(a,b) => a`, `f((x)=>x)` → **THROW "Assigning to rvalue (1:NaN)"**
+- `(1)`, `(x)`, `var y=(1);` (parenthesized exprs, no arrow) → **OK**
+
+So the wall is specifically acorn's `parseParenAndDistinguishExpression` →
+arrow-param `toAssignable(Identifier)` path. `background.js` and `edge.js` both
+contain parameterized arrows, so this is what now blocks the full NM differential.
+The `(1:NaN)` column hints a position/number field reads NaN on the raise path —
+worth a look when scoping the follow-up. This is a distinct parser-logic bug, not
+the value-representation write trap #2831 fixed.
+
+### Known narrow gaps (architect-scoped OUT, not regressions)
+- Dynamic any-receiver `.push()` on a vec read back through the host boundary
+  doesn't persist the mutation (host-marshalling copy) — orthogonal any-receiver
+  array-method gap; pre-existing, trapped earlier before this fix.
+- A vec-of-**ref-struct** field given GENUINE host-object elements can still trap
+  inside the materializer's element `ref.cast_null` (the architect's "object-rep
+  conversion is out of scope"). acorn uses externref-elem vecs, which work.
