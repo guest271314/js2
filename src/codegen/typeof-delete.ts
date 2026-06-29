@@ -10,6 +10,7 @@ import { reportError } from "./context/errors.js";
 import { allocLocal, allocTempLocal, releaseTempLocal } from "./context/locals.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { isStrictContext } from "./expressions/assignment.js";
+import { EVAL_SOURCE_FILENAME } from "./expressions/eval-inline.js";
 import { ensureLateImport, flushLateImportShifts, shiftLateImportIndices } from "./expressions/late-imports.js";
 import { resolveStructName } from "./expressions/misc.js";
 import { addUnionImports, parseRegExpLiteral, resolveWasmType } from "./index.js";
@@ -245,7 +246,19 @@ export function compileDeleteExpression(
     // through to the resolvable-binding case below. Using symbol-presence — not
     // the weaker `!valueDeclaration` heuristic — is what keeps those three
     // intrinsics out of the `true` bucket (they have a symbol but no value decl).
-    if (ctx.checker.getSymbolAtLocation(ident) === undefined) {
+    //
+    // EXCEPTION — a node inside an inlined `eval("<literal>")` body lives in a
+    // foreign `SourceFile` (EVAL_SOURCE_FILENAME) the checker never bound, so
+    // `getSymbolAtLocation` is `undefined` for EVERY identifier there — including
+    // a name that resolves to an outer binding (`var x = 1; eval('delete x')` ⇒
+    // x is a non-deletable var ⇒ `false`). The symbol oracle is meaningless for
+    // such nodes, so fall through to the existing `false` (the prior behaviour,
+    // correct for the resolvable-outer-binding case `11.4.1-4.a-7.js`). Precise
+    // eval-scope delete resolution is out of scope (eval-substrate lane).
+    if (
+      ctx.checker.getSymbolAtLocation(ident) === undefined &&
+      ident.getSourceFile().fileName !== EVAL_SOURCE_FILENAME
+    ) {
       fctx.body.push({ op: "i32.const", value: 1 });
       return { kind: "i32" };
     }
