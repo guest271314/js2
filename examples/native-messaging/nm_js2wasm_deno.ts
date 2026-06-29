@@ -25,14 +25,21 @@
 // to the compiler's native nullable representation (no JS host needed), so
 // `=== null` works in the standalone module exactly as it does under real Deno.
 //
-// The Native Messaging FRAMING + verbatim streaming itself lives in the shared,
-// host-independent core `nm_js2wasm_sync_framing.ts` (#2778) — this file is just the thin
-// Deno adapter that injects `Deno.stdin.readSync` / `Deno.stdout.writeSync` into
-// the `runNmHost` seam and runs it with NO re-chunk cap (verbatim byte echo).
-// `nm_js2wasm_node_fs.ts` is the same core injected with `node:fs` IO and a 1 MiB cap;
-// `nm_js2wasm_wasi_p1.ts` is the raw `wasi_snapshot_preview1` `fd_read`/`fd_write` form.
-// All compile to the SAME pure-WASI-P1 shape; they differ only in which runtime's
-// source-level API they additionally run under, unmodified.
+// The Native Messaging FRAMING + browser-cap re-chunk streaming itself lives in
+// the shared, host-independent core `nm_js2wasm_sync_framing.ts` (#2778) — this file is
+// just the thin Deno adapter that injects `Deno.stdin.readSync` /
+// `Deno.stdout.writeSync` into the `runNmHost` seam and runs it with a **1 MiB
+// re-chunk cap** (#2814), exactly like `nm_js2wasm_node_fs.ts`. A body larger than
+// the browser 1 MiB per-host->extension-message cap is split into a sequence of
+// valid <=1 MiB JSON frames (`[run]` for an array body, `"run"` for a string body)
+// whose interiors, concatenated by the receiver, reproduce the original body; a
+// body that already fits is echoed verbatim. This keeps every host->extension
+// message within the real Chrome cap and bounds resident memory on the write side.
+// `nm_js2wasm_wasi_p1.ts` is the raw `wasi_snapshot_preview1` `fd_read`/`fd_write`
+// form (it re-chunks too, in linear memory). All compile to the SAME pure-WASI-P1
+// shape; they differ only in which runtime's source-level API they additionally
+// run under, unmodified. NO Native-Messaging host echoes a single >1 MiB frame
+// (#2814 — re-chunking is not optional; loopdive/js2#389).
 //
 // The seam is two FUNCTION references (`denoRead` / `denoWrite`), not an object:
 // passing a struct value across the bundled-module boundary traps at runtime
@@ -70,18 +77,30 @@ function denoWrite(buf: Uint8Array): void {
   }
 }
 
-// No fd-2 telemetry in the verbatim variant (matches the pre-dedup nm_js2wasm_deno). The
-// verbatim path never invokes the diagnostics hook, so this is never called — it
-// exists only to satisfy the shared core's `log` parameter.
+// No fd-2 telemetry in the Deno variant (the fd-2 diagnostics line is the
+// `nm_js2wasm_node_fs` demo's deliberate extra; this thin Deno adapter keeps the
+// no-op to stay focused on the stdio seam). The shared core's re-chunk path calls
+// this once per input message with the declared body length; a no-op is a valid
+// implementation of the `log` hook.
 function denoNoLog(declaredLen: number): void {
   // intentionally empty; `declaredLen` is referenced so strict typecheck is happy
   void declaredLen;
 }
 
 export function main(): void {
-  // Verbatim echo: no browser re-chunk cap (maxFrameSize 0). Each framed message
-  // is streamed back byte-for-byte until EOF / a zero-length shutdown frame.
-  runNmHost(denoRead, denoWrite, denoNoLog, 0);
+  // Largest body the browser Native-Messaging implementation accepts in one
+  // host->extension message — the shared core's re-chunk cap (#2814). A body
+  // larger than this is split into valid <=1 MiB JSON frames; a smaller body is
+  // echoed verbatim. Streams to EOF / a zero-length shutdown frame.
+  //
+  // Kept a LOCAL const (not module-level) on purpose: a module-level const lowers
+  // to a Wasm GLOBAL, and passing that global as the cap argument across the
+  // bundled-module call into the shared core mis-lowers under `--target wasi` → a
+  // runtime fault (a clean compile, but a fault) — the same multi-file
+  // index-shift gap noted in `nm_js2wasm_node_fs.ts` (#2778). A local const (or an
+  // inline literal) compiles to a plain `i32.const` operand and is unaffected.
+  const frameChunk = 1024 * 1024;
+  runNmHost(denoRead, denoWrite, denoNoLog, frameChunk);
 }
 
 // Invoke the entry point. js2wasm compiles a top-level call into the module's

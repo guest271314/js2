@@ -15,21 +15,23 @@
  * runtime — the matrix therefore runs in every CI shard, not only where
  * `wasmtime` happens to be installed.
  *
- *   - `nm_js2wasm_deno.ts`    / `nm_js2wasm_wasi_p1.ts`  — VERBATIM streamers: a frame of any size
- *     is echoed back byte-for-byte through a fixed window. Asserted byte-EXACT at
- *     1 / 64 / 128 MiB.
- *   - `nm_js2wasm_node_fs.ts` — re-chunks a body LARGER than the browser 1 MiB cap into a
- *     sequence of valid <=1 MiB JSON frames (its documented design). A single
- *     >1 MiB frame does NOT come back byte-identical, so it is asserted on
- *     ROUND-TRIP correctness instead: every emitted frame is <=1 MiB and a valid
- *     `[…]`, and concatenating the frame interiors reconstructs the original
- *     array body exactly. Tested at 1 / 64 / 128 MiB.
- *   - `nm_js2wasm_node_process.ts` — async `process.stdin` reactor. #2777 replaced the
- *     prelude's per-byte chunk build (and the example's growing-cons-rope
- *     `buffered`) with amortized-growth BYTE buffers, making the read side O(n);
- *     it now echoes 1 / 64 / 128 MiB byte-EXACT under the in-process reactor shim
- *     on EVERY CI run, matching the other three variants (previously the large
- *     cases were gated on #2777 because the O(n^2) read SIGKILLed at multi-MiB).
+ * #2814 — ALL FOUR hosts now RE-CHUNK a body LARGER than their per-host frame cap
+ * into a sequence of valid <=1 MiB JSON frames (no host echoes a single >1 MiB
+ * frame any more). A re-chunked >cap body does NOT come back byte-identical, so
+ * every host is asserted on ROUND-TRIP correctness: every emitted frame is <=1 MiB
+ * and a valid `[…]`, and concatenating the frame interiors (re-inserting one comma
+ * between consecutive frames) reconstructs the original array body exactly. Tested
+ * at 1 / 64 / 128 MiB.
+ *
+ *   - `nm_js2wasm_node_fs.ts` / `nm_js2wasm_deno.ts` — re-chunk to the 1 MiB browser
+ *     cap via the shared `nm_js2wasm_sync_framing` core (synchronous fd IO).
+ *   - `nm_js2wasm_wasi_p1.ts` — re-chunks in RAW linear memory to a 64 KiB cap (its
+ *     fixed 3-page memory has no memory.grow; 64 KiB is still <= the 1 MiB browser
+ *     cap). Synchronous raw `wasi_snapshot_preview1` fd IO.
+ *   - `nm_js2wasm_node_process.ts` — async `process.stdin` reactor. #2777 made the read
+ *     side O(n) (amortized-growth BYTE buffers — it previously SIGKILLed at
+ *     multi-MiB); #2810 re-chunked its WRITE side to the 1 MiB cap. Driven by the
+ *     in-process reactor shim; same round-trip assertion as the other three.
  */
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -302,80 +304,75 @@ async function runReactorShim(binary: Uint8Array, stdin: Uint8Array): Promise<Ui
   return out;
 }
 
+// ---- shared re-chunk round-trip assertion -----------------------------------
+/**
+ * Assert one host's re-chunked echo of a `~bytes` JSON-array body: every emitted
+ * frame is a valid `[…]` within the 1 MiB browser cap, and concatenating the
+ * frame interiors (re-inserting one comma between consecutive frames) reconstructs
+ * the original array body byte-for-byte (the receiver's reassembly semantics).
+ */
+function assertRechunkRoundTrip(file: string, label: string, body: Buffer, out: Uint8Array): void {
+  const frames = parseFrames(out);
+  expect(frames.length, `${file} ${label}: expected at least one response frame`).toBeGreaterThanOrEqual(1);
+
+  for (const f of frames) {
+    expect(f.length, `${file} ${label}: frame must be <= 1 MiB (browser cap)`).toBeLessThanOrEqual(FRAME_CAP);
+    expect(f[0], `${file} ${label}: frame must open with '['`).toBe(0x5b);
+    expect(f[f.length - 1], `${file} ${label}: frame must close with ']'`).toBe(0x5d);
+  }
+
+  const parts: Buffer[] = [];
+  for (let i = 0; i < frames.length; i++) {
+    if (i > 0) parts.push(Buffer.from([0x2c])); // ,
+    parts.push(Buffer.from(frames[i]!.subarray(1, frames[i]!.length - 1)));
+  }
+  const recon = Buffer.concat([Buffer.from([0x5b]), Buffer.concat(parts), Buffer.from([0x5d])]);
+  expect(recon.length, `${file} ${label}: reconstructed body length`).toBe(body.length);
+  expect(Buffer.compare(recon, body), `${file} ${label}: reassembled array must equal the input`).toBe(0);
+}
+
 // =============================================================================
-describe("#2775 — verbatim streamers echo 1/64/128 MiB byte-for-byte", () => {
-  for (const file of ["nm_js2wasm_deno.ts", "nm_js2wasm_wasi_p1.ts"]) {
+// #2814 — ALL FOUR hosts now RE-CHUNK a body larger than their frame cap into
+// valid <=1 MiB JSON frames; none is a verbatim streamer any more. The node hosts
+// cap at 1 MiB; the raw-WASI `nm_js2wasm_wasi_p1` caps at 64 KiB (its fixed 3-page
+// linear memory has no memory.grow), still comfortably <= 1 MiB. The round-trip
+// assertion (every frame body <=1 MiB; reassembled interiors == input) is
+// identical for every host. The three SYNCHRONOUS hosts run under the raw-fd
+// {@link runFdShim}; the async `nm_js2wasm_node_process` runs under the reactor
+// {@link runReactorShim}.
+describe("#2814 — sync re-chunk streamers round-trip 1/64/128 MiB into valid <=1 MiB frames", () => {
+  for (const file of ["nm_js2wasm_deno.ts", "nm_js2wasm_wasi_p1.ts", "nm_js2wasm_node_fs.ts"]) {
     describe(file, () => {
       for (const { label, bytes } of SIZES) {
-        it(`echoes a ${label} frame byte-identically`, { timeout: 180_000 }, async () => {
+        it(`reassembles a ~${label} array body from valid <=1 MiB frames`, { timeout: 180_000 }, async () => {
           const r = await getCompiled(file);
           expect(r.success, r.success ? "" : `compile error: ${r.errors?.[0]?.message}`).toBe(true);
           expect(WebAssembly.validate(r.binary!), `${file} must validate`).toBe(true);
-          const input = frame(new Uint8Array(bytes).fill(0x61));
-          const out = await runFdShim(r.binary!, input);
-          expect(out.length, `${file} ${label} echo length`).toBe(input.length);
-          expect(Buffer.compare(Buffer.from(out), Buffer.from(input)), `${file} ${label} must be byte-identical`).toBe(
-            0,
-          );
+          const body = jsonArrayBody(bytes);
+          const out = await runFdShim(r.binary!, frame(body));
+          assertRechunkRoundTrip(file, label, body, out);
         });
       }
     });
   }
 });
 
-describe("#2775 — nm_js2wasm_node_fs re-chunk round-trips 1/64/128 MiB correctly", () => {
-  for (const { label, bytes } of SIZES) {
-    it(`reassembles a ~${label} array body from valid <=1 MiB frames`, { timeout: 180_000 }, async () => {
-      const r = await getCompiled("nm_js2wasm_node_fs.ts");
-      expect(r.success, r.success ? "" : `compile error: ${r.errors?.[0]?.message}`).toBe(true);
-      const body = jsonArrayBody(bytes);
-      const out = await runFdShim(r.binary!, frame(body));
-      const frames = parseFrames(out);
-      expect(frames.length, `${label}: expected at least one response frame`).toBeGreaterThanOrEqual(1);
-
-      // Every emitted frame must be a valid `[…]` JSON array within the 1 MiB cap.
-      for (const f of frames) {
-        expect(f.length, `${label}: frame must be <= 1 MiB (browser cap)`).toBeLessThanOrEqual(FRAME_CAP);
-        expect(f[0], `${label}: frame must open with '['`).toBe(0x5b);
-        expect(f[f.length - 1], `${label}: frame must close with ']'`).toBe(0x5d);
-      }
-
-      // Concatenating the frame interiors (with a comma between consecutive
-      // frames) reconstructs the original array interior byte-for-byte — the
-      // receiver's reassembly semantics.
-      const parts: Buffer[] = [];
-      for (let i = 0; i < frames.length; i++) {
-        if (i > 0) parts.push(Buffer.from([0x2c])); // ,
-        parts.push(Buffer.from(frames[i]!.subarray(1, frames[i]!.length - 1)));
-      }
-      const recon = Buffer.concat([Buffer.from([0x5b]), Buffer.concat(parts), Buffer.from([0x5d])]);
-      expect(recon.length, `${label}: reconstructed body length`).toBe(body.length);
-      expect(Buffer.compare(recon, body), `${label}: reassembled array must equal the input`).toBe(0);
-    });
-  }
-});
-
-describe("#2777 — nm_js2wasm_node_process echoes 1/64/128 MiB byte-for-byte (async reactor)", () => {
+describe("#2814 — nm_js2wasm_node_process re-chunk round-trips 1/64/128 MiB (async reactor)", () => {
   // nm_js2wasm_node_process is reactor-driven (async `process.stdin`), so it is driven by
   // the in-process {@link runReactorShim} (poll_oneoff/fd_read/fd_write) rather
-  // than the synchronous {@link runFdShim}. Before #2777 its read side was O(n^2)
-  // — the prelude built each chunk byte-by-byte and the example re-flattened its
-  // growing cons-rope `buffered` on every charCodeAt/substring — so it SIGKILLed
-  // at multi-MiB and the large sizes were gated. The #2777 byte-buffer
-  // accumulation makes it O(n), so it now runs the FULL 1/64/128 MiB sweep on
-  // EVERY CI run, byte-identical, matching the other three streaming variants.
+  // than the synchronous {@link runFdShim}. The #2777 byte-buffer accumulation
+  // made the read side O(n) (it previously SIGKILLed at multi-MiB); #2810 then
+  // re-chunked its WRITE side to the 1 MiB browser cap, so — like the other three
+  // hosts — it no longer echoes a single >1 MiB frame and is asserted on re-chunk
+  // ROUND-TRIP correctness rather than a byte-identical echo (#2814).
   for (const { label, bytes } of SIZES) {
-    it(`echoes a ${label} frame byte-identically`, { timeout: 180_000 }, async () => {
+    it(`reassembles a ~${label} array body from valid <=1 MiB frames`, { timeout: 180_000 }, async () => {
       const r = await getCompiled("nm_js2wasm_node_process.ts");
       expect(r.success, r.success ? "" : `compile error: ${r.errors?.[0]?.message}`).toBe(true);
       expect(WebAssembly.validate(r.binary!), "nm_js2wasm_node_process.ts must validate").toBe(true);
-      const input = frame(new Uint8Array(bytes).fill(0x61));
-      const out = await runReactorShim(r.binary!, input);
-      expect(out.length, `nm_js2wasm_node_process ${label} echo length`).toBe(input.length);
-      expect(
-        Buffer.compare(Buffer.from(out), Buffer.from(input)),
-        `nm_js2wasm_node_process ${label} must be byte-identical`,
-      ).toBe(0);
+      const body = jsonArrayBody(bytes);
+      const out = await runReactorShim(r.binary!, frame(body));
+      assertRechunkRoundTrip("nm_js2wasm_node_process.ts", label, body, out);
     });
   }
 });

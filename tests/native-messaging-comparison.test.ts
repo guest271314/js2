@@ -101,6 +101,62 @@ function frame(body: Uint8Array): Uint8Array {
   return out;
 }
 
+/** Split a framed stream back into its body frames (4-byte LE prefix + body). */
+function parseFrames(stream: Uint8Array): Uint8Array[] {
+  const frames: Uint8Array[] = [];
+  let p = 0;
+  while (p + 4 <= stream.length) {
+    const len = stream[p]! + stream[p + 1]! * 256 + stream[p + 2]! * 65536 + stream[p + 3]! * 16777216;
+    p += 4;
+    if (p + len > stream.length) break; // truncated tail — stop
+    frames.push(stream.subarray(p, p + len));
+    p += len;
+  }
+  return frames;
+}
+
+/** A valid JSON-array body `[null,null,…,null]` of approximately `approx` bytes. */
+function jsonArrayBody(approx: number): Buffer {
+  const m = Math.max(1, Math.floor((approx - 6) / 5) + 1);
+  const total = 2 + 4 + 5 * (m - 1);
+  const buf = Buffer.alloc(total);
+  let p = 0;
+  buf[p++] = 0x5b; // [
+  buf.write("null", p, "ascii");
+  p += 4;
+  for (let i = 1; i < m; i++) {
+    buf.write(",null", p, "ascii");
+    p += 5;
+  }
+  buf[p++] = 0x5d; // ]
+  return buf;
+}
+
+// The browser per-host->extension-message cap every host re-chunks to stay under.
+const FRAME_CAP_1MIB = 1024 * 1024;
+
+/**
+ * Assert one host's re-chunked echo (#2814): every emitted frame is a valid `[…]`
+ * within the 1 MiB browser cap, and concatenating the frame interiors (re-inserting
+ * one comma between consecutive frames) reconstructs the original array body.
+ */
+function assertRechunkRoundTrip(file: string, body: Buffer, out: Uint8Array): void {
+  const frames = parseFrames(out);
+  expect(frames.length, `${file}: expected at least one response frame`).toBeGreaterThanOrEqual(1);
+  const parts: Buffer[] = [];
+  for (let i = 0; i < frames.length; i++) {
+    const f = frames[i]!;
+    expect(f.length, `${file}: frame must be <= 1 MiB (browser cap)`).toBeLessThanOrEqual(FRAME_CAP_1MIB);
+    expect(f[0], `${file}: frame must open with '['`).toBe(0x5b);
+    expect(f[f.length - 1], `${file}: frame must close with ']'`).toBe(0x5d);
+    if (i > 0) parts.push(Buffer.from([0x2c])); // ,
+    parts.push(Buffer.from(f.subarray(1, f.length - 1)));
+  }
+  const recon = Buffer.concat([Buffer.from([0x5b]), Buffer.concat(parts), Buffer.from([0x5d])]);
+  expect(recon.length, `${file}: reconstructed body length`).toBe(body.length);
+  expect(Buffer.compare(recon, body), `${file}: reassembled array must equal the input`).toBe(0);
+}
+
 async function compileVariant(file: string): Promise<Awaited<ReturnType<typeof compile>>> {
   const path = join(NM_DIR, file);
   const src = readFileSync(path, "utf-8");
@@ -433,46 +489,49 @@ describe("#2696 — Native Messaging #389 reporter payloads", () => {
     });
   }
 
-  // The 1 MiB browser-message-cap payload — a complete single Native Messaging
-  // frame echoed verbatim. Restricted to the SYNCHRONOUS variants (raw WASI / Deno
-  // / node:fs): the nm_js2wasm_node_process async reactor rebuilds the body via per-byte
-  // `String.fromCharCode` + string concat, which is not CI-feasible at 1 MiB (its
-  // wire protocol is already covered by the synchronous variants + the small
-  // payloads above). 1 MiB is exactly at the cap, so even nm_js2wasm_node_fs (which
-  // re-chunks bodies LARGER than 1 MiB, per its README) echoes it as one frame.
+  // The 1 MiB browser-message-cap payload. As of #2814 ALL hosts re-chunk a body
+  // larger than their per-host cap, so this is asserted on re-chunk ROUND-TRIP, not
+  // a byte-identical echo: a valid `[null,null,…]` array body is split into valid
+  // <=1 MiB JSON frames whose interiors reassemble to the input. Restricted to the
+  // SYNCHRONOUS variants (raw WASI / Deno / node:fs): the nm_js2wasm_node_process async
+  // reactor rebuilds the body via per-byte `String.fromCharCode`, not CI-feasible at
+  // 1 MiB (its wire protocol is covered by the matrix test + the small payloads
+  // above). node_fs/deno cap at 1 MiB (a ~1 MiB body echoes as one frame); wasi_p1
+  // caps at 64 KiB (its fixed 3-page memory has no memory.grow) so it splits into
+  // ~64 KiB frames — both round-trip identically.
   for (const file of ["nm_js2wasm_wasi_p1.ts", "nm_js2wasm_node_fs.ts", "nm_js2wasm_deno.ts"]) {
-    it(`${file} echoes a 1 MiB frame verbatim`, { timeout: 60_000 }, async () => {
+    it(`${file} re-chunks a 1 MiB array body into valid <=1 MiB frames`, { timeout: 60_000 }, async () => {
       const r = await getCompiled(file);
       if (!isRunnableStandalone(r)) return;
-      const frameIn = frame(new Uint8Array(1024 * 1024).fill(0x61));
-      const out = await echoOnce(r, file.replace(/\.ts$/, "-1mib"), frameIn);
+      const body = jsonArrayBody(1024 * 1024);
+      const out = await echoOnce(r, file.replace(/\.ts$/, "-1mib"), frame(body));
       if (out === null) return;
-      expect(out.length, `${file} 1 MiB echo length`).toBe(frameIn.length);
-      expect(Buffer.compare(Buffer.from(out), Buffer.from(frameIn)), `${file} 1 MiB echo must be byte-identical`).toBe(
-        0,
-      );
+      assertRechunkRoundTrip(file, body, out);
     });
   }
 
-  // A LARGE multi-MiB single frame echoed verbatim. Restricted to the RAW
-  // byte-streaming variants (nm_js2wasm_wasi_p1 / nm_js2wasm_deno), which stream any frame through a
-  // fixed window byte-for-byte regardless of size. nm_js2wasm_node_fs deliberately
-  // re-chunks bodies > 1 MiB into <=1 MiB JSON response frames (browser cap), so a
-  // single >1 MiB frame does NOT come back byte-identical from it — that is its
-  // documented design, exercised separately. The reporter verified a 64 MiB body
-  // manually; 3 MiB is the CI-feasible stand-in for the same streaming path.
+  // A LARGE multi-MiB body. As of #2814 the raw byte-streaming variants
+  // (nm_js2wasm_wasi_p1 / nm_js2wasm_deno) re-chunk too (formerly verbatim), so this is
+  // asserted on re-chunk ROUND-TRIP like nm_js2wasm_node_fs: a >cap array body splits into
+  // valid <=1 MiB JSON frames whose interiors reassemble to the input. The reporter
+  // verified a 64 MiB body manually; 3 MiB is the CI-feasible stand-in.
   for (const file of ["nm_js2wasm_wasi_p1.ts", "nm_js2wasm_deno.ts"]) {
-    it(`${file} echoes a 3 MiB frame verbatim (reporter verified 64 MiB manually)`, { timeout: 120_000 }, async () => {
-      const r = await getCompiled(file);
-      if (!isRunnableStandalone(r)) return;
-      const frameIn = frame(new Uint8Array(3 * 1024 * 1024).fill(0x62));
-      const out = await echoOnce(r, file.replace(/\.ts$/, "-large"), frameIn);
-      if (out === null) return;
-      expect(out.length, `${file} 3 MiB echo length`).toBe(frameIn.length);
-      expect(Buffer.compare(Buffer.from(out), Buffer.from(frameIn)), `${file} 3 MiB echo must be byte-identical`).toBe(
-        0,
-      );
-    });
+    it(
+      `${file} re-chunks a 3 MiB array body into valid <=1 MiB frames (reporter verified 64 MiB manually)`,
+      {
+        timeout: 120_000,
+      },
+      async () => {
+        const r = await getCompiled(file);
+        if (!isRunnableStandalone(r)) return;
+        const body = jsonArrayBody(3 * 1024 * 1024);
+        const out = await echoOnce(r, file.replace(/\.ts$/, "-large"), frame(body));
+        if (out === null) return;
+        assertRechunkRoundTrip(file, body, out);
+        // Sanity: a >cap body MUST come back as multiple frames (re-chunked, not one).
+        expect(parseFrames(out).length, `${file} 3 MiB must re-chunk into multiple frames`).toBeGreaterThan(1);
+      },
+    );
   }
 
   // nm_js2wasm_wasi_p3.ts is the WASI Preview 3 async-component source-reference arm. The
