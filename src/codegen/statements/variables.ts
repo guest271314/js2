@@ -798,37 +798,43 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
     // isHoistedLetConst path below (value-slot == capture-slot). Fires only when
     // the name is currently absent from localMap (i.e. it WAS shadow-removed).
     //
-    // (#2814 narrowing) Skip the reuse when the name is captured by a CPS-lowered
-    // nested function — an `async` and/or generator function declaration. Those
-    // spill captured locals into a continuation state struct rather than reading
-    // a raw outer slot, and collapsing the block-let's duplicate slot perturbs
-    // that lowering: the full-test262 merge_group caught 43 regressions, ALL in
-    // `for-await-of/async-{func,gen}-decl-dstr-*`, where the captured loop-state
-    // vars (`nextCount`/`iterCount`/`iterator`/…) are read inside a for-await-of
-    // continuation. Crucially these are captured BOTH mutably AND immutably, so a
-    // mutability gate is insufficient — the discriminator is the *capturer* being
-    // async/generator. Plain (non-CPS) function declarations — the Bug-C cluster
-    // (sync `function f`) and the recovered for-of/for `iter-close` cases — keep
-    // the reuse. Skipping CPS captures makes every regressed test byte-identical
-    // to baseline; the async/generator cluster recovery is deferred to the
-    // architect follow-up (#2818) alongside the class-method context.
+    // (#2814 narrowing) Reuse the pre-hoisted slot ONLY when the name is captured
+    // by at least one PLAIN (non-CPS) nested function declaration and by NO
+    // CPS-lowered (`async` / generator) one. Rationale:
+    //   • The Bug-C desync only manifests when a hoisted FunctionDeclaration
+    //     CAPTURES the block-let (it pins the capture to the pre-hoist slot). For
+    //     an UNcaptured block-let the reuse fixes nothing and only perturbs which
+    //     raw slot it lands in — so we don't reuse it (keeps non-Bug-C functions
+    //     byte-identical to baseline).
+    //   • A CPS capturer (async / generator) spills captures into a continuation
+    //     state struct; collapsing the duplicate slot perturbs that lowering. The
+    //     full-test262 merge_group caught 43 regressions, ALL in
+    //     `for-await-of/async-{func,gen}-decl-dstr-*`, where loop-state vars
+    //     (`nextCount`/`iterCount`/`iterator`/…) are read inside a for-await-of
+    //     continuation — captured BOTH mutably and immutably, so a mutability gate
+    //     is insufficient; the *capturer* being async/generator is the signal. If
+    //     ANY CPS function captures the name, skip the reuse (the mutable boxed
+    //     cell, when present, already threads the value correctly).
+    // Plain sync `function f` capturers — the Bug-C cluster and the recovered
+    // for-of/for `iter-close` cases — keep the reuse. The async/generator cluster
+    // recovery is deferred to the architect follow-up (#2818).
     const isLetConstDecl = !!(
       decl.parent.flags &
       (ts.NodeFlags.Let | ts.NodeFlags.Const | ts.NodeFlags.Using | ts.NodeFlags.AwaitUsing)
     );
     if (isLetConstDecl && !fctx.localMap.has(name)) {
       const preHoisted = fctx.preHoistedLetConstSlots?.get(decl);
+      let capturedByPlainFn = false;
       let cpsCaptured = false;
       for (const [capturerName, caps] of ctx.nestedFuncCaptures) {
-        const capturerIsCps =
-          (ctx.asyncFunctions?.has(capturerName) ?? false) || (ctx.generatorFunctions?.has(capturerName) ?? false);
-        if (!capturerIsCps) continue;
-        if (caps.some((c) => c.name === name)) {
+        if (!caps.some((c) => c.name === name)) continue;
+        if ((ctx.asyncFunctions?.has(capturerName) ?? false) || (ctx.generatorFunctions?.has(capturerName) ?? false)) {
           cpsCaptured = true;
           break;
         }
+        capturedByPlainFn = true;
       }
-      if (!cpsCaptured && preHoisted !== undefined && preHoisted.valueSlot >= fctx.params.length) {
+      if (capturedByPlainFn && !cpsCaptured && preHoisted !== undefined && preHoisted.valueSlot >= fctx.params.length) {
         fctx.localMap.set(name, preHoisted.valueSlot);
         if (preHoisted.flagSlot !== undefined) {
           if (!fctx.tdzFlagLocals) fctx.tdzFlagLocals = new Map();
