@@ -63,7 +63,7 @@
 //              newline; the partial-write loop drains the whole buffer.
 
 import { readSync, writeSync } from "node:fs";
-import { runNmHost } from "./nm_js2wasm_sync_framing";
+import { runNmHost } from "./nm_js2wasm_sync_framing.ts";
 
 // ONE incremental fd=0 read filling the WHOLE buffer it is handed (offset 0,
 // length = buf.length); returns the byte count (0 at EOF — the core treats
