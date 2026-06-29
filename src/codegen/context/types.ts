@@ -1077,6 +1077,28 @@ export interface CodegenContext {
    */
   memberGetDispatchNames?: Set<string>;
   /**
+   * (#2831) Per-target-vec-type host-externref → wasm-vec materializer helpers.
+   * Maps a vec struct typeIdx (`$__vec_*`) → the reserved helper function NAME
+   * `__vec_from_extern_<vecTypeIdx>(externref) -> (ref null $vec)`. The helper
+   * body is `buildVecFromExternref` (the read-consistent inverse of
+   * `__make_iterable`): it reads `__extern_length` + per-element `__extern_get`
+   * and `struct.new`s a fresh vec of the EXACT target type, handling
+   * empty/non-empty/host-array/null uniformly, with a same-rep `ref.test`
+   * short-circuit that preserves wasm-vec identity.
+   *
+   * Reserved ONCE up-front by `reserveVecFieldMaterializers` (a finalize sub-pass
+   * that owns its import shifts — the #2043 reserve-then-fill discipline), BEFORE
+   * the `__sset_*` setters and `fillMemberSetDispatch` bake. The three setter
+   * emitters then look the helper up by NAME (funcMap stays in lockstep across
+   * later import shifts) and emit a `call` instead of an UNGUARDED narrowing
+   * `ref.cast` on the inbound value — which traps `illegal cast` on a
+   * host-marshalled `[]` at a dynamic any-receiver write (the #2831 blocker), or
+   * (with a wasm-vec-only guard) silently DROPS the write (the #2664 desync).
+   * Empty/undefined until a vec-typed field write site exists ⇒ byte-identical
+   * for modules without the pattern.
+   */
+  vecFromExternMap?: Map<number, string>;
+  /**
    * (#1904) True once the standalone `__extern_is_array(externref) -> i32`
    * helper placeholder has been emitted by the object runtime. Its body is
    * filled in post-processing after all Wasm array carrier types (`__vec_*`
