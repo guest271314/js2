@@ -11,7 +11,7 @@ import { reportError, reportErrorNoNode } from "../context/errors.js";
 import { allocLocal, getLocalType } from "../context/locals.js";
 import { snapshotSpeculative, rollbackSpeculative } from "../context/speculative.js";
 import type { CodegenContext, FunctionContext, HoistedCharRead } from "../context/types.js";
-import { emitExternrefDestructureGuard } from "../destructuring-params.js";
+import { emitExternrefDestructureGuard, emitObjectPatternRestFromVec } from "../destructuring-params.js";
 import {
   findUnresolvableInArrayPattern,
   findUnresolvableInObjectPattern,
@@ -1889,10 +1889,19 @@ function compileForOfDestructuring(
           }
           fctx.body.push({ op: "local.set", index: restIdx });
 
-          // If the rest target is itself a binding pattern (e.g. [...[...x]]),
-          // recurse into it with the freshly built rest vec as the element.
-          if (ts.isArrayBindingPattern(element.name) || ts.isObjectBindingPattern(element.name)) {
+          // If the rest target is itself a binding pattern, destructure the
+          // freshly built rest vec into it.
+          if (ts.isArrayBindingPattern(element.name)) {
+            // Nested array sub-pattern (e.g. [...[a, b]]): recurse — the
+            // recursion's vec-array branch reads A.data[i].
             compileForOfDestructuring(ctx, fctx, element.name, restIdx, restVecType, stmt);
+          } else if (ts.isObjectBindingPattern(element.name)) {
+            // (#2844) Nested object sub-pattern (e.g. [...{ 0: v, length: z }]):
+            // the rest vec is array-like. The generic object destructure resolves
+            // struct fields by name (no field `0`) and dropped numeric-key
+            // bindings — route through the shared array-like object read instead.
+            // For-of/for-await loop heads are always declarations -> isDecl=true.
+            emitObjectPatternRestFromVec(ctx, fctx, restIdx, structTypeIdx, innerArrTypeIdx, element.name, true);
           }
           continue;
         }

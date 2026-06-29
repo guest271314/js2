@@ -3,7 +3,8 @@ id: 2844
 parent: 2669
 related: [2602, 2826]
 sprint: current
-status: in-progress
+status: done
+completed: 2026-06-29
 assignee: ttraenkler/restobj
 priority: medium
 horizon: m
@@ -98,6 +99,54 @@ no regression, and out of the cluster's scope.
   pattern at all. The cluster's RHS `[[7,8,9]]` is `number[][]` -> the **vec**
   branch, so the tuple branch is not hit. Tracked as a follow-up.
 
+## Implementation
+
+- `src/codegen/destructuring-params.ts`: new exported helper
+  `emitObjectPatternRestFromVec(ctx, fctx, vecLocal, vecTypeIdx, arrTypeIdx,
+  objPattern, isDecl)` — the array-like object-from-rest-vec read (`length` -> vec
+  field 0, integer key `k` -> `A.data[k]` via `emitBoundsCheckedArrayGetUndef`,
+  OOB -> undefined). Extracted from the inline block in `destructureParamArray`,
+  which now calls the helper (behaviourally identical — param/var-decl lanes
+  re-verified).
+- `src/codegen/statements/loops.ts`: `compileForOfDestructuring` vec-array rest
+  branch now splits the rest-target-is-pattern case — array sub-pattern keeps
+  recursing (already worked); object sub-pattern routes through
+  `emitObjectPatternRestFromVec` instead of the generic by-name struct destructure.
+  Fixes both `for`-of and `for await`-of (all loop-head callers funnel through
+  `compileForOfDestructuring`).
+
+Import-neutral: standalone/WASI import sets are byte-identical to main; no new host
+import. tsc + biome + prettier clean.
+
 ## Test Results
 
-(filled in after implementation — see `tests/issue-2844.test.ts`)
+`tests/issue-2844.test.ts` — 11/11 pass. Scoped manual repro (host + WASI):
+
+| case                                              | result |
+| ------------------------------------------------- | ------ |
+| for-of `[...{ 0: v, length: z }]`                 | 703 ✓  |
+| for-await `[...{ 0: v, length: z }]`              | 703 ✓  |
+| for-of full `[...{0:v,1:w,2:x,3:y,length:z}]` (y=undefined) | 107893 ✓ |
+| for-of `[...{ length }]` shorthand                | 3 ✓    |
+| for-of `[a, ...{ 0: b, length: z }]` (mixed)      | 7803 ✓ |
+| for-await full cluster shape                      | 107893 ✓ |
+| control: for-of `[...[a, b]]` (array target)      | 708 ✓  |
+| control: for-of `[...rest]` (identifier)          | 703 ✓  |
+| control: for-await `[...[a, b]]`                  | 708 ✓  |
+| param lane `function([...{0:v,length:z}])`        | 703 ✓  |
+| var-decl lane `var [...{0:v,length:z}] = [...]`   | 703 ✓  |
+
+Regression batch (loadable dstr/for-of/rest tests): `class-dstr-rest-in-rest`,
+`fn-param-dstr-rest-in-rest`, `issue-1128-dstr-tdz`, `issue-2602-forof-assign-rest`,
+`issue-2158-dstr-param-default-nested-pattern`, `issue-1372-ir-destructuring-params`
+— 40/40 pass. (`spread-rest.test.ts` and `*helpers.js`-importing files fail
+identically on pristine main — pre-existing test-infra issues, unrelated.)
+
+Authoritative test262 conformance validated by the `merge_group` full run.
+
+### Follow-up
+
+- The for-of **tuple-struct** branch (`loops.ts` ~1680) still handles rest only for
+  identifier targets (externref slice) and does not recurse into a nested pattern.
+  Not exercised by this cluster (`[[7,8,9]]` is `number[][]` -> vec branch). Track
+  separately if a `[number,number][]` rest-to-pattern case surfaces.
