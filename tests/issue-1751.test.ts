@@ -69,6 +69,8 @@ describe("#1751 WIT generator complete world surface", () => {
           "tsx",
           path.resolve("src/cli.ts"),
           inFile,
+          "-o",
+          dir,
           "--target",
           "wasi",
           "--wit-package",

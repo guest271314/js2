@@ -27,7 +27,10 @@ Every successful compile writes the following alongside the input (or in
 
 ### `-o, --out <dir>`
 
-Output directory. Defaults to the directory of the input file.
+Output directory. Defaults to the current working directory (#2816). Writing
+beside the input was a footgun for inputs that live inside the installed package
+(e.g. an example under `node_modules/@loopdive/js2/examples/...`), which would
+dump artifacts into `node_modules`.
 
 ```bash
 js2wasm src/main.ts -o dist/
