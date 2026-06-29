@@ -15,12 +15,23 @@
  *
  * This module emits Wasm-native byte read/write directly into the `i32_byte`
  * vec struct that backs ArrayBuffer / DataView (field 0 = length i32, field 1 =
- * array of i32, one byte per element, values 0..255). Multi-byte accessors
- * honour the `littleEndian` flag at runtime.
+ * a PACKED `array(mut i8)`, one byte per element, values 0..255). Multi-byte
+ * accessors honour the `littleEndian` flag at runtime.
  *
  * Backing-store representation:
- *   ArrayBuffer / DataView  → vec "i32_byte"  (one i32 per byte, 0..255)
+ *   ArrayBuffer / DataView  → vec "i32_byte"  (packed i8, one byte per element)
  *   Uint8Array (native)     → vec "i8_byte"   (packed bytes, unsigned reads)
+ *
+ * (#2835) The `i32_byte` byte buffer is now backed by `array(mut i8)` (was
+ * `array(mut i32)`) — a 4× GC-footprint cut for ArrayBuffer / DataView. The KEY
+ * string is kept (`$__vec_i32_byte`, a type DISTINCT from Uint8Array's
+ * `i8_byte`, so `ref.cast`-based DataView/ArrayBuffer dispatch stays
+ * unambiguous), only the element type changed. Byte READS therefore MUST use
+ * `array.get_u` (plain `array.get` is invalid Wasm on a packed array); the
+ * assembled value is zero-extended, so the DataView accessor's own
+ * sign-extension (`getInt8`/`getInt16`/…) is unaffected. WRITES use `array.set`,
+ * which truncates the i32 to the low byte (the `& 0xff` masks become redundant
+ * but are kept defensively).
  *
  * The receiver (`this`) of a DataView accessor is an externref holding the
  * i32_byte vec; we `any.convert_extern` + `ref.cast` to recover the struct.
@@ -85,7 +96,7 @@ export function emitArrayBufferSlice(
   args: readonly import("../ts-api.js").ts.Expression[],
   compileExpr: (expr: import("../ts-api.js").ts.Expression, hint?: ValType) => ValType | null,
 ): ValType | null {
-  const vecTypeIdx = getOrRegisterVecType(ctx, "i32_byte", { kind: "i32" });
+  const vecTypeIdx = getOrRegisterVecType(ctx, "i32_byte", { kind: "i8" }); // (#2835) packed byte buffer
   const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
   if (arrTypeIdx < 0) return null;
 
@@ -184,7 +195,8 @@ export function emitArrayBufferSlice(
     { op: "local.get", index: beginLocal } as Instr,
     { op: "local.get", index: iLocal } as Instr,
     { op: "i32.add" } as Instr,
-    { op: "array.get", typeIdx: arrTypeIdx } as Instr,
+    // (#2835) packed i8 src/dst; read unsigned, `array.set` truncates to low byte.
+    { op: "array.get_u", typeIdx: arrTypeIdx } as Instr,
     { op: "array.set", typeIdx: arrTypeIdx } as Instr,
     { op: "local.get", index: iLocal } as Instr,
     { op: "i32.const", value: 1 } as Instr,
@@ -254,7 +266,7 @@ function emitNormalizeIndex(fctx: FunctionContext, idxLocal: number, lenLocal: n
 
 /** Lazily ensure the i32_byte vec type exists and return its struct/array indices. */
 function i32ByteVec(ctx: CodegenContext): { vecTypeIdx: number; arrTypeIdx: number } {
-  const vecTypeIdx = getOrRegisterVecType(ctx, "i32_byte", { kind: "i32" });
+  const vecTypeIdx = getOrRegisterVecType(ctx, "i32_byte", { kind: "i8" }); // (#2835) packed byte buffer
   const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
   return { vecTypeIdx, arrTypeIdx };
 }
@@ -273,7 +285,7 @@ function i32ByteVec(ctx: CodegenContext): { vecTypeIdx: number; arrTypeIdx: numb
  */
 export function getOrRegisterDvWindowType(ctx: CodegenContext): number {
   if (ctx.dvWindowTypeIdx >= 0) return ctx.dvWindowTypeIdx;
-  const vecTypeIdx = getOrRegisterVecType(ctx, "i32_byte", { kind: "i32" });
+  const vecTypeIdx = getOrRegisterVecType(ctx, "i32_byte", { kind: "i8" }); // (#2835) packed byte buffer
   const idx = ctx.mod.types.length;
   ctx.mod.types.push({
     kind: "struct",
@@ -580,8 +592,10 @@ function pushByte(fctx: FunctionContext, arrLocal: number, offLocal: number, k: 
     fctx.body.push({ op: "i32.const", value: k } as Instr);
     fctx.body.push({ op: "i32.add" } as Instr);
   }
-  fctx.body.push({ op: "array.get", typeIdx: arrTypeIdx } as Instr);
-  // Mask to a byte — the backing array holds 0..255 already, but defensively
+  // (#2835) Packed `i8` backing → unsigned zero-extended read (plain `array.get`
+  // is invalid on a packed array). Result already in [0,255].
+  fctx.body.push({ op: "array.get_u", typeIdx: arrTypeIdx } as Instr);
+  // Mask to a byte — `array.get_u` already yields 0..255, but defensively
   // keep only the low 8 bits so sign/overflow can't leak in.
   fctx.body.push({ op: "i32.const", value: 0xff } as Instr);
   fctx.body.push({ op: "i32.and" } as Instr);
@@ -694,7 +708,7 @@ function buildIntoBranch(
       seq.push({ op: "i32.const", value: k } as Instr);
       seq.push({ op: "i32.add" } as Instr);
     }
-    seq.push({ op: "array.get", typeIdx: arrTypeIdx } as Instr);
+    seq.push({ op: "array.get_u", typeIdx: arrTypeIdx } as Instr); // (#2835) packed i8 byte read
     seq.push({ op: "i32.const", value: 0xff } as Instr);
     seq.push({ op: "i32.and" } as Instr);
     return seq;
@@ -732,7 +746,7 @@ function emitReadI64(
         seq.push({ op: "i32.const", value: k } as Instr);
         seq.push({ op: "i32.add" } as Instr);
       }
-      seq.push({ op: "array.get", typeIdx: arrTypeIdx } as Instr);
+      seq.push({ op: "array.get_u", typeIdx: arrTypeIdx } as Instr); // (#2835) packed i8 byte read
       seq.push({ op: "i32.const", value: 0xff } as Instr);
       seq.push({ op: "i32.and" } as Instr);
       seq.push({ op: "i64.extend_i32_u" } as Instr);
@@ -964,12 +978,12 @@ export function emitDataViewToWriteScratch(
     { op: "i32.const", value: scratchStart } as Instr,
     { op: "local.get", index: jLocal } as Instr,
     { op: "i32.add" } as Instr,
-    // value = arr[base + j] & 0xff
+    // value = arr[base + j] & 0xff  ((#2835) packed i8 → unsigned read)
     { op: "local.get", index: arrLocal } as Instr,
     { op: "local.get", index: baseLocal } as Instr,
     { op: "local.get", index: jLocal } as Instr,
     { op: "i32.add" } as Instr,
-    { op: "array.get", typeIdx: arrTypeIdx } as Instr,
+    { op: "array.get_u", typeIdx: arrTypeIdx } as Instr,
     { op: "i32.const", value: 0xff } as Instr,
     { op: "i32.and" } as Instr,
     { op: "i32.store8", align: 0, offset: 0 } as Instr,

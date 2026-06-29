@@ -1,7 +1,8 @@
 ---
 id: 2835
 title: "Pack $__vec_i32_byte byte backing as array(mut i8) — 4× smaller DataView/ArrayBuffer/Uint8Array GC footprint"
-status: in-progress
+status: done
+completed: 2026-06-29
 assignee: ttraenkler/sendev-2835
 sprint: Backlog
 created: 2026-06-29
@@ -431,3 +432,108 @@ The Native-Messaging `nm_js2wasm_node_process` scale-test fails to compile on
 (`i8_byte`) vec field pushes an externref into an `i8` array. node_fs (the other
 byte-buffer NM host) passes. This is a separate latent issue (the NM scale-test is
 not a CI gate) and is unrelated to the #2835 key split — worth its own issue.
+
+---
+
+## PR-2 implementation notes (the packing — the 4× win, closes #2835)
+
+**Status: PR-2 of 2. Closes #2835.** PR-1 split the overloaded key so the
+ArrayBuffer/DataView byte buffer (`i32_byte`) is disentangled from Int32/Uint32
+element storage (`i32_elem`). This PR flips the byte buffer to a packed
+`array(mut i8)` (1 byte/element), delivering the 4× GC-footprint cut.
+
+### Representation decision — keep the `i32_byte` KEY, change its element type
+
+I did **not** converge the byte buffer onto the existing `i8_byte` key. Instead
+the `i32_byte` key/struct (`$__vec_i32_byte`) is **retained as a distinct type**
+but its data array element type changed `i32 → i8`. Rationale:
+
+- `recoverDvBacking`, `getOrRegisterDvWindowType` (`buf` field), `emitArrayBufferSlice`,
+  `emitTypedArrayFromByteBuffer`, the `.buffer` synth, `__dv_byte_*` exports and
+  the `node:fs` write helpers all `ref.test`/`ref.cast` to the **`i32_byte` vec
+  type** to recover a DataView/ArrayBuffer backing. Native `Uint8Array` is a
+  **separate** value that uses `i8_byte`. Converging the two onto one struct
+  would make a `Uint8Array` and an ArrayBuffer backing structurally
+  indistinguishable to every `ref.test`-based dispatch (e.g. a windowed DataView
+  over a Uint8Array vs over an ArrayBuffer) — a needless ambiguity. Keeping
+  `i32_byte` distinct preserves the existing dispatch exactly; only the per-byte
+  storage shrinks. The two i8-element arrays (`__arr_i32_byte`, `__arr_i8_byte`)
+  are deduped under distinct cache keys, so they stay separate types.
+- **Single consistency invariant:** `getOrRegisterVecType` caches by key, so the
+  FIRST registration's element-type override wins. Every `i32_byte` registration
+  site (dataview-native, property-access, new-super ArrayBuffer/DataView ctors +
+  `emitTypedArrayFromByteBuffer`, node-fs-api) was therefore switched to
+  `{ kind: "i8" }` in lockstep — a mismatch would have desynced the array
+  element type from the read opcode.
+
+### Reads → `array.get_u`, writes unchanged (`array.set` truncates)
+
+`array.get` on a packed array is **invalid Wasm**, so every hardcoded byte READ
+on the `i32_byte` backing became `array.get_u` (unsigned, zero-extended to i32 —
+this is the validator's safety net: a missed site fails module validation, never
+silently miscompiles):
+
+- `dataview-native.ts`: `pushByte`, `buildIntoBranch` byteAt, `emitReadI64`
+  byteAt, `emitArrayBufferSlice` copy, `emitDataViewToWriteScratch`.
+- `index.ts`: `__vec_get` (i32_byte joins the `array.get_u` branch), `__vec_pop`
+  (i32_byte joins `isPackedByte`), `__dv_byte_get`, `ensureWasiWriteArrayBufferHelper`.
+- `new-super.ts`: `emitTypedArrayFromByteBuffer` source read.
+
+WRITES (`emitStoreByte`, `__dv_byte_set`, `emitVecSetByteExport`, the slice/synth
+`array.set`/`array.new`) need **no change** — `array.set`/`array.new` on a packed
+i8 array auto-truncate the i32 to the low byte, exactly the `& 0xff` semantics the
+byte writers already enforced (the masks are now redundant but kept defensively).
+
+### Why this is byte-exact / soundness
+
+- **Bytes are the provably-safe packing case** (per §4 of the feasibility): every
+  value stored is `0..255` and read back zero-extended, so `array.get_u(i8) ∈
+  [0,255]` is bit-identical to the value the old i32 slot held. No `-0`, no
+  fraction, no `>2^31` hazard — the canonical-i32 proof is trivial.
+- **Signedness:** the DataView accessors sign-extend the *assembled* value
+  (`getInt8`/`getInt16`/…) themselves, so the backing read is ALWAYS unsigned
+  (`array.get_u`) regardless of the accessor's signedness — unchanged contract.
+- Most typed-array element reads (`property-access.ts`, `calls.ts` TA-from-TA
+  copy, the `array.get_u`-for-i8 helper in `new-super.ts`) already derive the
+  opcode from `arrDef.element.kind`, so they handle the i8 byte buffer correctly
+  with no edit.
+- `i32_elem` (Int32/Uint32 element storage) is deliberately **untouched** — it
+  stays full 32-bit (plain `array.get`, signed/unsigned box). Packing it would
+  truncate every 32-bit element (the MISCOMPILE the PR-1 split exists to prevent).
+
+### Type-index / DCE discipline
+
+The `i32_byte` vec still registers **lazily** (the byte buffer has no `subarray`
+view, so no eager pre-reservation slot is needed — unchanged from PR-1). Changing
+only the element type does not alter *when* it registers, so no new
+type-index/DCE-remap hazard is introduced
+(`project_type_index_shift_and_deadelim`, `reference_subview_type_idx_stability`).
+
+### Verification
+
+- `tsc --noEmit` clean.
+- DataView / ArrayBuffer / TypedArray / Uint8Array suites green, byte-identical:
+  `issue-1654` (5), `issue-2199` (bounds), `issue-2199b` (setter order),
+  `issue-2593` (typed-array int-width), `issue-2639` (node:fs writeSync
+  string+DataView, incl. windowed byteOffset/byteLength), `issue-2648`,
+  `issue-1670`, `issue-1787` (packed-typedarray-semantics), `issue-2379` — all pass.
+- **NM scale-test** (`node examples/native-messaging/scale-test.mjs`,
+  `NM_SCALE_SIZES_MIB="1 64 128 256"`): all four hosts (`node_process`, `deno`,
+  `wasi_p1`, `node_fs`) round-trip byte-exact at every size up to **256 MiB**
+  under real wasmtime 46. A 256 MiB ArrayBuffer now materialises as a 256 MiB GC
+  array instead of ~1 GiB (4× cut). `nm_js2wasm_node_process` — which PR-1 noted
+  failed on origin/main before #2839 — now passes (the #2839 `buildElemCoerce`
+  i8 arm landed; this PR keeps the byte buffer consistent with it).
+- Pre-existing failures confirmed IDENTICAL on base origin/main (NOT introduced
+  here): `arraybuffer-dataview.test.ts` (6 — the JS-host harness doesn't stub the
+  default string backend's `string_constants` import) and the one
+  `issue-1655` Uint8Array.**subarray** WASI-write `illegal cast` (base-commit
+  bug flagged in PR-1 notes). Verified by running both files on a detached
+  origin/main worktree: same 7-failed/7-passed split with and without this PR.
+
+### Validator note
+
+Packed `i8` arrays encode the element as an SLEB storage byte (`-0x8`), a
+GC-aware-validator-only encoding (like the i16 string `-0x9`). This is already
+true for the shipping `i8_byte`/`i16_byte` typed arrays, so wasmtime / wasm-tools
+/ Binaryen already accept it — confirmed by the 256 MiB real-wasmtime scale-test.
