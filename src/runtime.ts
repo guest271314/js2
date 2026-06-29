@@ -3543,6 +3543,31 @@ function _installErrorCause(inst: any, options: any, exports: Record<string, Fun
  */
 function _wasmToPlain(val: any, exports: Record<string, Function> | undefined, seen?: Set<any>): any {
   if (val == null || typeof val !== "object") return val;
+  // (#2841) A real host JS array can still hold RAW wasm-struct elements. This
+  // happens when a wasm vec crosses a dynamic-dispatch boundary as an `any`
+  // argument and the host shim `__make_iterable` materialises it into a JS
+  // array of opaque structs (#2836 — e.g. acorn's arrow-function param list:
+  // the paren `exprList` is passed to `parseArrowExpression` indirectly, so
+  // `node.params` ends up a host JS array whose Identifier elements are wasm
+  // structs). `_wasmToPlain` previously returned such an array as-is (the
+  // `!_isWasmStruct` early-out below), leaving the elements opaque so a
+  // marshal:"copy"/JSON.stringify consumer saw `param.type`/`.name` as
+  // `undefined`. Decl/fn-expr params take the `parseBindingList` path and stay a
+  // genuine wasm vec, which the `__vec_get` branch below already converts —
+  // hence only ARROW params lost their fields. Recurse element-wise so the deep
+  // copy reaches the structs. (A wasm vec is NOT a JS array — `Array.isArray`
+  // is false for it — so this never double-handles the `__vec_get` path.)
+  if (Array.isArray(val)) {
+    if (seen) {
+      if (seen.has(val)) throw new TypeError("Converting circular structure to JSON");
+      seen.add(val);
+    }
+    try {
+      return val.map((e) => _wasmToPlain(e, exports, seen));
+    } finally {
+      if (seen) seen.delete(val);
+    }
+  }
   if (!_isWasmStruct(val)) return val;
 
   // (#2671) Cycle detection for the JSON.stringify flatten fast path. When a
@@ -5403,6 +5428,48 @@ function _wrapVecForHost(vec: any, exports: Record<string, Function>): any {
   return proxy;
 }
 
+// (#2841) Present a REAL host JS array (not a wasm vec) that may hold RAW
+// wasm-struct elements as an array whose elements are `_wrapForHost`-wrapped on
+// read. Root cause: when a wasm vec crosses a dynamic-dispatch boundary as an
+// `any` argument, the host shim `__make_iterable` materialises it into a real
+// JS array of OPAQUE wasm structs (#2836). When such an array is then read back
+// as a struct field (acorn arrow-fn `node.params` — the paren `exprList` is
+// passed to `parseArrowExpression` indirectly, so the param list is this host
+// array, not a wasm vec), the `_wrapForHost` proxy returned it RAW, so its
+// Identifier elements stayed opaque and `param.type` / `param.name` read back
+// `undefined`. Decl / fn-expr params take the `parseBindingList` path and stay a
+// genuine wasm vec (routed to `_wrapVecForHost`, which wraps elements), so only
+// ARROW params were affected. This view wraps each struct element lazily on
+// index read (mirroring `_wrapVecForHost`); primitives and already-plain
+// elements pass through. The proxy target is a real `[]`-backed array so
+// `Array.isArray` holds and native Array.prototype methods / iteration work via
+// the index trap. Cached so repeated `node.params` reads keep identity.
+function _wrapHostArrayElems(arr: any[], exports: Record<string, Function> | undefined): any[] {
+  const cached = _hostProxyCache.get(arr);
+  if (cached) return cached;
+  const wrapElem = (el: any): any =>
+    el != null && typeof el === "object" && _isWasmStruct(el) ? _wrapForHost(el, exports) : el;
+  const handler: ProxyHandler<any[]> = {
+    get(target, key) {
+      if (typeof key === "string") {
+        const idx = _asArrayIndex(key);
+        if (idx !== undefined) return wrapElem(target[idx]);
+      }
+      return (target as Record<string | symbol, any>)[key as any];
+    },
+    getOwnPropertyDescriptor(target, key) {
+      const desc = Object.getOwnPropertyDescriptor(target, key);
+      if (desc && typeof key === "string" && _asArrayIndex(key) !== undefined && "value" in desc) {
+        desc.value = wrapElem(desc.value);
+      }
+      return desc;
+    },
+  };
+  const proxy = new Proxy(arr, handler);
+  _hostProxyCache.set(arr, proxy);
+  return proxy;
+}
+
 function _wrapForHost(obj: any, exports: Record<string, Function> | undefined): any {
   if (obj == null || typeof obj !== "object") return obj;
   if (!_isWasmStruct(obj)) return obj;
@@ -5579,6 +5646,15 @@ function _wrapForHost(obj: any, exports: Record<string, Function> | undefined): 
         // Non-closure WasmGC struct (e.g. nested object with valueOf/toString) —
         // wrap with _wrapForHost so its properties are accessible from JS (#1090)
         return _wrapForHost(val, exports);
+      }
+      // (#2841) A field value that is a REAL host JS array may hold raw
+      // wasm-struct elements (acorn arrow-fn `node.params` — a host array from
+      // #2836's `__make_iterable`, NOT a wasm vec). Return a view that wraps
+      // those elements so `param.type` / `param.name` resolve through the proxy.
+      // Genuine wasm vecs were already routed to `_wrapVecForHost` above; this
+      // catches only true JS arrays the resolver returned directly.
+      if (Array.isArray(val) && exports) {
+        return _wrapHostArrayElems(val, exports);
       }
       return val;
     },
