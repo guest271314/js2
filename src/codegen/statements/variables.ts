@@ -797,13 +797,35 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
     // never recorded), re-register it so the declaration reuses it via the
     // isHoistedLetConst path below (value-slot == capture-slot). Fires only when
     // the name is currently absent from localMap (i.e. it WAS shadow-removed).
+    //
+    // (#2814 narrowing) Skip the reuse when the name is captured MUTABLY by any
+    // nested function. A mutable capture is threaded through a shared ref cell
+    // (boxed), and the box re-points `localMap` regardless of which raw slot the
+    // `let` uses — so collapsing the duplicate slot buys nothing there but DOES
+    // perturb the async-CPS lowering: a block-`let` mutated inside a for-await-of
+    // (`let iterCount = 0; async function fn(){ for await(...){ iterCount++ } }`)
+    // regressed 43 `for-await-of/async-*-decl-dstr-*` tests in the merge_group
+    // because the reuse changed the slot the continuation state machine spills.
+    // The Bug-C cluster (`length` read-only) and every test262 case this PR
+    // recovers capture IMMUTABLY, so gating on mutability keeps the +win and
+    // makes every regressed (mutable-capture) test byte-identical to baseline.
     const isLetConstDecl = !!(
       decl.parent.flags &
       (ts.NodeFlags.Let | ts.NodeFlags.Const | ts.NodeFlags.Using | ts.NodeFlags.AwaitUsing)
     );
     if (isLetConstDecl && !fctx.localMap.has(name)) {
       const preHoisted = fctx.preHoistedLetConstSlots?.get(decl);
-      if (preHoisted !== undefined && preHoisted.valueSlot >= fctx.params.length) {
+      let mutablyCaptured = false;
+      for (const caps of ctx.nestedFuncCaptures.values()) {
+        for (const c of caps) {
+          if (c.name === name && c.mutable) {
+            mutablyCaptured = true;
+            break;
+          }
+        }
+        if (mutablyCaptured) break;
+      }
+      if (!mutablyCaptured && preHoisted !== undefined && preHoisted.valueSlot >= fctx.params.length) {
         fctx.localMap.set(name, preHoisted.valueSlot);
         if (preHoisted.flagSlot !== undefined) {
           if (!fctx.tdzFlagLocals) fctx.tdzFlagLocals = new Map();
