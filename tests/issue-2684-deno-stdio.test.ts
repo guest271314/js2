@@ -15,7 +15,7 @@
 // boxed-number externref or `ref.null extern`) — `=== null` works in the
 // standalone module with NO JS host import.
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -143,10 +143,29 @@ export function main(): void { writeSync(1, "hi\\n"); }
       if (tmp) rmSync(tmp, { recursive: true, force: true });
     });
 
+    // #2821: feed wasmtime's stdin from a regular file (opened read-only and
+    // handed to the child as fd 0) instead of streaming the input over a parent-
+    // owned pipe. Piping `input` to the child races wasmtime's stdin close — a
+    // pure-WASI command that hits EOF (readSync→null) or finishes echoing can
+    // close fd 0 before the parent finishes writing the frame, surfacing as a
+    // flaky EPIPE on the write end (aggravated by box load). A file fd has no
+    // parent-side write end, so there is no pipe to break: EOF is the natural
+    // end of file. Invocations are also serialized (execFileSync is synchronous,
+    // one wasmtime spawn at a time) so concurrent runs never oversubscribe.
     function run(binary: Uint8Array, name: string, input: Buffer): Buffer {
       const p = join(tmp, `${name}.wasm`);
       writeFileSync(p, binary);
-      return execFileSync(wasmtimeBin!, [...WASMTIME_FLAGS, p], { input, maxBuffer: 8 * 1024 * 1024 });
+      const inPath = join(tmp, `${name}.in`);
+      writeFileSync(inPath, input);
+      const inFd = openSync(inPath, "r");
+      try {
+        return execFileSync(wasmtimeBin!, [...WASMTIME_FLAGS, p], {
+          stdio: [inFd, "pipe", "inherit"],
+          maxBuffer: 8 * 1024 * 1024,
+        });
+      } finally {
+        closeSync(inFd);
+      }
     }
 
     it("framed echo round-trips a message byte-for-byte (incl. high/null bytes)", async () => {
