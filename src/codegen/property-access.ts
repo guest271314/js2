@@ -1049,6 +1049,11 @@ export function resolveStructNameForExpr(
   ctx: CodegenContext,
   fctx: FunctionContext,
   expression: ts.Expression,
+  // (#2838 L5) The member being accessed off `expression`, when known. A PRIVATE
+  // identifier (`this.#x`) must keep its exact static struct resolution (brand-
+  // checked WasmGC private dispatch — the host MOP can never see it), so the L5
+  // `__anon`-`this` override is suppressed for private accesses.
+  accessedMember?: ts.MemberName,
 ): string | undefined {
   // (#1239) Variables initialised by an object literal containing get/set
   // accessor declarations are stored as externref plain JS objects. The
@@ -1087,9 +1092,31 @@ export function resolveStructNameForExpr(
   // guard does NOT trigger and the unchanged original resolution runs — critical
   // for brand-checked private/static class-element dispatch, which must keep its
   // exact struct resolution.
-  if (bareIdent.kind === ts.SyntaxKind.ThisKeyword) {
+  // (#2838 L5) `this`-receiver: override the TS type with the runtime truth ONLY
+  // for the descriptor-literal LIE on a PUBLIC member — otherwise behave EXACTLY
+  // as the original path below. Inside a runtime-installed accessor getter/setter
+  // (`Object.defineProperties(Proto, { f:{ get/set: function(){ … this.x … } } })`)
+  // TS contextually types `this` as the descriptor literal object
+  // (`{configurable:boolean}` → `__anon_N`), so `resolveStructName` would lower
+  // `this.<x>` against that WRONG struct and read/write a default slot (the
+  // round-5/6 "getter fires but returns 0/null" bug, and the setter-write analog).
+  // When the TS type of `this` resolves to such an `__anon` descriptor, use the
+  // fctx `this` local's actual ref type instead (a dynamic accessor's local is
+  // externref → `resolveThisStructName` undefined → fully dynamic host MOP). This
+  // is SUPPRESSED for a private member (`this.#x`): a static/instance method whose
+  // `this` also TS-resolves to `__anon` must keep its exact struct resolution so
+  // brand-checked private dispatch is not diverted to the host MOP (which cannot
+  // see private elements). Every non-`__anon` `this` falls through unchanged.
+  if (bareIdent.kind === ts.SyntaxKind.ThisKeyword && !(accessedMember && ts.isPrivateIdentifier(accessedMember))) {
     const tsName = resolveStructName(ctx, ctx.checker.getTypeAtLocation(expression));
-    if (tsName !== undefined && tsName.startsWith("__anon")) {
+    // Match ONLY the descriptor-literal anon struct (`__anon_<n>`), NOT an
+    // anonymous CLASS struct (`__anonClass_<n>`). A class with static private
+    // elements TS-resolves `this` to `__anonClass_0`; that is a genuine struct
+    // whose brand-checked private/static dispatch must keep its exact resolution —
+    // matching it diverted the static private setter `this.#x = v` to the host MOP
+    // (`__extern_set_strict`), the #2325 regression. Descriptor literals are
+    // `__anon_<n>` (the acorn `prototypeAccessors` getter's `this`).
+    if (tsName !== undefined && tsName.startsWith("__anon_")) {
       return resolveThisStructName(ctx, fctx);
     }
     // else: fall through to the original behavior unchanged.
@@ -4824,7 +4851,7 @@ export function compilePropertyAccess(
   }
 
   // Handle getter accessor on user-defined classes
-  const typeName = resolveStructNameForExpr(ctx, fctx, expr.expression);
+  const typeName = resolveStructNameForExpr(ctx, fctx, expr.expression, expr.name);
   if (typeName) {
     const accessorKey = `${typeName}_${propName}`;
     // (#1888 S5c / C3) Migrated struct accessor → route through the host-free

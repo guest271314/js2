@@ -4011,7 +4011,10 @@ function compileCallExpression(
         mName !== "bind" &&
         resolveThisStructName(ctx, fctx) === undefined &&
         tsThisName !== undefined &&
-        tsThisName.startsWith("__anon")
+        // ONLY the descriptor-literal anon struct (`__anon_<n>`, the acorn getter's
+        // `this`), NEVER an anonymous CLASS struct (`__anonClass_<n>`) whose
+        // static/instance method dispatch must stay static (the #2325 regression).
+        tsThisName.startsWith("__anon_")
       ) {
         const dynThisResult = emitWrapperDynamicMethodCall(ctx, fctx, propAccess.expression, mName, expr);
         if (dynThisResult !== null) return dynThisResult;
