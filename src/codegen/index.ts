@@ -12893,6 +12893,17 @@ const WASI_STDIN_REACTOR_INTRINSICS = new Set([
   "__wasiStdinAvailable",
   "__wasiStdinEof",
   "__wasiStdinSetReader",
+  // #2817 — `__wasiStdinStop` (added in #2735 for a NON-EOF reactor exit: it
+  // drops the fd0 subscription so the run loop terminates on in-band shutdown /
+  // `process.stdin.destroy()` / pre-`proc_exit`). Its every call site is
+  // inline-lowered by `emitStdinStop` (async-scheduler.ts) via tryWasiTimerCall
+  // — a native `global.set` clearing `__stdin_fd_active`, NO host import. The
+  // sibling intrinsics above were already skipped; #2735 forgot to add this one,
+  // so its prelude `declare function __wasiStdinStop` stub re-registered here as
+  // a DEAD `env.__wasiStdinStop` host import (dropped from the binary, but
+  // firing the spurious "not on the dual-mode allowlist" warning on the
+  // otherwise-runnable standalone nm_js2wasm_node_process.ts build). Skip it.
+  "__wasiStdinStop",
 ]);
 
 // `libReferencedNames`, when provided (lib-file scan only), gates ambient
