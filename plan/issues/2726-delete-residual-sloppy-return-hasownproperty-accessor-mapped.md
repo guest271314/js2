@@ -1,7 +1,7 @@
 ---
 id: 2726
 title: "delete residual: sloppy return-value semantics, hasOwnProperty-after-delete, accessor descriptor configurability, mapped-arguments delete"
-status: ready
+status: in-progress
 sprint: current
 goal: test262-conformance
 feasibility: medium
@@ -10,8 +10,9 @@ priority: medium
 es_edition: ES5
 language_feature: delete
 task_type: bug
+assignee: ttraenkler/del2726
 created: 2026-06-26
-updated: 2026-06-27
+updated: 2026-06-29
 ---
 
 > **Partial resolution (2026-06-27, dev2).** Groups **(c)** and **(d)** are

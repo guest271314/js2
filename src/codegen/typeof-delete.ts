@@ -229,7 +229,28 @@ export function compileDeleteExpression(
       emitOuterDelete();
       return { kind: "i32" };
     }
-    // Variables are not deletable — return false
+    // (#2726 group (a)) §13.5.1.2 step 4: `delete IdentifierReference` whose
+    // reference is UNRESOLVABLE (the name resolves to NO binding anywhere — not
+    // a local var/let/const/param/function, nor a real global property)
+    // evaluates to `true` in sloppy mode. Strict mode would already be an early
+    // SyntaxError (`Delete of an unqualified identifier in strict mode`, see
+    // early-errors/node-checks.ts), so this codegen path is reached only in
+    // sloppy code — exactly where step 4 applies.
+    //
+    // Oracle: the TS checker returns NO symbol (`getSymbolAtLocation === undefined`)
+    // for a truly unresolvable identifier. The non-configurable intrinsic globals
+    // that MUST stay `false` (`undefined`, `arguments`, `globalThis`) and every
+    // lib-declared global (`NaN`, `Infinity`, `JSON`, `Object`, …) instead return
+    // a symbol (with or without a `valueDeclaration`), so they correctly fall
+    // through to the resolvable-binding case below. Using symbol-presence — not
+    // the weaker `!valueDeclaration` heuristic — is what keeps those three
+    // intrinsics out of the `true` bucket (they have a symbol but no value decl).
+    if (ctx.checker.getSymbolAtLocation(ident) === undefined) {
+      fctx.body.push({ op: "i32.const", value: 1 });
+      return { kind: "i32" };
+    }
+    // A resolvable binding (var/let/const/param/function/intrinsic global) is
+    // not deletable — return false.
     fctx.body.push({ op: "i32.const", value: 0 });
     return { kind: "i32" };
   }
