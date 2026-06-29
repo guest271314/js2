@@ -1,7 +1,9 @@
 ---
 id: 2837
-title: "[SENIOR-DEV ONLY] dynamic property-add to a NON-EMPTY object literal is silently dropped (closed struct, no sidecar) — breaks `Object.defineProperties` getters → compiled acorn throws on every `return` statement"
-status: ready
+title: "[SENIOR-DEV ONLY] dynamic property-add to a NON-EMPTY object literal is silently dropped (closed struct, no sidecar) — route growable literals to externref $Object (Approach A)"
+status: done
+completed: 2026-06-29
+assignee: ttraenkler/sendev-arrowparam
 sprint: current
 priority: high
 horizon: l
@@ -436,9 +438,11 @@ FUNCTION directly in wasm — `po.inFn.get()` — not the installed-accessor cha
 **Conclusion:** Approach A is NECESSARY but NOT SUFFICIENT for acorn's `return`.
 Layer 3 needs its own architect design (member-get on a typed receiver must
 consult runtime-installed prototype accessors via the host MOP, or acorn-shape
-`prototypeAccessors` getters must be modeled statically). ESCALATED — do not land
-a broad object-rep change that does not reach the milestone without the lead's
-decision on landing-as-stepping-stone vs combining with the Layer-3 fix.
+`prototypeAccessors` getters must be modeled statically). **Carved as #2838**
+(dynamic prototype-accessor dispatch; `depends_on: 2837`). Per the tech lead's
+Option-1 decision, this PR lands Approach A as a stepping stone (it fixes the REAL
+general dropped-out-of-shape-write data-loss bug, valuable beyond acorn); #2838
+tracks the orthogonal accessor-dispatch layer.
 
 ### NOTE — possible round 6 (set expectation)
 
