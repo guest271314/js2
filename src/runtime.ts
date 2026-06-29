@@ -2651,10 +2651,15 @@ function _convertIterableForHost(obj: any, exports: Record<string, Function> | u
       }
     }
   }
-  // Vec struct (homogeneous arrays)
+  // Vec struct (homogeneous arrays).
+  // (#2836) Gate on the POSITIVE `__is_vec` discriminator — `__vec_len` returns
+  // `0` for ANY non-vec struct, so without this guard a plain object element is
+  // mis-flattened to an empty array, erasing its fields. Mirrors the same fix in
+  // `__make_iterable`'s `convertToJS`.
   const vecLen = exports.__vec_len as Function | undefined;
   const vecGet = exports.__vec_get as Function | undefined;
-  if (typeof vecLen === "function" && typeof vecGet === "function") {
+  const isVec = exports.__is_vec as Function | undefined;
+  if (typeof vecLen === "function" && typeof vecGet === "function" && (typeof isVec !== "function" || isVec(obj))) {
     try {
       const len = vecLen(obj) as number;
       if (typeof len === "number" && len >= 0) {
@@ -12231,10 +12236,23 @@ assert._isSameValue = isSameValue;
               }
             }
           }
-          // Try vec struct (homogeneous arrays)
+          // Try vec struct (homogeneous arrays).
+          // (#2836) Gate on the POSITIVE `__is_vec` discriminator (a
+          // `ref.test $__vec_base`). `__vec_len` returns its not-a-vec default
+          // `0` for ANY non-vec struct, so without this guard a plain object
+          // element (e.g. an acorn `Node`) is mis-detected as an empty vec and
+          // flattened to `new Array(0)`, erasing its fields. The
+          // `typeof isVec !== "function"` fallback preserves old behavior for a
+          // module lacking the export (never happens when __vec_len/__vec_get
+          // exist — all three are emitted together).
           const vecLen = exports.__vec_len as Function | undefined;
           const vecGet = exports.__vec_get as Function | undefined;
-          if (typeof vecLen === "function" && typeof vecGet === "function") {
+          const isVec = exports.__is_vec as Function | undefined;
+          if (
+            typeof vecLen === "function" &&
+            typeof vecGet === "function" &&
+            (typeof isVec !== "function" || isVec(obj))
+          ) {
             const len = vecLen(obj) as number;
             if (typeof len === "number" && len >= 0) {
               const arr: any[] = new Array(len);
