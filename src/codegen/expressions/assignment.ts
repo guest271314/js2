@@ -6,6 +6,7 @@ import { ts, forEachChild } from "../../ts-api.js";
 import { isBooleanType, isExternalDeclaredClass, isStringType } from "../../checker/type-mapper.js";
 import type { FieldDef, Instr, ValType } from "../../ir/types.js";
 import { emitBoundsCheckedArrayGet, resolveArrayInfo } from "../array-methods.js";
+import { emitHoleToUndefined } from "../array-holes.js";
 import { tryEmitLinearU8ElementCompound, tryEmitLinearU8ElementSet } from "../linear-uint8-codegen.js";
 import { emitAnyAdd, emitModulo, emitToInt32, emitToUint8Clamp } from "../binary-ops.js";
 import { pushBody } from "../context/bodies.js";
@@ -826,8 +827,36 @@ function compileDestructuringAssignment(
 
       if (getIdx !== undefined && undefIdx !== undefined) {
         for (const prop of target.properties) {
-          if (!ts.isShorthandPropertyAssignment(prop)) continue;
-          const name = prop.name.text;
+          // Determine (keyName to read, targetName to write, default). Handle
+          // both shorthand `{ x = d }` (key === target) and the property form
+          // `{ y: x = d }` with an identifier target (key !== target). The old
+          // path only handled shorthand, so `{ y: x = 1 } = {}` silently dropped
+          // the binding and never fired the default. (#2845)
+          let keyName: string | undefined;
+          let targetName: string | undefined;
+          let propDefault: ts.Expression | undefined;
+          if (ts.isShorthandPropertyAssignment(prop)) {
+            keyName = prop.name.text;
+            targetName = keyName;
+            propDefault = prop.objectAssignmentInitializer;
+          } else if (ts.isPropertyAssignment(prop)) {
+            keyName =
+              ts.isIdentifier(prop.name) || ts.isStringLiteral(prop.name) || ts.isNumericLiteral(prop.name)
+                ? prop.name.text
+                : undefined;
+            let te: ts.Expression = prop.initializer;
+            if (
+              ts.isBinaryExpression(te) &&
+              te.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+              ts.isIdentifier(te.left)
+            ) {
+              propDefault = te.right;
+              te = te.left;
+            }
+            if (ts.isIdentifier(te)) targetName = te.text;
+          }
+          if (keyName === undefined || targetName === undefined) continue;
+          const name = targetName;
 
           // Resolve write target: local first, then module global. Allocate
           // a local only if neither exists.
@@ -844,15 +873,15 @@ function compileDestructuringAssignment(
             targetType = { kind: "externref" as const };
           }
 
-          // Read prop value: tmp = __extern_get(rhs, "name")
-          addStringConstantGlobal(ctx, name);
+          // Read prop value: tmp = __extern_get(rhs, "keyName")
+          addStringConstantGlobal(ctx, keyName);
 
           const tmpVal = allocLocal(fctx, `__destruct_val_${fctx.locals.length}`, { kind: "externref" });
           fctx.body.push({ op: "local.get", index: rhsTmp });
           // (#2515 S0 / #1623) sentinel-safe key push — nativeStrings stores `-1`
           // for the string-constant global, so materialize the key inline as
           // externref instead of `global.get -1`.
-          for (const instr of stringConstantExternrefInstrs(ctx, name)) fctx.body.push(instr);
+          for (const instr of stringConstantExternrefInstrs(ctx, keyName)) fctx.body.push(instr);
           fctx.body.push({ op: "call", funcIdx: getIdx });
           fctx.body.push({ op: "local.set", index: tmpVal });
 
@@ -874,7 +903,7 @@ function compileDestructuringAssignment(
             }
           };
 
-          if (prop.objectAssignmentInitializer) {
+          if (propDefault) {
             // Per spec: defaults fire ONLY on undefined. Use
             // __extern_is_undefined (not ref.is_null) so JS null falls
             // through to the assignment branch.
@@ -885,7 +914,7 @@ function compileDestructuringAssignment(
             const trueInstrs: Instr[] = [];
             const savedTrueBody = fctx.body;
             fctx.body = trueInstrs;
-            const initType = compileExpression(ctx, fctx, prop.objectAssignmentInitializer, targetType);
+            const initType = compileExpression(ctx, fctx, propDefault, targetType);
             if (initType && !valTypesMatch(initType, targetType)) {
               coerceType(ctx, fctx, initType, targetType);
             }
@@ -1117,14 +1146,9 @@ function compileDestructuringAssignment(
         propName = resolveComputedKeyExpression(ctx, prop.name.expression);
       }
       if (!propName) continue; // truly unresolvable property name — skip
-      const fieldIdx = fields.findIndex((f) => f.name === propName);
-      if (fieldIdx === -1) {
-        reportSilentFallback(ctx, "lookup-miss-skip", "assignment:destructure-assign-property-field-miss", prop);
-        continue;
-      }
-      const fieldType = fields[fieldIdx]!.type;
 
-      // Determine the target and optional default value
+      // Determine the target and optional default value FIRST — the missing-
+      // field arm below needs the default to fire it on an absent property. (#2845)
       let targetExpr = prop.initializer;
       let defaultExpr: ts.Expression | undefined;
 
@@ -1137,6 +1161,28 @@ function compileDestructuringAssignment(
         defaultExpr = targetExpr.right;
         targetExpr = targetExpr.left;
       }
+
+      const fieldIdx = fields.findIndex((f) => f.name === propName);
+      if (fieldIdx === -1) {
+        // The source struct has no matching field → reading `obj[prop]` yields
+        // `undefined`. Per §13.15.5.5 the default Initializer fires on undefined,
+        // so `{ y: x = d } = {}` (no `y`) must evaluate `d` and assign it to the
+        // target. The old path skipped the binding entirely, leaving the local at
+        // its zero/null. Mirrors the shorthand `fieldIdx === -1` arm above. (#2845)
+        if (defaultExpr && ts.isIdentifier(targetExpr)) {
+          const localName = targetExpr.text;
+          let localIdx = fctx.localMap.get(localName);
+          if (localIdx === undefined) localIdx = allocLocal(fctx, localName, { kind: "externref" });
+          const targetType = getLocalType(fctx, localIdx) ?? { kind: "externref" as const };
+          const initType = compileExpression(ctx, fctx, defaultExpr, targetType);
+          if (initType && !valTypesMatch(initType, targetType)) coerceType(ctx, fctx, initType, targetType);
+          fctx.body.push({ op: "local.set", index: localIdx });
+          continue;
+        }
+        reportSilentFallback(ctx, "lookup-miss-skip", "assignment:destructure-assign-property-field-miss", prop);
+        continue;
+      }
+      const fieldType = fields[fieldIdx]!.type;
 
       if (ts.isIdentifier(targetExpr)) {
         // { prop: ident } or { prop: ident = default }
@@ -1158,7 +1204,28 @@ function compileDestructuringAssignment(
           if (fieldType.kind === "externref" || fieldType.kind === "ref" || fieldType.kind === "ref_null") {
             const tmpField = allocLocal(fctx, `__dflt_${fctx.locals.length}`, fieldType);
             fctx.body.push({ op: "local.tee", index: tmpField });
-            fctx.body.push({ op: "ref.is_null" } as Instr);
+            // Per §13.15.5.5 the default fires ONLY when the read value is
+            // `undefined`, never JS `null`. JS `null` is `ref.null extern`
+            // (ref.is_null === 1), so a bare `ref.is_null` wrongly fired the
+            // default for `{ y: x = d } = { y: null }`. Use __extern_is_undefined
+            // for externref (strict === undefined); keep ref.is_null for plain
+            // wasm ref/ref_null (no JS-undefined sentinel — null slot = missing). (#2845)
+            if (fieldType.kind === "externref") {
+              const undefIdxP = ensureLateImport(
+                ctx,
+                "__extern_is_undefined",
+                [{ kind: "externref" }],
+                [{ kind: "i32" }],
+              );
+              if (undefIdxP !== undefined) {
+                flushLateImportShifts(ctx, fctx);
+                fctx.body.push({ op: "call", funcIdx: undefIdxP } as Instr);
+              } else {
+                fctx.body.push({ op: "ref.is_null" } as Instr);
+              }
+            } else {
+              fctx.body.push({ op: "ref.is_null" } as Instr);
+            }
             fctx.body.push({
               op: "if",
               blockType: { kind: "empty" },
@@ -1736,72 +1803,105 @@ function compileArrayDestructuringAssignment(
         if (localIdx === undefined) {
           localIdx = allocLocal(fctx, localName, elemType);
         }
-        emitElementGet(i);
-        if (elemType.kind === "externref" || elemType.kind === "ref" || elemType.kind === "ref_null") {
-          const tmpElem = allocLocal(fctx, `__dflt_${fctx.locals.length}`, elemType);
-          // Per ECMA-262 §13.15.5.5 (AssignmentElement) the default initializer
-          // fires ONLY when the read value is `undefined`, never for JS `null`.
-          // JS `null` maps to `ref.null extern` in the WebAssembly JS API, so a
-          // bare `ref.is_null` guard wrongly fired the default for `[a=1] = [null]`.
-          // For externref elements, use __extern_is_undefined (strict === undefined);
-          // for plain wasm ref/ref_null elements (no JS-undefined sentinel) keep
-          // ref.is_null — a wasm-null slot there means "missing", which fires.
+        const localType = getLocalType(fctx, localIdx);
+
+        // Per ECMA-262 §13.15.5.5 (AssignmentElement /
+        // IteratorDestructuringAssignmentEvaluation) the default Initializer
+        // fires when the source element is ABSENT — i.e. the array/iterator
+        // yields `undefined`. For a backing vec that means the index is OUT OF
+        // BOUNDS (`i >= length`); for an `any`-typed (externref) element it ALSO
+        // means an in-bounds slot holding the JS `undefined` sentinel (or an
+        // array hole). The previous lowering (a) DROPPED the default entirely
+        // for numeric (f64/i32) elements and (b) missed the OOB case for
+        // externref elements (OOB read produced `ref.null` = JS `null`, which is
+        // NOT `undefined`), so `[a = d] = []` left `a` at a garbage sentinel and
+        // never evaluated `d`. (#2845)
+        //
+        // Strategy: only READ the element when in bounds (so a non-null `ref`
+        // element never traps on an OOB `ref.as_non_null`), recording the value
+        // in `tmpElem` and an `absent` i32 flag; then fire the default iff
+        // absent, else assign the read value.
+        const elemValType: ValType = elemType.kind === "i8" || elemType.kind === "i16" ? { kind: "i32" } : elemType;
+        const tmpElem = allocLocal(fctx, `__dflt_${fctx.locals.length}`, elemValType);
+        const absentLocal = allocLocal(fctx, `__dflt_absent_${fctx.locals.length}`, { kind: "i32" });
+
+        // Build the IN-BOUNDS path: read element → tmpElem, set absent from the
+        // value's undefined-ness (externref/ref) or 0 (numeric).
+        const buildInBoundsInit = (): Instr[] => {
+          const saved = fctx.body;
+          fctx.body = [];
+          emitElementGet(i); // safe: guarded by the in-bounds check below
+          // An in-bounds `any[]` slot may hold the `$Hole` sentinel for a literal
+          // elision (`[1, , 3]`); per Get it reads as `undefined`, so map it.
+          if (elemType.kind === "externref" && ctx.usesArrayHoles) emitHoleToUndefined(ctx, fctx);
+          fctx.body.push({ op: "local.set", index: tmpElem } as Instr);
           if (elemType.kind === "externref") {
-            const undefIdxTuple = ensureLateImport(
-              ctx,
-              "__extern_is_undefined",
-              [{ kind: "externref" }],
-              [{ kind: "i32" }],
-            );
+            const undefIdx = ensureLateImport(ctx, "__extern_is_undefined", [{ kind: "externref" }], [{ kind: "i32" }]);
             flushLateImportShifts(ctx, fctx);
-            fctx.body.push({ op: "local.tee", index: tmpElem });
-            if (undefIdxTuple !== undefined) {
-              fctx.body.push({ op: "call", funcIdx: undefIdxTuple });
-            } else {
-              fctx.body.push({ op: "ref.is_null" } as Instr);
-            }
-          } else {
-            fctx.body.push({ op: "local.tee", index: tmpElem });
+            fctx.body.push({ op: "local.get", index: tmpElem } as Instr);
+            if (undefIdx !== undefined) fctx.body.push({ op: "call", funcIdx: undefIdx } as Instr);
+            else fctx.body.push({ op: "ref.is_null" } as Instr);
+            fctx.body.push({ op: "local.set", index: absentLocal } as Instr);
+          } else if (elemType.kind === "ref" || elemType.kind === "ref_null") {
+            fctx.body.push({ op: "local.get", index: tmpElem } as Instr);
             fctx.body.push({ op: "ref.is_null" } as Instr);
+            fctx.body.push({ op: "local.set", index: absentLocal } as Instr);
+          } else {
+            fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+            fctx.body.push({ op: "local.set", index: absentLocal } as Instr);
           }
-          const localType = getLocalType(fctx, localIdx);
+          const instrs = fctx.body;
+          fctx.body = saved;
+          return instrs;
+        };
+
+        if (isVecStruct) {
+          // inBounds = i < length  (emitted as `length > i`)
+          fctx.body.push({ op: "local.get", index: tmpLocal });
+          fctx.body.push({ op: "struct.get", typeIdx, fieldIdx: 0 }); // length
+          fctx.body.push({ op: "i32.const", value: i });
+          fctx.body.push({ op: "i32.gt_s" } as Instr);
           fctx.body.push({
             op: "if",
             blockType: { kind: "empty" },
-            then: [
-              ...(() => {
-                const saved = fctx.body;
-                fctx.body = [];
-                compileExpression(ctx, fctx, defaultExpr, localType ?? elemType);
-                fctx.body.push({ op: "local.set", index: localIdx! } as Instr);
-                const instrs = fctx.body;
-                fctx.body = saved;
-                return instrs;
-              })(),
-            ],
-            else: [
-              { op: "local.get", index: tmpElem } as Instr,
-              ...(() => {
-                if (localType && !valTypesMatch(elemType, localType)) {
-                  const saved = fctx.body;
-                  fctx.body = [];
-                  coerceType(ctx, fctx, elemType, localType);
-                  const instrs = fctx.body;
-                  fctx.body = saved;
-                  return instrs;
-                }
-                return [];
-              })(),
-              { op: "local.set", index: localIdx! } as Instr,
-            ],
-          });
+            then: buildInBoundsInit(),
+            else: [{ op: "i32.const", value: 1 } as Instr, { op: "local.set", index: absentLocal } as Instr],
+          } as Instr);
+        } else if (i < typeDef.fields.length) {
+          // Tuple field present (compile-time known).
+          fctx.body.push(...buildInBoundsInit());
         } else {
-          const localType = getLocalType(fctx, localIdx);
-          if (localType && !valTypesMatch(elemType, localType)) {
-            coerceType(ctx, fctx, elemType, localType);
-          }
-          fctx.body.push({ op: "local.set", index: localIdx });
+          // Tuple shorter than the pattern → element absent.
+          fctx.body.push({ op: "i32.const", value: 1 } as Instr);
+          fctx.body.push({ op: "local.set", index: absentLocal } as Instr);
         }
+
+        const thenInit: Instr[] = (() => {
+          const saved = fctx.body;
+          fctx.body = [];
+          compileExpression(ctx, fctx, defaultExpr, localType ?? elemType);
+          fctx.body.push({ op: "local.set", index: localIdx! } as Instr);
+          const instrs = fctx.body;
+          fctx.body = saved;
+          return instrs;
+        })();
+        const elseAssign: Instr[] = (() => {
+          const saved = fctx.body;
+          fctx.body = [];
+          fctx.body.push({ op: "local.get", index: tmpElem } as Instr);
+          if (localType && !valTypesMatch(elemValType, localType)) coerceType(ctx, fctx, elemValType, localType);
+          fctx.body.push({ op: "local.set", index: localIdx! } as Instr);
+          const instrs = fctx.body;
+          fctx.body = saved;
+          return instrs;
+        })();
+        fctx.body.push({ op: "local.get", index: absentLocal });
+        fctx.body.push({
+          op: "if",
+          blockType: { kind: "empty" },
+          then: thenInit,
+          else: elseAssign,
+        } as Instr);
       }
     }
     // else: unsupported element target — skip
