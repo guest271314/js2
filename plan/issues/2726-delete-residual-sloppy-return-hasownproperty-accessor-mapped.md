@@ -1,7 +1,7 @@
 ---
 id: 2726
 title: "delete residual: sloppy return-value semantics, hasOwnProperty-after-delete, accessor descriptor configurability, mapped-arguments delete"
-status: in-progress
+status: ready
 sprint: current
 goal: test262-conformance
 feasibility: medium
@@ -10,18 +10,21 @@ priority: medium
 es_edition: ES5
 language_feature: delete
 task_type: bug
-assignee: ttraenkler/del2726
 created: 2026-06-26
 updated: 2026-06-29
 ---
 
-> **Partial resolution (2026-06-27, dev2).** Groups **(c)** and **(d)** are
-> DONE (+6 test262 incl. siblings, 0 regressions — see `## Resolution`).
-> Remaining open scope: **(a)** sloppy unresolvable-identifier oracle and
-> **(b)** sloppy global-object model are STRUCTURAL (architect-spec first);
-> **(e)** mapped-arguments delete is DEFERRED to #1726 (mapped-arguments
-> exotic); **(f)**/**(g)** re-route to their owning feature issues (not delete
-> bugs). This issue stays open (`status: ready`) for (a)/(b).
+> **Partial resolution (2026-06-29, del2726).** Group **(a)** is now DONE
+> (sloppy `delete <unresolvable identifier>` → `true`; +4 test262, 0
+> regressions — see `## Resolution — group (a)`). Groups **(c)** and **(d)**
+> were DONE earlier (+6 test262 incl. siblings, 0 regressions — see
+> `## Resolution — groups (c) + (d)`). Remaining open scope: **(b)** sloppy
+> global-object model (now 3/4 — `S11.4.1_A3.2_T1` implicit-global was carried
+> by the (a) oracle as a bonus; `S11.4.1_A3.1`, `S11.4.1_A3.3_T1`,
+> `11.4.1-4.a-8` remain) is STRUCTURAL (architect-spec first); **(e)**
+> mapped-arguments delete is DEFERRED to #1726; **(f)**/**(g)** re-route to
+> their owning feature issues (not delete bugs). This issue stays open
+> (`status: ready`) for (b) — route to architect before further dispatch.
 
 # #2726 — delete residual (non-throw) semantics
 
@@ -33,10 +36,10 @@ on its throw-semantics scope.
 
 ## Sub-groups (14 tests, all `test/language/expressions/delete/` unless noted)
 
-### (a) Sloppy-mode `delete <unresolvable identifier>` → `true` (3)
+### (a) Sloppy-mode `delete <unresolvable identifier>` → `true` (3) — DONE (2026-06-29)
 `S11.4.1_A2.2_T1.js`, `S11.4.1_A3.3_T6.js`, `11.4.1-3-1.js`
 - `delete x` where `x` resolves to **no binding anywhere** returns `true` in
-  sloppy mode (§13.5.1.2: unresolvable Reference ⇒ true). We currently return
+  sloppy mode (§13.5.1.2: unresolvable Reference ⇒ true). We previously returned
   `false` for every bare identifier (variables-not-deletable path in
   `compileDeleteExpression`).
 - **Hazard**: a naive "unknown to the compiler ⇒ unresolvable ⇒ true" flip
@@ -44,6 +47,11 @@ on its throw-semantics scope.
   non-configurable globals ⇒ must stay `false`). Needs a reliable
   "is this a real global binding" oracle, not the `isUnresolvableIdent`
   compiler-knowledge heuristic.
+- **Resolved** — see `## Resolution — group (a)`. The reliable oracle is
+  TS-checker **symbol presence** (`getSymbolAtLocation === undefined` ⇒
+  unresolvable), which keeps `undefined`/`arguments`/`globalThis` (symbol, no
+  value decl) and `NaN`/`Infinity`/`JSON` (lib-declared) out of the `true`
+  bucket. +4 test262 (the 3 targets + bonus implicit-global `S11.4.1_A3.2_T1`).
 
 ### (b) Sloppy global-object model (4)
 `S11.4.1_A3.1.js` (#2 `delete this.y === false`), `S11.4.1_A3.2_T1.js`
@@ -89,6 +97,50 @@ on its throw-semantics scope.
 The (a)–(e) groups flip from fail to pass with no regression in
 `expressions/delete/` or `built-ins/Object/defineProperty/`. (f) and (g) may be
 re-routed to their owning feature issues. Full CI green.
+
+## Resolution — group (a) (2026-06-29, del2726)
+
+**Root cause (a).** The bare-identifier arm of `compileDeleteExpression`
+(`src/codegen/typeof-delete.ts`) unconditionally emitted `i32.const 0` ("variables
+are not deletable") for **every** `delete <Identifier>`. §13.5.1.2 step 4 says a
+`delete` of an **UnresolvableReference** (the name resolves to no binding
+anywhere) evaluates to `true` in sloppy mode. Strict mode makes
+`delete <bare identifier>` an early SyntaxError
+(`early-errors/node-checks.ts` already enforces this), so the codegen arm is
+reached only in sloppy code — exactly where step 4 applies.
+
+**Oracle (the issue's stated hazard).** A reliable "real binding vs unresolvable"
+test is **TS-checker symbol presence**: `ctx.checker.getSymbolAtLocation(ident)`
+returns `undefined` only for a genuinely unresolvable name. The three
+non-configurable intrinsic globals that MUST stay `false`
+(`undefined`/`arguments`/`globalThis`) return a **symbol with no
+`valueDeclaration`**, and every lib-declared global (`NaN`/`Infinity`/`JSON`/…)
+returns a symbol **with** a value decl — so symbol-presence keeps all of them out
+of the `true` bucket, where the weaker `!valueDeclaration` heuristic would
+wrongly flip `undefined`/`arguments`/`globalThis`.
+
+**Fix (a).** When the bare-identifier reference is unresolvable
+(`getSymbolAtLocation === undefined`), emit `i32.const 1` (true); otherwise keep
+the `false`. **Eval guard**: an identifier inside an inlined `eval("<literal>")`
+body lives in a foreign `SourceFile` (`EVAL_SOURCE_FILENAME`, exported from
+`expressions/eval-inline.ts`) the checker never bound, so its symbol is *always*
+`undefined` even for a name resolving to an outer var. The flip is gated to skip
+eval-body nodes (`ident.getSourceFile().fileName !== EVAL_SOURCE_FILENAME`),
+preserving `var x = 1; eval('delete x') === false` (`11.4.1-4.a-7`). Precise
+eval-scope delete resolution stays out of scope (eval-substrate lane).
+`src/codegen/typeof-delete.ts`, `src/codegen/expressions/eval-inline.ts`.
+
+### Test Results — group (a) (host/gc lane, authoritative `runTest262File`)
+
+| cluster | baseline → fix |
+|---|---|
+| `language/expressions/delete` | 59 → **63** pass, **0 regressions** |
+| 98 other test262 files containing a bare-identifier `delete` | no change (0 collateral) |
+
+Net **+4** test262. Flipped fail→pass: `S11.4.1_A2.2_T1`, `S11.4.1_A3.3_T6`,
+`11.4.1-3-1` (group (a)) plus bonus `S11.4.1_A3.2_T1` (group (b) implicit-global
+`x = 1; delete x === true`, carried by the same oracle). Regression test:
+`tests/issue-2726-sloppy-unresolvable-delete.test.ts`.
 
 ## Resolution — groups (c) + (d) (2026-06-27, dev2)
 
@@ -142,6 +194,16 @@ flipped fail→pass: `11.4.1-4.a-1`, `11.4.1-4.a-2`, `11.4.1-4-a-4-s` (c),
 `Object/seal/object-seal-inherited-accessor-properties-are-ignored`.
 Regression test: `tests/issue-2726.test.ts`.
 
-## Residual (as of #2199, PO reconcile 2026-06-28)
+## Residual (as of #2199, PO reconcile 2026-06-28; updated 2026-06-29 del2726)
 
-NOT done — partially resolved. Groups (c) hasOwnProperty-after-configurable-delete + (d) non-configurable accessor delete are DONE (+6 test262, 0 regressions). Remaining OPEN: (a) sloppy unresolvable-identifier oracle + (b) sloppy global-object model — both STRUCTURAL and need an architect spec first (NOT dev-claimable as-is). (e) mapped-arguments delete → #1726; (f)/(g) re-routed to owning feature issues. Stays ready for (a)/(b) — route to architect before dispatch.
+NOT done — partially resolved. DONE so far: (a) sloppy unresolvable-identifier
+oracle (+4 test262, 0 regressions, 2026-06-29), (c) hasOwnProperty-after-
+configurable-delete + (d) non-configurable accessor delete (+6 test262, 0
+regressions). Remaining OPEN: **(b) sloppy global-object model** — now 3/4
+(`S11.4.1_A3.2_T1` implicit-global was carried by the (a) oracle; still failing:
+`S11.4.1_A3.1` `delete this.y === false`, `S11.4.1_A3.3_T1` `delete x; x` →
+ReferenceError, `11.4.1-4.a-8` `delete JSON === true`). (b) is STRUCTURAL (needs
+top-level-`this`-as-global-object + configurable-global tracking) and needs an
+architect spec first (NOT dev-claimable as-is). (e) mapped-arguments delete →
+#1726; (f)/(g) re-routed to owning feature issues. Stays `in-progress` for (b) —
+route to architect before further dispatch.
