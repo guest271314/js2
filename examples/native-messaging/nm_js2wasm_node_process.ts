@@ -400,6 +400,18 @@ function main(): void {
   // 1 MiB cap) as their bytes arrive, until EOF (or a zero-length frame). The
   // reactor injected for `process.stdin` drives the `'data'`/`'end'` callbacks
   // after `_start` returns.
+  //
+  // setEncoding("latin1") — node-runnability (#2834). Under REAL node a stream with
+  // NO explicit encoding delivers each `'data'` chunk as a `Buffer`, which has no
+  // `.charCodeAt` — so the state machine's `chunk.charCodeAt(...)` byte reads threw
+  // `TypeError: chunk.charCodeAt is not a function` when this source was run as
+  // plain JS under node (loopdive/js2#389). Declaring the "latin1" encoding makes
+  // node deliver one-char-per-byte STRING chunks instead, so `charCodeAt` recovers
+  // the raw byte exactly as it does for the js2wasm prelude's string chunks. Under
+  // `--target wasi` the injected `process.stdin` prelude already materialises every
+  // chunk as a one-char-per-byte string, so `setEncoding` is a faithful no-op there
+  // (the SAME source now runs unchanged under both node and wasmtime).
+  process.stdin.setEncoding("latin1");
   process.stdin.on("data", (chunk: string) => {
     onData(chunk);
   });
