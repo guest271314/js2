@@ -1,8 +1,8 @@
 ---
-id: 2821
+id: 2826
 title: "Bug C (CPS-capture half): block-scoped let immutably captured by a hoisted async/generator declaration reads the stale pre-hoisted slot"
 parent: 2818
-related: [2820, 2818, 2811, 2669]
+related: [2820, 2818, 2825, 2811, 2669]
 status: ready
 created: 2026-06-29
 priority: high
@@ -18,7 +18,7 @@ horizon: m
 architect_spec: done
 ---
 
-# #2821 — Bug C (CPS-capture half): block-`let` immutably captured by a hoisted async/generator declaration
+# #2826 — Bug C (CPS-capture half): block-`let` immutably captured by a hoisted async/generator declaration
 
 Carved from #2818 (parent) and #2820 (the plain-function half of Bug C, fixed
 there). This is the **async / generator capturer** residual of the
@@ -204,7 +204,7 @@ validation. **Do not** ship the un-gated `?? outerLocalIdx` form.
 
 ### Scoped repro / acceptance
 
-Add `tests/issue-2821.test.ts`:
+Add `tests/issue-2826.test.ts`:
 
 - `t5` (block async), `t6` (block generator) above return **42** (and a string
   variant returns the captured string).

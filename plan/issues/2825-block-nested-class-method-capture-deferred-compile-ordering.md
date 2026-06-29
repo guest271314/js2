@@ -2,7 +2,7 @@
 id: 2825
 title: "Bug C (class-method half, spec'd): block-nested class compiled eagerly, so captured-globals promotion never fires for an outer block-let"
 parent: 2818
-related: [2820, 2818, 2811, 2669, 1672]
+related: [2820, 2818, 2826, 2811, 2669, 1672]
 status: ready
 created: 2026-06-29
 priority: high
@@ -23,11 +23,11 @@ architect_spec: done
 The actionable, spec'd carve of **#2818** (the class-method context of the
 `ary-ptrn-rest-obj-prop-id` block-`let`-capture cluster — the `meth-…` /
 `gen-meth-…` / `private-meth-…` members and their `-dflt` / `-static`
-variants). Sibling carve: **#2821** (the async/generator CPS-capture half).
+variants). Sibling carve: **#2826** (the async/generator CPS-capture half).
 Implements #2818's "Direction (for the architect)"; #2818 stays the parent
 bucket.
 
-This is a **distinct subsystem** from #2820 / #2821: class methods do not take
+This is a **distinct subsystem** from #2820 / #2826: class methods do not take
 lifted leading capture params — they capture an outer local by **promotion to a
 `__captured_<name>` global** (`promoteAccessorCapturesToGlobals`). The bug is a
 **class-body-compile ordering** defect that makes that promotion never run for a
@@ -240,7 +240,7 @@ ordering changes). Watch specifically for:
 
 - **In-lane** (class-collection ordering + captured-globals promotion;
   `declarations.ts` / `nested-declarations.ts` / `closures.ts`). **No** overlap
-  with #2820 / #2821 (those touch `variables.ts` slot reuse and
+  with #2820 / #2826 (those touch `variables.ts` slot reuse and
   `nestedFuncCaptures` leading-param capture — disjoint files/mechanism), so this
   composes cleanly with both.
 - No dependency on the parallel substrate work ($Object dynamic reader /
