@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-06-28T22:48:14.082Z",
-  "baseline_generated_at": "2026-06-28T22:48:14.083Z",
-  "baseline_sha": "7ee6e8c9624377767f09df3d30d6e55a0d9ecc46",
+  "timestamp": "2026-06-28T23:30:58.039Z",
+  "baseline_generated_at": "2026-06-28T23:30:58.039Z",
+  "baseline_sha": "1da7a8694df7f296798d476b7c558bd50abecb6d",
   "oracle_version": 1,
   "mode": {
     "target": "gc",
@@ -10,8 +10,8 @@
   },
   "summary": {
     "total": 43135,
-    "pass": 32817,
-    "fail": 9824,
+    "pass": 32841,
+    "fail": 9800,
     "compile_error": 396,
     "compile_timeout": 80,
     "skip": 18,
@@ -20,8 +20,8 @@
     "by_category": {
       "standard": {
         "total": 42049,
-        "pass": 32210,
-        "fail": 9367,
+        "pass": 32234,
+        "fail": 9343,
         "compile_error": 374,
         "compile_timeout": 80,
         "skip": 18,
@@ -43,18 +43,18 @@
       "proposal": {
         "total": 4982,
         "pass": 1491,
-        "fail": 3157,
-        "compile_error": 228,
+        "fail": 3169,
+        "compile_error": 216,
         "compile_timeout": 1,
         "skip": 105,
-        "compilable": 4648,
+        "compilable": 4660,
         "stale": 0,
         "label": "TC39 proposals"
       },
       "official": {
         "total": 43135,
-        "pass": 32817,
-        "fail": 9824,
+        "pass": 32841,
+        "fail": 9800,
         "compile_error": 396,
         "compile_timeout": 80,
         "skip": 18,
@@ -64,12 +64,12 @@
       },
       "full": {
         "total": 48117,
-        "pass": 34308,
-        "fail": 12981,
-        "compile_error": 624,
+        "pass": 34332,
+        "fail": 12969,
+        "compile_error": 612,
         "compile_timeout": 81,
         "skip": 123,
-        "compilable": 47289,
+        "compilable": 47301,
         "stale": 0,
         "label": "standard + annex_b + proposals"
       }
@@ -77,8 +77,8 @@
   },
   "official_summary": {
     "total": 43135,
-    "pass": 32817,
-    "fail": 9824,
+    "pass": 32841,
+    "fail": 9800,
     "compile_error": 396,
     "compile_timeout": 80,
     "skip": 18,
@@ -87,18 +87,18 @@
   },
   "full_summary": {
     "total": 48117,
-    "pass": 34308,
-    "fail": 12981,
-    "compile_error": 624,
+    "pass": 34332,
+    "fail": 12969,
+    "compile_error": 612,
     "compile_timeout": 81,
     "skip": 123,
-    "compilable": 47289,
+    "compilable": 47301,
     "stale": 0
   },
   "strict_summary": {
     "total": 40626,
-    "pass": 31446,
-    "fail": 8791,
+    "pass": 31470,
+    "fail": 8767,
     "compile_error": 292,
     "compile_timeout": 79,
     "skip": 18,
@@ -119,17 +119,17 @@
     "proposal": {
       "total": 4982,
       "pass": 1491,
-      "fail": 3157,
-      "compile_error": 228,
+      "fail": 3169,
+      "compile_error": 216,
       "compile_timeout": 1,
       "skip": 105,
-      "compilable": 4648,
+      "compilable": 4660,
       "stale": 0
     },
     "standard": {
       "total": 42049,
-      "pass": 32210,
-      "fail": 9367,
+      "pass": 32234,
+      "fail": 9343,
       "compile_error": 374,
       "compile_timeout": 80,
       "skip": 18,
@@ -712,8 +712,8 @@
       "name": "built-ins/Temporal",
       "path": "built-ins/Temporal",
       "pass": 1295,
-      "fail": 3143,
-      "compile_error": 76,
+      "fail": 3155,
+      "compile_error": 64,
       "compile_timeout": 1,
       "skip": 9,
       "total": 4524
@@ -891,8 +891,8 @@
     {
       "name": "language/expressions",
       "path": "language/expressions",
-      "pass": 8616,
-      "fail": 2110,
+      "pass": 8632,
+      "fail": 2094,
       "compile_error": 264,
       "compile_timeout": 28,
       "skip": 18,
@@ -1051,8 +1051,8 @@
     {
       "name": "language/statements",
       "path": "language/statements",
-      "pass": 7383,
-      "fail": 1825,
+      "pass": 7391,
+      "fail": 1817,
       "compile_error": 97,
       "compile_timeout": 32,
       "skip": 0,
@@ -1080,18 +1080,18 @@
     }
   ],
   "error_categories": {
-    "assertion_fail": 6775,
+    "assertion_fail": 6751,
     "illegal_cast": 87,
     "negative_test_fail": 78,
     "null_deref": 190,
     "oob": 51,
-    "other": 3887,
+    "other": 3899,
     "promise_error": 50,
     "range_error": 32,
     "runtime_error": 1187,
     "type_error": 292,
     "unreachable": 26,
-    "wasm_compile": 950
+    "wasm_compile": 938
   },
   "hard_errors": {},
   "skip_reasons": {
