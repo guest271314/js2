@@ -4002,6 +4002,10 @@ function compileCallExpression(
       if (
         !noJsHost(ctx) &&
         propAccess.expression.kind === ts.SyntaxKind.ThisKeyword &&
+        // Private members (`this.#m()`) are brand-checked WasmGC elements the host
+        // MOP can never see — never route them dynamically (would break static/
+        // instance private-method dispatch). The acorn getter chain is all public.
+        !ts.isPrivateIdentifier(propAccess.name) &&
         mName !== "call" &&
         mName !== "apply" &&
         mName !== "bind" &&

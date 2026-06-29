@@ -1070,29 +1070,29 @@ export function resolveStructNameForExpr(
   if (ts.isIdentifier(bareIdent) && ctx.externrefAccessorVars.has(bareIdent.text)) {
     return undefined;
   }
-  // (#2838 L5) `this`-receiver: prefer the runtime truth over a LYING TS type, but
-  // ONLY for the descriptor-literal mistype — never for a genuine struct. Inside a
-  // runtime-installed accessor getter (`Object.defineProperties(Proto, { f:{ get:
-  // function(){ return this.flags } } })`) TS contextually types the getter's `this`
-  // as the descriptor literal object (`{configurable:boolean}` → `__anon_N`), so
-  // `resolveStructName` would lower `this.<x>` against that WRONG struct and read a
-  // default slot (the round-5/6 "getter fires but returns 0/null" bug). Precise
-  // 3-way rule:
-  //   1. fctx `this` local is a concrete struct ref → use it (the runtime truth;
-  //      AGREES with a genuine typed method, so no behavior change there).
-  //   2. fctx `this` is dynamic (externref) AND TS typed it as a real (non-`__anon`)
-  //      struct → KEEP the TS struct. This is the static-method case (`this` = the
-  //      class object, externref, but TS `typeof C` resolves a genuine struct that
-  //      private-member / static dispatch needs) — must NOT be forced dynamic.
-  //   3. fctx `this` is dynamic AND TS typed it as an `__anon` descriptor literal
-  //      (the lie) → return undefined → fully dynamic (host MOP consults the
-  //      runtime-installed accessor). This is the acorn getter case.
+  // (#2838 L5) `this`-receiver: override the TS type with the runtime truth ONLY
+  // for the descriptor-literal LIE — otherwise behave EXACTLY as the original path
+  // below (no behavior change for any genuine struct, class instance, or static
+  // receiver). Inside a runtime-installed accessor getter
+  // (`Object.defineProperties(Proto, { f:{ get: function(){ return this.flags } } })`)
+  // TS contextually types the getter's `this` as the descriptor literal object
+  // (`{configurable:boolean}` → `__anon_N`), so `resolveStructName` would lower
+  // `this.<x>` against that WRONG struct and read a default slot (the round-5/6
+  // "getter fires but returns 0/null" bug). When — and only when — the TS type of
+  // `this` resolves to such an `__anon` descriptor, use the fctx `this` local's
+  // actual ref type instead (a dynamic getter's local is externref →
+  // `resolveThisStructName` undefined → fully dynamic host MOP, which consults the
+  // runtime-installed accessor). For every other `this` (class instance methods,
+  // STATIC methods whose `this` is the class object, real fnctor methods) this
+  // guard does NOT trigger and the unchanged original resolution runs — critical
+  // for brand-checked private/static class-element dispatch, which must keep its
+  // exact struct resolution.
   if (bareIdent.kind === ts.SyntaxKind.ThisKeyword) {
-    const fctxThis = resolveThisStructName(ctx, fctx);
-    if (fctxThis !== undefined) return fctxThis;
     const tsName = resolveStructName(ctx, ctx.checker.getTypeAtLocation(expression));
-    if (tsName !== undefined && !tsName.startsWith("__anon")) return tsName;
-    return undefined;
+    if (tsName !== undefined && tsName.startsWith("__anon")) {
+      return resolveThisStructName(ctx, fctx);
+    }
+    // else: fall through to the original behavior unchanged.
   }
   // (#2837) A member access on a chain rooted at a growable-object-literal var
   // (`o.inner` / `o.inner.get`) operates on a nested externref `$Object` →
