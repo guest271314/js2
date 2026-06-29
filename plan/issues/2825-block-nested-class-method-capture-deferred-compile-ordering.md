@@ -3,7 +3,7 @@ id: 2825
 title: "Bug C (class-method half, spec'd): block-nested class compiled eagerly, so captured-globals promotion never fires for an outer block-let"
 parent: 2818
 related: [2820, 2818, 2826, 2811, 2669, 1672]
-status: ready
+status: blocked
 created: 2026-06-29
 priority: high
 feasibility: hard
@@ -13,9 +13,9 @@ area: codegen
 es_edition: 2015
 language_feature: closures
 goal: spec-completeness
-sprint: current
+sprint: Backlog
 horizon: m
-architect_spec: done
+architect_spec: needs-revision
 ---
 
 # #2825 — Bug C (class-method half): block-nested class compiled eagerly → captured-globals promotion skipped
@@ -255,3 +255,20 @@ ordering changes). Watch specifically for:
   members return pass.
 - No regression in fn-scope class-method/accessor capture (#1672), the #2820
   function-declaration fix, or TDZ throws — on full merge_group.
+
+## Deferral (2026-06-29)
+
+Implementation deferred after PR #2300 (the "defer every block-nested class body"
+approach) parked the **merge_group TWICE** on the same required checks
+(`merge shard reports` + `check for test262 regressions`):
+
+- **1st park** — a latent cross-scope `capturedGlobals` leak surfaced by the
+  deferral. Fixed on-branch with a byte-identical proof over 18 non-capture shapes.
+- **2nd park** — a further regression the local control set could not cover (the
+  ephemeral merge_group ref is pruned right after the run, so each fix is partly blind).
+
+**Conclusion:** deferring *every* block-nested class body is too broad a lever.
+Needs a **narrower** approach: a targeted promotion for the specific
+block-nested-class-capturing-a-block-`let` shape that does NOT re-order global
+class-body compile timing. Fix + diagnosis preserved on branch
+`issue-2825-class-method-capture` (head `2f835ee`); PR #2300 closed. → architect re-spec.
