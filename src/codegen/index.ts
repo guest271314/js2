@@ -4971,9 +4971,12 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
         { op: "local.get", index: 1 } as Instr, // index
         // (#2593) Packed i8/i16 elements REQUIRE array.get_u/_s (plain array.get
         // is invalid Wasm on a packed array); read zero-extended in this generic
-        // path. i32_byte/f64 use plain array.get.
+        // path. (#2835) `i32_byte` (the ArrayBuffer/DataView byte buffer) is now
+        // ALSO packed i8 — it joins the `array.get_u` branch (its box arm already
+        // does the unsigned i32→f64 conversion). `i32_elem` (Int32/Uint32 element
+        // storage) and `f64` stay on plain `array.get`.
         {
-          op: elemKey === "i8_byte" || elemKey === "i16_byte" ? "array.get_u" : "array.get",
+          op: elemKey === "i8_byte" || elemKey === "i16_byte" || elemKey === "i32_byte" ? "array.get_u" : "array.get",
           typeIdx: arrTypeIdx,
         } as Instr,
         ...boxInstrs,
@@ -5296,7 +5299,10 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
       // (#2593) Packed i8/i16 elements need array.get_u and unsigned→f64; plain
       // `array.get` is invalid Wasm on a packed array. Generic dynamic path reads
       // zero-extended (the per-view signedness is at the typed `a[i]` site).
-      const isPackedByte = elemKey === "i8_byte" || elemKey === "i16_byte";
+      // (#2835) `i32_byte` (ArrayBuffer/DataView byte buffer) is now packed i8 too
+      // — same unsigned read/box. `i32_elem` (Int32/Uint32 element storage) stays
+      // full-width signed (plain `array.get`), preserving its pre-split behaviour.
+      const isPackedByte = elemKey === "i8_byte" || elemKey === "i16_byte" || elemKey === "i32_byte";
       const boxInstrs: Instr[] =
         elemKey === "externref"
           ? []
@@ -5649,7 +5655,8 @@ function emitDataViewByteExports(ctx: CodegenContext): void {
           { op: "ref.cast", typeIdx: byteVecTypeIdx },
           { op: "struct.get", typeIdx: byteVecTypeIdx, fieldIdx: 1 },
           { op: "local.get", index: 1 } as Instr,
-          { op: "array.get", typeIdx: arrTypeIdx },
+          // (#2835) packed i8 backing → unsigned zero-extended byte read.
+          { op: "array.get_u", typeIdx: arrTypeIdx },
           { op: "return" } as Instr,
         ],
         else: [],
@@ -8225,10 +8232,10 @@ export function ensureWasiWriteUint8ArrayHelper(
  *
  * Companion to `ensureWasiWriteUint8ArrayHelper` for the ArrayBuffer-backing
  * representation. Under `--target wasi` / `--target standalone`, an
- * `ArrayBuffer` is lowered to a vec struct of i32 bytes (one byte per
- * element, values 0..255 — see dataview-native.ts comment block) rather than
- * the Uint8Array f64-element shape. The element conversion is therefore a
- * direct i32 read (no `i32.trunc_sat_f64_s`).
+ * `ArrayBuffer` is lowered to a vec struct of packed `i8` bytes (one byte per
+ * element, values 0..255 — (#2835), see dataview-native.ts comment block)
+ * rather than the Uint8Array f64-element shape. The element read is therefore a
+ * packed `array.get_u` (no `i32.trunc_sat_f64_s`).
  */
 export function ensureWasiWriteArrayBufferHelper(
   ctx: CodegenContext,
@@ -8323,10 +8330,11 @@ export function ensureWasiWriteArrayBufferHelper(
             { op: "local.get", index: I } as Instr,
             { op: "i32.add" } as Instr,
 
-            // value = data[i] (i32; low byte kept by i32.store8)
+            // value = data[i] ((#2835) packed i8 byte → unsigned read; low byte
+            // kept by i32.store8)
             { op: "local.get", index: DATA } as Instr,
             { op: "local.get", index: I } as Instr,
-            { op: "array.get", typeIdx: arrTypeIdx } as Instr,
+            { op: "array.get_u", typeIdx: arrTypeIdx } as Instr,
 
             { op: "i32.store8", align: 0, offset: 0 },
 
