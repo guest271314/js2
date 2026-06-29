@@ -265,6 +265,80 @@ function emitBoundsCheckedArrayGetUndef(
   });
 }
 
+/**
+ * (#2844) Destructure an OBJECT binding pattern from a freshly-built rest vec.
+ *
+ * Per §13.3.3.6 `BindingRestElement : ... BindingPattern`, an array-pattern rest
+ * element collects the remaining iterator values into a fresh `Array A`, then runs
+ * BindingInitialization of the inner BindingPattern with `A`. When that inner
+ * pattern is an OBJECT pattern (`[...{ 0: v, length: z }]`), the bindings are
+ * property reads on the Array object: `length` -> A.length, a non-negative integer
+ * key `k` -> A[k] (OOB -> undefined).
+ *
+ * The generic struct-by-name object destructure does NOT know the rest vec is
+ * array-like (the `__vec` struct has no field named `0`), so it silently drops
+ * numeric-key bindings. This helper supplies the array-like reads. It is SHARED by
+ * the two lanes that build a rest vec and then need an object-from-vec read:
+ *   - the function-parameter / decl rest lane (`destructureParamArray`), and
+ *   - the for-of / for-await loop-head rest lane (`compileForOfDestructuring`).
+ *
+ * `vecLocal` holds the (non-null) rest vec ref; `vecTypeIdx`/`arrTypeIdx` describe
+ * the vec struct and its backing array. `isDecl` flips per-binding TDZ flags for
+ * let/const declarations (a no-op when no flag exists).
+ *
+ * Scope matches the test262 `*-ary-ptrn-rest-obj-{id,prop-id}` cluster: shorthand
+ * / renamed identifier targets keyed by `length` or a non-negative integer.
+ * Rest-within-rest, nested sub-patterns, and defaults inside the rest object are
+ * out of scope (skipped) — consistent across both lanes.
+ */
+export function emitObjectPatternRestFromVec(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  vecLocal: number,
+  vecTypeIdx: number,
+  arrTypeIdx: number,
+  objPattern: ts.ObjectBindingPattern,
+  isDecl: boolean,
+): void {
+  ensureBindingLocals(ctx, fctx, objPattern);
+  for (const nested of objPattern.elements) {
+    if (!ts.isBindingElement(nested)) continue;
+    if (nested.dotDotDotToken) continue;
+    if (!ts.isIdentifier(nested.name)) continue;
+    const propNode = nested.propertyName ?? nested.name;
+    let key: string | undefined;
+    if (ts.isIdentifier(propNode)) key = propNode.text;
+    else if (ts.isStringLiteral(propNode)) key = propNode.text;
+    else if (ts.isNumericLiteral(propNode)) key = propNode.text;
+    if (key === undefined) continue;
+    const localName = nested.name.text;
+    const localIdx = fctx.localMap.get(localName);
+    if (localIdx === undefined) continue;
+    const localType = getLocalType(fctx, localIdx);
+    if (!localType) continue;
+    if (key === "length") {
+      fctx.body.push({ op: "local.get", index: vecLocal });
+      fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 });
+      coerceType(ctx, fctx, { kind: "i32" }, localType);
+      fctx.body.push({ op: "local.set", index: localIdx });
+      if (isDecl) emitLocalTdzInit(fctx, localName);
+      continue;
+    }
+    const numKey = Number(key);
+    if (Number.isInteger(numKey) && numKey >= 0 && String(numKey) === key) {
+      const arrDef = ctx.mod.types[arrTypeIdx];
+      const elemWasmType = arrDef && arrDef.kind === "array" ? arrDef.element : ({ kind: "externref" } as ValType);
+      fctx.body.push({ op: "local.get", index: vecLocal });
+      fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 });
+      fctx.body.push({ op: "i32.const", value: numKey });
+      emitBoundsCheckedArrayGetUndef(ctx, fctx, arrTypeIdx, elemWasmType);
+      coerceType(ctx, fctx, elemWasmType, localType);
+      fctx.body.push({ op: "local.set", index: localIdx });
+      if (isDecl) emitLocalTdzInit(fctx, localName);
+    }
+  }
+}
+
 function boxToExternref(ctx: CodegenContext, elemKey: string, srcElemType?: ValType): Instr[] {
   // (#2669) When the backing array ALREADY stores externref elements, the value
   // produced by `array.get` is already an externref and needs no conversion.
@@ -1886,52 +1960,15 @@ export function destructureParamArray(
         fctx.body.push({ op: "local.set", index: nestedTmpLocal });
         destructureParamArray(ctx, fctx, nestedTmpLocal, element.name, nestedType, opts);
       } else if (ts.isObjectBindingPattern(element.name)) {
-        // Nested rest with object pattern: function([...{length}]) or [...{0:v}]
-        // The rest array is array-like: destructure "length" from vec field 0
-        // and numeric properties via vec's data array. destructureParamObject
-        // on the vec type only knows "length" and "data" — numeric keys would
-        // be skipped. Emit property access inline to cover both shapes.
-        const nestedType: ValType = { kind: "ref", typeIdx: vecTypeIdx };
-        const nestedTmpLocal = allocLocal(fctx, `__rest_nested_${fctx.locals.length}`, nestedType);
+        // Nested rest with object pattern: function([...{length}]) or [...{0:v}].
+        // The rest array is array-like: `length` -> vec field 0, numeric keys ->
+        // vec data array (#2844 shared helper, also used by the for-of lane).
+        const nestedTmpLocal = allocLocal(fctx, `__rest_nested_${fctx.locals.length}`, {
+          kind: "ref",
+          typeIdx: vecTypeIdx,
+        });
         fctx.body.push({ op: "local.set", index: nestedTmpLocal });
-        ensureBindingLocals(ctx, fctx, element.name);
-        for (const nested of element.name.elements) {
-          if (!ts.isBindingElement(nested)) continue;
-          if (nested.dotDotDotToken) continue;
-          if (!ts.isIdentifier(nested.name)) continue;
-          const propNode = nested.propertyName ?? nested.name;
-          let key: string | undefined;
-          if (ts.isIdentifier(propNode)) key = propNode.text;
-          else if (ts.isStringLiteral(propNode)) key = propNode.text;
-          else if (ts.isNumericLiteral(propNode)) key = propNode.text;
-          if (key === undefined) continue;
-          const localName = nested.name.text;
-          const localIdx = fctx.localMap.get(localName);
-          if (localIdx === undefined) continue;
-          const localType = getLocalType(fctx, localIdx);
-          if (!localType) continue;
-          if (key === "length") {
-            fctx.body.push({ op: "local.get", index: nestedTmpLocal });
-            fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 });
-            coerceType(ctx, fctx, { kind: "i32" }, localType);
-            fctx.body.push({ op: "local.set", index: localIdx });
-            if (isDecl) emitLocalTdzInit(fctx, localName);
-            continue;
-          }
-          const numKey = Number(key);
-          if (Number.isInteger(numKey) && numKey >= 0 && String(numKey) === key) {
-            const arrDef = ctx.mod.types[arrTypeIdx];
-            const elemWasmType =
-              arrDef && arrDef.kind === "array" ? arrDef.element : ({ kind: "externref" } as ValType);
-            fctx.body.push({ op: "local.get", index: nestedTmpLocal });
-            fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 });
-            fctx.body.push({ op: "i32.const", value: numKey });
-            emitBoundsCheckedArrayGetUndef(ctx, fctx, arrTypeIdx, elemWasmType);
-            coerceType(ctx, fctx, elemWasmType, localType);
-            fctx.body.push({ op: "local.set", index: localIdx });
-            if (isDecl) emitLocalTdzInit(fctx, localName);
-          }
-        }
+        emitObjectPatternRestFromVec(ctx, fctx, nestedTmpLocal, vecTypeIdx, arrTypeIdx, element.name, isDecl);
       } else {
         fctx.body.push({ op: "drop" });
       }
