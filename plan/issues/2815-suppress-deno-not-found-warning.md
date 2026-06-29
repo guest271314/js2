@@ -58,6 +58,7 @@ member-call shape syntactically regardless of types).
 ## Test Results
 
 `tests/issue-2815-deno-not-found-warning.test.ts` — 5/5 pass:
+
 - recognized `Deno.stdin`/`Deno.stdout` surface (multi-file): no TS2304 'Deno'
 - Deno adapter compiles to a valid wasi module, no warning
 - `Deno.notAThing` still warns
