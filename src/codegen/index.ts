@@ -14732,12 +14732,22 @@ function walkStmtForLetConst(ctx: CodegenContext, fctx: FunctionContext, stmt: t
               : isNullablePrimitiveType(varType)
                 ? { kind: "externref" }
                 : (inferLetConstInitializerWasmType(ctx, fctx, decl.initializer) ?? resolveWasmType(ctx, varType));
-        allocLocal(fctx, name, wasmType);
+        const valueSlot = allocLocal(fctx, name, wasmType);
+        // (#2814) Record the pre-hoisted slot for THIS declaration so
+        // compileVariableStatement can reuse it when saveBlockScopedShadows later
+        // deletes the block-let's own slot (the duplicate-local desync — Bug C).
+        // Recorded only here, i.e. only for names the pre-pass actually allocated
+        // (absent from localMap ⇒ no outer/param/var shadow). Genuine shadows are
+        // skipped above (the `localMap.has(name)` continue) and never recorded.
+        if (!fctx.preHoistedLetConstSlots) fctx.preHoistedLetConstSlots = new Map();
+        const preHoistRecord: { valueSlot: number; flagSlot?: number } = { valueSlot };
+        fctx.preHoistedLetConstSlots.set(decl, preHoistRecord);
         // Only add TDZ flag if static analysis can't prove all accesses are safe
         if (needsTdzFlag(ctx, decl)) {
           if (!fctx.tdzFlagLocals) fctx.tdzFlagLocals = new Map();
           const flagIdx = allocLocal(fctx, `__tdz_${name}`, { kind: "i32" });
           fctx.tdzFlagLocals.set(name, flagIdx);
+          preHoistRecord.flagSlot = flagIdx;
         }
       }
       // Destructuring patterns (let/const) are NOT pre-allocated here —
