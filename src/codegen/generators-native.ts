@@ -37,6 +37,7 @@ import { emitBrandCheckTypeError } from "./native-proto.js";
 import { addFuncType } from "./registry/types.js";
 import { coerceType, compileExpression, compileStatement, valTypesMatch } from "./shared.js";
 import { bodyUsesArguments } from "./helpers/body-uses-arguments.js";
+import { resolveSpillLocalValType } from "./statements/variables.js";
 
 const STATE_FIELD = 0;
 const SENT_FIELD = 1;
@@ -95,6 +96,15 @@ interface NativeGeneratorState {
 interface NativeGeneratorPlan {
   states: NativeGeneratorState[];
   spills: string[];
+  /**
+   * (#2864 F1b) The wasm ValType for each spilled local, keyed by name. A local
+   * carried across a `yield` gets a state-struct field at its ACTUAL type
+   * (object → `ref_null $Object`, string → the native-string ref, number → f64),
+   * not the historical f64. A `let x = yield …` resume binding takes the carrier
+   * (`sent`-field) type. Every spill resolves to a supported kind or the plan
+   * bails to the host path (see `buildNativeGeneratorPlan`).
+   */
+  spillTypes: Map<string, ValType>;
   /** (#2171) Uniform yield element ValType — f64 (numeric) or native string. */
   elemValType: ValType;
   /**
@@ -287,7 +297,11 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
   // this array is the terminator's `siteIndex`.
   const delegationSites: { innerName: string }[] = [];
   const spillSet = new Set<string>();
-  const addSpill = (name: string): void => {
+  // (#2864 F1b) The variable declaration that introduced each spilled name, so
+  // the spill's wasm type can be resolved at its actual ValType.
+  const spillDecls = new Map<string, ts.VariableDeclaration>();
+  const addSpill = (name: string, decl?: ts.VariableDeclaration): void => {
+    if (decl !== undefined && !spillDecls.has(name)) spillDecls.set(name, decl);
     if (spillSet.has(name)) return;
     spillSet.add(name);
     spills.push(name);
@@ -746,7 +760,7 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
   function collectSpillsIn(node: ts.Node): void {
     function visit(n: ts.Node): void {
       if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name)) {
-        addSpill(n.name.text);
+        addSpill(n.name.text, n);
       }
       if (
         ts.isFunctionDeclaration(n) ||
@@ -780,20 +794,43 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
   if (suspendCount === 0) return null;
   if (states.length > MAX_NATIVE_GENERATOR_STATES) return null;
 
-  // (#2864 F1) The boxed-any carrier types only the per-frame scalars (sent /
-  // abrupt / yielded value) as externref; it does NOT yet type the spill slots
-  // for live-across-yield LOCALS. A faithful spill field must carry the local's
-  // exact wasm type (an object literal lowers to a concrete `ref $Object`, which
-  // the up-front struct layout cannot know without a body pre-pass — the
-  // "deeper rewrite" flagged in the #2864 plan). So a heterogeneous generator
-  // that needs to spill any local bails to the host path here (consistent across
-  // `isNativeGeneratorCandidate` and `registerNativeGenerator`, both of which
-  // route through this builder, so the host imports stay registered and no
-  // undefined funcidx is baked). Numeric / string carriers are unaffected (their
-  // spills are f64). Follow-up: two-pass spill typing widens this.
-  if (elemIsAny && spills.length > 0) return null;
+  // (#2864 F1b) Type every spilled local at its ACTUAL wasm ValType so a live-
+  // across-yield object / string / typed-struct local survives the frame, rather
+  // than the F1 blanket bail (`elemIsAny && spills.length > 0`) or the historical
+  // f64-only assumption. Two kinds of spill:
+  //   • a `let x = yield …` RESUME BINDING — its value comes from the `sent`
+  //     carrier field, so it must match the carrier type (f64 for numeric/string,
+  //     externref for the boxed-any carrier), NOT resolveWasmType(x) (the declared
+  //     `TNext`, usually `any`).
+  //   • a plain body LOCAL — resolved via `resolveSpillLocalValType`, which mirrors
+  //     the type the resume function's var-declaration will assign it.
+  // If ANY spill cannot be resolved to a supported, struct-storable kind, the
+  // whole generator bails to the host path (return null) — consistent across the
+  // candidate gate and registration (both route through this builder), so the
+  // host imports stay registered and no undefined funcidx is baked.
+  const resumeBindingNames = new Set<string>();
+  for (const s of states) for (const b of s.resumeBindings) resumeBindingNames.add(b);
+  const carrierType = genCarrierFieldType(elemValType);
+  const spillTypes = new Map<string, ValType>();
+  for (const name of spills) {
+    if (resumeBindingNames.has(name)) {
+      // A `let x = yield …` binding reads `.next(v)`'s value from the `sent`
+      // carrier field. For numeric / native-string carriers (sent = f64 / string)
+      // this round-trips and was already supported. For the BOXED-ANY carrier the
+      // sent value is an externref whose later member reads need the any-receiver
+      // dispatch (#2151) — not yet correct here (it silently computes a wrong
+      // value), so keep bailing that shape to the host path, exactly as F1 did.
+      if (carrierIsAny(elemValType)) return null;
+      spillTypes.set(name, carrierType);
+      continue;
+    }
+    const declNode = spillDecls.get(name);
+    const resolved = declNode ? resolveSpillLocalValType(ctx, declNode) : null;
+    if (!resolved) return null;
+    spillTypes.set(name, resolved);
+  }
 
-  return { states, spills, elemValType, delegationSites };
+  return { states, spills, spillTypes, elemValType, delegationSites };
 }
 
 /** A `break`/`continue` inside a yield-loop body is not modeled in this slice. */
@@ -1113,17 +1150,10 @@ export function registerNativeGenerator(
   if (!plan) return null;
 
   const elemValType = plan.elemValType;
-  const elemIsString = elemValType.kind !== "f64";
-  // (#2171) Scope guard for the string slice: spilled locals are typed f64 in
-  // the state struct, so a string generator that needs to spill a live local
-  // across a suspension can't faithfully store it yet. Bail to the host/#680
-  // path for that shape (numeric generators are unaffected — they spill f64).
-  // This keeps the slice to the dominant `yield "a"; yield "b"` shape; spilled
-  // non-numeric locals are the documented follow-up.
-  const bodySpillsForGuard = plan.spills.filter(
-    (s) => !decl.parameters.some((p) => ts.isIdentifier(p.name) && p.name.text === s),
-  );
-  if (elemIsString && bodySpillsForGuard.length > 0) return null;
+  // (#2864 F1b) Spilled locals are now typed at their actual ValType
+  // (`plan.spillTypes`), so the historical string/any guards that bailed any
+  // generator with a live-across-yield non-numeric local are retired — the plan
+  // builder already returned null for any spill whose type it could not resolve.
 
   const resultTypeIdx = ensureNativeGeneratorResultType(ctx, elemValType);
   // (#2571) The synthetic `this` (when present) is the FIRST param name, aligned
@@ -1152,10 +1182,15 @@ export function registerNativeGenerator(
   // but params already live in the struct. Spills cover body-declared locals.
   const paramNameSet = new Set(paramNames);
   const bodySpills = plan.spills.filter((s) => !paramNameSet.has(s));
-  for (const spill of bodySpills) {
+  // (#2864 F1b) Spill field at the local's actual ValType (object → ref_null
+  // struct, string → native-string ref, number → f64), aligned 1:1 with
+  // `bodySpills` so the resume-load local, store/load, and struct-init default
+  // all agree. `plan.spillTypes` is guaranteed to hold an entry for each spill.
+  const spillTypes: ValType[] = bodySpills.map((s) => plan.spillTypes.get(s) ?? { kind: "f64" });
+  for (let i = 0; i < bodySpills.length; i++) {
     stateFields.push({
-      name: `spill_${spill}`,
-      type: { kind: "f64" },
+      name: `spill_${bodySpills[i]}`,
+      type: spillTypes[i]!,
       mutable: true,
     });
   }
@@ -1198,6 +1233,7 @@ export function registerNativeGenerator(
     modeFieldIdx: MODE_FIELD,
     abruptFieldIdx: ABRUPT_FIELD,
     spillNames: bodySpills,
+    spillTypes,
     spillFieldOffset,
     yieldCount,
     doneState: plan.states.length - 1, // the final `done` state id
@@ -1236,6 +1272,25 @@ function emptyResult(info: NativeGeneratorInfo): Instr[] {
     { op: "i32.const", value: 1 },
     { op: "struct.new", typeIdx: info.resultTypeIdx },
   ];
+}
+
+// (#2864 F1b) The inert default a spill field is constructed with, by ValType.
+// Overwritten by the body's declaration on first entry into the owning state, so
+// it only has to satisfy `struct.new`'s field type. Mirrors `defaultElemValueInstr`
+// but spans the full set of supported spill kinds.
+function defaultSpillInstr(type: ValType): Instr {
+  switch (type.kind) {
+    case "f64":
+      return { op: "f64.const", value: NaN };
+    case "i32":
+      return { op: "i32.const", value: 0 };
+    case "i64":
+      return { op: "i64.const", value: 0n } as Instr;
+    case "externref":
+      return { op: "ref.null.extern" } as Instr;
+    default:
+      return { op: "ref.null", typeIdx: (type as { typeIdx: number }).typeIdx } as Instr;
+  }
 }
 
 function emptyResultForType(resultTypeIdx: number): Instr[] {
@@ -1812,9 +1867,13 @@ export function ensureNativeGeneratorResumeFunction(ctx: CodegenContext, info: N
     resumeFctx.body.push({ op: "local.set", index: localIdx });
   }
 
-  // Load spills into locals.
+  // Load spills into locals. (#2864 F1b) The load local is minted at the spill's
+  // actual ValType so the `struct.get` (of the same-typed field) round-trips. The
+  // body's var-declaration reuses this exact slot (it is already in `localMap`),
+  // and because the resume fctx carries no analysis caches, its computed type
+  // equals `resolveSpillLocalValType` → no slot re-type, no mismatch.
   for (let i = 0; i < info.spillNames.length; i++) {
-    const localIdx = allocLocal(resumeFctx, info.spillNames[i]!, { kind: "f64" });
+    const localIdx = allocLocal(resumeFctx, info.spillNames[i]!, info.spillTypes[i]!);
     resumeFctx.body.push({ op: "local.get", index: 0 });
     resumeFctx.body.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: info.spillFieldOffset + i });
     resumeFctx.body.push({ op: "local.set", index: localIdx });
@@ -1834,6 +1893,32 @@ export function ensureNativeGeneratorResumeFunction(ctx: CodegenContext, info: N
       resumeFctx.body.push(...emitTrampoline(ctx, resumeFctx, info, plan, 0, resultLocal));
     } finally {
       ctx.currentFunc = savedFunc;
+    }
+  }
+
+  // (#2864 F1b) Reconcile each spill's struct field with the FINAL type its
+  // resume-function local settled on. The body's var-declaration reuses the
+  // pre-allocated spill slot and may re-type it (e.g. a predicted `ref_null`
+  // narrowed by the declaration to a non-null `ref`); a non-null ref has no
+  // struct-construction default and would not round-trip through `struct.get`,
+  // so widen it back to `ref_null` and pin BOTH the local slot and the spill
+  // field (+ `info.spillTypes`, which the constructor's init default reads) to
+  // that common type. This runs before any `struct.new` of the state struct —
+  // the constructor (`compileNativeGeneratorFunction`) calls this function
+  // first — so the init defaults observe the reconciled types.
+  const stateStruct = ctx.mod.types[info.stateTypeIdx];
+  for (let i = 0; i < info.spillNames.length; i++) {
+    const localIdx = resumeFctx.localMap.get(info.spillNames[i]!);
+    if (localIdx === undefined || localIdx < resumeFctx.params.length) continue;
+    const slot = resumeFctx.locals[localIdx - resumeFctx.params.length];
+    if (!slot) continue;
+    let finalType = slot.type;
+    if (finalType.kind === "ref") finalType = { kind: "ref_null", typeIdx: finalType.typeIdx };
+    slot.type = finalType;
+    info.spillTypes[i] = finalType;
+    if (stateStruct && stateStruct.kind === "struct") {
+      const field = stateStruct.fields[info.spillFieldOffset + i];
+      if (field) field.type = finalType;
     }
   }
 
@@ -1870,8 +1955,12 @@ export function compileNativeGeneratorFunction(
   for (let i = 0; i < info.paramTypes.length; i++) {
     fctx.body.push({ op: "local.get", index: i });
   }
+  // (#2864 F1b) Spill slots start at their type's inert default — `f64 NaN`
+  // (numeric, unchanged), `i32`/`i64` 0, a null ref for object/string spills, or
+  // a null externref for boxed-any spills — so the `struct.new` typechecks before
+  // the body's declaration overwrites the slot on first entry.
   for (let i = 0; i < info.spillNames.length; i++) {
-    fctx.body.push({ op: "f64.const", value: NaN });
+    fctx.body.push(defaultSpillInstr(info.spillTypes[i]!));
   }
   // (#2170) `yield*` delegation slots start null — the inner generator is
   // materialized lazily on first entry into the yield-star state.
