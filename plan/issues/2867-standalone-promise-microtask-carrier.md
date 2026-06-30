@@ -2,7 +2,7 @@
 id: 2867
 title: "Standalone: Promise / async microtask leaks Promise_resolve/reject/then + __make_callback host imports"
 status: in-progress
-assignee: ttraenkler/sendev-carrier-gaps
+assignee: ttraenkler/sendev-carriergap4
 created: 2026-06-30
 updated: 2026-07-01
 priority: high
@@ -37,6 +37,7 @@ landed.)
 ## Root cause
 
 No standalone microtask queue + Promise state machine. Needs:
+
 - a native `$Promise` struct (state: pending/fulfilled/rejected, value, reaction
   list).
 - a native **microtask queue** drained at top-of-job / after the main module
@@ -55,6 +56,7 @@ it between async functions, generators, and async generators. Check #1326c
 microtask work already present before re-deriving.
 
 Sketch:
+
 - `$Promise` + microtask ring in the object-runtime; drain entry called after
   module main + at each await resume.
 - Replace the `Promise_*`/`__make_callback` host-import emission sites (search
@@ -66,6 +68,7 @@ Sketch:
 ## Test plan
 
 Standalone fail/CE → pass:
+
 - `test/built-ins/Promise/**` (resolve/reject/then/finally/all/race/allSettled/any)
 - `test/language/expressions/await/**`, `test/language/statements/async-function/**`
 
@@ -82,8 +85,7 @@ async unlock). The async-frame **drive layer** (#2895 slices 1a–1c, PRs
 count-move is gated on completing the native `$Promise` carrier so the slice-1d
 gate-widen (`isStandalonePromiseActive` + `isStandaloneThenChainNativeActive` →
 `standalone`) stops regressing. sendev-asyncdrive's A/B/C isolation proved the
-drive layer alone = 0 regression and the broad carrier widen = −16 (async-function
-74) / −29 (150-sample cluster); the carrier gaps are the cause.
+drive layer alone = 0 regression and the broad carrier widen = −16 (async-function 74) / −29 (150-sample cluster); the carrier gaps are the cause.
 
 **Gap 1 of 5 — recursive thenable assimilation in native `.then`/`.catch`.** The
 dominant regressor (e.g. `language/statements/async-function/returns-async-function.js`:
@@ -143,7 +145,7 @@ widen at slice 1d; gc/host + still-host-backed standalone lanes byte-unchanged):
 1. `src/codegen/expressions.ts` — **call-site double-wrap (the prerequisite).**
    A genuinely-suspending async fn under the drive layer ALREADY returns a real
    `$Promise` (externref). The legacy call-site contract (#1313/#1727) still
-   applied `wrapAsyncReturn` for a *thenable* consumer (`f().then(...)`), wrapping
+   applied `wrapAsyncReturn` for a _thenable_ consumer (`f().then(...)`), wrapping
    the `$Promise` in a SECOND native `$Promise` (`wrapAsyncReturn`'s `struct.new`
    arm) → `.then`/assignment read **NaN / illegal-cast** (Promise-of-Promise).
    New predicate `calleeIsDriveLowered(ctx, expr)` (mirrors the
@@ -172,18 +174,84 @@ to the fulfil handler. The existing #2867 Gap-1 + #2895 drive-layer suites stay 
 `tests/async-await.test.ts` (gc/host) + `issue-2671-promise-executor` stay green; typecheck clean.
 
 **KNOWN-OUT-OF-SCOPE / flagged for the tech lead (architectural — do NOT churn):**
-- **`const p = f(); p.then(...)` (and any `Promise<T>`-typed *binding/param/field*) still
+
+- **`const p = f(); p.then(...)` (and any `Promise<T>`-typed _binding/param/field_) still
   corrupts** — `resolveWasmType(Promise<T>)` unwraps to `T` (f64) at index.ts:12046
   ("async fns compiled synchronously"), which is false under the carrier; the inline
   `.then($DONE,$DONE)` harness path (Gap-2 fix) is unaffected, but stored-promise
   consumption needs a **broad `resolveWasmType(Promise<T>) → externref` decision under the
   carrier** with wide blast radius (every Promise-typed slot) — the #2367-graveyard class.
 - **Pre-existing AG0 value-consumer regression** (`tests/issue-2865-...`: 2 fails — `let p =
-  Promise.resolve(7); return await p` consumed as `f() as number`): reproduces IDENTICALLY on
+Promise.resolve(7); return await p` consumed as `f() as number`): reproduces IDENTICALLY on
   the unmodified Gap-1 base. The #2895 drive layer makes `return await <var>` genuinely-suspend
-  (returns a `$Promise`), which the `f() as number` *value*-consumer idiom can't unwrap
+  (returns a `$Promise`), which the `f() as number` _value_-consumer idiom can't unwrap
   host-free — a #2895/sendev-asyncdrive contract item, not introduced here.
 
 Both feed slice 1d. **Gaps 3/4/5 + the runner-drain hook + the gate-widen remain**; the widen
 stays blocked until the stored-`Promise<T>` consumption decision lands and the corpus measures
 net-positive. Gap 2 is independently-mergeable and inert.
+
+## Implementation notes — Gap 4 LANDED (native Promise.all / Promise.race combinators), sendev-carriergap4 2026-07-01
+
+**Gap 4 of 5 — native, host-free `Promise.all` / `Promise.race`.** Today these
+leak `Promise_all` / `Promise_race` host imports **even on the carrier target**
+(`--target wasi`): `declarations.ts`'s aggregator pre-registration only skipped
+`resolve`/`reject` for wasi, so every `Promise.all` module was unsatisfiable
+host-free. This slice lowers the **array-literal** form
+(`Promise.all([a, b])` / `Promise.race([a, b])`) directly onto the EXISTING
+carrier substrate — it forks nothing:
+
+- New `src/codegen/promise-combinators.ts`. `ensureCombinatorFunctions(ctx)`
+  registers two small struct types — `$CombinatorState{ resultPromise, resultsArr,
+length, remaining(mut) }` and `$CombinatorElemCaps{ state, index }` — plus four
+  shared runtime helpers with funcIdx slots reserved up-front (the generator
+  slot-reservation idiom, late-shift-safe): `__combinator_subscribe` (normalises an
+  input to a `$Promise`, builds the per-element caps, and either enqueues an
+  already-settled reaction or prepends a `$PromiseCallback` onto a pending input's
+  callbacks list), `__combinator_all_fulfill` (writes `results[index]`, decrements
+  `remaining`, and on 0 fulfils the result `$Promise` with the results vec),
+  `__combinator_race_fulfill` (one-shot fulfil — first wins), and
+  `__combinator_reject` (one-shot reject — shared by all & race). All reuse
+  `ensureAsyncDriveRuntime` (Promise type, reaction node, microtask ring,
+  `__promise_fulfill`/`__promise_reject`).
+- `expressions/calls.ts` aggregator branch: under `isStandalonePromiseActive` +
+  array-literal arg (no spread/elision) + non-subclass receiver →
+  `emitStandalonePromiseCombinator`; everything else (generic iterables,
+  `allSettled`/`any`, subclass capability-ctor receivers) falls through to the
+  host path unchanged.
+- `declarations.ts`: skip the `Promise_all`/`Promise_race` host-import
+  pre-registration under the carrier (mirrors the resolve/reject wasi skip); the
+  host path still lazily `ensureLateImport`s for the genuine non-native cases.
+
+**Result array representation:** the fulfilled `Promise.all` value is an
+externref vec (`getOrRegisterVecType("externref")`) — i.e. boxed elements, so the
+natural consumer type is `any[]`. A `number[]`-typed `.then` handler casts the
+fulfilled value to an f64-element vec and traps (`illegal cast`); that is the
+expected representation contract, not a combinator bug (`any[]` access unboxes
+correctly).
+
+**Verification** (`tests/issue-2867-gap4.test.ts`, host-free wasi,
+`__drain_microtasks`, all green): all-fulfil (correct values array), all-reject
+(first rejection), `all([])` immediate fulfil, **genuinely-pending all** (inputs
+settle only on a later microtask → aggregate suspends and resumes across the
+drain — the case the host import cannot serve host-free), race-fulfil (first
+wins), race-reject. **Inertness proven by byte-hash:** gc/host
+(`691d10aac350c024`) and `--target standalone` (`43d3f001a1be11aa`) binaries are
+**identical** base-vs-branch (both still host-route the combinators); only the
+wasi carrier lane changes. Typecheck clean; the pre-existing
+`tests/promise-combinators.test.ts` 2 gc/host `Promise.race` runtime-shim failures
+reproduce on the unmodified base (documented in the Gap-1 note — not this change).
+
+**Scope deferred (follow-ups within this gap):** `allSettled` (needs per-element
+`{status,value}` status objects) and `any` (needs `AggregateError`) — both add
+object/error construction coupling; and the **generic-iterable** argument form
+(non-array-literal) which needs host-free `GetIterator` driving. These stay on
+the host path and are inert.
+
+**Remaining for the unlock:** Gap 3 (try/finally-across-await, drive-layer
+coupled) · Gap 5 (for-await-of / async-generator drive, drive-layer coupled) ·
+the runner `__drain_microtasks` hook (sr-pathb's 1d-scaffolding, in branch
+`issue-2895-async-drive-1b`) · then the slice-1d gate-widen, measured
+NET-POSITIVE on the full `merge_group` standalone corpus AFTER #2402 (the stored
+`Promise<T>` consumption contract, now LANDED on main). Gap 4 is
+independently-mergeable and inert.

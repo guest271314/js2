@@ -181,7 +181,7 @@ premature widen is the AG0 −31 regression — do NOT repeat it).
 ### Slice 1a — frame-layout foundation (THIS PR, inert / zero-risk)
 
 - `src/codegen/async-frame.ts` (new): `isAsyncDriveActive(ctx)` (standalone||wasi
-  drive-layer gate, distinct from the `isStandalonePromiseActive` *carrier*
+  drive-layer gate, distinct from the `isStandalonePromiseActive` _carrier_
   gate), `AsyncFrameInfo` (satisfies frame-core `FrameLayout`), and
   `buildAsyncFrameInfo(...)` which registers the per-async-fn `$AsyncFrame_<name>`
   state struct: fixed frame ABI fields (`STATE` i32, `SENT`/`ABRUPT`/`ERROR`
@@ -206,32 +206,32 @@ premature widen is the AG0 −31 regression — do NOT repeat it).
 ### Remaining slices (next sessions, build order)
 
 1b. **resume fn + step adapters + settle** — `ensureAsyncResumeFunction(info)`
-    builds `__async_resume_f<name>(frame)` with the generator slot-reservation
-    funcIdx-stability idiom (reserve placeholder slot BEFORE body emit). For the
-    single-await canonical shape it is a 2-state machine: `br_table` over
-    `STATE_FIELD` → seg0 (entry: prefix + awaited-expr assimilate → if FULFILLED
-    set SENT and fall through, else `storeSpills` + set STATE=1 + register a
-    `$PromiseCallback{__async_step_fulfill_f<name>, frame, __async_step_reject_f
+builds `__async_resume_f<name>(frame)` with the generator slot-reservation
+funcIdx-stability idiom (reserve placeholder slot BEFORE body emit). For the
+single-await canonical shape it is a 2-state machine: `br_table` over
+`STATE_FIELD` → seg0 (entry: prefix + awaited-expr assimilate → if FULFILLED
+set SENT and fall through, else `storeSpills` + set STATE=1 + register a
+`$PromiseCallback{__async_step_fulfill_f<name>, frame, __async_step_reject_f
     <name>, frame, next}` reaction on the awaited promise's callbacks + `return`)
-    → seg1 (continuation: bind `x = SENT`, suffix). `__async_step_*` adapters
-    store the settled value into `SENT`/`ERROR` then call resume. `return v` in
-    a resume body settles `frame.result_promise` via `__promise_fulfill` (new
-    `compileReturnStatement` hook keyed off a `fctx.asyncDriveResultLocal`,
-    mirroring the `fctx.isGenerator` arm); `throw e` → `__promise_reject`.
+→ seg1 (continuation: bind `x = SENT`, suffix). `__async_step_*` adapters
+store the settled value into `SENT`/`ERROR` then call resume. `return v` in
+a resume body settles `frame.result_promise` via `__promise_fulfill` (new
+`compileReturnStatement` hook keyed off a `fctx.asyncDriveResultLocal`,
+mirroring the `fctx.isGenerator` arm); `throw e` → `__promise_reject`.
 1c. **wire live + call-site + runner drain hook** — in `function-body.ts`, when
-    `isAsyncDriveActive(ctx) && asyncFnNeedsCps(...)`, alloc the frame (params
-    spilled), create the pending result `$Promise`, call `__async_resume_f` once
-    (runs seg0 to first real suspension), return the result promise. **Runner
-    drain hook** (`tests/test262-runner.ts`): for `flags:[async]`
-    standalone/wasi tests, drain `__drain_microtasks` after `test()` runs and
-    before reading `__fail` — REQUIRED for any harness credit (the trap AG0 fell
-    into). Verify-first on REAL failing test262 async paths (async-function/dstr,
-    class async methods, `Promise.all().then` chains, async-generator/dstr) via
-    the corpus `wrapTest`/`runTest262File(...,"standalone")`; require
-    NET-POSITIVE on the full `merge_group` standalone report.
+`isAsyncDriveActive(ctx) && asyncFnNeedsCps(...)`, alloc the frame (params
+spilled), create the pending result `$Promise`, call `__async_resume_f` once
+(runs seg0 to first real suspension), return the result promise. **Runner
+drain hook** (`tests/test262-runner.ts`): for `flags:[async]`
+standalone/wasi tests, drain `__drain_microtasks` after `test()` runs and
+before reading `__fail` — REQUIRED for any harness credit (the trap AG0 fell
+into). Verify-first on REAL failing test262 async paths (async-function/dstr,
+class async methods, `Promise.all().then` chains, async-generator/dstr) via
+the corpus `wrapTest`/`runTest262File(...,"standalone")`; require
+NET-POSITIVE on the full `merge_group` standalone report.
 1d. **re-widen carrier gates** — flip `isStandalonePromiseActive` +
-    `isStandaloneThenChainNativeActive` to include `ctx.standalone` TOGETHER,
-    only after 1c proves net-positive.
+`isStandaloneThenChainNativeActive` to include `ctx.standalone` TOGETHER,
+only after 1c proves net-positive.
 
 ### Slice 1b/1c — resume fn + live wiring (LANDED + VALIDATED on wasi)
 
@@ -243,7 +243,7 @@ carrier target (`--target wasi`, where the carrier gate is already on; the
   entry → assimilate awaited `$Promise`, FULFILLED → deliver `SENT` + fall
   through, PENDING → `storeSpills` + STATE=1 + register a `$PromiseCallback`
   reaction + `return`; continuation reads `SENT`), `__async_step_f<name>_{fulfill,
-  reject}` microtask adapters, and `emitAsyncFrameStateMachine` call-site shim
+reject}` microtask adapters, and `emitAsyncFrameStateMachine` call-site shim
   (alloc frame + pending result `$Promise`, kick resume once, return the promise).
   Uses the generator slot-reservation funcIdx-stability idiom.
 - `function-body.ts`: wires it for `isStandalonePromiseActive(ctx) && asyncFnNeedsCps`
@@ -254,6 +254,7 @@ carrier target (`--target wasi`, where the carrier gate is already on; the
 
 **Validated** (`tests/issue-2895-async-frame.test.ts`, all green, host-free —
 `result.imports` empty, `WebAssembly.validate` true):
+
 - FULFILLED fast path: `await g()` (sync-settled async fn) delivers the value.
 - chained drive-lowered async fns thread the value through both frames.
 - **GENUINELY-PENDING**: `await Promise.resolve(1).then(cb)` (pending until the
@@ -268,3 +269,32 @@ typed `(ref $Promise)` local once and reuse it.
 Remaining: **1d** — widen `isStandalonePromiseActive`/`isStandaloneThenChainNativeActive`
 to `standalone` + the runner `__drain_microtasks` hook for `flags:[async]` tests,
 measured NET-POSITIVE on the full `merge_group` standalone report.
+
+### Slice 1d-scaffolding — `__drain_microtasks` intrinsic + runner hook (LANDED, inert)
+
+sendev-carriergap4 2026-07-01. Rescued from the dormant `issue-2895-async-drive-1b`
+branch and shipped as its own small inert PR (de-risks the eventual 1d widen
+measurement — without a drain the `flags:[async]` harness can't observe a
+genuinely-pending async result, the AG0 score-0 trap):
+
+- `src/codegen/expressions.ts`: a `__drain_microtasks()` **compiler intrinsic** —
+  under the native-`$Promise` carrier (`isStandalonePromiseActive`, wasi-only
+  today) it lowers to the existing native `emitDrainMicrotasks`; on the gc/host
+  lane (no native microtask ring) and `--target standalone` (carrier not yet
+  widened) it is a **void no-op**, so those lanes stay byte-identical.
+- `tests/test262-runner.ts`: for `flags:[async]` / `needsAsyncTest` tests, declare
+  `__drain_microtasks` and call it after `test()` runs and before reading `__fail`.
+  Inert on the measured (gc + standalone) lanes — the intrinsic emits nothing
+  there; it only fires once 1d widens the carrier to standalone.
+
+Verified (`tests/issue-2895-drain-hook.test.ts`): an in-source `__drain_microtasks()`
+under wasi resumes a genuinely-pending continuation (→ 41); host-free
+(`result.imports` empty); a `--target standalone` `__drain_microtasks()` is a
+host-free void no-op. Existing carrier suites (`issue-2867-gap2`,
+`issue-2895-async-frame`, `async-await`) stay green; typecheck clean.
+
+**The slice-1d widen itself stays blocked** — it gates on the general multi-state
+CFG-aware CPS resume machine (Gaps 3/5 = try/finally-across-await + for-await/
+async-gen, which the single-await `splitBodyAtAwait` cannot express; tracked as a
+new XL substrate issue) landing AND the full `merge_group` standalone corpus
+measuring net-positive.
