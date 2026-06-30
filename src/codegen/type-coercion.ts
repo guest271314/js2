@@ -299,6 +299,38 @@ export function buildVecFromExternref(
     // (loopdive/js2#389 / #2311 regression — buildElemCoerce only handled
     // f64/i32/externref/ref). (#2839)
     if ((et.kind === "i32" || et.kind === "i8" || et.kind === "i16") && unboxIdx !== undefined) {
+      // (#2866 slice 3) In a symbol-bearing module the externref element may be a
+      // `$Symbol` carrier (materialising `Object.getOwnPropertySymbols(o)` into a
+      // typed `symbol[]` whose value-position rep is the i32 id) rather than a
+      // boxed number. `symbol[]` shares the unbranded `$__arr_i32` element type
+      // with `number[]`, so it can't be disambiguated statically — dispatch at
+      // runtime: a `$Symbol` carrier yields its i32 id (`$Symbol.id`), anything
+      // else unboxes as a number. Gated on the carrier being registered
+      // (standalone/WASI symbol modules); plain numeric modules are byte-identical.
+      if ((ctx.standalone || ctx.wasi) && ctx.symbolTypeIdx >= 0 && et.kind === "i32") {
+        const symIdx = ctx.symbolTypeIdx;
+        const tmpSym = allocLocal(fctx, `__sym_elem_${fctx.locals.length}`, { kind: "externref" });
+        return [
+          { op: "local.tee", index: tmpSym } as Instr,
+          { op: "any.convert_extern" } as Instr,
+          { op: "ref.test", typeIdx: symIdx } as Instr,
+          {
+            op: "if",
+            blockType: { kind: "val", type: { kind: "i32" } },
+            then: [
+              { op: "local.get", index: tmpSym } as Instr,
+              { op: "any.convert_extern" } as Instr,
+              { op: "ref.cast", typeIdx: symIdx } as Instr,
+              { op: "struct.get", typeIdx: symIdx, fieldIdx: 0 } as Instr,
+            ],
+            else: [
+              { op: "local.get", index: tmpSym } as Instr,
+              { op: "call", funcIdx: unboxIdx } as Instr,
+              { op: "i32.trunc_sat_f64_s" } as Instr,
+            ],
+          } as Instr,
+        ];
+      }
       return [{ op: "call", funcIdx: unboxIdx } as Instr, { op: "i32.trunc_sat_f64_s" }];
     }
     if (et.kind === "externref") return [];
@@ -1521,6 +1553,21 @@ export function coerceType(
   }
   // externref → i32 (unbox as number to preserve value, then truncate)
   if (from.kind === "externref" && to.kind === "i32") {
+    // (#2866 slice 3) symbol carrier → i32 id. A standalone/WASI symbol VALUE is
+    // a bare i32 counter id; when it has crossed an externref channel (e.g. a
+    // single `symbol` element of `Object.getOwnPropertySymbols(o)`) it is a
+    // `$Symbol` struct. Unboxing to a symbol slot is the inverse of the
+    // `__box_symbol` boxing path: recover the canonical i32 id (`$Symbol.id`) so
+    // symbol identity (`===`, id-compare) and re-indexing (`o[sym]`) work on the
+    // returned carrier. Narrowly gated on a symbol-branded target with the
+    // carrier registered; never touches number/boolean i32 coercions.
+    if (to.symbol === true && (ctx.standalone || ctx.wasi) && ctx.symbolTypeIdx >= 0) {
+      const symIdx = ctx.symbolTypeIdx;
+      fctx.body.push({ op: "any.convert_extern" });
+      fctx.body.push({ op: "ref.cast", typeIdx: symIdx } as Instr);
+      fctx.body.push({ op: "struct.get", typeIdx: symIdx, fieldIdx: 0 } as Instr);
+      return;
+    }
     addUnionImports(ctx);
     const funcIdx = ctx.funcMap.get("__unbox_number");
     if (funcIdx !== undefined) {

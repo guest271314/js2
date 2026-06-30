@@ -215,8 +215,8 @@ answer.)
 
 **Deferred to follow-ups (pre-existing gaps, NOT regressions):**
 
-- slice 3 SELECT side — `__getOwnPropertySymbols` still returns `[]` (stub); needs the
-  `symbol[]` read path so the returned carriers are usable as symbol values.
+- ~~slice 3 SELECT side~~ **DONE (sendev-promisecarrier, 2026-06-30).** See
+  "## Implementation — slice 3" below.
 - slice 4 — `Symbol.toPrimitive` dispatch in the coercion engine (ties into #2862).
 
 ## Implementation — slice 4 (Symbol.toPrimitive STRING-hint dispatch), sendev-symbol 2026-06-30
@@ -273,3 +273,47 @@ wrong, so it is net-positive. Threading the exact `"default"` hint through
 `tryStructToString`'s callers is a follow-up. **Not addressed (separate gates):**
 abstract `==` ToPrimitive dispatch; `obj + str` default-hint `valueOf`-only
 (pre-existing native-concat gap, unrelated to symbols).
+
+## Implementation — slice 3 (getOwnPropertySymbols SELECT side), 2026-06-30
+
+`Object.getOwnPropertySymbols(o)` now returns the object's own symbol keys
+host-free (was the `[]` stub). Three coordinated pieces:
+
+1. **`object-runtime.ts` — `__obj_ordered_symbols` + real `__getOwnPropertySymbols`.**
+   The SELECT counterpart to PR1's string-key EXCLUSION: a new
+   `__obj_ordered_symbols(ref $Object) -> ref $PropMap` compacts the LIVE own
+   `$Symbol`-keyed entries (INCLUDING non-enumerable — §20.5.2.9 returns all own
+   symbol keys) and selection-sorts them by `$PropEntry.seq` (insertion order;
+   symbols are never integer indices, so NO `entryIndexOf`/`ref.cast $AnyString`
+   which would trap on a `$Symbol` key). `__getOwnPropertySymbols` (under
+   `symbolKeysEnabled`) walks that compacted map and pushes each stored `$Symbol`
+   carrier (`extern.convert_any(e.key)`) into a fresh `$ObjVec`; the `[]`-stub is
+   kept for host/gc mode and symbol-free modules (byte-identical).
+
+2. **`symbol-native.ts` — INTERN `__box_symbol` carriers by id.** A standalone
+   symbol VALUE is a bare i32 id, but every externref crossing (object key,
+   `symbol[]` element, an `any`-typed arg like `assert.sameValue(syms[0], sym)`)
+   boxes it via `__box_symbol`. The generic externref `===` paths
+   (`__extern_strict_eq`/`__any_strict_eq`, array `indexOf`) compare boxed objects
+   with `ref.eq`, so a fresh struct per box made two boxings of the SAME symbol
+   unequal (broke `getOwnPropertySymbols` identity, `sym in obj`,
+   `[sym].indexOf(sym)`). A growable id→carrier intern table makes `ref.eq` hold
+   for same-id boxings — symbol identity now works uniformly with **no change to
+   the central equality helpers**.
+
+3. **`type-coercion.ts` — carrier → i32-id unbox.** For the symbol-TYPED path
+   (`let s2: symbol = syms[0]`, whose value-position rep is the i32 id), both the
+   scalar `externref → i32` coercion and the typed-vec element materialization
+   (`buildElemCoerce`) recover `$Symbol.id`. The vec path runtime-dispatches
+   (`ref.test $Symbol` → id, else `__unbox_number`) because `symbol[]` shares the
+   unbranded `$__arr_i32` element type with `number[]` and can't be disambiguated
+   statically. All gated on the carrier being registered → byte-identical for
+   symbol-free / host modules.
+
+All gated on `symbolKeysEnabled` / `ctx.symbolTypeIdx >= 0`; zero host imports.
+Verified: 7 new standalone tests in `tests/issue-2866.test.ts` (length, identity,
+re-index, insertion order, string-key disjointness, empty, any-boundary `===`);
+the `built-ins/Object/getOwnPropertySymbols` standalone dir improves (the
+remaining fails are Proxy-dependent / ToObject-coercion / not-a-constructor —
+separate concerns). The full merge_group standalone report is the conformance
+gate.
