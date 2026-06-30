@@ -147,6 +147,7 @@ import { tryCompileNodeFsCall, tryCompileNodeProcessCall } from "../node-fs-api.
 import { tryCompileDenoStdioCall } from "../deno-api.js";
 import { tryCompileRawWasiCall } from "../raw-wasi-api.js";
 import { resolvePromiseSubclassName, tryEmitPromiseSubclassReceiver } from "./promise-subclass.js";
+import { emitStandalonePromiseCombinator, isNativeCombinatorMethod } from "../promise-combinators.js";
 import { isSupportedBuiltinStaticProperty, resolveBuiltinNamespaceValueName } from "../builtin-static-globals.js";
 import {
   defaultValueInstrs,
@@ -8515,6 +8516,37 @@ function compileCallExpression(
         (propAccess.name.text === "resolve" || propAccess.name.text === "reject");
       if (isAggregator) {
         const methodName = propAccess.name.text;
+        // (#2867 Gap 4) Native host-free `Promise.all`/`Promise.race` over an
+        // array literal under the native-`$Promise` carrier. Gated on
+        // `isStandalonePromiseActive` (wasi-only today → widens to standalone at
+        // slice 1d), so gc/host + still-host-backed standalone lanes are
+        // byte-unchanged. Only the literal, no-spread, non-subclass form is
+        // intercepted; `allSettled`/`any`, generic iterables, and subclass
+        // capability-ctor receivers fall through to the host path (follow-ups).
+        const arg0 = expr.arguments[0];
+        if (
+          isStandalonePromiseActive(ctx) &&
+          isNativeCombinatorMethod(methodName) &&
+          !isPromiseSubclassReceiver &&
+          expr.arguments.length === 1 &&
+          arg0 !== undefined &&
+          ts.isArrayLiteralExpression(arg0) &&
+          arg0.elements.every((el) => !ts.isSpreadElement(el) && !ts.isOmittedExpression(el))
+        ) {
+          const elementInstrs: Instr[][] = [];
+          for (const el of arg0.elements) {
+            const buf: Instr[] = [];
+            const savedBody = fctx.body;
+            fctx.body = buf;
+            try {
+              compileExpression(ctx, fctx, el, { kind: "externref" });
+            } finally {
+              fctx.body = savedBody;
+            }
+            elementInstrs.push(buf);
+          }
+          return emitStandalonePromiseCombinator(ctx, fctx, methodName, elementInstrs);
+        }
         const importName = `Promise_${methodName}`;
         // Three-arg signature: (thisArg, iterable, directCall) → result
         // (#1116) directCall=1 means "no explicit `.call` was used; default to
