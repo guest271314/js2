@@ -27,6 +27,7 @@ import {
   getNativeProtoBuiltinGlue,
   registerNativeProtoBuiltin,
   emitBrandCheckTypeError,
+  emitLazyNativeProtoGet,
   type NativeProtoBuiltinGlue,
 } from "./native-proto.js";
 import { emitThrowTypeError } from "./expressions/helpers.js";
@@ -35,6 +36,9 @@ import { emitThisReceiverGuardConvert } from "./property-access.js";
 import { compileArraySliceFromVecLocal } from "./array-methods.js";
 import { getArrTypeIdxFromVec } from "./registry/types.js";
 import { ensureLateImport, flushLateImportShifts } from "./shared.js";
+import { ensureObjectRuntime } from "./object-runtime.js";
+import { addStringConstantGlobal } from "./registry/imports.js";
+import { stringConstantExternrefInstrs } from "./native-strings.js";
 
 /**
  * `Array.prototype`'s own enumerable+non-enumerable method names (ES2024
@@ -1258,4 +1262,86 @@ export function ensureTypedArrayViewNativeProtoGlue(ctx: CodegenContext, viewNam
   // (D4 links concrete-view protos to it in a later slice; harmless here).
   ensureTypedArrayIntrinsicNativeProtoGlue(ctx);
   return brand;
+}
+
+/** (#2901) True iff `name` is a wired (non-bigint) `%TypedArray%` view constructor. */
+export function isWiredTypedArrayViewName(name: string): boolean {
+  return (WIRED_TYPED_ARRAY_VIEWS as readonly string[]).includes(name);
+}
+
+/**
+ * (#2901) Materialize the standalone `%TypedArray%` INTRINSIC CONSTRUCTOR object
+ * as a runtime value: a lazily-cached `$Object` singleton carrying a single
+ * `prototype` own-property pointing at the existing `%TypedArray%.prototype`
+ * `$NativeProto` glue. This is the object the test262 `testTypedArray.js` harness
+ * obtains via `Object.getPrototypeOf(<view ctor>)` and then reads `.prototype` off
+ * to reach `%TypedArray%.prototype` (and thence the §23.2.3 accessor descriptors
+ * the #2893 getter bodies serve).
+ *
+ * Modelled on `emitBuiltinNamespaceObject` (builtin-static-globals.ts): one
+ * mutable null-init externref global, lazily populated via `__new_plain_object` +
+ * `__extern_set("prototype", <proto>)`, cached so the intrinsic ctor identity is
+ * stable (`getProtoOf(Int8Array) === getProtoOf(Uint8Array)`, per the harness's
+ * single `%TypedArray%`). Standalone only (the `$NativeProto` glue + `$Object`
+ * runtime are standalone constructs). Leaves the ctor externref on the stack;
+ * returns its ValType, or `null` if the `%TypedArray%` glue/runtime is unavailable
+ * (caller falls through to the existing getProtoOf behaviour).
+ */
+export function emitTypedArrayIntrinsicCtorObject(ctx: CodegenContext, fctx: FunctionContext): ValType | null {
+  const brand = ensureTypedArrayIntrinsicNativeProtoGlue(ctx);
+  if (brand === undefined) return null;
+
+  ensureObjectRuntime(ctx);
+  const newObjectIdx = ctx.funcMap.get("__new_plain_object");
+  const setIdx = ctx.funcMap.get("__extern_set");
+  if (newObjectIdx === undefined || setIdx === undefined) return null;
+
+  const globalName = "__builtin_%TypedArray%_ctor";
+  let globalIdx = ctx.builtinObjectGlobals.get(globalName);
+  if (globalIdx === undefined) {
+    globalIdx = ctx.numImportGlobals + ctx.mod.globals.length;
+    ctx.mod.globals.push({
+      name: globalName,
+      type: { kind: "externref" },
+      mutable: true,
+      init: [{ op: "ref.null.extern" }],
+    });
+    ctx.builtinObjectGlobals.set(globalName, globalIdx);
+  }
+
+  const objLocal = allocLocal(fctx, `__ta_ctor_obj_${fctx.locals.length}`, { kind: "externref" });
+  const initBody: Instr[] = [
+    { op: "call", funcIdx: newObjectIdx } as Instr,
+    { op: "local.set", index: objLocal } as Instr,
+  ];
+
+  // (#2182 pattern) `savedBody` is detached during the swap; register it in
+  // `liveBodies` so any late-import funcidx shift still walks it.
+  const savedBody = fctx.body;
+  fctx.body = initBody;
+  ctx.liveBodies.add(savedBody);
+  let ok = true;
+  try {
+    // obj.prototype = %TypedArray%.prototype glue object
+    fctx.body.push({ op: "local.get", index: objLocal } as Instr);
+    addStringConstantGlobal(ctx, "prototype");
+    for (const instr of stringConstantExternrefInstrs(ctx, "prototype")) fctx.body.push(instr);
+    if (emitLazyNativeProtoGet(ctx, fctx, brand)) {
+      fctx.body.push({ op: "call", funcIdx: setIdx } as Instr);
+      fctx.body.push({ op: "local.get", index: objLocal } as Instr);
+      fctx.body.push({ op: "global.set", index: globalIdx } as Instr);
+    } else {
+      ok = false;
+    }
+  } finally {
+    fctx.body = savedBody;
+    ctx.liveBodies.delete(savedBody);
+  }
+  if (!ok) return null;
+
+  fctx.body.push({ op: "global.get", index: globalIdx } as Instr);
+  fctx.body.push({ op: "ref.is_null" } as Instr);
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: initBody, else: [] } as Instr);
+  fctx.body.push({ op: "global.get", index: globalIdx } as Instr);
+  return { kind: "externref" };
 }

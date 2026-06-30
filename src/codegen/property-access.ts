@@ -87,6 +87,9 @@ import {
   ensureWeakRefNativeProtoGlue,
   ensureFinalizationRegistryNativeProtoGlue,
   ensureTypedArrayViewNativeProtoGlue,
+  ensureTypedArrayIntrinsicNativeProtoGlue,
+  emitTypedArrayIntrinsicCtorObject,
+  isWiredTypedArrayViewName,
 } from "./array-object-proto.js";
 import { isBuiltinSubtype, isBuiltinTypeName } from "./builtin-tags.js";
 import { getOrRegisterErrorStructType, isWasiErrorName } from "./registry/error-types.js";
@@ -833,6 +836,13 @@ export function tryEnsureNativeProtoBrand(ctx: CodegenContext, builtinName: stri
   {
     const taBrand = ensureTypedArrayViewNativeProtoGlue(ctx, builtinName);
     if (taBrand !== undefined) return taBrand;
+  }
+  // (#2901) The abstract `%TypedArray%` intrinsic proto — the receiver the
+  // `testTypedArray.js` harness reaches via `Object.getPrototypeOf(Int8Array).prototype`.
+  // Register the shared intrinsic glue so the #2885 gOPD synthesis + #2876 reflective
+  // `.call` resolve its §23.2.3 accessor descriptors host-free.
+  if (builtinName === "%TypedArray%") {
+    return ensureTypedArrayIntrinsicNativeProtoGlue(ctx);
   }
   // Other builtins: only resolve if some path already registered glue for them.
   const brand = getBuiltinBrand(ctx, builtinName);
@@ -2839,6 +2849,30 @@ function tryEmitConstructorViaTag(
   return { kind: "externref" };
 }
 
+/**
+ * (#2901) True iff `expr` is syntactically `Object.getPrototypeOf(<wired view>.prototype)`
+ * — the inner half of the test262-runner `%TypedArray%`-intrinsic shim.
+ */
+function isGetProtoOfWiredViewProtoCall(expr: ts.Expression): boolean {
+  if (!ts.isCallExpression(expr) || expr.arguments.length < 1) return false;
+  const callee = expr.expression;
+  if (
+    !ts.isPropertyAccessExpression(callee) ||
+    !ts.isIdentifier(callee.expression) ||
+    callee.expression.text !== "Object" ||
+    callee.name.text !== "getPrototypeOf"
+  ) {
+    return false;
+  }
+  const a0 = expr.arguments[0]!;
+  return (
+    ts.isPropertyAccessExpression(a0) &&
+    a0.name.text === "prototype" &&
+    ts.isIdentifier(a0.expression) &&
+    isWiredTypedArrayViewName(a0.expression.text)
+  );
+}
+
 export function compilePropertyAccess(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -2903,6 +2937,20 @@ export function compilePropertyAccess(
     (objIdent as { parent?: ts.Node }).parent = expr.parent ?? expr;
     ts.setTextRange(objIdent, expr.expression);
     const t = compileExpression(ctx, fctx, objIdent, { kind: "externref" });
+    if (t) return t.kind === "externref" ? t : { kind: "externref" };
+  }
+
+  // (#2901) `Object.getPrototypeOf(<view>.prototype).constructor` → the standalone
+  // `%TypedArray%` intrinsic constructor object. This is the test262-runner's
+  // injected `const TypedArray = Object.getPrototypeOf(Int8Array.prototype).constructor`
+  // shim for the abstract intrinsic (test262-runner.ts ~1823); resolving the whole
+  // syntactic chain to the ctor object (whose `.prototype` is `%TypedArray%.prototype`)
+  // keeps the harness binding non-null at runtime and lets the §23.2.3 accessor
+  // descriptor tests reach the #2893 getters host-free. Keyed on the call shape (not
+  // identifier-as-value) so it cannot collide with the name-keyed `new Int8Array()`
+  // construction path; standalone-only.
+  if (noJsHost(ctx) && propName === "constructor" && isGetProtoOfWiredViewProtoCall(expr.expression)) {
+    const t = emitTypedArrayIntrinsicCtorObject(ctx, fctx);
     if (t) return t.kind === "externref" ? t : { kind: "externref" };
   }
 
