@@ -1,8 +1,9 @@
 ---
 id: 2869
 title: "Destructuring with a member-expression assignment target ([x.y]=vals, {k:x.y}=src) — funcIdx-repoint of detached body buffer (~53 fails)"
-status: in-progress
+status: done
 assignee: ttraenkler/member2869
+completed: 2026-06-30
 created: 2026-06-30
 updated: 2026-06-30
 parent: 2669
@@ -399,3 +400,92 @@ changes the `$Object` store ABI or the union-import set, re-merge `origin/main`
 and re-verify the dispatcher fill. No expected conflict in `assignment.ts` /
 `loops.ts`. Recommend landing after, or merging up from, the substrate PRs to
 inherit any `__extern_set_strict` changes.
+
+---
+
+## Implementation Notes (senior-dev, 2026-06-30)
+
+Implemented architect **Direction 1** verbatim; all anchors re-verified against
+`origin/main` @ `0ff8888`.
+
+### What changed
+
+**`src/codegen/expressions/assignment.ts`**
+- New `emitDynamicMemberSet(ctx, fctx, target, valueLocal, valueType)` — boxes
+  receiver + the already-materialized value to externref locals and routes
+  through `emitAlternateStructSetDispatch(...strict)` (terminal = `__extern_set_strict`).
+  Reserved-name carve-out (`length`/`constructor`/`__proto__`/`prototype`/`name`)
+  + the `!dispatched` fall-through emit a bare `__extern_set_strict` instead, mirroring
+  `compileExternPropertySet`. The value is **not** recompiled (`-no-get` once-only).
+- `emitAssignToTarget` PropertyAccess branch: the three field/struct-miss
+  early-`return`s now fall through to `emitDynamicMemberSet` (was: silent drop).
+  Exported so `loops.ts` reuses it. Static struct-field fast path unchanged.
+- New member-target **with default** branch in `compileArrayDestructuringAssignment`'s
+  `else if (Binary EqualsToken)` (previously identifier-only → member+default dropped):
+  read element (bounds-checked → absent) → value-or-default into a temp →
+  `emitAssignToTarget`.
+- **liveBodies registration** (the keystone) added at the swap / deleted after the
+  splice in **all four** detached-buffer functions: `arrDestructInstrsADA`
+  (compileArrayDestructuringAssignment), `destructInstrsDA`
+  (compileDestructuringAssignment), `odflInstrs` (emitObjectDestructureFromLocal),
+  `adflInstrs` (emitArrayDestructureFromLocal — reaches a member set transitively
+  via nested object patterns + has its own `buildDestructureNullThrow` splice-gap).
+
+**`src/codegen/statements/loops.ts`** (`compileForOfAssignDestructuring`, the typed path)
+- Object struct branch, tuple branch, and vec branch: a `PropertyAccess`/`ElementAccess`
+  target is read into a temp (applying any default) and routed through `emitAssignToTarget`
+  instead of the `continue`/identifier-gate drop. Emits into the **live** loop body —
+  no detached-buffer hazard. for-await shares this function → fixed transitively.
+- The for-of **externref** path (`compileForOfAssignDestructuringExternref`) already
+  handled member targets via `__extern_set` (since #1258) — left untouched.
+
+### Why liveBodies (not pre-ensuring imports)
+
+The dispatcher funcIdx is reserved **per-property, in-loop** (`reserveMemberSetDispatch`),
+so it cannot be hoisted out of the detached window; a heterogeneous pattern always
+pulls *some* late import mid-loop / in the splice-gap. Registering the detached
+buffer in `ctx.liveBodies` makes BOTH `shiftLateImportIndices` (func-idx) AND
+`fixupModuleGlobalIndices` (the `string_constants` global shift from
+`addStringConstantGlobal`) walk it — both already iterate `ctx.liveBodies` — so the
+already-emitted dispatch `call` and any string-constant `global.get` repoint in
+lockstep. Deleted right after the splice (no flush in that gap) to dodge the #1109
+double-shift on the non-nullable spread-splice (shared element objects).
+
+### funcIdx proof (the architect's requested WAT check)
+
+`[z, x.y, a.b] = [10,20,30]` (the heterogeneous case that exposed the desync):
+`wasm-dis` resolves the destructure's baked calls to `call $__set_member_y` and
+`call $__set_member_b` (the **correct** dispatchers, declared at the right indices),
+whose terminals call `$__extern_set_strict`. The module validates in V8 (all probes
+instantiated; no `need 3 got 2`). A stale-low funcIdx would resolve to a neighbour
+function or fail validation.
+
+### Scoped validation
+
+`tests/issue-2869.test.ts` — 20/20 pass: headline/multi/heterogeneous array member
+targets, object-property member targets, member+default (present & default-fires),
+nested receiver, string value, for-of tuple/vec/object member, for-await, the
+standalone variants, and regression controls (plain `[a]=v`, plain `x.y=4`,
+object-pattern externref subset). Loadable destructuring/for-of/param-default
+regression suites: 48/48 pass. `check:ir-fallbacks` unchanged; prettier clean.
+
+### Out-of-scope pre-existing issues found (NOT regressions — reproduce on clean main)
+
+1. **Array-destructure result identity through `any`** — `result = [x.y] = vals;
+   assert.sameValue(result, vals)` fails the `result === vals` sub-assertion because
+   the vec-ref → `any`/externref round-trip is not `===`-identity-preserving. **Confirmed
+   identical for the identifier target `[a] = vals`** (code untouched by this PR); the
+   object pattern `{a} = src` *does* preserve it. Affects only the ~3-6 assignment-expr
+   `*-prop-ref` tests' second assertion — the member *write* (the primary assertion)
+   is correct. The 30 for-of/for-await tests have no result; `-no-get`/`-user-err`
+   check write semantics.
+2. **Partial-OOB identifier default** — `[a, b = 42] = [1]` leaves `b` at the f64 NaN
+   sentinel instead of firing the default (empty-array `[a = 9] = []` works). **Confirmed
+   on clean `origin/main` with NO member target** → pre-existing (#2845 territory). The
+   member+default branch added here inherits the same limitation but is strictly better
+   than the previous drop (present-value and empty-source default-fires both work).
+3. **`Object.defineProperty` accessor `set` on write** is not invoked — `plain o.y = v`
+   doesn't invoke it either, so the destructure routing is consistent. Out of scope.
+
+These three are independent follow-ons (substrate / OOB-default / accessor runtime),
+not blockers for the member-target write cluster this issue targets.
