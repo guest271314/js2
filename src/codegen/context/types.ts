@@ -1368,6 +1368,17 @@ export interface CodegenContext {
   nativeStrTypeIdx: number;
   consStrTypeIdx: number;
   /**
+   * (#2866) Type index of the native `$Symbol` carrier struct
+   * `(struct (field $id i32) (field $desc (ref null $AnyString)))`, used in
+   * `--target standalone`/`wasi` (host-free) to represent a Symbol value as a
+   * real GC reference instead of leaking the host-only `env::__box_symbol`
+   * import. Identity is decided by the i32 `$id` (well-known symbols get fixed
+   * ids 1-12, `Symbol()` ids monotonically from 100), so `Symbol("x") !==
+   * Symbol("x")` and the same well-known symbol is `===`. -1 until registered by
+   * `ensureSymbolCarrier`.
+   */
+  symbolTypeIdx: number;
+  /**
    * (#40) Immutable `(array i32)` type index for the Unicode case-mapping tables
    * (emitNativeCaseConversion). Registered once on first use.
    */
