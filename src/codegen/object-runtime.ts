@@ -70,6 +70,7 @@ import { addStringConstantGlobal, ensureExnTag } from "./registry/imports.js";
 import { addFuncType, getArrTypeIdxFromVec, getOrRegisterVecBaseType } from "./registry/types.js";
 import { addUnionImportsViaRegistry, flushLateImportShifts } from "./shared.js";
 import { reserveAccessorGetDriver, reserveAccessorSetDriver } from "./accessor-driver.js";
+import { ensureSymbolCarrier } from "./symbol-native.js";
 import { reserveArrayToPrimitiveString } from "./array-to-primitive.js";
 import { reserveClassToPrimitive } from "./class-to-primitive.js";
 
@@ -199,13 +200,35 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   const nativeStrTypeIdx = ctx.nativeStrTypeIdx;
   const strDataTypeIdx = ctx.nativeStrDataTypeIdx;
 
+  // (#2866) Register the native `$Symbol` carrier struct + `__box_symbol` builder
+  // so the `$Object` property key channel can hold a Symbol key (`o[sym] = v`).
+  // The carrier struct's type index drives the `ref.test $Symbol` discriminators
+  // in `__obj_hash`/`__key_equals`/`__obj_ordered`. Gated on no-JS-host mode: in
+  // gc/host mode this native object runtime is not used (host `env::__extern_*`
+  // imports own the dynamic property path), so the carrier is never needed there.
+  // `symbolTypeIdx` stays -1 when not registered, and every symbol branch below
+  // is guarded on `symbolKeysEnabled` (idx >= 0) so the string-only key path is
+  // byte-unchanged when symbols are absent from the type space.
+  const symbolTypeIdx = ctx.standalone || ctx.wasi ? ensureSymbolCarrier(ctx) : -1;
+  const symbolKeysEnabled = symbolTypeIdx >= 0;
+
   // --- 1. Register the three struct/array types. ---
   const propEntryTypeIdx = ctx.mod.types.length;
   ctx.mod.types.push({
     kind: "struct",
     name: "$PropEntry",
     fields: [
-      { name: "key", type: { kind: "ref", typeIdx: anyStrTypeIdx }, mutable: false },
+      // (#2866) `key` is `anyref`, not `(ref $AnyString)`: the open-object key
+      // channel now holds EITHER a native string key ($AnyString) OR a native
+      // `$Symbol` carrier (for `o[sym] = v`). Readers discriminate with
+      // `ref.test $AnyString` / `ref.test $Symbol`; the hash + equality
+      // (`__obj_hash`/`__key_equals`) branch on the key kind. `anyref` (not
+      // `eqref`) keeps storage free — the converted search key (`any.convert_extern`
+      // → anyref) and a `(ref $AnyString)`/`(ref $Symbol)` both widen to it with no
+      // cast — and symbol identity is decided by the i32 `$id`, not `ref.eq`, so
+      // `eqref` is unnecessary. String-only programs are behaviour-identical; the
+      // few string readers add a `ref.cast $AnyString` (always succeeds).
+      { name: "key", type: { kind: "anyref" }, mutable: false },
       { name: "value", type: { kind: "anyref" }, mutable: true },
       { name: "flags", type: { kind: "i32" }, mutable: true },
       // #1837 — monotonically-increasing insertion sequence, assigned at
@@ -539,9 +562,32 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     const FNV_OFFSET = 0x811c9dc5 | 0;
     const FNV_PRIME = 0x01000193;
     const body: Instr[] = [
-      // str = flatten(cast<$AnyString>(any.convert_extern(key)))
+      // (#2866) keyAny = any.convert_extern(key). A Symbol key hashes by its i32
+      // identity id (consistent with `__key_equals`'s id-compare); a string key
+      // takes the FNV-1a path below. The two hash spaces may collide — open
+      // addressing resolves any collision via `__key_equals`, so that is benign.
       { op: "local.get", index: 0 },
       { op: "any.convert_extern" },
+      { op: "local.tee", index: 7 },
+      ...(symbolKeysEnabled
+        ? ([
+            { op: "ref.test", typeIdx: symbolTypeIdx },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                { op: "local.get", index: 7 },
+                { op: "ref.cast", typeIdx: symbolTypeIdx },
+                { op: "struct.get", typeIdx: symbolTypeIdx, fieldIdx: 0 }, // $Symbol.id
+                { op: "i32.const", value: 0x7fffffff },
+                { op: "i32.and" },
+                { op: "return" },
+              ],
+            },
+          ] as Instr[])
+        : []),
+      // str = flatten(cast<$AnyString>(keyAny))
+      { op: "local.get", index: 7 },
       { op: "ref.cast", typeIdx: anyStrTypeIdx },
       { op: "call", funcIdx: strFlattenIdx },
       { op: "local.tee", index: 1 },
@@ -609,6 +655,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
         { name: "off", type: { kind: "i32" } },
         { name: "i", type: { kind: "i32" } },
         { name: "h", type: { kind: "i32" } },
+        { name: "keyAny", type: { kind: "anyref" } }, // (#2866) index 7
       ],
       // #2042 S1 — coerce a non-string key (boxed number) to its canonical
       // string before the FNV walk's `ref.cast $AnyString`. key is param 0.
@@ -616,6 +663,151 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     );
   }
   const objHashIdx = ctx.funcMap.get("__obj_hash")!;
+
+  // ── __key_equals(anyref storedKey, i32 searchIsSym, i32 searchSymId,
+  //                ref_null $NativeString fkey) -> i32  (#2866) ───────────────
+  //
+  // Unified property-key equality over the widened (anyref) `$PropEntry.key`
+  // channel. The caller classifies the SEARCH key ONCE (`searchIsSym` +
+  // `searchSymId` for a Symbol, or the pre-flattened `fkey` for a string) so the
+  // per-probe cost stays a single `__str_equals` on the string hot path — exactly
+  // the pre-#2866 work — plus one `ref.test` to reject a cross-kind collision.
+  //
+  //   - searching for a Symbol: match iff storedKey is a `$Symbol` whose `$id`
+  //     equals `searchSymId` (identity by id; no interning needed).
+  //   - searching for a string: match iff storedKey is an `$AnyString` whose
+  //     flattened content equals `fkey` (`__str_equals`). A `$Symbol` stored key
+  //     fails the `ref.test $AnyString` and is skipped (cross-kind keys collide
+  //     in the table only by hash, never by equality).
+  if (symbolKeysEnabled) {
+    const keyEqualsBody: Instr[] = [
+      { op: "local.get", index: 1 }, // searchIsSym
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "i32" } },
+        then: [
+          // symbol search: ref.test $Symbol(storedKey) && id == searchSymId
+          { op: "local.get", index: 0 },
+          { op: "ref.test", typeIdx: symbolTypeIdx },
+          {
+            op: "if",
+            blockType: { kind: "val", type: { kind: "i32" } },
+            then: [
+              { op: "local.get", index: 0 },
+              { op: "ref.cast", typeIdx: symbolTypeIdx },
+              { op: "struct.get", typeIdx: symbolTypeIdx, fieldIdx: 0 },
+              { op: "local.get", index: 2 }, // searchSymId
+              { op: "i32.eq" },
+            ],
+            else: [{ op: "i32.const", value: 0 }],
+          },
+        ],
+        else: [
+          // string search: ref.test $AnyString(storedKey) && str_equals(flatten(storedKey), fkey)
+          { op: "local.get", index: 0 },
+          { op: "ref.test", typeIdx: anyStrTypeIdx },
+          {
+            op: "if",
+            blockType: { kind: "val", type: { kind: "i32" } },
+            then: [
+              { op: "local.get", index: 0 },
+              { op: "ref.cast", typeIdx: anyStrTypeIdx },
+              { op: "call", funcIdx: strFlattenIdx },
+              { op: "local.get", index: 3 }, // fkey (ref_null $NativeString)
+              { op: "ref.as_non_null" },
+              { op: "call", funcIdx: strEqualsIdx },
+            ],
+            else: [{ op: "i32.const", value: 0 }],
+          },
+        ],
+      },
+    ];
+    registerNative(
+      "__key_equals",
+      [{ kind: "anyref" }, { kind: "i32" }, { kind: "i32" }, { kind: "ref_null", typeIdx: nativeStrTypeIdx }],
+      [{ kind: "i32" }],
+      [],
+      keyEqualsBody,
+    );
+  }
+  const keyEqualsIdx = symbolKeysEnabled ? ctx.funcMap.get("__key_equals")! : -1;
+
+  // (#2866) Classify a search key (an externref param) into scratch locals:
+  //   searchAny  (anyref)               — the converted key; ALSO the value to
+  //                                       STORE into `$PropEntry.key` (preserves
+  //                                       Symbol identity in the table).
+  //   searchIsSym(i32)                  — 1 iff the key is a `$Symbol`.
+  //   searchSymId(i32)                  — the `$Symbol.$id` when a symbol.
+  //   fkey       (ref_null $NativeString) — the flattened string key (null when a
+  //                                       symbol) — the hot-path `__str_equals` rhs.
+  const emitClassifyKey = (
+    keyParamIdx: number,
+    searchAnyLocal: number,
+    isSymLocal: number,
+    symIdLocal: number,
+    fkeyLocal: number,
+  ): Instr[] => [
+    { op: "local.get", index: keyParamIdx },
+    { op: "any.convert_extern" },
+    { op: "local.set", index: searchAnyLocal },
+    ...(symbolKeysEnabled
+      ? ([
+          { op: "local.get", index: searchAnyLocal },
+          { op: "ref.test", typeIdx: symbolTypeIdx },
+          { op: "local.tee", index: isSymLocal },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [
+              { op: "local.get", index: searchAnyLocal },
+              { op: "ref.cast", typeIdx: symbolTypeIdx },
+              { op: "struct.get", typeIdx: symbolTypeIdx, fieldIdx: 0 },
+              { op: "local.set", index: symIdLocal },
+              { op: "ref.null", typeIdx: nativeStrTypeIdx },
+              { op: "local.set", index: fkeyLocal },
+            ],
+            else: [
+              { op: "local.get", index: searchAnyLocal },
+              { op: "ref.cast", typeIdx: anyStrTypeIdx },
+              { op: "call", funcIdx: strFlattenIdx },
+              { op: "local.set", index: fkeyLocal },
+            ],
+          },
+        ] as Instr[])
+      : ([
+          { op: "i32.const", value: 0 },
+          { op: "local.set", index: isSymLocal },
+          { op: "local.get", index: searchAnyLocal },
+          { op: "ref.cast", typeIdx: anyStrTypeIdx },
+          { op: "call", funcIdx: strFlattenIdx },
+          { op: "local.set", index: fkeyLocal },
+        ] as Instr[])),
+  ];
+
+  // (#2866) Leave an i32 (1/0) on the stack: does `entryLocal`'s (non-null) key
+  // match the classified search key? Routes through `__key_equals` when symbol
+  // keys are in play; a `ref.cast $AnyString` string-only path otherwise.
+  const emitKeyMatch = (entryLocal: number, isSymLocal: number, symIdLocal: number, fkeyLocal: number): Instr[] =>
+    symbolKeysEnabled
+      ? [
+          { op: "local.get", index: entryLocal },
+          { op: "ref.as_non_null" },
+          { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 0 },
+          { op: "local.get", index: isSymLocal },
+          { op: "local.get", index: symIdLocal },
+          { op: "local.get", index: fkeyLocal },
+          { op: "call", funcIdx: keyEqualsIdx },
+        ]
+      : [
+          { op: "local.get", index: entryLocal },
+          { op: "ref.as_non_null" },
+          { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 0 },
+          { op: "ref.cast", typeIdx: anyStrTypeIdx },
+          { op: "call", funcIdx: strFlattenIdx },
+          { op: "local.get", index: fkeyLocal },
+          { op: "ref.as_non_null" },
+          { op: "call", funcIdx: strEqualsIdx },
+        ];
 
   // ── __new_plain_object() -> externref ────────────────────────────────────
   //
@@ -647,12 +839,8 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   // locals: 2=arr(ref $PropMap) 3=cap 4=mask 5=i 6=e(ref null $PropEntry) 7=fkey(ref $NativeString)
   {
     const body: Instr[] = [
-      // fkey = flatten(cast<$AnyString>(any.convert_extern(key)))
-      { op: "local.get", index: 1 },
-      { op: "any.convert_extern" },
-      { op: "ref.cast", typeIdx: anyStrTypeIdx },
-      { op: "call", funcIdx: strFlattenIdx },
-      { op: "local.set", index: 7 },
+      // (#2866) classify the search key → searchAny(8)/isSym(9)/symId(10)/fkey(7)
+      ...emitClassifyKey(1, 8, 9, 10, 7),
       // arr = o.props ; cap = arr.len ; mask = cap - 1
       { op: "local.get", index: 0 },
       { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 1 },
@@ -688,7 +876,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
                 blockType: { kind: "empty" },
                 then: [{ op: "ref.null", typeIdx: propEntryTypeIdx }, { op: "return" }],
               },
-              // if !(e.flags & TOMBSTONE) && str_equals(flatten(e.key), fkey) → return e
+              // if !(e.flags & TOMBSTONE) && key_match(e.key) → return e  (#2866)
               { op: "local.get", index: 6 },
               { op: "ref.as_non_null" },
               { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 2 },
@@ -699,13 +887,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
                 op: "if",
                 blockType: { kind: "empty" },
                 then: [
-                  // flatten(e.key)
-                  { op: "local.get", index: 6 },
-                  { op: "ref.as_non_null" },
-                  { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 0 },
-                  { op: "call", funcIdx: strFlattenIdx },
-                  { op: "local.get", index: 7 },
-                  { op: "call", funcIdx: strEqualsIdx },
+                  ...emitKeyMatch(6, 9, 10, 7),
                   {
                     op: "if",
                     blockType: { kind: "empty" },
@@ -737,7 +919,11 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
         { name: "mask", type: { kind: "i32" } },
         { name: "i", type: { kind: "i32" } },
         { name: "e", type: entryRefNull },
-        { name: "fkey", type: nativeStrRef },
+        // (#2866) fkey is now NULLABLE — null for a Symbol search key.
+        { name: "fkey", type: { kind: "ref_null", typeIdx: nativeStrTypeIdx } },
+        { name: "searchAny", type: { kind: "anyref" } }, // 8
+        { name: "searchIsSym", type: { kind: "i32" } }, // 9
+        { name: "searchSymId", type: { kind: "i32" } }, // 10
       ],
       // #2042 S1 — coerce a non-string key (boxed number) to its canonical
       // string before the `ref.cast $AnyString` flatten + the inner __obj_hash
@@ -888,13 +1074,10 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   // locals: 5=arr(ref $PropMap) 6=cap 7=mask 8=i 9=e(ref null $PropEntry) 10=fkey(ref $NativeString) 11=keyStr(ref $AnyString)
   {
     const body: Instr[] = [
-      // keyStr = cast<$AnyString>(any.convert_extern(key)) ; fkey = flatten(keyStr)
-      { op: "local.get", index: 1 },
-      { op: "any.convert_extern" },
-      { op: "ref.cast", typeIdx: anyStrTypeIdx },
-      { op: "local.tee", index: 11 },
-      { op: "call", funcIdx: strFlattenIdx },
-      { op: "local.set", index: 10 },
+      // (#2866) classify the search key → searchAny(12)/isSym(13)/symId(14)/fkey(10).
+      // searchAny is the raw converted key (string OR $Symbol) — it is what gets
+      // STORED into `$PropEntry.key`, preserving Symbol identity in the table.
+      ...emitClassifyKey(1, 12, 13, 14, 10),
       // arr = o.props ; cap = arr.len ; mask = cap - 1
       { op: "local.get", index: 0 },
       { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 1 },
@@ -948,11 +1131,12 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
                   { op: "i32.const", value: OBJ_FLAG_NONEXTENSIBLE },
                   { op: "i32.and" },
                   { op: "if", blockType: { kind: "empty" }, then: [{ op: "return" }] },
-                  // arr[i] = struct.new $PropEntry { keyStr, value, flags, seq,
-                  //                                   get=null, set=null }
+                  // arr[i] = struct.new $PropEntry { searchAny, value, flags, seq,
+                  //                                   get=null, set=null }  (#2866:
+                  //   store the raw converted key — $AnyString or $Symbol)
                   { op: "local.get", index: 5 },
                   { op: "local.get", index: 8 },
-                  { op: "local.get", index: 11 },
+                  { op: "local.get", index: 12 },
                   { op: "local.get", index: 2 },
                   { op: "local.get", index: 3 },
                   { op: "local.get", index: 4 }, // seq (#1837)
@@ -970,14 +1154,8 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
                   { op: "return" },
                 ],
               },
-              // occupied + LIVE + key matches → update in place
-              // str_equals(flatten(e.key), fkey)
-              { op: "local.get", index: 9 },
-              { op: "ref.as_non_null" },
-              { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 0 },
-              { op: "call", funcIdx: strFlattenIdx },
-              { op: "local.get", index: 10 },
-              { op: "call", funcIdx: strEqualsIdx },
+              // occupied + LIVE + key matches → update in place  (#2866 key_match)
+              ...emitKeyMatch(9, 13, 14, 10),
               // AND not a tombstone
               { op: "local.get", index: 9 },
               { op: "ref.as_non_null" },
@@ -1026,8 +1204,13 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
         { name: "mask", type: { kind: "i32" } },
         { name: "i", type: { kind: "i32" } },
         { name: "e", type: entryRefNull },
-        { name: "fkey", type: nativeStrRef },
-        { name: "keyStr", type: anyStrRef },
+        // (#2866) fkey nullable (null for a Symbol key); keyStr retired (the raw
+        // converted key in `searchAny` is stored directly).
+        { name: "fkey", type: { kind: "ref_null", typeIdx: nativeStrTypeIdx } },
+        { name: "keyStr", type: { kind: "ref_null", typeIdx: anyStrTypeIdx } },
+        { name: "searchAny", type: { kind: "anyref" } }, // 12
+        { name: "searchIsSym", type: { kind: "i32" } }, // 13
+        { name: "searchSymId", type: { kind: "i32" } }, // 14
       ],
       // #2042 S1 — coerce a non-string key (boxed number) to its canonical
       // string before the `ref.cast $AnyString` that both flattens it for the
@@ -2835,6 +3018,9 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       { op: "local.get", index: entryLocal },
       { op: "ref.as_non_null" },
       { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 0 },
+      // (#2866) key is anyref; entries reaching here are pre-filtered to string
+      // keys (the compaction pass excludes `$Symbol` keys), so this cast is safe.
+      { op: "ref.cast", typeIdx: anyStrTypeIdx },
       { op: "call", funcIdx: objIndexOfKeyIdx },
     ];
     const entrySeqOf = (entryLocal: number): Instr[] => [
@@ -2950,6 +3136,19 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
                         { op: "i32.eqz" },
                         { op: "i32.and" },
                       ] as Instr[])),
+                  // (#2866) AND is-string-key: exclude `$Symbol` keys from the
+                  // string-key enumeration order (Object.keys/values/entries/
+                  // getOwnPropertyNames/for-in/JSON — §10.1.11.1 lists string keys
+                  // here; symbols come only from getOwnPropertySymbols).
+                  ...(symbolKeysEnabled
+                    ? ([
+                        { op: "local.get", index: 4 },
+                        { op: "ref.as_non_null" },
+                        { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 0 },
+                        { op: "ref.test", typeIdx: anyStrTypeIdx },
+                        { op: "i32.and" },
+                      ] as Instr[])
+                    : []),
                   {
                     op: "if",
                     blockType: { kind: "empty" },
@@ -3122,6 +3321,210 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     // __obj_ordered_all — live, INCLUDING non-enumerable (#2042 S3,
     // Object.getOwnPropertyNames). Same ordering + sort; enumerable filter off.
     registerNative("__obj_ordered_all", [objRef], [propMapRef], makeOrderedLocals(), buildOrderedBody(true));
+
+    // (#2866 slice 3) __obj_ordered_symbols — the SELECT counterpart to the
+    // string-key exclusion above: collect this object's LIVE own SYMBOL-keyed
+    // entries (INCLUDING non-enumerable ones — Object.getOwnPropertySymbols
+    // returns own symbol keys regardless of enumerability, §20.5.2.9) into a
+    // compacted $PropMap in insertion order. Symbol keys are never integer
+    // indices and never interleave with string keys, so OrdinaryOwnPropertyKeys
+    // order among symbols is purely creation order (`$PropEntry.seq` ascending) —
+    // a plain seq selection sort, with NO `entryIndexOf` (its `ref.cast
+    // $AnyString` would trap on a `$Symbol` key).
+    //
+    // param: 0=o(ref $Object) ; locals (reuse makeOrderedLocals): 1=arr 2=cap 3=i
+    //   4=e 5=out 6=m 7=j 8=best 9=k 10=cand 11=bestE 15=bestSeq 14=candSeq 16=tmp
+    const buildOrderedSymbolsBody = (): Instr[] => [
+      // arr = o.props ; cap = arr.len
+      { op: "local.get", index: 0 },
+      { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 1 },
+      { op: "local.tee", index: 1 },
+      { op: "array.len" },
+      { op: "local.set", index: 2 },
+      // out = new $PropMap[o.count] (upper bound; trailing slots stay null)
+      { op: "local.get", index: 0 },
+      { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 2 },
+      { op: "array.new_default", typeIdx: propMapTypeIdx },
+      { op: "local.set", index: 5 },
+      // m = 0 ; i = 0 — first pass: compact live symbol-keyed entries into out
+      { op: "i32.const", value: 0 },
+      { op: "local.set", index: 6 },
+      { op: "i32.const", value: 0 },
+      { op: "local.set", index: 3 },
+      {
+        op: "block",
+        blockType: { kind: "empty" },
+        body: [
+          {
+            op: "loop",
+            blockType: { kind: "empty" },
+            body: [
+              { op: "local.get", index: 3 },
+              { op: "local.get", index: 2 },
+              { op: "i32.ge_u" },
+              { op: "br_if", depth: 1 },
+              // e = arr[i]
+              { op: "local.get", index: 1 },
+              { op: "local.get", index: 3 },
+              { op: "array.get", typeIdx: propMapTypeIdx },
+              { op: "local.tee", index: 4 },
+              { op: "ref.is_null" },
+              { op: "i32.eqz" },
+              {
+                op: "if",
+                blockType: { kind: "empty" },
+                then: [
+                  // !tombstone
+                  { op: "local.get", index: 4 },
+                  { op: "ref.as_non_null" },
+                  { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 2 },
+                  { op: "i32.const", value: FLAG_TOMBSTONE },
+                  { op: "i32.and" },
+                  { op: "i32.eqz" },
+                  // && ref.test $Symbol(key) — SELECT only symbol keys
+                  { op: "local.get", index: 4 },
+                  { op: "ref.as_non_null" },
+                  { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 0 },
+                  { op: "ref.test", typeIdx: symbolTypeIdx },
+                  { op: "i32.and" },
+                  {
+                    op: "if",
+                    blockType: { kind: "empty" },
+                    then: [
+                      { op: "local.get", index: 5 },
+                      { op: "local.get", index: 6 },
+                      { op: "local.get", index: 4 },
+                      { op: "array.set", typeIdx: propMapTypeIdx },
+                      { op: "local.get", index: 6 },
+                      { op: "i32.const", value: 1 },
+                      { op: "i32.add" },
+                      { op: "local.set", index: 6 },
+                    ],
+                  },
+                ],
+              },
+              { op: "local.get", index: 3 },
+              { op: "i32.const", value: 1 },
+              { op: "i32.add" },
+              { op: "local.set", index: 3 },
+              { op: "br", depth: 0 },
+            ],
+          },
+        ],
+      },
+      // Second pass: selection sort out[0..m) by seq ascending (insertion order).
+      { op: "i32.const", value: 0 },
+      { op: "local.set", index: 7 }, // j
+      {
+        op: "block",
+        blockType: { kind: "empty" },
+        body: [
+          {
+            op: "loop",
+            blockType: { kind: "empty" },
+            body: [
+              { op: "local.get", index: 7 },
+              { op: "local.get", index: 6 },
+              { op: "i32.ge_u" },
+              { op: "br_if", depth: 1 },
+              // best = j ; bestE = out[j] ; bestSeq = bestE.seq
+              { op: "local.get", index: 7 },
+              { op: "local.set", index: 8 },
+              { op: "local.get", index: 5 },
+              { op: "local.get", index: 7 },
+              { op: "array.get", typeIdx: propMapTypeIdx },
+              { op: "local.set", index: 11 },
+              { op: "local.get", index: 11 },
+              { op: "ref.as_non_null" },
+              { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 3 },
+              { op: "local.set", index: 15 },
+              // for k in j+1..m
+              { op: "local.get", index: 7 },
+              { op: "i32.const", value: 1 },
+              { op: "i32.add" },
+              { op: "local.set", index: 9 },
+              {
+                op: "block",
+                blockType: { kind: "empty" },
+                body: [
+                  {
+                    op: "loop",
+                    blockType: { kind: "empty" },
+                    body: [
+                      { op: "local.get", index: 9 },
+                      { op: "local.get", index: 6 },
+                      { op: "i32.ge_u" },
+                      { op: "br_if", depth: 1 },
+                      // cand = out[k] ; candSeq = cand.seq
+                      { op: "local.get", index: 5 },
+                      { op: "local.get", index: 9 },
+                      { op: "array.get", typeIdx: propMapTypeIdx },
+                      { op: "local.set", index: 10 },
+                      { op: "local.get", index: 10 },
+                      { op: "ref.as_non_null" },
+                      { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 3 },
+                      { op: "local.set", index: 14 },
+                      // if candSeq < bestSeq → best = k, bestSeq = candSeq, bestE = cand
+                      { op: "local.get", index: 14 },
+                      { op: "local.get", index: 15 },
+                      { op: "i32.lt_s" },
+                      {
+                        op: "if",
+                        blockType: { kind: "empty" },
+                        then: [
+                          { op: "local.get", index: 9 },
+                          { op: "local.set", index: 8 },
+                          { op: "local.get", index: 14 },
+                          { op: "local.set", index: 15 },
+                          { op: "local.get", index: 10 },
+                          { op: "local.set", index: 11 },
+                        ],
+                      },
+                      { op: "local.get", index: 9 },
+                      { op: "i32.const", value: 1 },
+                      { op: "i32.add" },
+                      { op: "local.set", index: 9 },
+                      { op: "br", depth: 0 },
+                    ],
+                  },
+                ],
+              },
+              // swap out[j] <-> out[best] (only if best != j)
+              { op: "local.get", index: 8 },
+              { op: "local.get", index: 7 },
+              { op: "i32.ne" },
+              {
+                op: "if",
+                blockType: { kind: "empty" },
+                then: [
+                  { op: "local.get", index: 5 },
+                  { op: "local.get", index: 7 },
+                  { op: "array.get", typeIdx: propMapTypeIdx },
+                  { op: "local.set", index: 16 },
+                  { op: "local.get", index: 5 },
+                  { op: "local.get", index: 7 },
+                  { op: "local.get", index: 11 },
+                  { op: "array.set", typeIdx: propMapTypeIdx },
+                  { op: "local.get", index: 5 },
+                  { op: "local.get", index: 8 },
+                  { op: "local.get", index: 16 },
+                  { op: "array.set", typeIdx: propMapTypeIdx },
+                ],
+              },
+              { op: "local.get", index: 7 },
+              { op: "i32.const", value: 1 },
+              { op: "i32.add" },
+              { op: "local.set", index: 7 },
+              { op: "br", depth: 0 },
+            ],
+          },
+        ],
+      },
+      { op: "local.get", index: 5 },
+    ];
+    if (symbolKeysEnabled) {
+      registerNative("__obj_ordered_symbols", [objRef], [propMapRef], makeOrderedLocals(), buildOrderedSymbolsBody());
+    }
     void entryRef;
   }
   const objOrderedIdx = ctx.funcMap.get("__obj_ordered")!;
@@ -5293,6 +5696,134 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     );
   }
 
+  // ── __create_descriptor(value, flags) -> externref (#2874 standalone-native) ─
+  //
+  // Standalone-native carrier for the host `__create_descriptor` consumed by the
+  // `Object.getOwnPropertyDescriptor` typed-receiver fast path
+  // (`expressions/calls.ts:6652`/`:6808`). That fast path inlines `struct.get`
+  // for a statically-typed receiver, then calls `__create_descriptor(value,
+  // flags)` to wrap the field value in a data descriptor. The host import has no
+  // standalone carrier, so the typed-receiver case leaked `env::__create_descriptor`
+  // and the standalone module trapped (#2874; the `any`-typed / inline-literal
+  // receiver already resolves natively).
+  //
+  // Builds a fresh DATA descriptor `$Object`
+  // `{ value, writable, enumerable, configurable }` from the value externref +
+  // the flag bits (1=writable, 2=enumerable, 4=configurable) — identical shape to
+  // the host `runtime.ts:__create_descriptor` and to the data branch of the
+  // native `__getOwnPropertyDescriptor` above. Keys are native `$AnyString`s; the
+  // attribute booleans are boxed via `__box_boolean`.
+  //
+  // params: 0=value(externref) 1=flags(i32) ; locals: 2=desc(externref)
+  {
+    addUnionImportsViaRegistry(ctx);
+    const boxBoolIdx = ctx.funcMap.get("__box_boolean")!;
+    const newPlainObjectIdx = ctx.funcMap.get("__new_plain_object")!;
+    const externSetCdIdx = ctx.funcMap.get("__extern_set")!;
+
+    // `desc["<key>"] = <value externref>` — desc is in local 2.
+    const setKeyCd = (key: string, valueInstrs: Instr[]): Instr[] => [
+      { op: "local.get", index: 2 },
+      ...nativeStringLiteralInstrs(ctx, key),
+      { op: "extern.convert_any" } as Instr,
+      ...valueInstrs,
+      { op: "call", funcIdx: externSetCdIdx },
+    ];
+
+    // Box `(flags & mask) != 0` as a JS boolean externref.
+    const boolFlagCd = (mask: number): Instr[] => [
+      { op: "local.get", index: 1 },
+      { op: "i32.const", value: mask },
+      { op: "i32.and" },
+      { op: "i32.const", value: 0 },
+      { op: "i32.ne" },
+      { op: "call", funcIdx: boxBoolIdx },
+    ];
+
+    const body: Instr[] = [
+      // desc = __new_plain_object()
+      { op: "call", funcIdx: newPlainObjectIdx },
+      { op: "local.set", index: 2 },
+      // desc.value = value (param 0)
+      ...setKeyCd("value", [{ op: "local.get", index: 0 }]),
+      // desc.writable / enumerable / configurable = box(flags & bit)
+      ...setKeyCd("writable", boolFlagCd(FLAG_WRITABLE)),
+      ...setKeyCd("enumerable", boolFlagCd(FLAG_ENUMERABLE)),
+      ...setKeyCd("configurable", boolFlagCd(FLAG_CONFIGURABLE)),
+      // return desc
+      { op: "local.get", index: 2 },
+    ];
+    registerNative(
+      "__create_descriptor",
+      [{ kind: "externref" }, { kind: "i32" }],
+      [{ kind: "externref" }],
+      [{ name: "desc", type: { kind: "externref" } }],
+      body,
+    );
+  }
+
+  // ── __create_accessor_descriptor(get, set, flags) -> externref (#2885) ──────
+  //
+  // Accessor sibling of `__create_descriptor`. Builds a fresh ACCESSOR descriptor
+  // `$Object` `{ get, set, enumerable, configurable }` from the get/set closure
+  // externrefs (null → undefined) + the flag bits (2=enumerable, 4=configurable).
+  // Used by the standalone builtin-proto descriptor-synthesis path in
+  // `Object.getOwnPropertyDescriptor(<Builtin>.prototype, "<getter>")`
+  // (expressions/calls.ts) so an intrinsic accessor reflects host-free, mirroring
+  // the accessor branch of the native `__getOwnPropertyDescriptor` above and the
+  // host `runtime.ts:__create_descriptor` shape. Keys are native `$AnyString`s;
+  // attribute booleans are boxed via `__box_boolean`. Intrinsic accessors are
+  // `{enumerable:false, configurable:true}` (flags = 0x04), so `writable` is
+  // intentionally absent (accessor descriptors carry no `value`/`writable`).
+  //
+  // params: 0=get(externref) 1=set(externref) 2=flags(i32) ; locals: 3=desc(externref)
+  {
+    addUnionImportsViaRegistry(ctx);
+    const boxBoolIdx = ctx.funcMap.get("__box_boolean")!;
+    const newPlainObjectIdx = ctx.funcMap.get("__new_plain_object")!;
+    const externSetCdIdx = ctx.funcMap.get("__extern_set")!;
+
+    // `desc["<key>"] = <value externref>` — desc is in local 3.
+    const setKeyAcc = (key: string, valueInstrs: Instr[]): Instr[] => [
+      { op: "local.get", index: 3 },
+      ...nativeStringLiteralInstrs(ctx, key),
+      { op: "extern.convert_any" } as Instr,
+      ...valueInstrs,
+      { op: "call", funcIdx: externSetCdIdx },
+    ];
+
+    // Box `(flags & mask) != 0` as a JS boolean externref.
+    const boolFlagAcc = (mask: number): Instr[] => [
+      { op: "local.get", index: 2 },
+      { op: "i32.const", value: mask },
+      { op: "i32.and" },
+      { op: "i32.const", value: 0 },
+      { op: "i32.ne" },
+      { op: "call", funcIdx: boxBoolIdx },
+    ];
+
+    const body: Instr[] = [
+      // desc = __new_plain_object()
+      { op: "call", funcIdx: newPlainObjectIdx },
+      { op: "local.set", index: 3 },
+      // desc.get = get (param 0) ; desc.set = set (param 1)
+      ...setKeyAcc("get", [{ op: "local.get", index: 0 }]),
+      ...setKeyAcc("set", [{ op: "local.get", index: 1 }]),
+      // desc.enumerable / configurable = box(flags & bit)
+      ...setKeyAcc("enumerable", boolFlagAcc(FLAG_ENUMERABLE)),
+      ...setKeyAcc("configurable", boolFlagAcc(FLAG_CONFIGURABLE)),
+      // return desc
+      { op: "local.get", index: 3 },
+    ];
+    registerNative(
+      "__create_accessor_descriptor",
+      [{ kind: "externref" }, { kind: "externref" }, { kind: "i32" }],
+      [{ kind: "externref" }],
+      [{ name: "desc", type: { kind: "externref" } }],
+      body,
+    );
+  }
+
   // ── __getOwnPropertyNames(externref obj) -> externref (#2042 S3) ──────────
   //
   // `Object.getOwnPropertyNames(obj)` / `Reflect.ownKeys(obj)` (string subset)
@@ -5383,17 +5914,111 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     );
   }
 
-  // ── __getOwnPropertySymbols(externref obj) -> externref (#2042 S3) ────────
+  // ── __getOwnPropertySymbols(externref obj) -> externref (#2042 S3, #2866 s3) ─
   //
-  // The string-keyed `$Object` runtime holds NO symbol keys, so the own-symbol
-  // list is always empty. Returning an empty `$ObjVec` (rather than refusing)
-  // lets the large body of symbol-free `getOwnPropertySymbols` tests pass —
-  // §20.1.2.9 returns [] for an object with no symbol-keyed own properties,
-  // which is every `$Object` here. (When symbol keys are added to the open-object
-  // runtime this helper grows a real body.)
+  // §20.1.2.10 / OrdinaryOwnPropertyKeys §10.1.11.1 — own SYMBOL-keyed property
+  // keys in creation (insertion) order.
   //
-  // params: 0=obj(externref) — unused (always [] for the string-keyed runtime)
-  {
+  // Without the native Symbol carrier (host/gc mode, or a standalone module with
+  // no symbol keys in its type space) the `$Object` runtime holds no symbol keys,
+  // so the list is always empty — return a fresh empty `$ObjVec` (the historical
+  // #2042 S3 stub; lets the large body of symbol-free tests pass).
+  //
+  // With the carrier enabled (#2866 PR1: `$PropEntry.key` is `anyref` and may
+  // hold a `$Symbol`), delegate selection + ordering to `__obj_ordered_symbols`
+  // (live own symbol entries, incl. non-enumerable, in seq order), then push each
+  // entry's key — the stored `$Symbol` carrier, `extern.convert_any`'d back to an
+  // externref symbol VALUE — into the result vec. Identity is by the i32
+  // `$Symbol.id`, so the returned carrier `===` the original symbol and re-indexes
+  // the same own property. Non-`$Object` receivers return an empty vec.
+  //
+  // params: 0=obj(externref)
+  // locals: 1=any(anyref) 2=o(ref null $Object) 3=arr(ref $PropMap) 4=cap
+  //         5=i 6=e(ref null $PropEntry) 7=vec(externref)
+  if (symbolKeysEnabled) {
+    const objOrderedSymbolsIdx = ctx.funcMap.get("__obj_ordered_symbols")!;
+    const body: Instr[] = [
+      // vec = __objvec_new()
+      { op: "call", funcIdx: objVecNewIdx },
+      { op: "local.set", index: 7 },
+      // any = any.convert_extern(obj); if !$Object → return empty vec
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.tee", index: 1 },
+      { op: "ref.test", typeIdx: objectTypeIdx },
+      { op: "i32.eqz" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "local.get", index: 7 }, { op: "return" }],
+      },
+      // o = cast<$Object>(any) ; arr = __obj_ordered_symbols(o) ; cap = arr.len
+      { op: "local.get", index: 1 },
+      { op: "ref.cast", typeIdx: objectTypeIdx },
+      { op: "local.tee", index: 2 },
+      { op: "call", funcIdx: objOrderedSymbolsIdx },
+      { op: "local.tee", index: 3 },
+      { op: "array.len" },
+      { op: "local.set", index: 4 },
+      // i = 0
+      { op: "i32.const", value: 0 },
+      { op: "local.set", index: 5 },
+      {
+        op: "block",
+        blockType: { kind: "empty" },
+        body: [
+          {
+            op: "loop",
+            blockType: { kind: "empty" },
+            body: [
+              // if i >= cap break
+              { op: "local.get", index: 5 },
+              { op: "local.get", index: 4 },
+              { op: "i32.ge_s" },
+              { op: "br_if", depth: 1 },
+              // e = arr[i] ; ordered array is compacted — stop at first null
+              { op: "local.get", index: 3 },
+              { op: "local.get", index: 5 },
+              { op: "array.get", typeIdx: propMapTypeIdx },
+              { op: "local.tee", index: 6 },
+              { op: "ref.is_null" },
+              { op: "br_if", depth: 1 },
+              // __objvec_push(vec, extern.convert_any(e.key))  — key is a $Symbol carrier
+              { op: "local.get", index: 7 },
+              { op: "local.get", index: 6 },
+              { op: "ref.as_non_null" },
+              { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 0 },
+              { op: "extern.convert_any" },
+              { op: "call", funcIdx: objVecPushIdx },
+              // i++ ; loop
+              { op: "local.get", index: 5 },
+              { op: "i32.const", value: 1 },
+              { op: "i32.add" },
+              { op: "local.set", index: 5 },
+              { op: "br", depth: 0 },
+            ],
+          },
+        ],
+      },
+      { op: "local.get", index: 7 },
+    ];
+    registerNative(
+      "__getOwnPropertySymbols",
+      [{ kind: "externref" }],
+      [{ kind: "externref" }],
+      [
+        { name: "any", type: { kind: "anyref" } },
+        { name: "o", type: objRefNull },
+        { name: "arr", type: propMapRef },
+        { name: "cap", type: { kind: "i32" } },
+        { name: "i", type: { kind: "i32" } },
+        { name: "e", type: entryRefNull },
+        { name: "vec", type: { kind: "externref" } },
+      ],
+      body,
+    );
+  } else {
+    // String-keyed runtime (host/gc, or no symbol keys): always [].
     const body: Instr[] = [{ op: "call", funcIdx: objVecNewIdx }];
     registerNative("__getOwnPropertySymbols", [{ kind: "externref" }], [{ kind: "externref" }], [], body);
   }

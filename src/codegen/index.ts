@@ -3245,7 +3245,7 @@ function emitToPrimitiveMethodExport(ctx: CodegenContext): void {
     addUnionImports(ctx);
   }
 
-  const entries: { typeIdx: number; funcIdx: number; resultType: ValType }[] = [];
+  const entries: { typeIdx: number; funcIdx: number; resultType: ValType; takesHint: boolean }[] = [];
 
   for (const [structName] of ctx.structFields) {
     const typeIdx = ctx.structMap.get(structName);
@@ -3268,13 +3268,26 @@ function emitToPrimitiveMethodExport(ctx: CodegenContext): void {
         ? funcType.results[0]!
         : { kind: "externref" };
 
-    // The hint param is param[1] (param[0] is `self`). Only forward when it is
-    // an externref; skip nativeStrings string-ref params (see doc comment).
-    const hintParamType =
-      funcType && funcType.kind === "func" && funcType.params.length > 1 ? funcType.params[1] : undefined;
+    // (#2883) The resolved `${structName}_@@toPrimitive` function is either a
+    // 2-param `(self, hint) -> result` method (the method declared its hint
+    // param — nominal class OR object literal `[Symbol.toPrimitive](hint)`) or a
+    // 1-param `(self) -> result` body (the method ignores the hint, e.g. the very
+    // common `[Symbol.toPrimitive]() { throw … }` abrupt-completion shape, whose
+    // object-literal closure body is `(captureStruct) -> result`). The dispatcher
+    // must forward the hint ONLY in the 2-param case; pushing `self + hint` into a
+    // 1-param callee produced an arity mismatch that a downstream arg-coercion
+    // pass "repaired" by dropping the result and leaving the struct ref on the
+    // stack — yielding an invalid `fallthru[0] (expected externref, got (ref N))`
+    // module for ~40 suite-wide tests. Branch on the real param count.
+    const paramCount = funcType && funcType.kind === "func" ? funcType.params.length : 1;
+    const takesHint = paramCount >= 2;
+    // When the hint IS forwarded, skip nativeStrings non-externref string-ref
+    // hint params (the runtime that calls `__call_@@toPrimitive` is JS-host-only
+    // and cannot synthesize the WasmGC string-ref hint inline — see doc comment).
+    const hintParamType = takesHint && funcType && funcType.kind === "func" ? funcType.params[1] : undefined;
     if (hintParamType !== undefined && hintParamType.kind !== "externref") continue;
 
-    entries.push({ typeIdx, funcIdx, resultType });
+    entries.push({ typeIdx, funcIdx, resultType, takesHint });
   }
 
   if (entries.length === 0) return;
@@ -3299,9 +3312,15 @@ function emitToPrimitiveMethodExport(ctx: CodegenContext): void {
     const testAndCall: Instr[] = [
       { op: "local.get", index: 2 } as Instr,
       { op: "ref.cast", typeIdx: entry.typeIdx } as Instr,
-      { op: "local.get", index: 1 } as Instr, // hint (externref)
-      { op: "call", funcIdx: entry.funcIdx } as Instr,
     ];
+    // (#2883) Forward the ToPrimitive hint ONLY to a method that declared it.
+    // A hint-less `[Symbol.toPrimitive]()` body takes a single (self/capture)
+    // param; pushing the hint there is an arity mismatch that corrupts the
+    // dispatcher (see entry-collection comment above).
+    if (entry.takesHint) {
+      testAndCall.push({ op: "local.get", index: 1 } as Instr); // hint (externref)
+    }
+    testAndCall.push({ op: "call", funcIdx: entry.funcIdx } as Instr);
 
     if (entry.resultType.kind === "ref" || entry.resultType.kind === "ref_null") {
       testAndCall.push({ op: "extern.convert_any" } as Instr);
@@ -4390,6 +4409,25 @@ function emitToPrimitiveMethodExports(ctx: CodegenContext): void {
           fieldIdx: number;
           closureTypeIdx: number;
           closureInfo: ClosureInfo;
+        }
+      | {
+          // (#2891) eqref closure field, GUARDED multi-candidate dispatch. A
+          // single-literal object struct stores its `valueOf`/`toString` method
+          // as a per-instance closure in an `eqref` field, but
+          // `ctx.valueOfClosureTypes` accumulates the closure types of BOTH
+          // fields, so a fixed "first tracked type" pick (the legacy eqref arm)
+          // can `ref.cast` the WRONG field's closure type and TRAP. We instead
+          // `ref.test` each candidate closure type on the actual stored field
+          // value and `call_ref` the one that matches (null if none) — trap-free.
+          // This is what lets standalone reduce a single-literal object operand
+          // (the pre-#2891 code gated single literals out for exactly this trap
+          // risk). Standalone-only widening; the host `_hostToPrimitive` path is
+          // unchanged (it stays on the name-keyed arm).
+          structName: string;
+          typeIdx: number;
+          mode: "closure-eqref-multi";
+          fieldIdx: number;
+          candidates: { closureTypeIdx: number; closureInfo: ClosureInfo }[];
         };
 
     const entries: DispatchEntry[] = [];
@@ -4423,7 +4461,14 @@ function emitToPrimitiveMethodExports(ctx: CodegenContext): void {
       // in `_hostToPrimitive`. Same-shape valueOf/toString closures are
       // `ref.test`-indistinguishable, so routing a single-literal struct through
       // the per-instance arm could mis-select the closure type for `toString`.
-      const preferClosure = ctx.toPrimitiveForkedStructs.has(structName);
+      const forked = ctx.toPrimitiveForkedStructs.has(structName);
+      // (#2891) In STANDALONE, also route single-literal closure-method structs
+      // through the per-instance closure arm — there is no host `_hostToPrimitive`
+      // to fall back on, so the name-keyed arm (which collapses same-shape
+      // literals AND cannot model the §7.1.1.1 object-return fall-through) is not
+      // enough. The eqref path below is GUARDED (`closure-eqref-multi`), so the
+      // trap that previously justified gating single literals out is avoided.
+      const preferClosure = forked || ctx.standalone;
       let pushedClosure = false;
       if (field && preferClosure) {
         // Closure ref field (eagerly-typed closure ref).
@@ -4435,16 +4480,22 @@ function emitToPrimitiveMethodExports(ctx: CodegenContext): void {
             pushedClosure = true;
           }
         }
-        // eqref field — try tracked closure types (typed object-literal methods).
+        // eqref field — GUARDED multi-candidate dispatch over the tracked closure
+        // types (typed object-literal methods). `ref.test` selects the closure
+        // type actually stored in THIS field, so accumulating both valueOf and
+        // toString closure types in `valueOfClosureTypes` can no longer mis-cast.
         if (!pushedClosure && field.type.kind === "eqref") {
           const trackedTypes = ctx.valueOfClosureTypes.get(structName) ?? [];
+          const candidates: { closureTypeIdx: number; closureInfo: ClosureInfo }[] = [];
           for (const closureTypeIdx of trackedTypes) {
             const closureInfo = ctx.closureInfoByTypeIdx.get(closureTypeIdx);
             if (closureInfo && closureInfo.paramTypes.length === 0) {
-              entries.push({ structName, typeIdx, mode: "closure", fieldIdx, closureTypeIdx, closureInfo });
-              pushedClosure = true;
-              break;
+              candidates.push({ closureTypeIdx, closureInfo });
             }
+          }
+          if (candidates.length > 0) {
+            entries.push({ structName, typeIdx, mode: "closure-eqref-multi", fieldIdx, candidates });
+            pushedClosure = true;
           }
         }
         // (#1989) externref field holding a closure — the `any`-typed
@@ -4552,6 +4603,67 @@ function emitToPrimitiveMethodExports(ctx: CodegenContext): void {
         } else {
           boxResult(ci.returnType, thenInstrs);
         }
+      } else if (entry.mode === "closure-eqref-multi") {
+        // (#2891) GUARDED dispatch over candidate closure types for an eqref
+        // method field. Read the field once into the eqref scratch, then
+        // `ref.test` each candidate and `call_ref` the matching one (null if
+        // none) — never an unguarded `ref.cast`, so the wrong-field-type trap is
+        // impossible.
+        const closureLocal = 2; // eqref scratch local (the stored method closure)
+        const fieldEntry = entry;
+        const buildCandidate = (ci: number): Instr[] => {
+          if (ci >= fieldEntry.candidates.length) return [{ op: "ref.null.extern" } as Instr];
+          const { closureTypeIdx, closureInfo } = fieldEntry.candidates[ci]!;
+          // Body run when BOTH the struct cast and the funcref type match.
+          const callInstrs: Instr[] = [
+            // self-param: the closure struct (cast is safe — struct ref.test passed)
+            { op: "local.get", index: closureLocal } as Instr,
+            { op: "ref.cast", typeIdx: closureTypeIdx },
+            // funcref already validated + stashed in eqrefFuncLocal
+            { op: "local.get", index: eqrefFuncLocal } as Instr,
+            { op: "ref.cast", typeIdx: closureInfo.funcTypeIdx },
+            { op: "call_ref", typeIdx: closureInfo.funcTypeIdx } as Instr,
+          ];
+          if (!closureInfo.returnType) {
+            callInstrs.push({ op: "ref.null.extern" } as Instr);
+          } else {
+            boxResult(closureInfo.returnType, callInstrs);
+          }
+          // Guard 1: the stored closure must be (a subtype of) this candidate's
+          // struct type. Guard 2: its funcref (field 0) must be this candidate's
+          // func type — distinct methods can share a struct type but differ in
+          // func type, so the funcref test is the real discriminator (an
+          // unguarded `ref.cast funcTypeIdx` would TRAP otherwise).
+          return [
+            { op: "local.get", index: closureLocal } as Instr,
+            { op: "ref.test", typeIdx: closureTypeIdx },
+            {
+              op: "if",
+              blockType: { kind: "val" as const, type: { kind: "externref" as const } },
+              then: [
+                { op: "local.get", index: closureLocal } as Instr,
+                { op: "ref.cast", typeIdx: closureTypeIdx },
+                { op: "struct.get", typeIdx: closureTypeIdx, fieldIdx: 0 } as Instr,
+                { op: "local.tee", index: eqrefFuncLocal } as Instr,
+                { op: "ref.test", typeIdx: closureInfo.funcTypeIdx },
+                {
+                  op: "if",
+                  blockType: { kind: "val" as const, type: { kind: "externref" as const } },
+                  then: callInstrs,
+                  else: buildCandidate(ci + 1),
+                } as Instr,
+              ],
+              else: buildCandidate(ci + 1),
+            } as Instr,
+          ];
+        };
+        thenInstrs.push(
+          { op: "local.get", index: anyLocal } as Instr,
+          { op: "ref.cast", typeIdx: entry.typeIdx },
+          { op: "struct.get", typeIdx: entry.typeIdx, fieldIdx: entry.fieldIdx } as Instr,
+          { op: "local.set", index: closureLocal } as Instr,
+          ...buildCandidate(0),
+        );
       } else {
         // Closure field: extract closure, get funcref, call_ref
         const ci = entry.closureInfo;
@@ -4597,7 +4709,9 @@ function emitToPrimitiveMethodExports(ctx: CodegenContext): void {
 
     // Determine locals: param 0 (externref), local 1 (anyref), local 2 (eqref for closure)
     // (#2679) locals 3/4 (__prev_this / __tp_result) thread `__current_this`.
-    const hasClosureEntry = entries.some((e) => e.mode === "closure" || e.mode === "closure-extern");
+    const hasClosureEntry = entries.some(
+      (e) => e.mode === "closure" || e.mode === "closure-extern" || e.mode === "closure-eqref-multi",
+    );
     const locals: { name: string; type: ValType }[] = [{ name: "__any", type: { kind: "anyref" } }];
     if (hasClosureEntry) {
       locals.push({ name: "__closure", type: { kind: "eqref" } });
@@ -4616,6 +4730,12 @@ function emitToPrimitiveMethodExports(ctx: CodegenContext): void {
     const tpResultLocal = 4;
     locals.push({ name: "__prev_this", type: { kind: "externref" } });
     locals.push({ name: "__tp_result", type: { kind: "externref" } });
+    // (#2891) funcref scratch (index 5) for the guarded `closure-eqref-multi`
+    // dispatch — distinct method closures can share one closure STRUCT type but
+    // carry different FUNC types, so the candidate is discriminated by a guarded
+    // `ref.test` on the funcref (field 0), not by the struct type alone.
+    locals.push({ name: "__tp_funcref", type: { kind: "funcref" } });
+    const eqrefFuncLocal = 5;
     const currentThisGlobalIdx2 = ensureCurrentThisGlobal(ctx);
 
     const body: Instr[] = [

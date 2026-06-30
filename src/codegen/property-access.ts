@@ -71,6 +71,9 @@ import {
   ensureBooleanNativeProtoGlue,
   ensureDateNativeProtoGlue,
   ensureErrorNativeProtoGlue,
+  ensureNativeErrorNativeProtoGlue,
+  ensurePromiseNativeProtoGlue,
+  ensureIteratorNativeProtoGlue,
   ensureMapNativeProtoGlue,
   ensureSetNativeProtoGlue,
   ensureFunctionNativeProtoGlue,
@@ -78,6 +81,11 @@ import {
   ensureBigIntNativeProtoGlue,
   ensureWeakMapNativeProtoGlue,
   ensureWeakSetNativeProtoGlue,
+  ensureArrayBufferNativeProtoGlue,
+  ensureDataViewNativeProtoGlue,
+  ensureSharedArrayBufferNativeProtoGlue,
+  ensureWeakRefNativeProtoGlue,
+  ensureFinalizationRegistryNativeProtoGlue,
   ensureTypedArrayViewNativeProtoGlue,
 } from "./array-object-proto.js";
 import { isBuiltinSubtype, isBuiltinTypeName } from "./builtin-tags.js";
@@ -119,7 +127,7 @@ import { reserveAccessorGetDriver } from "./accessor-driver.js";
 import { S5C_STRUCT_ACCESSOR_CLOSURE } from "./struct-accessor-closure.js";
 import { tryCompileTemporalPropertyAccess } from "./temporal-native.js";
 
-const BUILTIN_CTOR_NAMES = new Set([
+export const BUILTIN_CTOR_NAMES = new Set([
   "Object",
   "Array",
   "Function",
@@ -693,7 +701,7 @@ function ensureStandaloneNativeMethodClosureLocal(
  * core (caller falls through to the existing refusal). S1 wires RegExp only;
  * S3 adds %TypedArray% / the concrete views.
  */
-function tryEnsureNativeProtoBrand(ctx: CodegenContext, builtinName: string): number | undefined {
+export function tryEnsureNativeProtoBrand(ctx: CodegenContext, builtinName: string): number | undefined {
   if (builtinName === "RegExp") {
     return ensureRegExpNativeProtoGlue(ctx);
   }
@@ -732,13 +740,39 @@ function tryEnsureNativeProtoBrand(ctx: CodegenContext, builtinName: string): nu
   }
   // (#1907 / #1888 S6-b — S6) Error / Map / Set protos. These three carry no
   // runtime-state entanglement that breaks the `$NativeProto` value-read
-  // materialization (measured: clean flips, 0 regressions). Promise is
-  // deliberately EXCLUDED here — its proto glue introduced a runtime
-  // null-pointer deref in a passing Promise test (the async-capability runtime
-  // state collides with the value-read path, the Promise analog of the
-  // TypedArray init-trap in #2375); deferred to a dedicated investigation.
+  // materialization (measured: clean flips, 0 regressions). Promise's INSTANCE
+  // -state read was the #1907 null-deref; #2861 re-admits ONLY its static
+  // `.prototype` value read (pure value object, never touches async-capability
+  // state) — see the Promise arm below.
   if (builtinName === "Error") {
     return ensureErrorNativeProtoGlue(ctx);
+  }
+  // (#2861) NativeError subclass protos — TypeError/RangeError/ReferenceError/
+  // SyntaxError/EvalError/URIError. Each has its own reserved brand; the proto
+  // value object shares Error.prototype's clean-flip shape (no runtime-state
+  // entanglement), so wiring the glue flips the `<NativeError>.prototype[.member]`
+  // value-read CE → host-free value object.
+  if (
+    builtinName === "TypeError" ||
+    builtinName === "RangeError" ||
+    builtinName === "ReferenceError" ||
+    builtinName === "SyntaxError" ||
+    builtinName === "EvalError" ||
+    builtinName === "URIError"
+  ) {
+    return ensureNativeErrorNativeProtoGlue(ctx, builtinName);
+  }
+  // (#2861) Promise.prototype — wired for the STATIC `.prototype` value read +
+  // method-closure value reads only (then/catch/finally). The #1907 null-deref
+  // was an INSTANCE-state read; the pure value-read object never touches async
+  // capability state. Re-validated against the Promise standalone suite (no
+  // currently-passing test regresses).
+  if (builtinName === "Promise") {
+    return ensurePromiseNativeProtoGlue(ctx);
+  }
+  // (#2861) Iterator.prototype — ES2025 iterator-helper value reads.
+  if (builtinName === "Iterator") {
+    return ensureIteratorNativeProtoGlue(ctx);
   }
   if (builtinName === "Map") {
     return ensureMapNativeProtoGlue(ctx);
@@ -762,6 +796,29 @@ function tryEnsureNativeProtoBrand(ctx: CodegenContext, builtinName: string): nu
   }
   if (builtinName === "WeakSet") {
     return ensureWeakSetNativeProtoGlue(ctx);
+  }
+  // (#2861) ArrayBuffer / DataView protos — the single largest standalone-CE
+  // builtin cluster (ArrayBuffer 166, DataView 89). Their proto value objects
+  // carry no runtime-state entanglement (the byte vec lives on the INSTANCE,
+  // never the proto), so the `$NativeProto` materialization is clean. The
+  // accessor getters (`byteLength`/`buffer`/`byteOffset`/…) fold `.length` to 0.
+  if (builtinName === "ArrayBuffer") {
+    return ensureArrayBufferNativeProtoGlue(ctx);
+  }
+  if (builtinName === "DataView") {
+    return ensureDataViewNativeProtoGlue(ctx);
+  }
+  // (#2861) SharedArrayBuffer mirrors ArrayBuffer's clean value-object shape;
+  // WeakRef / FinalizationRegistry are plain-method protos (held value / cells
+  // live on the instance, never the proto).
+  if (builtinName === "SharedArrayBuffer") {
+    return ensureSharedArrayBufferNativeProtoGlue(ctx);
+  }
+  if (builtinName === "WeakRef") {
+    return ensureWeakRefNativeProtoGlue(ctx);
+  }
+  if (builtinName === "FinalizationRegistry") {
+    return ensureFinalizationRegistryNativeProtoGlue(ctx);
   }
   // (#2651 M1 / D2) Concrete TypedArray view protos — `Int8Array.prototype`,
   // `Uint8Array.prototype`, … This is the measured Slice-0 lever: the
@@ -863,6 +920,31 @@ function tryCompileStandaloneBuiltinProtoMemberRead(
   const kind = glue.memberKind(member);
   const closure = ensureStandaloneNativeMethodClosure(ctx, brand, member, kind);
   if (!closure) return undefined;
+
+  if (kind === "getter") {
+    // (#2885 Site 3) A plain read of `<Builtin>.prototype.<getter>` must INVOKE
+    // the accessor on the receiver, not return the getter closure value. This
+    // site only fires for the literal `<Builtin>.prototype.<getter>` shape, so
+    // the receiver is always the proto object (`$NativeProto` externref): the
+    // proto-identity arm in the getter body (Site 1) then yields `undefined`
+    // (§22.2.6), e.g. `RegExp.prototype.global === undefined`. Instance reads
+    // (`re.global`) route through `tryCompileStandaloneRegExpPropertyRead`, not
+    // here. Returns externref (the unified getter result type).
+    const closureInfo = ctx.closureInfoByTypeIdx.get(closure.type.typeIdx);
+    if (!closureInfo) return undefined;
+
+    // self struct (param 0) — unused by the body (no captures) but type-required.
+    fctx.body.push({ op: "ref.func", funcIdx: closure.funcIdx } as Instr);
+    fctx.body.push({ op: "struct.new", typeIdx: closure.type.typeIdx } as Instr);
+    // `this` arg (param 1): the builtin proto object externref.
+    if (!emitLazyNativeProtoGet(ctx, fctx, brand)) return undefined;
+    // call_ref operand: the typed funcref. `ref.func` yields `(ref liftedType)`
+    // directly (the func's declared type IS the lifted closure type), so no
+    // struct.get / guard-cast is needed.
+    fctx.body.push({ op: "ref.func", funcIdx: closure.funcIdx } as Instr);
+    fctx.body.push({ op: "call_ref", typeIdx: closureInfo.funcTypeIdx } as Instr);
+    return closureInfo.returnType ?? { kind: "externref" };
+  }
 
   fctx.body.push({ op: "ref.func", funcIdx: closure.funcIdx } as Instr);
   fctx.body.push({ op: "struct.new", typeIdx: closure.type.typeIdx } as Instr);

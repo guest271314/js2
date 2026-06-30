@@ -32,6 +32,187 @@ import { compileNativeStringLiteral } from "./string-ops.js";
 const INITIAL_CAP = 128;
 
 /**
+ * (#2866) Ensure the native `$Symbol` carrier struct and the host-free
+ * `__box_symbol(i32 id) -> externref` builder exist. Idempotent. Sets
+ * `ctx.symbolTypeIdx` and registers `__box_symbol` in `ctx.funcMap` as a DEFINED
+ * function (no import → no index shift, same invariant as the #1471 boxing
+ * helpers and the #1472 object-runtime helpers).
+ *
+ * A standalone/WASI Symbol VALUE is a bare i32 counter id (`compileSymbolCall`,
+ * literals.ts); its description lives in the id→string side table
+ * (`ensureSymbolDescTable`). The carrier is needed only when a Symbol must cross
+ * an **externref channel** — chiefly entering the `$Object` property key path
+ * (externref-typed), where the host-only `env::__box_symbol` import would
+ * otherwise leak (#2866). Identity is decided by the i32 `$id` (id-compare in
+ * `__obj_find`/`__key_equals`), so NO interning of carriers is required: a fresh
+ * `$Symbol` struct per box is fine because two carriers with the same id compare
+ * equal and the same well-known/registry id always reproduces the same id.
+ *
+ * `$desc` is carried for forward use (getOwnPropertySymbols → `.description`) but
+ * left null here; the description is always recoverable from the side table by
+ * id, so the box path stays trivial and side-table-free.
+ *
+ * MUST only be called in `ctx.standalone || ctx.wasi` (host/gc mode keeps the
+ * spec-accurate `env::__box_symbol` host import; registering a native carrier
+ * there would both collide with that import and shift host type indices).
+ */
+export function ensureSymbolCarrier(ctx: CodegenContext): number {
+  if (ctx.symbolTypeIdx < 0) {
+    // `ensureNativeStringHelpers` registers the native string types and sets
+    // `ctx.anyStrTypeIdx` (the carrier's `$desc` field type).
+    ensureNativeStringHelpers(ctx);
+    const anyStrTypeIdx = ctx.anyStrTypeIdx;
+    const idx = ctx.mod.types.length;
+    ctx.mod.types.push({
+      kind: "struct",
+      name: "$Symbol",
+      fields: [
+        { name: "id", type: { kind: "i32" }, mutable: false },
+        { name: "desc", type: { kind: "ref_null", typeIdx: anyStrTypeIdx }, mutable: false },
+      ],
+    });
+    ctx.symbolTypeIdx = idx;
+  }
+  if (ctx.funcMap.get("__box_symbol") === undefined) {
+    const symIdx = ctx.symbolTypeIdx;
+    const anyStrTypeIdx = ctx.anyStrTypeIdx;
+    // (#2866 slice 3) INTERN carriers by id. A standalone symbol VALUE is a bare
+    // i32 id; whenever it crosses an externref channel (`$Object` key, `symbol[]`
+    // element, an `any`-typed argument such as `assert.sameValue(syms[0], sym)`)
+    // it is boxed via `__box_symbol`. Identity is decided by the i32 id, but the
+    // generic externref `===` paths (`__extern_strict_eq`/`__any_strict_eq`,
+    // array `indexOf`) compare boxed objects with `ref.eq`. A fresh struct per box
+    // made two boxings of the SAME symbol compare unequal (`getOwnPropertySymbols`
+    // identity, `sym in obj`, `[sym].indexOf(sym)`). Interning — one canonical
+    // `$Symbol` per id in a growable id→carrier table — makes `ref.eq` hold for
+    // same-id boxings, so symbol identity works uniformly with no change to the
+    // central equality helpers. The table is lazily allocated and grown ×2.
+    const internArrTypeIdx = getOrRegisterArrayType(ctx, `symref_${symIdx}`, {
+      kind: "ref_null",
+      typeIdx: symIdx,
+    });
+    const internGlobalIdx = ctx.numImportGlobals + ctx.mod.globals.length;
+    ctx.mod.globals.push({
+      name: "__symbol_intern_table",
+      type: { kind: "ref_null", typeIdx: internArrTypeIdx },
+      mutable: true,
+      init: [{ op: "ref.null", typeIdx: internArrTypeIdx } as Instr],
+    });
+    const symNull: ValType = { kind: "ref_null", typeIdx: symIdx };
+    const arrNull: ValType = { kind: "ref_null", typeIdx: internArrTypeIdx };
+    const typeIdx = addFuncType(ctx, [{ kind: "i32" }], [{ kind: "externref" }]);
+    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    ctx.funcMap.set("__box_symbol", funcIdx);
+    // params: 0=id(i32). locals: 1=tbl 2=existing 3=grow
+    const TBL = 1;
+    const EXISTING = 2;
+    const GROW = 3;
+    ctx.mod.functions.push({
+      name: "__box_symbol",
+      typeIdx,
+      locals: [
+        { name: "tbl", type: arrNull },
+        { name: "existing", type: symNull },
+        { name: "grow", type: arrNull },
+      ],
+      body: [
+        // tbl = global; allocate (id+1, min 16) slots if null.
+        { op: "global.get", index: internGlobalIdx },
+        { op: "local.tee", index: TBL },
+        { op: "ref.is_null" },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            // allocate id+1 slots; the grow loop below extends ×2 as ids climb.
+            { op: "local.get", index: 0 } as Instr,
+            { op: "i32.const", value: 1 } as Instr,
+            { op: "i32.add" } as Instr,
+            { op: "array.new_default", typeIdx: internArrTypeIdx } as Instr,
+            { op: "local.set", index: TBL } as Instr,
+            { op: "local.get", index: TBL } as Instr,
+            { op: "global.set", index: internGlobalIdx } as Instr,
+          ],
+        },
+        // grow ×2 until id < tbl.len
+        {
+          op: "block",
+          blockType: { kind: "empty" },
+          body: [
+            {
+              op: "loop",
+              blockType: { kind: "empty" },
+              body: [
+                { op: "local.get", index: 0 },
+                { op: "local.get", index: TBL },
+                { op: "ref.as_non_null" },
+                { op: "array.len" },
+                { op: "i32.lt_s" },
+                { op: "br_if", depth: 1 },
+                { op: "local.get", index: TBL },
+                { op: "ref.as_non_null" },
+                { op: "array.len" },
+                { op: "i32.const", value: 2 },
+                { op: "i32.mul" },
+                { op: "array.new_default", typeIdx: internArrTypeIdx } as Instr,
+                { op: "local.set", index: GROW },
+                { op: "local.get", index: GROW },
+                { op: "ref.as_non_null" },
+                { op: "i32.const", value: 0 },
+                { op: "local.get", index: TBL },
+                { op: "ref.as_non_null" },
+                { op: "i32.const", value: 0 },
+                { op: "local.get", index: TBL },
+                { op: "ref.as_non_null" },
+                { op: "array.len" },
+                { op: "array.copy", dstTypeIdx: internArrTypeIdx, srcTypeIdx: internArrTypeIdx } as Instr,
+                { op: "local.get", index: GROW },
+                { op: "local.set", index: TBL },
+                { op: "local.get", index: TBL },
+                { op: "global.set", index: internGlobalIdx },
+                { op: "br", depth: 0 },
+              ],
+            } as Instr,
+          ],
+        },
+        // existing = tbl[id]; if null create + store; return extern(existing).
+        { op: "local.get", index: TBL },
+        { op: "ref.as_non_null" },
+        { op: "local.get", index: 0 },
+        { op: "array.get", typeIdx: internArrTypeIdx } as Instr,
+        { op: "local.tee", index: EXISTING },
+        { op: "ref.is_null" },
+        {
+          op: "if",
+          blockType: { kind: "val", type: { kind: "externref" } },
+          then: [
+            // tbl[id] = new $Symbol{id, null}; tee into `existing`
+            { op: "local.get", index: TBL } as Instr,
+            { op: "ref.as_non_null" } as Instr,
+            { op: "local.get", index: 0 } as Instr,
+            { op: "local.get", index: 0 } as Instr,
+            { op: "ref.null", typeIdx: anyStrTypeIdx } as Instr,
+            { op: "struct.new", typeIdx: symIdx } as Instr,
+            { op: "local.tee", index: EXISTING } as Instr,
+            { op: "array.set", typeIdx: internArrTypeIdx } as Instr,
+            { op: "local.get", index: EXISTING } as Instr,
+            { op: "ref.as_non_null" } as Instr,
+            { op: "extern.convert_any" } as Instr,
+          ],
+          else: [
+            { op: "local.get", index: EXISTING } as Instr,
+            { op: "ref.as_non_null" } as Instr,
+            { op: "extern.convert_any" } as Instr,
+          ],
+        },
+      ],
+      exported: false,
+    });
+  }
+  return ctx.symbolTypeIdx;
+}
+
+/**
  * Ensure the symbol description table's array type and lazy global exist.
  * Idempotent. Sets `ctx.symbolDescArrTypeIdx` and `ctx.symbolDescGlobalIdx`.
  */
