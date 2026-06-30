@@ -1,6 +1,6 @@
 ---
 id: 2860
-title: "Umbrella: close the standalone-vs-js-host test262 gap (9,177 tests)"
+title: "Umbrella: close the standalone-vs-js-host test262 gap (~20,500 host-free, honest metric #2879/#2360)"
 status: ready
 created: 2026-06-30
 updated: 2026-06-30
@@ -11,24 +11,52 @@ area: codegen
 goal: standalone
 sprint: current
 horizon: xl
-related: [2861, 2862, 2863, 2864, 2865, 2866, 2867, 2868]
+related: [2861, 2862, 2863, 2864, 2865, 2866, 2867, 2868, 2872, 2873, 2874, 2875, 2876, 2877, 2878, 2879]
 ---
 
 # Umbrella: close the standalone-vs-js-host test262 gap
 
-## The gap
+> **THE SPRINT FOCUS (stakeholder directive, 2026-06-30).** Closing the
+> standalone-vs-js-host gap is the top priority for the current budget window.
+> Every child issue here is `priority: high` + `sprint: current` and sorts to
+> the TOP of the auto-synced TaskList. Non-standalone `sprint: current` work
+> (acorn remnants #2850/#2853, IR-migration #2855–#2859, and the other ES/spec
+> umbrellas #2669/#2803/#1042) is demoted to `priority: low` — kept claimable
+> as tail-filler but sorting under the standalone work.
 
-js-host passes **33,032 / 43,135** official tests; `--target standalone`
-passes **24,656**. The **standalone-only failure set** (tests that PASS in
-js-host but FAIL or compile-error in standalone) is **9,177 tests**.
+## The gap (honest metric, #2879 via #2360)
+
+The metric was made **honest** in #2879/#2360: a standalone pass is only
+credited when it is **host-free** (no leaked host imports), not when a leaky
+binary is host-satisfied. On the honest metric:
+
+- **js-host** passes **~34,052** official tests.
+- **host-free standalone** passes **~12,883**.
+- The honest **standalone gap is ~20,500 tests** — roughly double the earlier
+  ~9,177 figure, which counted host-satisfied leaky passes as standalone wins.
+
+The gap decomposes into two halves:
+
+1. **The carriers (~architecture-scale half).** Whole language features that
+   leak host imports because there is no Wasm-native carrier yet:
+   generators **#2864** (697), async-generators **#2865** (986), Promise/
+   microtask **#2867** (375), Symbol **#2866** (418). These are the biggest
+   single lever and warrant an architect frame-substrate design pass.
+2. **The substrate + de-masked real-failure clusters (the other half).** The
+   dynamic-object substrate, the proto-glue / CE clusters (**#2861** remaining,
+   **#2863**), and the de-masked real-failure clusters that surfaced once the
+   metric stopped masking them behind #2862: TypedArray **#2872** (294),
+   language/expressions **#2873** (276), String **#2875** (159), RegExp
+   **#2876** (125), tooling/triage **#2877**, plus the invalid-Wasm residual
+   **#2878**.
 
 Measured 2026-06-30 from the two lane baselines in `loopdive/js2wasm-baselines`
 (`test262-current.jsonl` vs `test262-standalone-current.jsonl`, official-scope,
-matched by file+strict). Method: `host.status==pass AND standalone.status!=pass`.
-The standalone baseline tags each row with `host_import_leak_class` and the
-leaked `imports` set, which drives the clustering below.
-
-By standalone status: **5,989 fail, 3,187 compile_error, 1 timeout.**
+matched by file+strict). The standalone baseline tags each row with
+`host_import_leak_class` and the leaked `imports` set, which drives the
+clustering below. (The legacy per-cluster counts in the table below are from
+the pre-honest measure and are kept as the relative root-cause breakdown; the
+absolute total is now ~20,500 per the honest metric.)
 
 ## Clusters (by root cause → est. tests → issue)
 
@@ -66,16 +94,47 @@ single fix flips directly.
   with a RegExp arg + RegExp character-class escapes; standalone-native string/regex
   bug. File separately if it doesn't clear with #2863.
 
-## Sequencing
+## Sequencing (carriers are the biggest lever)
 
-1. **#2861** (mechanical, ~882, start now) — dev-standalone.
-2. **#2862** ToPrimitive (architect_spec) + **#2863** dynamic-shape — these two
-   substrate fixes likely also drop a chunk of the "leak" buckets' proximate
-   failures. Re-measure the gap after they land.
-3. **#2868** invalid-wasm (correctness — broken binaries are worst-class).
-4. Carriers **#2866** (Symbol), **#2864→#2865** (generators, epic), **#2867**
-   (Promise) — biggest but architecture-scale; #2864/#2865 are the largest
-   single lever (1,683 combined) and warrant an architect design pass.
+**Carrier track (architecture-scale — the dominant lever, ~2,476 combined).**
+The carriers share a common need: a Wasm-native suspendable-**frame substrate**
+(the arch-frame design). Build that once, then layer the carriers on it:
+
+1. **Frame substrate** — the suspendable activation-frame ABI shared by
+   generators, async-generators and the Promise/microtask scheduler. Architect
+   frame-substrate spec lives in **#2860 / #2864** (`architect_spec: candidate`).
+2. **#2864** sync generator carrier (697) — first carrier on the frame; proves
+   the substrate end-to-end.
+3. **#2867** Promise / microtask carrier (375) — the microtask scheduler the
+   async machinery needs; independent enough to land in parallel once the frame
+   exists.
+4. **#2865** async-generator / for-await carrier (986) — composes the generator
+   frame (#2864) with the microtask scheduler (#2867); `depends_on: [2864, 2867]`.
+
+**#2866** Symbol carrier (418) is independent of the frame substrate and can run
+in parallel on its own track.
+
+**Substrate + cluster track (runs in parallel with carriers).**
+
+5. **#2861** built-in static/proto value-read glue (mechanical, ~882 remaining) —
+   dev-standalone, start now.
+6. **#2863** dynamic-shape `__get_builtin` / reflective read codegen.
+7. **#2878** invalid-Wasm residual (`__str_flatten` + user-body shapes) — broken
+   binaries are worst-class correctness; follows the #2868 URI-carrier fix.
+8. De-masked real-failure clusters (surfaced once the honest metric stopped
+   masking them behind #2862): **#2872** TypedArray (294), **#2873**
+   language/expressions (276), **#2875** String (159), **#2876** RegExp (125).
+9. **#2877** standalone exception message readability — tooling/triage enabler
+   (lower lever; unblocks message-level triage of the residual).
+
+**Done / blocked children (no longer queued):**
+
+- **#2868** invalid-Wasm emission (URI/str_flatten carrier) — **done** (via #2350).
+- **#2874** getOwnPropertyDescriptor numeric-key coercion — **done** (via #2354).
+- **#2879** honest host-free metric — **done** (via #2360); this is what
+  re-based the gap to ~20,500.
+- **#2862** ToPrimitive over built-in exotics — **blocked** (superseded; the
+  de-masked clusters #2872/#2873/#2875/#2876 carry the tractable residual).
 
 ## Definition of done (umbrella)
 

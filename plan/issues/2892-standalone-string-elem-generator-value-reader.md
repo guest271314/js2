@@ -1,8 +1,10 @@
 ---
 id: 2892
 title: "Standalone: string-ELEM native generator `.next().value as string` mis-types the result value (typeIdx mismatch) — fails wasm validation"
-status: ready
+status: done
 created: 2026-06-30
+completed: 2026-06-30
+assignee: ttraenkler/sr-genframe
 priority: medium
 feasibility: medium
 task_type: bug
@@ -91,3 +93,49 @@ Surfaced while implementing #2864 F1b (typed spills). F1b deliberately scoped
 AROUND this: F1b enables string LOCAL spills in _numeric_-elem generators (which
 work), and string-elem generators with spills inherit this pre-existing reader
 bug regardless of spilling.
+
+## Resolution (2026-06-30)
+
+**Actual root cause was the open `.next()` DISPATCH, not the result reader.**
+When the iterator local is statically opaque (`let it = g()` types `it` as
+`externref`, the common shape), `it.next()` lowers through the OPEN dispatch
+(`buildNativeGeneratorDispatch`), not the direct path. That function hard-coded
+its enclosing-block result type to the **f64 IteratorResult singleton** for any
+non-`any`-carrier module:
+
+```ts
+const resultType = hasAny ? { kind: "eqref" }
+                          : { kind: "ref", typeIdx: ensureNativeGeneratorResultType(ctx) }; // f64 singleton!
+```
+
+But each per-generator branch produces `struct.new info.resultTypeIdx` — for a
+string generator that is the native-string `__NativeGeneratorResult_refN`
+(typeIdx 35 in the repro), not the f64 singleton (41, which this very call
+spuriously minted). So `if` branches typed `ref 35` flowed into a block declared
+`ref 41` → `type error in fallthru[0] (expected (ref null 41), got (ref null 35))`.
+
+**Fix** (`buildNativeGeneratorDispatch`): key the block type on the result
+structs actually present rather than always the f64 singleton:
+- any boxed-`any` carrier present, OR generators with **distinct** result
+  structs (e.g. a numeric AND a string generator in one module) → `eqref`
+  (the common `eq` supertype);
+- all generators share ONE result-struct typeIdx → `ref <that idx>`. This covers
+  both the dominant numeric-only case (every numeric generator shares the f64
+  singleton — **byte-identical** to before) and the single-string-elem case.
+
+For the single-string-generator case the dispatch now yields `ref <stringResult>`,
+so the downstream `.value`/`.done` read takes the existing DIRECT reader path and
+reads the value at the correct native-string typeIdx — no reader change needed.
+
+**Verified host-free + correct** (`result.imports == []`): `.next().value as
+string).length`, `=== "aa"`, annotated `Generator<string>` iterator, string
+generator with a `return` value, `.done` after exhaustion, and a numeric
+`.next().value` regression case. Tests: `tests/issue-2892-string-gen-value-reader.test.ts`
+(6 cases). gc (JS-host) mode validates unchanged; numeric path emits identical bytes.
+
+**Out of scope (pre-existing, separate path):** `for-of` over an *un-annotated*
+string generator returns 0 on `origin/main` too — that is the documented #2171
+loop-var-typing limitation (the loop var must be statically `string`), not this
+reader/dispatch bug. Mixed numeric+string generators now *validate* (eqref) but
+the open `.value` reader's string arm is still unimplemented — a strict
+improvement over the prior CE; a narrow follow-up if needed.

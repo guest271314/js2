@@ -126,3 +126,61 @@ describe("#2866 native Symbol carrier — Symbol-keyed $Object ops (standalone)"
     ).toBe(210);
   });
 });
+
+describe("#2866 slice 3 — Object.getOwnPropertySymbols SELECT side (standalone)", () => {
+  it("returns the object's own symbol keys (length)", async () => {
+    expect(
+      await runStandalone(
+        `export function test(): number { const o: any = {}; const s = Symbol("k"); o[s] = 42; return Object.getOwnPropertySymbols(o).length; }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("returned symbol === the original (identity preserved, host-free)", async () => {
+    expect(
+      await runStandalone(
+        `export function test(): number { const o: any = {}; const s = Symbol("k"); o[s] = 7; const syms = Object.getOwnPropertySymbols(o); return (syms[0] === s) ? 1 : 0; }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("returned symbol re-indexes the same own property", async () => {
+    expect(
+      await runStandalone(
+        `export function test(): number { const o: any = {}; const s = Symbol("k"); o[s] = 9; const syms = Object.getOwnPropertySymbols(o); return o[syms[0]] as number; }`,
+      ),
+    ).toBe(9);
+  });
+
+  it("preserves insertion order across multiple symbols", async () => {
+    expect(
+      await runStandalone(
+        `export function test(): number { const o: any = {}; const a = Symbol("a"); const b = Symbol("b"); o[a] = 1; o[b] = 2; const syms = Object.getOwnPropertySymbols(o); return (syms.length === 2 && syms[0] === a && syms[1] === b) ? 1 : 0; }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("excludes string keys; getOwnPropertySymbols and keys are disjoint", async () => {
+    expect(
+      await runStandalone(
+        `export function test(): number { const o: any = { x: 1 }; const s = Symbol("s"); o[s] = 9; return Object.getOwnPropertySymbols(o).length * 10 + Object.keys(o).length; }`,
+      ),
+    ).toBe(11);
+  });
+
+  it("returns an empty array for a symbol-free object", async () => {
+    expect(
+      await runStandalone(
+        `export function test(): number { const o: any = { a: 1, b: 2 }; const s = Symbol("force-carrier"); const o2: any = {}; o2[s] = 1; return Object.getOwnPropertySymbols(o).length; }`,
+      ),
+    ).toBe(0);
+  });
+
+  it("symbol identity holds through an any-typed boundary (===)", async () => {
+    expect(
+      await runStandalone(
+        `function eq(a: any, b: any): boolean { return a === b; } export function test(): number { const o: any = {}; const s = Symbol("k"); o[s] = 1; const syms = Object.getOwnPropertySymbols(o); return eq(syms[0], s) ? 1 : 0; }`,
+      ),
+    ).toBe(1);
+  });
+});

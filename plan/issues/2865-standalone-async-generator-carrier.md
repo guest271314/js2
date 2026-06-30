@@ -5,7 +5,7 @@ status: in-progress
 assignee: ttraenkler/sendev-async
 created: 2026-06-30
 updated: 2026-06-30
-priority: medium
+priority: high
 feasibility: hard
 task_type: feature
 area: codegen

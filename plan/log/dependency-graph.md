@@ -4,7 +4,57 @@ Issues organized by dependency order -- work items at the top are ready now,
 items below unlock when their dependencies complete. No sprint batching needed:
 pick any "ready" item and start.
 
-## IR front-end migration — fallback-bucket ratchet (added 2026-06-30, `sprint: current`)
+## TOP PRIORITY — close the standalone-vs-js-host test262 gap (stakeholder directive, 2026-06-30)
+
+Umbrella **#2860**. The honest metric (#2879 via #2360) re-based the gap to
+**~20,500 host-free tests** (js-host ~34,052 vs host-free standalone ~12,883).
+**This is THE sprint focus.** Every issue below is `priority: high` +
+`sprint: current` and sorts to the TOP of the auto-synced TaskList. The
+self-serving devs pull these first, in this order:
+
+**Carriers (the biggest lever — architecture-scale, ~2,476 combined).** Share a
+common Wasm-native suspendable **frame substrate** (arch-frame spec in
+#2860/#2864). Sequence: **frame substrate → #2864 → #2867 → #2865**.
+
+| Issue | Cluster | Est. | Priority | Horizon | Status / dep |
+| ----- | ------- | ---- | -------- | ------- | ------------ |
+| #2860 | umbrella / arch-frame spec | — | high | xl | ready |
+| #2864 | sync generator carrier | 697 | high | xl | ready — first carrier on the frame |
+| #2867 | Promise / microtask carrier | 375 | high | l | ready — microtask scheduler |
+| #2865 | async-generator / for-await carrier | 986 | high | xl | ready — `depends_on: [2864, 2867]` |
+| #2866 | Symbol carrier | 418 | high | l | ready — independent track |
+
+**Substrate + de-masked real-failure clusters (parallel track).**
+
+| Issue | Cluster | Est. | Priority | Horizon | Status |
+| ----- | ------- | ---- | -------- | ------- | ------ |
+| #2861 | built-in static/proto value-read glue | ~882 | high | l | ready — start now |
+| #2863 | dynamic-shape `__get_builtin` read codegen | 365 | high | m | ready |
+| #2878 | invalid-Wasm residual (`__str_flatten`/body shapes) | — | high | m | ready |
+| #2872 | TypedArray.prototype.* cluster | 294 | high | m | ready (de-masked from #2862) |
+| #2873 | language/expressions cluster | 276 | high | m | ready (de-masked from #2862) |
+| #2875 | String.prototype.* cluster | 159 | high | m | ready (de-masked from #2862) |
+| #2876 | RegExp cluster | 125 | high | m | ready (de-masked from #2862) |
+| #2877 | exception message readability (triage enabler) | — | medium | s | ready |
+
+**Done / blocked children:** #2868 (invalid-Wasm, via #2350) · #2874
+(getOwnPropertyDescriptor key coercion, via #2354) · #2879 (honest metric, via
+#2360) all **done**. #2862 (ToPrimitive built-in exotics) **blocked** —
+superseded; the de-masked clusters carry the tractable residual.
+
+**Demoted to `priority: low`** (kept `sprint: current` as tail-filler, sort
+under the standalone work): acorn remnants **#2850/#2853**, IR-migration
+**#2855–#2858** (#2859 already low), and ES/spec umbrellas **#2669** (ES2015
+destructuring), **#2803** (callsite param-type inference), **#1042** (async
+state-machine epic). In-progress non-standalone work is left at its current
+priority (already claimed — not competing for the next pull).
+
+## IR front-end migration — fallback-bucket ratchet (added 2026-06-30, DEMOTED to `priority: low` 2026-06-30)
+
+> **Demoted below the standalone gap (stakeholder directive, 2026-06-30).** All
+> rows below are now `priority: low` — still `sprint: current` (claimable as
+> tail-filler) but sorting under the standalone-gap work above. The counts /
+> sequencing are unchanged; only priority dropped.
 
 Drive the **unintended** `IrFallbackReason` buckets to zero, then promote each
 reason into `STRICT_IR_REASONS` (`src/codegen/index.ts:1013`). Counts verified
@@ -15,10 +65,10 @@ CLAUDE.md / codegen-axes.md / ir-adoption.md). Gate mechanism: #1376 / #2089 /
 
 | Issue | Bucket                      | Count | Priority | Horizon | Status                                                                       |
 | ----- | --------------------------- | ----- | -------- | ------- | ---------------------------------------------------------------------------- |
-| #2855 | (tracking epic)             | —     | high     | xl      | backlog (visible, not a code task)                                           |
-| #2856 | `body-shape-rejected`       | 31    | high     | l       | **ready** — dominant; diagnostic pass first, then slice by kind              |
-| #2857 | `class-method`              | 6     | medium   | m       | **ready** — #1370 Phase C/D/E residual (ctor/static/accessors/private/super) |
-| #2858 | `call-graph-closure`        | 7     | medium   | m       | **ready** — derivative; depends_on #2856 + #2857                             |
+| #2855 | (tracking epic)             | —     | low      | xl      | backlog (visible, not a code task)                                           |
+| #2856 | `body-shape-rejected`       | 31    | low      | l       | **ready** — dominant; diagnostic pass first, then slice by kind              |
+| #2857 | `class-method`              | 6     | low      | m       | **ready** — #1370 Phase C/D/E residual (ctor/static/accessors/private/super) |
+| #2858 | `call-graph-closure`        | 7     | low      | m       | **ready** — derivative; depends_on #2856 + #2857                             |
 | #2859 | `param-type-not-resolvable` | 1     | low      | s       | **ready** — single site (benchmarks/helpers.ts); TypeMap propagation         |
 
 Deferred (NOT queued): `async-function` (4) → #1373b (blocked on #1326c
