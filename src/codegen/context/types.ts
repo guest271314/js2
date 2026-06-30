@@ -346,6 +346,22 @@ export interface FunctionContext {
    * emitted Wasm is byte-identical.
    */
   asyncCpsActive?: boolean;
+  /**
+   * (#2895 PATH B) Set while emitting a host-free async **resume** function body
+   * (`__async_resume_f<name>`). When present, `return v` settles the frame's
+   * result `$Promise` (`__promise_fulfill(resultPromise, v)`) and emits a void
+   * `return`, instead of the generic value-return — the resume function returns
+   * void; the async result is delivered through the promise. Mirrors the
+   * `isGenerator` `return` arm. Undefined on every non-resume body.
+   */
+  asyncDriveReturn?: {
+    /** Local holding the frame's result `$Promise` (loaded at resume entry). */
+    resultPromiseLocal: number;
+    /** `$Promise` struct typeIdx. */
+    promiseTypeIdx: number;
+    /** `__promise_fulfill(promise, value) -> value` funcIdx. */
+    fulfillFuncIdx: number;
+  };
   /** Set of variable names that are read-only bindings (e.g. named function expression name) */
   readOnlyBindings?: Set<string>;
   /** Set of variable names that are const bindings — assignment throws TypeError at runtime */

@@ -170,6 +170,29 @@ export function compileReturnStatement(ctx: CodegenContext, fctx: FunctionContex
     return;
   }
 
+  // (#2895 PATH B) Inside a host-free async resume function, `return v` settles
+  // the frame's result `$Promise` with `v` (`__promise_fulfill`) and returns
+  // void — the resume function carries the async result through the promise, not
+  // its wasm return value. Mirrors the generator arm above.
+  if (fctx.asyncDriveReturn) {
+    const { resultPromiseLocal, fulfillFuncIdx } = fctx.asyncDriveReturn;
+    fctx.body.push({ op: "local.get", index: resultPromiseLocal });
+    if (stmt.expression) {
+      const t = compileExpression(ctx, fctx, stmt.expression);
+      if (t !== null && t !== undefined) {
+        coerceType(ctx, fctx, t as ValType, { kind: "externref" });
+      } else {
+        fctx.body.push({ op: "ref.null.extern" });
+      }
+    } else {
+      fctx.body.push({ op: "ref.null.extern" });
+    }
+    fctx.body.push({ op: "call", funcIdx: fulfillFuncIdx });
+    fctx.body.push({ op: "drop" }); // __promise_fulfill returns the value
+    fctx.body.push({ op: "return" });
+    return;
+  }
+
   const hasPendingFinally = fctx.finallyStack && fctx.finallyStack.length > 0;
 
   // Derived class constructors: per §10.2.1.3 step 13c, returning a non-object
