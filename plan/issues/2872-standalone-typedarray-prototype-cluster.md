@@ -13,6 +13,18 @@ related: [2860, 2870, 2862, 2651]
 umbrella: 2860
 ---
 
+> **Unblocked machinery (#2885 + #2876, both merged):** the reflective-accessor
+> subset (`verifyProperty` / `prop-desc` over `%TypedArray%.prototype` accessor
+> members — `byteLength`, `byteOffset`, `length`, `buffer`, `@@toStringTag`) now
+> has its shared lever: gOPD builtin-proto accessor descriptor SYNTHESIS (#2885)
+> and the brand-agnostic reflective `.call`/`.apply` recovery of a
+> descriptor-retrieved getter (#2876, `emitReflectiveNativeProtoClosureCall` +
+> the `gOPD(...).get.call(R)` data-flow trace in `calls.ts`). The remaining
+> TypedArray work is the **per-cluster glue**: wire the `%TypedArray%`/view
+> getter `emitMemberBody` arms + their proto-identity opt-in; the gOPD +
+> reflective-call surfaces then apply for free. (NB: the view brands carry
+> vec/runtime entanglement — see #2375.)
+
 # Standalone: TypedArray.prototype.\* failures (de-masked)
 
 ## Problem
