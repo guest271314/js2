@@ -209,6 +209,35 @@ const BOOLEAN_PROTO_METHODS = ["toString", "valueOf"] as const;
  * data properties (own on the proto), not methods. */
 const ERROR_PROTO_METHODS = ["toString"] as const;
 
+/** (#2861) `NativeError.prototype`'s own method names — a `<NativeError>.prototype`
+ * (TypeError/RangeError/ReferenceError/SyntaxError/EvalError/URIError) inherits
+ * `toString` from `Error.prototype`; its own data props (`constructor`/`name`/
+ * `message`) are not methods. The shared method member set mirrors Error's so
+ * the proto value object + `.length`/`.name` meta-fold resolve host-free. */
+const NATIVE_ERROR_PROTO_METHODS = ["toString"] as const;
+
+/** (#2861) `Promise.prototype`'s own method names (ES2024 §27.2.5). Only the
+ * static `.prototype` VALUE read + these method-closure value reads are wired
+ * here; instance-state reads were deliberately excluded in #1907 (async
+ * capability null-deref), so this glue NEVER touches runtime promise state. */
+const PROMISE_PROTO_METHODS = ["catch", "finally", "then"] as const;
+
+/** (#2861) `Iterator.prototype`'s own helper method names (ES2025 iterator
+ * helpers, §27.1.4). `[Symbol.iterator]` is a computed key handled elsewhere. */
+const ITERATOR_PROTO_METHODS = [
+  "drop",
+  "every",
+  "filter",
+  "find",
+  "flatMap",
+  "forEach",
+  "map",
+  "reduce",
+  "some",
+  "take",
+  "toArray",
+] as const;
+
 /** `Function.prototype`'s own method names (ES2024 §20.2.3). */
 const FUNCTION_PROTO_METHODS = ["apply", "bind", "call", "toString"] as const;
 
@@ -787,6 +816,48 @@ export function ensureErrorNativeProtoGlue(ctx: CodegenContext): number | undefi
   if (brand === undefined) return undefined;
   if (!getNativeProtoBuiltinGlue(ctx, brand)) {
     registerNativeProtoBuiltin(ctx, makeGlue(ctx, brand, "Error", ERROR_PROTO_METHODS));
+  }
+  return brand;
+}
+
+/**
+ * (#2861) Register `<NativeError>.prototype` glue (idempotent) and return its
+ * brand. Each NativeError ctor (TypeError/RangeError/ReferenceError/SyntaxError/
+ * EvalError/URIError) has its own reserved brand; the proto value object only
+ * needs the (Error-shared) member CSV so a `<NativeError>.prototype` /
+ * `<NativeError>.prototype.<member>` value read resolves host-free instead of
+ * refusing. Clean flip — Error.prototype glue (S6) carried no runtime-state
+ * entanglement and these subclass protos share its shape. */
+export function ensureNativeErrorNativeProtoGlue(ctx: CodegenContext, builtinName: string): number | undefined {
+  const brand = getBuiltinBrand(ctx, builtinName);
+  if (brand === undefined) return undefined;
+  if (!getNativeProtoBuiltinGlue(ctx, brand)) {
+    registerNativeProtoBuiltin(ctx, makeGlue(ctx, brand, builtinName, NATIVE_ERROR_PROTO_METHODS));
+  }
+  return brand;
+}
+
+/**
+ * (#2861) Register `Promise.prototype` glue (idempotent) and return its brand.
+ * Scoped to the static `.prototype` VALUE read + method-closure value reads
+ * (`then`/`catch`/`finally`) — the proto OBJECT is a pure value object
+ * (member CSV only; `emitLazyNativeProtoGet` never re-emits a body that touches
+ * the async-capability runtime state, which is what #1907 found to null-deref). */
+export function ensurePromiseNativeProtoGlue(ctx: CodegenContext): number | undefined {
+  const brand = getBuiltinBrand(ctx, "Promise");
+  if (brand === undefined) return undefined;
+  if (!getNativeProtoBuiltinGlue(ctx, brand)) {
+    registerNativeProtoBuiltin(ctx, makeGlue(ctx, brand, "Promise", PROMISE_PROTO_METHODS));
+  }
+  return brand;
+}
+
+/** (#2861) Register `Iterator.prototype` glue (idempotent) and return its brand. */
+export function ensureIteratorNativeProtoGlue(ctx: CodegenContext): number | undefined {
+  const brand = getBuiltinBrand(ctx, "Iterator");
+  if (brand === undefined) return undefined;
+  if (!getNativeProtoBuiltinGlue(ctx, brand)) {
+    registerNativeProtoBuiltin(ctx, makeGlue(ctx, brand, "Iterator", ITERATOR_PROTO_METHODS));
   }
   return brand;
 }
