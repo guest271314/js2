@@ -1,8 +1,9 @@
 ---
 id: 2870
 title: "Standalone exception-message formatter throws on Wasm-GC payload, masking real failure signatures"
-status: in-progress
-assignee: sendev-demask
+status: done
+assignee: ttraenkler/sendev-ci
+completed: 2026-06-30
 created: 2026-06-30
 priority: high
 task_type: bug
