@@ -3484,11 +3484,19 @@ function _structToPlainObject(
       result[key] = val;
     }
   }
-  // Also include sidecar properties
+  // Also include sidecar properties (dynamically-assigned own props, e.g.
+  // acorn's `node.quasis = [...]` / `node.expressions = [...]`).
+  // (#2851/#2852) These MUST be deep-converted the same way nominal fields are
+  // (the `val = _wasmToPlain(getter(obj))` above): a sidecar value that is —
+  // or contains — raw WasmGC structs (a child AST node, or an ARRAY of child
+  // nodes) was previously merged verbatim, so a `marshal:"copy"`/JSON consumer
+  // saw `quasis[*]` / `expressions[*]` elements as blank/opaque. Recurse so the
+  // deep copy reaches struct values and array-of-struct elements. Idempotent
+  // for plain JS values (`_wasmToPlain` returns primitives as-is).
   const sc = _wasmStructProps.get(obj);
   if (sc) {
     for (const key of Object.keys(sc)) {
-      if (!(key in result)) result[key] = sc[key];
+      if (!(key in result)) result[key] = _wasmToPlain(sc[key], exports, seen);
     }
   }
   return result;
