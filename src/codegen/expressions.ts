@@ -396,6 +396,47 @@ function wrapAsyncReturn(ctx: CodegenContext, fctx: FunctionContext, resultType:
 }
 
 /**
+ * (#2865 AG0) Emit a one-level native-`$Promise` await unwrap, host-free.
+ * Consumes one externref on the stack and leaves one externref:
+ *   - if it is a `$Promise` struct → push its `value` field (the resolved
+ *     value the awaiter wants);
+ *   - otherwise → push the original externref unchanged (a plain value / a
+ *     non-Promise thenable is already "the value" under the standalone
+ *     synchronous-settlement model).
+ *
+ * A runtime `ref.test (ref $Promise)` discriminates — the non-null test means a
+ * null externref (or any non-`$Promise`) takes the passthrough arm. This fixes
+ * the standalone identity-passthrough NaN bug (`await <fulfilled $Promise>`
+ * previously returned the promise object itself, which the consumer coerced to
+ * f64 → NaN). Genuinely-pending awaits (a promise that only settles on a later
+ * microtask) need true frame suspension — deferred to #2865 AG1 (PATH B).
+ */
+function emitStandaloneAwaitUnwrap(ctx: CodegenContext, fctx: FunctionContext): void {
+  const promiseTypeIdx = getOrRegisterPromiseType(ctx);
+  const tmp = allocTempLocal(fctx, { kind: "externref" });
+  // stack: externref(operand) → stash, then test the stashed copy.
+  fctx.body.push({ op: "local.set", index: tmp });
+  fctx.body.push({ op: "local.get", index: tmp });
+  fctx.body.push({ op: "any.convert_extern" });
+  fctx.body.push({ op: "ref.test", typeIdx: promiseTypeIdx });
+  const thenBody: Instr[] = [
+    { op: "local.get", index: tmp },
+    { op: "any.convert_extern" },
+    { op: "ref.cast", typeIdx: promiseTypeIdx },
+    // $Promise field 1 = `value` (externref). See getOrRegisterPromiseType.
+    { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 1 },
+  ];
+  const elseBody: Instr[] = [{ op: "local.get", index: tmp }];
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "val", type: { kind: "externref" } },
+    then: thenBody,
+    else: elseBody,
+  });
+  releaseTempLocal(fctx, tmp);
+}
+
+/**
  * Splice instructions [start..end) from fctx.body and re-emit them inside a
  * try/catch that converts synchronous throws into a rejected Promise. Used for
  * async function calls so that a throw during default-param evaluation or body
@@ -1303,18 +1344,32 @@ function compileExpressionInner(
       );
       return { kind: "externref" };
     }
-    // (#2613) `await <thenable>` / `await <non-Promise>` assimilation is now
-    // owned by the async-CPS state machine (`async-cps.ts`, gate
-    // `ASYNC_CPS_ENABLED = true`): a body whose await operand is not statically
-    // resolved (a user thenable / `any`) is a *real suspension* and is driven
-    // by `emitAsyncStateMachine` (`Promise_resolve` → `Promise_then2` →
-    // continuation), so it never reaches this legacy passthrough arm. The
-    // residual thenable-await test262 failures are therefore a CPS
-    // *synchronous-settlement* gap — the test262 harness calls `test()`
-    // synchronously and reads the result with no microtask drain, while the CPS
-    // continuation settles on a later microtask — which is #1373b's domain, not
-    // a JS-host point-fix. Keep the legacy identity passthrough here for the
-    // await shapes CPS does not claim (statically-resolved operands, bodies
+    // (#2865 AG0) Host-free standalone/WASI await. Async fns are compiled
+    // synchronously here (no CPS — function-body.ts gates it off for these
+    // targets) and the awaited operand, when it is a Promise, is the Wasm-native
+    // `$Promise` carrier. The legacy identity passthrough returned that promise
+    // OBJECT unchanged, so `await <fulfilled $Promise>` yielded the struct where
+    // the consumer expected the resolved value → coerced to f64 = NaN. Instead,
+    // compile the operand to its NATURAL type (do NOT force `expectedType` — that
+    // would coerce a $Promise externref to f64/NaN before we can read it) and, if
+    // it is an externref, unwrap one level of native `$Promise`. Non-externref
+    // operands (f64/i32 — e.g. `await someSyncAsyncCall()` already returning the
+    // unwrapped number) are passed through. Genuinely-pending awaits still need
+    // true frame suspension (#2865 AG1 / PATH B).
+    if (isStandalonePromiseActive(ctx)) {
+      const operandType = compileExpressionInner(ctx, fctx, expr.expression);
+      if (operandType !== null && operandType !== VOID_RESULT && operandType.kind === "externref") {
+        emitStandaloneAwaitUnwrap(ctx, fctx);
+        return { kind: "externref" };
+      }
+      return operandType;
+    }
+    // (#2613) JS-host path: `await <thenable>` / `await <non-Promise>`
+    // assimilation is owned by the async-CPS state machine (`async-cps.ts`); a
+    // genuinely-suspending body is driven by `emitAsyncStateMachine`
+    // (`Promise_resolve` → `Promise_then2` → continuation), so it never reaches
+    // this legacy passthrough. Keep the identity passthrough for the await
+    // shapes CPS does not claim (statically-resolved operands, bodies
     // `splitBodyAtAwait` rejects); these are already the resolved value on the
     // stack.
     return compileExpressionInner(ctx, fctx, expr.expression, expectedType);
