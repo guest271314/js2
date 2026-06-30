@@ -13,7 +13,7 @@
  */
 import { ts } from "../ts-api.js";
 import { isBooleanType, isPromiseType, mapTsTypeToWasm } from "../checker/type-mapper.js";
-import { classifyAsyncConsumer } from "./async-cps.js";
+import { classifyAsyncConsumer, analyzeAsyncBody, asyncFnNeedsCps } from "./async-cps.js";
 import type { Instr, ValType } from "../ir/types.js";
 import {
   emitStandalonePromiseReject,
@@ -338,6 +338,35 @@ function asyncResultConsumedAsValue(ctx: CodegenContext, expr: ts.CallExpression
   // This stays behaviour-identical until #1796 changes the value/thenable
   // dispatch. The rich rationale for each case is documented above.
   return classifyAsyncConsumer(ctx.checker, expr) !== "thenable";
+}
+
+/**
+ * (#2867 Gap 2 prerequisite) Is the callee of `expr` an async function that is
+ * **drive-lowered** under the host-free native-`$Promise` carrier — i.e. it is
+ * compiled by the #2895 async-frame drive layer and therefore ALREADY returns a
+ * real `$Promise` object (externref), not a raw `T`?
+ *
+ * The legacy call-site contract (#1313/#1727) assumes an async call leaves a raw
+ * `T` on the stack and wraps it in `Promise.resolve(...)` for thenable consumers
+ * (`f().then(...)`, `const p: Promise<T> = f()`). That double-wraps a
+ * drive-lowered result — the `$Promise` externref is wrapped in a SECOND native
+ * `$Promise` (`wrapAsyncReturn`'s `struct.new` arm), so `.then`/assignment sees a
+ * Promise-of-Promise and reads NaN / illegal-casts. When the callee is
+ * drive-lowered we must leave its `$Promise` result un-wrapped.
+ *
+ * Mirrors the drive-layer gate in `function-body.ts` exactly: carrier active +
+ * the callee is a plain async (non-generator) `function` declaration whose body
+ * genuinely suspends (`asyncFnNeedsCps`). Inert off the carrier (gc/host).
+ */
+function calleeIsDriveLowered(ctx: CodegenContext, expr: ts.CallExpression): boolean {
+  if (!isStandalonePromiseActive(ctx)) return false;
+  const sig = ctx.checker.getResolvedSignature(expr);
+  const decl = sig?.getDeclaration();
+  if (!decl || !ts.isFunctionDeclaration(decl) || decl.body === undefined) return false;
+  if (decl.asteriskToken) return false; // async generator — returns AsyncGenerator, not Promise
+  const isAsyncDecl = (decl.modifiers ?? []).some((m) => m.kind === ts.SyntaxKind.AsyncKeyword);
+  if (!isAsyncDecl) return false;
+  return asyncFnNeedsCps(decl, analyzeAsyncBody(ctx, decl));
 }
 
 /**
@@ -1267,6 +1296,18 @@ function compileExpressionInner(
         // Skip the wrap; the raw value on the stack is what the consumer
         // (await passthrough or primitive cast sink) expects.
         return callResult;
+      }
+      // (#2867) A drive-lowered async callee already returns a real `$Promise`
+      // (externref) — the #2895 frame driver settled it. Re-wrapping it via
+      // `wrapAsyncReturn` would build a Promise-of-Promise (the native
+      // `struct.new` arm), so `.then`/assignment reads NaN / illegal-casts. Leave
+      // the `$Promise` un-wrapped for the thenable consumer. Carrier-gated → inert
+      // on gc/host.
+      if (calleeIsDriveLowered(ctx, expr)) {
+        if (callResult !== null && callResult !== VOID_RESULT && (callResult as ValType).kind !== "externref") {
+          coerceType(ctx, fctx, callResult as ValType, { kind: "externref" });
+        }
+        return { kind: "externref" };
       }
       const wrappedType = wrapAsyncReturn(ctx, fctx, callResult);
       // Wrap the call+Promise.resolve in try/catch so synchronous throws from
