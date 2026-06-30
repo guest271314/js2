@@ -9,9 +9,19 @@ area: codegen
 goal: standalone
 sprint: current
 horizon: l
-related: [2860, 2870, 2862, 2651]
+related: [2860, 2870, 2862, 2651, 2885, 2876, 2893]
 umbrella: 2860
+blocked_on: 2893
 ---
+
+> **Blocked on #2893** (distinct %TypedArray% view brand). Traced 2026-06-30: the
+> #2885 gOPD synthesis + #2876 reflective `.call` machinery light up the reflective
+> accessor subset for free once the §23.2.3 getter bodies exist — but those bodies
+> need a runtime brand to classify an opaque `externref` as a view vs a plain array
+> (TA views share `$Vec` types with `number[]`, no tag — see #2893). The "just needs
+> per-cluster glue" framing was optimistic; the glue is gated on that representation
+> change. The `verifyProperty`/`*.name` subset also needs lever-2 + mutable
+> descriptor semantics.
 
 > **Unblocked machinery (#2885 + #2876, both merged):** the reflective-accessor
 > subset (`verifyProperty` / `prop-desc` over `%TypedArray%.prototype` accessor
