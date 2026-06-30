@@ -213,6 +213,45 @@ export function compileAssignment(ctx: CodegenContext, fctx: FunctionContext, ex
     }
     const localIdx = fctx.localMap.get(name);
     if (localIdx !== undefined) {
+      // (#2897) Reassigning the materialized `arguments` binding. In non-strict
+      // code `arguments` is a valid SimpleAssignmentTarget (§13.15.1), so
+      // `arguments = X` rebinds the identifier to X. `arguments` is materialized
+      // as a concrete (non-null) vec ref local for fast `.length` / `[i]` access;
+      // coercing an arbitrary RHS (e.g. an f64 `1`) to that vec-ref type emits a
+      // trapping `ref.as_non_null (ref.null …)` — the L41:3 "dereferencing a null
+      // pointer" crash. Instead, rebind the name to a fresh externref local
+      // holding X (the universal value carrier) and sever the param↔arguments
+      // map, since the arguments object has been replaced.
+      {
+        const argsLocalType =
+          localIdx < fctx.params.length
+            ? fctx.params[localIdx]!.type
+            : fctx.locals[localIdx - fctx.params.length]?.type;
+        const isArgsVecLocal =
+          name === "arguments" &&
+          argsLocalType !== undefined &&
+          (argsLocalType.kind === "ref" || argsLocalType.kind === "ref_null") &&
+          !ctx.closureInfoByTypeIdx.has((argsLocalType as { typeIdx: number }).typeIdx);
+        if (isArgsVecLocal) {
+          const rhsType = compileExpression(ctx, fctx, expr.right, { kind: "externref" });
+          if (!rhsType) {
+            reportError(ctx, expr, "Failed to compile assignment value");
+            return null;
+          }
+          if (rhsType.kind !== "externref") {
+            coerceType(ctx, fctx, rhsType, { kind: "externref" });
+          }
+          // allocLocal re-points fctx.localMap["arguments"] to the new slot, so
+          // subsequent reads resolve to the rebound value.
+          const newIdx = allocLocal(fctx, "arguments", { kind: "externref" });
+          // The arguments object is replaced; later `arguments[i]` writes must no
+          // longer flow back into named params.
+          fctx.mappedArgsInfo = undefined;
+          fctx.body.push({ op: "local.tee", index: newIdx });
+          // Assignment expression evaluates to the RHS value.
+          return { kind: "externref" };
+        }
+      }
       // Check if this is a boxed (ref cell) mutable capture
       const boxed = fctx.boxedCaptures?.get(name);
       if (boxed) {
