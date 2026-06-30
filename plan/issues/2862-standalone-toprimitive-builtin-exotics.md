@@ -174,3 +174,199 @@ failures, all collapsed onto one signature by the runner's error-formatter.
 already tagged for (`architect_spec: candidate`). The claim is released so the
 de-mask step (a test-infra change, not this compiler substrate) can be routed
 independently.
+
+## Implementation Plan (architect design pass, 2026-06-30)
+
+This design pass **honors the verify-first finding above** and supersedes the
+A/B sketch in the original "Implementation Plan". The headline correction: the
+proximate `"Cannot convert object to primitive value"` signature is *mostly* a
+test-runner stringify artifact, NOT one compiler bug. So #2862 is **not one
+substrate change** — it is (0) a test-infra de-mask, then (1) a genuinely
+bounded value-rep substrate change for built-in exotics reaching a primitive,
+which the operator paths (`==`/`+`/relational) already call into. **#2862 must
+be SPLIT.**
+
+### The value-rep substrate, as it actually stands (read against current main)
+
+The standalone `any` value representation is the `$AnyValue` struct
+(`ensureAnyValueType`, any-helpers.ts:23): fields `tag:i32, i32val, f64val,
+refval:eqref, externval:externref`. Tags: `0=null 1=undefined 2=i32 3=f64
+4=bool 5=string/boxed 7=function`; `tag>=5 ⇒ truthy object`. The "tag-5 field-4
+3-way classifier" (`tag5StringEqThen`/`tag5ToNumber`, any-helpers.ts:685/1138)
+discriminates *within* tag-5 between an `$AnyString` ref and a boxed-number
+carrier using `externval` (field 4) + `ref.test $AnyString` — that classifier is
+**equality/ToNumber-local and must NOT be widened blindly** (the #2040 note in
+any-helpers.ts:1677-1686 explicitly DROPS extra tag-5 classifier arms because
+changing the boxed-value shape regressed dstr defaults — `reference_2040`,
+`project_2040_tag5_classifier_dstr_default_regression`). **Do not route the
+exotic-to-primitive fix through the tag-5 classifier.** The correct seam is
+`__to_primitive` (object-runtime.ts:2194), which the operators already call.
+
+### Operators already call `__to_primitive` — the gap is its COVERAGE, not the wiring
+
+- Loose `==`/`!=` (binary-ops.ts:2310-2329): when exactly one operand is an
+  object (`typeofObject` XOR), it overwrites the operand in place with
+  `__to_primitive(operand, default)`. **Wired.**
+- Binary `+` and relational (binary-ops.ts:2034): a struct-ref operand is
+  coerced to f64 via `coerceType(..., hint)` which bottoms out in
+  `__to_primitive`. **Wired.**
+
+So the substrate change is entirely *inside* `__to_primitive`'s arm cascade
+(object-runtime.ts:2361-2462). Today it handles: non-object (unchanged) ·
+`$__vec_base` array → `__array_to_primitive_string` · nominal class struct →
+`__class_to_primitive` · `$Object` wrapper internal slot · `$Object` own
+`valueOf`/`toString` with a `"[object Object]"` default. It **falls through to
+`return unchanged`** (object-runtime.ts:2408-2413, NOT a throw) for a built-in
+exotic that is none of those — a TypedArray view, DataView, ArrayBuffer, RegExp,
+or boxed wrapper backed by a nominal runtime struct. "Return unchanged" then
+makes the caller's `__unbox_number`/string coercion produce the WRONG value
+(0/NaN) — it does **not** itself throw the headline TypeError (the verify-first
+probes confirmed: `"" + new Uint8Array([1,2,3])` already works via the
+`$__vec_base` arm; `"" + /x/` returns the wrong value but does not throw).
+
+### Changes — bounded, all in the `!ref.test $Object` block (object-runtime.ts ~2378)
+
+Add a brand-dispatch BETWEEN the existing `$__vec_base` arm (2384) and the
+`__class_to_primitive` arm (2399), reducing each built-in exotic to its spec
+OrdinaryToPrimitive result. Each reuses the **reserve-placeholder-funcIdx +
+fill-in-post-processing** discipline (the established
+`reserveArrayToPrimitiveString` / `reserveClassToPrimitive` /
+`fillClassToPrimitive` pattern, class-to-primitive.ts:58/111) because these
+helpers depend on carriers/structs registered AFTER `__to_primitive`:
+
+1. **RegExp exotic** → `RegExp.prototype.toString` = `"/" + source + "/" + flags`.
+   The `$NativeRegExp` struct is recoverable via the existing
+   `recoverRegExpStructFromExternref` (regexp-standalone.ts:908) and the field
+   reads already exist (`emitRegExpReflectionFieldRead`). Arm: after the
+   `$__vec_base` test, `ref.test` the standalone RegExp struct
+   (`ensureStandaloneRegExpStruct`) → if hit, build the source/flags string and
+   `return`. (This is the only exotic with a non-`[object X]` ToPrimitive.)
+2. **TypedArray view** → `%TypedArray%.prototype.join(",")` (Array-like
+   toString). **This arm DEPENDS ON #2893's `recoverTypedArrayViewFromExternref`
+   classifier** — without a view brand the engine cannot tell a view from a
+   `number[]` here either (the integer views are already type-distinct so
+   `ref.test $__vec_i8_byte`/… classifies them; the float views need #2893 PR-2).
+   So gate this arm behind #2893 and reuse its classifier. NOTE: integer-view
+   concat *already* works via the `$__vec_base` arm (a view IS a `$__vec_base`
+   subtype) → so this arm is only needed for the float-view + correct-formatting
+   subset; verify-first to confirm it is even a gap before coding.
+3. **DataView / ArrayBuffer** → inherit `Object.prototype.toString` →
+   `"[object DataView]"` / `"[object ArrayBuffer]"` native string constants.
+   These are `__vec_i32_byte` structs (new-super.ts:4484) — `ref.test
+   $__vec_i32_byte` distinguishes them, but that key is SHARED by both
+   ArrayBuffer and DataView (and SharedArrayBuffer), so the exact `[object X]`
+   label cannot be recovered from the vec type alone. **This is a real
+   sub-blocker** — either accept a generic `"[object Object]"` for these (spec
+   wants the specific tag, but a generic label flips the no-throw subset), or
+   defer DataView/ArrayBuffer ToPrimitive to a follow-up that gives them a brand
+   (parallels #2893). Recommend: ship the generic-label arm first (unblocks the
+   no-throw rows), file the specific-tag refinement separately.
+
+For the §7.1.1.1 step-6 "must return primitive" TypeError, keep the existing
+`returnIfPrimitive` guard (object-runtime.ts:2256) so a present-but-object-
+returning `valueOf`/`toString` STILL throws (the genuine-TypeError tests).
+
+### Default `Object.prototype.toString` for inherited-method misses (object-runtime.ts:2321 `tryOrdinaryMethod`)
+
+Today the `"[object Object]"` default fires only on the `toString`-arm when the
+own probe misses (`defaultObjectToStringOnMissing`). Per §7.1.1.1 a plain object
+with neither own `valueOf` nor own `toString` resolves to
+`Object.prototype.toString` → `"[object Object]"`. When BOTH own probes miss
+(standalone `__extern_get` is OWN-only; the prototype chain is not materialized),
+return `"[object Object]"` rather than falling through to `throwTypeError`. Guard:
+this default must NOT mask the genuine TypeError when a present method returns an
+object — keep the `returnIfPrimitive` guard on present methods.
+
+### Late-funcIdx discipline (has bitten before — `reference_1461`/`reference_2191`/`reference_2193`)
+
+- The new exotic arms call helpers (`__array_to_primitive_string`, the RegExp
+  source/flags builders, string-constant globals) that are registered AFTER
+  `__to_primitive`. **Reserve a stable placeholder funcIdx at `__to_primitive`
+  build time and FILL the body post-processing** — never read the helper's
+  funcIdx inline (it does not exist yet). Mirror `reserveArrayToPrimitiveString`
+  (object-runtime.ts:2223) exactly.
+- `addUnionImportsViaRegistry` is already called at the top of the
+  `__to_primitive` block (object-runtime.ts:2208) — keep any new `ensureLateImport`
+  BEFORE the funcIdx reads, and if a late import is added inside the body, flush
+  with the established shift discipline so the in-progress body's call targets
+  don't desync (the #1890/#329 finalization-shift class that corrupted strict
+  `===`, binary-ops.ts:2249).
+- The fill helpers must run in the correct post-processing ORDER relative to
+  `emitToPrimitiveMethodExports` / `fillClassToPrimitive` (object-runtime.ts
+  finalize) — add the new fills alongside them, after the carrier structs exist.
+
+### Edge cases / regression guards
+
+- `Symbol.toPrimitive` precedence: a user `@@toPrimitive` is handled in the
+  coercion engine BEFORE `__to_primitive` — verify the new exotic arms don't
+  short-circuit it (they run only in the `!ref.test $Object` block, which a
+  `$Object` with `@@toPrimitive` never reaches). The
+  `structHasStaticNumericToPrimitive` fast-path (binary-ops.ts:3188) must still
+  win for nominal structs with a static numeric ToPrimitive.
+- `new Number(5)` etc. wrapper-slot arm (object-runtime.ts:2423) must keep
+  winning over the new default-toString arm — it runs in the `$Object` block,
+  before the cascade reaches the exotic arms. Order preserved.
+- Genuine `§7.1.1.1` TypeError tests MUST still throw: `Symbol.toPrimitive`
+  returning an object, ordinary `toString`/`valueOf` returning an object. Keep
+  the `returnIfPrimitive` guard + the trailing `throwTypeError()`.
+- All new arms `ctx.standalone`-gated (the host lane uses `_hostToPrimitive`).
+
+### Verify-first plan (run BEFORE coding — the verify-first finding is mandatory)
+
+0. **PREREQUISITE (route as a SEPARATE test-infra task, NOT this issue):** the
+   de-mask of `extractWasmExceptionMessage` (test262-runner.ts:2913/2927) +
+   `scripts/compiler-fork-worker.mjs` — wrap `String(payload)` in try/catch.
+   **Error-text only, flips zero pass/fail.** Until this lands, the ~2014
+   mis-labeled rows cannot be re-triaged and the true #2862 cluster size is
+   unknown. Do not start the compiler work until the de-mask reveals the real
+   per-exotic counts.
+1. Probe each exotic on current main via the EXACT CI standalone path
+   (`runTest262File(file, cat, undefined, "standalone")`): `"" + /x/`,
+   `"" + new DataView(new ArrayBuffer(8))`, `\`${new Float64Array([1])}\``,
+   `1 + {}` (inherited toString). Record actual vs spec. Only code the arms that
+   are a REAL gap (the integer-view concat is already correct — do not re-add it).
+2. After coding, re-run the relevant `language/expressions/**` operator dirs
+   (`addition`, `equals`, relational) + `built-ins/RegExp/prototype/Symbol.*` +
+   the genuine-TypeError tests. Confirm fail→pass on the targeted exotics AND no
+   pass→fail on the genuine-TypeError set.
+3. Full `merge_group` + standalone high-water; 0 host-mode regression.
+
+### Files
+
+- `src/codegen/object-runtime.ts` — `__to_primitive` arm cascade (the
+  `!ref.test $Object` block, 2378-2413) + `tryOrdinaryMethod` default (2321) +
+  the new reserve/fill placeholders alongside `reserveArrayToPrimitiveString`.
+- `src/codegen/regexp-standalone.ts` — read-only reuse of
+  `recoverRegExpStructFromExternref` / `emitRegExpReflectionFieldRead`.
+- `src/codegen/array-to-primitive.ts`, `src/codegen/class-to-primitive.ts` —
+  reserve/fill template (read-only reference).
+- `tests/test262-runner.ts` + `scripts/compiler-fork-worker.mjs` — the de-mask
+  (SEPARATE task, step 0).
+
+### Estimated cluster size + split verdict
+
+The original "728 pure" figure is **not** the deliverable of this substrate
+change (verify-first proved it heterogeneous). Realistic per-arm yields after
+de-mask: RegExp ToPrimitive ~20-40 (`RegExp` 125 total, only the
+concat/format subset); built-in-exotic concat/format across DataView/
+ArrayBuffer/float-TypedArray ~30-60; inherited-default `[object Object]` for
+plain objects ~30-80. **Total realistic ~80-180 standalone rows** — materially
+smaller than 728, with the remainder belonging to the re-triaged real clusters
+(number→string key coercion, `ToIndex` object coercion, getter reflection,
+propertyHelper formatting) that the de-mask exposes as SEPARATE issues.
+
+**SPLIT VERDICT: #2862 is bigger than one focused effort — split into:**
+- **#2862-A (test-infra, do FIRST, unblocks triage):** the runner de-mask
+  (step 0). Flips zero tests but is the prerequisite for sizing everything else.
+- **#2862-B (this substrate change):** the `__to_primitive` exotic arms +
+  inherited-default. The TypedArray-view arm DEPENDS ON #2893 (shared brand
+  classifier) — sequence after #2893 PR-1, or scope #2862-B to RegExp + DataView/
+  ArrayBuffer generic-label + inherited-default and leave the float-view arm to
+  ride #2893.
+- **#2862-C..n (re-triaged clusters):** filed from the de-mask output (number→
+  string key coercion, ToIndex, getter reflection, propertyHelper) — NOT this
+  issue.
+
+Dispatch #2862-A immediately (independent, low-risk). Hold #2862-B until the
+de-mask reveals real counts AND #2893 PR-1 lands (for the view arm). Do NOT sell
+#2862-B as flipping the 728.
