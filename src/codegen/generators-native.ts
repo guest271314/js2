@@ -38,14 +38,24 @@ import { addFuncType } from "./registry/types.js";
 import { coerceType, compileExpression, compileStatement, valTypesMatch } from "./shared.js";
 import { bodyUsesArguments } from "./helpers/body-uses-arguments.js";
 import { resolveSpillLocalValType } from "./statements/variables.js";
+import { ensureExnTag } from "./registry/imports.js";
 
 const STATE_FIELD = 0;
 const SENT_FIELD = 1;
 const MODE_FIELD = 2;
 const ABRUPT_FIELD = 3;
+// (#2864 F2) `gen.throw(e)` error payload. Always externref (an Error object),
+// independent of the carrier — the `abrupt`/`sent` carrier fields can be f64 in a
+// numeric generator, so the thrown value needs its own slot. Resume mode 2 reads
+// it and re-throws after running enclosing finalizers.
+const ERROR_FIELD = 4;
 const RESULT_VALUE_FIELD = 0;
 const RESULT_DONE_FIELD = 1;
-const PARAM_FIELD_OFFSET = 4;
+const PARAM_FIELD_OFFSET = 5;
+// Resume modes stored in MODE_FIELD: 0 = next, 1 = return (abrupt), 2 = throw.
+const MODE_NEXT = 0;
+const MODE_RETURN = 1;
+const MODE_THROW = 2;
 const MAX_NATIVE_GENERATOR_STATES = 256;
 
 /**
@@ -1169,6 +1179,8 @@ export function registerNativeGenerator(
     { name: "sent", type: carrierFieldType, mutable: true },
     { name: "mode", type: { kind: "i32" }, mutable: true },
     { name: "abrupt", type: carrierFieldType, mutable: true },
+    // (#2864 F2) `gen.throw(e)` payload — externref regardless of carrier.
+    { name: "error", type: { kind: "externref" }, mutable: true },
   ];
   for (let i = 0; i < paramTypes.length; i++) {
     stateFields.push({
@@ -1605,8 +1617,12 @@ function compileState(
   // import would over-shift any `call` funcIdx already in the outer body.
   ctx.liveBodies.add(saved);
 
-  // Abrupt-resume (.return()) handling: if we resumed into this state in mode 1
-  // (return), run finalizers, store spills, and complete with the abrupt value.
+  // Abrupt-resume handling: if we resumed into this state in an abrupt mode
+  // (mode != 0), run the enclosing finalizers, then either complete with the
+  // `.return(v)` value (mode 1) or RE-THROW the `.throw(e)` error (mode 2, #2864
+  // F2). Both share the finalizer run + spill store + done transition; they
+  // diverge only at the tail. The finalizers are compiled ONCE into `abruptBody`,
+  // which the outer `if (mode != 0)` guards.
   if (state.abruptResume) {
     const abruptBody: Instr[] = [];
     const savedAbrupt = fctx.body;
@@ -1616,29 +1632,47 @@ function compileState(
     }
     abruptBody.push(...storeSpills(info, fctx, selfLocal));
     abruptBody.push(...setStateInstrs(info, selfLocal, info.doneState));
-    // (#2171/#2864) `.return(v)` value lives in the `abrupt` field. When the
-    // field carrier matches the result `value` type — numeric (both f64) or the
-    // boxed-any carrier (both externref) — the abrupt field IS the completion
-    // value, so read it. For a string generator the result `value` is a string
-    // ref while `abrupt` stays f64, so string `.return(v)` is not yet wired —
-    // complete with the elem-type default so the result struct typechecks.
-    // (String `.return(v)` is a documented follow-up.)
+
+    // mode 2 (throw): re-throw the stored error. `throw` is stack-polymorphic
+    // (control leaves the resume function), so no value/`br` is needed and the
+    // generator surfaces the error to the `.throw(e)` caller, finalizers having
+    // run first (§27.5.3.4 GeneratorResumeAbrupt with a throw completion, no
+    // catch in this slice — try/catch-across-yield stays the next slice).
+    const throwBody: Instr[] = [
+      { op: "local.get", index: selfLocal },
+      { op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: ERROR_FIELD },
+      { op: "throw", tagIdx: ensureExnTag(ctx) } as Instr,
+    ];
+
+    // mode 1 (return): complete with the abrupt value (unchanged from F1). The
+    // `.return(v)` value lives in `abrupt` when its carrier matches the result
+    // `value` type (numeric / boxed-any); for a string generator the abrupt
+    // field stays f64, so complete with the elem default (string `.return(v)` is
+    // a documented follow-up). br depth is exitDepth + 2 — inside the outer
+    // `if (mode != 0)` AND the inner `if (mode == 2) … else …`.
+    const returnBody: Instr[] = [];
     if (valTypesMatch(genCarrierFieldType(info.elemValType), info.elemValType)) {
-      abruptBody.push({ op: "local.get", index: selfLocal });
-      abruptBody.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: info.abruptFieldIdx });
+      returnBody.push({ op: "local.get", index: selfLocal });
+      returnBody.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: info.abruptFieldIdx });
     } else {
-      abruptBody.push(defaultElemValueInstr(info.elemValType));
+      returnBody.push(defaultElemValueInstr(info.elemValType));
     }
-    abruptBody.push({ op: "i32.const", value: 1 });
-    abruptBody.push({ op: "struct.new", typeIdx: info.resultTypeIdx });
-    abruptBody.push({ op: "local.set", index: resultLocal });
-    abruptBody.push({ op: "br", depth: exitDepth + 1 }); // +1: inside the `if`
+    returnBody.push({ op: "i32.const", value: 1 });
+    returnBody.push({ op: "struct.new", typeIdx: info.resultTypeIdx });
+    returnBody.push({ op: "local.set", index: resultLocal });
+    returnBody.push({ op: "br", depth: exitDepth + 2 });
+
+    abruptBody.push({ op: "local.get", index: selfLocal });
+    abruptBody.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: info.modeFieldIdx });
+    abruptBody.push({ op: "i32.const", value: MODE_THROW });
+    abruptBody.push({ op: "i32.eq" });
+    abruptBody.push({ op: "if", blockType: { kind: "empty" }, then: throwBody, else: returnBody });
     fctx.body = savedAbrupt;
 
     body.push({ op: "local.get", index: selfLocal });
     body.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: info.modeFieldIdx });
-    body.push({ op: "i32.const", value: 1 });
-    body.push({ op: "i32.eq" });
+    body.push({ op: "i32.const", value: MODE_NEXT });
+    body.push({ op: "i32.ne" });
     body.push({ op: "if", blockType: { kind: "empty" }, then: abruptBody, else: [] });
   }
 
@@ -1943,10 +1977,11 @@ export function compileNativeGeneratorFunction(
   const carrierInit: Instr = carrierIsAny(info.elemValType)
     ? ({ op: "ref.null.extern" } as Instr)
     : { op: "f64.const", value: NaN };
-  fctx.body.push({ op: "i32.const", value: 0 });
-  fctx.body.push(carrierInit);
-  fctx.body.push({ op: "i32.const", value: 0 });
-  fctx.body.push(carrierInit);
+  fctx.body.push({ op: "i32.const", value: 0 }); // state
+  fctx.body.push(carrierInit); // sent
+  fctx.body.push({ op: "i32.const", value: 0 }); // mode = MODE_NEXT
+  fctx.body.push(carrierInit); // abrupt
+  fctx.body.push({ op: "ref.null.extern" } as Instr); // (#2864 F2) error
   // (#2571) Read every wasm param into its `param_*` state slot. For an instance
   // method generator the synthetic `this` is wasm param 0 and user params are
   // 1..n, so iterate `info.paramTypes.length` (which includes the synthetic
@@ -2020,8 +2055,6 @@ function compileDirectNativeGeneratorMethod(
   methodName: string,
   args: readonly ts.Expression[],
 ): ValType | null | undefined {
-  if (methodName === "throw") return undefined;
-
   if (receiverType.kind === "ref_null") {
     fctx.body.push({ op: "ref.as_non_null" });
   }
@@ -2030,6 +2063,56 @@ function compileDirectNativeGeneratorMethod(
     typeIdx: info.stateTypeIdx,
   });
   fctx.body.push({ op: "local.set", index: selfLocal });
+
+  if (methodName === "throw") {
+    // (#2864 F2) `gen.throw(e)` — §27.5.3.4 GeneratorResumeAbrupt(throw).
+    // Compile the error to externref into the dedicated error slot, then:
+    //   • SUSPENDED (state != start && state != done): set mode=2 and resume —
+    //     the resume function runs enclosing finalizers and re-throws (this slice
+    //     has no try/catch-across-yield, so it always propagates).
+    //   • NOT-STARTED / DONE: complete the generator and throw the error directly.
+    const errorTmp = allocLocal(fctx, `__native_gen_err_${fctx.locals.length}`, { kind: "externref" });
+    if (args[0]) {
+      const t = compileExpression(ctx, fctx, args[0], { kind: "externref" });
+      if (t && t.kind !== "externref") coerceType(ctx, fctx, t, { kind: "externref" });
+      else if (!t) fctx.body.push({ op: "ref.null.extern" });
+    } else {
+      fctx.body.push({ op: "ref.null.extern" });
+    }
+    fctx.body.push({ op: "local.set", index: errorTmp });
+    compileIgnoredArgs(ctx, fctx, args.slice(1));
+
+    const tagIdx = ensureExnTag(ctx);
+    // suspended = (state != START) && (state != doneState)
+    fctx.body.push({ op: "local.get", index: selfLocal });
+    fctx.body.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: STATE_FIELD });
+    fctx.body.push({ op: "i32.const", value: 0 });
+    fctx.body.push({ op: "i32.ne" });
+    fctx.body.push({ op: "local.get", index: selfLocal });
+    fctx.body.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: STATE_FIELD });
+    fctx.body.push({ op: "i32.const", value: info.doneState });
+    fctx.body.push({ op: "i32.ne" });
+    fctx.body.push({ op: "i32.and" });
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "val", type: { kind: "ref", typeIdx: info.resultTypeIdx } },
+      then: [
+        { op: "local.get", index: selfLocal },
+        { op: "local.get", index: errorTmp },
+        { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: ERROR_FIELD },
+        ...setStateI32FromConst(info, selfLocal, info.modeFieldIdx, MODE_THROW),
+        { op: "local.get", index: selfLocal },
+        { op: "call", funcIdx: ensureNativeGeneratorResumeFunction(ctx, info) },
+      ],
+      else: [
+        // Not-started / completed: mark done and throw the error to the caller.
+        ...setStateI32FromConst(info, selfLocal, STATE_FIELD, info.doneState),
+        { op: "local.get", index: errorTmp },
+        { op: "throw", tagIdx } as Instr,
+      ],
+    });
+    return { kind: "ref", typeIdx: info.resultTypeIdx };
+  }
 
   if (methodName === "next") {
     const sentTmp = emitCarrierValue(ctx, fctx, args[0], info);
@@ -2095,6 +2178,8 @@ function buildNativeGeneratorDispatch(
   // branches). When no any-carrier generator participates this is undefined and
   // the dispatch is byte-identical to pre-#2864.
   valueAnyLocal?: number,
+  // (#2864 F2) externref error local for `.throw(e)`.
+  errorLocal?: number,
 ): { instrs: Instr[]; resultType: ValType } {
   const infos = Array.from(ctx.nativeGenerators.values());
   // (#2864 F1) When ANY generator in the chain uses the boxed-any carrier, the
@@ -2128,7 +2213,52 @@ function buildNativeGeneratorDispatch(
     const info = infos[index]!;
     const vLocal = branchValueLocal(info);
     let thenBody: Instr[];
-    if (methodName === "next") {
+    if (methodName === "throw") {
+      // (#2864 F2) `gen.throw(e)` — suspended: write the error, set mode=2, and
+      // resume (the resume function runs enclosing finalizers then re-throws);
+      // not-started / done: complete and throw the error directly. Mirrors the
+      // direct-path throw. `throw` is stack-polymorphic so the not-started/done
+      // arm satisfies the block's `resultType` without leaving a value.
+      const tagIdx = ensureExnTag(ctx);
+      thenBody = [
+        { op: "local.get", index: anyLocal },
+        { op: "ref.cast", typeIdx: info.stateTypeIdx },
+        { op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: STATE_FIELD },
+        { op: "i32.const", value: 0 },
+        { op: "i32.ne" },
+        { op: "local.get", index: anyLocal },
+        { op: "ref.cast", typeIdx: info.stateTypeIdx },
+        { op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: STATE_FIELD },
+        { op: "i32.const", value: info.doneState },
+        { op: "i32.ne" },
+        { op: "i32.and" },
+        {
+          op: "if",
+          blockType: { kind: "val", type: resultType },
+          then: [
+            { op: "local.get", index: anyLocal },
+            { op: "ref.cast", typeIdx: info.stateTypeIdx },
+            { op: "local.get", index: errorLocal! },
+            { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: ERROR_FIELD },
+            { op: "local.get", index: anyLocal },
+            { op: "ref.cast", typeIdx: info.stateTypeIdx },
+            { op: "i32.const", value: MODE_THROW },
+            { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: info.modeFieldIdx },
+            { op: "local.get", index: anyLocal },
+            { op: "ref.cast", typeIdx: info.stateTypeIdx },
+            { op: "call", funcIdx: ensureNativeGeneratorResumeFunction(ctx, info) },
+          ],
+          else: [
+            { op: "local.get", index: anyLocal },
+            { op: "ref.cast", typeIdx: info.stateTypeIdx },
+            { op: "i32.const", value: info.doneState },
+            { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: STATE_FIELD },
+            { op: "local.get", index: errorLocal! },
+            { op: "throw", tagIdx } as Instr,
+          ],
+        },
+      ];
+    } else if (methodName === "next") {
       thenBody = [
         { op: "local.get", index: anyLocal },
         { op: "ref.cast", typeIdx: info.stateTypeIdx },
@@ -2222,7 +2352,7 @@ export function tryCompileNativeGeneratorMethodCall(
   methodName: string,
   args: readonly ts.Expression[],
 ): ValType | null | undefined {
-  if (methodName !== "next" && methodName !== "return") return undefined;
+  if (methodName !== "next" && methodName !== "return" && methodName !== "throw") return undefined;
   if (ctx.nativeGenerators.size === 0) return undefined;
 
   const receiverType = compileExpression(ctx, fctx, receiverExpr);
@@ -2255,7 +2385,22 @@ export function tryCompileNativeGeneratorMethodCall(
   const dispatchHasAny = Array.from(ctx.nativeGenerators.values()).some((i) => carrierIsAny(i.elemValType));
   let valueLocal: number | undefined;
   let valueAnyLocal: number | undefined;
-  if (methodName === "return" || methodName === "next") {
+  let errorLocal: number | undefined;
+  if (methodName === "throw") {
+    // (#2864 F2) The thrown value is an externref error, independent of any
+    // generator's carrier — store it in a dedicated local for the dispatch's
+    // throw branch (which writes it to the state struct's `error` field).
+    errorLocal = allocLocal(fctx, `__gen_throw_err_${fctx.locals.length}`, { kind: "externref" });
+    if (args[0]) {
+      const t = compileExpression(ctx, fctx, args[0], { kind: "externref" });
+      if (t && t.kind !== "externref") coerceType(ctx, fctx, t, { kind: "externref" });
+      else if (!t) fctx.body.push({ op: "ref.null.extern" });
+    } else {
+      fctx.body.push({ op: "ref.null.extern" });
+    }
+    fctx.body.push({ op: "local.set", index: errorLocal });
+    compileIgnoredArgs(ctx, fctx, args.slice(1));
+  } else if (methodName === "return" || methodName === "next") {
     if (dispatchHasAny) {
       valueAnyLocal = emitOpenAnyArgValue(ctx, fctx, args[0]);
       compileIgnoredArgs(ctx, fctx, args.slice(1));
@@ -2269,7 +2414,14 @@ export function tryCompileNativeGeneratorMethodCall(
     }
   }
 
-  const { instrs, resultType } = buildNativeGeneratorDispatch(ctx, anyLocal, methodName, valueLocal, valueAnyLocal);
+  const { instrs, resultType } = buildNativeGeneratorDispatch(
+    ctx,
+    anyLocal,
+    methodName,
+    valueLocal,
+    valueAnyLocal,
+    errorLocal,
+  );
   fctx.body.push(...instrs);
   return resultType;
 }
