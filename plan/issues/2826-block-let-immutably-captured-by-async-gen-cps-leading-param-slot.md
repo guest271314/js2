@@ -3,7 +3,7 @@ id: 2826
 title: "Bug C (CPS-capture half): block-scoped let immutably captured by a hoisted async/generator declaration reads the stale pre-hoisted slot"
 parent: 2818
 related: [2820, 2818, 2825, 2811, 2669]
-status: ready
+status: blocked
 created: 2026-06-29
 priority: high
 feasibility: hard
@@ -260,3 +260,40 @@ comment for the precise regression signature.)
 - **Zero** regressions in the 43-test `for-await-of/async-{func,gen}-decl-dstr-*`
   mutable-capture class on full merge_group.
 - TDZ throws for pre-init reads through a CPS capture preserved.
+
+## Merge-group regression (do not re-enqueue as-is)
+
+The first implementation attempt (PR #2333, branch `issue-2826-bugc-cps-capture-repoint`,
+commit `7eba3f486` "re-point immutable CPS block-let captures to fresh slot (Bug C)")
+was **auto-parked** (`hold` + `auto-park-bot:merge-group-failure`) on a REAL,
+net-negative test262 regression caught only in `merge_group`. It is NOT
+baseline drift.
+
+**Why PR-level missed it:** at PR level the test262 shards are skipped — the
+`check for test262 regressions` check ran in ~3s on a stub with no shard data.
+Full conformance is only validated in `merge_group`. So "PR-green" never
+validated test262 here.
+
+**Delta (merge_group, baseline f8c1aa5):**
+- 30 regressions / 22 improvements → **net −8**, ratio 136%, signature `dd4fa22aa1d2c2a1`.
+- ALL 30 regressed tests are `for-await-of` dstr
+  (`async-func-decl-dstr-*` / `async-gen-decl-dstr-*` array/obj rest+elem,
+  e.g. `async-func-decl-dstr-array-elem-iter-nrml-close.js`).
+- The 22 improvements are also for-await/await dstr — so the fix is a
+  **same-area tradeoff that breaks more than it fixes**.
+- Confirmed PR-caused (not drift/flake): WAT differs branch vs `origin/main`,
+  and a runtime probe via the exact CI path (`runTest262File`) flips
+  `async-func-decl-dstr-array-elem-iter-nrml-close.js` from **pass on main**
+  to **fail on branch** ("assert.sameValue(nextCount, 1)").
+- Cross-checked against #2335/#2818: DIFFERENT signature, ZERO shared regressed
+  tests, no `S15.3_A3_T1`/TLA markers → not a shared drift cluster.
+
+**Narrowing direction for the rework:** the slot re-point is over-applied. It
+must re-point ONLY the CPS capture that genuinely needs a fresh slot (the exact
+immutable-`let`-captured-by-hoisted-async/gen case this issue targets), and
+leave the mutable `for-await-of/async-{func,gen}-decl-dstr-*` capture path on
+its existing slot — that path is what regressed. Gate the re-point on the same
+predicate #2820 used to *exclude* CPS capturers, inverted to its single
+intended case. **Validate against a full `merge_group` / local-CI test262 run
+BEFORE re-enqueue** — a scoped check cannot see this cluster. PR #2333 branch
++ this diagnosis must survive; re-open this issue for the narrowed attempt.
