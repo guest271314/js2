@@ -98,6 +98,32 @@ byte-identical in host mode.
 - gc-mode output unchanged.
 - Full merge_group NET-POSITIVE, zero regression.
 
+## merge_group regression + fix (post-#2835 interaction)
+
+The first cut regressed **440 standalone `*/dstr/*` tests (net -404)**, caught only
+in the merge_group standalone-floor re-validation (PR checks were green). Root
+cause — NOT a type-index shift (the i8-pack hypothesis): the unconditional native
+`__array_from_iter_n` drain routed EVERY externref destructure source through the
+native `__iterator`, whose **vec-only carrier hard-casts a non-`__vec_externref`
+subject → `illegal cast`**. Indexable sources (function / class-method / for-of
+array-pattern destructuring — `ary-ptrn-*`, `iter-close`, `iter-step-err`) that
+passed on baseline via the `buildVecFromExternref` indexed-read fallback now
+trapped.
+
+Why baseline passed: `destructureParamArray`'s externref fallback has TWO
+sub-paths — block A (`__array_from_iter_n` materialise + `__extern_length` /
+`__extern_get_idx` read) and block B (`buildVecFromExternref`, indexed read). On
+baseline the host `__array_from_iter_n` either didn't run for these or block B
+handled them; my native helper made block A's `__iterator` drain ALWAYS run →
+trap.
+
+Fix (commit `b0e8e3bb9`): gate the iterator drain on `ref.test __vec_externref`.
+A non-`$Vec` source is returned UNCHANGED so block A's own indexed read
+(`__extern_length`/`__extern_get_idx`) handles it — byte-equivalent to the legacy
+host result for an indexable source, host-free, and never trapping. Verified
+30/30 previously-regressed dstr tests now pass; de-leak preserved; non-vec
+iterables (generator/Set-as-any) degrade gracefully (they failed on baseline too).
+
 ## Test Results
 
 `tests/issue-2904-standalone-fixed-dstr-iter-drain.test.ts` (7 cases, all green):
