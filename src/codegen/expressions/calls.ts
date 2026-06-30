@@ -43,6 +43,7 @@ import {
   ensureTimerHeap,
   getRunLoopNowFuncIdx,
   isStandalonePromiseActive,
+  isStandaloneThenChainNativeActive,
   isStdinReactorActive,
   type StandalonePromiseThenCallback,
 } from "../async-scheduler.js";
@@ -9550,7 +9551,7 @@ function compileCallExpression(
         const isPromiseReceiver = recvSym === "Promise" || apparentSym === "Promise";
 
         if (isPromiseReceiver) {
-          if (isStandalonePromiseActive(ctx) && method === "then") {
+          if (isStandaloneThenChainNativeActive(ctx) && method === "then") {
             const liveBuffers: Instr[][] = [];
             try {
               const promiseInstrs = compilePromiseThenReceiverBuffer(ctx, fctx, propAccess.expression, liveBuffers);
@@ -9569,7 +9570,7 @@ function compileCallExpression(
           // imports. The chained promise still propagates a fulfilled receiver
           // unchanged (onFulfilled = null) and routes a rejection through the
           // user's onRejected continuation.
-          if (isStandalonePromiseActive(ctx) && method === "catch") {
+          if (isStandaloneThenChainNativeActive(ctx) && method === "catch") {
             const liveBuffers: Instr[][] = [];
             try {
               const promiseInstrs = compilePromiseThenReceiverBuffer(ctx, fctx, propAccess.expression, liveBuffers);
