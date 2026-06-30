@@ -6660,6 +6660,13 @@ function compileCallExpression(
       const arg0 = expr.arguments[0]!;
       const arg1 = expr.arguments[1]!;
 
+      // (#2874) Under standalone, register the native object runtime so the
+      // typed-receiver fast path's `ensureLateImport("__create_descriptor", …)`
+      // below resolves to the native `__create_descriptor` (object-runtime.ts)
+      // instead of leaking the `env::__create_descriptor` host import (which has
+      // no standalone carrier — the module would trap). Idempotent.
+      if (ctx.standalone) ensureObjectRuntime(ctx);
+
       // Try compile-time fast path: known struct + literal property name
       const arg0TsType = ctx.checker.getTypeAtLocation(arg0);
       const structName = resolveStructName(ctx, arg0TsType);
