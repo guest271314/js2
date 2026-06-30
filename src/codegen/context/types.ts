@@ -238,6 +238,13 @@ export interface NativeGeneratorInfo {
   abruptFieldIdx: number;
   /** Function-local names spilled into the state struct across suspensions. */
   spillNames: string[];
+  /**
+   * (#2864 F1b) Wasm ValType of each spilled local, aligned 1:1 with
+   * `spillNames`. The state-struct spill field, the resume-load local, and the
+   * struct-construction init default are all minted at this type so object /
+   * string / typed-struct locals survive across a `yield` (historically f64).
+   */
+  spillTypes: ValType[];
   /** Field index where spilled locals start in the state struct. */
   spillFieldOffset: number;
   /** Number of top-level yield suspension points. */

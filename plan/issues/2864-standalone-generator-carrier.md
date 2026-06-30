@@ -2,7 +2,7 @@
 id: 2864
 title: "Standalone: no Wasm-native generator carrier — sync generators leak __create_generator/__gen_* host imports"
 status: in-progress
-assignee: ttraenkler/sendev-genframe
+assignee: ttraenkler/sr-frame
 created: 2026-06-30
 updated: 2026-06-30
 priority: high
@@ -162,3 +162,82 @@ frame rather than building a new one.
   drain consumers parametrised on the generator's carrier element type.
 - `tests/issue-2864-standalone-generator-carrier.test.ts` — 8 standalone cases
   (zero-host-import asserted).
+
+## F1b — typed live-across-yield LOCAL spills (landed)
+
+**Scope shipped:** a generator that carries an OBJECT / STRING / typed-struct
+local across a `yield` now compiles host-free in standalone/WASI, instead of
+mis-compiling (the f64 spill field could not hold a `ref`) or bailing. The
+spill field, the resume-function load local, and the state-struct construction
+default are all minted at the local's **actual** ValType.
+
+Verify-first (`function* g(){ let o={n:1}; yield 1; yield o.n }`, read via
+`.next().value`): **CE-refused** on main → host-free + returns `2` after F1b
+(`result.imports` empty). Also host-free: numeric/string LOCAL spills, an
+object-yield carrier WITH an object local spill, and loop-carried object spills
+drained via `for-of`. gc-mode unchanged (the native path is gated
+`noJsHostTarget`); numeric spills stay byte-identical (f64).
+
+### Why these decisions (root-cause, not symptom)
+
+The F1 notes framed this as gated on the **any** carrier, but the dominant
+failure is broader: a generator with **numeric** yields and an **object/string
+LOCAL** (e.g. `let o={…}; yield 1; yield o.n`) is an f64-carrier generator whose
+spill field was hardcoded f64 (`stateFields … {kind:"f64"}`), the resume-load
+local was hardcoded f64, and the struct-init pushed `f64.const NaN` — so the
+object local's `ref` value mis-stored against an f64 field → a hard wasm
+validation error (`local.set expected (ref null N), found struct.get of type
+f64`). The fix types all three sites per-spill.
+
+- **Spill type resolved by `resolveSpillLocalValType` (in `variables.ts`).** The
+  resume function compiles the body with a FRESH `FunctionContext` whose analysis
+  caches are empty and whose locals never resolve to a module global, so the type
+  its var-declaration computes reduces to the **fctx-independent** subset of the
+  `compileVariableStatement` cascade — the ctx/AST externref-forcing overrides
+  plus `localTypeForDeclaration`. The helper replicates exactly that subset (it
+  lives next to those predicates so they stay in lockstep) and returns `null` for
+  any form whose representation the up-front layout cannot match (Proxy, accessor
+  / spread / growable object literals, `subarray` subview, regexp-match arrays,
+  `Array<any>` vecs, …). A `null` for ANY spill keeps the WHOLE generator on the
+  host path — a conservative, non-regressing bail consistent across the candidate
+  gate and registration.
+- **Non-null `ref` widened to `ref_null`.** `resolveWasmType` returns a non-null
+  `ref` for object literals, but a wasm local is widened to nullable and a
+  non-null ref struct field has no `struct.new` default. So spills carry
+  `ref_null`; `struct.get` of a nullable ref is valid and traps-on-null exactly
+  as the source semantics require.
+- **Post-emission reconcile.** The body's var-declaration reuses the
+  pre-allocated spill slot and may re-type it (e.g. narrow `ref_null` → non-null
+  `ref`). After the resume body is emitted, each spill's FINAL local type is
+  read back, widened to `ref_null`, and pinned onto BOTH the local slot and the
+  state-struct field (+ `info.spillTypes`, which the constructor init reads). This
+  runs before any `struct.new` of the state struct (the constructor calls the
+  resume builder first), so the init defaults observe the reconciled types — no
+  prediction-vs-emission divergence can slip through.
+
+### Deferred (F1b — kept on the host path; correctness-preserving)
+
+- **Boxed-any `.next(v)` RESUME bindings** (`let x = yield …` where the yields are
+  object/mixed → externref carrier): the sent value is an externref whose later
+  **member** reads need the any-receiver dispatch (#2151), which silently computes
+  a wrong value here. So an any-carrier generator with a resume binding still
+  bails to the host path (exactly as F1 did) — a CE-refusal is correct, a wrong
+  answer is not. Numeric/native-string resume bindings (sent = f64 / string) ARE
+  supported. Widening the boxed-any sent-value reads is an F1c follow-up that
+  builds on #2151.
+- **String-ELEM generators read via `.next().value as string`** remain blocked on
+  a PRE-EXISTING #2171 string-carrier result-reader mismatch (result `value`
+  typeIdx ≠ the produced string vec), independent of spills — reproduces with a
+  zero-spill string generator. Not in F1b scope.
+
+### Files (F1b)
+
+- `src/codegen/statements/variables.ts` — new exported `resolveSpillLocalValType`.
+- `src/codegen/generators-native.ts` — per-spill `spillTypes` in the plan + info,
+  typed spill fields / resume-load locals / `struct.new` defaults
+  (`defaultSpillInstr`), the any-carrier resume-binding bail, and the
+  post-emission spill-type reconcile. Retired the F1 `elemIsAny && spills>0` and
+  string-elem spill guards (subsumed by per-spill resolution).
+- `src/codegen/context/types.ts` — `NativeGeneratorInfo.spillTypes`.
+- `tests/issue-2864-standalone-generator-carrier.test.ts` — 6 F1b standalone
+  cases (zero-host-import asserted).

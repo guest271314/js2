@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-06-30T08:23:02.244Z",
-  "baseline_generated_at": "2026-06-30T08:23:02.244Z",
-  "baseline_sha": "17c509414ed7bb6ddbcd8339e6f1f0a5d79fada2",
+  "timestamp": "2026-06-30T10:06:41.641Z",
+  "baseline_generated_at": "2026-06-30T10:06:41.642Z",
+  "baseline_sha": "7d6fb10706da55e06167f17e5e7ee5b4f0f6b475",
   "oracle_version": 1,
   "mode": {
     "target": "standalone",
@@ -10,37 +10,37 @@
   },
   "summary": {
     "total": 43136,
-    "pass": 24927,
-    "fail": 12888,
-    "compile_error": 5297,
+    "pass": 24951,
+    "fail": 12955,
+    "compile_error": 5206,
     "compile_timeout": 6,
     "skip": 18,
-    "compilable": 37815,
-    "host_free_pass": 12557,
-    "leaky_pass": 12370,
+    "compilable": 37906,
+    "host_free_pass": 12566,
+    "leaky_pass": 12385,
     "stale": 0,
     "by_category": {
       "standard": {
         "total": 42050,
-        "pass": 24403,
-        "fail": 12453,
-        "compile_error": 5170,
+        "pass": 24427,
+        "fail": 12518,
+        "compile_error": 5081,
         "compile_timeout": 6,
         "skip": 18,
-        "compilable": 36856,
-        "host_free_pass": 12395,
-        "leaky_pass": 12008,
+        "compilable": 36945,
+        "host_free_pass": 12404,
+        "leaky_pass": 12023,
         "stale": 0,
         "label": "ECMAScript current standard"
       },
       "annex_b": {
         "total": 1086,
         "pass": 524,
-        "fail": 435,
-        "compile_error": 127,
+        "fail": 437,
+        "compile_error": 125,
         "compile_timeout": 0,
         "skip": 0,
-        "compilable": 959,
+        "compilable": 961,
         "host_free_pass": 162,
         "leaky_pass": 362,
         "stale": 0,
@@ -61,27 +61,27 @@
       },
       "official": {
         "total": 43136,
-        "pass": 24927,
-        "fail": 12888,
-        "compile_error": 5297,
+        "pass": 24951,
+        "fail": 12955,
+        "compile_error": 5206,
         "compile_timeout": 6,
         "skip": 18,
-        "compilable": 37815,
-        "host_free_pass": 12557,
-        "leaky_pass": 12370,
+        "compilable": 37906,
+        "host_free_pass": 12566,
+        "leaky_pass": 12385,
         "stale": 0,
         "label": "standard + annex_b (default)"
       },
       "full": {
         "total": 48118,
-        "pass": 26067,
-        "fail": 13906,
-        "compile_error": 8015,
+        "pass": 26091,
+        "fail": 13973,
+        "compile_error": 7924,
         "compile_timeout": 7,
         "skip": 123,
-        "compilable": 39973,
-        "host_free_pass": 12889,
-        "leaky_pass": 13178,
+        "compilable": 40064,
+        "host_free_pass": 12898,
+        "leaky_pass": 13193,
         "stale": 0,
         "label": "standard + annex_b + proposals"
       }
@@ -89,49 +89,49 @@
   },
   "official_summary": {
     "total": 43136,
-    "pass": 24927,
-    "fail": 12888,
-    "compile_error": 5297,
+    "pass": 24951,
+    "fail": 12955,
+    "compile_error": 5206,
     "compile_timeout": 6,
     "skip": 18,
-    "compilable": 37815,
-    "host_free_pass": 12557,
-    "leaky_pass": 12370,
+    "compilable": 37906,
+    "host_free_pass": 12566,
+    "leaky_pass": 12385,
     "stale": 0
   },
   "full_summary": {
     "total": 48118,
-    "pass": 26067,
-    "fail": 13906,
-    "compile_error": 8015,
+    "pass": 26091,
+    "fail": 13973,
+    "compile_error": 7924,
     "compile_timeout": 7,
     "skip": 123,
-    "compilable": 39973,
-    "host_free_pass": 12889,
-    "leaky_pass": 13178,
+    "compilable": 40064,
+    "host_free_pass": 12898,
+    "leaky_pass": 13193,
     "stale": 0
   },
   "strict_summary": {
     "total": 40627,
-    "pass": 23724,
-    "fail": 12054,
-    "compile_error": 4825,
+    "pass": 23748,
+    "fail": 12121,
+    "compile_error": 4734,
     "compile_timeout": 6,
     "skip": 18,
-    "compilable": 35778,
-    "host_free_pass": 11955,
-    "leaky_pass": 11769,
+    "compilable": 35869,
+    "host_free_pass": 11964,
+    "leaky_pass": 11784,
     "stale": 0
   },
   "scope_summaries": {
     "annex_b": {
       "total": 1086,
       "pass": 524,
-      "fail": 435,
-      "compile_error": 127,
+      "fail": 437,
+      "compile_error": 125,
       "compile_timeout": 0,
       "skip": 0,
-      "compilable": 959,
+      "compilable": 961,
       "host_free_pass": 162,
       "leaky_pass": 362,
       "stale": 0
@@ -150,14 +150,14 @@
     },
     "standard": {
       "total": 42050,
-      "pass": 24403,
-      "fail": 12453,
-      "compile_error": 5170,
+      "pass": 24427,
+      "fail": 12518,
+      "compile_error": 5081,
       "compile_timeout": 6,
       "skip": 18,
-      "compilable": 36856,
-      "host_free_pass": 12395,
-      "leaky_pass": 12008,
+      "compilable": 36945,
+      "host_free_pass": 12404,
+      "leaky_pass": 12023,
       "stale": 0
     }
   },
@@ -166,8 +166,8 @@
       "name": "annexB/built-ins",
       "path": "annexB/built-ins",
       "pass": 77,
-      "fail": 132,
-      "compile_error": 32,
+      "fail": 134,
+      "compile_error": 30,
       "compile_timeout": 0,
       "skip": 0,
       "total": 241,
@@ -617,8 +617,8 @@
       "name": "built-ins/Object",
       "path": "built-ins/Object",
       "pass": 1277,
-      "fail": 1404,
-      "compile_error": 730,
+      "fail": 1432,
+      "compile_error": 702,
       "compile_timeout": 0,
       "skip": 0,
       "total": 3411,
@@ -682,13 +682,13 @@
     {
       "name": "built-ins/RegExp",
       "path": "built-ins/RegExp",
-      "pass": 1345,
-      "fail": 376,
-      "compile_error": 158,
+      "pass": 1370,
+      "fail": 412,
+      "compile_error": 97,
       "compile_timeout": 0,
       "skip": 0,
       "total": 1879,
-      "host_free_pass": 1243
+      "host_free_pass": 1253
     },
     {
       "name": "built-ins/RegExpStringIteratorPrototype",
@@ -990,13 +990,13 @@
     {
       "name": "language/expressions",
       "path": "language/expressions",
-      "pass": 7635,
-      "fail": 2655,
+      "pass": 7634,
+      "fail": 2656,
       "compile_error": 727,
       "compile_timeout": 1,
       "skip": 18,
       "total": 11036,
-      "host_free_pass": 3355
+      "host_free_pass": 3354
     },
     {
       "name": "language/function-code",
@@ -1198,18 +1198,18 @@
     }
   ],
   "error_categories": {
-    "assertion_fail": 9336,
+    "assertion_fail": 9402,
     "illegal_cast": 1888,
     "negative_test_fail": 78,
     "null_deref": 389,
     "oob": 36,
-    "other": 2054,
+    "other": 2052,
     "promise_error": 192,
     "range_error": 16,
-    "runtime_error": 6914,
+    "runtime_error": 6819,
     "type_error": 19,
     "unreachable": 8,
-    "wasm_compile": 991
+    "wasm_compile": 998
   },
   "hard_errors": {},
   "skip_reasons": {
@@ -1219,37 +1219,35 @@
   },
   "root_cause_map": {
     "target": "standalone",
-    "total_non_pass_non_skip": 21928,
-    "classified": 21928,
+    "total_non_pass_non_skip": 21904,
+    "classified": 21904,
     "unclassified_threshold": null,
     "buckets": [
       {
         "id": "late-import-index-shift",
         "issues": ["#2079", "#2043"],
         "label": "Late-import index-shift fail-loud CE (stale captured index across flushLateImportShifts) — standalone generators, class globals",
-        "count": 6,
+        "count": 4,
         "statuses": {
           "pass": 0,
           "fail": 0,
-          "compile_error": 6,
+          "compile_error": 4,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 6,
+          "total": 4,
           "host_free_pass": 0
         },
         "error_categories": {
-          "other": 6
+          "other": 4
         },
         "sample_files": [
           "test/built-ins/String/prototype/replaceAll/searchValue-replacer-RegExp-call.js",
           "test/built-ins/String/prototype/replaceAll/searchValue-replacer-RegExp-call-fn.js",
-          "test/annexB/built-ins/RegExp/RegExp-invalid-control-escape-character-class.js",
           "test/language/expressions/property-accessors/S11.2.1_A3_T2.js",
-          "test/annexB/built-ins/RegExp/RegExp-control-escape-russian-letter.js"
+          "test/language/statements/for-of/iterator-next-reference.js"
         ],
         "sample_signatures": [
           "other:L#:## Binary emit error: RangeError: Codegen error: global index out of range — -# (valid: [#, #)) at function 'RE_@@replace'. This is the late-import index-shift class (##): a captured index went stale across a deferred flushLateImportShif",
-          "other:L#:## Binary emit error: RangeError: Codegen error: function index out of range — undefined (valid: [#, #)) at function 'invalidControls'. This is the late-import index-shift class (##): a captured index went stale across a deferred flushLa",
           "other:L#:## Binary emit error: RangeError: Codegen error: global index out of range — -# (valid: [#, #)) at function 'test'. This is the late-import index-shift class (##): a captured index went stale across a deferred flushLateImportShifts/addUn",
           "other:L#:## Binary emit error: RangeError: Codegen error: local index out of range — # (valid: [#, #)) at function '__anon_0_get_next'. This is the late-import index-shift class (##): a captured index went stale across a deferred flushLateImportS"
         ]
@@ -1301,8 +1299,8 @@
         },
         "error_categories": {
           "runtime_error": 2476,
-          "wasm_compile": 70,
           "illegal_cast": 14,
+          "wasm_compile": 70,
           "null_deref": 51,
           "other": 184,
           "assertion_fail": 773,
@@ -1310,15 +1308,15 @@
         },
         "sample_files": [
           "test/built-ins/Temporal/Now/zonedDateTimeISO/return-value.js",
-          "test/built-ins/Temporal/PlainDateTime/subclass.js",
           "test/built-ins/Temporal/ZonedDateTime/prototype/eraYear/prop-desc.js",
+          "test/built-ins/Temporal/PlainDateTime/subclass.js",
           "test/built-ins/Temporal/PlainDateTime/prototype/month/prop-desc.js",
-          "test/built-ins/Temporal/Instant/prototype/toString/timezone-wrong-type.js"
+          "test/built-ins/Temporal/PlainMonthDay/refisoyear-undefined.js"
         ],
         "sample_signatures": [
           "runtime_error:Cannot convert object to primitive value",
-          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: extern.convert_any[#] expected type shared anyref, found array.get of type i64 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $instance",
           "illegal_cast:illegal cast [in __str_to_number() ← test]",
+          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: extern.convert_any[#] expected type shared anyref, found array.get of type i64 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $instance",
           "null_deref:L#:## dereferencing a null pointer [in test()]",
           "other:L#:## Temporal.PlainDate argument must be a string or property bag, not object"
         ]
@@ -1348,8 +1346,8 @@
           "test/built-ins/AsyncDisposableStack/prototype/use/not-a-constructor.js",
           "test/built-ins/DisposableStack/prototype/adopt/returns-value.js",
           "test/built-ins/AsyncDisposableStack/length.js",
-          "test/built-ins/DisposableStack/prototype/use/throws-if-value-missing-Symbol.dispose.js",
-          "test/built-ins/DisposableStack/prototype/use/throws-if-value-Symbol.dispose-property-is-null.js"
+          "test/built-ins/DisposableStack/prototype/use/throws-if-value-Symbol.dispose-property-is-null.js",
+          "test/built-ins/DisposableStack/prototype/use/throws-if-value-missing-Symbol.dispose.js"
         ],
         "sample_signatures": [
           "other:L#:## Codegen error: AsyncDisposableStack.prototype built-in static property value read is not supported in --target standalone (## / ## S6-b). Add a native built-in method closure for this pair.",
@@ -1542,22 +1540,22 @@
         "id": "standalone-regexp-native-engine",
         "issues": ["#1914", "#1909", "#682"],
         "label": "Standalone RegExp native-engine/runtime gaps: source, constructors, prototype access, result shape",
-        "count": 424,
+        "count": 404,
         "statuses": {
           "pass": 0,
-          "fail": 285,
-          "compile_error": 139,
+          "fail": 326,
+          "compile_error": 78,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 424,
+          "total": 404,
           "host_free_pass": 0
         },
         "error_categories": {
-          "runtime_error": 181,
-          "assertion_fail": 128,
+          "assertion_fail": 168,
           "other": 16,
+          "runtime_error": 114,
           "illegal_cast": 49,
-          "wasm_compile": 20,
+          "wasm_compile": 27,
           "null_deref": 30
         },
         "sample_files": [
@@ -1568,7 +1566,7 @@
           "test/built-ins/Proxy/has/trap-is-missing-target-is-proxy.js"
         ],
         "sample_signatures": [
-          "runtime_error:Cannot convert object to primitive value",
+          "assertion_fail:returned # — assert ## at L#: assert.sameValue(get.call(r), \"\", \"ignoreCase: undefined\");",
           "assertion_fail:returned # — assert ## at L#: throw new Test262Error();",
           "other:L#:## Codegen error: '__get_builtin' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get/struct",
           "runtime_error:L#:## Cannot convert object to primitive value",
@@ -1766,19 +1764,19 @@
         "id": "class-prototype-private-descriptor",
         "issues": ["#1591", "#1365", "#1364"],
         "label": "Class element, prototype, private-name, and descriptor reconciliation gaps",
-        "count": 5382,
+        "count": 5379,
         "statuses": {
           "pass": 0,
-          "fail": 3844,
-          "compile_error": 1535,
+          "fail": 3869,
+          "compile_error": 1507,
           "compile_timeout": 3,
           "skip": 0,
-          "total": 5382,
+          "total": 5379,
           "host_free_pass": 0
         },
         "error_categories": {
-          "runtime_error": 1631,
-          "assertion_fail": 3038,
+          "runtime_error": 1603,
+          "assertion_fail": 3063,
           "other": 79,
           "illegal_cast": 183,
           "wasm_compile": 274,
@@ -1929,8 +1927,8 @@
         "error_categories": {
           "assertion_fail": 928,
           "other": 164,
-          "runtime_error": 356,
           "wasm_compile": 22,
+          "runtime_error": 356,
           "promise_error": 89,
           "negative_test_fail": 5,
           "illegal_cast": 2,
@@ -1940,15 +1938,15 @@
           "test/language/expressions/object/cpn-obj-lit-computed-property-name-from-multiplicative-expression-mult.js",
           "test/language/expressions/object/literal-property-name-bigint.js",
           "test/built-ins/String/fromCharCode/S15.5.3.2_A3_T2.js",
-          "test/built-ins/Object/defineProperties/15.2.3.7-5-b-247.js",
-          "test/built-ins/Object/create/properties-arg-to-object-bigint.js"
+          "test/built-ins/Object/create/properties-arg-to-object-bigint.js",
+          "test/built-ins/Object/isExtensible/15.2.3.13-2-1.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert.sameValue( o[# * #], # );",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(o[\"#\"], true, \"the property name must be the string representation of the numeric value.\");",
           "other:L#:## Codegen error: String.fromCharCode built-in static property value read is not supported in --target standalone (## / ## S6-b). Add a native built-in method closure for this pair.",
-          "runtime_error:Cannot convert object to primitive value",
-          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: extern.convert_any[#] expected type shared anyref, found i64.const of type i64 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $proto ex"
+          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: extern.convert_any[#] expected type shared anyref, found i64.const of type i64 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $proto ex",
+          "assertion_fail:returned # — assert ## at L#: assert(Object.isExtensible(global));"
         ]
       },
       {
@@ -2107,8 +2105,8 @@
           "host_free_pass": 0
         },
         "error_categories": {
-          "assertion_fail": 159,
           "runtime_error": 120,
+          "assertion_fail": 159,
           "illegal_cast": 4,
           "other": 5,
           "wasm_compile": 7,
@@ -2117,15 +2115,15 @@
           "negative_test_fail": 1
         },
         "sample_files": [
-          "test/language/function-code/10.4.3-1-98-s.js",
           "test/language/function-code/10.4.3-1-74gs.js",
+          "test/language/function-code/10.4.3-1-98-s.js",
           "test/language/expressions/arrow-function/lexical-this.js",
           "test/built-ins/Function/S15.3.5_A2_T1.js",
           "test/language/function-code/10.4.3-1-101gs.js"
         ],
         "sample_signatures": [
-          "assertion_fail:returned # — assert ## at L#: assert((function () {\"use strict\"; return f.bind(o)();})());",
           "runtime_error:Cannot convert object to primitive value",
+          "assertion_fail:returned # — assert ## at L#: assert((function () {\"use strict\"; return f.bind(o)();})());",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(f.af(), f);",
           "illegal_cast:L#:## illegal cast [in test()]",
           "assertion_fail:returned # — assert ## at L#: assert.throws(TypeError, function() { C(); });"
@@ -2169,18 +2167,18 @@
         "id": "assignment-private-short-circuit",
         "issues": ["#334", "#1456", "#540"],
         "label": "Assignment targets, private refs, and short-circuit semantics",
-        "count": 73,
+        "count": 74,
         "statuses": {
           "pass": 0,
-          "fail": 70,
+          "fail": 71,
           "compile_error": 3,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 73,
+          "total": 74,
           "host_free_pass": 0
         },
         "error_categories": {
-          "assertion_fail": 59,
+          "assertion_fail": 60,
           "null_deref": 6,
           "other": 1,
           "negative_test_fail": 4,
@@ -2408,8 +2406,8 @@
         },
         "sample_files": [
           "test/language/expressions/object/method-definition/forbidden-ext/b2/async-meth-forbidden-ext-indirect-access-own-prop-caller-get.js",
-          "test/built-ins/Promise/all/resolve-element-function-extensible.js",
           "test/built-ins/Promise/race/same-resolve-function.js",
+          "test/built-ins/Promise/all/resolve-element-function-extensible.js",
           "test/built-ins/Promise/allSettled/reject-element-function-multiple-calls.js",
           "test/built-ins/Promise/any/ctx-non-ctor.js"
         ],
