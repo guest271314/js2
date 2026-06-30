@@ -87,6 +87,7 @@ import {
   exportDrainMicrotasksIfRegistered,
   getDrainFuncIdxForWasiStart,
   getRunLoopFuncIdxForWasiStart,
+  isStandalonePromiseActive,
 } from "./async-scheduler.js";
 import {
   brandExternMethodResult,
@@ -12049,13 +12050,28 @@ export function resolveWasmType(ctx: CodegenContext, tsType: ts.Type, _depth = 0
       return { kind: "externref" };
     }
 
-    // Promise<T> → unwrap to T.
-    // Async functions are compiled synchronously, so Promise<T> is just T at the Wasm level.
+    // Promise<T> → unwrap to T (host/GC) OR externref (native carrier).
     if (sym?.name === "Promise") {
       const typeArgs = ctx.checker.getTypeArguments(tsType as ts.TypeReference);
       if (typeArgs.length > 0) {
         const inner = typeArgs[0]!;
         if (isVoidType(inner)) return { kind: "externref" }; // Promise<void> → externref (no value)
+        // (#2905) Under the native `$Promise` carrier (isStandalonePromiseActive
+        // — today WASI, widened to standalone by #2895 slice 1d) a STORED/TYPED
+        // `Promise<T>` is a real `$Promise` externref (produced by wrapAsyncReturn
+        // at the call site / the drive-layer result), NOT the unwrapped `T`.
+        // Lower the value slot to externref so it matches the value end-to-end;
+        // storing the externref into an f64/struct slot would otherwise coerce
+        // `externref → f64` via __unbox_number = NaN (or an illegal struct cast).
+        //
+        // GC/host stays byte-identical: the unwrap-to-T contract only held
+        // because async fns are compiled synchronously, which is exactly when the
+        // carrier is OFF. An async fn's OWN wasm return signature pre-unwraps via
+        // unwrapPromiseType (function-body.ts / declarations.ts), so this branch
+        // is only hit for *value* slots (bindings / params / fields / non-async
+        // returns), never an async fn's own result type. externref is a leaf
+        // valtype — registers no new type, so no DCE remap / funcIdx churn.
+        if (isStandalonePromiseActive(ctx)) return { kind: "externref" };
         return resolveWasmType(ctx, inner, _depth + 1, _visited);
       }
       return { kind: "externref" }; // bare Promise without type arg
