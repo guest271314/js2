@@ -53,6 +53,7 @@ import {
   STRING_METHODS,
   unwrapGeneratorYieldType,
 } from "./index.js";
+import { isStandalonePromiseActive } from "./async-scheduler.js";
 import { ensureNativeStringExternBridge, ensureNativeStringHelpers } from "./native-strings.js";
 import { emitNativeParseNumber } from "./parse-number-native.js";
 import { emitNativeUriDecode, emitNativeUriEncode } from "./uri-encoding-native.js";
@@ -1652,7 +1653,21 @@ export function resolveGenericCallSiteTypes(
           params.push(resolveWasmType(ctx, paramType));
         }
         const retType = ctx.checker.getReturnTypeOfSignature(sig);
-        const results: ValType[] = isVoidType(retType) ? [] : [resolveWasmType(ctx, retType)];
+        // (#2905) Carrier own-return guard. resolveWasmType(Promise<T>) lowers to
+        // externref under the native $Promise carrier (index.ts), but an async
+        // callee's OWN wasm result is the unwrapped T — its body returns raw T;
+        // wrapAsyncReturn boxes to $Promise only at the *call* site. So for an
+        // async callee under the carrier, pre-unwrap to keep this inferred
+        // signature matching the actually-compiled fn (else externref-result vs
+        // f64-body = invalid Wasm). Gated on the carrier so off-carrier bytes are
+        // identical (effRet === retType). Non-async fns returning Promise<T> keep
+        // retType → resolveWasmType → externref, which is correct (body returns a
+        // real promise). Mirrors the main async-return sites (e.g. :2930).
+        const callDecl = sig.getDeclaration();
+        const calleeIsAsync = callDecl ? hasAsyncModifier(callDecl) : false;
+        const effRetType =
+          isStandalonePromiseActive(ctx) && calleeIsAsync ? unwrapPromiseType(retType, ctx.checker) : retType;
+        const results: ValType[] = isVoidType(effRetType) ? [] : [resolveWasmType(ctx, effRetType)];
         found = { params, results };
       }
     }
@@ -3739,7 +3754,16 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
               params.push(resolveWasmType(ctx, paramType));
             }
             const retType = ctx.checker.getReturnTypeOfSignature(sig);
-            const results = isVoidType(retType) ? [] : [resolveWasmType(ctx, retType)];
+            // (#2905) Carrier own-return guard — see findCallSignature. An async
+            // function-expression export's own wasm result is the unwrapped T;
+            // pre-unwrap under the carrier so the declared result matches the
+            // raw-T body (else externref-result vs f64-body = invalid Wasm).
+            // Carrier-gated → off-carrier bytes identical.
+            const effRetType =
+              isStandalonePromiseActive(ctx) && hasAsyncModifier(fnExpr)
+                ? unwrapPromiseType(retType, ctx.checker)
+                : retType;
+            const results = isVoidType(effRetType) ? [] : [resolveWasmType(ctx, effRetType)];
             const typeIdx = addFuncType(ctx, params, results, `${name}_type`);
             const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
             ctx.funcMap.set(name, funcIdx);
@@ -3801,7 +3825,15 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
             params.push(resolveWasmType(ctx, paramType));
           }
           const retType = ctx.checker.getReturnTypeOfSignature(sig);
-          const results = isVoidType(retType) ? [] : [resolveWasmType(ctx, retType)];
+          // (#2905) Carrier own-return guard — see findCallSignature. CJS named
+          // function-expression export; pre-unwrap an async fn's Promise<T>
+          // result under the carrier so the declared result matches the raw-T
+          // body. Carrier-gated → off-carrier bytes identical.
+          const effRetType =
+            isStandalonePromiseActive(ctx) && hasAsyncModifier(fnExpr)
+              ? unwrapPromiseType(retType, ctx.checker)
+              : retType;
+          const results = isVoidType(effRetType) ? [] : [resolveWasmType(ctx, effRetType)];
           const typeIdx = addFuncType(ctx, params, results, `${name}_type`);
           const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
           ctx.funcMap.set(name, funcIdx);
