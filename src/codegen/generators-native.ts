@@ -39,23 +39,29 @@ import { coerceType, compileExpression, compileStatement, valTypesMatch } from "
 import { bodyUsesArguments } from "./helpers/body-uses-arguments.js";
 import { resolveSpillLocalValType } from "./statements/variables.js";
 import { ensureExnTag } from "./registry/imports.js";
+// (#2895 PR1) The frame ABI (state-struct field offsets + resume modes) and the
+// field-I/O / spill-store emit helpers now live in the shared resumable-frame
+// core, consumed unchanged here and by the host-free async path (PATH B).
+import {
+  STATE_FIELD,
+  SENT_FIELD,
+  MODE_FIELD,
+  ABRUPT_FIELD,
+  ERROR_FIELD,
+  RESULT_VALUE_FIELD,
+  RESULT_DONE_FIELD,
+  PARAM_FIELD_OFFSET,
+  MODE_NEXT,
+  MODE_THROW,
+  sanitizeTypeName,
+  defaultSpillInstr,
+  setStateInstrs,
+  setModeInstrs,
+  setStateFieldFromLocal,
+  setStateI32FromConst,
+  storeSpills,
+} from "./frame-core.js";
 
-const STATE_FIELD = 0;
-const SENT_FIELD = 1;
-const MODE_FIELD = 2;
-const ABRUPT_FIELD = 3;
-// (#2864 F2) `gen.throw(e)` error payload. Always externref (an Error object),
-// independent of the carrier — the `abrupt`/`sent` carrier fields can be f64 in a
-// numeric generator, so the thrown value needs its own slot. Resume mode 2 reads
-// it and re-throws after running enclosing finalizers.
-const ERROR_FIELD = 4;
-const RESULT_VALUE_FIELD = 0;
-const RESULT_DONE_FIELD = 1;
-const PARAM_FIELD_OFFSET = 5;
-// Resume modes stored in MODE_FIELD: 0 = next, 1 = return (abrupt), 2 = throw.
-const MODE_NEXT = 0;
-const MODE_RETURN = 1;
-const MODE_THROW = 2;
 const MAX_NATIVE_GENERATOR_STATES = 256;
 
 /**
@@ -129,10 +135,6 @@ interface NativeGeneratorPlan {
 
 function noJsHostTarget(ctx: CodegenContext): boolean {
   return ctx.standalone || ctx.wasi;
-}
-
-function sanitizeTypeName(name: string): string {
-  return name.replace(/[^A-Za-z0-9_$]/g, "_");
 }
 
 function isNumericExpression(ctx: CodegenContext, expr: ts.Expression | undefined): boolean {
@@ -1286,67 +1288,11 @@ function emptyResult(info: NativeGeneratorInfo): Instr[] {
   ];
 }
 
-// (#2864 F1b) The inert default a spill field is constructed with, by ValType.
-// Overwritten by the body's declaration on first entry into the owning state, so
-// it only has to satisfy `struct.new`'s field type. Mirrors `defaultElemValueInstr`
-// but spans the full set of supported spill kinds.
-function defaultSpillInstr(type: ValType): Instr {
-  switch (type.kind) {
-    case "f64":
-      return { op: "f64.const", value: NaN };
-    case "i32":
-      return { op: "i32.const", value: 0 };
-    case "i64":
-      return { op: "i64.const", value: 0n } as Instr;
-    case "externref":
-      return { op: "ref.null.extern" } as Instr;
-    default:
-      return { op: "ref.null", typeIdx: (type as { typeIdx: number }).typeIdx } as Instr;
-  }
-}
-
 function emptyResultForType(resultTypeIdx: number): Instr[] {
   return [
     { op: "f64.const", value: 0 },
     { op: "i32.const", value: 1 },
     { op: "struct.new", typeIdx: resultTypeIdx },
-  ];
-}
-
-function setStateInstrs(info: NativeGeneratorInfo, selfLocal: number, state: number): Instr[] {
-  return [
-    { op: "local.get", index: selfLocal },
-    { op: "i32.const", value: state },
-    { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: STATE_FIELD },
-  ];
-}
-
-function setModeInstrs(info: NativeGeneratorInfo, selfLocal: number, mode: number): Instr[] {
-  return [
-    { op: "local.get", index: selfLocal },
-    { op: "i32.const", value: mode },
-    { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: info.modeFieldIdx },
-  ];
-}
-
-function setStateFieldFromLocal(
-  info: NativeGeneratorInfo,
-  selfLocal: number,
-  fieldIdx: number,
-  valueLocal: number,
-): Instr[] {
-  return [
-    { op: "local.get", index: selfLocal },
-    { op: "local.get", index: valueLocal },
-    { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx },
-  ];
-}
-
-function setStateI32FromConst(info: NativeGeneratorInfo, selfLocal: number, fieldIdx: number, value: number): Instr[] {
-  return [
-    { op: "local.get", index: selfLocal },
-    { op: "i32.const", value },
-    { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx },
   ];
 }
 
@@ -1356,18 +1302,6 @@ function nativeReturnResultFromLocal(info: NativeGeneratorInfo, valueLocal: numb
     { op: "i32.const", value: 1 },
     { op: "struct.new", typeIdx: info.resultTypeIdx },
   ];
-}
-
-function storeSpills(info: NativeGeneratorInfo, fctx: FunctionContext, selfLocal: number): Instr[] {
-  const body: Instr[] = [];
-  for (let i = 0; i < info.spillNames.length; i++) {
-    const localIdx = fctx.localMap.get(info.spillNames[i]!);
-    if (localIdx === undefined) continue;
-    body.push({ op: "local.get", index: selfLocal });
-    body.push({ op: "local.get", index: localIdx });
-    body.push({ op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: info.spillFieldOffset + i });
-  }
-  return body;
 }
 
 function emitExpressionAsF64(ctx: CodegenContext, fctx: FunctionContext, expr: ts.Expression | undefined): number {
