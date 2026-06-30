@@ -88,6 +88,16 @@ export interface AsyncSchedulerState {
   identityFulfillWrapperFuncIdx: number;
   /** Function index of the identity rejection task wrapper. */
   identityRejectWrapperFuncIdx: number;
+  /**
+   * Function index of `__promise_resolve_value((ref $Promise), externref) ->
+   * externref` — the spec "Resolve(promise, value)" primitive (#2867 Gap 1).
+   * If `value` is itself a native `$Promise` (the result of an async-fn call or
+   * a `.then` handler that returns a promise), the chained promise ADOPTS that
+   * inner promise's eventual state (recursive thenable assimilation) instead of
+   * fulfilling with the promise object. Otherwise it fulfils directly — so it is
+   * a drop-in for `__promise_fulfill` at every settle-with-handler-result site.
+   */
+  promiseResolveValueFuncIdx: number;
   /** Counter for generated `__then_fulfill_N` / `__then_reject_N` wrappers. */
   thenWrapperCounter: number;
   /** Whether `__drain_microtasks` has been added to the module's exports. */
@@ -190,6 +200,7 @@ function getOrInitState(ctx: CodegenContextWithScheduler): AsyncSchedulerState {
       promiseRejectFuncIdx: -1,
       identityFulfillWrapperFuncIdx: -1,
       identityRejectWrapperFuncIdx: -1,
+      promiseResolveValueFuncIdx: -1,
       thenWrapperCounter: 0,
       drainExported: false,
       timerFuncArrTypeIdx: -1,
@@ -754,6 +765,10 @@ function ensurePromiseSettleFunctions(ctx: CodegenContext): void {
   state.promiseRejectFuncIdx = baseFuncIdx + 1;
   state.identityFulfillWrapperFuncIdx = baseFuncIdx + 2;
   state.identityRejectWrapperFuncIdx = baseFuncIdx + 3;
+  // (#2867 Gap 1) reserve the resolve-value slot up-front so the identity
+  // fulfill wrapper below (and the `.then` handler wrappers) can reference it
+  // before its body is pushed — late assignment would shift later funcIdxs.
+  state.promiseResolveValueFuncIdx = baseFuncIdx + 4;
 
   ctx.mod.functions.push({
     name: "__promise_fulfill",
@@ -773,11 +788,17 @@ function ensurePromiseSettleFunctions(ctx: CodegenContext): void {
   });
   ctx.funcMap.set("__promise_reject", state.promiseRejectFuncIdx);
 
+  // The identity FULFILL wrapper settles its chained promise via
+  // resolve-value (not fulfill) so a passed-through value that is itself a
+  // `$Promise` is adopted, AND so the adoption reactions this resolve-value
+  // helper registers on a pending inner promise recurse correctly (#2867 Gap 1).
+  // The identity REJECT wrapper stays a direct reject — rejection reasons are
+  // never assimilated.
   ctx.mod.functions.push({
     name: "__then_identity_fulfill",
     typeIdx: state.microtaskFuncTypeIdx,
     locals: buildIdentityWrapperLocals(capsTypeIdx),
-    body: buildIdentityWrapperBody(capsTypeIdx, state.promiseFulfillFuncIdx),
+    body: buildIdentityWrapperBody(capsTypeIdx, state.promiseResolveValueFuncIdx),
     exported: false,
   });
   ctx.funcMap.set("__then_identity_fulfill", state.identityFulfillWrapperFuncIdx);
@@ -790,6 +811,15 @@ function ensurePromiseSettleFunctions(ctx: CodegenContext): void {
     exported: false,
   });
   ctx.funcMap.set("__then_identity_reject", state.identityRejectWrapperFuncIdx);
+
+  ctx.mod.functions.push({
+    name: "__promise_resolve_value",
+    typeIdx: settleTypeIdx,
+    locals: buildPromiseResolveValueLocals(promiseTypeIdx),
+    body: buildPromiseResolveValueBody(state, promiseTypeIdx, callbackTypeIdx, capsTypeIdx),
+    exported: false,
+  });
+  ctx.funcMap.set("__promise_resolve_value", state.promiseResolveValueFuncIdx);
 }
 
 function buildPromiseSettleLocals(callbackTypeIdx: number): LocalDef[] {
@@ -899,6 +929,121 @@ function buildIdentityWrapperBody(capsTypeIdx: number, settleFuncIdx: number): I
     { op: "struct.get", typeIdx: capsTypeIdx, fieldIdx: 1 },
     { op: "local.get", index: valueLocal },
     { op: "call", funcIdx: settleFuncIdx },
+  ];
+}
+
+function buildPromiseResolveValueLocals(promiseTypeIdx: number): LocalDef[] {
+  // Params 0/1: (promise, value). Locals start at 2.
+  return [
+    { name: "$inner", type: { kind: "ref", typeIdx: promiseTypeIdx } },
+    { name: "$caps", type: { kind: "externref" } },
+  ];
+}
+
+/**
+ * (#2867 Gap 1) `__promise_resolve_value(promise, value)` — the spec
+ * "Resolve(promise, value)" step for the native `$Promise` carrier.
+ *
+ * If `value` is a native `$Promise`, `promise` ADOPTS that inner promise's
+ * eventual state instead of fulfilling with the promise object:
+ *   - inner FULFILLED  → enqueue `__then_identity_fulfill(caps, inner.value)`
+ *   - inner REJECTED   → enqueue `__then_identity_reject(caps, inner.value)`
+ *   - inner PENDING    → prepend a `$PromiseCallback` reaction onto inner.callbacks
+ * where `caps` is `$__then_caps{callback: null, chained: promise}`, so the
+ * identity wrappers settle `promise` when the inner promise eventually settles.
+ * Because `__then_identity_fulfill` itself routes back through this helper, a
+ * chain of promises-returning-promises is assimilated recursively.
+ *
+ * If `value` is not a `$Promise`, it fulfils `promise` directly — byte-behaviour
+ * identical to the previous unconditional `__promise_fulfill` at the settle site.
+ */
+function buildPromiseResolveValueBody(
+  state: AsyncSchedulerState,
+  promiseTypeIdx: number,
+  callbackTypeIdx: number,
+  capsTypeIdx: number,
+): Instr[] {
+  const promiseLocal = 0;
+  const valueLocal = 1;
+  const innerLocal = 2;
+  const capsLocal = 3;
+  return [
+    { op: "local.get", index: valueLocal },
+    { op: "any.convert_extern" },
+    { op: "ref.test", typeIdx: promiseTypeIdx } as Instr,
+    {
+      op: "if",
+      blockType: { kind: "val", type: { kind: "externref" } },
+      then: [
+        // inner = (ref $Promise) value
+        { op: "local.get", index: valueLocal },
+        { op: "any.convert_extern" },
+        { op: "ref.cast", typeIdx: promiseTypeIdx } as Instr,
+        { op: "local.set", index: innerLocal },
+        // caps = $__then_caps{ callback: null, chained: promise }
+        { op: "ref.null.extern" },
+        { op: "local.get", index: promiseLocal },
+        { op: "struct.new", typeIdx: capsTypeIdx } as Instr,
+        { op: "extern.convert_any" },
+        { op: "local.set", index: capsLocal },
+        // dispatch on inner.state
+        { op: "local.get", index: innerLocal },
+        { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 0 },
+        { op: "i32.const", value: PROMISE_STATE_FULFILLED },
+        { op: "i32.eq" },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            // already fulfilled: schedule fulfill reaction with inner.value
+            { op: "ref.func", funcIdx: state.identityFulfillWrapperFuncIdx },
+            { op: "local.get", index: capsLocal },
+            { op: "local.get", index: innerLocal },
+            { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 1 },
+            { op: "call", funcIdx: state.enqueueFuncIdx },
+          ],
+          else: [
+            { op: "local.get", index: innerLocal },
+            { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 0 },
+            { op: "i32.const", value: PROMISE_STATE_REJECTED },
+            { op: "i32.eq" },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                // already rejected: schedule reject reaction with inner.value
+                { op: "ref.func", funcIdx: state.identityRejectWrapperFuncIdx },
+                { op: "local.get", index: capsLocal },
+                { op: "local.get", index: innerLocal },
+                { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 1 },
+                { op: "call", funcIdx: state.enqueueFuncIdx },
+              ],
+              else: [
+                // pending: prepend a reaction node onto inner.callbacks
+                { op: "local.get", index: innerLocal },
+                { op: "ref.func", funcIdx: state.identityFulfillWrapperFuncIdx },
+                { op: "local.get", index: capsLocal },
+                { op: "ref.func", funcIdx: state.identityRejectWrapperFuncIdx },
+                { op: "local.get", index: capsLocal },
+                { op: "local.get", index: innerLocal },
+                { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 2 },
+                { op: "struct.new", typeIdx: callbackTypeIdx } as Instr,
+                { op: "extern.convert_any" },
+                { op: "struct.set", typeIdx: promiseTypeIdx, fieldIdx: 2 } as Instr,
+              ],
+            } as Instr,
+          ],
+        } as Instr,
+        // result (unused by the microtask drain, but the type must be externref)
+        { op: "local.get", index: valueLocal },
+      ],
+      else: [
+        // not a promise: fulfil directly
+        { op: "local.get", index: promiseLocal },
+        { op: "local.get", index: valueLocal },
+        { op: "call", funcIdx: state.promiseFulfillFuncIdx },
+      ],
+    } as Instr,
   ];
 }
 
@@ -2985,11 +3130,15 @@ export function emitStandalonePromiseThen(
   const callbackTypeIdx = getOrRegisterPromiseCallbackType(ctx);
   const capsTypeIdx = getOrRegisterThenCapsType(ctx);
 
+  // (#2867 Gap 1) handler results settle the chained promise via resolve-value
+  // (not fulfill) so a handler that RETURNS a promise/thenable causes the chain
+  // to adopt that inner promise's eventual state. A reject handler that returns
+  // normally also fulfils the chain (catch-recovery), so it routes the same way.
   const fulfillWrapperFuncIdx = onFulfilled
-    ? emitThenWrapperFunction(ctx, onFulfilled.closureInfo, state.promiseFulfillFuncIdx, "__then_fulfill")
+    ? emitThenWrapperFunction(ctx, onFulfilled.closureInfo, state.promiseResolveValueFuncIdx, "__then_fulfill")
     : state.identityFulfillWrapperFuncIdx;
   const rejectWrapperFuncIdx = onRejected
-    ? emitThenWrapperFunction(ctx, onRejected.closureInfo, state.promiseFulfillFuncIdx, "__then_reject")
+    ? emitThenWrapperFunction(ctx, onRejected.closureInfo, state.promiseResolveValueFuncIdx, "__then_reject")
     : state.identityRejectWrapperFuncIdx;
 
   const promiseLocal = allocLocal(fctx, `__then_promise_${fctx.locals.length}`, {
