@@ -147,17 +147,54 @@ export function getOrRegisterErrorStructType(ctx: CodegenContext): number {
  * helper finds it in `ctx.stringGlobalMap`.
  */
 export function emitWasiErrorConstructor(ctx: CodegenContext, errorName: WasiErrorName, argCount: number): void {
-  const importName = `__new_${errorName}`;
+  emitErrorStructConstructor(ctx, `__new_${errorName}`, errorName, BUILTIN_TYPE_TAGS[errorName], argCount);
+}
+
+/**
+ * (#2902) Standalone/WASI-native `new Test262Error(msg)` construction.
+ *
+ * The test262 harness injects `class Test262Error { message }` (and, in the
+ * JS-host eval shim, `class Test262Error extends Error`) into every wrapped
+ * test. In JS-host mode `new Test262Error(msg)` lowers to a `__new_Test262Error`
+ * host import that yields a real `Error` subclass. In standalone mode there is
+ * no JS host, so that import is unsatisfiable and leaks into the module — even
+ * though the constructor is only ever reached on the (untaken) failure path of
+ * a passing test. A leak-analysis of the merge_group standalone report found
+ * ~2,779 tests that import ONLY `env::__new_Test262Error`, so building it
+ * in-module flips them host-free.
+ *
+ * The value is built as the SAME `$Error_struct` the WASI error constructors
+ * use, tagged as `Error` (so `instanceof Error` holds, matching
+ * `Test262Error extends Error`) with `$name` = "Test262Error" (so `err.name`
+ * and the standalone exception formatter read the correct constructor name).
+ * `err.message` reads the first-arg field via the existing property-access
+ * fast path. Host mode is unchanged — it keeps the `__new_Test262Error` import.
+ */
+export function emitStandaloneTest262Error(ctx: CodegenContext, argCount: number): void {
+  emitErrorStructConstructor(ctx, "__new_Test262Error", "Test262Error", BUILTIN_TYPE_TAGS.Error, argCount);
+}
+
+/**
+ * Shared builder for an in-module `$Error_struct` constructor. `displayName` is
+ * materialized into the `$name` field; `tagValue` is written to `$tag` (drives
+ * standalone `instanceof`). Idempotent on `importName`.
+ */
+function emitErrorStructConstructor(
+  ctx: CodegenContext,
+  importName: string,
+  displayName: string,
+  tagValue: number,
+  argCount: number,
+): void {
   if (ctx.funcMap.has(importName)) return;
 
   const structIdx = getOrRegisterErrorStructType(ctx);
-  const tagValue = BUILTIN_TYPE_TAGS[errorName];
 
   // #1536 Phase 2 — register the class-name string so the $name field can be
   // materialized below. Must run BEFORE building the body so the dual-mode
   // helper finds the interned global.
-  addStringConstantGlobal(ctx, errorName);
-  const nameInstrs = stringConstantExternrefInstrs(ctx, errorName);
+  addStringConstantGlobal(ctx, displayName);
+  const nameInstrs = stringConstantExternrefInstrs(ctx, displayName);
 
   const params: ValType[] = Array.from({ length: argCount }, () => ({ kind: "externref" }) as ValType);
   const typeIdx = addFuncType(ctx, params, [{ kind: "externref" }], `${importName}_type`);
