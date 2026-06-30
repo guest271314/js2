@@ -103,11 +103,13 @@ import {
   emitNonObjectArgGuard,
 } from "../object-ops.js";
 import {
+  BUILTIN_CTOR_NAMES,
   emitArrayIsArrayExternrefPredicate,
   emitNullCheckThrow,
   receiverIsCaughtErrorStringRead,
   receiverIsNativeStringValType,
   receiverMayBeNativeStringAtRuntime,
+  tryEnsureNativeProtoBrand,
   typeErrorThrowInstrs,
 } from "../property-access.js";
 import { emitToNumber, emitToString } from "../coercion-engine.js";
@@ -6895,6 +6897,73 @@ function compileCallExpression(
               if (argResult) fctx.body.push({ op: "drop" });
               fctx.body.push({ op: "ref.null.extern" });
               return { kind: "externref" };
+            }
+          }
+        }
+      }
+
+      // (#2885 Site 2) Standalone builtin-proto descriptor synthesis. The native
+      // `__getOwnPropertyDescriptor` only understands `$Object`; an INTRINSIC
+      // accessor/method on a virtual `$NativeProto` (e.g. `RegExp.prototype.global`)
+      // is invisible to it, so gOPD returns undefined and `desc.get` then derefs
+      // undefined → trap. Synthesize the descriptor directly from the brand-keyed
+      // closure factory when arg0 is a literal `<Builtin>.prototype` and arg1 names
+      // a member the glue advertises. Anything that doesn't resolve falls through
+      // to the dynamic fallback below (no behavior change for other receivers).
+      if (
+        ctx.standalone &&
+        propLiteral !== undefined &&
+        ts.isPropertyAccessExpression(arg0) &&
+        !ts.isPrivateIdentifier(arg0.name) &&
+        arg0.name.text === "prototype" &&
+        ts.isIdentifier(arg0.expression) &&
+        BUILTIN_CTOR_NAMES.has(arg0.expression.text) &&
+        !(fctx.localMap.has(arg0.expression.text) || (fctx.boxedCaptures?.has(arg0.expression.text) ?? false))
+      ) {
+        const protoBuiltin = arg0.expression.text;
+        const protoBrand = tryEnsureNativeProtoBrand(ctx, protoBuiltin);
+        const protoGlue = protoBrand !== undefined ? getNativeProtoBuiltinGlue(ctx, protoBrand) : undefined;
+        if (protoBrand !== undefined && protoGlue && protoGlue.memberCsv.split(",").includes(propLiteral)) {
+          const memberKind = protoGlue.memberKind(propLiteral);
+          const protoClosure = ensureStandaloneNativeMethodClosure(ctx, protoBrand, propLiteral, memberKind);
+          if (protoClosure) {
+            if (memberKind === "getter") {
+              // Accessor descriptor: get=<closure>, set=undefined,
+              // {enumerable:false, configurable:true} (intrinsic accessor attrs).
+              const createAccIdx = ensureLateImport(
+                ctx,
+                "__create_accessor_descriptor",
+                [{ kind: "externref" }, { kind: "externref" }, { kind: "i32" }],
+                [{ kind: "externref" }],
+              );
+              flushLateImportShifts(ctx, fctx);
+              if (createAccIdx !== undefined) {
+                fctx.body.push({ op: "ref.func", funcIdx: protoClosure.funcIdx } as Instr);
+                fctx.body.push({ op: "struct.new", typeIdx: protoClosure.type.typeIdx } as Instr);
+                fctx.body.push({ op: "extern.convert_any" } as Instr); // get
+                fctx.body.push({ op: "ref.null.extern" } as Instr); // set = undefined
+                fctx.body.push({ op: "i32.const", value: 0x04 } as Instr); // FLAG_CONFIGURABLE
+                fctx.body.push({ op: "call", funcIdx: createAccIdx } as Instr);
+                return { kind: "externref" };
+              }
+            } else {
+              // Data descriptor: value=<method closure>,
+              // {writable:true, enumerable:false, configurable:true}.
+              const createIdx = ensureLateImport(
+                ctx,
+                "__create_descriptor",
+                [{ kind: "externref" }, { kind: "i32" }],
+                [{ kind: "externref" }],
+              );
+              flushLateImportShifts(ctx, fctx);
+              if (createIdx !== undefined) {
+                fctx.body.push({ op: "ref.func", funcIdx: protoClosure.funcIdx } as Instr);
+                fctx.body.push({ op: "struct.new", typeIdx: protoClosure.type.typeIdx } as Instr);
+                fctx.body.push({ op: "extern.convert_any" } as Instr); // value
+                fctx.body.push({ op: "i32.const", value: 0x05 } as Instr); // FLAG_WRITABLE | FLAG_CONFIGURABLE
+                fctx.body.push({ op: "call", funcIdx: createIdx } as Instr);
+                return { kind: "externref" };
+              }
             }
           }
         }
