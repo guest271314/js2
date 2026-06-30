@@ -869,6 +869,26 @@ async function doCompile(source, sourceMapUrl, target, inferModuleStrictArgument
  * (e.g. the throw happened during `WebAssembly.instantiate` from a
  * start function), tag lookup is skipped.
  */
+/**
+ * (#2870) Stringify a thrown payload WITHOUT ever letting a host TypeError
+ * escape. A `--target standalone` module's thrown value is frequently a Wasm-GC
+ * error struct (an `anyref` with no JS-reachable `toString`); calling `String()`
+ * on it makes the HOST `ToPrimitive` throw `Cannot convert object to primitive
+ * value`. Unguarded, that host throw escaped this formatter and was recorded as
+ * the test's failure — masking the REAL signature behind a phantom TypeError and
+ * collapsing ~2,014 heterogeneous standalone failures onto one string (#2862).
+ */
+function safeStringifyThrown(v) {
+  try {
+    return String(v);
+  } catch {
+    const t = typeof v;
+    return t === "object" || t === "function"
+      ? "uncaught Wasm-GC exception (non-stringifiable payload)"
+      : `uncaught Wasm exception (${t})`;
+  }
+}
+
 function extractWasmExceptionMessage(err, instance) {
   if (err instanceof WebAssembly.Exception) {
     let payload = null;
@@ -879,9 +899,9 @@ function extractWasmExceptionMessage(err, instance) {
       } catch {}
     }
     if (payload instanceof Error) {
-      return payload.message ?? String(payload);
+      return payload.message ?? safeStringifyThrown(payload);
     }
-    if (payload != null) return String(payload);
+    if (payload != null) return safeStringifyThrown(payload);
     return instance ? "TypeError (null/undefined access)" : "wasm exception during module init";
   }
   if (err instanceof Error) {
@@ -909,7 +929,7 @@ function extractWasmExceptionMessage(err, instance) {
     }
     return info;
   }
-  return String(err);
+  return safeStringifyThrown(err);
 }
 
 function extractWasmFuncName(err) {

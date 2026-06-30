@@ -3,8 +3,8 @@ id: 2803
 title: "Infer function-parameter types from call-site arguments (usage-based inference) — untyped/.js-stripped params default to `any`"
 status: ready
 created: 2026-06-28
-updated: 2026-06-28
-priority: high
+updated: 2026-06-30
+priority: low
 feasibility: hard
 task_type: feature
 area: checker

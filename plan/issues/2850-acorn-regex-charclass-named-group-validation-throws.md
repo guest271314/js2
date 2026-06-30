@@ -3,10 +3,11 @@ id: 2850
 title: "compiled-acorn THROWS validating regex literals with character classes `[…]`/`\\d` or named capture groups `(?<n>…)`"
 status: ready
 sprint: current
-priority: high
+priority: low
 horizon: m
 feasibility: hard
 created: 2026-06-29
+updated: 2026-06-30
 task_type: bugfix
 area: codegen, runtime
 language_feature: regexp
