@@ -1,7 +1,8 @@
 ---
 id: 2895
 title: "Standalone: genuinely-pending await needs true frame suspension (AG1 / PATH B) — await-on-$Frame + microtask resume"
-status: ready
+status: in-progress
+assignee: ttraenkler/sendev-asyncdrive
 created: 2026-06-30
 priority: medium
 feasibility: hard
@@ -167,3 +168,67 @@ ResumeFunction`): reserve slot first; load params+spills; **br_table over
 FRESH budget window (a full per-agent share) — do not begin late in a draining
 window (the XL would strand at the freeze). PR1 (#2384 frame-core) and the #2865
 AG0 reconcile (PR #2380) are the landed predecessors.
+
+## Implementation notes — PATH B build log (sendev-asyncdrive)
+
+Building PATH B incrementally on `origin/main` (post-#2380 AG0 reconcile, which
+landed: `isStandalonePromiseActive` + `isStandaloneThenChainNativeActive` are
+`wasi`-only, `emitStandaloneAwaitUnwrap` is the AG0 one-level unwrap). Each
+sub-slice is a separate, independently-mergeable PR; the broad carrier-gate
+re-widen (1d) is LAST, only after the drive layer is measured net-positive (a
+premature widen is the AG0 −31 regression — do NOT repeat it).
+
+### Slice 1a — frame-layout foundation (THIS PR, inert / zero-risk)
+
+- `src/codegen/async-frame.ts` (new): `isAsyncDriveActive(ctx)` (standalone||wasi
+  drive-layer gate, distinct from the `isStandalonePromiseActive` *carrier*
+  gate), `AsyncFrameInfo` (satisfies frame-core `FrameLayout`), and
+  `buildAsyncFrameInfo(...)` which registers the per-async-fn `$AsyncFrame_<name>`
+  state struct: fixed frame ABI fields (`STATE` i32, `SENT`/`ABRUPT`/`ERROR`
+  externref — awaited values are always boxed, unlike a numeric generator
+  carrier, `MODE` i32), captured params at `PARAM_FIELD_OFFSET`, live-across-await
+  spills (computed from `analyzeAsyncBody` liveness minus params minus the
+  resume binding — mirrors the generator `bodySpills`), then a trailing
+  `result_promise` field (after spills so `spillFieldOffset` is stable, same
+  discipline as generator `yield*` delegation slots).
+- `src/codegen/async-scheduler.ts`: added public accessors
+  `getOrRegisterPromiseCallbackTypeIdx` + `ensureAsyncDriveRuntime` (returns the
+  stable `$Promise`/reaction-node typeIdxs and the settle/enqueue/drain funcIdxs)
+  so the frame driver reuses the EXISTING Promise+microtask substrate verbatim
+  rather than forking a parallel scheduler.
+- `tests/issue-2895-async-frame.test.ts`: pins the gate + the `$AsyncFrame`
+  struct ABI (5 leading frame fields, param field, spill of a live body local
+  excluding param/resume-binding, trailing `(ref $Promise)`).
+- **Inert**: nothing in the live compile path imports `async-frame.ts` yet, so
+  output is byte-identical (the #2384 frame-core extraction pattern). No gate
+  flip, no regression surface.
+
+### Remaining slices (next sessions, build order)
+
+1b. **resume fn + step adapters + settle** — `ensureAsyncResumeFunction(info)`
+    builds `__async_resume_f<name>(frame)` with the generator slot-reservation
+    funcIdx-stability idiom (reserve placeholder slot BEFORE body emit). For the
+    single-await canonical shape it is a 2-state machine: `br_table` over
+    `STATE_FIELD` → seg0 (entry: prefix + awaited-expr assimilate → if FULFILLED
+    set SENT and fall through, else `storeSpills` + set STATE=1 + register a
+    `$PromiseCallback{__async_step_fulfill_f<name>, frame, __async_step_reject_f
+    <name>, frame, next}` reaction on the awaited promise's callbacks + `return`)
+    → seg1 (continuation: bind `x = SENT`, suffix). `__async_step_*` adapters
+    store the settled value into `SENT`/`ERROR` then call resume. `return v` in
+    a resume body settles `frame.result_promise` via `__promise_fulfill` (new
+    `compileReturnStatement` hook keyed off a `fctx.asyncDriveResultLocal`,
+    mirroring the `fctx.isGenerator` arm); `throw e` → `__promise_reject`.
+1c. **wire live + call-site + runner drain hook** — in `function-body.ts`, when
+    `isAsyncDriveActive(ctx) && asyncFnNeedsCps(...)`, alloc the frame (params
+    spilled), create the pending result `$Promise`, call `__async_resume_f` once
+    (runs seg0 to first real suspension), return the result promise. **Runner
+    drain hook** (`tests/test262-runner.ts`): for `flags:[async]`
+    standalone/wasi tests, drain `__drain_microtasks` after `test()` runs and
+    before reading `__fail` — REQUIRED for any harness credit (the trap AG0 fell
+    into). Verify-first on REAL failing test262 async paths (async-function/dstr,
+    class async methods, `Promise.all().then` chains, async-generator/dstr) via
+    the corpus `wrapTest`/`runTest262File(...,"standalone")`; require
+    NET-POSITIVE on the full `merge_group` standalone report.
+1d. **re-widen carrier gates** — flip `isStandalonePromiseActive` +
+    `isStandaloneThenChainNativeActive` to include `ctx.standalone` TOGETHER,
+    only after 1c proves net-positive.
