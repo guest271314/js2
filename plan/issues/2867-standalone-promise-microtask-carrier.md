@@ -2,9 +2,9 @@
 id: 2867
 title: "Standalone: Promise / async microtask leaks Promise_resolve/reject/then + __make_callback host imports"
 status: in-progress
-assignee: ttraenkler/sendev-carrier
+assignee: ttraenkler/sendev-carrier-gaps
 created: 2026-06-30
-updated: 2026-06-30
+updated: 2026-07-01
 priority: high
 feasibility: hard
 task_type: feature
@@ -127,3 +127,63 @@ combinators · 5 `for-await-of`/async-generator native drive (drive-layer-couple
 Do NOT widen the carrier gates until all gap fixes land and the corpus measures
 net-positive. Gaps 3 & 5 touch the #2895 drive layer (owned by sendev-asyncdrive)
 — coordinate, don't fork.
+
+## Implementation notes — Gap 2 LANDED (throw→reject routing) + the call-site observability prerequisite, sendev-carrier-gaps 2026-07-01
+
+**Gap 2 of 5 — async-fn throw → reject routing**, plus a **foundational
+prerequisite** that was NOT in the original gap roadmap but blocks ALL of them:
+a drive-lowered async result (a real `$Promise`) was **not observable via
+`.then` at all** (the landed #2895 drive layer was only validated via
+side-effects + `await`, never `.then`). Without this, the test262
+`asyncTest(fn)` harness — which does `fn().then(verifyFulfill, $DONE)`, inline
+`.then` on the async call — can read nothing, so any gap-completion + widen would
+score 0 (the AG0 trap). Three coupled, **carrier-gated** fixes (wasi-only today →
+widen at slice 1d; gc/host + still-host-backed standalone lanes byte-unchanged):
+
+1. `src/codegen/expressions.ts` — **call-site double-wrap (the prerequisite).**
+   A genuinely-suspending async fn under the drive layer ALREADY returns a real
+   `$Promise` (externref). The legacy call-site contract (#1313/#1727) still
+   applied `wrapAsyncReturn` for a *thenable* consumer (`f().then(...)`), wrapping
+   the `$Promise` in a SECOND native `$Promise` (`wrapAsyncReturn`'s `struct.new`
+   arm) → `.then`/assignment read **NaN / illegal-cast** (Promise-of-Promise).
+   New predicate `calleeIsDriveLowered(ctx, expr)` (mirrors the
+   `function-body.ts` drive gate exactly: carrier active + async `function`
+   declaration + `asyncFnNeedsCps`) → skip the wrap, leave the `$Promise`
+   un-wrapped. Verified: `f().then(onF)` now threads the settled value; was NaN.
+2. `src/codegen/async-frame.ts` — **async-body throw / rejected-await → reject.**
+   Wrapped the resume-fn dispatch in `try/catch $exn → __promise_reject(result, e)`
+   (a `throw` in the body or a re-thrown rejected await now settles the result
+   `$Promise` REJECTED instead of escaping uncaught → trap / stranded-pending).
+   The continuation re-throws a microtask-delivered rejection (MODE_THROW +
+   ERROR_FIELD, set by the reject step adapter); the entry's rejected-now arm
+   arms MODE_THROW (was: delivered the reason as a fulfil value — the slice-1
+   placeholder).
+3. `src/codegen/async-scheduler.ts` — **throwing `.then`/`.catch` handler → reject
+   chain.** `emitThenWrapperFunction` now runs the user handler inside
+   `try/catch $exn → __promise_reject(chained, e)` (spec PerformPromiseThen reject
+   step) instead of letting a handler throw escape the microtask wrapper uncaught
+   (which trapped the whole `__drain_microtasks` pass).
+
+**Verification** (`tests/issue-2867-gap2.test.ts`, host-free wasi, `__drain_microtasks`,
+all green): drive result observable via inline `.then` (was NaN); throw-after-pending-await
+rejects (→ reject handler gets the reason); rejected genuinely-pending await rejects;
+throwing `.then` handler rejects the chain (was a trap); normal fulfilment still routes
+to the fulfil handler. The existing #2867 Gap-1 + #2895 drive-layer suites stay green;
+`tests/async-await.test.ts` (gc/host) + `issue-2671-promise-executor` stay green; typecheck clean.
+
+**KNOWN-OUT-OF-SCOPE / flagged for the tech lead (architectural — do NOT churn):**
+- **`const p = f(); p.then(...)` (and any `Promise<T>`-typed *binding/param/field*) still
+  corrupts** — `resolveWasmType(Promise<T>)` unwraps to `T` (f64) at index.ts:12046
+  ("async fns compiled synchronously"), which is false under the carrier; the inline
+  `.then($DONE,$DONE)` harness path (Gap-2 fix) is unaffected, but stored-promise
+  consumption needs a **broad `resolveWasmType(Promise<T>) → externref` decision under the
+  carrier** with wide blast radius (every Promise-typed slot) — the #2367-graveyard class.
+- **Pre-existing AG0 value-consumer regression** (`tests/issue-2865-...`: 2 fails — `let p =
+  Promise.resolve(7); return await p` consumed as `f() as number`): reproduces IDENTICALLY on
+  the unmodified Gap-1 base. The #2895 drive layer makes `return await <var>` genuinely-suspend
+  (returns a `$Promise`), which the `f() as number` *value*-consumer idiom can't unwrap
+  host-free — a #2895/sendev-asyncdrive contract item, not introduced here.
+
+Both feed slice 1d. **Gaps 3/4/5 + the runner-drain hook + the gate-widen remain**; the widen
+stays blocked until the stored-`Promise<T>` consumption decision lands and the corpus measures
+net-positive. Gap 2 is independently-mergeable and inert.

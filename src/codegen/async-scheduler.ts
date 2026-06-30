@@ -21,6 +21,7 @@ import type { ClosureInfo, CodegenContext, FunctionContext } from "./context/typ
 import { allocLocal } from "./context/locals.js";
 import { addFuncType, getOrRegisterArrayType } from "./registry/types.js";
 import { addUnionImportsViaRegistry } from "./shared.js";
+import { ensureExnTag } from "./registry/imports.js";
 
 /**
  * #1326 — Sentinel state values for `$Promise.state`. Match the JS spec
@@ -1210,33 +1211,67 @@ function emitThenWrapperFunction(
     { op: "any.convert_extern" },
     { op: "ref.cast", typeIdx: info.structTypeIdx },
     { op: "local.set", index: callbackLocal },
+  ];
 
+  // (#2867 Gap 2) Run the user `.then`/`.catch` handler inside a try/catch: a
+  // handler that THROWS must REJECT the chained promise (spec PerformPromiseThen
+  // reject step), not let the exception escape the microtask wrapper uncaught —
+  // which traps the entire `__drain_microtasks` pass. Applies uniformly to the
+  // fulfill-handler and reject-handler wrappers (the reject arm of
+  // `.then(onF, onR)` / `.catch` throwing must also reject the chain). Reuses the
+  // module's single exception tag and the native `__promise_reject` settle.
+  const exnTag = ensureExnTag(ctx);
+  const reasonLocal = 5;
+  locals.push({ name: "$reason", type: { kind: "externref" } });
+
+  // Happy path: call the handler, coerce its result, settle the chained promise.
+  const tryBody: Instr[] = [
     // call_ref stack shape: [closure_self, ...user_args, typed_funcref]
     { op: "local.get", index: callbackLocal },
   ];
-
   for (let i = 0; i < info.paramTypes.length; i++) {
     if (i === 0) {
-      pushExternrefLocalAsType(ctx, body, 1, info.paramTypes[i]!);
+      pushExternrefLocalAsType(ctx, tryBody, 1, info.paramTypes[i]!);
     } else {
-      pushDefaultForType(body, info.paramTypes[i]!);
+      pushDefaultForType(tryBody, info.paramTypes[i]!);
     }
   }
-
-  body.push(
+  tryBody.push(
     { op: "local.get", index: callbackLocal },
     { op: "struct.get", typeIdx: info.structTypeIdx, fieldIdx: 0 } as Instr,
     { op: "ref.cast", typeIdx: info.funcTypeIdx } as Instr,
     { op: "call_ref", typeIdx: info.funcTypeIdx },
   );
-  coerceStackValueToExternref(ctx, body, info.returnType);
-  body.push(
+  coerceStackValueToExternref(ctx, tryBody, info.returnType);
+  tryBody.push(
     { op: "local.set", index: resultLocal },
     { op: "local.get", index: capLocal },
     { op: "struct.get", typeIdx: capsTypeIdx, fieldIdx: 1 } as Instr,
     { op: "local.get", index: resultLocal },
     { op: "call", funcIdx: settleFuncIdx },
+    { op: "drop" }, // settle returns the value; the drain ignores the wrapper result
   );
+
+  body.push({
+    op: "try",
+    blockType: { kind: "empty" },
+    body: tryBody,
+    catches: [
+      {
+        tagIdx: exnTag,
+        body: [
+          { op: "local.set", index: reasonLocal },
+          { op: "local.get", index: capLocal },
+          { op: "struct.get", typeIdx: capsTypeIdx, fieldIdx: 1 } as Instr,
+          { op: "local.get", index: reasonLocal },
+          { op: "call", funcIdx: state.promiseRejectFuncIdx },
+          { op: "drop" },
+        ],
+      },
+    ],
+  } as Instr);
+  // Wrapper result (externref) — dropped by the drain; always null now.
+  body.push({ op: "ref.null.extern" });
 
   ctx.mod.functions.push({
     name: wrapperName,
