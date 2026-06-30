@@ -3037,17 +3037,27 @@ export function emitStandalonePromiseThen(
 }
 
 /**
- * #1326 — Check whether standalone-mode Promise codegen is active.
- * Auto-enables for any host-free target — WASI *and* `--target standalone`
- * (#2865 AG0). Both lack the JS host microtask queue / Promise_* imports, so
- * Promise construction (`Promise.resolve/reject`), `.then`, and the async-fn
- * `await` unwrap must use the Wasm-native `$Promise` carrier rather than leak
- * `env::Promise_*` / `__make_callback`. Previously gated on `ctx.wasi` only,
- * which left `--target standalone` leaking those imports (and the await path
- * falling back to the identity-passthrough NaN bug).
+ * #1326 — Check whether host-free Promise codegen (native `$Promise` carrier:
+ * construction, async-fn return wrap, `await` unwrap) is active.
+ *
+ * **Gated on `ctx.wasi` only.** AG0 (#2865) briefly widened this to
+ * `ctx.standalone` too, but ground-truth measurement (#2895 reconcile, against
+ * the #2384 frame-core base) showed that widening is a NET REGRESSION on
+ * standalone: the `flags:[async]` test262 harness uses synchronous-settlement
+ * (`asyncTest(fn)` calls `fn()` then `$DONE()` with no microtask drain), so an
+ * async fn that returns a native `$Promise` is observed as an undrained struct,
+ * not a value → 32/202 async tests that PASS on baseline regress to FAIL, with
+ * **no** offsetting await-unwrap gain (the await/async-function area itself went
+ * 71→42 pass under the broad gate). The host-free standalone await win is
+ * coupled to a real async drive layer (result `$Promise` + microtask drain that
+ * the harness can settle), which is **PATH B (#2895)** — not bankable in a
+ * bounded gate flip. So standalone reverts to baseline here (net-0, no
+ * regression); WASI keeps the genuine native-`$Promise` behaviour + the await
+ * NaN-fix. PATH B re-widens this (and {@link isStandaloneThenChainNativeActive})
+ * once the drive layer makes native async results observable.
  */
 export function isStandalonePromiseActive(ctx: CodegenContext): boolean {
-  return ctx.wasi === true || ctx.standalone === true;
+  return ctx.wasi === true;
 }
 
 /**
