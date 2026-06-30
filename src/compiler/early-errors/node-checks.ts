@@ -239,6 +239,27 @@ export function runNodeChecks(ctx: EarlyErrorContext, node: ts.Node): void {
   if (ts.isYieldExpression(node)) {
     if (isInsideGeneratorParams(node)) {
       ctx.addError(node, "Yield expression is not allowed in generator function parameters");
+    } else if (!isInsideFunction(node)) {
+      // ── Top-level YieldExpression (outside any function) (#2898) ──────
+      // ES: `yield` is only a YieldExpression inside a generator (a function).
+      // A YieldExpression that is not inside ANY function is therefore always
+      // invalid — in sloppy top-level code `yield` is an Identifier (TS parses
+      // those as Identifier nodes, not YieldExpression), so a top-level
+      // YieldExpression node means TS leniently consumed an operand the spec
+      // rejects at parse time, e.g. `yield x = 1;` (which the
+      // assignmenttargettype test treats as `(yield x)` in invalid LHS
+      // position) or a bare `yield 1;`. Both are early SyntaxErrors.
+      //
+      // We test `!isInsideFunction` rather than `!isInsideGeneratorFunction`
+      // deliberately: it is the SOUND invariant (no false positives). A yield
+      // nested in a non-generator function/method *inside* a generator can be
+      // valid — e.g. a `[yield]` ComputedPropertyName on a non-generator method
+      // is evaluated in the enclosing generator's scope (test262
+      // name-prop-name-yield-expr / cpn-class-*-from-yield-expression). Those
+      // sit under a MethodDeclaration, so `isInsideFunction` is true and we
+      // correctly leave them alone. The narrower in-function generator-context
+      // cases are out of scope for #2898.
+      ctx.addError(node, "A 'yield' expression is only allowed within a generator body");
     }
   }
   if (ts.isAwaitExpression(node)) {
