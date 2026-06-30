@@ -1,7 +1,9 @@
 ---
 id: 2874
 title: "Standalone: Object.getOwnPropertyDescriptor (and defineProperty) numeric/object property-key → string coercion drops the lookup"
-status: ready
+status: done
+completed: 2026-06-30
+assignee: ttraenkler/dev-standalone
 created: 2026-06-30
 priority: high
 task_type: bug
