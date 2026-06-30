@@ -996,6 +996,12 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
         paramOffset: 0,
         paramTypes: params.map((p) => p.type),
       };
+      // (#2676) Record this mapped function's live `mappedArgsInfo` keyed by its
+      // declaration node so a `delete args[i]` in a nested (strict) closure can
+      // resolve an aliased `arguments` (`var args = arguments`) back to this
+      // function's per-index `nonConfigurableIndices`. See the delete site in
+      // typeof-delete.ts (resolveAliasedMappedArgs).
+      ctx.mappedArgsInfoByFunc.set(decl, fctx.mappedArgsInfo);
     }
 
     // Build the arguments vec by concatenating formal params with

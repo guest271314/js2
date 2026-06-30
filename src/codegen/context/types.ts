@@ -2005,6 +2005,21 @@ export interface CodegenContext {
    * (#2726 group (d): `11.4.1-4-a-2-s`). Consumed ONLY by the delete site.
    */
   nonConfigurableAccessorKeys: Set<string>;
+  /**
+   * (#2676) Maps a mapped-`arguments` function's declaration node to its live
+   * `mappedArgsInfo`. A `delete args[i]` in a *nested* closure — typically the
+   * strict callback in `assert.throws(TypeError, function(){ "use strict";
+   * delete args[0]; })` after `var args = arguments` — has no `mappedArgsInfo`
+   * of its own and reads the alias `args`, not the literal `arguments`, so the
+   * #2667 direct-`arguments[i]` delete arm never fires. The delete site walks
+   * the alias' declaration initializer (`= arguments`) up to the enclosing
+   * (non-arrow) function that owns `arguments` and reads this map to recover the
+   * outer function's per-index `nonConfigurableIndices`. Populated when
+   * `mappedArgsInfo` is created (the `compileFunctionBody` path); read live at
+   * the delete site, so the index reflects every `Object.defineProperty(...,
+   * { configurable:false })` processed before the delete is compiled.
+   */
+  mappedArgsInfoByFunc: Map<ts.Node, NonNullable<FunctionContext["mappedArgsInfo"]>>;
   /** Object mutability state sets */
   nonExtensibleVars: Set<string>;
   frozenVars: Set<string>;
