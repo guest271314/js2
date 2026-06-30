@@ -15,8 +15,9 @@
  */
 
 import { ts, forEachChild } from "../ts-api.js";
-import { isVoidType, unwrapPromiseType } from "../checker/type-mapper.js";
+import { isVoidType, unwrapPromiseType, isPromiseType } from "../checker/type-mapper.js";
 import type { FieldDef, Instr, LocalDef, StructTypeDef, ValType } from "../ir/types.js";
+import { isStandalonePromiseActive } from "./async-scheduler.js"; // (#2867 Gap 1) native-$Promise carrier gate
 import { classMemberFuncKey } from "./class-member-keys.js"; // (#1983) collision-free class-member funcMap keys
 import { addStringConstantGlobal } from "./registry/imports.js"; // (#2025)
 import { stringConstantExternrefInstrs } from "./native-strings.js"; // (#2025)
@@ -1500,11 +1501,25 @@ export function compileArrowAsClosure(
     if (isAsync) {
       retType = unwrapPromiseType(retType, ctx.checker);
     }
+    // (#2867 Gap 1) A NON-async closure that returns a `Promise<T>` — e.g. a
+    // `.then`/`.catch` handler `v => Promise.resolve(...)` — produces a real
+    // Promise OBJECT at runtime, not a `T`. Under the host-free native-`$Promise`
+    // carrier, `resolveWasmType(Promise<T>)` would unwrap to `T` (e.g. f64),
+    // coercing the promise externref to NaN inside the body and breaking recursive
+    // thenable assimilation (the chained promise must ADOPT the returned inner
+    // promise's state). Keep the result `externref` so `__promise_resolve_value`
+    // at the settle site sees a real `$Promise`. Gated on the carrier predicate
+    // (wasi today; widens to standalone in lockstep at #2895 slice 1d) so the
+    // default gc/host `.then` path — and the standalone lane while its carrier is
+    // still host-backed — stay byte-unchanged.
+    if (!isAsync && isStandalonePromiseActive(ctx) && isPromiseType(retType)) {
+      closureReturnType = { kind: "externref" };
+    }
     // Treat `never` the same as `void` — a function returning `never` (e.g.
     // always throws) never produces a value, so it should have no Wasm result.
     // Without this, `never` resolves to externref and creates a mismatched
     // closure wrapper type vs. the `() => void` signature expected by callers.
-    if (!isVoidType(retType) && !(retType.flags & ts.TypeFlags.Never)) {
+    if (closureReturnType === null && !isVoidType(retType) && !(retType.flags & ts.TypeFlags.Never)) {
       closureReturnType = resolveWasmType(ctx, retType);
     }
   }

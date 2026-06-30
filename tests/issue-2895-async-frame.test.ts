@@ -9,8 +9,8 @@ import { describe, it, expect } from "vitest";
 import * as ts from "typescript";
 // Import the top compiler entry first so the codegen module graph initializes in
 // the correct order (the regexp-standalone → string-ops → coercion-engine init
-// cycle is otherwise tripped by loading the barrel cold). Not otherwise used.
-import "../src/index.js";
+// cycle is otherwise tripped by loading the barrel cold).
+import { compile } from "../src/index.js";
 import { createEmptyModule } from "../src/ir/types.js";
 import { createCodegenContext } from "../src/codegen/index.js";
 import { getOrRegisterPromiseType } from "../src/codegen/async-scheduler.js";
@@ -140,5 +140,63 @@ describe("#2895 PATH B foundation — $AsyncFrame state struct", () => {
     const keepIdx = info.spillFieldOffset + info.spillNames.indexOf("keep");
     expect(struct.fields[keepIdx]!.name).toBe("spill_keep");
     expect(struct.fields[keepIdx]!.mutable).toBe(true);
+  });
+});
+
+// ── PATH B slice 1b/1c: the live host-free async drive layer (validated on the
+// native-`$Promise` carrier target — `--target wasi`, where the carrier gate is
+// already on; the `--target standalone` re-widen is slice 1d). ────────────────
+
+/** Compile a host-free async program and instantiate it (imports must be empty). */
+async function instantiateWasi(src: string): Promise<WebAssembly.Exports> {
+  const r = await compile(src, { fileName: "test.ts", target: "wasi" });
+  expect(r.success, r.success ? "" : JSON.stringify(r.errors?.slice(0, 3))).toBe(true);
+  // The drive layer is host-free: the module must request no imports.
+  expect((r.imports ?? []).map((i) => `${i.module}.${i.name}`)).toEqual([]);
+  expect(WebAssembly.validate(r.binary)).toBe(true);
+  const { instance } = await WebAssembly.instantiate(r.binary, {});
+  return instance.exports;
+}
+
+describe("#2895 PATH B drive layer — host-free async frame suspension", () => {
+  it("synchronously-settled await delivers the resolved value (FULFILLED fast path)", async () => {
+    const ex = (await instantiateWasi(`
+      let cap: number = 0;
+      async function g(): Promise<number> { return 41; }
+      async function f(): Promise<number> { const x = await g(); cap = x; return x + 1; }
+      export function test(): number { f() as any; return cap; }
+    `)) as { test: () => number };
+    expect(ex.test()).toBe(41);
+  });
+
+  it("chained drive-lowered async fns thread the value through both frames", async () => {
+    const ex = (await instantiateWasi(`
+      let cap: number = 0;
+      async function g(): Promise<number> { return 41; }
+      async function h(): Promise<number> { const a = await g(); return a + 1; }
+      async function f(): Promise<number> { const x = await h(); cap = x; return x + 1; }
+      export function test(): number { f() as any; return cap; }
+    `)) as { test: () => number };
+    expect(ex.test()).toBe(42); // g→41, h→42, f reads 42
+  });
+
+  it("GENUINELY-PENDING await suspends, then the microtask drain resumes the frame", async () => {
+    // `Promise.resolve(1).then(cb)` is PENDING until the drain runs `cb` on a
+    // microtask — the await must spill, register a reaction, and return; the
+    // drain settles the awaited promise, fires the reaction, and resumes the
+    // frame at the saved state with the delivered value. This is the case AG0's
+    // one-level unwrap cannot serve.
+    const ex = (await instantiateWasi(`
+      let cap: number = 0;
+      async function consumer(): Promise<void> {
+        const x = await Promise.resolve(1).then((v: number) => v + 40);
+        cap = x;
+      }
+      export function kick(): number { consumer() as any; return cap; }
+      export function getCap(): number { return cap; }
+    `)) as { kick: () => number; getCap: () => number; __drain_microtasks: () => void };
+    expect(ex.kick()).toBe(0); // suspended: continuation has not run yet
+    ex.__drain_microtasks(); // run the pending `.then` + the resumed continuation
+    expect(ex.getCap()).toBe(41); // 1 + 40, delivered on resume
   });
 });

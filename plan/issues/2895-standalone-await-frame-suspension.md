@@ -232,3 +232,39 @@ premature widen is the AG0 −31 regression — do NOT repeat it).
 1d. **re-widen carrier gates** — flip `isStandalonePromiseActive` +
     `isStandaloneThenChainNativeActive` to include `ctx.standalone` TOGETHER,
     only after 1c proves net-positive.
+
+### Slice 1b/1c — resume fn + live wiring (LANDED + VALIDATED on wasi)
+
+Built and validated the host-free drive layer end-to-end on the native-`$Promise`
+carrier target (`--target wasi`, where the carrier gate is already on; the
+`--target standalone` re-widen is slice 1d):
+
+- `async-frame.ts`: `ensureAsyncResumeFunction` (2-state resume fn — `if(state==0)`
+  entry → assimilate awaited `$Promise`, FULFILLED → deliver `SENT` + fall
+  through, PENDING → `storeSpills` + STATE=1 + register a `$PromiseCallback`
+  reaction + `return`; continuation reads `SENT`), `__async_step_f<name>_{fulfill,
+  reject}` microtask adapters, and `emitAsyncFrameStateMachine` call-site shim
+  (alloc frame + pending result `$Promise`, kick resume once, return the promise).
+  Uses the generator slot-reservation funcIdx-stability idiom.
+- `function-body.ts`: wires it for `isStandalonePromiseActive(ctx) && asyncFnNeedsCps`
+  — gating on the **carrier** predicate so 1d's standalone widen flips carrier +
+  drive layer **together** (AG0-safe). The JS-host CPS branch is preserved.
+- `control-flow.ts`: `return v` in a resume body settles `result_promise` via
+  `__promise_fulfill` (keyed off `fctx.asyncDriveReturn`, mirrors the generator arm).
+
+**Validated** (`tests/issue-2895-async-frame.test.ts`, all green, host-free —
+`result.imports` empty, `WebAssembly.validate` true):
+- FULFILLED fast path: `await g()` (sync-settled async fn) delivers the value.
+- chained drive-lowered async fns thread the value through both frames.
+- **GENUINELY-PENDING**: `await Promise.resolve(1).then(cb)` (pending until the
+  microtask runs `cb`) SUSPENDS (continuation not run), and `__drain_microtasks`
+  resumes the frame to deliver the settled value — the exact case AG0 cannot serve.
+
+**Codegen lesson banked**: repeated `local.get <externref>; any.convert_extern;
+ref.cast $T` confuses the `stack-balance` type-repair pass (it splices a bogus
+`ref.cast_null; any.convert_extern`). Narrow the awaited `$Promise` into a single
+typed `(ref $Promise)` local once and reuse it.
+
+Remaining: **1d** — widen `isStandalonePromiseActive`/`isStandaloneThenChainNativeActive`
+to `standalone` + the runner `__drain_microtasks` hook for `flags:[async]` tests,
+measured NET-POSITIVE on the full `merge_group` standalone report.

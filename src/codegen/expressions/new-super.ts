@@ -40,7 +40,7 @@ import {
   isGlobalRegExpIdentifier,
   isGlobalRegExpType,
 } from "../regexp-standalone.js";
-import { emitWasiErrorConstructor, isWasiErrorName } from "../registry/error-types.js";
+import { emitStandaloneTest262Error, emitWasiErrorConstructor, isWasiErrorName } from "../registry/error-types.js";
 import type { InnerResult } from "../shared.js";
 import {
   coerceType,
@@ -2903,6 +2903,22 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       // #1473 — standalone mode also has no JS host; build the Error in-module.
       if ((ctx.wasi || ctx.standalone) && isWasiErrorName(ctorName)) {
         emitWasiErrorConstructor(ctx, ctorName, 1);
+        const internalFuncIdx = ctx.funcMap.get(importName);
+        if (internalFuncIdx !== undefined) {
+          fctx.body.push({ op: "call", funcIdx: internalFuncIdx });
+        }
+        return { kind: "externref" };
+      }
+      // (#2902) `Test262Error` is not a WASI builtin error, but the test262
+      // harness declares it (`class Test262Error extends Error`) and `throw new
+      // Test262Error(...)` appears in nearly every wrapped test. In standalone /
+      // WASI mode the `__new_Test262Error` host import is unsatisfiable and
+      // leaks the module out of host-free — yet the ctor is only reached on the
+      // untaken failure path of a passing test. Build it natively as an
+      // $Error_struct (tagged Error, name "Test262Error") so ~2,779 such tests
+      // become host-free. JS-host mode keeps the host import (real Error).
+      if ((ctx.wasi || ctx.standalone) && ctorName === "Test262Error") {
+        emitStandaloneTest262Error(ctx, 1);
         const internalFuncIdx = ctx.funcMap.get(importName);
         if (internalFuncIdx !== undefined) {
           fctx.body.push({ op: "call", funcIdx: internalFuncIdx });
