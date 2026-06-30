@@ -3137,7 +3137,37 @@ function compileNumberIsPredicate(
 ): ValType {
   const argTsType = ctx.checker.getTypeAtLocation(arg);
   const argWasm = resolveWasmType(ctx, argTsType);
-  const isStaticNumber = isNumberType(argTsType) || argWasm.kind === "f64" || argWasm.kind === "i32";
+
+  // #2034 follow-up: a `symbol`-typed argument is statically NOT a Number, so
+  // every `Number.is*` predicate is `false` (ES §21.1.2.x). A Symbol's Wasm
+  // representation is a single-slot reference that BOTH the i32/f64 "static
+  // number" fast path AND the runtime `__typeof_number` guard mis-handle (the
+  // guard reports it as a number), so neither generic arm yields the spec
+  // answer. Fold it at compile time: evaluate the argument for its side effects
+  // (the Symbol expression may be an observable call) and push `false`.
+  // (test262 Number/{isInteger,isFinite,isSafeInteger}/arg-is-not-number.js.)
+  if ((argTsType.flags & ts.TypeFlags.ESSymbolLike) !== 0) {
+    const t = compileExpression(ctx, fctx, arg);
+    if (t) fctx.body.push({ op: "drop" } as Instr);
+    fctx.body.push({ op: "i32.const", value: 0 });
+    return { kind: "i32" };
+  }
+
+  // Several non-Number primitive types reuse a numeric Wasm representation that
+  // would otherwise hijack the "static number" fast path and coerce, violating
+  // the no-coercion rule (ES §21.1.2.x):
+  //   - `boolean` is i32 (`true`→1.0 / `false`→0.0), and
+  //   - `undefined` / `void` / `null` lower to an f64 `NaN` (CLAUDE.md: "null/
+  //     undefined in f64 context → f64.const NaN"). For `isInteger`/`isFinite`/
+  //     `isSafeInteger` the NaN happens to yield the correct `false`, but
+  //     `Number.isNaN(undefined)` would wrongly return `true`.
+  // Exclude them so they take the runtime `__typeof_number` guard, which reports
+  // a non-number and yields `false`.
+  // (test262 Number/{isInteger,isFinite,isNaN,isSafeInteger}/arg-is-not-number.js.)
+  const nonNumberMask = ts.TypeFlags.BooleanLike | ts.TypeFlags.Undefined | ts.TypeFlags.Void | ts.TypeFlags.Null;
+  const isNonNumberPrimitive = (argTsType.flags & nonNumberMask) !== 0;
+  const isStaticNumber =
+    !isNonNumberPrimitive && (isNumberType(argTsType) || argWasm.kind === "f64" || argWasm.kind === "i32");
 
   if (isStaticNumber) {
     // Fast path: the argument is statically a number — apply the test directly.
@@ -5120,6 +5150,18 @@ function compileCallExpression(
       // non-Number value is `false` (ES §21.1.2.x). compileNumberIsPredicate
       // guards an any-typed argument with `__typeof_number` before applying the
       // numeric test; a static number keeps the direct f64 fast path.
+      // No argument ⇒ the argument is `undefined`, whose Type is not Number, so
+      // every `Number.is*` predicate returns `false` (ES §21.1.2.x). Without this
+      // the `arguments.length >= 1` guards below fall through to the generic
+      // member-call path and mis-handle the bare call.
+      // (test262 Number/{isInteger,isFinite,isNaN,isSafeInteger}/arg-is-not-number.js.)
+      if (
+        expr.arguments.length === 0 &&
+        (method === "isNaN" || method === "isInteger" || method === "isFinite" || method === "isSafeInteger")
+      ) {
+        fctx.body.push({ op: "i32.const", value: 0 });
+        return { kind: "i32" };
+      }
       if (method === "isNaN" && expr.arguments.length >= 1) {
         // NaN !== NaN is true; for any other number it's false.
         return compileNumberIsPredicate(ctx, fctx, expr.arguments[0]!, (v) => [
@@ -6659,6 +6701,13 @@ function compileCallExpression(
     ) {
       const arg0 = expr.arguments[0]!;
       const arg1 = expr.arguments[1]!;
+
+      // (#2874) Under standalone, register the native object runtime so the
+      // typed-receiver fast path's `ensureLateImport("__create_descriptor", …)`
+      // below resolves to the native `__create_descriptor` (object-runtime.ts)
+      // instead of leaking the `env::__create_descriptor` host import (which has
+      // no standalone carrier — the module would trap). Idempotent.
+      if (ctx.standalone) ensureObjectRuntime(ctx);
 
       // Try compile-time fast path: known struct + literal property name
       const arg0TsType = ctx.checker.getTypeAtLocation(arg0);
@@ -10921,12 +10970,18 @@ function compileCallExpression(
     // graceful null-extern fallback and the test fails with "null/undefined
     // access" instead of reaching the expected throw.
     if (propAccess.name.text === "toLocaleString" && expr.arguments.length === 0) {
-      const toLSIdx = ensureLateImport(
-        ctx,
-        "__extern_toLocaleString",
-        [{ kind: "externref" }],
-        [{ kind: "externref" }],
-      );
+      // (#2863 Phase 2) Standalone/WASI have no host `__extern_toLocaleString`
+      // (it's a dynamic-shape refusal — a host-only import with no native
+      // carrier). Without ECMA-402 the spec default
+      // `Object.prototype.toLocaleString` (§20.1.3.5) just calls the receiver's
+      // `toString`, and `Array.prototype.toLocaleString` (§23.1.3.32) joins the
+      // per-element `toLocaleString` results — both collapse to the same comma-
+      // join as `toString` in a locale-independent runtime. Route to the NATIVE
+      // `__extern_toString` (registered host-free under standalone via #1866),
+      // which removes the CE while matching the locale-independent value. Host
+      // (gc) mode keeps `__extern_toLocaleString` for real Intl grouping.
+      const toLSName = ctx.standalone || ctx.wasi ? "__extern_toString" : "__extern_toLocaleString";
+      const toLSIdx = ensureLateImport(ctx, toLSName, [{ kind: "externref" }], [{ kind: "externref" }]);
       flushLateImportShifts(ctx, fctx);
       if (toLSIdx !== undefined) {
         const recvType = compileExpression(ctx, fctx, propAccess.expression, { kind: "externref" });
