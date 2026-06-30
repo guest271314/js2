@@ -53,6 +53,8 @@ import { collectI32SpecializedArrays } from "./array-element-typing.js";
 import { detectArrayReduceFusion, applyArrayReduceFusion } from "./array-reduce-fusion.js";
 import { compileNativeGeneratorFunction } from "./generators-native.js";
 import { ASYNC_CPS_ENABLED, analyzeAsyncBody, asyncFnNeedsCps, emitAsyncStateMachine } from "./async-cps.js";
+import { emitAsyncFrameStateMachine } from "./async-frame.js";
+import { isStandalonePromiseActive } from "./async-scheduler.js";
 import {
   functionHasLinearU8Params,
   getLinearU8ParamIndicesForDeclaration,
@@ -1140,7 +1142,38 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
       // fn now returns a real Promise object), drive emitAsyncStateMachine, and
       // skip the normal statement loop.
       let asyncCpsHandled = false;
-      if (ASYNC_CPS_ENABLED && isAsync && !ctx.wasi && !ctx.standalone && ts.isFunctionDeclaration(decl) && decl.body) {
+      // (#2895 PATH B) Host-free async drive layer. Gated on the native-`$Promise`
+      // *carrier* (`isStandalonePromiseActive`, currently `wasi`-only): when the
+      // awaited operand resolves to a native `$Promise`, a genuinely-suspending
+      // async fn is driven by a real resumable `$AsyncFrame` (await → spill +
+      // reaction + return result-promise; microtask drain resumes). Gating the
+      // wiring on the carrier predicate makes the standalone re-widen (#2895 1d)
+      // flip the carrier AND the drive layer together — exactly the AG0-safe
+      // coupling. The result is a real `$Promise` (externref), not a sync value.
+      if (
+        ASYNC_CPS_ENABLED &&
+        isAsync &&
+        isStandalonePromiseActive(ctx) &&
+        ts.isFunctionDeclaration(decl) &&
+        decl.body
+      ) {
+        const asyncPlan = analyzeAsyncBody(ctx, decl);
+        if (asyncFnNeedsCps(decl, asyncPlan)) {
+          rewriteFuncResultType(ctx, func, { kind: "externref" });
+          fctx.returnType = { kind: "externref" };
+          emitAsyncFrameStateMachine(ctx, fctx, decl, asyncPlan);
+          asyncCpsHandled = true;
+        }
+      }
+      if (
+        !asyncCpsHandled &&
+        ASYNC_CPS_ENABLED &&
+        isAsync &&
+        !ctx.wasi &&
+        !ctx.standalone &&
+        ts.isFunctionDeclaration(decl) &&
+        decl.body
+      ) {
         const asyncPlan = analyzeAsyncBody(ctx, decl);
         if (asyncFnNeedsCps(decl, asyncPlan)) {
           // The async function returns a Promise object (externref), not the
