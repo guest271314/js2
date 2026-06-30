@@ -2469,10 +2469,23 @@ function emitRegExpProtoMemberBody(
     // `undefined` per §22.2.6 ("If SameValue(R, %RegExp.prototype%) return
     // undefined"), NOT the brand-check TypeError. The getter-closure result is
     // unified to externref (the undefined sentinel + every boxed field value
-    // share one type), so the proto-identity arm yields `ref.null.extern`.
+    // share one type). Most getters yield `undefined` (`ref.null.extern`) on the
+    // proto, but per §22.2.6.13 the `source` getter returns `"(?:)"` and per
+    // §22.2.6.4 the `flags` getter returns `""` when `R === %RegExp.prototype%`
+    // (#2876) — so pass a member-specific proto result.
     const brand = getBuiltinBrand(ctx, "RegExp");
     if (brand !== undefined) {
-      emitNativeProtoIdentityReturnUndefined(ctx, fctx, brand, 1, [{ op: "ref.null.extern" } as Instr]);
+      let protoResult: Instr[];
+      if (member === "source") {
+        addStringConstantGlobal(ctx, "(?:)");
+        protoResult = stringConstantExternrefInstrs(ctx, "(?:)");
+      } else if (member === "flags") {
+        addStringConstantGlobal(ctx, "");
+        protoResult = stringConstantExternrefInstrs(ctx, "");
+      } else {
+        protoResult = [{ op: "ref.null.extern" } as Instr];
+      }
+      emitNativeProtoIdentityReturnUndefined(ctx, fctx, brand, 1, protoResult);
     }
 
     // Brand-recovery prologue: `this` is closure param index 1 (externref). On a

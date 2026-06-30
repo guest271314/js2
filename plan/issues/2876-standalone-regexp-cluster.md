@@ -1,8 +1,9 @@
 ---
 id: 2876
 title: "Standalone: RegExp cluster (125 host-pass/standalone-fail, de-masked from #2862)"
-status: in-progress
+status: done
 assignee: ttraenkler/sr-reflect
+completed: 2026-06-30
 created: 2026-06-30
 priority: high
 task_type: bug
@@ -99,3 +100,71 @@ The 48 fails are dominated by ONE root cause, plus two smaller ones:
 
 **Sequencing:** depends on #2885 (PR #2371) merging first. Lever (1) is the large,
 shared piece; (2) and (3) are smaller follow-ons gated behind it.
+
+## Implementation Notes (sr-reflect, 2026-06-30 — landed on top of merged #2885)
+
+Implemented **lever (1)** (the dominant, shared unblock for #2876 + #2875 + #2872)
+and **lever (3)** (source/flags proto values). Lever (2) (`.name` reflection on the
+opaque getter closure) is deferred — see "Remaining" below.
+
+**Lever (1) — reflective `.call`/`.apply` on a descriptor-retrieved getter.**
+Rather than a runtime `ref.test` dispatch over the hot generic `.call` path (high
+blast radius), the receiver's data-flow is traced STATICALLY back to its
+`Object.getOwnPropertyDescriptor(<Builtin>.prototype, "<getter>").get` initializer.
+Three shapes resolve: inline `gOPD(...).get.call(R)`, `var g = gOPD(...).get;
+g.call(R)`, and `var d = gOPD(...); d.get.call(R)`. Brand+member recovered from the
+trace; then the existing #2193 call_ref emitter is reused (factored into
+`emitReflectiveNativeProtoClosureCall`) — it call_ref's the funcref stored in the
+runtime wrapper, threading `thisArg → param 1 (this)`. The getter body's #2885
+proto-identity arm + brand recovery yield the spec result. Standalone-only;
+returns `undefined` (no behaviour change) for any receiver that doesn't trace to a
+builtin-proto accessor descriptor — verified the generic `.call` path (user fns,
+arrows, `Array.prototype.slice.call`) is byte-unchanged.
+
+Files: `src/codegen/expressions/calls.ts` — `emitReflectiveNativeProtoClosureCall`
+(extracted), `tryEmitNativeProtoDescriptorAccessorCall` + the data-flow trace
+helpers (`resolveDescriptorAccessorSource`, `parseBuiltinProtoGopdCall`,
+`traceVarInitializer`, `isObjectGopdCall`, `unwrapTransparent`), wired into the
+`.call`/`.apply` dispatch right after the symbol-keyed reflective call.
+
+**Lever (3) — source/flags proto values.** `emitRegExpProtoMemberBody` now passes a
+member-specific proto result to `emitNativeProtoIdentityReturnUndefined`:
+`"(?:)"` for `source` (§22.2.6.13), `""` for `flags` (§22.2.6.4), `undefined` for
+the boolean flag getters. (`src/codegen/regexp-standalone.ts`.)
+
+### Results (accessor-reflection subset, 90 files, `runTest262File(..., "standalone")`)
+
+| state           | on `main` (pre-#2885) | +#2885 only | **+this PR** |
+| --------------- | --------------------- | ----------- | ------------ |
+| pass            | ~0 (deref-trap)       | 28          | **47**       |
+| fail / non-pass | ~90                   | 62          | 43           |
+
+**+19 passes vs #2885 alone, 0 regressions.** `get.call(instance)` returns the
+boolean/string; `get.call(proto)` → undefined / `"(?:)"` / `""`;
+`get.call(<non-RegExp>)` throws a catchable TypeError; inline + two-hop forms all
+work, host-free (`imports: []`). Regression tests in `tests/issue-2876.test.ts`
+(8/8). `tsc --noEmit` clean. Full conformance + standalone floor validated by CI
+`merge_group`.
+
+### Remaining (separate follow-ups, NOT regressions — all non-pass pre-#2885 too)
+
+- **`*/name.js` (×9) — lever (2):** `verifyProperty(descriptor.get, "name",
+{value:"get global", …})` needs `.name`/`.length` reflection (and their own
+  descriptors) on the opaque getter closure to consult `nativeClosureMeta` by the
+  wrapper's funcref identity. `#2885` already records the `"get <member>"` name;
+  the dynamic read path must be taught to use it. (Function-name reflection +
+  propertyHelper.)
+- **`S15.10.7.x_A8/A9/A10`, `15.10.7.x-2`:** `RegExp.prototype.hasOwnProperty('global')`
+  / `propertyIsEnumerable` / `for-in` over the `$NativeProto` — proto own-key
+  enumeration reflection, a distinct native-proto surface.
+- **`flags/coercion-*.js`, `flags/rethrow.js`, `flags/get-order.js`:** the `flags`
+  getter must compute via `Get(R, "global")` etc. (invoking user flag getters), not
+  the struct field — a flags-via-Get semantic, out of scope for the struct backend.
+- **`source/value*.js`:** use `eval` (a skipped feature).
+
+### Unblocks
+
+Lever (1) is the **shared** mechanism: #2875 (String.prototype) and #2872
+(TypedArray accessors) reflective-call subsets open up once their per-cluster
+getter `emitMemberBody` glue exists — the gOPD synthesis (#2885) + this reflective
+`.call` recovery are brand-agnostic.
