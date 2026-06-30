@@ -71,3 +71,65 @@ Standalone fail/CE → pass:
 Full `merge_group` + standalone high-water; preserve Symbol identity via
 `ref.eq` (regression guard: two `Symbol("x")` must be `!==`, the same well-known
 must be `===`). Zero host-mode regression.
+
+## Verify-first findings + implementation spec (sendev-promise, 2026-06-30)
+
+**Current state (probed on origin/main, `--target standalone`).** A Symbol is an
+**i32 counter id** (`{kind:"i32", symbol:true}`) — NOT a struct. The SIMPLE cases
+already work host-free and correct (`result.imports` empty, return 1):
+`typeof s==="symbol"`, distinct-identity (`Symbol("x")!==Symbol("x")`),
+`Symbol.for` interning, well-known `===`, `.description`.
+
+**The real gaps (host-free FAILS), all rooted in one thing — Symbol-as-an-`$Object`-key:**
+
+| probe | result |
+|---|---|
+| `o[s]=42; o[s]===42` | RUNERR `illegal cast`, leaks `env::__box_symbol` |
+| `Object.getOwnPropertySymbols(o)` | RUNERR `illegal cast`, leaks `env::__box_symbol` |
+| `{[Symbol.toPrimitive](){return 7}}` (o*1) | RUNERR `illegal cast` (no import) |
+
+Root cause: to enter the `$Object` property map a key must be an externref, and a
+Symbol i32 is boxed via `env::__box_symbol` — a **host-only** import
+(`index.ts:10386 addImport("env","__box_symbol")`; the "native standalone
+`__box_symbol` exists" comments in property-access.ts are aspirational — it does
+NOT). Worse, `$PropEntry.key` is typed **`(ref $AnyString)`** (object-runtime.ts
+~208), so even a boxed Symbol can't be stored as a key without widening the
+channel. So this is a **value-representation build**, not a gate-broaden.
+
+### Required pieces (L, needs the value-rep call)
+
+1. **Native `$Symbol` carrier struct** — `struct $Symbol { id:i32, desc:(ref null $AnyString) }`,
+   registered once; standalone `__box_symbol(i32)->externref` becomes an in-module
+   func building/interning a `$Symbol` (identity via the i32 id; `ref.eq` on the
+   interned struct also works). Well-known symbols + `Symbol.for` registry already
+   have stable ids — intern their `$Symbol` carriers as singletons.
+2. **`$Object` key channel widening** — two options:
+   - **(A) union key (correct, larger):** `$PropEntry.key : eqref` (or a
+     `$AnyString | $Symbol` union), find-loop compares `$Symbol` keys by `id`/`ref.eq`
+     and `$AnyString` keys by `__str_equals` (branch on `ref.test`). Touches
+     `__to_property_key`, store/find/has/delete, enumeration. ~the whole key path.
+   - **(B) encoded-key compile-away (smaller, collision-risk):** keep
+     `key:(ref $AnyString)`, encode a Symbol key as a reserved sentinel string
+     embedding the id, set a new `FLAG_SYMBOL` (0x20) bit on the `$PropEntry`.
+     `Object.keys`/for-in/JSON exclude `FLAG_SYMBOL` (like the existing
+     `FLAG_INTERNAL` 0x10 exclusion); `getOwnPropertySymbols` selects only
+     `FLAG_SYMBOL` entries and decodes the id back to the `$Symbol`. Avoids the
+     struct-type rewrite but needs a collision-proof sentinel and id↔desc decode.
+   **Recommendation:** (A) is the durable design and aligns with the issue's plan;
+   (B) is a faster slice if a bulk win is needed sooner. Pick per value-rep review.
+3. **`getOwnPropertySymbols`** — enumerate Symbol-keyed entries (filter by the
+   key type (A) or `FLAG_SYMBOL` (B)), return `$Symbol` carriers.
+4. **`Symbol.toPrimitive` dispatch** — `{[Symbol.toPrimitive](){…}}` illegal-casts
+   today; the coercion engine must look up the well-known `$Symbol` key (ties into
+   #2862 ToPrimitive). Likely the same key-channel widening unblocks it.
+
+### Host-mode safety
+JS-host (`gc`) keeps the `env::__box_symbol` path entirely — gate every native
+carrier piece on `ctx.standalone || ctx.wasi`, mirroring the Promise/generator
+carriers. Verify gc byte-unchanged.
+
+### Acceptance
+`result.imports` empty for `o[sym]`, `getOwnPropertySymbols`, `Symbol.toPrimitive`;
+identity preserved (`Symbol("x")!==Symbol("x")`, well-known `===`); Symbol keys
+excluded from `Object.keys`/for-in/JSON; zero host-mode regression; full
+merge_group + honest standalone floor.
