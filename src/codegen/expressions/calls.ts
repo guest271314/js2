@@ -10831,12 +10831,18 @@ function compileCallExpression(
     // graceful null-extern fallback and the test fails with "null/undefined
     // access" instead of reaching the expected throw.
     if (propAccess.name.text === "toLocaleString" && expr.arguments.length === 0) {
-      const toLSIdx = ensureLateImport(
-        ctx,
-        "__extern_toLocaleString",
-        [{ kind: "externref" }],
-        [{ kind: "externref" }],
-      );
+      // (#2863 Phase 2) Standalone/WASI have no host `__extern_toLocaleString`
+      // (it's a dynamic-shape refusal — a host-only import with no native
+      // carrier). Without ECMA-402 the spec default
+      // `Object.prototype.toLocaleString` (§20.1.3.5) just calls the receiver's
+      // `toString`, and `Array.prototype.toLocaleString` (§23.1.3.32) joins the
+      // per-element `toLocaleString` results — both collapse to the same comma-
+      // join as `toString` in a locale-independent runtime. Route to the NATIVE
+      // `__extern_toString` (registered host-free under standalone via #1866),
+      // which removes the CE while matching the locale-independent value. Host
+      // (gc) mode keeps `__extern_toLocaleString` for real Intl grouping.
+      const toLSName = ctx.standalone || ctx.wasi ? "__extern_toString" : "__extern_toLocaleString";
+      const toLSIdx = ensureLateImport(ctx, toLSName, [{ kind: "externref" }], [{ kind: "externref" }]);
       flushLateImportShifts(ctx, fctx);
       if (toLSIdx !== undefined) {
         const recvType = compileExpression(ctx, fctx, propAccess.expression, { kind: "externref" });
