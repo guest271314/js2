@@ -42,6 +42,7 @@ destructuring/iterator machinery that the generator drives.
 There is no Wasm-native coroutine/state-machine lowering for general generator
 bodies in standalone. The host carrier buffers yields in a JS-side structure
 (`__gen_*`). A standalone generator needs either:
+
 1. a **resumable state-machine transform** (CPS / explicit state var + switch on
    re-entry, locals spilled to a heap frame struct), or
 2. WasmGC **stack-switching** (the `stack-switching` proposal) if the target
@@ -58,6 +59,7 @@ to the inner iterator's `next`.
 
 **Architecture-scale — tagged `architect_spec: candidate`.** Design needed
 before coding. Key decisions for the architect:
+
 - Frame representation: `struct $GenFrame (field $state (mut i32)) (field $localN (mut T))…`
   one field per live-across-yield local; reuse the ref-cell pattern for captures.
 - State-machine transform location: in IR lowering (`src/ir/lower.ts`) vs the
@@ -78,6 +80,7 @@ arbitrary host iterator until the iterator-protocol carrier is native.
 ## Test plan
 
 Standalone fail/CE → pass:
+
 - `test/language/expressions/yield/**`, `test/language/statements/generators/**`
 - `test/built-ins/GeneratorFunction/**`, `test/built-ins/GeneratorPrototype/**`
 - `test/built-ins/Iterator/prototype/{map,take,drop,flatMap}/**` (driven by gens)
@@ -241,3 +244,64 @@ f64`). The fix types all three sites per-spill.
 - `src/codegen/context/types.ts` — `NativeGeneratorInfo.spillTypes`.
 - `tests/issue-2864-standalone-generator-carrier.test.ts` — 6 F1b standalone
   cases (zero-host-import asserted).
+
+## F2 — `gen.throw()` abrupt completion (landed)
+
+**Scope shipped:** `gen.throw(e)` now completes a native generator host-free —
+running enclosing `finally` blocks and then propagating the error to the
+`.throw(e)` caller. Previously `.throw()` was effectively unimplemented: the open
+dispatch (`buildNativeGeneratorDispatch`) lumped it into the `.return()` arm
+(mode 1), so it silently _completed_ the generator instead of throwing and never
+ran the `finally`.
+
+Verify-first (`--target standalone`):
+`function* g(){ try { yield 1; yield 2 } finally { log = 42 } }` with
+`it.throw(new Error())` mid-yield → **before:** `log` stayed 0 and the error did
+NOT propagate (silently wrong); **after:** `finally` runs (`log === 42`) and the
+error is caught by the caller, all host-free (`result.imports` empty). Also
+host-free: `throw()` on a plain-suspended / not-started / exhausted generator all
+propagate the error; `return()` through try/finally is unchanged.
+
+### Why these decisions (root-cause, not symptom)
+
+- **A dedicated externref `error` field** (`ERROR_FIELD`, `PARAM_FIELD_OFFSET`
+  4→5). The thrown value is always an Error object (externref), but the
+  `sent`/`abrupt` carrier fields are f64 in a numeric generator, so the error
+  needs its own slot. Added once to every state struct (inert for non-throw
+  paths); `PARAM_FIELD_OFFSET`-derived spill/deleg offsets shift automatically.
+- **Resume mode 2 = throw**, alongside 0 = next, 1 = return. The per-state abrupt
+  block (present at EVERY yield-successor, finalizers possibly empty) now guards
+  on `mode != 0`, runs the finalizers + spill-store + done-transition ONCE, then
+  branches: mode 2 → `local.get error; throw $exnTag` (stack-polymorphic, so the
+  generator unwinds to the caller after the finally ran); mode 1 → complete with
+  the return value (unchanged). Reuses the existing wasm-EH tag
+  (`ensureExnTag`) — the same one `throw`/`try` statements use — so no new
+  import and host-free.
+- **`.throw()` wired in BOTH dispatch paths.** The direct (concrete-`Generator`-
+  typed receiver) and open (`let it = g()` → externref) paths each get a throw
+  arm: SUSPENDED → write the error field, set mode 2, resume (re-throws after
+  finalizers); NOT-STARTED / DONE → mark done and `throw` the error directly
+  (§27.5.3.4 GeneratorResumeAbrupt). The open path is the load-bearing one (most
+  `it.throw()` receivers are externref-typed).
+
+### Deferred (F2 — kept on the host path)
+
+- **try/CATCH across a yield** (a `catch` clause spanning a suspend point, and
+  `gen.throw()` routed INTO a catch) still bails to the host path
+  (`generators-native.ts` try-statement lowering: `if (stmt.catchClause) fail()`).
+  This is the next slice — it needs the state machine to model catch-handler
+  regions (which yield-successor states are covered by which catch) and route a
+  mode-2 resume to the catch state with the error bound, rather than re-throwing.
+- **yield inside a `finally`** block remains unsupported (the finally must be
+  yield-free, unchanged from F1).
+
+### Files (F2)
+
+- `src/codegen/generators-native.ts` — `ERROR_FIELD` + `MODE_*` constants
+  (`PARAM_FIELD_OFFSET` 4→5), error field in the state struct + its
+  `ref.null.extern` init, mode-2 arm in the per-state abrupt block, `.throw()`
+  in both `compileDirectNativeGeneratorMethod` and `buildNativeGeneratorDispatch`
+  (+ externref error local threading through `tryCompileNativeGeneratorMethodCall`),
+  `ensureExnTag` import.
+- `tests/issue-2864-standalone-generator-carrier.test.ts` — 5 F2 standalone cases
+  (zero-host-import asserted).
