@@ -3,7 +3,7 @@ id: 2818
 title: "Bug C (class-method half): block-scoped let captured by a class method reads null (captured-globals promotion ordering)"
 parent: 2669
 related: [2820, 2811, 1672]
-status: ready
+status: blocked
 created: 2026-06-29
 priority: high
 feasibility: hard
@@ -109,3 +109,54 @@ async-generator methods, private methods, and the TDZ flag promotion
   the #2820 function-declaration fix, or TDZ throws.
 - `tests/issue-2818.test.ts` with the repros + a class-method cluster slice +
   fn-scope-capture regression controls.
+
+## Merge-group regression (do not re-enqueue as-is)
+
+The first implementation attempt (PR #2335, branch `issue-2818-blocklet-classmethod-capture`,
+commit `498f7b9f7` "defer block-nested class bodies inside functions") was
+**auto-parked** (`hold` + `auto-park-bot:merge-group-failure`) on a LARGE, REAL,
+net-negative test262 regression caught only in `merge_group`. It is NOT
+baseline drift.
+
+**Why PR-level missed it:** at PR level the test262 shards are skipped — the
+`check for test262 regressions` check ran in ~3s on a stub with no shard data.
+Full conformance is only validated in `merge_group`. So "PR-green" never
+validated test262 here.
+
+**Delta (merge_group, baseline f8c1aa5):**
+- **545 regressions / 74 improvements → net −471**, ratio 736%, signature `9c6151da5837060f`.
+- Two buckets EACH over the 50-test gate limit:
+  `language/expressions/class/dstr` (335) + `language/expressions/class/elements` (165),
+  plus class `method-static` / `gen-method-static` / `arguments-object cls-expr-meth-static`.
+- Confirmed PR-caused (not drift/flake): on `class/dstr/async-gen-meth-obj-ptrn-list-err.js`
+  the WAT shrinks 54869→51844 bytes (≈3 KB of class codegen DROPPED), and a
+  runtime probe via the exact CI path (`runTest262File`) flips it from
+  **pass on main** to **fail on branch**.
+- Cross-checked against #2333/#2826: DIFFERENT signature, ZERO shared regressed
+  tests → not a shared drift cluster.
+
+**Root cause of the regression:** the fix propagates `insideFunction=true`
+through the block/if/loop/switch/try/labeled recursion in
+`compileClassesFromStatements` (`src/codegen/declarations.ts`), which adds those
+classes to `ctx.deferredClassBodies`. The deferred-compilation path
+(`compileNestedClassDeclaration` in `src/codegen/statements/nested-declarations.ts`,
+reached from `compileStatement`) does NOT fully cover all the now-deferred
+shapes — in particular class **expressions** assigned in variable statements
+(`const C = class {…}`) and block-nested classes — so their method/element
+bodies are never compiled and the codegen is silently dropped. The pre-#2818
+eager path compiled them correctly (at the cost of the one narrow capture bug
+this issue targets).
+
+**Narrowing direction for the rework — two viable options:**
+1. **Defer only when there is an actual capture:** restrict the
+   `insideFunction` deferral to classes that genuinely capture a block-scoped
+   `let` declared in the enclosing block (the exact #2818 case), and keep all
+   other block-nested / class-expression classes on the eager path.
+2. **Fix the deferred path to be complete:** make the deferred-class compilation
+   cover class **expressions** in variable statements and block-nested class
+   declarations, so deferral never drops codegen.
+
+Option 1 is the lower-risk, more surgical fix. Either way, **validate against a
+full `merge_group` / local-CI test262 run BEFORE re-enqueue** — a scoped check
+cannot see this 545-test cluster. PR #2335 branch + this diagnosis must survive;
+re-open this issue for the narrowed attempt.
