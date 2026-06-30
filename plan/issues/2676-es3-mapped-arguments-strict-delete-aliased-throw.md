@@ -4,7 +4,7 @@ title: "≤ES3: mapped arguments — strict-mode aliased `delete args[i]` must t
 status: ready
 created: 2026-06-25
 updated: 2026-06-25
-priority: medium
+priority: high
 feasibility: hard
 reasoning_effort: high
 task_type: bug
@@ -14,7 +14,7 @@ language_feature: arguments-object
 goal: spec-completeness
 depends_on: []
 related: [2667, 1511]
-sprint: Backlog
+sprint: current
 ---
 # #2676 — ≤ES3 mapped-arguments strict aliased delete throws (residual of #2667)
 
