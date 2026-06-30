@@ -692,6 +692,25 @@ const STANDALONE_ROOT_CAUSE_BUCKETS = [
         "typeerror",
       ]),
   },
+  {
+    // #2870 — the de-masked exception formatter falls back to this stable label
+    // when a standalone test throws a Wasm-GC error struct whose payload has no
+    // host-reachable `toString` (so `String(payload)` would itself throw). Most
+    // such failures are classified by their feature path in an earlier bucket
+    // (Temporal, DataView, Object, destructuring, …); this LAST bucket is the
+    // honest residual catch for the ones no feature-path bucket matches. It MUST
+    // stay at the end of the list so `find`'s first-match never poaches a record
+    // that a path-based bucket already owns. The underlying failures are
+    // heterogeneous real in-Wasm throws/traps whose only common property is a
+    // non-stringifiable payload — re-triaged into actual fixable sub-clusters by
+    // the #2862 follow-up.
+    id: "nonstringifiable-wasmgc-exception",
+    issues: ["#2870", "#2862"],
+    label:
+      "Standalone failure threw a non-stringifiable Wasm-GC exception payload (de-masked formatter fallback) — residual not matched by a feature-path bucket",
+    match: (_record, text) =>
+      hasAny(text, ["uncaught wasm-gc exception (non-stringifiable payload)", "non-stringifiable payload"]),
+  },
 ];
 
 function emptyRootCauseBucket(bucket) {
