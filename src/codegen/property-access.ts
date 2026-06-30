@@ -71,6 +71,9 @@ import {
   ensureBooleanNativeProtoGlue,
   ensureDateNativeProtoGlue,
   ensureErrorNativeProtoGlue,
+  ensureNativeErrorNativeProtoGlue,
+  ensurePromiseNativeProtoGlue,
+  ensureIteratorNativeProtoGlue,
   ensureMapNativeProtoGlue,
   ensureSetNativeProtoGlue,
   ensureFunctionNativeProtoGlue,
@@ -732,13 +735,39 @@ function tryEnsureNativeProtoBrand(ctx: CodegenContext, builtinName: string): nu
   }
   // (#1907 / #1888 S6-b — S6) Error / Map / Set protos. These three carry no
   // runtime-state entanglement that breaks the `$NativeProto` value-read
-  // materialization (measured: clean flips, 0 regressions). Promise is
-  // deliberately EXCLUDED here — its proto glue introduced a runtime
-  // null-pointer deref in a passing Promise test (the async-capability runtime
-  // state collides with the value-read path, the Promise analog of the
-  // TypedArray init-trap in #2375); deferred to a dedicated investigation.
+  // materialization (measured: clean flips, 0 regressions). Promise's INSTANCE
+  // -state read was the #1907 null-deref; #2861 re-admits ONLY its static
+  // `.prototype` value read (pure value object, never touches async-capability
+  // state) — see the Promise arm below.
   if (builtinName === "Error") {
     return ensureErrorNativeProtoGlue(ctx);
+  }
+  // (#2861) NativeError subclass protos — TypeError/RangeError/ReferenceError/
+  // SyntaxError/EvalError/URIError. Each has its own reserved brand; the proto
+  // value object shares Error.prototype's clean-flip shape (no runtime-state
+  // entanglement), so wiring the glue flips the `<NativeError>.prototype[.member]`
+  // value-read CE → host-free value object.
+  if (
+    builtinName === "TypeError" ||
+    builtinName === "RangeError" ||
+    builtinName === "ReferenceError" ||
+    builtinName === "SyntaxError" ||
+    builtinName === "EvalError" ||
+    builtinName === "URIError"
+  ) {
+    return ensureNativeErrorNativeProtoGlue(ctx, builtinName);
+  }
+  // (#2861) Promise.prototype — wired for the STATIC `.prototype` value read +
+  // method-closure value reads only (then/catch/finally). The #1907 null-deref
+  // was an INSTANCE-state read; the pure value-read object never touches async
+  // capability state. Re-validated against the Promise standalone suite (no
+  // currently-passing test regresses).
+  if (builtinName === "Promise") {
+    return ensurePromiseNativeProtoGlue(ctx);
+  }
+  // (#2861) Iterator.prototype — ES2025 iterator-helper value reads.
+  if (builtinName === "Iterator") {
+    return ensureIteratorNativeProtoGlue(ctx);
   }
   if (builtinName === "Map") {
     return ensureMapNativeProtoGlue(ctx);
