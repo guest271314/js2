@@ -1,7 +1,9 @@
 ---
 id: 2893
 title: "Standalone: distinct %TypedArray% view brand (unblocks #2872 reflective getter/method bodies)"
-status: ready
+status: done
+completed: 2026-06-30
+assignee: ttraenkler/sendev-typedview
 created: 2026-06-30
 priority: high
 task_type: bug
@@ -9,10 +11,19 @@ area: codegen
 goal: standalone
 sprint: current
 horizon: l
-related: [2872, 2375, 2593, 2651, 2885, 2876]
+related: [2872, 2375, 2593, 2651, 2885, 2876, 2901]
 umbrella: 2860
 blocks: [2872]
+depends_on: 2901
 ---
+
+> **PR-1 delivered (2026-06-30, stacked on #2901 in one PR).** The integer-view
+> §23.2.3 accessor getter bodies (`length`/`byteLength`/`byteOffset`) are wired and
+> verified host-free; the harness reachability they were gated on is provided by
+> the #2901 `%TypedArray%`-intrinsic constructor + getProtoOf/gOPD chain (the two
+> land together). Combined result: TypedArray accessor corpus 28→40 standalone, 0
+> regressions. PR-2 (float-view brand split) and PR-3 (`buffer` + per-name brand)
+> remain open as follow-ups.
 
 # Standalone: distinct %TypedArray% view brand
 

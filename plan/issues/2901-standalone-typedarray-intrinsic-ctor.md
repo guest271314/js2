@@ -1,7 +1,8 @@
 ---
 id: 2901
 title: "Standalone: %TypedArray%/view intrinsic constructor objects + getPrototypeOf chain"
-status: in-progress
+status: done
+completed: 2026-06-30
 assignee: ttraenkler/sendev-typedview
 created: 2026-06-30
 priority: high
@@ -78,9 +79,59 @@ This MUST NOT collide with the syntactic `new Int8Array(...)` construction path
   broad-builtin-identifier blast-radius class, validated against full CI, not a
   scoped sweep.
 
-## Implementation Plan
+## Implementation Plan (as built)
 
-_(Pending the constructor-as-value representation map; filled in below.)_
+The corpus reaches the §23.2.3 accessor descriptors through the test262
+`testTypedArray.js` harness's `%TypedArray%` intrinsic, in TWO shapes:
+1. full harness (`testWithTypedArrayConstructors` present):
+   `var TypedArray = Object.getPrototypeOf(Int8Array); TypedArray.prototype`;
+2. the **test262-runner injected shim** (the common accessor-test case,
+   `test262-runner.ts ~1823`):
+   `const TypedArray = Object.getPrototypeOf(Int8Array.prototype).constructor; TypedArray.prototype`.
+
+Both then do `Object.getOwnPropertyDescriptor(TypedArrayPrototype, "<member>").get`
+through intermediate vars. Three bounded, **syntactic / static-analysis** arms (no
+runtime dispatch, no element-rep change), all standalone-gated and additive:
+
+1. **`%TypedArray%` intrinsic ctor object** — `emitTypedArrayIntrinsicCtorObject`
+   (`array-object-proto.ts`): a lazily-cached `$Object` singleton with a single
+   `prototype` own-prop = the existing `%TypedArray%.prototype` glue (modelled on
+   `emitBuiltinNamespaceObject`). Stable identity.
+2. **`getPrototypeOf` arm** (`calls.ts`): `Object.getPrototypeOf(<view ctor>)` →
+   the ctor object (full-harness shape).
+3. **`.constructor` arm** (`property-access.ts`):
+   `Object.getPrototypeOf(<view>.prototype).constructor` → the ctor object (the
+   runner shim) — keeps the harness binding **non-null at runtime**.
+4. **static gOPD/`.call` trace** (`calls.ts`, `tracesToTypedArrayIntrinsicProto`):
+   recognises the *dynamic, variable-routed* `%TypedArray%.prototype` receiver so
+   the #2885 gOPD synthesis + #2876 reflective `.call` fire through the harness's
+   intermediate vars, not just the syntactic `<Ctor>.prototype` form.
+5. `tryEnsureNativeProtoBrand("%TypedArray%")` → `ensureTypedArrayIntrinsicNativeProtoGlue`.
+
+All arms keyed on **syntactic call shapes**, never identifier-as-value — so they
+cannot collide with the name-keyed `new Int8Array()` construction path
+(`new-super.ts`). Stacks the #2893 integer-view accessor getter bodies in the same
+branch/PR.
+
+## Result (standalone, verified)
+
+Targeted before/after sweep (125 files: TypedArray accessor dirs + RegExp gOPD +
+Object/getPrototypeOf + ArrayBuffer): **28 → 40 pass, ZERO regressions**, +12
+fail→pass — `length`/`byteLength`/`byteOffset` × {`this-is-not-object`,
+`invoked-as-func`, `length`, `prop-desc`} flip host-free (0 imports). RegExp
+syntactic-gOPD path, Object.getPrototypeOf, ArrayBuffer all unchanged.
+
+### Known out-of-scope residuals (follow-ups, NOT regressions)
+- `name.js` — needs the getter closure's dynamic `.name` (`"get length"`) via
+  `nativeClosureMeta` (function-metadata lever, #2896 family).
+- `resizable-*` / `resized-out-of-bounds-*` — resizable ArrayBuffer support.
+- `invoked-as-accessor.js` — getter invoked via plain `obj.length` accessor lookup.
+- `this-has-no-typedarrayname-internal.js` assert #3: `get.call(new ArrayBuffer(8))`
+  returns `8` instead of throwing — the value comes from a typed-receiver `.call`
+  shortcut (NOT the #2893 getter, whose `ref.test` cascade correctly excludes
+  `$__vec_i32_byte`). Pre-existing: before this work `gOPD(...).get` was
+  `undefined`, so this test failed anyway — **no regression**. Track separately.
+- `buffer` accessor (PR-3) + float-view brand split (#2893 PR-2) still pending.
 
 ## Notes
 
