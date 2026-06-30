@@ -268,6 +268,7 @@ export function createCodegenContext(
     sidecarDefinedPropertyKeys: new Set(),
     definePropertyReceiverKeys: new Set(),
     nonConfigurableAccessorKeys: new Set(),
+    mappedArgsInfoByFunc: new Map(),
     nonExtensibleVars: new Set(),
     frozenVars: new Set(),
     sealedVars: new Set(),

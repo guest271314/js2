@@ -528,6 +528,11 @@ export function compileNestedFunctionDeclaration(
       const unmapped =
         isStrictFunction(stmt, ctx.inferModuleStrictArguments) || !isSimpleParameterList(stmt.parameters);
       emitArgumentsObject(ctx, liftedFctx, paramTypes, 0, unmapped);
+      // (#2676) Expose this nested mapped function's live `mappedArgsInfo` keyed
+      // by its declaration node so a `delete args[i]` in a deeper (strict)
+      // closure can resolve an aliased `arguments` (`var args = arguments`) back
+      // to this function's per-index `nonConfigurableIndices`.
+      if (liftedFctx.mappedArgsInfo) ctx.mappedArgsInfoByFunc.set(stmt, liftedFctx.mappedArgsInfo);
     }
 
     if (nativeGenInfo) {
@@ -833,6 +838,9 @@ export function compileNestedFunctionDeclaration(
       const unmapped =
         isStrictFunction(stmt, ctx.inferModuleStrictArguments) || !isSimpleParameterList(stmt.parameters);
       emitArgumentsObject(ctx, liftedFctx, paramTypes, leadingParamCount, unmapped);
+      // (#2676) See the sibling site above — expose the live `mappedArgsInfo`
+      // by decl node for aliased-`arguments` strict-delete resolution.
+      if (liftedFctx.mappedArgsInfo) ctx.mappedArgsInfoByFunc.set(stmt, liftedFctx.mappedArgsInfo);
     }
 
     if (isGenerator) {

@@ -99,6 +99,49 @@ function emitStrictDeleteCheck(ctx: CodegenContext, fctx: FunctionContext, expr:
   fctx.body.push({ op: "local.get", index: resLocal });
 }
 
+/**
+ * (#2676) Resolve an identifier that aliases a mapped-`arguments` object back to
+ * the owning function's live `mappedArgsInfo`. Matches the statically-tractable
+ * shape `var <alias> = arguments` (the alias' value declaration is a
+ * VariableDeclaration whose initializer is the bare `arguments` identifier). The
+ * `arguments` it reads belongs to the nearest enclosing *non-arrow* function;
+ * that function's `mappedArgsInfo` is looked up from `ctx.mappedArgsInfoByFunc`
+ * (present only for sloppy, simple-parameter functions — exactly the mapped
+ * case). Returns `undefined` for anything else (no alias, a strict/unmapped
+ * owner, or a transitive alias). Lets an aliased `delete args[i]` in a nested
+ * strict closure consult the outer function's per-index non-configurability.
+ */
+function resolveAliasedMappedArgs(
+  ctx: CodegenContext,
+  sym: ts.Symbol | undefined,
+): NonNullable<FunctionContext["mappedArgsInfo"]> | undefined {
+  const decls = sym?.declarations;
+  if (!decls) return undefined;
+  for (const d of decls) {
+    if (!ts.isVariableDeclaration(d)) continue;
+    const init = d.initializer;
+    if (!init || !ts.isIdentifier(init) || init.text !== "arguments") continue;
+    // The aliased `arguments` read resolves to the nearest enclosing non-arrow
+    // function (arrows do not bind their own `arguments`, so walk past them).
+    let owner: ts.Node | undefined = d.parent;
+    while (
+      owner &&
+      !ts.isFunctionDeclaration(owner) &&
+      !ts.isFunctionExpression(owner) &&
+      !ts.isMethodDeclaration(owner) &&
+      !ts.isConstructorDeclaration(owner) &&
+      !ts.isGetAccessorDeclaration(owner) &&
+      !ts.isSetAccessorDeclaration(owner)
+    ) {
+      owner = owner.parent;
+    }
+    if (!owner) continue;
+    const info = ctx.mappedArgsInfoByFunc.get(owner);
+    if (info) return info;
+  }
+  return undefined;
+}
+
 // ── Delete expression ─────────────────────────────────────────────────
 
 /**
@@ -296,6 +339,36 @@ export function compileDeleteExpression(
         return { kind: "i32" };
       }
       (fctx.mappedArgsInfo.unmappedIndices ??= new Set<number>()).add(argIndex);
+    }
+  }
+
+  // (#2676) Aliased mapped-`arguments` strict delete. `var args = arguments;
+  // ... delete args[i]` — the delete frequently lives in a nested *strict*
+  // closure (e.g. the `assert.throws(TypeError, function(){ "use strict";
+  // delete args[0]; })` callback) that captures `args` and has no
+  // `mappedArgsInfo` of its own, so the #2667 direct-`arguments[i]` arm above
+  // never fires. Resolve the alias through the AST back to the owning
+  // function's live `nonConfigurableIndices`. A non-configurable index makes
+  // the delete FAIL (OrdinaryDelete ⇒ false): emit `false` and route it through
+  // the strict check so a strict caller throws TypeError (§13.5.1.2 step 6.b)
+  // while a sloppy caller observes `false` — exactly mirroring the #2667 direct
+  // case (which the outer sloppy function takes via the arm above).
+  if (ts.isElementAccessExpression(inner) && ts.isIdentifier(inner.expression)) {
+    const aliasInfo = resolveAliasedMappedArgs(ctx, ctx.checker.getSymbolAtLocation(inner.expression));
+    if (aliasInfo?.nonConfigurableIndices && aliasInfo.nonConfigurableIndices.size > 0) {
+      const idxArg = inner.argumentExpression;
+      const idxText = ts.isNumericLiteral(idxArg) ? idxArg.text : ts.isStringLiteral(idxArg) ? idxArg.text : undefined;
+      const argIndex = idxText !== undefined ? Number(idxText) : NaN;
+      if (
+        Number.isInteger(argIndex) &&
+        argIndex >= 0 &&
+        argIndex < aliasInfo.paramCount &&
+        aliasInfo.nonConfigurableIndices.has(argIndex)
+      ) {
+        fctx.body.push({ op: "i32.const", value: 0 });
+        emitStrictDeleteCheck(ctx, fctx, expr);
+        return { kind: "i32" };
+      }
     }
   }
 

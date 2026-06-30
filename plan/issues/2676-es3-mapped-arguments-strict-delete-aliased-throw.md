@@ -1,9 +1,11 @@
 ---
 id: 2676
 title: "≤ES3: mapped arguments — strict-mode aliased `delete args[i]` must throw TypeError on a non-configurable index (residual of #2667)"
-status: ready
+status: done
+assignee: ttraenkler/es3-2676
 created: 2026-06-25
-updated: 2026-06-25
+updated: 2026-06-30
+completed: 2026-06-30
 priority: high
 feasibility: hard
 reasoning_effort: high
@@ -75,3 +77,46 @@ Three things make this harder than the #2667 static path:
   `mappedArgsInfo`, or (b) a runtime descriptor on the arguments object so a
   strict `delete` consults real configurability and throws. Option (b) overlaps
   with the broader arguments-object descriptor-fidelity gap (#2668).
+
+## Resolution (option (a), compile-time alias resolution)
+
+Chose option (a) — no substrate/runtime-descriptor change (option (b) is
+deferred with #2668). The compile-time `nonConfigurableIndices` set from #2667
+is already authoritative for the statically-resolvable
+`Object.defineProperty(arguments, "<i>", { configurable:false })` shape these
+tests use; the only missing piece was making it reachable from the aliased
+delete site in the nested strict closure.
+
+- **Expose the info across the closure boundary.** Added
+  `ctx.mappedArgsInfoByFunc: Map<ts.Node, mappedArgsInfo>`, populated wherever a
+  mapped (sloppy, simple-param) function's `mappedArgsInfo` is created — the
+  top-level path (`compileFunctionBody`) and both nested-lift paths
+  (`nested-declarations.ts`). The stored value is the **live** info object, so
+  the `nonConfigurableIndices` set it carries reflects every `defineProperty`
+  processed before the delete is compiled. (Ordering holds: the
+  `defineProperty` textually precedes the `assert.throws(...)` closure, and the
+  map entry itself is created at function-entry, before either.)
+- **Resolve the alias at the delete site** (`typeof-delete.ts`,
+  `resolveAliasedMappedArgs`): for `delete <id>[<literal>]`, walk `<id>`'s symbol
+  → its `var <id> = arguments` value declaration → the nearest enclosing
+  non-arrow function (the `arguments` owner) → `ctx.mappedArgsInfoByFunc`. A hit
+  whose `nonConfigurableIndices` contains the literal index means OrdinaryDelete
+  fails: emit `i32.const 0` (`false`) and route it through the **existing**
+  `emitStrictDeleteCheck`, which throws TypeError in a strict context
+  (§13.5.1.2 step 6.b) and leaves `false` in a sloppy one — identical to the
+  #2667 direct-`arguments[i]` arm.
+- **Why this is downstream-safe.** No emitted-code change to any existing path:
+  the new map is pure bookkeeping, and the delete arm is gated on a *non-empty*
+  `nonConfigurableIndices` + an in-range literal index on a resolved
+  `arguments` alias. Configurable indices, unmapped/strict `arguments` (which
+  never get `mappedArgsInfo`), transitive aliases, and all non-arguments
+  deletes fall straight through to the prior behaviour. Stack balance is
+  unchanged — the arm produces exactly one i32 like every other delete arm.
+
+**Verification** — fresh single-file runs (mirroring `test262-worker`): all 4
+`mapped-arguments-nonconfigurable-strict-delete-{1..4}` flip fail→pass. The
+`language/arguments-object/mapped` directory goes 35→39 pass (the 4 targets),
+0 regressions; the remaining 4 fails there are pre-existing descriptor-fidelity
+cases (#2668), unchanged. `tests/issue-2676.test.ts` adds the core case plus
+sloppy-returns-false, configurable-index-does-not-throw, and regular-object
+strict-delete controls.
