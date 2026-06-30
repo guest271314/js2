@@ -1,10 +1,11 @@
 ---
 id: 2880
 title: "Host mode: string constants containing lone surrogates arrive as `undefined` (lossy UTF-8 import-name encoding)"
-status: in-progress
+status: done
 assignee: ttraenkler/explore2
 created: 2026-06-30
 updated: 2026-06-30
+completed: 2026-06-30
 priority: medium
 feasibility: medium
 task_type: bug
@@ -92,5 +93,27 @@ regression risk to the ~33k passing tests.
 
 ## Test Results
 
-(see `tests/issue-2880.test.ts` + scoped fresh single-file sweep of the
-32 lone-surrogate lane files)
+`tests/issue-2880.test.ts` — 8 tests pass (helper unit tests + host-mode
+codePointAt/charCodeAt/length/at/padStart/padEnd/equality on lone-surrogate
+constants + a surrogate-free regression control).
+
+**Scoped fresh single-file sweep** (one Node process per file via the real
+`parseMeta`+`wrapTest`+`compile`+`buildImports`+`WebAssembly.instantiate`
+harness, matching `scripts/test262-worker.mjs`). Of the 32 lane files
+(`built-ins/String/prototype` + `built-ins/RegExp`) whose decoded source
+contains a lone surrogate:
+
+| | baseline | with fix |
+| --- | --- | --- |
+| pass | 9 | 29 |
+| fail | 19 | 0 |
+| runtime_error | 4 | 3 |
+
+**Net +20 new passes, 0 regressions.** Recovered: `String.prototype`
+codePointAt×2, padStart, padEnd, at, isWellFormed, match (7); `RegExp`
+dotall×4, regexp-modifiers×5, named-groups×2, escape, exec (13). The remaining 3
+non-passes are unrelated (RegExp Symbol.replace Symbol-coercion,
+match-indices `assert is not defined` harness shim).
+
+A full re-sweep of the 1073-file `String/prototype` lane shows no
+surrogate-free regression (the normal `string_constants` path is byte-identical).
