@@ -83,11 +83,16 @@ the packed-byte machinery (#2835) where possible.
    - **throughput** (wall-time at 1/64/128/256 MiB),
    - **peak RSS** (at 128/256 MiB).
    `wasi_p1` is currently the **leanest and fastest** of the four hosts (probe-2829:
-   ~46% smaller, ~3× faster, ~38% less RSS than node_fs) — the rewrite must **not
-   regress that** materially. If the DataView lowering emits the same inline
-   `i32.load/store` as the `store32`/`load32` intrinsics, this should be a wash;
-   quantify and confirm. A non-trivial regression is a blocker → fall back to
-   keeping the intrinsic + documenting `--no-bundle` (the prior scope, below).
+   ~46% smaller, ~3× faster, ~38% less RSS than node_fs). If the DataView lowering
+   emits the same inline `i32.load/store` as the `store32`/`load32` intrinsics this
+   should be a wash; quantify and confirm.
+   - **If efficiency holds → the DataView host REPLACES `nm_js2wasm_wasi_p1.ts`**
+     (one host, JS-runnable + standalone, no ghost import).
+   - **If it materially regresses → ship it as an ADDITIONAL variant** in the host
+     collection *alongside* the low-level `wasm:memory` `wasi_p1` (both stay: raw =
+     max efficiency, DataView = runs in a plain JS runtime) — NOT a replacement.
+   Either way, keep the `--no-bundle` docs (below) for whichever intrinsic host
+   remains.
 
 ## Fallback (the prior docs-only scope, if the lowering proves infeasible or regresses efficiency)
 
