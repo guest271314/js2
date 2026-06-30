@@ -3037,10 +3037,47 @@ export function emitStandalonePromiseThen(
 }
 
 /**
- * #1326 — Check whether standalone-mode Promise codegen is active.
- * Auto-enables in WASI target mode (the JS host imports for Promise are
- * unavailable); opt-in elsewhere via a flag.
+ * #1326 — Check whether host-free Promise codegen (native `$Promise` carrier:
+ * construction, async-fn return wrap, `await` unwrap) is active.
+ *
+ * **Gated on `ctx.wasi` only.** AG0 (#2865) briefly widened this to
+ * `ctx.standalone` too, but ground-truth measurement (#2895 reconcile, against
+ * the #2384 frame-core base) showed that widening is a NET REGRESSION on
+ * standalone: the `flags:[async]` test262 harness uses synchronous-settlement
+ * (`asyncTest(fn)` calls `fn()` then `$DONE()` with no microtask drain), so an
+ * async fn that returns a native `$Promise` is observed as an undrained struct,
+ * not a value → 32/202 async tests that PASS on baseline regress to FAIL, with
+ * **no** offsetting await-unwrap gain (the await/async-function area itself went
+ * 71→42 pass under the broad gate). The host-free standalone await win is
+ * coupled to a real async drive layer (result `$Promise` + microtask drain that
+ * the harness can settle), which is **PATH B (#2895)** — not bankable in a
+ * bounded gate flip. So standalone reverts to baseline here (net-0, no
+ * regression); WASI keeps the genuine native-`$Promise` behaviour + the await
+ * NaN-fix. PATH B re-widens this (and {@link isStandaloneThenChainNativeActive})
+ * once the drive layer makes native async results observable.
  */
 export function isStandalonePromiseActive(ctx: CodegenContext): boolean {
+  return ctx.wasi === true;
+}
+
+/**
+ * (#2895) Gate for the **native `.then` / `.catch` chaining** lowering
+ * (`emitStandalonePromiseThen`) specifically — narrower than
+ * {@link isStandalonePromiseActive}.
+ *
+ * That lowering has a stack-imbalance at corpus scale under `--target
+ * standalone` in async-method-in-class contexts
+ * (`Promise.all(...).then(arrow).then($DONE, $DONE)` → "not enough arguments on
+ * the stack for call"; a −601 standalone regression caught only in the
+ * `merge_group`). It is superseded by the PATH B async result/drive rewrite
+ * (#2895), so rather than deepen it now we scope it back to **WASI only** (where
+ * it was validated) and let `--target standalone` fall through to the host-import
+ * `.then` path — exactly the pre-AG0 standalone behaviour (fails to instantiate
+ * cleanly, no invalid-Wasm), so no regression. The broad
+ * {@link isStandalonePromiseActive} still keeps the host-free
+ * `Promise.resolve`/`reject` construction + `await`-unwrap wins for standalone.
+ * PATH B re-enables native chaining for standalone by widening this predicate.
+ */
+export function isStandaloneThenChainNativeActive(ctx: CodegenContext): boolean {
   return ctx.wasi === true;
 }
