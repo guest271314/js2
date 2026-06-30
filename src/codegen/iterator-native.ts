@@ -379,7 +379,31 @@ export function ensureNativeArrayFromIterN(ctx: CodegenContext): number {
     { op: "local.get", index: 0 } as Instr,
     { op: "ref.is_null" } as Instr,
     { op: "if", blockType: { kind: "empty" }, then: [...emptyVec, { op: "return" } as Instr], else: [] } as Instr,
-    // iter = __iterator(obj)
+    // (#2904) Only drain a genuine native externref `$Vec` through the iterator
+    // protocol. A NON-`__vec_externref` source — a JS array / `$ObjVec` / typed
+    // vec / custom iterable arriving as externref — would hit `__iterator`'s
+    // vec-only carrier and hard-cast → `illegal cast` (the vec-only carrier traps
+    // on a non-vec subject by design). The legacy JS-host `__array_from_iter_n`
+    // handled those via the JS iterator protocol; in standalone the indexable
+    // ones are read directly by the caller's downstream
+    // `__extern_length`/`__extern_get_idx` (and the `buildVecFromExternref`
+    // fallback, #792). So for a non-`$Vec` source, return it UNCHANGED and let
+    // that indexed reader handle it — byte-equivalent to the host result for an
+    // indexable source, and crucially NEVER trapping. This preserves the ~440
+    // indexable-source destructure tests that the unconditional drain regressed
+    // (the `__iterator` USER arm is unfilled in a bare destructure module, so a
+    // non-vec source has no safe drain path here).
+    { op: "local.get", index: 0 } as Instr,
+    { op: "any.convert_extern" } as Instr,
+    { op: "ref.test", typeIdx: vecTypeIdx } as Instr,
+    { op: "i32.eqz" } as Instr,
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [{ op: "local.get", index: 0 } as Instr, { op: "return" } as Instr],
+      else: [],
+    } as Instr,
+    // iter = __iterator(obj)  (only reached for a genuine `$Vec`)
     { op: "local.get", index: 0 } as Instr,
     { op: "call", funcIdx: iteratorIdx } as Instr,
     { op: "local.set", index: 2 } as Instr,
