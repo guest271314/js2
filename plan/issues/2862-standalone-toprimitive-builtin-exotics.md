@@ -1,15 +1,15 @@
 ---
 id: 2862
 title: "Standalone: ToPrimitive throws 'Cannot convert object to primitive value' for built-in exotics + inherited valueOf/toString"
-status: blocked
+status: wont-fix
 created: 2026-06-30
 updated: 2026-06-30
-priority: high
+priority: low
 feasibility: hard
 task_type: feature
 area: codegen
 goal: standalone
-sprint: current
+sprint: Backlog
 horizon: l
 related: [2860, 1900, 2358, 2638, 1910]
 umbrella: 2860
@@ -370,3 +370,75 @@ propertyHelper formatting) that the de-mask exposes as SEPARATE issues.
 Dispatch #2862-A immediately (independent, low-risk). Hold #2862-B until the
 de-mask reveals real counts AND #2893 PR-1 lands (for the view arm). Do NOT sell
 #2862-B as flipping the 728.
+
+## Re-measurement on current main, 2026-06-30 (sendev-toprim) — WONT-FIX
+
+Re-measured the whole issue empirically against current `origin/main`
+(`bd5ae6f3f`) per the "measure before building" mandate. Verdict: **#2862-A is
+already delivered and #2862-B is a net-≈0 change against the standalone test262
+floor.** Setting `status: wont-fix`, `sprint: Backlog`. The narrow real gap that
+remains is recorded below for whoever needs it, but it does not earn a sprint
+slot.
+
+### Finding 1 — #2862-A (the de-mask) is MERGED. Do NOT rebuild it.
+
+The runner de-mask the architect pass made a prerequisite was filed and landed
+as **#2870** (merged PR #2346, commit `4fdb36d63` / `9e411f74c`). `String(payload)`
+is now wrapped by `safeStringifyThrown` in **both** consumers:
+- `tests/test262-runner.ts:2955` (`safeStringifyThrown`, used at
+  `extractWasmExceptionMessage:2966`), and
+- `scripts/test262-worker.mjs:881` (the CI sharded-worker path).
+On a non-stringifiable Wasm-GC payload they now return
+`"uncaught Wasm-GC exception (non-stringifiable payload)"`, and
+`scripts/build-test262-report.mjs:717-724` buckets that label. So the
+phantom-TypeError mask is gone; the ~2014 rows are already re-triageable. Any
+new #2862-A work would be net-zero.
+
+### Finding 2 — #2862-B (exotic→primitive arms) flips ~0 standalone test262 rows.
+
+Probed the actual `__to_primitive` behaviour and ran the cited paths through the
+EXACT CI standalone path (`runTest262File(file, cat, undefined, "standalone")`):
+
+- **Explicit coercion already works.** `(/abc/g).toString()` → `"/abc/g"` (len 6,
+  `=== "/abc/g"` is true). `String(/abc/g)` → `"/abc/g"` (correct). Both the
+  `.toString()` method dispatch and the `String()` builtin already reach the
+  right primitive.
+- **Only IMPLICIT `+`-concat of an exotic with an INHERITED toString is wrong**,
+  and it does NOT throw — it returns `"[object Object]"`: `"" + /abc/g` → 15-char
+  `"[object Object]"` (should be `/abc/g`); `"" + new DataView(buf)` and
+  `"" + new ArrayBuffer(8)` → `"[object Object]"` (should be the specific
+  `[object DataView]`/`[object ArrayBuffer]` tag). So these ARE `$Object`-shaped
+  and hit the existing `"[object Object]"` default — a wrong-tag, not a throw.
+- **test262 does not exercise that implicit-concat path as a failure cause.** The
+  most arm-B-relevant directory, `built-ins/RegExp/prototype/toString/`, is 8/9
+  fail — but for unrelated reasons: 4 are Wasm **compile_errors** (codegen
+  validation bugs, not ToPrimitive), and the rest are `.prototype`-reflection /
+  `isConstructor` / "not-a-constructor" tests (`S15.10.6.4_A6/A7`,
+  `called-as-function`, `not-a-constructor`). `RegExp/Symbol.replace/coerce-global`
+  fails on `defineProperty`/`Symbol.replace` semantics. `Object/getOwnProperty
+  Descriptor/15.2.3.3-2-14` fails on a null-deref (key coercion), surfacing now
+  as the de-masked non-stringifiable label. NONE are flipped by a RegExp/DataView/
+  ArrayBuffer ToPrimitive arm.
+
+This confirms the verify-first finding above with current-main numbers: the
+"728/2039 ToPrimitive" cluster is heterogeneous and its members fail on
+unrelated mechanisms. Building the arm-B substrate would correct a genuine but
+**unobserved-by-test262** spec detail (implicit-concat tag of an exotic) → net
+≈0 on the standalone floor, i.e. exactly the change this role is told not to
+build / self-merge.
+
+### Residual (recorded, not scheduled)
+
+- The implicit-concat exotic-tag gap (RegExp `/src/flags`, `[object DataView]`,
+  etc.) is real but yields ~0 test262 and is **gated on the same brand
+  classifiers** (#2893 for the view/buffer brand) the architect pass flagged.
+  Revisit only if a future cluster actually depends on it.
+- The TypedArray-view `test()` **compile_error** seen while probing
+  (`call[0] expected type (ref null 6), found local.tee of type i32` when
+  compiling `"" + new Uint8Array([1,2,3])` inside a `test()` wrapper) is a
+  SEPARATE codegen-validation bug, not ToPrimitive — worth its own issue if it
+  recurs in the de-masked triage.
+
+**Net result of this pass: 0 code changes (documentation/disposition only).**
+The de-mask is shipped; the substrate arms are net-zero; the issue is closed
+`wont-fix` and parked to Backlog.
