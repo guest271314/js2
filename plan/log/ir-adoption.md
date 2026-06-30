@@ -140,13 +140,5 @@ This file is generated. To move a row:
    union in `src/ir/select.ts` **and** to `BUCKETS` here — the generator
    cross-checks the two and fails otherwise.
 
-The aim of **#2855** (the IR front-end migration ratchet epic) is that every
-"unintended" bucket reaches zero, after which its `IrFallbackReason` is promoted
-into `STRICT_IR_REASONS`. The ratchet _mechanism_ is #1376 (the telemetry gate)
-
-- #2089 + #1923. The "deferred" buckets are stable — they're a documented
-  decision, not a TODO.
-
-> Historical note: earlier revisions of this file (and `CLAUDE.md` /
-> `docs/architecture/codegen-axes.md`) cited **#1530** here. That id is an
-> unrelated WASI example; the real tracking owner is **#2855**.
+The aim of #1530 is that every "unintended" bucket reaches zero. The
+"deferred" buckets are stable — they're a documented decision, not a TODO.
