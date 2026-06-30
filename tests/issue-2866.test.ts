@@ -126,3 +126,78 @@ describe("#2866 native Symbol carrier — Symbol-keyed $Object ops (standalone)"
     ).toBe(210);
   });
 });
+
+describe("#2866 slice 4 — Symbol.toPrimitive string-hint dispatch (standalone)", () => {
+  // Pre-slice-4: `+obj` already dispatched `[Symbol.toPrimitive]("number")`
+  // host-free (#2891), but the STRING-hint coercion contexts — a template-literal
+  // span `\`${o}\`` and `String(o)` — did NOT dispatch the well-known
+  // `Symbol.toPrimitive` method: the template path's `tryStructToString` only
+  // checked `toString`, and the `String()` path's `coerceType(ref→externref,
+  // "string")` BOXED a numeric `@@toPrimitive` result instead of stringifying it
+  // (a boxed-number externref then null-derefs on the next string op). Slice 4
+  // wires `[Symbol.toPrimitive]("string")` into both, host-free.
+
+  it("template literal dispatches @@toPrimitive with the 'string' hint", async () => {
+    expect(
+      await runStandalone(
+        `export function test(): number { const o = { [Symbol.toPrimitive](hint: string): string { return hint === "string" ? "S" : "N"; } }; return \`\${o}\` === "S" ? 1 : -1; }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("String(o) dispatches @@toPrimitive with the 'string' hint", async () => {
+    expect(
+      await runStandalone(
+        `export function test(): number { const o = { [Symbol.toPrimitive](hint: string): string { return hint === "string" ? "S" : "N"; } }; return String(o) === "S" ? 1 : -1; }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("a numeric @@toPrimitive('string') result is ToString'd, not boxed (template)", async () => {
+    expect(
+      await runStandalone(
+        `export function test(): number { const o = { [Symbol.toPrimitive](hint: string): number { return hint === "string" ? 2 : 1; } }; return \`\${o}\` === "2" ? 1 : -1; }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("a numeric @@toPrimitive('string') result is ToString'd, not boxed (String + .length)", async () => {
+    expect(
+      await runStandalone(
+        `export function test(): number { const o = { [Symbol.toPrimitive](hint: string): number { return hint === "string" ? 2 : 1; } }; return String(o).length; }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("the 'number' hint still wins for unary + (no string-path regression)", async () => {
+    expect(
+      await runStandalone(
+        `export function test(): number { const o = { [Symbol.toPrimitive](hint: string): number { return hint === "number" ? 42 : 0; } }; return +o; }`,
+      ),
+    ).toBe(42);
+  });
+
+  it("a class [Symbol.toPrimitive] dispatches in string context", async () => {
+    expect(
+      await runStandalone(
+        `class C { [Symbol.toPrimitive](hint: string): string { return hint === "string" ? "CS" : "CN"; } } export function test(): number { const c = new C(); return \`\${c}\` === "CS" ? 1 : -1; }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("toString-only objects are unregressed (no @@toPrimitive)", async () => {
+    expect(
+      await runStandalone(
+        `export function test(): number { const o = { toString(): string { return "TS"; } }; return (\`\${o}\` === "TS" && String(o) === "TS") ? 1 : -1; }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("plain objects still stringify to [object Object]", async () => {
+    expect(
+      await runStandalone(
+        `export function test(): number { const o = { a: 1 }; return \`\${o}\` === "[object Object]" ? 1 : -1; }`,
+      ),
+    ).toBe(1);
+  });
+});

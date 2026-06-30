@@ -13,6 +13,7 @@ import { allocLocal, allocTempLocal, releaseTempLocal } from "./context/locals.j
 import type { ClosureInfo, CodegenContext, FunctionContext, OptionalParamInfo } from "./context/types.js";
 import { addUnionImports, ensureAnyHelpers, ensureAnyToExternHelper, isAnyValue } from "./index.js";
 import { ensureAnyToStringHelper, stringConstantExternrefInstrs } from "./native-strings.js";
+import { emitNativeNumberFormat } from "./number-format-native.js";
 import { addStringConstantGlobal } from "./registry/imports.js";
 import { addFuncType, getArrTypeIdxFromVec } from "./registry/types.js";
 import { ensureLateImport, flushLateImportShifts, materializeStructAsObject, registerCoerceType } from "./shared.js";
@@ -1755,17 +1756,24 @@ export function coerceType(
         const funcType = funcDef ? ctx.mod.types[funcDef.typeIdx] : undefined;
         // Default to "externref" for imports (funcDefIdx < 0) which typically return externref
         const retKind = (funcType?.kind === "func" && funcType.results?.[0]?.kind) || "externref";
-        if (retKind === "f64") {
-          // Ensure __box_number is available via union imports
-          addUnionImports(ctx);
-          const boxIdx = ctx.funcMap.get("__box_number")!;
-          fctx.body.push({ op: "call", funcIdx: boxIdx });
-        } else if (retKind === "i32") {
-          fctx.body.push({ op: "f64.convert_i32_s" });
-          // Ensure __box_number is available via union imports
-          addUnionImports(ctx);
-          const boxIdx = ctx.funcMap.get("__box_number")!;
-          fctx.body.push({ op: "call", funcIdx: boxIdx });
+        if (retKind === "f64" || retKind === "i32") {
+          if (retKind === "i32") fctx.body.push({ op: "f64.convert_i32_s" });
+          // (#2866 slice 4) Under a STRING hint (String()/concat ToString context,
+          // target externref), a numeric `@@toPrimitive` result must be ToString'd
+          // — NOT boxed. Returning a boxed-number externref as the "string" result
+          // null-derefs on the next string op (e.g. `String(o).length`). Use the
+          // native `number_toString` formatter (registered eagerly for String()
+          // calls), which returns an externref wrapping a native string. Fall back
+          // to boxing when it is unavailable (no string-hint context, or host mode
+          // without the formatter) — preserves prior behaviour, no regression.
+          const numToStrIdx = hint === "string" && ctx.nativeStrings ? ctx.funcMap.get("number_toString") : undefined;
+          if (numToStrIdx !== undefined) {
+            fctx.body.push({ op: "call", funcIdx: numToStrIdx });
+          } else {
+            addUnionImports(ctx);
+            const boxIdx = ctx.funcMap.get("__box_number")!;
+            fctx.body.push({ op: "call", funcIdx: boxIdx });
+          }
         }
         // externref/ref return → use extern.convert_any for ref types
         if (retKind === "ref" || retKind === "ref_null") {
@@ -2626,9 +2634,48 @@ export function tryStructToString(ctx: CodegenContext, fctx: FunctionContext, fr
     return ft?.kind === "func" ? ft.results?.[0]?.kind : undefined;
   };
 
+  // 0. `[Symbol.toPrimitive]` method (`${name}_@@toPrimitive`) — takes precedence
+  // over toString/valueOf per §7.1.1.1 (ToString(obj) = ToString(ToPrimitive(obj,
+  // "string"))). (#2866 slice 4) Mirrors the numeric (ref→f64) @@toPrimitive
+  // dispatch in `coerceType`: self is already on the stack, push the "string" hint
+  // externref, call the wrapper, then normalise the result (f64/i32/string-ref) to
+  // a `ref $AnyString`. Host-free: the only late import is `__box_number` (native
+  // in standalone), reached only when the method returns a number. This was the
+  // deferred residual noted in the old comment below — String()/template-literal
+  // string coercion now dispatches `[Symbol.toPrimitive]("string")` natively.
+  const toPrimFuncIdx = ctx.funcMap.get(`${name}_@@toPrimitive`);
+  if (toPrimFuncIdx !== undefined) {
+    pushStringHint(ctx, fctx, "string");
+    fctx.body.push({ op: "call", funcIdx: toPrimFuncIdx });
+    const retKind = funcResultKind(toPrimFuncIdx);
+    if (retKind === "f64" || retKind === "i32") {
+      // Numeric primitive result → ToString via the native `number_toString`
+      // formatter (host-free), mirroring the f64→string bridge in
+      // `coercion-engine.ts`. Register it on demand — `emitNativeNumberFormat`
+      // only APPENDS defined funcs (no import insertion → no funcIdx-shift
+      // hazard). This is preferred over `normaliseToString`'s
+      // `__box_number`→`$__any_to_string` route, whose boxed-number arm is
+      // OMITTED when `number_toString` was absent at the (cached) helper's build
+      // time (an object-only program never registers it otherwise → the result
+      // would mis-stringify to "[object Object]").
+      if (retKind === "i32") fctx.body.push({ op: "f64.convert_i32_s" });
+      let numToStrIdx = ctx.funcMap.get("number_toString");
+      if (numToStrIdx === undefined) {
+        emitNativeNumberFormat(ctx, new Set(["number_toString"]));
+        numToStrIdx = ctx.funcMap.get("number_toString");
+      }
+      if (numToStrIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx: numToStrIdx });
+        fctx.body.push({ op: "any.convert_extern" } as Instr);
+        fctx.body.push({ op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr);
+        return true;
+      }
+    }
+    normaliseToString(retKind);
+    return true;
+  }
+
   // 1. `toString` closure field (object-literal method) via call_ref.
-  // (A user `[Symbol.toPrimitive]` would take precedence per §7.1.1.1, but its
-  // native-string hint marshalling is deferred — see the function doc comment.)
   const fields = ctx.structFields.get(name);
   if (fields) {
     const toStrFieldIdx = fields.findIndex((f) => f.name === "toString");
