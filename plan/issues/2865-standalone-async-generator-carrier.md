@@ -2,7 +2,7 @@
 id: 2865
 title: "Standalone: no Wasm-native async-generator / for-await carrier — leaks __create_async_generator + Promise_* host imports"
 status: in-progress
-assignee: ttraenkler/sendev-async
+assignee: ttraenkler/sendev-flatten
 created: 2026-06-30
 updated: 2026-06-30
 priority: high
@@ -75,8 +75,8 @@ value from the native `$Promise` carrier host-free; `async f(): Promise<number>
 imports** and return the correct value (was NaN, the identity-passthrough bug).
 
 > **#2895 reconcile (2026-06-30) — standalone widening REVERTED, net-neutral.**
-> AG0 originally widened `isStandalonePromiseActive` to `ctx.wasi ||
-ctx.standalone`, activating the native `$Promise` carrier for
+> AG0 originally widened `isStandalonePromiseActive` to
+> `ctx.wasi || ctx.standalone`, activating the native `$Promise` carrier for
 > `--target standalone` too. Ground-truth measurement on the #2384 frame-core
 > base proved that widening is a **net regression** on standalone, **not** a
 > gain: async standalone sample 134→103 pass (−31); the await+async-function
