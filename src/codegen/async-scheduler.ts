@@ -3049,3 +3049,25 @@ export function emitStandalonePromiseThen(
 export function isStandalonePromiseActive(ctx: CodegenContext): boolean {
   return ctx.wasi === true || ctx.standalone === true;
 }
+
+/**
+ * (#2895) Gate for the **native `.then` / `.catch` chaining** lowering
+ * (`emitStandalonePromiseThen`) specifically — narrower than
+ * {@link isStandalonePromiseActive}.
+ *
+ * That lowering has a stack-imbalance at corpus scale under `--target
+ * standalone` in async-method-in-class contexts
+ * (`Promise.all(...).then(arrow).then($DONE, $DONE)` → "not enough arguments on
+ * the stack for call"; a −601 standalone regression caught only in the
+ * `merge_group`). It is superseded by the PATH B async result/drive rewrite
+ * (#2895), so rather than deepen it now we scope it back to **WASI only** (where
+ * it was validated) and let `--target standalone` fall through to the host-import
+ * `.then` path — exactly the pre-AG0 standalone behaviour (fails to instantiate
+ * cleanly, no invalid-Wasm), so no regression. The broad
+ * {@link isStandalonePromiseActive} still keeps the host-free
+ * `Promise.resolve`/`reject` construction + `await`-unwrap wins for standalone.
+ * PATH B re-enables native chaining for standalone by widening this predicate.
+ */
+export function isStandaloneThenChainNativeActive(ctx: CodegenContext): boolean {
+  return ctx.wasi === true;
+}
