@@ -83,6 +83,9 @@ import {
   ensureWeakSetNativeProtoGlue,
   ensureArrayBufferNativeProtoGlue,
   ensureDataViewNativeProtoGlue,
+  ensureSharedArrayBufferNativeProtoGlue,
+  ensureWeakRefNativeProtoGlue,
+  ensureFinalizationRegistryNativeProtoGlue,
   ensureTypedArrayViewNativeProtoGlue,
 } from "./array-object-proto.js";
 import { isBuiltinSubtype, isBuiltinTypeName } from "./builtin-tags.js";
@@ -804,6 +807,18 @@ function tryEnsureNativeProtoBrand(ctx: CodegenContext, builtinName: string): nu
   }
   if (builtinName === "DataView") {
     return ensureDataViewNativeProtoGlue(ctx);
+  }
+  // (#2861) SharedArrayBuffer mirrors ArrayBuffer's clean value-object shape;
+  // WeakRef / FinalizationRegistry are plain-method protos (held value / cells
+  // live on the instance, never the proto).
+  if (builtinName === "SharedArrayBuffer") {
+    return ensureSharedArrayBufferNativeProtoGlue(ctx);
+  }
+  if (builtinName === "WeakRef") {
+    return ensureWeakRefNativeProtoGlue(ctx);
+  }
+  if (builtinName === "FinalizationRegistry") {
+    return ensureFinalizationRegistryNativeProtoGlue(ctx);
   }
   // (#2651 M1 / D2) Concrete TypedArray view protos — `Int8Array.prototype`,
   // `Uint8Array.prototype`, … This is the measured Slice-0 lever: the

@@ -474,6 +474,13 @@ const PROTO_METHOD_LENGTH: Readonly<Record<string, number>> = {
   // toString/valueOf/… default to 0 or 1; the value-read OBJECT does not depend
   // on exact arities, only the member set.
   toJSON: 1,
+  // WeakRef.prototype.deref (ES2024 §26.1.3.2) is 0-arity; FinalizationRegistry.
+  // prototype.register (§26.2.3.1) is arity 2, unregister (§26.2.3.2) arity 1.
+  // These names don't collide with other builtins, so they live in the shared
+  // table safely.
+  deref: 0,
+  register: 2,
+  unregister: 1,
 };
 
 // ── ArrayBuffer.prototype (ES2024 §25.1.5) ────────────────────────────────────
@@ -547,6 +554,24 @@ const DATAVIEW_PROTO_METHOD_LENGTH: Readonly<Record<string, number>> = {
   ...Object.fromEntries(DATAVIEW_GET_TYPES.map((m) => [m, 1])),
   ...Object.fromEntries(DATAVIEW_SET_TYPES.map((m) => [m, 2])),
 };
+
+// ── SharedArrayBuffer.prototype (ES2024 §25.2.5) ──────────────────────────────
+// Mirrors ArrayBuffer's shape: `slice`/`grow` methods + `byteLength`/
+// `maxByteLength`/`growable` accessor getters (getters fold `.length` to 0).
+const SHAREDARRAYBUFFER_PROTO_METHODS = ["slice", "grow", "byteLength", "maxByteLength", "growable"] as const;
+const SHAREDARRAYBUFFER_PROTO_GETTERS: ReadonlySet<string> = new Set(["byteLength", "maxByteLength", "growable"]);
+const SHAREDARRAYBUFFER_PROTO_METHOD_LENGTH: Readonly<Record<string, number>> = {
+  slice: 2,
+  grow: 1,
+};
+
+// ── WeakRef.prototype (ES2024 §26.1.3) ── single `deref` method (0-arity). ────
+const WEAKREF_PROTO_METHODS = ["deref"] as const;
+
+// ── FinalizationRegistry.prototype (ES2024 §26.2.3) ───────────────────────────
+// `register` (arity 2) + `unregister` (arity 1). Arities live in the shared
+// PROTO_METHOD_LENGTH table (no cross-builtin collision).
+const FINALIZATIONREGISTRY_PROTO_METHODS = ["register", "unregister"] as const;
 
 /**
  * Graceful member-body refusal: the value-read object (PR-A) does not need
@@ -955,6 +980,56 @@ export function ensureDataViewNativeProtoGlue(ctx: CodegenContext): number | und
         DATAVIEW_PROTO_METHOD_LENGTH,
       ),
     );
+  }
+  return brand;
+}
+
+/**
+ * (#2861) Register `SharedArrayBuffer.prototype` glue (idempotent). Same clean
+ * value-object shape as ArrayBuffer (the shared byte vec lives on the instance).
+ */
+export function ensureSharedArrayBufferNativeProtoGlue(ctx: CodegenContext): number | undefined {
+  const brand = getBuiltinBrand(ctx, "SharedArrayBuffer");
+  if (brand === undefined) return undefined;
+  if (!getNativeProtoBuiltinGlue(ctx, brand)) {
+    registerNativeProtoBuiltin(
+      ctx,
+      makeGlueWithGetters(
+        brand,
+        "SharedArrayBuffer",
+        SHAREDARRAYBUFFER_PROTO_METHODS,
+        SHAREDARRAYBUFFER_PROTO_GETTERS,
+        SHAREDARRAYBUFFER_PROTO_METHOD_LENGTH,
+      ),
+    );
+  }
+  return brand;
+}
+
+/**
+ * (#2861) Register `WeakRef.prototype` glue (idempotent). Single `deref` method;
+ * no accessor getters — plain `makeGlue`. The held value lives on the instance,
+ * so the proto value object is pure.
+ */
+export function ensureWeakRefNativeProtoGlue(ctx: CodegenContext): number | undefined {
+  const brand = getBuiltinBrand(ctx, "WeakRef");
+  if (brand === undefined) return undefined;
+  if (!getNativeProtoBuiltinGlue(ctx, brand)) {
+    registerNativeProtoBuiltin(ctx, makeGlue(ctx, brand, "WeakRef", WEAKREF_PROTO_METHODS));
+  }
+  return brand;
+}
+
+/**
+ * (#2861) Register `FinalizationRegistry.prototype` glue (idempotent). The
+ * FinalizationRegistry brand is newly appended to `BUILTIN_BRAND_TABLE` (slot 40).
+ * `register`/`unregister` methods; no getters — plain `makeGlue`.
+ */
+export function ensureFinalizationRegistryNativeProtoGlue(ctx: CodegenContext): number | undefined {
+  const brand = getBuiltinBrand(ctx, "FinalizationRegistry");
+  if (brand === undefined) return undefined;
+  if (!getNativeProtoBuiltinGlue(ctx, brand)) {
+    registerNativeProtoBuiltin(ctx, makeGlue(ctx, brand, "FinalizationRegistry", FINALIZATIONREGISTRY_PROTO_METHODS));
   }
   return brand;
 }
