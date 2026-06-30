@@ -1144,10 +1144,14 @@ export function generateModule(
     // registration order is untouched. Standalone/WASI only; additive.
     if (ctx.standalone || ctx.wasi) {
       reserveTypedArraySubviewTypes(ctx);
-      // (#2893 PR-1) Reserve the plain integer-view vec structs too, so the
-      // reflective accessor-getter brand-recovery candidate set is stable even
-      // when the getter closure is emitted before any view construction.
-      reserveTypedArrayIntViewVecTypes(ctx);
+      // (#2901 fix) The integer-view PLAIN vec structs are deliberately NOT
+      // reserved here. An up-front, unconditional reservation prepended them to
+      // every standalone module's type table, renumbering the #2835 i8-packed
+      // array type → ~2.6k `array.get: ... packed type i8` failures in the
+      // merge_group (type-index-shift hazard). They are now registered LATE +
+      // ONCE, append-only, inside `typedArrayViewBrandCandidates` (only when a
+      // reflective TypedArray accessor getter is actually emitted) — so non-TA
+      // modules stay byte-identical and nothing already registered is renumbered.
     }
 
     // (#2026 #53) Reserve `$ObjVecArr` up-front when the source declares a class,
@@ -7505,34 +7509,6 @@ export function reserveTypedArraySubviewTypes(ctx: CodegenContext): void {
   getOrRegisterSubviewType(ctx, "i16_byte", { kind: "i16" }); // (#2593) Int16/Uint16
   getOrRegisterSubviewType(ctx, "i32_elem", { kind: "i32" }); // (#2835) Int32/Uint32 element storage (split from i32_byte)
   getOrRegisterSubviewType(ctx, "f64", { kind: "f64" });
-}
-
-/**
- * (#2893 PR-1) Reserve the plain integer-view `$__vec_<key>` structs up-front, at
- * the deterministic type-init point, so the reflective `%TypedArray%` accessor
- * getter bodies (`emitTypedArrayProtoMemberBody`, array-object-proto.ts) have a
- * STABLE, populated brand-recovery candidate set at closure-emit time — even when
- * the descriptor closure is synthesised BEFORE any `new <View>()` construction is
- * compiled (the hoist-vs-emit timing hazard: without this, the candidate set was
- * empty and a valid view receiver fell through to the brand-check throw).
- *
- * Mirrors `reserveTypedArraySubviewTypes`: idempotent (`getOrRegisterVecType`
- * returns the existing slot at the construction site, so `new Uint8Array()` still
- * resolves to this exact idx), and the element types match
- * `TYPED_ARRAY_PACKED_STORAGE` so the construction path is byte-identical. Wrapped
- * in `suppressVecUsageFlag` so the reservation does NOT count as array usage (the
- * host-glue vec exports stay gated on real usage, per #2083). A reserved-but-unused
- * vec struct is pruned + renumbered cleanly by dead-elimination, so this is a true
- * no-op for non-TypedArray modules. Standalone/WASI only (the packed integer-view
- * storage keys only exist under those targets; host/gc keeps views on `f64`).
- */
-export function reserveTypedArrayIntViewVecTypes(ctx: CodegenContext): void {
-  const wasSuppressed = ctx.suppressVecUsageFlag;
-  ctx.suppressVecUsageFlag = true;
-  getOrRegisterVecType(ctx, "i8_byte", { kind: "i8" }); // Int8/Uint8/Uint8Clamped
-  getOrRegisterVecType(ctx, "i16_byte", { kind: "i16" }); // Int16/Uint16
-  getOrRegisterVecType(ctx, "i32_elem", { kind: "i32" }); // Int32/Uint32 element storage
-  ctx.suppressVecUsageFlag = wasSuppressed;
 }
 
 /**

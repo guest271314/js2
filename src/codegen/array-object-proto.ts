@@ -34,7 +34,7 @@ import { emitThrowTypeError } from "./expressions/helpers.js";
 import { allocLocal } from "./context/locals.js";
 import { emitThisReceiverGuardConvert } from "./property-access.js";
 import { compileArraySliceFromVecLocal } from "./array-methods.js";
-import { getArrTypeIdxFromVec } from "./registry/types.js";
+import { getArrTypeIdxFromVec, getOrRegisterVecType } from "./registry/types.js";
 import { ensureLateImport, flushLateImportShifts } from "./shared.js";
 import { ensureObjectRuntime } from "./object-runtime.js";
 import { addStringConstantGlobal } from "./registry/imports.js";
@@ -682,15 +682,39 @@ const TYPED_ARRAY_INT_VIEW_STORAGE: ReadonlyArray<{ key: string; width: number }
 
 /**
  * (#2893 PR-1) Build the runtime brand-recovery candidate set for a
- * `%TypedArray%` view receiver: every registered integer-view vec struct plus
- * its `$__subview_<k>` struct (a `subarray` window), each tagged with its
+ * `%TypedArray%` view receiver: every integer-view vec struct plus its
+ * `$__subview_<k>` struct (a `subarray` window), each tagged with its
  * compile-time element width and whether it is a subview (the byteOffset arm
- * differs). Keys absent from `ctx.vecTypeMap`/`ctx.subviewTypeMap` (the source
- * never constructed that view) are skipped — a receiver cannot be a view of a
- * type the module never registered. Reads the type idxs at body-emit time so the
- * reserved subview slots already exist (see `reserveTypedArraySubviewTypes`).
+ * differs).
+ *
+ * **Type-index discipline (#2901 fix — `project_type_index_shift_and_deadelim`):**
+ * the integer-view vec structs are registered **here, LATE and ONCE** (idempotent,
+ * `suppressVecUsageFlag`), at the moment a reflective accessor getter body is
+ * emitted — NOT up-front at the deterministic type-init point. An up-front,
+ * unconditional reservation prepended these structs to EVERY standalone module's
+ * type table, **renumbering the #2835 i8-packed array type** so unrelated
+ * `array.get` sites (which captured a pre-shift index in the hoist pass) landed on
+ * a now-packed array → `array.get: ... packed type i8` validation failures across
+ * ~2.6k tests in the merge_group. Registering on-read here is **append-only** (the
+ * new structs take high indices, shifting nothing already registered) and **gated**
+ * (only TypedArray-reflective modules ever register them, so non-TA modules stay
+ * byte-identical). `getOrRegisterVecType` is idempotent, so a later
+ * `new Uint8Array()` resolves to the same struct index. The subview structs are
+ * still reserved up-front by `reserveTypedArraySubviewTypes` (existing main
+ * behaviour, unchanged) and read here.
  */
 function typedArrayViewBrandCandidates(ctx: CodegenContext): { typeIdx: number; width: number; isSubview: boolean }[] {
+  // Register the integer-view vec structs LATE + ONCE (append-only, suppressed
+  // usage flag) so the candidate set is populated even when the getter closure is
+  // emitted before any `new <View>()` construction — without renumbering the
+  // i8-packed array type that up-front reservation perturbed.
+  const wasSuppressed = ctx.suppressVecUsageFlag;
+  ctx.suppressVecUsageFlag = true;
+  getOrRegisterVecType(ctx, "i8_byte", { kind: "i8" });
+  getOrRegisterVecType(ctx, "i16_byte", { kind: "i16" });
+  getOrRegisterVecType(ctx, "i32_elem", { kind: "i32" });
+  ctx.suppressVecUsageFlag = wasSuppressed;
+
   const out: { typeIdx: number; width: number; isSubview: boolean }[] = [];
   for (const { key, width } of TYPED_ARRAY_INT_VIEW_STORAGE) {
     const vecIdx = ctx.vecTypeMap.get(key);
