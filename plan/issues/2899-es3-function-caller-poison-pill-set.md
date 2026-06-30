@@ -1,7 +1,8 @@
 ---
 id: 2899
 title: "≤ES3: Function `.caller` poison-pill must throw TypeError on set (`bound.caller = {}`)"
-status: ready
+status: done
+completed: 2026-06-30
 priority: high
 sprint: current
 created: 2026-06-30
@@ -32,3 +33,33 @@ The function-object property model needs `caller`/`arguments` realized as poison
 ## Acceptance
 - `bound.caller = {}` (and `.arguments` set/get) throw `TypeError`; the test passes.
 - No regression in normal function-property tests.
+
+## Resolution (2026-06-30)
+Already fixed on `main` when re-verified against the live tree — the filed
+baseline was stale. `test/language/statements/function/13.2-30-s.js` returns
+`status: pass` via `runTest262File` (and the runner was sanity-checked to
+report `fail` on a deliberately-broken `assert.throws` variant, so the pass is
+real, not a false positive).
+
+Root cause of the prior fix: **#2745**. `target.bind(self)` yields a real JS
+bound-function exotic (host `Function.prototype.bind`, runtime.ts §`__bind_function`),
+which inherits `caller`/`arguments` from `%FunctionPrototype%` as `%ThrowTypeError%`
+poison-pill accessors. Member-assignment (`bound.caller = {}`) routes through
+`__extern_set_strict` → `_safeSet(strict=true)`, whose `strictAccessorWrite`
+path (runtime.ts:4699-4738) walks the prototype chain, finds the inherited
+poison-pill setter, runs the write, and **re-throws** the setter's TypeError so
+the user's `try/catch` sees it. The get arms throw via the host `__extern_get`
+invoking the inherited poison-pill getter.
+
+This PR adds a regression guard (`tests/issue-2899.test.ts`): the four
+get/set arms each throw `TypeError`, bound functions have no own
+`caller`/`arguments`, ordinary object/function-custom property set/get is
+unaffected, plus an end-to-end `runTest262File` check (skipped when the
+test262 submodule isn't present). No compiler-source change was required.
+
+Note (out of scope for #2899): a *narrow, separate* quirk surfaced while
+probing — reading `bound.caller` inside a nested `(fn: any)` callback that
+captures a **module-level** `bound` returns `null` instead of throwing
+(the production test262 wrapper declares `bound` *local* to `test()` with a
+`() => void` callback, so it is unaffected and the conformance test passes).
+Flagged to the lead as a possible follow-up; does not block this issue.
