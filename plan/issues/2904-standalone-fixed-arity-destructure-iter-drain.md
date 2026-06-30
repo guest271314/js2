@@ -1,7 +1,7 @@
 ---
 id: 2904
 title: Standalone fixed-arity array destructuring leaks env::__array_from_iter_n
-status: in-progress
+status: done
 assignee: ttraenkler/sendev-iterdrain
 sprint: current
 priority: high
@@ -9,6 +9,7 @@ horizon: l
 feasibility: hard
 goal: standalone-host-free
 created: 2026-06-30
+completed: 2026-06-30
 ---
 
 ## Problem
@@ -99,4 +100,41 @@ byte-identical in host mode.
 
 ## Test Results
 
-(filled during implementation)
+`tests/issue-2904-standalone-fixed-dstr-iter-drain.test.ts` (7 cases, all green):
+decl 2-of-3 / 3-of-3 positional, out-of-length default, elision, array-pattern
+param, >4-element grow, undefined-check. Each asserts **zero host imports** + the
+correct value. Regression sweep clean: #1592, #2169 (generator/spread/arrayfrom),
+#1021/#1024/#1158 all green. The two pre-existing `#1320` `arr.entries()` failures
+(`for (const pair of storedEntries)` → `pair.length`) reproduce **identically on
+clean `origin/main`** — they are the #1888/#2177 open-any retrieval gap, NOT a
+regression here (my new function is only reachable from the destructure site).
+
+Host/gc mode still emits `env::__array_from_iter_n` → byte-identical, zero risk to
+the JS-host lane.
+
+## Scope landed vs. deferred
+
+**Landed (this PR):** the dominant cluster — `const/let [a,b] = anyExpr` and
+`function f([a,b]: any)` — both route through `destructureParamArray`'s externref
+fallback and now drain host-free. Measured: the leak is gone and individual
+destructured values bind correctly (`return a` → 10, defaults fire, elision works).
+
+**Deferred (separate follow-ups, NOT regressions — all fail on base too):**
+
+1. **`any + any` arithmetic on values read out of an `any` source.** `const [a,b] =
+   anyArr; return a + b` yields 0/NaN — but so does `anyArr[0] + anyArr[1]` with NO
+   destructuring at all. This is the pre-existing boxed-number value-read substrate
+   gap (`project_standalone_any_string_value_read_substrate`), orthogonal to the
+   host-import leak this issue targets. Individual reads and `any * number` work.
+2. **Generator-as-`any` / Set-as-`any` destructure** (`const y:any = g(); const
+   [a,b] = y`) traps `illegal cast` in the native `__iterator` USER arm — the
+   #2157/#2864 standalone-iterator-of-`any` substrate. On base these failed at
+   instantiation (the leak); now they trap at runtime (strictly no worse, and other
+   functions in the same module become usable).
+3. **Assignment-target destructure** (`[a,b] = anyExpr`, the
+   `compileExternrefArrayDestructuringAssignment` site) still leaks. Swapping its
+   materialise to the native helper removes the leak but its element reads use
+   `__extern_get(box(i))`, which casts the boxed-number key to `$AnyString` and
+   traps `illegal cast` in standalone. Converting those reads to `__extern_get_idx`
+   surfaced a deeper USER-arm-fill dependency in that path; deferred to keep this PR
+   zero-regression. The decl/param cluster is the overwhelming majority of the ~889.
