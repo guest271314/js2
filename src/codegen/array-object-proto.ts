@@ -209,6 +209,35 @@ const BOOLEAN_PROTO_METHODS = ["toString", "valueOf"] as const;
  * data properties (own on the proto), not methods. */
 const ERROR_PROTO_METHODS = ["toString"] as const;
 
+/** (#2861) `NativeError.prototype`'s own method names — a `<NativeError>.prototype`
+ * (TypeError/RangeError/ReferenceError/SyntaxError/EvalError/URIError) inherits
+ * `toString` from `Error.prototype`; its own data props (`constructor`/`name`/
+ * `message`) are not methods. The shared method member set mirrors Error's so
+ * the proto value object + `.length`/`.name` meta-fold resolve host-free. */
+const NATIVE_ERROR_PROTO_METHODS = ["toString"] as const;
+
+/** (#2861) `Promise.prototype`'s own method names (ES2024 §27.2.5). Only the
+ * static `.prototype` VALUE read + these method-closure value reads are wired
+ * here; instance-state reads were deliberately excluded in #1907 (async
+ * capability null-deref), so this glue NEVER touches runtime promise state. */
+const PROMISE_PROTO_METHODS = ["catch", "finally", "then"] as const;
+
+/** (#2861) `Iterator.prototype`'s own helper method names (ES2025 iterator
+ * helpers, §27.1.4). `[Symbol.iterator]` is a computed key handled elsewhere. */
+const ITERATOR_PROTO_METHODS = [
+  "drop",
+  "every",
+  "filter",
+  "find",
+  "flatMap",
+  "forEach",
+  "map",
+  "reduce",
+  "some",
+  "take",
+  "toArray",
+] as const;
+
 /** `Function.prototype`'s own method names (ES2024 §20.2.3). */
 const FUNCTION_PROTO_METHODS = ["apply", "bind", "call", "toString"] as const;
 
@@ -447,6 +476,78 @@ const PROTO_METHOD_LENGTH: Readonly<Record<string, number>> = {
   toJSON: 1,
 };
 
+// ── ArrayBuffer.prototype (ES2024 §25.1.5) ────────────────────────────────────
+// Method names + accessor getters. Getters (`byteLength`/`maxByteLength`/
+// `detached`/`resizable`) are marked below so their `.length` meta folds to 0.
+// The value-read OBJECT only needs the member set; reflective member closures
+// degrade to a catchable TypeError until per-member native bodies land.
+const ARRAYBUFFER_PROTO_METHODS = [
+  "slice",
+  "resize",
+  "transfer",
+  "transferToFixedLength",
+  // Accessor getters (§25.1.5.{1,2,3,4}).
+  "byteLength",
+  "maxByteLength",
+  "detached",
+  "resizable",
+] as const;
+const ARRAYBUFFER_PROTO_GETTERS: ReadonlySet<string> = new Set([
+  "byteLength",
+  "maxByteLength",
+  "detached",
+  "resizable",
+]);
+const ARRAYBUFFER_PROTO_METHOD_LENGTH: Readonly<Record<string, number>> = {
+  slice: 2,
+  resize: 1,
+  transfer: 0,
+  transferToFixedLength: 0,
+};
+
+// ── DataView.prototype (ES2024 §25.3.4) ───────────────────────────────────────
+// All `get<Type>` methods are arity 1, all `set<Type>` arity 2. The accessor
+// getters `buffer`/`byteLength`/`byteOffset` (§25.3.4.{1,2,3}) fold to 0.
+const DATAVIEW_GET_TYPES = [
+  "getInt8",
+  "getUint8",
+  "getInt16",
+  "getUint16",
+  "getInt32",
+  "getUint32",
+  "getFloat16",
+  "getFloat32",
+  "getFloat64",
+  "getBigInt64",
+  "getBigUint64",
+] as const;
+const DATAVIEW_SET_TYPES = [
+  "setInt8",
+  "setUint8",
+  "setInt16",
+  "setUint16",
+  "setInt32",
+  "setUint32",
+  "setFloat16",
+  "setFloat32",
+  "setFloat64",
+  "setBigInt64",
+  "setBigUint64",
+] as const;
+const DATAVIEW_PROTO_METHODS = [
+  ...DATAVIEW_GET_TYPES,
+  ...DATAVIEW_SET_TYPES,
+  // Accessor getters (§25.3.4.{1,2,3}).
+  "buffer",
+  "byteLength",
+  "byteOffset",
+] as const;
+const DATAVIEW_PROTO_GETTERS: ReadonlySet<string> = new Set(["buffer", "byteLength", "byteOffset"]);
+const DATAVIEW_PROTO_METHOD_LENGTH: Readonly<Record<string, number>> = {
+  ...Object.fromEntries(DATAVIEW_GET_TYPES.map((m) => [m, 1])),
+  ...Object.fromEntries(DATAVIEW_SET_TYPES.map((m) => [m, 2])),
+};
+
 /**
  * Graceful member-body refusal: the value-read object (PR-A) does not need
  * member bodies, but if a reflective member closure is materialized for a member
@@ -579,6 +680,33 @@ function makeTypedArrayGlue(brand: number, name: string): NativeProtoBuiltinGlue
 }
 
 /**
+ * (#2861) Generic glue factory for a ctor-prototype value object whose member
+ * set mixes data methods and accessor getters (ArrayBuffer / DataView / …).
+ * Differs from `makeGlue` only in marking the `getters` members as getters so
+ * the `.length` meta-fold reports 0 arity, and consulting a per-builtin length
+ * table. The proto OBJECT is a pure value object (member CSV + name;
+ * `emitLazyNativeProtoGet` never calls `emitMemberBody`); a reflective member
+ * CLOSURE read degrades to a catchable TypeError until a native body lands (the
+ * established #2193 / #2651 pattern).
+ */
+function makeGlueWithGetters(
+  brand: number,
+  name: string,
+  members: readonly string[],
+  getters: ReadonlySet<string>,
+  lengthTable: Readonly<Record<string, number>>,
+): NativeProtoBuiltinGlue {
+  return {
+    brand,
+    name,
+    memberCsv: members.join(","),
+    memberKind: (member) => (getters.has(member) ? "getter" : "method"),
+    memberLength: (member) => lengthTable[member] ?? 1,
+    emitMemberBody: (c, fctx, member) => emitProtoMemberBodyRefusal(c, fctx, name, member),
+  };
+}
+
+/**
  * Register `Array.prototype` glue (idempotent) and return its brand, or
  * `undefined` if the Array brand isn't reserved (should not happen).
  */
@@ -667,6 +795,48 @@ export function ensureErrorNativeProtoGlue(ctx: CodegenContext): number | undefi
   return brand;
 }
 
+/**
+ * (#2861) Register `<NativeError>.prototype` glue (idempotent) and return its
+ * brand. Each NativeError ctor (TypeError/RangeError/ReferenceError/SyntaxError/
+ * EvalError/URIError) has its own reserved brand; the proto value object only
+ * needs the (Error-shared) member CSV so a `<NativeError>.prototype` /
+ * `<NativeError>.prototype.<member>` value read resolves host-free instead of
+ * refusing. Clean flip — Error.prototype glue (S6) carried no runtime-state
+ * entanglement and these subclass protos share its shape. */
+export function ensureNativeErrorNativeProtoGlue(ctx: CodegenContext, builtinName: string): number | undefined {
+  const brand = getBuiltinBrand(ctx, builtinName);
+  if (brand === undefined) return undefined;
+  if (!getNativeProtoBuiltinGlue(ctx, brand)) {
+    registerNativeProtoBuiltin(ctx, makeGlue(ctx, brand, builtinName, NATIVE_ERROR_PROTO_METHODS));
+  }
+  return brand;
+}
+
+/**
+ * (#2861) Register `Promise.prototype` glue (idempotent) and return its brand.
+ * Scoped to the static `.prototype` VALUE read + method-closure value reads
+ * (`then`/`catch`/`finally`) — the proto OBJECT is a pure value object
+ * (member CSV only; `emitLazyNativeProtoGet` never re-emits a body that touches
+ * the async-capability runtime state, which is what #1907 found to null-deref). */
+export function ensurePromiseNativeProtoGlue(ctx: CodegenContext): number | undefined {
+  const brand = getBuiltinBrand(ctx, "Promise");
+  if (brand === undefined) return undefined;
+  if (!getNativeProtoBuiltinGlue(ctx, brand)) {
+    registerNativeProtoBuiltin(ctx, makeGlue(ctx, brand, "Promise", PROMISE_PROTO_METHODS));
+  }
+  return brand;
+}
+
+/** (#2861) Register `Iterator.prototype` glue (idempotent) and return its brand. */
+export function ensureIteratorNativeProtoGlue(ctx: CodegenContext): number | undefined {
+  const brand = getBuiltinBrand(ctx, "Iterator");
+  if (brand === undefined) return undefined;
+  if (!getNativeProtoBuiltinGlue(ctx, brand)) {
+    registerNativeProtoBuiltin(ctx, makeGlue(ctx, brand, "Iterator", ITERATOR_PROTO_METHODS));
+  }
+  return brand;
+}
+
 /** Register `Map.prototype` glue (idempotent) and return its brand. (S6) */
 export function ensureMapNativeProtoGlue(ctx: CodegenContext): number | undefined {
   const brand = getBuiltinBrand(ctx, "Map");
@@ -733,6 +903,58 @@ export function ensureWeakSetNativeProtoGlue(ctx: CodegenContext): number | unde
   if (brand === undefined) return undefined;
   if (!getNativeProtoBuiltinGlue(ctx, brand)) {
     registerNativeProtoBuiltin(ctx, makeGlue(ctx, brand, "WeakSet", WEAKSET_PROTO_METHODS));
+  }
+  return brand;
+}
+
+/**
+ * (#2861) Register `ArrayBuffer.prototype` glue (idempotent) and return its
+ * brand. The ArrayBuffer brand is pre-reserved in `BUILTIN_BRAND_TABLE`; this
+ * fills in the member CSV (with the accessor getters marked) so a bare
+ * `ArrayBuffer.prototype` / `ArrayBuffer.prototype.<member>` value read resolves
+ * host-free instead of refusing. ArrayBuffer's proto value object carries no
+ * vec/runtime-state entanglement (the byte vec lives on the INSTANCE, never the
+ * proto), so the materialization is clean. Reflective member-CLOSURE bodies
+ * degrade to a catchable TypeError until native bodies land.
+ */
+export function ensureArrayBufferNativeProtoGlue(ctx: CodegenContext): number | undefined {
+  const brand = getBuiltinBrand(ctx, "ArrayBuffer");
+  if (brand === undefined) return undefined;
+  if (!getNativeProtoBuiltinGlue(ctx, brand)) {
+    registerNativeProtoBuiltin(
+      ctx,
+      makeGlueWithGetters(
+        brand,
+        "ArrayBuffer",
+        ARRAYBUFFER_PROTO_METHODS,
+        ARRAYBUFFER_PROTO_GETTERS,
+        ARRAYBUFFER_PROTO_METHOD_LENGTH,
+      ),
+    );
+  }
+  return brand;
+}
+
+/**
+ * (#2861) Register `DataView.prototype` glue (idempotent) and return its brand.
+ * Same shape as ArrayBuffer — the get/set accessors operate on the INSTANCE's
+ * viewed buffer, so the proto value object is pure (member CSV only). The three
+ * `buffer`/`byteLength`/`byteOffset` accessor getters fold their `.length` to 0.
+ */
+export function ensureDataViewNativeProtoGlue(ctx: CodegenContext): number | undefined {
+  const brand = getBuiltinBrand(ctx, "DataView");
+  if (brand === undefined) return undefined;
+  if (!getNativeProtoBuiltinGlue(ctx, brand)) {
+    registerNativeProtoBuiltin(
+      ctx,
+      makeGlueWithGetters(
+        brand,
+        "DataView",
+        DATAVIEW_PROTO_METHODS,
+        DATAVIEW_PROTO_GETTERS,
+        DATAVIEW_PROTO_METHOD_LENGTH,
+      ),
+    );
   }
   return brand;
 }
