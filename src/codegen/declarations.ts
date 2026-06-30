@@ -1396,6 +1396,12 @@ export function finalizeUnifiedCollector(ctx: CodegenContext, state: UnifiedColl
   for (const method of state.promiseNeeded) {
     if (method === "then" || method === "catch" || method === "finally") continue;
     if (ctx.wasi && (method === "resolve" || method === "reject")) continue;
+    // (#2867 Gap 4) Under the native-`$Promise` carrier, `Promise.all`/`Promise.race`
+    // over an array literal lower to the host-free native combinator (no host
+    // import). Skip the unsatisfiable `Promise_all`/`Promise_race` pre-registration
+    // here; the host path (generic iterables / subclass receivers) still
+    // lazily `ensureLateImport`s it at the call site when actually needed.
+    if (isStandalonePromiseActive(ctx) && (method === "all" || method === "race")) continue;
     const importName = `Promise_${method}`;
     if (!ctx.funcMap.has(importName)) {
       const isAggregator = method === "all" || method === "race" || method === "allSettled" || method === "any";
