@@ -133,3 +133,17 @@ carriers. Verify gc byte-unchanged.
 identity preserved (`Symbol("x")!==Symbol("x")`, well-known `===`); Symbol keys
 excluded from `Object.keys`/for-in/JSON; zero host-mode regression; full
 merge_group + honest standalone floor.
+
+## Design decision (2026-06-30)
+
+Design **(A) union/eqref key** chosen; **(B) rejected** — a collision risk in the
+shared `$Object` key channel is a substrate hazard not worth the speed (coordinator
+sign-off). Carry as a multi-PR incremental effort (self), verify-first that
+standalone string-keyed ops stay behavior-identical at each slice (the key channel
+is every property op — high blast radius). Note: `$Object`/`$PropEntry` are
+standalone/wasi-only (host `gc` uses `env::__extern_*`), so host mode is
+structurally untouched; the no-regression bar is the standalone string-key suite.
+Slice order: (1) native `$Symbol` struct + standalone native `__box_symbol`; (2)
+eqref key-channel widening (find/store/has/delete) behind ref.test branch; (3)
+enumeration split (Object.keys excludes / getOwnPropertySymbols selects); (4)
+Symbol.toPrimitive dispatch.
