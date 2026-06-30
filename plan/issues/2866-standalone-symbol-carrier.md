@@ -1,12 +1,11 @@
 ---
 id: 2866
 title: "Standalone: Symbol values leak __box_symbol — no Wasm-native Symbol carrier"
-status: done
+status: in-progress
 assignee: ttraenkler/sendev-symbol
 created: 2026-06-30
 updated: 2026-06-30
-completed: 2026-06-30
-priority: medium
+priority: high
 feasibility: hard
 task_type: feature
 area: codegen
@@ -219,61 +218,6 @@ answer.)
 - ~~slice 3 SELECT side~~ **DONE (sendev-promisecarrier, 2026-06-30).** See
   "## Implementation — slice 3" below.
 - slice 4 — `Symbol.toPrimitive` dispatch in the coercion engine (ties into #2862).
-
-## Implementation — slice 4 (Symbol.toPrimitive STRING-hint dispatch), sendev-symbol 2026-06-30
-
-**Verify-first re-grounded the gap (the earlier "illegal cast" finding was stale).**
-On current `origin/main` (post-PR1 #2377 + the #2891 ToPrimitive-operators landing),
-the NUMBER-hint path already dispatches `[Symbol.toPrimitive]` host-free: `+o` /
-`o*1` return the right value via `coerceType(ref→f64, "number")` →
-`${name}_@@toPrimitive`. The remaining gap was the **STRING-hint** coercion
-contexts — a template-literal span `` `${o}` `` and `String(o)` — which did NOT
-dispatch the well-known method:
-
-- **Template literal** → `tryStructToString` (type-coercion.ts), which only checked
-  a `toString` field/`${name}_toString` and fell through to `$__any_to_string`
-  ("[object Object]"). `[Symbol.toPrimitive]` was explicitly deferred there (old
-  doc comment).
-- **`String(o)`** → `coerceType(ref→externref, "string")` already dispatched
-  `${name}_@@toPrimitive`, but for a **numeric** result it `__box_number`-boxed the
-  number and returned the _boxed number_ as the "string" — which then null-derefs
-  on the next string op (`String(o).length`).
-
-**Fix (standalone/native only; gc structurally untouched):**
-
-1. `tryStructToString` (type-coercion.ts): add a §7.1.1.1-precedence `@@toPrimitive`
-   arm BEFORE the `toString` lookup — push the `"string"` hint, call
-   `${name}_@@toPrimitive`, then normalise the result to a `ref $AnyString`. A
-   numeric (f64/i32) result is ToString'd via the native `number_toString`
-   formatter (registered on demand — `emitNativeNumberFormat` only APPENDS defined
-   funcs, **no import-insert → no funcIdx-shift hazard**). This is preferred over
-   `normaliseToString`'s `__box_number`→`$__any_to_string` route, whose boxed-number
-   arm is OMITTED when `number_toString` was absent at the (cached) helper's build
-   time (an object-only program never registers it → "[object Object]").
-2. `coerceType(ref→externref)` `@@toPrimitive` arm: under a **STRING hint** (and
-   `ctx.nativeStrings`), ToString a numeric result via `number_toString` (returns
-   an externref wrapping a native string) instead of `__box_number`. **Gated on
-   `ctx.nativeStrings`** so gc mode keeps the exact prior `__box_number` branch —
-   byte-identical (verified: gc `String(o)` WAT still calls `__box_number`).
-
-**Verified host-free (`--target standalone`, 0 imports):** `` `${o}` `` /
-`String(o)` dispatch `[Symbol.toPrimitive]("string")` for both string- and
-number-returning methods (`String(o).length` correct); class `[Symbol.toPrimitive]`
-in string context; `+o` number-hint unchanged; toString-only + valueOf + plain
-`[object Object]` objects unregressed. 20/20 in `tests/issue-2866.test.ts`; related
-toprimitive/string-coercion suites green (#1716, #1806, #2163, #1470, #2610, #1732,
-#2891, #2358-nominal, #2638, #1917). gc byte-unchanged by construction (native-gated).
-
-**Side-benefit + a known minor edge (NOT a regression):** the native `+`-concat
-path (`obj + str`) also routes objects through `tryStructToString`, so it now
-dispatches `[Symbol.toPrimitive]` too — a strict improvement over the prior
-"[object Object]" (which ignored the method entirely). Its hint is `"string"`
-rather than the spec's `"default"` for `+`; this only differs for the rare method
-that distinguishes `default` vs `string`, and the prior behaviour was already
-wrong, so it is net-positive. Threading the exact `"default"` hint through
-`tryStructToString`'s callers is a follow-up. **Not addressed (separate gates):**
-abstract `==` ToPrimitive dispatch; `obj + str` default-hint `valueOf`-only
-(pre-existing native-concat gap, unrelated to symbols).
 
 ## Implementation — slice 3 (getOwnPropertySymbols SELECT side), 2026-06-30
 

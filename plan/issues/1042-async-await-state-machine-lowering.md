@@ -3,8 +3,8 @@ id: 1042
 title: "async/await state-machine lowering (AwaitExpression is currently a no-op)"
 status: backlog
 created: 2026-04-11
-updated: 2026-06-24
-priority: high
+updated: 2026-06-30
+priority: low
 feasibility: hard
 reasoning_effort: max
 goal: async-model
