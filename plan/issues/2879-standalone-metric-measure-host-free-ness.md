@@ -1,9 +1,11 @@
 ---
 id: 2879
 title: "Standalone metric must measure HOST-FREE-ness — credit only host-free passes, not host-satisfied leaky passes"
-status: ready
+status: done
+completed: 2026-06-30
 assignee: sendev-hostfree
 created: 2026-06-30
+updated: 2026-06-30
 priority: high
 task_type: enhancement
 area: tooling

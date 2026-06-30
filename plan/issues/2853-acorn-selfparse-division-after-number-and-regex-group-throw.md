@@ -3,10 +3,11 @@ id: 2853
 title: "compiled-acorn THROWS parsing its OWN source — two bisected constructs: division after a numeric literal (`1 / 2`) and ANY regex group `(…)`"
 status: ready
 sprint: current
-priority: high
+priority: low
 horizon: m
 feasibility: hard
 created: 2026-06-30
+updated: 2026-06-30
 task_type: bugfix
 area: codegen, runtime
 language_feature: regexp, tokenizer

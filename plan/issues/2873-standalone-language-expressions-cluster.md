@@ -3,12 +3,13 @@ id: 2873
 title: "Standalone: language/expressions cluster (276 host-pass/standalone-fail, de-masked from #2862)"
 status: ready
 created: 2026-06-30
+updated: 2026-06-30
 priority: high
 task_type: bug
 area: codegen
 goal: standalone
 sprint: current
-horizon: l
+horizon: m
 related: [2860, 2870, 2862]
 umbrella: 2860
 ---
