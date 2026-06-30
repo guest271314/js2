@@ -2182,17 +2182,32 @@ function buildNativeGeneratorDispatch(
   errorLocal?: number,
 ): { instrs: Instr[]; resultType: ValType } {
   const infos = Array.from(ctx.nativeGenerators.values());
-  // (#2864 F1) When ANY generator in the chain uses the boxed-any carrier, the
-  // enclosing block must accept every carrier's result struct, so its type is
-  // `eqref` (the common supertype) and the chain produces concrete result
-  // structs (eqref subtypes). For numeric/string-only modules (the existing,
-  // dominant case) there is no any carrier — keep the f64 IteratorResult
-  // singleton block type, byte-identical to before, so no numeric generator
-  // regresses.
+  // (#2864 F1 / #2892) The enclosing dispatch block must accept every branch's
+  // produced result struct. Each branch for generator `info` produces a value of
+  // type `ref info.resultTypeIdx`, so the block type must be a supertype of all
+  // of them:
+  //   - ANY boxed-any carrier present → `eqref` (the common eq supertype), as in
+  //     #2864 F1.
+  //   - all generators share ONE result-struct typeIdx → `ref <that idx>`. This
+  //     covers the dominant numeric-only case (every numeric generator shares the
+  //     f64 IteratorResult singleton, byte-identical to before) AND the #2892
+  //     single-string-elem case (the string carrier's per-elem result struct).
+  //     Previously this branch hard-coded the f64 singleton even for a string
+  //     generator, so the branches' `ref <stringResult>` mismatched the block's
+  //     `ref <f64Result>` and the module failed wasm validation.
+  //   - generators with DISTINCT result structs (e.g. a numeric AND a string
+  //     generator in one module) have no shared nominal supertype → `eqref`.
   const hasAny = infos.some((i) => carrierIsAny(i.elemValType));
-  const resultType: ValType = hasAny
-    ? { kind: "eqref" }
-    : { kind: "ref", typeIdx: ensureNativeGeneratorResultType(ctx) };
+  const distinctResultIdxs = new Set(infos.map((i) => i.resultTypeIdx));
+  let resultType: ValType;
+  if (hasAny || distinctResultIdxs.size > 1) {
+    resultType = { kind: "eqref" };
+  } else if (distinctResultIdxs.size === 1) {
+    resultType = { kind: "ref", typeIdx: infos[0]!.resultTypeIdx };
+  } else {
+    // No generators registered (defensive) — fall back to the f64 singleton.
+    resultType = { kind: "ref", typeIdx: ensureNativeGeneratorResultType(ctx) };
+  }
   // The per-branch `.next(v)`/`.return(v)` value local: an any-carrier branch
   // consumes the externref `valueAnyLocal`; numeric / string branches consume the
   // f64 `valueLocal` (unchanged). `valueLocal` is always present when valueAnyLocal
