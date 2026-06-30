@@ -1157,6 +1157,63 @@ export function exportDrainMicrotasksIfRegistered(ctx: CodegenContext): void {
 }
 
 /**
+ * The stable runtime handles the host-free async drive layer (#2895 PATH B)
+ * depends on: the native `$Promise` carrier + its `$PromiseCallback` reaction
+ * node, the microtask ring, and the one-shot settle helpers. All of these are
+ * the SAME substrate the standalone `.then` machinery
+ * ({@link emitStandalonePromiseThen}) and the WASI async path already use — the
+ * async frame driver reuses them rather than forking a parallel scheduler.
+ */
+export interface AsyncDriveRuntime {
+  /** `$Promise` struct typeIdx (`{state i32, value externref, callbacks externref}`). */
+  promiseTypeIdx: number;
+  /** `$PromiseCallback` reaction-node typeIdx ({@link getOrRegisterPromiseCallbackTypeIdx}). */
+  callbackTypeIdx: number;
+  /** `__promise_fulfill(promise, value) -> value` funcIdx (settles + drains callbacks). */
+  fulfillFuncIdx: number;
+  /** `__promise_reject(promise, value) -> value` funcIdx. */
+  rejectFuncIdx: number;
+  /** `__microtask_enqueue(funcref, caps externref, value externref)` funcIdx. */
+  enqueueFuncIdx: number;
+  /** `__drain_microtasks()` funcIdx. */
+  drainFuncIdx: number;
+}
+
+/**
+ * (#2895 PATH B) Public accessor for the `$PromiseCallback` reaction-node type.
+ * The async frame driver prepends a reaction (its per-fn resume-step funcref +
+ * the frame as caps) onto a pending awaited promise's `callbacks` list, so it
+ * needs the node's typeIdx. Internally identical to the private registrar the
+ * `.then` machinery uses — same node shape, same cache.
+ */
+export function getOrRegisterPromiseCallbackTypeIdx(ctx: CodegenContext): number {
+  return getOrRegisterPromiseCallbackType(ctx);
+}
+
+/**
+ * (#2895 PATH B) Idempotently register the full async-drive runtime substrate
+ * (Promise type, reaction node, microtask ring, settle helpers) and return the
+ * stable func/type indices. Must be invoked BEFORE emitting any function body
+ * that bakes these `call`/`struct.new` indices — registering mid-body would
+ * shift subsequent funcIdx values (the late-import-shift hazard #1677/#1809).
+ * The async frame driver calls this from its prepass / call-site emission, which
+ * runs before the resume function body is filled.
+ */
+export function ensureAsyncDriveRuntime(ctx: CodegenContext): AsyncDriveRuntime {
+  ensureMicrotaskQueue(ctx);
+  ensurePromiseSettleFunctions(ctx);
+  const state = getOrInitState(ctx as CodegenContextWithScheduler);
+  return {
+    promiseTypeIdx: getOrRegisterPromiseType(ctx),
+    callbackTypeIdx: getOrRegisterPromiseCallbackType(ctx),
+    fulfillFuncIdx: state.promiseFulfillFuncIdx,
+    rejectFuncIdx: state.promiseRejectFuncIdx,
+    enqueueFuncIdx: state.enqueueFuncIdx,
+    drainFuncIdx: state.drainFuncIdx,
+  };
+}
+
+/**
  * #1326 Phase 1C-A — Auto-drain hook for WASI `_start`. Returns the funcIdx
  * of `__drain_microtasks` when the queue is registered, or `null` when not
  * (queue was never used by this module; no drain call needed). Callers
