@@ -2910,6 +2910,29 @@ function decodeVLQSegment(segment: string): number[] {
  * #1294 / #1295 fixes that handled the worker.mjs paths but not the
  * vitest-runner path used by `scripts/test262-worker-esm.mjs`).
  */
+/**
+ * (#2870) Stringify a thrown payload WITHOUT ever letting a host TypeError
+ * escape. A `--target standalone` module's thrown value is frequently a Wasm-GC
+ * error struct (an `anyref` with no JS-reachable `toString`); calling `String()`
+ * on it makes the HOST `ToPrimitive` throw `Cannot convert object to primitive
+ * value`. Unguarded, that host throw escaped `extractWasmExceptionMessage` and
+ * was recorded as the test's failure — masking the REAL signature (the genuine
+ * in-Wasm throw/trap) behind a phantom formatter TypeError, and collapsing
+ * ~2,014 heterogeneous standalone failures onto one string (see #2862). Guard
+ * it: on failure fall back to a stable label so the recorded signature reflects
+ * that the module threw a non-JS-stringifiable Wasm-GC payload.
+ */
+function safeStringifyThrown(v: any): string {
+  try {
+    return String(v);
+  } catch {
+    const t = typeof v;
+    return t === "object" || t === "function"
+      ? "uncaught Wasm-GC exception (non-stringifiable payload)"
+      : `uncaught Wasm exception (${t})`;
+  }
+}
+
 export function extractWasmExceptionMessage(err: any, instance: any): string {
   if (typeof WebAssembly !== "undefined" && err instanceof (WebAssembly as any).Exception) {
     let payload: any = null;
@@ -2922,15 +2945,15 @@ export function extractWasmExceptionMessage(err: any, instance: any): string {
       }
     }
     if (payload instanceof Error) {
-      return payload.message ?? String(payload);
+      return payload.message ?? safeStringifyThrown(payload);
     }
-    if (payload != null) return String(payload);
+    if (payload != null) return safeStringifyThrown(payload);
     return instance ? "TypeError (null/undefined access)" : "wasm exception during module init";
   }
   if (err instanceof Error) {
-    return err.message ?? String(err);
+    return err.message ?? safeStringifyThrown(err);
   }
-  return String(err);
+  return safeStringifyThrown(err);
 }
 
 /**
