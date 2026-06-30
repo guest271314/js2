@@ -1,5 +1,5 @@
 ---
-id: 2879
+id: 2882
 title: "Date.UTC: MakeFullYear, MakeDay month-overflow, non-finite/TimeClip → NaN"
 status: done
 completed: 2026-06-30
@@ -75,7 +75,7 @@ currently-passing path in this PR.
 
 ## Tests
 
-`tests/issue-2879.test.ts` — MakeFullYear, month/day overflow (positive +
+`tests/issue-2882.test.ts` — MakeFullYear, month/day overflow (positive +
 negative), non-finite propagation, TimeClip boundaries (`±8.64e15` valid,
 beyond ⇒ NaN), plus regression controls for ordinary timestamps.
 

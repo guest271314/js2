@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { compile } from "../src/index.js";
 import { buildImports } from "./equivalence/helpers.js";
 
-// #2879 — Date.UTC (ECMA-262 §21.4.3.4) spec conformance.
+// #2882 — Date.UTC (ECMA-262 §21.4.3.4) spec conformance.
 //
 // The prior lowering treated a missing year as 1970, skipped MakeFullYear
 // (§21.4.1.27 — the 0..99 ⇒ 1900+y offset), did no MakeDay month normalization
@@ -19,7 +19,7 @@ async function utc(expr: string): Promise<number> {
   return (instance.exports as any).test() as number;
 }
 
-describe("#2879 — Date.UTC spec conformance (§21.4.3.4)", () => {
+describe("#2882 — Date.UTC spec conformance (§21.4.3.4)", () => {
   it("missing year ⇒ NaN (ToNumber(undefined))", async () => {
     expect(await utc("Date.UTC()")).toBeNaN();
   });
