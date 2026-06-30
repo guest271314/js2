@@ -447,6 +447,78 @@ const PROTO_METHOD_LENGTH: Readonly<Record<string, number>> = {
   toJSON: 1,
 };
 
+// ── ArrayBuffer.prototype (ES2024 §25.1.5) ────────────────────────────────────
+// Method names + accessor getters. Getters (`byteLength`/`maxByteLength`/
+// `detached`/`resizable`) are marked below so their `.length` meta folds to 0.
+// The value-read OBJECT only needs the member set; reflective member closures
+// degrade to a catchable TypeError until per-member native bodies land.
+const ARRAYBUFFER_PROTO_METHODS = [
+  "slice",
+  "resize",
+  "transfer",
+  "transferToFixedLength",
+  // Accessor getters (§25.1.5.{1,2,3,4}).
+  "byteLength",
+  "maxByteLength",
+  "detached",
+  "resizable",
+] as const;
+const ARRAYBUFFER_PROTO_GETTERS: ReadonlySet<string> = new Set([
+  "byteLength",
+  "maxByteLength",
+  "detached",
+  "resizable",
+]);
+const ARRAYBUFFER_PROTO_METHOD_LENGTH: Readonly<Record<string, number>> = {
+  slice: 2,
+  resize: 1,
+  transfer: 0,
+  transferToFixedLength: 0,
+};
+
+// ── DataView.prototype (ES2024 §25.3.4) ───────────────────────────────────────
+// All `get<Type>` methods are arity 1, all `set<Type>` arity 2. The accessor
+// getters `buffer`/`byteLength`/`byteOffset` (§25.3.4.{1,2,3}) fold to 0.
+const DATAVIEW_GET_TYPES = [
+  "getInt8",
+  "getUint8",
+  "getInt16",
+  "getUint16",
+  "getInt32",
+  "getUint32",
+  "getFloat16",
+  "getFloat32",
+  "getFloat64",
+  "getBigInt64",
+  "getBigUint64",
+] as const;
+const DATAVIEW_SET_TYPES = [
+  "setInt8",
+  "setUint8",
+  "setInt16",
+  "setUint16",
+  "setInt32",
+  "setUint32",
+  "setFloat16",
+  "setFloat32",
+  "setFloat64",
+  "setBigInt64",
+  "setBigUint64",
+] as const;
+const DATAVIEW_PROTO_METHODS = [
+  ...DATAVIEW_GET_TYPES,
+  ...DATAVIEW_SET_TYPES,
+  // Accessor getters (§25.3.4.{1,2,3}).
+  "buffer",
+  "byteLength",
+  "byteOffset",
+] as const;
+const DATAVIEW_PROTO_GETTERS: ReadonlySet<string> = new Set(["buffer", "byteLength", "byteOffset"]);
+const DATAVIEW_PROTO_METHOD_LENGTH: Readonly<Record<string, number>> = {
+  ...Object.fromEntries(DATAVIEW_GET_TYPES.map((m) => [m, 1])),
+  ...Object.fromEntries(DATAVIEW_SET_TYPES.map((m) => [m, 2])),
+};
+
 /**
  * Graceful member-body refusal: the value-read object (PR-A) does not need
  * member bodies, but if a reflective member closure is materialized for a member
@@ -574,6 +646,33 @@ function makeTypedArrayGlue(brand: number, name: string): NativeProtoBuiltinGlue
     memberCsv: TYPED_ARRAY_PROTO_METHODS.join(","),
     memberKind: (member) => (TYPED_ARRAY_PROTO_GETTERS.has(member) ? "getter" : "method"),
     memberLength: (member) => TYPED_ARRAY_PROTO_METHOD_LENGTH[member] ?? 1,
+    emitMemberBody: (c, fctx, member) => emitProtoMemberBodyRefusal(c, fctx, name, member),
+  };
+}
+
+/**
+ * (#2861) Generic glue factory for a ctor-prototype value object whose member
+ * set mixes data methods and accessor getters (ArrayBuffer / DataView / …).
+ * Differs from `makeGlue` only in marking the `getters` members as getters so
+ * the `.length` meta-fold reports 0 arity, and consulting a per-builtin length
+ * table. The proto OBJECT is a pure value object (member CSV + name;
+ * `emitLazyNativeProtoGet` never calls `emitMemberBody`); a reflective member
+ * CLOSURE read degrades to a catchable TypeError until a native body lands (the
+ * established #2193 / #2651 pattern).
+ */
+function makeGlueWithGetters(
+  brand: number,
+  name: string,
+  members: readonly string[],
+  getters: ReadonlySet<string>,
+  lengthTable: Readonly<Record<string, number>>,
+): NativeProtoBuiltinGlue {
+  return {
+    brand,
+    name,
+    memberCsv: members.join(","),
+    memberKind: (member) => (getters.has(member) ? "getter" : "method"),
+    memberLength: (member) => lengthTable[member] ?? 1,
     emitMemberBody: (c, fctx, member) => emitProtoMemberBodyRefusal(c, fctx, name, member),
   };
 }
@@ -733,6 +832,58 @@ export function ensureWeakSetNativeProtoGlue(ctx: CodegenContext): number | unde
   if (brand === undefined) return undefined;
   if (!getNativeProtoBuiltinGlue(ctx, brand)) {
     registerNativeProtoBuiltin(ctx, makeGlue(ctx, brand, "WeakSet", WEAKSET_PROTO_METHODS));
+  }
+  return brand;
+}
+
+/**
+ * (#2861) Register `ArrayBuffer.prototype` glue (idempotent) and return its
+ * brand. The ArrayBuffer brand is pre-reserved in `BUILTIN_BRAND_TABLE`; this
+ * fills in the member CSV (with the accessor getters marked) so a bare
+ * `ArrayBuffer.prototype` / `ArrayBuffer.prototype.<member>` value read resolves
+ * host-free instead of refusing. ArrayBuffer's proto value object carries no
+ * vec/runtime-state entanglement (the byte vec lives on the INSTANCE, never the
+ * proto), so the materialization is clean. Reflective member-CLOSURE bodies
+ * degrade to a catchable TypeError until native bodies land.
+ */
+export function ensureArrayBufferNativeProtoGlue(ctx: CodegenContext): number | undefined {
+  const brand = getBuiltinBrand(ctx, "ArrayBuffer");
+  if (brand === undefined) return undefined;
+  if (!getNativeProtoBuiltinGlue(ctx, brand)) {
+    registerNativeProtoBuiltin(
+      ctx,
+      makeGlueWithGetters(
+        brand,
+        "ArrayBuffer",
+        ARRAYBUFFER_PROTO_METHODS,
+        ARRAYBUFFER_PROTO_GETTERS,
+        ARRAYBUFFER_PROTO_METHOD_LENGTH,
+      ),
+    );
+  }
+  return brand;
+}
+
+/**
+ * (#2861) Register `DataView.prototype` glue (idempotent) and return its brand.
+ * Same shape as ArrayBuffer — the get/set accessors operate on the INSTANCE's
+ * viewed buffer, so the proto value object is pure (member CSV only). The three
+ * `buffer`/`byteLength`/`byteOffset` accessor getters fold their `.length` to 0.
+ */
+export function ensureDataViewNativeProtoGlue(ctx: CodegenContext): number | undefined {
+  const brand = getBuiltinBrand(ctx, "DataView");
+  if (brand === undefined) return undefined;
+  if (!getNativeProtoBuiltinGlue(ctx, brand)) {
+    registerNativeProtoBuiltin(
+      ctx,
+      makeGlueWithGetters(
+        brand,
+        "DataView",
+        DATAVIEW_PROTO_METHODS,
+        DATAVIEW_PROTO_GETTERS,
+        DATAVIEW_PROTO_METHOD_LENGTH,
+      ),
+    );
   }
   return brand;
 }

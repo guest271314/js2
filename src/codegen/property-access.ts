@@ -78,6 +78,8 @@ import {
   ensureBigIntNativeProtoGlue,
   ensureWeakMapNativeProtoGlue,
   ensureWeakSetNativeProtoGlue,
+  ensureArrayBufferNativeProtoGlue,
+  ensureDataViewNativeProtoGlue,
   ensureTypedArrayViewNativeProtoGlue,
 } from "./array-object-proto.js";
 import { isBuiltinSubtype, isBuiltinTypeName } from "./builtin-tags.js";
@@ -762,6 +764,17 @@ function tryEnsureNativeProtoBrand(ctx: CodegenContext, builtinName: string): nu
   }
   if (builtinName === "WeakSet") {
     return ensureWeakSetNativeProtoGlue(ctx);
+  }
+  // (#2861) ArrayBuffer / DataView protos — the single largest standalone-CE
+  // builtin cluster (ArrayBuffer 166, DataView 89). Their proto value objects
+  // carry no runtime-state entanglement (the byte vec lives on the INSTANCE,
+  // never the proto), so the `$NativeProto` materialization is clean. The
+  // accessor getters (`byteLength`/`buffer`/`byteOffset`/…) fold `.length` to 0.
+  if (builtinName === "ArrayBuffer") {
+    return ensureArrayBufferNativeProtoGlue(ctx);
+  }
+  if (builtinName === "DataView") {
+    return ensureDataViewNativeProtoGlue(ctx);
   }
   // (#2651 M1 / D2) Concrete TypedArray view protos — `Int8Array.prototype`,
   // `Uint8Array.prototype`, … This is the measured Slice-0 lever: the
