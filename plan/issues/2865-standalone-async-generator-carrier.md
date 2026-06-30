@@ -4,7 +4,7 @@ title: "Standalone: no Wasm-native async-generator / for-await carrier — leaks
 status: ready
 created: 2026-06-30
 updated: 2026-06-30
-priority: medium
+priority: high
 feasibility: hard
 task_type: feature
 area: codegen
