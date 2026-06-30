@@ -298,6 +298,38 @@ export function buildVecFromExternref(
     // (loopdive/js2#389 / #2311 regression — buildElemCoerce only handled
     // f64/i32/externref/ref). (#2839)
     if ((et.kind === "i32" || et.kind === "i8" || et.kind === "i16") && unboxIdx !== undefined) {
+      // (#2866 slice 3) In a symbol-bearing module the externref element may be a
+      // `$Symbol` carrier (materialising `Object.getOwnPropertySymbols(o)` into a
+      // typed `symbol[]` whose value-position rep is the i32 id) rather than a
+      // boxed number. `symbol[]` shares the unbranded `$__arr_i32` element type
+      // with `number[]`, so it can't be disambiguated statically — dispatch at
+      // runtime: a `$Symbol` carrier yields its i32 id (`$Symbol.id`), anything
+      // else unboxes as a number. Gated on the carrier being registered
+      // (standalone/WASI symbol modules); plain numeric modules are byte-identical.
+      if ((ctx.standalone || ctx.wasi) && ctx.symbolTypeIdx >= 0 && et.kind === "i32") {
+        const symIdx = ctx.symbolTypeIdx;
+        const tmpSym = allocLocal(fctx, `__sym_elem_${fctx.locals.length}`, { kind: "externref" });
+        return [
+          { op: "local.tee", index: tmpSym } as Instr,
+          { op: "any.convert_extern" } as Instr,
+          { op: "ref.test", typeIdx: symIdx } as Instr,
+          {
+            op: "if",
+            blockType: { kind: "val", type: { kind: "i32" } },
+            then: [
+              { op: "local.get", index: tmpSym } as Instr,
+              { op: "any.convert_extern" } as Instr,
+              { op: "ref.cast", typeIdx: symIdx } as Instr,
+              { op: "struct.get", typeIdx: symIdx, fieldIdx: 0 } as Instr,
+            ],
+            else: [
+              { op: "local.get", index: tmpSym } as Instr,
+              { op: "call", funcIdx: unboxIdx } as Instr,
+              { op: "i32.trunc_sat_f64_s" } as Instr,
+            ],
+          } as Instr,
+        ];
+      }
       return [{ op: "call", funcIdx: unboxIdx } as Instr, { op: "i32.trunc_sat_f64_s" }];
     }
     if (et.kind === "externref") return [];
@@ -1520,6 +1552,21 @@ export function coerceType(
   }
   // externref → i32 (unbox as number to preserve value, then truncate)
   if (from.kind === "externref" && to.kind === "i32") {
+    // (#2866 slice 3) symbol carrier → i32 id. A standalone/WASI symbol VALUE is
+    // a bare i32 counter id; when it has crossed an externref channel (e.g. a
+    // single `symbol` element of `Object.getOwnPropertySymbols(o)`) it is a
+    // `$Symbol` struct. Unboxing to a symbol slot is the inverse of the
+    // `__box_symbol` boxing path: recover the canonical i32 id (`$Symbol.id`) so
+    // symbol identity (`===`, id-compare) and re-indexing (`o[sym]`) work on the
+    // returned carrier. Narrowly gated on a symbol-branded target with the
+    // carrier registered; never touches number/boolean i32 coercions.
+    if (to.symbol === true && (ctx.standalone || ctx.wasi) && ctx.symbolTypeIdx >= 0) {
+      const symIdx = ctx.symbolTypeIdx;
+      fctx.body.push({ op: "any.convert_extern" });
+      fctx.body.push({ op: "ref.cast", typeIdx: symIdx } as Instr);
+      fctx.body.push({ op: "struct.get", typeIdx: symIdx, fieldIdx: 0 } as Instr);
+      return;
+    }
     addUnionImports(ctx);
     const funcIdx = ctx.funcMap.get("__unbox_number");
     if (funcIdx !== undefined) {
@@ -1674,18 +1721,19 @@ export function coerceType(
       }
     }
     // symbol → __box_symbol (takes the i32 handle/id directly; identity-stable
-    // via the host symbol cache). (#2792) HOST mode only: `addUnionImports` above
-    // registers `__box_symbol` as a host import, and the symbol brand is
-    // reconstructed only at the F1 `symbol[]` read site (`f1ElementBoxType`),
-    // which itself fires only in host mode (standalone defers `symbol[]` — a
-    // native `__box_symbol_struct` carrier shifted standalone type/func indices
-    // and broke unrelated tests, see the note there). Symbols are NOT broadly
-    // branded in type-mapper (that mismatched other boxing sites). Still guarded:
-    // falls through to the number box if the helper is absent, so the arm is
-    // purely additive and never leaks a host import into a standalone module.
+    // via the host symbol cache in gc mode, via the i32 `$id` in the native
+    // `$Symbol` carrier in standalone/wasi). (#2792/#2866) `ensureLateImport`
+    // resolves the right `__box_symbol`: a host `env::__box_symbol` import in gc
+    // mode (added by `addUnionImports` above) and the in-module `$Symbol` carrier
+    // builder under `ctx.standalone || ctx.wasi` (`ensureSymbolCarrier`). Before
+    // #2866 the standalone branch had no native helper, so a symbol-keyed boxing
+    // (e.g. `o[sym] = v`) fell through to the number box and corrupted the symbol
+    // id — or leaked an unsatisfiable host import. Still guarded: falls through to
+    // the number box only if the helper is genuinely absent.
     if (from.symbol === true) {
-      const boxSymIdx = ctx.funcMap.get("__box_symbol");
+      const boxSymIdx = ensureLateImport(ctx, "__box_symbol", [{ kind: "i32" }], [{ kind: "externref" }]);
       if (boxSymIdx !== undefined) {
+        flushLateImportShifts(ctx, fctx);
         fctx.body.push({ op: "call", funcIdx: boxSymIdx });
         return;
       }
