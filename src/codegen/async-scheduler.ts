@@ -3038,9 +3038,14 @@ export function emitStandalonePromiseThen(
 
 /**
  * #1326 — Check whether standalone-mode Promise codegen is active.
- * Auto-enables in WASI target mode (the JS host imports for Promise are
- * unavailable); opt-in elsewhere via a flag.
+ * Auto-enables for any host-free target — WASI *and* `--target standalone`
+ * (#2865 AG0). Both lack the JS host microtask queue / Promise_* imports, so
+ * Promise construction (`Promise.resolve/reject`), `.then`, and the async-fn
+ * `await` unwrap must use the Wasm-native `$Promise` carrier rather than leak
+ * `env::Promise_*` / `__make_callback`. Previously gated on `ctx.wasi` only,
+ * which left `--target standalone` leaking those imports (and the await path
+ * falling back to the identity-passthrough NaN bug).
  */
 export function isStandalonePromiseActive(ctx: CodegenContext): boolean {
-  return ctx.wasi === true;
+  return ctx.wasi === true || ctx.standalone === true;
 }
