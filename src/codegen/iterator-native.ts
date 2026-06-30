@@ -243,6 +243,186 @@ export function ensureNativeIteratorRuntime(ctx: CodegenContext): void {
 }
 
 /**
+ * (#2904) Register a native standalone `__array_from_iter_n(externref, f64) ->
+ * externref` defined function, reusing the existing native iterator runtime
+ * (`__iterator` / `__iterator_next`). This replaces the JS-host
+ * `env::__array_from_iter_n` import that fixed-arity array destructuring of an
+ * `any`-typed (externref) source otherwise leaks — a leak that breaks
+ * zero-import instantiation under `--target standalone`/`wasi`.
+ *
+ * Semantics mirror the host `_arrayFromIter(obj, limit)`:
+ *   - `n < 0` (rest patterns): unbounded drain until the iterator reports done.
+ *   - `n >= 0` (no-rest patterns, §8.5.3): consume AT MOST `n` IteratorSteps —
+ *     exactly one `.next()` per binding slot, never over-draining a lazy
+ *     generator. Stopping at the bound is a NormalCompletion (no IteratorClose).
+ *   - `null`/`undefined` source: return an empty vec (host returns `[]`).
+ *
+ * Returns a canonical externref `$Vec` (`__vec_externref`), which the downstream
+ * `__extern_length` / `__extern_get_idx` consumers already read natively (it is
+ * a `vecTypeMap` carrier). Drain loop = array-doubling growth + `array.copy`,
+ * byte-shaped after the proven spread-override drain in literals.ts (#1749).
+ *
+ * Append-only: registering a DEFINED function does NOT shift existing function
+ * indices the way `addImport` does. The body's `call __iterator` /
+ * `call __iterator_next` funcIdx are captured here (post `ensureNativeIteratorRuntime`)
+ * and patched by `shiftLateImportIndices` like any other defined body if a later
+ * import shifts them.
+ */
+export function ensureNativeArrayFromIterN(ctx: CodegenContext): number {
+  const existing = ctx.funcMap.get("__array_from_iter_n");
+  if (existing !== undefined) return existing;
+
+  // Guarantee the iterator runtime (and the $Vec/$IterRec geometry) exist.
+  ensureNativeIteratorRuntime(ctx);
+  const { vecTypeIdx, arrTypeIdx } = iterRuntimeTypes(ctx);
+  const iteratorIdx = ctx.funcMap.get("__iterator");
+  const iteratorNextIdx = ctx.funcMap.get("__iterator_next");
+  if (iteratorIdx === undefined || iteratorNextIdx === undefined) {
+    // Should never happen (ensureNativeIteratorRuntime just ran) — fall back to
+    // a host import so the caller still resolves a funcIdx by name.
+    const typeIdx = addFuncType(ctx, [{ kind: "externref" }, { kind: "f64" }], [{ kind: "externref" }]);
+    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    ctx.funcMap.set("__array_from_iter_n", funcIdx);
+    ctx.mod.functions.push({ name: "__array_from_iter_n", typeIdx, locals: [], body: [], exported: false });
+    return funcIdx;
+  }
+
+  // Local layout:
+  //   0 = obj   (externref, param)
+  //   1 = n     (f64, param)
+  //   2 = iter  (externref)        the $IterRec, as externref
+  //   3 = limit (i32)              n<0 ? -1 : trunc_sat(n)
+  //   4 = cap   (i32)              backing-array capacity
+  //   5 = len   (i32)              logical element count
+  //   6 = data  (ref $arrExtern)   backing array
+  //   7 = grow  (ref $arrExtern)   doubled array on growth
+  //   8 = done  (i32)
+  //   9 = value (externref)
+  const arrRef: ValType = { kind: "ref", typeIdx: arrTypeIdx };
+  const locals: { name: string; type: ValType }[] = [
+    { name: "iter", type: { kind: "externref" } },
+    { name: "limit", type: { kind: "i32" } },
+    { name: "cap", type: { kind: "i32" } },
+    { name: "len", type: { kind: "i32" } },
+    { name: "data", type: arrRef },
+    { name: "grow", type: arrRef },
+    { name: "done", type: { kind: "i32" } },
+    { name: "value", type: { kind: "externref" } },
+  ];
+
+  // Build an empty `__vec_externref` and convert to externref.
+  const emptyVec: Instr[] = [
+    { op: "i32.const", value: 0 } as Instr,
+    { op: "i32.const", value: 0 } as Instr,
+    { op: "array.new_default", typeIdx: arrTypeIdx } as Instr,
+    { op: "struct.new", typeIdx: vecTypeIdx } as Instr,
+    { op: "extern.convert_any" } as Instr,
+  ];
+
+  // Grow: cap *= 2; grow = new array[cap]; array.copy grow[0..len]=data[0..len]; data = grow.
+  const growInstrs: Instr[] = [
+    { op: "local.get", index: 4 } as Instr,
+    { op: "i32.const", value: 2 } as Instr,
+    { op: "i32.mul" } as Instr,
+    { op: "local.set", index: 4 } as Instr,
+    { op: "local.get", index: 4 } as Instr,
+    { op: "array.new_default", typeIdx: arrTypeIdx } as Instr,
+    { op: "local.set", index: 7 } as Instr,
+    { op: "local.get", index: 7 } as Instr, // dst
+    { op: "i32.const", value: 0 } as Instr, // dstOffset
+    { op: "local.get", index: 6 } as Instr, // src
+    { op: "i32.const", value: 0 } as Instr, // srcOffset
+    { op: "local.get", index: 5 } as Instr, // len
+    { op: "array.copy", dstTypeIdx: arrTypeIdx, srcTypeIdx: arrTypeIdx } as Instr,
+    { op: "local.get", index: 7 } as Instr,
+    { op: "local.set", index: 6 } as Instr,
+  ];
+
+  const loopBody: Instr[] = [
+    // Bounded break: if (limit >= 0) && (len >= limit) → break.
+    { op: "local.get", index: 3 } as Instr,
+    { op: "i32.const", value: 0 } as Instr,
+    { op: "i32.ge_s" } as Instr,
+    { op: "local.get", index: 5 } as Instr,
+    { op: "local.get", index: 3 } as Instr,
+    { op: "i32.ge_s" } as Instr,
+    { op: "i32.and" } as Instr,
+    { op: "br_if", depth: 1 } as Instr,
+    // (done, value) = __iterator_next(iter)
+    { op: "local.get", index: 2 } as Instr,
+    { op: "call", funcIdx: iteratorNextIdx } as Instr,
+    { op: "local.set", index: 9 } as Instr, // value (top of stack)
+    { op: "local.set", index: 8 } as Instr, // done
+    // if done → break
+    { op: "local.get", index: 8 } as Instr,
+    { op: "br_if", depth: 1 } as Instr,
+    // grow if len == cap
+    { op: "local.get", index: 5 } as Instr,
+    { op: "local.get", index: 4 } as Instr,
+    { op: "i32.ge_s" } as Instr,
+    { op: "if", blockType: { kind: "empty" }, then: growInstrs, else: [] } as Instr,
+    // data[len] = value
+    { op: "local.get", index: 6 } as Instr,
+    { op: "local.get", index: 5 } as Instr,
+    { op: "local.get", index: 9 } as Instr,
+    { op: "array.set", typeIdx: arrTypeIdx } as Instr,
+    // len++
+    { op: "local.get", index: 5 } as Instr,
+    { op: "i32.const", value: 1 } as Instr,
+    { op: "i32.add" } as Instr,
+    { op: "local.set", index: 5 } as Instr,
+    { op: "br", depth: 0 } as Instr,
+  ];
+
+  const body: Instr[] = [
+    // null/undefined guard → return empty vec (host `_arrayFromIter(null) → []`).
+    { op: "local.get", index: 0 } as Instr,
+    { op: "ref.is_null" } as Instr,
+    { op: "if", blockType: { kind: "empty" }, then: [...emptyVec, { op: "return" } as Instr], else: [] } as Instr,
+    // iter = __iterator(obj)
+    { op: "local.get", index: 0 } as Instr,
+    { op: "call", funcIdx: iteratorIdx } as Instr,
+    { op: "local.set", index: 2 } as Instr,
+    // limit = (n < 0) ? -1 : trunc_sat(n)
+    { op: "local.get", index: 1 } as Instr,
+    { op: "f64.const", value: 0 } as Instr,
+    { op: "f64.lt" } as Instr,
+    {
+      op: "if",
+      blockType: { kind: "val", type: { kind: "i32" } },
+      then: [{ op: "i32.const", value: -1 } as Instr],
+      else: [{ op: "local.get", index: 1 } as Instr, { op: "i32.trunc_sat_f64_s" } as Instr],
+    } as Instr,
+    { op: "local.set", index: 3 } as Instr,
+    // cap = 4; data = array.new_default(4); len = 0
+    { op: "i32.const", value: 4 } as Instr,
+    { op: "local.set", index: 4 } as Instr,
+    { op: "local.get", index: 4 } as Instr,
+    { op: "array.new_default", typeIdx: arrTypeIdx } as Instr,
+    { op: "local.set", index: 6 } as Instr,
+    { op: "i32.const", value: 0 } as Instr,
+    { op: "local.set", index: 5 } as Instr,
+    // drain loop
+    {
+      op: "block",
+      blockType: { kind: "empty" },
+      body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr],
+    } as Instr,
+    // return $Vec{len, data} as externref
+    { op: "local.get", index: 5 } as Instr,
+    { op: "local.get", index: 6 } as Instr,
+    { op: "struct.new", typeIdx: vecTypeIdx } as Instr,
+    { op: "extern.convert_any" } as Instr,
+  ];
+
+  const typeIdx = addFuncType(ctx, [{ kind: "externref" }, { kind: "f64" }], [{ kind: "externref" }]);
+  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  ctx.funcMap.set("__array_from_iter_n", funcIdx);
+  ctx.mod.functions.push({ name: "__array_from_iter_n", typeIdx, locals, body, exported: false });
+  return funcIdx;
+}
+
+/**
  * (#2038, reserve-then-fill #1719) Rebuild the `__iterator` / `__iterator_next`
  * bodies with the USER `{next()}`-protocol arm, now that the closed-struct
  * dispatchers (`__call_@@iterator`, `__call_next`, `__sget_value`, `__sget_done`)
