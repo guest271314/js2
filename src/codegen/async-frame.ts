@@ -42,12 +42,14 @@ import {
   STATE_FIELD,
   SENT_FIELD,
   MODE_FIELD,
+  MODE_THROW,
   ERROR_FIELD,
   sanitizeTypeName,
   storeSpills,
   setStateI32FromConst,
   defaultSpillInstr,
 } from "./frame-core.js";
+import { ensureExnTag } from "./registry/imports.js";
 import type { AsyncCpsPlan } from "./async-cps.js";
 import { splitBodyAtAwait } from "./async-cps.js";
 import { resolveSpillLocalValType } from "./statements/variables.js";
@@ -455,11 +457,43 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
   // `return` or falls through delivering SENT); any other state skips straight
   // to the continuation. The entry's fall-through and the state!=0 path both
   // reach the continuation that follows the `if`.
-  resumeFctx.body.push({ op: "local.get", index: frameLocal });
-  resumeFctx.body.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: STATE_FIELD });
-  resumeFctx.body.push({ op: "i32.eqz" });
-  resumeFctx.body.push({ op: "if", blockType: { kind: "empty" }, then: entrySeg } as Instr);
-  for (const instr of contSeg) resumeFctx.body.push(instr);
+  const dispatch: Instr[] = [
+    { op: "local.get", index: frameLocal },
+    { op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: STATE_FIELD },
+    { op: "i32.eqz" },
+    { op: "if", blockType: { kind: "empty" }, then: entrySeg } as Instr,
+    ...contSeg,
+  ];
+
+  // (#2867 Gap 2) Throw → reject routing. An async function that throws — a bare
+  // `throw e` in the body, OR a rejected await whose reason the continuation
+  // re-throws (see `buildContinuationSegment`'s MODE_THROW arm and the
+  // `rejectFromP` rejected-now arm in `buildEntrySegment`) — must settle the
+  // frame's result `$Promise` REJECTED, not let the exception escape the resume
+  // function uncaught (which traps / strands the promise pending). Wrap the whole
+  // dispatch in a `try`/`catch $exn` that `__promise_reject`s the result with the
+  // caught reason. The suspend `return` and the fulfil-settle `return` exit the
+  // function cleanly (a `return` inside `try` does NOT invoke `catch`), so only a
+  // genuine throw reaches here.
+  const exnTag = ensureExnTag(ctx);
+  const reasonLocal = allocLocal(resumeFctx, "__async_reason", { kind: "externref" });
+  resumeFctx.body.push({
+    op: "try",
+    blockType: { kind: "empty" },
+    body: dispatch,
+    catches: [
+      {
+        tagIdx: exnTag,
+        body: [
+          { op: "local.set", index: reasonLocal },
+          { op: "local.get", index: resultPromiseLocal },
+          { op: "local.get", index: reasonLocal },
+          { op: "call", funcIdx: rt.rejectFuncIdx },
+          { op: "drop" },
+        ],
+      },
+    ],
+  } as Instr);
 
   resumePlaceholder.locals = resumeFctx.locals;
   resumePlaceholder.body = resumeFctx.body;
@@ -566,6 +600,19 @@ function buildEntrySegment(
       { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: SENT_FIELD } as Instr,
     ];
 
+    // (#2867 Gap 2) Rejected-now: stash the reason into ERROR_FIELD and arm
+    // MODE_THROW, then fall through into the continuation — whose MODE_THROW arm
+    // re-throws it (→ result-promise reject, or an enclosing try/catch under
+    // Gap 3). Minted fresh per use so no `Instr[]` is aliased into two branch
+    // slots (`reference_shared_instr_object_dce_double_remap`).
+    const rejectFromP = (): Instr[] => [
+      { op: "local.get", index: frameLocal },
+      { op: "local.get", index: pLocal },
+      { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 1 } as Instr,
+      { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: ERROR_FIELD } as Instr,
+      ...setStateI32FromConst(info, frameLocal, MODE_FIELD, MODE_THROW),
+    ];
+
     // Suspend arm: storeSpills + STATE=1 + register reaction + return.
     const suspend: Instr[] = [
       ...storeSpills(info, fctx, frameLocal),
@@ -595,7 +642,7 @@ function buildEntrySegment(
       {
         op: "if",
         blockType: { kind: "empty" },
-        then: deliverFromP(), // rejected-now: deliver reason as value (slice-1)
+        then: rejectFromP(), // rejected-now: arm MODE_THROW, continuation re-throws (Gap 2)
         else: suspend, // genuinely pending: suspend
       } as Instr,
     ];
@@ -657,6 +704,29 @@ function buildContinuationSegment(
   const seg: Instr[] = [];
   fctx.body = seg;
   try {
+    // (#2867 Gap 2) A rejected await delivers its reason through MODE_THROW +
+    // ERROR_FIELD — set either by the reject step adapter (microtask-delivered
+    // rejection) or by the `rejectFromP` rejected-now arm in the entry segment.
+    // Re-throw the reason here so it propagates to the result-promise reject
+    // wrapper in `ensureAsyncResumeFunction` (or, once Gap 3 lands, an enclosing
+    // try/catch across the await). On the fulfil path MODE is NEXT, so this is a
+    // no-op. Emitted BEFORE binding the resume value because a rejection has no
+    // value to bind.
+    const exnTag = ensureExnTag(ctx);
+    seg.push({ op: "local.get", index: frameLocal });
+    seg.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: MODE_FIELD });
+    seg.push({ op: "i32.const", value: MODE_THROW });
+    seg.push({ op: "i32.eq" });
+    seg.push({
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: frameLocal },
+        { op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: ERROR_FIELD } as Instr,
+        { op: "throw", tagIdx: exnTag } as Instr,
+      ],
+    } as Instr);
+
     // Bind `x = SENT` (coerced) for `const x = await P`.
     if (resumeBindingLocal !== undefined && resumeBindingType) {
       seg.push({ op: "local.get", index: frameLocal });
