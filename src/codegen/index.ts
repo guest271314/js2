@@ -88,6 +88,7 @@ import {
   getDrainFuncIdxForWasiStart,
   getRunLoopFuncIdxForWasiStart,
   isStandalonePromiseActive,
+  shiftAsyncSideChannelFuncIdxs,
 } from "./async-scheduler.js";
 import {
   brandExternMethodResult,
@@ -9210,6 +9211,12 @@ export function addStringImports(ctx: CodegenContext): void {
         ctx.mapHelpers.set(name, idx + delta);
       }
     }
+    // (#2918) Async-scheduler + Promise.all/race combinator side-channel funcIdxs
+    // move in lockstep too. The string-import shifter used to miss them entirely
+    // — a native `.then`/combinator baked its `call`/`ref.func` from a stale-low
+    // stored index whenever a string import landed between registration and the
+    // bake site. Same complete key list as the other two shifters.
+    shiftAsyncSideChannelFuncIdxs(ctx, importsBefore, delta);
     // (#2039 slice 2) Re-base so reconcileNativeStrFinalizeShift doesn't apply
     // the same `delta` a second time — this inline shift already repaired the
     // helper bodies and the map. Matches addUnionImports (#1677-fast-path) and
@@ -10666,6 +10673,10 @@ export function addUnionImports(ctx: CodegenContext): void {
       if (t.methodFuncIdx >= importsBefore) t.methodFuncIdx += delta;
       if (t.trampolineFuncIdx >= importsBefore) t.trampolineFuncIdx += delta;
     }
+    // (#2918) Async-scheduler + Promise.all/race combinator side-channel funcIdxs
+    // move in lockstep too (addUnionImports missed them). Same complete key list
+    // as shiftLateImportIndices / addStringImports.
+    shiftAsyncSideChannelFuncIdxs(ctx, importsBefore, delta);
   }
 }
 

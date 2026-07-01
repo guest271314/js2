@@ -3322,3 +3322,79 @@ export function isStandalonePromiseActive(ctx: CodegenContext): boolean {
 export function isStandaloneThenChainNativeActive(ctx: CodegenContext): boolean {
   return ctx.wasi === true;
 }
+
+/**
+ * All `*FuncIdx` side-channel fields on `ctx.asyncScheduler` that hold a
+ * **defined-function** index (never an import). These are read directly at
+ * call-bake sites (`emitStandalonePromiseThen`, the microtask/timer emitters,
+ * `emitThenWrapperFunction`'s `settleFuncIdx`, …), so any late-import addition
+ * must shift them in lockstep with the defined-function body walk — exactly the
+ * lockstep `nativeStrHelpers` / `mapHelpers` / `pendingMethodTrampolines` get.
+ *
+ * The list MUST stay complete: a missing key (historically
+ * `promiseResolveValueFuncIdx`, #2867 Gap 1) leaves a `.then` handler wrapper
+ * calling one function too EARLY after a late import lands between the settle
+ * helpers' registration and a downstream bake site — an arity mismatch that
+ * surfaces as "not enough arguments on the stack for call" invalid Wasm (the
+ * −601 standalone-scale Promise.then/all regression, #2918). See
+ * {@link shiftAsyncSideChannelFuncIdxs}.
+ */
+const ASYNC_SCHEDULER_FUNC_IDX_KEYS = [
+  "enqueueFuncIdx",
+  "drainFuncIdx",
+  "growFuncIdx",
+  "promiseFulfillFuncIdx",
+  "promiseRejectFuncIdx",
+  "identityFulfillWrapperFuncIdx",
+  "identityRejectWrapperFuncIdx",
+  "promiseResolveValueFuncIdx",
+  "timerAddFuncIdx",
+  "timerCancelFuncIdx",
+  "timerPeekDeadlineFuncIdx",
+  "timerFireDueFuncIdx",
+  "runLoopFuncIdx",
+  "runLoopNowFuncIdx",
+  "stdinDrainFuncIdx",
+  "pollFd0OrClockFuncIdx",
+] as const;
+
+/**
+ * Combinator (`Promise.all`/`race`) runtime `*FuncIdx` fields on
+ * `ctx.__promiseCombinators` (see promise-combinators.ts `CombinatorRuntime`).
+ * Same lockstep requirement as the scheduler keys — the aggregator call site
+ * (`emitStandalonePromiseCombinator`) bakes `ref.func`/`call` straight from these.
+ */
+const COMBINATOR_FUNC_IDX_KEYS = [
+  "subscribeFuncIdx",
+  "allFulfillFuncIdx",
+  "raceFulfillFuncIdx",
+  "rejectFuncIdx",
+] as const;
+
+/**
+ * Shift every async-substrate side-channel funcIdx (scheduler + Promise.all/race
+ * combinators) up by `added` when it points at or past `importsBefore`. Called
+ * from ALL THREE late-import shifters (`shiftLateImportIndices`,
+ * `addStringImports`, `addUnionImports`) so the async funcIdxs can never drift
+ * out of lockstep depending on which import path fired. Inert unless the native
+ * async carrier actually emitted these helpers (all fields stay `-1` otherwise,
+ * so `v >= importsBefore` is false → no-op → byte-identical on the off-carrier
+ * gc/host + standalone lanes).
+ */
+export function shiftAsyncSideChannelFuncIdxs(ctx: CodegenContext, importsBefore: number, added: number): void {
+  if (added <= 0) return;
+  const sched = (ctx as unknown as { asyncScheduler?: Record<string, number> }).asyncScheduler;
+  if (sched) {
+    for (const k of ASYNC_SCHEDULER_FUNC_IDX_KEYS) {
+      const v = sched[k];
+      if (typeof v === "number" && v >= importsBefore) sched[k] = v + added;
+    }
+  }
+  const comb = (ctx as unknown as { __promiseCombinators?: Record<string, number> }).__promiseCombinators;
+  if (comb) {
+    for (const k of COMBINATOR_FUNC_IDX_KEYS) {
+      const v = comb[k];
+      if (typeof v === "number" && v >= importsBefore) comb[k] = v + added;
+    }
+  }
+}
