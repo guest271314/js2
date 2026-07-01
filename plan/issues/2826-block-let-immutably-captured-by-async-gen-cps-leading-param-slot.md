@@ -24,7 +24,7 @@ blocked_reason: "THREE approaches now fail: Design 1A re-point (impl2826) AND wr
 Carved from #2818 (parent) and #2820 (the plain-function half of Bug C, fixed
 there). This is the **async / generator capturer** residual of the
 `ary-ptrn-rest-obj-prop-id` block-`let`-capture cluster — the half #2820's
-producer-side slot-reuse gate *deliberately excludes* (the gate fires only when
+producer-side slot-reuse gate _deliberately excludes_ (the gate fires only when
 the block-`let` is captured by ≥1 plain function and **zero** CPS-lowered
 async/generator functions, because the broad reuse regressed 43
 `for-await-of/async-{func,gen}-decl-dstr-*` tests, net −14).
@@ -38,13 +38,25 @@ this one is in the **leading-capture-param** channel, #2825 is in the
 ```ts
 // async capturer
 export async function t5(): Promise<number> {
-  { let s = 42; async function f(): Promise<number> { return s; } return await f(); }
+  {
+    let s = 42;
+    async function f(): Promise<number> {
+      return s;
+    }
+    return await f();
+  }
 }
 // => 0   (should be 42)
 
 // generator capturer
 export function t6(): number {
-  { let s = 42; function* g(): Generator<number> { yield s; } return g().next().value; }
+  {
+    let s = 42;
+    function* g(): Generator<number> {
+      yield s;
+    }
+    return g().next().value;
+  }
 }
 // => 0   (should be 42)
 ```
@@ -53,11 +65,19 @@ Controls that **PASS** (function-scope `let`, not in a block):
 
 ```ts
 export async function t4(): Promise<number> {
-  let s = 42; async function f(): Promise<number> { return s; } return await f();
-}                                                            // => 42 ✓
+  let s = 42;
+  async function f(): Promise<number> {
+    return s;
+  }
+  return await f();
+} // => 42 ✓
 export function t7(): number {
-  let s = 42; function* g(): Generator<number> { yield s; } return g().next().value;
-}                                                            // => 42 ✓
+  let s = 42;
+  function* g(): Generator<number> {
+    yield s;
+  }
+  return g().next().value;
+} // => 42 ✓
 ```
 
 The block-nested capturer reads `0` — the numeric zero-init of an **un-written
@@ -71,7 +91,7 @@ captures as **leading parameters** (`compileNestedFunctionDeclaration`,
 `src/codegen/statements/nested-declarations.ts:617-783`). The capture metadata is
 recorded in `ctx.nestedFuncCaptures` at the point the nested fn is
 **hoist-compiled** (`nested-declarations.ts:773-783`), pinning each capture to
-the outer-frame slot it sees *then* via `outerLocalIdx`
+the outer-frame slot it sees _then_ via `outerLocalIdx`
 (`src/codegen/context/types.ts:1254`).
 
 The construction/call site reads the capture value out of that pinned slot. For
@@ -84,7 +104,7 @@ was load-bearing) — so the immutable path is hard-pinned to `outerLocalIdx`.
 Now the duplicate-slot mechanism (the Bug C core, see #2820):
 
 1. `walkStmtForLetConst` (`src/codegen/index.ts:14626`) pre-allocates a slot for
-   every block-`let`/`const` at **function entry** (the *pre-hoisted slot A*),
+   every block-`let`/`const` at **function entry** (the _pre-hoisted slot A_),
    recorded in `fctx.preHoistedLetConstSlots` (added by #2820).
 2. A function declaration nested in a block is **hoisted to the top of that
    block** and compiled before `let s` runs, so its `nestedFuncCaptures` entry
@@ -104,13 +124,21 @@ B` and the read is correct. For a **CPS** function the collapse perturbs the
 `for-await-of` continuation state machine (43 regressions), so #2820 skips it —
 leaving the immutable CPS capture pinned to the stale A. **That is this bug.**
 
-Why only *immutable* captures: a **mutable** CPS capture is boxed into a ref
+Why only _immutable_ captures: a **mutable** CPS capture is boxed into a ref
 cell at the call site (`calls.ts:12904-12928`), and that boxed cell already
 threads the value correctly (per #2820's gate comment) — and is exactly the path
-the broad reuse *broke*. So the fix must touch **only** the immutable,
+the broad reuse _broke_. So the fix must touch **only** the immutable,
 unboxed CPS capture, never the mutable boxed one.
 
 ## Implementation Plan
+
+> **SUPERSEDED (senior-conflicts 2026-07-02).** Designs 1A (re-point A→B) and 1B
+> (construction-site re-resolve) below, **and** the later write-through-to-A
+> (see `## Implementation attempt 2`), are **all three proven net-negative and
+> un-gateable at the let-init site** — do NOT retry any producer-side point-fix.
+> The real spec is **`## Implementation Plan — v2`** (transitive
+> continuation-snapshot discriminator) further down. Designs 1A/1B are retained
+> only as the historical record of what fails and why.
 
 ### Design 1A — producer-side capture re-point (preferred)
 
@@ -125,7 +153,7 @@ B) for the block-`let` is allocated + the initializer stored:
 
 - Compute `preHoisted = fctx.preHoistedLetConstSlots?.get(decl)` (already in
   scope from the #2820 gate) — its `valueSlot` is the stale slot **A**.
-- Guard: run **only** when the block-`let` was *not* reused (i.e. the
+- Guard: run **only** when the block-`let` was _not_ reused (i.e. the
   `freshLocalForLetConst` path produced a distinct `localIdx` **B** with
   `B !== A`), i.e. the CPS-excluded branch — this is the exact inverse of
   #2820's `capturedByPlainFn && !cpsCaptured` gate, so the two compose with no
@@ -154,11 +182,12 @@ baseline for the regression cluster → no perturbation.
 ### Ordering guarantee
 
 The re-point is valid because:
+
 - The capture entry already exists when `let s` runs (the nested fn is
   block-hoisted → compiled before the `let`). The `cap.outerLocalIdx === A`
   guard makes the re-point a no-op if the entry does not yet exist or already
   points at B.
-- A **non-hoisted** capturer (async arrow / async fn-expr assigned *after* the
+- A **non-hoisted** capturer (async arrow / async fn-expr assigned _after_ the
   `let`) records its capture with `localMap` already at B → guard fails → no
   re-point needed (already correct).
 
@@ -169,7 +198,7 @@ immutable capture by name at `calls.ts:12941` (`fctx.localMap.get(cap.name) ??
 cap.outerLocalIdx`) **gated narrowly** on: capturer is async/generator
 (`ctx.asyncFunctions`/`ctx.generatorFunctions`), the name is a pre-hoisted
 block-`let`/`const`, and `localMap.get(name) !== cap.outerLocalIdx`. This is the
-*minefield* #1177 hit with the blanket version (the async-null-deref tests rely
+_minefield_ #1177 hit with the blanket version (the async-null-deref tests rely
 on the wrong slot) — prefer 1A; only fall back here with full merge_group
 validation. **Do not** ship the un-gated `?? outerLocalIdx` form.
 
@@ -186,7 +215,7 @@ validation. **Do not** ship the un-gated `?? outerLocalIdx` form.
   The construction in the repro is textually after `let s`, so the analysis is
   "skip" — but a transitive call through a closure that captured the flag must
   still observe the live flag.
-- **Nested destructuring patterns** (`let [...{ length: z }]`): the *outer*
+- **Nested destructuring patterns** (`let [...{ length: z }]`): the _outer_
   immutable capture is the plain identifier `length`/`s`, not the pattern
   binding `z`. Pattern bindings are not pre-allocated by `walkStmtForLetConst`
   (`index.ts:14732`) so they carry no pre-hoist slot — the guard
@@ -241,6 +270,104 @@ Specifically confirm **zero** regressions in:
 i.e. the mutable boxed-capture path must stay byte-identical. (See #2820's gate
 comment for the precise regression signature.)
 
+## Implementation Plan — v2 (transitive continuation-snapshot discriminator)
+
+_(architect spec, senior-conflicts 2026-07-02 — the un-gateability of all three
+producer-side point-fixes is PROVEN, see `## Implementation attempt 2`. This is
+recommendation #1 made concrete. It is genuinely whole-program and NOT a
+~20-line patch; scope it as a `feasibility: hard`, `reasoning_effort: max`
+analysis-pass task and validate on full merge_group.)_
+
+### Why a local predicate cannot work (the proven blocker)
+
+At `compileVariableStatement` (the let-init site) the name that **needs** the fix
+(`length`) and the names that **regress** (`nextCount`, `iterator`, `iterations`)
+are **byte-identical in every materialised signal**: same `cap.mutable`, same
+not-a-captured-global, same single direct capturer. The distinguishing property
+is **runtime dataflow of the captured value through a suspending CPS
+continuation**, which is not represented as metadata when the slot decision is
+made. Gates (a) per-entry `mutable`, (b) per-name "no mutable cap anywhere",
+(c) "no direct capturer is itself captured", (d) `!capturedGlobals.has(name)`
+were each disproven on the sample. Therefore the fix MUST be driven by a
+**pre-codegen whole-program pass** that materialises the missing property.
+
+### The safety predicate to compute
+
+Apply the producer-side slot fix (re-point `cap.outerLocalIdx` A→B, or the
+equivalent) for a block-`let` `name` **iff NO function in the transitive
+capturer+callee closure of `name` snapshots `name` (or a value derived from it)
+into a _suspending_ continuation state struct.** `length` qualifies (safe);
+`nextCount`/`iterator`/`iterations` do not (each reaches a suspending
+continuation, directly or transitively).
+
+### Pass design (new, e.g. `src/codegen/analysis/continuation-capture-graph.ts`)
+
+Run **before** slot assignment in `compileVariableStatement`, cache the verdict
+on `fctx` keyed by the decl. Build two graphs over the function's nested
+declarations + object-literal methods:
+
+1. **Capture graph** (edges available today from `ctx.nestedFuncCaptures`,
+   `types.ts:1312`): `capturer → capturedName`, and transitively
+   `capturer → names captured by fns it captures`.
+2. **Call graph** (does NOT exist today — build it): scan every nested-fn body
+   and every **object-literal method / accessor** (`{ next(){…} }`,
+   get/set) for `CallExpression`s that resolve to a named nested fn, an
+   object-method, or a direct funcIdx call into an async/generator body. The
+   `iterations` case reaches its suspending `callAsync` via a **direct call
+   edge** (`pushAwait()`), invisible to the capture graph — so the call graph is
+   mandatory, not optional.
+
+Per node, compute **`spillsIntoSuspendingContinuation`**: the fn is CPS-lowered
+(`ctx.asyncFunctions`/`ctx.generatorFunctions`, `types.ts:1289/1291`, incl.
+async-generators) **and** it has a `yield`/`await` point at which the capture is
+live (i.e. the captured value is spilled into the resumable `$Frame`/state
+struct across a suspend). Also mark **object-literal iterator/accessor methods
+that mutate the name** (`next(){ nextCount += 1 }`) — that mutation escapes into
+the iteration protocol and is invisible to a `nestedFuncCaptures` mutability
+scan, so treat such a method as an unsafe spiller of `name`.
+
+`name` is **safe** iff the transitive closure (capture ∪ call edges) from every
+direct capturer of `name` contains **no** node with
+`spillsIntoSuspendingContinuation` and **no** escaping-mutation object-method for
+`name`. Only then apply the re-point.
+
+### Where it plugs in
+
+`src/codegen/statements/variables.ts` — the same block after #2820's reuse gate
+(~line 837) where Design 1A lived. Replace 1A's local `cap.mutable !== true`
+guard with `isSafeToRepointName(fctx, name)` from the new pass. When true,
+re-point `cap.outerLocalIdx` (and `cap.outerTdzFlagIdx`) A→B exactly as Design 1A
+specifies; when false, leave the capture on slot A (today's behaviour → the
+`for-await-of` cluster stays byte-identical, zero regression).
+
+### Edge cases
+
+- Mixed plain + CPS capturer of the same `name`: the plain capturer benefits from
+  the re-point; safety is governed solely by the CPS side's suspend-spill.
+- TDZ flag re-point in lockstep (see Design 1A ordering guarantee).
+- Nested destructuring pattern bindings carry no pre-hoist slot (guard excludes).
+- Recursion / cycles in the call graph: use a visited-set; a cycle through a
+  suspending node makes the whole component unsafe.
+
+### Validation (REQUIRED — same as attempt 2)
+
+The flips manifest ONLY on the merged baseline. Confirm on full
+`merge_group`/local-CI: (i) `t5`/`t6`/`t8` + the `length` `dstr` targets flip
+fail→pass; (ii) **zero** regressions in the 43-test
+`for-await-of/async-{func,gen}-decl-dstr-*` class (the named guardrails
+`async-generator-interleaved.js` + `array-elem-iter-nrml-close.js` stay pass).
+A scoped sweep cannot see this cluster. Harness preserved under `.tmp/`
+(`probe-2826.mts`, `run262-2826.mts`).
+
+### Do NOT retry (proven-failed point-fixes)
+
+- **Design 1A** re-point A→B (PR #2333): net −8, perturbs the CPS state struct.
+- **Design 1B** construction-site `localMap.get(name) ?? outerLocalIdx`: the
+  #1177 minefield (async-null-deref tests rely on the wrong slot).
+- **write-through-to-A** (attempt 2): identical CPS perturbation as 1A, reached
+  via the write instead of the re-point.
+  All three are un-gateable by any predicate computable at the let-init site.
+
 ## Dependencies
 
 - **Depends on #2820** (PR #2293) being merged: this fix reuses
@@ -250,7 +377,7 @@ comment for the precise regression signature.)
 - **In-lane** (closures / nested-fn lowering / `nestedFuncCaptures`); no
   dependency on the parallel substrate work ($Object dynamic reader /
   any-receiver dispatch / `calls.ts` host-dispatch / acorn / NM). The only
-  `calls.ts` touch is the *fallback* Design 1B; Design 1A leaves `calls.ts`
+  `calls.ts` touch is the _fallback_ Design 1B; Design 1A leaves `calls.ts`
   untouched.
 
 ## Acceptance criteria
@@ -276,6 +403,7 @@ Full conformance is only validated in `merge_group`. So "PR-green" never
 validated test262 here.
 
 **Delta (merge_group, baseline f8c1aa5):**
+
 - 30 regressions / 22 improvements → **net −8**, ratio 136%, signature `dd4fa22aa1d2c2a1`.
 - ALL 30 regressed tests are `for-await-of` dstr
   (`async-func-decl-dstr-*` / `async-gen-decl-dstr-*` array/obj rest+elem,
@@ -294,15 +422,16 @@ must re-point ONLY the CPS capture that genuinely needs a fresh slot (the exact
 immutable-`let`-captured-by-hoisted-async/gen case this issue targets), and
 leave the mutable `for-await-of/async-{func,gen}-decl-dstr-*` capture path on
 its existing slot — that path is what regressed. Gate the re-point on the same
-predicate #2820 used to *exclude* CPS capturers, inverted to its single
+predicate #2820 used to _exclude_ CPS capturers, inverted to its single
 intended case. **Validate against a full `merge_group` / local-CI test262 run
 BEFORE re-enqueue** — a scoped check cannot see this cluster. PR #2333 branch
-+ this diagnosis must survive; re-open this issue for the narrowed attempt.
+
+- this diagnosis must survive; re-open this issue for the narrowed attempt.
 
 ## Implementation attempt 2 (cps2826, senior-dev) — write-through-to-A is ALSO unsafe; PROVEN un-gateable → architect
 
 **Verdict: STOP / defer to architect (third strike).** The corrected approach —
-impl2826's recommendation #2, *write-through-to-A* (leave `outerLocalIdx = A`,
+impl2826's recommendation #2, _write-through-to-A_ (leave `outerLocalIdx = A`,
 also store the block-`let`'s value INTO slot A at let-init so the stale-A
 read/CPS-snapshot observes the live value) — was implemented and **reproduces the
 EXACT same CPS-state perturbation as the reverted Design 1A re-point.** Reverted;
@@ -311,47 +440,53 @@ host/gc lane. Harness: `.tmp/probe-2826.mts` (t5/t6/t8 + controls),
 `.tmp/run262-2826.mts` (guardrail + 43-class samples + the 4 cited targets).
 
 ### Re-grounding: #2844 advanced the cited targets, but NOT to the #2826 assert
+
 The premise for the retry was that #2844 (for-await rest→object-pattern dstr,
 now merged) unblocks the cited `ary-ptrn-rest-obj-prop-id` targets. Confirmed
 #2844 is on main — the targets advanced from **assert #1** (`v===7`) to **assert
 #5** (`z===3`, "returned 6"). But assert #5 (`length: z` reads the rest array's
 `.length`) is **yet another orthogonal dstr bug**, still short of assert #6
 (`length === "outer"` — the actual #2826 immutable-outer-`let` capture). So on a
-*correct* baseline the cited targets remain blocked upstream of #2826.
+_correct_ baseline the cited targets remain blocked upstream of #2826.
 
 ### What write-through fixes
+
 Synthetic repro fixed: `t5`/`t6`/`t5s`/`t8` (mixed plain+CPS) return the captured
 value (42 / "hi" / 28) vs 0 on baseline; `t4`/`t7` fn-scope controls unchanged.
 And — notably — write-through on `length` **flips all 4 cited targets fail→pass**
-(it satisfies assert #5+#6 together), so the conformance payoff is real *when it
-fires on the right name*.
+(it satisfies assert #5+#6 together), so the conformance payoff is real _when it
+fires on the right name_.
 
 ### Why it is unsafe (same mechanism as Design 1A, reached via the write)
+
 Writing B→A at the let-init **clobbers slot A, which the CPS continuation relies
 on** (it is NOT a dead pre-hoist slot for escaping/suspending capturers). Two
 named regressions, **identical signatures to the reverted re-point** (PR #2333):
+
 - `language/expressions/await/async-generator-interleaved.js` (NAMED guardrail):
-  pass→fail, *"dereferencing a null pointer in pushAwait()"* (`actual`/`iterations`).
+  pass→fail, _"dereferencing a null pointer in pushAwait()"_ (`actual`/`iterations`).
 - `for-await-of/async-{func,gen}-decl-dstr-array-elem-iter-nrml-close.js` (43-class):
-  pass→fail, *`assert.sameValue(nextCount, 1)` returned 2* (`nextCount`/`iterator`).
+  pass→fail, _`assert.sameValue(nextCount, 1)` returned 2_ (`nextCount`/`iterator`).
 
 ### The decisive finding: the regression is UN-GATEABLE at the let-init site
+
 Instrumented every write-through firing. The name that **must** get the fix
 (`length`) and the names that **regress** (`nextCount`, `iterations`, `iterator`)
 have **identical state** at `compileVariableStatement` — no discriminator exists:
 
-| name (test)                     | mutable-cap? | captured-global? | capturers | write-through |
-| ------------------------------- | ------------ | ---------------- | --------- | ------------- |
-| `length` (target) — **needs fix** | no         | no               | `[fn]`    | **safe (fix)** |
-| `nextCount` (array-elem) — **regresses** | no  | no               | `[fn]`    | **null/2**    |
-| `iterator` (array-elem) — **regresses**  | no  | no               | `[fn]`    | **regress**   |
-| `iterations` (interleaved) — **regresses** | no | no             | `[callAsync]` | **null-deref** |
-| `x`/`y` (array-rest) — harmless | no           | no               | `[fn]`    | stays green   |
+| name (test)                                | mutable-cap? | captured-global? | capturers     | write-through  |
+| ------------------------------------------ | ------------ | ---------------- | ------------- | -------------- |
+| `length` (target) — **needs fix**          | no           | no               | `[fn]`        | **safe (fix)** |
+| `nextCount` (array-elem) — **regresses**   | no           | no               | `[fn]`        | **null/2**     |
+| `iterator` (array-elem) — **regresses**    | no           | no               | `[fn]`        | **regress**    |
+| `iterations` (interleaved) — **regresses** | no           | no               | `[callAsync]` | **null-deref** |
+| `x`/`y` (array-rest) — harmless            | no           | no               | `[fn]`        | stays green    |
 
 `length` (safe) and `nextCount`/`iterator` (regress) are **byte-for-byte identical
 in every signal available** — same `mutable` across all cap entries, same
 not-a-captured-global, same single capturer `fn`. The difference is purely the
 **runtime dataflow of the captured value through the CPS continuation**:
+
 - `length` — a plain immutable read inside the for-await body of an inline-driven
   `fn().next()`;
 - `nextCount`/`returnCount`/`args` — mutated inside **object-literal iterator
@@ -371,11 +506,12 @@ captured" (transitive); (d) `!capturedGlobals.has(name)`. **None** separate
 timing) is **not materialized as metadata** when `compileVariableStatement` runs.
 
 ### Recommendation → architect (recommendation #1 only; #2 disproven)
+
 A producer-side slot fix (whether re-point A→B or write-through B→A) **cannot be
 made safe by any predicate computable at the let-init site.** Both perturb the
 CPS state and the safe/unsafe boundary is whole-program. The only remaining
 viable path is impl2826 **recommendation #1**: build the **transitive
-capture+call graph** and a per-nested-fn **"spills captures into a *suspending*
+capture+call graph** and a per-nested-fn **"spills captures into a _suspending_
 continuation state struct"** predicate; apply the fix **only** when no capturer
 of the name (directly or transitively, including through object-literal
 iterator/accessor methods and direct calls into suspending async/gen bodies)
