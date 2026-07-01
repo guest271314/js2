@@ -16,6 +16,7 @@ import { createHash } from "crypto";
 import { join, relative, dirname, basename } from "path";
 import { buildImports } from "../src/runtime.js";
 import { findNthAssert } from "./test262-assert-locator.js";
+import { negativeCompileErrorMatches } from "../scripts/negative-verdict.mjs";
 // Lazy-load compileMulti only when needed (FIXTURE tests) to avoid
 // loading the full compiler into the fork alongside the pool worker.
 let _compileMulti: typeof import("../src/index.js").compileMulti | null = null;
@@ -614,17 +615,42 @@ for (const category of TEST_CATEGORIES) {
             }
 
             if (!compileResult.ok) {
-              const ES_EARLY_ERRORS = new Set([1102, 1103, 1210, 1213, 1214, 1359, 1360, 2300, 18050]);
+              // (#2912) Compile-FAILED arm — real error-type gate (was the dead
+              // `hasEarlyError ? "pass" : "pass"`): pass only when the raised
+              // compile error is consistent with the test's `negative.type`. For
+              // the SyntaxError population (all parse/early/resolution negatives)
+              // any compile-time rejection is a static/syntax rejection => pass;
+              // a future wrong-type negative rejected for an unrelated reason now
+              // fails.
               const codes = (compileResult as any).errorCodes as number[] | undefined;
-              const hasEarlyError = codes?.some((c: number) => ES_EARLY_ERRORS.has(c));
-              if (hasEarlyError) {
+              const matched = negativeCompileErrorMatches(
+                meta.negative!.type,
+                codes ?? [],
+                (compileResult as any).error ?? "",
+              );
+              if (matched) {
                 recordResult(relPath, category, "pass", undefined, undefined, scopeInfo, wasmSha);
               } else {
-                recordResult(relPath, category, "pass", undefined, undefined, scopeInfo, wasmSha);
+                recordResult(
+                  relPath,
+                  category,
+                  "compile_error",
+                  `expected ${meta.negative!.type} but compiler rejected for an unrelated reason`,
+                  undefined,
+                  scopeInfo,
+                  wasmSha,
+                );
               }
               return;
             }
-            // Compilation succeeded — try instantiation (Wasm validation may catch errors)
+            // Compilation succeeded — try instantiation (Wasm validation may catch errors).
+            // (#2912) DELIBERATELY-LENIENT fallback, mirrored in
+            // scripts/test262-worker.mjs: the compiler emitted NO error, so the
+            // "pass" below is INCIDENTAL (the Wasm merely fails to
+            // instantiate/link). ~439 host-lane negatives pass ONLY this way
+            // (real early-error-detection gaps). Strictly gating this is the
+            // #2912 follow-up — a ~439-flip intentional-drop needing a
+            // coordinated re-baseline (PO/lead sign-off).
             try {
               const binary = compileResult.cachePath ? readFileSync(compileResult.cachePath) : compileResult.binary;
               const imports = buildImports(compileResult.result.imports, undefined, compileResult.result.stringPool);
