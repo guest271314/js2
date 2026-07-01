@@ -13764,7 +13764,23 @@ function collectUsedExternImports(ctx: CodegenContext, sourceFile: ts.SourceFile
       ) {
         const wasmType = mapTsTypeToWasm(objType, ctx.checker);
         if (wasmType.kind === "externref") {
-          register("__extern_get", [{ kind: "externref" }, { kind: "externref" }], [{ kind: "externref" }]);
+          // (#2908) Host-free modes: DO NOT eagerly seed the `env::__extern_get`
+          // HOST import here. `__extern_get` is a member of
+          // OBJECT_RUNTIME_HELPER_NAMES, so under `--target standalone`/`wasi`
+          // the compile-path `ensureLateImport(ctx, "__extern_get", …)` at every
+          // dynamic-read site routes the name to the Wasm-native `__extern_get`
+          // defined by `ensureObjectRuntime` (object-runtime.ts) — a DEFINED
+          // function, no host import. But `ensureLateImport` short-circuits on
+          // `funcMap.has(name)`: if THIS pre-scan has already registered the
+          // host import into funcMap, that native routing never fires and the
+          // module ships an unsatisfiable `env::__extern_get` (the standalone
+          // dynamic-object-property leak — the single largest host-import leak
+          // class, harness `verifyProperty`/`obj[name]` drives it into ~4.5k
+          // tests). Skipping the pre-registration lets the native routing win;
+          // host/gc mode is unchanged (still eagerly seeds the host import).
+          if (!(ctx.standalone || ctx.wasi)) {
+            register("__extern_get", [{ kind: "externref" }, { kind: "externref" }], [{ kind: "externref" }]);
+          }
         }
       }
     }
