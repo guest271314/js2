@@ -16,6 +16,7 @@ import { fileURLToPath } from "node:url";
 import { compile, createIncrementalCompiler } from "./compiler-bundle.mjs";
 import { buildImports } from "./runtime-bundle.mjs";
 import { poisonRecycleReason } from "./test262-poison-error.mjs";
+import { negativeCompileErrorMatches } from "./negative-verdict.mjs";
 
 // ── Bundle hash (#1521) ────────────────────────────────────────────────
 // Each cache entry written below carries a `bundle_hash` field. When the
@@ -1142,17 +1143,27 @@ process.on("message", async (msg) => {
       return;
     }
 
-    // Negative parse/early tests: compile error = pass
+    // (#2912) Negative parse/early/resolution test, compile-FAILED arm.
+    // Real error-type gate (was the dead `hasEarlyError ? "pass" : "pass"`):
+    // score a conformance pass only when the raised compile error is consistent
+    // with the test's expected `negative.type`. For the SyntaxError population
+    // (all of test262's parse/early/resolution negatives) any compile-time
+    // rejection is a static/syntax rejection => pass; a future wrong-type
+    // negative rejected with an unrelated diagnostic now fails.
     if (execute && isNegative) {
-      const ES_EARLY_ERRORS = new Set([1102, 1103, 1210, 1213, 1214, 1359, 1360, 2300, 18050]);
-      const hasEarlyError = errorCodes.some((c) => ES_EARLY_ERRORS.has(c));
-      sendResult({
-        id,
-        status: hasEarlyError ? "pass" : "pass",
-        compileMs,
-        errorCodes,
-        ...compileMetadata,
-      });
+      const matched = negativeCompileErrorMatches(expectedErrorType, errorCodes, errMsg);
+      if (matched) {
+        sendResult({ id, status: "pass", compileMs, errorCodes, ...compileMetadata });
+      } else {
+        sendResult({
+          id,
+          status: "compile_error",
+          error: `expected ${expectedErrorType} but compiler rejected for an unrelated reason: ${errMsg || "unknown"}`,
+          errorCodes,
+          compileMs,
+          ...compileMetadata,
+        });
+      }
     } else {
       sendResult({
         id,
@@ -1166,15 +1177,21 @@ process.on("message", async (msg) => {
     return;
   }
 
+  // (#2912) Negative test that COMPILED (no severity-error) but emitted
+  // warnings — e.g. an ES early error demoted to a warning (#2898). Route
+  // through the same error-type gate: for the SyntaxError population any such
+  // diagnostic is a static rejection => pass. (This warning arm is part of the
+  // documented-lenient compile-SUCCEEDED fallback; strictly requiring a
+  // severity-error diagnostic of the expected type is the #2912 follow-up.)
   if (execute && isNegative && result.errors.length > 0) {
-    sendResult({
-      id,
-      status: "pass",
-      compileMs,
-      errorCodes: result.errors.filter((e) => e.code).map((e) => e.code),
-      ...compileMetadata,
-    });
-    return;
+    const warnCodes = result.errors.filter((e) => e.code).map((e) => e.code);
+    const warnMsg = result.errors.map((e) => e.message).join("; ");
+    const matched = negativeCompileErrorMatches(expectedErrorType, warnCodes, warnMsg);
+    if (matched) {
+      sendResult({ id, status: "pass", compileMs, errorCodes: warnCodes, ...compileMetadata });
+      return;
+    }
+    // wrong-type warning — fall through to the compile/instantiate arms below
   }
 
   // Validate Wasm binary before proceeding
@@ -1216,7 +1233,19 @@ process.on("message", async (msg) => {
 
   // ── Execute ──────────────────────────────────────────────────────
 
-  // Negative parse/early test that compiled successfully — need to check instantiation
+  // Negative parse/early test that compiled successfully — need to check instantiation.
+  //
+  // (#2912) DELIBERATELY-LENIENT fallback. The compiler emitted NO error, so we
+  // never actually detected the expected SyntaxError; the "pass" below is
+  // INCIDENTAL — the produced Wasm merely fails to instantiate/link. A full-corpus
+  // audit (2026-07-01) found ~439 host-lane negatives that pass ONLY this way
+  // (e.g. `await`/`yield` as a binding identifier, escaped keywords, duplicate
+  // module exports — real early-error-detection gaps). Strictly requiring a
+  // compile-time diagnostic here would flip all ~439 pass->fail: a correctness
+  // improvement, but an intentional-drop that needs a COORDINATED re-baseline
+  // (PO/lead sign-off — the regression gate has no in-PR intentional-drop flag).
+  // Kept lenient for now; tracked as the #2912 follow-up (verdict-fix + baseline
+  // update split).
   if (isNegative) {
     try {
       const importObj = buildImports(result.imports, undefined, result.stringPool);
@@ -1230,7 +1259,7 @@ process.on("message", async (msg) => {
         ...compileMetadata,
       });
     } catch {
-      // Instantiation failed — pass (Wasm validation caught the error)
+      // Instantiation failed — pass (Wasm validation/link caught the error)
       sendResult({ id, status: "pass", compileMs, ...compileMetadata });
     }
     return;

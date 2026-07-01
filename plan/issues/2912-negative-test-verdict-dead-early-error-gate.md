@@ -1,10 +1,12 @@
 ---
 id: 2912
 title: "test262 runner marks negative parse/early tests pass on ANY compile error (dead `? \"pass\" : \"pass\"` gate)"
-status: ready
+status: done
+assignee: ttraenkler/fix2912
 priority: medium
 sprint: current
 created: 2026-07-01
+completed: 2026-07-01
 feasibility: medium
 task_type: bug
 area: tooling
@@ -79,3 +81,70 @@ the negative-parse/early population.
 - No dead `? "pass" : "pass"` gate; negative-test verdict is either a real
   error-type/early-error gate or an explicitly-documented lenient policy.
 - Behaviour identical across `gc` and `standalone` targets.
+
+## Resolution (2026-07-01)
+
+### Quantification first (per the re-baseline-handling requirement)
+
+Recompiled **every** currently-passing negative `parse|early|resolution` test
+(host baseline pass-set: **4,549** tests) and classified how the compiler
+rejected each. Full-corpus scan also confirms the population is **100%
+`type: SyntaxError`** (4,595 parse + 34 resolution; **zero** non-SyntaxError
+parse/early/resolution negatives exist in test262).
+
+Two arms:
+
+| arm | count | what happens | tightened-gate flip |
+| --- | --- | --- | --- |
+| **compile-FAILED** (raised a compile error) | 4,110 | all are genuine static/syntax rejections (`';' expected`, `Invalid LHS`, `Rest element…`, `super() only valid…`, duplicate-decl, strict-mode, numeric-separator 6188/6189, `for-in requires…`, exponentiation-LHS, hashbang, …) | **0** |
+| **compile-SUCCEEDED** (no error raised) | 439 | pass ONLY incidentally — the produced Wasm fails to instantiate/link (`await`/`yield` as binding identifier, escaped keywords, duplicate module exports, unresolved imports = real early-error-detection gaps; the #2898 fragility) | **439** |
+
+A naive code-range classifier (TS 1xxx only) *looked* like it flipped 82, but
+inspection showed all 82 are **genuine** syntax detections our classifier merely
+failed to recognize (6xxx numeric-separator codes, no-code syntactic messages) —
+flipping them would be **false regressions**, not a correctness gain. So the
+compile-FAILED arm has ~0 true false-passes.
+
+### What landed (0 verdict change → passes the regression gate)
+
+A shared `scripts/negative-verdict.mjs` (`negativeCompileErrorMatches`) used by
+**both** runners (`scripts/test262-worker.mjs` + `tests/test262-vitest.test.ts`),
+replacing the dead `? "pass" : "pass"` with a **real, `negative.type`-aware
+gate** on the compile-FAILED arm:
+- SyntaxError (the whole current population): any raised compile error is a
+  static rejection ⇒ pass (verified 0/4,110 flips).
+- non-SyntaxError (currently empty, future-proof): requires the diagnostic to
+  evidence the expected type; a wrong-reason rejection now records
+  `compile_error`, not `pass`.
+- unknown/absent expected type: stays lenient (never a false regression).
+
+Identical logic across `gc`/`standalone` (single shared module). Unit test:
+`tests/issue-2912.test.ts`. `tsc --noEmit` clean; prettier clean.
+
+The compile-SUCCEEDED/instantiate-throw arm is kept as an **explicitly-documented
+lenient fallback** (loud comments in both runners referencing this issue) — it
+does not masquerade as a strict gate. This satisfies the Acceptance ("a real
+error-type/early-error gate ... or an explicitly-documented lenient policy").
+
+### Stopped-at-report (needs coordinated re-baseline — PO/lead call)
+
+Strictly gating the compile-SUCCEEDED arm (require a compile-time diagnostic of
+the expected type instead of an incidental Wasm-instantiate failure) is the real
+numeric tightening: **it flips ~439 host-lane negatives pass→fail.** This is a
+genuine correctness improvement (we currently score a pass for SyntaxError tests
+we compile without detecting the error), but it **cannot land in this PR**:
+- `scripts/test262-worker.mjs` is on the `test262-sharded.yml` path filter, so
+  the change re-runs full test262; a 439-drop trips the `check for test262
+  regressions` / merge-group `auto-park` gates.
+- There is **no in-PR intentional-drop flag**. The baseline (`loopdive/js2wasm-baselines`)
+  only advances **post-merge** via `promote-baseline`; the only override is the
+  maintainer `workflow_dispatch` `force_promote=YES` on `test262-sharded.yml`.
+
+**Re-baseline strategy (split):** land this verdict-logic fix (done), then a
+**follow-up PR** that (a) switches the compile-SUCCEEDED arm to strict in both
+runners, and (b) is merged with a coordinated baseline bump — either the
+maintainer `force_promote` dispatch, or landing the runner change behind a merge
+that the PO/lead approves as an intentional −439 drop, so `promote-baseline`
+re-seeds the floor to the honest number. The ~439-file list is captured in the
+audit (categories: `language/expressions` 133, `module-code` 128,
+`statements` 117, plus asi/punctuators/keywords/literals).
