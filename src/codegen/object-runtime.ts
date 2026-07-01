@@ -7804,6 +7804,160 @@ export function ensureObjVecBuilders(ctx: CodegenContext): { newIdx: number; pus
 }
 
 /**
+ * (#2863 Phase 3) Native standalone `Object.groupBy(items, keyFn)` — ES2024
+ * §20.1.2.14 (GroupBy with keyCoercion PROPERTY). Under `--target
+ * standalone`/`wasi` there is no host `__object_groupBy`, so the call site
+ * (`expressions/calls.ts`) hits the #1472 dynamic-shape refusal. This registers
+ * a Wasm-native helper that:
+ *
+ *   out = OrdinaryObjectCreate(null)                   // __new_plain_object
+ *   for i in 0 .. __extern_length(items):
+ *     val = __extern_get_idx(items, i)
+ *     key = keyFn(val, i)  via __apply_closure(keyFn, undefined, [val, boxNum(i)])
+ *     group = __extern_get(out, key)                   // ToPropertyKey done inside
+ *     if group is null: group = __objvec_new(); __extern_set(out, key, group)
+ *     __objvec_push(group, val)
+ *   return out
+ *
+ * The keyFn is invoked through the proven open-`any` closure bridge
+ * `__apply_closure` (the same path Proxy traps / `__extern_method_call` use), so
+ * any user callback arity ≤ 2 is dispatched correctly (§ passes `(value,
+ * index)`; a 1-arg arrow ignores the index). ToPropertyKey is applied uniformly
+ * by `__extern_get`/`__extern_set`, so the get-probe and the set use the same
+ * coerced key. Each group value is the ORIGINAL element (a `$ObjVec`, i.e. a
+ * real Array on read-back).
+ *
+ * Registered lazily (append-only — no funcidx shift of the in-flight function)
+ * from the call site, NOT unconditionally in `ensureObjectRuntime`, so a module
+ * with no `Object.groupBy` pays nothing (and does not reserve the closure
+ * bridge). Returns the `__object_groupBy` funcIdx.
+ *
+ * `items` is iterated via `__extern_length`/`__extern_get_idx`, which index a
+ * real Array (`$__vec_base`) and array-like `$Object`s reliably — generic
+ * iterables (Map/Set/user iterators) are the separate iterator-carrier follow-up
+ * (#2864) and are NOT handled here.
+ */
+export function ensureObjectGroupBy(ctx: CodegenContext): number {
+  ensureObjectRuntime(ctx);
+  const existing = ctx.funcMap.get("__object_groupBy");
+  if (existing !== undefined) return existing;
+
+  const applyClosureIdx = reserveApplyClosure(ctx);
+  const newPlainObjectIdx = ctx.funcMap.get("__new_plain_object")!;
+  const externLengthIdx = ctx.funcMap.get("__extern_length")!;
+  const externGetIdxIdx = ctx.funcMap.get("__extern_get_idx")!;
+  const externGetIdx = ctx.funcMap.get("__extern_get")!;
+  const externSetIdx = ctx.funcMap.get("__extern_set")!;
+  const objVecNewIdx = ctx.funcMap.get("__objvec_new")!;
+  const objVecPushIdx = ctx.funcMap.get("__objvec_push")!;
+  const boxNumIdx = ctx.funcMap.get("__box_number")!;
+
+  // params: 0=items 1=keyFn
+  // locals: 2=len(f64) 3=i(i32) 4=out 5=val 6=key 7=group 8=args
+  const body: Instr[] = [
+    { op: "call", funcIdx: newPlainObjectIdx },
+    { op: "local.set", index: 4 },
+    { op: "local.get", index: 0 },
+    { op: "call", funcIdx: externLengthIdx },
+    { op: "local.set", index: 2 },
+    { op: "i32.const", value: 0 },
+    { op: "local.set", index: 3 },
+    {
+      op: "block",
+      blockType: { kind: "empty" },
+      body: [
+        {
+          op: "loop",
+          blockType: { kind: "empty" },
+          body: [
+            // if f64(i) >= len → break
+            { op: "local.get", index: 3 },
+            { op: "f64.convert_i32_s" },
+            { op: "local.get", index: 2 },
+            { op: "f64.ge" },
+            { op: "br_if", depth: 1 },
+            // val = __extern_get_idx(items, f64(i))
+            { op: "local.get", index: 0 },
+            { op: "local.get", index: 3 },
+            { op: "f64.convert_i32_s" },
+            { op: "call", funcIdx: externGetIdxIdx },
+            { op: "local.set", index: 5 },
+            // args = __objvec_new(); push(val); push(box(i))
+            { op: "call", funcIdx: objVecNewIdx },
+            { op: "local.set", index: 8 },
+            { op: "local.get", index: 8 },
+            { op: "local.get", index: 5 },
+            { op: "call", funcIdx: objVecPushIdx },
+            { op: "local.get", index: 8 },
+            { op: "local.get", index: 3 },
+            { op: "f64.convert_i32_s" },
+            { op: "call", funcIdx: boxNumIdx },
+            { op: "call", funcIdx: objVecPushIdx },
+            // key = __apply_closure(keyFn, undefined, args)
+            { op: "local.get", index: 1 },
+            { op: "ref.null.extern" },
+            { op: "local.get", index: 8 },
+            { op: "call", funcIdx: applyClosureIdx },
+            { op: "local.set", index: 6 },
+            // group = __extern_get(out, key)
+            { op: "local.get", index: 4 },
+            { op: "local.get", index: 6 },
+            { op: "call", funcIdx: externGetIdx },
+            { op: "local.set", index: 7 },
+            // if group is null → group = __objvec_new(); __extern_set(out, key, group)
+            { op: "local.get", index: 7 },
+            { op: "ref.is_null" },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                { op: "call", funcIdx: objVecNewIdx },
+                { op: "local.set", index: 7 },
+                { op: "local.get", index: 4 },
+                { op: "local.get", index: 6 },
+                { op: "local.get", index: 7 },
+                { op: "call", funcIdx: externSetIdx },
+              ],
+            },
+            // __objvec_push(group, val)
+            { op: "local.get", index: 7 },
+            { op: "local.get", index: 5 },
+            { op: "call", funcIdx: objVecPushIdx },
+            // i++
+            { op: "local.get", index: 3 },
+            { op: "i32.const", value: 1 },
+            { op: "i32.add" },
+            { op: "local.set", index: 3 },
+            { op: "br", depth: 0 },
+          ],
+        },
+      ],
+    },
+    { op: "local.get", index: 4 },
+  ];
+
+  const typeIdx = addFuncType(ctx, [{ kind: "externref" }, { kind: "externref" }], [{ kind: "externref" }]);
+  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  ctx.funcMap.set("__object_groupBy", funcIdx);
+  ctx.mod.functions.push({
+    name: "__object_groupBy",
+    typeIdx,
+    locals: [
+      { name: "len", type: { kind: "f64" } },
+      { name: "i", type: { kind: "i32" } },
+      { name: "out", type: { kind: "externref" } },
+      { name: "val", type: { kind: "externref" } },
+      { name: "key", type: { kind: "externref" } },
+      { name: "group", type: { kind: "externref" } },
+      { name: "args", type: { kind: "externref" } },
+    ],
+    body,
+    exported: false,
+  });
+  return funcIdx;
+}
+
+/**
  * (#1888 Slice 1) Reserve the `__apply_closure(externref fn, externref recv,
  * externref args) -> externref` arity-bridge funcIdx with a placeholder
  * `unreachable` body, registered in `funcMap`. The real body (an arity switch
