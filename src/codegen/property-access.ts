@@ -432,6 +432,68 @@ const TYPED_ARRAY_BYTES_PER_ELEMENT: Record<string, number> = {
 };
 
 /**
+ * (#2861) A built-in **constructor**'s own `length` (declared arity, a
+ * non-configurable data property) — statically known per ctor name, so
+ * `<Ctor>.length` folds to a numeric constant and `<Ctor>.name` folds to the
+ * ctor-name string (`Ctor.name === "Ctor"` for every standard builtin). Both
+ * refuse under `--target standalone` today (`#1907`/`#1888 S6-b` builtin static
+ * value read); host mode reads the identical value via `__get_builtin`, so the
+ * fold is observationally identical and host-mode never reaches the fold (the
+ * `__get_builtin` branch returns first).
+ *
+ * Values verified against the host runtime (Node). The NAMESPACES `Math` / `JSON`
+ * / `Reflect` / `Atomics` are deliberately EXCLUDED — they are not functions, so
+ * their `.length`/`.name` are `undefined`; folding a name/arity for them would be
+ * wrong, so they keep refusing (namespace static reads are a separate #2860
+ * follow-up).
+ */
+const BUILTIN_CTOR_ARITY: Record<string, number> = {
+  Object: 1,
+  Array: 1,
+  Function: 1,
+  Symbol: 0,
+  Proxy: 2,
+  BigInt: 1,
+  Date: 7,
+  RegExp: 2,
+  ArrayBuffer: 1,
+  SharedArrayBuffer: 1,
+  DataView: 1,
+  Promise: 1,
+  WeakMap: 0,
+  WeakSet: 0,
+  WeakRef: 1,
+  FinalizationRegistry: 1,
+  Iterator: 0,
+  Map: 0,
+  Set: 0,
+  Error: 1,
+  TypeError: 1,
+  RangeError: 1,
+  SyntaxError: 1,
+  URIError: 1,
+  EvalError: 1,
+  ReferenceError: 1,
+  SuppressedError: 3,
+  String: 1,
+  Number: 1,
+  Boolean: 1,
+  Int8Array: 3,
+  Uint8Array: 3,
+  Uint8ClampedArray: 3,
+  Int16Array: 3,
+  Uint16Array: 3,
+  Int32Array: 3,
+  Uint32Array: 3,
+  Float32Array: 3,
+  Float64Array: 3,
+  BigInt64Array: 3,
+  BigUint64Array: 3,
+  DisposableStack: 0,
+  AsyncDisposableStack: 0,
+};
+
+/**
  * (#2593) Recover the packed-element signedness ("s"/"u") of a typed-array
  * element-access receiver from its TS type. Returns undefined when the receiver
  * is not a recognised integer typed-array view (callers then fall back to the
@@ -468,6 +530,14 @@ function typedArrayViewSignedness(ctx: CodegenContext, receiver: ts.Expression):
  * to the S6-b builtins-as-globals lever.
  */
 function hasNativeBuiltinConstantHandler(builtinName: string, propName: string): boolean {
+  // (#2861) `<Ctor>.length` (declared arity) / `<Ctor>.name` (ctor name string)
+  // have a downstream constant emitter; defer the standalone refusal to it. Only
+  // for real constructors (BUILTIN_CTOR_ARITY excludes the Math/JSON/Reflect/
+  // Atomics namespaces, whose `.length`/`.name` are undefined). Checked FIRST so
+  // it isn't pre-empted by the per-builtin branches below (e.g. the `Symbol`
+  // branch returns for any non-well-known prop, which would refuse `Symbol.length`).
+  // `length`/`name` never collide with a Math/Number constant name.
+  if ((propName === "length" || propName === "name") && builtinName in BUILTIN_CTOR_ARITY) return true;
   if (builtinName === "Math") return MATH_CONSTANT_PROPS.has(propName);
   if (builtinName === "Number") return NUMBER_CONSTANT_PROPS.has(propName);
   // (#2610) `Symbol.<wellKnown>` as a VALUE folds to its small i32 sentinel id
@@ -4838,6 +4908,35 @@ export function compilePropertyAccess(
       const bytes = TYPED_ARRAY_BYTES_PER_ELEMENT[builtinName]!;
       fctx.body.push({ op: ctx.fast ? "i32.const" : "f64.const", value: bytes });
       return ctx.fast ? { kind: "i32" } : { kind: "f64" };
+    }
+  }
+
+  // (#2861) `<Ctor>.length` (declared arity) / `<Ctor>.name` (ctor name string)
+  // — a built-in constructor's own function properties. Statically known per ctor
+  // name, so emit as a constant. Standalone otherwise reaches
+  // `reportUnsupportedStandaloneBuiltinValueRead` (the generic builtin-static-value
+  // -read refusal); host mode reads the same value via `__get_builtin` and returns
+  // BEFORE this point, so folding here is observationally identical and never
+  // fires in host mode for a ctor. Namespaces (Math/JSON/Reflect/Atomics) are not
+  // in BUILTIN_CTOR_ARITY (their `.length`/`.name` are undefined), so they keep
+  // refusing. Skip when the name is shadowed by a local.
+  if (
+    (propName === "length" || propName === "name") &&
+    ts.isIdentifier(expr.expression) &&
+    expr.expression.text in BUILTIN_CTOR_ARITY
+  ) {
+    const builtinName = expr.expression.text;
+    const isShadowed = fctx.localMap.has(builtinName) || (fctx.boxedCaptures?.has(builtinName) ?? false);
+    if (!isShadowed) {
+      if (propName === "length") {
+        const arity = BUILTIN_CTOR_ARITY[builtinName]!;
+        fctx.body.push({ op: ctx.fast ? "i32.const" : "f64.const", value: arity });
+        return ctx.fast ? { kind: "i32" } : { kind: "f64" };
+      }
+      // `<Ctor>.name` === "<Ctor>" for every standard builtin constructor.
+      addStringConstantGlobal(ctx, builtinName);
+      fctx.body.push(...stringConstantExternrefInstrs(ctx, builtinName));
+      return { kind: "externref" };
     }
   }
 
