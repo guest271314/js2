@@ -127,6 +127,7 @@ import {
 import {
   ensureArrayNativeProtoGlue,
   ensureObjectNativeProtoGlue,
+  ensureStringNativeProtoGlue,
   emitTypedArrayIntrinsicCtorObject,
   isWiredTypedArrayViewName,
 } from "../array-object-proto.js";
@@ -999,6 +1000,7 @@ function tryEmitNativeProtoReflectiveCall(
   let brand: number | undefined;
   if (ifaceName === "Array" || ifaceName === "ReadonlyArray") brand = ensureArrayNativeProtoGlue(ctx);
   else if (ifaceName === "Object") brand = ensureObjectNativeProtoGlue(ctx);
+  else if (ifaceName === "String") brand = ensureStringNativeProtoGlue(ctx); // (#2875)
   if (brand === undefined) return undefined;
 
   const glue = getNativeProtoBuiltinGlue(ctx, brand);
