@@ -1,108 +1,129 @@
 ---
 id: 2921
-title: "standalone: __make_callback sole-leak is the harness-wrapper (testWith*Constructors / assert.throws) graceful-fallback + vacuous pass — NOT a TypedArray HOF gap (sub-front 4 of #2903 yields 0)"
-status: in-progress
+title: "standalone: __make_callback sole-leak is the harness-wrapper vacuous pass — gated on dynamic-closure-dispatch arity/type tolerance (sub-front 4 of #2903 yields 0)"
+status: blocked
 sprint: current
 priority: high
 feasibility: hard
 reasoning_effort: max
 task_type: research+bugfix
 area: codegen
-language_feature: closures, typed-arrays, test262-harness
+language_feature: closures, dynamic-dispatch, typed-arrays, test262-harness
 goal: host-independence
 assignee: ttraenkler/dev-callback
 related: [2903, 2879, 2075]
+blocked_on: "dynamic dispatch of `fn(...)` on an any-typed closure param must tolerate arity mismatch + coerce arg type-kinds (calls-closures.ts) — otherwise removing the import yields DISHONEST vacuous host-free passes"
 created: 2026-07-02
 updated: 2026-07-02
-origin: "2026-07-02 __make_callback sole-leak-front measurement (dev-callback). Verified on origin/main @ 4d5287afc, target standalone, merged report run 28491700781."
+origin: "2026-07-02 __make_callback sole-leak-front measurement (dev-callback). origin/main @ 4d5287afc, target standalone, merged report run 28491700781."
 ---
 
-# #2921 — `env::__make_callback` sole-leak: measured root cause
+# #2921 — `env::__make_callback` sole-leak: measured root cause + yield gate
 
-## TL;DR
+## TL;DR / decision
 
-The leak-front task assumed the 1,364 standalone sole-`__make_callback` passes
-are flippable to host-free by giving **TypedArray HOF methods native bodies**
-(sub-front 4 of #2903). **Measured, that yield is ZERO.** All 601 TypedArray
-sole-leak files leak the import from the **test262 harness wrapper**
-(`testWith*Constructors(function(TA){…})`) via the compiler's *graceful-fallback
-for unknown functions* path — not from any HOF method. Worse, those wrapper
-callbacks are **never invoked** (graceful fallback returns `ref.null.extern`),
-so the entire test body is dead code and the 601 "passes" are **vacuous**.
+The 1,364 standalone sole-`__make_callback` passes are **NOT** flippable by
+TypedArray HOF native bodies (sub-front 4 of #2903): measured yield **0**. All
+601 TypedArray files leak from the test262 **harness wrapper**
+(`testWithBigIntTypedArrayConstructors(function(TA){…})`), not any HOF. Adding
+the missing runner shim removes the import, but the bodies **stay vacuous** — the
+compiler's dynamic dispatch of a closure held in an `any`-typed parameter
+(`fn(ctor, factory)` inside the shim) only invokes the closure when the call
+arg-count **and** arg type-kinds exactly match the callback's declared params.
+So a shim-only change converts an *honestly-flagged* leaky-pass into a
+**dishonest clean (host-free) vacuous pass** — metric goes up but tests nothing.
+**Genuine-flip yield with a bounded fix = 0**, below the 200 build-gate →
+**blocked**, pending the dynamic-dispatch fix below.
 
-The import-gate hypothesis from the original brief (gate registration in
-`collectUsedExternImports`, #2405 pattern) is **disproven** — the import is
-genuinely *referenced* (`WebAssembly.instantiate(binary, {})` rejects on
-`Import #0 "env"`), consistent with merged research #2903 ("Not a finalize-time
-unused-import prune… the import is referenced").
+The original import-gate hypothesis (#2405 pattern) is disproven: the import is
+*referenced* (`WebAssembly.instantiate(binary, {})` rejects `Import #0 "env"`),
+consistent with merged research #2903.
 
-## Measurement (origin/main @ 4d5287afc, `target: standalone`)
-
-Source: merged report run `28491700781`, standalone lane.
+## Measurement (origin/main @ 4d5287afc, `target: standalone`, run 28491700781)
 
 - Sole-leak set (`status==pass`, `imports==["env::__make_callback"]`): **1,364**;
-  `__make_callback` total touches: **5,572**. (Matches the brief exactly.)
-- By category: **TypedArray\* 601** (348 TypedArray + 253 TypedArrayConstructors),
+  total `__make_callback` touches: **5,572**. (Matches the brief.)
+- Category: **TypedArray\* 601** (348 TypedArray + 253 TypedArrayConstructors),
   **Temporal 707**, Iterator 18, other 38.
+- Of the 601 TypedArray: **601/601** contain the `testWith*Constructors(function…)`
+  wrapper; **572** use `testWithBigIntTypedArrayConstructors`; only **~202** even
+  call a HOF method; 337 use a 2-arg (`makeCtorArg`) callback.
 
-### Sub-front 4 (TypedArray HOF native bodies) flippable yield = 0
+### Why sub-front 4 yields 0
 
-Scanned all 601 TypedArray sole-leak sources + live-traced the leak sites
-through the real runner (`runTest262File(..., "standalone")`):
+Live trace (`TypedArray/prototype/every/BigInt/callbackfn-returns-abrupt.js`,
+standalone) shows the two `__make_callback` emissions are:
+- the `function(TA, makeCtorArg){…}` **wrapper** → `compileArrowAsCallback` from
+  `src/codegen/expressions/calls.ts:13393` ("graceful fallback for unknown
+  functions": `testWithBigIntTypedArrayConstructors` is unresolved in `funcMap`);
+- `assert.throws(T, function(){})` → closed-method dispatch (`calls.ts:11624`).
 
-- **601/601** contain the `testWith*Constructors(function…)` harness wrapper.
-- Live trace of `TypedArray/prototype/every/BigInt/callbackfn-returns-abrupt.js`:
-  - leak site A = the `function(TA, makeCtorArg){…}` wrapper →
-    `compileArrowAsCallback` from **`calls.ts:13393`** ("graceful fallback for
-    unknown functions"): `testWithBigIntTypedArrayConstructors` is not resolved
-    in `funcMap`, so the call compiles its args for side-effect and returns null.
-  - leak site B = `assert.throws(T, function(){…})` (205/601) →
-    closed-method dispatch **`calls.ts:11624`**.
-  - **Neither leak site is a TypedArray HOF callback.**
-- Only ~202/601 even *call* a HOF method (forEach 31, reduce/reduceRight 27 each,
-  from 25, filter/map 12, of/every/some/find… ≤10). The other 399 use non-HOF
-  methods (slice/fill/reverse/indexOf/ctors). But the import is **module-scoped**:
-  it disappears only if NO callback in the module takes the host path — and the
-  wrapper always does. So native HOF bodies remove **zero** imports here.
+Neither is a HOF callback; the import is module-scoped, so native HOF bodies
+remove **zero** imports.
 
-### Correctness: these are VACUOUS passes
+### Why the wrapper is unresolved (runner shim gap)
 
-Injected `throw new Error('WRAPPER_RAN')` as the first statement of the wrapper
-body; the standalone binary **ran to completion without throwing** — the wrapper
-callback is never invoked, so every assertion in the test body is dead code. The
-601 "passes" test nothing.
+`tests/test262-runner.ts` shims `testWithTypedArrayConstructors` but:
+1. the gate `needsTestTypedArray` tested `/testWithTypedArrayConstructors/`,
+   which does **not** match `testWith`**`BigInt`**`TypedArrayConstructors`;
+2. no `testWithBigIntTypedArrayConstructors` shim existed;
+3. the shim passed only 1 arg (`fn(ctor)`), so tests declaring
+   `function(TA, makeCtorArg)` got `makeCtorArg === undefined`.
+A prototype shim (BigInt wrapper + a passthrough `makeCtorArg`, fixed regex)
+removes the import and instantiates **host-free** — confirmed on samples.
 
-Implication: the *correct* fix (make `testWithTypedArrayConstructors` compile as
-an invokable user function and actually drive its callback) would execute the
-dead bodies, and many would then genuinely **fail** (BigInt element semantics,
-detached-buffer paths) — converting leaky-passes to real fails. Net headline
-pass count is negative short-term; it makes the metric honest and surfaces the
-real gaps.
+### But it stays VACUOUS — the real blocker
 
-## What is NOT the fix (disproven here + in #2903)
+With the shim, the wrapper resolves and the callback goes the closure path (no
+`__make_callback`), yet injecting `throw`/`log()` as the wrapper body's first
+statement **never fires**. Isolated repro (`.tmp`) pins the compiler gap in the
+dynamic dispatch of `fn(...)` where `fn` is an `any`-typed param
+(`src/codegen/expressions/calls-closures.ts`, e.g. the exact-arity gate at
+L688 `if (info.paramTypes.length !== sigParamCount) continue;` + the per-param
+kind check L693–698):
 
-- **Not** a TypedArray HOF native-body PR (sub-front 4) — yields 0 host-free
-  flips for the sole-leak set.
-- **Not** a `collectCallbackImports` predicate tightening / finalize-time unused
-  import prune — the import is referenced; pruning breaks the binary.
+| call | callback params | invoked? |
+|------|-----------------|----------|
+| `fn(x)` | `(TA)` | YES |
+| `fn(x, y:number)` | `(TA, m)` | YES |
+| `fn(x)` | `(TA, m)` | NO (arity) |
+| `fn(x, y)` | `(TA)` | NO (arity) |
+| `fn(ctor[i], namedFn)` | `(TA, makeCtorArg)` | NO (arg type-kinds != externref params) |
 
-## Actual root cause / next lever
+Real 2-param BigInt tests: 25/25 sampled stay **vacuous** with the shim (the
+shim passes a constructor value + a funcref, whose kinds don't match the
+callback's `any`/externref params -> dispatch skips). So **genuine-flip yield with
+shim alone = 0**, and shipping it would be *harmful* (dishonest host-free
+vacuous passes).
 
-The sole-leak driver is the **harness-wrapper callback** taking the host
-`__make_callback` path via graceful-fallback (`calls.ts:13393`) and never being
-invoked. Open questions for the re-scoped effort:
+## The real fix (2 parts) — gated, not built
 
-1. Why is `testWith*Constructors` (defined in the prepended `testTypedArray.js`
-   include) not resolved as an invokable user function in `funcMap`? (compile
-   failure of the harness body? forward-reference? var-assigned fn?)
-2. Once invoked, is fixing it net-positive on conformance, or does it convert a
-   large block of vacuous passes to real fails (needs a corpus OUTPUT diff vs
-   js-host before shipping)?
-3. Same pattern likely covers much of the 707 Temporal sole-leaks (255 use
-   test/helper wrappers, 420 use other closures).
+1. **Runner shim** (`tests/test262-runner.ts`): add
+   `testWithBigIntTypedArrayConstructors` + a `makeCtorArg` passthrough factory,
+   fix the `needsTestTypedArray` regex to `/testWith(?:BigInt)?TypedArrayConstructors/`.
+   (Prototype done on this branch; do NOT ship alone.)
+2. **Compiler — dynamic closure dispatch of an `any`-typed param**
+   (`src/codegen/expressions/calls-closures.ts`): make `fn(...)` invoke the
+   matched closure under **JS arity semantics** (pad missing args with
+   `undefined`, drop extras) and **coerce args to the closure's param kinds**
+   instead of requiring exact arg-count/type-kind match. This is a hot, fragile
+   core-dispatch path — scope/verify carefully; it is a *general* improvement
+   (any dynamic `fn(...)` with arity/type mismatch), not TypedArray-specific.
+3. Only then does genuine PASS depend on the underlying BigInt
+   TypedArray/detached-buffer/species semantics per test — unmeasured, likely
+   partial. Corpus OUTPUT-vs-js-host diff required before shipping (a vacuous
+   host-free pass must be counted as a fail, not a pass, by the harness).
+
+## Metric-safety caveat (corrects the earlier framing)
+
+"Removing the import can only move the honest metric up" holds **only if the
+body actually executes**. With the current compiler it does not — the shim
+alone produces host-free *vacuous* passes, which is a **dishonest** metric gain.
+Metric-safety is contingent on part (2) landing.
 
 ## Status
 
-Escalated to tech lead 2026-07-02: sub-front 4 yield = 0 (< the 300 build-gate),
-paused before building, awaiting re-scope decision. Import-gate hypothesis
-disproven. Claim held, worktree clean.
+Blocked pending the dynamic-dispatch fix (part 2). Genuine-flip yield with a
+bounded fix = 0 (< the 200 build-gate). Analysis delivered; claim released;
+recommend spinning part (2) as its own scoped codegen issue (broad value beyond
+this leak). Import-gate hypothesis disproven; sub-front 4 disproven.
