@@ -17,6 +17,44 @@ umbrella: 2860
 
 # Standalone native SYNC-generator resume substrate
 
+## ⚠️ CORRECTED MEASUREMENT (2026-07-02) — the corpus is NO-YIELD generators
+
+The original import-set measurement below (1396 dstr-param / 1851 flippable) was
+**methodologically wrong**: it counted files whose imports ⊆ gen-suite, which
+conflates *"a generator exists and `.next()` is called"* (leaks
+`__create_generator`/`__gen_next`) with *"the generator actually yields."*
+
+**Grounded re-measurement** (compiled real corpus files through the runner's
+standalone path, `.tmp/2920/corpus-verify.mjs`):
+
+- Of the 1851 fully-flippable files, only **~70 contain a `yield` in code**
+  (65 emit `__gen_push_*` = a runtime-yielded value). **1780 are NO-YIELD
+  generators** — the test262 `dstr-binding` templates
+  (`*method({x:y}){ assert(bindings); }` then `.next()`), which test **parameter
+  binding**, not iteration.
+- The native machine **requires a yield** (`generators-native.ts:806`
+  `suspendCount===0 → return null`, and `:987`). So every no-yield generator
+  bails to the host eager-buffer path — that is what 1780 of the 1851 leak on.
+- **The destructuring-param slice (committed) flips ~0 corpus tests** (verified
+  0/70 on the with-yield files: the few with-yield dstr tests use *untyped*
+  array patterns, which the slice correctly bails; the rest are no-yield).
+  It IS correct + byte-inert (gc/host sha256-identical; non-dstr generators
+  byte-unchanged) and flips ~10-20 *synthetic* with-yield object-param cases —
+  a valid prerequisite, but ~0 real test262 on its own.
+
+**The real opportunity = native NO-YIELD generators (the 1780).** A naive relax
+of the two no-yield bails produces **invalid Wasm** (`__gen_resume_f`:
+local.set expected i32, found externref) — the resume-function state typing
+assumes ≥1 yield. So no-yield support is a genuine L/XL slice: give the resume
+function a zero-suspend lowering (state 0 runs body to completion → `done`
+result), fix the i32/externref result typing, and verify `.next()`/`.return()`
+dispatch on a done-from-start generator. The committed dstr-param work is the
+prerequisite (no-yield dstr-binding tests need BOTH) and stays on the branch.
+
+*Status: reported to tech lead; awaiting direction on re-scope (A: build no-yield
+generators on this branch keeping dstr-params; vs B: hold).* The dstr-param
+commit is safe on origin regardless.
+
 ## Problem / goal
 
 In standalone mode, `function*` sync generators that fall outside the native
