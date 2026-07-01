@@ -123,7 +123,15 @@ corpus — there the struct field type already matches the local, so the coercio
 is a no-op path). Regression test: `tests/issue-2878-dstr-default-valuerep.test.ts`.
 The 11 honest FAILs are a **separate** pre-existing bug (`null`-valued property
 wrongly triggers the default in the *default-check*, and the multi-field
-dynamic-object read returns 0 — #2849), NOT this slice. Remaining Class-A
+dynamic-object read returns 0 — #2849), NOT this slice.
+
+**Re-measure pending (#2849 / PR #2432):** the dynamic-object multi-field
+read-returns-0 half of the honest-FAIL set is #2849, whose fix is in CI as
+**PR #2432**. When that lands, several of the 11 FAILs here should flip to
+genuine PASS with no further change to this slice — re-run the targeted-sample
+measurement (`local.set expected f64/i32, found ref`, seed 11) against
+post-#2432 main and update the pass/fail split above. No action on this branch;
+tracked as a re-measure note. Remaining Class-A
 value-rep signatures (`call[N] expected externref, found struct.new/ref.cast`;
 `struct.new expected eqref, found anyref`; `not enough arguments for struct.new`)
 are distinct codegen shapes → follow-up slices.
