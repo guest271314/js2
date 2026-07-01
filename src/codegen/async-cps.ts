@@ -676,6 +676,22 @@ export interface LinearAwaitSegment {
   readonly resumeBinding: { readonly name: string; readonly type: ts.TypeNode | undefined } | null;
   /** `return await P` — the resolved value settles the result promise directly. */
   readonly isReturnAwait: boolean;
+  /**
+   * (#2906 Gap 3) `true` when THIS await sits inside a `try` whose `finally` must
+   * run if the await rejects. `false` when not inside a try/finally. Slice scope:
+   * a single, non-nested `try { …awaits… } finally { F }` with an await-free `F`,
+   * no `catch`, and no `return` in the try body (anything richer makes
+   * `planLinearAwaits` return `null` → legacy/AG0 fallback).
+   */
+  readonly awaitInTry: boolean;
+  /**
+   * (#2906 Gap 3) Per-statement flag parallel to `leadStmts`: `leadInTry[i]` is
+   * `true` when `leadStmts[i]` runs INSIDE the try region (a throw there must run
+   * the finally). Covers both the outer→in-try entry and the in-try→finally exit
+   * boundaries within a single lead (the `finally` body itself is flagged
+   * `false` — a throw in it must not re-run it).
+   */
+  readonly leadInTry: readonly boolean[];
 }
 
 /**
@@ -687,6 +703,15 @@ export interface LinearAwaitPlan {
   readonly segments: readonly LinearAwaitSegment[];
   /** Statements after the last await's statement (empty for `return await P`). */
   readonly tail: readonly ts.Statement[];
+  /** (#2906 Gap 3) Per-statement in-try flag parallel to `tail` (see `leadInTry`). */
+  readonly tailInTry: readonly boolean[];
+  /**
+   * (#2906 Gap 3) The single `finally` body of the try/finally spanning an await,
+   * or `null` when the body has none. The drive layer compiles it a SECOND time
+   * into the resume function's outer `catch` (the abrupt path) — the inline copy
+   * on the normal path is already woven into the segment/tail lead statements.
+   */
+  readonly finalizer: readonly ts.Statement[] | null;
 }
 
 /**
@@ -707,60 +732,161 @@ export interface LinearAwaitPlan {
  */
 export function planLinearAwaits(fn: ts.FunctionLikeDeclaration, plan: AsyncCpsPlan): LinearAwaitPlan | null {
   if (plan.awaitPoints.length === 0) return null;
-  if (plan.hasTryAcrossAwait) return null; // Gap 3 — not linear
   const body = fn.body;
   if (body === undefined || !ts.isBlock(body)) return null;
 
   const awaitSet = new Set<ts.AwaitExpression>(plan.awaitPoints);
-  const stmts = body.statements;
-  const segments: LinearAwaitSegment[] = [];
-  let lead: ts.Statement[] = [];
-  let sawReturnAwait = false;
+  const st: LowerState = {
+    segments: [],
+    lead: [],
+    leadInTry: [],
+    finalizer: null,
+    theFinalizer: null,
+    usedFinally: false,
+    sawReturnAwait: false,
+  };
+  if (!lowerLinearStatements(body.statements, st, awaitSet)) return null;
 
-  for (let i = 0; i < stmts.length; i++) {
-    const stmt = stmts[i]!;
+  // Every await must have been consumed into a segment (defensive; a stray await
+  // in a `lead` statement would have made `awaitsHere > 0` and been handled).
+  if (st.segments.length !== plan.awaitPoints.length) return null;
+  return { segments: st.segments, tail: st.lead, tailInTry: st.leadInTry, finalizer: st.theFinalizer };
+}
+
+/** Mutable accumulator threaded through the recursive linear-await lowering. */
+interface LowerState {
+  segments: LinearAwaitSegment[];
+  lead: ts.Statement[];
+  /** Per-statement in-try flag, parallel to `lead`. */
+  leadInTry: boolean[];
+  /** The active `finally` body if currently inside the try (else null). */
+  finalizer: ts.Statement[] | null;
+  /** The one finally body of this fn (for the abrupt-path catch copy). */
+  theFinalizer: ts.Statement[] | null;
+  /** A finally has already been consumed — a second try/finally falls back (single-try slice). */
+  usedFinally: boolean;
+  sawReturnAwait: boolean;
+}
+
+/**
+ * Lower a statement sequence into suspend segments (#2906). Recurses ONE level
+ * into a `try { … } finally { F }` whose try body carries the awaits (Gap 3),
+ * carrying `F` as the active finalizer for every await inside — mirroring
+ * `generators-native.ts lowerStatements` + `activeFinalizers`, bounded to a
+ * single non-nested finally. Returns `false` (→ legacy/AG0 fallback) on any
+ * shape outside the slice.
+ */
+function lowerLinearStatements(
+  statements: readonly ts.Statement[],
+  st: LowerState,
+  awaitSet: ReadonlySet<ts.AwaitExpression>,
+): boolean {
+  const pushLead = (stmt: ts.Statement): void => {
+    st.lead.push(stmt);
+    st.leadInTry.push(st.finalizer !== null);
+  };
+  const resetLead = (): void => {
+    st.lead = [];
+    st.leadInTry = [];
+  };
+
+  for (const stmt of statements) {
     const awaitsHere = countAwaitsInStatement(stmt, awaitSet);
     if (awaitsHere === 0) {
-      if (sawReturnAwait) return null; // unreachable code after `return await`
-      lead.push(stmt);
+      if (st.sawReturnAwait) return false; // unreachable code after `return await`
+      pushLead(stmt);
       continue;
     }
-    if (awaitsHere > 1) return null; // two awaits in one statement — not linear-canonical
+    if (awaitsHere > 1) return false; // two awaits in one statement — not linear-canonical
+
+    // (#2906 Gap 3) try/finally spanning an await — the try body carries the
+    // awaits, the finally runs on every completion. Bounded slice: single,
+    // non-nested finally, no catch, await-free finally, no return-in-try.
+    if (ts.isTryStatement(stmt)) {
+      if (st.finalizer !== null) return false; // nested try/finally — fall back
+      if (st.usedFinally) return false; // a second try/finally in the fn — single-try slice
+      if (stmt.catchClause) return false; // try/catch — Gap 3 follow-up
+      if (!stmt.finallyBlock) return false; // a try with no finally + await — fall back
+      const finallyStmts = stmt.finallyBlock.statements;
+      for (const f of finallyStmts) if (countAwaitsInStatement(f, awaitSet) > 0) return false; // await-in-finally
+      if (blockHasTopLevelReturn(stmt.tryBlock)) return false; // return-in-try (return-through-finally) — follow-up
+      st.finalizer = [...finallyStmts];
+      st.theFinalizer = st.finalizer;
+      st.usedFinally = true;
+      if (!lowerLinearStatements(stmt.tryBlock.statements, st, awaitSet)) return false;
+      // Normal path: finally runs inline after the try body, flagged NOT-in-try
+      // (a throw in the finally itself must not re-run it).
+      st.finalizer = null;
+      for (const f of finallyStmts) pushLead(f);
+      continue;
+    }
+
     const awaitNode = findAwaitInStatement(stmt, awaitSet)!;
+    const awaitInTry = st.finalizer !== null;
+    const leadStmts = st.lead;
+    const leadInTry = st.leadInTry;
 
     // The await must be DIRECTLY one of the three canonical positions.
     if (ts.isReturnStatement(stmt) && stmt.expression === awaitNode) {
-      segments.push({ leadStmts: lead, awaitedExpr: awaitNode.expression, resumeBinding: null, isReturnAwait: true });
-      lead = [];
-      sawReturnAwait = true;
+      if (awaitInTry) return false; // `return await` in a try → return-through-finally, follow-up
+      st.segments.push({
+        leadStmts,
+        awaitedExpr: awaitNode.expression,
+        resumeBinding: null,
+        isReturnAwait: true,
+        awaitInTry,
+        leadInTry,
+      });
+      resetLead();
+      st.sawReturnAwait = true;
       continue;
     }
     if (ts.isVariableStatement(stmt)) {
       const decls = stmt.declarationList.declarations;
-      if (decls.length !== 1) return null;
+      if (decls.length !== 1) return false;
       const decl = decls[0]!;
-      if (decl.initializer !== awaitNode || !ts.isIdentifier(decl.name)) return null;
-      segments.push({
-        leadStmts: lead,
+      if (decl.initializer !== awaitNode || !ts.isIdentifier(decl.name)) return false;
+      st.segments.push({
+        leadStmts,
         awaitedExpr: awaitNode.expression,
         resumeBinding: { name: decl.name.text, type: decl.type },
         isReturnAwait: false,
+        awaitInTry,
+        leadInTry,
       });
-      lead = [];
+      resetLead();
       continue;
     }
     if (ts.isExpressionStatement(stmt) && stmt.expression === awaitNode) {
-      segments.push({ leadStmts: lead, awaitedExpr: awaitNode.expression, resumeBinding: null, isReturnAwait: false });
-      lead = [];
+      st.segments.push({
+        leadStmts,
+        awaitedExpr: awaitNode.expression,
+        resumeBinding: null,
+        isReturnAwait: false,
+        awaitInTry,
+        leadInTry,
+      });
+      resetLead();
       continue;
     }
-    return null; // await sits in a non-canonical position within this statement
+    return false; // await sits in a non-canonical position within this statement
   }
+  return true;
+}
 
-  // Every await must have been consumed into a segment (defensive; a stray await
-  // in a `lead` statement would have made `awaitsHere > 0` and been handled).
-  if (segments.length !== plan.awaitPoints.length) return null;
-  return { segments, tail: lead };
+/** True if `block` contains a `return` at any depth (not crossing nested fn scopes). */
+function blockHasTopLevelReturn(block: ts.Block): boolean {
+  let found = false;
+  const walk = (node: ts.Node): void => {
+    if (found || isNestedFunctionScope(node)) return;
+    if (ts.isReturnStatement(node)) {
+      found = true;
+      return;
+    }
+    forEachChild(node, walk);
+  };
+  forEachChild(block, walk);
+  return found;
 }
 
 /** Count how many of `awaitSet`'s awaits sit inside `stmt` (not crossing fn scopes). */
