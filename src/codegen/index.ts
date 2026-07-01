@@ -5973,6 +5973,100 @@ function buildGetterExtract(
 }
 
 /**
+ * (#2930) Register import-binding local-name aliases.
+ *
+ * Codegen keys `funcMap` / `closureMap` / `moduleGlobals` (and the per-name call
+ * metadata) by the imported symbol's *declaration name*, never by the local
+ * import binding. So an import whose LOCAL name differs from the target's
+ * declaration name — a default import (`import val from './m'` where `./m`
+ * declares `function fn`), a renamed named import (`import { add as plus }`), an
+ * anonymous `export default function () {}`, or `export { g as default }` — left
+ * the local binding (`val` / `plus`) unresolved: every read/call of it fell
+ * through to the graceful-null default (returned 0 / null / a wrong closure).
+ *
+ * This pass runs AFTER `collectDeclarations` (targets are registered) and BEFORE
+ * function bodies compile (which reference the local names). For each import
+ * binding it follows the checker alias to the target declaration's name and
+ * copies the resolution entries onto the local name. Purely additive: it writes
+ * ONLY local-name keys that are currently absent, so every already-resolving
+ * name stays byte-identical.
+ */
+function registerImportBindingAliases(ctx: CodegenContext, sourceFiles: readonly ts.SourceFile[]): void {
+  const aliasOneBinding = (localId: ts.Identifier): void => {
+    const localName = localId.text;
+    // Already resolvable under the local name (e.g. `import { add }` where the
+    // local name equals the export) — nothing to alias.
+    if (ctx.funcMap.has(localName) || ctx.moduleGlobals.has(localName) || ctx.closureMap.has(localName)) {
+      return;
+    }
+    let sym: ts.Symbol | undefined;
+    try {
+      sym = ctx.checker.getSymbolAtLocation(localId);
+    } catch {
+      return;
+    }
+    if (!sym) return;
+    let target: ts.Symbol | undefined = sym;
+    if (sym.flags & ts.SymbolFlags.Alias) {
+      try {
+        target = ctx.checker.getAliasedSymbol(sym);
+      } catch {
+        return;
+      }
+    }
+    if (!target) return;
+    const decl = target.valueDeclaration ?? target.declarations?.[0];
+    if (!decl) return;
+    // The name the target was registered under in funcMap/moduleGlobals/closureMap.
+    let targetName: string | undefined;
+    const declName = (decl as { name?: ts.Node }).name;
+    if (declName && ts.isIdentifier(declName)) {
+      targetName = declName.text;
+    } else if (
+      (ts.isFunctionDeclaration(decl) || ts.isClassDeclaration(decl)) &&
+      ts.canHaveModifiers(decl) &&
+      ts.getModifiers(decl)?.some((m) => m.kind === ts.SyntaxKind.DefaultKeyword)
+    ) {
+      // Anonymous `export default function () {}` / `export default class {}`
+      // is registered under the synthetic name "default".
+      targetName = "default";
+    }
+    if (!targetName || targetName === localName) return;
+    // Copy each resolution entry keyed by the target name onto the local name.
+    // Every write is guarded so a genuine same-named binding is never clobbered.
+    const fnIdx = ctx.funcMap.get(targetName);
+    if (fnIdx !== undefined && !ctx.funcMap.has(localName)) ctx.funcMap.set(localName, fnIdx);
+    const closure = ctx.closureMap.get(targetName);
+    if (closure !== undefined && !ctx.closureMap.has(localName)) ctx.closureMap.set(localName, closure);
+    const modGlobal = ctx.moduleGlobals.get(targetName);
+    if (modGlobal !== undefined && !ctx.moduleGlobals.has(localName)) ctx.moduleGlobals.set(localName, modGlobal);
+    const optParams = ctx.funcOptionalParams.get(targetName);
+    if (optParams !== undefined && !ctx.funcOptionalParams.has(localName)) {
+      ctx.funcOptionalParams.set(localName, optParams);
+    }
+    const nested = ctx.nestedFuncCaptures.get(targetName);
+    if (nested !== undefined && !ctx.nestedFuncCaptures.has(localName)) ctx.nestedFuncCaptures.set(localName, nested);
+  };
+
+  for (const sf of sourceFiles) {
+    for (const stmt of sf.statements) {
+      if (!ts.isImportDeclaration(stmt)) continue;
+      const clause = stmt.importClause;
+      if (!clause) continue;
+      // Default import: `import val from './m'`.
+      if (clause.name) aliasOneBinding(clause.name);
+      // Named imports: `import { a, b as c } from './m'`.
+      const nb = clause.namedBindings;
+      if (nb && ts.isNamedImports(nb)) {
+        for (const el of nb.elements) aliasOneBinding(el.name);
+      }
+      // Namespace import (`import * as ns`) resolves to a module object, not a
+      // single function/global binding — nothing to alias here.
+    }
+  }
+}
+
+/**
  * Compile multiple typed source files into a single WasmModule IR.
  * All source files share the same codegen context (funcMap, structMap, etc.).
  * Only functions exported from the entry file become Wasm exports.
@@ -6121,6 +6215,12 @@ export function generateMultiModule(
     // exports that install / restore this global are emitted later in
     // post-processing — registering the global here keeps both sides in sync.
     ensureCurrentThisGlobal(ctx);
+
+    // (#2930) Register import-binding aliases (default / renamed / anonymous-default
+    // imports whose LOCAL name differs from the imported target's declaration name)
+    // so their reads and calls resolve to the target instead of the graceful-null
+    // default. Runs after collectDeclarations (targets registered), before bodies.
+    registerImportBindingAliases(ctx, multiAst.sourceFiles);
 
     // Phase 3: Compile all function bodies
     for (const sf of multiAst.sourceFiles) {
