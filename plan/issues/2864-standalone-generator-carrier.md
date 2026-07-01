@@ -305,3 +305,8 @@ propagate the error; `return()` through try/finally is unchanged.
   `ensureExnTag` import.
 - `tests/issue-2864-standalone-generator-carrier.test.ts` — 5 F2 standalone cases
   (zero-host-import asserted).
+
+
+## Reconciliation note (shepherd, 2026-07-01)
+
+Landed slices: **F1** heterogeneous boxed-any carrier (PR #2366), **F1b** typed live-across-yield local spills (PR #2372), **F2** `gen.throw()` abrupt completion (PR #2375). Issue stays `in-progress` for the remaining carrier phases.

@@ -298,3 +298,8 @@ CFG-aware CPS resume machine (Gaps 3/5 = try/finally-across-await + for-await/
 async-gen, which the single-await `splitBodyAtAwait` cannot express; tracked as a
 new XL substrate issue) landing AND the full `merge_group` standalone corpus
 measuring net-positive.
+
+
+## Reconciliation note (shepherd, 2026-07-01)
+
+Landed slices: async-drive **1b** (PR #2394) and the **`__drain_microtasks` intrinsic + test262 runner hook** (PR #2404 — 1d scaffolding, inert). Issue stays `in-progress` for the active drive layer (PATH B).
