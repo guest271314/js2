@@ -1810,6 +1810,15 @@ jobs:
               git add -f website/public/benchmarks/results/test262-editions.json || true
             [ -f website/public/benchmarks/results/test262-category-editions.json ] && \
               git add -f website/public/benchmarks/results/test262-category-editions.json || true
+            # #2910 — the reconciled, edition-sliced feature-row counts
+            # (passCount/totalCount) that generate-editions.ts patched into
+            # feature-examples.json in the "Regenerate edition buckets" step
+            # above. Staged so those counts land ATOMICALLY with the badges
+            # (re-derived from them just below) — otherwise committed
+            # index.html would carry reconciled badges over a stale
+            # feature-examples.json and wedge generate:feature-badges:check.
+            [ -f website/public/feature-examples.json ] && \
+              git add -f website/public/feature-examples.json || true
             # Landing-page feature-support badges, re-derived from the promoted
             # baseline just above. Staged so the badges and the committed
             # test262-current.json land in ONE atomic commit (keeps

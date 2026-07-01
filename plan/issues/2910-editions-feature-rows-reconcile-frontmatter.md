@@ -1,8 +1,9 @@
 ---
 id: 2910
 title: "Editions dashboard: classify feature rows by `features:` frontmatter (edition-sliced) so they reconcile with the section headline"
-status: in-progress
+status: done
 assignee: ttraenkler/impl2910
+completed: 2026-07-01
 priority: medium
 sprint: current
 created: 2026-07-01
@@ -101,3 +102,63 @@ headline, **sliced within each test's single edition**:
   breakdown (no path-glob), never the ~2,804 phantom population.
 - `pnpm run build:pages` regenerates the data; landing page renders without the
   reconciliation disclaimer (or with only the two documented caveats).
+
+## Implementation notes (done — 2026-07-01)
+
+**Data measured before designing** (host baseline, 48,117 tests). Fraction of
+each edition's population that carries ANY `features:` tag:
+`≤ES3 0/274`, `ES5 28/13,086`, `ES2015 7,560/15,397`, and **ES2016–ES2026 100 %**
+(those editions are *only reachable* via a feature tag). So the `features:` axis
+is dense for ES2015+ but **absent for ≤ES3 and ES5** — those two predate the
+metadata format.
+
+**Where the reconciliation happens.** `scripts/generate-editions.ts` already
+classifies every test into exactly one edition (max feature edition / es-id).
+It now also:
+1. emits per-edition **per-tag** slices into `test262-editions.json`
+   (`editions[].features[] = {name, pass, fail, ce, skip, total, pct}`) — the
+   canonical, additive shape (all existing consumers spread/ignore it);
+2. computes, via the exported pure `computeFeatureRowCounts(tests, featureTags,
+   featureEditionYear)`, the **per-landing-feature union** count = `|{tests
+   classified into F's edition carrying ANY of F's tags}|`, and **patches**
+   `feature-examples.json` `passCount`/`totalCount` with it (host/default run
+   only — the standalone `--output` run is skipped). The union is computed from
+   per-test data so a multi-tag feature is **counted once, never summed** (no
+   double-count, so `total ≤ edition total` always holds).
+
+Because each row's population is scoped to its own edition and selected by tag,
+it is a **strict subset** of that edition's headline → *no row `total` exceeds
+its edition `total`* and *edition 100 % ⇒ every row 100 %*. `generate-editions`
+asserts these invariants at generation time (throws on violation), and
+`tests/generate-editions-feature-rows.test.ts` pins them.
+
+**Landing name → tag map:** `scripts/feature-t262-features.json` (mirrors the
+existing `feature-test-categories.json` pattern; `testCategories` path-globs are
+kept ONLY for the "view test262 sources" links, not for counting). Verified
+across all 81 catalog rows: **41 reconciled rows, 0 subset violations, 0
+≤ES3/ES5 phantom rows.**
+
+**≤ES3 / ES5 decision (PO note).** The issue defaults ≤ES3 to *headline-only*.
+I extended that to **ES5 as well** — same root cause (only 28/13,086 ES5 tests
+carry a tag; the ES5 rows are broad categories like "Objects"/"Arrays" with no
+canonical tag), and keeping their path-glob counts would leave the section
+non-reconciled and block honestly removing the disclaimer. Both sections now
+show the reconciled edition headline; their rows keep code examples + badges but
+no live `N/T` chip (`passCount`/`totalCount` set to 0 ⇒ the runtime treats them
+as "no measurable data"). Concrete phantom removed: ES3/Core "Operators" was
+`849/1083` — a **1,083-test** population inside a **274-test** edition — now
+headline-only. If the PO later wants ES5 rows to carry counts, the follow-up is
+a hand-curated core-language → explicit-test-list mapping (per the issue's ES3
+option), NOT a path-glob.
+
+**Disclaimer** softened to the two irreducible caveats (rows overlap so they are
+slices not a sum; ≤ES3/ES5 core sections are headline-only).
+
+**Workflow wiring:** `test262-sharded.yml` promote-baseline now stages the
+patched `feature-examples.json` atomically with the re-derived badges +
+`index.html` (generate-editions patches it, then derive-feature-badges bakes
+from it) — without this the committed badges would sit over a stale
+feature-examples and wedge `generate:feature-badges:check`. `deploy-pages`
+(`build:pages`) already runs build-data → generate-editions → derive in the
+correct order. `baseline-summary-sync` / `refresh-baseline` don't stage
+feature-examples, so their (discarded) working-tree patch is harmless.

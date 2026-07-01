@@ -18,7 +18,7 @@
  * Issue: #959
  */
 
-import { existsSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, readFileSync, realpathSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 
@@ -45,6 +45,9 @@ const BASELINE_CACHE_JSONL = join(ROOT, ".test262-cache", "test262-current.jsonl
 const CURRENT_RESULTS_JSONL = join(ROOT, "benchmarks", "results", "test262-current.jsonl");
 const RESULTS_JSONL = join(ROOT, "benchmarks", "results", "test262-results.jsonl");
 const OUTPUT_PATH = join(ROOT, "website", "public", "benchmarks", "results", "test262-editions.json");
+// (#2910) Landing-page feature catalog + its reconciled row counts.
+const FEATURE_EXAMPLES_PATH = join(ROOT, "website", "public", "feature-examples.json");
+const FEATURE_T262_MAP_PATH = join(ROOT, "scripts", "feature-t262-features.json");
 const CURRENT_DRAFT_EDITION = 2026;
 
 // ---------------------------------------------------------------------------
@@ -311,6 +314,23 @@ const EDITION_NAMES: Record<number, string> = {
 
 const EDITION_ORDER = [0, 5, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025, 2026, -1];
 
+/**
+ * (#2910) Map a landing-page edition label (as used in feature-examples.json's
+ * `edition` field / the landing section headers) to its edition year, so a
+ * feature row's population can be scoped to exactly the edition section it is
+ * displayed under. Returns `undefined` for labels with no `features:` axis
+ * (Legacy/Deprecated, npm libraries) — those rows stay headline-only.
+ */
+export function editionStringToYear(label: string): number | undefined {
+  const s = label.trim();
+  if (s === "≤ ES3" || s === "ES3 / Core" || s === "ES3") return 0;
+  if (s === "ES5") return 5;
+  if (s === "Proposals") return -1;
+  const m = /^ES(\d{4})$/.exec(s);
+  if (m) return Number(m[1]);
+  return undefined;
+}
+
 // ---------------------------------------------------------------------------
 // Frontmatter parsing
 // ---------------------------------------------------------------------------
@@ -461,6 +481,88 @@ function normalizeStatus(s: string): StatusKey {
   return "fail";
 }
 
+// ---------------------------------------------------------------------------
+// (#2910) Landing-page feature-row reconciliation
+// ---------------------------------------------------------------------------
+
+/** A test after edition classification, used to compute reconciled row counts. */
+export interface ClassifiedTest {
+  edition: number;
+  features: string[];
+  status: StatusKey;
+}
+
+export interface FeatureRowCount {
+  pass: number;
+  fail: number;
+  ce: number;
+  skip: number;
+  total: number;
+  pct: number;
+}
+
+/**
+ * (#2910) Compute the landing-page feature-row pass/total counts from the SAME
+ * per-test edition classification the section headline uses — the reconciled
+ * replacement for the path-glob population of #2774.
+ *
+ * For each landing feature `F` (keyed by its feature-examples.json `name`):
+ *   count(F) = | { tests classified into F's edition that carry ANY of F's
+ *                  `features:` tags } |
+ *
+ * Because the population is scoped to F's own edition and selected by tag, it is
+ * a strict SUBSET of that edition's headline population:
+ *   - a test is counted at most once per feature (union across tags, not sum),
+ *     so `total(F) ≤ edition total` — never the phantom path-glob count;
+ *   - if the edition is 100% pass, every subset (row) is also 100%.
+ *
+ * @param tests               classified tests (only edition > 0 with tags matter)
+ * @param featureTags         landing feature name → canonical test262 tag(s);
+ *                            an empty array = intentional headline-only row
+ * @param featureEditionYear  landing feature name → the edition YEAR it is shown
+ *                            under (scopes the population to that section)
+ */
+export function computeFeatureRowCounts(
+  tests: Iterable<ClassifiedTest>,
+  featureTags: Record<string, string[]>,
+  featureEditionYear: Record<string, number | undefined>,
+): Record<string, FeatureRowCount> {
+  // Index features by their edition year for O(candidates) matching per test.
+  const byYear = new Map<number, Array<{ name: string; tags: Set<string> }>>();
+  const acc: Record<string, { pass: number; fail: number; ce: number; skip: number }> = {};
+  for (const [name, tags] of Object.entries(featureTags)) {
+    acc[name] = { pass: 0, fail: 0, ce: 0, skip: 0 };
+    const yr = featureEditionYear[name];
+    if (yr === undefined || yr <= 0 || tags.length === 0) continue; // headline-only
+    const arr = byYear.get(yr) ?? [];
+    arr.push({ name, tags: new Set(tags) });
+    byYear.set(yr, arr);
+  }
+
+  for (const t of tests) {
+    const candidates = byYear.get(t.edition);
+    if (!candidates || t.features.length === 0) continue;
+    const testTags = new Set(t.features);
+    for (const f of candidates) {
+      let hit = false;
+      for (const tag of f.tags) {
+        if (testTags.has(tag)) {
+          hit = true;
+          break;
+        }
+      }
+      if (hit) acc[f.name]![t.status]++;
+    }
+  }
+
+  const out: Record<string, FeatureRowCount> = {};
+  for (const [name, c] of Object.entries(acc)) {
+    const total = c.pass + c.fail + c.ce + c.skip;
+    out[name] = { ...c, total, pct: total > 0 ? Math.round((c.pass / total) * 100) : 0 };
+  }
+  return out;
+}
+
 /**
  * (#1398) Derive a category path from a test file path. Mirrors the runner's
  * categorization (top two path segments after the leading `test/`), so the
@@ -492,6 +594,20 @@ interface ResultRecord {
   category?: string;
 }
 
+// #2910 — per-edition feature-tag slice. Each entry is the subset of the
+// edition's headline population that carries this `features:` tag, so it is a
+// strict subset of the edition (row total ≤ edition total; edition 100% ⇒ row
+// 100%). The `name` is the canonical test262 feature tag.
+interface FeatureSlice {
+  name: string;
+  pass: number;
+  fail: number;
+  ce: number;
+  skip: number;
+  total: number;
+  pct: number;
+}
+
 interface EditionBucket {
   edition: string;
   pass: number;
@@ -500,6 +616,8 @@ interface EditionBucket {
   skip: number;
   total: number;
   pct: number;
+  /** #2910 — feature-tag slices of this edition's population (frontmatter `features:`). */
+  features?: FeatureSlice[];
 }
 
 function getArg(args: string[], flag: string): string | undefined {
@@ -545,6 +663,19 @@ async function main() {
   // category table can filter to a selected edition.
   const categoryBuckets: Record<string, Record<number, { pass: number; fail: number; ce: number; skip: number }>> = {};
 
+  // (#2910) Per-edition × per-feature-tag buckets. Keyed by edition year then by
+  // the canonical test262 `features:` tag. A test contributes to each of its
+  // feature tags WITHIN its single assigned edition, so every slice is a strict
+  // subset of that edition's headline population (row total ≤ edition total;
+  // edition 100% ⇒ every row 100%). This is the reconciled row source for the
+  // landing-page edition sections (replaces the path-glob population of #2774).
+  const featureBuckets: Record<number, Record<string, { pass: number; fail: number; ce: number; skip: number }>> = {};
+  // Diagnostic: how many tests in each edition carry at least one `features:` tag.
+  const taggedCounts: Record<number, number> = {};
+  // (#2910) Every classified, tagged test — the input to computeFeatureRowCounts
+  // which patches the landing-page feature-row counts in feature-examples.json.
+  const taggedTests: ClassifiedTest[] = [];
+
   let classified = 0;
   let unclassified = 0;
   let processed = 0;
@@ -581,6 +712,22 @@ async function main() {
     const bucket = buckets[edition] ?? (buckets[edition] = { pass: 0, fail: 0, ce: 0, skip: 0 });
     bucket[key]++;
 
+    // (#2910) Slice this test into per-edition per-feature-tag buckets. Only
+    // standard editions (year > 0) carry feature rows on the landing page;
+    // ≤ES3/ES5-era tests predate `features:` and are handled headline-only.
+    if (edition > 0 && fm.features && fm.features.length > 0) {
+      taggedCounts[edition] = (taggedCounts[edition] ?? 0) + 1;
+      const dedupedTags = [...new Set(fm.features)];
+      const tagMap = featureBuckets[edition] ?? (featureBuckets[edition] = {});
+      // Dedup tags within a single test so a test that lists the same tag twice
+      // is counted once per slice.
+      for (const tag of dedupedTags) {
+        const fb = tagMap[tag] ?? (tagMap[tag] = { pass: 0, fail: 0, ce: 0, skip: 0 });
+        fb[key]++;
+      }
+      taggedTests.push({ edition, features: dedupedTags, status: key });
+    }
+
     // (#1398) Also accumulate into per-category × per-edition buckets.
     // Use the JSONL `category` field if present (the runner sets it to the
     // top-level path prefix, e.g. "language/expressions"); fall back to
@@ -602,6 +749,30 @@ async function main() {
     if (total === 0) continue; // skip empty buckets
 
     const name = EDITION_NAMES[yr] ?? `ES${yr}`;
+
+    // (#2910) Build this edition's feature-tag slices, sorted by population
+    // (largest first), dropping empty tags. Every slice is ⊆ this edition.
+    const tagMap = featureBuckets[yr];
+    let features: FeatureSlice[] | undefined;
+    if (tagMap) {
+      features = Object.entries(tagMap)
+        .map(([tag, c]) => {
+          const t = c.pass + c.fail + c.ce + c.skip;
+          return {
+            name: tag,
+            pass: c.pass,
+            fail: c.fail,
+            ce: c.ce,
+            skip: c.skip,
+            total: t,
+            pct: t > 0 ? Math.round((c.pass / t) * 100) : 0,
+          };
+        })
+        .filter((f) => f.total > 0)
+        .sort((a, b2) => b2.total - a.total || a.name.localeCompare(b2.name));
+      if (features.length === 0) features = undefined;
+    }
+
     output.push({
       edition: name,
       pass: b.pass,
@@ -610,6 +781,7 @@ async function main() {
       skip: b.skip,
       total,
       pct: total > 0 ? Math.round((b.pass / total) * 100) : 0,
+      ...(features ? { features } : {}),
     });
   }
 
@@ -627,6 +799,35 @@ async function main() {
   const accounted = output.reduce((sum, bucket) => sum + bucket.total, 0);
   if (accounted !== processed) {
     throw new Error(`Edition totals (${accounted}) do not match processed results (${processed}).`);
+  }
+
+  // (#2910) Feature-tag slice diagnostics + reconciliation invariants. Each
+  // slice must be a strict subset of its edition (total ≤ edition total, pass ≤
+  // edition pass), which structurally guarantees the acceptance property:
+  // "section 100% ⇒ every feature row 100%".
+  console.log("\nFeature-tag slices (per edition):");
+  for (const b of output) {
+    const nFeatures = b.features?.length ?? 0;
+    const yr = EDITION_ORDER.find((y) => (EDITION_NAMES[y] ?? `ES${y}`) === b.edition);
+    const tagged = yr !== undefined ? (taggedCounts[yr] ?? 0) : 0;
+    console.log(`  ${b.edition.padEnd(8)} ${nFeatures} tag slice(s), ${tagged}/${b.total} tests carry a features: tag`);
+    for (const f of b.features ?? []) {
+      if (f.total > b.total) {
+        throw new Error(
+          `Feature slice ${b.edition}/${f.name} total ${f.total} exceeds edition total ${b.total} (not a subset).`,
+        );
+      }
+      if (f.pass > b.pass) {
+        throw new Error(
+          `Feature slice ${b.edition}/${f.name} pass ${f.pass} exceeds edition pass ${b.pass} (not a subset).`,
+        );
+      }
+      if (b.pass === b.total && f.pass !== f.total) {
+        throw new Error(
+          `Edition ${b.edition} is 100% but feature slice ${f.name} is ${f.pass}/${f.total} (reconciliation broken).`,
+        );
+      }
+    }
   }
 
   // (#1398) Write the per-category × per-edition breakdown alongside the
@@ -666,9 +867,117 @@ async function main() {
     writeFileSync(categoriesPath, JSON.stringify(categoryEditionOutput, null, 2) + "\n");
     console.log(`Wrote ${Object.keys(categoryEditionOutput).length} category × edition buckets to: ${categoriesPath}`);
   }
+
+  // (#2910) Reconcile the landing-page feature-row counts with the edition
+  // headline. Only on the DEFAULT host run (no --output / --feature-examples
+  // override, i.e. the run that owns test262-editions.json + feature-examples
+  // .json). The standalone run passes --output and is skipped, keeping the
+  // host-lane feature counts intact.
+  const featureExamplesPath = getArg(args, "--feature-examples") ?? FEATURE_EXAMPLES_PATH;
+  const wantFeatureExamples =
+    !args.includes("--no-feature-examples") &&
+    (outputPath === OUTPUT_PATH || getArg(args, "--feature-examples") != null);
+  if (wantFeatureExamples) {
+    patchFeatureExamples(featureExamplesPath, taggedTests);
+  }
 }
 
-main().catch((e) => {
-  console.error(e);
-  process.exit(1);
-});
+/**
+ * (#2910) Rewrite `feature-examples.json`'s per-feature `passCount`/`totalCount`
+ * so the landing-page edition rows are the reconciled, edition-sliced
+ * `features:`-tag counts (a subset of each section's headline) instead of the
+ * path-glob population of #2774. Curated example code + `testCategories`
+ * (report links) are left untouched. Features not in the tag map — including
+ * every ≤ES3 / ES5 / Legacy / Proposals row, which predate `features:` — are
+ * set to 0/0 so the runtime treats them as headline-only (no phantom count).
+ * Best-effort: a missing map or catalog leaves the file untouched.
+ */
+function patchFeatureExamples(examplesPath: string, taggedTests: ClassifiedTest[]): void {
+  if (!existsSync(examplesPath)) {
+    console.warn(`[#2910] feature-examples not found at ${examplesPath} — skipping row reconciliation.`);
+    return;
+  }
+  if (!existsSync(FEATURE_T262_MAP_PATH)) {
+    console.warn(`[#2910] feature→tag map not found at ${FEATURE_T262_MAP_PATH} — skipping row reconciliation.`);
+    return;
+  }
+
+  let examples: { features?: Array<Record<string, unknown>> };
+  let rawMap: Record<string, unknown>;
+  try {
+    examples = JSON.parse(readFileSync(examplesPath, "utf-8"));
+    rawMap = JSON.parse(readFileSync(FEATURE_T262_MAP_PATH, "utf-8"));
+  } catch (e) {
+    console.warn(`[#2910] could not parse feature data — skipping row reconciliation: ${(e as Error).message}`);
+    return;
+  }
+  if (!Array.isArray(examples.features)) {
+    console.warn(`[#2910] feature-examples has no features[] — skipping row reconciliation.`);
+    return;
+  }
+
+  // Landing feature name → tags (drop the "_comment" and any non-array entry).
+  const featureTags: Record<string, string[]> = {};
+  for (const [name, tags] of Object.entries(rawMap)) {
+    if (name.startsWith("_")) continue;
+    if (Array.isArray(tags)) featureTags[name] = tags.map(String);
+  }
+
+  // Landing feature name → the edition YEAR it is displayed under (from the
+  // catalog's `edition` label), used to scope each row's population.
+  const featureEditionYear: Record<string, number | undefined> = {};
+  for (const f of examples.features) {
+    const nm = typeof f.name === "string" ? f.name : undefined;
+    if (nm) featureEditionYear[nm] = editionStringToYear(typeof f.edition === "string" ? f.edition : "");
+  }
+
+  const rowCounts = computeFeatureRowCounts(taggedTests, featureTags, featureEditionYear);
+
+  let reconciled = 0;
+  let headlineOnly = 0;
+  const unmapped: string[] = [];
+  for (const f of examples.features) {
+    const nm = typeof f.name === "string" ? f.name : "";
+    if (nm && Object.prototype.hasOwnProperty.call(featureTags, nm)) {
+      const c = rowCounts[nm]!;
+      f.passCount = c.pass;
+      f.totalCount = c.total;
+      reconciled++;
+    } else {
+      // Not in the tag map → headline-only (no per-row live count). Zero out any
+      // path-glob population so the phantom count never reaches the page.
+      f.passCount = 0;
+      f.totalCount = 0;
+      headlineOnly++;
+      const yr = editionStringToYear(typeof f.edition === "string" ? f.edition : "");
+      if (yr !== undefined && yr >= 2015 && nm) unmapped.push(nm);
+    }
+  }
+
+  writeFileSync(examplesPath, JSON.stringify(examples, null, 2) + "\n");
+  console.log(
+    `\n[#2910] Reconciled feature-examples row counts: ${reconciled} tag-sliced, ${headlineOnly} headline-only → ${examplesPath}`,
+  );
+  if (unmapped.length > 0) {
+    console.warn(
+      `[#2910] ${unmapped.length} ES2015+ feature row(s) have no tag mapping (headline-only) — add them to scripts/feature-t262-features.json:`,
+    );
+    for (const n of unmapped) console.warn(`  - ${n}`);
+  }
+}
+
+// Only run the generator when invoked directly (not when imported by tests).
+const invokedDirectly = (() => {
+  try {
+    return process.argv[1] != null && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url);
+  } catch {
+    return false;
+  }
+})();
+
+if (invokedDirectly) {
+  main().catch((e) => {
+    console.error(e);
+    process.exit(1);
+  });
+}
