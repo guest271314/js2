@@ -132,3 +132,8 @@ not a regression. arch-asyncgen's AG0–AG5 spec lives on `origin/async-gen-2865
   `await` arm.
 - `tests/issue-2865-standalone-async-await-unwrap.test.ts` — 7 standalone cases
   (zero-host-import asserted, correct values).
+
+
+## Reconciliation note (shepherd, 2026-07-01)
+
+Landed slice: **AG0** host-free await unwrap on native `$Promise` (PR #2380), reconciled net-neutral and **scoped to WASI**; the standalone async-generator drive is deferred to PATH B (#2895). Issue stays `in-progress`.
