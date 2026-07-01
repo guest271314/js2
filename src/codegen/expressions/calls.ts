@@ -41,6 +41,7 @@ import {
   emitTimerCallbackWrapper,
   emitTimerCancel,
   ensureTimerHeap,
+  getDrainFuncIdxForWasiStart,
   getRunLoopNowFuncIdx,
   isStandalonePromiseActive,
   isStandaloneThenChainNativeActive,
@@ -3921,6 +3922,34 @@ function compileCallExpression(
   {
     const r = tryWasiTimerCall(ctx, fctx, expr);
     if (r !== undefined) return r;
+  }
+
+  // (#2921) `__drain_microtasks()` — explicit microtask-queue drain intrinsic
+  // (banked from the closed #2367/#2867 PR-B; the funcIdx-shift half already
+  // landed via #2918). Lets a standalone/WASI embedder — and, once the carrier
+  // is activated for `--target standalone` (blocked on #2864's native $Frame),
+  // the test262 harness verdict-read — flush pending native `$Promise` reactions
+  // before observing module state. Native `.then` reactions are QUEUED, not run
+  // synchronously, so assertions inside them set state only once the queue drains.
+  //
+  // Fully INERT until something *calls* it: it emits the native drain ONLY when
+  // the microtask queue is already registered (some `.then`/Promise lowered
+  // earlier on a carrier target, `getDrainFuncIdxForWasiStart` non-null).
+  // Otherwise — every JS-host compile (the host owns its own microtask queue),
+  // and any carrier module with no Promise — it is a silent VOID no-op that emits
+  // NOTHING, so the identifier can be introduced into a wrapper unconditionally
+  // without leaking an import, forcing queue infra into Promise-free modules, or
+  // disturbing JS-host / gc / linear codegen (byte-identical off the carrier path).
+  if (
+    ts.isIdentifier(expr.expression) &&
+    expr.expression.text === "__drain_microtasks" &&
+    expr.arguments.length === 0
+  ) {
+    const drainIdx = getDrainFuncIdxForWasiStart(ctx);
+    if (drainIdx !== null) {
+      fctx.body.push({ op: "call", funcIdx: drainIdx });
+    }
+    return VOID_RESULT;
   }
 
   // Node-shaped process APIs are lowered in their own module so the generic
