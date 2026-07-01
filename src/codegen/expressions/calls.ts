@@ -26,7 +26,7 @@ import { classMemberFuncKey } from "../class-member-keys.js"; // (#1983) collisi
 import { ensureNativeIteratorRuntime } from "../iterator-native.js"; // (#2169c) native Array.from drain
 import { reserveClosedMethodDispatch, reserveClosedMethodDispatchVararg } from "../closed-method-dispatch.js";
 import { emitNativeDateParse } from "../date-parse-native.js"; // (#2164) pure-Wasm Date.parse / new Date(str)
-import { ensureObjVecBuilders, ensureObjectRuntime } from "../object-runtime.js";
+import { ensureObjVecBuilders, ensureObjectGroupBy, ensureObjectRuntime } from "../object-runtime.js";
 import {
   emitMicrotaskEnqueue,
   emitStandalonePromiseReject,
@@ -7725,6 +7725,38 @@ function compileCallExpression(
       propAccess.name.text === "groupBy" &&
       expr.arguments.length >= 2
     ) {
+      // (#2863 Phase 3) Standalone has no host `__object_groupBy`; register the
+      // native helper (array / array-like receiver) instead of refusing. The
+      // helper needs the closure bridge, so register it BEFORE lowering the args
+      // (append-only; no funcidx shift of this in-flight function). Generic
+      // iterables (Map/Set/user iterators) are the #2864 iterator-carrier
+      // follow-up and still fall through to the refusing host import below.
+      // Only take the native array/array-like path when the items arg is
+      // indexable (real Array, tuple, `any`, or an array-like with a numeric
+      // index signature). Map/Set/generic iterables have no numeric index →
+      // `__extern_length`/`__extern_get_idx` can't iterate them; keep refusing
+      // loudly there (the #2864 iterator carrier is the follow-up) rather than
+      // silently returning an empty grouping.
+      const gbItemsType = ctx.checker.getTypeAtLocation(expr.arguments[0]!);
+      const gbItemsIndexable =
+        ts.isArrayLiteralExpression(expr.arguments[0]!) || gbItemsType.getNumberIndexType() !== undefined;
+      if (ctx.standalone && gbItemsIndexable) {
+        const groupByIdx = ensureObjectGroupBy(ctx);
+        const iterTypeS = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "externref" });
+        if (iterTypeS && iterTypeS.kind !== "externref") coerceType(ctx, fctx, iterTypeS, { kind: "externref" });
+        // Compile the callback as a raw GC closure (call_ref via __apply_closure),
+        // NOT a host callback — `compileExpression` on an arrow that flows to a
+        // host import would insert `__make_callback`, leaking an env import into
+        // the standalone module (#2863). Mirrors the array-method callback path.
+        const cbArg = expr.arguments[1]!;
+        const fnTypeS =
+          ts.isArrowFunction(cbArg) || ts.isFunctionExpression(cbArg)
+            ? compileArrowAsClosure(ctx, fctx, cbArg)
+            : compileExpression(ctx, fctx, cbArg, { kind: "externref" });
+        if (fnTypeS && fnTypeS.kind !== "externref") coerceType(ctx, fctx, fnTypeS, { kind: "externref" });
+        fctx.body.push({ op: "call", funcIdx: groupByIdx });
+        return { kind: "externref" };
+      }
       const iterType = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "externref" });
       if (iterType && iterType.kind !== "externref") coerceType(ctx, fctx, iterType, { kind: "externref" });
       const fnType = compileExpression(ctx, fctx, expr.arguments[1]!, { kind: "externref" });

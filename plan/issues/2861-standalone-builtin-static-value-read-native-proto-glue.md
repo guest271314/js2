@@ -150,3 +150,8 @@ Validation: full `merge_group` (test262 merge shard reports) + standalone-floor
 high-water (`check-standalone-highwater.mjs`). Expect a net standalone pass gain
 of several hundred with **zero** host-mode regression (these paths are
 `ctx.standalone`-gated).
+
+
+## Reconciliation note (shepherd, 2026-07-01)
+
+Landed slices (native-proto glue wired, verified present in `src/codegen/`): **ArrayBuffer, DataView** (PR #2340), **Promise, Iterator, NativeError subclasses** (PR #2341), **SharedArrayBuffer, WeakRef, FinalizationRegistry** (PR #2344). **Remaining (issue stays `ready`)**: `DisposableStack` / `AsyncDisposableStack` proto glue not yet wired (no `ensureDisposableStack*NativeProtoGlue` in source), plus the `Math`/`JSON`/`Reflect`/`Atomics` namespace static reads explicitly split out per the Implementation Plan.

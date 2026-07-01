@@ -274,3 +274,8 @@ change (the intended unlock). All Gap-3 machine instrs are guarded on
 **Stacked on slice 1 (#2413)** — branch `issue-2906-gap3-tryfinally` from the
 slice-1 branch; enqueue after #2413 lands. Gap 5 (for-await / async-gen) builds on
 this same abrupt-completion machinery; the slice-1d widen stays LAST.
+
+
+## Reconciliation note (shepherd, 2026-07-01)
+
+Landed slices: **slice 1** general N-state async resume machine (PR #2413), **slice 2 / Gap 3** try/finally-across-await on the N-state machine (PR #2416). Issue stays `in-progress` for the remaining slices.
