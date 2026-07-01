@@ -262,3 +262,8 @@ the `built-ins/Object/getOwnPropertySymbols` standalone dir improves (the
 remaining fails are Proxy-dependent / ToObject-coercion / not-a-constructor —
 separate concerns). The full merge_group standalone report is the conformance
 gate.
+
+
+## Reconciliation note (shepherd, 2026-07-01)
+
+Landed slices: native **Symbol carrier** (PR #2377), **Object.getOwnPropertySymbols SELECT** side (PR #2379, slice 3), **Symbol.toPrimitive string-hint** dispatch (PR #2382, slice 4). The carrier core is in; issue stays `in-progress` for the full-acceptance residual (typeof/registry routing + the ~418-test flip).

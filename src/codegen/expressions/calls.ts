@@ -26,7 +26,7 @@ import { classMemberFuncKey } from "../class-member-keys.js"; // (#1983) collisi
 import { ensureNativeIteratorRuntime } from "../iterator-native.js"; // (#2169c) native Array.from drain
 import { reserveClosedMethodDispatch, reserveClosedMethodDispatchVararg } from "../closed-method-dispatch.js";
 import { emitNativeDateParse } from "../date-parse-native.js"; // (#2164) pure-Wasm Date.parse / new Date(str)
-import { ensureObjVecBuilders, ensureObjectRuntime } from "../object-runtime.js";
+import { ensureObjVecBuilders, ensureObjectGroupBy, ensureObjectRuntime } from "../object-runtime.js";
 import {
   emitMicrotaskEnqueue,
   emitStandalonePromiseReject,
@@ -41,6 +41,7 @@ import {
   emitTimerCallbackWrapper,
   emitTimerCancel,
   ensureTimerHeap,
+  getDrainFuncIdxForWasiStart,
   getRunLoopNowFuncIdx,
   isStandalonePromiseActive,
   isStandaloneThenChainNativeActive,
@@ -3923,6 +3924,34 @@ function compileCallExpression(
     if (r !== undefined) return r;
   }
 
+  // (#2921) `__drain_microtasks()` — explicit microtask-queue drain intrinsic
+  // (banked from the closed #2367/#2867 PR-B; the funcIdx-shift half already
+  // landed via #2918). Lets a standalone/WASI embedder — and, once the carrier
+  // is activated for `--target standalone` (blocked on #2864's native $Frame),
+  // the test262 harness verdict-read — flush pending native `$Promise` reactions
+  // before observing module state. Native `.then` reactions are QUEUED, not run
+  // synchronously, so assertions inside them set state only once the queue drains.
+  //
+  // Fully INERT until something *calls* it: it emits the native drain ONLY when
+  // the microtask queue is already registered (some `.then`/Promise lowered
+  // earlier on a carrier target, `getDrainFuncIdxForWasiStart` non-null).
+  // Otherwise — every JS-host compile (the host owns its own microtask queue),
+  // and any carrier module with no Promise — it is a silent VOID no-op that emits
+  // NOTHING, so the identifier can be introduced into a wrapper unconditionally
+  // without leaking an import, forcing queue infra into Promise-free modules, or
+  // disturbing JS-host / gc / linear codegen (byte-identical off the carrier path).
+  if (
+    ts.isIdentifier(expr.expression) &&
+    expr.expression.text === "__drain_microtasks" &&
+    expr.arguments.length === 0
+  ) {
+    const drainIdx = getDrainFuncIdxForWasiStart(ctx);
+    if (drainIdx !== null) {
+      fctx.body.push({ op: "call", funcIdx: drainIdx });
+    }
+    return VOID_RESULT;
+  }
+
   // Node-shaped process APIs are lowered in their own module so the generic
   // call-expression compiler does not accumulate host API special cases.
   const nodeProcessCall = tryCompileNodeProcessCall(ctx, fctx, expr);
@@ -7725,6 +7754,38 @@ function compileCallExpression(
       propAccess.name.text === "groupBy" &&
       expr.arguments.length >= 2
     ) {
+      // (#2863 Phase 3) Standalone has no host `__object_groupBy`; register the
+      // native helper (array / array-like receiver) instead of refusing. The
+      // helper needs the closure bridge, so register it BEFORE lowering the args
+      // (append-only; no funcidx shift of this in-flight function). Generic
+      // iterables (Map/Set/user iterators) are the #2864 iterator-carrier
+      // follow-up and still fall through to the refusing host import below.
+      // Only take the native array/array-like path when the items arg is
+      // indexable (real Array, tuple, `any`, or an array-like with a numeric
+      // index signature). Map/Set/generic iterables have no numeric index →
+      // `__extern_length`/`__extern_get_idx` can't iterate them; keep refusing
+      // loudly there (the #2864 iterator carrier is the follow-up) rather than
+      // silently returning an empty grouping.
+      const gbItemsType = ctx.checker.getTypeAtLocation(expr.arguments[0]!);
+      const gbItemsIndexable =
+        ts.isArrayLiteralExpression(expr.arguments[0]!) || gbItemsType.getNumberIndexType() !== undefined;
+      if (ctx.standalone && gbItemsIndexable) {
+        const groupByIdx = ensureObjectGroupBy(ctx);
+        const iterTypeS = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "externref" });
+        if (iterTypeS && iterTypeS.kind !== "externref") coerceType(ctx, fctx, iterTypeS, { kind: "externref" });
+        // Compile the callback as a raw GC closure (call_ref via __apply_closure),
+        // NOT a host callback — `compileExpression` on an arrow that flows to a
+        // host import would insert `__make_callback`, leaking an env import into
+        // the standalone module (#2863). Mirrors the array-method callback path.
+        const cbArg = expr.arguments[1]!;
+        const fnTypeS =
+          ts.isArrowFunction(cbArg) || ts.isFunctionExpression(cbArg)
+            ? compileArrowAsClosure(ctx, fctx, cbArg)
+            : compileExpression(ctx, fctx, cbArg, { kind: "externref" });
+        if (fnTypeS && fnTypeS.kind !== "externref") coerceType(ctx, fctx, fnTypeS, { kind: "externref" });
+        fctx.body.push({ op: "call", funcIdx: groupByIdx });
+        return { kind: "externref" };
+      }
       const iterType = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "externref" });
       if (iterType && iterType.kind !== "externref") coerceType(ctx, fctx, iterType, { kind: "externref" });
       const fnType = compileExpression(ctx, fctx, expr.arguments[1]!, { kind: "externref" });
