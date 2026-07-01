@@ -1,137 +1,137 @@
 [
   {
     "edition": "≤ ES3",
-    "pass": 219,
-    "fail": 51,
+    "pass": 209,
+    "fail": 61,
     "ce": 4,
     "skip": 0,
     "total": 274,
-    "pct": 80
+    "pct": 76
   },
   {
     "edition": "ES5",
-    "pass": 7319,
-    "fail": 4176,
-    "ce": 1591,
+    "pass": 3120,
+    "fail": 8582,
+    "ce": 1384,
     "skip": 0,
     "total": 13086,
-    "pct": 56
+    "pct": 24
   },
   {
     "edition": "ES2015",
-    "pass": 7768,
-    "fail": 5315,
-    "ce": 2315,
+    "pass": 5096,
+    "fail": 8152,
+    "ce": 2150,
     "skip": 0,
     "total": 15398,
-    "pct": 50
+    "pct": 33
   },
   {
     "edition": "ES2016",
-    "pass": 80,
-    "fail": 30,
+    "pass": 60,
+    "fail": 50,
     "ce": 13,
     "skip": 0,
     "total": 123,
-    "pct": 65
+    "pct": 49
   },
   {
     "edition": "ES2017",
-    "pass": 310,
-    "fail": 86,
-    "ce": 271,
+    "pass": 144,
+    "fail": 244,
+    "ce": 279,
     "skip": 0,
     "total": 667,
-    "pct": 46
+    "pct": 22
   },
   {
     "edition": "ES2018",
-    "pass": 2699,
-    "fail": 1247,
-    "ce": 305,
+    "pass": 1087,
+    "fail": 2875,
+    "ce": 289,
     "skip": 0,
     "total": 4251,
-    "pct": 63
+    "pct": 26
   },
   {
     "edition": "ES2019",
-    "pass": 28,
-    "fail": 79,
+    "pass": 11,
+    "fail": 96,
     "ce": 29,
     "skip": 0,
     "total": 136,
-    "pct": 21
+    "pct": 8
   },
   {
     "edition": "ES2020",
-    "pass": 1157,
-    "fail": 347,
-    "ce": 378,
+    "pass": 248,
+    "fail": 1294,
+    "ce": 340,
     "skip": 18,
     "total": 1900,
-    "pct": 61
+    "pct": 13
   },
   {
     "edition": "ES2021",
-    "pass": 272,
-    "fail": 105,
-    "ce": 86,
+    "pass": 203,
+    "fail": 172,
+    "ce": 88,
     "skip": 0,
     "total": 463,
-    "pct": 59
-  },
-  {
-    "edition": "ES2022",
-    "pass": 2858,
-    "fail": 874,
-    "ce": 503,
-    "skip": 0,
-    "total": 4235,
-    "pct": 67
-  },
-  {
-    "edition": "ES2023",
-    "pass": 145,
-    "fail": 54,
-    "ce": 135,
-    "skip": 0,
-    "total": 334,
-    "pct": 43
-  },
-  {
-    "edition": "ES2024",
-    "pass": 285,
-    "fail": 101,
-    "ce": 259,
-    "skip": 0,
-    "total": 645,
     "pct": 44
   },
   {
+    "edition": "ES2022",
+    "pass": 1486,
+    "fail": 2257,
+    "ce": 492,
+    "skip": 0,
+    "total": 4235,
+    "pct": 35
+  },
+  {
+    "edition": "ES2023",
+    "pass": 55,
+    "fail": 147,
+    "ce": 132,
+    "skip": 0,
+    "total": 334,
+    "pct": 16
+  },
+  {
+    "edition": "ES2024",
+    "pass": 173,
+    "fail": 247,
+    "ce": 225,
+    "skip": 0,
+    "total": 645,
+    "pct": 27
+  },
+  {
     "edition": "ES2025",
-    "pass": 575,
-    "fail": 423,
-    "ce": 277,
+    "pass": 377,
+    "fail": 622,
+    "ce": 276,
     "skip": 0,
     "total": 1275,
-    "pct": 45
+    "pct": 30
   },
   {
     "edition": "ES2026",
-    "pass": 54,
-    "fail": 109,
-    "ce": 186,
+    "pass": 14,
+    "fail": 151,
+    "ce": 184,
     "skip": 0,
     "total": 349,
-    "pct": 15
+    "pct": 4
   },
   {
     "edition": "Proposals",
-    "pass": 1140,
-    "fail": 1019,
+    "pass": 332,
+    "fail": 1827,
     "ce": 2718,
     "skip": 105,
     "total": 4982,
-    "pct": 23
+    "pct": 7
   }
 ]

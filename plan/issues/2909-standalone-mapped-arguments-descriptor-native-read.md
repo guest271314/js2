@@ -3,12 +3,45 @@ id: 2909
 title: standalone mapped-arguments [[DefineOwnProperty]] descriptor semantics under fully-native read
 area: codegen-standalone
 feasibility: hard
-status: ready
+status: wont-fix
 related: [2908, 1472]
 sprint: Backlog
 priority: low
 horizon: m
 ---
+
+## Measure-first verdict (2026-07-01, sdev-tail) — NOT REPRODUCIBLE, closing wont-fix
+
+Re-measured on a tree that **includes #2908** (fix commit `005e92a6b` verified an
+ancestor of the measured HEAD `a8dba40bc`), i.e. the post-#2908 fully-native
+`obj[key]` read is in effect. Ran the whole `language/arguments-object/mapped/**`
+corpus (43 files) host-mode vs `--target standalone` via
+`runTest262File(..., "standalone")`:
+
+```
+CONVERTIBLE (host=pass, standalone=fail) = 0
+both-pass  = 39
+other      = 4   (all host=fail AND standalone=fail — pre-existing gaps that
+                  affect HOST too, so not standalone-specific)
+```
+
+Every host-passing mapped-arguments test **also passes standalone**. The
+env-import leak is likewise gone: the whole `mapped/**` dir compiles **host-free**
+(`leaky=0` — zero `env::` imports in the emitted module). The specific descriptor
+test this issue cited,
+`nonconfigurable-nonwritable-descriptors-set-by-arguments.js`, is **both-pass**
+(host=pass, sa=pass). The 4 `other` files
+(`enumerable-configurable-accessor-descriptor.js`,
+`nonconfigurable-descriptors-define-failure.js`,
+`nonwritable-nonenumerable-nonconfigurable-descriptors-set-by-define-property.js`,
+`writable-enumerable-configurable-descriptor.js`) fail **identically** in host and
+standalone — a host-mode gap, out of scope for a standalone-specific issue.
+
+**Conclusion:** the predicted pass→host-free-fail flip (#2908 exposing a native
+mapped-arguments `[[DefineOwnProperty]]`/mapping-removal gap) does **not**
+reproduce on current main — #2908 as-merged did not regress these tests. There is
+nothing to convert. Closing `wont-fix`; re-file with a concrete
+host-pass/standalone-fail repro if one surfaces.
 
 ## Problem
 

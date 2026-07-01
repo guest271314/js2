@@ -57,6 +57,12 @@ try {
       standaloneJsonl,
       "--output",
       resolve(ROOT, "website", "public", "benchmarks", "results", "test262-standalone-editions.json"),
+      // (#2914) The standalone lane must count a `pass` only when it is
+      // host-free (no `env::__*` runtime import) — mirroring the standalone
+      // donut headline (#2879) and the absolute floor (#2097). Without this,
+      // the per-edition slider counted leaky (host-import) passes and diverged
+      // from the honest headline/floor.
+      "--host-free",
     ]);
   } else {
     console.warn(

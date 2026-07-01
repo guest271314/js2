@@ -1,10 +1,12 @@
 ---
 id: 2914
 title: "Standalone per-edition pass rates count leaky (host-import) passes, diverging from the host-free headline/floor"
-status: ready
+status: done
+assignee: ttraenkler/fix2914
 priority: medium
 sprint: current
 created: 2026-07-01
+completed: 2026-07-01
 feasibility: medium
 task_type: bug
 area: tooling
@@ -64,3 +66,44 @@ fine — the divergence is purely in the **pass definition**.
 - Standalone per-edition pass rates and the standalone headline both use
   `host_free_pass`; the landing-page slider and donut agree for the standalone
   toggle.
+
+## Resolution (2026-07-01)
+
+Implemented the `--host-free` flag (also triggered by `--target standalone`) in
+`scripts/generate-editions.ts` and wired it into the standalone invocation in
+`scripts/run-pages-build.mjs`.
+
+**Changes:**
+- `scripts/generate-editions.ts`
+  - `ResultRecord` gains `host_import_leak_class?: string` (the field was already
+    present in the standalone JSONL rows — confirmed 23,987/48,118 rows carry it).
+  - New `resolveStatusKey(record, hostFree)` helper: in host-free mode a raw
+    `status === "pass"` with a truthy `host_import_leak_class` is demoted to
+    `fail` (kept in `total`, dropped from `pass`) — mirroring
+    `build-test262-report.mjs:844` and `check-standalone-highwater.mjs`. All three
+    counting sites (proposal bucket, edition bucket, category bucket) route
+    through it.
+  - `--host-free` / `--target standalone` arg parsing; default (host/`gc`) mode is
+    unchanged and still counts raw `pass`.
+- `scripts/run-pages-build.mjs` — the standalone `generate-editions.ts` invocation
+  now passes `--host-free`.
+- `website/public/benchmarks/results/test262-standalone-editions.json` regenerated
+  with the honest counts.
+
+**Verification (against the fetched standalone baseline JSONL):**
+
+| metric                                   | before (raw) | after (host-free) |
+| ---------------------------------------- | ------------ | ----------------- |
+| Σ edition `pass` (standalone slider)     | 25,292       | **12,615**        |
+| donut/floor `host_free_pass`             | 12,615       | 12,615            |
+| leaky passes demoted (pass w/ host leak) | —            | 12,677            |
+
+The standalone slider total now **exactly equals** the donut/floor
+`host_free_pass` (12,615), so all standalone surfaces agree. Per-edition rates
+drop to the honest host-free rate (e.g. ES5 56%→24%, ES2015 50%→33%). The host
+(`gc`) editions invocation is untouched and still counts raw `pass`. `tsc
+--noEmit` clean; prettier clean.
+
+Leaky-pass breakdown (why the slider was inflated): `host_import` 4,916,
+`iterator_protocol` 4,783, `dynamic_object_property` 2,645, `dynamic_code` 325,
+`regexp` 8.
