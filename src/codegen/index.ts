@@ -13832,6 +13832,22 @@ function collectDeclaredGlobals(ctx: CodegenContext, libFile: ts.SourceFile, use
       if (ctx.declaredGlobals.has(name)) continue;
       const type = ctx.checker.getTypeAtLocation(decl);
       if (!isExternalDeclaredClass(type, ctx.checker)) continue;
+      // #2907 — under no-JS-host mode (standalone as well as
+      // strictNoHostImports/wasi) there is no host to satisfy
+      // `env.global_<Name>`. `TypeError`, `Error`, `RegExp`, `Reflect`, the
+      // *Error subtypes etc. are NOT in `BUILTIN_TYPES`, so they reach here via
+      // `isExternalDeclaredClass` and leaked a `global_<Name>` host import in
+      // standalone — the ambient-ctor loop below already skips under strict mode
+      // (#2696) but this earlier declared-globals loop had no such guard. A bare
+      // value use of the global (the harness `expectedError = TypeError` idiom,
+      // an array literal `[TypeError, RangeError]`, `Object.getPrototypeOf(Reflect)`)
+      // was the sole standalone blocker for a large cluster. `instanceof`/`new`
+      // are resolved BEFORE identifier resolution (static builtin-tag registry in
+      // builtin-tags.ts / `new`-callee interception), so dropping the host value
+      // binding here only affects genuine bare-value uses, which fall through to
+      // the native-namespace carrier (identifiers.ts:emitBuiltinNamespaceObject)
+      // or the `ref.null.extern` graceful default. Host/gc mode is unchanged.
+      if (ctx.strictNoHostImports || ctx.standalone) continue;
       const importName = `global_${name}`;
       const typeIdx = addFuncType(ctx, [], [{ kind: "externref" }]);
       addImport(ctx, "env", importName, { kind: "func", typeIdx });
@@ -13893,17 +13909,25 @@ function collectDeclaredGlobals(ctx: CodegenContext, libFile: ts.SourceFile, use
     // native fast paths and needs no host constructor object.
     if (!valueRefNames.has(name)) continue;
     if (ctx.declaredGlobals.has(name)) continue;
-    // #2696 — under strict-no-host-imports (auto-on for --target wasi /
-    // standalone) there is no JS host to satisfy `env.global_<Ctor>`, so
-    // addImport would drop it AND, because the dropped import leaves no funcMap
-    // entry, the `declaredGlobals.set` below never fires either — the whole
-    // registration is already a no-op EXCEPT for the spurious "not on the
-    // dual-mode allowlist" warning it emits. nm_js2wasm_node_process.ts trips this via
-    // the `String.fromCharCode` receiver in the injected process.stdin prelude
+    // #2696 — under strict-no-host-imports (auto-on for --target wasi) there is
+    // no JS host to satisfy `env.global_<Ctor>`, so addImport would drop it AND,
+    // because the dropped import leaves no funcMap entry, the
+    // `declaredGlobals.set` below never fires either — the whole registration is
+    // already a no-op EXCEPT for the spurious "not on the dual-mode allowlist"
+    // warning it emits. nm_js2wasm_node_process.ts trips this via the
+    // `String.fromCharCode` receiver in the injected process.stdin prelude
     // (loopdive/js2#389 bug 2: `env.global_String`). Skip it so the standalone
     // module compiles cleanly; bare identity uses already had no host global
     // under strict mode, so behavior is unchanged.
-    if (ctx.strictNoHostImports) continue;
+    // #2907 — `ctx.standalone` is a SEPARATE flag from `strictNoHostImports`
+    // (create-context.ts: strictNoHostImports defaults to `wasi`, NOT
+    // `standalone`), so the guard above missed `--target standalone`. A bare
+    // value use of an ambient ctor there (`[Int8Array, Uint8Array, …].forEach`,
+    // `expectedError = TypeError`) leaked `env.global_<Ctor>` with no host to
+    // satisfy it. Include `ctx.standalone` so standalone stops leaking the host
+    // constructor object; bare-value uses fall through to the native carrier /
+    // ref.null.extern default exactly as under wasi.
+    if (ctx.strictNoHostImports || ctx.standalone) continue;
     const importName = `global_${name}`;
     const typeIdx = addFuncType(ctx, [], [{ kind: "externref" }]);
     addImport(ctx, "env", importName, { kind: "func", typeIdx });

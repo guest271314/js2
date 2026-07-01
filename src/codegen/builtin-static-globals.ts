@@ -20,6 +20,33 @@ import { stringConstantExternrefInstrs } from "./native-strings.js";
 const SUPPORTED_STATIC_PROPS: ReadonlyMap<string, readonly string[]> = new Map([
   ["Array", ["isArray"]],
   ["Object", ["keys"]],
+  // #2907 — bare-value carriers for the well-known namespace globals. An EMPTY
+  // supported-prop list means: materialize a native extensible `$Object`
+  // singleton for the bare identifier (`Math`, `JSON`, `Reflect` used as a
+  // VALUE — `Object.isFrozen(Math)`, `[].filter(fn, JSON)` thisArg,
+  // `Object.getPrototypeOf(Reflect)`), WITHOUT claiming any supported static
+  // property. `isSupportedBuiltinStaticProperty(ns, m)` stays false for these,
+  // so `Math.PI` / `JSON.stringify` / `Reflect.ownKeys` keep their existing
+  // property-access fast paths (those are intercepted at the property-access
+  // site, before identifier resolution of the receiver). This only affects the
+  // bare-identifier value read, which previously leaked `env.global_<Name>`.
+  ["Math", []],
+  ["JSON", []],
+  ["Reflect", []],
+  // #2907 — Error-family constructors as bare-value carriers. `expectedError =
+  // TypeError`, `[TypeError, RangeError]`, `Object.isFrozen(TypeError)`. A `new
+  // TypeError(...)` / `TypeError(...)` callee and `e instanceof TypeError` are
+  // resolved BEFORE identifier resolution (native-error construction /
+  // static builtin-tag registry), so the carrier only backs the bare-value read
+  // — which previously leaked `env.global_<Name>` or fell to a null default.
+  ["Error", []],
+  ["TypeError", []],
+  ["RangeError", []],
+  ["SyntaxError", []],
+  ["ReferenceError", []],
+  ["EvalError", []],
+  ["URIError", []],
+  ["AggregateError", []],
 ]);
 
 export function isSupportedBuiltinNamespace(name: string): boolean {
