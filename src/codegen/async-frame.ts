@@ -543,24 +543,41 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
   const reasonLocal = allocLocal(resumeFctx, "__async_reason", { kind: "externref" });
   const N = linear.segments.length;
 
+  // (#2906 Gap 3) try/finally-across-await. When the body has a single
+  // try/finally spanning an await, `inSrcTryLocal` (an i32 resume-local) records
+  // whether control is currently inside the try region. The outer catch runs the
+  // `finally` before rejecting when the flag is set (an abrupt completion — a
+  // throw or a rejected await — while inside the try); the `finally` also runs
+  // inline on the normal path (`planLinearAwaits` appends it to the post-try
+  // lead). The local + all associated instrs are emitted ONLY when a finalizer
+  // exists, so non-try async stays byte-identical to slice 1.
+  const theFinalizer = linear.finalizer;
+  const hasFinalizer = theFinalizer !== null;
+  const inSrcTryLocal = hasFinalizer ? allocLocal(resumeFctx, "__async_in_try", { kind: "i32" }) : -1;
+  const setInTry = (v: number): Instr[] => [
+    { op: "i32.const", value: v },
+    { op: "local.set", index: inSrcTryLocal },
+  ];
+
   // Emit `SENT_FIELD → predecessor await's resume binding`, guarded by a
   // MODE_THROW re-throw of a rejected predecessor. `s` is the state whose
   // predecessor await is `s-1` (used by state s≥1 and the final state N).
   const emitDeliverPrev = (out: Instr[], s: number): void => {
+    const prev = linear.segments[s - 1]!;
+    // A rejected predecessor await that sat inside a try must run the finally
+    // before the result promise rejects — arm `inSrcTry` so the outer catch does.
+    const throwArm: Instr[] = [];
+    if (hasFinalizer && prev.awaitInTry) throwArm.push(...setInTry(1));
+    throwArm.push(
+      { op: "local.get", index: frameLocal },
+      { op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: ERROR_FIELD } as Instr,
+      { op: "throw", tagIdx: exnTag } as Instr,
+    );
     out.push({ op: "local.get", index: frameLocal });
     out.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: MODE_FIELD });
     out.push({ op: "i32.const", value: MODE_THROW });
     out.push({ op: "i32.eq" });
-    out.push({
-      op: "if",
-      blockType: { kind: "empty" },
-      then: [
-        { op: "local.get", index: frameLocal },
-        { op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: ERROR_FIELD } as Instr,
-        { op: "throw", tagIdx: exnTag } as Instr,
-      ],
-    } as Instr);
-    const prev = linear.segments[s - 1]!;
+    out.push({ op: "if", blockType: { kind: "empty" }, then: throwArm } as Instr);
     if (prev.resumeBinding) {
       const bl = bindingLocal.get(prev.resumeBinding.name)!;
       out.push({ op: "local.get", index: frameLocal });
@@ -578,8 +595,27 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
     const out: Instr[] = [];
     resumeFctx.body = out;
     try {
+      // (#2906 Gap 3) Reset the in-try flag at arm entry (a resume enters here
+      // fresh; a fast-path advance re-dispatched from an earlier in-try state).
+      let curFlag = false;
+      if (hasFinalizer) out.push(...setInTry(0));
       if (s >= 1) emitDeliverPrev(out, s);
-      for (const stmt of seg.leadStmts) compileStatement(ctx, resumeFctx, stmt);
+
+      // Compile the lead, toggling `inSrcTry` at each in-try/out-of-try boundary
+      // (`leadInTry[i]`) so a throw in an in-try statement (or the await eval)
+      // runs the finally; a throw in an out-of-try statement (or the inline
+      // finally itself) does not.
+      for (let i = 0; i < seg.leadStmts.length; i++) {
+        if (hasFinalizer && seg.leadInTry[i]! !== curFlag) {
+          curFlag = seg.leadInTry[i]!;
+          out.push(...setInTry(curFlag ? 1 : 0));
+        }
+        compileStatement(ctx, resumeFctx, seg.leadStmts[i]!);
+      }
+      if (hasFinalizer && seg.awaitInTry !== curFlag) {
+        curFlag = seg.awaitInTry;
+        out.push(...setInTry(curFlag ? 1 : 0));
+      }
 
       const awaitedType = compileExpression(ctx, resumeFctx, seg.awaitedExpr);
       if (awaitedType !== null && awaitedType !== undefined) {
@@ -686,6 +722,8 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
     const out: Instr[] = [];
     resumeFctx.body = out;
     try {
+      let curFlag = false;
+      if (hasFinalizer) out.push(...setInTry(0));
       emitDeliverPrev(out, N);
       const last = linear.segments[N - 1]!;
       if (last.isReturnAwait) {
@@ -696,7 +734,15 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
         out.push({ op: "drop" });
         out.push({ op: "return" });
       } else {
-        for (const stmt of linear.tail) compileStatement(ctx, resumeFctx, stmt);
+        // Run the tail, toggling `inSrcTry` per statement (`tailInTry[i]`) —
+        // covers in-try post-await statements that precede the inline finally.
+        for (let i = 0; i < linear.tail.length; i++) {
+          if (hasFinalizer && linear.tailInTry[i]! !== curFlag) {
+            curFlag = linear.tailInTry[i]!;
+            out.push(...setInTry(curFlag ? 1 : 0));
+          }
+          compileStatement(ctx, resumeFctx, linear.tail[i]!);
+        }
         out.push({ op: "local.get", index: resultPromiseLocal });
         out.push({ op: "ref.null.extern" } as Instr);
         out.push({ op: "call", funcIdx: rt.fulfillFuncIdx });
@@ -728,8 +774,29 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
   const savedFunc = ctx.currentFunc;
   ctx.currentFunc = resumeFctx;
   let chain: Instr[];
+  // (#2906 Gap 3) The finally, compiled a SECOND time for the abrupt path (the
+  // first copy runs inline on the normal path via the post-try lead). Fresh
+  // Instr[] — never aliased with the inline copy. Guarded by `inSrcTry` in the
+  // catch so it runs only for a throw/rejected-await that crossed the try.
+  let catchFinallyInstrs: Instr[] = [];
   try {
     chain = buildStateArm(0);
+    if (hasFinalizer) {
+      const saved = resumeFctx.body;
+      ctx.liveBodies.add(saved);
+      const fbody: Instr[] = [];
+      resumeFctx.body = fbody;
+      try {
+        for (const f of theFinalizer!) compileStatement(ctx, resumeFctx, f);
+      } finally {
+        resumeFctx.body = saved;
+        ctx.liveBodies.delete(saved);
+      }
+      catchFinallyInstrs = [
+        { op: "local.get", index: inSrcTryLocal },
+        { op: "if", blockType: { kind: "empty" }, then: fbody } as Instr,
+      ];
+    }
   } finally {
     ctx.currentFunc = savedFunc;
   }
@@ -756,6 +823,9 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
         tagIdx: exnTag,
         body: [
           { op: "local.set", index: reasonLocal },
+          // (#2906 Gap 3) run the finally before rejecting, if the throw crossed
+          // the try region (inline no-op array when the body has no finally).
+          ...catchFinallyInstrs,
           { op: "local.get", index: resultPromiseLocal },
           { op: "local.get", index: reasonLocal },
           { op: "call", funcIdx: rt.rejectFuncIdx },
