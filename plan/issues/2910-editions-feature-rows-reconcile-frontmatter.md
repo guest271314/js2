@@ -1,7 +1,8 @@
 ---
 id: 2910
 title: "Editions dashboard: classify feature rows by `features:` frontmatter (edition-sliced) so they reconcile with the section headline"
-status: ready
+status: in-progress
+assignee: ttraenkler/impl2910
 priority: medium
 sprint: current
 created: 2026-07-01
