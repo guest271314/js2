@@ -1284,6 +1284,147 @@ function emitDynamicInstanceOf(ctx: CodegenContext, fctx: FunctionContext, expr:
 }
 
 /**
+ * (#2916) Deduped root struct type indices of every registered closure wrapper,
+ * for `ref.test`-discriminating a callable (Function membership). Mirrors the
+ * private helper in `dyn-read.ts` / `index.ts` (walking each closure struct up
+ * its `superTypeIdx` chain to the root) — inlined here to avoid a cross-module
+ * import cycle. Type-index `ref.test` is rec-group / dead-elim stable, so this
+ * carries no funcidx-shift hazard.
+ */
+function closureRootTypeIdxsFor(ctx: CodegenContext): number[] {
+  const mod = ctx.mod;
+  const out: number[] = [];
+  const seen = new Set<number>();
+  for (const [typeIdx, info] of ctx.closureInfoByTypeIdx) {
+    if (!info) continue;
+    const typeDef = mod.types[typeIdx];
+    if (!typeDef || typeDef.kind !== "struct") continue;
+    let root = typeIdx;
+    let cur: typeof typeDef = typeDef;
+    while (cur && cur.kind === "struct" && cur.superTypeIdx !== undefined && cur.superTypeIdx >= 0) {
+      const parent = mod.types[cur.superTypeIdx];
+      if (!parent || parent.kind !== "struct") break;
+      root = cur.superTypeIdx;
+      cur = parent;
+    }
+    if (!seen.has(root)) {
+      seen.add(root);
+      out.push(root);
+    }
+  }
+  return out;
+}
+
+/**
+ * (#2916) Backing-struct type indices answering `value instanceof <Builtin>`
+ * natively via `ref.test`, for the `noJsHost` (standalone / WASI) string-name
+ * path where the legacy `__instanceof` host import is unsatisfiable.
+ *
+ * Return contract:
+ *   - non-empty list → emit an OR of `ref.test <typeIdx>` (membership test)
+ *   - empty list     → the module never registers that builtin's backing struct,
+ *                      so NO value can be an instance → a definite `0`
+ *   - `undefined`    → this builtin is not natively modeled here; caller emits a
+ *                      conservative `0` (a missed conversion, never a wrong
+ *                      `true`)
+ *
+ * SAFETY: this whole branch only runs under `noJsHost`, where the string-name
+ * path currently *always* leaks `__instanceof` (→ the module cannot instantiate
+ * standalone, so every reaching test already fails). A native answer can only
+ * CONVERT a failing test, never regress a passing one; gc/host is byte-identical
+ * (this branch is skipped there); and `ref.test` uses *type* indices, which are
+ * rec-group / dead-elim stable (no funcidx-ordering hazard).
+ *
+ * Error-family RHS (`Error` / `*Error` / user Error subclasses) is handled by
+ * the dedicated native branch above and never reaches here. Deliberately NOT
+ * modeled in this first cut (Slice A): `Object` (needs a struct-minus-boxed
+ * discriminator to avoid a wrong `true` on boxed primitives) and the reflective
+ * fully-dynamic RHS path (`__instanceof_check`, Slice B) — both deferred.
+ */
+function nativeBuiltinInstanceOfTypeIdxs(ctx: CodegenContext, ctorName: string): number[] | undefined {
+  const keep = (...idxs: (number | undefined)[]): number[] =>
+    idxs.filter((n): n is number => typeof n === "number" && n >= 0);
+  switch (ctorName) {
+    case "Array": {
+      // Every registered vec subtype (plain arrays, tuples). `vecBaseTypeIdx` is
+      // the shared `$__vec_base` supertype, so `ref.test` against it matches all
+      // vec subtypes in one op; union the concrete vec types as a fallback when
+      // no base is registered. Imprecision note (carried from #2605/#2893):
+      // TypedArray views currently share the `$Vec` representation with plain
+      // arrays and have no distinguishing brand yet, so `typedArray instanceof
+      // Array` may answer `true`. This is regression-safe (the reaching test
+      // already fails to instantiate standalone) and never a wrong `true` on a
+      // currently-passing test; the brand fix is tracked by #2893/#2872.
+      const set = new Set<number>();
+      if (ctx.vecBaseTypeIdx >= 0) set.add(ctx.vecBaseTypeIdx);
+      for (const idx of ctx.vecTypeMap.values()) if (idx >= 0) set.add(idx);
+      return [...set];
+    }
+    case "Function":
+      // Any registered closure (IsCallable). #1992: a WasmGC closure IS an
+      // `instanceof Function`.
+      return closureRootTypeIdxsFor(ctx);
+    case "Map":
+    case "WeakMap":
+    case "Set":
+    case "WeakSet":
+      // #2605: native collections share the `$Map` backing struct, so cross-type
+      // assertions (`set instanceof Map`) are imprecise — carried forward, not a
+      // regression.
+      return keep(ctx.mapTypeIdx);
+    case "Number":
+      return keep(ctx.wrapperNumberTypeIdx);
+    case "String":
+      return keep(ctx.wrapperStringTypeIdx);
+    case "Boolean":
+      return keep(ctx.wrapperBooleanTypeIdx);
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * (#2916) Emit a native `value instanceof <Builtin>` membership test: normalize
+ * the LHS to anyref and OR together `ref.test <typeIdx>` over `typeIdxs`. A
+ * numeric/boolean primitive or null LHS answers `0` (never traps: `ref.test`
+ * on a null / non-matching anyref is `0`). Leaves an i32 (0/1) on the stack.
+ */
+function emitNativeInstanceOfMembership(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.BinaryExpression,
+  typeIdxs: number[],
+): ValType {
+  const leftType = compileExpression(ctx, fctx, expr.left);
+  if (leftType && (leftType.kind === "i32" || leftType.kind === "f64" || leftType.kind === "i64")) {
+    // A numeric / boolean primitive is never a builtin-object instance.
+    fctx.body.push({ op: "drop" });
+    fctx.body.push({ op: "i32.const", value: 0 });
+    return { kind: "i32" };
+  }
+  if (!leftType) {
+    fctx.body.push({ op: "ref.null.extern" });
+  } else if (leftType.kind !== "externref") {
+    coerceType(ctx, fctx, leftType, { kind: "externref" });
+  }
+  fctx.body.push({ op: "any.convert_extern" } as Instr);
+  const anyLocalIdx = allocLocal(fctx, `__io_any_${fctx.locals.length}`, { kind: "anyref" } as ValType);
+  fctx.body.push({ op: "local.set", index: anyLocalIdx });
+  if (typeIdxs.length === 0) {
+    fctx.body.push({ op: "i32.const", value: 0 });
+    return { kind: "i32" };
+  }
+  fctx.body.push({ op: "local.get", index: anyLocalIdx });
+  fctx.body.push({ op: "ref.test", typeIdx: typeIdxs[0]! } as Instr);
+  for (let i = 1; i < typeIdxs.length; i++) {
+    fctx.body.push({ op: "local.get", index: anyLocalIdx });
+    fctx.body.push({ op: "ref.test", typeIdx: typeIdxs[i]! } as Instr);
+    fctx.body.push({ op: "i32.or" });
+  }
+  return { kind: "i32" };
+}
+
+/**
  * Compile `expr instanceof RHS` using a host import when the RHS class is not
  * in our struct system (e.g., TypeError, Array, Function, Promise). (#738)
  * Passes the value as externref and the constructor name as a string constant,
@@ -1459,6 +1600,27 @@ function compileHostInstanceOf(ctx: CodegenContext, fctx: FunctionContext, expr:
       });
       return { kind: "i32" };
     }
+  }
+
+  // (#2916) No-JS-host: replace the unsatisfiable `__instanceof` host import on
+  // the built-in string-name path with an inline native `ref.test` membership
+  // test. This path currently ALWAYS leaks under standalone/WASI (→ the module
+  // cannot instantiate, so every reaching test already fails), so a native
+  // answer can only CONVERT a failing test — never regress a passing one; and
+  // gc/host stays byte-identical (this branch is skipped when a JS host is
+  // present). Error-family RHS was already handled natively above. A builtin we
+  // do not yet model natively (Object, Date, RegExp, Promise, ArrayBuffer, ...)
+  // or an unresolvable non-builtin ctor falls to a conservative `0` (a missed
+  // conversion, never a wrong `true` — #2916). NEVER emit the host import here.
+  if (noJsHost(ctx)) {
+    const typeIdxs = nativeBuiltinInstanceOfTypeIdxs(ctx, ctorName);
+    if (typeIdxs !== undefined) {
+      return emitNativeInstanceOfMembership(ctx, fctx, expr, typeIdxs);
+    }
+    const lt = compileExpression(ctx, fctx, expr.left);
+    if (lt) fctx.body.push({ op: "drop" });
+    fctx.body.push({ op: "i32.const", value: 0 });
+    return { kind: "i32" };
   }
 
   // Ensure the __instanceof host import exists

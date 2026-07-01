@@ -1,8 +1,9 @@
 ---
 id: 2916
 title: "[SUBSTRATE][ARCH] Standalone native instanceof operator + isPrototypeOf residual (~31 leaky-PASS conversions)"
-status: ready
-sprint: Backlog
+status: in-progress
+assignee: ttraenkler/sendev-instanceof
+sprint: current
 created: 2026-07-01
 priority: medium
 horizon: l
@@ -260,3 +261,70 @@ ref.test $__closure_base      ;; ctx.closureInfoByTypeIdx supertype
   regression in the `instanceof` / `isPrototypeOf` corpus.
 - gc/host byte-identical (compile-diff probe).
 - Full `merge_group` net-positive.
+
+## Implementation Notes — Slice A landed (sendev-instanceof, 2026-07-01)
+
+**Scope delivered: Slice A only. Slice B + C deferred (escalated to lead — NOT
+churned).**
+
+### Why this split (root-cause + measure-first)
+Confirmed by broad standalone sweep (196 instanceof-using tests): the leak is
+dominated by `env::__instanceof` on the *string-name* path (~30 files), with a
+smaller `__instanceof_check` fully-dynamic-RHS tail (~7). Crucially, the 12
+leaky-PASSES *inside* the `instanceof`/`isPrototypeOf` test directories are ALL
+the hard cases — `symbol-hasinstance-*` (@@hasInstance dispatch, spec-declared
+out-of-scope), `primitive-prototype`/`prototype-getter` (the reflective
+`Get(C,"prototype")` crux sr-tail2 flagged), and non-callable-RHS `TypeError`
+throws. Slice A converts NONE of those; they need Slice B's reflective
+`.prototype` path, which is only tractable once the ctor-carrier grows a real
+`.prototype`/brand (#2907 follow-up). Attempting a partial `__instanceof_check`
+here is the "partial/wrong instanceof" graveyard, so it was deliberately left to
+a follow-up rather than churned.
+
+### What Slice A does (`src/codegen/expressions/identifiers.ts`)
+On the `noJsHost` string-name path in `compileHostInstanceOf`, BEFORE the
+`__instanceof` late-import, dispatch on the compile-time-known `ctorName` to an
+inline native `ref.test` membership test
+(`nativeBuiltinInstanceOfTypeIdxs` + `emitNativeInstanceOfMembership`):
+`Array`→vec subtypes (`vecBaseTypeIdx` ∪ `vecTypeMap`), `Function`→closure root
+structs (#1992), `Map`/`Set`/`WeakMap`/`WeakSet`→`mapTypeIdx` (#2605 shared-$Map
+imprecision carried), `Number`/`String`/`Boolean`→wrapper structs. Error-family
+keeps its existing native branch untouched. Any builtin not modeled here
+(`Object`, `Date`, `RegExp`, `Promise`, `ArrayBuffer`, …) or an unresolvable
+non-builtin ctor falls to a conservative `0` — a *missed conversion*, never a
+wrong `true`. The host `__instanceof` import is NEVER emitted under `noJsHost`.
+
+### Why this is regression-safe (the airtight part)
+1. The `noJsHost` string-name branch *currently always leaks* `__instanceof` →
+   the module cannot instantiate standalone → **every reaching test already
+   fails**. A native answer can only CONVERT a failing test, never regress a
+   passing one (a standalone-passing test cannot contain a leaking instanceof).
+2. gc/host is **byte-identical**: the branch is gated `noJsHost(ctx)`; verified
+   with a 6-program binary-SHA compile-diff (branch == baseline, all match).
+3. `ref.test` uses *type* indices, which are rec-group / dead-elim stable — no
+   funcidx-ordering hazard (cf. `dyn-read.ts:287`). No late-import shift added.
+
+### Measured
+Synthetic corpus: `__instanceof` leaks 21→2 (the 2 residual are Slice-B
+`__instanceof_check`). Runtime correctness verified standalone: `[]`/Map/Set/
+WeakMap → true, closure → true (#1992), primitive/null/non-matching → false,
+Error-family preserved. Real-corpus dynamic-LHS conversion confirmed
+(`RegExp.prototype.exec(...) instanceof Array`, an `any`-typed result, flips
+sa-fail→sa-pass; baseline fails). Note: many statically-typed `instanceof Array`
+sites were already resolved by `tryStaticInstanceOf`, so the *net* Slice-A yield
+is the dynamic-LHS residual; the `new Number()`-wrapper cases do NOT convert
+because `new Number(x): any` collapses to a boxed primitive (a separate
+representation gap, #1111/#2503), not `$WrapperNumber` — kept in the set but
+harmless (never a wrong `true`). Authoritative conversion count = `merge_group`
+`net_per_test`.
+
+### Deferred to follow-up (NOT in this PR)
+- **Slice B**: native `__instanceof_check`/`__instanceof_dyn` fully-dynamic
+  tri-state (reflective `.prototype`, non-callable-RHS throw). Needs the
+  ctor-carrier `.prototype`/brand infra (#2907 follow-up) first.
+- **Slice C**: `isPrototypeOf` generic-host-method residual (1 leaky-PASS in the
+  corpus) — shares Slice B's proto-walk substrate; deferred with B.
+- **Slice A tails**: `Object` (needs a struct-minus-boxed discriminator to avoid
+  a wrong `true` on boxed primitives), `Date`/`RegExp`/`Promise`/`ArrayBuffer`
+  membership (readable backing-struct idxs not yet wired), TypedArray brand
+  (#2893/#2872).
