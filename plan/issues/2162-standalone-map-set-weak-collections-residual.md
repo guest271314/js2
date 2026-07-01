@@ -377,3 +377,37 @@ the umbrella as `done` once the 4 sub-issues are confirmed merged (they are), wi
 the residual carried by #2580/#2104 (value-rep), #1472/#2158 (reflection),
 #2622 (native subclass), and the iterator-object follow-up. No new dev slice from
 this architect pass — do NOT re-dispatch #2162 as fresh dev work.
+
+## Re-measurement (2026-07-01, sdev-tail) — residual leaks are NOT pass-convertible; no follow-up filed
+
+A "round-2 residual" of ~33 sole leaks (`WeakMap_new`/`WeakSet_new`/`Set_new`/
+`Set_forEach`/`Set_entries`) was floated as a candidate follow-up. **Measured on
+current main** (`a8dba40bc`) — leak probe (env-import section of the emitted
+standalone module) + host-vs-standalone `runTest262File` pass/fail:
+
+| Leak class | leaks | of those, host-pass AND standalone-fail (convertible) |
+|---|---|---|
+| `WeakMap_new` (ctor-with-iterable) | 23 | **2** (`empty-iterable`, `get-set-method-failure`) |
+| `WeakSet_new` (ctor-with-iterable) | 13 | **0** convertible (1 host-pass but sa=compile_error) |
+| `Set_forEach`/`Set_entries`/`Set_new` | ~10 | **0** convertible (all host=compile_error except 1) |
+
+**~30 of the ~33 leaking tests are `host=compile_error`** — they do not compile in
+**host** mode either (they use custom-iterator / `$262` / Symbol.iterator-protocol
+harness objects the compiler doesn't yet accept). They are therefore **not
+leaky-passes**: removing the host-import leak cannot convert them to
+host-free-pass, because they never passed. This is the exact "host-free ≠ pass"
+trap — the leak is real but the pass-conversion is not. The ~3 genuinely
+host-passing candidates each need bespoke constructor-iterable / error-path
+semantics and even then land as `compile_error`/`fail` standalone (the native
+side CEs, not merely leaks) — marginal value for the substrate cost.
+
+The big Set leak clusters (`__gen_create_buffer`/`__create_generator`/
+`__get_caught_exception`, ~38 each) are the **set-like-object dynamic-read**
+family (`prototype/{difference,isSubsetOf,…}/allows-set-like-object`) — the
+value-rep / `__dyn_get` substrate already tracked to **#2580 M2**, not a native
+body.
+
+**Disposition:** no new follow-up issue filed — it would be a stale front. The
+collection residual is substrate-deferred (#2580/#2104, #1472/#2158) exactly as
+the umbrella reconciliation above concluded; this pass confirms it with concrete
+leaky-vs-convertible counts.
