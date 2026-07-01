@@ -1,9 +1,11 @@
 ---
 id: 2861
 title: "Standalone: built-in static/prototype property value read not supported — extend native-proto glue (ArrayBuffer, DataView, Promise, Iterator, Error subclasses, …)"
-status: ready
+status: done
+completed: 2026-07-02
+assignee: ttraenkler/fable-dev
 created: 2026-06-30
-updated: 2026-06-30
+updated: 2026-07-02
 priority: high
 feasibility: medium
 task_type: feature
@@ -38,21 +40,44 @@ compile-error cluster in the standalone gap.
 **~882 standalone-only failures** carry this signature. Breakdown by builtin
 (top of the residual — these are the ones with NO native-proto glue yet):
 
-| builtin            | tests | builtin             | tests |
-| ------------------ | ----- | ------------------- | ----- |
-| ArrayBuffer        | 166   | Atomics             | 33    |
-| DataView           | 89    | SharedArrayBuffer   | 29    |
-| Promise            | 78    | DisposableStack     | 27    |
-| Iterator           | 65    | AsyncDisposableStack| 25    |
-| Math               | 59    | Symbol              | 16    |
-| TypeError          | 42    | JSON                | 16    |
-| Object (residual)  | 41    | Reflect             | 13    |
-| Array (residual)   | 26    | WeakRef             | 11    |
-|                    |       | FinalizationRegistry| 10    |
-|                    |       | Error subclasses (Range/Reference/…) | ~30 |
+| builtin           | tests | builtin                              | tests |
+| ----------------- | ----- | ------------------------------------ | ----- |
+| ArrayBuffer       | 166   | Atomics                              | 33    |
+| DataView          | 89    | SharedArrayBuffer                    | 29    |
+| Promise           | 78    | DisposableStack                      | 27    |
+| Iterator          | 65    | AsyncDisposableStack                 | 25    |
+| Math              | 59    | Symbol                               | 16    |
+| TypeError         | 42    | JSON                                 | 16    |
+| Object (residual) | 41    | Reflect                              | 13    |
+| Array (residual)  | 26    | WeakRef                              | 11    |
+|                   |       | FinalizationRegistry                 | 10    |
+|                   |       | Error subclasses (Range/Reference/…) | ~30   |
 
 (The `<View>.prototype` TypedArray residual already has glue via #2651; these
 are the still-unwired builtins.)
+
+## Completion (2026-07-02)
+
+Landed across several slices. Earlier PRs (2340/2341/2344) wired ArrayBuffer,
+DataView, Promise, Iterator, the NativeError subclasses, SharedArrayBuffer,
+WeakRef, and FinalizationRegistry. The **final residual slice** (this PR) wires
+the Explicit-Resource-Management stacks and ES2026 error aggregation:
+
+- `DisposableStack.prototype` — `dispose`/`use`/`adopt`/`defer`/`move` methods +
+  the `disposed` accessor getter (brand slot 41, `makeGlueWithGetters`).
+- `AsyncDisposableStack.prototype` — same shape with `disposeAsync` (slot 42).
+- `SuppressedError.prototype` — reuses the shared NativeError glue (Error
+  subclass; slot 43).
+
+Measured standalone flips (host-pass → standalone-pass): DisposableStack +30,
+AsyncDisposableStack +20, SuppressedError +5 (**+55**). Standalone-only change
+(arms reached only from `ctx.standalone`-gated proto-value-read/meta paths);
+host mode unchanged; purely additive (new brand slots + exact-name arms), so no
+regression to the 42 existing native-proto tests.
+
+The namespace static reads (`Math.PI`, `JSON.stringify`, `Reflect.get`,
+`Atomics.add`) remain a separate follow-up per the "namespace static reads"
+sub-case below — they do not go through `$NativeProto` proto glue.
 
 ## Root cause
 
@@ -89,6 +114,7 @@ export function ensureArrayBufferNativeProtoGlue(ctx: CodegenContext): number | 
 ### Changes
 
 **File: `src/codegen/array-object-proto.ts`**
+
 - Add a `*_PROTO_METHODS` member list per builtin (the spec'd
   `<Builtin>.prototype` own enumerable + standard method/getter names — pull
   from the ES spec / the host-mode member set; getters like `ArrayBuffer.prototype.byteLength`,
@@ -102,6 +128,7 @@ export function ensureArrayBufferNativeProtoGlue(ctx: CodegenContext): number | 
   needs the member CSV.
 
 **File: `src/codegen/property-access.ts`**
+
 - In `tryEnsureNativeProtoBrand` (line 696), add a `if (builtinName === "ArrayBuffer") return ensureArrayBufferNativeProtoGlue(ctx);`
   arm per newly-wired builtin, before the final `getBuiltinBrand` fallthrough (line 781).
 - Order by impact: ArrayBuffer, DataView, Promise, Iterator, then the Error
@@ -121,6 +148,7 @@ Iterator, Error subclasses, WeakRef, FinalizationRegistry, DisposableStack,
 AsyncDisposableStack) — ~700 of the 882. Math/JSON/Reflect/Atomics (~120) split out.
 
 ### Edge cases
+
 - A builtin whose ctor brand isn't reserved (`getBuiltinBrand` returns
   `undefined`) → return `undefined` (caller keeps the refusal — no fabricated
   value). Confirm ArrayBuffer/DataView/Promise/Iterator brands ARE reserved
@@ -139,6 +167,7 @@ AsyncDisposableStack) — ~700 of the 882. Math/JSON/Reflect/Atomics (~120) spli
 ## Test plan
 
 These standalone-CE tests must flip to **pass** (host already passes them):
+
 - `test/built-ins/ArrayBuffer/prototype/**` (byteLength getter, slice, etc.)
 - `test/built-ins/DataView/prototype/**` (byteLength/buffer/byteOffset getters)
 - `test/built-ins/Promise/prototype/**` (finally/then/catch name+length reads)
@@ -150,7 +179,6 @@ Validation: full `merge_group` (test262 merge shard reports) + standalone-floor
 high-water (`check-standalone-highwater.mjs`). Expect a net standalone pass gain
 of several hundred with **zero** host-mode regression (these paths are
 `ctx.standalone`-gated).
-
 
 ## Reconciliation note (shepherd, 2026-07-01)
 

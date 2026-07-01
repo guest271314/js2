@@ -126,7 +126,14 @@ const BUILTIN_BRAND_TABLE: Readonly<Record<string, number>> = {
   // ── Resource-management / weak builtins ──────────────────────────────────
   FinalizationRegistry: BUILTIN_BRAND_BASE + 40,
 
-  // Next free slot: BUILTIN_BRAND_BASE + 41 (append only).
+  // ── Explicit Resource Management (TC39 Stage 3) + ES2026 error aggregation ─
+  // (#2861 residual) DisposableStack / AsyncDisposableStack `.prototype` value
+  // reads; SuppressedError shares the NativeError glue shape (Error subclass).
+  DisposableStack: BUILTIN_BRAND_BASE + 41,
+  AsyncDisposableStack: BUILTIN_BRAND_BASE + 42,
+  SuppressedError: BUILTIN_BRAND_BASE + 43,
+
+  // Next free slot: BUILTIN_BRAND_BASE + 44 (append only).
 };
 
 /**

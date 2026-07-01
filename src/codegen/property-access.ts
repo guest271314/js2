@@ -86,6 +86,8 @@ import {
   ensureSharedArrayBufferNativeProtoGlue,
   ensureWeakRefNativeProtoGlue,
   ensureFinalizationRegistryNativeProtoGlue,
+  ensureDisposableStackNativeProtoGlue,
+  ensureAsyncDisposableStackNativeProtoGlue,
   ensureTypedArrayViewNativeProtoGlue,
   ensureTypedArrayIntrinsicNativeProtoGlue,
   emitTypedArrayIntrinsicCtorObject,
@@ -822,6 +824,22 @@ export function tryEnsureNativeProtoBrand(ctx: CodegenContext, builtinName: stri
   }
   if (builtinName === "FinalizationRegistry") {
     return ensureFinalizationRegistryNativeProtoGlue(ctx);
+  }
+  // (#2861 residual) Explicit Resource Management stacks — `dispose`/`use`/
+  // `adopt`/`defer`/`move` methods + the `disposed` accessor getter. Held
+  // resources live on the instance, so the proto value object is pure.
+  if (builtinName === "DisposableStack") {
+    return ensureDisposableStackNativeProtoGlue(ctx);
+  }
+  if (builtinName === "AsyncDisposableStack") {
+    return ensureAsyncDisposableStackNativeProtoGlue(ctx);
+  }
+  // (#2861 residual) SuppressedError (ES2026 error aggregation) is an Error
+  // subclass — its prototype's own method set mirrors Error's (`toString`), with
+  // `constructor`/`name`/`message` data props handled by the shared meta-fold.
+  // Reuse the NativeError glue (its own-brand slot 43).
+  if (builtinName === "SuppressedError") {
+    return ensureNativeErrorNativeProtoGlue(ctx, builtinName);
   }
   // (#2651 M1 / D2) Concrete TypedArray view protos — `Int8Array.prototype`,
   // `Uint8Array.prototype`, … This is the measured Slice-0 lever: the
