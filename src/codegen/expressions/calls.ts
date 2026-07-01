@@ -124,7 +124,12 @@ import {
   VOID_RESULT,
 } from "../shared.js";
 // (#2193 PR-B) reflective `m.call(thisArg, …)` on a `$NativeProto` member-closure value.
-import { ensureArrayNativeProtoGlue, ensureObjectNativeProtoGlue } from "../array-object-proto.js";
+import {
+  ensureArrayNativeProtoGlue,
+  ensureObjectNativeProtoGlue,
+  emitTypedArrayIntrinsicCtorObject,
+  isWiredTypedArrayViewName,
+} from "../array-object-proto.js";
 import {
   emitBrandCheckTypeError,
   ensureStandaloneNativeMethodClosure,
@@ -1189,9 +1194,96 @@ function resolveDescriptorAccessorSource(
 }
 
 /**
+ * (#2901) Resolve a module/function-scope variable's initializer expression, or
+ * `undefined` if `ident` is not a single-initializer variable. Used by the static
+ * data-flow trace that recognises the `testTypedArray.js` harness's
+ * `var TypedArray = Object.getPrototypeOf(Int8Array)` / `var P = TypedArray.prototype`
+ * intermediate bindings.
+ */
+function resolveVarInitializer(ctx: CodegenContext, ident: ts.Identifier): ts.Expression | undefined {
+  const sym = ctx.checker.getSymbolAtLocation(ident);
+  const decl = sym?.valueDeclaration;
+  if (!decl || !ts.isVariableDeclaration(decl) || !decl.initializer) return undefined;
+  return decl.initializer;
+}
+
+/** (#2901) True iff `call` is `Object.getPrototypeOf(<arg>)`; returns the unwrapped arg or undefined. */
+function getProtoOfCallArg(expr: ts.Expression): ts.Expression | undefined {
+  const e = unwrapTransparent(expr);
+  if (!ts.isCallExpression(e) || e.arguments.length < 1) return undefined;
+  const callee = e.expression;
+  if (
+    !ts.isPropertyAccessExpression(callee) ||
+    !ts.isIdentifier(callee.expression) ||
+    callee.expression.text !== "Object" ||
+    callee.name.text !== "getPrototypeOf"
+  ) {
+    return undefined;
+  }
+  return unwrapTransparent(e.arguments[0]!);
+}
+
+/**
+ * (#2901) True iff `expr` (statically, following single-init var bindings) denotes
+ * the abstract `%TypedArray%` intrinsic constructor, in either shape the test262
+ * TypedArray corpus reaches it:
+ *   - `Object.getPrototypeOf(Int8Array)`                      (full `testTypedArray.js`)
+ *   - `Object.getPrototypeOf(Int8Array.prototype).constructor` (the test262-runner
+ *     injected shim for the abstract intrinsic — test262-runner.ts ~1823)
+ */
+function isTypedArrayIntrinsicCtorExpr(ctx: CodegenContext, expr: ts.Expression): boolean {
+  const e = unwrapTransparent(expr);
+  // Object.getPrototypeOf(<wired view ctor>)
+  const gpoArg = getProtoOfCallArg(e);
+  if (gpoArg && ts.isIdentifier(gpoArg) && isWiredTypedArrayViewName(gpoArg.text)) return true;
+  // Object.getPrototypeOf(<wired view ctor>.prototype).constructor
+  if (ts.isPropertyAccessExpression(e) && e.name.text === "constructor") {
+    const innerArg = getProtoOfCallArg(e.expression);
+    if (
+      innerArg &&
+      ts.isPropertyAccessExpression(innerArg) &&
+      innerArg.name.text === "prototype" &&
+      ts.isIdentifier(innerArg.expression) &&
+      isWiredTypedArrayViewName(innerArg.expression.text)
+    ) {
+      return true;
+    }
+  }
+  // a var whose initializer denotes the intrinsic ctor
+  if (ts.isIdentifier(e)) {
+    const init = resolveVarInitializer(ctx, e);
+    if (init && isTypedArrayIntrinsicCtorExpr(ctx, init)) return true;
+  }
+  return false;
+}
+
+/**
+ * (#2901) True iff `arg0` statically traces to `%TypedArray%.prototype`: it is (or
+ * a var whose initializer is) a `<X>.prototype` access where `X` denotes the
+ * `%TypedArray%` intrinsic constructor (see `isTypedArrayIntrinsicCtorExpr`). This
+ * lets the #2885 gOPD synthesis + #2876 reflective `.call` fire on the harness's
+ * *dynamic* (variable-routed) proto receiver — `gOPD(TypedArrayPrototype, m)` where
+ * `TypedArrayPrototype = TypedArray.prototype` — not just the syntactic
+ * `<Ctor>.prototype` form. Pure static analysis — no runtime dispatch, no rep
+ * change; returns false (unchanged behaviour) for any other receiver.
+ */
+function tracesToTypedArrayIntrinsicProto(ctx: CodegenContext, arg0: ts.Expression): boolean {
+  let pa: ts.Expression = unwrapTransparent(arg0);
+  if (ts.isIdentifier(pa)) {
+    const init = resolveVarInitializer(ctx, pa);
+    if (!init) return false;
+    pa = unwrapTransparent(init);
+  }
+  if (!ts.isPropertyAccessExpression(pa) || pa.name.text !== "prototype") return false;
+  return isTypedArrayIntrinsicCtorExpr(ctx, pa.expression);
+}
+
+/**
  * (#2876) Parse `Object.getOwnPropertyDescriptor(<Builtin>.prototype, "<member>")`
  * → `{ builtinName, member }`, gated like the gOPD-synthesis site: arg0 is an
  * unshadowed `BUILTIN_CTOR_NAMES` `.prototype` access, arg1 a string literal.
+ * (#2901) Also accepts a `%TypedArray%`-intrinsic proto receiver that statically
+ * traces through the harness's intermediate vars (see `tracesToTypedArrayIntrinsicProto`).
  */
 function parseBuiltinProtoGopdCall(
   ctx: CodegenContext,
@@ -1202,6 +1294,11 @@ function parseBuiltinProtoGopdCall(
   const arg0 = unwrapTransparent(call.arguments[0]!);
   const arg1 = call.arguments[1]!;
   if (!ts.isStringLiteral(arg1)) return undefined;
+  // (#2901) Dynamic %TypedArray%.prototype receiver, traced through the harness's
+  // intermediate vars (`var TypedArray = getProtoOf(Int8Array); TypedArray.prototype`).
+  if (tracesToTypedArrayIntrinsicProto(ctx, arg0)) {
+    return { builtinName: "%TypedArray%", member: arg1.text };
+  }
   if (
     !ts.isPropertyAccessExpression(arg0) ||
     arg0.name.text !== "prototype" ||
@@ -6529,6 +6626,25 @@ function compileCallExpression(
         }
       }
 
+      // (#2901) `Object.getPrototypeOf(<view ctor>)` → the standalone `%TypedArray%`
+      // intrinsic constructor object (whose `.prototype` is `%TypedArray%.prototype`).
+      // The test262 `testTypedArray.js` harness does
+      // `var TypedArray = Object.getPrototypeOf(Int8Array); TypedArray.prototype`
+      // to reach the §23.2.3 accessor descriptors (#2893). Keyed on the SYNTACTIC
+      // constructor identifier — NOT identifier-as-value — so it can't collide with
+      // the name-keyed `new Int8Array()` construction path, and is host-mode-neutral
+      // (the JS host import already returns the correct intrinsic). A local binding
+      // shadowing the name falls through unchanged.
+      if (
+        noJsHost(ctx) &&
+        ts.isIdentifier(arg0) &&
+        !fctx.localMap.has(arg0.text) &&
+        isWiredTypedArrayViewName(arg0.text)
+      ) {
+        const ctorType = emitTypedArrayIntrinsicCtorObject(ctx, fctx);
+        if (ctorType) return ctorType;
+      }
+
       const argTsType = ctx.checker.getTypeAtLocation(arg0);
       const className = resolveStructName(ctx, argTsType);
 
@@ -7087,22 +7203,32 @@ function compileCallExpression(
       // closure factory when arg0 is a literal `<Builtin>.prototype` and arg1 names
       // a member the glue advertises. Anything that doesn't resolve falls through
       // to the dynamic fallback below (no behavior change for other receivers).
-      if (
-        ctx.standalone &&
-        propLiteral !== undefined &&
-        ts.isPropertyAccessExpression(arg0) &&
-        !ts.isPrivateIdentifier(arg0.name) &&
-        arg0.name.text === "prototype" &&
-        ts.isIdentifier(arg0.expression) &&
-        BUILTIN_CTOR_NAMES.has(arg0.expression.text) &&
-        !(fctx.localMap.has(arg0.expression.text) || (fctx.boxedCaptures?.has(arg0.expression.text) ?? false))
-      ) {
-        const protoBuiltin = arg0.expression.text;
+      // (#2901) Resolve the proto's builtin name from EITHER the syntactic
+      // `<Ctor>.prototype` form OR the harness's dynamic %TypedArray%.prototype
+      // receiver traced through intermediate vars.
+      let gopdProtoBuiltin: string | undefined;
+      if (ctx.standalone && propLiteral !== undefined) {
+        if (
+          ts.isPropertyAccessExpression(arg0) &&
+          !ts.isPrivateIdentifier(arg0.name) &&
+          arg0.name.text === "prototype" &&
+          ts.isIdentifier(arg0.expression) &&
+          BUILTIN_CTOR_NAMES.has(arg0.expression.text) &&
+          !(fctx.localMap.has(arg0.expression.text) || (fctx.boxedCaptures?.has(arg0.expression.text) ?? false))
+        ) {
+          gopdProtoBuiltin = arg0.expression.text;
+        } else if (tracesToTypedArrayIntrinsicProto(ctx, arg0)) {
+          gopdProtoBuiltin = "%TypedArray%";
+        }
+      }
+      if (gopdProtoBuiltin !== undefined && propLiteral !== undefined) {
+        const protoBuiltin = gopdProtoBuiltin;
+        const protoMember = propLiteral;
         const protoBrand = tryEnsureNativeProtoBrand(ctx, protoBuiltin);
         const protoGlue = protoBrand !== undefined ? getNativeProtoBuiltinGlue(ctx, protoBrand) : undefined;
-        if (protoBrand !== undefined && protoGlue && protoGlue.memberCsv.split(",").includes(propLiteral)) {
-          const memberKind = protoGlue.memberKind(propLiteral);
-          const protoClosure = ensureStandaloneNativeMethodClosure(ctx, protoBrand, propLiteral, memberKind);
+        if (protoBrand !== undefined && protoGlue && protoGlue.memberCsv.split(",").includes(protoMember)) {
+          const memberKind = protoGlue.memberKind(protoMember);
+          const protoClosure = ensureStandaloneNativeMethodClosure(ctx, protoBrand, protoMember, memberKind);
           if (protoClosure) {
             if (memberKind === "getter") {
               // Accessor descriptor: get=<closure>, set=undefined,
