@@ -662,7 +662,17 @@ jobs:
       - name: Catastrophic regression guard (#1668)
         if: env.SHARDS_RAN == 'true'
         env:
-          CATASTROPHIC_REGRESSION_THRESHOLD: "200"
+          # TEMPORARY (#2920): raised 200 -> 500 to land the maintainer-approved
+          # intentional −439 negative-verdict drop (the strict compile-SUCCEEDED
+          # arm). The CI shard JSONL carries no wasm_sha, so diff-test262's
+          # byte-identical "wasm-identical noise" filter is inert here and all
+          # 439 verdict-only flips (byte-identical compiled Wasm) count as
+          # wasm-change regressions — which would otherwise trip this guard on
+          # #2920's own merge_group run. 439 < 500 lets the merged tree through;
+          # promote-baseline then re-seeds the honest baseline on push:main.
+          # REVERT to "200" immediately after #2920 merges — tracked by the
+          # revert PR referenced in #2920. Do NOT leave this at 500.
+          CATASTROPHIC_REGRESSION_THRESHOLD: "500"
           # #1954 — on a scoped PR run the merged JSONL only covers the scope;
           # restrict the baseline the same way or every out-of-scope baseline
           # pass counts as a pass→absent "regression". Empty on merge_group/

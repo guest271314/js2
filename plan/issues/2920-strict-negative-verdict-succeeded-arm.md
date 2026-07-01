@@ -1,11 +1,12 @@
 ---
 id: 2920
 title: "Strict compile-SUCCEEDED arm of the negative-test verdict (the #2912 follow-up, intentional −439)"
-status: in-review
+status: done
 assignee: ttraenkler/dev-2912
 priority: medium
 sprint: current
 created: 2026-07-02
+completed: 2026-07-02
 feasibility: medium
 task_type: bug
 area: tooling
@@ -80,32 +81,37 @@ score flips). The #2912 resolution assumed the drop could land via a maintainer
    guards inside `merge shard reports`.
 
 So an intentional −439 needs a coordinated infra step beyond the issue's stated
-plan. Options (a lead/maintainer decision — escalated):
+plan. **Lead decision (2026-07-02): Option A, executed in this PR.**
 
-- **(A)** Temporarily raise `CATASTROPHIC_REGRESSION_THRESHOLD` (e.g. to 500)
-  for this one landing, admin-merge / queue it, then `promote-baseline` on
-  push:main re-seeds the honest baseline; restore the threshold in a follow-up.
-- **(B)** Land a small **prerequisite** PR adding `wasm_sha` emission to the CI
-  shard runner (`tests/test262-shared.ts` / the worker), let `promote-baseline`
-  refresh the baseline WITH `wasm_sha`, THEN land this verdict flip — it then
-  classifies as "wasm-identical noise" and passes `#1668`/`#1897`/regression
-  gate cleanly, leaving only `#2097` (fix by lowering the committed high-water
-  mark; `promote-baseline --update` re-ratchets it up post-merge).
-- **(C)** Wire `ORACLE_REBASE=1` (the #2096 mechanism) into the workflow AND
-  raise `#1668`, then a `force_baseline_refresh` dispatch can re-seed. Note:
-  `ORACLE_VERSION` has never been bumped (still 1) and this plumbing is
-  currently unwired.
+- **(A) — CHOSEN & EXECUTED:** temporarily raise
+  `CATASTROPHIC_REGRESSION_THRESHOLD` **200 → 500** in
+  `.github/workflows/test262-sharded.yml` (with a loud TEMPORARY comment
+  referencing the revert). 439 < 500 lets the merged tree through its own
+  `merge_group` run; `promote-baseline` on push:main then re-seeds the honest
+  baseline. A **revert PR** restoring the threshold to 200 follows immediately
+  after this merges (the 500-window is kept as short as possible; the standalone
+  floor is left at its new honest value — it re-ratchets on its own).
+- **(B)** (deferred to a Backlog improvement issue) — emit `wasm_sha` in the CI
+  shard JSONL so `diff-test262`'s wasm-identical-noise filter works in CI; that
+  is the _permanent_ fix for this whole class of verdict-only landing, removing
+  the need for a threshold bump next time.
+- **(C)** Wire `ORACLE_REBASE=1` (#2096) + raise `#1668` — not pursued.
 
-### Standalone high-water floor (`#2097`)
+### Standalone high-water floor (`#2097`) — handled in this PR
 
 Any of the 439 that are `host_free_pass` on the standalone lane also drop the
 absolute standalone floor (tolerance 50). This is an **absolute-count** gate
-(not a wasm-hash diff), so it trips independently. The fix is to lower the
-committed `benchmarks/results/test262-standalone-highwater.json` mark in the
-landing PR; `promote-baseline --update` (which only ratchets UP) re-keys it to
-the honest number on the next push:main. NOT touched in this PR pending the
-chosen landing path (the exact new standalone count isn't known without a full
-standalone run).
+(not a wasm-hash diff), so it trips independently. The zero-diagnostic compile
+set is **target-independent** (parse/early-error detection is the shared
+front-end), so the standalone flip set equals the host flip set (439 files) and
+the standalone `host_free_pass` drop is a **subset** of those → **≤ 439**. So
+439 is a tight, safe upper bound. The committed
+`benchmarks/results/test262-standalone-highwater.json` mark is lowered by 439
+(`pass`/`host_free_pass` 18241 → 17802, `official_pass` 17890 → 17451).
+`promote-baseline --update` (which only ratchets UP) re-keys it to the **exact**
+honest number on the post-merge push:main run — so a full pre-merge standalone
+audit (which would only widen the temporary-threshold window) is unnecessary;
+the value self-heals to exact.
 
 ## Acceptance
 
