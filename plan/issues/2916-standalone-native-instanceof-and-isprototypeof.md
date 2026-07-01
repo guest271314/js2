@@ -328,3 +328,8 @@ harmless (never a wrong `true`). Authoritative conversion count = `merge_group`
   a wrong `true` on boxed primitives), `Date`/`RegExp`/`Promise`/`ArrayBuffer`
   membership (readable backing-struct idxs not yet wired), TypedArray brand
   (#2893/#2872).
+
+
+## Reconciliation note (shepherd, 2026-07-01)
+
+Landed slice: **Slice A** standalone native `instanceof` builtin membership (PR #2418). Issue stays `in-progress` for the remaining instanceof/isPrototypeOf slices.
