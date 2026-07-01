@@ -36,6 +36,7 @@ import {
   valTypesMatch,
 } from "./shared.js";
 import { buildVecFromExternref, getVecInfo } from "./type-coercion.js";
+import { ensureNativeArrayFromIterN } from "./iterator-native.js";
 import { arrayIteratorOverrideGlobalIdx } from "./expressions/proto-override.js";
 // (#1719 CPR-2) `arrayDstrNeedsIdentity` / `tryEmitArrayProtoIteratorReadDrive` /
 // `syncDestructuredLocalsToGlobals` live in statements/destructuring.ts, which
@@ -1337,7 +1338,18 @@ export function destructureParamArray(
       // pass -1 → unbounded drain, byte-identical to legacy __array_from_iter
       // and preserving its IteratorClose tuning (#1219, #1592).
       const fbIterStepCount = patternIteratorStepCount(pattern.elements);
-      ensureLateImport(ctx, "__array_from_iter_n", [{ kind: "externref" }, { kind: "f64" }], [{ kind: "externref" }]);
+      // (#2904) Standalone/WASI are host-free: instead of leaking the JS-host
+      // `env::__array_from_iter_n` import (which breaks zero-import
+      // instantiation), register a NATIVE `__array_from_iter_n` that drains the
+      // source through the existing native `__iterator` / `__iterator_next`
+      // runtime into a `__vec_externref` — byte-identical for the downstream
+      // `__extern_length` / `__extern_get_idx` reads below. JS-host mode keeps
+      // the import (byte-identical).
+      if (ctx.standalone || ctx.wasi) {
+        ensureNativeArrayFromIterN(ctx);
+      } else {
+        ensureLateImport(ctx, "__array_from_iter_n", [{ kind: "externref" }, { kind: "f64" }], [{ kind: "externref" }]);
+      }
       flushLateImportShifts(ctx, fctx);
 
       // Else: try each other known vec type and convert element-by-element
