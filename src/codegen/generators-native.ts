@@ -38,6 +38,8 @@ import { addFuncType } from "./registry/types.js";
 import { coerceType, compileExpression, compileStatement, valTypesMatch } from "./shared.js";
 import { bodyUsesArguments } from "./helpers/body-uses-arguments.js";
 import { resolveSpillLocalValType } from "./statements/variables.js";
+import { destructureParamArray, destructureParamObject } from "./destructuring-params.js";
+import { resolveWasmType } from "./index.js";
 import { ensureExnTag } from "./registry/imports.js";
 // (#2895 PR1) The frame ABI (state-struct field offsets + resume modes) and the
 // field-I/O / spill-store emit helpers now live in the shared resumable-frame
@@ -284,6 +286,46 @@ function nodeContainsYield(root: ts.Node): boolean {
 }
 
 /**
+ * (#2920) Collect every bound identifier in a param binding pattern
+ * (recursively — nested array/object patterns and rest elements included;
+ * array holes skipped). Used to register each destructured PARAM name as a
+ * live-across-yield spill and to resolve its spill ValType from the checker.
+ */
+function collectPatternBindingIdentifiers(pattern: ts.BindingPattern): ts.Identifier[] {
+  const out: ts.Identifier[] = [];
+  const visitPattern = (pat: ts.BindingPattern): void => {
+    for (const el of pat.elements) {
+      if (ts.isOmittedExpression(el)) continue;
+      if (ts.isIdentifier(el.name)) out.push(el.name);
+      else visitPattern(el.name);
+    }
+  };
+  visitPattern(pattern);
+  return out;
+}
+
+/**
+ * (#2920) A spilled destructured-param local must round-trip through a state
+ * struct field, so its ValType needs a struct-construction default. Scalars and
+ * nullable refs qualify; a non-null `ref` is widened to `ref_null` (matching the
+ * F1b reconcile). Any other kind → null (bail the whole generator to host).
+ */
+function spillSafeValType(t: ValType): ValType | null {
+  switch (t.kind) {
+    case "f64":
+    case "i32":
+    case "i64":
+    case "externref":
+    case "ref_null":
+      return t;
+    case "ref":
+      return { kind: "ref_null", typeIdx: t.typeIdx };
+    default:
+      return null;
+  }
+}
+
+/**
  * Plan builder. Walks the generator body producing a state graph. Returns
  * `null` when any shape is outside the supported subset, so callers fall back
  * to the host path (or the scoped diagnostic in standalone).
@@ -312,6 +354,12 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
   // (#2864 F1b) The variable declaration that introduced each spilled name, so
   // the spill's wasm type can be resolved at its actual ValType.
   const spillDecls = new Map<string, ts.VariableDeclaration>();
+  // (#2920) Types for names bound by a destructuring PARAM pattern. These names
+  // are not introduced by a body `VariableDeclaration` (so `resolveSpillLocalValType`
+  // cannot type them) — they are destructured from the raw arg in the resume
+  // function's state-0 prelude. Registering them as spills persists them across
+  // yields; this map supplies their ValType in the spill-typing loop.
+  const patternParamSpillTypes = new Map<string, ValType>();
   const addSpill = (name: string, decl?: ts.VariableDeclaration): void => {
     if (decl !== undefined && !spillDecls.has(name)) spillDecls.set(name, decl);
     if (spillSet.has(name)) return;
@@ -793,6 +841,44 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
   // spill regardless of which state declared it).
   collectSpillsIn(decl.body);
 
+  // (#2920) Register each destructuring-PARAM binding name as a spill, typed at
+  // its declared ValType. The raw arg is stored in the state struct (a
+  // `param_*` field) and destructured into these spill locals once, on first
+  // entry (state 0), by the resume function; spilling persists them across
+  // yields. If ANY bound name has no struct-storable type, bail to host so the
+  // candidate gate and registration agree (no undefined-funcidx module).
+  for (const param of decl.parameters) {
+    if (ts.isIdentifier(param.name)) continue;
+    const pat = param.name;
+    if (!ts.isArrayBindingPattern(pat) && !ts.isObjectBindingPattern(pat)) return null;
+    // Slice-1 conservative gate (correct-or-legacy — no regressions):
+    //  • FLAT patterns only — every element binds an identifier (a nested
+    //    array/object sub-pattern is a follow-up; bail so it stays on host).
+    //  • NO rest element — object rest needs `__extern_rest_object`, array rest
+    //    needs the host iterator drain; both are host imports, so bail.
+    //  • ARRAY patterns require a CONCRETE typed param (a `ref`/`ref_null` vec or
+    //    tuple). An untyped array pattern widens the param to `externref`, whose
+    //    host-free element extraction is a pre-existing fragile path (a numeric
+    //    vec reads back null — normal functions have the same gap), so bail to
+    //    the host path rather than risk turning a passing test null. Object
+    //    patterns extract host-free & correctly regardless of typing.
+    for (const el of pat.elements) {
+      if (ts.isOmittedExpression(el)) continue;
+      if (el.dotDotDotToken) return null;
+      if (!ts.isIdentifier(el.name)) return null;
+    }
+    if (ts.isArrayBindingPattern(pat)) {
+      const pt = resolveWasmType(ctx, ctx.checker.getTypeAtLocation(param));
+      if (pt.kind !== "ref" && pt.kind !== "ref_null") return null;
+    }
+    for (const id of collectPatternBindingIdentifiers(pat)) {
+      const safe = spillSafeValType(resolveWasmType(ctx, ctx.checker.getTypeAtLocation(id)));
+      if (!safe) return null;
+      patternParamSpillTypes.set(id.text, safe);
+      addSpill(id.text);
+    }
+  }
+
   if (!lowerStatements(decl.body.statements, [])) return null;
   if (!ok) return null;
 
@@ -834,6 +920,13 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
       // value), so keep bailing that shape to the host path, exactly as F1 did.
       if (carrierIsAny(elemValType)) return null;
       spillTypes.set(name, carrierType);
+      continue;
+    }
+    // (#2920) A destructuring-param binding name — typed up-front from the
+    // checker (no body `VariableDeclaration` exists to resolve it from).
+    const patternType = patternParamSpillTypes.get(name);
+    if (patternType) {
+      spillTypes.set(name, patternType);
       continue;
     }
     const declNode = spillDecls.get(name);
@@ -953,7 +1046,19 @@ export function isNativeGeneratorCandidate(ctx: CodegenContext, decl: GeneratorD
     return false;
   }
   for (const param of decl.parameters) {
-    if (param.dotDotDotToken || !ts.isIdentifier(param.name)) return false;
+    // (#2920) Rest params (`...args`) still bail — a separate follow-up. Array /
+    // object binding-pattern params are now natively lowered: the raw
+    // (externref/vec-widened) arg is stored in the state struct and destructured
+    // in the resume function's state-0 prelude (see `emitPatternParamDestructure`
+    // + `collectPatternBindingIdentifiers`). Identifier params stay byte-identical.
+    if (param.dotDotDotToken) return false;
+    if (
+      !ts.isIdentifier(param.name) &&
+      !ts.isArrayBindingPattern(param.name) &&
+      !ts.isObjectBindingPattern(param.name)
+    ) {
+      return false;
+    }
   }
   // (#2581) An OBJECT-LITERAL generator method with a DEFAULT or OPTIONAL param
   // must bail to the host path. Object-literal methods are invoked through the
@@ -1170,7 +1275,11 @@ export function registerNativeGenerator(
   const resultTypeIdx = ensureNativeGeneratorResultType(ctx, elemValType);
   // (#2571) The synthetic `this` (when present) is the FIRST param name, aligned
   // with the caller's `paramTypes[0] === receiverType`. User params follow.
-  const userParamNames = decl.parameters.map((p) => (ts.isIdentifier(p.name) ? p.name.text : ""));
+  // (#2920) A binding-pattern param has no source identifier; mint a unique
+  // synthetic name (`__genarg{i}`) so its `param_*` state field is distinct
+  // (two `[a,b]`/`{x}` params would otherwise both be `param_`, a dup field).
+  // The raw arg lives in this field and is destructured in the resume prelude.
+  const userParamNames = decl.parameters.map((p, i) => (ts.isIdentifier(p.name) ? p.name.text : `__genarg${i}`));
   const paramNames = synthesizedThis ? ["this", ...userParamNames] : userParamNames;
   // (#2864 F1) `sent` / `abrupt` carry the `.next(v)` / `.return(v)` value. For
   // the boxed-any carrier they are externref so an arbitrary value survives; for
@@ -1845,6 +1954,39 @@ export function ensureNativeGeneratorResumeFunction(ctx: CodegenContext, info: N
     resumeFctx.body.push({ op: "local.get", index: 0 });
     resumeFctx.body.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: info.spillFieldOffset + i });
     resumeFctx.body.push({ op: "local.set", index: localIdx });
+  }
+
+  // (#2920) Destructure binding-pattern params ONCE, on first entry (state 0).
+  // The raw arg was rehydrated into its `param_*` local above; each bound name
+  // is a spill local (loaded above, persisted across yields) that this
+  // overwrites on first entry. Guarding on `state == 0` keeps it
+  // side-effect-safe — a default initializer / getter in the pattern must not
+  // re-run on resume (the spilled value is authoritative then). The bound-name
+  // spill locals are already in `localMap`, so the destructure helper's
+  // `ensureBindingLocals` reuses them (no double-alloc, no re-type).
+  const thisOffset = info.synthesizedThis ? 1 : 0;
+  const patternParams = info.decl.parameters.filter((p) => !ts.isIdentifier(p.name));
+  if (patternParams.length > 0) {
+    const saved = pushBody(resumeFctx);
+    for (let k = 0; k < info.decl.parameters.length; k++) {
+      const p = info.decl.parameters[k]!;
+      if (ts.isIdentifier(p.name)) continue;
+      const nameIdx = k + thisOffset;
+      const rawLocal = resumeFctx.localMap.get(info.paramNames[nameIdx]!);
+      if (rawLocal === undefined) continue;
+      const rawType = info.paramTypes[nameIdx]!;
+      if (ts.isArrayBindingPattern(p.name)) {
+        destructureParamArray(ctx, resumeFctx, rawLocal, p.name, rawType);
+      } else if (ts.isObjectBindingPattern(p.name)) {
+        destructureParamObject(ctx, resumeFctx, rawLocal, p.name, rawType);
+      }
+    }
+    const destrInstrs = resumeFctx.body;
+    popBody(resumeFctx, saved);
+    resumeFctx.body.push({ op: "local.get", index: 0 });
+    resumeFctx.body.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: STATE_FIELD });
+    resumeFctx.body.push({ op: "i32.eqz" });
+    resumeFctx.body.push({ op: "if", blockType: { kind: "empty" }, then: destrInstrs, else: [] } as Instr);
   }
 
   // Result holding local (the trampoline writes it; the tail reads it).
