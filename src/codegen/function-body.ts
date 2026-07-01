@@ -53,7 +53,7 @@ import { collectI32SpecializedArrays } from "./array-element-typing.js";
 import { detectArrayReduceFusion, applyArrayReduceFusion } from "./array-reduce-fusion.js";
 import { compileNativeGeneratorFunction } from "./generators-native.js";
 import { ASYNC_CPS_ENABLED, analyzeAsyncBody, asyncFnNeedsCps, emitAsyncStateMachine } from "./async-cps.js";
-import { emitAsyncFrameStateMachine } from "./async-frame.js";
+import { emitAsyncFrameStateMachine, asyncFnNeedsDrive } from "./async-frame.js";
 import { isStandalonePromiseActive } from "./async-scheduler.js";
 import {
   functionHasLinearU8Params,
@@ -1164,7 +1164,12 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
         decl.body
       ) {
         const asyncPlan = analyzeAsyncBody(ctx, decl);
-        if (asyncFnNeedsCps(decl, asyncPlan)) {
+        // (#2906) Drive-layer eligibility now accepts linear MULTI-await bodies,
+        // not just the single canonical await `asyncFnNeedsCps` gates on. For a
+        // single await the verdict is identical, so wasi single-await routing is
+        // unchanged; ≥2 sequential awaits (previously demoted to the AG0 unwrap)
+        // now get the general N-state resume machine.
+        if (asyncFnNeedsDrive(ctx, decl, asyncPlan)) {
           rewriteFuncResultType(ctx, func, { kind: "externref" });
           fctx.returnType = { kind: "externref" };
           emitAsyncFrameStateMachine(ctx, fctx, decl, asyncPlan);

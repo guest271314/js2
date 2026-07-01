@@ -248,7 +248,7 @@ const PROMISE_COMBINATOR_NAMES = new Set(["all", "race", "any", "allSettled"]);
  * gap (e.g. `Promise.all(src.getPromises())`) that #2028 owns — the CPS awaited
  * expression would otherwise mis-marshal the host-method argument. (#1796)
  */
-function awaitedExprIsPromiseCombinator(operand: ts.Expression): boolean {
+export function awaitedExprIsPromiseCombinator(operand: ts.Expression): boolean {
   let expr: ts.Expression = operand;
   while (
     ts.isParenthesizedExpression(expr) ||
@@ -643,6 +643,155 @@ export function splitBodyAtAwait(fn: ts.FunctionLikeDeclaration, plan: AsyncCpsP
   }
 
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// Multi-await linear planning (#2906 slice 1 — the N-state drive substrate).
+//
+// `splitBodyAtAwait` above is the SINGLE-await split that the JS-host CPS path
+// (`emitAsyncStateMachine`) and `asyncFnNeedsCps` gate on; it is intentionally
+// left UNCHANGED so the host/gc lanes stay byte-identical. `planLinearAwaits`
+// is the generalization used ONLY by the host-free drive layer (`async-frame.ts`,
+// carrier-gated on `isStandalonePromiseActive`, wasi-only today): it splits a
+// LINEAR async body (no try/catch/finally-across-await, no await inside loops or
+// other control flow) into an ordered list of suspend segments, one per await,
+// which the general `br`-table-style resume machine drives.
+// ---------------------------------------------------------------------------
+
+/**
+ * One suspend segment of a linear multi-await body. Segment `k` runs the
+ * statements immediately preceding await `k` (in the same top-level sequence),
+ * then evaluates await `k`'s operand and suspends on it.
+ */
+export interface LinearAwaitSegment {
+  /** Top-level statements between the previous await's statement and this one. */
+  readonly leadStmts: readonly ts.Statement[];
+  /** The operand of this await (the value we assimilate + suspend on). */
+  readonly awaitedExpr: ts.Expression;
+  /**
+   * The binding this await's resolved value flows into (`const x = await P`), or
+   * `null` for a bare `await P;` / `return await P`. Delivered fresh from
+   * `SENT_FIELD` on resume — never snapshotted at suspend time.
+   */
+  readonly resumeBinding: { readonly name: string; readonly type: ts.TypeNode | undefined } | null;
+  /** `return await P` — the resolved value settles the result promise directly. */
+  readonly isReturnAwait: boolean;
+}
+
+/**
+ * A linear async body split into N ordered suspend segments plus the tail that
+ * runs after the last await resolves. Produced by {@link planLinearAwaits}.
+ */
+export interface LinearAwaitPlan {
+  /** One segment per await point, in source order. */
+  readonly segments: readonly LinearAwaitSegment[];
+  /** Statements after the last await's statement (empty for `return await P`). */
+  readonly tail: readonly ts.Statement[];
+}
+
+/**
+ * Split a LINEAR async function body (a flat statement sequence whose awaits all
+ * sit at canonical top-level positions) into ordered suspend segments. This is
+ * the multi-await generalization of {@link splitBodyAtAwait}: each await must be
+ * DIRECTLY the return-arg / single-var-initializer / expression-statement of a
+ * top-level statement — exactly the three shapes `splitBodyAtAwait` accepts, but
+ * now any number of them in sequence.
+ *
+ * Returns `null` (caller falls back to the legacy / AG0 path) when the body is
+ * not linear-canonical: no awaits, a try/catch spanning an await (Gap 3), an
+ * await nested inside a loop / `if` / expression (Gap 5 / non-linear), more than
+ * one await in a single statement, or dead code after a `return await`.
+ *
+ * Pure — no `ctx`/`fctx` mutation; type-eligibility (spill-safe resume-binding
+ * types) is a separate gate applied by the drive layer.
+ */
+export function planLinearAwaits(fn: ts.FunctionLikeDeclaration, plan: AsyncCpsPlan): LinearAwaitPlan | null {
+  if (plan.awaitPoints.length === 0) return null;
+  if (plan.hasTryAcrossAwait) return null; // Gap 3 — not linear
+  const body = fn.body;
+  if (body === undefined || !ts.isBlock(body)) return null;
+
+  const awaitSet = new Set<ts.AwaitExpression>(plan.awaitPoints);
+  const stmts = body.statements;
+  const segments: LinearAwaitSegment[] = [];
+  let lead: ts.Statement[] = [];
+  let sawReturnAwait = false;
+
+  for (let i = 0; i < stmts.length; i++) {
+    const stmt = stmts[i]!;
+    const awaitsHere = countAwaitsInStatement(stmt, awaitSet);
+    if (awaitsHere === 0) {
+      if (sawReturnAwait) return null; // unreachable code after `return await`
+      lead.push(stmt);
+      continue;
+    }
+    if (awaitsHere > 1) return null; // two awaits in one statement — not linear-canonical
+    const awaitNode = findAwaitInStatement(stmt, awaitSet)!;
+
+    // The await must be DIRECTLY one of the three canonical positions.
+    if (ts.isReturnStatement(stmt) && stmt.expression === awaitNode) {
+      segments.push({ leadStmts: lead, awaitedExpr: awaitNode.expression, resumeBinding: null, isReturnAwait: true });
+      lead = [];
+      sawReturnAwait = true;
+      continue;
+    }
+    if (ts.isVariableStatement(stmt)) {
+      const decls = stmt.declarationList.declarations;
+      if (decls.length !== 1) return null;
+      const decl = decls[0]!;
+      if (decl.initializer !== awaitNode || !ts.isIdentifier(decl.name)) return null;
+      segments.push({
+        leadStmts: lead,
+        awaitedExpr: awaitNode.expression,
+        resumeBinding: { name: decl.name.text, type: decl.type },
+        isReturnAwait: false,
+      });
+      lead = [];
+      continue;
+    }
+    if (ts.isExpressionStatement(stmt) && stmt.expression === awaitNode) {
+      segments.push({ leadStmts: lead, awaitedExpr: awaitNode.expression, resumeBinding: null, isReturnAwait: false });
+      lead = [];
+      continue;
+    }
+    return null; // await sits in a non-canonical position within this statement
+  }
+
+  // Every await must have been consumed into a segment (defensive; a stray await
+  // in a `lead` statement would have made `awaitsHere > 0` and been handled).
+  if (segments.length !== plan.awaitPoints.length) return null;
+  return { segments, tail: lead };
+}
+
+/** Count how many of `awaitSet`'s awaits sit inside `stmt` (not crossing fn scopes). */
+function countAwaitsInStatement(stmt: ts.Node, awaitSet: ReadonlySet<ts.AwaitExpression>): number {
+  let n = 0;
+  const walk = (node: ts.Node): void => {
+    if (isNestedFunctionScope(node) && node !== stmt) return;
+    if (ts.isAwaitExpression(node) && awaitSet.has(node)) n++;
+    forEachChild(node, walk);
+  };
+  walk(stmt);
+  return n;
+}
+
+/** The single `awaitSet` await inside `stmt`, or `undefined`. */
+function findAwaitInStatement(
+  stmt: ts.Node,
+  awaitSet: ReadonlySet<ts.AwaitExpression>,
+): ts.AwaitExpression | undefined {
+  let found: ts.AwaitExpression | undefined;
+  const walk = (node: ts.Node): void => {
+    if (found) return;
+    if (isNestedFunctionScope(node) && node !== stmt) return;
+    if (ts.isAwaitExpression(node) && awaitSet.has(node)) {
+      found = node;
+      return;
+    }
+    forEachChild(node, walk);
+  };
+  walk(stmt);
+  return found;
 }
 
 /** True if `node` appears anywhere within `stmt`'s subtree (not crossing fn scopes). */

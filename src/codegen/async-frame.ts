@@ -50,8 +50,8 @@ import {
   defaultSpillInstr,
 } from "./frame-core.js";
 import { ensureExnTag } from "./registry/imports.js";
-import type { AsyncCpsPlan } from "./async-cps.js";
-import { splitBodyAtAwait } from "./async-cps.js";
+import type { AsyncCpsPlan, LinearAwaitPlan } from "./async-cps.js";
+import { planLinearAwaits, awaitedExprIsPromiseCombinator, ASYNC_CPS_ENABLED } from "./async-cps.js";
 import { resolveSpillLocalValType } from "./statements/variables.js";
 import { allocLocal } from "./context/locals.js";
 import { addFuncType } from "./registry/types.js";
@@ -226,13 +226,87 @@ function asyncFnName(decl: ts.FunctionLikeDeclaration): string {
 }
 
 /**
- * The body locals that are live across the (single, slice-1) await and so must
- * be spilled into the frame. Mirrors the generator's `bodySpills`: the
- * live-after-await set MINUS params (already captured in param fields) MINUS the
- * resume binding (`const x = await P` — `x` is delivered fresh from `SENT_FIELD`
- * on resume, never snapshotted at suspend time). Spill ValTypes are resolved
- * from the declaring `VariableDeclaration` via `resolveSpillLocalValType`,
- * defaulting to externref when a precise type is not recoverable.
+ * The Wasm ValType a resume binding (`const x = await P`) settles to — the
+ * coercion target the continuation writes `SENT_FIELD` into, and (when the
+ * binding survives a later await) the type of its frame spill field. Resolved
+ * consistently in ONE place so the spill field and the resume-function local
+ * agree and round-trip through `struct.get`/`struct.set`.
+ */
+function resumeBindingValType(ctx: CodegenContext, rb: { name: string; type: ts.TypeNode | undefined }): ValType {
+  return rb.type ? resolveWasmType(ctx, ctx.checker.getTypeAtLocation(rb.type)) : { kind: "externref" };
+}
+
+/**
+ * ValTypes that spill safely in slice 1: they have a valid inert
+ * {@link defaultSpillInstr} AND survive a mutable-field round-trip. Non-null GC
+ * refs are excluded — their field default would be a `ref.null` of a non-null
+ * type (invalid Wasm) — so a resume binding of such a type that must be spilled
+ * makes the fn fall back to the legacy path (a later slice widens this).
+ */
+function isSpillSafeType(t: ValType): boolean {
+  return t.kind === "i32" || t.kind === "f64" || t.kind === "i64" || t.kind === "externref" || t.kind === "ref_null";
+}
+
+/** Is `name` (a resume binding delivered by await `k`) read after some LATER
+ *  await (`j > k`)? If so it must be preserved across that await's suspend. */
+function bindingLiveAcrossLaterAwait(name: string, k: number, plan: AsyncCpsPlan): boolean {
+  for (let j = k + 1; j < plan.awaitPoints.length; j++) {
+    const live = plan.liveAfterAwait.get(plan.awaitPoints[j]!);
+    if (live && live.has(name)) return true;
+  }
+  return false;
+}
+
+/**
+ * Host-free drive-layer eligibility (#2906) — the standalone/wasi analogue of
+ * {@link import("./async-cps.js").asyncFnNeedsCps}. True when the async fn
+ * genuinely suspends AND its body is a LINEAR multi-await shape the general
+ * resume machine can drive ({@link planLinearAwaits}) AND every resume binding
+ * that must survive a later await has a spill-safe type.
+ *
+ * **Single-await parity.** For exactly one canonical await this returns the same
+ * verdict as `asyncFnNeedsCps` (same real-suspension + Promise-combinator gates;
+ * a single await's binding is never crossed by a later await so the type gate is
+ * inert), so the wasi single-await routing decision is unchanged by #2906 — only
+ * the emitted resume machine generalizes.
+ */
+export function asyncFnNeedsDrive(ctx: CodegenContext, fn: ts.FunctionLikeDeclaration, plan: AsyncCpsPlan): boolean {
+  if (!ASYNC_CPS_ENABLED) return false;
+  if (plan.awaitPoints.length === 0) return false;
+  const anyRealSuspension = plan.awaitPoints.some((a) => plan.awaitedStaticallyResolved.get(a) !== true);
+  if (!anyRealSuspension) return false; // fully await-elidable → sync + resolved promise
+  const linear = planLinearAwaits(fn, plan);
+  if (linear === null) return false;
+  // Parity with asyncFnNeedsCps: a lone `await Promise.all(...)`/`.race`/… already
+  // yields a real Promise — keep it on the legacy identity path.
+  if (linear.segments.length === 1 && awaitedExprIsPromiseCombinator(linear.segments[0]!.awaitedExpr)) return false;
+  // Slice-1 type gate: a resume binding spilled across a later await needs a
+  // spill-safe type (see isSpillSafeType).
+  for (let k = 0; k < linear.segments.length; k++) {
+    const rb = linear.segments[k]!.resumeBinding;
+    if (!rb) continue;
+    if (!bindingLiveAcrossLaterAwait(rb.name, k, plan)) continue;
+    if (!isSpillSafeType(resumeBindingValType(ctx, rb))) return false;
+  }
+  return true;
+}
+
+/**
+ * The body locals that are live across ANY await and so must be spilled into the
+ * frame (the multi-await generalization of the generator's `bodySpills`).
+ *
+ * The spill set is the UNION, over every await `k`, of the locals live across
+ * await `k`'s suspend, MINUS params (captured in param fields) and MINUS await
+ * `k`'s OWN resume binding (delivered fresh from `SENT_FIELD` on resume, never
+ * snapshotted at suspend time). A resume binding from an EARLIER await that
+ * survives a later await IS spilled — it is an ordinary live local at that later
+ * suspend. Iterating awaits in order over insertion-ordered `Set`s and skipping
+ * only each await's own binding keeps a SINGLE-await body's spill list
+ * byte-identical to the pre-#2906 computation.
+ *
+ * Spill ValTypes: a resume-binding name uses {@link resumeBindingValType} (so the
+ * field matches the SENT-coercion target); any other local uses
+ * `resolveSpillLocalValType`, defaulting to externref.
  */
 function computeAsyncSpills(
   ctx: CodegenContext,
@@ -240,22 +314,38 @@ function computeAsyncSpills(
   plan: AsyncCpsPlan,
   paramNames: string[],
 ): { spillNames: string[]; spillTypes: ValType[] } {
-  if (plan.awaitPoints.length === 0) return { spillNames: [], spillTypes: [] };
-  const live = plan.liveAfterAwait.get(plan.awaitPoints[0]!) ?? new Set<string>();
-  const split = splitBodyAtAwait(decl, plan);
-  const resumeBindingName = split?.resumeBinding?.name;
+  const linear = planLinearAwaits(decl, plan);
+  if (linear === null) return { spillNames: [], spillTypes: [] };
   const paramSet = new Set(paramNames);
+
+  const rbTypeByName = new Map<string, ValType>();
+  for (const seg of linear.segments) {
+    if (seg.resumeBinding) rbTypeByName.set(seg.resumeBinding.name, resumeBindingValType(ctx, seg.resumeBinding));
+  }
 
   const declByName = collectVarDeclsByName(decl);
   const spillNames: string[] = [];
   const spillTypes: ValType[] = [];
-  for (const name of live) {
-    if (paramSet.has(name)) continue;
-    if (resumeBindingName !== undefined && name === resumeBindingName) continue;
-    const declNode = declByName.get(name);
-    const resolved = declNode ? resolveSpillLocalValType(ctx, declNode) : null;
-    spillNames.push(name);
-    spillTypes.push(resolved ?? { kind: "externref" });
+  const seen = new Set<string>();
+  for (let k = 0; k < linear.segments.length; k++) {
+    const live = plan.liveAfterAwait.get(plan.awaitPoints[k]!) ?? new Set<string>();
+    const ownBinding = linear.segments[k]!.resumeBinding?.name;
+    for (const name of live) {
+      if (paramSet.has(name)) continue;
+      if (ownBinding !== undefined && name === ownBinding) continue;
+      if (seen.has(name)) continue;
+      seen.add(name);
+      const rbType = rbTypeByName.get(name);
+      if (rbType !== undefined) {
+        spillNames.push(name);
+        spillTypes.push(rbType);
+        continue;
+      }
+      const declNode = declByName.get(name);
+      const resolved = declNode ? resolveSpillLocalValType(ctx, declNode) : null;
+      spillNames.push(name);
+      spillTypes.push(resolved ?? { kind: "externref" });
+    }
   }
   return { spillNames, spillTypes };
 }
@@ -295,31 +385,41 @@ function isNestedScope(node: ts.Node): boolean {
  * `__async_resume_f<name>(frame) -> void` and its two microtask **step
  * adapters** for one async function. Returns the resume funcIdx.
  *
- * For the slice-1 single-await canonical shape (`splitBodyAtAwait`) the resume
- * function is a **2-state** machine driven by `frame.STATE_FIELD`:
- *   - state 0 (entry): run the synchronous prefix, evaluate the awaited operand
- *     and assimilate it to a `$Promise`. If it is already FULFILLED, deliver its
- *     value into `SENT_FIELD` and fall through into the continuation (fast path).
- *     If still PENDING, `storeSpills`, set STATE=1, register a reaction
- *     (`__async_step_fulfill_f<name>` / `__async_step_reject_f<name>` funcrefs +
- *     this frame as caps) on the awaited promise's callback list, and `return`
- *     (suspend). A non-`$Promise` operand is delivered straight through.
- *   - state 1 (continuation): bind the resume value from `SENT_FIELD`, then run
- *     the suffix. `return v` settles `frame.result_promise` (the
- *     `asyncDriveReturn` hook); a fall-through end settles it with undefined.
+ * The resume function is a **general N-state machine** (#2906) driven by
+ * `frame.STATE_FIELD` over an ordered list of suspend segments
+ * ({@link planLinearAwaits}) — the multi-await generalization of the pre-#2906
+ * 2-state machine. It mirrors the Wasm-native generator trampoline
+ * (`generators-native.ts emitTrampoline`): a `block { loop { if-chain } }` that
+ * dispatches on STATE, where a synchronously-settled await advances STATE and
+ * `br`s back to re-dispatch (chaining fast-path awaits within one call) and a
+ * genuinely-pending await suspends with a `return`.
+ *
+ * For N awaits there are N+1 states:
+ *   - state s (0 ≤ s < N): [for s≥1] re-throw a rejected predecessor await + bind
+ *     its value from `SENT_FIELD`; run the lead statements; evaluate await s's
+ *     operand and assimilate it to a `$Promise`. FULFILLED → deliver value to
+ *     SENT, STATE=s+1, `br` re-dispatch. REJECTED → stash reason in ERROR +
+ *     MODE=THROW, STATE=s+1, `br` (the next state's prelude re-throws). PENDING →
+ *     `storeSpills`, STATE=s+1, register the reaction (the SAME two step adapters
+ *     for every state — they only deliver SENT/ERROR then call resume, which
+ *     routes by STATE), `return`. A non-`$Promise` operand is delivered straight.
+ *   - state N (final): re-throw / bind the last await's value, then run the tail
+ *     (`return v` settles `frame.result_promise` via the `asyncDriveReturn` hook;
+ *     fall-through settles undefined). `return await P` settles with SENT directly.
  *
  * Uses the generator slot-reservation discipline (#2079/#1677/#1809): the resume
  * function and both step adapters reserve their funcIdx slots with placeholder
  * bodies BEFORE the resume body is emitted, because `compileStatement` on the
- * prefix/suffix can lazily append helper functions to `ctx.mod.functions` — a
- * stale capture would otherwise repoint every baked `call`/`ref.func`.
+ * lead/tail statements can lazily append helper functions to `ctx.mod.functions`
+ * — a stale capture would otherwise repoint every baked `call`/`ref.func`. The
+ * N-segment body widens that window (more helpers) but the discipline is the same.
  */
 export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameInfo, plan: AsyncCpsPlan): number {
   if (info.resumeFuncIdx !== undefined) return info.resumeFuncIdx;
 
-  const split = splitBodyAtAwait(info.decl, plan);
-  if (split === null) {
-    reportError(ctx, info.decl, "internal: async-frame resume built on an unsupported body shape (#2895 slice 1)");
+  const linear = planLinearAwaits(info.decl, plan);
+  if (linear === null) {
+    reportError(ctx, info.decl, "internal: async-frame resume built on an unsupported body shape (#2906 slice 1)");
     info.resumeFuncIdx = -1;
     return -1;
   }
@@ -329,7 +429,8 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
   const stem = sanitizeTypeName(info.functionName);
 
   // Reserve slots: resume fn, then the two step adapters. The microtask wrapper
-  // ABI is (caps externref, value externref) -> externref (result dropped).
+  // ABI is (caps externref, value externref) -> externref (result dropped). N
+  // states reuse the SAME two adapters (no per-state ABI change — #2906).
   const resumeName = `__async_resume_f${stem}`;
   const resumeTypeIdx = addFuncType(ctx, [frameRef], [], `${resumeName}_type`);
   const stepName = `__async_step_f${stem}`;
@@ -397,8 +498,8 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
     resumeFctx.body.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: info.paramFieldOffset + i });
     resumeFctx.body.push({ op: "local.set", index: idx });
   }
-  // Load spills from the frame into locals (overwritten by the prefix on first
-  // entry; restored from the frame on resume).
+  // Load spills from the frame into locals (overwritten by a segment's lead on
+  // first entry into its owning state; restored from the frame on resume).
   for (let i = 0; i < info.spillNames.length; i++) {
     const idx = allocLocal(resumeFctx, info.spillNames[i]!, info.spillTypes[i]!);
     resumeFctx.body.push({ op: "local.get", index: frameLocal });
@@ -419,64 +520,233 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
     fulfillFuncIdx: rt.fulfillFuncIdx,
   };
 
-  // Resume binding (`const x = await P`) — declared up-front so the continuation
-  // and (harmlessly) the entry segment share the slot.
-  let resumeBindingLocal: number | undefined;
-  let resumeBindingType: ValType | undefined;
-  if (split.resumeBinding) {
-    resumeBindingType = split.resumeBinding.type
-      ? resolveWasmType(ctx, ctx.checker.getTypeAtLocation(split.resumeBinding.type))
-      : { kind: "externref" };
-    resumeBindingLocal = allocLocal(resumeFctx, split.resumeBinding.name, resumeBindingType);
+  // Resume-binding locals. A binding that survives a later await is ALREADY a
+  // spill local (allocated above) — reuse that slot so the delivered SENT value
+  // and the spilled/reloaded value share one local. A binding used only within
+  // its own continuation gets a fresh delivery-only local. Typed via
+  // `resumeBindingValType` (== the spill field type for the spilled ones).
+  const bindingLocal = new Map<string, { local: number; type: ValType }>();
+  for (const seg of linear.segments) {
+    if (!seg.resumeBinding) continue;
+    const t = resumeBindingValType(ctx, seg.resumeBinding);
+    const existing = resumeFctx.localMap.get(seg.resumeBinding.name);
+    const local = existing !== undefined ? existing : allocLocal(resumeFctx, seg.resumeBinding.name, t);
+    bindingLocal.set(seg.resumeBinding.name, { local, type: t });
   }
 
-  // Compile the entry + continuation segments under this resume context (so late
-  // imports shift THIS body). `liveBodies` guards the detached outer arrays.
+  // Transient locals reused across every state arm (only one await is processed
+  // per resume-call dispatch, so a single set suffices).
+  const awaitedLocal = allocLocal(resumeFctx, "__async_awaited", { kind: "externref" });
+  const pLocal = allocLocal(resumeFctx, "__async_p", { kind: "ref", typeIdx: info.promiseTypeIdx });
+  const suspendedLocal = allocLocal(resumeFctx, "__async_suspended", { kind: "i32" });
+  const exnTag = ensureExnTag(ctx);
+  const reasonLocal = allocLocal(resumeFctx, "__async_reason", { kind: "externref" });
+  const N = linear.segments.length;
+
+  // Emit `SENT_FIELD → predecessor await's resume binding`, guarded by a
+  // MODE_THROW re-throw of a rejected predecessor. `s` is the state whose
+  // predecessor await is `s-1` (used by state s≥1 and the final state N).
+  const emitDeliverPrev = (out: Instr[], s: number): void => {
+    out.push({ op: "local.get", index: frameLocal });
+    out.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: MODE_FIELD });
+    out.push({ op: "i32.const", value: MODE_THROW });
+    out.push({ op: "i32.eq" });
+    out.push({
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: frameLocal },
+        { op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: ERROR_FIELD } as Instr,
+        { op: "throw", tagIdx: exnTag } as Instr,
+      ],
+    } as Instr);
+    const prev = linear.segments[s - 1]!;
+    if (prev.resumeBinding) {
+      const bl = bindingLocal.get(prev.resumeBinding.name)!;
+      out.push({ op: "local.get", index: frameLocal });
+      out.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: SENT_FIELD });
+      coerceType(ctx, resumeFctx, { kind: "externref" }, bl.type);
+      out.push({ op: "local.set", index: bl.local });
+    }
+  };
+
+  // State s (0 ≤ s < N): run await s, then advance (br to re-dispatch) or suspend.
+  const buildAwaitSegment = (s: number): Instr[] => {
+    const seg = linear.segments[s]!;
+    const saved = resumeFctx.body;
+    ctx.liveBodies.add(saved);
+    const out: Instr[] = [];
+    resumeFctx.body = out;
+    try {
+      if (s >= 1) emitDeliverPrev(out, s);
+      for (const stmt of seg.leadStmts) compileStatement(ctx, resumeFctx, stmt);
+
+      const awaitedType = compileExpression(ctx, resumeFctx, seg.awaitedExpr);
+      if (awaitedType !== null && awaitedType !== undefined) {
+        coerceType(ctx, resumeFctx, awaitedType as ValType, { kind: "externref" });
+      } else {
+        out.push({ op: "ref.null.extern" } as Instr);
+      }
+      out.push({ op: "local.set", index: awaitedLocal });
+
+      // Classify the assimilated value; set suspendedLocal + SENT/ERROR/MODE.
+      // No `br` inside these nested ifs — the single advance/suspend `br`/`return`
+      // is emitted flat below at a known control depth.
+      out.push({ op: "i32.const", value: 0 });
+      out.push({ op: "local.set", index: suspendedLocal });
+
+      const deliverFromP: Instr[] = [
+        { op: "local.get", index: frameLocal },
+        { op: "local.get", index: pLocal },
+        { op: "struct.get", typeIdx: info.promiseTypeIdx, fieldIdx: 1 } as Instr,
+        { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: SENT_FIELD } as Instr,
+      ];
+      const rejectFromP: Instr[] = [
+        { op: "local.get", index: frameLocal },
+        { op: "local.get", index: pLocal },
+        { op: "struct.get", typeIdx: info.promiseTypeIdx, fieldIdx: 1 } as Instr,
+        { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: ERROR_FIELD } as Instr,
+        ...setStateI32FromConst(info, frameLocal, MODE_FIELD, MODE_THROW),
+      ];
+      const markPending: Instr[] = [
+        { op: "i32.const", value: 1 },
+        { op: "local.set", index: suspendedLocal },
+      ];
+      const deliverPlain: Instr[] = [
+        { op: "local.get", index: frameLocal },
+        { op: "local.get", index: awaitedLocal },
+        { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: SENT_FIELD } as Instr,
+      ];
+      const pendingOrRejected: Instr[] = [
+        { op: "local.get", index: pLocal },
+        { op: "struct.get", typeIdx: info.promiseTypeIdx, fieldIdx: 0 } as Instr,
+        { op: "i32.const", value: PROMISE_STATE_REJECTED },
+        { op: "i32.eq" },
+        { op: "if", blockType: { kind: "empty" }, then: rejectFromP, else: markPending } as Instr,
+      ];
+      out.push(
+        { op: "local.get", index: awaitedLocal },
+        { op: "any.convert_extern" } as Instr,
+        { op: "ref.test", typeIdx: info.promiseTypeIdx } as Instr,
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            { op: "local.get", index: awaitedLocal },
+            { op: "any.convert_extern" } as Instr,
+            { op: "ref.cast", typeIdx: info.promiseTypeIdx } as Instr,
+            { op: "local.set", index: pLocal },
+            { op: "local.get", index: pLocal },
+            { op: "struct.get", typeIdx: info.promiseTypeIdx, fieldIdx: 0 } as Instr,
+            { op: "i32.const", value: PROMISE_STATE_FULFILLED },
+            { op: "i32.eq" },
+            { op: "if", blockType: { kind: "empty" }, then: deliverFromP, else: pendingOrRejected } as Instr,
+          ],
+          else: deliverPlain,
+        } as Instr,
+      );
+
+      // Advance-or-suspend. STATE = s+1 for both (suspend → resume enters s+1;
+      // advance → re-dispatch enters s+1).
+      out.push(...setStateI32FromConst(info, frameLocal, STATE_FIELD, s + 1));
+      const suspendArm: Instr[] = [
+        ...storeSpills(info, resumeFctx, frameLocal),
+        // promise.callbacks = $PromiseCallback{stepFulfill, frame, stepReject, frame, promise.callbacks}
+        { op: "local.get", index: pLocal },
+        { op: "ref.func", funcIdx: info.stepFulfillFuncIdx! } as Instr,
+        { op: "local.get", index: frameLocal },
+        { op: "extern.convert_any" } as Instr,
+        { op: "ref.func", funcIdx: info.stepRejectFuncIdx! } as Instr,
+        { op: "local.get", index: frameLocal },
+        { op: "extern.convert_any" } as Instr,
+        { op: "local.get", index: pLocal },
+        { op: "struct.get", typeIdx: info.promiseTypeIdx, fieldIdx: 2 } as Instr,
+        { op: "struct.new", typeIdx: rt.callbackTypeIdx } as Instr,
+        { op: "extern.convert_any" } as Instr,
+        { op: "struct.set", typeIdx: info.promiseTypeIdx, fieldIdx: 2 } as Instr,
+        { op: "return" },
+      ];
+      // Advance: `br` to the dispatch `loop` to re-enter at STATE=s+1. Control
+      // depth from inside this `else`: br0 = this if, br1 = if(state==s), … ,
+      // br(s+1) = if(state==0), br(s+2) = loop.
+      const advanceArm: Instr[] = [{ op: "br", depth: s + 2 } as Instr];
+      out.push({ op: "local.get", index: suspendedLocal });
+      out.push({ op: "if", blockType: { kind: "empty" }, then: suspendArm, else: advanceArm } as Instr);
+    } finally {
+      resumeFctx.body = saved;
+      ctx.liveBodies.delete(saved);
+    }
+    return out;
+  };
+
+  // State N (final): deliver the last await's value, then run the tail / settle.
+  const buildFinalSegment = (): Instr[] => {
+    const saved = resumeFctx.body;
+    ctx.liveBodies.add(saved);
+    const out: Instr[] = [];
+    resumeFctx.body = out;
+    try {
+      emitDeliverPrev(out, N);
+      const last = linear.segments[N - 1]!;
+      if (last.isReturnAwait) {
+        out.push({ op: "local.get", index: resultPromiseLocal });
+        out.push({ op: "local.get", index: frameLocal });
+        out.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: SENT_FIELD });
+        out.push({ op: "call", funcIdx: rt.fulfillFuncIdx });
+        out.push({ op: "drop" });
+        out.push({ op: "return" });
+      } else {
+        for (const stmt of linear.tail) compileStatement(ctx, resumeFctx, stmt);
+        out.push({ op: "local.get", index: resultPromiseLocal });
+        out.push({ op: "ref.null.extern" } as Instr);
+        out.push({ op: "call", funcIdx: rt.fulfillFuncIdx });
+        out.push({ op: "drop" });
+        out.push({ op: "return" });
+      }
+    } finally {
+      resumeFctx.body = saved;
+      ctx.liveBodies.delete(saved);
+    }
+    return out;
+  };
+
+  // Nested if-chain dispatch (`if(state==s){seg}else{…}`), mirroring the
+  // generator trampoline. Recursion depth == stateId, so each arm's `br`-to-loop
+  // depth is computed as `stateId + 2` inside `buildAwaitSegment`.
+  const buildStateArm = (s: number): Instr[] => {
+    if (s > N) return [{ op: "unreachable" } as Instr];
+    const then = s === N ? buildFinalSegment() : buildAwaitSegment(s);
+    return [
+      { op: "local.get", index: frameLocal },
+      { op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: STATE_FIELD },
+      { op: "i32.const", value: s },
+      { op: "i32.eq" },
+      { op: "if", blockType: { kind: "empty" }, then, else: buildStateArm(s + 1) } as Instr,
+    ];
+  };
+
   const savedFunc = ctx.currentFunc;
   ctx.currentFunc = resumeFctx;
-  let entrySeg: Instr[];
-  let contSeg: Instr[];
+  let chain: Instr[];
   try {
-    entrySeg = buildEntrySegment(ctx, resumeFctx, info, split, rt, frameLocal);
-    contSeg = buildContinuationSegment(
-      ctx,
-      resumeFctx,
-      info,
-      split,
-      resultPromiseLocal,
-      rt,
-      frameLocal,
-      resumeBindingLocal,
-      resumeBindingType,
-    );
+    chain = buildStateArm(0);
   } finally {
     ctx.currentFunc = savedFunc;
   }
 
-  // 2-state dispatch: state 0 runs the entry (which either suspends with
-  // `return` or falls through delivering SENT); any other state skips straight
-  // to the continuation. The entry's fall-through and the state!=0 path both
-  // reach the continuation that follows the `if`.
+  // (#2867 Gap 2) Throw → reject routing. A genuine throw — a bare `throw e`, or
+  // a rejected await re-thrown by a state prelude's MODE_THROW arm — must settle
+  // the result `$Promise` REJECTED, not escape uncaught (trap / strand pending).
+  // Wrap the whole `block { loop { if-chain } }` dispatch in `try`/`catch $exn`.
+  // Suspend / settle `return`s exit cleanly (a `return` in `try` skips `catch`),
+  // so only a real throw reaches the handler.
   const dispatch: Instr[] = [
-    { op: "local.get", index: frameLocal },
-    { op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: STATE_FIELD },
-    { op: "i32.eqz" },
-    { op: "if", blockType: { kind: "empty" }, then: entrySeg } as Instr,
-    ...contSeg,
+    {
+      op: "block",
+      blockType: { kind: "empty" },
+      body: [{ op: "loop", blockType: { kind: "empty" }, body: chain } as Instr],
+    } as Instr,
   ];
-
-  // (#2867 Gap 2) Throw → reject routing. An async function that throws — a bare
-  // `throw e` in the body, OR a rejected await whose reason the continuation
-  // re-throws (see `buildContinuationSegment`'s MODE_THROW arm and the
-  // `rejectFromP` rejected-now arm in `buildEntrySegment`) — must settle the
-  // frame's result `$Promise` REJECTED, not let the exception escape the resume
-  // function uncaught (which traps / strands the promise pending). Wrap the whole
-  // dispatch in a `try`/`catch $exn` that `__promise_reject`s the result with the
-  // caught reason. The suspend `return` and the fulfil-settle `return` exit the
-  // function cleanly (a `return` inside `try` does NOT invoke `catch`), so only a
-  // genuine throw reaches here.
-  const exnTag = ensureExnTag(ctx);
-  const reasonLocal = allocLocal(resumeFctx, "__async_reason", { kind: "externref" });
   resumeFctx.body.push({
     op: "try",
     blockType: { kind: "empty" },
@@ -543,219 +813,6 @@ function buildStepAdapterBody(info: AsyncFrameInfo, resumeFuncIdx: number, rejec
     { op: "ref.null.extern" } as Instr, // dropped by the drain
   );
   return body;
-}
-
-/**
- * Entry segment (state 0): synchronous prefix → assimilate awaited operand → on
- * FULFILLED deliver value to SENT and fall through; on PENDING register the
- * reaction and `return` (suspend); a non-`$Promise` operand is delivered
- * straight through. Built into a detached `Instr[]`.
- */
-function buildEntrySegment(
-  ctx: CodegenContext,
-  fctx: FunctionContext,
-  info: AsyncFrameInfo,
-  split: ReturnType<typeof splitBodyAtAwait> & object,
-  rt: AsyncDriveRuntime,
-  frameLocal: number,
-): Instr[] {
-  const promiseTypeIdx = info.promiseTypeIdx;
-  const saved = fctx.body;
-  ctx.liveBodies.add(saved);
-  const seg: Instr[] = [];
-  fctx.body = seg;
-  try {
-    for (const stmt of split.prefix) compileStatement(ctx, fctx, stmt);
-
-    // Awaited operand → externref.
-    const awaitedType = compileExpression(ctx, fctx, split.awaitedExpr);
-    if (awaitedType !== null && awaitedType !== undefined) {
-      coerceType(ctx, fctx, awaitedType as ValType, { kind: "externref" });
-    } else {
-      seg.push({ op: "ref.null.extern" } as Instr);
-    }
-    const awaitedLocal = allocLocal(fctx, "__async_awaited", { kind: "externref" });
-    seg.push({ op: "local.set", index: awaitedLocal });
-
-    // Cast the awaited `$Promise` into a single typed local and reuse it for
-    // every field access / reaction receiver. A repeated `local.get <externref>;
-    // any.convert_extern; ref.cast` pattern confuses the stack-balance
-    // type-repair pass (it re-infers the value and splices a bogus
-    // `ref.cast_null; any.convert_extern` "fixup"), so we narrow once here.
-    const pLocal = allocLocal(fctx, "__async_p", { kind: "ref", typeIdx: promiseTypeIdx });
-
-    // frame.SENT = pLocal.value — minted fresh per use (FULFILLED + REJECTED
-    // arms) so no `Instr[]` is aliased into two branch slots (a later
-    // type/funcIdx-shift pass would double-mutate a shared array; memory
-    // `reference_shared_instr_object_dce_double_remap`).
-    const deliverFromP = (): Instr[] => [
-      { op: "local.get", index: frameLocal },
-      { op: "local.get", index: pLocal },
-      { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 1 } as Instr,
-      { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: SENT_FIELD } as Instr,
-    ];
-    const deliverPlain: Instr[] = [
-      { op: "local.get", index: frameLocal },
-      { op: "local.get", index: awaitedLocal },
-      { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: SENT_FIELD } as Instr,
-    ];
-
-    // (#2867 Gap 2) Rejected-now: stash the reason into ERROR_FIELD and arm
-    // MODE_THROW, then fall through into the continuation — whose MODE_THROW arm
-    // re-throws it (→ result-promise reject, or an enclosing try/catch under
-    // Gap 3). Minted fresh per use so no `Instr[]` is aliased into two branch
-    // slots (`reference_shared_instr_object_dce_double_remap`).
-    const rejectFromP = (): Instr[] => [
-      { op: "local.get", index: frameLocal },
-      { op: "local.get", index: pLocal },
-      { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 1 } as Instr,
-      { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: ERROR_FIELD } as Instr,
-      ...setStateI32FromConst(info, frameLocal, MODE_FIELD, MODE_THROW),
-    ];
-
-    // Suspend arm: storeSpills + STATE=1 + register reaction + return.
-    const suspend: Instr[] = [
-      ...storeSpills(info, fctx, frameLocal),
-      ...setStateI32FromConst(info, frameLocal, STATE_FIELD, 1),
-      // promise.callbacks = $PromiseCallback{stepFulfill, frame, stepReject, frame, promise.callbacks}
-      { op: "local.get", index: pLocal }, // receiver for struct.set callbacks
-      { op: "ref.func", funcIdx: info.stepFulfillFuncIdx! } as Instr,
-      { op: "local.get", index: frameLocal },
-      { op: "extern.convert_any" } as Instr,
-      { op: "ref.func", funcIdx: info.stepRejectFuncIdx! } as Instr,
-      { op: "local.get", index: frameLocal },
-      { op: "extern.convert_any" } as Instr,
-      { op: "local.get", index: pLocal },
-      { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 2 } as Instr, // current callbacks (next)
-      { op: "struct.new", typeIdx: rt.callbackTypeIdx } as Instr,
-      { op: "extern.convert_any" } as Instr,
-      { op: "struct.set", typeIdx: promiseTypeIdx, fieldIdx: 2 } as Instr,
-      { op: "return" },
-    ];
-
-    // PENDING-or-rejected discrimination inside the "is a promise" arm.
-    const pendingOrRejected: Instr[] = [
-      { op: "local.get", index: pLocal },
-      { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 0 } as Instr,
-      { op: "i32.const", value: PROMISE_STATE_REJECTED },
-      { op: "i32.eq" },
-      {
-        op: "if",
-        blockType: { kind: "empty" },
-        then: rejectFromP(), // rejected-now: arm MODE_THROW, continuation re-throws (Gap 2)
-        else: suspend, // genuinely pending: suspend
-      } as Instr,
-    ];
-
-    // is it a $Promise?
-    seg.push(
-      { op: "local.get", index: awaitedLocal },
-      { op: "any.convert_extern" } as Instr,
-      { op: "ref.test", typeIdx: promiseTypeIdx } as Instr,
-      {
-        op: "if",
-        blockType: { kind: "empty" },
-        then: [
-          // narrow once: pLocal = (ref $Promise) awaitedLocal
-          { op: "local.get", index: awaitedLocal },
-          { op: "any.convert_extern" } as Instr,
-          { op: "ref.cast", typeIdx: promiseTypeIdx } as Instr,
-          { op: "local.set", index: pLocal },
-          // state == FULFILLED ?
-          { op: "local.get", index: pLocal },
-          { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 0 } as Instr,
-          { op: "i32.const", value: PROMISE_STATE_FULFILLED },
-          { op: "i32.eq" },
-          {
-            op: "if",
-            blockType: { kind: "empty" },
-            then: deliverFromP(), // fulfilled: deliver value, fall through
-            else: pendingOrRejected,
-          } as Instr,
-        ],
-        else: deliverPlain, // non-promise: deliver straight through
-      } as Instr,
-    );
-  } finally {
-    fctx.body = saved;
-    ctx.liveBodies.delete(saved);
-  }
-  return seg;
-}
-
-/**
- * Continuation segment (state 1): bind the resume value from `SENT_FIELD`, run
- * the suffix (whose `return v` settles `result_promise` via the
- * `asyncDriveReturn` hook), then settle with undefined on fall-through.
- */
-function buildContinuationSegment(
-  ctx: CodegenContext,
-  fctx: FunctionContext,
-  info: AsyncFrameInfo,
-  split: ReturnType<typeof splitBodyAtAwait> & object,
-  resultPromiseLocal: number,
-  rt: AsyncDriveRuntime,
-  frameLocal: number,
-  resumeBindingLocal: number | undefined,
-  resumeBindingType: ValType | undefined,
-): Instr[] {
-  const saved = fctx.body;
-  ctx.liveBodies.add(saved);
-  const seg: Instr[] = [];
-  fctx.body = seg;
-  try {
-    // (#2867 Gap 2) A rejected await delivers its reason through MODE_THROW +
-    // ERROR_FIELD — set either by the reject step adapter (microtask-delivered
-    // rejection) or by the `rejectFromP` rejected-now arm in the entry segment.
-    // Re-throw the reason here so it propagates to the result-promise reject
-    // wrapper in `ensureAsyncResumeFunction` (or, once Gap 3 lands, an enclosing
-    // try/catch across the await). On the fulfil path MODE is NEXT, so this is a
-    // no-op. Emitted BEFORE binding the resume value because a rejection has no
-    // value to bind.
-    const exnTag = ensureExnTag(ctx);
-    seg.push({ op: "local.get", index: frameLocal });
-    seg.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: MODE_FIELD });
-    seg.push({ op: "i32.const", value: MODE_THROW });
-    seg.push({ op: "i32.eq" });
-    seg.push({
-      op: "if",
-      blockType: { kind: "empty" },
-      then: [
-        { op: "local.get", index: frameLocal },
-        { op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: ERROR_FIELD } as Instr,
-        { op: "throw", tagIdx: exnTag } as Instr,
-      ],
-    } as Instr);
-
-    // Bind `x = SENT` (coerced) for `const x = await P`.
-    if (resumeBindingLocal !== undefined && resumeBindingType) {
-      seg.push({ op: "local.get", index: frameLocal });
-      seg.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: SENT_FIELD });
-      coerceType(ctx, fctx, { kind: "externref" }, resumeBindingType);
-      seg.push({ op: "local.set", index: resumeBindingLocal });
-    }
-
-    if (split.isReturnAwait) {
-      // `return await P`: the resolved value IS the result. Settle with SENT.
-      seg.push({ op: "local.get", index: resultPromiseLocal });
-      seg.push({ op: "local.get", index: frameLocal });
-      seg.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: SENT_FIELD });
-      seg.push({ op: "call", funcIdx: rt.fulfillFuncIdx });
-      seg.push({ op: "drop" });
-      seg.push({ op: "return" });
-    } else {
-      for (const stmt of split.suffix) compileStatement(ctx, fctx, stmt);
-      // Fall-through (no explicit return): settle result with undefined.
-      seg.push({ op: "local.get", index: resultPromiseLocal });
-      seg.push({ op: "ref.null.extern" } as Instr);
-      seg.push({ op: "call", funcIdx: rt.fulfillFuncIdx });
-      seg.push({ op: "drop" });
-    }
-  } finally {
-    fctx.body = saved;
-    ctx.liveBodies.delete(saved);
-  }
-  return seg;
 }
 
 /**
