@@ -226,3 +226,51 @@ async-gen) now extend this ONE N-state machine instead of re-deriving the
 generalization; multi-await-in-linear-code works host-free today. The count-move
 carrier widen (slice 1d) remains gated on all resume-machine slices + a
 net-positive standalone corpus.
+
+## Slice 2 — Gap 3: try/finally-across-await (LANDED, host-free wasi lane)
+
+**What shipped.** `try { …awaits… } finally { F }` spanning an await is now
+driven on the N-state machine (previously `planLinearAwaits` rejected it via the
+`hasTryAcrossAwait` gate → AG0). The finally runs on **all four completion
+paths**, reusing the generator's `activeFinalizers` model (not a re-derivation):
+
+- **`async-cps.ts`** — `planLinearAwaits` is now **recursive + try-region-aware**
+  (`lowerLinearStatements`): it recurses one level into a `try` body carrying the
+  finally as the active finalizer, weaving the finally into the post-try lead for
+  the **normal path** and tagging every statement with a per-statement
+  `leadInTry`/`tailInTry` flag (covers the outer→in-try entry AND the
+  in-try→finally exit boundaries within one lead — a `throw` between the last
+  in-try await and the finally still runs it).
+- **`async-frame.ts`** — a resume-local `inSrcTry` flag records whether control is
+  inside the try region (toggled per statement by the `leadInTry` flags; armed in
+  the rejected-predecessor `MODE_THROW` prelude). The resume function's outer
+  `catch` runs the finally (compiled a SECOND time, fresh Instr[]) before
+  rejecting **iff `inSrcTry`** — so a synchronous throw or a rejected await that
+  crossed the try runs the finally, while a throw outside it (or in the finally
+  itself) does not. Normal completion runs the inline copy woven into the lead.
+
+**Four paths, all verified** (`tests/issue-2906-gap3-tryfinally.test.ts`, 6
+host-free wasi tests): normal completion, synchronous throw after the await,
+synchronous throw before ever awaiting, pending-then-rejected (finally runs on the
+`MODE_THROW` resume via `__drain_microtasks`), pending-then-fulfilled, and
+post-try statements ordering (finally before them).
+
+**Bounded slice (everything else falls back — correct-or-legacy).** Single,
+non-nested `try/finally`, one per fn, await-free finally, **no `catch`**, **no
+`return` in the try body**. `planLinearAwaits` returns `null` for anything richer
+(try/catch, nested/second try, await-in-finally, return-through-finally), so those
+stay on the legacy/AG0 path — no wrong finally semantics, ever. try/catch and
+return-through-finally are the immediate follow-ups (they reuse this same
+`inSrcTry` + abrupt-completion machinery).
+
+**Byte-inertness proof.** gc/host + standalone are **byte-identical to `main`**
+for every program (single/multi-await/plain via slice 1; `try/finally` verified
+directly against a `main` worktree: gc `3e42…`/standalone `116a…` unchanged).
+Non-try async **wasi** output is byte-identical to slice 1 — Gap 3 adds **zero
+churn** to non-try async; only a `try/finally`-across-await program's wasi bytes
+change (the intended unlock). All Gap-3 machine instrs are guarded on
+`hasFinalizer`, so the non-try path emits the slice-1 machine unchanged.
+
+**Stacked on slice 1 (#2413)** — branch `issue-2906-gap3-tryfinally` from the
+slice-1 branch; enqueue after #2413 lands. Gap 5 (for-await / async-gen) builds on
+this same abrupt-completion machinery; the slice-1d widen stays LAST.
