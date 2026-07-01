@@ -1,8 +1,8 @@
 ---
 id: 2906
 title: "Standalone: generalize the async drive layer → multi-state, CFG-aware CPS resume machine (unlocks try/finally-across-await, for-await, multi-await)"
-status: ready
-assignee: null
+status: in-progress
+assignee: ttraenkler/sendev-async-multistate
 created: 2026-07-01
 priority: high
 feasibility: hard
@@ -145,3 +145,84 @@ covering the new shape, plus the byte-hash inertness proof (gc/host + standalone
 unchanged). The slice-1d widen is gated on the full `merge_group` standalone
 corpus (sr-pathb's 74-file async-function + the 150-sample for-await/async-gen/
 Promise.then/all cluster) measuring NET-POSITIVE — the authoritative gate.
+
+## Slice 1 — multi-await-in-linear-code (LANDED, host-free wasi lane)
+
+**What shipped.** The single-await 2-state resume machine
+(`async-frame.ts ensureAsyncResumeFunction`) is generalized to a **general
+N-state machine** driving a LINEAR async body with any number of sequential
+awaits (no try/finally, no loops — those stay Gap 3 / Gap 5). New surface:
+
+- `async-cps.ts planLinearAwaits(fn, plan)` — the multi-await generalization of
+  `splitBodyAtAwait`. Splits a linear body into ordered suspend segments (one per
+  await at a canonical top-level position: return-arg / single-var-init /
+  expr-stmt). Returns `null` (→ legacy/AG0 fallback) for try-across-await, awaits
+  in loops/`if`/expressions, two awaits in one statement, or dead code after
+  `return await`. **`splitBodyAtAwait` is left UNCHANGED** so the JS-host CPS
+  path + `asyncFnNeedsCps` stay byte-identical.
+- `async-frame.ts asyncFnNeedsDrive(ctx, fn, plan)` — drive-layer eligibility.
+  For a SINGLE await it returns the same verdict as `asyncFnNeedsCps` (identical
+  real-suspension + Promise-combinator gates), so wasi single-await routing is
+  unchanged; ≥2 awaits are newly accepted. `function-body.ts` swaps the drive
+  branch from `asyncFnNeedsCps` → `asyncFnNeedsDrive`.
+- The resume machine is now a `try { block { loop { if-chain } } } catch $exn`
+  dispatch (mirrors `generators-native.ts emitTrampoline`): STATE `s` (0..N-1)
+  runs await `s` — FULFILLED delivers SENT + `br`s to re-dispatch at `s+1`
+  (chaining synchronous fast-path awaits within one call), REJECTED arms
+  MODE_THROW + advances (next prelude re-throws), PENDING spills + registers the
+  reaction + `return`s. STATE N settles. The advance `br`-to-loop depth is
+  `stateId + 2` (validated at runtime).
+
+**Why one machine, no fork (the #2367 graveyard rule).** The two microtask step
+adapters are **STATE-agnostic** — they only write SENT/ERROR then call resume,
+which routes by STATE — so N states reuse the SAME two adapters with **no ABI
+change**. The 2-state `buildEntrySegment`/`buildContinuationSegment` were
+**deleted**, not left beside a parallel multi-await path: single- and multi-await
+both flow through the one general machine, which is the substrate Gap 3
+(finally-regions) and Gap 5 (loop back-edges) extend.
+
+**Spill correctness (the multi-await-specific hazard).** The spill set is now the
+UNION over every await `k` of the locals live across await `k`'s suspend, minus
+params and minus await `k`'s OWN resume binding (delivered fresh from SENT). A
+resume binding from an EARLIER await that survives a later await IS spilled — the
+core case `const a = await p; const b = await q; use(a)`. Such a spilled binding
+reuses its spill local (no double-`allocLocal`) and is typed via
+`resumeBindingValType` so the frame field and local round-trip. Iterating awaits
+in order over insertion-ordered Sets + skipping only each await's own binding
+keeps a single-await body's spill list byte-identical to pre-#2906.
+
+**Slice-1 scope guard.** A resume binding that must be SPILLED across a later
+await is required to have a spill-safe type (`i32`/`f64`/`i64`/`externref`/
+`ref_null`); a non-null GC-ref binding would need an invalid `ref.null`
+field default, so those fall back to legacy (a later slice can widen this).
+
+**Byte-inertness proof (the −16/−29 discipline).** Compiled 4 representative
+programs (single-await, 2×multi-await, plain) under gc(default) / standalone /
+wasi and sha256'd the binaries before vs after:
+
+| program     | gc | standalone | wasi |
+| ----------- | -- | ---------- | ---- |
+| singleAwait | identical | identical | CHANGED (general machine) |
+| multiAwait  | identical | identical | CHANGED (new drive) |
+| pendingMulti| identical | identical | CHANGED (new drive) |
+| plain       | identical | identical | identical |
+
+gc/host + standalone are **byte-identical** — the drive branch is gated on
+`isStandalonePromiseActive` (wasi-only), so neither lane reaches the changed
+code. Only wasi (the native-`$Promise` carrier lane) changes, which is the
+intended unlock. The slice-1d `isStandalonePromiseActive` widen stays LAST,
+after Gaps 3/5, gated on a NET-POSITIVE full `merge_group` standalone corpus.
+
+**Verification.** `tests/issue-2906-async-multiawait.test.ts` (6 host-free wasi
+tests: 2/3 sequential fast-path awaits, spilled-binding-across-suspend, bare-await
+sequences, `return await` as final segment, and the critical two-genuinely-pending
+chain resolving to 4142 via `__drain_microtasks`). All 10 pre-existing
+`issue-2895-async-frame` / drain-hook tests still pass (single-await parity). The
+2 `issue-2865` + 2 `promise-combinators` failures are **pre-existing on
+upstream/main** (verified in a base worktree), not #2906 regressions.
+
+**Unblocks.** Gap 3 (try/finally-across-await) and Gap 5 (for-await-of /
+async-gen) now extend this ONE N-state machine instead of re-deriving the
+generalization; multi-await-in-linear-code works host-free today. The count-move
+carrier widen (slice 1d) remains gated on all resume-machine slices + a
+net-positive standalone corpus.
