@@ -866,6 +866,13 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
       if (ts.isOmittedExpression(el)) continue;
       if (el.dotDotDotToken) return null;
       if (!ts.isIdentifier(el.name)) return null;
+      // (#2920) A default initializer on a pattern element (`{a = expr}`,
+      // `{a: b = expr}`) evaluates `expr` when the property is `undefined`. The
+      // resume-prelude destructure lowering of that default is not yet correct
+      // for all shapes — a throwing / function-valued default produced invalid
+      // modules on the corpus — so bail to the host path (a follow-up slice can
+      // widen this once the defaulted-destructure lowering is hardened).
+      if (el.initializer) return null;
     }
     // (#2920) ARRAY patterns are native-eligible ONLY when TYPED (`param.type`
     // present) and the resolved type is a concrete vec/tuple ref. This is the
@@ -905,9 +912,17 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
   // Final fallthrough state completes the generator.
   finishState(curId, { kind: "done" });
 
-  // Reject if there is no actual suspension point (then it's not a generator
-  // worth the native path) or the state count is too large. (#2170) A
-  // `yield*` delegation state is a suspension point too.
+  // Reject if there is no actual suspension point or the state count is too
+  // large. (#2170) A `yield*` delegation state is a suspension point too.
+  //
+  // (#2920) NO-YIELD generator support (relaxing this bail so a zero-suspend body
+  // lowers to a done-from-start trampoline) is PREPARED but held OFF: at test262
+  // harness scale a late/union import fired during the resume-function emit
+  // shifts function indices and desyncs an already-emitted runtime helper
+  // (`__str_flatten call[1] expected externref, found i32`), producing an invalid
+  // module for ~1.4% of no-yield generators. That late-import funcIdx-shift is
+  // the real blocker (the reference_1461 / #2918 class), independent of
+  // destructuring; it must be fixed before this bail is relaxed. See the issue.
   const suspendCount = states.filter((s) => s.terminator.kind === "yield" || s.terminator.kind === "yield-star").length;
   if (suspendCount === 0) return null;
   if (states.length > MAX_NATIVE_GENERATOR_STATES) return null;
@@ -1987,26 +2002,40 @@ export function ensureNativeGeneratorResumeFunction(ctx: CodegenContext, info: N
   const thisOffset = info.synthesizedThis ? 1 : 0;
   const patternParams = info.decl.parameters.filter((p) => !ts.isIdentifier(p.name));
   if (patternParams.length > 0) {
-    const saved = pushBody(resumeFctx);
-    for (let k = 0; k < info.decl.parameters.length; k++) {
-      const p = info.decl.parameters[k]!;
-      if (ts.isIdentifier(p.name)) continue;
-      const nameIdx = k + thisOffset;
-      const rawLocal = resumeFctx.localMap.get(info.paramNames[nameIdx]!);
-      if (rawLocal === undefined) continue;
-      const rawType = info.paramTypes[nameIdx]!;
-      if (ts.isArrayBindingPattern(p.name)) {
-        destructureParamArray(ctx, resumeFctx, rawLocal, p.name, rawType);
-      } else if (ts.isObjectBindingPattern(p.name)) {
-        destructureParamObject(ctx, resumeFctx, rawLocal, p.name, rawType);
+    // (#2920 funcIdx-shift fix) `destructureParamObject`/`destructureParamArray`
+    // may add a late/union import (string helpers, `__get_undefined`, …), which
+    // shifts every function index. The shifter rewrites `ctx.currentFunc.body`,
+    // so `ctx.currentFunc` MUST point at the resume fctx during this emit — else
+    // the shift is applied to the OUTER caller's body and the resume prelude's
+    // own `call` indices (and already-emitted helpers like `__str_flat`) desync,
+    // producing an invalid module (only visible at harness scale, where a late
+    // import actually fires). Mirror the `emitTrampoline` wrapping below.
+    const savedFunc = ctx.currentFunc;
+    ctx.currentFunc = resumeFctx;
+    try {
+      const saved = pushBody(resumeFctx);
+      for (let k = 0; k < info.decl.parameters.length; k++) {
+        const p = info.decl.parameters[k]!;
+        if (ts.isIdentifier(p.name)) continue;
+        const nameIdx = k + thisOffset;
+        const rawLocal = resumeFctx.localMap.get(info.paramNames[nameIdx]!);
+        if (rawLocal === undefined) continue;
+        const rawType = info.paramTypes[nameIdx]!;
+        if (ts.isArrayBindingPattern(p.name)) {
+          destructureParamArray(ctx, resumeFctx, rawLocal, p.name, rawType);
+        } else if (ts.isObjectBindingPattern(p.name)) {
+          destructureParamObject(ctx, resumeFctx, rawLocal, p.name, rawType);
+        }
       }
+      const destrInstrs = resumeFctx.body;
+      popBody(resumeFctx, saved);
+      resumeFctx.body.push({ op: "local.get", index: 0 });
+      resumeFctx.body.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: STATE_FIELD });
+      resumeFctx.body.push({ op: "i32.eqz" });
+      resumeFctx.body.push({ op: "if", blockType: { kind: "empty" }, then: destrInstrs, else: [] } as Instr);
+    } finally {
+      ctx.currentFunc = savedFunc;
     }
-    const destrInstrs = resumeFctx.body;
-    popBody(resumeFctx, saved);
-    resumeFctx.body.push({ op: "local.get", index: 0 });
-    resumeFctx.body.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: STATE_FIELD });
-    resumeFctx.body.push({ op: "i32.eqz" });
-    resumeFctx.body.push({ op: "if", blockType: { kind: "empty" }, then: destrInstrs, else: [] } as Instr);
   }
 
   // Result holding local (the trampoline writes it; the tail reads it).

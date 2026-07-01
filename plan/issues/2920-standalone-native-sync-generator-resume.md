@@ -17,6 +17,46 @@ umbrella: 2860
 
 # Standalone native SYNC-generator resume substrate
 
+## 🚧 SLICE-1 BUILD STATUS (2026-07-02) — no-yield BLOCKED on a funcIdx-shift bug
+
+**On the branch now (safe, byte-inert on real test262):**
+- Destructuring generator params (object + typed-array, with-yield) — native
+  lowering via a state-0-guarded resume-prelude destructure. Correct on synthetic
+  cases; **flips ~0 real test262** (the dstr corpus is no-yield, see below) and is
+  **byte-inert on the real corpus** (with-yield object-pattern generators all bail
+  to host for other reasons — 0 native flips, 0 invalid on the 70-file with-yield
+  corpus). Kept as the prerequisite it is.
+- `ctx.currentFunc = resumeFctx` wrapping + a default-initializer bail on the
+  destructure emit (correctness hardening).
+
+**No-yield generator support is PREPARED but HELD OFF** (the two bails —
+`buildNativeGeneratorPlan` suspendCount and the candidate yield-require — are
+reverted to reject no-yield). Zero-suspend lowering itself is **correct**
+(ident/obj param, return-value, 2nd-next→`{done:true}`, throw-in-body all valid +
+js-host-matching, 0 wrong-value failures on a 500-file corpus sample). It flips
+**~14% of no-yield generators host-free** (71–78/500 → ~250–350 of the 1780).
+
+**BLOCKER — late-import funcIdx-shift at harness scale.** With no-yield enabled,
+~1.4% of no-yield generators (7/500) produce an **invalid module**:
+`__str_flatten call[1] expected externref, found i32` — an already-emitted runtime
+string helper (func #6/#7) desyncs because a late/union import fired *during the
+lazily-emitted resume function's body/param emit* and shifted function indices
+without repointing that helper's `call`. This is the **reference_1461 /
+reference_2193 / #2918 `shiftAsyncSideChannelFuncIdxs` class** of bug, NOT specific
+to destructuring: it reproduces on `obj-ptrn-empty.js` (destructure-triggered) AND
+`scope-paramsbody-var-close.js` (escaping-closure-triggered), i.e. any no-yield
+body/param that triggers a late import at scale. Only reproduces with the full
+test262 harness (a small module never fires the shifting import), so it is a
+merge_group-class regression that scoped checks miss. `ctx.currentFunc` wrapping +
+default-init/dstr gating each removed a subset but not the root cause.
+
+**Next step:** a focused funcIdx-shift fix — ensure the lazily-emitted resume
+function's late imports repoint ALL already-emitted bodies (runtime helpers
+included), likely by registering the resume path's imports up-front or applying
+the #2918 side-channel-shift pattern. Once green on a 500+ file no-yield sample
+with **0 invalid**, relax the two bails and the ~250–350-test yield unlocks.
+Escalated to tech lead for scheduling.
+
 ## ⚠️ CORRECTED MEASUREMENT (2026-07-02) — the corpus is NO-YIELD generators
 
 The original import-set measurement below (1396 dstr-param / 1851 flippable) was
