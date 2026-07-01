@@ -14,6 +14,7 @@ import { addFuncType } from "../registry/types.js";
 import { addUnionImportsViaRegistry } from "../shared.js";
 import { ensureObjectRuntime, OBJECT_RUNTIME_HELPER_NAMES } from "../object-runtime.js";
 import { ensureSymbolCarrier } from "../symbol-native.js";
+import { shiftAsyncSideChannelFuncIdxs } from "../async-scheduler.js";
 
 /**
  * #1471: helper names that `addUnionImports` provides Wasm-native
@@ -298,46 +299,20 @@ export function shiftLateImportIndices(
     if (t.methodFuncIdx >= importsBefore) t.methodFuncIdx += added;
     if (t.trampolineFuncIdx >= importsBefore) t.trampolineFuncIdx += added;
   }
-  // (#2632) Same lockstep for the async-scheduler / event-loop helper func
-  // indices. They are stored as plain numbers on `ctx.asyncScheduler` and read
-  // directly when baking `call` funcIdx at timer/microtask/stdin-reactor call
-  // sites (`getRunLoopNowFuncIdx`, `emitTimerAdd`, `emitTimerCancel`,
-  // `emitMicrotaskEnqueue`). A late import landing AFTER the helper registration
-  // but BEFORE/BETWEEN a call site (e.g. `__str_concat` pulled in while
-  // compiling a `setTimeout(()=>console.log("x"+n))` callback body, which runs
-  // before the now-reader call is baked) shifts every defined function up by
-  // `added` but NOT these stored numbers — so the now-reader call landed one
-  // function too early (`__rl_now_ns` → `__timer_fire_due`), producing "expected
-  // i64 but nothing on stack" invalid Wasm (#2632 Phase 2). Mirrors the
-  // nativeStrHelpers / mapHelpers lockstep above.
-  {
-    const sched = (ctx as unknown as { asyncScheduler?: Record<string, number> }).asyncScheduler;
-    if (sched) {
-      const funcIdxKeys = [
-        "enqueueFuncIdx",
-        "drainFuncIdx",
-        "growFuncIdx",
-        "promiseFulfillFuncIdx",
-        "promiseRejectFuncIdx",
-        "identityFulfillWrapperFuncIdx",
-        "identityRejectWrapperFuncIdx",
-        "timerAddFuncIdx",
-        "timerCancelFuncIdx",
-        "timerPeekDeadlineFuncIdx",
-        "timerFireDueFuncIdx",
-        "runLoopFuncIdx",
-        "runLoopNowFuncIdx",
-        "stdinDrainFuncIdx",
-        "pollFd0OrClockFuncIdx",
-      ];
-      for (const k of funcIdxKeys) {
-        const v = sched[k];
-        if (typeof v === "number" && v >= importsBefore) {
-          sched[k] = v + added;
-        }
-      }
-    }
-  }
+  // (#2632 / #2918) Same lockstep for the async-scheduler / event-loop helper
+  // func indices AND the Promise.all/race combinator helper indices. They are
+  // stored as plain numbers on `ctx.asyncScheduler` / `ctx.__promiseCombinators`
+  // and read directly when baking `call`/`ref.func` funcIdx at timer/microtask/
+  // stdin-reactor + `.then`/combinator call sites. A late import landing AFTER
+  // the helper registration but BEFORE/BETWEEN a call site (e.g. `__str_concat`
+  // pulled in while compiling a callback body, or an object-runtime helper for a
+  // `{}` literal that precedes a native `.then`) shifts every defined function up
+  // by `added` but NOT these stored numbers — so the call landed one function too
+  // early, producing "not enough arguments on the stack for call" / "expected i64
+  // but nothing on stack" invalid Wasm. Centralised so all three shifters use the
+  // SAME complete key list (the previous inline list here omitted
+  // `promiseResolveValueFuncIdx` + every combinator idx — the #2918 −601 bug).
+  shiftAsyncSideChannelFuncIdxs(ctx, importsBefore, added);
   // Shift export descriptors
   for (const exp of ctx.mod.exports) {
     if (exp.desc.kind === "func" && exp.desc.index >= importsBefore) {

@@ -3333,7 +3333,16 @@ function compilePromiseThenReceiverBuffer(
   const instrs: Instr[] = [];
   liveBuffers.push(instrs);
   ctx.liveBodies.add(instrs);
+  // (#2918) Push the real body onto `savedBodies` — NOT just a local — so a
+  // late-import funcIdx shift fired while compiling this buffer (e.g. an object-
+  // runtime helper import pulled in by an earlier `{}` statement, or `__box_*`
+  // for a numeric arg) still walks the outer body and bumps the `call`/`ref.func`
+  // indices already emitted there. A bare `savedBody` local left the outer body
+  // unreachable to the shifter, so a `call __new_plain_object` baked at N stayed
+  // N after everything moved to N+delta → it pointed at a wrong-arity helper
+  // ("not enough arguments on the stack for call", the −601 standalone regression).
   const savedBody = fctx.body;
+  fctx.savedBodies.push(savedBody);
   fctx.body = instrs;
   try {
     const type = compileExpression(ctx, fctx, expr, { kind: "externref" });
@@ -3341,6 +3350,7 @@ function compilePromiseThenReceiverBuffer(
       coerceType(ctx, fctx, type, { kind: "externref" });
     }
   } finally {
+    fctx.savedBodies.pop();
     fctx.body = savedBody;
   }
   return instrs;
@@ -3357,7 +3367,10 @@ function compileStandalonePromiseThenCallback(
   const instrs: Instr[] = [];
   liveBuffers.push(instrs);
   ctx.liveBodies.add(instrs);
+  // (#2918) Keep the outer body reachable to the late-import shifter — see the
+  // matching note in compilePromiseThenReceiverBuffer.
   const savedBody = fctx.body;
+  fctx.savedBodies.push(savedBody);
   fctx.body = instrs;
   try {
     const type =
@@ -3380,6 +3393,7 @@ function compileStandalonePromiseThenCallback(
     }
     return { instrs, closureInfo };
   } finally {
+    fctx.savedBodies.pop();
     fctx.body = savedBody;
   }
 }
