@@ -26,14 +26,19 @@ import {
   getBuiltinBrand,
   getNativeProtoBuiltinGlue,
   registerNativeProtoBuiltin,
+  emitBrandCheckTypeError,
+  emitLazyNativeProtoGet,
   type NativeProtoBuiltinGlue,
 } from "./native-proto.js";
 import { emitThrowTypeError } from "./expressions/helpers.js";
 import { allocLocal } from "./context/locals.js";
 import { emitThisReceiverGuardConvert } from "./property-access.js";
 import { compileArraySliceFromVecLocal } from "./array-methods.js";
-import { getArrTypeIdxFromVec } from "./registry/types.js";
+import { getArrTypeIdxFromVec, getOrRegisterVecType } from "./registry/types.js";
 import { ensureLateImport, flushLateImportShifts } from "./shared.js";
+import { ensureObjectRuntime } from "./object-runtime.js";
+import { addStringConstantGlobal } from "./registry/imports.js";
+import { stringConstantExternrefInstrs } from "./native-strings.js";
 
 /**
  * `Array.prototype`'s own enumerable+non-enumerable method names (ES2024
@@ -659,6 +664,197 @@ function emitArrayProtoMemberBody(ctx: CodegenContext, fctx: FunctionContext, me
   return resultType;
 }
 
+/**
+ * (#2893 PR-1) The integer-view standalone vec storage keys and their
+ * compile-time element widths (BYTES_PER_ELEMENT). Post-#2593/#2835 each is a
+ * DISJOINT `$Vec` struct on current main (see `TYPED_ARRAY_PACKED_STORAGE`,
+ * index.ts) — so `ref.test` against one already proves "an integer view, not a
+ * `number[]` and not an ArrayBuffer". The float views (`Float32Array`/
+ * `Float64Array`) still key to `f64` (colliding with `number[]`) and are
+ * therefore DELIBERATELY EXCLUDED here until the PR-2 brand split — including
+ * them would mis-classify a plain `number[]` as a view.
+ */
+const TYPED_ARRAY_INT_VIEW_STORAGE: ReadonlyArray<{ key: string; width: number }> = [
+  { key: "i8_byte", width: 1 }, // Int8Array / Uint8Array / Uint8ClampedArray
+  { key: "i16_byte", width: 2 }, // Int16Array / Uint16Array
+  { key: "i32_elem", width: 4 }, // Int32Array / Uint32Array (element storage, #2835)
+];
+
+/**
+ * (#2893 PR-1) Build the runtime brand-recovery candidate set for a
+ * `%TypedArray%` view receiver: every integer-view vec struct plus its
+ * `$__subview_<k>` struct (a `subarray` window), each tagged with its
+ * compile-time element width and whether it is a subview (the byteOffset arm
+ * differs).
+ *
+ * **Type-index discipline (#2901 fix — `project_type_index_shift_and_deadelim`):**
+ * the integer-view vec structs are registered **here, LATE and ONCE** (idempotent,
+ * `suppressVecUsageFlag`), at the moment a reflective accessor getter body is
+ * emitted — NOT up-front at the deterministic type-init point. An up-front,
+ * unconditional reservation prepended these structs to EVERY standalone module's
+ * type table, **renumbering the #2835 i8-packed array type** so unrelated
+ * `array.get` sites (which captured a pre-shift index in the hoist pass) landed on
+ * a now-packed array → `array.get: ... packed type i8` validation failures across
+ * ~2.6k tests in the merge_group. Registering on-read here is **append-only** (the
+ * new structs take high indices, shifting nothing already registered) and **gated**
+ * (only TypedArray-reflective modules ever register them, so non-TA modules stay
+ * byte-identical). `getOrRegisterVecType` is idempotent, so a later
+ * `new Uint8Array()` resolves to the same struct index. The subview structs are
+ * still reserved up-front by `reserveTypedArraySubviewTypes` (existing main
+ * behaviour, unchanged) and read here.
+ */
+function typedArrayViewBrandCandidates(ctx: CodegenContext): { typeIdx: number; width: number; isSubview: boolean }[] {
+  // Register the integer-view vec structs LATE + ONCE (append-only, suppressed
+  // usage flag) so the candidate set is populated even when the getter closure is
+  // emitted before any `new <View>()` construction — without renumbering the
+  // i8-packed array type that up-front reservation perturbed.
+  const wasSuppressed = ctx.suppressVecUsageFlag;
+  ctx.suppressVecUsageFlag = true;
+  getOrRegisterVecType(ctx, "i8_byte", { kind: "i8" });
+  getOrRegisterVecType(ctx, "i16_byte", { kind: "i16" });
+  getOrRegisterVecType(ctx, "i32_elem", { kind: "i32" });
+  ctx.suppressVecUsageFlag = wasSuppressed;
+
+  const out: { typeIdx: number; width: number; isSubview: boolean }[] = [];
+  for (const { key, width } of TYPED_ARRAY_INT_VIEW_STORAGE) {
+    const vecIdx = ctx.vecTypeMap.get(key);
+    if (vecIdx !== undefined) out.push({ typeIdx: vecIdx, width, isSubview: false });
+    const subIdx = ctx.subviewTypeMap.get(key);
+    if (subIdx !== undefined) out.push({ typeIdx: subIdx, width, isSubview: true });
+  }
+  return out;
+}
+
+/**
+ * (#2893 PR-1) Push the f64 numeric result of a `%TypedArray%` accessor getter
+ * off a recovered view local, then box it to externref via the pre-resolved
+ * `__box_number` funcidx (the closure-call ABI + descriptor `.get` unify on
+ * externref). `boxIdx` is resolved by the CALLER before the brand-recovery
+ * cascade so no late import is added inside a detached cascade arm (funcIdx-shift
+ * discipline, `reference_1461`/`reference_2193`).
+ *
+ *  - `length`     → element count = `$__vec_base` length prefix (field 0).
+ *  - `byteLength` → count × width (compile-time BYTES_PER_ELEMENT).
+ *  - `byteOffset` → 0 for a plain view; for a `$__subview` it is the element
+ *                   window offset (field 2) × width.
+ */
+function emitTypedArrayAccessorResult(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  member: string,
+  viewLocal: number,
+  typeIdx: number,
+  width: number,
+  isSubview: boolean,
+  boxIdx: number | undefined,
+): void {
+  if (member === "length") {
+    fctx.body.push({ op: "local.get", index: viewLocal } as Instr);
+    fctx.body.push({ op: "struct.get", typeIdx, fieldIdx: 0 } as Instr); // i32 element count
+    fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+  } else if (member === "byteLength") {
+    fctx.body.push({ op: "local.get", index: viewLocal } as Instr);
+    fctx.body.push({ op: "struct.get", typeIdx, fieldIdx: 0 } as Instr); // i32 element count
+    fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+    fctx.body.push({ op: "f64.const", value: width } as Instr);
+    fctx.body.push({ op: "f64.mul" } as Instr);
+  } else {
+    // byteOffset
+    if (isSubview) {
+      fctx.body.push({ op: "local.get", index: viewLocal } as Instr);
+      fctx.body.push({ op: "struct.get", typeIdx, fieldIdx: 2 } as Instr); // i32 element offset
+      fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+      fctx.body.push({ op: "f64.const", value: width } as Instr);
+      fctx.body.push({ op: "f64.mul" } as Instr);
+    } else {
+      // A plain (non-subview) view starts at byte 0 of its own backing array.
+      fctx.body.push({ op: "f64.const", value: 0 } as Instr);
+    }
+  }
+  if (boxIdx !== undefined) fctx.body.push({ op: "call", funcIdx: boxIdx } as Instr);
+}
+
+/**
+ * (#2893 PR-1) Native body for a `%TypedArray%.prototype` accessor-getter closure
+ * (`length`/`byteLength`/`byteOffset`). The closure params are: index 0 the
+ * `__fn_wrap` self struct, index 1 the externref `this`. Recovers the view from
+ * the opaque externref `this` over the registered integer-view vec/subview type
+ * set (a runtime `ref.test`/`ref.cast` cascade), reads/computes the §23.2.3 field
+ * off the recovered local, and boxes the result to externref. A non-view `this`
+ * (plain `number[]`, ArrayBuffer, host object, or EITHER prototype) throws a
+ * catchable TypeError — the §23.2.3 RequireInternalSlot [[TypedArrayName]] step.
+ *
+ * **Key divergence from the RegExp template (verified 2026-06-30, Node):** unlike
+ * §22.2.6 RegExp getters, the §23.2.3 TypedArray getters have NO
+ * "`this === %TypedArray%.prototype` → undefined" carve-out — they throw for
+ * EVERY non-view receiver, including both prototype objects
+ * (`get.call(%TypedArray%.prototype)` and `get.call(Uint8Array.prototype)` both
+ * throw TypeError in V8). So we deliberately OMIT the proto-identity arm
+ * (`emitNativeProtoIdentityReturnUndefined`) that RegExp uses; the brand-check
+ * else-arm correctly throws for the prototype receivers too.
+ *
+ * Methods (`fill`/`set`/`map`/…) and `buffer` (needs an ArrayBuffer materialized
+ * off the view — PR-3) stay a catchable refusal. Float views are unbranded until
+ * PR-2. Returns externref (the uniform closure result), or `null` on refusal.
+ */
+function emitTypedArrayProtoMemberBody(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  member: string,
+  name: string,
+): ValType | null {
+  // Only the three width-derivable accessor getters get a native body here.
+  // `buffer` needs an ArrayBuffer window off the view (PR-3); methods belong to
+  // the #2872 per-member slices — both stay a catchable refusal.
+  if (member === "buffer" || !TYPED_ARRAY_PROTO_GETTERS.has(member)) {
+    return emitProtoMemberBodyRefusal(ctx, fctx, name, member);
+  }
+
+  const resultType: ValType = { kind: "externref" };
+  const refuseMsg = `Method ${name}.prototype.${member} called on incompatible receiver`;
+
+  // Resolve the box import BEFORE building the cascade so its funcidx is final
+  // and no late import is added inside a detached cascade arm (the funcidx-shift
+  // hazard the established `emitArrayProtoMemberBody`/`unboxArgToI32` pattern
+  // avoids). `emitBrandCheckTypeError` appends a FUNCTION (`__new_TypeError`),
+  // not an import, so it is shift-safe inside the cascade arms.
+  const boxIdx = ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
+  flushLateImportShifts(ctx, fctx);
+
+  const candidates = typedArrayViewBrandCandidates(ctx);
+  if (candidates.length === 0) {
+    // No integer-view vec type registered in this module → no receiver can be a
+    // view → the §23.2.3 RequireInternalSlot throw applies unconditionally.
+    emitBrandCheckTypeError(ctx, fctx.body, refuseMsg);
+    return resultType;
+  }
+
+  const byIdx = new Map(candidates.map((c) => [c.typeIdx, c]));
+  const typeIdxs = candidates.map((c) => c.typeIdx);
+
+  fctx.body.push({ op: "local.get", index: 1 } as Instr); // externref `this`
+  emitThisReceiverGuardConvert(
+    ctx,
+    fctx,
+    typeIdxs,
+    resultType,
+    (concreteType) => {
+      // The recovered concrete view ref is on the stack (the helper ran ref.cast).
+      const tIdx = (concreteType as { typeIdx: number }).typeIdx;
+      const cand = byIdx.get(tIdx)!;
+      const viewLocal = allocLocal(fctx, `__ta_view_${fctx.locals.length}`, { kind: "ref", typeIdx: tIdx });
+      fctx.body.push({ op: "local.set", index: viewLocal } as Instr);
+      emitTypedArrayAccessorResult(ctx, fctx, member, viewLocal, tIdx, cand.width, cand.isSubview, boxIdx);
+    },
+    () => {
+      // Genuine non-view `this` (plain array / ArrayBuffer / host object / either
+      // prototype): §23.2.3 RequireInternalSlot → catchable TypeError.
+      emitBrandCheckTypeError(ctx, fctx.body, refuseMsg);
+    },
+  );
+  return resultType;
+}
+
 function makeGlue(
   ctx: CodegenContext,
   brand: number,
@@ -700,7 +896,10 @@ function makeTypedArrayGlue(brand: number, name: string): NativeProtoBuiltinGlue
     memberCsv: TYPED_ARRAY_PROTO_METHODS.join(","),
     memberKind: (member) => (TYPED_ARRAY_PROTO_GETTERS.has(member) ? "getter" : "method"),
     memberLength: (member) => TYPED_ARRAY_PROTO_METHOD_LENGTH[member] ?? 1,
-    emitMemberBody: (c, fctx, member) => emitProtoMemberBodyRefusal(c, fctx, name, member),
+    // (#2893 PR-1) The `length`/`byteLength`/`byteOffset` accessor getters now
+    // emit real reflective bodies (brand-recover the view → read/compute the
+    // field → throw on non-view); `buffer` + all methods stay a catchable refusal.
+    emitMemberBody: (c, fctx, member) => emitTypedArrayProtoMemberBody(c, fctx, member, name),
   };
 }
 
@@ -1087,4 +1286,86 @@ export function ensureTypedArrayViewNativeProtoGlue(ctx: CodegenContext, viewNam
   // (D4 links concrete-view protos to it in a later slice; harmless here).
   ensureTypedArrayIntrinsicNativeProtoGlue(ctx);
   return brand;
+}
+
+/** (#2901) True iff `name` is a wired (non-bigint) `%TypedArray%` view constructor. */
+export function isWiredTypedArrayViewName(name: string): boolean {
+  return (WIRED_TYPED_ARRAY_VIEWS as readonly string[]).includes(name);
+}
+
+/**
+ * (#2901) Materialize the standalone `%TypedArray%` INTRINSIC CONSTRUCTOR object
+ * as a runtime value: a lazily-cached `$Object` singleton carrying a single
+ * `prototype` own-property pointing at the existing `%TypedArray%.prototype`
+ * `$NativeProto` glue. This is the object the test262 `testTypedArray.js` harness
+ * obtains via `Object.getPrototypeOf(<view ctor>)` and then reads `.prototype` off
+ * to reach `%TypedArray%.prototype` (and thence the §23.2.3 accessor descriptors
+ * the #2893 getter bodies serve).
+ *
+ * Modelled on `emitBuiltinNamespaceObject` (builtin-static-globals.ts): one
+ * mutable null-init externref global, lazily populated via `__new_plain_object` +
+ * `__extern_set("prototype", <proto>)`, cached so the intrinsic ctor identity is
+ * stable (`getProtoOf(Int8Array) === getProtoOf(Uint8Array)`, per the harness's
+ * single `%TypedArray%`). Standalone only (the `$NativeProto` glue + `$Object`
+ * runtime are standalone constructs). Leaves the ctor externref on the stack;
+ * returns its ValType, or `null` if the `%TypedArray%` glue/runtime is unavailable
+ * (caller falls through to the existing getProtoOf behaviour).
+ */
+export function emitTypedArrayIntrinsicCtorObject(ctx: CodegenContext, fctx: FunctionContext): ValType | null {
+  const brand = ensureTypedArrayIntrinsicNativeProtoGlue(ctx);
+  if (brand === undefined) return null;
+
+  ensureObjectRuntime(ctx);
+  const newObjectIdx = ctx.funcMap.get("__new_plain_object");
+  const setIdx = ctx.funcMap.get("__extern_set");
+  if (newObjectIdx === undefined || setIdx === undefined) return null;
+
+  const globalName = "__builtin_%TypedArray%_ctor";
+  let globalIdx = ctx.builtinObjectGlobals.get(globalName);
+  if (globalIdx === undefined) {
+    globalIdx = ctx.numImportGlobals + ctx.mod.globals.length;
+    ctx.mod.globals.push({
+      name: globalName,
+      type: { kind: "externref" },
+      mutable: true,
+      init: [{ op: "ref.null.extern" }],
+    });
+    ctx.builtinObjectGlobals.set(globalName, globalIdx);
+  }
+
+  const objLocal = allocLocal(fctx, `__ta_ctor_obj_${fctx.locals.length}`, { kind: "externref" });
+  const initBody: Instr[] = [
+    { op: "call", funcIdx: newObjectIdx } as Instr,
+    { op: "local.set", index: objLocal } as Instr,
+  ];
+
+  // (#2182 pattern) `savedBody` is detached during the swap; register it in
+  // `liveBodies` so any late-import funcidx shift still walks it.
+  const savedBody = fctx.body;
+  fctx.body = initBody;
+  ctx.liveBodies.add(savedBody);
+  let ok = true;
+  try {
+    // obj.prototype = %TypedArray%.prototype glue object
+    fctx.body.push({ op: "local.get", index: objLocal } as Instr);
+    addStringConstantGlobal(ctx, "prototype");
+    for (const instr of stringConstantExternrefInstrs(ctx, "prototype")) fctx.body.push(instr);
+    if (emitLazyNativeProtoGet(ctx, fctx, brand)) {
+      fctx.body.push({ op: "call", funcIdx: setIdx } as Instr);
+      fctx.body.push({ op: "local.get", index: objLocal } as Instr);
+      fctx.body.push({ op: "global.set", index: globalIdx } as Instr);
+    } else {
+      ok = false;
+    }
+  } finally {
+    fctx.body = savedBody;
+    ctx.liveBodies.delete(savedBody);
+  }
+  if (!ok) return null;
+
+  fctx.body.push({ op: "global.get", index: globalIdx } as Instr);
+  fctx.body.push({ op: "ref.is_null" } as Instr);
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: initBody, else: [] } as Instr);
+  fctx.body.push({ op: "global.get", index: globalIdx } as Instr);
+  return { kind: "externref" };
 }

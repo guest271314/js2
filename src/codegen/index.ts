@@ -1145,6 +1145,14 @@ export function generateModule(
     // registration order is untouched. Standalone/WASI only; additive.
     if (ctx.standalone || ctx.wasi) {
       reserveTypedArraySubviewTypes(ctx);
+      // (#2901 fix) The integer-view PLAIN vec structs are deliberately NOT
+      // reserved here. An up-front, unconditional reservation prepended them to
+      // every standalone module's type table, renumbering the #2835 i8-packed
+      // array type → ~2.6k `array.get: ... packed type i8` failures in the
+      // merge_group (type-index-shift hazard). They are now registered LATE +
+      // ONCE, append-only, inside `typedArrayViewBrandCandidates` (only when a
+      // reflective TypedArray accessor getter is actually emitted) — so non-TA
+      // modules stay byte-identical and nothing already registered is renumbered.
     }
 
     // (#2026 #53) Reserve `$ObjVecArr` up-front when the source declares a class,
