@@ -1,7 +1,7 @@
 ---
 id: 2919
 title: "Standalone async widen: native generic-iterable Promise.all/race (clears the 63 host-path-receiver .then illegal-casts, residual −65 layer)"
-status: ready
+status: in-progress
 created: 2026-07-01
 priority: high
 feasibility: hard
@@ -12,6 +12,7 @@ horizon: xl
 related: [2867, 2918, 2895, 2906, 2860]
 umbrella: 2860
 depends_on: [2918]
+assignee: ttraenkler/sendev-2919
 ---
 
 # Native generic-iterable Promise.all/race — the residual −65 widen layer
@@ -108,3 +109,17 @@ closure-capture path: `let m = new Map(); m.set("a",1);
 Promise.resolve(1).then((v)=>m.get("a"),...)` emits invalid Wasm in `__closure_0`
 under `--target wasi` on clean upstream/main (a Map-helper late-import shift
 desyncing a captured-closure body). Not part of the standalone-gap goal.
+
+## Suspended Work
+
+- **Branch:** `issue-2919-generic-iterable-combinators`, worktree
+  `/workspace/.claude/worktrees/issue-2919-generic-iterable-combinators` (branched
+  from `upstream/main`; plan branch merged so the spec file shares history).
+- **State:** analysis complete, **no implementation code written yet**. Full derived
+  design + next concrete steps in `plan/agent-context/sr-combinator.md` (committed on
+  this branch). Repro probes in `.tmp/` (gitignored).
+- **Resume:** read `plan/agent-context/sr-combinator.md`, then implement ARM 1
+  (array-typed args) per that plan: extend the `isAggregator` gate at
+  `src/codegen/expressions/calls.ts:8657-8689` and add
+  `emitStandalonePromiseCombinatorRuntime` to `src/codegen/promise-combinators.ts`.
+  Re-claim with `node scripts/claim-issue.mjs 2919 ttraenkler/<agent> --branch issue-2919-generic-iterable-combinators --force`.
