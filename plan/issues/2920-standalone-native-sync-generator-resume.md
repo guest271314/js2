@@ -1,7 +1,8 @@
 ---
 id: 2920
 title: "Standalone: native SYNC-generator resume substrate — widen native generator lowering to eliminate __create_generator / __gen_* host imports"
-status: in-progress
+status: blocked
+blocked_on: 2930
 assignee: ttraenkler/sr-generators
 created: 2026-07-01
 priority: high
@@ -14,6 +15,34 @@ horizon: xl
 related: [2906, 2413, 2864, 2171, 2170, 2571, 2581, 2203]
 umbrella: 2860
 ---
+
+## Handoff to #2930 (funcIdx-shift fix — the unblocker)
+
+#2920 is BLOCKED on #2930 (late-import funcIdx-shift for lazily-emitted resume
+functions). This issue's no-yield yield (~250–350 host-free tests) unlocks the
+moment #2930 lands. Everything the successor needs:
+
+- **The two held-off bails** (search `#2920` in `src/codegen/generators-native.ts`):
+  1. `buildNativeGeneratorPlan` — `if (suspendCount === 0) return null;` (the
+     comment above it names the blocker). Relax to allow zero-suspend once #2930
+     is fixed.
+  2. `isNativeGeneratorCandidate` — the terminal
+     `return plan !== null && plan.states.some(... "yield" ...)`. Relax to
+     `return plan !== null;` in lockstep with #1 (both must flip together — a
+     mismatch is an undefined-funcidx invalid module).
+- **Repro files** (compile through the test262 runner's standalone path — the bug
+  only fires at full-harness scale, never in isolation):
+  - `test262/test/language/statements/generators/dstr/obj-ptrn-empty.js`
+    (destructure-triggered late import).
+  - `test262/test/language/statements/generators/scope-paramsbody-var-close.js`
+    (escaping-closure-triggered — proves it is NOT destructuring-specific).
+  - Error signature: `__str_flatten call[1] expected externref, found i32`.
+- **Verification for the relax PR**: 0 invalid modules on a 500+ file no-yield
+  sample (`.tmp/2920/noyield_files.txt` derivation is in the corrected-measurement
+  section) + the byte-inert sha256 check for gc/host and standalone with-yield.
+- **Base commit**: `492fe0c58` on branch
+  `issue-2920-standalone-native-sync-generator-resume` carries the correct
+  zero-suspend lowering + destructure hardening; only the two bails gate it off.
 
 # Standalone native SYNC-generator resume substrate
 
