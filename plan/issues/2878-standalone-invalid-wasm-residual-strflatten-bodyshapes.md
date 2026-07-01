@@ -1,9 +1,10 @@
 ---
 id: 2878
-title: "Standalone: invalid Wasm residual — __str_flatten + user-body shapes (test/inner/fn) after #2868 URI-carrier fix"
-status: ready
+title: "Standalone: invalid Wasm residual — 3 root-cause classes (A: dstr default value-rep, B: __str_flatten null-deref, C: funcidx-shift). Single-cause framing superseded."
+status: in-progress
+assignee: ttraenkler/dev-callback
 created: 2026-06-30
-updated: 2026-06-30
+updated: 2026-07-02
 priority: high
 feasibility: medium
 task_type: bug
@@ -11,8 +12,9 @@ area: codegen
 goal: standalone
 sprint: current
 horizon: m
-related: [2860, 2868]
+related: [2860, 2868, 2849, 2918, 1461]
 umbrella: 2860
+decomposition: "Triaged 2026-07-02 into 3 independent classes (see ## Triage findings). The original shared-Instr-shift hypothesis covers Class C only. Class A slice 1 (object-destructuring default value-rep coercion) landed; remaining Class-A value-rep signatures + Classes B/C are follow-up slices."
 ---
 
 # Standalone: invalid Wasm — residual after #2868
@@ -105,6 +107,26 @@ into an f64 local → invalid Wasm.
 
 Verify with **output-vs-js-host** on the `dstr` corpus before shipping (a valid
 binary that returns NaN is NOT a pass).
+
+**Class A slice 1 — LANDED (2026-07-02):** `emitDefaultValueCheck`
+(`src/codegen/statements/destructuring.ts`) now coerces the **value-present**
+arm to the binding local's ACTUAL declared type (`getLocalType(localIdx)`), not
+`targetType`, at all three value-arm sites (`buildElseBranch`, the
+`objectPropertySemantics` ref else-arm, and the trailing i32/other else). The
+NaN-trap fear did **not** materialise: a scalar (f64/i32) local only ever binds
+a *numeric* property whose boxed-number externref unboxes correctly; a
+`null`-valued binding gets an externref local, so no lossy coercion occurs.
+Measured on the targeted population (`local.set expected f64/i32, found ref`,
+42 tests): **0→18 genuine PASS, +11 honest FAIL, 40→11 CE** (no-fix baseline was
+40/40 CE). Byte-inert for the gc/host lane (sha256 identical on a dstr snippet
+corpus — there the struct field type already matches the local, so the coercion
+is a no-op path). Regression test: `tests/issue-2878-dstr-default-valuerep.test.ts`.
+The 11 honest FAILs are a **separate** pre-existing bug (`null`-valued property
+wrongly triggers the default in the *default-check*, and the multi-field
+dynamic-object read returns 0 — #2849), NOT this slice. Remaining Class-A
+value-rep signatures (`call[N] expected externref, found struct.new/ref.cast`;
+`struct.new expected eqref, found anyref`; `not enough arguments for struct.new`)
+are distinct codegen shapes → follow-up slices.
 
 ### Class B — `__str_flatten` runtime null-deref (String.split/replace with RegExp arg)
 
