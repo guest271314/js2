@@ -1,5 +1,5 @@
 ---
-id: 2921
+id: 2931
 title: "standalone: __make_callback sole-leak is the harness-wrapper vacuous pass — gated on dynamic-closure-dispatch arity/type tolerance (sub-front 4 of #2903 yields 0)"
 status: blocked
 sprint: current
@@ -18,7 +18,11 @@ updated: 2026-07-02
 origin: "2026-07-02 __make_callback sole-leak-front measurement (dev-callback). origin/main @ 4d5287afc, target standalone, merged report run 28491700781."
 ---
 
-# #2921 — `env::__make_callback` sole-leak: measured root cause + yield gate
+# #2931 — `env::__make_callback` sole-leak: measured root cause + yield gate
+
+> Formerly drafted as #2921 on this branch; id 2921 was concurrently taken on
+> main by the drain-microtasks intrinsic issue (PR #2425, parallel session).
+> Reallocated to #2931 to clear the `check:issue-ids:against-main` collision.
 
 ## TL;DR / decision
 
