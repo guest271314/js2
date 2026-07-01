@@ -1610,10 +1610,20 @@
             still on the roadmap. Status is derived from ECMAScript Test262 pass rates and known compiler limitations.
           </p>
           <p class="feat-tables-note">
-            Each edition's percentage and <span class="feat-tables-note-mono">pass / total</span> count cover
-            <strong>every</strong> Test262 test in that edition. The feature rows below are illustrative
-            examples — a hand-picked subset, not a complete breakdown — so their individual counts are not meant
-            to sum to the edition total.
+            Each edition's percentage and
+            <span class="feat-tables-note-mono">pass / total</span>
+            count cover
+            <strong>every</strong>
+            Test262 test in that edition. Each feature row below is sliced from that same population by the tests'
+            <span class="feat-tables-note-mono">features:</span>
+            tags, so every row is a
+            <strong>subset</strong>
+            of its edition — when a section reads 100%, every row in it does too. Two caveats: a test can carry several
+            feature tags, so rows
+            <em>overlap</em>
+            (they are slices, not a sum); and the ≤ES3 / ES5 core-language sections predate
+            <span class="feat-tables-note-mono">features:</span>
+            tags, so they show the edition headline only.
           </p>
           <p style="margin-top: 1.25rem">
             <a class="btn-outline" href="./benchmarks/report.html">Compatibility Test Report</a>
@@ -1717,7 +1727,10 @@ const x = null;</pre
                   >
                 </details>
               </div>
-              <div class="feat-row" data-t262-paths="language/expressions/addition,language/expressions/subtraction,language/expressions/multiplication,language/expressions/division,language/expressions/modulus,language/expressions/bitwise-and,language/expressions/bitwise-or,language/expressions/bitwise-xor,language/expressions/bitwise-not,language/expressions/left-shift,language/expressions/right-shift,language/expressions/unsigned-right-shift,language/expressions/equals,language/expressions/does-not-equals,language/expressions/strict-equals,language/expressions/strict-does-not-equals,language/expressions/less-than,language/expressions/less-than-or-equal,language/expressions/greater-than,language/expressions/greater-than-or-equal,language/expressions/logical-and,language/expressions/logical-or,language/expressions/logical-not,language/expressions/unary-plus,language/expressions/unary-minus,language/expressions/conditional,language/expressions/grouping,language/expressions/postfix-increment,language/expressions/postfix-decrement,language/expressions/prefix-increment,language/expressions/prefix-decrement,language/expressions/in,language/expressions/void,language/expressions/concatenation,language/expressions/relational">
+              <div
+                class="feat-row"
+                data-t262-paths="language/expressions/addition,language/expressions/subtraction,language/expressions/multiplication,language/expressions/division,language/expressions/modulus,language/expressions/bitwise-and,language/expressions/bitwise-or,language/expressions/bitwise-xor,language/expressions/bitwise-not,language/expressions/left-shift,language/expressions/right-shift,language/expressions/unsigned-right-shift,language/expressions/equals,language/expressions/does-not-equals,language/expressions/strict-equals,language/expressions/strict-does-not-equals,language/expressions/less-than,language/expressions/less-than-or-equal,language/expressions/greater-than,language/expressions/greater-than-or-equal,language/expressions/logical-and,language/expressions/logical-or,language/expressions/logical-not,language/expressions/unary-plus,language/expressions/unary-minus,language/expressions/conditional,language/expressions/grouping,language/expressions/postfix-increment,language/expressions/postfix-decrement,language/expressions/prefix-increment,language/expressions/prefix-decrement,language/expressions/in,language/expressions/void,language/expressions/concatenation,language/expressions/relational"
+              >
                 <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">Operators (arithmetic, comparison, logical, bitwise)</span>
                 <span class="feat-desc">All standard operators including ternary</span>
@@ -1878,7 +1891,11 @@ function legacy() {
                   </div>
                 </details>
               </div>
-              <div class="feat-row" data-t262-paths="language/statements/with,annexB/language/statements/with" data-sloppy>
+              <div
+                class="feat-row"
+                data-t262-paths="language/statements/with,annexB/language/statements/with"
+                data-sloppy
+              >
                 <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">with statement</span>
                 <span class="feat-desc">Dynamic scope extension</span>
@@ -1891,7 +1908,10 @@ function legacy() {
             </div>
             <div class="feat-section">
               <div class="feat-edition">ES5</div>
-              <div class="feat-row" data-t262-paths="language/statements/let,language/statements/const,language/statements/variable,language/block-scope">
+              <div
+                class="feat-row"
+                data-t262-paths="language/statements/let,language/statements/const,language/statements/variable,language/block-scope"
+              >
                 <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">Variables (var, let, const)</span>
                 <span class="feat-desc">Block-scoped and function-scoped variable declarations</span>
@@ -1916,7 +1936,10 @@ var legacy = true;</pre
                   >
                 </details>
               </div>
-              <div class="feat-row" data-t262-paths="language/statements/function,language/function-code,built-ins/Function">
+              <div
+                class="feat-row"
+                data-t262-paths="language/statements/function,language/function-code,built-ins/Function"
+              >
                 <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">Functions &amp; closures</span>
                 <span class="feat-desc">Named functions, expressions, and lexical closures</span>
@@ -1939,7 +1962,10 @@ const add = (a, b) =&gt; a + b;</pre
                   >
                 </details>
               </div>
-              <div class="feat-row" data-t262-paths="language/statements/if,language/statements/switch,language/statements/while,language/statements/do-while,language/statements/for,language/statements/break,language/statements/continue,language/statements/return">
+              <div
+                class="feat-row"
+                data-t262-paths="language/statements/if,language/statements/switch,language/statements/while,language/statements/do-while,language/statements/for,language/statements/break,language/statements/continue,language/statements/return"
+              >
                 <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">Control flow</span>
                 <span class="feat-desc">Branching, loops, and switch statements</span>
@@ -2103,7 +2129,10 @@ const str = JSON.stringify({ a: 1 });</pre
                   >
                 </details>
               </div>
-              <div class="feat-row" data-t262-paths="built-ins/Error,built-ins/NativeErrors,built-ins/AggregateError,built-ins/SuppressedError">
+              <div
+                class="feat-row"
+                data-t262-paths="built-ins/Error,built-ins/NativeErrors,built-ins/AggregateError,built-ins/SuppressedError"
+              >
                 <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">Error types</span>
                 <span class="feat-desc">Error, TypeError, RangeError, SyntaxError and more</span>
@@ -2122,7 +2151,10 @@ throw new RangeError("out of bounds");</pre
                   >
                 </details>
               </div>
-              <div class="feat-row" data-t262-paths="built-ins/Array,built-ins/ArrayIteratorPrototype,language/expressions/array">
+              <div
+                class="feat-row"
+                data-t262-paths="built-ins/Array,built-ins/ArrayIteratorPrototype,language/expressions/array"
+              >
                 <span class="feat-badge partial">⚠</span>
                 <span class="feat-host">host</span>
                 <span class="feat-name">Arrays</span>
@@ -2217,7 +2249,10 @@ Object.defineProperty(obj, "x", {
             </div>
             <div class="feat-section">
               <div class="feat-edition">ES2015</div>
-              <div class="feat-row" data-t262-paths="language/expressions/arrow-function,language/expressions/async-arrow-function">
+              <div
+                class="feat-row"
+                data-t262-paths="language/expressions/arrow-function,language/expressions/async-arrow-function"
+              >
                 <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">Arrow functions</span>
                 <span class="feat-desc">Concise function syntax with lexical this</span>
@@ -2243,7 +2278,10 @@ const greet = () =&gt; "hello";</pre
                   >
                 </details>
               </div>
-              <div class="feat-row" data-t262-paths="language/expressions/template-literal,language/expressions/tagged-template">
+              <div
+                class="feat-row"
+                data-t262-paths="language/expressions/template-literal,language/expressions/tagged-template"
+              >
                 <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">Template literals</span>
                 <span class="feat-desc">String interpolation with backtick syntax</span>
@@ -2302,7 +2340,7 @@ function sum(...args) { }</pre
                 </details>
               </div>
               <div class="feat-row" data-t262-paths="language/statements/function/default-parameter">
-                <span class="feat-badge full">✓</span>
+                <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">Default parameters</span>
                 <span class="feat-desc">Fallback values for function parameters</span>
                 <details>
@@ -2361,7 +2399,10 @@ const obj = { [key]: 42 };</pre
                   >
                 </details>
               </div>
-              <div class="feat-row" data-t262-paths="language/statements/generators,language/expressions/generators,language/expressions/yield,built-ins/GeneratorFunction,built-ins/GeneratorPrototype">
+              <div
+                class="feat-row"
+                data-t262-paths="language/statements/generators,language/expressions/generators,language/expressions/yield,built-ins/GeneratorFunction,built-ins/GeneratorPrototype"
+              >
                 <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">Generators (function*, yield)</span>
                 <span class="feat-desc">Pausable functions that produce sequences</span>
@@ -2394,7 +2435,10 @@ function* range(n) {
                   >
                 </details>
               </div>
-              <div class="feat-row" data-t262-paths="language/expressions/class,language/statements/class,language/expressions/super,language/expressions/new,language/expressions/new.target">
+              <div
+                class="feat-row"
+                data-t262-paths="language/expressions/class,language/statements/class,language/expressions/super,language/expressions/new,language/expressions/new.target"
+              >
                 <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">Classes</span>
                 <span class="feat-desc">Class declarations with inheritance</span>
@@ -2547,7 +2591,7 @@ new Proxy(t, handler);      // trap dispatch not yet</pre
                 </details>
               </div>
               <div class="feat-row" data-t262-paths="built-ins/Promise">
-                <span class="feat-badge partial">⚠</span>
+                <span class="feat-badge none">✗</span>
                 <span class="feat-host">host</span>
                 <span class="feat-name">Promise .then / .catch / .finally</span>
                 <span class="feat-desc">Promise chaining and error handling</span>
@@ -2643,7 +2687,10 @@ const { a, ...rest } = obj;</pre
                   >
                 </details>
               </div>
-              <div class="feat-row" data-t262-paths="built-ins/AsyncGeneratorFunction,built-ins/AsyncGeneratorPrototype,built-ins/AsyncIteratorPrototype,built-ins/AsyncFromSyncIteratorPrototype,language/expressions/async-generator,language/statements/async-generator">
+              <div
+                class="feat-row"
+                data-t262-paths="built-ins/AsyncGeneratorFunction,built-ins/AsyncGeneratorPrototype,built-ins/AsyncIteratorPrototype,built-ins/AsyncFromSyncIteratorPrototype,language/expressions/async-generator,language/statements/async-generator"
+              >
                 <span class="feat-badge partial">⚠</span>
                 <span class="feat-host">host</span>
                 <span class="feat-name">Async iteration (for-await-of)</span>
@@ -2688,7 +2735,7 @@ const { a, ...rest } = obj;</pre
                 </details>
               </div>
               <div class="feat-row" data-t262-paths="language/expressions/coalesce">
-                <span class="feat-badge partial">⚠</span>
+                <span class="feat-badge full">✓</span>
                 <span class="feat-name">Nullish coalescing (??)</span>
                 <span class="feat-desc">Default values for null or undefined</span>
                 <details>
@@ -2775,7 +2822,7 @@ const sum = big + 1n;</pre
             <div class="feat-section">
               <div class="feat-edition">ES2022</div>
               <div class="feat-row" data-t262-paths="language/statements/class/fields">
-                <span class="feat-badge full">✓</span>
+                <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">Class fields (public, private, static)</span>
                 <span class="feat-desc">Declarative field syntax in classes</span>
                 <details>
@@ -2801,7 +2848,7 @@ class Counter {
                 </details>
               </div>
               <div class="feat-row" data-t262-paths="built-ins/Error/cause">
-                <span class="feat-badge full">✓</span>
+                <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">Error.cause</span>
                 <span class="feat-desc">Chain errors with a cause property</span>
                 <details>
@@ -2841,7 +2888,7 @@ class Counter {
                 </details>
               </div>
               <div class="feat-row" data-t262-paths="language/module-code/top-level-await">
-                <span class="feat-badge none">✗</span>
+                <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">Top-level await</span>
                 <span class="feat-desc">Await at module scope without async wrapper</span>
 
@@ -2858,7 +2905,7 @@ export { data };</pre
             <div class="feat-section">
               <div class="feat-edition">ES2016</div>
               <div class="feat-row" data-t262-paths="built-ins/Array/prototype/includes">
-                <span class="feat-badge full">✓</span>
+                <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">Array.prototype.includes</span>
                 <span class="feat-desc">Check if array contains a value</span>
 
@@ -2897,7 +2944,7 @@ call $Math.pow</pre
             <div class="feat-section">
               <div class="feat-edition">ES2019</div>
               <div class="feat-row" data-t262-paths="language/statements/try/optional-catch-binding">
-                <span class="feat-badge full">✓</span>
+                <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">Optional catch binding</span>
                 <span class="feat-desc">Omit the error parameter in catch</span>
 
@@ -2951,7 +2998,10 @@ const obj = Object.fromEntries(
             </div>
             <div class="feat-section">
               <div class="feat-edition">ES2023</div>
-              <div class="feat-row" data-t262-paths="built-ins/Array/prototype/findLast,built-ins/Array/prototype/findLastIndex">
+              <div
+                class="feat-row"
+                data-t262-paths="built-ins/Array/prototype/findLast,built-ins/Array/prototype/findLastIndex"
+              >
                 <span class="feat-badge partial">⚠</span>
                 <span class="feat-host">host</span>
                 <span class="feat-name">Array.findLast / findLastIndex</span>
@@ -2967,7 +3017,10 @@ const obj = Object.fromEntries(
                   <div class="feat-explain">Iterates WasmGC array from end. Callback via host import.</div>
                 </details>
               </div>
-              <div class="feat-row" data-t262-paths="built-ins/Array/prototype/toSorted,built-ins/Array/prototype/toReversed,built-ins/Array/prototype/toSpliced">
+              <div
+                class="feat-row"
+                data-t262-paths="built-ins/Array/prototype/toSorted,built-ins/Array/prototype/toReversed,built-ins/Array/prototype/toSpliced"
+              >
                 <span class="feat-badge none">✗</span>
                 <span class="feat-host">host</span>
                 <span class="feat-name">Change array by copy (toSorted, toReversed, toSpliced)</span>
@@ -3005,7 +3058,7 @@ console.log("hello");</pre
             <div class="feat-section">
               <div class="feat-edition">ES2024</div>
               <div class="feat-row" data-t262-paths="built-ins/Promise/withResolvers">
-                <span class="feat-badge none">✗</span>
+                <span class="feat-badge partial">⚠</span>
                 <span class="feat-host">host</span>
                 <span class="feat-name">Promise.withResolvers</span>
                 <span class="feat-desc">Create Promise with external resolve/reject</span>
@@ -3036,7 +3089,7 @@ buf.resize(16);</pre
                 </details>
               </div>
               <div class="feat-row" data-t262-paths="built-ins/RegExp/unicodeSets">
-                <span class="feat-badge none">✗</span>
+                <span class="feat-badge full">✓</span>
                 <span class="feat-name">RegExp v flag</span>
                 <span class="feat-desc">Set notation in character classes</span>
 
@@ -3051,7 +3104,10 @@ buf.resize(16);</pre
             </div>
             <div class="feat-section">
               <div class="feat-edition">ES2025</div>
-              <div class="feat-row" data-t262-paths="built-ins/Set/prototype/union,built-ins/Set/prototype/intersection,built-ins/Set/prototype/difference,built-ins/Set/prototype/symmetricDifference,built-ins/Set/prototype/isSubsetOf,built-ins/Set/prototype/isSupersetOf,built-ins/Set/prototype/isDisjointFrom">
+              <div
+                class="feat-row"
+                data-t262-paths="built-ins/Set/prototype/union,built-ins/Set/prototype/intersection,built-ins/Set/prototype/difference,built-ins/Set/prototype/symmetricDifference,built-ins/Set/prototype/isSubsetOf,built-ins/Set/prototype/isSupersetOf,built-ins/Set/prototype/isDisjointFrom"
+              >
                 <span class="feat-badge partial">⚠</span>
                 <span class="feat-host">host</span>
                 <span class="feat-name">Set methods (union, intersection, difference)</span>
@@ -3085,7 +3141,7 @@ nums().filter(x =&gt; x &gt; 1)
                 </details>
               </div>
               <div class="feat-row" data-t262-paths="built-ins/RegExp/named-groups">
-                <span class="feat-badge none">✗</span>
+                <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">RegExp duplicate named groups</span>
                 <span class="feat-desc">Same group name in alternatives</span>
 
@@ -3201,7 +3257,10 @@ function f() {
                   <div class="feat-explain">Forbidden in strict mode. Not available in Wasm.</div>
                 </details>
               </div>
-              <div class="feat-row" data-t262-paths="annexB/built-ins/String/prototype/anchor,annexB/built-ins/String/prototype/big,annexB/built-ins/String/prototype/blink,annexB/built-ins/String/prototype/bold,annexB/built-ins/String/prototype/fixed,annexB/built-ins/String/prototype/fontcolor,annexB/built-ins/String/prototype/fontsize,annexB/built-ins/String/prototype/italics,annexB/built-ins/String/prototype/link,annexB/built-ins/String/prototype/small,annexB/built-ins/String/prototype/strike,annexB/built-ins/String/prototype/sub,annexB/built-ins/String/prototype/sup">
+              <div
+                class="feat-row"
+                data-t262-paths="annexB/built-ins/String/prototype/anchor,annexB/built-ins/String/prototype/big,annexB/built-ins/String/prototype/blink,annexB/built-ins/String/prototype/bold,annexB/built-ins/String/prototype/fixed,annexB/built-ins/String/prototype/fontcolor,annexB/built-ins/String/prototype/fontsize,annexB/built-ins/String/prototype/italics,annexB/built-ins/String/prototype/link,annexB/built-ins/String/prototype/small,annexB/built-ins/String/prototype/strike,annexB/built-ins/String/prototype/sub,annexB/built-ins/String/prototype/sup"
+              >
                 <span class="feat-badge full">✓</span>
                 <span class="feat-name">HTML string methods (.bold(), .anchor())</span>
                 <span class="feat-desc">Deprecated HTML wrapper string methods</span>
@@ -5597,10 +5656,11 @@ console.log(instance.exports.run()); // &rarr; 55</pre
                 text.textContent = `${pct}%`;
                 text.title = title;
               }
-              // B (edition-card relabel): show the edition-wide population the
-              // header % is measured over — ALL test262 tests classified into
-              // this edition by frontmatter, NOT the sum of the illustrative
-              // feature rows below (which bucket by file path and don't add up).
+              // Edition-card headline: the edition-wide population the header %
+              // is measured over — ALL test262 tests classified into this
+              // edition by frontmatter. The feature rows below are edition-
+              // sliced by `features:` tag (#2910), so each is a SUBSET of this
+              // population; they overlap and so still don't SUM to the headline.
               if (count instanceof HTMLElement) {
                 count.textContent = `${bucket.pass.toLocaleString()} / ${bucket.total.toLocaleString()}`;
                 count.title = title;
@@ -5665,13 +5725,17 @@ console.log(instance.exports.run()); // &rarr; 55</pre
       // `totalCount`. Prose EXPLANATIONS (the "why / how to work around
       // it" text) are kept; only the *status claim* is data-driven.
       //
-      // Canonical source: `feature-examples.json` is augmented by
-      // `dashboard/build-data.js`, which buckets every test262 result
-      // into exactly one feature (first-match-wins on `testCategories`)
-      // and writes `passCount` / `totalCount` / `testCategories`. That
-      // is the authoritative per-feature aggregation — preferred over
-      // summing raw `test262-report.json` category totals, which would
-      // double-count features that share a path prefix.
+      // Canonical source (#2910): `feature-examples.json`'s `passCount` /
+      // `totalCount` are the reconciled, EDITION-SLICED counts written by
+      // `scripts/generate-editions.ts` — for each feature, the tests
+      // classified into its edition that carry any of its `features:` tags
+      // (scripts/feature-t262-features.json). Because that population is a
+      // strict subset of the edition headline, a 100% edition shows 100%
+      // rows and no row exceeds its edition total. `testCategories` (path
+      // globs, still set by `dashboard/build-data.js`) are kept only to
+      // render the "view test262 sources" links, NOT to count. Features
+      // with no tag axis — every ≤ES3 / ES5 core-language row — are set to
+      // 0/0 (headline-only), so `total <= 0` below leaves them uncounted.
       //
       // Threshold (kept consistent with the existing landing-page
       // `toneFor` and with scripts/generate-feature-compatibility.ts):
