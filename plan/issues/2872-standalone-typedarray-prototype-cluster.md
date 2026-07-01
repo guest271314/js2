@@ -1,7 +1,7 @@
 ---
 id: 2872
 title: "Standalone: TypedArray.prototype.* cluster (294 host-pass/standalone-fail, de-masked from #2862)"
-status: ready
+status: blocked
 created: 2026-06-30
 priority: high
 task_type: bug
@@ -13,6 +13,34 @@ related: [2860, 2870, 2862, 2651, 2885, 2876, 2893]
 umbrella: 2860
 blocked_on: 2893
 ---
+
+## Measure-first verdict (2026-07-01, sdev-tail) — CONFIRMED BLOCKED, brand not on main
+
+Do **not** dispatch the residual TypedArray.prototype *method* native-body work
+yet. The dependency #2893 (distinct %TypedArray% view brand) is **NOT on main** —
+its implementation lives in **OPEN PR #2395** (`feat(#2901,#2893): standalone
+%TypedArray% intrinsic ctor chain + integer-view accessor getters`, by
+sr-typedarray). Only the #2893 *docs/spec* PR (#2376) merged; the brand runtime
+has not. Marked `status: blocked` to stop it being pulled off the `current`
+TaskList before the brand lands.
+
+**Measured** on current main (leak-probe over `built-ins/TypedArray/prototype/fill`,
+51 files): the method leaks that remain are **not** brand-independent. `.fill()`
+on a **statically-typed** concrete TA (`Int8Array` etc.) already lowers host-free
+(20/51 host-free). The residual leaks are on an **`any`/opaque-externref** receiver
+(the `testWithTypedArrayConstructors(TA => …)` callback form): `.fill` there
+dispatches through the generic extern-method resolver and leaks
+`CanvasRenderingContext2D_fill` (a name-collision host import) — 12/51. A native
+body for that path needs a **runtime brand** to classify an opaque externref as a
+TA view vs a plain `number[]` (TA views share the `$Vec` type with plain arrays,
+no tag — the exact #2893 gap). So the method work is **brand-gated too**, not just
+the reflective getter/descriptor subset. Building it now (branching off main
+without the brand) risks the plain-array-vs-view mis-dispatch regression this
+umbrella already warns about.
+
+**Unblock condition:** PR #2395 (#2893 brand) merges to main. Then predecessor-stack
+the method native bodies on that landed work (or branch fresh from the post-#2395
+main). Until then this stays `blocked`.
 
 > **Blocked on #2893** (distinct %TypedArray% view brand). Traced 2026-06-30: the
 > #2885 gOPD synthesis + #2876 reflective `.call` machinery light up the reflective

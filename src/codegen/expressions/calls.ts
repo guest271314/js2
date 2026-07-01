@@ -12571,7 +12571,20 @@ function compileCallExpression(
         // a null reference) and broke `Boolean(undefined) === false` plus
         // every other ToBoolean edge case (NaN, +/-0, "", 0n, wrapper
         // objects which must always be truthy).
-        const toBoolIdx = ensureLateImport(ctx, "__to_boolean", [{ kind: "externref" }], [{ kind: "i32" }]);
+        // (#2915) In standalone mode use the NATIVE `__is_truthy` union helper
+        // instead — it applies the identical ES §7.1.2 lowering over the boxed
+        // value structs (number/boolean/bigint/string, wrapper objects → truthy,
+        // null → false) but has a real Wasm body, so `Boolean(x)` no longer
+        // leaks the bodyless `env::__to_boolean` host import. Gated on
+        // `ctx.standalone` so the GC/host lane stays byte-identical.
+        const useNativeTruthy = ctx.standalone;
+        if (useNativeTruthy) addUnionImports(ctx);
+        const toBoolIdx = ensureLateImport(
+          ctx,
+          useNativeTruthy ? "__is_truthy" : "__to_boolean",
+          [{ kind: "externref" }],
+          [{ kind: "i32" }],
+        );
         flushLateImportShifts(ctx, fctx);
         if (toBoolIdx !== undefined) {
           fctx.body.push({ op: "call", funcIdx: toBoolIdx });

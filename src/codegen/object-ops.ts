@@ -2555,7 +2555,26 @@ function emitRuntimeFlagsF64(
   // Push static base as i32
   fctx.body.push({ op: "i32.const", value: staticBase });
 
-  const toBoolIdx = ensureLateImport(ctx, "__to_boolean", [{ kind: "externref" }], [{ kind: "i32" }]);
+  // (#2915) ToBoolean-coerce each dynamic descriptor attribute. In standalone
+  // mode use the NATIVE `__is_truthy` union helper (a real Wasm body — walks the
+  // same boxed-value structs `__box_number`/`__box_boolean`/`$BigInt`/`$AnyString`
+  // and treats any other non-null ref, e.g. a `new Boolean(false)` $Object
+  // wrapper, as truthy per ES §7.1.2) instead of the `__to_boolean` HOST import,
+  // which has no native body and therefore leaks an `env::__to_boolean` import
+  // that keeps otherwise-passing defineProperty/defineProperties/Boolean tests
+  // host-dependent. `__is_truthy` is strictly ≥ `__to_boolean` in spec-fidelity
+  // here (the host import, seeing an opaque WasmGC ref, can only answer
+  // "non-null → truthy"), so every leaky-PASS converts 1:1 host-free with no
+  // behaviour change. Gated on `ctx.standalone` so the GC/host lane emits the
+  // byte-identical `__to_boolean` sequence it always did.
+  const useNativeTruthy = ctx.standalone;
+  if (useNativeTruthy) addUnionImports(ctx);
+  const toBoolIdx = ensureLateImport(
+    ctx,
+    useNativeTruthy ? "__is_truthy" : "__to_boolean",
+    [{ kind: "externref" }],
+    [{ kind: "i32" }],
+  );
   flushLateImportShifts(ctx, fctx);
 
   const emitDyn = (expr: ts.Expression, valueBitShift: number): void => {
