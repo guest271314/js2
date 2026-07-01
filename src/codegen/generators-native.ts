@@ -867,7 +867,27 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
       if (el.dotDotDotToken) return null;
       if (!ts.isIdentifier(el.name)) return null;
     }
+    // (#2920) ARRAY patterns are native-eligible ONLY when TYPED (`param.type`
+    // present) and the resolved type is a concrete vec/tuple ref. This is the
+    // gate-consistency + correctness guard:
+    //  • `param.type` present ⇒ BOTH callers — the free-function path
+    //    (`bindingPatternParamNeedsWiden` returns false when `p.type` is set) and
+    //    the class-method path (class-bodies.ts) — type the param via
+    //    `resolveWasmType(getTypeAtLocation(param))`, IDENTICAL to this gate. So
+    //    `isNativeGeneratorCandidate` and `registerNativeGenerator` (both routed
+    //    through this one plan builder) AND the resume-prelude destructure all
+    //    observe the SAME `paramTypes[i]` — no divergence, no invalid module, no
+    //    externref/concrete miscompile.
+    //  • An UNTYPED array pattern is widened to `externref` (and may be
+    //    call-site-inferred) by the free-function caller — that diverges from a
+    //    plain `getTypeAtLocation` resolution AND hits the pre-existing
+    //    externref-array null-readback rep gap (a numeric vec reads back null;
+    //    normal functions share it). So BAIL to the host path (a later slice with
+    //    its own honest yield can widen this once that rep gap is closed).
+    // Object patterns extract correctly for externref OR concrete, so they carry
+    // no such guard — accepted regardless of typing.
     if (ts.isArrayBindingPattern(pat)) {
+      if (!param.type) return null;
       const pt = resolveWasmType(ctx, ctx.checker.getTypeAtLocation(param));
       if (pt.kind !== "ref" && pt.kind !== "ref_null") return null;
     }
