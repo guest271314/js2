@@ -462,6 +462,29 @@ function normalizeStatus(s: string): StatusKey {
 }
 
 /**
+ * (#2914) Resolve a record's edition bucket key, honouring the host-free
+ * (standalone) definition of "pass".
+ *
+ * In `--host-free` mode a raw `status === "pass"` that still leaked a JS host
+ * runtime import (`host_import_leak_class` set) is NOT a standalone pass — it
+ * only "passed" by pulling an `env::__*` import. This mirrors
+ * `build-test262-report.mjs:844` (`hostFreePass = status === "pass" &&
+ * !record.host_import_leak_class`) and `check-standalone-highwater.mjs`
+ * (`full_summary.host_free_pass`), so the per-edition slider, the donut
+ * headline (#2879) and the absolute floor (#2097) all share ONE definition of a
+ * standalone pass. A leaky pass is demoted to `fail` (kept in `total`, dropped
+ * from `pass`) — exactly how the donut counts it: in the denominator, out of
+ * `host_free_pass`. The default (host / `gc`) mode is unchanged: host imports
+ * are expected there, so a raw `pass` is counted.
+ */
+function resolveStatusKey(record: ResultRecord, hostFree: boolean): StatusKey {
+  if (hostFree && record.status === "pass" && record.host_import_leak_class) {
+    return "fail";
+  }
+  return normalizeStatus(record.status);
+}
+
+/**
  * (#1398) Derive a category path from a test file path. Mirrors the runner's
  * categorization (top two path segments after the leading `test/`), so the
  * resulting key matches `test262-report.json`'s `categories[].name`.
@@ -490,6 +513,13 @@ interface ResultRecord {
   scope?: string;
   scope_official?: boolean;
   category?: string;
+  /**
+   * (#2914) Present (a non-empty leak-class string) when a `pass` still pulled a
+   * JS host `env::__*` runtime import. Written by the worker via
+   * `metadataFromWorkerResult` and preserved in the standalone baseline JSONL.
+   * Consumed here only in `--host-free` mode to exclude leaky passes.
+   */
+  host_import_leak_class?: string;
 }
 
 interface EditionBucket {
@@ -519,6 +549,11 @@ async function main() {
         : RESULTS_JSONL);
   const outputPath = getArg(args, "--output") ?? OUTPUT_PATH;
   const test262Root = getArg(args, "--test262") ?? TEST262_ROOT;
+  // (#2914) In host-free (standalone) mode, count a `pass` only when it emitted
+  // no JS host runtime import — mirrors build-test262-report.mjs:844 so the
+  // per-edition slider agrees with the standalone donut/floor. Accept either the
+  // explicit `--host-free` flag or `--target standalone`.
+  const hostFree = args.includes("--host-free") || getArg(args, "--target") === "standalone";
 
   if (!existsSync(join(test262Root, "test"))) {
     throw new Error(
@@ -528,6 +563,9 @@ async function main() {
 
   console.log(`Reading results from: ${resultsPath}`);
   console.log(`Reading test262 from: ${test262Root}`);
+  console.log(
+    `Pass definition: ${hostFree ? "host-free (standalone; excludes host_import_leak_class)" : "raw pass (host)"}`,
+  );
 
   // Read all result records
   const lines = readFileSync(resultsPath, "utf-8").split("\n").filter(Boolean);
@@ -563,7 +601,7 @@ async function main() {
 
     if (record.scope_official === false || record.scope === "proposal") {
       const proposalBucket = buckets[-1] ?? (buckets[-1] = { pass: 0, fail: 0, ce: 0, skip: 0 });
-      proposalBucket[normalizeStatus(status)]++;
+      proposalBucket[resolveStatusKey(record, hostFree)]++;
       unclassified++;
       continue;
     }
@@ -573,7 +611,7 @@ async function main() {
     const fm = parseFrontmatter(fullPath);
 
     const edition = classifyEdition(fm, file);
-    const key = normalizeStatus(status);
+    const key = resolveStatusKey(record, hostFree);
 
     if (edition === 0 || edition === -1) unclassified++;
     else classified++;
