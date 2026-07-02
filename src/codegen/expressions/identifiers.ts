@@ -15,6 +15,7 @@ import {
 } from "../../checker/type-mapper.js";
 import type { Instr, ValType } from "../../ir/types.js";
 import { emitCachedFuncClosureAccess, emitFuncRefAsClosure } from "../closures.js";
+import { emitNativeGlobalThisObject } from "../array-object-proto.js";
 import { emitLazyClassObjectGet } from "./extern.js";
 import type { CodegenContext, FunctionContext } from "../context/types.js";
 import {
@@ -822,8 +823,20 @@ function compileIdentifierCore(ctx: CodegenContext, fctx: FunctionContext, id: t
     return { kind: "externref" };
   }
 
-  // globalThis — return the JS global object via host import
+  // globalThis — return the JS global object.
   if (name === "globalThis") {
+    // (#2996) Standalone / WASI (no-JS-host): resolve to a native, cached
+    // `$Object` singleton instead of the `env::__get_globalThis` host import,
+    // which a host-free binary can't satisfy (it merely leaks into the import
+    // section). This eliminates the biggest genuine sole-import leak lever
+    // (47 tests) — READ-value substrate only; `globalThis.prop` reflective reads
+    // are the deferred #2988 MOP work and keep their existing path. Host/gc mode
+    // is byte-identical (falls through to the host import below).
+    if (ctx.standalone || ctx.wasi) {
+      const nativeVt = emitNativeGlobalThisObject(ctx, fctx);
+      if (nativeVt) return nativeVt;
+      // Native runtime unavailable — fall through to the host-import path.
+    }
     let funcIdx = ctx.funcMap.get("__get_globalThis");
     if (funcIdx === undefined) {
       const importsBefore = ctx.numImportFuncs;
