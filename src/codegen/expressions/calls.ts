@@ -4185,7 +4185,21 @@ function compileCallExpression(
   // but also (fn)(), ((fn))(), (obj.method)() etc. which would otherwise fail.
   if (ts.isParenthesizedExpression(expr.expression)) {
     let unwrapped: ts.Expression = expr.expression;
-    while (ts.isParenthesizedExpression(unwrapped)) {
+    // Strip parentheses AND type-only callee wrappers (`as T`, `satisfies T`,
+    // `<T>x`). A type cast is a compile-time no-op, so `(eval as any)()` must
+    // behave exactly like `eval()`. Critically, `AsExpression` /
+    // `SatisfiesExpression` / `TypeAssertion` are NOT `LeftHandSideExpression`s,
+    // so if we left them wrapped and fell through to the generic synthetic-call
+    // path below, `ts.factory.createCallExpression` would re-wrap the callee in
+    // a `ParenthesizedExpression` and the re-entry would rebuild an identical
+    // synthetic call → unbounded recursion (#3005). Stripping them here lets the
+    // inner expression reach its normal callee handling (e.g. eval special-casing).
+    while (
+      ts.isParenthesizedExpression(unwrapped) ||
+      ts.isAsExpression(unwrapped) ||
+      ts.isSatisfiesExpression(unwrapped) ||
+      ts.isTypeAssertionExpression(unwrapped)
+    ) {
       unwrapped = unwrapped.expression;
     }
     // Only unwrap if it's NOT a function expression or arrow (those are IIFEs, handled later)
