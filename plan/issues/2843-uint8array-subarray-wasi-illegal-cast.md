@@ -33,3 +33,9 @@ post-#2835) byte-buffer rep or the view wrapper. Confirm whether it predates
 
 The `issue-1655` `Uint8Array.subarray` WASI-write case passes; no regression to
 other `subarray`/typed-array WASI paths.
+
+## Status note (reconcile 2026-07-02)
+
+No implementation PR has merged for this issue. The only merged PR referencing
+it (PR #2327, `chore(plan): close #2829; file #2842/#2843 cleanups`) merely
+FILED this issue — do not mistake it for a fix. Stays `ready`.
