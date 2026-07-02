@@ -102,5 +102,26 @@ lead/dev-callback.
 - `src/codegen/native-proto.ts`, `src/codegen/array-object-proto.ts`,
   `src/codegen/property-access.ts` (#2861 glue, brand slots 41-43)
 - `src/codegen/expressions/calls.ts` (~L2911 — #2923 arity filter)
-- `tests/issue-2849.test.ts`, `tests/issue-2861-disposablestack-glue.test.ts`,
+- `tests/issue-2849.test.ts`, `tests/issue-2861-suppressederror-glue.test.ts`,
   `tests/issue-2923.test.ts`
+
+## Addendum — #2436 reconciliation (post parallel-merge)
+
+A parallel session landed #2433 (DisposableStack/AsyncDisposableStack glue,
+brand slots 41/42 — identical to #2436's original scope) and #2438 (Ctor
+length/name folds), making #2436 DIRTY. Reconciled per lead direction (outcome
+b, partial delta): merged origin/main, took the parallel session's version of the
+three codegen files (do not fight their merge), and kept ONLY the still-unwired
+**SuppressedError** glue as the honest delta:
+
+- SuppressedError brand slot 43 (`native-proto.ts`).
+- SuppressedError arm → `ensureNativeErrorNativeProtoGlue` (Error subclass;
+  reuses the shared NativeError glue, no new factory).
+- Test trimmed to `tests/issue-2861-suppressederror-glue.test.ts` (DisposableStack
+  / AsyncDisposableStack now covered by #2433's test).
+
+Verified on the merged state: `SuppressedError.prototype` value read flips CE→works
+(standalone, ~5 flips), DisposableStack control still works via #2433, tsc clean.
+The DisposableStack/AsyncDisposableStack half of my original +55 claim is now
+attributable to #2433; my net remaining contribution here is the SuppressedError
+subset.
