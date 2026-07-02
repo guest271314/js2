@@ -93,11 +93,11 @@ stays fixed.
 
 - **The escape mechanism, instrumented firing site, and measured
   revert-vs-bail comparison** are captured in the "The conflict" section above
-  (root-caused during #2937). `plan/issues/2937-*.md` has the symptom, the
+  (root-caused during #2937). The #2937 issue file has the symptom, the
   bisect to PR #2432, and the fixed-by-revert banner.
 - **#2849 design** (the poison, `objectHashConsumerVars`, the sidecar-wins
-  strategy (b) and why (a)/(c) were rejected): `plan/issues/2849-*.md`
-  "Corrected Root Cause & Design".
+  strategy (b) and why (a)/(c) were rejected): the #2849 issue file's
+  "Corrected Root Cause & Design" section.
 - WIP receiver-identifier bail (the incomplete first half — a foundation, NOT a
   fix): earlier commit on branch `issue-2937-acorn-host-poison` history
   (superseded by the revert; recover from git if useful).
