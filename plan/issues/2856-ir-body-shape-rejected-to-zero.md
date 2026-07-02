@@ -283,7 +283,7 @@ registered anyway; the IR lowering resolves them **by name**
 Design deltas vs the plan above:
 
 1. **No new IR node kinds.** `IrInstrCall` takes a symbolic `{kind:"func",
-   name}` target and an explicit result IrType, so `document` lowers as
+name}` target and an explicit result IrType, so `document` lowers as
    `call global_document : {kind:"extern", className:"Document"}`, and
    `console.log(s)` as a void `call console_log_string`. Member get/set/call
    reuse the existing `extern.prop` / `extern.propSet` / `extern.call` instrs
@@ -319,7 +319,37 @@ Design deltas vs the plan above:
 5. **Standalone**: `"defer"` ⇒ the selector never claims ⇒ legacy ⇒ the
    existing #1472/#2907 refusal — unchanged, as the plan requires. The
    `console` arm is also host-only (WASI console lowers natively via
-   fd_write, no `console_*` host imports).
+   fd*write, no `console*\*` host imports).
+
+### Slice 1 RESULTS (2026-07-02, dev-2856f — extern-in-IR landed)
+
+- Gate: `body-shape-rejected` **34 → 27** (−7); post-claim demotions **0**
+  (the two `<f64>.toString()` demotions the first run surfaced were fixed by
+  the `number_toString` arm). `call-graph-closure` 5 → 8: the predicted
+  contagion shuffle — `el`/`bcrd`/helpers are now IR-CAPABLE but pinned by
+  callers whose own first blockers are **closure-valued args**
+  (`addBenchCard(…, bench_fib)`), **imported callees** (cross-module calls),
+  `%`-defer (#2945), and misc arms — all separately tracked. Banked via
+  `--update` in the slice PR (net unintended 45 → 41).
+- Runtime parity: IR-on vs IR-off **identical observable behavior** on
+  benchmarks/dom.ts, benchmarks/helpers.ts, js/algorithms.ts, js/classes.ts
+  (full console-output equality on the executable ones; identical
+  failure-mode on DOM files under Node's shimless host).
+- Landmine fixed en route: extern method imports have FIXED Wasm arity
+  including optional params (`createElement(tag, options?)` = 3 slots) — the
+  IR extern.call arm must pad missing optionals with default sentinels like
+  legacy's `pushDefaultValue`, or the module fails validation ("not enough
+  arguments on the stack"). Regression-tested in
+  `tests/issue-2856-extern-in-ir.test.ts`.
+- Use-site branding replaced registration-time branding (the plan's note 4):
+  overloads collapse at registration (`createElement`'s first overload
+  returns a type param), so `resolveExternMember` brands from the checker at
+  the USE SITE (`getTypeAtLocation` + `getNonNullableType`).
+- Remaining body-shape (27): 8 `nontail-callstmt` (mains calling
+  imported/closure-valued fns), 4 helper-internal (incl. the `#private`
+  pair), 3 if-in-loop, 2 ArrayType annotation, 2 `%` (#2945-deferred), 1
+  each arrow-value / tail-expr / if-cond / if-else-nontail / assign-nonprop
+  / vardecl-call / cloop-guard / instanceof.
 
 ### What the bucket actually is (grounded by the Step-1 histogram)
 
