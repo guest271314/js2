@@ -1,12 +1,12 @@
 ---
 id: 2768
 title: "bare-var receiver recovery: per-type externref→ref recovery hardening + safelist expansion (follow-on of #2767's Date-only gate)"
-status: ready
+status: in-progress
 sprint: current
 priority: medium
-assignee: ttraenkler/unassigned
+assignee: ttraenkler/agent-abbff25f3a84c2b88
 created: 2026-06-28
-updated: 2026-06-28
+updated: 2026-07-03
 feasibility: medium
 reasoning_effort: high
 task_type: bugfix
