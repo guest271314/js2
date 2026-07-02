@@ -253,8 +253,30 @@ family split across two PRs):
     String.prototype.indexOf; new C()` silently does NOT throw (the direct
     member form does) — generic new-on-non-constructor-closure runtime check
     missing.
-- **Slice 5 — next:** the misc bucket (`fromCharCode` static read,
-  `Symbol.iterator`, `matchAll`, …).
+- **Slice 5 — in PR (dev-2875f): fromCharCode ToUint16 + zero-arg.** Post-#2477
+  reground of the misc dirs (fromCharCode / Symbol.iterator / matchAll /
+  fromCodePoint / raw): 12 hp/sf. Two compiler bugs fixed:
+  - **§7.1.8 ToUint16**: the native lane coerced f64 args with a bare
+    `i32.trunc_sat_f64_s`, which SATURATES before the helper's low-16 mask —
+    `fromCharCode(+Infinity)` → 0xFFFF instead of +0 (S9.7_A1 #5), and any
+    |x| ≥ 2³¹ lost its true modulus (`fromCharCode(2³²+65)` ≠ "A"). Fixed with
+    an f64-domain floor-mod (t = trunc(x); m = t − floor(t/2¹⁶)·2¹⁶ — exact
+    for all finite f64s since /2¹⁶ is an exponent shift; NaN/±∞ propagate to
+    NaN → trunc_sat → the spec's +0). Flips S9.7_A1, S9.7_A2.1.
+  - **Zero-arg `String.fromCharCode()` / `fromCodePoint()`**: an
+    `arguments.length >= 1` gate dropped the spec-valid zero-arg form
+    (§22.1.2.1/2 → "") to the generic member-call path = `__get_builtin`
+    Phase-B refusal → CE. Gate removed; the family fold's empty-parts arm
+    already returns the empty-string literal. Flips S15.5.3.2_A2.
+  - **Remaining misc hp/sf (next sub-slices, each a separate mechanism):**
+    (a) `String.hasOwnProperty("fromCharCode")` → false (static own-property
+    reflection over the builtin CONSTRUCTOR object; blocks S15.5.3.2_A1 whose
+    typeof + .length asserts already pass); (b) `String.prototype[Symbol.
+    iterator].call(null/undefined)` must throw — the @@iterator symbol-member
+    ROC guard; needs TS-symbol-name → `@@<id>` sentinel normalization in the
+    reflective-call resolver before the glue arm can fire (2 tests);
+    (c) matchAll flags/custom-@@matchAll (route with the RegExp-arg (c)
+    sub-cluster / #2868).
 - **Out of scope (routed elsewhere):** the 69-test #2862 ToPrimitive substrate
   bucket; the property-attribute `compile_error` tests (S15.5.4.7_A8–A11
   et al — `delete`/for-in over builtins, a different mechanism).

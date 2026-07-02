@@ -327,6 +327,18 @@ export interface FunctionContext {
   generatorReturnDepth?: number;
   /** Map from variable name → ref cell info (for mutable closure captures) */
   boxedCaptures?: Map<string, { refCellTypeIdx: number; valType: ValType }>;
+  /**
+   * (#2976) Per-activation memo locals for capture-carrying nested function
+   * declarations referenced as VALUES: funcName → local holding the
+   * `(ref null $__fn_cap_<name>_struct)` closure instance. Every reference
+   * site emits a `ref.is_null`-guarded lazy build into this local instead of
+   * constructing a fresh struct per reference, so `f === f` holds and
+   * sidecar/static writes land on the same instance every reference sees.
+   * The guard (rather than a prologue hoist) preserves the existing
+   * value-capture semantics: immutable captures are copied at the FIRST
+   * dynamic reference, exactly where the old per-site build copied them.
+   */
+  nestedFnClosureMemos?: Map<string, number>;
   /** Whether this function is a class constructor (for new.target support) */
   isConstructor?: boolean;
   /** Whether this constructor belongs to a class declared with `extends`. Spec §10.2.1.3
@@ -1336,6 +1348,16 @@ export interface CodegenContext {
   deferredDefaultGlobalExport?: string;
   /** Module-level variable initializers (compiled into __module_init) */
   moduleInitStatements: ts.Statement[];
+  /**
+   * (#2976) Module-level dedupe of the value-closure artifacts for a
+   * capture-carrying nested function declaration: funcName → its ONE custom
+   * closure struct type and trampoline. Previously every reference site
+   * minted a fresh struct type + trampoline function (and a fresh instance —
+   * the identity bug). The trampoline is stored by NAME and re-resolved
+   * through `ctx.funcMap` at each emission so late-import funcIdx shifts
+   * cannot desync a cached raw index.
+   */
+  nestedFnClosureArtifacts?: Map<string, { structTypeIdx: number; trampolineName: string }>;
   /** Nested function capture info. */
   nestedFuncCaptures: Map<
     string,

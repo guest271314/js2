@@ -169,9 +169,6 @@ export interface BackendEmitter<S = Instr[]> {
   emitClosureNew?(layout: IrClosureLowering, captureCount: number, out: Instr[]): void;
   emitClosureFuncGet?(layout: IrClosureLowering, out: Instr[]): void;
   emitCaptureGet?(layout: IrClosureLowering, index: number, out: Instr[]): void;
-  emitRefCellNew?(layout: IrRefCellLowering, out: Instr[]): void;
-  emitRefCellGet?(layout: IrRefCellLowering, out: Instr[]): void;
-  emitRefCellSet?(layout: IrRefCellLowering, out: Instr[]): void;
 
   // ---- (a1) call family — MIGRATED behind the trait (#1584 §2a) -----------
   // The first op-family to move from inline `lower.ts` pushes to typed trait
@@ -215,4 +212,20 @@ export interface BackendEmitter<S = Instr[]> {
    * into their own sinks (built via `newSink()`). `catches[i].tagIdx` selects
    * the handler by exception tag. */
   emitTry(blockType: BlockType, body: S, catches: { tagIdx: number; body: S }[], catchAll: S | undefined, out: S): void;
+
+  // ---- (a5) ref-cell family — MIGRATED behind the trait (#2953) ------------
+  // Mutable closure-capture cells (`struct (field $value (mut T))`). WasmGc
+  // realizes them byte-identically to the prior inline pushes in the
+  // refcell.new/get/set arms of lower.ts ({op:"struct.new"} / {op:"struct.get"}
+  // / {op:"struct.set"} over the cell's typeIdx/fieldIdx) — the WasmGC `Instr`
+  // stream is unchanged. A ref-cell is structurally a 1-field mutable struct, so
+  // a future bytecode/linear wiring mirrors the (a2) struct family
+  // (STRUCT_NEW fieldCount=1 / STRUCT_GET|SET fieldIdx=0); until then those
+  // backends fail loudly, exactly like the other not-yet-wired families.
+  /** value on the stack -> a new ref-cell holding it. */
+  emitRefCellNew(layout: IrRefCellLowering, out: S): void;
+  /** cell ref on the stack -> the cell's stored value. */
+  emitRefCellGet(layout: IrRefCellLowering, out: S): void;
+  /** cell ref + value on the stack -> writes the cell's value (void). */
+  emitRefCellSet(layout: IrRefCellLowering, out: S): void;
 }
