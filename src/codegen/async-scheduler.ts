@@ -22,6 +22,7 @@ import { allocLocal } from "./context/locals.js";
 import { addFuncType, getOrRegisterArrayType } from "./registry/types.js";
 import { addUnionImportsViaRegistry } from "./shared.js";
 import { ensureExnTag } from "./registry/imports.js";
+import { inLiveShiftRange } from "../emit/resolve-layout.js"; // (#1916 S3) stable handles never shift
 
 /**
  * #1326 — Sentinel state values for `$Promise.state`. Match the JS spec
@@ -3402,14 +3403,14 @@ export function shiftAsyncSideChannelFuncIdxs(ctx: CodegenContext, importsBefore
   if (sched) {
     for (const k of ASYNC_SCHEDULER_FUNC_IDX_KEYS) {
       const v = sched[k];
-      if (typeof v === "number" && v >= importsBefore) sched[k] = v + added;
+      if (typeof v === "number" && inLiveShiftRange(v, importsBefore)) sched[k] = v + added;
     }
   }
   const comb = (ctx as unknown as { __promiseCombinators?: Record<string, number> }).__promiseCombinators;
   if (comb) {
     for (const k of COMBINATOR_FUNC_IDX_KEYS) {
       const v = comb[k];
-      if (typeof v === "number" && v >= importsBefore) comb[k] = v + added;
+      if (typeof v === "number" && inLiveShiftRange(v, importsBefore)) comb[k] = v + added;
     }
   }
 }
