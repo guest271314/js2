@@ -125,8 +125,14 @@ const BUILTIN_BRAND_TABLE: Readonly<Record<string, number>> = {
 
   // ── Resource-management / weak builtins ──────────────────────────────────
   FinalizationRegistry: BUILTIN_BRAND_BASE + 40,
+  // (#2861) TC39 Explicit Resource Management stacks — `<Stack>.prototype`
+  // value reads (use/adopt/defer/move/dispose[Async]/disposed getter). The
+  // resource list lives on the INSTANCE, never the proto, so the proto value
+  // object is pure (member CSV only).
+  DisposableStack: BUILTIN_BRAND_BASE + 41,
+  AsyncDisposableStack: BUILTIN_BRAND_BASE + 42,
 
-  // Next free slot: BUILTIN_BRAND_BASE + 41 (append only).
+  // Next free slot: BUILTIN_BRAND_BASE + 43 (append only).
 };
 
 /**
