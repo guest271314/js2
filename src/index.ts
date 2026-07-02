@@ -285,6 +285,18 @@ export interface CompileOptions {
    * direct-emission path (bit-by-bit divergence tests or emergency revert).
    */
   experimentalIR?: boolean;
+  /**
+   * (#2973) Opt this compile out of the `JS2WASM_IR_FIRST` compile-once
+   * inversion, regardless of the ambient env flag. Semantics-critical
+   * in-process sub-compiles — the `eval` / `new Function` host shims — MUST
+   * set this: they are a proven fast path, not an IR-first *measurement*
+   * target, and an IR-first post-claim hard error there is swallowed by the
+   * shim's fallback `catch` arms and silently degraded to `undefined` (a wrong
+   * answer, not a fail-loud error). Only the fail-loud skip-body inversion is
+   * disabled; the ordinary IR overlay (`experimentalIR`) is untouched.
+   * Default: false.
+   */
+  disableIrFirst?: boolean;
   /** Compile-time constant definitions. Substitutes identifiers/dotted paths with literal values
    *  before TypeScript parsing. Example: `{ "process.env.NODE_ENV": '"production"' }`.
    *  Values must be valid JS expression literals (strings need inner quotes).
