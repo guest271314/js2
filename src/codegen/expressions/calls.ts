@@ -8777,17 +8777,18 @@ function compileCallExpression(
           }
         }
         // (#2919 arm 1) Native combinator over an ARRAY-TYPED non-literal
-        // argument — `Promise.all(arrVar)`, spread/holed literals, etc. Compile
-        // the argument in place with its natural type; if it lowers to an
-        // externref-backed vec (`Promise<T>[]`-shaped arrays do), loop over it
-        // at runtime feeding `__combinator_subscribe`. Anything else (f64-backed
-        // `number[]` vecs — the Gap-4 output-representation escalation —,
-        // `any`/externref, strings, generic iterables) rolls the probe compile
-        // back and falls through to the host path byte-unchanged (the compile-
-        // time double-compile of arg0 is side-effect-free at runtime: the
-        // rolled-back instructions never execute).
+        // argument — `Promise.all(arrVar)`, spread/holed literals, etc.
+        // Transactionally compile the argument with its natural type; if it
+        // lowers to an externref-backed vec (`Promise<T>[]`-shaped arrays do),
+        // KEEP the compiled arg and loop over it at runtime feeding
+        // `__combinator_subscribe`. Anything else (f64-backed `number[]` vecs —
+        // the Gap-4 output-representation escalation —, `any`/externref,
+        // strings, generic iterables) is rolled back — body AND any locals /
+        // late imports / errors the probe allocated — via the #1919 helper (a
+        // raw `body.length =` rollback would leak a phantom late import), and
+        // control falls through to the host path byte-unchanged.
         if (nativeCombinatorEligible && arg0 !== undefined) {
-          const mark = fctx.body.length;
+          const snap = snapshotSpeculative(ctx, fctx);
           const argType = compileExpression(ctx, fctx, arg0);
           const vecShape = resolveExternrefVecArg(ctx, argType);
           if (vecShape) {
@@ -8805,7 +8806,8 @@ function compileCallExpression(
               vecShape.arrTypeIdx,
             );
           }
-          fctx.body.length = mark;
+          // Didn't lower as an externref vec — roll back and use the host path.
+          rollbackSpeculative(ctx, fctx, snap);
         }
         const importName = `Promise_${methodName}`;
         // Three-arg signature: (thisArg, iterable, directCall) → result
