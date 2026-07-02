@@ -5,6 +5,7 @@ import { emitWasiErrorConstructor } from "./registry/error-types.js";
 import { analyzeLinearUint8 } from "./linear-uint8-analysis.js";
 import { analyzeFnctorEscapeGate, deriveFnctorFields } from "./fnctor-escape-gate.js";
 import { isLinearU8RepresentableNew } from "./linear-uint8-signatures.js";
+import { definedFuncAt } from "./func-space.js"; // (#1916 S2) positional-read chokepoint
 import type { MultiTypedAST, TypedAST } from "../checker/index.js";
 import {
   isBigIntType,
@@ -26,6 +27,7 @@ import { irVal, type IrType } from "../ir/nodes.js";
 import { buildTypeMap, type LatticeType } from "../ir/propagate.js";
 import { planIrCompilation, irClosureSignatureFromFunctionTypeNode, type IrFallbackReason } from "../ir/select.js";
 import { createCodegenContext } from "./context/create-context.js";
+import { collectModuleTopLevelNames, irFirstBodyReadsHostNode } from "./ir-first-gate.js";
 import type { FallbackCounts } from "./fallback-telemetry.js";
 import { buildLeakedHostImportError, scanForLeakedHostImports } from "./host-import-allowlist.js";
 import { reportError, reportErrorNoNode } from "./context/errors.js";
@@ -97,6 +99,7 @@ import {
   isStandalonePromiseActive,
   shiftAsyncSideChannelFuncIdxs,
 } from "./async-scheduler.js";
+import { inLiveShiftRange } from "../emit/resolve-layout.js"; // (#1916 S3) stable handles never shift
 import {
   brandExternMethodResult,
   ensureLateImport,
@@ -143,6 +146,7 @@ import {
   destructureParamObjectExternref,
 } from "./destructuring-params.js";
 import {
+  emitExceptionRenderExports,
   emitTestRuntimeStringHelpers,
   ensureNativeStringExternBridge,
   ensureNativeStringHelpers,
@@ -1134,6 +1138,13 @@ interface IrOverlayPlan {
  *      sufficient: only the function's own IR success is load-bearing for
  *      its slot, and a callee that is claimed-but-not-skipped still occupies
  *      its pre-allocated slot with a working body either way.
+ *   4. Its body does not read a HOST node (property/element access or bare
+ *      call rooted at an identifier that is neither function-local nor a
+ *      module top-level binding) — see `irFirstBodyReadsHostNode` (#2138
+ *      Trap 4 / #2856 sequencing). A no-op today (the selector still rejects
+ *      host-global receivers), load-bearing the moment #2856's extern-in-IR
+ *      selector arm lands: host-node functions stay compile-twice until that
+ *      lowering is proven, keeping the flag-on measurement clean.
  *
  * Class members are NEVER skipped in this slice (their slot pre-allocation
  * lives in `class-bodies.ts` and carries a typeIdx parity contract with
@@ -1148,14 +1159,19 @@ interface IrOverlayPlan {
  * placeholder must never ship) — surfacing exactly the selector↔builder
  * divergences this investigation exists to find (#2135).
  */
-function computeIrFirstSkipSet(plan: IrOverlayPlan): ReadonlySet<string> {
+function computeIrFirstSkipSet(plan: IrOverlayPlan, sourceFile: ts.SourceFile): ReadonlySet<string> {
   const skip = new Set<string>();
   const funcs = plan.safeSelection.funcs;
   if (funcs.size === 0) return skip;
   const edges = plan.selection.localCallees;
+  // Gate 4 (#2138 Trap 4, coordinated with the extern-in-IR plan in #2856):
+  // module-level user bindings, computed once — receivers/callees rooted at
+  // these are user code, never host globals.
+  const moduleNames = collectModuleTopLevelNames(sourceFile);
   for (const name of funcs) {
     const fn = plan.declByName.get(name);
     if (!fn || fn.asteriskToken) continue; // gate 2 — generators
+    if (irFirstBodyReadsHostNode(fn, moduleNames)) continue; // gate 4 — host nodes
     if (!edges) continue; // no edge info (defensive) — stay conservative
     const callees = edges.get(name);
     let closed = true;
@@ -1689,7 +1705,7 @@ export function generateModule(
     let irSkipBodies: ReadonlySet<string> | undefined;
     if (irFirst) {
       irPlan = planIrOverlay(ctx, ast);
-      irSkipBodies = computeIrFirstSkipSet(irPlan);
+      irSkipBodies = computeIrFirstSkipSet(irPlan, ast.sourceFile);
     }
 
     // Third pass: compile function bodies
@@ -1959,6 +1975,13 @@ export function generateModule(
     // (#1716) Emit __call_@@toPrimitive(self, hint) for runtime ToPrimitive
     // dispatch of a class's [Symbol.toPrimitive] *method* on opaque structs.
     emitToPrimitiveMethodExport(ctx);
+
+    // (#2962) Emit __exn_render_prepare / __exn_render_char so the test262
+    // harness can render a natively-thrown GC payload ("TypeError: boom")
+    // with zero host imports. No-op unless (standalone || wasi) &&
+    // nativeStrings && the `$exc` tag was registered (i.e. the module can
+    // actually throw).
+    emitExceptionRenderExports(ctx);
 
     // Emit __call_fn_0 export for calling zero-arg closures from JS (#851)
     emitClosureCallExport(ctx);
@@ -2453,9 +2476,8 @@ function addWasiStartExport(ctx: CodegenContext): void {
 
   const mainIdx = ctx.funcMap.get("main");
   if (mainIdx !== undefined) {
-    const funcArrayIdx = mainIdx - ctx.numImportFuncs;
-    if (funcArrayIdx >= 0 && funcArrayIdx < ctx.mod.functions.length) {
-      const func = ctx.mod.functions[funcArrayIdx]!;
+    const func = definedFuncAt(ctx, mainIdx);
+    if (func) {
       const funcType = ctx.mod.types[func.typeIdx];
       // Only an EXPORTED, no-arg, no-result `main` is a valid `_start` entry.
       // A non-exported `main` (the `main()`-calls-itself convention) is reached
@@ -3331,7 +3353,7 @@ function emitIteratorMethodExport(ctx: CodegenContext): void {
       const funcIdx = ctx.funcMap.get(methodFullName);
       if (funcIdx === undefined) continue;
 
-      const funcDef = mod.functions[funcIdx - ctx.numImportFuncs];
+      const funcDef = definedFuncAt(ctx, funcIdx);
       const funcType = funcDef ? mod.types[funcDef.typeIdx] : undefined;
       const resultType: ValType =
         funcType && funcType.kind === "func" && funcType.results.length > 0
@@ -3477,7 +3499,7 @@ function emitToPrimitiveMethodExport(ctx: CodegenContext): void {
     const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, `${structName}_${methodSuffix}`)); // (#1983)
     if (funcIdx === undefined) continue;
 
-    const funcDef = mod.functions[funcIdx - ctx.numImportFuncs];
+    const funcDef = definedFuncAt(ctx, funcIdx);
     const funcType = funcDef ? mod.types[funcDef.typeIdx] : undefined;
     const resultType: ValType =
       funcType && funcType.kind === "func" && funcType.results.length > 0
@@ -3596,7 +3618,7 @@ function toPrimitiveNeedsBoxing(ctx: CodegenContext, methodSuffix: string): bool
       continue;
     const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, `${structName}_${methodSuffix}`));
     if (funcIdx === undefined) continue;
-    const funcDef = mod.functions[funcIdx - ctx.numImportFuncs];
+    const funcDef = definedFuncAt(ctx, funcIdx);
     const funcType = funcDef ? mod.types[funcDef.typeIdx] : undefined;
     const resultType =
       funcType && funcType.kind === "func" && funcType.results.length > 0 ? funcType.results[0] : undefined;
@@ -4735,7 +4757,7 @@ function emitToPrimitiveMethodExports(ctx: CodegenContext): void {
       // nominal class methods and structs whose method has no stored closure.
       const funcIdx = ctx.funcMap.get(methodFullName);
       if (funcIdx !== undefined) {
-        const funcDef = mod.functions[funcIdx - ctx.numImportFuncs];
+        const funcDef = definedFuncAt(ctx, funcIdx);
         const funcType = funcDef ? mod.types[funcDef.typeIdx] : undefined;
         const resultType: ValType =
           funcType && funcType.kind === "func" && funcType.results.length > 0
@@ -5358,7 +5380,7 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
     // pass; fill it in place if reserved.
     const reservedGet = ctx.funcMap.get("__vec_get");
     if (reservedGet !== undefined) {
-      const fn = mod.functions[reservedGet - ctx.numImportFuncs]! as { locals: typeof getLocals; body: Instr[] };
+      const fn = definedFuncAt(ctx, reservedGet)! as { locals: typeof getLocals; body: Instr[] };
       fn.locals = getLocals;
       fn.body = body;
     } else {
@@ -5605,7 +5627,7 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
     // fresh and register in funcMap (shift-tracked) so a same-pass lookup resolves.
     const reservedPush = ctx.funcMap.get("__vec_push");
     if (reservedPush !== undefined) {
-      const fn = mod.functions[reservedPush - ctx.numImportFuncs]! as { locals: typeof locals; body: Instr[] };
+      const fn = definedFuncAt(ctx, reservedPush)! as { locals: typeof locals; body: Instr[] };
       fn.locals = locals;
       fn.body = body;
     } else {
@@ -5705,7 +5727,7 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
     // (#2784 S3) FILL-or-build (see __vec_push above).
     const reservedPop = ctx.funcMap.get("__vec_pop");
     if (reservedPop !== undefined) {
-      const fn = mod.functions[reservedPop - ctx.numImportFuncs]! as { locals: typeof locals; body: Instr[] };
+      const fn = definedFuncAt(ctx, reservedPop)! as { locals: typeof locals; body: Instr[] };
       fn.locals = locals;
       fn.body = body;
     } else {
@@ -5862,9 +5884,8 @@ function hasExportedVecParam(ctx: CodegenContext): boolean {
   const vecTypeIdxs = new Set<number>(ctx.vecTypeMap.values());
   for (const exp of mod.exports) {
     if (exp.desc.kind !== "func") continue;
-    const idx = exp.desc.index - ctx.numImportFuncs;
-    if (idx < 0 || idx >= mod.functions.length) continue;
-    const fn = mod.functions[idx]!;
+    const fn = definedFuncAt(ctx, exp.desc.index);
+    if (!fn) continue;
     const typeDef = mod.types[fn.typeIdx];
     if (!typeDef) continue;
     // Resolve sub-type wrappers (some FuncTypeDefs are nested under SubTypeDef).
@@ -6629,6 +6650,13 @@ export function generateMultiModule(
     // (#1716) Emit __call_@@toPrimitive(self, hint) for runtime ToPrimitive
     // dispatch of a class's [Symbol.toPrimitive] *method* on opaque structs.
     emitToPrimitiveMethodExport(ctx);
+
+    // (#2962) Emit __exn_render_prepare / __exn_render_char so the test262
+    // harness can render a natively-thrown GC payload ("TypeError: boom")
+    // with zero host imports. No-op unless (standalone || wasi) &&
+    // nativeStrings && the `$exc` tag was registered (i.e. the module can
+    // actually throw).
+    emitExceptionRenderExports(ctx);
 
     // #1326c Phase 1C-A — export __drain_microtasks BEFORE WASI _start so the
     // _start wrapper (which appends a drain call) can find its funcIdx.
@@ -9494,12 +9522,12 @@ export function addStringImports(ctx: CodegenContext): void {
   if (delta > 0 && ctx.mod.functions.length > 0) {
     const newImportNames = new Set(["concat", "length", "equals", "substring", "charCodeAt"]);
     for (const [name, idx] of ctx.funcMap) {
-      if (!newImportNames.has(name) && idx >= importsBefore) {
+      if (!newImportNames.has(name) && inLiveShiftRange(idx, importsBefore)) {
         ctx.funcMap.set(name, idx + delta);
       }
     }
     for (const exp of ctx.mod.exports) {
-      if (exp.desc.kind === "func" && exp.desc.index >= importsBefore) {
+      if (exp.desc.kind === "func" && inLiveShiftRange(exp.desc.index, importsBefore)) {
         exp.desc.index += delta;
       }
     }
@@ -9510,10 +9538,10 @@ export function addStringImports(ctx: CodegenContext): void {
       if (shifted.has(instrs)) return;
       shifted.add(instrs);
       for (const instr of instrs) {
-        if ((instr.op === "call" || instr.op === "return_call") && instr.funcIdx >= importsBefore) {
+        if ((instr.op === "call" || instr.op === "return_call") && inLiveShiftRange(instr.funcIdx, importsBefore)) {
           instr.funcIdx += delta;
         }
-        if (instr.op === "ref.func" && instr.funcIdx >= importsBefore) {
+        if (instr.op === "ref.func" && inLiveShiftRange(instr.funcIdx, importsBefore)) {
           instr.funcIdx += delta;
         }
         const a = instr as any;
@@ -9563,20 +9591,22 @@ export function addStringImports(ctx: CodegenContext): void {
     for (const elem of ctx.mod.elements) {
       if (elem.funcIndices) {
         for (let i = 0; i < elem.funcIndices.length; i++) {
-          if (elem.funcIndices[i]! >= importsBefore) {
+          if (inLiveShiftRange(elem.funcIndices[i]!, importsBefore)) {
             elem.funcIndices[i]! += delta;
           }
         }
       }
     }
     if (ctx.mod.declaredFuncRefs.length > 0) {
-      ctx.mod.declaredFuncRefs = ctx.mod.declaredFuncRefs.map((idx) => (idx >= importsBefore ? idx + delta : idx));
+      ctx.mod.declaredFuncRefs = ctx.mod.declaredFuncRefs.map((idx) =>
+        inLiveShiftRange(idx, importsBefore) ? idx + delta : idx,
+      );
     }
     // (#1525b) Shift pendingMethodTrampolines side-channel indices in lockstep
     // — see the matching block in addUnionImports / shiftLateImportIndices.
     for (const t of ctx.pendingMethodTrampolines) {
-      if (t.methodFuncIdx >= importsBefore) t.methodFuncIdx += delta;
-      if (t.trampolineFuncIdx >= importsBefore) t.trampolineFuncIdx += delta;
+      if (inLiveShiftRange(t.methodFuncIdx, importsBefore)) t.methodFuncIdx += delta;
+      if (inLiveShiftRange(t.trampolineFuncIdx, importsBefore)) t.trampolineFuncIdx += delta;
     }
     // (#1839) `nativeStrHelpers` is read directly by string-lowering call sites
     // and helper emitters — it is NOT a copy of funcMap, so it must be shifted
@@ -9584,14 +9614,14 @@ export function addStringImports(ctx: CodegenContext): void {
     // every entry >= importsBefore moves up by `delta`. Omitting this left the
     // map stale under plain `--nativeStrings` JS-host mode.
     for (const [name, idx] of ctx.nativeStrHelpers) {
-      if (idx >= importsBefore) {
+      if (inLiveShiftRange(idx, importsBefore)) {
         ctx.nativeStrHelpers.set(name, idx + delta);
       }
     }
     // (#1913) Regex helper map moves in lockstep too — regexp-standalone call
     // sites bake `call` indices straight from this map.
     for (const [name, idx] of ctx.nativeRegexHelpers) {
-      if (idx >= importsBefore) {
+      if (inLiveShiftRange(idx, importsBefore)) {
         ctx.nativeRegexHelpers.set(name, idx + delta);
       }
     }
@@ -9600,7 +9630,7 @@ export function addStringImports(ctx: CodegenContext): void {
     // indices straight from this map (see shiftLateImportIndices for the full
     // rationale / the WeakMap stale-index validation failure it fixes).
     for (const [name, idx] of ctx.mapHelpers) {
-      if (idx >= importsBefore) {
+      if (inLiveShiftRange(idx, importsBefore)) {
         ctx.mapHelpers.set(name, idx + delta);
       }
     }
@@ -9619,7 +9649,7 @@ export function addStringImports(ctx: CodegenContext): void {
     }
     // (#1839) The module start function index also moves if it was a defined
     // function at or above the insertion point. Matches addUnionImports.
-    if (ctx.mod.startFuncIdx !== undefined && ctx.mod.startFuncIdx >= importsBefore) {
+    if (ctx.mod.startFuncIdx !== undefined && inLiveShiftRange(ctx.mod.startFuncIdx, importsBefore)) {
       ctx.mod.startFuncIdx += delta;
     }
   }
@@ -10950,7 +10980,7 @@ export function addUnionImports(ctx: CodegenContext): void {
     ]);
     // Update funcMap entries for defined functions (not imports)
     for (const [name, idx] of ctx.funcMap) {
-      if (!newImportNames.has(name) && idx >= importsBefore) {
+      if (!newImportNames.has(name) && inLiveShiftRange(idx, importsBefore)) {
         ctx.funcMap.set(name, idx + delta);
       }
     }
@@ -10963,13 +10993,13 @@ export function addUnionImports(ctx: CodegenContext): void {
     // (e.g. `__box_number` for a numeric key/value) land between helper
     // registration and the call, so `wm.has` called `__map_get` → invalid Wasm.
     for (const [name, idx] of ctx.mapHelpers) {
-      if (idx >= importsBefore) {
+      if (inLiveShiftRange(idx, importsBefore)) {
         ctx.mapHelpers.set(name, idx + delta);
       }
     }
     // Update export indices
     for (const exp of ctx.mod.exports) {
-      if (exp.desc.kind === "func" && exp.desc.index >= importsBefore) {
+      if (exp.desc.kind === "func" && inLiveShiftRange(exp.desc.index, importsBefore)) {
         exp.desc.index += delta;
       }
     }
@@ -10980,10 +11010,10 @@ export function addUnionImports(ctx: CodegenContext): void {
       if (shifted.has(instrs)) return;
       shifted.add(instrs);
       for (const instr of instrs) {
-        if ((instr.op === "call" || instr.op === "return_call") && instr.funcIdx >= importsBefore) {
+        if ((instr.op === "call" || instr.op === "return_call") && inLiveShiftRange(instr.funcIdx, importsBefore)) {
           instr.funcIdx += delta;
         }
-        if (instr.op === "ref.func" && instr.funcIdx >= importsBefore) {
+        if (instr.op === "ref.func" && inLiveShiftRange(instr.funcIdx, importsBefore)) {
           instr.funcIdx += delta;
         }
         const a = instr as any;
@@ -11030,7 +11060,7 @@ export function addUnionImports(ctx: CodegenContext): void {
     for (const elem of ctx.mod.elements) {
       if (elem.funcIndices) {
         for (let i = 0; i < elem.funcIndices.length; i++) {
-          if (elem.funcIndices[i]! >= importsBefore) {
+          if (inLiveShiftRange(elem.funcIndices[i]!, importsBefore)) {
             elem.funcIndices[i]! += delta;
           }
         }
@@ -11038,11 +11068,13 @@ export function addUnionImports(ctx: CodegenContext): void {
     }
     // Update declaredFuncRefs
     if (ctx.mod.declaredFuncRefs.length > 0) {
-      ctx.mod.declaredFuncRefs = ctx.mod.declaredFuncRefs.map((idx) => (idx >= importsBefore ? idx + delta : idx));
+      ctx.mod.declaredFuncRefs = ctx.mod.declaredFuncRefs.map((idx) =>
+        inLiveShiftRange(idx, importsBefore) ? idx + delta : idx,
+      );
     }
     // Update Wasm start function index (#907) — late-added imports shift the
     // defined-function index that __module_init lives at.
-    if (ctx.mod.startFuncIdx !== undefined && ctx.mod.startFuncIdx >= importsBefore) {
+    if (ctx.mod.startFuncIdx !== undefined && inLiveShiftRange(ctx.mod.startFuncIdx, importsBefore)) {
       ctx.mod.startFuncIdx += delta;
     }
     // Sync nativeStrHelpers and re-base so reconcileNativeStrFinalizeShift is a no-op
@@ -11050,11 +11082,11 @@ export function addUnionImports(ctx: CodegenContext): void {
     // native-string helper bodies. Without this, reconcile double-shifts them (#1677-fast-path).
     if (ctx.nativeStrHelperImportBase >= 0) {
       for (const [name, idx] of ctx.nativeStrHelpers) {
-        if (idx >= importsBefore) ctx.nativeStrHelpers.set(name, idx + delta);
+        if (inLiveShiftRange(idx, importsBefore)) ctx.nativeStrHelpers.set(name, idx + delta);
       }
       // (#1913) Regex helper map shares the same lifecycle.
       for (const [name, idx] of ctx.nativeRegexHelpers) {
-        if (idx >= importsBefore) ctx.nativeRegexHelpers.set(name, idx + delta);
+        if (inLiveShiftRange(idx, importsBefore)) ctx.nativeRegexHelpers.set(name, idx + delta);
       }
       ctx.nativeStrHelperImportBase = ctx.numImportFuncs;
     }
@@ -11063,8 +11095,8 @@ export function addUnionImports(ctx: CodegenContext): void {
     // reachable from any Instr — without this, finalizeMethodTrampolines later
     // resolves the wrong (import) signature, producing invalid Wasm.
     for (const t of ctx.pendingMethodTrampolines) {
-      if (t.methodFuncIdx >= importsBefore) t.methodFuncIdx += delta;
-      if (t.trampolineFuncIdx >= importsBefore) t.trampolineFuncIdx += delta;
+      if (inLiveShiftRange(t.methodFuncIdx, importsBefore)) t.methodFuncIdx += delta;
+      if (inLiveShiftRange(t.trampolineFuncIdx, importsBefore)) t.trampolineFuncIdx += delta;
     }
     // (#2918) Async-scheduler + Promise.all/race combinator side-channel funcIdxs
     // move in lockstep too (addUnionImports missed them). Same complete key list
