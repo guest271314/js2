@@ -2627,25 +2627,42 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     ];
     registerNative("__extern_toString", [{ kind: "externref" }], [{ kind: "externref" }], [], toStringBody);
 
-    // #2042 R2 — now that `__extern_toString` exists, splice the object-key arm
-    // into `__to_property_key`'s body (built earlier, before this funcIdx was
-    // known). For a `$Object` key, ToPropertyKey = ToString(ToPrimitive(key,
-    // "string")) — exactly `__extern_toString`. Insert BEFORE the trailing
-    // `local.get 0` fallthrough so Symbol/opaque keys still pass through.
+    // #2042 R2 / #2985 — now that `__extern_toString` exists, splice the
+    // non-Symbol ToString arm into `__to_property_key`'s body (built earlier,
+    // before this funcIdx was known). By this point the key is neither an
+    // `$AnyString` nor a boxed number (both returned already). For EVERY
+    // remaining non-Symbol key — `$Object`, boolean, bigint, null/undefined,
+    // any other opaque primitive — ToPropertyKey = ToString(ToPrimitive(key,
+    // "string")), exactly `__extern_toString` (§7.1.1.1 → §7.1.17). Originally
+    // this arm only tested `$Object`, so a boolean/bigint/etc. computed key
+    // (`o[true]`, `Object.defineProperty(o, true, …)`) fell through UNCHANGED
+    // and then hit the downstream `ref.cast $AnyString` in
+    // `emitClassifyKey`/`__obj_hash`, trapping "illegal cast [in __obj_find()]"
+    // (#2985 residual). Broadening the test from "is `$Object`" to "is NOT a
+    // Symbol" canonicalises those keys instead. A genuine Symbol still falls
+    // through to the trailing `local.get 0` unchanged (Symbols are looked up by
+    // identity via `__key_equals`, not by string cast). When symbol keys are
+    // disabled there are no Symbol keys, so the ToString applies unconditionally.
     if (tpkBodyRef !== undefined) {
       const externToStringIdx = ctx.funcMap.get("__extern_toString")!;
-      const objArm: Instr[] = [
-        // if (ref.test $Object any) return __extern_toString(key)
-        { op: "local.get", index: 1 },
-        { op: "ref.test", typeIdx: objectTypeIdx },
-        {
-          op: "if",
-          blockType: { kind: "empty" },
-          then: [{ op: "local.get", index: 0 }, { op: "call", funcIdx: externToStringIdx }, { op: "return" }],
-        } as Instr,
+      const toStringArm: Instr[] = [
+        { op: "local.get", index: 0 },
+        { op: "call", funcIdx: externToStringIdx },
+        { op: "return" },
       ];
-      // Splice before the last instruction (the unchanged-key fallthrough).
-      tpkBodyRef.splice(tpkBodyRef.length - 1, 0, ...objArm);
+      const nonSymbolToStringArm: Instr[] = symbolKeysEnabled
+        ? [
+            // if (!ref.test $Symbol any) return __extern_toString(key)
+            { op: "local.get", index: 1 },
+            { op: "ref.test", typeIdx: symbolTypeIdx },
+            { op: "i32.eqz" },
+            { op: "if", blockType: { kind: "empty" }, then: toStringArm } as Instr,
+          ]
+        : // no Symbol keys in play → ToString every remaining key unconditionally
+          toStringArm;
+      // Splice before the last instruction (the unchanged-key fallthrough, which
+      // now only serves genuine Symbol keys under symbolKeysEnabled).
+      tpkBodyRef.splice(tpkBodyRef.length - 1, 0, ...nonSymbolToStringArm);
     }
   }
 
@@ -5477,6 +5494,20 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     const HOST_FLAG_WRITABLE = FLAG_WRITABLE; // bit 0
     const HOST_FLAG_ENUMERABLE = FLAG_ENUMERABLE; // bit 1
     const HOST_FLAG_CONFIGURABLE = FLAG_CONFIGURABLE; // bit 2
+    // (#2989) "Desc has a [[X]] field" specified-bits + hasValue bit — the
+    // §10.1.6.3 ValidateAndApplyPropertyDescriptor preflight in
+    // `__defineProperty_value` gates every spec TypeError on THESE bits (a
+    // configurable/enumerable/writable change is only forbidden when the Desc
+    // actually *specifies* that attribute). The inline-literal fast path
+    // (`computeRuntimeFlags`, object-ops.ts) sets them; this dynamic-descriptor
+    // applier previously set only the value bits 0/1/2, so the preflight read
+    // "no attribute specified / no value" for every field → it never threw and
+    // an invalid redefine silently no-op'd (array length non-writable→writable,
+    // non-configurable redefine, non-extensible new prop via a `var` descriptor).
+    const HOST_WRITABLE_SPECIFIED = 1 << 3;
+    const HOST_ENUMERABLE_SPECIFIED = 1 << 4;
+    const HOST_CONFIGURABLE_SPECIFIED = 1 << 5;
+    const HOST_HAS_VALUE = 1 << 7;
 
     const L_DESC = 3; // desc as externref (after $Object validation)
     const L_DESC_ANY = 4;
@@ -5516,12 +5547,15 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       ];
     };
     // ToBoolean(getField(key)) → set valueBit; always set hasData when marksData.
-    const readBooleanFlag = (key: string, valueBit: number, marksData: boolean): Instr[] => [
+    // (#2989) When the field is present, ALSO set its "specified" bit so the
+    // `__defineProperty_value` §10.1.6.3 preflight can gate the spec TypeErrors.
+    const readBooleanFlag = (key: string, valueBit: number, marksData: boolean, specifiedBit: number): Instr[] => [
       ...hasField(key),
       {
         op: "if",
         blockType: { kind: "empty" },
         then: [
+          ...setFlag(specifiedBit),
           ...(marksData
             ? ([
                 { op: "i32.const", value: 1 },
@@ -5598,7 +5632,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       { op: "ref.null.extern" },
       { op: "local.set", index: L_SETTER },
 
-      // value present → hasData, capture value.
+      // value present → hasData + hasValue bit (#2989), capture value.
       ...hasField("value"),
       {
         op: "if",
@@ -5606,13 +5640,14 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
         then: [
           { op: "i32.const", value: 1 },
           { op: "local.set", index: L_HAS_DATA },
+          ...setFlag(HOST_HAS_VALUE),
           ...getField("value"),
           { op: "local.set", index: L_VALUE },
         ],
       },
-      ...readBooleanFlag("writable", HOST_FLAG_WRITABLE, true),
-      ...readBooleanFlag("enumerable", HOST_FLAG_ENUMERABLE, false),
-      ...readBooleanFlag("configurable", HOST_FLAG_CONFIGURABLE, false),
+      ...readBooleanFlag("writable", HOST_FLAG_WRITABLE, true, HOST_WRITABLE_SPECIFIED),
+      ...readBooleanFlag("enumerable", HOST_FLAG_ENUMERABLE, false, HOST_ENUMERABLE_SPECIFIED),
+      ...readBooleanFlag("configurable", HOST_FLAG_CONFIGURABLE, false, HOST_CONFIGURABLE_SPECIFIED),
       ...readAccessor("get", L_GETTER),
       ...readAccessor("set", L_SETTER),
 
