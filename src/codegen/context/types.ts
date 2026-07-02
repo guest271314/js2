@@ -826,8 +826,11 @@ export interface CodegenContext {
   exportSignatures: Map<string, import("../../ir/types.js").ExportSignature>;
   /** Map from className → parent className (for inheritance chain walk) */
   externClassParent: Map<string, string>;
-  /** Map from global name (e.g. "document") → import info */
-  declaredGlobals: Map<string, { type: ValType; funcIdx: number }>;
+  /** Map from global name (e.g. "document") → import info. `className` is
+   *  the extern class of the global's declared type ("Document") — recorded
+   *  at registration for the IR host-extern path (#2856), which types the
+   *  `call global_<name>` handle as `IrType.extern { className }`. */
+  declaredGlobals: Map<string, { type: ValType; funcIdx: number; className?: string }>;
   /** Counter for generated callback functions (__cb_0, __cb_1, ...) */
   callbackCounter: number;
   /** Map from captured variable name → global index in mod.globals */
