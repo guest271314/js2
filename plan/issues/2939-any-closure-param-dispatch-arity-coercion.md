@@ -131,3 +131,44 @@ rule: leak-elim must prove bodies execute, not just that the import disappears).
 
 Spun out of #2940 (blocked_on this). Repro scripts were under `.tmp/` during the
 #2940 investigation (dyncall / genuine probes); regenerate from the table above.
+
+---
+
+## Suspended Work (dev-f1, 2026-07-02 — budget wind-down)
+
+**Branch:** `issue-2939-dispatch-fix` (fork `ttraenkler/js2`), worktree was
+`/workspace/.claude/worktrees/agent-a91f6c08eea395deb` (harness-managed; a new
+agent should make its own worktree from the branch). **Stacks on PR #2463**
+(the #2940 vacuity scorer) — do NOT open before #2463 lands.
+
+**State: implementation COMPLETE, PR not opened (per tech-lead sequencing).**
+
+Done on this branch (single commit 35a19b8fe on top of the PR1 stack):
+- `src/codegen/closures.ts` — `computeClosureWrapperSig()` extracted (the exact
+  param/return-type logic of `compileArrowAsClosure`, now shared).
+- `src/codegen/expressions/calls.ts` — `ensureFuncValueWrappersRegistered` now
+  pre-registers inner-scope function-expression/arrow callbacks (call-arg or
+  var-init position) as dynamic-dispatch candidates, RESTRICTED to the
+  all-externref param + externref/void return shape. The restriction is
+  load-bearing: it fixes 5 invalid-Wasm CEs (over-arity numeric-param
+  candidates minted malformed dispatch arms — `call[0] expected externref,
+  found f64…`). Standalone-gated; gc lane byte-identical (sha A/B verified).
+- `tests/issue-2939.test.ts` — 7 tests (nested 1/2-param dispatch, arity
+  tolerance, capture, var-passed callback, inject-throw genuine-execution
+  proof, gc-lane sanity). 6/7 passed pre-wind-down; the 7th (gc-lane) needs
+  its importObject handling double-checked on the merged tree.
+
+Resume steps for the next-window agent:
+1. Wait for PR #2463 to land (shepherd verifies the all-vacuous park signature,
+   lead admin-merges).
+2. `git fetch origin issue-2939-dispatch-fix && git merge upstream/main` —
+   the branch is behind the final #2463 head (3 re-ground commits).
+3. Re-run: `.tmp` repros are regenerable from the issue tables; the committed
+   `tests/issue-2939.test.ts` is the gate. Re-verify the 5 formerly-CE files
+   (`TypedArray/prototype/{every,filter,some,findLastIndex}/callbackfn-resize.js`,
+   `findLastIndex/predicate-call-changes-value.js`) are non-CE.
+4. With the scorer on main, this fix can only move host_free_pass UP
+   (vacuous-fail → genuine pass where semantics hold). Standard corpus A/B +
+   PR + merge_group flow. Also remeasure #2939's remaining half: kind-coercion
+   (part b) and the fn-value-in-any-param call (issue table row 5) are NOT
+   covered by this branch — only nested-scope candidate registration (part a).
