@@ -252,6 +252,17 @@ export function emitDynGet(ctx: CodegenContext, fctx: FunctionContext, keyName: 
   if (keyName === "length") {
     ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
     ensureLateImport(ctx, "__extern_is_undefined", [{ kind: "externref" }], [{ kind: "i32" }]);
+    // (#2896) Builtin-fn metadata read for the closure arm (standalone only):
+    // a builtin function value's `.length` is its spec arity, answered by the
+    // finalize-filled `__builtinfn_get_meta` native instead of the flat 0.
+    if (ctx.standalone) {
+      ensureLateImport(
+        ctx,
+        "__builtinfn_get_meta",
+        [{ kind: "externref" }, { kind: "externref" }],
+        [{ kind: "externref" }],
+      );
+    }
   }
   addStringConstantGlobal(ctx, keyName);
   flushLateImportShifts(ctx, fctx);
@@ -288,6 +299,31 @@ export function emitDynGet(ctx: CodegenContext, fctx: FunctionContext, keyName: 
     // no funcidx hazard). Closure base types are derived inline from
     // `ctx.closureInfoByTypeIdx` (walking each to its root struct) to avoid a
     // circular import on index.ts's private `collectClosureBaseWrapperTypeIdxs`.
+    // (#2896) Standalone: a builtin function value carries its spec arity in
+    // the finalize-filled `__builtinfn_get_meta` native — ask it first; a null
+    // result (plain user closure, or a builtin fn whose `length` was deleted →
+    // inherited Function.prototype.length === 0) keeps the prior flat 0.
+    const bfnGetMetaIdx = ctx.standalone ? ctx.funcMap.get("__builtinfn_get_meta") : undefined;
+    const closureArmThen = (): Instr[] => {
+      if (bfnGetMetaIdx === undefined) {
+        // arity fallback: box_number(0.0) — matches the prior numeric path.
+        return [{ op: "f64.const", value: 0 } as Instr, { op: "call", funcIdx: boxNumIdx } as Instr];
+      }
+      const metaTmp = allocLocal(fctx, `__dg_bfnmeta_${fctx.locals.length}`, { kind: "externref" });
+      return [
+        { op: "local.get", index: recvTmp } as Instr,
+        ...stringConstantExternrefInstrs(ctx, keyName),
+        { op: "call", funcIdx: bfnGetMetaIdx } as Instr,
+        { op: "local.tee", index: metaTmp } as Instr,
+        { op: "ref.is_null" } as Instr,
+        {
+          op: "if",
+          blockType: { kind: "val", type: { kind: "externref" } as ValType },
+          then: [{ op: "f64.const", value: 0 } as Instr, { op: "call", funcIdx: boxNumIdx } as Instr],
+          else: [{ op: "local.get", index: metaTmp } as Instr],
+        } as Instr,
+      ];
+    };
     for (const closureBaseTypeIdx of closureBaseWrapperTypeIdxs(ctx)) {
       chain = [
         { op: "local.get", index: anyTmp } as Instr,
@@ -295,11 +331,7 @@ export function emitDynGet(ctx: CodegenContext, fctx: FunctionContext, keyName: 
         {
           op: "if",
           blockType: { kind: "val", type: { kind: "externref" } as ValType },
-          then: [
-            // arity fallback: box_number(0.0) — matches the prior numeric path.
-            { op: "f64.const", value: 0 } as Instr,
-            { op: "call", funcIdx: boxNumIdx } as Instr,
-          ],
+          then: closureArmThen(),
           else: chain,
         } as Instr,
       ];
