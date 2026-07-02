@@ -119,3 +119,89 @@ describe("#2867 Gap 4 — native Promise.all/race (wasi carrier)", () => {
     expect(r).toEqual({ getFf: 0, getRj: 7 });
   });
 });
+
+// #2919 arm 1 — native `Promise.all`/`race` over an ARRAY-TYPED (non-literal)
+// argument. The receiver was previously routed to the host `Promise_all`/`race`
+// import, which is suppressed host-free under wasi → left `ref.null.extern` on
+// the stack → the subsequent `.then`'s `ref.cast $Promise` trapped ("illegal
+// cast"). These loop over the argument vec at runtime feeding the shared
+// `__combinator_subscribe`, keeping the chain host-free and valid.
+describe("#2919 arm 1 — native Promise.all/race over array-typed args (wasi carrier)", () => {
+  it("Promise.all(arrVar) fulfils with the values array", async () => {
+    const r = await runWasi(
+      `
+      export function run(): void {
+        const a = [Promise.resolve(1), Promise.resolve(2)];
+        Promise.all(a).then((arr: any[]) => { val = arr[0] + arr[1]; }, (e: number) => { rj = -1; });
+      }
+      `,
+      ["getVal", "getRj"],
+    );
+    expect(r).toEqual({ getVal: 3, getRj: 0 });
+  });
+
+  it("Promise.all(arrVar) preserves element order", async () => {
+    const r = await runWasi(
+      `
+      export function run(): void {
+        const a = [Promise.resolve(1), Promise.resolve(2), Promise.resolve(3)];
+        Promise.all(a).then((arr: any[]) => { val = arr[0]*100 + arr[1]*10 + arr[2]; }, (e: number) => { rj = -1; });
+      }
+      `,
+      ["getVal", "getRj"],
+    );
+    expect(r).toEqual({ getVal: 123, getRj: 0 });
+  });
+
+  it("Promise.all(arrVar) rejects as soon as one input rejects", async () => {
+    const r = await runWasi(
+      `
+      export function run(): void {
+        const a = [Promise.resolve(1), Promise.reject(7)];
+        Promise.all(a).then((arr: any[]) => { ff = 1; }, (e: number) => { rj = e; });
+      }
+      `,
+      ["getFf", "getRj"],
+    );
+    expect(r).toEqual({ getFf: 0, getRj: 7 });
+  });
+
+  it("Promise.all(emptyArrVar) fulfils immediately", async () => {
+    const r = await runWasi(
+      `
+      export function run(): void {
+        const a: Promise<number>[] = [];
+        Promise.all(a).then((arr: any[]) => { ff = 42; }, (e: number) => { rj = -1; });
+      }
+      `,
+      ["getFf", "getRj"],
+    );
+    expect(r).toEqual({ getFf: 42, getRj: 0 });
+  });
+
+  it("Promise.all([...spread]) lowers natively", async () => {
+    const r = await runWasi(
+      `
+      export function run(): void {
+        const a = [Promise.resolve(4), Promise.resolve(5)];
+        Promise.all([...a]).then((arr: any[]) => { val = arr[0] + arr[1]; }, (e: number) => { rj = -1; });
+      }
+      `,
+      ["getVal", "getRj"],
+    );
+    expect(r).toEqual({ getVal: 9, getRj: 0 });
+  });
+
+  it("Promise.race(arrVar) fulfils with the first settled value", async () => {
+    const r = await runWasi(
+      `
+      export function run(): void {
+        const a = [Promise.resolve(5), Promise.resolve(9)];
+        Promise.race(a).then((v: number) => { val = v; }, (e: number) => { rj = -1; });
+      }
+      `,
+      ["getVal", "getRj"],
+    );
+    expect(r).toEqual({ getVal: 5, getRj: 0 });
+  });
+});

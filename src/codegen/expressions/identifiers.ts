@@ -897,6 +897,21 @@ function compileIdentifierCore(ctx: CodegenContext, fctx: FunctionContext, id: t
     return { kind: "f64" };
   }
 
+  // (#2931) Reassigned function-declaration live binding: the name (or an import
+  // alias of it) is backed by a mutable `externref` module global that both the
+  // reassignment (`global.set`) and every read go through, so a later read
+  // observes `fn = …`. Read through the global. Checked before the funcref-value
+  // path (which would otherwise re-wrap the func index into a fresh closure,
+  // ignoring the live value). Gated on the normally-empty set — byte-identical
+  // for programs that never reassign a function declaration.
+  if (fctx.localMap.get(name) === undefined && ctx.liveFuncBindingGlobals?.has(name)) {
+    const liveGlobalIdx = ctx.moduleGlobals.get(name);
+    if (liveGlobalIdx !== undefined) {
+      fctx.body.push({ op: "global.get", index: liveGlobalIdx });
+      return { kind: "externref" };
+    }
+  }
+
   // Function reference as value: when a known function name is used as an
   // expression (not called), wrap it in a closure struct so it can be stored
   // in a variable and later called via call_ref.

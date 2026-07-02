@@ -52,7 +52,13 @@ import { fillMemberGetDispatch } from "./member-get-dispatch.js";
 import { emitUndefined, ensureGetUndefined, reconcileNativeStrFinalizeShift } from "./expressions/late-imports.js";
 import { fillProtoIteratorDriver } from "./expressions/proto-override.js";
 import { fillAccessorDrivers } from "./accessor-driver.js";
-import { fillApplyClosure, fillExternGetIdxVecArms, fillExternIsArray, fillProxyDispatch } from "./object-runtime.js";
+import {
+  fillApplyClosure,
+  fillBuiltinFnMeta,
+  fillExternGetIdxVecArms,
+  fillExternIsArray,
+  fillProxyDispatch,
+} from "./object-runtime.js";
 import { fillArrayToPrimitive } from "./array-to-primitive.js";
 import { fillClassToPrimitive } from "./class-to-primitive.js";
 import {
@@ -1397,6 +1403,11 @@ export function generateModule(
     // emitted in post-processing.
     ensureCurrentThisGlobal(ctx);
 
+    // (#2931) Back reassigned function-declaration names (`fn = …`) with a
+    // mutable live-binding module global so later reads observe the write.
+    // No-op unless a function declaration is reassigned.
+    registerReassignedFunctionGlobals(ctx, [ast.sourceFile]);
+
     // Third pass: compile function bodies
     compileDeclarations(ctx, ast.sourceFile);
 
@@ -1900,6 +1911,16 @@ export function generateModule(
     // `.length` fix, so `(arr as any)[i]` through the externref boundary reads
     // the element instead of null/0. Standalone only (no-op otherwise).
     fillExternGetIdxVecArms(ctx);
+
+    // (#2896) Fill the reserved builtin-fn metadata natives
+    // (`__builtinfn_get_meta` / `__builtinfn_gopd` / `__builtinfn_delete` /
+    // `__builtinfn_push_ownnames`) now that every builtin closure meta type
+    // (builtin-fn-meta.ts) is registered — the reflective
+    // `Object.getOwnPropertyDescriptor(fn, "name")` / `fn[key]` /
+    // `hasOwnProperty` / `getOwnPropertyNames` reads over a builtin function
+    // value resolve its spec `name`/`length` at runtime, host-free. No-op when
+    // no builtin closure was materialized (standalone only).
+    fillBuiltinFnMeta(ctx);
 
     // (#2358 #10) Fill the reserved `__array_to_primitive_string` body now that
     // `__extern_length`/`__extern_get_idx` (filled just above) and the native
@@ -5985,6 +6006,72 @@ function buildGetterExtract(
 }
 
 /**
+ * (#2931) Register live-binding module globals for function declarations whose
+ * name is *reassigned* somewhere in the realm (`fn = …`, `fn += …`, …).
+ *
+ * ES function bindings are live and mutable: a function declaration name can be
+ * reassigned, and later reads must observe the new value. But a function
+ * declaration is otherwise bound to an immutable Wasm func index, and the
+ * assignment write-path (`emitIdentifierWriteFromLocal`) — finding the name in
+ * neither `localMap`/`capturedGlobals`/`moduleGlobals` — falls through to
+ * "auto-allocate a throwaway local", losing the write entirely.
+ *
+ * This pass (run after `collectDeclarations`, before bodies compile) statically
+ * detects reassigned function-declaration names, backs each with a MUTABLE
+ * `externref` module global (which the write-path then targets via `global.set`),
+ * and records the name in `ctx.liveFuncBindingGlobals` so the identifier read-path
+ * reads through the global (`global.get`). `__module_init` seeds each global with
+ * the function's closure so a read *before* any reassignment still yields the
+ * function (see `compileModuleInitBody`). Reassigning a function declaration is a
+ * rare pattern, so `liveFuncBindingGlobals` is empty for virtually every program
+ * and this is a no-op there.
+ */
+function registerReassignedFunctionGlobals(ctx: CodegenContext, sourceFiles: readonly ts.SourceFile[]): void {
+  const reassigned = new Set<string>();
+  const scan = (node: ts.Node): void => {
+    // Simple / compound assignment (`fn = …`, `fn += …`, …) whose LHS is a
+    // bare identifier resolving to a function declaration.
+    if (
+      ts.isBinaryExpression(node) &&
+      node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+      node.operatorToken.kind <= ts.SyntaxKind.LastAssignment &&
+      ts.isIdentifier(node.left)
+    ) {
+      let sym: ts.Symbol | undefined;
+      try {
+        sym = ctx.checker.getSymbolAtLocation(node.left);
+      } catch {
+        sym = undefined;
+      }
+      const decl = sym?.valueDeclaration ?? sym?.declarations?.[0];
+      if (decl && ts.isFunctionDeclaration(decl) && decl.name) {
+        reassigned.add(decl.name.text);
+      }
+    }
+    ts.forEachChild(node, scan);
+  };
+  for (const sf of sourceFiles) scan(sf);
+  if (reassigned.size === 0) return;
+
+  const set = (ctx.liveFuncBindingGlobals ??= new Set<string>());
+  for (const name of reassigned) {
+    const funcIdx = ctx.funcMap.get(name);
+    // Only defined user functions (not host imports) have an in-module body.
+    if (funcIdx === undefined || funcIdx < ctx.numImportFuncs) continue;
+    if (ctx.moduleGlobals.has(name)) continue; // already a global — nothing to do
+    const globalIdx = nextModuleGlobalIdx(ctx);
+    ctx.mod.globals.push({
+      name: `__mod_${name}`,
+      type: { kind: "externref" },
+      mutable: true,
+      init: [{ op: "ref.null.extern" }],
+    });
+    ctx.moduleGlobals.set(name, globalIdx);
+    set.add(name);
+  }
+}
+
+/**
  * (#2930) Register import-binding local-name aliases.
  *
  * Codegen keys `funcMap` / `closureMap` / `moduleGlobals` (and the per-name call
@@ -6058,6 +6145,10 @@ function registerImportBindingAliases(ctx: CodegenContext, sourceFiles: readonly
     }
     const nested = ctx.nestedFuncCaptures.get(targetName);
     if (nested !== undefined && !ctx.nestedFuncCaptures.has(localName)) ctx.nestedFuncCaptures.set(localName, nested);
+    // (#2931) If the target is a reassigned function backed by a live-binding
+    // global, propagate membership so the aliased local name reads through the
+    // (copied) module global too.
+    if (ctx.liveFuncBindingGlobals?.has(targetName)) ctx.liveFuncBindingGlobals.add(localName);
   };
 
   for (const sf of sourceFiles) {
@@ -6227,6 +6318,11 @@ export function generateMultiModule(
     // exports that install / restore this global are emitted later in
     // post-processing — registering the global here keeps both sides in sync.
     ensureCurrentThisGlobal(ctx);
+
+    // (#2931) Back reassigned function-declaration names (`fn = …`) with a mutable
+    // live-binding module global BEFORE aliasing, so an import of such a function
+    // (#2930) copies the live global too. No-op unless a function is reassigned.
+    registerReassignedFunctionGlobals(ctx, multiAst.sourceFiles);
 
     // (#2930) Register import-binding aliases (default / renamed / anonymous-default
     // imports whose LOCAL name differs from the imported target's declaration name)
