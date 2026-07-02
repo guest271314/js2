@@ -7,12 +7,14 @@ completed: 2026-07-02
 created: 2026-04-11
 updated: 2026-07-02
 priority: high
+horizon: l
 feasibility: hard
 reasoning_effort: max
 goal: async-model
 sprint: current
 parent: 1032
-depends_on: [680, 2906]
+depends_on: [2906]
+related: [2957, 1373b, 2895]
 required_by: [1058, 1766, 1774]
 follow_up: [2967]
 note: "Verified 2026-05-21: AwaitExpression no-op at expressions.ts:973 (drifted from cited L790). Multiple other line refs in this issue may need re-verification before dispatch."
@@ -21,6 +23,25 @@ reconcile_note_2: "2026-06-25 (sdev-async-sm reground vs origin/main @d28fdb2c5)
 ---
 
 # #1042 — Real `async`/`await` state-machine lowering
+
+## RE-SCOPE (2026-07-02, July Fable audit — plan/log/analysis-2026-07/00)
+
+The remaining #1042 shapes (multi-await in one segment, nested/buried
+await, try-across-await on the JS-host lane) should NOT be built by
+extending `splitBodyAtAwait`/`emitAsyncStateMachine` (the single-tail-await
+CPS special case). #2906 has since landed a general **N-state, CFG-aware
+`$AsyncFrame` resume machine** on the WASI lane (multi-await, linear
+try/finally-across-await, shared frame ABI with generators). The audited
+convergence path: **re-target the JS-host lane onto that same machine with
+host-Promise settle adapters** — reactions registered via
+`Promise_resolve`/`__make_callback`/`Promise_then2` instead of the native
+`$Promise` callback list — then retire `emitAsyncStateMachine` +
+`splitBodyAtAwait` entirely. One lowering engine, two settle primitives.
+This is the single highest-leverage step toward one async model and the
+prerequisite that makes #1373b (IR async) tractable (IR then targets ONE
+engine, not three). Depends on #2906 (its CFG layer is the engine).
+Activation-shape widening (arrows/methods/function-expressions) is split
+out as #2957 and can proceed independently.
 
 ## Joint architect spec (S53)
 
@@ -471,13 +492,11 @@ async function f(a, b) {
    - Restores locals from capture struct (`struct.get`).
    - Binds `y = awaitValue`.
    - Compiles `const z = y + x;`.
-   - Compiles `return z;` as: settle `captures.outerPromise` to FULFILLED with `z`.
-     - JS-host mode: `Promise_resolve_with_promise(outerPromise, z)` (new
-       import — see step 5).
-     - Standalone mode: `struct.set $Promise.state := FULFILLED;
+   - Compiles `return z;` as: settle `captures.outerPromise` to FULFILLED with `z`. - JS-host mode: `Promise_resolve_with_promise(outerPromise, z)` (new
+     import — see step 5). - Standalone mode: `struct.set $Promise.state := FULFILLED;
 struct.set $Promise.value := z;` plus draining any registered
-       callbacks (delegate to `emitStandalonePromiseSettle` — add as a new
-       helper in `async-scheduler.ts`).
+     callbacks (delegate to `emitStandalonePromiseSettle` — add as a new
+     helper in `async-scheduler.ts`).
 
 3. **`__cont_1_reject` (rejection of the first await)** — receives `(captures: externref, reason: externref)`:
    - Settles `captures.outerPromise` to REJECTED with `reason`.
