@@ -1,7 +1,9 @@
 ---
 id: 2849
 title: "dynamic-object numeric property reads back 0 when the same property is also compared via === string / == null (acorn ecmaVersion 2022 not normalised → spurious import attributes)"
-status: ready
+status: done
+completed: 2026-07-02
+assignee: ttraenkler/fable-dev
 sprint: current
 priority: medium
 horizon: l
@@ -38,7 +40,106 @@ import x from "y";   // ecmaVersion: 2022, sourceType: "module"
 // compiled    : body[0].attributes -> []        (SPURIOUS)
 ```
 
-## Root cause (verified by bisected repro)
+## Corrected Root Cause & Design (2026-07-02, supersedes the original diagnosis below)
+
+> The original "Root cause" section below is **superseded**. Two of its
+> framings were wrong when re-measured on current `main`:
+>
+> 1. **The "no-guards WORKS: run(2022)=13" claim did NOT reproduce** — the whole
+>    for-in-copy family read back `undefined`/`0` in my minimal harness. That was
+>    itself a **harness false-negative**: the repro never called
+>    `importResult.setExports(instance.exports)`, so host `__extern_get`/`_safeGet`
+>    on a struct returned `undefined`. With `setExports` wired (as the test262
+>    runner does), the no-guards case already returns 13 on current main — for-in
+>    over a closed struct is NOT broken.
+> 2. **The bug is NOT string/null-specific.** A numeric-only guard triggers it
+>    too. The "`=== string` / `== null`" framing is incidental.
+
+### Actual mechanism (bisected, `setExports` wired)
+
+The trigger needs BOTH:
+
+- `o = {}` populated via **dynamic-key writes** `o[k]=v` (the for-in copy loop) —
+  these land in `o`'s dynamic `$Object` **sidecar**; AND
+- a **STATIC-named write** `o.ecmaVersion = <const>` somewhere in the function
+  (even an **unreached** branch — `if (ev<0) { o.ecmaVersion=999 }` is enough).
+
+The static-named write makes the compile-time widening pre-pass
+`collectEmptyObjectWidening` (`src/codegen/declarations.ts:2197`, via
+`collectPropsFromStatements`) register `ecmaVersion` as a **real struct field**
+on `o`'s widened `__anon_N` struct type (default 0). The scan is
+**reachability-blind**, so an unreached branch still registers it. Thereafter
+every read `o.ecmaVersion` (static OR computed) resolves `o` to that struct and
+lowers to `struct.get` of the empty field → **0**, while the for-in values sit
+untouched in the sidecar. A COMPUTED write `o["ecmaVersion"]=v` does NOT trigger
+it (the pre-pass only scans `PropertyAccessExpression` targets), and neither does
+`direct`/literal-key construction (their writes hit the same field the reads use).
+
+Proof points (host lane, `setExports` wired): `F; return o.ecmaVersion` = 2022;
+add an unreached `o.ecmaVersion=999` → 0; only the written prop corrupts
+(`o.sourceType` still 1).
+
+### Candidate strategies
+
+- **(a) write-through coherence** — when a static write widens a field on an
+  object that also takes dynamic-key writes, mirror dynamic writes of that name
+  into the field. Rejected: fragile (must intercept every dynamic-key write and
+  reflect it into the right field at runtime), and doubles the storage.
+- **(b) sidecar-wins (CHOSEN)** — a `{}` var that is ALSO the subject of any
+  `$Object`-hash consumer (computed `o[k]` read/write, `k in o`, `for (k in o)`,
+  `Object.keys/values/entries/…`) must NOT be struct-widened; it stays a
+  `$Object` so static-named reads/writes route through the SAME sidecar the
+  dynamic writes land in. **This mechanism already exists** — `#2584`'s
+  `objectHashConsumerVars` poison-set (`markObjectHashConsumers`,
+  `declarations.ts:2569`) + the widening-suppression at `declarations.ts:2252`.
+  It was **gated `if (ctx.standalone)`** (declarations.ts:2228) on the assumption
+  "host keeps the struct fast path via the live-mirror Proxy" — but the Proxy
+  does NOT bridge the for-in `o[k]=` → static `struct.get` divergence, so host
+  regressed (#2849). Fix: extend the poison to host mode.
+- **(c) read-side sidecar fallback** — on a `struct.get` that yields the default,
+  consult the sidecar. Rejected as **unsound**: a genuine 0 is indistinguishable
+  from an unset field default.
+
+**Chosen: (b).** Rationale — it reuses the exact precedent designed for this
+class (#2584 for computed-access divergence, #2372 for dynamic-descriptor
+divergence), keeps the static fast path byte-for-byte untouched (only vars with
+a dynamic-access consumer are poisoned), and unifies host with standalone
+(both now keep such objects on `$Object`). Blast radius: host `{}`-with-dynamic-
+access vars move struct→`$Object` (a representation change for that narrow class,
+already the standalone behavior); validated by full `merge_group` + standalone
+floor. Note: this touches the widening **decision** pre-pass (extends an existing
+suppression), not struct layout/registration logic.
+
+### Change
+
+`src/codegen/declarations.ts:2228` — drop the `ctx.standalone` gate on the
+`markObjectHashConsumers` scan so the `objectHashConsumerVars` poison (and its
+widening-suppression at 2252) applies in host mode too.
+
+### Guardrails
+
+- byte-diff (sha256) neutrality on a corpus of `{}`-with-only-static-access
+  programs — the static fast path must be untouched;
+- equivalence tests green;
+- new `tests/issue-2849.test.ts`: the dead-branch repro + the guarded
+  (`==null` / `=== "latest"` / numeric-only) for-in-copy family, host AND
+  standalone;
+- full `merge_group` + standalone floor for the representation change.
+
+### Follow-up (separate, pre-existing — NOT this issue)
+
+The **standalone** lane has a distinct, pre-existing gap for the same for-in-copy
+shape: `var o={}; for (k in d) o[k]=opts[k]; … o.ecmaVersion` reads back
+`0`/`null` under `--target standalone` (the `$Object` dynamic read-back of a
+value copied from a struct receiver via a runtime key). This is unaffected by
+#2849 (my fix only extends the host poison; standalone codegen is byte-identical
+— sha256 verified) and is out of scope here (the #2849 / edge.js acorn use case
+is host/node-acorn). Should be filed separately against the standalone
+`$Object`/struct dynamic-read substrate (relates to #2896 / the value-rep work).
+The #2849 tests therefore assert the standalone lane only for **purity + no
+trap**, not the normalised numeric.
+
+## ~~Root cause (verified by bisected repro)~~ (SUPERSEDED — see above)
 
 acorn sets `node.attributes` ONLY when `this.options.ecmaVersion >= 16`
 (acorn.mjs:1813/1838/1965 — `16` is the YEAR-normalised form of ES2025).
@@ -58,8 +159,12 @@ var d = { ecmaVersion: null, sourceType: 0 };
 export function run(ev) {
   var opts = { ecmaVersion: ev, sourceType: 1 };
   var o = {};
-  for (var k in d) { o[k] = opts[k]; }
-  if (o.ecmaVersion >= 2015) { o.ecmaVersion -= 2009; }   // WORKS: run(2022)=13
+  for (var k in d) {
+    o[k] = opts[k];
+  }
+  if (o.ecmaVersion >= 2015) {
+    o.ecmaVersion -= 2009;
+  } // WORKS: run(2022)=13
   return o.ecmaVersion;
 }
 ```
@@ -68,9 +173,15 @@ Adding the acorn-shaped `=== "latest"` / `== null` guards BEFORE the numeric
 branch breaks it — `o.ecmaVersion` then reads back **0** in the numeric context:
 
 ```ts
-  if (o.ecmaVersion === "latest") { o.ecmaVersion = 1e8; }       // <- either of
-  else if (o.ecmaVersion == null) { o.ecmaVersion = 11; }        //    these two
-  else if (o.ecmaVersion >= 2015) { o.ecmaVersion -= 2009; }     // run(2022)=0 (BUG)
+if (o.ecmaVersion === "latest") {
+  o.ecmaVersion = 1e8;
+} // <- either of
+else if (o.ecmaVersion == null) {
+  o.ecmaVersion = 11;
+} //    these two
+else if (o.ecmaVersion >= 2015) {
+  o.ecmaVersion -= 2009;
+} // run(2022)=0 (BUG)
 ```
 
 Both `=== "latest"` (string compare) and `== null` independently trigger it. The

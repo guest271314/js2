@@ -91,6 +91,54 @@ kind:
    `STRICT_IR_REASONS` (`src/codegen/index.ts:1013`) and promote the affected
    rows in `plan/log/ir-adoption.md` (`pnpm run gen:ir-adoption`).
 
+## Step-1 diagnostic pass (2026-07-01, dev-b) — hypothesis CORRECTED
+
+Ran a non-invasive diagnostic (reuses the real `planIrCompilation` selector to
+identify the 31 `body-shape-rejected` functions, then classifies each body):
+
+**Key correction — the "Likely covered kinds" hypothesis above is WRONG.** All
+31 rejected functions have **only Phase-1-ACCEPTED top-level statement kinds**.
+**Zero** of them contain a `SwitchStatement`, `BreakStatement`,
+`ContinueStatement`, `DoStatement`, `LabeledStatement`, or `ForInStatement` — at
+top level OR nested. So this bucket is **not** driven by unhandled statement
+_kinds_; it is driven by inner **expression/statement SHAPE** rejections inside
+otherwise-accepted statements.
+
+Approximate cause histogram (heuristic — a function can carry >1 tag; derived
+directly from the `isPhase1Expr` / `isPhase1StatementList` reject arms):
+
+| cause                                                         | ~fns   | reject arm                                                                                                                                            |
+| ------------------------------------------------------------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `stmt: local reassignment` `x = e;` (LHS not property-access) | ~10    | `isPhase1StatementList` accepts `=` only when LHS is a PropertyAccess (line ~824)                                                                     |
+| `guard: C-style loop + array literal` (#1804)                 | 5      | `isPhase1Expr` array-literal arm withholds when `currentFnHasCStyleLoop` (line ~1761)                                                                 |
+| `expr: closure value` (arrow / function expression)           | 3      | no `isPhase1Expr` arm for ArrowFunction/FunctionExpression                                                                                            |
+| `op: %` (remainder)                                           | 2      | `isPhase1BinaryOp` rejects `%`                                                                                                                        |
+| `stmt: if/else @ non-tail`                                    | 2      | non-tail loop accepts only `if` WITHOUT else (line ~842)                                                                                              |
+| `stmt: ++/--`                                                 | 1      | no ExpressionStatement arm for postfix/prefix inc-dec                                                                                                 |
+| `stmt: element assignment` `arr[i] = e;`                      | 1      | same `=` arm — ElementAccess LHS not accepted                                                                                                         |
+| `op: instanceof`                                              | 1      | `isPhase1BinaryOp` rejects `instanceof`                                                                                                               |
+| **unclassified by the heuristic**                             | **17** | needs the selector's own verdict (bare/multiple non-tail returns, var-decl with non-Phase-1 / non-resolvable initializer, unsupported tail shapes, …) |
+
+**The heuristic explains ~14/31; 17 remain unclassified.** An EXACT per-cause
+histogram requires **opt-in selector instrumentation** — thread an
+"offending-node" recorder through the `return false` sites of
+`isPhase1StatementList` / `isPhase1Expr` (behaviour unchanged when the recorder
+is off) and surface it via `planIrCompilation`'s fallbacks, then have
+`scripts/check-ir-fallbacks.ts` print the node-kind. That instrumentation is the
+concrete Step-1 implementation (was mis-scoped as "just print the kind"; the
+kinds are all accepted — it must print the _reject-arm/shape_).
+
+**Recommended first kind-slice** (highest lever, once instrumentation confirms):
+statement-level **mutable assignment** — `x = e;` and `arr[i] = e;` — which the
+heuristic attributes to ~11 functions. NB this is a substantial IR change
+(mutable-local versioning / element-store lowering in `from-ast.ts`), not a
+quick win; size it as its own PR with legacy/IR equivalence parity.
+
+Diagnostic script kept at `.tmp/diagnose-body-shape.mjs` (heuristic; not
+committed — the exact instrumentation supersedes it). Routing: this epic needs
+`senior-developer` for the selector instrumentation + the mutable-assignment IR
+lowering.
+
 ## Acceptance criteria
 
 1. `body-shape-rejected` count in `scripts/ir-fallback-baseline.json` is `0`

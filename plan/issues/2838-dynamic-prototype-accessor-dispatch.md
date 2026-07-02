@@ -1,7 +1,8 @@
 ---
 id: 2838
 title: "[SENIOR-DEV ONLY] dynamic prototype-accessor dispatch on statically-typed receivers — `Object.defineProperties(Proto, {get})` getters never fire on `this.field` (acorn `return` wall)"
-status: in-progress
+status: done
+completed: 2026-06-29
 assignee: sendev-2838
 sprint: current
 priority: high
