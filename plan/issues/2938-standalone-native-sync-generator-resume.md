@@ -124,25 +124,35 @@ in the f64 carrier). Fix: UNDEF_F64-sentinel producer + sentinel-aware
 readers/`__extern_is_undefined` — full design, probe validation (identity
 matrix all JS-correct; the exhausted **with-yield** `.value` was ALSO wrong on
 plain main, so the fix stands alone), and resume steps live in
-**`plan/issues/2970-genresult-undefined-carrier.md`** on branch
-**`issue-2938-genresult-undefined-carrier`** (pushed, commit `d1ec95a26`,
-based on main `fa399fd70`).
+**`plan/issues/2979-genresult-undefined-carrier.md`** on branch
+**`issue-2938-genresult-undefined-carrier`** (pushed; originally
+`d1ec95a26` / id 2970, **RE-ID'd 2970 → 2979** by the shepherd in commit
+`aba1038d7` after a parallel-session allocator race took id 2970 on main for
+the import-meta issue — cite #2979 for the carrier fix from here on).
 
 Revival sequence for the successor:
 
 1. Finish PR A from that branch (tsc/prettier/lint + scoped generator suites +
-   `tests/issue-2970.test.ts` — checklist in the 2970 file) and land it.
+   `tests/issue-2979.test.ts` — checklist in the 2979 file) and land it.
+   _Status update:_ DONE — PR #2488 is green/CLEAN and rides auto-enqueue.
+   A follow-up gap was found for the 4 repro tests: `.done` boxes as
+   `$BoxedNumber` not `$BoxedBoolean` (the #2785 i32-brand-erasure class);
+   partial fix + WAT trace on branch `issue-2938-done-bool-brand`
+   (stacked on the carrier branch pre-re-id — merge the updated carrier
+   branch or main-after-#2488 before building on it).
 2. Merge main into THIS branch (`issue-2933-noyield-relax`, PR #2445, parked
    `hold` + BEHIND); bails are already relaxed here.
 3. Re-run the 4 repros (`language/{statements,expressions}/generators/{no-yield,return}.js`)
-   + the readVal probe — should pass natively with the carrier fix.
+   - the readVal probe — should pass natively with the carrier fix.
 4. Re-check the two REMAINING parked blockers (negative-test early-error miss,
    async-from-sync invalid module) — still unaddressed.
 5. Construct-strided corpus re-validation (class-static / no-yield /
    return-arm / async-from-sync / negative-test shapes), then ONE re-admission
    of PR #2445 via the shepherd (bot park-hold diagnosis rules apply).
 
-Claims #2938/#2970 released on suspend; re-claim with `--force`.
+Claims: #2938 released (re-claim with `--force`); the carrier-fix claim was
+completed under the OLD id 2970 pre-re-id — the canonical id is **#2979**
+(2970 on main = import-meta per-module identity, an unrelated issue).
 
 ## Handoff to #2936 (funcIdx-shift fix — the unblocker) [historical]
 
