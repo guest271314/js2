@@ -3,7 +3,7 @@
   "unintended": {
     "body-shape-rejected": 25,
     "call-graph-closure": 10,
-    "class-method": 6
+    "class-method": 5
   },
   "deferred": {
     "async-function": 4
