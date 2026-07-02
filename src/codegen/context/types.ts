@@ -97,6 +97,15 @@ export interface CodegenOptions {
    */
   experimentalIR?: boolean;
   /**
+   * (#2973) Opt out of the `JS2WASM_IR_FIRST` compile-once inversion for this
+   * compile, regardless of the ambient env flag. Set by semantics-critical
+   * in-process sub-compiles (the `eval` / `new Function` host shims) so an
+   * IR-first post-claim hard error there is not swallowed by the shim's
+   * fallback `catch` and silently turned into `undefined`. Leaves the ordinary
+   * IR overlay (`experimentalIR`) untouched. Default: false.
+   */
+  disableIrFirst?: boolean;
+  /**
    * #2089 — count silent codegen fallbacks via `reportSilentFallback` and, when
    * set, surface each as a warning diagnostic. Used by
    * `scripts/check-codegen-fallbacks.ts`. Default off (counts are still kept;
