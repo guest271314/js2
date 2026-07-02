@@ -116,15 +116,17 @@ const positional = argv.filter((a, i) => !a.startsWith("--") && argv[i - 1] !== 
 
 const mode = flags.has("--list")
   ? "list"
-  : flags.has("--allocate")
-    ? "allocate"
-    : flags.has("--check")
-      ? "check"
-      : flags.has("--release")
-        ? "release"
-        : flags.has("--complete")
-          ? "complete"
-          : "claim";
+  : flags.has("--debug-pr-scan")
+    ? "debug-pr-scan"
+    : flags.has("--allocate")
+      ? "allocate"
+      : flags.has("--check")
+        ? "check"
+        : flags.has("--release")
+          ? "release"
+          : flags.has("--complete")
+            ? "complete"
+            : "claim";
 
 function normalizeAssignee(raw) {
   if (!raw) return "";
@@ -254,49 +256,97 @@ function idsFromAssignRef(sha) {
 
 // Ids added by currently-open PRs. Uses `gh` when available (the only way to
 // see a fork-headed PR whose branch is NOT a refs/remotes/origin/* ref here).
-// Best-effort: on any gh failure (offline, unauthenticated, old gh) we return
-// an empty set and fall back to main ∪ ref — the PR-time CI gate
-// (check-issue-ids --against-main) is the hard backstop, this scan only shrinks
-// the race window at allocation time.
-function idsFromOpenPRs() {
-  const out = new Set();
-  const repo = process.env.CLAIM_PR_REPO || "loopdive/js2";
-  // List open PR numbers (cap to keep the per-PR file query bounded).
-  let prNumbers = [];
-  try {
-    const raw = execFileSync(
-      "gh",
-      ["pr", "list", "-R", repo, "--state", "open", "--limit", "200", "--json", "number"],
-      {
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "ignore"],
-      },
-    );
-    prNumbers = JSON.parse(raw).map((p) => p.number);
-  } catch {
-    return out; // gh unavailable / unauthenticated — fall back to main ∪ ref
-  }
-  for (const n of prNumbers) {
-    try {
-      const raw = execFileSync("gh", ["pr", "view", String(n), "-R", repo, "--json", "files"], {
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "ignore"],
-      });
-      for (const f of JSON.parse(raw).files || []) {
-        const m = (f.path || "").match(ISSUE_ID_RE);
-        if (m) out.add(Number(m[1]));
-      }
-    } catch {
-      /* skip this PR */
+//
+// #2943 hardening — the original implementation fanned out 1 + N gh calls
+// (`gh pr list` then `gh pr view --json files` per PR), which made EVERY open
+// PR an independent, silently-swallowed failure point. Under gh rate-limit /
+// API contention (many concurrent agents), a dropped call narrowed the id
+// universe with NO signal: on 2026-07-02 an --allocate returned 2920 while
+// open PR #2424 already added plan/issues/2920-*.md (same pattern hit 2921 /
+// PR #2425; downstream, one analysis file burned the 2921→2931→2937→2940
+// re-id chain on parallel-session collisions). Now:
+//   - ONE batched GraphQL query (100 PRs × 100 files per page, paginated)
+//     replaces the fan-out — two orders of magnitude fewer API calls, one
+//     failure point instead of N;
+//   - a per-PR REST `--paginate` fallback covers the rare >100-file PR
+//     (`gh pr view --json files` also silently truncates at 100 — a second
+//     latent miss source in the old code);
+//   - the whole scan retries 3× with backoff, and on total failure returns
+//     `complete: false` so the caller can WARN LOUDLY instead of proceeding
+//     silently. Still fail-open by design (offline/unauthenticated use keeps
+//     working; the PR-time CI gate check-issue-ids --against-main is the hard
+//     backstop) — but no longer fail-SILENT.
+function sleepMs(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+const PR_FILES_QUERY = `query($owner:String!,$name:String!,$cursor:String){
+  repository(owner:$owner,name:$name){
+    pullRequests(states:OPEN,first:100,after:$cursor){
+      pageInfo{hasNextPage endCursor}
+      nodes{number files(first:100){pageInfo{hasNextPage} nodes{path}}}
     }
   }
-  return out;
+}`;
+
+function idsFromOpenPRs() {
+  const repo = process.env.CLAIM_PR_REPO || "loopdive/js2";
+  const [owner, name] = repo.split("/");
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const ids = new Set();
+      const bigPRs = [];
+      let cursor = null;
+      for (;;) {
+        const args = ["api", "graphql", "-f", `query=${PR_FILES_QUERY}`, "-F", `owner=${owner}`, "-F", `name=${name}`];
+        if (cursor) args.push("-F", `cursor=${cursor}`);
+        const raw = execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+        const prs = JSON.parse(raw)?.data?.repository?.pullRequests;
+        if (!prs) throw new Error("unexpected GraphQL shape");
+        for (const pr of prs.nodes || []) {
+          for (const f of pr.files?.nodes || []) {
+            const m = (f.path || "").match(ISSUE_ID_RE);
+            if (m) ids.add(Number(m[1]));
+          }
+          if (pr.files?.pageInfo?.hasNextPage) bigPRs.push(pr.number);
+        }
+        if (!prs.pageInfo?.hasNextPage) break;
+        cursor = prs.pageInfo.endCursor;
+      }
+      // >100-file PRs: fetch the full file list via REST pagination.
+      for (const n of bigPRs) {
+        const raw = execFileSync(
+          "gh",
+          ["api", `repos/${repo}/pulls/${n}/files`, "--paginate", "--jq", ".[].filename"],
+          { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+        );
+        for (const p of raw.split("\n")) {
+          const m = p.match(ISSUE_ID_RE);
+          if (m) ids.add(Number(m[1]));
+        }
+      }
+      return { ids, complete: true };
+    } catch {
+      if (attempt < 3) sleepMs(attempt * 1000);
+    }
+  }
+  console.error(
+    "warning: open-PR id scan FAILED after 3 attempts (gh offline/unauthenticated/rate-limited). " +
+      "Allocating against main ∪ reservations ONLY — the id may collide with an in-flight PR's issue file " +
+      "(#2943). The CI gate check-issue-ids --against-main remains the hard backstop.",
+  );
+  return { ids: new Set(), complete: false };
 }
 
 function allUsedIds(sha, { scanPRs }) {
   const all = new Set([...idsFromMain(), ...idsFromAssignRef(sha)]);
-  if (scanPRs) for (const id of idsFromOpenPRs()) all.add(id);
-  return all;
+  let prScanComplete = true;
+  if (scanPRs) {
+    const pr = idsFromOpenPRs();
+    for (const id of pr.ids) all.add(id);
+    prScanComplete = pr.complete;
+  }
+  return { ids: all, prScanComplete };
 }
 
 // Build a new tree = base tree with `<id>.json` set to `content`, then
@@ -393,19 +443,23 @@ function doAllocate(assignee) {
     const sha = remoteAssignSha();
     fetchAssign(sha);
 
-    const used = allUsedIds(sha, { scanPRs });
+    const { ids: used, prScanComplete } = allUsedIds(sha, { scanPRs });
     // contiguousMax+1 is always strictly above the contiguous body, so it can
     // never alias an in-use id (strays sit > STRAY_GAP above max, never at +1).
     const id = String(contiguousMax(used) + 1);
+    // #2943: degraded-scan marker — idsFromOpenPRs already warned on stderr;
+    // also carried in the --json output so tooling can react.
+    const degraded = scanPRs && !prScanComplete;
 
     // --dry-run: preview the candidate without reserving (no push). Useful to
     // see "what id would I get" without burning a reservation. NOT collision-
     // safe on its own — only the real reserve+push is atomic.
     if (flags.has("--dry-run")) {
-      if (wantJson) process.stdout.write(JSON.stringify({ id: Number(id), dryRun: true }) + "\n");
+      if (wantJson)
+        process.stdout.write(JSON.stringify({ id: Number(id), dryRun: true, prScanDegraded: degraded }) + "\n");
       else {
         console.error(
-          `(dry-run) next free id would be #${id} (scanned ${used.size} used ids; PR-scan ${scanPRs ? "on" : "off"})`,
+          `(dry-run) next free id would be #${id} (scanned ${used.size} used ids; PR-scan ${scanPRs ? (degraded ? "DEGRADED" : "on") : "off"})`,
         );
         process.stdout.write(`${id}\n`);
       }
@@ -429,7 +483,12 @@ function doAllocate(assignee) {
       // stdout = just the id (scriptable); details to stderr unless --json.
       if (wantJson) {
         process.stdout.write(
-          JSON.stringify({ id: Number(id), assignee: assignee || null, branch: entry.branch || null }) + "\n",
+          JSON.stringify({
+            id: Number(id),
+            assignee: assignee || null,
+            branch: entry.branch || null,
+            prScanDegraded: degraded,
+          }) + "\n",
         );
       } else {
         console.error(
@@ -516,6 +575,12 @@ function writeMode(target, assignee, kind) {
 // --- dispatch ---------------------------------------------------------------
 if (mode === "list") {
   doList();
+} else if (mode === "debug-pr-scan") {
+  // #2943: expose the open-PR id scan for tests/diagnosis. Prints
+  // {ids:[...],complete:bool} as JSON. Exit 0 even on a degraded scan —
+  // `complete` carries the signal.
+  const r = idsFromOpenPRs();
+  process.stdout.write(JSON.stringify({ ids: [...r.ids].sort((a, b) => a - b), complete: r.complete }) + "\n");
 } else if (mode === "allocate") {
   // --allocate [<assignee>] — reserve the next fresh id. Assignee optional.
   doAllocate(normalizeAssignee(positional[0] || process.env.CLAIM_ASSIGNEE || ""));

@@ -3,7 +3,7 @@ id: 2860
 title: "Umbrella: close the standalone-vs-js-host test262 gap (~20,500 host-free, honest metric #2879/#2360)"
 status: ready
 created: 2026-06-30
-updated: 2026-06-30
+updated: 2026-07-02
 priority: high
 feasibility: hard
 task_type: epic
@@ -86,7 +86,13 @@ single fix flips directly.
   Depends on the iterator-protocol carrier (#2864).
 - **Namespace static reads** (`Math.PI`, `JSON.stringify`, `Reflect.get`,
   `Atomics.add`) — ~120 tests. Split out of #2861 (different mechanism: not
-  `.prototype` proto-glue).
+  `.prototype` proto-glue). Updated 2026-07-02 (#2861 closed; #2863 remeasure):
+  namespace static **data constants** (`Math.PI`/`E`/`LN2`,
+  `Number.MAX_SAFE_INTEGER`) now fold, and static-method **calls**
+  (`Math.max(…)`, `JSON.stringify(…)`) compile. The live residual is
+  static-method **value reads** (`const f = JSON.stringify; f(x)`,
+  `Math.max` as a value — the #1907/#1888 S6-b refusal) plus reflective
+  correctness bugs (`Math[computedKey]` → 0, `globalThis.Math.PI` traps).
 - **illegal cast** — 1,177 total but only ~102 pure; the rest are inside the
   generator/iterator machinery and clear when #2864/#2865 land. The ~102 pure
   ref.test-before-cast misses fold into #2863/#2868 triage.
