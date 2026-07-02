@@ -6905,7 +6905,24 @@ export function compileElementAccessBody(
     // already ref.tests `$ObjVec`); numeric index only (a string key is a genuine
     // property, never a vec index).
     if (!ctx.standalone && ctx.vecTypeMap.size > 0 && isNumericIndexExpression(ctx, expr.argumentExpression)) {
-      const vecGetIdx = ctx.funcMap.get("__vec_get");
+      // recv externref is on the stack → recvLocal (allocated FIRST so the local
+      // numbering of recv / idx / anyTmp is unchanged from before #3007).
+      const recvLocal = allocLocal(fctx, `__nve_recv_${fctx.locals.length}`, { kind: "externref" });
+      fctx.body.push({ op: "local.set", index: recvLocal } as Instr);
+      // (#3007) index → f64 → idxLocal, compiled BEFORE the fast-path funcIdxs are
+      // captured. A computed index (`a[a.length - 1]`) lowers its own dynamic
+      // reads, which can register late imports and shift every DEFINED-function
+      // index — including `__vec_get`. The pre-#3007 order captured `__vec_get`
+      // BEFORE this compile, so the index's imports left it stale; the desynced
+      // `then` arm emitted an invalid instruction stream (`f64.convert_i32_s` on
+      // the externref receiver → "expected i32, found externref", invalid Wasm).
+      // Resolving the imports and `__vec_get` AFTER the index compile (single
+      // flush) keeps every funcIdx live through emission. For a non-import-adding
+      // index (e.g. a literal) the import order is identical, so valid output is
+      // byte-for-byte unchanged.
+      compileExpression(ctx, fctx, expr.argumentExpression, { kind: "f64" });
+      const idxLocal = allocLocal(fctx, `__nve_idx_${fctx.locals.length}`, { kind: "f64" });
+      fctx.body.push({ op: "local.set", index: idxLocal } as Instr);
       const extGetIdx = ensureLateImport(
         ctx,
         "__extern_get",
@@ -6914,15 +6931,8 @@ export function compileElementAccessBody(
       );
       const boxNumIdx = ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
       flushLateImportShifts(ctx, fctx);
-      const vgIdx = vecGetIdx ?? reserveVecMethodHelper(ctx, "get");
+      const vgIdx = ctx.funcMap.get("__vec_get") ?? reserveVecMethodHelper(ctx, "get");
       if (vgIdx !== undefined && extGetIdx !== undefined && boxNumIdx !== undefined) {
-        // recv externref is on the stack → recvLocal.
-        const recvLocal = allocLocal(fctx, `__nve_recv_${fctx.locals.length}`, { kind: "externref" });
-        fctx.body.push({ op: "local.set", index: recvLocal } as Instr);
-        // index → f64 → idxLocal (numeric index; reused as i32 for vec, boxed for host).
-        compileExpression(ctx, fctx, expr.argumentExpression, { kind: "f64" });
-        const idxLocal = allocLocal(fctx, `__nve_idx_${fctx.locals.length}`, { kind: "f64" });
-        fctx.body.push({ op: "local.set", index: idxLocal } as Instr);
         // isVec = OR of ref.test over the registered vec carriers.
         const anyTmp = allocLocal(fctx, `__nve_any_${fctx.locals.length}`, { kind: "anyref" } as ValType);
         fctx.body.push({ op: "local.get", index: recvLocal } as Instr);
@@ -6957,6 +6967,21 @@ export function compileElementAccessBody(
         } as Instr);
         return { kind: "externref" };
       }
+      // (#3007) Defensive fallback — recv/idx were consumed into locals above, so
+      // if the fast-path imports are somehow unavailable we must not fall through
+      // to the generic path (which expects recv on the stack). Emit the generic
+      // host read from the stored locals. Unreachable in host mode (the box/extern
+      // imports are always registerable), so this changes no valid output.
+      fctx.body.push({ op: "local.get", index: recvLocal } as Instr);
+      if (boxNumIdx !== undefined && extGetIdx !== undefined) {
+        fctx.body.push({ op: "local.get", index: idxLocal } as Instr);
+        fctx.body.push({ op: "call", funcIdx: boxNumIdx } as Instr);
+        fctx.body.push({ op: "call", funcIdx: extGetIdx } as Instr);
+        return { kind: "externref" };
+      }
+      fctx.body.push({ op: "drop" } as Instr);
+      fctx.body.push({ op: "ref.null.extern" } as Instr);
+      return { kind: "externref" };
     }
     // (#2166 PR-C2) A NUMERIC index on a standalone externref must go through
     // `__extern_get_idx(v, f64)`, not the string-keyed `__extern_get`. The
