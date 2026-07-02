@@ -1413,6 +1413,86 @@ function closureProvablyAfterLetDecl(
   return true;
 }
 
+/**
+ * (#2939) Compute the funcref-wrapper signature (user param ValTypes + return
+ * ValType) of an arrow / function-expression closure, WITHOUT emitting anything.
+ *
+ * This is the exact param+return-type logic `compileArrowAsClosure` uses to
+ * build its `getOrCreateFuncRefWrapperTypes(params, results)` wrapper type,
+ * factored out so the dynamic-dispatch candidate pre-scan
+ * (`ensureFuncValueWrappersRegistered`) can pre-register the SAME wrapper type
+ * for a callback function-expression defined in an inner scope — otherwise its
+ * wrapper is registered only LAZILY at the (later-compiled) value site, so an
+ * earlier-compiled higher-order body that dispatches the callback
+ * (`tryEmitInlineDynamicCall`) sees ZERO candidates and silently drops the call
+ * (the #2939 nested-scope gap: the test262 `testWith*Constructors(function(TA){…})`
+ * harness wrapper, ~814 vacuous passes). Capture analysis is intentionally NOT
+ * replicated here — the dispatch keys on the funcref signature (funcTypeIdx),
+ * which a capturing closure's custom subtype shares with this base wrapper.
+ *
+ * Pure: reads only `ctx` + the checker; no side effects, no `fctx`.
+ */
+export function computeClosureWrapperSig(
+  ctx: CodegenContext,
+  arrow: ts.ArrowFunction | ts.FunctionExpression,
+): { params: ValType[]; returnType: ValType | null } {
+  const isGenerator = ts.isFunctionExpression(arrow) && arrow.asteriskToken !== undefined;
+
+  // 1. Parameter types.
+  const arrowParams: ValType[] = [];
+  for (const p of arrow.parameters) {
+    const paramType = ctx.checker.getTypeAtLocation(p);
+    let wasmType = resolveWasmType(ctx, paramType);
+    if (p.initializer && wasmType.kind === "ref") {
+      wasmType = { kind: "ref_null", typeIdx: (wasmType as { kind: "ref"; typeIdx: number }).typeIdx };
+    }
+    const hasBindingPattern = ts.isArrayBindingPattern(p.name) || ts.isObjectBindingPattern(p.name);
+    if (hasBindingPattern && wasmType.kind !== "externref") {
+      wasmType = { kind: "externref" };
+    }
+    if (ctx.forceExternrefCallbackParams && isVecOrArrayRefType(ctx, wasmType)) {
+      wasmType = { kind: "externref" };
+    }
+    arrowParams.push(wasmType);
+  }
+
+  // 2. Return type (mirrors compileArrowAsClosure).
+  const isAsync = arrow.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) ?? false;
+  const sig = ctx.checker.getSignatureFromDeclaration(arrow);
+  let closureReturnType: ValType | null = null;
+  if (isGenerator) {
+    closureReturnType = { kind: "externref" };
+  } else if (sig) {
+    let retType = ctx.checker.getReturnTypeOfSignature(sig);
+    if (isAsync) {
+      retType = unwrapPromiseType(retType, ctx.checker);
+    }
+    if (!isAsync && isStandalonePromiseActive(ctx) && isPromiseType(retType)) {
+      closureReturnType = { kind: "externref" };
+    }
+    if (closureReturnType === null && !isVoidType(retType) && !(retType.flags & ts.TypeFlags.Never)) {
+      closureReturnType = resolveWasmType(ctx, retType);
+    }
+  }
+  if (closureReturnType === null && isAssignedToSymbolIterator(arrow)) {
+    closureReturnType = inferExplicitClosureReturnType(ctx, arrow);
+  }
+  if (closureReturnType !== null) {
+    const ctxType = ctx.checker.getContextualType(arrow);
+    if (ctxType) {
+      const ctxCallSigs = ctxType.getCallSignatures?.();
+      if (ctxCallSigs && ctxCallSigs.length > 0) {
+        const ctxRetType = ctx.checker.getReturnTypeOfSignature(ctxCallSigs[0]!);
+        if (isVoidType(ctxRetType) && !isAssignedToSymbolIterator(arrow)) {
+          closureReturnType = null;
+        }
+      }
+    }
+  }
+
+  return { params: arrowParams, returnType: closureReturnType };
+}
+
 export function compileArrowFunction(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -1442,107 +1522,17 @@ export function compileArrowAsClosure(
   if (isGenerator) {
     ctx.generatorFunctions.add(closureName);
   }
-
-  // 1. Determine arrow parameter types and return type
-  const arrowParams: ValType[] = [];
-  for (const p of arrow.parameters) {
-    const paramType = ctx.checker.getTypeAtLocation(p);
-    let wasmType = resolveWasmType(ctx, paramType);
-    // If the parameter has a default value and is a non-null ref type,
-    // widen to ref_null so callers can pass ref.null as a sentinel for "use default"
-    if (p.initializer && wasmType.kind === "ref") {
-      wasmType = { kind: "ref_null", typeIdx: (wasmType as { kind: "ref"; typeIdx: number }).typeIdx };
-    }
-    // Binding-pattern params MUST route through the externref destructure path
-    // so that (a) null/undefined trigger a spec-mandated synchronous TypeError and
-    // (b) nested patterns (e.g. `[[x]]`) recurse via the generic destructure logic.
-    // See #1151. Without this override:
-    //   * Pattern params inferred as f64/i32 fall through to allocBindingLocals
-    //     and emit no destructure code at all.
-    //   * Pattern params inferred as a tuple-struct ref bypass the nested-pattern
-    //     loop (which only handles identifier children) and skip the null guard,
-    //     so `f([null])` silently returns an empty result on an unannotated
-    //     pattern parameter.
-    const hasBindingPattern = ts.isArrayBindingPattern(p.name) || ts.isObjectBindingPattern(p.name);
-    if (hasBindingPattern && wasmType.kind !== "externref") {
-      wasmType = { kind: "externref" };
-    }
-    // (#2640) Array-like generic-method dispatch widens a callback parameter
-    // that TS inferred as a typed vec/array (`T[]` → `__vec_*`/`__arr_*`/
-    // `$__vec_base`) to `externref`. The receiver passed to such a callback by
-    // `compileArrayLikePrototypeCall` is a DYNAMIC (non-vec) array-like
-    // externref, not a typed vec; if the param stays a vec ref the dispatch
-    // loop must pass `ref.null` (the receiver fails the vec `ref.test`) and the
-    // callback's `obj.length`/`obj[i]` lowers to `struct.get` on null → a null
-    // deref. Widening to externref routes those reads through the tag-aware
-    // dynamic reader. Gated on the flag, set ONLY for the non-vec array-like
-    // path (typed `arr.forEach(cb)` never enters that path).
-    if (ctx.forceExternrefCallbackParams && isVecOrArrayRefType(ctx, wasmType)) {
-      wasmType = { kind: "externref" };
-    }
-    arrowParams.push(wasmType);
-  }
-
-  // Detect async functions/arrows — their TS return type is Promise<T> but the
-  // Wasm return should be T (matching the unwrap that top-level async functions use).
+  // `isAsync` is still consumed below (generator-create name selection); the
+  // return-type derivation moved into computeClosureWrapperSig.
   const isAsync = arrow.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) ?? false;
 
-  const sig = ctx.checker.getSignatureFromDeclaration(arrow);
-  let closureReturnType: ValType | null = null;
-  if (isGenerator) {
-    // Generator function expressions always return externref (JS Generator object)
-    closureReturnType = { kind: "externref" };
-  } else if (sig) {
-    let retType = ctx.checker.getReturnTypeOfSignature(sig);
-    // For async functions, unwrap Promise<T> to get T — matching the top-level
-    // async function handling in index.ts. Without this, async Promise<void>
-    // closures get externref return type and push ref.null.extern, breaking
-    // .then()/.catch() chains that expect a real Promise.
-    if (isAsync) {
-      retType = unwrapPromiseType(retType, ctx.checker);
-    }
-    // (#2867 Gap 1) A NON-async closure that returns a `Promise<T>` — e.g. a
-    // `.then`/`.catch` handler `v => Promise.resolve(...)` — produces a real
-    // Promise OBJECT at runtime, not a `T`. Under the host-free native-`$Promise`
-    // carrier, `resolveWasmType(Promise<T>)` would unwrap to `T` (e.g. f64),
-    // coercing the promise externref to NaN inside the body and breaking recursive
-    // thenable assimilation (the chained promise must ADOPT the returned inner
-    // promise's state). Keep the result `externref` so `__promise_resolve_value`
-    // at the settle site sees a real `$Promise`. Gated on the carrier predicate
-    // (wasi today; widens to standalone in lockstep at #2895 slice 1d) so the
-    // default gc/host `.then` path — and the standalone lane while its carrier is
-    // still host-backed — stay byte-unchanged.
-    if (!isAsync && isStandalonePromiseActive(ctx) && isPromiseType(retType)) {
-      closureReturnType = { kind: "externref" };
-    }
-    // Treat `never` the same as `void` — a function returning `never` (e.g.
-    // always throws) never produces a value, so it should have no Wasm result.
-    // Without this, `never` resolves to externref and creates a mismatched
-    // closure wrapper type vs. the `() => void` signature expected by callers.
-    if (closureReturnType === null && !isVoidType(retType) && !(retType.flags & ts.TypeFlags.Never)) {
-      closureReturnType = resolveWasmType(ctx, retType);
-    }
-  }
-  if (closureReturnType === null && isAssignedToSymbolIterator(arrow)) {
-    closureReturnType = inferExplicitClosureReturnType(ctx, arrow);
-  }
-
-  // (#585) Check the contextual type (e.g., a parameter type like `() => void`).
-  // If the contextual type expects a void-returning callable but the closure's
-  // actual return type is non-void, override to void so the closure uses the
-  // same wrapper struct type that callers will ref.cast against.
-  if (closureReturnType !== null) {
-    const ctxType = ctx.checker.getContextualType(arrow);
-    if (ctxType) {
-      const ctxCallSigs = ctxType.getCallSignatures?.();
-      if (ctxCallSigs && ctxCallSigs.length > 0) {
-        const ctxRetType = ctx.checker.getReturnTypeOfSignature(ctxCallSigs[0]!);
-        if (isVoidType(ctxRetType) && !isAssignedToSymbolIterator(arrow)) {
-          closureReturnType = null;
-        }
-      }
-    }
-  }
+  // 1. Determine arrow parameter types and return type. (#2939) Factored into
+  //    `computeClosureWrapperSig` so the dynamic-dispatch candidate pre-scan
+  //    registers the IDENTICAL wrapper type for inner-scope callbacks. The
+  //    (#585 contextual-void / #2867 Gap-1 / async-unwrap / #1151 binding-pattern
+  //    / #2640 array-callback-widen) logic all lives there now.
+  const { params: arrowParams, returnType: closureReturnTypeInit } = computeClosureWrapperSig(ctx, arrow);
+  let closureReturnType: ValType | null = closureReturnTypeInit;
 
   // 2. Analyze captured variables. Use scope-aware collection so that nested
   //    `var` declarations and parameter bindings inside the closure body shadow

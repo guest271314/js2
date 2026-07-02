@@ -53,6 +53,7 @@ import {
   collectWrittenIdentifiers,
   compileArrowAsClosure,
   compileArrowFunction,
+  computeClosureWrapperSig,
   getFuncSignature,
   getOrCreateFuncRefWrapperTypes,
 } from "../closures.js";
@@ -2839,6 +2840,68 @@ function ensureFuncValueWrappersRegistered(ctx: CodegenContext, sf: ts.SourceFil
     const sig = getFuncSignature(ctx, funcIdx);
     if (!sig) continue;
     getOrCreateFuncRefWrapperTypes(ctx, sig.params, sig.results);
+  }
+
+  // (#2939) Nested-scope function-expression / arrow callbacks. A callback like
+  // `testWith*Constructors(function (TA) { … })` defined INSIDE another function
+  // (e.g. the test262 runner's `export function test()` wrapper) registers its
+  // funcref-wrapper type only LAZILY when its value site compiles — which is
+  // inside a body compiled AFTER the higher-order function whose `fn(...)`
+  // dispatch needs the candidate. So the dispatch (`tryEmitInlineDynamicCall`)
+  // saw ZERO candidates and silently dropped the call — the ~814 vacuous
+  // `testWith*Constructors` harness passes (round-4 leak analysis). Pre-register
+  // the SAME wrapper type (computeClosureWrapperSig ≡ the value-site logic;
+  // getOrCreateFuncRefWrapperTypes is signature-cached, so the value site reuses
+  // it — a capturing callback's custom subtype still shares this funcTypeIdx,
+  // which is what the dispatch discriminates on) for every func-expr / arrow used
+  // as a call argument or a variable initializer.
+  //
+  // Standalone-gated: on the gc/host lane a callback may instead take the
+  // `__make_callback` host path and never materialize a closure wrapper, so
+  // pre-registering one there would add a module type that lazy compilation
+  // would not — a byte change on the default lane. In standalone there is no
+  // host `__make_callback`, so every func-expr/arrow value compiles to a closure
+  // and the wrapper type is created regardless; pre-creating it only reorders
+  // when (all references stay internally consistent — same discipline the
+  // declaration loop above already relies on).
+  if (ctx.standalone) {
+    const seenFnNodes = new Set<ts.Node>();
+    const usedAsValueFn = (node: ts.FunctionExpression | ts.ArrowFunction): void => {
+      if (seenFnNodes.has(node)) return;
+      seenFnNodes.add(node);
+      const { params, returnType } = computeClosureWrapperSig(ctx, node);
+      // (#2939) Restrict pre-registration to the ALL-EXTERNREF callback shape
+      // (externref params + externref/void return). This is exactly the harness
+      // callback shape (`function(TA, makeCtorArg)` — `any` params) — the whole
+      // ~1421-test target population. A candidate with a NUMERIC (f64/i32) param
+      // in an OVER-ARITY position mints a malformed dispatch arm in the
+      // higher-order body (`call[0] expected externref, found f64…`) — the
+      // over-arity numeric-pad + box path in `tryEmitInlineDynamicCall` is not
+      // sound for a speculatively-registered candidate that never matches a real
+      // runtime value. Numeric-mixed nested callbacks stay lazily-registered
+      // (unchanged from base — they were never candidates), so this both fixes
+      // the invalid-Wasm CE and keeps the fix's blast radius to the harness
+      // class. (Inner numeric-param callbacks like `findLastIndex(fn)` dispatch
+      // via the array-method path, never this inline dispatcher.)
+      const allExternref = params.every((p) => p.kind === "externref");
+      const externrefOrVoidReturn = returnType === null || returnType.kind === "externref";
+      if (!allExternref || !externrefOrVoidReturn) return;
+      getOrCreateFuncRefWrapperTypes(ctx, params, returnType ? [returnType] : []);
+    };
+    const visitFns = (node: ts.Node): void => {
+      if (ts.isFunctionExpression(node) || ts.isArrowFunction(node)) {
+        const p = node.parent;
+        const isCallArg = p && ts.isCallExpression(p) && p.arguments.some((a) => a === node);
+        const isVarInit = p && ts.isVariableDeclaration(p) && p.initializer === node;
+        // A generator function-expression's value is a Generator object, not a
+        // plain closure the inline dispatcher marshals; skip (its wrapper type
+        // is externref-returning and harmless, but leave it to the value site).
+        const isGen = ts.isFunctionExpression(node) && node.asteriskToken !== undefined;
+        if ((isCallArg || isVarInit) && !isGen) usedAsValueFn(node);
+      }
+      ts.forEachChild(node, visitFns);
+    };
+    visitFns(sf);
   }
 }
 
