@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 //
-// #3004 — vacuity-reclassification gate excusal (**TEMPORARY**, removal
-// follow-up #3001).
+// #3004 — vacuity-reclassification gate excusal (**TEMPORARY, DEFAULT-ON**,
+// removal follow-up #3001).
 //
 // #2463's vacuity scorer intentionally rescored ~1438 vacuous "passes" (the
 // harness-wrapper callback never executed, so no assertion ran) as `fail`
@@ -10,14 +10,20 @@
 // code PR's merge_group standalone diff reads the policy delta as a mass
 // regression (the d822f85a −1438 cluster) and wedges the merge queue.
 //
-// `diff-test262.ts --exclude-vacuous-reclassification` drops those pass→vacuous
-// flips out of the gated regression count so the queue clears. These tests pin
-// the behaviour required by the incident fix:
-//   1. a synthetic pass→vacuous-fail IS excused (dropped from REG) under the flag;
+// `diff-test262.ts` excludes those pass→vacuous flips from the gated regression
+// count **UNCONDITIONALLY (default-on)** — mirroring the #2167 stale-async flake
+// exclusion, NOT the flag-gated leaky excusal. This is load-bearing for
+// self-landing: `merge_group` runs the BASE-branch (main) workflow YAML against
+// the MERGED-tree script, so a flag added only in a PR's YAML would not fire in
+// that PR's own merge_group and the fixing PR would park itself (deadlock). A
+// default-on, script-side exclusion fires in every merge_group regardless of
+// which YAML runs. These tests pin the behaviour required by the incident fix:
+//   1. a synthetic pass→vacuous-fail IS excused by DEFAULT (no flag needed);
 //   2. a real pass→fail with a NON-vacuous reason still counts at full strength;
 //   3. a genuine net-negative (non-vacuous) still fails the gate;
-//   4. without the flag, the vacuity flip counts (the excusal is opt-in);
-//   5. the standalone guard (#1897) wires the flag in the workflow.
+//   4. the excused-count line is always emitted (grep-able);
+//   5. the workflow does NOT pass a vacuity flag (guards against re-introducing
+//      the deadlock-prone flag design).
 
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -35,19 +41,21 @@ function writeJsonl(path: string, entries: unknown[]) {
   writeFileSync(path, entries.map((entry) => JSON.stringify(entry)).join("\n") + "\n");
 }
 
-function runDiff(baseline: unknown[], candidate: unknown[], extraArgs: string[]) {
+// Run the diff with NO extra flags — the vacuity exclusion is default-on, so the
+// bare invocation is exactly what a merge_group runs (base-branch YAML has no
+// vacuity flag).
+function runDiff(baseline: unknown[], candidate: unknown[]) {
   const dir = mkdtempSync(join(tmpdir(), "issue-3004-diff-"));
   try {
     const basePath = join(dir, "baseline.jsonl");
     const candPath = join(dir, "candidate.jsonl");
     writeJsonl(basePath, baseline);
     writeJsonl(candPath, candidate);
-    const result = spawnSync(
+    return spawnSync(
       process.execPath,
-      ["--experimental-strip-types", "scripts/diff-test262.ts", basePath, candPath, "--quiet", ...extraArgs],
+      ["--experimental-strip-types", "scripts/diff-test262.ts", basePath, candPath, "--quiet"],
       { cwd: ROOT, encoding: "utf-8" },
     );
-    return result;
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -98,33 +106,35 @@ describe("#3004 — isVacuousReclassification (both directions)", () => {
   });
 });
 
-describe("#3004 — end-to-end gate behaviour (diff-test262 --exclude-vacuous-reclassification)", () => {
+describe("#3004 — end-to-end gate behaviour (default-on, no flag)", () => {
   // A single pass→vacuous flip, with a CHANGED wasm_sha so it is NOT filtered
-  // out by the #1222 wasm-identical noise path — proving the *excusal* (not the
-  // noise filter) is what drops it.
+  // out by the #1222 wasm-identical noise path — proving the *vacuity excusal*
+  // (not the noise filter) is what drops it, and that it fires with NO flag.
   const vacuousBaseline = [{ file: "vac.js", status: "pass", wasm_sha: "aaaaaaaaaaa1" }];
   const vacuousCandidate = [
     { file: "vac.js", status: "fail", vacuous: true, error: VACUOUS_ERROR, wasm_sha: "aaaaaaaaaaa2" },
   ];
 
-  it("EXCUSES the vacuity flip under the flag: REG=0, excused=1, gate passes", () => {
-    const r = runDiff(vacuousBaseline, vacuousCandidate, ["--exclude-vacuous-reclassification"]);
+  it("EXCUSES the vacuity flip BY DEFAULT (no flag): REG=0, excused=1, gate passes — the merge_group self-land property", () => {
+    const r = runDiff(vacuousBaseline, vacuousCandidate);
     expect(r.stdout).toContain("=== Regressions with wasm-hash change: 0 ===");
     expect(r.stdout).toMatch(/Excused vacuous reclassifications[^\n]*: 1 ===/);
     expect(r.status).toBe(0); // net = 0 improvements − 0 regressions ⇒ not a net negative
   });
 
-  it("COUNTS the vacuity flip WITHOUT the flag (excusal is opt-in): REG=1, gate fails", () => {
-    const r = runDiff(vacuousBaseline, vacuousCandidate, []);
-    expect(r.stdout).toContain("=== Regressions with wasm-hash change: 1 ===");
-    expect(r.stdout).not.toContain("Excused vacuous reclassifications");
-    expect(r.status).toBe(1); // net = 0 − 1 < 0 ⇒ GATE FAIL
+  it("excuses via the error-string fallback alone (row without the vacuous:true boolean)", () => {
+    const r = runDiff(vacuousBaseline, [
+      { file: "vac.js", status: "fail", error: VACUOUS_ERROR, wasm_sha: "aaaaaaaaaaa2" },
+    ]);
+    expect(r.stdout).toContain("=== Regressions with wasm-hash change: 0 ===");
+    expect(r.stdout).toMatch(/Excused vacuous reclassifications[^\n]*: 1 ===/);
+    expect(r.status).toBe(0);
   });
 
-  it("does NOT excuse a real non-vacuous regression even with the flag set: REG=1, excused=0, gate fails", () => {
+  it("does NOT excuse a real non-vacuous regression (default-on is narrow): REG=1, excused=0, gate fails", () => {
     const baseline = [{ file: "real.js", status: "pass", wasm_sha: "bbbbbbbbbbb1" }];
     const candidate = [{ file: "real.js", status: "fail", error: "AssertionError", wasm_sha: "bbbbbbbbbbb2" }];
-    const r = runDiff(baseline, candidate, ["--exclude-vacuous-reclassification"]);
+    const r = runDiff(baseline, candidate);
     expect(r.stdout).toContain("=== Regressions with wasm-hash change: 1 ===");
     expect(r.stdout).toMatch(/Excused vacuous reclassifications[^\n]*: 0 ===/);
     expect(r.status).toBe(1);
@@ -141,23 +151,30 @@ describe("#3004 — end-to-end gate behaviour (diff-test262 --exclude-vacuous-re
       { file: "vac.js", status: "fail", vacuous: true, error: VACUOUS_ERROR, wasm_sha: "aaaaaaaaaaa2" },
       { file: "real.js", status: "fail", error: "AssertionError", wasm_sha: "bbbbbbbbbbb2" },
     ];
-    const r = runDiff(baseline, candidate, ["--exclude-vacuous-reclassification"]);
+    const r = runDiff(baseline, candidate);
     expect(r.stdout).toContain("=== Regressions with wasm-hash change: 1 ===");
     expect(r.stdout).toMatch(/Excused vacuous reclassifications[^\n]*: 1 ===/);
     expect(r.status).toBe(1);
   });
+
+  it("always emits the grep-able excused-count line (even when zero)", () => {
+    const r = runDiff(
+      [{ file: "x.js", status: "pass", wasm_sha: "eeeeeeeeeee1" }],
+      [{ file: "x.js", status: "pass", wasm_sha: "eeeeeeeeeee1" }],
+    );
+    expect(r.stdout).toContain("Excused vacuous reclassifications");
+  });
 });
 
-describe("#3004 — workflow wiring", () => {
-  it("the standalone regression guard (#1897) passes --exclude-vacuous-reclassification", () => {
+describe("#3004 — merge_group self-land invariant", () => {
+  it("the standalone guard does NOT pass a vacuity flag — the exclusion must be default-on in the script", () => {
+    // A flag added only in this PR's YAML would NOT fire in the PR's own
+    // merge_group (which runs the BASE-branch YAML), so the fix would deadlock.
+    // The exclusion is therefore script-side/default-on; the workflow must stay
+    // flag-free for vacuity. If this ever regresses to a flag, the wedge returns.
     const workflow = readFileSync(resolve(ROOT, ".github/workflows/test262-sharded.yml"), "utf-8");
-    const start = workflow.indexOf("- name: Standalone regression guard (#1897)");
-    const end = workflow.indexOf("- name: Compile-time regression guard (#1942)", start);
-    expect(start).toBeGreaterThanOrEqual(0);
-    expect(end).toBeGreaterThan(start);
-    const guard = workflow.slice(start, end);
-    expect(guard).toContain("--exclude-vacuous-reclassification");
-    // still keeps the pre-existing leaky excusal
-    expect(guard).toContain("--exclude-leaky-baseline-regressions");
+    expect(workflow).not.toContain("--exclude-vacuous-reclassification");
+    // The pre-existing leaky flag is unaffected.
+    expect(workflow).toContain("--exclude-leaky-baseline-regressions");
   });
 });

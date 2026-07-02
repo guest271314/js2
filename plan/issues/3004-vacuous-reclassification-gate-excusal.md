@@ -41,30 +41,41 @@ regression.
 
 ## Fix
 
-Add an opt-in excusal to `scripts/diff-test262.ts`: exclude `pass→fail`
-transitions whose NEW row is a #2940 vacuity reclassification (`vacuous === true`,
-or `error` starting with `vacuous:`) from the gated regression count — mirroring
-the existing #2879 §4 `--exclude-leaky-baseline-regressions` excusal.
+Exclude `pass→fail` transitions whose NEW row is a #2940 vacuity
+reclassification (`vacuous === true`, or `error` starting with `vacuous:`) from
+the gated regression count in `scripts/diff-test262.ts` — **UNCONDITIONALLY
+(default-on)**, mirroring the #2167 `isStaleAsyncArgsFlake` exclusion (NOT the
+flag-gated #2879 §4 leaky excusal).
 
-- New flag: `--exclude-vacuous-reclassification`.
 - Helpers: `isVacuousResult(entry)` and `isVacuousReclassification(base, cur)`.
 - Excused flips are dropped from `regressionsWasmChange` (the `Regressions with
-  wasm-hash change: N` line the #1897 guard greps) **and** therefore from the
+wasm-hash change: N` line the #1897 guard greps) **and** therefore from the
   ratio/per-bucket gates (they read the same `noiseFiltered` set).
-- The excused count is logged loudly and grep-ably:
-  `=== Excused vacuous reclassifications (#2940 TEMPORARY … see #3001): N ===`.
-- Wired into the workflow at the **Standalone regression guard (#1897)**
-  invocation (the RED gate) and, defense-in-depth, the **Catastrophic
-  regression guard (#1668)** invocation (host lane — inert today since the host
-  baseline is already new-policy).
+- The excused count is always logged loudly and grep-ably:
+  `=== Excused vacuous reclassifications (#2940 TEMPORARY default-on … see #3001): N ===`.
+- **No workflow change.** `.github/workflows/test262-sharded.yml` is unchanged.
+
+### Why default-on and NOT a YAML flag (the self-land invariant)
+
+A `merge_group` check runs the workflow YAML from the **base branch (main)**,
+but checks out the **merged-tree scripts**. If the excusal were gated behind a
+new `--exclude-vacuous-reclassification` flag added only in this PR's YAML, that
+flag would **not** be passed in this PR's own `merge_group` (main's flag-free
+YAML runs) → the merged-tree script would not excuse the cluster → the #1897
+guard would still fail → **this PR would park itself and could not land to fix
+the wedge (deadlock).** This is exactly the trap that cost the −439 landing
+(#2424) multiple parked attempts. The leaky excusal only works in `merge_group`
+because its flag is _already on main's YAML_; a brand-new flag is not. Making the
+exclusion default-on in the merged-tree script fires it in every `merge_group`
+regardless of which YAML runs, so this fix self-excuses and lands.
 
 ## Why TEMPORARY (removal follow-up #3001)
 
 Once the next push-to-main run passes with this excusal, `promote-baseline`
 banks ~1496 vacuous standalone rows → the standalone baseline becomes
-new-policy. From then on the excusal excuses **zero** flips (the d822f85a
-cluster can't recur), making it inert — and then a **mask**: a real codegen
-break flipping a true-pass → "callback never executed" would be silently
+new-policy. From then on the default-on exclusion excuses **zero** flips (the
+d822f85a cluster can't recur), making it inert — and then a **mask**: a real
+codegen break flipping a true-pass → "callback never executed" would be silently
 forgiven. So it MUST be removed (or converted to a `vacuous-count-may-not-grow`
 ratchet) immediately after the standalone baseline promotes. Tracked in **#3001**.
 
@@ -74,8 +85,11 @@ regressions) is dev-3003's work (#3003).
 
 ## Test Results
 
-`tests/issue-3004.test.ts` pins: a synthetic pass→vacuous-fail is excused under
-the flag (REG 0, gate passes) and counted without it (REG 1, gate fails); a real
-non-vacuous pass→fail still counts at full strength even with the flag; a genuine
-net-negative alongside a vacuity flip still fails; and the workflow wires the flag
-into the #1897 guard.
+`tests/issue-3004.test.ts` (13 tests) pins: a synthetic pass→vacuous-fail is
+excused **by default with no flag** (REG 0, gate passes) — the `merge_group`
+self-land property; a real non-vacuous pass→fail still counts at full strength
+(REG 1, gate fails); a genuine net-negative alongside a vacuity flip still fails;
+the excused-count line is always emitted; and the workflow does **not** pass a
+vacuity flag (guards against re-introducing the deadlock-prone flag design).
+Also wired into the `quality` CI job (`ci.yml`) so the gate logic is executed in
+CI. Local: typecheck ✓, biome lint ✓, prettier ✓, issue-ids:against-main ✓.
