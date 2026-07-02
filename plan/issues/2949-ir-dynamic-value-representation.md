@@ -83,3 +83,153 @@ below the IR: the IR and the value-rep model have never met.
   only behavior change).
 - Interaction with #2138 skip-set: a claimed-because-dynamic function must
   still satisfy the skipped-slot hard-error contract.
+
+## Implementation Plan — Slice 1 (RATIFIED, fable-1, 2026-07-02)
+
+### 0. What slice 1 ships (and what it deliberately does not)
+
+Slice 1 is the **type-lattice + verifier + lowering-contract** slice. It is
+**byte-inert by construction**: no producer (`from-ast.ts`, selector,
+propagation) emits `dynamic`-typed IR yet, so no compiled module changes.
+Producers land in slice 2 (coordinated with #2138's skip-set contract, which
+is in flight on `issue-2138-ir-first-slice1`); box/unbox/tag.test _lowering_
+for dynamic operands lands in slice 3 (via the emitter contract, coordinated
+with #2953). Slice-1 lowering arms throw staged
+`"… lands in #2949 slice 3"` errors so a premature producer fails loudly.
+
+### 1. The lattice extension (`src/ir/nodes.ts`)
+
+```ts
+| { readonly kind: "dynamic"; readonly tag?: JsTag }
+```
+
+- `dynamic` is the **TOP** of the IrType lattice: every other IrType enters
+  it only via an explicit `box` node and leaves it only via an explicit
+  `unbox` (after a `tag.test` proof). **No implicit conversions** — this is
+  what keeps the typed mainline unboxed (#1852 §3 invariant).
+- `tag?: JsTag` is an optional **static refinement**: the producer proved
+  the runtime partition (e.g. inside a `tag.test`-guarded branch). It never
+  changes the carrier; it only licenses checked unboxes without a runtime
+  re-test. `irTypeEquals` is **exact** on the refinement (both absent or
+  both equal) — producers must widen to bare `dynamic` before joins
+  (branch args, slot writes), because silently merging two refinements
+  would keep whichever tag came first.
+- `JsTag` is the **existing** canonical tag enum (#2104), extracted verbatim
+  to the dependency-free leaf `src/codegen/js-tag.ts` (re-exported from
+  `value-tags.ts` so all existing imports are unchanged). One tag table for
+  codegen and IR — the June-audit D4 rule (no second tag/boxing engine)
+  holds at the type level too. The extraction exists because `ir/nodes.ts`
+  is a pure leaf imported by both layers; importing `value-tags.ts` (which
+  pulls `ts-api` + codegen context types) from it would knot the module
+  graph.
+
+### 2. Node contracts (`box` / `unbox` / `tag.test` widened, not duplicated)
+
+One boxing concept in the IR, discriminated by the operand/target **type**
+(the type system carries representation, not the node kind — same principle
+as `string`/`object`/`closure` resolver-deferred kinds):
+
+- `box{ value, toType }` — `toType` may now be `dynamic` (erasure into the
+  carrier). The operand must NOT itself be dynamic (re-box is provably
+  redundant; verifier R1 rejects).
+- `unbox{ value, tag?, jsTag? }` — `tag: ValType` became optional; it is
+  REQUIRED for union operands (V1 contract, verifier-enforced) while
+  dynamic operands use `jsTag: JsTag` (REQUIRED there). `jsTag` must have a
+  payload (`jsTagUnboxKind(jsTag) !== null`) — Null/Undefined are singleton
+  partitions and cannot be unboxed (R2). If both fields are present they
+  must be consistent (scalar partitions exact, String/Object/Function
+  ref-shaped).
+- `tag.test{ value, tag?, jsTag? }` — same field discipline; `jsTag` may be
+  ANY partition including Null/Undefined (testing for them is the point)
+  (R3).
+
+`jsTagUnboxKind(tag)` (in `js-tag.ts`) is the canonical partition→payload
+mapping, derived from the `$AnyValue` layout
+(`{tag, i32val, f64val, refval, externval}`): NumberI32/Boolean → `"i32"`,
+NumberF64 → `"f64"`, String/Object/Function → `"ref"` (exact ValType is a
+backend decision at lowering), Null/Undefined → `null` (no payload).
+
+### 3. Verifier rules (`src/ir/verify.ts`, all enforced in slice 1)
+
+- **R1 (box):** `toType` union (existing member rule) or dynamic (operand
+  must not be dynamic).
+- **R2 (unbox):** operand union (existing rules + `tag` now required-if-
+  union) or dynamic (`jsTag` required, payload-bearing, `tag` consistent).
+- **R3 (tag.test):** operand union (as R2) or dynamic (`jsTag` required,
+  any partition).
+- **R4 (scalar ops):** ALL `binary`/`unary` ops reject dynamic operands
+  ("requires an explicit unbox"). Note `valKindOf` returns `null` for
+  non-`val` kinds, which would have silently _skipped_ the existing kind
+  rule — the explicit dynamic check closes that hole. Conservative on
+  purpose (`ref.is_null` included); relax per-op when a slice needs it.
+  Loop `condValue` (must-be-i32) already rejects dynamic via the existing
+  #1980 rule.
+- **R5 (joins):** enforced structurally by exact `irTypeEquals` in the
+  existing branch-arg type checks; producers widen refinements first.
+- **R6 (returns):** existing `returnTypeAssignable` already behaves
+  correctly for dynamic (it is reference-shaped: scalar→dynamic result
+  flags "needs a box the IR doesn't emit"; dynamic→scalar flags; ref→
+  dynamic passes) — no change needed, documented here.
+
+### 4. Lowering contract (`src/ir/lower.ts` + `integration.ts`)
+
+- `IrLowerResolver.resolveDynamic?(): ValType` — returns the module's
+  canonical **boxed-any carrier**, and MUST equal legacy
+  `resolveWasmType`'s any/unknown arm so IR-claimed and legacy functions
+  agree on the `any` ABI:
+  - WasmGC **fast/standalone** → `ref_null $AnyValue` (via the idempotent,
+    append-only `ensureAnyValueType`).
+  - WasmGC **host (non-fast)** → `externref`.
+  - **Linear** → deferred (#1852-G4/#2956); method omitted, lowering throws.
+- `lowerIrTypeToValType` gains the dynamic arm (resolver-deferred, like
+  string/object/closure). The `tag` refinement never changes the carrier.
+- Dynamic box/unbox/tag.test **op** lowering is slice 3: it must route
+  through the emitter contract (`emitBox`/`emitUnbox`/`emitTagLoad`,
+  promoted from optional per #1852-G1) and the existing `__any_box_*` /
+  classifier helper family — never a second boxing engine. Slice 3 keys the
+  layout-handle union on `IrUnionLowering | IrDynamicLowering` (new handle:
+  `{ carrier: ValType, anyValueTypeIdx, tagFieldIdx, payloadFieldIdx(jsTag) }`)
+  — spec'd here so #2953's `pushRaw`-routing can anticipate the shape.
+
+### 5. Slice-1 file inventory
+
+- `src/codegen/js-tag.ts` (new leaf): `JsTag` moved verbatim +
+  `jsTagUnboxKind`. `value-tags.ts` re-exports both.
+- `src/ir/nodes.ts`: dynamic kind, `irDynamic`/`isDynamic`, `irTypeEquals`
+  arm, widened box/unbox/tag.test contracts.
+- `src/ir/verify.ts`: R1–R4.
+- `src/ir/lower.ts`: `resolveDynamic` contract, type-lowering arm, staged
+  slice-3 errors, union-path `tag` guard.
+- `src/ir/integration.ts`: `makeResolver().resolveDynamic` (additive; no
+  overlap with #2138's in-flight diff, which touches only
+  `codegen/index.ts`).
+- `src/ir/{from-ast,passes/monomorphize}.ts` + `lower.ts`/`integration.ts`
+  describe/key helpers: dynamic arms (refinement-distinct keys).
+- NOT touched: `select.ts` (capability rows are slice 2), `emitter.ts`
+  (#2953's surface), `propagate.ts` (its lattice `dynamic` maps onto
+  `IrType.dynamic` in slice 2).
+
+## Test Results — Slice 1 (2026-07-02, fable-1)
+
+- `tests/issue-2949-ir-dynamic-type.test.ts` — 19/19 pass (tag-table
+  identity, lattice equality, verifier R1–R4 positive+negative, lowering
+  contract incl. missing-resolver and staged-slice-3 failures).
+- **Byte-inertness PROVEN** (not just argued):
+  `scripts/prove-emit-identity.mjs` baseline captured on clean main
+  (`affc55523`), `check` on this branch → **IDENTICAL, all 39
+  (file,target) hashes match** across gc/standalone/wasi targets.
+- `pnpm run check:ir-fallbacks` — OK, zero delta in every bucket (no
+  selector change, as designed).
+- Related suites: `issue-2104-value-tags` (JsTag move), `ir/phase3c`
+  (union box/unbox/tag.test V1 path), `ir-frontend-widening`,
+  `ir-backend-emitter` — all pass. `ir-scaffold.test.ts` has 2 failures
+  that reproduce identically on clean main (pre-existing, unrelated —
+  `__unbox_number` link error + `func.params not iterable`).
+- `npx tsc --noEmit` clean; the new IrType variant surfaced exactly 4
+  boxed-fallthrough describe/key helpers + 2 optional-`tag` consumers,
+  all fixed with explicit dynamic arms.
+
+Slice 1 landed via PR (this branch). Slices 2–4 remain — issue stays
+`in-progress`; slice 2 must coordinate with #2138's skip-set contract
+(in flight on `issue-2138-ir-first-slice1`) before touching `select.ts`
+/ the from-ast producers.
