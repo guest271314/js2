@@ -18,12 +18,12 @@ umbrella: 2860
 > Formerly #2920; id ceded to PR #2424's negative-verdict issue (parallel
 > session, earlier reservation).
 
-## ✅ RELAX LANDED (2026-07-02, branch issue-2933-noyield-relax, stacked on #2930)
+## ✅ RELAX LANDED (2026-07-02, branch issue-2933-noyield-relax, stacked on #2936)
 
 The two no-yield bails are relaxed (lockstep: `buildNativeGeneratorPlan`
 suspendCount + `isNativeGeneratorCandidate` terminal yield-require), unblocked
-by #2930's late-import shift-regime fix (see
-`plan/issues/2930-resume-lazy-emit-funcidx-shift.md` for the corrected root
+by #2936's late-import shift-regime fix (see
+`plan/issues/2936-resume-lazy-emit-funcidx-shift.md` for the corrected root
 cause — the shift never fired during the resume emit; it was a raw-import +
 deferred-batch regime mix in `ensureLateImport`). Two new corpus-found bails
 added, both gate-consistent (in `isNativeGeneratorCandidate` /
@@ -51,15 +51,15 @@ added, both gate-consistent (in `isNativeGeneratorCandidate` /
 - gc/host byte-inert (120 sha256 A/B vs origin/main generators-native.ts).
 - Generator equivalence suites + tests/issue-2930.test.ts green.
 
-## Handoff to #2930 (funcIdx-shift fix — the unblocker) [historical]
+## Handoff to #2936 (funcIdx-shift fix — the unblocker) [historical]
 
-#2920 is BLOCKED on #2930 (late-import funcIdx-shift for lazily-emitted resume
+#2920 is BLOCKED on #2936 (late-import funcIdx-shift for lazily-emitted resume
 functions). This issue's no-yield yield (~250–350 host-free tests) unlocks the
-moment #2930 lands. Everything the successor needs:
+moment #2936 lands. Everything the successor needs:
 
 - **The two held-off bails** (search `#2920` in `src/codegen/generators-native.ts`):
   1. `buildNativeGeneratorPlan` — `if (suspendCount === 0) return null;` (the
-     comment above it names the blocker). Relax to allow zero-suspend once #2930
+     comment above it names the blocker). Relax to allow zero-suspend once #2936
      is fixed.
   2. `isNativeGeneratorCandidate` — the terminal
      `return plan !== null && plan.states.some(... "yield" ...)`. Relax to

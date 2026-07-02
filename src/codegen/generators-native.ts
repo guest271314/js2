@@ -926,7 +926,7 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
   // (#2933) NO-YIELD generators now lower natively: a zero-suspend body runs to
   // completion in state 0 and produces a done-from-start trampoline. This was
   // held off behind the late-import funcIdx-shift bug (`__str_flatten call[1]
-  // expected externref, found i32` at harness scale) fixed by #2930 (the
+  // expected externref, found i32` at harness scale) fixed by #2936 (the
   // raw-import + deferred-batch shift-regime mix in ensureLateImport). The
   // 1780-file no-yield dstr-binding corpus is the payoff (~250-350 host-free
   // flips). This bail relaxes in LOCKSTEP with the candidate gate's terminal
@@ -1164,7 +1164,7 @@ export function isNativeGeneratorCandidate(ctx: CodegenContext, decl: GeneratorD
   }
   const plan = buildNativeGeneratorPlan(ctx, decl);
   // (#2933) No terminal yield-require — no-yield (zero-suspend) generators are
-  // native candidates now that #2930 fixed the late-import funcIdx-shift class.
+  // native candidates now that #2936 fixed the late-import funcIdx-shift class.
   // Relaxed in LOCKSTEP with buildNativeGeneratorPlan's suspendCount bail.
   return plan !== null;
 }
