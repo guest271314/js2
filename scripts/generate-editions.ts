@@ -687,7 +687,49 @@ async function main() {
 
   // Read all result records
   const lines = readFileSync(resultsPath, "utf-8").split("\n").filter(Boolean);
-  console.log(`Processing ${lines.length} test results...`);
+
+  // (#2913) Dedup duplicate result rows by `file` BEFORE bucketing. The merged
+  // JSONL can carry >1 row per test (retry path / doubled shard artifact); with
+  // no dedup the editions inherit the same double-count as the report builder.
+  // Keep one row per file using a deterministic WORST-status precedence
+  // (compile_error > fail > timeout/crash > pass > skip) so editions are stable
+  // regardless of retry timing / row order. Mirrors build-test262-report.mjs.
+  const EDITION_STATUS_PRECEDENCE: Record<string, number> = {
+    compile_error: 6,
+    compile_timeout: 6,
+    fail: 5,
+    timeout: 4,
+    crash: 4,
+    pass: 3,
+    skip: 2,
+  };
+  const editionStatusRank = (s: string | undefined): number => (s ? EDITION_STATUS_PRECEDENCE[s] : undefined) ?? 1;
+  const dedupedByFile = new Map<string, ResultRecord>();
+  let editionDupDropped = 0;
+  for (const line of lines) {
+    let record: ResultRecord;
+    try {
+      record = JSON.parse(line) as ResultRecord;
+    } catch {
+      continue;
+    }
+    const key = record.file ?? `__nofile_${dedupedByFile.size}`;
+    const prior = dedupedByFile.get(key);
+    if (prior === undefined) {
+      dedupedByFile.set(key, record);
+    } else {
+      editionDupDropped++;
+      if (editionStatusRank(record.status) >= editionStatusRank(prior.status)) {
+        dedupedByFile.set(key, record);
+      }
+    }
+  }
+  const dedupedRecords = [...dedupedByFile.values()];
+  console.log(
+    `Processing ${dedupedRecords.length} test results` +
+      (editionDupDropped > 0 ? ` (#2913: dropped ${editionDupDropped} duplicate row(s) from ${lines.length})` : "") +
+      "...",
+  );
 
   // Initialise buckets
   const buckets: Record<number, { pass: number; fail: number; ce: number; skip: number }> = {};
@@ -718,14 +760,7 @@ async function main() {
   let unclassified = 0;
   let processed = 0;
 
-  for (const line of lines) {
-    let record: ResultRecord;
-    try {
-      record = JSON.parse(line) as ResultRecord;
-    } catch {
-      continue;
-    }
-
+  for (const record of dedupedRecords) {
     const { file, status } = record;
     if (!file || !status) continue;
     processed++;
