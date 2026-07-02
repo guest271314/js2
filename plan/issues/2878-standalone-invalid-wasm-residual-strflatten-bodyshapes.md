@@ -137,7 +137,7 @@ value-rep signatures (`call[N] expected externref, found struct.new/ref.cast`;
 `struct.new expected eqref, found anyref`; `not enough arguments for struct.new`)
 are distinct codegen shapes → follow-up slices.
 
-### Class B — `__str_flatten` runtime null-deref (String.split/replace with RegExp arg)
+### Class B — `__str_flatten` runtime null-deref (String.split/replace with RegExp arg) — tracked as #2935
 
 Repro: `test/built-ins/String/prototype/split/argument-is-regexp-a-z-and-instance-is-string-abc.js`,
 `.../replace/S15.5.4.11_A1_T7.js`. Runtime (not compile): `dereferencing a null
