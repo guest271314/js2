@@ -121,12 +121,55 @@ Local probes (gc lane, in-process replication of the runner fixture branch):
 - Baseline-fail set (54): 6 flip fail→**pass** (incl. prize test,
   eval-rqstd-order, instn-\* siblings), 48 remain fail (honest failures now —
   real fixture semantics instead of the null-import artifact).
-- Baseline-pass set (38): 31 still pass; 7 candidate pass→fail flips, all in
-  async/$DONE or exotic-syntax buckets where this in-process replication is
-  known-unfaithful (4× top-level-await rejection tests, 2× import-attributes,
-  1× import.meta). Authoritative read: the PR CI regression report (both
-  directions), per the lead's instruction; a scoped REAL-runner run over
-  `language/module-code|import|export|import.meta` was also performed before
-  opening the PR (see PR description for the delta).
+- Baseline-pass set (38): 31 still pass; 7 candidate pass→fail flips from the
+  in-process replication, resolved by a scoped REAL-runner run
+  (`TEST262_PATH_FILTER` over the candidates, local shards):
+  - 3 artifacts of the replication (no flip): `top-level-await/module-import-rejection{,-body,-tick}.js` — real runner records **pass**.
+  - 2 were real but FIXED in-branch: `import-attributes/import-attribute-key-string-{double,single}.js` — negative resolution tests; `allowJs` suppresses the
+    syntax-error bail in `compileMultiSource`, so the invalid module "compiled"
+    and its raw top-level asserts executed at instantiation. Fix: `allowJs:
+!isNegative` in both runners (negative tests assert compile-time failure;
+    allowJs must never mask it).
+  - 2 REAL honest regressions remain (baseline pass was a null-import artifact;
+    the now-compiled fixture exposes genuine compiler gaps):
+    - `language/expressions/import.meta/distinct-for-each-module.js` — requires
+      per-module `import.meta` object identity.
+    - `language/module-code/top-level-await/async-module-does-not-block-sibling-modules.js` — requires async-module sibling evaluation ordering.
 - Scoped unit tests: `issue-1015`, `test262-runner-static-gen-yield`,
   `test262-path-filter`, `test262-scope-classification` — 20/20 pass.
+
+## merge_group run #1 (head 228d906, run 28568484919) — PARKED, diagnosed (dev-2900f)
+
+The queue's full-matrix run attributed **8 improvements / 8 regressions**
+(merge-base baseline 72fad54, ratio gate 100% ≥ 10% → auto-park `hold`).
+Per-file attribution (from the run's merged-report artifact):
+
+- **8 improvements** — the 6 predicted fixture gains (prize test incl.) + 2
+  accidental `module-code/namespace/internals` wins
+  (`get-own-property-str-found-uninit.js`, `set-prototype-of.js`).
+- **8 regressions**, three buckets:
+  1. `import-attributes/import-attribute-key-string-{double,single}.js` —
+     negative-resolution tests broken by allowJs diagnostic suppression.
+     **FIXED** in-branch: `allowJs: !isNegative` in both runners.
+  2. 4× `module-code/namespace{,/internals}` tests failing `ns is not defined`
+     (`Symbol.iterator`, `get-own-property-str-not-found`, `is-extensible`,
+     `set-prototype-of-null`) — these tests **SELF-import**
+     (`import * as ns from './<own-filename>.js'`); the hoist moved the
+     self-import to top level where it cannot resolve under the runner's
+     virtual `./test.ts` key. **FIXED** in-branch: hoist restricted to
+     `_FIXTURE` specifiers only (the exact fixture-linking purpose of #2932).
+     This also reverts the 2 accidental namespace improvements above — they
+     were the same brittle self-import-hoist behavior in the lucky direction.
+  3. 2 honest, irreducible regressions (baseline pass was the null-import
+     artifact; the now-compiled fixture exposes real compiler gaps), each with
+     a tracking issue filed in this PR:
+     - `language/expressions/import.meta/distinct-for-each-module.js` —
+       per-module `import.meta` object identity → **#2970**.
+     - `language/module-code/top-level-await/async-module-does-not-block-sibling-modules.js` — async-module sibling evaluation ordering → **#2971**.
+
+**Post-fix arithmetic: +6 / −2 (net +4), ratio 2/6 = 33% ≥ 10%** — the
+required `check for test262 regressions` gate will re-park on re-enqueue.
+The remaining 2 regressions cannot be removed honestly at the harness level
+(skips also count as pass→other regressions). Lead decision required on the
+landing mechanism (accept-and-refresh-baseline vs gate excusal vs
+gap-fix-first).

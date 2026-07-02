@@ -558,7 +558,9 @@ for (const category of TEST_CATEGORIES) {
               const multiCompile = await getCompileMulti();
               // (#2932) allowJs: `.js` _FIXTURE root files are otherwise
               // excluded from the TS program and their imports resolve to null.
-              const result = multiCompile(vfiles, "./test.ts", { skipSemanticDiagnostics: true, allowJs: true });
+              // Negative tests excluded — they assert compile-time failure,
+              // which allowJs's diagnostic suppression would mask.
+              const result = multiCompile(vfiles, "./test.ts", { skipSemanticDiagnostics: true, allowJs: !isNegative });
               if (result.success && result.binary.length > 0) {
                 compileResult = {
                   ok: true,

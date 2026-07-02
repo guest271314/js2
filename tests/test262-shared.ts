@@ -614,7 +614,13 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
                   // top-level declarations are never codegen'd and every
                   // import of them resolves to null. Harness-scoped by
                   // decision (lead, 2026-07-02); NOT a compiler default.
-                  allowJs: true,
+                  // NEGATIVE (parse/early/resolution) tests are excluded:
+                  // they assert compile-time FAILURE, and allowJs suppresses
+                  // the syntax/type-error bail in compileMultiSource — with it
+                  // the invalid module "compiles", its raw top-level asserts
+                  // execute at instantiation, and the test records fail
+                  // (import-attribute-key-string-* flipped pass→fail this way).
+                  allowJs: !isNegative,
                 });
                 const compileRecordMetadata = metadataFromImports(result.imports, false);
                 const reachedRecordMetadata = metadataFromImports(result.imports, true);
