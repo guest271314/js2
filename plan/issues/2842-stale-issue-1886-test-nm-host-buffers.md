@@ -39,3 +39,9 @@ the right source.
 
 `npm test -- tests/issue-1886.test.ts` passes; the linear-safe classification of
 the native-messaging host buffers is still meaningfully asserted.
+
+## Status note (reconcile 2026-07-02)
+
+No implementation PR has merged for this issue. The only merged PR referencing
+it (PR #2327, `chore(plan): close #2829; file #2842/#2843 cleanups`) merely
+FILED this issue — do not mistake it for a fix. Stays `ready`.

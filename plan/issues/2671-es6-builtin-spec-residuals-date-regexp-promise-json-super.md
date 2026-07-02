@@ -3,7 +3,7 @@ id: 2671
 title: "ES2015 builtin/feature spec residuals: Date, RegExp, Promise, JSON, super (~400 fails — tracking, slice per area)"
 status: ready
 created: 2026-06-25
-updated: 2026-06-26
+updated: 2026-07-02
 priority: medium
 feasibility: medium
 reasoning_effort: high
@@ -354,3 +354,17 @@ language/expressions/super/call-spread-err-sngl-err-expr-throws.js
 ## Residual (as of #2199, PO reconcile 2026-06-28)
 
 NOT done — tracking umbrella. The referencing PR landed the RegExp lastIndex value-preserving data-slot slice (host). Date / Promise / JSON / super areas remain (~400 fails); slice per area. Stays ready as the tracker.
+
+## Landed slices (reconcile 2026-07-02)
+
+Per-area slices merged so far (all `fix(#2671)` PRs):
+
+- **Date**: PR #2076 (`Date.prototype.getYear`, Annex B §B.2.4), PR #2129
+  (`set*` must not clobber `[[DateValue]]` re-set during `ToNumber`).
+- **RegExp**: PR #2134 (`lastIndex` value-preserving data slot, host mode).
+- **JSON**: PR #2100 (`JSON.stringify` array-replacer PropertyList fidelity),
+  PR #2127 (wrong-type replacer + circular-structure crash).
+- **Promise**: PR #2225 (Promise.resolve/reject capability-ctor sites, +6 test262).
+
+**super** area untouched so far. Stays `ready` as the tracker — acceptance is
+per-area ≥50% of the residual fails, not yet measured/claimed for any area.
