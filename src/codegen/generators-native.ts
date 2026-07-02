@@ -1115,6 +1115,38 @@ export function isNativeGeneratorCandidate(ctx: CodegenContext, decl: GeneratorD
       if (param.initializer || param.questionToken) return false;
     }
   }
+  // (#2933) A generator METHOD whose emitted name is not unique within its
+  // class / object literal must bail to the host path. The class collection
+  // pass keys everything on `${className}_${methodName}` and SKIPS a
+  // duplicate-name member ("Skip if a function with this name is already
+  // registered" — the static/instance same-name case), so a second `*id()`
+  // would be emitted against the FIRST member's `NativeGeneratorInfo`
+  // (mismatched `synthesizedThis` param model → "local index out of range" at
+  // binary emit, fn-name-gen-method.js). Computed names (`*[sym]()`) bail too:
+  // their emitted-name derivation is not stable enough to prove uniqueness.
+  // Gate here — the SINGLE source of truth — so collection, the method emit
+  // AND `sourceNeedsGeneratorHostImports` all agree (host imports stay
+  // registered; behavior matches the pre-#2933 eager-buffer path).
+  if (ts.isMethodDeclaration(decl)) {
+    if (ts.isComputedPropertyName(decl.name)) return false;
+    const parent = decl.parent;
+    if (ts.isClassLike(parent) || ts.isObjectLiteralExpression(parent)) {
+      const ownName = decl.name.getText();
+      const members: readonly ts.Node[] = ts.isObjectLiteralExpression(parent) ? parent.properties : parent.members;
+      let sameName = 0;
+      for (const m of members) {
+        if (
+          ts.isMethodDeclaration(m) &&
+          m.asteriskToken &&
+          !ts.isComputedPropertyName(m.name) &&
+          m.name.getText() === ownName
+        ) {
+          sameName++;
+        }
+      }
+      if (sameName > 1) return false;
+    }
+  }
   // (#2571) A method generator that reads `arguments`, uses `super.*`, or
   // CAPTURES an enclosing-function binding (#2203) has no native state-machine
   // support: the eager-buffer path builds the arguments vec / closure, while the
