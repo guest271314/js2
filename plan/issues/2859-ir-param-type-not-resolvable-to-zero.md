@@ -4,8 +4,8 @@ title: "IR: drive param-type-not-resolvable fallback bucket to zero (TypeMap pro
 status: ready
 sprint: current
 created: 2026-06-30
-updated: 2026-06-30
-priority: low
+updated: 2026-07-02
+priority: high
 horizon: s
 feasibility: medium
 reasoning_effort: medium

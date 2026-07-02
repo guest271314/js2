@@ -2,7 +2,7 @@
 id: 2875
 title: "Standalone: String.prototype.* cluster (159 host-pass/standalone-fail, de-masked from #2862)"
 status: in-progress
-assignee: ttraenkler/dev-2875b
+assignee: ttraenkler/dev-2875f
 created: 2026-06-30
 updated: 2026-07-02
 priority: high
@@ -178,7 +178,83 @@ family split across two PRs):
   host-free tests pass; byte-diff neutrality re-verified after `git merge
   origin/main` (12/12 unrelated programs byte-identical to main; only the two
   target reflective programs change output).
-- **Slice 3 — next:** search family — `indexOf`, `lastIndexOf`, `includes`,
-  `endsWith`, `startsWith` (+ IsRegExp-arg throw for the last three).
+- **Slice 3 — in PR (dev-2875f, salvaged from dev-2875b's rotation):** the full
+  search family — `indexOf`, `lastIndexOf` (number results, `__box_number`) and
+  `includes`, `startsWith`, `endsWith` (boolean results, `__box_boolean` so the
+  externref is a real JS boolean — `1 === true` is false).
+
+  **Root cause of the predecessor's invalid-Wasm ("compile succeeds, invalid
+  module"):** `ensureStandaloneNativeMethodClosure` sized the lifted func type's
+  user params to the member's SPEC arity (`glue.memberLength` — `fn.length` is
+  **1** for the whole search family; the optional `position` is UNCOUNTED per
+  spec), so the salvaged body's `local.get 3` for the position arg pointed at
+  the first DECLARED LOCAL (`unboxArgToI32`'s own i32 scratch — locals start at
+  index 3 in a 3-param func) and fed `__unbox_number(externref)` an i32:
+  `call[0] expected externref, found local.get of type i32`. Slices 1–2 never
+  hit this because their single arg (the counted position) sits at param 2.
+
+  **Fix (mechanism, not patch):** new optional
+  `NativeProtoBuiltinGlue.memberParamSlots` — the closure sizes its user params
+  to `max(memberLength, memberParamSlots)`; `.length` reads stay honest because
+  they resolve via `nativeClosureMeta` (+ the #2896 meta type), which records
+  the SPEC arity, never the func type. All call surfaces
+  (`compileClosureCall`, `emitReflectiveNativeProtoClosureCall`) already pad
+  missing args with `ref.null.extern`. Scoped to String
+  (`STRING_PROTO_METHOD_PARAM_SLOTS`: the 5 search members = 2 slots); every
+  other family/member returns 0 → arity-sized as before, byte-identical.
+
+  **Also fixed (direct-path core bugs found by the family triage):** the
+  `min(max(pos, 0), len)` clamps (§22.1.3.23 step 12 / §22.1.3.6 step 7 /
+  §22.1.3.9 step 8) were missing from `__str_startsWith` (Infinity position
+  overflowed `position + pLen` → OOB trap; negative position → OOB read),
+  `__str_endsWith` (no `max(0)` — `endsWith('', -1)` false instead of true),
+  `__str_lastIndexOf` (negative fromIndex skipped the position-0 check). Flips
+  `startsWith/out-of-bounds-position`,
+  `{starts,ends}With/return-true-if-searchstring-is-empty` on the DIRECT path.
+  Byte-radius note: the string helpers emit as ONE bundle
+  (`ctx.nativeStrHelpersEmitted`), so every standalone module's bytes shift —
+  neutrality vs main is asserted on the HOST lane (12/12 byte-identical) +
+  behaviorally via the 1223-file String sweep (base-vs-head, zero regressions).
+
+  **Known adjacent defects (pre-existing on main, verified out of scope):**
+  - Reflective number-`this`/`needle` mis-ToString: `charAt.call(42, 0)` ≠ "4",
+    `indexOf.call(42, "2")` = -1 — fails identically on main for slices 1–2, so
+    NOT introduced here. Clue for the follow-up: the same comparison
+    `v === "4"` yields FALSE in `return v === "4" ? 1 : 0` but TRUE in an
+    if-chain probe — smells like a call-site index-shift (string-constant
+    global) interaction, not the closure itself.
+  - `return-abrupt-from-this` (poisoned `toString`) doesn't throw through
+    `$__any_to_string` — the #2862 ToPrimitive substrate adjacency.
+  - Runtime IsRegExp(searchString) throw on the REFLECTIVE path is not emitted
+    (matches the direct path's static-only `argIsStaticRegExp` fold); no
+    test262 case exercises a runtime-only RegExp arg reaching a reflective
+    call today.
+- **Slice 4 — in PR (dev-2875f): the `not-a-constructor` bucket was a harness
+  STUB TYPE BUG, not compiler work.** The runner replaces the test262
+  `isConstructor` harness entirely (`needsIsConstructor` preamble,
+  test262-runner.ts) because real `Reflect.construct` is a #1472 Phase C
+  compile refusal standalone. The stub was
+  `function isConstructor(f: number): number { return 0; }` — and
+  `assert.sameValue(isConstructor(x), false)` compiles to a strict `===`
+  where `0 === false` is (correctly!) false in the standalone lane, so every
+  `*/not-a-constructor.js` failed at assert #1. (The host lane passed the same
+  comparison via a lax host-eq quirk — worth its own look.) The tests' second
+  assert — `new String.prototype.X()` throws TypeError — already exercises
+  real compiled semantics and passes standalone. Fix: stub returns a real
+  `boolean false`. Verified: all 5 String search + charAt + Array indexOf
+  `not-a-constructor.js` → pass/pass both lanes; `is-a-constructor.js` stays
+  fail/fail both lanes (no false conformance for constructors until real
+  standalone `Reflect.construct` newTarget-validation lands — that is the
+  honest Phase C follow-up, out of this cluster). Blast radius: 533
+  `not-a-constructor.js` + 45 `is-a-constructor.js` + ~58 other harness users
+  — standalone wins only in sampling (18 diverse files + 5 base-compared);
+  full validation in `merge_group`.
+  - Adjacent gap (documented, not in-bucket): `const C: any =
+    String.prototype.indexOf; new C()` silently does NOT throw (the direct
+    member form does) — generic new-on-non-constructor-closure runtime check
+    missing.
+- **Slice 5 — next:** the misc bucket (`fromCharCode` static read,
+  `Symbol.iterator`, `matchAll`, …).
 - **Out of scope (routed elsewhere):** the 69-test #2862 ToPrimitive substrate
-  bucket.
+  bucket; the property-attribute `compile_error` tests (S15.5.4.7_A8–A11
+  et al — `delete`/for-in over builtins, a different mechanism).
