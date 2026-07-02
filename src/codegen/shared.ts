@@ -29,6 +29,39 @@ import type { CodegenContext, FunctionContext } from "./context/types.js";
 export const VOID_RESULT = Symbol("void");
 export type InnerResult = ValType | null | typeof VOID_RESULT;
 
+// ── packed-element helpers (#2648/#2934) ──────────────────────────────
+
+/**
+ * The unpacked VALUE type of a (possibly packed) array element. Packed i8/i16
+ * (Uint8Array/Int8Array/Int16Array/… standalone storage, #2593) are STORAGE-only
+ * types: `array.get_s`/`get_u` widen them to `i32` on the stack, and a
+ * param/result/local/global/block declared with a packed kind is invalid Wasm
+ * ("packed storage type is not valid in a value position"). Identity for
+ * non-packed types.
+ */
+export function unpackedElemType(elemType: ValType): ValType {
+  return elemType.kind === "i8" || elemType.kind === "i16" ? { kind: "i32" } : elemType;
+}
+
+/**
+ * Pick the element-load op for a (possibly packed) typed-array element, driven
+ * by the view-name signedness when available (`Int*` → `array.get_s`, `Uint*` →
+ * `array.get_u`; the storage kind alone cannot distinguish them, #2648), else
+ * the legacy storage-kind heuristic (i8→get_u, i16→get_s). i32/f64/ref elements
+ * use plain `array.get`.
+ */
+export function elemGetOp(
+  elemType: ValType,
+  signedness: "s" | "u" | undefined,
+): "array.get" | "array.get_s" | "array.get_u" {
+  if (elemType.kind === "i8" || elemType.kind === "i16") {
+    if (signedness === "s") return "array.get_s";
+    if (signedness === "u") return "array.get_u";
+    return elemType.kind === "i8" ? "array.get_u" : "array.get_s";
+  }
+  return "array.get";
+}
+
 // ── resolveThisStructName ─────────────────────────────────────────────
 
 /**
