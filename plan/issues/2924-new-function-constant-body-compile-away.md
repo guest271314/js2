@@ -129,7 +129,31 @@ another any-add; the eval-lift control
 on a marshalled boxed-number param misreports too (same #1629b-class layer,
 noted in #2948).
 
-Tests: `tests/issue-2924.test.ts` (14 — standalone acceptance, fallback bails,
-host-mode flatten). No regression in `tests/issue-2923*` / `eval-tiering`
-(34 pass). Dynamic bodies and the malformed-body runtime `SyntaxError` remain
-on the legacy stub path (Tier-2 #2928).
+Tests: `tests/issue-2924.test.ts` (17 — standalone acceptance, fallback bails,
+host-mode flatten + index-shift shapes). No regression in `tests/issue-2923*` /
+`eval-tiering` (31 pass). Dynamic bodies and the malformed-body runtime
+`SyntaxError` remain on the legacy stub path (Tier-2 #2928).
+
+### Merge-group park fix (PR #2474, 2026-07-02)
+
+First enqueue parked with 4 regressions
+(`language/function-code/10.4.3-1-1{3,5}{-s,gs}.js`); diagnosis + prescription
+by the parallel session's [CI-FIX] handoff (its dup PR #2464 closed in favor of
+#2474). Fixes applied:
+
+1. **`this` bail** — a sloppy dynamic function's bare call must see
+   `this === globalThis` (§10.4.3), which the splice cannot provide (free
+   function `this = undefined`); any `ThisKeyword` in the synthesized decl
+   bails to the legacy path (`containsThisKeyword`).
+2. **funcIdx staleness** — arg compiles can `addUnionImports` and shift
+   function indices between synthesis and the emitted `call`; the direct-call
+   arm now re-fetches the index from `funcMap` after arg marshalling (fixed the
+   host 3-arg wrong-value / twice-in-one-expression findings).
+3. **Hoist rollback guard** (graft from #2464) — a mid-hoist throw now rolls
+   back partially-registered `mod.functions` entries + their `funcMap` keys.
+
+Verification: all 4 parked paths PASS (isolated harness); host 3-arg + twice
+shapes PASS; 17 + 31 tests green; Function-dir sweep 3 improvements / 0
+attributable regressions (two sweep flips proven false positives — one
+reproduces identically on unmodified main, one passes isolated and only fails
+under the single-process sweep's shared-realm `Object.prototype` pollution).

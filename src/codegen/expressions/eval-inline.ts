@@ -461,6 +461,17 @@ function synthesizeStaticNewFunction(
   // existing fallback path.
   if (fnDecl.body && evalBodyHasUseStrictDirective(fnDecl.body.statements)) return undefined;
 
+  // (#2924 park fix) A SLOPPY dynamic function's bare call must see
+  // `this === globalThis` (§10.4.3 OrdinaryCallBindThis with a non-strict
+  // callee), but our splice compiles the body as a free function with
+  // `this = undefined` — `Function("return typeof this;")()` returned
+  // "undefined" and regressed 4 language/function-code 10.4.3-1-1{3,5}
+  // tests in the merge_group. Bail on ANY `this` in the synthesized decl
+  // (nested functions included — they share the same wrong binding) so the
+  // legacy path keeps the baseline behavior. Diagnosis by the parallel
+  // session's [CI-FIX] handoff on PR #2474.
+  if (containsThisKeyword(fnDecl)) return undefined;
+
   // The body must be safely liftable (no function/arrow expression, class, etc.
   // that would need checker bindings the foreign SourceFile lacks — same guard
   // as constant-string eval, #2923). Body is sloppy here (strict bailed above).
@@ -469,14 +480,25 @@ function synthesizeStaticNewFunction(
   // Hoist + compile the synthesized declaration over GLOBAL scope: swap the
   // enclosing localMap/boxedCaptures for empty ones so the capture analysis in
   // hoistFunctionDeclarations finds nothing to capture (no lexical closure over
-  // caller locals, §20.2.1.1). Restore afterwards.
+  // caller locals, §20.2.1.1). Restore afterwards. Snapshot the module function
+  // table so a mid-hoist throw rolls back partially-registered entries instead
+  // of leaking them (graft from the closed dup PR #2464).
   const savedLocalMap = fctx.localMap;
   const savedBoxed = fctx.boxedCaptures;
+  const savedFuncCount = ctx.mod.functions.length;
   fctx.localMap = new Map();
   fctx.boxedCaptures = undefined;
   try {
     hoistFunctionDeclarations(ctx, fctx, [fnDecl]);
   } catch {
+    // Roll back functions registered by the failed hoist + their funcMap keys.
+    if (ctx.mod.functions.length > savedFuncCount) {
+      ctx.mod.functions.length = savedFuncCount;
+      const cutoff = ctx.numImportFuncs + savedFuncCount;
+      for (const [name, idx] of ctx.funcMap) {
+        if (idx >= cutoff) ctx.funcMap.delete(name);
+      }
+    }
     return undefined;
   } finally {
     fctx.localMap = savedLocalMap;
@@ -487,6 +509,21 @@ function synthesizeStaticNewFunction(
   if (funcIdx === undefined) return undefined;
 
   return { fnName, funcIdx, params: fnDecl.parameters };
+}
+
+/** (#2924 park fix) Does the node tree contain a `this` expression? */
+function containsThisKeyword(root: ts.Node): boolean {
+  let found = false;
+  const visit = (n: ts.Node): void => {
+    if (found) return;
+    if (n.kind === ts.SyntaxKind.ThisKeyword) {
+      found = true;
+      return;
+    }
+    n.forEachChild(visit);
+  };
+  visit(root);
+  return found;
 }
 
 /**
@@ -596,7 +633,17 @@ export function tryStaticFunctionCtorCall(
     const t = compileExpression(ctx, fctx, callArgs[i]!);
     if (t !== null) fctx.body.push({ op: "drop" });
   }
-  fctx.body.push({ op: "call", funcIdx: synth.funcIdx });
+  // (#2924 park fix) Re-fetch the funcIdx AFTER the arg compiles: any arg
+  // expression can trigger addUnionImports, which shifts function indices —
+  // the index captured at synthesis time goes stale and the emitted `call`
+  // targets the wrong function (the host-mode 3-arg wrong-value/invalid-Wasm
+  // finding in the #2474 [CI-FIX] handoff). funcMap auto-shifts, so it is
+  // the authoritative source at emit time.
+  // (Args are already on the stack here — never bail past this point. The
+  // funcMap entry cannot vanish, but keep the synthesis-time index as a
+  // defensive fallback rather than stranding operands.)
+  const liveIdx = ctx.funcMap.get(synth.fnName) ?? synth.funcIdx;
+  fctx.body.push({ op: "call", funcIdx: liveIdx });
   const resType = sig.results.length > 0 ? sig.results[0]! : null;
   if (resType === null) {
     // Void result — a JS call still evaluates to `undefined`.

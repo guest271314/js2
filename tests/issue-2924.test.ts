@@ -136,6 +136,16 @@ describe("#2924 — unsupported shapes keep the legacy fallback (clean bail, no 
   it("malformed body (SyntaxError case) does not become a compile error", async () => {
     expect(await compiles(`export function test(): number { const f = new Function("|||"); return 1; }`)).toBe(true);
   });
+
+  // (#2474 park fix) A sloppy dynamic function's bare call must see
+  // this === globalThis (§10.4.3), which the splice cannot provide — any
+  // `this` in the body bails to the legacy path. Guards the 4 parked
+  // language/function-code/10.4.3-1-1{3,5}{-s,gs} regressions.
+  it('body referencing `this` bails ("return typeof this;" — never a wrongly-strict "undefined")', async () => {
+    expect(
+      await compiles(`export function test(): number { const f = new Function("return typeof this;"); return 1; }`),
+    ).toBe(true);
+  });
 });
 
 describe("#2924 — host (gc) mode", () => {
@@ -154,5 +164,41 @@ describe("#2924 — host (gc) mode", () => {
     const { instance } = await WebAssembly.instantiate(r.binary, imports);
     imports.setExports?.(instance.exports);
     expect((instance.exports as { test(): number }).test()).toBe(1);
+  });
+
+  // (#2474 park fix) funcIdx staleness: host-mode arg compiles add late
+  // imports and shift function indices between synthesis and the emitted
+  // `call` — the 3-arg immediate call targeted the wrong function (wrong
+  // value / invalid Wasm in the [CI-FIX] handoff findings). The emit now
+  // re-fetches the index from funcMap after arg marshalling.
+  it("host immediate call with 3 args survives late-import index shifts", async () => {
+    const r = await compile(
+      `export function test(): number { return new Function("a","b","c","return c")(1,2,3) as number; }`,
+      {},
+    );
+    expect(r.success, JSON.stringify(r.errors)).toBe(true);
+    expect(WebAssembly.validate(r.binary), "module must be valid Wasm").toBe(true);
+    const { buildImports } = await import("../src/runtime.js");
+    const imports = buildImports(r.imports, undefined, r.stringPool) as WebAssembly.Imports & {
+      setExports?: (e: WebAssembly.Exports) => void;
+    };
+    const { instance } = await WebAssembly.instantiate(r.binary, imports);
+    imports.setExports?.(instance.exports);
+    expect((instance.exports as { test(): number }).test()).toBe(3);
+  });
+
+  it("host two immediate calls in one expression each target their own synthesized fn", async () => {
+    const r = await compile(
+      `export function test(): number { return (new Function("a","return a")(1) as number) + (new Function("a","return a")(2) as number); }`,
+      {},
+    );
+    expect(r.success, JSON.stringify(r.errors)).toBe(true);
+    const { buildImports } = await import("../src/runtime.js");
+    const imports = buildImports(r.imports, undefined, r.stringPool) as WebAssembly.Imports & {
+      setExports?: (e: WebAssembly.Exports) => void;
+    };
+    const { instance } = await WebAssembly.instantiate(r.binary, imports);
+    imports.setExports?.(instance.exports);
+    expect((instance.exports as { test(): number }).test()).toBe(3);
   });
 });
