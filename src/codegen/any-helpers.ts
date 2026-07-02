@@ -1077,10 +1077,37 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
                             { op: "ref.cast", typeIdx: ctx.nativeBoxNumberTypeIdx },
                             { op: "struct.get", typeIdx: ctx.nativeBoxNumberTypeIdx, fieldIdx: 0 },
                           ],
-                          else: [
-                            { op: "local.get", index: 0 },
-                            { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 2 },
-                          ],
+                          else:
+                            // (#2966) $BoxedBoolean recovery, symmetric with the
+                            // $BoxedNumber arm above: a boolean crossing the
+                            // open-any boundary is a tag-5 box whose externval is
+                            // the native `$BoxedBoolean` carrier. §7.1.4
+                            // ToNumber(true)=1 / ToNumber(false)=0 — reading the
+                            // box's f64val (always 0) made every dispatched
+                            // boolean numerically 0. Same gate style as #1888.
+                            ctx.nativeBoxBooleanTypeIdx >= 0
+                              ? ([
+                                  { op: "local.get", index: 2 },
+                                  { op: "ref.test", typeIdx: ctx.nativeBoxBooleanTypeIdx },
+                                  {
+                                    op: "if",
+                                    blockType: { kind: "val", type: { kind: "f64" } },
+                                    then: [
+                                      { op: "local.get", index: 2 },
+                                      { op: "ref.cast", typeIdx: ctx.nativeBoxBooleanTypeIdx },
+                                      { op: "struct.get", typeIdx: ctx.nativeBoxBooleanTypeIdx, fieldIdx: 0 },
+                                      { op: "f64.convert_i32_s" },
+                                    ],
+                                    else: [
+                                      { op: "local.get", index: 0 },
+                                      { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 2 },
+                                    ],
+                                  },
+                                ] as Instr[])
+                              : ([
+                                  { op: "local.get", index: 0 },
+                                  { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 2 },
+                                ] as Instr[]),
                         },
                       ],
                       else: [
@@ -1273,6 +1300,77 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
       // numeric arm so the two arms don't alias. Use a fresh numeric copy.
       buildNumericArm();
 
+  // (#2966) Effective stringiness of one operand for the §13.15.3 `+` dispatch.
+  //
+  // The tag-5 field-4 externval is OVERLOADED (see the #2040 classifier note
+  // above): the generic externref→AnyValue boxing (`value-tags.ts` boxToAny)
+  // wraps EVERY externref as a tag-5 "string" box — including the native
+  // `$BoxedNumber`/`$BoxedBoolean` carriers a value picks up crossing the
+  // open-any closure-call boundary (`f(1) + f(2)` where `f: any`). Treating
+  // those as strings sent two dispatched NUMBERS down the concat arm, whose
+  // tag-5 result reads back as 0 in an f64 context — silent wrong values
+  // (issue #2966; `f(1)+f(2)` → 0, `f(1,2,3)` → NaN).
+  //
+  // §13.15.3 ApplyStringOrNumericBinaryOperator: ToPrimitive of a number /
+  // boolean is NOT a string, so those operands must take the NUMERIC arm —
+  // whose `__any_to_f64` already recovers the honest value from a tag-5
+  // `$BoxedNumber` (#1888 arm; the `$BoxedBoolean` recovery is added in the
+  // same-numbered change below). Genuine strings and objects keep the concat
+  // arm unchanged, and the mixed case (boxed number + real string) already
+  // stringifies correctly via `__any_to_string`'s boxed-extern recovery.
+  //
+  // Gated ONLY on `nativeBoxNumberTypeIdx >= 0` (the #2040 lesson — never gate
+  // on nativeStrings); when unavailable this reproduces the legacy
+  // `tag==5 || tag==6` bytes exactly. Consumer-side only: the boxing site is
+  // deliberately untouched (producer-side re-tagging was the −788/−794 trap).
+  // Uses scratch anyref local 4; emits fresh Instr arrays per call (never
+  // alias `if` arms — the in-place index-shift double-remap hazard).
+  const stringyOperand = (opIdx: number, tagLocal: number): Instr[] => {
+    const tag6Test = (): Instr[] => [
+      { op: "local.get", index: tagLocal } as Instr,
+      { op: "i32.const", value: 6 } as Instr,
+      { op: "i32.eq" } as Instr,
+    ];
+    if (ctx.nativeBoxNumberTypeIdx < 0) {
+      // Legacy shape: tag==5 || tag==6 (byte-identical when no boxed-number
+      // carrier type exists, e.g. host/fast mode builds of this helper).
+      return [
+        { op: "local.get", index: tagLocal } as Instr,
+        { op: "i32.const", value: 5 } as Instr,
+        { op: "i32.eq" } as Instr,
+        ...tag6Test(),
+        { op: "i32.or" } as Instr,
+      ];
+    }
+    // tag==5 → stringy iff field-4 is NOT a boxed number/boolean carrier.
+    const notBoxedPrimitive: Instr[] = [
+      { op: "local.get", index: opIdx } as Instr,
+      { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 4 } as Instr,
+      { op: "any.convert_extern" } as Instr,
+      { op: "local.tee", index: 4 } as Instr,
+      { op: "ref.test", typeIdx: ctx.nativeBoxNumberTypeIdx } as Instr,
+      ...(ctx.nativeBoxBooleanTypeIdx >= 0
+        ? ([
+            { op: "local.get", index: 4 },
+            { op: "ref.test", typeIdx: ctx.nativeBoxBooleanTypeIdx },
+            { op: "i32.or" },
+          ] as Instr[])
+        : []),
+      { op: "i32.eqz" } as Instr,
+    ];
+    return [
+      { op: "local.get", index: tagLocal } as Instr,
+      { op: "i32.const", value: 5 } as Instr,
+      { op: "i32.eq" } as Instr,
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "i32" } },
+        then: notBoxedPrimitive,
+        else: tag6Test(),
+      } as Instr,
+    ];
+  };
+
   addHelper(
     "__any_add",
     [anyRefNull, anyRefNull],
@@ -1286,21 +1384,11 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
       { op: "local.get", index: 1 },
       { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 0 },
       { op: "local.set", index: 3 },
-      // stringy = (tagA==5 || tagA==6 || tagB==5 || tagB==6)
-      { op: "local.get", index: 2 },
-      { op: "i32.const", value: 5 },
-      { op: "i32.eq" },
-      { op: "local.get", index: 2 },
-      { op: "i32.const", value: 6 },
-      { op: "i32.eq" },
-      { op: "i32.or" },
-      { op: "local.get", index: 3 },
-      { op: "i32.const", value: 5 },
-      { op: "i32.eq" },
-      { op: "i32.or" },
-      { op: "local.get", index: 3 },
-      { op: "i32.const", value: 6 },
-      { op: "i32.eq" },
+      // stringy = stringyOperand(a) || stringyOperand(b) — tag 6, or tag 5
+      // whose payload is a genuine string/object (NOT a boxed number/boolean
+      // carrier crossing the open-any boundary — those are numeric, #2966).
+      ...stringyOperand(0, 2),
+      ...stringyOperand(1, 3),
       { op: "i32.or" },
       {
         op: "if",
@@ -1318,6 +1406,7 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
     [
       { name: "tagA", type: { kind: "i32" } },
       { name: "tagB", type: { kind: "i32" } },
+      { name: "recoverAdd", type: { kind: "anyref" } },
     ],
   );
 

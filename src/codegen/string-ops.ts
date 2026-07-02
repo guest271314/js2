@@ -2222,8 +2222,24 @@ export function compileNativeStringMethodCall(
 
   // (#2576) Single indirection for emitting the receiver. Default re-compiles
   // `propAccess.expression`; the guarded `any`-receiver path overrides it.
-  const emitReceiver = (): ValType | null =>
-    receiverOverride ? receiverOverride() : compileExpression(ctx, fctx, propAccess.expression);
+  // (#2934 2b) A statically-string-typed receiver can still COMPILE to
+  // externref — e.g. `String(42).concat(x)`: `number_toString` returns the
+  // native string EXTERNALIZED via `extern.convert_any`. Every method arm
+  // below feeds the receiver to a native helper expecting `(ref null
+  // $AnyString)`, so an uncoerced externref receiver is invalid Wasm
+  // (`call[0] expected (ref null $AnyString), found call of externref`).
+  // Cast it back with the established inverse
+  // (`emitNativeStringRefFromExternref`): in the native-strings world every
+  // string-typed externref wraps a native string struct (there are no host
+  // strings), so `any.convert_extern` + `ref.cast $AnyString` is exact.
+  const emitReceiver = (): ValType | null => {
+    const t = receiverOverride ? receiverOverride() : compileExpression(ctx, fctx, propAccess.expression);
+    if (t && (t.kind === "externref" || t.kind === "ref_extern") && ctx.anyStrTypeIdx >= 0) {
+      emitNativeStringRefFromExternref(ctx, fctx);
+      return nativeStringType(ctx);
+    }
+    return t;
+  };
 
   // Helper: emit a flatten call to convert ref $AnyString → ref $NativeString
   const emitFlatten = () => fctx.body.push({ op: "call", funcIdx: flattenIdx });
