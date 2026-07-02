@@ -19,7 +19,8 @@ import { isVoidType, unwrapPromiseType, isPromiseType } from "../checker/type-ma
 import type { FieldDef, Instr, LocalDef, StructTypeDef, ValType } from "../ir/types.js";
 import { isStandalonePromiseActive } from "./async-scheduler.js"; // (#2867 Gap 1) native-$Promise carrier gate
 import { classMemberFuncKey } from "./class-member-keys.js"; // (#1983) collision-free class-member funcMap keys
-import { definedFuncAt, funcSignatureOf } from "./func-space.js"; // (#1916 S2) positional-read chokepoint
+import { definedFuncAt, funcSignatureOf, mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S2 read chokepoint / S3b stable-regime minting)
+import { inLiveShiftRange } from "../emit/resolve-layout.js"; // (#1916 S3b) manual import-shift must skip stable handles
 import { addStringConstantGlobal } from "./registry/imports.js"; // (#2025)
 import { stringConstantExternrefInstrs } from "./native-strings.js"; // (#2025)
 import { noJsHost } from "./expressions/helpers.js"; // (#2025)
@@ -2528,8 +2529,8 @@ export function compileArrowAsClosure(
   ctx.currentFunc = savedFunc;
 
   // 6. Register the lifted function
-  const liftedFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-  ctx.mod.functions.push({
+  const liftedFuncIdx = mintDefinedFunc(ctx);
+  pushDefinedFunc(ctx, liftedFuncIdx, {
     name: closureName,
     typeIdx: liftedFuncTypeIdx,
     locals: liftedFctx.locals,
@@ -3032,8 +3033,8 @@ export function compileArrowAsCallback(
   ctx.currentFunc = savedFunc;
 
   // 6. Register and export the callback function
-  const cbFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-  ctx.mod.functions.push({
+  const cbFuncIdx = mintDefinedFunc(ctx);
+  pushDefinedFunc(ctx, cbFuncIdx, {
     name: cbName,
     typeIdx: cbTypeIdx,
     locals: cbFctx.locals,
@@ -3286,8 +3287,8 @@ export function compileSyntheticAsyncContinuation(
 
   // 7. Register + export the continuation (the __make_callback host bridge
   //    dispatches by the exported `__cb_${cbId}` name).
-  const cbFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-  ctx.mod.functions.push({
+  const cbFuncIdx = mintDefinedFunc(ctx);
+  pushDefinedFunc(ctx, cbFuncIdx, {
     name: cbName,
     typeIdx: cbTypeIdx,
     locals: cbFctx.locals,
@@ -3649,8 +3650,8 @@ export function emitFuncRefAsClosure(
     }
     trampolineBody.push({ op: "call", funcIdx } as Instr);
 
-    const trampolineFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-    ctx.mod.functions.push({
+    const trampolineFuncIdx = mintDefinedFunc(ctx);
+    pushDefinedFunc(ctx, trampolineFuncIdx, {
       name: trampolineName,
       typeIdx: liftedFuncTypeIdx,
       locals: trampolineLocals,
@@ -3705,8 +3706,8 @@ export function emitFuncRefAsClosure(
   }
   trampolineBody.push({ op: "call", funcIdx } as Instr);
 
-  const trampolineFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-  ctx.mod.functions.push({
+  const trampolineFuncIdx = mintDefinedFunc(ctx);
+  pushDefinedFunc(ctx, trampolineFuncIdx, {
     name: trampolineName,
     typeIdx: liftedFuncTypeIdx,
     locals: [],
@@ -3938,7 +3939,7 @@ export function emitObjectMethodAsClosure(
   const importsBeforeNT = ctx.numImportFuncs;
   ensureNullThisTypeError(ctx, fctx);
   const ntShift = ctx.numImportFuncs - importsBeforeNT;
-  if (ntShift > 0 && methodFuncIdx >= importsBeforeNT) methodFuncIdx += ntShift;
+  if (ntShift > 0 && inLiveShiftRange(methodFuncIdx, importsBeforeNT)) methodFuncIdx += ntShift;
   const trampolineBody: Instr[] = buildTrampolineThisSlot(ctx, objStructTypeIdx, anyTempLocalIdx, methodUsesThis);
   for (let i = 0; i < userParams.length; i++) {
     // Skip closure_self at param 0; user params start at index 1
@@ -3946,8 +3947,8 @@ export function emitObjectMethodAsClosure(
   }
   trampolineBody.push({ op: "call", funcIdx: methodFuncIdx } as Instr);
 
-  const trampolineFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-  ctx.mod.functions.push({
+  const trampolineFuncIdx = mintDefinedFunc(ctx);
+  pushDefinedFunc(ctx, trampolineFuncIdx, {
     name: trampolineName,
     typeIdx: liftedFuncTypeIdx,
     locals: [{ name: "__this_any", type: { kind: "anyref" } }],
@@ -4256,7 +4257,7 @@ export function emitCachedMethodClosureAccess(
     const importsBeforeNT = ctx.numImportFuncs;
     ensureNullThisTypeError(ctx, fctx);
     const ntShift = ctx.numImportFuncs - importsBeforeNT;
-    if (ntShift > 0 && methodFuncIdx >= importsBeforeNT) methodFuncIdx += ntShift;
+    if (ntShift > 0 && inLiveShiftRange(methodFuncIdx, importsBeforeNT)) methodFuncIdx += ntShift;
     const trampolineBody: Instr[] = buildTrampolineThisSlot(
       ctx,
       objStructTypeIdx,
@@ -4267,8 +4268,8 @@ export function emitCachedMethodClosureAccess(
       trampolineBody.push({ op: "local.get", index: i + 1 } as Instr);
     }
     trampolineBody.push({ op: "call", funcIdx: methodFuncIdx } as Instr);
-    trampolineFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-    ctx.mod.functions.push({
+    trampolineFuncIdx = mintDefinedFunc(ctx);
+    pushDefinedFunc(ctx, trampolineFuncIdx, {
       name: trampolineName,
       typeIdx: liftedFuncTypeIdx,
       locals: [{ name: "__this_any", type: { kind: "anyref" } }],
@@ -4393,8 +4394,8 @@ export function emitCachedFuncClosureAccess(
       trampolineBody.push({ op: "local.get", index: i + 1 } as Instr);
     }
     trampolineBody.push({ op: "call", funcIdx } as Instr);
-    trampolineFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-    ctx.mod.functions.push({
+    trampolineFuncIdx = mintDefinedFunc(ctx);
+    pushDefinedFunc(ctx, trampolineFuncIdx, {
       name: trampolineName,
       typeIdx: liftedFuncTypeIdx,
       locals: [],
