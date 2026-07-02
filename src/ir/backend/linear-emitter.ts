@@ -212,4 +212,14 @@ export class LinearEmitter implements BackendEmitter<Instr[]> {
   emitCallRef(): void {
     notImplemented("emitCallRef");
   }
+  // (a5) ref-cell family (#2953) — out of the #1714 vec-proof scope.
+  emitRefCellNew(): void {
+    notImplemented("emitRefCellNew");
+  }
+  emitRefCellGet(): void {
+    notImplemented("emitRefCellGet");
+  }
+  emitRefCellSet(): void {
+    notImplemented("emitRefCellSet");
+  }
 }
