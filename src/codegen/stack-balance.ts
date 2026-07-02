@@ -84,7 +84,14 @@ export type FixupKind =
   | "branch-type-cast" // branch result externref→ref/ref_null via any.convert_extern + ref.cast_null
   | "call-arg-coerce" // call argument coerced to the callee's declared param type
   | "struct-field-coerce" // struct.new field value coerced to the field's declared type
-  | "local-set-coerce"; // local.set/local.tee value coerced to the local's declared type
+  | "local-set-coerce" // local.set/local.tee value coerced to the local's declared type
+  // (#2140) NOT a repair — a detected-but-unbridgeable branch type mismatch.
+  // The pass inserts nothing; the module WILL fail WebAssembly.validate. The
+  // event makes the failure loud and located instead of an opaque validator
+  // offset; hard compile error under JS2WASM_STRICT_BALANCE=error; corpus
+  // baseline pins it at 0. Unconditional-throw promotion is the staged
+  // follow-up (see plan/issues/2140-fixbranchtype-coerce-or-throw.md).
+  | "branch-type-unfixable";
 
 /** A single located fixup the pass applied while repairing emitter output. */
 export interface FixupEvent {
@@ -123,6 +130,7 @@ export function summarizeFixups(events: readonly FixupEvent[]): Record<FixupKind
     "call-arg-coerce": 0,
     "struct-field-coerce": 0,
     "local-set-coerce": 0,
+    "branch-type-unfixable": 0,
   };
   for (const e of events) counts[e.kind]++;
   return counts;
@@ -895,7 +903,15 @@ function fixBranchType(
     const plan = coercionPlan(fromVT, expectedType, { boxNumberIdx, unboxNumberIdx });
     if (plan) {
       body.push(...plan.instrs);
-      recordFixup("branch-type-coerce", `coerced branch result ${produced} → ${expectedType.kind}`); // #1918
+      // (#2140) Propagate the plan's lossiness — the lossy rows (funcref→
+      // externref; any-hierarchy→numeric without an unbox helper) were being
+      // mis-recorded as clean coercions, hiding them from the strict-mode
+      // LOSSY marker and the audit trail.
+      recordFixup(
+        "branch-type-coerce",
+        `coerced branch result ${produced} → ${expectedType.kind}`,
+        plan.lossy === true,
+      ); // #1918
       return 1;
     }
   }
@@ -912,6 +928,33 @@ function fixBranchType(
     return 1;
   }
 
+  // (#2140 note) There is deliberately NO ref/eqref → concrete-ref cast arm
+  // here: `typesCompatible` assumes ref/eqref are compatible with any expected
+  // ref/ref_null (the kind-string inference carries no typeIdx to know
+  // better), so such pairs never reach this function, and `inferLastType`
+  // never yields "anyref" (any.convert_extern is classified "ref"). The
+  // richer per-instruction contexts (call args / local.set), whose
+  // `inferInstrType` DOES read local/global types, get the eqref/anyref
+  // rows from the shared coercionPlan instead.
+
+  // (#2140) Unfixable: the produced kind is KNOWN-incompatible with the block
+  // type and no coercion row / cast arm bridges it (e.g. funcref→f64,
+  // numeric→funcref). Leaving it silently meant the module failed
+  // `WebAssembly.validate` later with an opaque offset-only error. Record the
+  // located event (lossy — the module is about to be invalid): it surfaces in
+  // the per-compile fixup summary, becomes a hard error under
+  // `JS2WASM_STRICT_BALANCE=error`, and is ratcheted at 0 by the corpus gate.
+  // Promotion to an unconditional compile error is the staged follow-up once
+  // the corpus row + a CI test262 delta prove 0 occurrences (`inferLastType`
+  // is heuristic; a mis-inference here is a no-op today but would be a
+  // spurious compile failure under an unconditional throw).
+  recordFixup(
+    "branch-type-unfixable",
+    `branch result ${produced} is incompatible with block type ${expectedType.kind}` +
+      (expectedType.kind === "ref" || expectedType.kind === "ref_null" ? ` #${expectedType.typeIdx}` : "") +
+      ` and no coercion bridges it (module will fail validation)`,
+    true,
+  );
   return 0;
 }
 
@@ -2449,6 +2492,20 @@ export function stackBalance(mod: WasmModule): number {
       if (imp.name === "__box_number") boxNumberIdx = numImports;
       if (imp.name === "__unbox_number") unboxNumberIdx = numImports;
       numImports++;
+    }
+  }
+  // (#2140) In standalone/WASI the box/unbox helpers are DEFINED functions
+  // (Wasm-native UNION helpers, see late-imports.ts), not env imports — the
+  // import-only scan above left them null there, so every coercionPlan
+  // box/unbox row silently degraded to its fall-through (no coerce) or lossy
+  // arm in exactly the lane with no host to absorb the damage. Scan defined
+  // functions too (defined idx = numImports + position; import names win on
+  // the impossible-in-practice duplicate).
+  if (boxNumberIdx === null || unboxNumberIdx === null) {
+    for (let i = 0; i < mod.functions.length; i++) {
+      const name = mod.functions[i]!.name;
+      if (boxNumberIdx === null && name === "__box_number") boxNumberIdx = numImports + i;
+      if (unboxNumberIdx === null && name === "__unbox_number") unboxNumberIdx = numImports + i;
     }
   }
 
