@@ -1,7 +1,9 @@
 ---
 id: 2972
 title: "IR selector accepts string element access with computed index; from-ast throws 'not in slice 12' — 14 test262 CEs under IR-first"
-status: ready
+status: done
+completed: 2026-07-02
+assignee: ttraenkler/dev-2138f
 sprint: current
 created: 2026-07-02
 updated: 2026-07-02
@@ -104,3 +106,46 @@ predicate documenting the element-access family as claim-partial with this
 exact residual. Verify the emitted read against LEGACY's string-index
 emission first (verify-first — #2945's lesson; legacy may route through a
 host import with its own OOB contract).
+
+## Resolution (dev-2138f, 2026-07-02) — option 2a implemented
+
+Key verify-first simplification: for an integer index i with 0 ≤ i <
+s.length, `s[i]` ≡ `s.charAt(i)` exactly — and the IR ALREADY lowers charAt
+on both lanes (`STRING_METHOD_TABLE` / `lowerStringMethodCall` → host
+`string_charAt` import or native `__str_charAt`). So the slice is a proof +
+a delegation, not a new read primitive:
+
+- **`stringIndexProvenBelow`** (`src/ir/capability.ts` — the single-source
+  guard per acceptance criterion 2): non-negative int literal `< len`, or
+  `<expr> & K` / `K & <expr>` with non-negative int32 K < len (ToInt32 ⇒
+  result ∈ [0, K] — the harness shape `hex[(n >> 4) & 0xf]`).
+- **`collectStringLiteralLens`** (`from-ast.ts`): receiver lengths — locals
+  bound exactly once to a string literal and never written anywhere in the
+  function INCLUDING nested-function bodies (stricter than `mutatedLets`,
+  which deliberately skips those). Populated on the outer LowerCtx only.
+- **String-receiver arm in `lowerElementAccess`**: proven → delegate to
+  `lowerStringMethodCall("charAt", …)`; UNPROVEN stays on the demote path —
+  an OOB `s[i]` is `undefined` while charAt is `""`, so claiming an unproven
+  read would be silently wrong (the exact trap the scoping analysis called).
+- **Import materialization**: element-access syntax never mentions
+  `.charAt`, so the legacy method-syntax pre-scan can't see it; a new
+  element-access arm in `unifiedVisitNode` (`declarations.ts`) adds
+  "charAt" to `stringMethodNeeded` when a string-typed receiver is indexed
+  by a non-literal — the existing finalize loop then registers the host
+  import / ensures native helpers up-front (no late-import shift at IR
+  lower time). Over-registration is harmless (eliminateDeadImports).
+
+Verified: the exact harness shape is selector-claimed, IR-compiles with
+ZERO post-claim errors, is SKIPPED under `JS2WASM_IR_FIRST=1`
+(compile-once), and returns bit-correct results (`run(0xAB) === "%AB"`)
+both flag states (`tests/issue-2972.test.ts`, 5 tests: claim + parity +
+unproven-index OOB semantics preserved + proof-predicate unit rows +
+reassigned-receiver invalidation). `check:ir-fallbacks` unchanged.
+
+NOTE (selector `var` gate): in `.ts`-fileName probes the selector rejects
+`var`-declared bodies (`vardecl-var-kind`), so the probe/test uses `const`;
+the real test262 pipeline claimed the `var`-declared harness (proven by the
+Slice-3 post-claim errors), and the from-ast fix is declaration-kind-
+agnostic — the 14 tests should flip back under the next `ir_first`
+measurement dispatch (#2947 lane), which is the acceptance check for the
+flag-on criterion.
