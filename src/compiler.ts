@@ -734,6 +734,10 @@ function buildCodegenOptions(
     // revert. Forwarded to ALL drivers now (#1927); `generateMultiModule`
     // ignores it until #2138 wires the IR overlay into the multi generator.
     experimentalIR: options.experimentalIR !== false,
+    // (#2973) Forward the IR-first opt-out. The eval / new Function host shims
+    // set this so a post-claim IR-first hard error in a sub-compile is not
+    // swallowed by the shim's fallback catch into a silent wrong answer.
+    disableIrFirst: options.disableIrFirst === true,
     // Single-source-only import-preprocessing results (undefined in multi mode).
     // #1927: multi paths do not yet collect node-builtin / fs / jsx imports —
     // they resolve imports through the TS program; closing that gap is a
