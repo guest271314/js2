@@ -349,6 +349,24 @@ is never a moment where one value means two functions.
     machines whose `__sset_*` helpers exposed the `stackBalance`-class
     consumer bug; flipping them risks the same drift. They flip once the
     consumer audit fix lands.
+  - **S3b medium batch D — LANDED (dev-1916b)**: the 15 single-/double-mint
+    producer files — `array-to-primitive`, `builtin-static-globals` (2),
+    `class-to-primitive`, `closed-method-dispatch` (2), `fmod`,
+    `generators-native`, `json-runtime` (2), `math-helpers`, `native-proto`,
+    `expressions/calls`, `expressions/new-super` (2), `expressions/proto-override`,
+    `registry/error-types`, `timsort`, `type-coercion` (19 sites total).
+    Corpus byte-IDENTICAL (stacked on A+B+C). NOTE: `generators-native`
+    (generator state machine, `__gen_*` reserve-then-fill) flipped clean —
+    its helper is not on the `stackBalance` drift path the async
+    `__sset_*` helpers hit, so generators are safe to flip while
+    async-frame/promise-combinators wait for the consumer-audit fix.
+  - **Remaining after batch D**: `index.ts` (~38 non-uniform sites,
+    shifter-adjacent — its own careful PR), plus the deferred
+    `declarations.ts` / `async-frame.ts` / `promise-combinators.ts` (all
+    gated on the `stackBalance` consumer-audit fix). Out of scope for the
+    WasmGC front-end flip: `codegen-linear/*` (converts with the linear
+    backend's own registry), `emit/binary.ts` + `ir/integration.ts` (the
+    resolver/patch surfaces, not producers).
   - Batch discipline (for the next executor): flip whole FILES (a
     producer family), never partial files; `nextFuncIdx`-style local
     helpers redefine in place; multi-mint sibling derivations

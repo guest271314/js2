@@ -31,6 +31,7 @@
  */
 
 import type { Instr, ValType } from "../ir/types.js";
+import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S3b) stable-regime minting
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { getOrCreateFuncRefWrapperTypes } from "./closures.js";
 import { ensureBuiltinFnMetaType } from "./builtin-fn-meta.js";
@@ -455,8 +456,8 @@ export function ensureStandaloneNativeMethodClosure(
     const committedResult = glue.emitMemberBody(ctx, closureFctx, member, kind);
     if (committedResult === null) return null;
 
-    funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-    ctx.mod.functions.push({
+    funcIdx = mintDefinedFunc(ctx);
+    pushDefinedFunc(ctx, funcIdx, {
       name: funcName,
       typeIdx: wrapperTypes.liftedFuncTypeIdx,
       locals: closureFctx.locals,

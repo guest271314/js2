@@ -26,6 +26,7 @@
  *     (try/finally without catch is, as in Phase 1).
  */
 import { ts } from "../ts-api.js";
+import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S3b) stable-regime minting
 import { isBooleanType, isNumberType, isStringType, mapTsTypeToWasm } from "../checker/type-mapper.js";
 import type { FieldDef, Instr, ValType, WasmFunction } from "../ir/types.js";
 import { allocLocal } from "./context/locals.js";
@@ -1809,7 +1810,7 @@ export function ensureNativeGeneratorResumeFunction(ctx: CodegenContext, info: N
   const selfType: ValType = { kind: "ref", typeIdx: info.stateTypeIdx };
   const resultType: ValType = { kind: "ref", typeIdx: info.resultTypeIdx };
   const typeIdx = addFuncType(ctx, [selfType], [resultType], `${fnName}_type`);
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const funcIdx = mintDefinedFunc(ctx);
   info.resumeFuncIdx = funcIdx;
   ctx.funcMap.set(fnName, funcIdx);
 
@@ -1829,7 +1830,7 @@ export function ensureNativeGeneratorResumeFunction(ctx: CodegenContext, info: N
     body: [{ op: "unreachable" } as Instr],
     exported: false,
   };
-  ctx.mod.functions.push(placeholder);
+  pushDefinedFunc(ctx, funcIdx, placeholder);
 
   const resumeFctx: FunctionContext = {
     name: fnName,

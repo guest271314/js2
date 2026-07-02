@@ -8,6 +8,7 @@
  * `$Object` singleton populated only with those supported properties.
  */
 import type { Instr, ValType, WasmFunction } from "../ir/types.js";
+import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S3b) stable-regime minting
 import { ts } from "../ts-api.js";
 import { emitCachedFuncClosureAccess } from "./closures.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
@@ -112,8 +113,8 @@ function ensureArrayIsArrayFunc(ctx: CodegenContext): number {
     }
   }
 
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-  ctx.mod.functions.push({
+  const funcIdx = mintDefinedFunc(ctx);
+  pushDefinedFunc(ctx, funcIdx, {
     name,
     typeIdx,
     locals: [{ name: "any", type: { kind: "anyref" } }],
@@ -132,8 +133,8 @@ function ensureObjectKeysFunc(ctx: CodegenContext): number {
   ensureObjectRuntime(ctx);
   const objectKeysIdx = ctx.funcMap.get("__object_keys")!;
   const typeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "externref" }], "$builtin_Object_keys_type");
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-  ctx.mod.functions.push({
+  const funcIdx = mintDefinedFunc(ctx);
+  pushDefinedFunc(ctx, funcIdx, {
     name,
     typeIdx,
     locals: [],

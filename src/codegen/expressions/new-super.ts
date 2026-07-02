@@ -73,7 +73,7 @@ import { localGlobalIdx } from "../registry/imports.js";
 import { ensureLateImport, flushLateImportShifts } from "./late-imports.js";
 import { emitFnctorProtoGet } from "./fnctor-prototype.js"; // (#2660 S3a) reconstruct `new F()` as $Object
 import { deriveFnctorFields, resolveFnctorSymbol, resolveEnclosingFnctorOwner } from "../fnctor-escape-gate.js"; // (#2660 S3a) canonical fnctor-name key; (#2773 S1) shared field derivation; (#2681/#2686 A1) `new this()` owner
-import { funcSignatureOf } from "../func-space.js"; // (#1916 S2) positional-read chokepoint
+import { funcSignatureOf, mintDefinedFunc, pushDefinedFunc } from "../func-space.js"; // (#1916 S2 read chokepoint / S3b stable-regime minting)
 
 // #2146: resolveEnclosingClassName now lives in shared.ts (imported above).
 
@@ -1150,7 +1150,7 @@ function compileNewFunctionDeclaration(
   const ctorName = `${structName}_new`;
   const ctorResults: ValType[] = [{ kind: "ref", typeIdx: structTypeIdx }];
   const ctorTypeIdx = addFuncType(ctx, ctorParams, ctorResults, `${ctorName}_type`);
-  const ctorFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const ctorFuncIdx = mintDefinedFunc(ctx);
   ctx.funcMap.set(classMemberFuncKey(ctx, ctorName), ctorFuncIdx); // (#1983) collision-free key
 
   const ctorFunc = {
@@ -1160,7 +1160,7 @@ function compileNewFunctionDeclaration(
     body: [] as Instr[],
     exported: false,
   };
-  ctx.mod.functions.push(ctorFunc);
+  pushDefinedFunc(ctx, ctorFuncIdx, ctorFunc);
 
   // Cache the mapping
   ctx.funcConstructorMap.set(funcName, {
@@ -1638,8 +1638,8 @@ function compileNewFunctionExpression(
   ctx.currentFunc = savedFunc;
 
   // 7. Register the lifted function
-  const liftedFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-  ctx.mod.functions.push({
+  const liftedFuncIdx = mintDefinedFunc(ctx);
+  pushDefinedFunc(ctx, liftedFuncIdx, {
     name: closureName,
     typeIdx: liftedFuncTypeIdx,
     locals: liftedFctx.locals,
