@@ -670,4 +670,17 @@ export class BytecodeEmitter implements BackendEmitter<BytecodeSink> {
   emitVecNewFixed(): void {
     throw new Error("BytecodeEmitter: vec primitives not in the #1584 numeric subset — see §2a struct/object family.");
   }
+
+  // ---- (a5) ref-cell family (#2953) — a 1-field mutable struct. Not yet wired
+  // into the VM heap model; a future wiring mirrors the (a2) struct family
+  // (STRUCT_NEW fieldCount=1 / STRUCT_GET|SET fieldIdx=0).
+  emitRefCellNew(): void {
+    throw new Error("BytecodeEmitter: ref-cell ops not yet wired — see §2a struct/object family (STRUCT_NEW).");
+  }
+  emitRefCellGet(): void {
+    throw new Error("BytecodeEmitter: ref-cell ops not yet wired — see §2a struct/object family (STRUCT_GET).");
+  }
+  emitRefCellSet(): void {
+    throw new Error("BytecodeEmitter: ref-cell ops not yet wired — see §2a struct/object family (STRUCT_SET).");
+  }
 }
