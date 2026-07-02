@@ -208,10 +208,28 @@ export function compileNestedFunctionDeclaration(
     ctx.asyncFunctions.add(funcName);
   }
 
-  const sig = ctx.checker.getSignatureFromDeclaration(stmt);
+  // (#2923) A function declaration parsed from an inlined `eval("<const>")`
+  // body lives in a foreign `ts.createSourceFile` with NO checker bindings, so
+  // `getSignatureFromDeclaration` throws (`symbol.escapedName` on an undefined
+  // symbol). Treat that as "no static signature": params already degrade to
+  // externref above (getTypeAtLocation → `any`), and the return type defaults to
+  // externref (dynamic `any`) so a `return <expr>` still yields its value.
+  // (Detected by catch rather than a filename import to avoid an eval-inline ↔
+  // nested-declarations import cycle; a normal declaration always has a symbol,
+  // so the catch only fires for genuinely binding-less foreign nodes.)
+  let sig: ts.Signature | undefined;
+  let foreignNoSignature = false;
+  try {
+    sig = ctx.checker.getSignatureFromDeclaration(stmt);
+  } catch {
+    foreignNoSignature = true;
+  }
   let returnType: ValType | null = null;
   if (isGenerator) {
     // Generator functions return externref (JS Generator object)
+    returnType = { kind: "externref" };
+  } else if (foreignNoSignature) {
+    // Foreign eval-body function: dynamic `any` return (externref).
     returnType = { kind: "externref" };
   } else if (sig) {
     let retType = ctx.checker.getReturnTypeOfSignature(sig);
@@ -1441,9 +1459,22 @@ export function hoistFunctionDeclarations(
       });
       const isGen = stmt.asteriskToken !== undefined;
       const isAsync = stmt.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) ?? false;
-      const sig = ctx.checker.getSignatureFromDeclaration(stmt);
+      // (#2923) Foreign eval-body function declaration → no checker signature
+      // (getSignatureFromDeclaration throws). Default the reserved result type to
+      // externref, matching the identical fallback in
+      // compileNestedFunctionDeclaration so the reserved funcType matches the
+      // compiled body. Multiple foreign func decls hit THIS pre-reserve pass.
+      let sig: ts.Signature | undefined;
+      let foreignNoSig = false;
+      try {
+        sig = ctx.checker.getSignatureFromDeclaration(stmt);
+      } catch {
+        foreignNoSig = true;
+      }
       let resultType: ValType | undefined;
       if (isGen) {
+        resultType = { kind: "externref" };
+      } else if (foreignNoSig) {
         resultType = { kind: "externref" };
       } else if (sig) {
         let rt = ctx.checker.getReturnTypeOfSignature(sig);

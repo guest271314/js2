@@ -5,7 +5,7 @@ status: in-progress
 assignee: ttraenkler/sendev-substrate
 sprint: current
 created: 2026-06-28
-updated: 2026-06-28
+updated: 2026-07-02
 priority: high
 horizon: xl
 feasibility: hard
@@ -785,3 +785,19 @@ either without a cycle).
   validation — senior-dev judgment per type). The mechanical guard insertion at a
   single already-understood site could be a dev task, but the per-type spec
   behavior (TypeError vs fall-through, super-path validity) is senior-dev.
+
+## Landed slices (reconcile 2026-07-02)
+
+Epic stays **in-progress**. Per-slice merge state:
+
+- **S1** (keystone, up-front fnctor struct-type reservation) — LANDED, PR #2234.
+- **S2 + S2b** (dispatch symmetry + `new this()` reconstruct) — LANDED, PR #2247
+  (also fixed the dispatcher funcIdx over-shift).
+- **S3** (array-element struct identity / native-vec-aware dispatch) — LANDED
+  under #2784, PR #2260 (#2784 is `done`).
+- **S4** (#2760 plain-array OOB → `undefined`) — resolved: folded by the IR
+  ElementAccess prove-then-specialize work (#2766, PR #2233); #2760 is `done`.
+- **S5b** (#2770 boolean result branding) — LANDED, PR #2249; #2770 is `done`.
+- **S5a** (#2767/#2768 guarded receiver recovery): #2767 LANDED, PR #2228
+  (`done`). **Remaining:** #2768 per-type safelist expansion/hardening is still
+  `ready` — the open tail of this epic.

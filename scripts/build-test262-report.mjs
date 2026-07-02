@@ -814,6 +814,27 @@ async function main() {
   let oracleVersion;
   let oracleVersionMixed = false;
 
+  // (#2913) Dedup duplicate result rows by `file` BEFORE counting. The merged
+  // JSONL can carry >1 row per test (the poison/flake retry path recording both
+  // the original and the retry, or a shard artifact concatenated twice), and the
+  // counters below run per-record — so a duplicated file double-counts into both
+  // numerator and denominator and, when the two rows disagree (e.g.
+  // compile_error vs fail), makes the headline pass rate non-deterministic.
+  // Keep exactly one row per file using a deterministic WORST-status precedence
+  // (compile_error > fail > timeout/crash > pass > skip), so the report is stable
+  // regardless of retry timing / row order.
+  const STATUS_PRECEDENCE = {
+    compile_error: 6,
+    fail: 5,
+    timeout: 4,
+    crash: 4,
+    pass: 3,
+    skip: 2,
+  };
+  const statusRank = (s) => STATUS_PRECEDENCE[s] ?? 1;
+  const recordsByFile = new Map();
+  let dedupDropped = 0;
+
   const rl = createInterface({
     input: createReadStream(args.input),
     crlfDelay: Infinity,
@@ -830,6 +851,30 @@ async function main() {
         oracleVersion = Math.min(oracleVersion, record.oracle_version);
       }
     }
+    // Dedup rows that carry a `file` key (every test row does). A row without a
+    // file is unexpected here but is passed through uncounted-dedup as its own
+    // key so nothing is silently dropped.
+    const dedupKey = record.file ?? `__nofile_${recordsByFile.size}`;
+    const prior = recordsByFile.get(dedupKey);
+    if (prior === undefined) {
+      recordsByFile.set(dedupKey, record);
+    } else {
+      dedupDropped++;
+      // Worst-status wins; on a tie keep the later row (last-write-wins) for
+      // determinism against a fixed input ordering.
+      if (statusRank(record.status) >= statusRank(prior.status)) {
+        recordsByFile.set(dedupKey, record);
+      }
+    }
+  }
+
+  if (dedupDropped > 0) {
+    console.warn(
+      `[build-test262-report] #2913: dropped ${dedupDropped} duplicate result row(s); counting ${recordsByFile.size} distinct file(s).`,
+    );
+  }
+
+  for (const record of recordsByFile.values()) {
     const status = record.status;
     const scope = record.scope ?? "standard";
     const scopeOfficial = record.scope_official ?? scope !== "proposal";

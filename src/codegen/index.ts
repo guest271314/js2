@@ -52,7 +52,13 @@ import { fillMemberGetDispatch } from "./member-get-dispatch.js";
 import { emitUndefined, ensureGetUndefined, reconcileNativeStrFinalizeShift } from "./expressions/late-imports.js";
 import { fillProtoIteratorDriver } from "./expressions/proto-override.js";
 import { fillAccessorDrivers } from "./accessor-driver.js";
-import { fillApplyClosure, fillExternGetIdxVecArms, fillExternIsArray, fillProxyDispatch } from "./object-runtime.js";
+import {
+  fillApplyClosure,
+  fillBuiltinFnMeta,
+  fillExternGetIdxVecArms,
+  fillExternIsArray,
+  fillProxyDispatch,
+} from "./object-runtime.js";
 import { fillArrayToPrimitive } from "./array-to-primitive.js";
 import { fillClassToPrimitive } from "./class-to-primitive.js";
 import {
@@ -2071,6 +2077,16 @@ export function generateModule(
     // `.length` fix, so `(arr as any)[i]` through the externref boundary reads
     // the element instead of null/0. Standalone only (no-op otherwise).
     fillExternGetIdxVecArms(ctx);
+
+    // (#2896) Fill the reserved builtin-fn metadata natives
+    // (`__builtinfn_get_meta` / `__builtinfn_gopd` / `__builtinfn_delete` /
+    // `__builtinfn_push_ownnames`) now that every builtin closure meta type
+    // (builtin-fn-meta.ts) is registered — the reflective
+    // `Object.getOwnPropertyDescriptor(fn, "name")` / `fn[key]` /
+    // `hasOwnProperty` / `getOwnPropertyNames` reads over a builtin function
+    // value resolve its spec `name`/`length` at runtime, host-free. No-op when
+    // no builtin closure was materialized (standalone only).
+    fillBuiltinFnMeta(ctx);
 
     // (#2358 #10) Fill the reserved `__array_to_primitive_string` body now that
     // `__extern_length`/`__extern_get_idx` (filled just above) and the native
