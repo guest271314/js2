@@ -24,7 +24,7 @@ import { createEmptyModule } from "../ir/types.js";
 import { compileIrPathFunctions, type IrIntegrationError } from "../ir/integration.js";
 import { irVal, type IrType } from "../ir/nodes.js";
 import { buildTypeMap, type LatticeType } from "../ir/propagate.js";
-import { planIrCompilation, type IrFallbackReason } from "../ir/select.js";
+import { planIrCompilation, irClosureSignatureFromFunctionTypeNode, type IrFallbackReason } from "../ir/select.js";
 import { createCodegenContext } from "./context/create-context.js";
 import type { FallbackCounts } from "./fallback-telemetry.js";
 import { buildLeakedHostImportError, scanForLeakedHostImports } from "./host-import-allowlist.js";
@@ -46,6 +46,7 @@ import { scanForNewTarget } from "./new-target.js"; // (#2023)
 import { scanForArrayHoles, ensureHoleType } from "./array-holes.js"; // (#2001 S1)
 import { ensureDynReadHelpers } from "./dyn-read.js"; // (#2580 M0)
 import { ensureNativeIteratorRuntime, fillNativeIteratorUserArms } from "./iterator-native.js";
+import { fillCombinatorToVec } from "./promise-combinators.js"; // (#2922) dynamic combinator-arg drain fill
 import { fillClosedMethodDispatch } from "./closed-method-dispatch.js";
 import { fillMemberSetDispatch, reserveVecFieldMaterializers } from "./member-set-dispatch.js";
 import { fillMemberGetDispatch } from "./member-get-dispatch.js";
@@ -142,6 +143,7 @@ import {
   destructureParamObjectExternref,
 } from "./destructuring-params.js";
 import {
+  emitExceptionRenderExports,
   emitTestRuntimeStringHelpers,
   ensureNativeStringExternBridge,
   ensureNativeStringHelpers,
@@ -682,6 +684,17 @@ function resolvePositionType(
       const ir = objectIrTypeFromTsType(ctx, tsType);
       if (ir) return ir;
       throw new Error(`object TypeNode ${ts.SyntaxKind[node.kind]} could not be lowered to IrType.object`);
+    }
+    // #2859 — function-typed position (`fn: () => number`). Mirrors the
+    // selector's `resolveParamType` FunctionTypeNode arm: the signature is
+    // built by the SAME helper, so the override the lowerer receives compares
+    // `irTypeEquals`-equal to the signature a slice-3 closure literal argument
+    // produces. A claimed function reaching the throw below means selector and
+    // override builder diverged (the standard out-of-sync guard → legacy).
+    if (ts.isFunctionTypeNode(node)) {
+      const signature = irClosureSignatureFromFunctionTypeNode(node);
+      if (signature) return { kind: "closure", signature };
+      throw new Error(`function TypeNode not expressible as an IR closure signature`);
     }
     throw new Error(`unsupported TypeNode kind ${ts.SyntaxKind[node.kind]}`);
   }
@@ -1938,9 +1951,22 @@ export function generateModule(
     }
     fillNativeIteratorUserArms(ctx);
 
+    // (#2922) Rebuild `__combinator_to_vec`'s user-iterable arm with the same
+    // closed-struct dispatchers (identical five-dispatcher condition, so the
+    // combinator drain and the native iterator carrier can never disagree).
+    // No-op unless a dynamic Promise.all/race argument site registered it.
+    fillCombinatorToVec(ctx);
+
     // (#1716) Emit __call_@@toPrimitive(self, hint) for runtime ToPrimitive
     // dispatch of a class's [Symbol.toPrimitive] *method* on opaque structs.
     emitToPrimitiveMethodExport(ctx);
+
+    // (#2962) Emit __exn_render_prepare / __exn_render_char so the test262
+    // harness can render a natively-thrown GC payload ("TypeError: boom")
+    // with zero host imports. No-op unless (standalone || wasi) &&
+    // nativeStrings && the `$exc` tag was registered (i.e. the module can
+    // actually throw).
+    emitExceptionRenderExports(ctx);
 
     // Emit __call_fn_0 export for calling zero-arg closures from JS (#851)
     emitClosureCallExport(ctx);
@@ -6611,6 +6637,13 @@ export function generateMultiModule(
     // (#1716) Emit __call_@@toPrimitive(self, hint) for runtime ToPrimitive
     // dispatch of a class's [Symbol.toPrimitive] *method* on opaque structs.
     emitToPrimitiveMethodExport(ctx);
+
+    // (#2962) Emit __exn_render_prepare / __exn_render_char so the test262
+    // harness can render a natively-thrown GC payload ("TypeError: boom")
+    // with zero host imports. No-op unless (standalone || wasi) &&
+    // nativeStrings && the `$exc` tag was registered (i.e. the module can
+    // actually throw).
+    emitExceptionRenderExports(ctx);
 
     // #1326c Phase 1C-A — export __drain_microtasks BEFORE WASI _start so the
     // _start wrapper (which appends a drain call) can find its funcIdx.
