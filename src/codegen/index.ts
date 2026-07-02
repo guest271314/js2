@@ -26,6 +26,7 @@ import { irVal, type IrType } from "../ir/nodes.js";
 import { buildTypeMap, type LatticeType } from "../ir/propagate.js";
 import { planIrCompilation, type IrFallbackReason } from "../ir/select.js";
 import { createCodegenContext } from "./context/create-context.js";
+import { collectModuleTopLevelNames, irFirstBodyReadsHostNode } from "./ir-first-gate.js";
 import type { FallbackCounts } from "./fallback-telemetry.js";
 import { buildLeakedHostImportError, scanForLeakedHostImports } from "./host-import-allowlist.js";
 import { reportError, reportErrorNoNode } from "./context/errors.js";
@@ -1122,6 +1123,13 @@ interface IrOverlayPlan {
  *      sufficient: only the function's own IR success is load-bearing for
  *      its slot, and a callee that is claimed-but-not-skipped still occupies
  *      its pre-allocated slot with a working body either way.
+ *   4. Its body does not read a HOST node (property/element access or bare
+ *      call rooted at an identifier that is neither function-local nor a
+ *      module top-level binding) — see `irFirstBodyReadsHostNode` (#2138
+ *      Trap 4 / #2856 sequencing). A no-op today (the selector still rejects
+ *      host-global receivers), load-bearing the moment #2856's extern-in-IR
+ *      selector arm lands: host-node functions stay compile-twice until that
+ *      lowering is proven, keeping the flag-on measurement clean.
  *
  * Class members are NEVER skipped in this slice (their slot pre-allocation
  * lives in `class-bodies.ts` and carries a typeIdx parity contract with
@@ -1136,14 +1144,19 @@ interface IrOverlayPlan {
  * placeholder must never ship) — surfacing exactly the selector↔builder
  * divergences this investigation exists to find (#2135).
  */
-function computeIrFirstSkipSet(plan: IrOverlayPlan): ReadonlySet<string> {
+function computeIrFirstSkipSet(plan: IrOverlayPlan, sourceFile: ts.SourceFile): ReadonlySet<string> {
   const skip = new Set<string>();
   const funcs = plan.safeSelection.funcs;
   if (funcs.size === 0) return skip;
   const edges = plan.selection.localCallees;
+  // Gate 4 (#2138 Trap 4, coordinated with the extern-in-IR plan in #2856):
+  // module-level user bindings, computed once — receivers/callees rooted at
+  // these are user code, never host globals.
+  const moduleNames = collectModuleTopLevelNames(sourceFile);
   for (const name of funcs) {
     const fn = plan.declByName.get(name);
     if (!fn || fn.asteriskToken) continue; // gate 2 — generators
+    if (irFirstBodyReadsHostNode(fn, moduleNames)) continue; // gate 4 — host nodes
     if (!edges) continue; // no edge info (defensive) — stay conservative
     const callees = edges.get(name);
     let closed = true;
@@ -1677,7 +1690,7 @@ export function generateModule(
     let irSkipBodies: ReadonlySet<string> | undefined;
     if (irFirst) {
       irPlan = planIrOverlay(ctx, ast);
-      irSkipBodies = computeIrFirstSkipSet(irPlan);
+      irSkipBodies = computeIrFirstSkipSet(irPlan, ast.sourceFile);
     }
 
     // Third pass: compile function bodies
