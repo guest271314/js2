@@ -439,7 +439,7 @@ export function ensureLateImport(
   refuseStandaloneToPrimitive(ctx, name);
   // Record importsBefore on the FIRST deferred addition in this batch
   if (ctx.pendingLateImportShift === null) {
-    // (#2930) Settle any un-reconciled RAW-import drift BEFORE opening a
+    // (#2936) Settle any un-reconciled RAW-import drift BEFORE opening a
     // deferred batch. Raw `addImport` additions (the finalize regime — e.g.
     // `__make_callback` in finalizeUnifiedCollector) leave every defined-func
     // reference baked under `nativeStrHelperImportBase` stale-low, with the
@@ -451,7 +451,7 @@ export function ensureLateImport(
     // index 0) — and (b) re-bases `nativeStrHelperImportBase` (#1903),
     // permanently CANCELLING the pending raw repair. The baked call then
     // resolves to a host import (`__str_flatten call[1] expected externref,
-    // found i32` — the #2930 invalid-module blocker for #2933's no-yield native
+    // found i32` — the #2936 invalid-module blocker for #2933's no-yield native
     // generators). Whether it fired depended on whether an interleaved pass like
     // addUnionImportsAsNativeFuncs happened to run the reconcile in between —
     // on main the hole is hit by a native-CANDIDATE generator that captures an

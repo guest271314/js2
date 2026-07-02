@@ -1,55 +1,79 @@
-// #2930 — late-import funcIdx-shift desync: a raw (finalize-regime) host
-// import (`env.__make_callback`) followed by a deferred late-import batch
-// (`addGeneratorImports`'s `__gen_*` suite) corrupted the native-string
-// helpers' baked sibling calls: the batch flush only shifted refs >=
-// importsBefore AND re-based `nativeStrHelperImportBase`, permanently
-// cancelling the pending raw-import repair. `__str_flatten`'s baked
-// `call __str_copy_tree` (index 0) then resolved to import #0
-// (`__make_callback(i32, externref)`), producing an invalid module:
-//   `__str_flatten call[1] expected type externref, found i32`.
-//
-// The trigger on main: `--target standalone` + native strings + an arrow
-// (raw `__make_callback`) + a native-CANDIDATE generator that CAPTURES an
-// outer local — candidate ⇒ the generator decl skips the `unionFound`
-// trigger (so no interleaved union-finalize reconcile), capture ⇒
-// `sourceNeedsGeneratorHostImports` still pulls the host gen-suite batch
-// right after the raw import. This is the blocker class for #2933's
-// no-yield native generators (~250-350 test262 flips), where the same
-// window opens for every no-yield dstr-binding test.
-import { describe, expect, it } from "vitest";
-import { compile } from "../src/index.js";
+import { describe, it, expect } from "vitest";
+import { compileMulti } from "../src/index.js";
+import { buildImports } from "../src/runtime.js";
 
-const SRC = `
-const greet = (n: string): string => "hi " + n;
-export function test(): string {
-  let n = 1;
-  function* g() { yield n; }
-  void g();
-  return greet("x");
+// #2930 — an import binding whose LOCAL name differs from the imported symbol's
+// declaration name must resolve to the imported target (not the graceful-null
+// default). Uses `.ts` fixtures so the alias resolution is isolated from #2932
+// (`.js` module-dependency compilation) and #2931 (live function bindings).
+async function runTest(files: Record<string, string>, entry = "./test.ts"): Promise<number> {
+  const result = await compileMulti(files, entry, { skipSemanticDiagnostics: true });
+  expect(result.success).toBe(true);
+  expect(result.binary.length).toBeGreaterThan(0);
+  const importObj = buildImports(result.imports, undefined, result.stringPool);
+  const { instance } = await WebAssembly.instantiate(result.binary, importObj as any);
+  if (typeof (importObj as any).setExports === "function") {
+    (importObj as any).setExports(instance.exports);
+  }
+  const testFn = (instance.exports as any).test;
+  expect(typeof testFn).toBe("function");
+  return testFn();
 }
-`;
 
-describe("issue #2930 — raw-import + deferred-batch shift-regime mix", () => {
-  it("standalone module with arrow + outer-capturing candidate generator validates", async () => {
-    const r = await compile(SRC, {
-      fileName: "issue-2930.ts",
-      target: "standalone",
-      skipSemanticDiagnostics: true,
+describe("#2930 — import-alias name mismatch resolution", () => {
+  it("default import with a differing local name resolves to the default export (call)", async () => {
+    const ret = await runTest({
+      "./test.ts": `import val from "./h.ts"; export function test(): number { return val(); }`,
+      "./h.ts": `export default function fn(){ return 7; }`,
     });
-    expect(r.success).toBe(true);
-    expect(r.binary).toBeDefined();
-    // Pre-fix this produced an invalid module (`__str_flatten call[1] expected
-    // externref, found i32`) — validation is the assertion, not instantiation
-    // (the module intentionally still carries env.__gen_* host imports).
-    expect(WebAssembly.validate(r.binary!)).toBe(true);
+    expect(ret).toBe(7);
   });
 
-  it("gc/host lane compiles and validates unchanged", async () => {
-    const r = await compile(SRC, {
-      fileName: "issue-2930.ts",
-      skipSemanticDiagnostics: true,
+  it("default import whose local name matches the declaration still works (no regression)", async () => {
+    const ret = await runTest({
+      "./test.ts": `import fn from "./h.ts"; export function test(): number { return fn(); }`,
+      "./h.ts": `export default function fn(){ return 7; }`,
     });
-    expect(r.success).toBe(true);
-    expect(WebAssembly.validate(r.binary!)).toBe(true);
+    expect(ret).toBe(7);
+  });
+
+  it("renamed named import ({ add as plus }) resolves to the exported function", async () => {
+    const ret = await runTest({
+      "./test.ts": `import { add as plus } from "./h.ts"; export function test(): number { return plus(1, 2); }`,
+      "./h.ts": `export function add(a: number, b: number){ return a + b; }`,
+    });
+    expect(ret).toBe(3);
+  });
+
+  it("plain named import still works (no regression)", async () => {
+    const ret = await runTest({
+      "./test.ts": `import { add } from "./h.ts"; export function test(): number { return add(1, 2); }`,
+      "./h.ts": `export function add(a: number, b: number){ return a + b; }`,
+    });
+    expect(ret).toBe(3);
+  });
+
+  it("export { g as default } resolves through the default import", async () => {
+    const ret = await runTest({
+      "./test.ts": `import v from "./h.ts"; export function test(): number { return v(); }`,
+      "./h.ts": `function g(){ return 5; } export { g as default };`,
+    });
+    expect(ret).toBe(5);
+  });
+
+  it("anonymous default function resolves through the default import", async () => {
+    const ret = await runTest({
+      "./test.ts": `import val from "./h.ts"; export function test(): number { return val(); }`,
+      "./h.ts": `export default function(){ return 9; }`,
+    });
+    expect(ret).toBe(9);
+  });
+
+  it("a differing-name default import read as a value is the callable target", async () => {
+    const ret = await runTest({
+      "./test.ts": `import val from "./h.ts"; export function test(): number { const x: any = val; return x(); }`,
+      "./h.ts": `export default function fn(){ return 7; }`,
+    });
+    expect(ret).toBe(7);
   });
 });
