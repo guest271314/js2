@@ -27,7 +27,11 @@ import { irVal, type IrType } from "../ir/nodes.js";
 import { buildTypeMap, type LatticeType } from "../ir/propagate.js";
 import { planIrCompilation, irClosureSignatureFromFunctionTypeNode, type IrFallbackReason } from "../ir/select.js";
 import { createCodegenContext } from "./context/create-context.js";
-import { collectModuleTopLevelNames, irFirstBodyReadsHostNode } from "./ir-first-gate.js";
+import {
+  collectModuleTopLevelNames,
+  irFirstBodyReadsHostNode,
+  irFirstBodyReadsStringElement,
+} from "./ir-first-gate.js";
 import type { FallbackCounts } from "./fallback-telemetry.js";
 import { buildLeakedHostImportError, scanForLeakedHostImports } from "./host-import-allowlist.js";
 import { reportError, reportErrorNoNode } from "./context/errors.js";
@@ -1172,6 +1176,7 @@ function computeIrFirstSkipSet(plan: IrOverlayPlan, sourceFile: ts.SourceFile): 
     const fn = plan.declByName.get(name);
     if (!fn || fn.asteriskToken) continue; // gate 2 — generators
     if (irFirstBodyReadsHostNode(fn, moduleNames)) continue; // gate 4 — host nodes
+    if (irFirstBodyReadsStringElement(fn)) continue; // gate 5 — string element read (#2972)
     if (!edges) continue; // no edge info (defensive) — stay conservative
     const callees = edges.get(name);
     let closed = true;
