@@ -3636,6 +3636,13 @@ export function classifyError(errorMsg: string | undefined): string | undefined 
   // Assertion failures (returned N patterns)
   if (/^returned -1\b/.test(errorMsg)) return "exception_in_test";
   if (/^returned \d+/.test(errorMsg)) return "assertion_fail";
+  // (#2962) A thrown Test262Error IS an assertion failure by definition. The
+  // standalone exception renderer (#2962) surfaces these as
+  // "Test262Error: <assert text>" — before it, such failures were the opaque
+  // #2870 label and fell to "other". Host-lane records are unaffected: there
+  // the payload is a real JS Error and the recorded message is `.message`
+  // WITHOUT the constructor-name prefix.
+  if (/^Test262Error\b/.test(errorMsg)) return "assertion_fail";
 
   // Wasm compile/validation errors (from instantiation)
   if (/Compiling function|No dependency provided|not a function/i.test(errorMsg)) return "wasm_compile";
