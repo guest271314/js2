@@ -11,8 +11,8 @@ area: codegen
 language_feature: closures, dynamic-dispatch, typed-arrays, test262-harness
 goal: host-independence
 assignee: ttraenkler/dev-callback
-related: [2903, 2879, 2075]
-blocked_on: "dynamic dispatch of `fn(...)` on an any-typed closure param must tolerate arity mismatch + coerce arg type-kinds (calls-closures.ts) — otherwise removing the import yields DISHONEST vacuous host-free passes"
+related: [2939, 2903, 2879, 2075]
+blocked_on: "#2939 (formerly #2923; arity half landed via PR #2441): dynamic dispatch of `fn(...)` on an any-typed closure param must tolerate arity mismatch + coerce arg type-kinds (calls-closures.ts) — otherwise removing the import yields DISHONEST vacuous host-free passes"
 created: 2026-07-02
 updated: 2026-07-02
 origin: "2026-07-02 __make_callback sole-leak-front measurement (dev-callback). origin/main @ 4d5287afc, target standalone, merged report run 28491700781."
@@ -35,13 +35,13 @@ the missing runner shim removes the import, but the bodies **stay vacuous** — 
 compiler's dynamic dispatch of a closure held in an `any`-typed parameter
 (`fn(ctor, factory)` inside the shim) only invokes the closure when the call
 arg-count **and** arg type-kinds exactly match the callback's declared params.
-So a shim-only change converts an *honestly-flagged* leaky-pass into a
+So a shim-only change converts an _honestly-flagged_ leaky-pass into a
 **dishonest clean (host-free) vacuous pass** — metric goes up but tests nothing.
 **Genuine-flip yield with a bounded fix = 0**, below the 200 build-gate →
 **blocked**, pending the dynamic-dispatch fix below.
 
 The original import-gate hypothesis (#2405 pattern) is disproven: the import is
-*referenced* (`WebAssembly.instantiate(binary, {})` rejects `Import #0 "env"`),
+_referenced_ (`WebAssembly.instantiate(binary, {})` rejects `Import #0 "env"`),
 consistent with merged research #2903.
 
 ## Measurement (origin/main @ 4d5287afc, `target: standalone`, run 28491700781)
@@ -58,6 +58,7 @@ consistent with merged research #2903.
 
 Live trace (`TypedArray/prototype/every/BigInt/callbackfn-returns-abrupt.js`,
 standalone) shows the two `__make_callback` emissions are:
+
 - the `function(TA, makeCtorArg){…}` **wrapper** → `compileArrowAsCallback` from
   `src/codegen/expressions/calls.ts:13393` ("graceful fallback for unknown
   functions": `testWithBigIntTypedArrayConstructors` is unresolved in `funcMap`);
@@ -69,13 +70,14 @@ remove **zero** imports.
 ### Why the wrapper is unresolved (runner shim gap)
 
 `tests/test262-runner.ts` shims `testWithTypedArrayConstructors` but:
+
 1. the gate `needsTestTypedArray` tested `/testWithTypedArrayConstructors/`,
    which does **not** match `testWith`**`BigInt`**`TypedArrayConstructors`;
 2. no `testWithBigIntTypedArrayConstructors` shim existed;
 3. the shim passed only 1 arg (`fn(ctor)`), so tests declaring
    `function(TA, makeCtorArg)` got `makeCtorArg === undefined`.
-A prototype shim (BigInt wrapper + a passthrough `makeCtorArg`, fixed regex)
-removes the import and instantiates **host-free** — confirmed on samples.
+   A prototype shim (BigInt wrapper + a passthrough `makeCtorArg`, fixed regex)
+   removes the import and instantiates **host-free** — confirmed on samples.
 
 ### But it stays VACUOUS — the real blocker
 
@@ -87,18 +89,18 @@ dynamic dispatch of `fn(...)` where `fn` is an `any`-typed param
 L688 `if (info.paramTypes.length !== sigParamCount) continue;` + the per-param
 kind check L693–698):
 
-| call | callback params | invoked? |
-|------|-----------------|----------|
-| `fn(x)` | `(TA)` | YES |
-| `fn(x, y:number)` | `(TA, m)` | YES |
-| `fn(x)` | `(TA, m)` | NO (arity) |
-| `fn(x, y)` | `(TA)` | NO (arity) |
+| call                   | callback params     | invoked?                                |
+| ---------------------- | ------------------- | --------------------------------------- |
+| `fn(x)`                | `(TA)`              | YES                                     |
+| `fn(x, y:number)`      | `(TA, m)`           | YES                                     |
+| `fn(x)`                | `(TA, m)`           | NO (arity)                              |
+| `fn(x, y)`             | `(TA)`              | NO (arity)                              |
 | `fn(ctor[i], namedFn)` | `(TA, makeCtorArg)` | NO (arg type-kinds != externref params) |
 
 Real 2-param BigInt tests: 25/25 sampled stay **vacuous** with the shim (the
 shim passes a constructor value + a funcref, whose kinds don't match the
 callback's `any`/externref params -> dispatch skips). So **genuine-flip yield with
-shim alone = 0**, and shipping it would be *harmful* (dishonest host-free
+shim alone = 0**, and shipping it would be _harmful_ (dishonest host-free
 vacuous passes).
 
 ## The real fix (2 parts) — gated, not built
@@ -112,7 +114,7 @@ vacuous passes).
    matched closure under **JS arity semantics** (pad missing args with
    `undefined`, drop extras) and **coerce args to the closure's param kinds**
    instead of requiring exact arg-count/type-kind match. This is a hot, fragile
-   core-dispatch path — scope/verify carefully; it is a *general* improvement
+   core-dispatch path — scope/verify carefully; it is a _general_ improvement
    (any dynamic `fn(...)` with arity/type mismatch), not TypedArray-specific.
 3. Only then does genuine PASS depend on the underlying BigInt
    TypedArray/detached-buffer/species semantics per test — unmeasured, likely
@@ -123,7 +125,7 @@ vacuous passes).
 
 "Removing the import can only move the honest metric up" holds **only if the
 body actually executes**. With the current compiler it does not — the shim
-alone produces host-free *vacuous* passes, which is a **dishonest** metric gain.
+alone produces host-free _vacuous_ passes, which is a **dishonest** metric gain.
 Metric-safety is contingent on part (2) landing.
 
 ## Status

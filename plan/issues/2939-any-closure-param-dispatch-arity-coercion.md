@@ -1,5 +1,5 @@
 ---
-id: 2923
+id: 2939
 title: "codegen: dynamic dispatch of an any-typed closure param (fn(...)) must honor JS arity semantics + coerce arg kinds (blocks #2937, unblocks 468+ BigInt tests)"
 status: ready
 sprint: current
@@ -17,7 +17,15 @@ updated: 2026-07-02
 origin: "2026-07-02 spun out of #2937 yield-gate analysis (dev-callback). origin/main @ 4d5287afc."
 ---
 
-# #2923 — dynamic `fn(...)` on an any-typed closure param: arity + kind tolerance
+# #2939 — dynamic `fn(...)` on an any-typed closure param: arity + kind tolerance
+
+> **Provenance / id history**: Formerly #2923; merged PR #2441 (the
+> implementation of THIS issue) cites #2923 in its title — at merge time that
+> id referred to this dispatch-arity issue; the id was subsequently taken on
+> main by the eval compile-away issue
+> (`plan/issues/2923-eval-constant-string-compile-away-broaden.md`), so this
+> file was re-id'd to #2939 (allocated via `claim-issue.mjs --allocate`,
+> tech-lead decision 2026-07-02).
 
 ## Problem
 
@@ -34,37 +42,42 @@ This is the blocker under #2937: the test262 `testWith*TypedArrayConstructors`
 harness wrapper calls `fn(ctor, makeCtorArg)`, but the callback declares
 `function(TA)` (1 param) or its params are `any`/externref while the shim
 passes a constructor value + a funcref — either way the kinds/arity don't match
-and the whole test body is dead (a *vacuous* pass). Fixing this unblocks
+and the whole test body is dead (a _vacuous_ pass). Fixing this unblocks
 **468+ BigInt TypedArray tests** and is a **general** correctness fix beyond the
 harness class.
 
 ## Isolated repro (standalone; `.tmp` probes)
 
 ```ts
-function __ta_passthrough(x: any): any { return x; }
+function __ta_passthrough(x: any): any {
+  return x;
+}
 function testWithBigIntTypedArrayConstructors(fn: any): void {
   const constructors = [BigInt64Array, BigUint64Array];
   for (let i = 0; i < constructors.length; i++) {
-    fn(constructors[i], __ta_passthrough);   // <-- call SILENTLY DROPPED
+    fn(constructors[i], __ta_passthrough); // <-- call SILENTLY DROPPED
   }
 }
-testWithBigIntTypedArrayConstructors(function (TA: any) { log(999); });
+testWithBigIntTypedArrayConstructors(function (TA: any) {
+  log(999);
+});
 // log(999) never fires -> body vacuous
 ```
 
 Truth table (call → callback params → invoked?):
 
-| call | callback params | invoked? |
-|------|-----------------|----------|
-| `fn(x)` | `(TA)` | YES |
-| `fn(x, y:number)` | `(TA, m)` | YES |
-| `fn(x)` | `(TA, m)` | **NO** (arity: fewer args than params) |
-| `fn(x, y)` | `(TA)` | **NO** (arity: more args than params) |
+| call                   | callback params     | invoked?                               |
+| ---------------------- | ------------------- | -------------------------------------- |
+| `fn(x)`                | `(TA)`              | YES                                    |
+| `fn(x, y:number)`      | `(TA, m)`           | YES                                    |
+| `fn(x)`                | `(TA, m)`           | **NO** (arity: fewer args than params) |
+| `fn(x, y)`             | `(TA)`              | **NO** (arity: more args than params)  |
 | `fn(ctor[i], namedFn)` | `(TA, makeCtorArg)` | **NO** (arg kinds != externref params) |
 
 ## Exact sites
 
 `src/codegen/expressions/calls-closures.ts`:
+
 - **L688** `if (info.paramTypes.length !== sigParamCount) continue;` — the
   exact-arity gate that skips a matching closure whose declared param count ≠
   the call-site arg count.
