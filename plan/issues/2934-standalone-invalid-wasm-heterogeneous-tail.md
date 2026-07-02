@@ -84,13 +84,40 @@ not one — triaged 2026-07-02:
      SHA over plain-array/string/entries for-of). Tests:
      `tests/issue-2934-packed-forof-valtype.test.ts` (12 cases incl. signedness
      semantics: Int8 −56, Uint8 200, Uint16 40000, Int16 −30000).
-- [ ] **(1c) `TypedArray.prototype.set` / `Uint8Array.toBase64`** — the
-      `array.set[2] expected i32, found array.get of externref` / packed-`array.get`
-      errors here are a DISTINCT **DCE type-index remap** (`project_type_index_shift_
-and_deadelim`): the pre-encode module has NO packed plain-`array.get`, so a
-      post-codegen dead-type-elimination / dedup pass mis-remaps an `array.get`
-      typeIdx onto a packed array. Needs a `dead-elimination.ts` audit — harder,
-      likely warrants an architect spec.
+- [x] **(1c) `TypedArray.prototype.set` / `Uint8Array.toBase64` packed-element
+      coercion** — DONE (dev-2934f, slice 5). **The DCE-remap hypothesis was
+      WRONG**: instrumented `eliminateDeadImports` entry/exit — the bad
+      instructions exist verbatim at DCE-entry (and `remapTypeIdxInBody` already
+      carries the #1302/#2564 double-remap guards). The real mechanisms were
+      three packed-element coercion gaps:
+  1. `coerceType` (`type-coercion.ts`) normalized packed i8/i16 kinds ONLY for
+     the numeric short-circuit pairs; every OTHER arm tests the raw
+     `from.kind`/`to.kind`, so `i8 → externref` matched NO arm → lossy
+     drop+null fallback (silent data loss), and `externref → i8` emitted NO
+     unbox → un-coerced externref reached the packed `array.set`
+     (`array.set[2] expected i32, found array.get of externref`). Fix: entry
+     now rewrites the packed side(s) to the true stack kind (i32) and FALLS
+     THROUGH to the real box/unbox arms. Packed elements are never
+     boolean/symbol/bigint-branded, so a bare i32 is the exact rewrite.
+  2. `emitVecToVecBody` (`type-coercion.ts`) read a packed source vec with a
+     plain `array.get` (`Array type N has packed type i8`) — same class as
+     (1)/(1b); now `elemGetOp` + widened-i32 coercion source.
+  3. The `new TypedArray(arrayLike)` copy loop (`expressions/new-super.ts`)
+     had an element-conversion matrix that only knew f64↔int — an externref
+     (any[]) source element (`new Uint8Array([102])` where the literal
+     compiled to an externref-elem vec) flowed raw into the packed
+     `array.set` (the `toBase64`/`__cb_0` signature). Now unboxes (ToNumber)
+     - truncates for integer storage; width truncation on packed store is
+       free.
+       Verified: 3/3 named repros standalone INVALID → valid (now runtime-fail
+       on separate pre-existing semantics gaps — resizable-arraybuffer log
+       order, toBase64 core, sab — same acceptance class as 2a); 100-file
+       `TypedArray/prototype/set` + base64 sweep 78→90 VALID (+12, 0 new
+       invalid; 10 residual CEs are the unrelated `__get_builtin` class);
+       byte-identical on host mode and non-packed standalone paths; value
+       semantics probed across all conversion directions (u8←literal,
+       i8←200→−56, f64←u8, u8←i16 truncation, u8←fractional). Tests:
+       `tests/issue-2934-packed-elem-coercion-1c.test.ts` (8 cases).
 - [ ] **(1d) simple `for (const v of u.values())`** — demotes to the IR path
       (`ir/from-ast: unknown class`), a separate IR-adoption gap. NOTE: after (1b)
       the legacy-path fallback now compiles these shapes correctly (valid Wasm,
@@ -128,9 +155,9 @@ externref, found struct.new of type (ref …)` invalid Wasm. Fix: coerce the
      arm (concat/charAt/indexOf/slice/…) in one place.
   2. `regObj.exec(str).toString()` — static receiver type resolves externref,
      but standalone lowers exec natively to a capture-array vec `(ref null
-   $Vec)`; the generic `.toString()` fallback (`expressions/calls.ts`) passed
+$Vec)`; the generic `.toString()` fallback (`expressions/calls.ts`) passed
      the raw ref to `__extern_toString(externref)` → `call[0] expected
-   externref, found if of (ref null 98)`. Fix: coerce the COMPILED type
+externref, found if of (ref null 98)`. Fix: coerce the COMPILED type
      (mirrors the 2a fix). Runtime ToString-of-match-array semantics is a
      separate pre-existing gap (2a precedent) — this slice is validity.
      Verified: 120-file concat/exec/toString sweep 115→117 VALID (+2, 0 new
@@ -145,9 +172,46 @@ externref, found struct.new of type (ref …)` invalid Wasm. Fix: coerce the
      mismatches the boxed-any (externref) element rep of `new Array(N)`; needs a
      standalone-native callback-bridge design (host-import leak + IsCallable +
      hole semantics), likely an architect spec — split to its own slice.
-- [ ] **(3) `__closure_5` `not enough arguments on the stack`** — the one
-      funcIdx-shift-shaped failure (for-await async path); may share the #2918
-      late-import class.
+- [x] **(3a) object-toString string-coercion stack-arity family** — DONE
+      (dev-2934f, slice 6). The `concat/S15.5.4.6_A4_T2` "not enough arguments
+      on the stack" was three mechanisms:
+  1. **`ensureNativeStringExternBridge` late-import over-shift**
+     (`native-strings.ts`): the bridge queued its 3 late imports and baked
+     their indices into helper bodies WITHOUT closing the deferred batch; the
+     eventual `flushLateImportShifts` bumps every `funcIdx >= importsBefore`
+     and cannot distinguish freshly-baked (final) import refs from stale
+     defined-func refs — `__str_to_extern`'s `call __str_from_mem` (arity 2)
+     landed on `__str_copy_tree` (arity 3). Fix: flush the batch after
+     registering, BEFORE baking (gated on actual registration — pure lookups
+     don't force-flush an outer batch). **This also fixes a LIVE main
+     regression**: plain `console.log("ab".concat("cd"))` standalone became
+     INVALID when #2473 (slice 2b) made the bridge emission reachable for
+     that shape — bisected to the a3576e7 merge; the shape is invisible to
+     the PR gates (test262 wrapping avoids `console_log_string`; the
+     standalone floor lacks a console.log-string shape → gate blind spot,
+     flagged to the lead).
+  2. **`normaliseToString` no-result arm** (`type-coercion.ts`
+     `tryStructToString`): a dispatched toString whose Wasm func type has NO
+     result (always-throws/never, or void) pushed nothing then fed
+     `$__any_to_string` (0 operands for a 1-arg call). Per §7.1.1
+     OrdinaryToPrimitive that path ends in TypeError — emit the throw (stack
+     goes polymorphic; dead code after an always-throwing call).
+  3. **Reflective receiver ToString** (`string-ops.ts` emitReceiver):
+     `String.prototype.concat.call(obj, …)` compiles the receiver to a
+     concrete object struct ref; §22.1.3.x requires ToString(this) — now
+     dispatched via `tryStructToString` (which handles the throwing case
+     after fix 2). A4_T2 flips standalone INVALID → **pass** (it asserts the
+     receiver's "intostring" throw).
+     Verified: 120-file concat/exec/toString sweep 117→118 VALID, 0 new
+     invalid; throwing-toString family (plus-concat/template/concat-method/
+     reflective-call) all valid + right exception semantics; 71/71 string
+     equivalence tests. Tests: `tests/issue-2934-tostring-dispatch-s3.test.ts`.
+- [ ] **(3b) `__closure_5` `not enough arguments on the stack for drop`** —
+      the for-await async CPS path (`AsyncFromSyncIteratorPrototype/next/
+for-await-next-rejected-promise-close.js`) — NOT the bridge/toString class
+      (still invalid after slice 6); a drop-balance bug in the async closure
+      lowering. The last open invalid-Wasm slice besides the `__closure_*`
+      host-bridge item above.
 
 ## Approach
 
