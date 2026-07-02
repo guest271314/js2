@@ -16,7 +16,7 @@ import { fileURLToPath } from "node:url";
 import { compile, createIncrementalCompiler } from "./compiler-bundle.mjs";
 import { buildImports } from "./runtime-bundle.mjs";
 import { poisonRecycleReason } from "./test262-poison-error.mjs";
-import { negativeCompileErrorMatches } from "./negative-verdict.mjs";
+import { negativeCompileErrorMatches, negativeCompileSucceededVerdict } from "./negative-verdict.mjs";
 
 // ── Bundle hash (#1521) ────────────────────────────────────────────────
 // Each cache entry written below carries a `bundle_hash` field. When the
@@ -1233,35 +1233,20 @@ process.on("message", async (msg) => {
 
   // ── Execute ──────────────────────────────────────────────────────
 
-  // Negative parse/early test that compiled successfully — need to check instantiation.
-  //
-  // (#2912) DELIBERATELY-LENIENT fallback. The compiler emitted NO error, so we
-  // never actually detected the expected SyntaxError; the "pass" below is
-  // INCIDENTAL — the produced Wasm merely fails to instantiate/link. A full-corpus
-  // audit (2026-07-01) found ~439 host-lane negatives that pass ONLY this way
-  // (e.g. `await`/`yield` as a binding identifier, escaped keywords, duplicate
-  // module exports — real early-error-detection gaps). Strictly requiring a
-  // compile-time diagnostic here would flip all ~439 pass->fail: a correctness
-  // improvement, but an intentional-drop that needs a COORDINATED re-baseline
-  // (PO/lead sign-off — the regression gate has no in-PR intentional-drop flag).
-  // Kept lenient for now; tracked as the #2912 follow-up (verdict-fix + baseline
-  // update split).
+  // (#2920) Negative parse/early/resolution test that COMPILED with NO
+  // diagnostic — the STRICT compile-SUCCEEDED arm (the follow-up to #2912's
+  // deliberately-lenient fallback). The compiler did not detect the expected
+  // early error, so this is a conformance FAIL regardless of whether the
+  // produced Wasm happens to instantiate or link. Previously an INCIDENTAL
+  // instantiate/link failure was scored `pass` (~439 host-lane false passes,
+  // the #2898 fragility — `await`/`yield` as a binding identifier, escaped
+  // keywords, duplicate module exports, unresolved imports). No instantiate
+  // attempt is needed: we already know we failed to reject the program at
+  // compile time. Intentional verdict tightening (coordinated baseline
+  // refresh, plan/issues/2920); identical across gc/standalone.
   if (isNegative) {
-    try {
-      const importObj = buildImports(result.imports, undefined, result.stringPool);
-      await WebAssembly.instantiate(result.binary, importObj);
-      // Instantiation succeeded — this is a failure (expected parse/early error)
-      sendResult({
-        id,
-        status: "fail",
-        error: `expected parse/early ${expectedErrorType || "error"} but compiled and instantiated successfully`,
-        compileMs,
-        ...compileMetadata,
-      });
-    } catch {
-      // Instantiation failed — pass (Wasm validation/link caught the error)
-      sendResult({ id, status: "pass", compileMs, ...compileMetadata });
-    }
+    const { status, error } = negativeCompileSucceededVerdict(expectedErrorType, undefined);
+    sendResult({ id, status, error, compileMs, ...compileMetadata });
     return;
   }
 
