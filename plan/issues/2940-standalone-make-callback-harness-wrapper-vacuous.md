@@ -211,3 +211,59 @@ place, PR2's vacuous→executing conversions can only move `host_free_pass` UP
 (a) making the dead callbacks EXECUTE (PR2) and (b) scoring the still-dead ones
 honestly (PR1). The final honest `host_free_pass` + gap are reported once both
 land.
+
+---
+
+## Re-measurement + park-signature verification (opus-2, 2026-07-02, CI-FIX #2463)
+
+DIRTY resolved: merged `upstream/main` (mark rose 18,790 → 18,812), re-derived
+the highwater re-seed **17,379 = 18,812 − 1,433** (same caveat: the −1,433 delta
+is from base 854ad5729, not re-measured on the merged tree).
+
+**The "12 non-vacuous regressions" were investigated by direct standalone
+re-measurement (`runTest262File(..., "standalone")` over the full 705-file
+BigInt-TA baseline-pass corpus). Verdict: this PR introduces ZERO un-excused
+non-vacuous standalone regressions.** Every BigInt-TA baseline pass was a LEAKY
+pass (705/705, 0 host-free), so any flip to a host-free non-pass is auto-excused
+by the #1897 guard's `--exclude-leaky-baseline-regressions`. Full classification
+of the 705:
+
+| class                                   | count | disposition                       |
+| --------------------------------------- | ----- | --------------------------------- |
+| `VACUOUS` (marked `vacuous:true`)       | 698   | intended park signature           |
+| leaky-pass → **host-free** non-pass     | 5     | AUTO-EXCUSED (cross-realm, below) |
+| still-pass (genuine)                    | 2     | fine                              |
+| **leaky-fail, un-excused, non-vacuous** | **0** | ← the only bad class; none        |
+
+The 5 excused flips are the cross-realm OtherTA detached-buffer tests
+(`internals/{DefineOwnProperty,Get,GetOwnProperty,HasProperty,Set}/BigInt/…-realm.js`).
+Root cause: the `$262.createRealm()` runner stub returns a realm whose `global`
+carries no constructors, so once the BigInt wrapper shim makes the callback
+dispatch (PR #2441 arity fix on main), `other[TA.name]` is `undefined` and the
+callback throws BEFORE any assertion. These genuinely cannot pass standalone
+(dynamic realm-property access + `Reflect.construct` + cross-realm are all
+unsupported — verified: exposing the constructors on the realm stub does NOT
+help, `other[TA.name]` stays undefined and proto-from-ctor hits
+`Reflect.construct not supported in standalone`). They flip leaky-vacuous-pass →
+honest host-free fail, which is the CORRECT honest classification and is
+auto-excused. The task's other buckets reconciled: the "5 proto-from-ctor-realm"
+were NOT standalone-baseline-pass (no flip); the "1 async-gen invalid-wasm"
+(`ctors-bigint/object-arg/as-generator-iterable-returns.js`, `__closure_3`
+compile failure) was ALREADY `compile_error` on the standalone baseline (CE→CE,
+no flip). The "No dependency provided for extern class OtherTA" wording is the
+HOST-lane message for the same root cause; on host the ≤12 flips sit far below
+the #1668 catastrophic threshold (200).
+
+**LEAD verification recipe (admin-merge, intentional-negative):** run
+`diff-test262.ts <standalone-baseline> <merged-standalone.jsonl> --exclude-leaky-baseline-regressions`.
+Every remaining counted regression must carry `vacuous:true` /
+`"vacuous: harness-wrapper callback never executed"`. The excused set is the
+handful of leaky-baseline→host-free cross-realm flips (≤5 BigInt-TA + their
+non-BigInt siblings). Zero un-excused non-vacuous collateral. `promote-baseline
+--update` raises the mark to the true CI number post-merge.
+
+**Follow-ups (separate issues, NOT blocking this PR):** (a) `$262.createRealm()`
+single-realm stub cannot model cross-realm constructor access standalone;
+(b) `Reflect.construct` unsupported standalone; (c) latent `__closure_3`
+invalid-wasm on `as-generator-iterable-returns.js` (pre-existing CE). None are
+PR-caused regressions.
