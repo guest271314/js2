@@ -41,6 +41,7 @@ import {
 } from "../codegen/registry/types.js";
 import type { CodegenContext } from "../codegen/context/types.js";
 import { applyIrTailCalls } from "../codegen/ir-tail-call.js";
+import { ensureFmod, FMOD_FN } from "../codegen/fmod.js"; // #2945 — on-demand `%` helper materialization
 import { lowerFunctionAstToIr, type IrFromAstResolver } from "./from-ast.js";
 import {
   lowerIrFunctionToWasm,
@@ -985,6 +986,13 @@ function makeResolver(
 ): IrLowerResolver {
   return {
     resolveFunc(ref: IrFuncRef): number {
+      // #2945 — `%` lowers to a call of the Wasm-native exact-fmod helper.
+      // Materialize it on demand: `ensureFmod` is idempotent (funcMap-cached)
+      // and appends a DEFINED function (never an import), so no existing
+      // funcIdx shifts — same append-only discipline as the IR's own closure
+      // functions. On-demand keeps the helper out of modules that never use
+      // `%` (parity with legacy, which also emits it lazily).
+      if (ref.name === FMOD_FN) return ensureFmod(ctx);
       const idx = ctx.funcMap.get(ref.name);
       if (idx !== undefined) return idx;
       // Slice 6 part 4 (#1183): native-string helpers (`__str_charAt`,

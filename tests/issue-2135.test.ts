@@ -51,23 +51,22 @@ function claims(source: string, fnName: string): boolean {
 
 describe("#2135 capability table — operator family single source", () => {
   it("deferred ops are selector-rejected (no more shape-only over-claim)", () => {
-    expect(claims(`export function m(a: number, b: number): number { return a % b; }`, "m")).toBe(false);
+    // (#2945 flipped `%` from defer → claim; `**` / `in` / `~` remain defer.)
     expect(claims(`export function p(a: number, b: number): number { return a ** b; }`, "p")).toBe(false);
     expect(claims(`export function tld(o: any): boolean { return "x" in o; }`, "tld")).toBe(false);
     expect(claims(`export function bnot(a: number): number { return ~a; }`, "bnot")).toBe(false);
   });
 
   it("deferred ops produce ZERO post-claim errors and run correctly via legacy", async () => {
-    // Pre-#2135 these were claim-then-build-throw ("operator '%' not in
+    // Pre-#2135 these were claim-then-build-throw ("operator '**' not in
     // slice 11") — counted on irPostClaimErrors and, under JS2WASM_IR_FIRST,
-    // a hard compile error (#2945). Now the selector never claims them.
-    const src = `export function m(a: number, b: number): number { return a % b; }`;
+    // a hard compile error (the #2945 class). Now the selector never claims
+    // them. (`%` moved to the claimed side — see tests/issue-2945.test.ts.)
+    const src = `export function p(a: number, b: number): number { return a ** b; }`;
     const r = await compile(src, { fileName: "issue-2135.ts" });
     expect(r.success).toBe(true);
-    expect((r.irPostClaimErrors ?? []).filter((e) => e.func === "m")).toEqual([]);
-    expect(await run(src, "m", [7, 3])).toBe(1);
-    expect(await run(src, "m", [-7, 2])).toBe(-1);
-    expect(await run(`export function p(a: number, b: number): number { return a ** b; }`, "p", [2, 10])).toBe(1024);
+    expect((r.irPostClaimErrors ?? []).filter((e) => e.func === "p")).toEqual([]);
+    expect(await run(src, "p", [2, 10])).toBe(1024);
   });
 
   it("claimed ops are selector-accepted and IR-compile with no post-claim error", async () => {
@@ -108,7 +107,7 @@ describe("#2135 capability table — operator family single source", () => {
   });
 
   it("table sanity: the retired over-claims are exactly defer; the accept set is unchanged otherwise", () => {
-    expect(binaryOpCapability(ts.SyntaxKind.PercentToken)).toBe("defer");
+    expect(binaryOpCapability(ts.SyntaxKind.PercentToken)).toBe("claim"); // #2945 — __fmod lowering landed
     expect(binaryOpCapability(ts.SyntaxKind.AsteriskAsteriskToken)).toBe("defer");
     expect(binaryOpCapability(ts.SyntaxKind.InKeyword)).toBe("defer");
     expect(binaryOpCapability(ts.SyntaxKind.InstanceOfKeyword)).toBe("defer");

@@ -1,7 +1,8 @@
 ---
 id: 2138
 title: "IR-first compile-once inversion: selector decides before compileDeclarations (flag-gated investigation)"
-status: in-progress
+status: done
+completed: 2026-07-02
 assignee: ttraenkler/dev-2138f
 pipeline_unblocked: 1927
 spec: ready
@@ -16,7 +17,7 @@ task_type: architecture
 area: compiler
 language_feature: compiler-internals
 goal: maintainability
-related: [1530, 1916, 1927, 2135]
+related: [1530, 1916, 1927, 2135, 2945, 2947, 2972, 2973]
 origin: "2026-06-12 sprint-62 architecture analysis (pipeline workstream N2)"
 ---
 
@@ -455,3 +456,79 @@ below).
   time from the runner's per-run timing in `runs/index.json`. Every
   flag-ON-only failure is by construction a loud selector↔builder/skip
   divergence — bucket by error class, file per class.
+
+## Measurement (JS2WASM_IR_FIRST) — FULL RUN, 2026-07-02 (dev-2138f) — Slice 3, closes the issue
+
+Run: `test262-sharded.yml` workflow_dispatch **28580162377** with
+`ir_first: true` (the #2947 lane) on `main@89676d232513` — full 57×2-shard
+matrix, `JS2WASM_IR_FIRST: 1` verified in every shard's env, fresh compiles
+(no result cache), promote-baseline hard-skipped by design. Diffed
+per-test against the honest baseline
+(`loopdive/js2wasm-baselines` JSONL, refreshed same day from unflagged main)
+via `scripts/diff-test262.ts`.
+
+### (a) test262 delta — js-host lane, 48,088 shared tests (official + proposals)
+
+| status | baseline (flag OFF) | flagged (IR-first ON) | delta |
+|---|---|---|---|
+| pass | 34,781 | 34,766 | **−15 (−0.031%)** |
+| fail | 12,534 | 12,537 | +3 |
+| compile_error | 576 | 591 | +15 |
+| compile_timeout | 83 | 80 | −3 |
+
+15 regressions, 0 improvements, **0 wasm-identical noise, 0 ct-flakes** —
+all 15 are real compiler-output differences, and they collapse into exactly
+TWO root causes (attributed, filed):
+
+- **#2972 (14 tests, `pass → compile_error`)** — ONE harness function
+  (`decimalToPercentHexString`): selector claims string element access with
+  a computed (BinaryExpression) index, from-ast throws `not in slice 12` →
+  skipped slot → hard error. **Fail-loud contract working as designed**;
+  the fix is #2135 family-2/3 capability work.
+- **#2973 (1 test, `pass → fail`, silent)** — `S12.4_A2_T2`: the eval shim's
+  in-process sub-compile (`runtime-eval.ts:213` wraps eval strings in a
+  claimable `__eval_result` FunctionDeclaration) inherits the env flag, its
+  post-claim residual hard-errors, and the shim's `catch` swallows it →
+  `undefined` instead of `7`. **The only fail-loud violation found** —
+  eval/`new Function` sub-compiles must opt out of the flag (#2973, S).
+
+Additionally, the pre-flip `%` class (#2945) never appears — retired by
+#2135 slice 1 before this run, confirming the capability-table mechanism.
+
+### (b) compile-time delta — honestly: not measurable across runs
+
+The diff tool reports **−1.8%** aggregate compile time vs the baseline the
+run itself fetched at 09:39 (8,510,718 → 8,356,264 ms over 47,882 shared
+tests), and **−27.1%** vs the 11:26-refreshed baseline (11,459,923 ms
+baseline side). Those two baseline timing sets describe the SAME unflagged
+code and differ by +35% — cross-run CI wall-clock is runner-lottery-
+dominated, so neither delta is attributable to the inversion. Verdict:
+**no measurable wall-clock change beyond noise** (expected: the structural
+saving is one legacy body compile per claimed function, small vs total
+front-end cost). A rigorous number needs a same-runner A/B (two dispatches
+on the same SHA back-to-back, flag off/on); not worth runner-minutes unless
+the inversion becomes default-on policy.
+
+### (c) skipped-body telemetry
+
+Not surfaced per-test by the runner (`CompileResult.irFirstSkipped` is not
+recorded into the JSONL rows). Local corpus evidence stands (8 bodies / 13
+playground examples; 100% of claimed funcs on claim-dense inputs). Optional
+runner extension if a future run wants the aggregate; not needed for the
+conclusion.
+
+### Verdict (what this buys #1530/#1916/#2855 sequencing)
+
+The compile-once inversion is **viable**: 99.97% of the js-host suite is
+indifferent to skipping legacy bodies for claimed closures; the fail-loud
+contract held for 14/15 divergences; the single silent path is an eval-shim
+artifact with a one-file fix (#2973); and the flag surfaced exactly the
+selector↔builder drift classes #2135 is retiring (one already fixed before
+this run, one filed as #2972). Remaining before any default-on discussion:
+#2973, #2972, the claim-partial ratchet (#2135 families), and the
+generator/class-member skip exclusions. Slice 4 (generateMultiModule seam)
+remains open as a follow-on under #2135-family planning.
+
+**Acceptance criteria: all met** — (1) flag + byte-identical default
+(proven), (2) full measured test262 + compile-time run recorded here,
+(3) divergences filed (#2945, #2972, #2973). → `status: done`.

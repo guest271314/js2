@@ -37,6 +37,7 @@
 
 import { ts, forEachChild } from "../ts-api.js";
 
+import { FMOD_FN } from "../codegen/fmod.js"; // #2945 — `%` lowers to a call of the shared exact-fmod helper
 import { evaluateConstantCondition } from "../codegen/statements/control-flow.js";
 // #2766 — reuse the legacy counted-loop proof predicates (pure AST analysis, no
 // codegen state) to port the `safeIndexedArrays` in-bounds proof into the IR.
@@ -4425,6 +4426,26 @@ function lowerBinary(expr: ts.BinaryExpression, cx: LowerCtx, hint: IrType): IrV
       binop = "f64.div";
       resultType = irVal({ kind: "f64" });
       break;
+    // #2945 — `a % b` lowers to a call of the Wasm-native exact-remainder
+    // helper (`__fmod`, #2056): the SAME helper legacy's `emitModulo` emits,
+    // so IR and legacy agree bit-for-bit on every edge (`x % 0` → NaN,
+    // `-0 % x` → -0, `Inf % x` → NaN, `x % Inf` → x, large-quotient
+    // exactness). Deliberately NOT the naive `a - trunc(a/b)*b` sequence —
+    // legacy tried that and replaced it (ULP drift, collapse-to-0 for large
+    // quotients, overflow to ±Inf; see `src/codegen/fmod.ts`). The symbolic
+    // `__fmod` func ref is materialized on demand by the integration
+    // resolver (`resolveFunc` calls `ensureFmod` — append-only, idempotent).
+    // f64 operands only: i32-typed operands demote to legacy, which keeps
+    // its `emitSafeI32Rem` i32 fast mode (trap-free rem semantics).
+    case ts.SyntaxKind.PercentToken: {
+      requireF64(isF64, "%", cx.funcName);
+      const fmodResult = cx.builder.emitCall({ kind: "func", name: FMOD_FN }, [lhs, rhs], irVal({ kind: "f64" }));
+      if (fmodResult === null) {
+        // Unreachable: a non-null resultType always yields a value id.
+        throw new Error(`ir/from-ast: internal — __fmod call produced no value in ${cx.funcName}`);
+      }
+      return fmodResult;
+    }
     // #1126 Stage 3 — magnitude compares accept f64 OR i32 operands.
     // i32 operands emit native `i32.{lt,le,gt,ge}_{s,u}` based on
     // signedness; f64 keeps the legacy `f64.lt` etc. The result is
