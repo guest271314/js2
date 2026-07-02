@@ -128,9 +128,9 @@ externref, found struct.new of type (ref …)` invalid Wasm. Fix: coerce the
      arm (concat/charAt/indexOf/slice/…) in one place.
   2. `regObj.exec(str).toString()` — static receiver type resolves externref,
      but standalone lowers exec natively to a capture-array vec `(ref null
-   $Vec)`; the generic `.toString()` fallback (`expressions/calls.ts`) passed
+$Vec)`; the generic `.toString()` fallback (`expressions/calls.ts`) passed
      the raw ref to `__extern_toString(externref)` → `call[0] expected
-   externref, found if of (ref null 98)`. Fix: coerce the COMPILED type
+externref, found if of (ref null 98)`. Fix: coerce the COMPILED type
      (mirrors the 2a fix). Runtime ToString-of-match-array semantics is a
      separate pre-existing gap (2a precedent) — this slice is validity.
      Verified: 120-file concat/exec/toString sweep 115→117 VALID (+2, 0 new
@@ -145,9 +145,46 @@ externref, found struct.new of type (ref …)` invalid Wasm. Fix: coerce the
      mismatches the boxed-any (externref) element rep of `new Array(N)`; needs a
      standalone-native callback-bridge design (host-import leak + IsCallable +
      hole semantics), likely an architect spec — split to its own slice.
-- [ ] **(3) `__closure_5` `not enough arguments on the stack`** — the one
-      funcIdx-shift-shaped failure (for-await async path); may share the #2918
-      late-import class.
+- [x] **(3a) object-toString string-coercion stack-arity family** — DONE
+      (dev-2934f, slice 6). The `concat/S15.5.4.6_A4_T2` "not enough arguments
+      on the stack" was three mechanisms:
+  1. **`ensureNativeStringExternBridge` late-import over-shift**
+     (`native-strings.ts`): the bridge queued its 3 late imports and baked
+     their indices into helper bodies WITHOUT closing the deferred batch; the
+     eventual `flushLateImportShifts` bumps every `funcIdx >= importsBefore`
+     and cannot distinguish freshly-baked (final) import refs from stale
+     defined-func refs — `__str_to_extern`'s `call __str_from_mem` (arity 2)
+     landed on `__str_copy_tree` (arity 3). Fix: flush the batch after
+     registering, BEFORE baking (gated on actual registration — pure lookups
+     don't force-flush an outer batch). **This also fixes a LIVE main
+     regression**: plain `console.log("ab".concat("cd"))` standalone became
+     INVALID when #2473 (slice 2b) made the bridge emission reachable for
+     that shape — bisected to the a3576e7 merge; the shape is invisible to
+     the PR gates (test262 wrapping avoids `console_log_string`; the
+     standalone floor lacks a console.log-string shape → gate blind spot,
+     flagged to the lead).
+  2. **`normaliseToString` no-result arm** (`type-coercion.ts`
+     `tryStructToString`): a dispatched toString whose Wasm func type has NO
+     result (always-throws/never, or void) pushed nothing then fed
+     `$__any_to_string` (0 operands for a 1-arg call). Per §7.1.1
+     OrdinaryToPrimitive that path ends in TypeError — emit the throw (stack
+     goes polymorphic; dead code after an always-throwing call).
+  3. **Reflective receiver ToString** (`string-ops.ts` emitReceiver):
+     `String.prototype.concat.call(obj, …)` compiles the receiver to a
+     concrete object struct ref; §22.1.3.x requires ToString(this) — now
+     dispatched via `tryStructToString` (which handles the throwing case
+     after fix 2). A4_T2 flips standalone INVALID → **pass** (it asserts the
+     receiver's "intostring" throw).
+     Verified: 120-file concat/exec/toString sweep 117→118 VALID, 0 new
+     invalid; throwing-toString family (plus-concat/template/concat-method/
+     reflective-call) all valid + right exception semantics; 71/71 string
+     equivalence tests. Tests: `tests/issue-2934-tostring-dispatch-s3.test.ts`.
+- [ ] **(3b) `__closure_5` `not enough arguments on the stack for drop`** —
+      the for-await async CPS path (`AsyncFromSyncIteratorPrototype/next/
+for-await-next-rejected-promise-close.js`) — NOT the bridge/toString class
+      (still invalid after slice 6); a drop-balance bug in the async closure
+      lowering. The last open invalid-Wasm slice besides the `__closure_*`
+      host-bridge item above.
 
 ## Approach
 
