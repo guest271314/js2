@@ -48,7 +48,7 @@ import { addStringConstantGlobal } from "./registry/imports.js";
 import { addFuncType } from "./registry/types.js";
 import { addUnionImportsViaRegistry, ensureLateImport, flushLateImportShifts } from "./shared.js";
 import { coercionInstrs } from "./type-coercion.js";
-import { definedFuncAt } from "./func-space.js"; // (#1916 S2) positional-read chokepoint
+import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S2/S3) positional-read chokepoint + stable-regime minting
 
 /** Mangle a property name into the reserved member-get dispatcher name. */
 function dispatcherName(propName: string): string {
@@ -119,8 +119,8 @@ export function reserveMemberGetDispatch(
   if (fctx) flushLateImportShifts(ctx, fctx);
 
   const typeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "externref" }], "$member_get_dispatch_type");
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-  ctx.mod.functions.push({
+  const funcIdx = mintDefinedFunc(ctx);
+  pushDefinedFunc(ctx, funcIdx, {
     name,
     typeIdx,
     locals: [],

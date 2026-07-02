@@ -16,7 +16,7 @@ import {
   isStringWrapperType,
 } from "../checker/type-mapper.js";
 import type { FieldDef, Instr, ValType } from "../ir/types.js";
-import { definedFuncAt } from "./func-space.js";
+import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js";
 import { emitBoundsCheckedArrayGet } from "./array-methods.js";
 import { emitHoleToUndefined } from "./array-holes.js"; // (#2001 S1)
 import { classMemberFuncKey } from "./class-member-keys.js"; // (#1983) collision-free class-member funcMap keys
@@ -1140,8 +1140,8 @@ function ensureStandaloneBuiltinStaticMethodClosure(
       closureFctx.body.push({ op: "call", funcIdx: gopdIdx });
     }
 
-    funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-    ctx.mod.functions.push({
+    funcIdx = mintDefinedFunc(ctx);
+    pushDefinedFunc(ctx, funcIdx, {
       name: funcName,
       typeIdx: wrapperTypes.liftedFuncTypeIdx,
       locals: closureFctx.locals,
