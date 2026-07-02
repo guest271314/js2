@@ -6,7 +6,7 @@ priority: high
 sprint: current
 created: 2026-07-02
 completed: 2026-07-02
-assignee: ttraenkler/dev-2900
+assignee: ttraenkler/dev-2900b
 feasibility: medium
 task_type: bug
 area: codegen
