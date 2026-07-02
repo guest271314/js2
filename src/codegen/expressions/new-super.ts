@@ -71,6 +71,7 @@ import { localGlobalIdx } from "../registry/imports.js";
 import { ensureLateImport, flushLateImportShifts } from "./late-imports.js";
 import { emitFnctorProtoGet } from "./fnctor-prototype.js"; // (#2660 S3a) reconstruct `new F()` as $Object
 import { deriveFnctorFields, resolveFnctorSymbol, resolveEnclosingFnctorOwner } from "../fnctor-escape-gate.js"; // (#2660 S3a) canonical fnctor-name key; (#2773 S1) shared field derivation; (#2681/#2686 A1) `new this()` owner
+import { funcSignatureOf } from "../func-space.js"; // (#1916 S2) positional-read chokepoint
 
 // #2146: resolveEnclosingClassName now lives in shared.ts (imported above).
 
@@ -1812,26 +1813,9 @@ function compileClassExpression(ctx: CodegenContext, fctx: FunctionContext, expr
  * expected anyref, found externref`). Returns `undefined` for void / unknown.
  */
 function getFuncResultType(ctx: CodegenContext, funcIdx: number): ValType | undefined {
-  if (funcIdx < ctx.numImportFuncs) {
-    let importFuncCount = 0;
-    for (const imp of ctx.mod.imports) {
-      if (imp.desc.kind === "func") {
-        if (importFuncCount === funcIdx) {
-          const typeDef = ctx.mod.types[imp.desc.typeIdx];
-          if (typeDef?.kind === "func" && typeDef.results.length > 0) return typeDef.results[0];
-          return undefined;
-        }
-        importFuncCount++;
-      }
-    }
-    return undefined;
-  }
-  const func = ctx.mod.functions[funcIdx - ctx.numImportFuncs];
-  if (func) {
-    const typeDef = ctx.mod.types[func.typeIdx];
-    if (typeDef?.kind === "func" && typeDef.results.length > 0) return typeDef.results[0];
-  }
-  return undefined;
+  // #1916 S2 — funcSignatureOf is the positional-read chokepoint (func-space.ts).
+  const sig = funcSignatureOf(ctx, funcIdx);
+  return sig && sig.results.length > 0 ? sig.results[0] : undefined;
 }
 
 /**

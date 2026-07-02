@@ -5,6 +5,7 @@ import { emitWasiErrorConstructor } from "./registry/error-types.js";
 import { analyzeLinearUint8 } from "./linear-uint8-analysis.js";
 import { analyzeFnctorEscapeGate, deriveFnctorFields } from "./fnctor-escape-gate.js";
 import { isLinearU8RepresentableNew } from "./linear-uint8-signatures.js";
+import { definedFuncAt } from "./func-space.js"; // (#1916 S2) positional-read chokepoint
 import type { MultiTypedAST, TypedAST } from "../checker/index.js";
 import {
   isBigIntType,
@@ -2268,9 +2269,8 @@ function addWasiStartExport(ctx: CodegenContext): void {
 
   const mainIdx = ctx.funcMap.get("main");
   if (mainIdx !== undefined) {
-    const funcArrayIdx = mainIdx - ctx.numImportFuncs;
-    if (funcArrayIdx >= 0 && funcArrayIdx < ctx.mod.functions.length) {
-      const func = ctx.mod.functions[funcArrayIdx]!;
+    const func = definedFuncAt(ctx, mainIdx);
+    if (func) {
       const funcType = ctx.mod.types[func.typeIdx];
       // Only an EXPORTED, no-arg, no-result `main` is a valid `_start` entry.
       // A non-exported `main` (the `main()`-calls-itself convention) is reached
@@ -3146,7 +3146,7 @@ function emitIteratorMethodExport(ctx: CodegenContext): void {
       const funcIdx = ctx.funcMap.get(methodFullName);
       if (funcIdx === undefined) continue;
 
-      const funcDef = mod.functions[funcIdx - ctx.numImportFuncs];
+      const funcDef = definedFuncAt(ctx, funcIdx);
       const funcType = funcDef ? mod.types[funcDef.typeIdx] : undefined;
       const resultType: ValType =
         funcType && funcType.kind === "func" && funcType.results.length > 0
@@ -3292,7 +3292,7 @@ function emitToPrimitiveMethodExport(ctx: CodegenContext): void {
     const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, `${structName}_${methodSuffix}`)); // (#1983)
     if (funcIdx === undefined) continue;
 
-    const funcDef = mod.functions[funcIdx - ctx.numImportFuncs];
+    const funcDef = definedFuncAt(ctx, funcIdx);
     const funcType = funcDef ? mod.types[funcDef.typeIdx] : undefined;
     const resultType: ValType =
       funcType && funcType.kind === "func" && funcType.results.length > 0
@@ -3411,7 +3411,7 @@ function toPrimitiveNeedsBoxing(ctx: CodegenContext, methodSuffix: string): bool
       continue;
     const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, `${structName}_${methodSuffix}`));
     if (funcIdx === undefined) continue;
-    const funcDef = mod.functions[funcIdx - ctx.numImportFuncs];
+    const funcDef = definedFuncAt(ctx, funcIdx);
     const funcType = funcDef ? mod.types[funcDef.typeIdx] : undefined;
     const resultType =
       funcType && funcType.kind === "func" && funcType.results.length > 0 ? funcType.results[0] : undefined;
@@ -4550,7 +4550,7 @@ function emitToPrimitiveMethodExports(ctx: CodegenContext): void {
       // nominal class methods and structs whose method has no stored closure.
       const funcIdx = ctx.funcMap.get(methodFullName);
       if (funcIdx !== undefined) {
-        const funcDef = mod.functions[funcIdx - ctx.numImportFuncs];
+        const funcDef = definedFuncAt(ctx, funcIdx);
         const funcType = funcDef ? mod.types[funcDef.typeIdx] : undefined;
         const resultType: ValType =
           funcType && funcType.kind === "func" && funcType.results.length > 0
@@ -5173,7 +5173,7 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
     // pass; fill it in place if reserved.
     const reservedGet = ctx.funcMap.get("__vec_get");
     if (reservedGet !== undefined) {
-      const fn = mod.functions[reservedGet - ctx.numImportFuncs]! as { locals: typeof getLocals; body: Instr[] };
+      const fn = definedFuncAt(ctx, reservedGet)! as { locals: typeof getLocals; body: Instr[] };
       fn.locals = getLocals;
       fn.body = body;
     } else {
@@ -5420,7 +5420,7 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
     // fresh and register in funcMap (shift-tracked) so a same-pass lookup resolves.
     const reservedPush = ctx.funcMap.get("__vec_push");
     if (reservedPush !== undefined) {
-      const fn = mod.functions[reservedPush - ctx.numImportFuncs]! as { locals: typeof locals; body: Instr[] };
+      const fn = definedFuncAt(ctx, reservedPush)! as { locals: typeof locals; body: Instr[] };
       fn.locals = locals;
       fn.body = body;
     } else {
@@ -5520,7 +5520,7 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
     // (#2784 S3) FILL-or-build (see __vec_push above).
     const reservedPop = ctx.funcMap.get("__vec_pop");
     if (reservedPop !== undefined) {
-      const fn = mod.functions[reservedPop - ctx.numImportFuncs]! as { locals: typeof locals; body: Instr[] };
+      const fn = definedFuncAt(ctx, reservedPop)! as { locals: typeof locals; body: Instr[] };
       fn.locals = locals;
       fn.body = body;
     } else {
@@ -5677,9 +5677,8 @@ function hasExportedVecParam(ctx: CodegenContext): boolean {
   const vecTypeIdxs = new Set<number>(ctx.vecTypeMap.values());
   for (const exp of mod.exports) {
     if (exp.desc.kind !== "func") continue;
-    const idx = exp.desc.index - ctx.numImportFuncs;
-    if (idx < 0 || idx >= mod.functions.length) continue;
-    const fn = mod.functions[idx]!;
+    const fn = definedFuncAt(ctx, exp.desc.index);
+    if (!fn) continue;
     const typeDef = mod.types[fn.typeIdx];
     if (!typeDef) continue;
     // Resolve sub-type wrappers (some FuncTypeDefs are nested under SubTypeDef).

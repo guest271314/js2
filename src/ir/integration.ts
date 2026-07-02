@@ -79,6 +79,7 @@ import { AllocSiteRegistry, ALLOC_NAMESPACES } from "./alloc-registry.js";
 import { analyzeEncoding } from "./analysis/encoding.js";
 import { assertAllocProvenance } from "./verify-alloc.js";
 import type { FieldDef, FuncTypeDef, Instr, StructTypeDef, ValType } from "./types.js";
+import { definedFuncAt, replaceDefinedFuncAt } from "../codegen/func-space.js"; // (#1916 S2) positional read/write chokepoints
 
 export interface IrIntegrationReport {
   readonly compiled: readonly string[];
@@ -680,15 +681,15 @@ export function compileIrPathFunctions(
         errors.push({ func: name, message: `no funcIdx allocated for ${name}` });
         continue;
       }
-      const localIdx = funcIdx - ctx.numImportFuncs;
-      if (localIdx < 0 || localIdx >= ctx.mod.functions.length) {
+      // #1916 S2 — definedFuncAt/replaceDefinedFuncAt are the positional
+      // read/write chokepoints (func-space.ts).
+      const existing = definedFuncAt(ctx, funcIdx);
+      if (!existing) {
         errors.push({ func: name, message: `funcIdx ${funcIdx} out of local range for ${name}` });
         continue;
       }
 
       const { func: wasmFunc } = lowerIrFunctionToWasm(entry.fn, resolver);
-
-      const existing = ctx.mod.functions[localIdx];
       // #1370 Phase B: signature parity guard for class methods.
       //
       // The legacy `class-bodies.ts` pass pre-allocated this method's
@@ -721,13 +722,13 @@ export function compileIrPathFunctions(
       // here, where the full module type info is available to enforce the same
       // guards (param-count + return-type match, never inside a try-with-handler).
       const tcoBody = applyIrTailCalls(ctx, wasmFunc.body, wasmFunc.typeIdx);
-      ctx.mod.functions[localIdx] = {
+      replaceDefinedFuncAt(ctx, funcIdx, {
         name: existing.name,
         typeIdx: wasmFunc.typeIdx,
         locals: wasmFunc.locals,
         body: tcoBody,
         exported: existing.exported,
-      };
+      });
       compiled.push(name);
     } catch (e) {
       errors.push({

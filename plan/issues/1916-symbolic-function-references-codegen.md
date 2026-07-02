@@ -137,12 +137,46 @@ orthogonal to index binding and stays tracked in those issues.
   × {gc, standalone, wasi}, 992 real binaries — **byte-identical**.
   Late-shift class holds: issue-329/1677/1809/1839/1899/2191/2193/2918
   suites green (51 tests) + new `tests/issue-1916-symbolic-func-refs.test.ts`.
-- **S2 (=2710 slice 3) — convert positional reads.** The ~94
-  `mod.functions[idx - numImportFuncs]` reads + `idx - numImportFuncs`
-  arithmetic become chokepoint accessors (registry-keyed); globals'
-  `localGlobalIdx`/`nextModuleGlobalIdx` analogues audited. Enumerate by
-  temporarily flipping the brand to `unique symbol` (tsc lists every
-  violation), convert, keep byte-identity.
+- **S2 (=2710 slice 3) — convert positional reads.** DONE (PR 2, this
+  slice) for the FUNCTION space. Implementation notes (the WHY, for S3):
+  - **New chokepoint module `src/codegen/func-space.ts`**: `definedFuncAt`
+    (handle→defined-record, the ONLY place `idx - numImportFuncs` lives),
+    `isImportFuncIdx`, `funcSignatureOf` (import-scan + defined unified),
+    `replaceDefinedFuncAt` (the write-side twin — the IR integration
+    patches a lowered body in-place by handle). S3 rewrites THESE four to
+    registry lookups and every caller is already correct.
+  - **~40 call sites across 24 files converted**; 4 duplicated
+    signature-scan helper clones collapsed onto `funcSignatureOf`
+    (`getFuncParamTypes`/`wasmFuncReturnsVoid`/`getWasmFuncReturnType` in
+    expressions/helpers.ts, `getFuncSignature` in closures.ts,
+    `getFuncResultType` in expressions/new-super.ts). Zero
+    `mod.functions[idx - numImportFuncs]` / `- numImportFuncs` arithmetic
+    remains in `src/codegen` + `src/ir` outside func-space.ts.
+  - **Semantics-preservation rule discovered**: several sites (e.g. the
+    toPrimitive retKind reads in type-coercion.ts) deliberately treat an
+    IMPORT handle as "unknown → default" — converting those to
+    `funcSignatureOf` (which resolves import signatures) would CHANGE
+    behavior. They use `definedFuncAt`, preserving exact semantics;
+    byte-identity is the proof. Flag for S3+: whether the import-default
+    behavior is itself a latent bug is a separate question.
+  - **Position-space reads are NOT this surface** (and were left alone):
+    `funcByName`-map reads in class-bodies.ts / declarations.ts index
+    `mod.functions` by POSITION (never mixing `numImportFuncs`) —
+    positions don't shift when imports are added, so they are already
+    stable and stay valid post-flip. Plain whole-array iteration
+    (shifters/DCE/emit) is layout work, also out of scope.
+  - **Known latent positional-import reads preserved for byte-identity**
+    (flagged in-code for S3 review): `ir-tail-call.ts` `calleeTypeIdx` and
+    `statements/control-flow.ts` index `mod.imports[calleeIdx]` by
+    func-space index — only correct while func imports precede non-func
+    imports; a mismatch degrades to undefined via the kind guard.
+  - **Out of scope**: `src/codegen-linear/c-abi.ts` (1 site) — the linear
+    backend uses bare mod/numImportFuncs locals, not `CodegenContext`;
+    convert when the linear backend gets its own registry (or S3 unifies).
+  - Proof: byte-identical over the same 1215-record corpus; the four
+    late-shift issue suites (329/1899/1916/2941, 32 tests) green. The
+    `ir-*-equivalence` harness failures observed locally reproduce
+    identically on clean origin/main (pre-existing, container-env).
 - **S3 (=2710 slice 4b/4c, func space — the heart of #1916).** Mint
   stable func handles at registration; `resolveLayout` computes the real
   permutation (imports in declaration order, then live defined funcs in
