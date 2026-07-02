@@ -1,5 +1,5 @@
 ---
-id: 2971
+id: 2980
 title: "Standalone async widen — FINAL layers (async-fn drive −16 residual, Gap 5 for-await/async-gen −32) + the slice-1d carrier-widen DECISION MEASURE"
 status: ready
 # measure phase delivered by ttraenkler/fable-5 (2026-07-02); claim released — the four residual classes are the remaining work
@@ -21,7 +21,11 @@ related: [2867, 2919, 2865, 1373b]
 origin: "#2922 residual re-scope (task #17) — arms 1-3 landed (PRs #2428/#2482); the remaining widen layers + the decision measure get their own id (#2922 is done on main)"
 ---
 
-# #2971 — Async widen final layers + the carrier-widen decision measure
+# #2980 — Async widen final layers + the carrier-widen decision measure
+> **Provenance**: formerly #2971; re-id'd because id 2971 was taken on main by
+> the TLA sibling-module evaluation-order issue (parallel session, #2531
+> allocator race). The code-comment ref in src/codegen/async-scheduler.ts was
+> renamed in the same commit.
 
 ## Problem
 

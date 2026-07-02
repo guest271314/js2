@@ -3303,7 +3303,7 @@ export function isStandalonePromiseActive(ctx: CodegenContext): boolean {
 }
 
 /**
- * (#2971) MEASUREMENT INSTRUMENT for the slice-1d carrier widen decision — NOT
+ * (#2980) MEASUREMENT INSTRUMENT for the slice-1d carrier widen decision — NOT
  * the widen itself. When the `JS2WASM_ASYNC_CARRIER_WIDEN` env var is `"1"`,
  * both carrier gates ({@link isStandalonePromiseActive} +
  * {@link isStandaloneThenChainNativeActive}) include `--target standalone`, so
