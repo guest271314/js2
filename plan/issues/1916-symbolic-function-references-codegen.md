@@ -320,6 +320,25 @@ is never a moment where one value means two functions.
        under wasi/standalone). Fixed to `inLiveShiftRange(...)` per the
        resolve-layout shifter contract (every shifter comparison must use
        it). Byte-neutral for live handles.
+  - **S3b medium batch B — LANDED (dev-1916b)**: `expressions/builtins.ts`
+    (6), `literals.ts` (4: object-literal fresh-fn / getter / setter /
+    method), `statements/nested-declarations.ts` (3: the reserve-then-fill
+    placeholder pattern — mint/push effectively adjacent, body filled by
+    mutating the pushed object reference). Corpus byte-IDENTICAL (stacked
+    on batch A so it inherits the declaredFuncRefs sort fix — literals'
+    object-method funcrefs are ref.func'd).
+  - **`declarations.ts` (5 sites) — DEFERRED to its own batch (dev-1916b,
+    needs deeper analysis)**. Flipping it drifts `async.ts::gc` (−6 bytes,
+    code section): the async state-machine helper `__sset_state`'s body is
+    emitted calling a DIFFERENT function (`__js_array_new`→`setTimeout`)
+    with a different compile-time result arity (drop×3 → drop×1). Both the
+    call target AND the baked drop-count differ, so this is NOT a late
+    shift — it is a `funcIdx`-interpreting consumer between freeze and emit
+    reading a stable handle positionally (prime suspect: `stackBalance`,
+    already flagged in the S3-final consumer list as "reads callee
+    signatures — takes `mod` only, import-count context must be derivable
+    from `mod`; audit"). Like closures, this file needs an infra fix before
+    it can flip byte-identically; tracked here for the next executor.
   - Batch discipline (for the next executor): flip whole FILES (a
     producer family), never partial files; `nextFuncIdx`-style local
     helpers redefine in place; multi-mint sibling derivations
