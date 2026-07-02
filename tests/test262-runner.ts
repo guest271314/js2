@@ -2497,6 +2497,50 @@ export function test(): number {
     };
   }
 
+  // (#2932) Module-goal tests: hoist top-level `import` / `export … from`
+  // statements whose specifier references a `_FIXTURE` module OUT of the
+  // synthetic `export function test()` wrapper to module top level. An
+  // `import` nested inside a function body is not a real module import — the
+  // TS checker never resolves its binding, and the compiler's top-level
+  // import-alias scan (#2930) only sees top-level ImportDeclarations — so
+  // every fixture-importing module test read `null`. Each hoisted statement is
+  // replaced in the body by a placeholder comment padded to the same line
+  // count (keeps error line citations stable); the hoisted copies are emitted
+  // ahead of the preamble (bodyLineOffset is computed from preBody, so it
+  // adjusts automatically).
+  //
+  // Scope: `_FIXTURE` specifiers ONLY — the exact class the multi-file
+  // fixture branch links via `allowJs` (#2932's purpose). Hoisting is NOT
+  // applied to other specifiers: test262's module-namespace tests SELF-import
+  // (`import * as ns from './<own-filename>.js'`), and under the runner the
+  // test compiles under the virtual key `./test.ts`, so a hoisted self-import
+  // cannot resolve — 4 namespace/internals tests flipped pass→fail with
+  // "ns is not defined" in PR #2471's merge_group run. Non-fixture module
+  // imports keep their pre-#2932 (nested, leniently-ignored) behavior.
+  let hoistedImports = "";
+  if (resolvedMeta.flags?.includes("module")) {
+    const hoistedStmts: string[] = [];
+    const hoistOne = (m: string, stmt: string): string => {
+      hoistedStmts.push(stmt);
+      const newlines = m.split("\n").length - 1;
+      return "/* #2932: import/export-from hoisted to module top level */" + "\n".repeat(newlines);
+    };
+    // import x from '…_FIXTURE.js'; / import {a as b} from …; / import * as ns from …;
+    // import x, {a} from …; / import '…_FIXTURE.js';  ([^'";]*? forbids crossing statements)
+    bodyForFunc = bodyForFunc.replace(
+      /^[ \t]*(import\s+(?:[^'";]*?\bfrom\s*)?['"][^'"]*_FIXTURE[^'"]*['"]\s*;)/gm,
+      (m, stmt) => hoistOne(m, stmt),
+    );
+    // export * from '…'; / export * as ns from '…'; / export {a, b as c} from '…';
+    bodyForFunc = bodyForFunc.replace(
+      /^[ \t]*(export\s+(?:\*(?:\s+as\s+[A-Za-z_$][\w$]*)?|\{[^}]*\})\s*from\s*['"][^'"]*_FIXTURE[^'"]*['"]\s*;)/gm,
+      (m, stmt) => hoistOne(m, stmt),
+    );
+    if (hoistedStmts.length > 0) {
+      hoistedImports = hoistedStmts.join("\n") + "\n";
+    }
+  }
+
   // (#2895 PATH B) Async tests: pump the microtask ring before reading the
   // result so genuinely-pending async-frame continuations (which carry the
   // assertions) run. `__drain_microtasks()` is a compiler intrinsic — the native
@@ -2507,7 +2551,7 @@ export function test(): number {
   const asyncDrainDecl = isAsyncTest ? `declare function __drain_microtasks(): void;\n` : "";
   const asyncDrainCall = isAsyncTest ? `  __drain_microtasks();\n` : "";
   const preBody = `${strictDirective}
-${asyncDrainDecl}${preamble}
+${hoistedImports}${asyncDrainDecl}${preamble}
 ${hoistedDecls}
 export function test(): number {
   ${implicitDecls}
