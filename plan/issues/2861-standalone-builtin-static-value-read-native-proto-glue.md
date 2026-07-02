@@ -1,9 +1,8 @@
 ---
 id: 2861
 title: "Standalone: built-in static/prototype property value read not supported — extend native-proto glue (ArrayBuffer, DataView, Promise, Iterator, Error subclasses, …)"
-status: done
-completed: 2026-07-02
-assignee: ttraenkler/fable-dev
+status: in-progress
+assignee: ttraenkler/dev-2863
 created: 2026-06-30
 updated: 2026-07-02
 priority: high
@@ -55,29 +54,6 @@ compile-error cluster in the standalone gap.
 
 (The `<View>.prototype` TypedArray residual already has glue via #2651; these
 are the still-unwired builtins.)
-
-## Completion (2026-07-02)
-
-Landed across several slices. Earlier PRs (2340/2341/2344) wired ArrayBuffer,
-DataView, Promise, Iterator, the NativeError subclasses, SharedArrayBuffer,
-WeakRef, and FinalizationRegistry. The **final residual slice** (this PR) wires
-the Explicit-Resource-Management stacks and ES2026 error aggregation:
-
-- `DisposableStack.prototype` — `dispose`/`use`/`adopt`/`defer`/`move` methods +
-  the `disposed` accessor getter (brand slot 41, `makeGlueWithGetters`).
-- `AsyncDisposableStack.prototype` — same shape with `disposeAsync` (slot 42).
-- `SuppressedError.prototype` — reuses the shared NativeError glue (Error
-  subclass; slot 43).
-
-Measured standalone flips (host-pass → standalone-pass): DisposableStack +30,
-AsyncDisposableStack +20, SuppressedError +5 (**+55**). Standalone-only change
-(arms reached only from `ctx.standalone`-gated proto-value-read/meta paths);
-host mode unchanged; purely additive (new brand slots + exact-name arms), so no
-regression to the 42 existing native-proto tests.
-
-The namespace static reads (`Math.PI`, `JSON.stringify`, `Reflect.get`,
-`Atomics.add`) remain a separate follow-up per the "namespace static reads"
-sub-case below — they do not go through `$NativeProto` proto glue.
 
 ## Root cause
 
@@ -183,3 +159,41 @@ of several hundred with **zero** host-mode regression (these paths are
 ## Reconciliation note (shepherd, 2026-07-01)
 
 Landed slices (native-proto glue wired, verified present in `src/codegen/`): **ArrayBuffer, DataView** (PR #2340), **Promise, Iterator, NativeError subclasses** (PR #2341), **SharedArrayBuffer, WeakRef, FinalizationRegistry** (PR #2344). **Remaining (issue stays `ready`)**: `DisposableStack` / `AsyncDisposableStack` proto glue not yet wired (no `ensureDisposableStack*NativeProtoGlue` in source), plus the `Math`/`JSON`/`Reflect`/`Atomics` namespace static reads explicitly split out per the Implementation Plan.
+
+## Slice 3 (dev-2863, 2026-07-02) — DisposableStack / AsyncDisposableStack
+
+Re-measured the value-read refusal per builtin against current `origin/main`:
+every previously-landed builtin (ArrayBuffer, DataView, Promise, Iterator,
+TypeError/RangeError/ReferenceError, SharedArrayBuffer, WeakRef,
+FinalizationRegistry, Symbol) now compiles. The only ctor/prototype value reads
+still refusing were **`DisposableStack` / `AsyncDisposableStack`** — wired here:
+
+- **`src/codegen/native-proto.ts`** — appended the `DisposableStack` (slot 41) /
+  `AsyncDisposableStack` (slot 42) brands to `BUILTIN_BRAND_TABLE` (they were
+  unreserved, so `getBuiltinBrand` returned `undefined` and the ensure-glue
+  returned early — the plan's "brand not reserved" edge case).
+- **`src/codegen/array-object-proto.ts`** — `*_PROTO_METHODS` member sets
+  (`use`/`adopt`/`defer`/`move`/`dispose`[`disposeAsync`] + the `disposed`
+  accessor getter) and `ensure{Disposable,AsyncDisposable}StackNativeProtoGlue`
+  via `makeGlueWithGetters` (getter folds `.length` to 0). The TC39 Explicit
+  Resource Management resource list lives on the INSTANCE, so the proto value
+  object is pure (member CSV only); member-CLOSURE bodies degrade to a catchable
+  TypeError (the #2193/#2651 pattern). Symbol-keyed members
+  (`[Symbol.dispose]`/`[Symbol.asyncDispose]`/`[Symbol.toStringTag]`) stay
+  outside the string CSV, same as every sibling glue.
+- **`src/codegen/property-access.ts`** — two arms in `tryEnsureNativeProtoBrand`.
+
+Tests: `tests/issue-2861-disposablestack-proto-value-read.test.ts` (value read
+compiles host-free; `.length` folds spec arity; `disposed` getter folds to 0;
+sibling ArrayBuffer/FinalizationRegistry glue unregressed).
+
+**All ctor/prototype value reads in this issue's scope are now wired.** Genuine
+remainder (NOT this slice, and NOT ctor/proto glue):
+
+- **`Math`/`JSON`/`Reflect`/`Atomics` namespace static reads** (`Math.LN2` value,
+  `JSON.stringify` as a value, …) — explicitly split out per the Implementation
+  Plan; a separate follow-up under umbrella #2860.
+- **`<Ctor>.length` / `<Ctor>.name` static reads** (e.g. `Boolean.length` — the
+  ctor's own arity, `test/built-ins/Boolean/S15.6.3_A3.js`) still refuse. This is
+  a distinct mechanism from proto glue (a function's own `length`/`name`, not a
+  `.prototype` member) — a candidate next slice.

@@ -125,12 +125,15 @@ const BUILTIN_BRAND_TABLE: Readonly<Record<string, number>> = {
 
   // ── Resource-management / weak builtins ──────────────────────────────────
   FinalizationRegistry: BUILTIN_BRAND_BASE + 40,
-
-  // ── Explicit Resource Management (TC39 Stage 3) + ES2026 error aggregation ─
-  // (#2861 residual) DisposableStack / AsyncDisposableStack `.prototype` value
-  // reads; SuppressedError shares the NativeError glue shape (Error subclass).
+  // (#2861) TC39 Explicit Resource Management stacks — `<Stack>.prototype`
+  // value reads (use/adopt/defer/move/dispose[Async]/disposed getter). The
+  // resource list lives on the INSTANCE, never the proto, so the proto value
+  // object is pure (member CSV only).
   DisposableStack: BUILTIN_BRAND_BASE + 41,
   AsyncDisposableStack: BUILTIN_BRAND_BASE + 42,
+  // (#2861) SuppressedError (ES2026 error aggregation) — an Error subclass, so
+  // its `.prototype` value read reuses the shared NativeError glue shape
+  // (`toString` member; constructor/name/message data props via the meta-fold).
   SuppressedError: BUILTIN_BRAND_BASE + 43,
 
   // Next free slot: BUILTIN_BRAND_BASE + 44 (append only).
