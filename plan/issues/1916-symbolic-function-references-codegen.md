@@ -1,13 +1,13 @@
 ---
 id: 1916
 title: "Symbolic function references in WasmGC codegen — retire the late-import index-shift machinery"
-status: blocked
-blocked_by: [2167]
+status: in-progress
+assignee: ttraenkler/dev-1916f
 pipeline_unblocked: 1927
 sprint: current
 model: fable
 created: 2026-06-10
-updated: 2026-06-24
+updated: 2026-07-02
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -15,6 +15,7 @@ task_type: refactor
 area: codegen
 language_feature: compiler-internals
 goal: maintainability
+related: [2710, 1899, 1985]
 ---
 # #1916 — Symbolic function references in WasmGC codegen
 
@@ -90,3 +91,73 @@ ts.Symbol**, with names demoted to debug metadata. The instance-side twin
 ($shape, #2009) covers struct identity; this issue owns function/registry
 identity. Full analysis: plan/log/analysis-2026-06/05-structure-review.md
 §3.
+
+## Reconciliation with #2710 + staged plan (dev-1916f, 2026-07-02)
+
+Unblocked: #2167 resolved — Fable re-enabled 2026-07-02 (coordinator
+direction); `blocked_by` cleared.
+
+**Foundation decision: #1916 builds ON #2710's landed FuncHandle
+foundation — it does NOT introduce a second identity mechanism.** While
+this issue was Fable-parked, #2710 ("late-bind module indices") landed
+slices 0+1 of the same migration: the `scripts/prove-emit-identity.mjs`
+byte-identity oracle and the `FuncHandle`/`GlobalHandle`/`TypeHandle`
+vocabulary pinned onto the discriminated `Instr` arms
+(`src/ir/types.ts`). #1916's original sketch (shared mutable `{index}`
+cells mutated by shifters) is **rejected** in favour of #2710's stable
+counter-minted handles + one `resolveLayout()` at serialization, for two
+reasons grounded in prior findings:
+
+1. **Mutable cells keep the class reachable** — every shifter must still
+   know about every cell holder (the same "did you remember to chase this
+   side-channel" discipline that produced the 7 regressions). Stable
+   handles + late resolve delete the shifters instead of teaching them.
+2. **#1899's implementation notes prove idx-keyed repair is unsound** —
+   a numeric funcIdx is ambiguous across shifts (a freed slot gets reused
+   by a different function), so identity must ride IN the instruction as
+   a layout-independent value. That is exactly the #2710 handle.
+
+The #1916 amendment's collision-free requirement is satisfied for the
+handle itself (monotonic counter, never reused, never renumbered — no
+name derivation). The registry-key collision class (name-keyed
+`funcMap.get(name)` returning the wrong entry — #1983/#1989) is
+orthogonal to index binding and stays tracked in those issues.
+
+**Slice mapping (each ships green + byte-identical via
+`prove-emit-identity`; #2710 slice numbers in parens):**
+
+- **S1 (=2710 slice 2) — resolver seam, identity.** THIS SLICE.
+  `src/emit/resolve-layout.ts` (`ModuleLayout` + identity `resolveLayout`)
+  armed per-emit in `emitBinaryWithSourceMap` next to `valCtx`; every
+  func/global reference serialization in `src/emit/binary.ts` now
+  dereferences through it: `call`, `return_call`, `ref.func`,
+  `global.{get,set}`, func/global export descriptors, element-segment
+  function lists, `declaredFuncRefs`, start section. Proof: 1215
+  (file,target) records — playground examples + 392-file test262 sample
+  × {gc, standalone, wasi}, 992 real binaries — **byte-identical**.
+  Late-shift class holds: issue-329/1677/1809/1839/1899/2191/2193/2918
+  suites green (51 tests) + new `tests/issue-1916-symbolic-func-refs.test.ts`.
+- **S2 (=2710 slice 3) — convert positional reads.** The ~94
+  `mod.functions[idx - numImportFuncs]` reads + `idx - numImportFuncs`
+  arithmetic become chokepoint accessors (registry-keyed); globals'
+  `localGlobalIdx`/`nextModuleGlobalIdx` analogues audited. Enumerate by
+  temporarily flipping the brand to `unique symbol` (tsc lists every
+  violation), convert, keep byte-identity.
+- **S3 (=2710 slice 4b/4c, func space — the heart of #1916).** Mint
+  stable func handles at registration; `resolveLayout` computes the real
+  permutation (imports in declaration order, then live defined funcs in
+  array order post-DCE — reproduces today's layout byte-for-byte); DELETE
+  the four func-index shifters (`shiftLateImportIndices`,
+  `reconcileNativeStrFinalizeShift`, the `addStringImports` /
+  `addUnionImports` inline shifters) + the `liveBodies`/
+  `parentBodiesStack` reachability bookkeeping; dead-elim stops
+  renumbering func refs (drops dead defs; layout skips dead handles).
+  Full CI + merge_group (broad-impact — never a scoped sweep).
+- **S4 (=2710 slice 4a/4d) — globals (`fixupModuleGlobalIndices` + ~25
+  cached fields, the #2078 site), then types (DCE renumber through
+  `resolveLayout`).** May land under #2710 directly.
+
+Coordination note: #2710 is claim-held by `ttraenkler/sd-indexshift`
+(2026-06-26, no active agent, no open PR). S1–S3 are being advanced
+under #1916 by `ttraenkler/dev-1916f` with a cross-note in #2710's log;
+the two issues share one mechanism and MUST NOT diverge.
