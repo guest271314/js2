@@ -3,7 +3,7 @@ id: 2849
 title: "dynamic-object numeric property reads back 0 when the same property is also compared via === string / == null (acorn ecmaVersion 2022 not normalised → spurious import attributes)"
 status: done
 completed: 2026-07-02
-assignee: ttraenkler/fable-dev
+assignee: ttraenkler/dev-2937f
 sprint: current
 priority: medium
 horizon: l
@@ -20,18 +20,23 @@ blocks: [1712]
 umbrella: 1712
 ---
 
-> **RE-CLOSED 2026-07-02 by #2944 (was briefly reopened/blocked).** The host-mode
-> fix (PR #2432, extend the `objectHashConsumerVars` poison to host) had broken
-> compiled-acorn (#2937): the var-name poison was honored only at the widening
-> decision, so the poisoned `$Object` value ESCAPED into struct-typed slots
-> (`getOptions`'s inferred return type / `this.options` field, all typed from
-> the SAME ts.Type via `ensureStructForType`) and nulled at the cast. **#2944
-> fixed the escape properly** — the poison is now also keyed by ts.Type
-> identity (`ctx.objectHashConsumerTypes`) and consulted at the type-resolution
-> chokepoints, so the host poison stays active AND compiled-acorn parses. The
-> host arms in `tests/issue-2849.test.ts` are plain `it` again;
-> `tests/issue-2944.test.ts` covers the escape shape. Standalone was never
-> affected (byte-identical throughout).
+> **RE-LANDED 2026-07-02 (chain: done → reverted → done).** Factual chain:
+> the host-mode fix (PR #2432, extend the `objectHashConsumerVars` poison to
+> host) **alone** regressed compiled-acorn to a uniform null-deref on every
+> host input (#2937) — the poisoned value ESCAPES the identifier into
+> struct-typed slots (`getOptions` return, `this.options` field) that the
+> widening-decision poison never re-typed. PR **#2462** (a plain revert of
+> #2432) was bot-parked at −137 on the strict gate (it un-fixed these flips),
+> then **owner admin-merged at 2026-07-02T04:50:32Z** (`06e47fd`), re-breaking
+> ~146 #2849 flips pending a fix-forward. This issue was briefly
+> `blocked_on: 2944`. The **re-land PR** (same PR as #2937/#2944) ships the
+> poison TOGETHER with the #2944 escape discipline
+> (`ctx.objectHashConsumerTypes` — the evolved checker type of a poisoned var
+> refuses struct resolution in `resolveWasmType`/`ensureStructForType`/
+> `resolveStructName`), so BOTH constraints hold: the host arms in
+> `tests/issue-2849.test.ts` are back to plain `it` and pass, AND
+> compiled-acorn parses (guarded by `tests/issue-2937.test.ts` + the dogfood
+> corpus, 21/23 equal±quirks). Standalone byte-identical throughout.
 
 # #2849 — dynamic-object property mis-typed when read in heterogeneous (string-`===` / `==null` AND numeric) contexts
 

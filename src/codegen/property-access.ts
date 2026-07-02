@@ -1217,13 +1217,9 @@ function isBindResultExpr(ctx: CodegenContext, expr: ts.Expression): boolean {
  * classExprNameMap, and anonTypeMap.
  */
 export function resolveStructName(ctx: CodegenContext, tsType: ts.Type): string | undefined {
-  // (#2944) A hash-consumer-poisoned type (host mode) never binds to a struct:
-  // the value is a dynamic `$Object` externref, so every member read/write on
-  // an expression of this type must route through the dynamic host path
-  // (`__extern_get`/`__extern_set` + the #2655 multi-struct dispatch). Without
-  // this, an anonTypeMap entry registered under the SAME ts.Type by another
-  // registrar would lower the access to `struct.get` against a value that is
-  // not (and must not become) a struct (#2937).
+  // (#2937) The evolved checker type of a poisoned `$Object`-hash-consumer
+  // `{}` var never resolves to a struct — receivers of that type route through
+  // the externref host-MOP path (see resolveWasmType's matching guard).
   if (ctx.objectHashConsumerTypes.has(tsType)) return undefined;
   const name = tsType.symbol?.name;
   if (name && name !== "__type" && name !== "__object" && ctx.structMap.has(name)) {

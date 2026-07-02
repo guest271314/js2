@@ -1568,25 +1568,20 @@ export interface CodegenContext {
    */
   objectHashConsumerVars: Set<string>;
   /**
-   * (#2944) HOST-mode companion to `objectHashConsumerVars`, keyed by ts.Type
-   * IDENTITY instead of var name. The var-name poison is consulted only at the
-   * widening DECISION, but representation actually flows from the ts.Type-keyed
-   * machinery: `ensureStructForType` (e.g. on a function's inferred RETURN type
-   * — `declarations.ts` signature pre-pass — or a closure/destructured param
-   * type) registers the SAME ts.Type instance the poisoned var carries as an
-   * anon struct, so the local/return/param/field slots all type as
-   * `(ref null $__anon_N)` while the value is a host `$Object` externref → the
-   * decl-init cast nulls the var and every downstream read null-derefs (the
-   * #2937 compiled-acorn total break). Membership here is consulted at the three
-   * type-resolution chokepoints — `ensureStructForType` (skip registration),
-   * `resolveWasmType` (→ externref), `resolveStructName` (→ undefined, dynamic
-   * host path) — so the "stays a `$Object`" decision follows the value through
-   * every slot it ESCAPES into (returns, params, fields, aliases, elements).
-   * Populated in `collectEmptyObjectWidening` with the poisoned var's declared
-   * + initializer types (never `any` — that singleton is shared by all
-   * any-typed vars). HOST-only (`!ctx.standalone`): standalone keeps its
-   * var-level poison unchanged and stays byte-identical; its matching latent
-   * escape is a separate slice.
+   * (#2937) HOST-mode companion to `objectHashConsumerVars`, keyed by ts.Type
+   * identity instead of variable name. In a JS-mode source file (acorn.mjs),
+   * the checker EVOLVES `var o = {}` through its later static-named writes into
+   * an anonymous object type WITH those properties. `resolveWasmType` /
+   * `ensureStructForType` would auto-register that evolved type as a closed
+   * `__anon_N` struct and type the LOCAL (and every flow position: returns,
+   * class fields, receivers) as `(ref null __anon_N)` — while the poisoned
+   * initializer builds a host plain object (externref). The declaration's
+   * guarded cast then stores ref.null and every static read null-derefs (the
+   * compiled-acorn `getOptions` uniform throw). Types recorded here refuse
+   * struct resolution and stay externref end to end, so ALL access forms on a
+   * poisoned var route through the host MOP (`__extern_get`/`__extern_set`)
+   * coherently. Populated only in host/gc/wasi mode (standalone keeps its
+   * pre-existing codegen byte-identical; its matching gap is filed separately).
    */
   objectHashConsumerTypes: Set<ts.Type>;
   /**

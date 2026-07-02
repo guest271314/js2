@@ -19,36 +19,21 @@ depends_on: []
 related: [2849, 2584, 2432, 1712, 1710, 2850, 2853, 2944]
 ---
 
-> **FIXED-BY-REVERT, THEN PROPERLY RE-FIXED BY #2944 (2026-07-02).** The revert
-> (PR #2462, merged) restored the standalone-only gate as the interim fix —
-> acorn un-broken at the accepted cost of the #2432 host wins. #2944 then
-> RE-ENABLED the host poison with the proper cure: the poison is ALSO keyed by
-> ts.Type identity (`ctx.objectHashConsumerTypes`) and consulted at the
-> type-resolution chokepoints (`ensureStructForType` / `resolveWasmType` /
-> `resolveStructName`), so the poisoned value's externref representation follows
-> it through every escaping slot. Compiled-acorn parses on all corpus inputs
-> (21 equal±quirks / 0 real / 2 pre-existing throws) WITH the host poison
-> active, AND #2849 stays fixed (the #2432 host wins recover). Standalone
-> codegen byte-identical (sha256-verified) throughout both steps. Historical
-> context of the revert decision below:
->
-> **FIXED BY REVERT (2026-07-02, tech-lead decision).** Backed out PR #2432's
-> host extension of the `objectHashConsumerVars` poison — restored the
-> `if (ctx.standalone)` gate at `declarations.ts` `collectEmptyObjectWidening`.
-> Compiled-acorn `parse("")`/`parse("1")`/all corpus inputs parse again in host
-> mode; standalone codegen is byte-identical (its poison was never touched). The
-> narrow #2849 host bug the extension had fixed **reopens** (`plan/issues/2849`
-> back to `blocked`), because the two constraints genuinely conflict under the
-> current representation model — the poisoned `$Object` value ESCAPES the
-> identifier (returned from `getOptions`, stored in the struct-typed
-> `this.options` field) into struct-typed slots the poison never re-types, so a
-> scoped receiver bail cannot fix it (measured: host poison + bail → 22/23 acorn
-> corpus inputs still throw; pure revert → all parse). Full escape analysis is
-> seeded into **#2944**. The **proper cure for BOTH** is the escape-discipline
-> substrate slice **#2944** (externref-typed escapes for poisoned `$Object`
-> values); the reverted host arms in `tests/issue-2849.test.ts` are
-> `it.fails`-pinned to it. (The "Fix direction" section below is the pre-decision
-> investigation record, superseded by this banner.)
+> **RESOLVED — RE-LAND WITH ESCAPE DISCIPLINE (2026-07-02).** Full factual
+> chain: (1) PR #2432 (#2849) extended the `objectHashConsumerVars` poison to
+> host → compiled-acorn null-dereffed on EVERY host input (this issue, bisected
+> to `4173306a9b29`). (2) Interim revert PR **#2462** was bot-parked at −137 on
+> the strict gate (it un-fixed #2849's flips), then **owner admin-merged at
+> 2026-07-02T04:50:32Z** (`06e47fd`) — acorn parsed again, ~146 #2849 flips
+> re-broke, `tests/issue-2849.test.ts` host arms `it.fails`-pinned to #2944.
+> (3) The **re-land PR** (this one) re-drops the host gate TOGETHER with the
+> #2944 escape discipline, satisfying BOTH constraints: the #2849 host arms
+> are back to plain `it` and pass, AND compiled-acorn parses (dogfood corpus
+> 21/23 equal±quirks, 0 REAL divergences — above the 13 pre-regression
+> watermark; the 2 THREW are pre-existing #2850 + acorn-self). See the
+> "Root Cause (final)" and "Fix (the re-land)" sections below; the "Fix
+> direction" / "Reduction status" sections are the earlier investigation
+> record.
 
 # #2937 — host-mode `$Object`-hash poison regresses compiled-acorn to a uniform null-deref
 
@@ -109,6 +94,83 @@ host mode to fix the acorn `getOptions` for-in-copy shape (ecmaVersion `2022`
 read back as `0` instead of `13`). But extending the poison to host mode makes
 some access shape Acorn uses read back a **null receiver**, and the null guard
 throws.
+
+## Root Cause (final — instrumented to the exact site)
+
+Instrumenting `typeErrorThrowInstrs` with per-site ids + the compiled function
+name pinned the throw to **`getOptions`**, at the null-guarded `struct.get`
+fast path in `emitNullGuardedStructGet`, reading **`__anon_4.ecmaVersion`** —
+a widened anonymous struct that could NOT be `options`'s own (its widening was
+poison-suppressed). The mechanism, verified by a minimal repro:
+
+1. Acorn compiles as a **JS-mode** source (`fileName: "acorn.mjs"`). In JS
+   special mode the TS checker **EVOLVES** `var options = {}` through its later
+   static-named writes (`options.ecmaVersion = …` etc.) into an anonymous
+   object type WITH those properties. **TS mode has no equivalent** — `{}`
+   stays the empty type there, which is why (a) the #2849 tests (compiled as
+   TS) stayed green while acorn broke, and (b) dev-2927's 7 reduced shapes
+   (all `fileName: "t.ts"`) never reproduced. JS-mode evolution was the
+   missing ingredient, not shape size.
+2. The #2584/#2849 poison is honored **only at the widening decision**
+   (`collectEmptyObjectWidening`). The evolved checker type independently
+   flows through `resolveWasmType` → `ensureStructForType`, auto-registers a
+   closed `__anon_N` struct, and types the **local** — and every ESCAPE
+   position: `getOptions`'s return type, the `Parser.options` class field,
+   receivers at read sites — as `(ref null __anon_N)`.
+3. The poisoned initializer builds a **host plain object**
+   (`__new_plain_object` → externref). The declaration's guarded cast of that
+   externref into `(ref null __anon_N)` fails → stores `ref.null`.
+4. First static read (`options.ecmaVersion === "latest"`, the first statement
+   after the for-in copy) hits the null-guarded `struct.get` → uniform
+   `TypeError: Cannot access property on null or undefined` at parser setup.
+
+Minimal repro (`tests/issue-2937.test.ts`): the getOptions escape shape as
+`repro.mjs` throws pre-fix / returns 13 post-fix; the identical source as
+`repro.ts` never threw (no evolution).
+
+## Fix (the re-land) — type-keyed escape discipline (#2944)
+
+`ctx.objectHashConsumerTypes: Set<ts.Type>` — when the poison suppresses
+widening for a var (host lanes only), `collectEmptyObjectWidening` records the
+var's **evolved** checker type (guards: `!ctx.standalone`, not `any`,
+`getProperties().length > 0` so TS-mode empty `{}` types are never recorded).
+Three resolution funnels refuse struct resolution for a recorded type:
+
+- `resolveWasmType` (index.ts) → returns externref
+- `ensureStructForType` (index.ts) → early-returns (never registers the
+  `__anon` struct)
+- `resolveStructName` (property-access.ts) → returns undefined (receivers
+  route through the externref host-MOP path)
+
+Because return types, class-field types, params, and aliases all resolve
+through the **same `ts.Type` object identity**, the single type-keyed check
+delivers the full #2944 escape discipline (return / field / param / alias)
+without per-site chasing: the poisoned value stays externref end to end and
+every access form (static dot, computed bracket, for-in, escape reads) routes
+through the host MOP (`__extern_get`/`__extern_set`) coherently. In host mode
+the `$Object` is a real JS object, so the MOP is fully correct.
+
+**Byte-diff verification (sha256, main vs re-land):** ONLY the host lanes of
+poisoned shapes change (the intended #2849 behavior change + this coherence
+fix). Standalone lanes (all shapes, both file modes), TS-mode non-poisoned,
+static-only and general programs are **byte-identical**.
+
+**Validation:** `tests/issue-2849.test.ts` 11/11 with the host arms back to
+plain `it`; `tests/issue-2937.test.ts` 4/4; dogfood corpus **21/23
+equal±quirks, 0 REAL divergences** (pre-regression watermark 13/22; the 2
+THREW — `corpus/regex.js` (#2850) and acorn-self-parse — are documented
+pre-existing gaps); compiled-acorn `parse("")`/`parse("1")`/`parse("var x =
+1;")` all return `Program`.
+
+**Known residual (out of scope, separate value-rep layer):** acorn's
+_defaulting_ path (`getOptions({})`) copies `defaultOptions.ecmaVersion` —
+a `null`-valued field on a NON-empty literal's closed struct — which stores
+null as f64 `0`, so the copy reads back `0` (not `null`) and the `== null`
+defaulting arm never fires (returns 0 instead of 11). This null-in-struct-
+field representation gap PRE-DATES the whole #2849/#2937 chain (never green
+in any build) and is invisible to the corpus (which passes an explicit
+`ecmaVersion`). Documented in `tests/issue-2937.test.ts` as a non-throwing
+known-residual assertion; candidate follow-up for the #2896 value-rep family.
 
 ## Fix direction (confirmed) — and why a plain revert is NOT acceptable
 
@@ -269,9 +331,12 @@ property on null or undefined`.
 
 ## Acceptance criteria
 
-- [ ] Compiled-Acorn `parse("")` / `parse("1")` return a `Program` in host mode
-      (dogfood corpus back to ≥ the 2026-06-30 baseline: ≥13 equal±quirks).
-- [ ] `tests/issue-2849.test.ts` still passes (host `2022 → 13` preserved).
-- [ ] Standalone codegen byte-identical (poison was already on there — no change).
-- [ ] A regression test captures the Acorn-shaped null-deref (reduced repro, or a
+- [x] Compiled-Acorn `parse("")` / `parse("1")` return a `Program` in host mode
+      (dogfood corpus back to ≥ the 2026-06-30 baseline: ≥13 equal±quirks —
+      measured 21/23, 0 REAL divergences).
+- [x] `tests/issue-2849.test.ts` still passes (host `2022 → 13` preserved —
+      all host arms restored to plain `it`, 11/11).
+- [x] Standalone codegen byte-identical (poison was already on there — no change;
+      sha256-verified across the byte-diff corpus).
+- [x] A regression test captures the Acorn-shaped null-deref (reduced repro, or a
       guarded compiled-Acorn smoke assertion in `tests/`).

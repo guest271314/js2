@@ -16,17 +16,16 @@
 //   else if (o.ecmaVersion == null) …
 //   else if (o.ecmaVersion >= 2015) o.ecmaVersion -= 2009;   // 2022 → 13
 //
-// (#2937 → #2944) The host extension of the poison briefly had to be reverted
-// (#2937): the var-name poison was honored only at the widening decision, so the
-// poisoned `$Object` value ESCAPED into struct-typed slots (inferred return type /
-// field / alias — all typed from the SAME ts.Type via `ensureStructForType`) and
-// compiled-acorn null-dereferenced on every host-mode input. #2944 fixed the
-// escape properly — the poison is now ALSO keyed by ts.Type identity
-// (`ctx.objectHashConsumerTypes`) and consulted at the type-resolution
-// chokepoints (`ensureStructForType` / `resolveWasmType` / `resolveStructName`),
-// so every slot the value flows into lowers to externref and every member access
-// routes through the dynamic host path. All host arms below are plain `it`
-// again; `tests/issue-2944.test.ts` covers the escape shape itself.
+// History (#2937/#2462/#2944): the #2849 host extension alone regressed
+// compiled-acorn to a uniform null-deref (#2937) — in JS-mode sources the
+// poisoned value ESCAPES into struct-typed slots (return / `this.options`
+// field) that the widening-decision poison never re-typed. It was reverted
+// (#2462, owner admin-merge) and these host arms were `it.fails`-pinned. The
+// re-land ships the poison TOGETHER with the #2944 escape discipline
+// (`objectHashConsumerTypes` — the evolved checker type of a poisoned var
+// refuses struct resolution everywhere), so BOTH constraints hold: these arms
+// pass again AND compiled-acorn parses (guarded by tests/issue-2937.test.ts +
+// the dogfood corpus).
 
 import { describe, it, expect } from "vitest";
 import { compile } from "../src/index.js";

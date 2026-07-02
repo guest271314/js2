@@ -192,6 +192,16 @@ export interface IrSelection {
    *  paired with the rejection reason. Only populated when
    *  `IrSelectionOptions.trackFallbacks` is true. */
   readonly fallbacks?: ReadonlyArray<IrFallback>;
+  /** (#2138) Local call-graph edges (top-level FunctionDeclaration name →
+   *  set of top-level FunctionDeclaration callee names in the same source
+   *  file), exactly as computed by `buildLocalCallGraph` for the Step-2
+   *  closure. Exposed so the IR-first compile-once inversion
+   *  (`JS2WASM_IR_FIRST=1`) can decide which claimed functions are safe to
+   *  skip on the legacy body pass WITHOUT re-deriving the call graph.
+   *  Present only when Step 2 ran (i.e. at least one function was
+   *  individually claimed); callers must treat a missing map as "no edge
+   *  information" and behave conservatively. */
+  readonly localCallees?: ReadonlyMap<string, ReadonlySet<string>>;
 }
 
 export interface IrSelectionOptions {
@@ -475,13 +485,17 @@ export function planIrCompilation(
   const classMembers = individuallyClaimedClassMembers.size > 0 ? individuallyClaimedClassMembers : undefined;
 
   if (!trackFallbacks) {
-    return classMembers ? { funcs: claimed, classMembers } : { funcs: claimed };
+    return classMembers
+      ? { funcs: claimed, classMembers, localCallees: callees }
+      : { funcs: claimed, localCallees: callees };
   }
 
   const fallbacks: IrFallback[] = [];
   for (const [name, reason] of fallbackReasons) fallbacks.push({ name, reason, detail: fallbackDetails.get(name) });
   for (let i = 0; i < unnamedCount; i++) fallbacks.push({ name: `<unnamed:${i}>`, reason: "unnamed" });
-  return classMembers ? { funcs: claimed, classMembers, fallbacks } : { funcs: claimed, fallbacks };
+  return classMembers
+    ? { funcs: claimed, classMembers, fallbacks, localCallees: callees }
+    : { funcs: claimed, fallbacks, localCallees: callees };
 }
 
 // ---------------------------------------------------------------------------

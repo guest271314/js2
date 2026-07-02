@@ -6,7 +6,7 @@ spec: ready
 sprint: current
 created: 2026-06-30
 updated: 2026-07-02
-priority: low
+priority: high
 horizon: l
 feasibility: hard
 reasoning_effort: high
