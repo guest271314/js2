@@ -851,7 +851,7 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
     if (ts.isIdentifier(param.name)) continue;
     const pat = param.name;
     if (!ts.isArrayBindingPattern(pat) && !ts.isObjectBindingPattern(pat)) return null;
-    // (#2933) A WHOLE-PARAM default on a binding pattern (`{} = undefined`,
+    // (#2938) A WHOLE-PARAM default on a binding pattern (`{} = undefined`,
     // `{x} = {}`) evaluates the initializer when the argument is `undefined`.
     // The resume-prelude destructure has no defaulted-raw-arg arm yet — on the
     // no-yield corpus this shape mis-typed the state struct
@@ -923,7 +923,7 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
   // Reject when the state count is too large. (#2170) A `yield*` delegation
   // state is a suspension point too.
   //
-  // (#2933) NO-YIELD generators now lower natively: a zero-suspend body runs to
+  // (#2938) NO-YIELD generators now lower natively: a zero-suspend body runs to
   // completion in state 0 and produces a done-from-start trampoline. This was
   // held off behind the late-import funcIdx-shift bug (`__str_flatten call[1]
   // expected externref, found i32` at harness scale) fixed by #2936 (the
@@ -1115,7 +1115,7 @@ export function isNativeGeneratorCandidate(ctx: CodegenContext, decl: GeneratorD
       if (param.initializer || param.questionToken) return false;
     }
   }
-  // (#2933) A generator METHOD whose emitted name is not unique within its
+  // (#2938) A generator METHOD whose emitted name is not unique within its
   // class / object literal must bail to the host path. The class collection
   // pass keys everything on `${className}_${methodName}` and SKIPS a
   // duplicate-name member ("Skip if a function with this name is already
@@ -1126,7 +1126,7 @@ export function isNativeGeneratorCandidate(ctx: CodegenContext, decl: GeneratorD
   // their emitted-name derivation is not stable enough to prove uniqueness.
   // Gate here — the SINGLE source of truth — so collection, the method emit
   // AND `sourceNeedsGeneratorHostImports` all agree (host imports stay
-  // registered; behavior matches the pre-#2933 eager-buffer path).
+  // registered; behavior matches the pre-#2938 eager-buffer path).
   if (ts.isMethodDeclaration(decl)) {
     if (ts.isComputedPropertyName(decl.name)) return false;
     const parent = decl.parent;
@@ -1163,7 +1163,7 @@ export function isNativeGeneratorCandidate(ctx: CodegenContext, decl: GeneratorD
     return false;
   }
   const plan = buildNativeGeneratorPlan(ctx, decl);
-  // (#2933) No terminal yield-require — no-yield (zero-suspend) generators are
+  // (#2938) No terminal yield-require — no-yield (zero-suspend) generators are
   // native candidates now that #2936 fixed the late-import funcIdx-shift class.
   // Relaxed in LOCKSTEP with buildNativeGeneratorPlan's suspendCount bail.
   return plan !== null;
