@@ -14,7 +14,7 @@ language_feature: compiler-internals
 goal: correctness
 parent: 2134
 related: [2134, 2135, 1982]
-origin: "#2134 slice-3 follow-up (design doc in plan/issues/2134-*.md)"
+origin: "#2134 slice-3 follow-up (design doc in plan/issues/2134-ir-effect-model-ordered-emission.md)"
 ---
 
 # #2990 — finish unifying the IR effect model (#2134 slice 3)
