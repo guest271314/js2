@@ -84,13 +84,40 @@ not one — triaged 2026-07-02:
      SHA over plain-array/string/entries for-of). Tests:
      `tests/issue-2934-packed-forof-valtype.test.ts` (12 cases incl. signedness
      semantics: Int8 −56, Uint8 200, Uint16 40000, Int16 −30000).
-- [ ] **(1c) `TypedArray.prototype.set` / `Uint8Array.toBase64`** — the
-      `array.set[2] expected i32, found array.get of externref` / packed-`array.get`
-      errors here are a DISTINCT **DCE type-index remap** (`project_type_index_shift_
-and_deadelim`): the pre-encode module has NO packed plain-`array.get`, so a
-      post-codegen dead-type-elimination / dedup pass mis-remaps an `array.get`
-      typeIdx onto a packed array. Needs a `dead-elimination.ts` audit — harder,
-      likely warrants an architect spec.
+- [x] **(1c) `TypedArray.prototype.set` / `Uint8Array.toBase64` packed-element
+      coercion** — DONE (dev-2934f, slice 5). **The DCE-remap hypothesis was
+      WRONG**: instrumented `eliminateDeadImports` entry/exit — the bad
+      instructions exist verbatim at DCE-entry (and `remapTypeIdxInBody` already
+      carries the #1302/#2564 double-remap guards). The real mechanisms were
+      three packed-element coercion gaps:
+  1. `coerceType` (`type-coercion.ts`) normalized packed i8/i16 kinds ONLY for
+     the numeric short-circuit pairs; every OTHER arm tests the raw
+     `from.kind`/`to.kind`, so `i8 → externref` matched NO arm → lossy
+     drop+null fallback (silent data loss), and `externref → i8` emitted NO
+     unbox → un-coerced externref reached the packed `array.set`
+     (`array.set[2] expected i32, found array.get of externref`). Fix: entry
+     now rewrites the packed side(s) to the true stack kind (i32) and FALLS
+     THROUGH to the real box/unbox arms. Packed elements are never
+     boolean/symbol/bigint-branded, so a bare i32 is the exact rewrite.
+  2. `emitVecToVecBody` (`type-coercion.ts`) read a packed source vec with a
+     plain `array.get` (`Array type N has packed type i8`) — same class as
+     (1)/(1b); now `elemGetOp` + widened-i32 coercion source.
+  3. The `new TypedArray(arrayLike)` copy loop (`expressions/new-super.ts`)
+     had an element-conversion matrix that only knew f64↔int — an externref
+     (any[]) source element (`new Uint8Array([102])` where the literal
+     compiled to an externref-elem vec) flowed raw into the packed
+     `array.set` (the `toBase64`/`__cb_0` signature). Now unboxes (ToNumber)
+     - truncates for integer storage; width truncation on packed store is
+       free.
+       Verified: 3/3 named repros standalone INVALID → valid (now runtime-fail
+       on separate pre-existing semantics gaps — resizable-arraybuffer log
+       order, toBase64 core, sab — same acceptance class as 2a); 100-file
+       `TypedArray/prototype/set` + base64 sweep 78→90 VALID (+12, 0 new
+       invalid; 10 residual CEs are the unrelated `__get_builtin` class);
+       byte-identical on host mode and non-packed standalone paths; value
+       semantics probed across all conversion directions (u8←literal,
+       i8←200→−56, f64←u8, u8←i16 truncation, u8←fractional). Tests:
+       `tests/issue-2934-packed-elem-coercion-1c.test.ts` (8 cases).
 - [ ] **(1d) simple `for (const v of u.values())`** — demotes to the IR path
       (`ir/from-ast: unknown class`), a separate IR-adoption gap. NOTE: after (1b)
       the legacy-path fallback now compiles these shapes correctly (valid Wasm,
