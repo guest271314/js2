@@ -5,6 +5,7 @@ import { emitWasiErrorConstructor } from "./registry/error-types.js";
 import { analyzeLinearUint8 } from "./linear-uint8-analysis.js";
 import { analyzeFnctorEscapeGate, deriveFnctorFields } from "./fnctor-escape-gate.js";
 import { isLinearU8RepresentableNew } from "./linear-uint8-signatures.js";
+import { definedFuncAt } from "./func-space.js"; // (#1916 S2) positional-read chokepoint
 import type { MultiTypedAST, TypedAST } from "../checker/index.js";
 import {
   isBigIntType,
@@ -98,6 +99,7 @@ import {
   isStandalonePromiseActive,
   shiftAsyncSideChannelFuncIdxs,
 } from "./async-scheduler.js";
+import { inLiveShiftRange } from "../emit/resolve-layout.js"; // (#1916 S3) stable handles never shift
 import {
   brandExternMethodResult,
   ensureLateImport,
@@ -2474,9 +2476,8 @@ function addWasiStartExport(ctx: CodegenContext): void {
 
   const mainIdx = ctx.funcMap.get("main");
   if (mainIdx !== undefined) {
-    const funcArrayIdx = mainIdx - ctx.numImportFuncs;
-    if (funcArrayIdx >= 0 && funcArrayIdx < ctx.mod.functions.length) {
-      const func = ctx.mod.functions[funcArrayIdx]!;
+    const func = definedFuncAt(ctx, mainIdx);
+    if (func) {
       const funcType = ctx.mod.types[func.typeIdx];
       // Only an EXPORTED, no-arg, no-result `main` is a valid `_start` entry.
       // A non-exported `main` (the `main()`-calls-itself convention) is reached
@@ -3352,7 +3353,7 @@ function emitIteratorMethodExport(ctx: CodegenContext): void {
       const funcIdx = ctx.funcMap.get(methodFullName);
       if (funcIdx === undefined) continue;
 
-      const funcDef = mod.functions[funcIdx - ctx.numImportFuncs];
+      const funcDef = definedFuncAt(ctx, funcIdx);
       const funcType = funcDef ? mod.types[funcDef.typeIdx] : undefined;
       const resultType: ValType =
         funcType && funcType.kind === "func" && funcType.results.length > 0
@@ -3498,7 +3499,7 @@ function emitToPrimitiveMethodExport(ctx: CodegenContext): void {
     const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, `${structName}_${methodSuffix}`)); // (#1983)
     if (funcIdx === undefined) continue;
 
-    const funcDef = mod.functions[funcIdx - ctx.numImportFuncs];
+    const funcDef = definedFuncAt(ctx, funcIdx);
     const funcType = funcDef ? mod.types[funcDef.typeIdx] : undefined;
     const resultType: ValType =
       funcType && funcType.kind === "func" && funcType.results.length > 0
@@ -3617,7 +3618,7 @@ function toPrimitiveNeedsBoxing(ctx: CodegenContext, methodSuffix: string): bool
       continue;
     const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, `${structName}_${methodSuffix}`));
     if (funcIdx === undefined) continue;
-    const funcDef = mod.functions[funcIdx - ctx.numImportFuncs];
+    const funcDef = definedFuncAt(ctx, funcIdx);
     const funcType = funcDef ? mod.types[funcDef.typeIdx] : undefined;
     const resultType =
       funcType && funcType.kind === "func" && funcType.results.length > 0 ? funcType.results[0] : undefined;
@@ -4756,7 +4757,7 @@ function emitToPrimitiveMethodExports(ctx: CodegenContext): void {
       // nominal class methods and structs whose method has no stored closure.
       const funcIdx = ctx.funcMap.get(methodFullName);
       if (funcIdx !== undefined) {
-        const funcDef = mod.functions[funcIdx - ctx.numImportFuncs];
+        const funcDef = definedFuncAt(ctx, funcIdx);
         const funcType = funcDef ? mod.types[funcDef.typeIdx] : undefined;
         const resultType: ValType =
           funcType && funcType.kind === "func" && funcType.results.length > 0
@@ -5379,7 +5380,7 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
     // pass; fill it in place if reserved.
     const reservedGet = ctx.funcMap.get("__vec_get");
     if (reservedGet !== undefined) {
-      const fn = mod.functions[reservedGet - ctx.numImportFuncs]! as { locals: typeof getLocals; body: Instr[] };
+      const fn = definedFuncAt(ctx, reservedGet)! as { locals: typeof getLocals; body: Instr[] };
       fn.locals = getLocals;
       fn.body = body;
     } else {
@@ -5626,7 +5627,7 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
     // fresh and register in funcMap (shift-tracked) so a same-pass lookup resolves.
     const reservedPush = ctx.funcMap.get("__vec_push");
     if (reservedPush !== undefined) {
-      const fn = mod.functions[reservedPush - ctx.numImportFuncs]! as { locals: typeof locals; body: Instr[] };
+      const fn = definedFuncAt(ctx, reservedPush)! as { locals: typeof locals; body: Instr[] };
       fn.locals = locals;
       fn.body = body;
     } else {
@@ -5726,7 +5727,7 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
     // (#2784 S3) FILL-or-build (see __vec_push above).
     const reservedPop = ctx.funcMap.get("__vec_pop");
     if (reservedPop !== undefined) {
-      const fn = mod.functions[reservedPop - ctx.numImportFuncs]! as { locals: typeof locals; body: Instr[] };
+      const fn = definedFuncAt(ctx, reservedPop)! as { locals: typeof locals; body: Instr[] };
       fn.locals = locals;
       fn.body = body;
     } else {
@@ -5883,9 +5884,8 @@ function hasExportedVecParam(ctx: CodegenContext): boolean {
   const vecTypeIdxs = new Set<number>(ctx.vecTypeMap.values());
   for (const exp of mod.exports) {
     if (exp.desc.kind !== "func") continue;
-    const idx = exp.desc.index - ctx.numImportFuncs;
-    if (idx < 0 || idx >= mod.functions.length) continue;
-    const fn = mod.functions[idx]!;
+    const fn = definedFuncAt(ctx, exp.desc.index);
+    if (!fn) continue;
     const typeDef = mod.types[fn.typeIdx];
     if (!typeDef) continue;
     // Resolve sub-type wrappers (some FuncTypeDefs are nested under SubTypeDef).
@@ -9522,12 +9522,12 @@ export function addStringImports(ctx: CodegenContext): void {
   if (delta > 0 && ctx.mod.functions.length > 0) {
     const newImportNames = new Set(["concat", "length", "equals", "substring", "charCodeAt"]);
     for (const [name, idx] of ctx.funcMap) {
-      if (!newImportNames.has(name) && idx >= importsBefore) {
+      if (!newImportNames.has(name) && inLiveShiftRange(idx, importsBefore)) {
         ctx.funcMap.set(name, idx + delta);
       }
     }
     for (const exp of ctx.mod.exports) {
-      if (exp.desc.kind === "func" && exp.desc.index >= importsBefore) {
+      if (exp.desc.kind === "func" && inLiveShiftRange(exp.desc.index, importsBefore)) {
         exp.desc.index += delta;
       }
     }
@@ -9538,10 +9538,10 @@ export function addStringImports(ctx: CodegenContext): void {
       if (shifted.has(instrs)) return;
       shifted.add(instrs);
       for (const instr of instrs) {
-        if ((instr.op === "call" || instr.op === "return_call") && instr.funcIdx >= importsBefore) {
+        if ((instr.op === "call" || instr.op === "return_call") && inLiveShiftRange(instr.funcIdx, importsBefore)) {
           instr.funcIdx += delta;
         }
-        if (instr.op === "ref.func" && instr.funcIdx >= importsBefore) {
+        if (instr.op === "ref.func" && inLiveShiftRange(instr.funcIdx, importsBefore)) {
           instr.funcIdx += delta;
         }
         const a = instr as any;
@@ -9591,20 +9591,22 @@ export function addStringImports(ctx: CodegenContext): void {
     for (const elem of ctx.mod.elements) {
       if (elem.funcIndices) {
         for (let i = 0; i < elem.funcIndices.length; i++) {
-          if (elem.funcIndices[i]! >= importsBefore) {
+          if (inLiveShiftRange(elem.funcIndices[i]!, importsBefore)) {
             elem.funcIndices[i]! += delta;
           }
         }
       }
     }
     if (ctx.mod.declaredFuncRefs.length > 0) {
-      ctx.mod.declaredFuncRefs = ctx.mod.declaredFuncRefs.map((idx) => (idx >= importsBefore ? idx + delta : idx));
+      ctx.mod.declaredFuncRefs = ctx.mod.declaredFuncRefs.map((idx) =>
+        inLiveShiftRange(idx, importsBefore) ? idx + delta : idx,
+      );
     }
     // (#1525b) Shift pendingMethodTrampolines side-channel indices in lockstep
     // — see the matching block in addUnionImports / shiftLateImportIndices.
     for (const t of ctx.pendingMethodTrampolines) {
-      if (t.methodFuncIdx >= importsBefore) t.methodFuncIdx += delta;
-      if (t.trampolineFuncIdx >= importsBefore) t.trampolineFuncIdx += delta;
+      if (inLiveShiftRange(t.methodFuncIdx, importsBefore)) t.methodFuncIdx += delta;
+      if (inLiveShiftRange(t.trampolineFuncIdx, importsBefore)) t.trampolineFuncIdx += delta;
     }
     // (#1839) `nativeStrHelpers` is read directly by string-lowering call sites
     // and helper emitters — it is NOT a copy of funcMap, so it must be shifted
@@ -9612,14 +9614,14 @@ export function addStringImports(ctx: CodegenContext): void {
     // every entry >= importsBefore moves up by `delta`. Omitting this left the
     // map stale under plain `--nativeStrings` JS-host mode.
     for (const [name, idx] of ctx.nativeStrHelpers) {
-      if (idx >= importsBefore) {
+      if (inLiveShiftRange(idx, importsBefore)) {
         ctx.nativeStrHelpers.set(name, idx + delta);
       }
     }
     // (#1913) Regex helper map moves in lockstep too — regexp-standalone call
     // sites bake `call` indices straight from this map.
     for (const [name, idx] of ctx.nativeRegexHelpers) {
-      if (idx >= importsBefore) {
+      if (inLiveShiftRange(idx, importsBefore)) {
         ctx.nativeRegexHelpers.set(name, idx + delta);
       }
     }
@@ -9628,7 +9630,7 @@ export function addStringImports(ctx: CodegenContext): void {
     // indices straight from this map (see shiftLateImportIndices for the full
     // rationale / the WeakMap stale-index validation failure it fixes).
     for (const [name, idx] of ctx.mapHelpers) {
-      if (idx >= importsBefore) {
+      if (inLiveShiftRange(idx, importsBefore)) {
         ctx.mapHelpers.set(name, idx + delta);
       }
     }
@@ -9647,7 +9649,7 @@ export function addStringImports(ctx: CodegenContext): void {
     }
     // (#1839) The module start function index also moves if it was a defined
     // function at or above the insertion point. Matches addUnionImports.
-    if (ctx.mod.startFuncIdx !== undefined && ctx.mod.startFuncIdx >= importsBefore) {
+    if (ctx.mod.startFuncIdx !== undefined && inLiveShiftRange(ctx.mod.startFuncIdx, importsBefore)) {
       ctx.mod.startFuncIdx += delta;
     }
   }
@@ -10978,7 +10980,7 @@ export function addUnionImports(ctx: CodegenContext): void {
     ]);
     // Update funcMap entries for defined functions (not imports)
     for (const [name, idx] of ctx.funcMap) {
-      if (!newImportNames.has(name) && idx >= importsBefore) {
+      if (!newImportNames.has(name) && inLiveShiftRange(idx, importsBefore)) {
         ctx.funcMap.set(name, idx + delta);
       }
     }
@@ -10991,13 +10993,13 @@ export function addUnionImports(ctx: CodegenContext): void {
     // (e.g. `__box_number` for a numeric key/value) land between helper
     // registration and the call, so `wm.has` called `__map_get` → invalid Wasm.
     for (const [name, idx] of ctx.mapHelpers) {
-      if (idx >= importsBefore) {
+      if (inLiveShiftRange(idx, importsBefore)) {
         ctx.mapHelpers.set(name, idx + delta);
       }
     }
     // Update export indices
     for (const exp of ctx.mod.exports) {
-      if (exp.desc.kind === "func" && exp.desc.index >= importsBefore) {
+      if (exp.desc.kind === "func" && inLiveShiftRange(exp.desc.index, importsBefore)) {
         exp.desc.index += delta;
       }
     }
@@ -11008,10 +11010,10 @@ export function addUnionImports(ctx: CodegenContext): void {
       if (shifted.has(instrs)) return;
       shifted.add(instrs);
       for (const instr of instrs) {
-        if ((instr.op === "call" || instr.op === "return_call") && instr.funcIdx >= importsBefore) {
+        if ((instr.op === "call" || instr.op === "return_call") && inLiveShiftRange(instr.funcIdx, importsBefore)) {
           instr.funcIdx += delta;
         }
-        if (instr.op === "ref.func" && instr.funcIdx >= importsBefore) {
+        if (instr.op === "ref.func" && inLiveShiftRange(instr.funcIdx, importsBefore)) {
           instr.funcIdx += delta;
         }
         const a = instr as any;
@@ -11058,7 +11060,7 @@ export function addUnionImports(ctx: CodegenContext): void {
     for (const elem of ctx.mod.elements) {
       if (elem.funcIndices) {
         for (let i = 0; i < elem.funcIndices.length; i++) {
-          if (elem.funcIndices[i]! >= importsBefore) {
+          if (inLiveShiftRange(elem.funcIndices[i]!, importsBefore)) {
             elem.funcIndices[i]! += delta;
           }
         }
@@ -11066,11 +11068,13 @@ export function addUnionImports(ctx: CodegenContext): void {
     }
     // Update declaredFuncRefs
     if (ctx.mod.declaredFuncRefs.length > 0) {
-      ctx.mod.declaredFuncRefs = ctx.mod.declaredFuncRefs.map((idx) => (idx >= importsBefore ? idx + delta : idx));
+      ctx.mod.declaredFuncRefs = ctx.mod.declaredFuncRefs.map((idx) =>
+        inLiveShiftRange(idx, importsBefore) ? idx + delta : idx,
+      );
     }
     // Update Wasm start function index (#907) — late-added imports shift the
     // defined-function index that __module_init lives at.
-    if (ctx.mod.startFuncIdx !== undefined && ctx.mod.startFuncIdx >= importsBefore) {
+    if (ctx.mod.startFuncIdx !== undefined && inLiveShiftRange(ctx.mod.startFuncIdx, importsBefore)) {
       ctx.mod.startFuncIdx += delta;
     }
     // Sync nativeStrHelpers and re-base so reconcileNativeStrFinalizeShift is a no-op
@@ -11078,11 +11082,11 @@ export function addUnionImports(ctx: CodegenContext): void {
     // native-string helper bodies. Without this, reconcile double-shifts them (#1677-fast-path).
     if (ctx.nativeStrHelperImportBase >= 0) {
       for (const [name, idx] of ctx.nativeStrHelpers) {
-        if (idx >= importsBefore) ctx.nativeStrHelpers.set(name, idx + delta);
+        if (inLiveShiftRange(idx, importsBefore)) ctx.nativeStrHelpers.set(name, idx + delta);
       }
       // (#1913) Regex helper map shares the same lifecycle.
       for (const [name, idx] of ctx.nativeRegexHelpers) {
-        if (idx >= importsBefore) ctx.nativeRegexHelpers.set(name, idx + delta);
+        if (inLiveShiftRange(idx, importsBefore)) ctx.nativeRegexHelpers.set(name, idx + delta);
       }
       ctx.nativeStrHelperImportBase = ctx.numImportFuncs;
     }
@@ -11091,8 +11095,8 @@ export function addUnionImports(ctx: CodegenContext): void {
     // reachable from any Instr — without this, finalizeMethodTrampolines later
     // resolves the wrong (import) signature, producing invalid Wasm.
     for (const t of ctx.pendingMethodTrampolines) {
-      if (t.methodFuncIdx >= importsBefore) t.methodFuncIdx += delta;
-      if (t.trampolineFuncIdx >= importsBefore) t.trampolineFuncIdx += delta;
+      if (inLiveShiftRange(t.methodFuncIdx, importsBefore)) t.methodFuncIdx += delta;
+      if (inLiveShiftRange(t.trampolineFuncIdx, importsBefore)) t.trampolineFuncIdx += delta;
     }
     // (#2918) Async-scheduler + Promise.all/race combinator side-channel funcIdxs
     // move in lockstep too (addUnionImports missed them). Same complete key list
@@ -11743,12 +11747,80 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
   //     callable JS functions to the outside, so this is conservatively 0.
   registerNative("__typeof_function", externrefToI32, [{ op: "i32.const", value: 0 }]);
 
-  // 15. __typeof(externref) -> externref — returns null externref under
-  //     wasi. Producing real type-tag strings would require a NativeString
-  //     per tag; defer until a wasi caller needs the typeof RESULT as a
-  //     string (today's callers compare against literal tags via the
-  //     __typeof_* helpers above).
-  registerNative("__typeof", externrefToExternref, [{ op: "ref.null.extern" }]);
+  // 15. __typeof(externref) -> externref — the MATERIALIZED typeof result.
+  //     (#2965) This was a `ref.null.extern` stub ("defer until a wasi caller
+  //     needs the typeof RESULT as a string"), which silently broke every
+  //     standalone site where the typeof string is a VALUE rather than an
+  //     inline `typeof x === "…"` compare: `var t = typeof x`,
+  //     `assert_sameValue_str(typeof(o.p), "undefined")` (the test262 runner's
+  //     paren-form transform miss), any typeof flowing through a param. The
+  //     result was a null externref, so `t === "undefined"` was false for
+  //     EVERY tag and `t.length` trapped. Classify with the same dispatch the
+  //     `__typeof_*` predicates above use (null → "undefined", box_number →
+  //     "number", box_boolean → "boolean", $BigInt → "bigint", $AnyString →
+  //     "string", else → "object"; functions stay "object", matching the
+  //     conservative `__typeof_function` = 0 predicate) and return the tag as
+  //     an inline NativeString (sentinel-safe, no funcidx baked — the #2515
+  //     discipline; string literals here are type-index-only instructions, so
+  //     the late-import finalize shift cannot desync this body). Falls back to
+  //     the old stub only when no native-string type is registered (then no
+  //     string content could be represented anyway).
+  if (ctx.nativeStrings && ctx.nativeStrTypeIdx >= 0) {
+    const typeofTagArm = (test: Instr[], tag: string): Instr[] => [
+      ...test,
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [...stringConstantExternrefInstrs(ctx, tag), { op: "return" }],
+      },
+    ];
+    registerNative(
+      "__typeof",
+      externrefToExternref,
+      [
+        // null externref → undefined (matches __typeof_undefined = ref.is_null)
+        ...typeofTagArm([{ op: "local.get", index: 0 }, { op: "ref.is_null" }], "undefined"),
+        { op: "local.get", index: 0 },
+        { op: "any.convert_extern" },
+        { op: "local.set", index: 1 },
+        ...typeofTagArm(
+          [
+            { op: "local.get", index: 1 },
+            { op: "ref.test", typeIdx: boxNumStructIdx },
+          ],
+          "number",
+        ),
+        ...typeofTagArm(
+          [
+            { op: "local.get", index: 1 },
+            { op: "ref.test", typeIdx: boxBoolStructIdx },
+          ],
+          "boolean",
+        ),
+        ...typeofTagArm(
+          [
+            { op: "local.get", index: 1 },
+            { op: "ref.test", typeIdx: bigIntStructIdx },
+          ],
+          "bigint",
+        ),
+        ...(ctx.anyStrTypeIdx >= 0
+          ? typeofTagArm(
+              [
+                { op: "local.get", index: 1 },
+                { op: "ref.test", typeIdx: ctx.anyStrTypeIdx },
+              ],
+              "string",
+            )
+          : []),
+        // non-null, not a boxed primitive, not a string → object
+        ...stringConstantExternrefInstrs(ctx, "object"),
+      ],
+      [{ name: "$any_temp", type: { kind: "anyref" } as ValType }],
+    );
+  } else {
+    registerNative("__typeof", externrefToExternref, [{ op: "ref.null.extern" }]);
+  }
 
   // #2508 — native `__host_eq` (Strict Equality, §7.2.16) and
   // `__same_value_zero` (SameValueZero, §7.2.11) over two boxed externrefs, so
