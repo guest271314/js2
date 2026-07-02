@@ -44,11 +44,11 @@ DisposableStack/AsyncDisposableStack (`makeGlueWithGetters`, `disposed` getter) 
 SuppressedError (reuses NativeError glue). Brand slots 41-43 in
 `native-proto.ts`. Standalone-only, purely additive → host unchanged, 42 existing
 native-proto tests green. **Still open follow-up:** Math/JSON/Reflect/Atomics
-namespace *static* reads (not `$NativeProto` proto glue) — separate task.
+namespace _static_ reads (not `$NativeProto` proto glue) — separate task.
 
 ## #2923 — dispatch arity fix (SITE REFINEMENT — read this for #2931)
 
-**The spec (`2923-...md`, on the #2921 branch) pointed at
+**The #2923 spec (living on the #2921 branch, not yet on main) pointed at
 `calls-closures.ts:688` (the `compileCallablePropertyCall` PROPERTY-call path).
 That is NOT where the actual test262 harness bug lives.** Measured via the
 inject-throw probe: the real harness `fn(ctor, makeCtorArg)` is a **bare
@@ -84,7 +84,7 @@ diff described in the #2923 spec's acceptance section.
 
 ### #2923 issue-file caveat
 
-I deliberately did NOT include `plan/issues/2923-*.md` in PR #2441 — it lives on
+I deliberately did NOT include the #2923 issue file in PR #2441 — it lives on
 the #2921/#2429 branch and was being re-id'd for a dup-id collision. Adding it
 would risk a `merge_group` id collision. Status reconciliation left to
 lead/dev-callback.
