@@ -137,6 +137,7 @@ import {
   ensureStandaloneNativeMethodClosure,
   getNativeProtoBuiltinGlue,
 } from "../native-proto.js";
+import { pushBuiltinFnClosureValueInstrs } from "../builtin-fn-meta.js";
 import { compileStatement, hoistFunctionDeclarations } from "../statements.js";
 import {
   emitSetExtrasArgv,
@@ -7308,8 +7309,7 @@ function compileCallExpression(
               );
               flushLateImportShifts(ctx, fctx);
               if (createAccIdx !== undefined) {
-                fctx.body.push({ op: "ref.func", funcIdx: protoClosure.funcIdx } as Instr);
-                fctx.body.push({ op: "struct.new", typeIdx: protoClosure.type.typeIdx } as Instr);
+                fctx.body.push(...pushBuiltinFnClosureValueInstrs(ctx, protoClosure));
                 fctx.body.push({ op: "extern.convert_any" } as Instr); // get
                 fctx.body.push({ op: "ref.null.extern" } as Instr); // set = undefined
                 fctx.body.push({ op: "i32.const", value: 0x04 } as Instr); // FLAG_CONFIGURABLE
@@ -7327,8 +7327,7 @@ function compileCallExpression(
               );
               flushLateImportShifts(ctx, fctx);
               if (createIdx !== undefined) {
-                fctx.body.push({ op: "ref.func", funcIdx: protoClosure.funcIdx } as Instr);
-                fctx.body.push({ op: "struct.new", typeIdx: protoClosure.type.typeIdx } as Instr);
+                fctx.body.push(...pushBuiltinFnClosureValueInstrs(ctx, protoClosure));
                 fctx.body.push({ op: "extern.convert_any" } as Instr); // value
                 fctx.body.push({ op: "i32.const", value: 0x05 } as Instr); // FLAG_WRITABLE | FLAG_CONFIGURABLE
                 fctx.body.push({ op: "call", funcIdx: createIdx } as Instr);
