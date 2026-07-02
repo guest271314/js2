@@ -904,6 +904,13 @@ export function tryEnsureNativeProtoBrand(ctx: CodegenContext, builtinName: stri
   if (builtinName === "AsyncDisposableStack") {
     return ensureAsyncDisposableStackNativeProtoGlue(ctx);
   }
+  // (#2861) SuppressedError (ES2026 error aggregation) is an Error subclass —
+  // its prototype's own method set mirrors Error's (`toString`), with
+  // `constructor`/`name`/`message` data props handled by the shared meta-fold.
+  // Reuse the NativeError glue (its own-brand slot 43).
+  if (builtinName === "SuppressedError") {
+    return ensureNativeErrorNativeProtoGlue(ctx, builtinName);
+  }
   // (#2651 M1 / D2) Concrete TypedArray view protos — `Int8Array.prototype`,
   // `Uint8Array.prototype`, … This is the measured Slice-0 lever: the
   // `<View>.prototype` value read (the #1907 / #1888 S6-b `Int8Array.prototype`
