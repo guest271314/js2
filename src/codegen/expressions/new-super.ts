@@ -42,6 +42,7 @@ import {
 } from "../regexp-standalone.js";
 import { emitStandaloneTest262Error, emitWasiErrorConstructor, isWasiErrorName } from "../registry/error-types.js";
 import type { InnerResult } from "../shared.js";
+import { tryStaticNewFunction } from "./eval-inline.js";
 import {
   coerceType,
   compileExpression,
@@ -3172,20 +3173,23 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     return { kind: "externref" };
   }
 
-  // Handle `new Function(...)` — dynamic code generation is not possible in Wasm.
-  // Emit a no-op function that returns undefined (ref.null extern) to prevent
-  // compile errors. Tests that rely on dynamic behavior will fail at runtime
-  // instead of at compile time, which is more informative.
+  // Handle `new Function(...)`.
   if (ts.isIdentifier(expr.expression) && expr.expression.text === "Function") {
-    // Compile and discard all arguments (they may have side effects)
     const args = expr.arguments ?? [];
+    // (#2924) Constant param list + body → compile-away to a real AOT callable
+    // (global scope, no capture). Dynamic bodies fall through to the no-op stub
+    // below (the Tier-2 interpreter, #2928, handles them).
+    const staticFn = tryStaticNewFunction(ctx, fctx, args);
+    if (staticFn !== undefined) return staticFn;
+    // Fallback (dynamic body): evaluate args for side effects, return a no-op
+    // function value (undefined). Tests that CALL a dynamic-body function fail
+    // at runtime rather than at compile time.
     for (const arg of args) {
       const argResult = compileExpression(ctx, fctx, arg);
       if (argResult) {
         fctx.body.push({ op: "drop" });
       }
     }
-    // Return ref.null extern — represents a function that returns undefined
     fctx.body.push({ op: "ref.null.extern" });
     return { kind: "externref" };
   }

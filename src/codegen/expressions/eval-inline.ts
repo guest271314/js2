@@ -17,12 +17,14 @@
  * dynamic-eval path.
  */
 import { ts } from "../../ts-api.js";
+import type { ValType } from "../../ir/types.js";
 import type { CodegenContext, FunctionContext } from "../context/types.js";
 import { hoistFunctionDeclarations } from "../statements/nested-declarations.js";
 import { hoistLetConstWithTdz, hoistVarDeclarations } from "../index.js";
 import type { InnerResult } from "../shared.js";
 import { coerceType, compileExpression, compileStatement } from "../shared.js";
 import { emitUndefined } from "./late-imports.js";
+import { emitFuncRefAsClosure } from "../closures.js";
 
 /**
  * Synthetic file name for the foreign `SourceFile` an inlined `eval("<literal>")`
@@ -182,7 +184,7 @@ export function tryStaticEvalInline(
  * declarations, for-of loops, yield/await, and dynamic import.  The check is
  * conservative — unsupported constructs simply fall through to runtime eval.
  */
-function allNodesInlineSupported(node: ts.Node): boolean {
+export function allNodesInlineSupported(node: ts.Node): boolean {
   let ok = true;
   const visit = (n: ts.Node): void => {
     if (!ok) return;
@@ -263,4 +265,105 @@ function isLiftableForOfIterable(expr: ts.Expression): boolean {
 function isLiftableForInIterable(expr: ts.Expression): boolean {
   const e = unwrapParens(expr);
   return ts.isObjectLiteralExpression(e) || ts.isArrayLiteralExpression(e);
+}
+
+/**
+ * (#2924) Compile-away `new Function("<params>", …, "<body>")` / the equivalent
+ * `Function(...)` call form when every argument is a compile-time-constant
+ * string. Slice B of the runtime-eval roadmap (§6-B / §4.4).
+ *
+ * Per §20.2.1.1 CreateDynamicFunction, the created function's scope is ALWAYS the
+ * global environment — it never captures the caller's lexical scope. So when the
+ * param list and body are constant, `new Function("a","b","return a+b")` is
+ * semantically identical to compiling `function (a,b){ return a+b }` at that site
+ * over GLOBAL scope. We synthesize that as a named foreign function declaration,
+ * hoist it (reusing the #2923 signature-tolerant path) with the enclosing
+ * `localMap` swapped for an empty one (so a body identifier that collides with a
+ * caller local resolves as a global, not a capture — the no-capture invariant),
+ * then materialize a first-class callable via `emitFuncRefAsClosure`.
+ *
+ * Returns:
+ *   - InnerResult on success (a callable externref left on the stack),
+ *   - undefined to fall through to the existing path (a non-constant argument,
+ *     a body that isn't safely liftable, or a synthesis/parse failure — the
+ *     dynamic-body case is the Tier-2 interpreter's, #2928).
+ */
+export function tryStaticNewFunction(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  args: readonly ts.Expression[],
+): ValType | undefined {
+  // Every argument must be a compile-time-constant string. A single non-constant
+  // arg → dynamic body → fall through (Tier-2 interpreter, #2928).
+  const consts: string[] = [];
+  for (const a of args) {
+    const s = resolveConstantString(a);
+    if (s === null) return undefined;
+    consts.push(s);
+  }
+
+  // §20.2.1.1.1: the LAST argument is the body; the rest form the parameter list
+  // (comma-joined so `("a","b,c","…")` flattens to params a, b, c). No args →
+  // `function anonymous() {}` (empty body, empty params).
+  const body = consts.length > 0 ? consts[consts.length - 1]! : "";
+  const paramSrc = consts.slice(0, -1).join(",");
+
+  // A unique synthesized name; `mod.functions.length` is monotonic within a
+  // compile, so two `new Function` sites never collide.
+  const fnName = `__new_function_${ctx.mod.functions.length}`;
+  const synthSrc = `function ${fnName}(${paramSrc}) {\n${body}\n}`;
+
+  const sf = ts.createSourceFile(
+    EVAL_SOURCE_FILENAME,
+    synthSrc,
+    ts.ScriptTarget.Latest,
+    /* setParentNodes */ true,
+    ts.ScriptKind.JS,
+  );
+  const parseDiag = (sf as unknown as { parseDiagnostics?: readonly ts.Diagnostic[] }).parseDiagnostics;
+  if (parseDiag && parseDiag.length > 0) {
+    // Malformed params/body — real JS throws SyntaxError. Fall through to the
+    // existing path rather than force a compile error (the dynamic path / stub
+    // preserves current behaviour; strict SyntaxError semantics are #2928).
+    return undefined;
+  }
+  if (sf.statements.length !== 1 || !ts.isFunctionDeclaration(sf.statements[0]!)) return undefined;
+  const fnDecl = sf.statements[0] as ts.FunctionDeclaration;
+
+  // The body must be safely liftable (no function/arrow expression, class, etc.
+  // that would need checker bindings the foreign SourceFile lacks — same guard
+  // as constant-string eval, #2923).
+  if (!allNodesInlineSupported(fnDecl)) return undefined;
+
+  // Hoist + compile the synthesized declaration over GLOBAL scope: swap the
+  // enclosing localMap/boxedCaptures for empty ones so the capture analysis in
+  // hoistFunctionDeclarations finds nothing to capture (no lexical closure over
+  // caller locals, §20.2.1.1). Restore afterwards.
+  const savedLocalMap = fctx.localMap;
+  const savedBoxed = fctx.boxedCaptures;
+  fctx.localMap = new Map();
+  fctx.boxedCaptures = undefined;
+  try {
+    hoistFunctionDeclarations(ctx, fctx, [fnDecl]);
+  } catch {
+    return undefined;
+  } finally {
+    fctx.localMap = savedLocalMap;
+    fctx.boxedCaptures = savedBoxed;
+  }
+
+  const funcIdx = ctx.funcMap.get(fnName);
+  if (funcIdx === undefined) return undefined;
+
+  // Materialize the callable value (closure struct over the funcref), then wrap
+  // to externref to match `new Function`'s `any`/callable result.
+  const closureRef = emitFuncRefAsClosure(ctx, fctx, fnName, funcIdx);
+  if (!closureRef) {
+    fctx.body.push({ op: "ref.null.extern" });
+    return { kind: "externref" };
+  }
+  if (closureRef.kind !== "externref") {
+    fctx.body.push({ op: "extern.convert_any" });
+  }
+  return { kind: "externref" };
 }
