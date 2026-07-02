@@ -2800,8 +2800,9 @@ export function tryEmitDeleteAwareDynamicSet(
   const valLocal = allocLocal(fctx, `__daset_val_${fctx.locals.length}`, { kind: "externref" });
   fctx.body.push({ op: "local.set", index: valLocal });
 
-  // __extern_set_strict(obj, "prop", val) → _safeSet (clears tombstone, writes
-  // sidecar, mirrors __sset_<key>). Bare call — NOT the struct.set dispatcher.
+  // RUNTIME arm — __extern_set_strict(obj, "prop", val) → _safeSet (clears
+  // tombstone, writes sidecar, mirrors __sset_<key>). Bare call — NOT the
+  // struct.set dispatcher.
   //
   // (#2681/#2686) An EARLIER pinned-write path (`tryEmitPinnedStructMemberSet`,
   // assignment.ts) already routes writes to a RECONSTRUCTED-fnctor receiver
@@ -2810,17 +2811,80 @@ export function tryEmitDeleteAwareDynamicSet(
   // READ. This delete-aware path is the GENERAL `any`-receiver write in a
   // delete-using module, where the receiver is typically a PLAIN object literal
   // lowered to an anonymous `$__anon_N` struct. Routing THAT through the
-  // dispatcher's `struct.set` arm overwrites the field SLOT in place, which
-  // bypasses the delete+re-add ORDERING the JS-host sidecar tracks
+  // dispatcher's `struct.set` arm at RUNTIME overwrites the field SLOT in place,
+  // which bypasses the delete+re-add ORDERING the JS-host sidecar tracks
   // (`delete o.p; o.p = v` must re-insert `p` at the END — `for-in` order, #2179/
-  // #2731). So the general delete-aware write MUST stay on the bare sidecar
-  // `_safeSet`; only the narrowly-pinned reconstructed-fnctor write uses the slot
-  // dispatcher. (The broad reroute here regressed `for-in/order-simple-object`.)
-  fctx.body.push({ op: "local.get", index: objLocal });
+  // #2731). So the general delete-aware runtime write MUST stay on the bare
+  // sidecar `_safeSet`; only the narrowly-pinned reconstructed-fnctor write uses
+  // the slot dispatcher. (The broad runtime reroute here regressed
+  // `for-in/order-simple-object`.)
+  //
+  // (#2805) MODULE-INIT correctness — the symmetric WRITE side of #2800. gc/host
+  // runs `__module_init` via the Wasm `start` section, INSIDE
+  // `WebAssembly.instantiate`, BEFORE the host wires the struct setters via
+  // `__setExports`. The runtime host write above threads `__extern_set_strict` →
+  // `_safeSet` → `getExports()?.__sset_<key>`, so at init `getExports()` is
+  // undefined and the field write is SILENTLY DROPPED — a top-level
+  // `new X({...})` whose ctor does `this.<f> = conf.<f>` on an `any`-typed `this`
+  // stores nothing (the struct keeps its 0/null default), while the IDENTICAL
+  // construction at RUNTIME works. Mirror #2800's read-side gate: branch on the
+  // `__in_module_init` flag and, DURING INIT, write the slot host-free via the
+  // `__set_member_<name>` dispatcher (a `ref.test`+`struct.set` over the complete
+  // finalize-time candidate set; #2664) — no exports needed, and nothing has been
+  // `delete`d yet on a freshly-built object so the for-in re-add ordering the
+  // runtime arm preserves is moot. At runtime keep the sidecar `__extern_set_strict`.
+  //
+  // gc/host only: WASI/standalone have no host `__extern_set_strict` (this
+  // function already returns early for `ctx.standalone`), and WASI's
+  // `__module_init` lazy-init wrap must stay untouched — so WASI keeps the legacy
+  // bare sidecar write.
+  //
+  // The dispatcher is reserved HERE — AFTER both operands are evaluated into
+  // locals — deliberately. The `value` expression (e.g. `conf.zz || 0`) can
+  // itself reserve a `__get_member_<name>` dispatcher and pull late imports that
+  // shift the DEFINED-function index space; reserving `__set_member_<name>` after
+  // all that, with NOTHING emitted between its reserve+flush and the bake below,
+  // guarantees `setMemberIdx` is post-shift and each property's write bakes its
+  // OWN distinct funcIdx. Reserving it BEFORE the value eval (the #2800 write-side
+  // prototype) left the local stale-low so `this.label` and `this.zz` baked the
+  // SAME `call funcIdx` (a funcIdx desync). `setIdx` is an IMPORT (its index is
+  // stable once added — new imports insert at the import-section end and shift
+  // only defined funcs), so baking it late is safe.
+  const setMemberIdx = ctx.wasi ? undefined : reserveMemberSetDispatch(ctx, propName, /*strict*/ true, fctx);
   addStringConstantGlobal(ctx, propName);
-  fctx.body.push(...stringConstantExternrefInstrs(ctx, propName));
-  fctx.body.push({ op: "local.get", index: valLocal });
-  fctx.body.push({ op: "call", funcIdx: setIdx } as Instr);
+  flushLateImportShifts(ctx, fctx);
+
+  if (setMemberIdx === undefined) {
+    // WASI / no dispatcher — legacy bare tombstone-aware host write (byte-identical).
+    fctx.body.push({ op: "local.get", index: objLocal });
+    fctx.body.push(...stringConstantExternrefInstrs(ctx, propName));
+    fctx.body.push({ op: "local.get", index: valLocal });
+    fctx.body.push({ op: "call", funcIdx: setIdx } as Instr);
+    fctx.body.push({ op: "local.get", index: valLocal });
+    return { kind: "externref" };
+  }
+
+  // `__in_module_init ? __set_member_<name>(recv, val) : __extern_set_strict(recv, "prop", val)`.
+  // The flag-read `global.get` index is a PLACEHOLDER patched at finalize by
+  // `finalizeInModuleInitFlag` (after all import globals settle) — shared with the
+  // read-side gate via the same `ctx.inModuleInitFlagReads` list.
+  const flagGet = recordInModuleInitFlagRead(ctx);
+  fctx.body.push(flagGet);
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: [
+      { op: "local.get", index: objLocal } as Instr,
+      { op: "local.get", index: valLocal } as Instr,
+      { op: "call", funcIdx: setMemberIdx } as Instr,
+    ],
+    else: [
+      { op: "local.get", index: objLocal } as Instr,
+      ...stringConstantExternrefInstrs(ctx, propName),
+      { op: "local.get", index: valLocal } as Instr,
+      { op: "call", funcIdx: setIdx } as Instr,
+    ],
+  } as Instr);
 
   // `=` evaluates to the assigned value.
   fctx.body.push({ op: "local.get", index: valLocal });
