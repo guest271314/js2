@@ -13,7 +13,13 @@ import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { ensureLateImport, flushLateImportShifts } from "./expressions/late-imports.js";
 import { emitNativeNumberFormat } from "./number-format-native.js";
 import { addImport } from "./registry/imports.js";
-import { addFuncType, getArrTypeIdxFromVec, getOrRegisterArrayType, getOrRegisterVecType } from "./registry/types.js";
+import {
+  addFuncType,
+  getArrTypeIdxFromVec,
+  getOrRegisterArrayType,
+  getOrRegisterErrorStructType,
+  getOrRegisterVecType,
+} from "./registry/types.js";
 
 export function nativeStringType(ctx: CodegenContext): ValType {
   return { kind: "ref", typeIdx: ctx.anyStrTypeIdx };
@@ -6153,6 +6159,125 @@ export function ensureEncodeIntoHelper(
  *
  * Idempotent — caches the function index under `nativeStrHelpers["__any_to_string"]`.
  */
+/**
+ * (#2962) §20.5.3.4 `Error.prototype.toString` for the native `$Error_struct` —
+ * `__error_to_string(v: anyref) -> ref $AnyString`, where `v` MUST already be
+ * a `$Error_struct` (callers guard with `ref.test`; the entry `ref.cast` is
+ * defensive).
+ *
+ *   1. name = $name field when it is a native string, else the literal
+ *      "Error" (our constructors always materialize a non-empty name, so the
+ *      spec's empty-name arm is unreachable — see emitErrorStructConstructor).
+ *   2. msg  = $message field; `null` (constructed argument-less), a NON-string
+ *      (documented residual: §20.5.1.1 stores ToString(message) at
+ *      construction, our ctor stores the raw arg), or the empty string all
+ *      yield `name` alone per §20.5.3.4 steps 4–6.
+ *   3. else `name + ": " + msg`.
+ *
+ * Standalone/WASI only: in JS-host mode the `__new_<Kind>` imports resolve to
+ * the real JS constructors, so thrown errors are host objects and never
+ * `$Error_struct`s — the helper would be dead weight. Registering the error
+ * struct type here (idempotent) makes the arm order-independent: a module
+ * whose first string coercion happens BEFORE its first error construction
+ * still gets the arm.
+ *
+ * Index-shift safety (#1448 pattern): the only baked dependency is
+ * `__str_concat` (already emitted by ensureNativeStringHelpers); the body is
+ * built and pushed with no intervening helper emission. Registered in
+ * `funcMap` so deferred late-import flushes keep the index authoritative.
+ *
+ * Idempotent — cached under `nativeStrHelpers["__error_to_string"]`.
+ */
+function ensureErrorToStringHelper(ctx: CodegenContext): number | undefined {
+  const cached = ctx.nativeStrHelpers.get("__error_to_string");
+  if (cached !== undefined) return cached;
+  if (!(ctx.standalone || ctx.wasi)) return undefined; // noJsHost only (see doc above)
+  ensureNativeStringHelpers(ctx);
+  const strConcatIdx = ctx.nativeStrHelpers.get("__str_concat");
+  if (strConcatIdx === undefined) return undefined;
+
+  const errStructIdx = getOrRegisterErrorStructType(ctx);
+  const anyStrTypeIdx = ctx.anyStrTypeIdx;
+  const strRef: ValType = { kind: "ref", typeIdx: anyStrTypeIdx };
+  const litStr = (value: string): Instr[] => nativeStringLiteralInstrs(ctx, value);
+
+  // params: v(0) anyref · locals: e(1) ref null $Error_struct, tmp(2) anyref,
+  // name(3) ref null $AnyString, msg(4) ref null $AnyString
+  const L_V = 0;
+  const L_E = 1;
+  const L_TMP = 2;
+  const L_NAME = 3;
+  const L_MSG = 4;
+
+  const returnName: Instr[] = [
+    { op: "local.get", index: L_NAME },
+    { op: "ref.as_non_null" } as Instr,
+    { op: "return" } as Instr,
+  ];
+
+  const body: Instr[] = [
+    { op: "local.get", index: L_V },
+    { op: "ref.cast", typeIdx: errStructIdx } as Instr,
+    { op: "local.set", index: L_E },
+    // name = ($name is a native string) ? it : "Error"
+    { op: "local.get", index: L_E },
+    { op: "struct.get", typeIdx: errStructIdx, fieldIdx: 2 }, // $name (externref)
+    { op: "any.convert_extern" } as Instr,
+    { op: "local.tee", index: L_TMP },
+    { op: "ref.test", typeIdx: anyStrTypeIdx } as Instr,
+    {
+      op: "if",
+      blockType: { kind: "val", type: strRef },
+      then: [{ op: "local.get", index: L_TMP }, { op: "ref.cast", typeIdx: anyStrTypeIdx } as Instr],
+      else: litStr("Error"),
+    } as Instr,
+    { op: "local.set", index: L_NAME },
+    // msg — null / non-string → name alone (steps 4–6; non-string is the
+    // documented construction-time-ToString residual).
+    { op: "local.get", index: L_E },
+    { op: "struct.get", typeIdx: errStructIdx, fieldIdx: 1 }, // $message (externref)
+    { op: "any.convert_extern" } as Instr,
+    { op: "local.tee", index: L_TMP },
+    { op: "ref.test", typeIdx: anyStrTypeIdx } as Instr,
+    { op: "i32.eqz" },
+    { op: "if", blockType: { kind: "empty" }, then: returnName.map((i) => ({ ...i })) } as Instr,
+    { op: "local.get", index: L_TMP },
+    { op: "ref.cast", typeIdx: anyStrTypeIdx } as Instr,
+    { op: "local.set", index: L_MSG },
+    // empty message → name alone (§20.5.3.4 step 6)
+    { op: "local.get", index: L_MSG },
+    { op: "struct.get", typeIdx: anyStrTypeIdx, fieldIdx: 0 }, // len
+    { op: "i32.eqz" },
+    { op: "if", blockType: { kind: "empty" }, then: returnName.map((i) => ({ ...i })) } as Instr,
+    // name + ": " + msg
+    { op: "local.get", index: L_NAME },
+    { op: "ref.as_non_null" } as Instr,
+    ...litStr(": "),
+    { op: "call", funcIdx: strConcatIdx },
+    { op: "local.get", index: L_MSG },
+    { op: "ref.as_non_null" } as Instr,
+    { op: "call", funcIdx: strConcatIdx },
+  ];
+
+  const typeIdx = addFuncType(ctx, [{ kind: "anyref" }], [strRef]);
+  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  ctx.nativeStrHelpers.set("__error_to_string", funcIdx);
+  ctx.funcMap.set("__error_to_string", funcIdx);
+  ctx.mod.functions.push({
+    name: "__error_to_string",
+    typeIdx,
+    locals: [
+      { name: "e", type: { kind: "ref_null", typeIdx: errStructIdx } },
+      { name: "tmp", type: { kind: "anyref" } },
+      { name: "name", type: { kind: "ref_null", typeIdx: anyStrTypeIdx } },
+      { name: "msg", type: { kind: "ref_null", typeIdx: anyStrTypeIdx } },
+    ],
+    body,
+    exported: false,
+  });
+  return funcIdx;
+}
+
 export function ensureAnyToStringHelper(ctx: CodegenContext): number {
   ensureNativeStringHelpers(ctx);
   const existing = ctx.nativeStrHelpers.get("__any_to_string");
@@ -6167,11 +6292,39 @@ export function ensureAnyToStringHelper(ctx: CodegenContext): number {
   ensureAnyValueType(ctx);
   const anyValueTypeIdx = ctx.anyValueTypeIdx;
 
+  // (#2962) Emit the §20.5.3.4 `__error_to_string` helper BEFORE this
+  // function's own index is baked (it appends a function — no import, so no
+  // index shift for anything already emitted). `undefined` in JS-host mode
+  // (errors are host objects there) — every arm below then degrades to the
+  // prior "[object Object]" literal, keeping host lanes byte-identical.
+  const errToStrIdx = ensureErrorToStringHelper(ctx);
+  const errStructTypeIdx = errToStrIdx !== undefined ? ctx.errorStructTypeIdx : -1;
+
   // number_toString returns an externref that is really a `ref $AnyString` in
   // native-strings mode; convert it back with any.convert_extern + ref.cast.
   const numToStrIdx = ctx.funcMap.get("number_toString");
 
   const litStr = (value: string): Instr[] => nativeStringLiteralInstrs(ctx, value);
+
+  // (#2962) Shared terminal for an unrecognized object ref: `$Error_struct` →
+  // `__error_to_string` (a real "TypeError: boom"), anything else → the
+  // canonical "[object Object]". `loadRef` is a FACTORY (fresh instruction
+  // objects per use) because the ref is loaded twice (test + call) — aliasing
+  // one instr array into two tree positions double-shifts funcIdx fields when
+  // post-codegen passes walk the tree (the #1448 corruption class).
+  const objectOrErrorTag = (loadRef: () => Instr[]): Instr[] =>
+    errToStrIdx !== undefined && errStructTypeIdx >= 0
+      ? [
+          ...loadRef(),
+          { op: "ref.test", typeIdx: errStructTypeIdx } as Instr,
+          {
+            op: "if",
+            blockType: { kind: "val", type: strRef },
+            then: [...loadRef(), { op: "call", funcIdx: errToStrIdx } as Instr],
+            else: litStr("[object Object]"),
+          } as Instr,
+        ]
+      : litStr("[object Object]");
 
   // `box` (the $AnyValue ref) lives in local 1; the original anyref param in 0.
   const L_V = 0;
@@ -6250,7 +6403,10 @@ export function ensureAnyToStringHelper(ctx: CodegenContext): number {
                         else: litStr("false"),
                       } as Instr,
                     ],
-                    else: litStr("[object Object]"),
+                    // (#2962) a `$Error_struct` reaching the tag-5 boxed-extern
+                    // recovery (a caught error re-boxed as `any`) renders
+                    // "Name: message" instead of "[object Object]".
+                    else: objectOrErrorTag(() => [{ op: "local.get", index: L_RECOVER }]),
                   } as Instr,
                 ],
               } as Instr,
@@ -6375,8 +6531,12 @@ export function ensureAnyToStringHelper(ctx: CodegenContext): number {
                               ]),
                             } as Instr,
                           ],
-                          // tag 6 / unknown → "[object Object]"
-                          else: litStr("[object Object]"),
+                          // tag 6 / unknown → $Error_struct renders
+                          // "Name: message" (#2962), else "[object Object]"
+                          else: objectOrErrorTag(() => [
+                            { op: "local.get", index: L_BOX },
+                            { op: "struct.get", typeIdx: anyValueTypeIdx, fieldIdx: 3 },
+                          ]),
                         } as Instr,
                       ],
                     } as Instr,
@@ -6443,13 +6603,16 @@ export function ensureAnyToStringHelper(ctx: CodegenContext): number {
                     else: litStr("false"),
                   } as Instr,
                 ],
-                // tag 6 / unknown ref → "[object Object]"
-                else: litStr("[object Object]"),
+                // unknown ref → $Error_struct renders "Name: message"
+                // (#2962), else "[object Object]"
+                else: objectOrErrorTag(() => [{ op: "local.get", index: L_V }]),
               } as Instr,
             ],
           } as Instr,
         ]
-      : litStr("[object Object]");
+      : // No box types registered — still recognize a raw `$Error_struct`
+        // (#2962) before the "[object Object]" terminal.
+        objectOrErrorTag(() => [{ op: "local.get", index: L_V }]);
 
   const body: Instr[] = [
     // if (v is a $AnyString) return it directly
@@ -7114,6 +7277,7 @@ export function ensureNativeStringExternBridge(ctx: CodegenContext): void {
     });
   }
 
+  const importsBeforeBridge = ctx.numImportFuncs;
   const fromMemIdx = ensureLateImport(
     ctx,
     "__str_from_mem",
@@ -7122,6 +7286,23 @@ export function ensureNativeStringExternBridge(ctx: CodegenContext): void {
   )!;
   const toMemIdx = ensureLateImport(ctx, "__str_to_mem", [{ kind: "externref" }, { kind: "i32" }], [])!;
   const externLenIdx = ensureLateImport(ctx, "__str_extern_len", [{ kind: "externref" }], [{ kind: "i32" }])!;
+  // (#2934 slice 3) Close the deferred late-import batch BEFORE baking
+  // `fromMemIdx`/`toMemIdx`/`externLenIdx` into the helper bodies below. The
+  // deferred flush repairs STALE refs by bumping every `funcIdx >=
+  // importsBefore` — it cannot distinguish a freshly-baked, already-final
+  // import index (these three) from a stale defined-function ref, so leaving
+  // the batch open until some later flush bumps the baked import refs onto
+  // whatever defined function lands at that offset (`__str_to_extern`'s
+  // `call __str_from_mem` resolved to `__str_copy_tree`, arity 3 — "not
+  // enough arguments on the stack" for every object-with-own-toString string
+  // coercion, S15.5.4.6_A4_T2). Flushing here settles all pre-batch stale
+  // refs and makes the subsequent flush a no-op for this batch. Gated on
+  // actually having REGISTERED imports (a funcMap-hit lookup is pure and must
+  // not force-flush an outer batch), so already-registered paths are
+  // byte-identical.
+  if (ctx.numImportFuncs > importsBeforeBridge) {
+    flushLateImportShifts(ctx, null);
+  }
 
   {
     const typeIdx = addFuncType(ctx, [strRef], [{ kind: "externref" }]);
@@ -7528,5 +7709,142 @@ export function emitTestRuntimeStringHelpers(ctx: CodegenContext): void {
       name: "__test_str_to_externref",
       desc: { kind: "func", index: funcIdx },
     });
+  }
+}
+
+/**
+ * (#2962) Harness-readable exception rendering for standalone/WASI binaries —
+ * the export pair that de-opaques the "uncaught Wasm-GC exception
+ * (non-stringifiable payload)" bucket (~5.9k standalone baseline entries).
+ *
+ * A natively-thrown payload (an `$Error_struct`, a native string, a boxed
+ * number, …) is a WasmGC value the HOST cannot stringify — `String(payload)`
+ * throws `Cannot convert object to primitive value`, so the test262 harness
+ * (`extractWasmExceptionMessage`) could only record the #2870 opaque label.
+ * These exports let the harness render the payload with ZERO host imports,
+ * following the same harness-support-export pattern as `__sget_*` / `__vec_*`:
+ *
+ *   - `__exn_render_prepare(payload: externref) -> i32` — runs the payload
+ *     through the same `__any_to_string` chain the in-module `String(x)`
+ *     coercion uses (so an `$Error_struct` renders `"TypeError: boom"` via
+ *     `__error_to_string`, §20.5.3.4), flattens the result, stashes it in a
+ *     module global, and returns its code-unit length (`-1` for a null
+ *     payload — the harness keeps its legacy label).
+ *   - `__exn_render_char(i: i32) -> i32` — code-unit readback from the
+ *     prepared buffer (`0` when unprepared / out of range).
+ *
+ * Emitted at finalize (see the `emitExceptionRenderExports` call in
+ * codegen/index.ts) and gated on `(standalone || wasi) && nativeStrings &&
+ * exnTagIdx >= 0` — a module that cannot throw through the `$exc` tag gets
+ * neither export nor the string-runtime pull-in, keeping non-throwing modules
+ * byte-identical. JS-host binaries are untouched (payloads there are real JS
+ * values the host formats directly).
+ *
+ * Index-shift safety: both dependencies (`__any_to_string`, `__str_flatten`)
+ * are ensured/read from the authoritative `funcMap`/`nativeStrHelpers` BEFORE
+ * either body is built, and both functions are pushed with no intervening
+ * helper emission or import registration.
+ */
+export function emitExceptionRenderExports(ctx: CodegenContext): void {
+  if (!(ctx.standalone || ctx.wasi)) return;
+  if (!ctx.nativeStrings) return;
+  if (ctx.exnTagIdx < 0) return;
+  if (ctx.funcMap.has("__exn_render_prepare")) return;
+
+  const anyToStrIdx = ensureAnyToStringHelper(ctx);
+  const flattenIdx = ctx.funcMap.get("__str_flatten") ?? ctx.nativeStrHelpers.get("__str_flatten");
+  const flatTypeIdx = ctx.nativeStrTypeIdx;
+  const dataTypeIdx = ctx.nativeStrDataTypeIdx;
+  if (anyToStrIdx === undefined || flattenIdx === undefined || flatTypeIdx < 0 || dataTypeIdx < 0) return;
+
+  const mod = ctx.mod;
+
+  // (mut ref null $NativeString) — the prepared render buffer.
+  const bufGlobalIdx = ctx.numImportGlobals + mod.globals.length;
+  mod.globals.push({
+    name: "__exn_render_buf",
+    type: { kind: "ref_null", typeIdx: flatTypeIdx },
+    mutable: true,
+    init: [{ op: "ref.null", typeIdx: flatTypeIdx } as Instr],
+  });
+
+  // __exn_render_prepare(payload: externref) -> i32
+  {
+    const typeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i32" }], "$exn_render_prepare_type");
+    const funcIdx = ctx.numImportFuncs + mod.functions.length;
+    const body: Instr[] = [
+      { op: "local.get", index: 0 },
+      { op: "ref.is_null" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "i32.const", value: -1 }, { op: "return" } as Instr],
+      },
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" } as Instr,
+      { op: "call", funcIdx: anyToStrIdx },
+      { op: "call", funcIdx: flattenIdx },
+      { op: "global.set", index: bufGlobalIdx } as Instr,
+      { op: "global.get", index: bufGlobalIdx } as Instr,
+      { op: "struct.get", typeIdx: flatTypeIdx, fieldIdx: 0 }, // len
+    ];
+    ctx.funcMap.set("__exn_render_prepare", funcIdx);
+    mod.functions.push({
+      name: "__exn_render_prepare",
+      typeIdx,
+      locals: [],
+      body,
+      exported: true,
+    } as WasmFunction);
+    mod.exports.push({ name: "__exn_render_prepare", desc: { kind: "func", index: funcIdx } });
+  }
+
+  // __exn_render_char(i: i32) -> i32
+  {
+    const typeIdx = addFuncType(ctx, [{ kind: "i32" }], [{ kind: "i32" }], "$exn_render_char_type");
+    const funcIdx = ctx.numImportFuncs + mod.functions.length;
+    const L_I = 0;
+    const L_BUF = 1;
+    const body: Instr[] = [
+      { op: "global.get", index: bufGlobalIdx } as Instr,
+      { op: "local.tee", index: L_BUF },
+      { op: "ref.is_null" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "i32.const", value: 0 }, { op: "return" } as Instr],
+      },
+      // i < 0 || i >= len → 0
+      { op: "local.get", index: L_I },
+      { op: "i32.const", value: 0 },
+      { op: "i32.lt_s" },
+      { op: "local.get", index: L_I },
+      { op: "local.get", index: L_BUF },
+      { op: "struct.get", typeIdx: flatTypeIdx, fieldIdx: 0 }, // len
+      { op: "i32.ge_s" },
+      { op: "i32.or" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "i32.const", value: 0 }, { op: "return" } as Instr],
+      },
+      // data[off + i]
+      { op: "local.get", index: L_BUF },
+      { op: "struct.get", typeIdx: flatTypeIdx, fieldIdx: 2 }, // data
+      { op: "local.get", index: L_BUF },
+      { op: "struct.get", typeIdx: flatTypeIdx, fieldIdx: 1 }, // off
+      { op: "local.get", index: L_I },
+      { op: "i32.add" },
+      { op: "array.get_u", typeIdx: dataTypeIdx },
+    ];
+    ctx.funcMap.set("__exn_render_char", funcIdx);
+    mod.functions.push({
+      name: "__exn_render_char",
+      typeIdx,
+      locals: [{ name: "buf", type: { kind: "ref_null", typeIdx: flatTypeIdx } }],
+      body,
+      exported: true,
+    } as WasmFunction);
+    mod.exports.push({ name: "__exn_render_char", desc: { kind: "func", index: funcIdx } });
   }
 }

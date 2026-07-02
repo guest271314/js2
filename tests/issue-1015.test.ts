@@ -49,7 +49,10 @@ describe("#1015 — fixture tests execute in unified mode", () => {
       "./helper_FIXTURE.js": helperSrc,
     };
 
-    const result = await compileMulti(vfiles, "./test.ts", { skipSemanticDiagnostics: true });
+    // (#2932) allowJs mirrors the test262 runner's FIXTURE branch — without it
+    // TypeScript excludes the `.js` root file from the program and `add`
+    // resolves to null (this exact test failed on main with `expected 2 to be 1`).
+    const result = await compileMulti(vfiles, "./test.ts", { skipSemanticDiagnostics: true, allowJs: true });
     expect(result.success).toBe(true);
     expect(result.binary.length).toBeGreaterThan(0);
 
