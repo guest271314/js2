@@ -101,6 +101,16 @@ export type IrFallbackReason =
 export interface IrFallback {
   readonly name: string;
   readonly reason: IrFallbackReason;
+  /**
+   * #2856 — for `body-shape-rejected` fallbacks only: the first rejecting
+   * leaf (a stable classifier `tag` plus a short source snippet, e.g.
+   * `"expr:ident-not-in-scope (document)"`). Populated only when
+   * `trackFallbacks` is on and a body-shape check recorded a leaf; absent
+   * for every other reason. Diagnostic-only — consumed by
+   * `scripts/check-ir-fallbacks.ts --verbose` to bucket the heterogeneous
+   * body-shape rejections by actual cause.
+   */
+  readonly rejectDetail?: string;
 }
 
 /**
@@ -228,6 +238,12 @@ export function planIrCompilation(
   // log/throw on legacy fallback. Only populated when trackFallbacks is on.
   const trackFallbacks = options?.trackFallbacks === true;
   const fallbackReasons = new Map<string, IrFallbackReason>();
+  // #2856 — per-function first-reject-leaf detail for body-shape rejections.
+  // Only recorded under trackFallbacks; keyed by the same name as
+  // `fallbackReasons`. `recordRejects` gates the reject-site capture so
+  // non-diagnostic compiles pay nothing.
+  const rejectDetails = new Map<string, string>();
+  recordRejects = trackFallbacks;
   // Track unnamed FunctionDeclarations too (rare but possible — `default`
   // export of an anonymous function, etc.) so callers can see them.
   let unnamedCount = 0;
@@ -247,6 +263,9 @@ export function planIrCompilation(
       individuallyClaimed.add(stmt.name.text);
     } else if (trackFallbacks) {
       fallbackReasons.set(stmt.name.text, reason);
+      if (reason === "body-shape-rejected" && lastRejectLeaf !== null) {
+        rejectDetails.set(stmt.name.text, lastRejectLeaf);
+      }
     }
   }
 
@@ -339,6 +358,9 @@ export function planIrCompilation(
         individuallyClaimedClassMembers.add(memberName);
       } else if (trackFallbacks) {
         fallbackReasons.set(memberName, reason);
+        if (reason === "body-shape-rejected" && lastRejectLeaf !== null) {
+          rejectDetails.set(memberName, lastRejectLeaf);
+        }
       }
     }
   }
@@ -352,7 +374,10 @@ export function planIrCompilation(
       return { funcs: new Set<string>(), classMembers: individuallyClaimedClassMembers };
     }
     const fallbacks: IrFallback[] = [];
-    for (const [name, reason] of fallbackReasons) fallbacks.push({ name, reason });
+    for (const [name, reason] of fallbackReasons) {
+      const rejectDetail = rejectDetails.get(name);
+      fallbacks.push(rejectDetail ? { name, reason, rejectDetail } : { name, reason });
+    }
     for (let i = 0; i < unnamedCount; i++) fallbacks.push({ name: `<unnamed:${i}>`, reason: "unnamed" });
     if (individuallyClaimedClassMembers.size === 0) {
       return { funcs: new Set<string>(), fallbacks };
@@ -427,7 +452,10 @@ export function planIrCompilation(
   }
 
   const fallbacks: IrFallback[] = [];
-  for (const [name, reason] of fallbackReasons) fallbacks.push({ name, reason });
+  for (const [name, reason] of fallbackReasons) {
+    const rejectDetail = rejectDetails.get(name);
+    fallbacks.push(rejectDetail ? { name, reason, rejectDetail } : { name, reason });
+  }
   for (let i = 0; i < unnamedCount; i++) fallbacks.push({ name: `<unnamed:${i}>`, reason: "unnamed" });
   return classMembers ? { funcs: claimed, classMembers, fallbacks } : { funcs: claimed, fallbacks };
 }
@@ -627,6 +655,11 @@ function whyNotIrClaimable(
     scope.add(p.name.text);
   }
 
+  // #2856 — clear the diagnostic reject-leaf before ANY body-shape verdict for
+  // THIS function (including the body-less early-out below, which must not
+  // inherit a leaf recorded for a previous function). No-op when recording is
+  // off. The caller reads `lastRejectLeaf` after a `body-shape-rejected`.
+  resetRejectLeaf();
   const body = fn.body;
   if (!body) return "body-shape-rejected";
   // #1804 regression guard — record whether this function has a C-style loop,
@@ -827,13 +860,14 @@ function isPhase1StatementList(
         ts.isPropertyAccessExpression(s.expression.left)
       ) {
         // LHS: <expr>.<id> — receiver expr must be Phase-1, prop must be Identifier.
-        if (!ts.isIdentifier(s.expression.left.name)) return false;
+        if (!ts.isIdentifier(s.expression.left.name))
+          return rej("stmtlist:assign-prop-name-not-ident", s.expression.left);
         if (!isPhase1Expr(s.expression.left.expression, scope, localClasses)) return false;
         // RHS: any Phase-1 expression.
         if (!isPhase1Expr(s.expression.right, scope, localClasses)) return false;
         continue;
       }
-      return false;
+      return rej("stmtlist:exprstmt-" + ts.SyntaxKind[s.expression.kind], s);
     }
     // Phase 2 extension: an `if (cond) <tail>` with NO else and the rest
     // of the statements forming a tail. This is the classic early-return
@@ -887,7 +921,7 @@ function isPhase1StatementList(
       if (!isPhase1TryStatement(s, scope, localClasses)) return false;
       continue;
     }
-    return false;
+    return rej("stmtlist:nontail-" + ts.SyntaxKind[s.kind], s);
   }
   return isPhase1Tail(stmts[stmts.length - 1]!, scope, localClasses, isGenerator, isVoidReturn);
 }
@@ -1152,11 +1186,12 @@ function isPhase1BodyStatement(stmt: ts.Statement, scope: Set<string>, localClas
       // Plain assignment `<id> = <expr>` — id must be in scope.
       if (op === ts.SyntaxKind.EqualsToken) {
         if (ts.isIdentifier(stmt.expression.left)) {
-          if (!scope.has(stmt.expression.left.text)) return false;
+          if (!scope.has(stmt.expression.left.text)) return rej("body:assign-lhs-not-in-scope", stmt.expression.left);
           return isPhase1Expr(stmt.expression.right, scope, localClasses);
         }
         if (ts.isPropertyAccessExpression(stmt.expression.left)) {
-          if (!ts.isIdentifier(stmt.expression.left.name)) return false;
+          if (!ts.isIdentifier(stmt.expression.left.name))
+            return rej("body:assign-prop-name-not-ident", stmt.expression.left);
           if (!isPhase1Expr(stmt.expression.left.expression, scope, localClasses)) return false;
           return isPhase1Expr(stmt.expression.right, scope, localClasses);
         }
@@ -1182,10 +1217,13 @@ function isPhase1BodyStatement(stmt: ts.Statement, scope: Set<string>, localClas
     if (ts.isPostfixUnaryExpression(stmt.expression) || ts.isPrefixUnaryExpression(stmt.expression)) {
       const op = stmt.expression.operator;
       if (op === ts.SyntaxKind.PlusPlusToken || op === ts.SyntaxKind.MinusMinusToken) {
-        return ts.isIdentifier(stmt.expression.operand) && scope.has(stmt.expression.operand.text);
+        return (
+          (ts.isIdentifier(stmt.expression.operand) && scope.has(stmt.expression.operand.text)) ||
+          rej("body:incdec-operand", stmt)
+        );
       }
     }
-    return false;
+    return rej("body:exprstmt-" + ts.SyntaxKind[stmt.expression.kind], stmt);
   }
   if (ts.isForOfStatement(stmt)) {
     return isPhase1ForOf(stmt, scope, localClasses);
@@ -1214,7 +1252,7 @@ function isPhase1BodyStatement(stmt: ts.Statement, scope: Set<string>, localClas
   if (ts.isTryStatement(stmt)) {
     return isPhase1TryStatement(stmt, scope, localClasses);
   }
-  return false;
+  return rej("body:stmt-" + ts.SyntaxKind[stmt.kind], stmt);
 }
 
 function isPhase1Tail(
@@ -1258,7 +1296,7 @@ function isPhase1Tail(
   if (isVoidReturn && ts.isExpressionStatement(stmt)) {
     return isPhase1Expr(stmt.expression, scope, localClasses);
   }
-  return false;
+  return rej("tail:" + ts.SyntaxKind[stmt.kind] + (isVoidReturn ? "-void" : "-nonvoid"), stmt);
 }
 
 function isPhase1VarDecl(stmt: ts.VariableStatement, scope: Set<string>, localClasses: ReadonlySet<string>): boolean {
@@ -1305,7 +1343,8 @@ function isPhase1VarDecl(stmt: ts.VariableStatement, scope: Set<string>, localCl
       scope.add(d.name.text);
       continue;
     }
-    if (d.type && !isPhase1TypeNode(d.type)) return false;
+    if (d.type && !isPhase1TypeNode(d.type))
+      return rej("vardecl:local-type-annotation-" + ts.SyntaxKind[d.type.kind], d);
     if (!isPhase1Expr(d.initializer, scope, localClasses)) return false;
     scope.add(d.name.text);
   }
@@ -1566,6 +1605,46 @@ function isKnownExternClass(name: string): boolean {
   return KNOWN_EXTERN_CLASSES.has(name);
 }
 
+// ---------------------------------------------------------------------------
+// #2856 — body-shape reject-leaf diagnostics (opt-in).
+//
+// The `body-shape-rejected` fallback bucket is heterogeneous: a function
+// demotes when ANY leaf statement/expression in its body fails a Phase-1
+// shape check. The plain bucket count says nothing about WHICH leaf. To scope
+// the IR-retirement work, the shape predicates below record the FIRST
+// rejecting leaf (a stable `tag` + a short source snippet) whenever
+// `recordRejects` is on. When off (the default — every non-diagnostic
+// compile) `rej()` is a plain `return false` with no allocation, so this
+// facility is zero-cost on the hot path.
+//
+// `planIrCompilation` turns recording on only under `trackFallbacks`, resets
+// the leaf before each function's body check (in `whyNotIrClaimable`), and
+// attaches the captured leaf to that function's `IrFallback.rejectDetail`.
+// `scripts/check-ir-fallbacks.ts --verbose` aggregates these into a
+// per-reject-leaf histogram. See #2856.
+// ---------------------------------------------------------------------------
+let recordRejects = false;
+let lastRejectLeaf: string | null = null;
+
+function resetRejectLeaf(): void {
+  lastRejectLeaf = null;
+}
+
+/** Uniform reject site: records the first rejecting leaf (when recording is
+ *  on) and returns `false` so call sites read `return rej(tag, node)`. */
+function rej(tag: string, node: ts.Node): false {
+  if (recordRejects && lastRejectLeaf === null) {
+    let text = "";
+    try {
+      text = node.getText().replace(/\s+/g, " ").slice(0, 60);
+    } catch {
+      /* synthesized node with no source range */
+    }
+    lastRejectLeaf = text ? `${tag} (${text})` : tag;
+  }
+  return false;
+}
+
 function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClasses: ReadonlySet<string>): boolean {
   if (ts.isParenthesizedExpression(expr)) return isPhase1Expr(expr.expression, scope, localClasses);
   if (ts.isNumericLiteral(expr)) return true;
@@ -1591,7 +1670,7 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
     // Identifier may name either a param/local (scope) or a function
     // (only valid as the callee of a CallExpression, handled below).
     // A bare identifier that isn't in scope is not a valid Phase-1 expr.
-    return scope.has(expr.text);
+    return scope.has(expr.text) || rej("expr:ident-not-in-scope", expr);
   }
   // #1370 Phase A — `this` reference inside a method or constructor body.
   // The selector marks `this` as an in-scope binding for class members
@@ -1603,11 +1682,12 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
     return scope.has("this");
   }
   if (ts.isPrefixUnaryExpression(expr)) {
-    if (!isPhase1PrefixOp(expr.operator)) return false;
+    if (!isPhase1PrefixOp(expr.operator)) return rej("expr:prefix-op-" + ts.SyntaxKind[expr.operator], expr);
     return isPhase1Expr(expr.operand, scope, localClasses);
   }
   if (ts.isBinaryExpression(expr)) {
-    if (!isPhase1BinaryOp(expr.operatorToken.kind)) return false;
+    if (!isPhase1BinaryOp(expr.operatorToken.kind))
+      return rej("expr:binop-" + ts.SyntaxKind[expr.operatorToken.kind], expr);
     return isPhase1Expr(expr.left, scope, localClasses) && isPhase1Expr(expr.right, scope, localClasses);
   }
   if (ts.isConditionalExpression(expr)) {
@@ -1623,7 +1703,7 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
     // enforces that the receiver is a class instance whose shape carries
     // `methodName`. If not, the function falls back to legacy.
     if (ts.isPropertyAccessExpression(expr.expression)) {
-      if (!ts.isIdentifier(expr.expression.name)) return false;
+      if (!ts.isIdentifier(expr.expression.name)) return rej("call:method-name-not-ident", expr);
       // (#1371) Whitelist `Math.<unary>(arg)` for a small set of f64-mapped
       // ops. The receiver `Math` is a host global, never in scope, so the
       // generic receiver check below would reject these. Recognise the shape
@@ -1643,12 +1723,12 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
         // Slice 8a (#1169g): spread args restricted to method calls is
         // out of scope — methods on classes have known signatures and
         // expanding spread would blur them. Reject for now.
-        if (ts.isSpreadElement(arg)) return false;
+        if (ts.isSpreadElement(arg)) return rej("call:method-spread-arg", expr);
         if (!isPhase1Expr(arg, scope, localClasses)) return false;
       }
       return true;
     }
-    if (!ts.isIdentifier(expr.expression)) return false;
+    if (!ts.isIdentifier(expr.expression)) return rej("call:callee-not-ident", expr);
     for (const arg of expr.arguments) {
       // Slice 8a (#1169g): accept `f(...source)` where the spread source
       // is an ArrayLiteralExpression with no nested spread. The lowerer
@@ -1675,10 +1755,10 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
   // class shape; slice 10 against `getExternClassInfo`'s
   // constructorParams).
   if (ts.isNewExpression(expr)) {
-    if (!ts.isIdentifier(expr.expression)) return false;
+    if (!ts.isIdentifier(expr.expression)) return rej("new:callee-not-ident", expr);
     const ctorName = expr.expression.text;
-    if (!localClasses.has(ctorName) && !isKnownExternClass(ctorName)) return false;
-    if (expr.typeArguments && expr.typeArguments.length > 0) return false; // defer generics
+    if (!localClasses.has(ctorName) && !isKnownExternClass(ctorName)) return rej("new:unknown-class-" + ctorName, expr);
+    if (expr.typeArguments && expr.typeArguments.length > 0) return rej("new:type-args", expr); // defer generics
     if (!expr.arguments) return true;
     for (const arg of expr.arguments) {
       if (!isPhase1Expr(arg, scope, localClasses)) return false;
@@ -1722,7 +1802,7 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
   // class instance (recv is Phase-1; lowerer dispatches by the recv's
   // resolved IrType).
   if (ts.isPropertyAccessExpression(expr)) {
-    if (!ts.isIdentifier(expr.name)) return false;
+    if (!ts.isIdentifier(expr.name)) return rej("prop:name-not-ident", expr);
     // Slice 11 (#1169n) — optional chaining (`obj?.prop`). The lowerer
     // doesn't yet emit the null-guard branch, so accept the shape
     // structurally but the lowerer will throw clean fallback when it
@@ -1758,10 +1838,10 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
     // loop's cond/body blocks — distinct from the working forof.vec path). When
     // this function contains such a loop, withhold the claim so the whole
     // function reverts to the (correct) legacy path, as it did pre-#1804.
-    if (currentFnHasCStyleLoop) return false;
+    if (currentFnHasCStyleLoop) return rej("arraylit:cstyle-loop-guard", expr);
     for (const el of expr.elements) {
-      if (ts.isSpreadElement(el)) return false; // out of scope
-      if (ts.isOmittedExpression(el)) return false; // sparse — out of scope
+      if (ts.isSpreadElement(el)) return rej("arraylit:spread", expr); // out of scope
+      if (ts.isOmittedExpression(el)) return rej("arraylit:sparse", expr); // sparse — out of scope
       if (!isPhase1Expr(el, scope, localClasses)) return false;
     }
     return true;
@@ -1781,7 +1861,7 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
   if (ts.isVoidExpression(expr)) {
     return isPhase1Expr(expr.expression, scope, localClasses);
   }
-  return false;
+  return rej("expr:unhandled-kind", expr);
 }
 
 /**

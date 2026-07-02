@@ -1,10 +1,11 @@
 ---
 id: 2856
 title: "IR: drive body-shape-rejected fallback bucket to zero (dominant unintended bucket)"
-status: ready
+status: in-progress
+assignee: ttraenkler/dev-2856f
 sprint: current
 created: 2026-06-30
-updated: 2026-06-30
+updated: 2026-07-02
 priority: low
 horizon: l
 feasibility: hard
@@ -138,6 +139,56 @@ Diagnostic script kept at `.tmp/diagnose-body-shape.mjs` (heuristic; not
 committed — the exact instrumentation supersedes it). Routing: this epic needs
 `senior-developer` for the selector instrumentation + the mutable-assignment IR
 lowering.
+
+## EXACT reject-leaf histogram (2026-07-02, dev-2856f — instrumentation landed)
+
+The opt-in reject-leaf instrumentation is now in `src/ir/select.ts` (a `rej(tag,
+node)` recorder threaded through the `return false` sites of the Phase-1 shape
+predicates, active only under `trackFallbacks`; zero behaviour change when off)
+and surfaced via `IrFallback.rejectDetail` →
+`pnpm run check:ir-fallbacks -- --why` (histogram + per-function detail;
+`--verbose` prints the histogram only). This is the EXACT verdict from the
+selector's own reject sites — it supersedes the 2026-07-01 heuristic above,
+which was materially wrong (the dominant cause is host-global identifier
+references, not local reassignment).
+
+| reject leaf (first failing, per function)   | count | what it actually is                                                                     |
+| ------------------------------------------- | ----- | ---------------------------------------------------------------------------------------- |
+| `expr:ident-not-in-scope`                    | 21    | `document` ×16, `console` ×2 (host globals → **#2939**); `fibCache`/`gridEl`/`selStart` ×3 (module-scope bindings → **#2940**) |
+| `body:stmt-IfStatement`                      | 3     | plain `if` inside a loop body — `isPhase1BodyStatement` has no `if` arm (→ **#2941**)     |
+| `vardecl:local-type-annotation-ArrayType`    | 2     | `const arr: number[] = []` — explicit array-type annotation rejected                      |
+| `tail:ExpressionStatement-nonvoid`           | 1     | `yr = yr - 1;` as final stmt of a value-returning branch (calendar `fdow`)                |
+| `stmtlist:nontail-IfStatement`               | 1     | `if/else if/else` chain at non-tail position (calendar `onDay`)                           |
+| `new:type-args`                              | 1     | `new Promise<number>(…)` — generic type args deferred (async `delay`)                     |
+| `body:assign-prop-name-not-ident`            | 1     | `this.#name = …` — private-field write (classes `Animal_new`)                             |
+| `prop:name-not-ident`                        | 1     | `this.#name` read — private-field access (classes `Animal_speak`)                         |
+
+Total 31/31 reconciled — every function in the bucket is leaf-classified.
+
+### Root cause: host globals are the keystone, and demotion is CONTAGIOUS
+
+`isPhase1Expr` rejects any identifier not in the function-local scope set
+(`expr:ident-not-in-scope`). Host globals (`document`, `console`) are never in
+scope, so every `main`/`bench_*` driver function demotes. **Fixing any other
+leaf first is a trap**: the selector's fixpoint loop (`src/ir/select.ts` ~415)
+demotes a claimed function whenever ANY local caller or callee is unclaimed,
+re-bucketing it as `call-graph-closure`. Since the host-global references sit
+in the `main` drivers — the roots of each example's call graph — a leaf-level
+fix just MOVES the count from `body-shape-rejected` into `call-graph-closure`,
+and the gate fails on that bucket's growth (proved by the predecessor's
+`fibIter` experiment: shape-fixing the leaf grew `call-graph-closure`). The
+host-global slice (#2939) must therefore land FIRST — it clears the
+`body-shape-rejected` rows AND the `call-graph-closure` contagion in the same
+PR, letting the ratchet (`--update-on-decrease`) bank both drops together.
+
+## Decomposition — child issues (one PR each)
+
+| child     | slice                                                            | fns freed | order                                        |
+| --------- | ----------------------------------------------------------------- | --------- | --------------------------------------------- |
+| **#2939** | host-global refs (`console`, `document`) via legacy host-import path | 18 (+ call-graph-closure contagion) | FIRST — keystone |
+| **#2940** | module-scope bindings (`fibCache`, `gridEl`, `selStart`)           | 3         | after #2939                                    |
+| **#2941** | `if` statement inside loop bodies                                  | 3         | independent, after #2939 (contagion)           |
+| (parent)  | misc leftovers: private fields ×2, array-type annotation ×2, non-void tail expr ×1, non-tail if/else ×1, `new` type-args ×1 | 7 | slice later, from this issue |
 
 ## Acceptance criteria
 

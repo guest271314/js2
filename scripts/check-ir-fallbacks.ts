@@ -161,6 +161,11 @@ async function aggregate(): Promise<{
   deferred: Partial<Record<IrFallbackReason, number>>;
   postClaim: PostClaimBuckets;
   perFile: Array<{ file: string; reasons: Partial<Record<IrFallbackReason, number>> }>;
+  // #2856 — first-reject-leaf histogram for `body-shape-rejected` fallbacks
+  // (tag → count) plus the per-function detail rows, so `--why` can explain
+  // WHICH statement/expression shape drove each demotion.
+  bodyShapeLeaves: Record<string, number>;
+  bodyShapeDetail: Array<{ file: string; name: string; detail: string }>;
 }> {
   const corpus = CORPUS_ROOTS.flatMap(listTsFiles);
 
@@ -173,6 +178,12 @@ async function aggregate(): Promise<{
   // — they happen during build/verify/lower AFTER the selector claims).
   const postClaim = emptyPostClaim();
   const perFile: Array<{ file: string; reasons: Partial<Record<IrFallbackReason, number>> }> = [];
+  // #2856 — reject-leaf histogram + detail for body-shape-rejected fallbacks.
+  const bodyShapeLeaves: Record<string, number> = {};
+  const bodyShapeDetail: Array<{ file: string; name: string; detail: string }> = [];
+  // Group the raw `tag (snippet)` detail into a coarser leaf-class so the
+  // histogram stays readable — strip the parenthesised snippet.
+  const leafClass = (detail: string): string => detail.replace(/\s*\(.*\)\s*$/, "") || detail;
 
   const compilerOptions: ts.CompilerOptions = {
     target: ts.ScriptTarget.ES2022,
@@ -227,6 +238,16 @@ async function aggregate(): Promise<{
       const bucket = UNINTENDED.has(fb.reason) ? unintended : deferred;
       bucket[fb.reason] = (bucket[fb.reason] ?? 0) + 1;
       fileReasons[fb.reason] = (fileReasons[fb.reason] ?? 0) + 1;
+      // #2856 — capture the reject-leaf for body-shape rejections. A few rare
+      // reject sites (e.g. some class-member `#private` field cases) aren't
+      // leaf-tagged; bucket those as `(unclassified)` so the histogram total
+      // always reconciles with the `body-shape-rejected` count.
+      if (fb.reason === "body-shape-rejected") {
+        const detail = fb.rejectDetail ?? "(unclassified)";
+        const cls = leafClass(detail);
+        bodyShapeLeaves[cls] = (bodyShapeLeaves[cls] ?? 0) + 1;
+        bodyShapeDetail.push({ file: relative(REPO_ROOT, filePath), name: fb.name, detail });
+      }
     }
     perFile.push({ file: relative(REPO_ROOT, filePath), reasons: fileReasons });
 
@@ -244,7 +265,7 @@ async function aggregate(): Promise<{
       // ignore — example-file compile failures are not the gate's concern
     }
   }
-  return { unintended, deferred, postClaim, perFile };
+  return { unintended, deferred, postClaim, perFile, bodyShapeLeaves, bodyShapeDetail };
 }
 
 function loadBaseline(): Baseline | undefined {
@@ -302,6 +323,34 @@ function formatPerFile(perFile: Array<{ file: string; reasons: Partial<Record<Ir
   return lines.join("\n") + "\n";
 }
 
+// #2856 — render the body-shape reject-leaf histogram + optional per-function
+// detail. This explains the heterogeneous `body-shape-rejected` bucket by the
+// ACTUAL first-rejecting leaf (host-global ref, if-in-loop-body, private field,
+// …) so migration slices are scoped to real causes, not guessed node kinds.
+function formatBodyShapeLeaves(
+  leaves: Record<string, number>,
+  detail: Array<{ file: string; name: string; detail: string }>,
+  withDetail: boolean,
+): string {
+  const entries = Object.entries(leaves).sort((a, b) => b[1] - a[1]);
+  if (entries.length === 0) return "\nbody-shape-rejected reject-leaves: (none)\n";
+  const max = Math.max("reject leaf".length, ...entries.map(([k]) => k.length));
+  const lines = [
+    "\nbody-shape-rejected reject-leaves (#2856 — first failing leaf per function):",
+    `  ${"reject leaf".padEnd(max)}  count`,
+    `  ${"-".repeat(max)}  -----`,
+    ...entries.map(([k, n]) => `  ${k.padEnd(max)}  ${String(n).padStart(5)}`),
+  ];
+  if (withDetail) {
+    lines.push("\n  per-function detail:");
+    for (const d of [...detail].sort((a, b) => a.detail.localeCompare(b.detail))) {
+      lines.push(`    ${d.file} :: ${d.name}`);
+      lines.push(`        ${d.detail}`);
+    }
+  }
+  return lines.join("\n") + "\n";
+}
+
 // #1923 — flatten the per-kind post-claim buckets into `kind/messageClass` rows
 // and diff against the baseline. Any increase fails (target = 0 for all).
 function diffPostClaim(
@@ -335,11 +384,19 @@ async function main(): Promise<void> {
         ? "json"
         : "gate";
   const verbose = args.has("--verbose");
+  // #2856 — `--why` prints the body-shape reject-leaf histogram + per-function
+  // detail (the "why is this function body-shape-rejected" breakdown). Implied
+  // by `--verbose` for the histogram; `--why` additionally lists each function.
+  const why = args.has("--why");
 
-  const { unintended, deferred, postClaim, perFile } = await aggregate();
+  const { unintended, deferred, postClaim, perFile, bodyShapeLeaves, bodyShapeDetail } = await aggregate();
+  const bodyShapeReport = (): string =>
+    verbose || why ? formatBodyShapeLeaves(bodyShapeLeaves, bodyShapeDetail, why) : "";
 
   if (mode === "json") {
-    process.stdout.write(JSON.stringify({ unintended, deferred, postClaim, perFile }, null, 2) + "\n");
+    process.stdout.write(
+      JSON.stringify({ unintended, deferred, postClaim, perFile, bodyShapeLeaves, bodyShapeDetail }, null, 2) + "\n",
+    );
     return;
   }
 
@@ -355,6 +412,7 @@ async function main(): Promise<void> {
       formatTable("Post-claim demotions (target = 0)", diffPostClaim(undefined, postClaim).rows) + "\n",
     );
     if (verbose) process.stdout.write(formatPerFile(perFile));
+    process.stdout.write(bodyShapeReport());
     return;
   }
 
@@ -426,6 +484,7 @@ async function main(): Promise<void> {
         `Staged update to ${relative(REPO_ROOT, BASELINE_PATH)} — commit it with the PR.\n`,
     );
     if (verbose) process.stdout.write(formatPerFile(perFile));
+    process.stdout.write(bodyShapeReport());
     return;
   }
 
@@ -433,6 +492,7 @@ async function main(): Promise<void> {
   // cause main to drift). Just succeed; CI doesn't auto-update either.
   process.stdout.write("\nIR fallback gate: OK (no unintended/post-claim increases vs. baseline).\n");
   if (verbose) process.stdout.write(formatPerFile(perFile));
+  process.stdout.write(bodyShapeReport());
 }
 
 main().catch((err) => {
