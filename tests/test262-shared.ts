@@ -16,6 +16,7 @@ import { afterAll, beforeAll, describe, it } from "vitest";
 import { availableParallelism } from "os";
 import { CompilerPool, type TestResult } from "../scripts/compiler-pool.js";
 import { isPoisonCompileError } from "../scripts/test262-poison-error.mjs";
+import { negativeCompileSucceededVerdict } from "../scripts/negative-verdict.mjs";
 import { findNthAssert } from "./test262-assert-locator.js";
 import { ORACLE_VERSION } from "./test262-oracle-version.js";
 import {
@@ -737,9 +738,9 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
                   }
                 } catch (execErr: any) {
                   const execRecordMetadata = metadataFromImports(result.imports, reachedFixtureTest);
-                  if (isRuntimeNegative || isNegative) {
-                    // For isNegative (parse/early/resolution), Wasm validation
-                    // or a thrown start-function counts as the expected error.
+                  if (isRuntimeNegative) {
+                    // A throw from the start function IS the expected runtime
+                    // error for a runtime-negative test.
                     recordResult(
                       relPath,
                       category,
@@ -750,6 +751,18 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
                       undefined,
                       execRecordMetadata,
                     );
+                  } else if (isNegative) {
+                    // (#2920) STRICT compile-SUCCEEDED arm (fixture path). The
+                    // compiler emitted no diagnostic, so the expected
+                    // parse/early error was NOT detected at compile time. An
+                    // incidental Wasm validation / start-function throw is not
+                    // spec-conformant detection => fail (was scored `pass`).
+                    // Intentional verdict tightening (plan/issues/2920).
+                    const { status, error } = negativeCompileSucceededVerdict(
+                      meta.negative!.type,
+                      meta.negative!.phase,
+                    );
+                    recordResult(relPath, category, status, error, undefined, scopeInfo, undefined, execRecordMetadata);
                   } else {
                     recordResult(
                       relPath,
