@@ -51,9 +51,39 @@ not one — triaged 2026-07-02:
       with the established `getOp` idiom (`i8 → array.get_u`, `i16 → array.get_s`).
       Flips `TypedArray/prototype/values/make-{in,out-of}-bounds-after-exhausted.js`
       standalone invalid → valid.
-- [ ] **(1b) TypedArray `.entries()`** — a DISTINCT `Binary emit error:
-encodeValType: packed …` (a packed array type reaching a valtype position the
-      encoder rejects). Not the same site as (1).
+- [x] **(1b) packed-element for-of / vec→tuple `encodeValType: packed`** — DONE
+      (dev-2934f, slice 3). Bigger than the `.entries()` label: EVERY
+      `for (const v of u)` / `of u.values()` / `of u.entries()` over a packed
+      (i8/i16) typed array was a standalone emit error, plus the manual-iterator
+      `it.next().value` tuple destructure. THREE distinct leak sites of one class
+      ("a packed STORAGE type reached a VALUE position"):
+  1. `compileForOfArray`/`compileForOfArrayEntries` (`statements/loops.ts`)
+     allocated the **loop variable local** with the raw `arrDef.element`
+     (i8/i16 — invalid local type) and read with plain `array.get` (invalid on
+     packed arrays). Fixed: bind as `unpackedElemType` (i32), read with
+     `elemGetOp` driven by **view-name signedness** (`Int*` → get_s, `Uint*` →
+     get_u — the storage kind alone can't distinguish, #2648), coerce/destructure
+     from the widened i32.
+  2. `stack-balance.ts` type simulation pushed the raw packed element/field
+     type for `array.get_s/_u`/`struct.get`; the struct.new arg-coercion repair
+     then materialized it into a `$sn_tmp` **temp local** → invalid. Fixed:
+     the simulator now models the widened i32 that is physically on the stack
+     (`widenPackedToI32` at all 4 producer sites + defensive widen at the
+     temp-local alloc).
+  3. `type-coercion.ts` vec→tuple paths (`buildTupleFromExternref` runtime
+     ref.test chain over ALL vec types incl. the packed i8_byte vec, and
+     `emitVecToTupleBody`) used plain `array.get` + a packed `if` **blockType**.
+     Fixed: `elemGetOp` (storage heuristic — no view name exists on the shared
+     vec type) + widened blockType + `f64.convert_i32_s` lift before the
+     f64/externref coercion arms.
+     Helpers `unpackedElemType`/`elemGetOp` are now canonical in `shared.ts` (the
+     acyclic sink — type-coercion.ts can't import array-methods.ts). Flips
+     `language/statements/for-of/{u,}int{8,16}array{,-mutate}.js` +
+     `uint8clampedarray{,-mutate}.js` (10 files) standalone CE → **pass**;
+     byte-identical on host mode and standalone non-packed paths (verified by
+     SHA over plain-array/string/entries for-of). Tests:
+     `tests/issue-2934-packed-forof-valtype.test.ts` (12 cases incl. signedness
+     semantics: Int8 −56, Uint8 200, Uint16 40000, Int16 −30000).
 - [ ] **(1c) `TypedArray.prototype.set` / `Uint8Array.toBase64`** — the
       `array.set[2] expected i32, found array.get of externref` / packed-`array.get`
       errors here are a DISTINCT **DCE type-index remap** (`project_type_index_shift_
@@ -62,7 +92,10 @@ and_deadelim`): the pre-encode module has NO packed plain-`array.get`, so a
       typeIdx onto a packed array. Needs a `dead-elimination.ts` audit — harder,
       likely warrants an architect spec.
 - [ ] **(1d) simple `for (const v of u.values())`** — demotes to the IR path
-      (`ir/from-ast: unknown class`), a separate IR-adoption gap.
+      (`ir/from-ast: unknown class`), a separate IR-adoption gap. NOTE: after (1b)
+      the legacy-path fallback now compiles these shapes correctly (valid Wasm,
+      right semantics), so this is a pure IR-adoption item, no longer an
+      invalid-Wasm producer.
 - [x] **(2a) `RegExp/test` receiver → `hasOwnProperty`/`propertyIsEnumerable`
       missing `extern.convert_any`** — DONE (dev-2934b, slice 2). `RegExp.prototype.
 test.hasOwnProperty('length')` — the receiver `RegExp.prototype.test` is a
