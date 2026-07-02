@@ -2852,7 +2852,8 @@ export async function handleNegativeTest(
  * We try to extract the quoted function name from the stack trace.
  */
 export function extractWasmFuncName(err: any): string | undefined {
-  const stack = err?.stack ?? String(err);
+  // (#2962) guarded stringify — see extractWasmCallStack.
+  const stack = err?.stack ?? safeStringifyThrown(err);
   // V8 format: at funcName (wasm://...)
   const atMatch = stack.match(/at\s+(\w[\w$]*)\s+\(wasm:\/\//);
   if (atMatch) return atMatch[1];
@@ -2982,6 +2983,33 @@ function safeStringifyThrown(v: any): string {
   }
 }
 
+/**
+ * (#2962) Render a natively-thrown Wasm-GC payload through the module's own
+ * `__exn_render_prepare` / `__exn_render_char` exports (standalone/wasi
+ * binaries emit them at finalize). The module runs the payload through the
+ * same `__any_to_string` chain its in-module `String(x)` uses — so an
+ * `$Error_struct` renders "TypeError: boom" per §20.5.3.4 and a Test262Error
+ * yields its real assertion message — then exposes the flat string one code
+ * unit at a time (WasmGC arrays are not host-indexable). Returns `null`
+ * when the exports are absent (JS-host binaries), the payload renders empty,
+ * or anything throws — the caller then falls back to the #2870 opaque label.
+ * The 64k cap is defensive (a corrupt length must not build a giant string).
+ */
+function tryNativeExnRender(instance: any, payload: any): string | null {
+  try {
+    const prep = instance?.exports?.__exn_render_prepare;
+    const chr = instance?.exports?.__exn_render_char;
+    if (typeof prep !== "function" || typeof chr !== "function") return null;
+    const len = prep(payload);
+    if (typeof len !== "number" || len <= 0 || len > 65536) return null;
+    let out = "";
+    for (let i = 0; i < len; i++) out += String.fromCharCode(chr(i));
+    return out;
+  } catch {
+    return null;
+  }
+}
+
 export function extractWasmExceptionMessage(err: any, instance: any): string {
   if (typeof WebAssembly !== "undefined" && err instanceof (WebAssembly as any).Exception) {
     let payload: any = null;
@@ -2996,7 +3024,17 @@ export function extractWasmExceptionMessage(err: any, instance: any): string {
     if (payload instanceof Error) {
       return payload.message ?? safeStringifyThrown(payload);
     }
-    if (payload != null) return safeStringifyThrown(payload);
+    if (payload != null) {
+      // (#2962) A host-opaque GC payload (typeof "object"/"function") renders
+      // through the module's own exports before falling back to the #2870
+      // label. Host-readable primitives keep the direct String() path.
+      const t = typeof payload;
+      if (t === "object" || t === "function") {
+        const native = tryNativeExnRender(instance, payload);
+        if (native != null) return native;
+      }
+      return safeStringifyThrown(payload);
+    }
     return instance ? "TypeError (null/undefined access)" : "wasm exception during module init";
   }
   if (err instanceof Error) {
@@ -3019,7 +3057,11 @@ export function extractWasmExceptionMessage(err: any, instance: any): string {
  *    { name: "test",  offset: 0x1e7 }]
  */
 export function extractWasmCallStack(err: any): Array<{ name: string; offset: number }> {
-  const stack: string = err?.stack ?? String(err);
+  // (#2962) Same #2870 hazard one level up: `String(err)` on an exotic thrown
+  // value (poisoned/prototype-less object) throws a host TypeError that would
+  // crash the runner mid-test instead of recording the failure. Route through
+  // the guarded stringifier.
+  const stack: string = err?.stack ?? safeStringifyThrown(err);
   const frames: Array<{ name: string; offset: number }> = [];
   // V8 format: `at <name> (wasm://wasm/<hash>:wasm-function[N]:0xOFFSET)`
   const re = /at\s+(\S+)\s+\(wasm:\/\/[^:]*:wasm-function\[\d+\]:0x([0-9a-fA-F]+)\)/g;

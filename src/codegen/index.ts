@@ -142,6 +142,7 @@ import {
   destructureParamObjectExternref,
 } from "./destructuring-params.js";
 import {
+  emitExceptionRenderExports,
   emitTestRuntimeStringHelpers,
   ensureNativeStringExternBridge,
   ensureNativeStringHelpers,
@@ -1941,6 +1942,13 @@ export function generateModule(
     // (#1716) Emit __call_@@toPrimitive(self, hint) for runtime ToPrimitive
     // dispatch of a class's [Symbol.toPrimitive] *method* on opaque structs.
     emitToPrimitiveMethodExport(ctx);
+
+    // (#2962) Emit __exn_render_prepare / __exn_render_char so the test262
+    // harness can render a natively-thrown GC payload ("TypeError: boom")
+    // with zero host imports. No-op unless (standalone || wasi) &&
+    // nativeStrings && the `$exc` tag was registered (i.e. the module can
+    // actually throw).
+    emitExceptionRenderExports(ctx);
 
     // Emit __call_fn_0 export for calling zero-arg closures from JS (#851)
     emitClosureCallExport(ctx);
@@ -6611,6 +6619,13 @@ export function generateMultiModule(
     // (#1716) Emit __call_@@toPrimitive(self, hint) for runtime ToPrimitive
     // dispatch of a class's [Symbol.toPrimitive] *method* on opaque structs.
     emitToPrimitiveMethodExport(ctx);
+
+    // (#2962) Emit __exn_render_prepare / __exn_render_char so the test262
+    // harness can render a natively-thrown GC payload ("TypeError: boom")
+    // with zero host imports. No-op unless (standalone || wasi) &&
+    // nativeStrings && the `$exc` tag was registered (i.e. the module can
+    // actually throw).
+    emitExceptionRenderExports(ctx);
 
     // #1326c Phase 1C-A — export __drain_microtasks BEFORE WASI _start so the
     // _start wrapper (which appends a drain call) can find its funcIdx.
