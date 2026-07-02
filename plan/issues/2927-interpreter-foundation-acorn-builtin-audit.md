@@ -1,7 +1,8 @@
 ---
 id: 2927
 title: "Interpreter foundation: Acorn-via-js2wasm runtime parser + generic-built-in audit"
-status: backlog
+status: in-progress
+assignee: ttraenkler/dev-2927
 created: 2026-07-02
 updated: 2026-07-02
 priority: medium
@@ -12,7 +13,7 @@ task_type: feature
 area: runtime
 language_feature: eval
 goal: runtime-eval
-sprint: Backlog
+sprint: current
 parent: 1584
 depends_on: [1058, 1710, 2527]
 related: [1584, 1715, 1066]
