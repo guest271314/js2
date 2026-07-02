@@ -1779,9 +1779,27 @@ function compileState(
 }
 
 export function ensureNativeGeneratorResumeFunction(ctx: CodegenContext, info: NativeGeneratorInfo): number {
-  if (info.resumeFuncIdx !== undefined) return info.resumeFuncIdx;
-
   const fnName = `__gen_resume_${sanitizeTypeName(info.functionName)}`;
+  // (#2941) SINGLE SOURCE OF TRUTH = `ctx.funcMap`, which every late-import
+  // shifter (`shiftLateImportIndices` / `addStringImports` / `addUnionImports`)
+  // keeps current. `info.resumeFuncIdx` is a plain cached number that NO shift
+  // pass walked (unlike `nativeStrHelpers` / `mapHelpers` / the async-scheduler
+  // side-channels), so once the resume function is emitted, a late import that
+  // lands afterwards bumps the funcMap entry but leaves the cache stale-low.
+  // Already-baked `call` instrs are repaired by the shifter's body walk, but a
+  // NEW bake after the shift that reads the stale cache targets one function too
+  // early — the class-static generator `call[…] need N got 1` invalid-module
+  // desync (#2938 merge_group). Re-reading funcMap on every cached hit makes the
+  // returned idx always current (reference_2193 lineage: read the shift-maintained
+  // map, never a cached number). We also refresh the cache so a direct reader of
+  // `info.resumeFuncIdx` sees the current value; `shiftLateImportIndices` now
+  // walks `ctx.nativeGenerators` too (belt-and-suspenders lockstep, #2941).
+  if (info.resumeFuncIdx !== undefined) {
+    const current = ctx.funcMap.get(fnName);
+    if (current !== undefined && current !== info.resumeFuncIdx) info.resumeFuncIdx = current;
+    return info.resumeFuncIdx;
+  }
+
   const existing = ctx.funcMap.get(fnName);
   if (existing !== undefined) {
     info.resumeFuncIdx = existing;
