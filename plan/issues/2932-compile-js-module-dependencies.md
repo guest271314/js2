@@ -11,7 +11,7 @@ area: codegen
 goal: spec-completeness
 related: [2900, 2930, 2931]
 parent: 2900
-blocked_reason: "Broad-impact (~172 _FIXTURE.js test262 tests + any .js multi-compile). Must be validated by a full test262 diff / merge_group, never a scoped sweep. Coordinate a dedicated run slot with the tech lead (see #2900 plan). Do NOT start without lead sign-off."
+blocked_reason: "DECIDED (lead, 2026-07-02): harness-scoped (option b) — wrapTest hoists module-goal imports to top level + passes allowJs:true (or .ts-key equiv) for fixture deps, scoped to the test262 runner; NOT compiler auto-allowJs (that is a separate product decision affecting every consumer). SEQUENCING: open the PR only AFTER (1) #2930+#2931 merged AND (2) the -439 re-baseline chain (#2424 + revert) has settled with the guard back at 200 — no two large baseline deltas overlapping. Its sharded CI run IS the dedicated full-test262 validation; read the regression report BOTH directions (~172 fixture tests change; expect net-positive), bucket any pass->fail flips before merging, and message the lead with the delta once CI reports."
 ---
 
 # #2932 — compile `.js` module dependencies in multi-file mode
@@ -36,15 +36,30 @@ exactly this (`expected 2 to be 1`). The test262 runner's `_FIXTURE.js` path
 (`tests/test262-shared.ts` + the sharded fork worker) calls `compileMulti` with no
 `allowJs`, so **every** fixture-based module test compiles the fixture to nothing.
 
-## Fix options (BROAD — pick with architect/lead; validate on full test262)
+## Fix — DECIDED: harness-scoped (option b) (lead, 2026-07-02)
 
-- **(a) Compiler**: in `analyzeMultiSource` (`src/checker/index.ts`), auto-set
-  `allowJs: true` (keep `checkJs` off) when any root file has a
-  `.js`/`.jsx`/`.cjs`/`.mjs` extension. Correct for real bundler use; changes every
-  multi-file `.js` compile.
-- **(b) Harness-scoped**: pass `allowJs: true` only in the FIXTURE branch of
-  `tests/test262-shared.ts` (+ the sharded fork worker). Blast radius bounded to
-  ~172 `_FIXTURE.js` tests, but still a conformance shift for that bucket.
+The lead chose **(b) harness-scoped**, NOT compiler auto-allowJs, because both
+runner-side gaps live in the runner anyway (the import-hoisting one can ONLY be
+fixed in `wrapTest`), the runner already special-cases `.js` entry handling, and
+changing the compiler API's default compilation set is a **product decision
+affecting every consumer** that deserves its own issue + validation, not a rider
+on a conformance fix.
+
+So #2932 is two runner-scoped changes:
+
+1. **`wrapTest` hoists module-goal imports to top level** — for `flags: [module]`
+   tests, emit the source's top-level `import`/`export … from` statements at module
+   top level (outside the synthetic `export function test()`), so the checker
+   resolves the bindings and #2930's top-level-scan alias pass sees them.
+2. **Pass `allowJs: true` for fixture deps** in the FIXTURE branch of
+   `tests/test262-shared.ts` (+ the sharded fork worker), or the equivalent
+   `.ts`-key mapping, so `.js` fixture modules compile.
+
+Rejected — **(a) compiler auto-allowJs** in `analyzeMultiSource`: correct for real
+bundler use but a broad API-default change; split to its own issue if ever wanted.
+
+Blast radius: ~172 `_FIXTURE.js` tests. Its sharded CI run is the dedicated
+full-test262 validation.
 
 ## Why blocked
 
