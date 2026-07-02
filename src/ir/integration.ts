@@ -738,7 +738,16 @@ export function compileIrPathFunctions(
       errors.push({
         func: name,
         message: e instanceof Error ? e.message : String(e),
-        kind: e instanceof Error && e.message.includes("backend legality failed") ? "backend-legality" : "lower",
+        // (#2134) "emission-schedule verify" marks a failure of the
+        // independent schedule checker in lower.ts — classify it "verify" so
+        // it is a HARD failure under CI/test (`irVerifierHardFailureEnabled`)
+        // while remaining a demote-to-legacy warning in production.
+        kind:
+          e instanceof Error && e.message.includes("backend legality failed")
+            ? "backend-legality"
+            : e instanceof Error && e.message.includes("emission-schedule verify")
+              ? "verify"
+              : "lower",
       });
     }
   }
