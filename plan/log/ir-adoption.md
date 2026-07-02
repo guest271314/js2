@@ -5,6 +5,15 @@ Source of truth for which AST node kinds are owned by the typed IR
 codegen (`src/codegen/`). Companion document to
 [`docs/architecture/codegen-axes.md`](../../docs/architecture/codegen-axes.md).
 
+**North star (goal `ir-full-coverage`, elevated 2026-07-02):** ALL AST node
+kinds route through the IR front-end; WasmGC vs linear is purely a backend
+fork below the IR (`BackendEmitter`); the direct AST→Wasm path is
+**deprecation-tracked by this file**, not a peer front-end. Every
+`direct-only` / `mixed` row here is a migration TODO (except `deferred`
+rows, which die with the direct path). See the "North star" section of the
+codegen-axes doc and `plan/goals/ir-full-coverage.md`; ratchet #2855,
+bucket work #2856–#2859.
+
 > **Generated file — do not edit by hand.** Regenerate with
 > `pnpm run gen:ir-adoption` after editing the curated data in
 > `scripts/gen-ir-adoption.mjs`. The quality CI job runs `--check` and fails
@@ -140,5 +149,5 @@ This file is generated. To move a row:
    union in `src/ir/select.ts` **and** to `BUCKETS` here — the generator
    cross-checks the two and fails otherwise.
 
-The aim of #1530 is that every "unintended" bucket reaches zero. The
+The aim of #2855 is that every "unintended" bucket reaches zero. The
 "deferred" buckets are stable — they're a documented decision, not a TODO.

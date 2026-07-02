@@ -16,7 +16,17 @@ sprint: 63
 related: [1042, 1326, 1373, 1373b]
 note: "2026-06-15: elevated to TOP priority by stakeholder (Proxy/Promise/async-to-100% epic). Host-mode Promise/async completion linchpin. Needs architect spec + senior-dev; sequenced after #1936 census, gated on #1373b CPS lowering."
 ---
+
 # #1796 — Migrate the synchronous-async contract to the CPS Promise model
+
+> **Scope clarification (2026-07-02, July Fable audit):** what shipped is a
+> _predicate-scoped_ flip — `ASYNC_CPS_ENABLED=true` routes through
+> `asyncFnNeedsCps` (async-cps.ts:292), so only genuinely-suspending,
+> single-tail-await function DECLARATIONS get the CPS Promise model in host
+> mode; await-elidable and non-canonical bodies remain on the legacy
+> synchronous contract. The GLOBAL model migration this title implies did
+> NOT ship and is owned by the #1042 re-scope (host lane onto the #2906
+> N-state machine) + #1373b (IR). Future reconciles: do not re-litigate.
 
 ## Context
 
@@ -30,7 +40,7 @@ byte-identical to before; existing async tests pass unchanged.
 ## The design wall (why this is its own issue)
 
 The existing compiler lowers `async function` **synchronously**: a caller does
-`f() as any as number` and gets the *unwrapped value* directly (await is an
+`f() as any as number` and gets the _unwrapped value_ directly (await is an
 identity pass-through). See `tests/equivalence/async-function.test.ts` — the
 "await expression is identity (pass-through)" test asserts
 `test() as any as number === 100` for `const v = await getValue(); return v`.
@@ -93,6 +103,7 @@ as one coordinated change with the test corpus.
 ## Implementation Plan (refreshed 2026-06-16, arch1 — against upstream/main 319d43460)
 
 ### What landed since the prior spec (verified on current main)
+
 - **#1936 DONE** (se1, completed 2026-06-16). `analyzeAsyncBody`,
   `awaitIsStaticallyResolved`, `asyncFnNeedsCps(fn, plan)`, `AsyncConsumerKind`,
   and `classifyAsyncConsumer(checker, expr)` all exist in
@@ -105,14 +116,15 @@ as one coordinated change with the test corpus.
   happened.
 - **The activation gates have NOT yet been migrated to `asyncFnNeedsCps`.**
   Both `function-body.ts:1117-1132` and the `collectAsyncCpsImports` prepass at
-  `declarations.ts:652-665` still use the *inline* duplicated shape check
+  `declarations.ts:652-665` still use the _inline_ duplicated shape check
   (`ASYNC_CPS_ENABLED && … && plan.awaitPoints.length === 1 &&
-  !plan.hasTryAcrossAwait && splitBodyAtAwait(...) !== null`). This issue is
+!plan.hasTryAcrossAwait && splitBodyAtAwait(...) !== null`). This issue is
   what migrates them onto the single predicate.
 - **#1326c DONE** — standalone microtask queue + chained `.then` landed; the
   standalone Promise substrate referenced below is live.
 
 ### Root cause
+
 Execution of the #1936 census: flip `ASYNC_CPS_ENABLED` (`async-cps.ts:60`) on,
 route both activation gates through the now-existing `asyncFnNeedsCps` predicate
 (replacing the two inline duplicated shape checks), and migrate the test corpus +
@@ -122,20 +134,23 @@ contract onto the real-Promise contract. Machinery is present and verified-when-
 lowering.
 
 ### Sequencing dependency note (read before flipping)
+
 The interaction with **#2028** (Promise executor body never dispatches) and the
 **#1042 staleness note** (`await Promise.resolve(41)` yields NaN today — issue
-file lines 63-68) means the *host-mode Promise substrate itself is partially
-broken right now*. Confirm #2028's `__make_callback`/`Promise_new` dispatch fix
+file lines 63-68) means the _host-mode Promise substrate itself is partially
+broken right now_. Confirm #2028's `__make_callback`/`Promise_new` dispatch fix
 has landed (or that the executor path is not on the critical path for the 5
 canonical #1042 cases) BEFORE flipping — otherwise the migrated equivalence
 tests will fail on a substrate bug, not a migration bug, and the net-delta
 signal is unreadable. Recommend: land #2028 first, then this flip.
 
 ### Sequencing
+
 Gated on #1936 (census + `asyncFnNeedsCps` + elision) and #1373b (CPS/IR
 adoption). Do NOT flip before #1936's census report exists.
 
 ### Changes (file:line verified on upstream/main 319d43460)
+
 - **`async-cps.ts:60`**: `ASYNC_CPS_ENABLED` → `true`. Step 2 (after green):
   REMOVE the constant and the `if (!ASYNC_CPS_ENABLED) return false;` line at
   `async-cps.ts:257` (removal is acceptance criterion 3).
@@ -161,7 +176,7 @@ adoption). Do NOT flip before #1936's census report exists.
   drop it in a follow-up.
 - **`declarations.ts:652-665`** (`collectAsyncCpsImports` prepass): mirror the
   exact same migration — replace the inline `plan.awaitPoints.length === 1 &&
-  !plan.hasTryAcrossAwait && splitBodyAtAwait(...) !== null` with
+!plan.hasTryAcrossAwait && splitBodyAtAwait(...) !== null` with
   `asyncFnNeedsCps(node, plan)`. The two gates MUST stay byte-identical in their
   decision or the prepass under/over-registers `Promise_resolve` /
   `__make_callback` / `Promise_then2` imports → the #1384 late-import-shift
@@ -178,6 +193,7 @@ adoption). Do NOT flip before #1936's census report exists.
   per scope step 6 or keep erroring; **never silently mis-lower**.
 
 ### Migration surface (from #1936 census)
+
 1. `value`-bucket sites (`f() as any as number`): rewrite to `await f()` /
    unwrap Promise; inventory via grep `as any as`/`as unknown as` on async results.
 2. Test corpus → Promise model: `tests/equivalence/async-function.test.ts`,
@@ -189,14 +205,16 @@ adoption). Do NOT flip before #1936's census report exists.
    Promise.all interleave; return-await collapse).
 
 ### Standalone vs JS-host
-host: Promise_resolve/__make_callback/Promise_then2 imports (runtime.ts:9494,9525).
+
+host: Promise_resolve/**make_callback/Promise_then2 imports (runtime.ts:9494,9525).
 standalone: native `$Promise` + microtask queue —
 `emitStandalonePromiseResolve` (async-scheduler.ts:1089) for Promise_resolve,
-`emitStandalonePromiseThen` (1132) for Promise_then2, synthesized `$__mt_func_type`
-`ref.func` for __make_callback; continuations are `__microtask_enqueue` tasks,
-FIFO drained after `_start` (line 1066). The #1326 engine — do not re-spec.
+`emitStandalonePromiseThen` (1132) for Promise_then2, synthesized `$**mt_func_type`
+`ref.func`for __make_callback; continuations are`\_\_microtask_enqueue`tasks,
+FIFO drained after`\_start` (line 1066). The #1326 engine — do not re-spec.
 
 ### Edge cases (acceptance: spec-correct ordering)
+
 sequential side effects `a();await x;b()` → "132" not "123"; try/catch reject →
 `hasTryAcrossAwait` PR1-unsupported, keep legacy + follow-up #1373c; Promise.all
 interleave → standalone combinator on native queue (#1326 follow-up); return-await
@@ -206,6 +224,7 @@ fallback unless `asyncFnNeedsCps` + widened `splitBodyAtAwait` accept; no silent
 mis-lowering (expressions.ts:1216 keeps erroring under an active machine).
 
 ### Test-gate plan
+
 `tests/issue-1042.test.ts` ASYNC_CPS_ENABLED assertion (25) flips to the predicate;
 5 canonical cases green; full `tests/equivalence/async-*.test.ts` migrated green;
 test262 `built-ins/Promise/**`, `language/expressions/await/**`,
@@ -213,6 +232,7 @@ test262 `built-ins/Promise/**`, `language/expressions/await/**`,
 net delta ≥ 0 (criterion 3). Run `/analyze-regression` on async buckets.
 
 ### Spec citations
+
 Await §27.7.5.3/§27.7.5.1; AsyncFunctionStart/rejection §27.7.5.2/§27.7.5.4;
 microtask FIFO PerformPromiseThen §27.2.5.4.1, Jobs §9.5.
 
@@ -224,10 +244,11 @@ Branch `issue-1796-async-cps-flip` off upstream/main `319d43460`. PR routes the
 flip through the #1936 census predicate exactly as the plan above specified.
 
 ### What landed
+
 1. **`ASYNC_CPS_ENABLED = true`** (`src/codegen/async-cps.ts`). The
    synchronous-consumption regression that kept it off is resolved structurally
    by **`asyncFnNeedsCps`**: an async fn is CPS-lowered (returns a real Promise)
-   ONLY when it *genuinely suspends* — at least one await operand is not
+   ONLY when it _genuinely suspends_ — at least one await operand is not
    statically resolved. Fully await-elidable bodies
    (`return await Promise.resolve(42)`) stay on the legacy synchronous path and
    keep returning the unwrapped value, so the `asyncFn() as any as number`
@@ -244,20 +265,23 @@ flip through the #1936 census predicate exactly as the plan above specified.
    (`Promise.all(src.getPromises())`). This keeps those on the legacy path.
 
 ### Root-cause finding — the "design wall" was the per-call-site contract
+
 The blocker recorded across #1042's notes was: the gate is per-definition but
 the consumption contract is per-call-site, so a global flip cannot serve both a
 `value` consumer (wants unwrapped T) and a `thenable` consumer (wants a Promise)
-of the same fn. The resolution is that `asyncFnNeedsCps` makes the *flip itself*
+of the same fn. The resolution is that `asyncFnNeedsCps` makes the _flip itself_
 per-function and conditioned on genuine suspension: a fn that truly suspends
-*cannot* synchronously produce its value, so a `value`-consumer of it was already
+_cannot_ synchronously produce its value, so a `value`-consumer of it was already
 semantically broken under the legacy fakery (the cast yielded a value only
 because the runtime had nothing to suspend on). Those few tests are migrated to
 the Promise model (`await exports.main()`); everything that stays synchronous
 (await-elidable) is untouched.
 
 ### Test migration (corpus → Promise model, plan criterion 2)
+
 Migrated the cases that consumed a genuinely-suspending async fn as a raw value
 to `await … resolves`:
+
 - `tests/equivalence/async-function.test.ts` — "await … identity (pass-through)"
 - `tests/equivalence/promise-chains.test.ts` — "await … passes through value",
   "nested async calls"
@@ -267,6 +291,7 @@ to `await … resolves`:
   resolved-value cases (previously `skipIf` skipped) now run and pass.
 
 ### Regression posture (verified locally)
+
 - Full async suite green except for failures that **pre-exist on upstream/main**
   (verified by running the same files on the `/workspace` main checkout):
   `tests/promise-combinators.test.ts` ×2 (host `declare`-class method marshaling,
@@ -279,6 +304,7 @@ to `await … resolves`:
 - Net new regressions from this PR: **0**.
 
 ### Deferred / follow-up
+
 - Multi-await sequencing, awaits in branches/loops, try-across-await (#1373c),
   async arrows/methods, standalone/WASI CPS — all remain on the legacy path via
   `splitBodyAtAwait → null` (plan step 6). They are not regressed; they are
