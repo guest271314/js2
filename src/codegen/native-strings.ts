@@ -7751,6 +7751,19 @@ export function emitExceptionRenderExports(ctx: CodegenContext): void {
   if (ctx.exnTagIdx < 0) return;
   if (ctx.funcMap.has("__exn_render_prepare")) return;
 
+  // (#2969) Force `number_toString` before `__any_to_string` bakes so its number
+  // arm renders a raw thrown number ("42") instead of degrading to
+  // "[object Object]" — a throwing module that never itself stringifies a number
+  // otherwise leaves the arm unresolved. `emitExceptionRenderExports` is the
+  // first (and here, only) consumer of `__any_to_string` for such a module, so
+  // ensuring the format helper ahead of the `ensureAnyToStringHelper` call below
+  // makes the number arm real. Size cost falls only on throwing standalone/WASI
+  // modules. Must precede the ensure call (which snapshots the number_toString
+  // funcIdx into the baked arm).
+  if (ctx.funcMap.get("number_toString") === undefined) {
+    emitNativeNumberFormat(ctx, new Set(["number_toString"]));
+  }
+
   const anyToStrIdx = ensureAnyToStringHelper(ctx);
   const flattenIdx = ctx.funcMap.get("__str_flatten") ?? ctx.nativeStrHelpers.get("__str_flatten");
   const flatTypeIdx = ctx.nativeStrTypeIdx;

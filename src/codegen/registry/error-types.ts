@@ -47,7 +47,8 @@ import type { Instr, ValType } from "../../ir/types.js";
 import { BUILTIN_TYPE_TAGS } from "../builtin-tags.js";
 import { addFuncType, getOrRegisterErrorStructType } from "./types.js";
 import { addStringConstantGlobal } from "./imports.js";
-import { stringConstantExternrefInstrs } from "../native-strings.js";
+import { stringConstantExternrefInstrs, ensureAnyToStringHelper } from "../native-strings.js";
+import { emitNativeNumberFormat } from "../number-format-native.js";
 
 // (#2962) `getOrRegisterErrorStructType` moved to registry/types.ts so
 // native-strings.ts can import it without an import cycle (this module imports
@@ -150,6 +151,55 @@ function emitErrorStructConstructor(
   addStringConstantGlobal(ctx, displayName);
   const nameInstrs = stringConstantExternrefInstrs(ctx, displayName);
 
+  // (#2969) §20.5.1.1 step 3 — when a `message` argument is supplied and is not
+  // undefined, the spec sets `msg = ToString(message)` at CONSTRUCTION time and
+  // stores that string. Previously the raw first argument was stored verbatim,
+  // so `new Error(42).message` was the number `42` (spec: `"42"`) and
+  // `String(new Error(42))` degraded to `"Error"` (the §20.5.3.4 renderer treats
+  // a non-string message as absent). Route the argument through the standalone
+  // `__any_to_string` chain (the in-module `String(x)` implementation, which
+  // performs ToPrimitive/toString for objects and decimal formatting for
+  // numbers) before `struct.new`, guarding the undefined/null-arg case so
+  // argument-less / `new Error(undefined)` errors still render the name alone.
+  //
+  // Emission-order discipline (#329/#1448): `emitNativeNumberFormat` and
+  // `ensureAnyToStringHelper` append functions (and may drive an
+  // `addUnionImports` funcIdx shift), so they MUST run BEFORE this ctor reserves
+  // its own `funcIdx` below — otherwise the reserved index goes stale. Forcing
+  // `number_toString` first keeps `__any_to_string`'s number arm real (else a
+  // module that only constructs an error never pulls it in and the arm degrades
+  // to "[object Object]"). Gated on standalone/native-strings; host mode uses
+  // real JS Error objects (no struct ctor) and stays byte-identical.
+  let messageFieldInstrs: Instr[];
+  if (argCount > 0 && (ctx.standalone || ctx.nativeStrings)) {
+    if (ctx.funcMap.get("number_toString") === undefined) {
+      emitNativeNumberFormat(ctx, new Set(["number_toString"]));
+    }
+    const anyToStrIdx = ensureAnyToStringHelper(ctx);
+    messageFieldInstrs = [
+      { op: "local.get", index: 0 },
+      { op: "ref.is_null" },
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "externref" } },
+        // undefined / null argument → no message property (renders name alone).
+        then: [{ op: "ref.null.extern" }],
+        // ToString(message): externref → anyref → `__any_to_string` (ref
+        // $AnyString) → externref for the $message field.
+        else: [
+          { op: "local.get", index: 0 },
+          { op: "any.convert_extern" } as Instr,
+          { op: "call", funcIdx: anyToStrIdx },
+          { op: "extern.convert_any" } as Instr,
+        ],
+      } as Instr,
+    ];
+  } else if (argCount > 0) {
+    messageFieldInstrs = [{ op: "local.get", index: 0 }];
+  } else {
+    messageFieldInstrs = [{ op: "ref.null.extern" }];
+  }
+
   const params: ValType[] = Array.from({ length: argCount }, () => ({ kind: "externref" }) as ValType);
   const typeIdx = addFuncType(ctx, params, [{ kind: "externref" }], `${importName}_type`);
   const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
@@ -160,8 +210,9 @@ function emitErrorStructConstructor(
   // the externref ABI shape that the `__new_<Name>` callers expect.
   const body: Instr[] = [
     { op: "i32.const", value: tagValue },
-    // $message — first arg if present, else null
-    argCount > 0 ? { op: "local.get", index: 0 } : { op: "ref.null.extern" },
+    // $message — (#2969) ToString(arg0) at construction (§20.5.1.1), or null
+    // when the ctor takes no argument / the argument is undefined.
+    ...messageFieldInstrs,
     // $name — #1536 Phase 2: materialized class-name string ("TypeError" …)
     // as externref, replacing the Phase-1 `ref.null.extern` placeholder.
     ...nameInstrs,
