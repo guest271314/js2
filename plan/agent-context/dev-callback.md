@@ -8,10 +8,12 @@ Successor: pick up from here. This dev ran a long session across the standalone
 **Docs-only PR #2429** on loopdive/js2 — the make-callback sole-leak analysis +
 the spun-out dispatch fix.
 
-- **Make-callback analysis file re-id: 2921 → 2931 → 2937** (collided twice on
-  main: 2921=drain-microtasks PR #2425, 2931=live-binding-reassigned-function-decl).
-  Current file: `plan/issues/2937-standalone-make-callback-harness-wrapper-vacuous.md`
-  (frontmatter `id: 2937`, provenance note in place). This re-id is COMMITTED on
+- **Make-callback analysis file re-id: 2921 → 2931 → 2937 → 2940** (collided
+  three times on main: 2921=drain-microtasks PR #2425,
+  2931=live-binding-reassigned-function-decl, 2937=acorn-hash-poison — the
+  last re-id done by successor dev-f2 on 2026-07-02).
+  Current file: `plan/issues/2940-standalone-make-callback-harness-wrapper-vacuous.md`
+  (frontmatter `id: 2940`, provenance note in place). This re-id is COMMITTED on
   the branch (commit `8beb4c2cb`), and `origin/main` was merged in (commit
   `7b231e37b`).
 - **NOT PUSHED at suspend** — branch is ~56 commits ahead of
@@ -26,12 +28,12 @@ the spun-out dispatch fix.
     **Escalated to tech-lead, awaiting decision** (per the standing "escalate before
     re-idding 2923" rule — the coherence tension: merged PR #2441 references
     #2923 = dispatch-arity = MINE, but main's 2923 file is now eval). Options I laid
-    out: (a) re-id my 2923-dispatch to a fresh `--allocate` id + update the #2937
+    out: (a) re-id my 2923-dispatch to a fresh `--allocate` id + update the #2940
     cross-refs; (b) make eval yield on main (needs a main-side change). **I did NOT
     re-id 2923** (respected the explicit instruction). Successor: get the tech-lead
     call, then execute. If (a): `claim-issue.mjs --allocate`, rename
     `2923-any-closure-*` → `<newid>-*`, update id + the `#2923` refs in that file
-    AND in `2937-*.md`, and repoint PR #2429's body.
+    AND in `2940-*.md`, and repoint PR #2429's body.
 - `hold` label status on #2429: it CARRIED a `hold` label earlier (shepherd was
   diagnosing) — do NOT touch it; the shepherd owns it.
 - **#2923 dispatch issue is the real lever** for the BigInt shim work: dynamic
@@ -40,7 +42,7 @@ the spun-out dispatch fix.
   (`src/codegen/expressions/calls-closures.ts` L688 exact-arity `continue` +
   L693-698 kind check). Must honor JS arity (undefined-fill/drop) + coerce kinds.
 
-## KEY FINDING — #2937 (was #2921): vacuous-pass / inject-throw discipline
+## KEY FINDING — #2940 (was #2921): vacuous-pass / inject-throw discipline
 
 The standalone `env::__make_callback` sole-leak (1,364 passes) is NOT flippable
 by TypedArray HOF native bodies (sub-front 4 of #2903 yields **0**). All 601
@@ -53,7 +55,7 @@ vacuous → **dishonest host-free vacuous passes**. **Durable rule (now project
 policy): a leak-elim change must PROVE bodies execute (inject-throw / sentinel),
 not merely that the import disappears.** The genuine fix is #2923 (dispatch
 arity/kind), then BigInt TypedArray semantics — measurement gated. See
-`plan/issues/2937-standalone-make-callback-harness-wrapper-vacuous.md`.
+`plan/issues/2940-standalone-make-callback-harness-wrapper-vacuous.md`.
 
 ## DONE THIS SESSION (merged / handed off)
 
@@ -89,7 +91,7 @@ arity/kind), then BigInt TypedArray semantics — measurement gated. See
 - `#2878` — was mine; merged (Class A). Claim may still be held under
   dev-callback; safe to release.
 - `#2921` — released earlier in session.
-- `#2937`/`#2935`/`#2923` — reserved via `--allocate`; not separately claim-locked.
+- `#2940`/`#2935`/`#2923` — reserved via `--allocate`; not separately claim-locked.
 
 ## RESOLVED (successor dev-f2, 2026-07-02)
 
@@ -97,5 +99,5 @@ The 2923 dup-id blocker above is resolved per tech-lead decision: the
 dispatch-arity issue was re-id'd **2923 → #2939** (fresh `--allocate`),
 file now `plan/issues/2939-any-closure-param-dispatch-arity-coercion.md`
 with a provenance note (merged PR #2441 cites #2923 = this issue at its
-merge time; main's 2923 is now the eval compile-away issue). #2937's
+merge time; main's 2923 is now the eval compile-away issue). #2940's
 `blocked_on`/`related` updated to #2939.

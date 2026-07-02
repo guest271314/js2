@@ -1,6 +1,6 @@
 ---
 id: 2939
-title: "codegen: dynamic dispatch of an any-typed closure param (fn(...)) must honor JS arity semantics + coerce arg kinds (blocks #2937, unblocks 468+ BigInt tests)"
+title: "codegen: dynamic dispatch of an any-typed closure param (fn(...)) must honor JS arity semantics + coerce arg kinds (blocks #2940, unblocks 468+ BigInt tests)"
 status: ready
 sprint: current
 priority: high
@@ -11,10 +11,10 @@ task_type: bugfix
 area: codegen
 language_feature: closures, dynamic-dispatch
 goal: host-independence
-related: [2937, 2903]
+related: [2940, 2903]
 created: 2026-07-02
 updated: 2026-07-02
-origin: "2026-07-02 spun out of #2937 yield-gate analysis (dev-callback). origin/main @ 4d5287afc."
+origin: "2026-07-02 spun out of #2940 yield-gate analysis (dev-callback). origin/main @ 4d5287afc."
 ---
 
 # #2939 — dynamic `fn(...)` on an any-typed closure param: arity + kind tolerance
@@ -38,7 +38,7 @@ dropped** (graceful fallback compiles the args for side-effect and returns
 semantics (extra args ignored, missing args `undefined`) and silently
 no-ops a large class of higher-order code.
 
-This is the blocker under #2937: the test262 `testWith*TypedArrayConstructors`
+This is the blocker under #2940: the test262 `testWith*TypedArrayConstructors`
 harness wrapper calls `fn(ctor, makeCtorArg)`, but the callback declares
 `function(TA)` (1 param) or its params are `any`/externref while the shim
 passes a constructor value + a funcref — either way the kinds/arity don't match
@@ -104,7 +104,7 @@ Truth table (call → callback params → invoked?):
 3. Preserve existing exact-match fast paths for byte-inertness on the js-host/gc
    lanes.
 
-## Part-1 prototype (from #2937, NOT to ship alone)
+## Part-1 prototype (from #2940, NOT to ship alone)
 
 The runner shim gap that surfaces this: `tests/test262-runner.ts`
 `needsTestTypedArray` gate regex `/testWithTypedArrayConstructors/` misses the
@@ -118,7 +118,7 @@ rule: leak-elim must prove bodies execute, not just that the import disappears).
 ## Acceptance / measurement
 
 - The repro above invokes the body (`log(999)` fires) in standalone.
-- Then re-measure the #2937 BigInt corpus: with shim + this fix, sample ~30 and
+- Then re-measure the #2940 BigInt corpus: with shim + this fix, sample ~30 and
   **compare standalone runtime OUTPUT vs js-host** (a vacuous host-free pass
   must be scored as a FAIL by the harness, not a pass). Report genuine-pass
   fraction. BigInt TypedArray semantics coverage is **unmeasured** — expect
@@ -129,5 +129,5 @@ rule: leak-elim must prove bodies execute, not just that the import disappears).
 
 ## Notes
 
-Spun out of #2937 (blocked_on this). Repro scripts were under `.tmp/` during the
-#2937 investigation (dyncall / genuine probes); regenerate from the table above.
+Spun out of #2940 (blocked_on this). Repro scripts were under `.tmp/` during the
+#2940 investigation (dyncall / genuine probes); regenerate from the table above.
