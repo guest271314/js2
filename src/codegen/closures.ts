@@ -24,7 +24,7 @@ import { addStringConstantGlobal } from "./registry/imports.js"; // (#2025)
 import { stringConstantExternrefInstrs } from "./native-strings.js"; // (#2025)
 import { noJsHost } from "./expressions/helpers.js"; // (#2025)
 import { emitWasiErrorConstructor } from "./registry/error-types.js"; // (#2025)
-import { pushBody } from "./context/bodies.js";
+import { popBody, pushBody } from "./context/bodies.js";
 import { reportError } from "./context/errors.js";
 import { reportSilentFallback } from "./fallback-telemetry.js";
 import { resolveLiftedMethodThisStruct } from "./fnctor-escape-gate.js"; // (#2681/#2686 A3) lifted-method `this`→struct
@@ -3366,6 +3366,164 @@ export function getOrCreateFuncRefWrapperTypes(
 }
 
 /**
+ * (#2976) Emit the memoized, `ref.is_null`-guarded VALUE instance of a
+ * capture-carrying nested function declaration:
+ *
+ *   local.get $memo
+ *   ref.is_null
+ *   if (empty)                       ;; first DYNAMIC reference only
+ *     ref.func $tramp
+ *     <capture pushes>               ;; unchanged from the per-site build
+ *     struct.new $__fn_cap_<name>
+ *     local.set $memo
+ *   end
+ *   local.get $memo
+ *   ref.as_non_null
+ *
+ * The memo local is allocated once per enclosing activation
+ * (`fctx.nestedFnClosureMemos`), so every reference yields the SAME struct
+ * instance — `f === f` holds and sidecar/static writes (`f.resolve = fn`)
+ * are visible through later references. The runtime guard (not a prologue
+ * hoist, not compile-order memoization) is load-bearing twice over:
+ *   - it preserves value-capture semantics — immutable captures copy their
+ *     value at the first DYNAMIC reference, exactly where the old per-site
+ *     build copied them (a prologue hoist would run before hoisted-over
+ *     initializers);
+ *   - it is control-flow-safe — with compile-order memoization, a reference
+ *     in a runtime-skipped branch would leave a later branch reading an
+ *     uninitialized local.
+ * The capture-push block keeps its compile-time side effects (mutable-capture
+ * boxing + localMap rebind, TDZ flag boxing) — they now occur while compiling
+ * the guard arm, same net effect as before.
+ */
+function emitMemoizedNestedFnClosure(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  funcName: string,
+  structTypeIdx: number,
+  trampolineFuncIdx: number,
+  nestedCaptures: NonNullable<ReturnType<CodegenContext["nestedFuncCaptures"]["get"]>>,
+  tdzFlaggedNested: NonNullable<ReturnType<CodegenContext["nestedFuncCaptures"]["get"]>>,
+): void {
+  const numCaptures = nestedCaptures.length;
+  const numTdzFlags = tdzFlaggedNested.length;
+
+  let memoLocal = fctx.nestedFnClosureMemos?.get(funcName);
+  if (memoLocal === undefined) {
+    memoLocal = allocLocal(fctx, `__fnmemo_${funcName}_${fctx.locals.length}`, {
+      kind: "ref_null",
+      typeIdx: structTypeIdx,
+    });
+    (fctx.nestedFnClosureMemos ??= new Map()).set(funcName, memoLocal);
+  }
+
+  fctx.body.push({ op: "local.get", index: memoLocal });
+  fctx.body.push({ op: "ref.is_null" });
+
+  // Build the construction sequence into the guard's then-arm.
+  const savedBody = pushBody(fctx);
+
+  // struct.new fields: func, cap0, cap1, ..., __tdz_*...
+  fctx.body.push({ op: "ref.func", funcIdx: trampolineFuncIdx });
+  // (#1312) Self-reference inside the lifted body of `funcName` itself —
+  // e.g. `function next() { return call(next); }`. The captures are
+  // already in scope as the leading params [0..numCaptures-1] of the
+  // lifted fn (mutable captures arrive as boxed ref cells, immutable as
+  // raw values). We re-push them by param index instead of trying to
+  // dereference `cap.outerLocalIdx`, which points into a different
+  // (outer) scope and yields garbage / null when reused inside the
+  // current lifted body.
+  const isSelfRef = fctx.name === funcName;
+  for (let i = 0; i < nestedCaptures.length; i++) {
+    const cap = nestedCaptures[i]!;
+    if (isSelfRef) {
+      // Captures arrive at param index `i` in the lifted fn (#1312).
+      fctx.body.push({ op: "local.get", index: i });
+      continue;
+    }
+    if (cap.mutable && cap.valType) {
+      const refCellTypeIdx = getOrRegisterRefCellType(ctx, cap.valType);
+      if (fctx.boxedCaptures?.has(cap.name)) {
+        const currentLocalIdx = fctx.localMap.get(cap.name)!;
+        fctx.body.push({ op: "local.get", index: currentLocalIdx });
+      } else {
+        // Stage 1 localMap-first lookup reverted — see calls.ts comment.
+        fctx.body.push({ op: "local.get", index: cap.outerLocalIdx });
+        fctx.body.push({ op: "struct.new", typeIdx: refCellTypeIdx });
+        const boxedLocalIdx = allocLocal(fctx, `__boxed_${cap.name}`, {
+          kind: "ref",
+          typeIdx: refCellTypeIdx,
+        });
+        fctx.body.push({ op: "local.tee", index: boxedLocalIdx });
+        fctx.localMap.set(cap.name, boxedLocalIdx);
+        if (!fctx.boxedCaptures) fctx.boxedCaptures = new Map();
+        fctx.boxedCaptures.set(cap.name, { refCellTypeIdx, valType: cap.valType });
+      }
+    } else {
+      fctx.body.push({ op: "local.get", index: cap.outerLocalIdx });
+    }
+  }
+  // #1205 Stage 3: after all value captures, push the boxed TDZ flag refs
+  // (one per TDZ-flagged capture). Sourcing rules mirror calls.ts — see
+  // the FNDECL-A4 cap-prepend block there for the full rationale. The
+  // short version: only trust the LIVE `fctx.tdzFlagLocals[name]` lookup
+  // when it points to an i32 in the current fctx. Otherwise (block-shadow
+  // or cross-fctx transitive) push `i32.const 1` (treat as initialized) —
+  // matches pre-#1205 behavior where the lifted body had no flag check.
+  if (numTdzFlags > 0) {
+    const i32RefCellTypeIdxForFlags = getOrRegisterRefCellType(ctx, { kind: "i32" });
+    for (let ti = 0; ti < tdzFlaggedNested.length; ti++) {
+      const cap = tdzFlaggedNested[ti]!;
+      if (isSelfRef) {
+        // (#1312) Self-reference inside the lifted body — the TDZ-flag
+        // boxed refs arrive as params at index `numCaptures + ti` (after
+        // all value captures). Re-push from there.
+        fctx.body.push({ op: "local.get", index: numCaptures + ti });
+        continue;
+      }
+      const existingBox = fctx.boxedTdzFlags?.get(cap.name);
+      if (existingBox) {
+        fctx.body.push({ op: "local.get", index: existingBox.localIdx });
+      } else {
+        const liveFlagIdx = fctx.tdzFlagLocals?.get(cap.name);
+        const liveType = liveFlagIdx !== undefined ? getLocalType(fctx, liveFlagIdx) : undefined;
+        const liveOk = liveType?.kind === "i32";
+        if (liveOk && liveFlagIdx !== undefined) {
+          fctx.body.push({ op: "local.get", index: liveFlagIdx });
+          fctx.body.push({ op: "struct.new", typeIdx: i32RefCellTypeIdxForFlags });
+        } else {
+          fctx.body.push({ op: "i32.const", value: 1 });
+          fctx.body.push({ op: "struct.new", typeIdx: i32RefCellTypeIdxForFlags });
+        }
+        const flagBoxLocal = allocLocal(fctx, `__tdz_box_${cap.name}`, {
+          kind: "ref",
+          typeIdx: i32RefCellTypeIdxForFlags,
+        });
+        fctx.body.push({ op: "local.tee", index: flagBoxLocal });
+        if (liveOk) {
+          if (!fctx.boxedTdzFlags) fctx.boxedTdzFlags = new Map();
+          fctx.boxedTdzFlags.set(cap.name, {
+            refCellTypeIdx: i32RefCellTypeIdxForFlags,
+            localIdx: flagBoxLocal,
+          });
+          if (!fctx.tdzFlagLocals) fctx.tdzFlagLocals = new Map();
+          fctx.tdzFlagLocals.set(cap.name, flagBoxLocal);
+        }
+      }
+    }
+  }
+  fctx.body.push({ op: "struct.new", typeIdx: structTypeIdx });
+  fctx.body.push({ op: "local.set", index: memoLocal });
+
+  const thenArm = fctx.body;
+  popBody(fctx, savedBody);
+
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: thenArm, else: [] });
+  fctx.body.push({ op: "local.get", index: memoLocal });
+  fctx.body.push({ op: "ref.as_non_null" });
+}
+
+/**
  * Emit a closure struct wrapping a plain function. Creates a per-function
  * trampoline that delegates to the original function.  Struct types are shared
  * across functions with the same signature so they can be reassigned.
@@ -3384,6 +3542,19 @@ export function emitFuncRefAsClosure(
   if (nestedCaptures && nestedCaptures.length > 0) {
     // Functions with captures: create a closure struct that stores the capture values.
     // The trampoline extracts captures from the struct and passes them to the original function. (#857)
+    //
+    // (#2976) IDENTITY: the struct type + trampoline are minted ONCE per
+    // funcName (module-level `nestedFnClosureArtifacts` dedupe below), and the
+    // INSTANCE is memoized per enclosing activation in a `ref.is_null`-guarded
+    // local (`fctx.nestedFnClosureMemos`). Previously every reference site
+    // built a fresh struct type + trampoline + instance, so
+    // `Constructor === Constructor` was false and a static/sidecar write
+    // (`Constructor.resolve = fn`) landed on a dead instance the next
+    // reference never saw (the #2671 Promise capability sub-bucket). The
+    // lazy guard — rather than a prologue hoist — preserves the existing
+    // value-capture semantics exactly: immutable captures copy their value at
+    // the FIRST DYNAMIC reference, the same point the old per-site build
+    // copied them; mutable captures were already live through ref cells.
     const numCaptures = nestedCaptures.length;
     // #1205 Stage 3: TDZ-flag captures get extra ref-cell fields after the
     // value captures, mirroring the leading-param layout of the lifted fn.
@@ -3395,6 +3566,23 @@ export function emitFuncRefAsClosure(
 
     const wrapperTypes = getOrCreateFuncRefWrapperTypes(ctx, userParams, results);
     if (!wrapperTypes) return null;
+
+    const cachedArtifacts = ctx.nestedFnClosureArtifacts?.get(funcName);
+    if (cachedArtifacts) {
+      const trampIdx = ctx.funcMap.get(cachedArtifacts.trampolineName);
+      if (trampIdx !== undefined) {
+        emitMemoizedNestedFnClosure(
+          ctx,
+          fctx,
+          funcName,
+          cachedArtifacts.structTypeIdx,
+          trampIdx,
+          nestedCaptures,
+          tdzFlaggedNested,
+        );
+        return { kind: "ref", typeIdx: cachedArtifacts.structTypeIdx };
+      }
+    }
 
     // Create a custom struct with func + capture fields + TDZ-flag fields
     // (subtype of the base wrapper).
@@ -3480,96 +3668,22 @@ export function emitFuncRefAsClosure(
     };
     ctx.closureInfoByTypeIdx.set(structTypeIdx, closureInfo);
 
-    // Emit: struct.new with fields: func, cap0, cap1, ..., __tdz_*..., ...
-    fctx.body.push({ op: "ref.func", funcIdx: trampolineFuncIdx });
-    // (#1312) Self-reference inside the lifted body of `funcName` itself —
-    // e.g. `function next() { return call(next); }`. The captures are
-    // already in scope as the leading params [0..numCaptures-1] of the
-    // lifted fn (mutable captures arrive as boxed ref cells, immutable as
-    // raw values). We re-push them by param index instead of trying to
-    // dereference `cap.outerLocalIdx`, which points into a different
-    // (outer) scope and yields garbage / null when reused inside the
-    // current lifted body.
-    const isSelfRef = fctx.name === funcName;
-    for (let i = 0; i < nestedCaptures.length; i++) {
-      const cap = nestedCaptures[i]!;
-      if (isSelfRef) {
-        // Captures arrive at param index `i` in the lifted fn (#1312).
-        fctx.body.push({ op: "local.get", index: i });
-        continue;
-      }
-      if (cap.mutable && cap.valType) {
-        const refCellTypeIdx = getOrRegisterRefCellType(ctx, cap.valType);
-        if (fctx.boxedCaptures?.has(cap.name)) {
-          const currentLocalIdx = fctx.localMap.get(cap.name)!;
-          fctx.body.push({ op: "local.get", index: currentLocalIdx });
-        } else {
-          // Stage 1 localMap-first lookup reverted — see calls.ts comment.
-          fctx.body.push({ op: "local.get", index: cap.outerLocalIdx });
-          fctx.body.push({ op: "struct.new", typeIdx: refCellTypeIdx });
-          const boxedLocalIdx = allocLocal(fctx, `__boxed_${cap.name}`, {
-            kind: "ref",
-            typeIdx: refCellTypeIdx,
-          });
-          fctx.body.push({ op: "local.tee", index: boxedLocalIdx });
-          fctx.localMap.set(cap.name, boxedLocalIdx);
-          if (!fctx.boxedCaptures) fctx.boxedCaptures = new Map();
-          fctx.boxedCaptures.set(cap.name, { refCellTypeIdx, valType: cap.valType });
-        }
-      } else {
-        fctx.body.push({ op: "local.get", index: cap.outerLocalIdx });
-      }
-    }
-    // #1205 Stage 3: after all value captures, push the boxed TDZ flag refs
-    // (one per TDZ-flagged capture). Sourcing rules mirror calls.ts — see
-    // the FNDECL-A4 cap-prepend block there for the full rationale. The
-    // short version: only trust the LIVE `fctx.tdzFlagLocals[name]` lookup
-    // when it points to an i32 in the current fctx. Otherwise (block-shadow
-    // or cross-fctx transitive) push `i32.const 1` (treat as initialized) —
-    // matches pre-#1205 behavior where the lifted body had no flag check.
-    if (numTdzFlags > 0) {
-      for (let ti = 0; ti < tdzFlaggedNested.length; ti++) {
-        const cap = tdzFlaggedNested[ti]!;
-        if (isSelfRef) {
-          // (#1312) Self-reference inside the lifted body — the TDZ-flag
-          // boxed refs arrive as params at index `numCaptures + ti` (after
-          // all value captures). Re-push from there.
-          fctx.body.push({ op: "local.get", index: numCaptures + ti });
-          continue;
-        }
-        const existingBox = fctx.boxedTdzFlags?.get(cap.name);
-        if (existingBox) {
-          fctx.body.push({ op: "local.get", index: existingBox.localIdx });
-        } else {
-          const liveFlagIdx = fctx.tdzFlagLocals?.get(cap.name);
-          const liveType = liveFlagIdx !== undefined ? getLocalType(fctx, liveFlagIdx) : undefined;
-          const liveOk = liveType?.kind === "i32";
-          if (liveOk && liveFlagIdx !== undefined) {
-            fctx.body.push({ op: "local.get", index: liveFlagIdx });
-            fctx.body.push({ op: "struct.new", typeIdx: i32RefCellTypeIdxForFlags });
-          } else {
-            fctx.body.push({ op: "i32.const", value: 1 });
-            fctx.body.push({ op: "struct.new", typeIdx: i32RefCellTypeIdxForFlags });
-          }
-          const flagBoxLocal = allocLocal(fctx, `__tdz_box_${cap.name}`, {
-            kind: "ref",
-            typeIdx: i32RefCellTypeIdxForFlags,
-          });
-          fctx.body.push({ op: "local.tee", index: flagBoxLocal });
-          if (liveOk) {
-            if (!fctx.boxedTdzFlags) fctx.boxedTdzFlags = new Map();
-            fctx.boxedTdzFlags.set(cap.name, {
-              refCellTypeIdx: i32RefCellTypeIdxForFlags,
-              localIdx: flagBoxLocal,
-            });
-            if (!fctx.tdzFlagLocals) fctx.tdzFlagLocals = new Map();
-            fctx.tdzFlagLocals.set(cap.name, flagBoxLocal);
-          }
-        }
-      }
-    }
-    fctx.body.push({ op: "struct.new", typeIdx: structTypeIdx });
+    // (#2976) Register the module-level artifacts so every later reference —
+    // in this or any other fctx — reuses this ONE struct type + trampoline
+    // instead of minting fresh ones per site. Stored by trampoline NAME
+    // (re-resolved via funcMap at emission) so late-import shifts can't
+    // desync a cached raw index.
+    (ctx.nestedFnClosureArtifacts ??= new Map()).set(funcName, { structTypeIdx, trampolineName });
 
+    emitMemoizedNestedFnClosure(
+      ctx,
+      fctx,
+      funcName,
+      structTypeIdx,
+      trampolineFuncIdx,
+      nestedCaptures,
+      tdzFlaggedNested,
+    );
     return { kind: "ref", typeIdx: structTypeIdx };
   }
 

@@ -214,6 +214,12 @@ export function createEvalShim(options: EvalShimOptions = {}): (src: any, isDire
         fileName: filename,
         allowJs: true,
         skipSemanticDiagnostics: true,
+        // (#2973) This is a semantics-critical fast path, not an IR-first
+        // measurement target. Under JS2WASM_IR_FIRST a claim-partial residual
+        // in the eval'd expression turns into a post-claim hard error, which
+        // the `catch` below swallows — silently degrading a correct answer to
+        // `undefined`. Always take the proven legacy-then-overlay pipeline.
+        disableIrFirst: true,
       });
     } catch {
       result = undefined;
@@ -227,6 +233,8 @@ export function createEvalShim(options: EvalShimOptions = {}): (src: any, isDire
           fileName: filename,
           allowJs: true,
           skipSemanticDiagnostics: true,
+          // (#2973) Same opt-out as the expression-form wrapper above.
+          disableIrFirst: true,
         });
       } catch (e: any) {
         // Compiler crashed — surface as SyntaxError to mimic JS eval.
