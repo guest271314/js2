@@ -127,7 +127,15 @@ export function tryStaticEvalInline(
   // need iterator types, etc.) would silently mis-compile.  When we detect
   // such a node we bail out and let the dynamic `__extern_eval` path handle
   // the call — correctness first, inlining is a best-effort fast path.
-  if (!allNodesInlineSupported(sf)) {
+  //
+  // A `"use strict"` directive prologue in the eval body switches on
+  // strict-mode early-error + strict-name semantics (e.g.
+  // `eval("'use strict'; function f(eval){}")` is a SyntaxError; assigning to
+  // `eval`/`arguments` throws) that the AST splice does NOT enforce — so
+  // function declarations in a strict body keep bailing to the dynamic path
+  // (host eval enforces them).  See `allNodesInlineSupported` / #2923 park fix.
+  const bodyIsStrict = evalBodyHasUseStrictDirective(stmts);
+  if (!allNodesInlineSupported(sf, bodyIsStrict)) {
     return undefined;
   }
 
@@ -181,8 +189,14 @@ export function tryStaticEvalInline(
  * for foreign nodes.  Currently: function/arrow/class expressions and
  * declarations, for-of loops, yield/await, and dynamic import.  The check is
  * conservative — unsupported constructs simply fall through to runtime eval.
+ *
+ * `bodyIsStrict` — whether the eval Script begins with a `"use strict"`
+ * directive prologue.  A strict eval body has early-error + strict-name
+ * semantics the naive splice does NOT enforce, so function declarations in a
+ * strict body must keep bailing to the dynamic path (see the `FunctionDeclaration`
+ * case below and the #2923 park fix).
  */
-function allNodesInlineSupported(node: ts.Node): boolean {
+function allNodesInlineSupported(node: ts.Node, bodyIsStrict: boolean): boolean {
   let ok = true;
   const visit = (n: ts.Node): void => {
     if (!ok) return;
@@ -228,9 +242,34 @@ function allNodesInlineSupported(node: ts.Node): boolean {
         n.forEachChild(visit);
         return;
       }
-      // FunctionDeclaration falls through to `default` → hoisted +
-      // signature-tolerant (see compileNestedFunctionDeclaration, #2923). Nested
-      // bail nodes inside its body are still caught by the recursion.
+      // (#2923 park fix) A function declaration is liftable ONLY when it is a
+      // TOP-LEVEL statement of a SLOPPY eval Script (hoisted by
+      // `hoistFunctionDeclarations`, signature-tolerant per
+      // `compileNestedFunctionDeclaration`). It must keep bailing to the dynamic
+      // path — which the host `__extern_eval` implements correctly — when:
+      //   (A) the eval body is strict (`"use strict"` prologue): strict
+      //       early-errors + strict-name rules (e.g. `function f(eval){}` /
+      //       `eval = 42` are SyntaxErrors) are NOT enforced by the splice; and
+      //   (B) the declaration is nested in a script-scope block / if / switch /
+      //       for / label (NOT directly a Script statement, and not inside
+      //       another function): AnnexB §B.3.3 Web-Legacy semantics require it to
+      //       create BOTH a block binding and a hoisted var binding in the
+      //       enclosing variable environment, which the splice does not do.
+      // Broadening past these two guards regressed 123 test262 files (102
+      // annexB/language/eval-code {direct,indirect} + 9 language/eval-code
+      // block/switch + 9 language/statements/function 13.*-s / *-eval-stricteval)
+      // when first landed — the merge_group park on PR #2442. A top-level sloppy
+      // func decl (the #2923 win, e.g. `eval("function add(a,b){return a+b}
+      // add(2,3)")`) still lifts. Nested bail nodes (arrow/class) inside a lifted
+      // decl's body are still caught by the recursion below.
+      case ts.SyntaxKind.FunctionDeclaration: {
+        if (bodyIsStrict || funcDeclNeedsDynamicEvalPath(n as ts.FunctionDeclaration)) {
+          ok = false;
+          return;
+        }
+        n.forEachChild(visit);
+        return;
+      }
       default:
         n.forEachChild(visit);
     }
@@ -263,4 +302,62 @@ function isLiftableForOfIterable(expr: ts.Expression): boolean {
 function isLiftableForInIterable(expr: ts.Expression): boolean {
   const e = unwrapParens(expr);
   return ts.isObjectLiteralExpression(e) || ts.isArrayLiteralExpression(e);
+}
+
+/**
+ * (#2923 park fix) Does the eval Script begin with a `"use strict"` directive
+ * prologue? Per §11.2.1 a directive prologue is the leading run of
+ * ExpressionStatements whose expression is a StringLiteral; `"use strict"`
+ * anywhere in that run turns the body strict. A strict eval body carries
+ * early-error + strict-name semantics (function `eval`/`arguments` params,
+ * assignment to `eval`, …) the AST splice does not enforce, so we keep bailing
+ * function declarations in such a body to the dynamic host-eval path.
+ */
+function evalBodyHasUseStrictDirective(stmts: ts.NodeArray<ts.Statement>): boolean {
+  for (const s of stmts) {
+    if (!ts.isExpressionStatement(s)) break;
+    // Only a plain StringLiteral counts as a directive (a template does not).
+    if (!ts.isStringLiteral(s.expression)) break;
+    if (s.expression.text === "use strict") return true;
+    // Some other directive (e.g. "use asm") → keep scanning the prologue.
+  }
+  return false;
+}
+
+/**
+ * (#2923 park fix) A function declaration must fall back to the dynamic eval
+ * path when it is nested in a SCRIPT-SCOPE block / if / switch / for / label
+ * (AnnexB §B.3.3 Web-Legacy Block-Level Function Declaration semantics the
+ * splice does not implement). It is safe (returns false) when it is either a
+ * top-level statement of the eval Script (hoisted correctly) OR nested inside
+ * another function's body (an ordinary nested function, compiled by that
+ * function's own codegen — not eval-scope-sensitive).
+ */
+function funcDeclNeedsDynamicEvalPath(fn: ts.FunctionDeclaration): boolean {
+  const parent = fn.parent;
+  // Directly a statement of the eval Script → top-level, safe to hoist.
+  if (parent && ts.isSourceFile(parent)) return false;
+  // Walk up: crossing a function boundary before the SourceFile means the decl
+  // lives inside another function (ordinary nested fn) → safe. Reaching the
+  // SourceFile through only lexical statements (block/if/switch/for/label)
+  // means it is a script-scope block-nested declaration → AnnexB-sensitive.
+  let p: ts.Node | undefined = parent;
+  while (p && !ts.isSourceFile(p)) {
+    if (isFunctionLikeContainer(p)) return false;
+    p = p.parent;
+  }
+  return true;
+}
+
+/** Nodes that introduce their own function scope (a lifted decl's ancestors). */
+function isFunctionLikeContainer(n: ts.Node): boolean {
+  return (
+    ts.isFunctionDeclaration(n) ||
+    ts.isFunctionExpression(n) ||
+    ts.isArrowFunction(n) ||
+    ts.isMethodDeclaration(n) ||
+    ts.isConstructorDeclaration(n) ||
+    ts.isGetAccessorDeclaration(n) ||
+    ts.isSetAccessorDeclaration(n)
+  );
 }
