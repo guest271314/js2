@@ -1,7 +1,8 @@
 ---
 id: 2964
 title: "for-in on $Object: prototype-chain enumeration + integer-key-ascending ordering"
-status: ready
+status: in-progress
+assignee: ttraenkler/opus-2964
 sprint: current
 created: 2026-07-02
 updated: 2026-07-02
