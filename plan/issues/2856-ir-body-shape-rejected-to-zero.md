@@ -139,6 +139,55 @@ committed — the exact instrumentation supersedes it). Routing: this epic needs
 `senior-developer` for the selector instrumentation + the mutable-assignment IR
 lowering.
 
+## Step-1 diagnostic DONE (2026-07-02, sr-funcidx) — heuristic OVERTURNED
+
+Implemented the opt-in reject-arm recorder (`shapeNo`/`takeShapeRejectDetail` in
+`src/ir/select.ts`, gated on `JS2WASM_IR_SHAPE_DIAG=1`, byte-inert when off) and a
+`--shape-diag` mode in `scripts/check-ir-fallbacks.ts`. Every instrumented
+`return false` in the Phase-1 shape gate (`isPhase1StatementList`,
+`isPhase1VarDecl`, `isPhase1Expr`, `isPhase1Tail`, `isPhase1BodyStatement`) records
+its `"<arm>:<NodeKind>"`; the FIRST (deepest) wins.
+
+Run: `JS2WASM_IR_SHAPE_DIAG=1 pnpm run check:ir-fallbacks -- --shape-diag`.
+
+**Exact histogram (31/31 attributed) — the "mutable assignment ~11 + 17
+unclassified" heuristic was WRONG:**
+
+| count | reject arm                                   | meaning                                                                                                                                                                  |
+| ----- | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 13    | `vardecl-init-expr:PropertyAccessExpression` | `const x = <host-global>.<prop>` — receiver identifier not in scope (`document.*`, `window.*`, `Math.*`, DOM globals)                                                    |
+| 4     | `vardecl-init-expr:CallExpression`           | `const x = <host-global-or-method>(...)` — call receiver/callee not IR-claimable                                                                                         |
+| 4     | `unattributed-arm:helper-internal`           | class-member reject inside an as-yet-uninstrumented helper (`isPhase1ObjectLiteral`/`TryStatement`/`ClosureLiteral`/`ForStatement` internals) — Step-1b to sub-attribute |
+| 3     | `body-unhandled-stmt:IfStatement`            | `if` in a constructor/body-statement position (non-tail body list)                                                                                                       |
+| 2     | `vardecl-typenode:ArrayType`                 | `const x: number[] = …` — `isPhase1TypeNode` rejects the array annotation                                                                                                |
+| 2     | `nontail-callstmt:CallExpression`            | non-tail call statement whose call isn't IR-claimable                                                                                                                    |
+| 1     | `tail-unhandled:ExpressionStatement`         | non-void tail expression statement                                                                                                                                       |
+| 1     | `nontail-if-cond:BinaryExpression`           | `if` condition expr not Phase-1                                                                                                                                          |
+| 1     | `nontail-unhandled-stmt:IfStatement`         | `if`-with-`else` at a non-tail (non-early-return) position                                                                                                               |
+
+**Key finding — the corpus is DOM / benchmark code dominated by host-global
+member access (`document`/`window`/`Math`/`performance`), NOT the compiler-
+internal statement-kind gaps the issue originally hypothesised, and NOT
+mutable-assignment (0 hits).** So driving THIS corpus's `body-shape-rejected` to
+zero is mostly about **host-global member access in `const` initializers** (17 of
+31 = 55%), not a `from-ast.ts` statement handler. That is a very different (and
+larger / possibly out-of-IR-scope) problem than a kind-slice — it likely needs a
+resolver notion of host-global receivers, or the corpus/gate scope revisited.
+**Recommend PO/architect re-scope #2856 around this finding before any lowering
+slice.**
+
+**Verification:** the `check:ir-fallbacks` gate is byte-unchanged with the
+recorder off (`body-shape-rejected: 31`, "IR fallback gate: OK"); typecheck
+clean; behaviour-neutral (identical IR-test pass/fail counts with vs. without the
+instrumentation — the ~28 pre-existing `ir-*-equivalence` failures in this
+container are unrelated and present on the pristine base).
+
+### Remaining (Step-1b, small)
+
+Instrument the 4 `unattributed-arm` helper internals (`isPhase1ObjectLiteral`,
+`isPhase1TryStatement`, `isPhase1ClosureLiteral`, `isPhase1ForStatement`
+internals) for full sub-attribution of the class-member rejects.
+
 ## Acceptance criteria
 
 1. `body-shape-rejected` count in `scripts/ir-fallback-baseline.json` is `0`

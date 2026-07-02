@@ -4237,8 +4237,18 @@ export function compilePropertyIntrospection(
     const hopIdx = ensureLateImport(ctx, importName, [{ kind: "externref" }, { kind: "externref" }], [{ kind: "i32" }]);
     flushLateImportShifts(ctx, fctx);
     if (hopIdx !== undefined) {
-      // Push receiver
-      compileExpression(ctx, fctx, propAccess.expression);
+      // Push receiver. `receiverWasm` is the receiver's STATIC type, which
+      // `resolveWasmType` reports as `externref` for a function/method type
+      // (e.g. `RegExp.prototype.test`). But the member access actually emits a
+      // concrete function-object struct `(ref $fn)`, not an externref — so the
+      // pushed value must still be coerced (`extern.convert_any`) to match the
+      // helper's `externref` param. Without this the receiver reached the call
+      // as a raw `struct.new` and produced `call[0] expected type externref,
+      // found struct.new of type (ref …)` invalid Wasm in standalone (#2934).
+      const recvType = compileExpression(ctx, fctx, propAccess.expression);
+      if (recvType && recvType.kind !== "externref") {
+        coerceType(ctx, fctx, recvType, { kind: "externref" });
+      }
       // Push key argument (or null if missing)
       if (expr.arguments[0]) {
         const argType = compileExpression(ctx, fctx, expr.arguments[0]);

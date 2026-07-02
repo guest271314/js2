@@ -719,13 +719,21 @@ function emitArrayProtoMemberBody(ctx: CodegenContext, fctx: FunctionContext, me
  * `$__any_to_string` are functions (append-only, no index shift).
  */
 function emitStringProtoMemberBody(ctx: CodegenContext, fctx: FunctionContext, member: string): ValType | null {
-  const SLICE1 = new Set(["charAt", "at"]);
-  if (!SLICE1.has(member)) return emitProtoMemberBodyRefusal(ctx, fctx, "String", member);
+  const IN_SCOPE = new Set(["charAt", "at", "charCodeAt", "codePointAt"]);
+  if (!IN_SCOPE.has(member)) return emitProtoMemberBodyRefusal(ctx, fctx, "String", member);
 
   ensureNativeStringHelpers(ctx);
-  // Unbox the integer position arg FIRST (the sole late-import site → flushes).
-  const posLocal = unboxArgToI32(ctx, fctx, 2);
-  // Fetch helper funcIdxs AFTER the import shift, by name.
+  const needsNumBox = member === "charCodeAt" || member === "codePointAt";
+  // Do ALL late-import-adding ops FIRST (mirrors emitArrayProtoMemberBody), so
+  // every helper funcIdx fetched by NAME afterwards is post-shift-correct.
+  const posLocal = unboxArgToI32(ctx, fctx, 2); // → __unbox_number import + flush
+  let boxIdx: number | undefined;
+  if (needsNumBox) {
+    boxIdx = ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
+    flushLateImportShifts(ctx, fctx);
+    if (boxIdx === undefined) return emitProtoMemberBodyRefusal(ctx, fctx, "String", member);
+  }
+  // Fetch helper funcIdxs AFTER the import shifts, by name.
   const anyToStrIdx = ensureAnyToStringHelper(ctx);
   const flattenIdx = ctx.nativeStrHelpers.get("__str_flatten");
   const charAtIdx = ctx.nativeStrHelpers.get("__str_charAt");
@@ -757,6 +765,135 @@ function emitStringProtoMemberBody(ctx: CodegenContext, fctx: FunctionContext, m
     fctx.body.push({ op: "local.get", index: posLocal } as Instr);
     fctx.body.push({ op: "call", funcIdx: charAtIdx } as Instr);
     fctx.body.push({ op: "extern.convert_any" } as Instr); // native string → externref
+    return { kind: "externref" };
+  }
+
+  const strTy = ctx.nativeStrTypeIdx; // flat string struct: 0=len, 1=off, 2=data
+  const dataTy = ctx.nativeStrDataTypeIdx;
+
+  if (member === "charCodeAt") {
+    // §22.1.3.3: out-of-range → NaN; else the UTF-16 code unit as a number.
+    fctx.body.push({ op: "local.get", index: posLocal } as Instr);
+    fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+    fctx.body.push({ op: "i32.lt_s" } as Instr);
+    fctx.body.push({ op: "local.get", index: posLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: flatLocal } as Instr);
+    fctx.body.push({ op: "struct.get", typeIdx: strTy, fieldIdx: 0 } as Instr); // len
+    fctx.body.push({ op: "i32.ge_s" } as Instr);
+    fctx.body.push({ op: "i32.or" } as Instr);
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "val", type: { kind: "f64" } },
+      then: [{ op: "f64.const", value: NaN } as Instr],
+      else: [
+        { op: "local.get", index: flatLocal } as Instr,
+        { op: "struct.get", typeIdx: strTy, fieldIdx: 2 } as Instr, // data
+        { op: "local.get", index: flatLocal } as Instr,
+        { op: "struct.get", typeIdx: strTy, fieldIdx: 1 } as Instr, // off
+        { op: "local.get", index: posLocal } as Instr,
+        { op: "i32.add" } as Instr,
+        { op: "array.get_u", typeIdx: dataTy } as Instr,
+        { op: "f64.convert_i32_u" } as Instr,
+      ],
+    } as Instr);
+    fctx.body.push({ op: "call", funcIdx: boxIdx! } as Instr); // f64 → externref
+    return { kind: "externref" };
+  }
+
+  if (member === "codePointAt") {
+    // §22.1.3.4: position out of range → undefined; else the code point at
+    // `pos`, combining a leading+trailing surrogate pair when present.
+    const lenL = allocLocal(fctx, `__str_pm_len_${fctx.locals.length}`, { kind: "i32" });
+    const firstL = allocLocal(fctx, `__str_pm_first_${fctx.locals.length}`, { kind: "i32" });
+    const secondL = allocLocal(fctx, `__str_pm_second_${fctx.locals.length}`, { kind: "i32" });
+    fctx.body.push({ op: "local.get", index: flatLocal } as Instr);
+    fctx.body.push({ op: "struct.get", typeIdx: strTy, fieldIdx: 0 } as Instr);
+    fctx.body.push({ op: "local.set", index: lenL } as Instr);
+    // out of range (pos<0 || pos>=len) → undefined
+    fctx.body.push({ op: "local.get", index: posLocal } as Instr);
+    fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+    fctx.body.push({ op: "i32.lt_s" } as Instr);
+    fctx.body.push({ op: "local.get", index: posLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: lenL } as Instr);
+    fctx.body.push({ op: "i32.ge_s" } as Instr);
+    fctx.body.push({ op: "i32.or" } as Instr);
+    // read unit at pos → firstL (guarded read builder)
+    const readUnit = (posInstrs: Instr[]): Instr[] => [
+      { op: "local.get", index: flatLocal } as Instr,
+      { op: "struct.get", typeIdx: strTy, fieldIdx: 2 } as Instr, // data
+      { op: "local.get", index: flatLocal } as Instr,
+      { op: "struct.get", typeIdx: strTy, fieldIdx: 1 } as Instr, // off
+      ...posInstrs,
+      { op: "i32.add" } as Instr,
+      { op: "array.get_u", typeIdx: dataTy } as Instr,
+    ];
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "val", type: { kind: "externref" } as ValType },
+      then: [{ op: "ref.null.extern" } as Instr],
+      else: [
+        // first = data[off+pos]
+        ...readUnit([{ op: "local.get", index: posLocal } as Instr]),
+        { op: "local.set", index: firstL } as Instr,
+        // isLead = first in [0xD800,0xDBFF] && pos+1 < len
+        { op: "local.get", index: firstL } as Instr,
+        { op: "i32.const", value: 0xd800 } as Instr,
+        { op: "i32.ge_u" } as Instr,
+        { op: "local.get", index: firstL } as Instr,
+        { op: "i32.const", value: 0xdbff } as Instr,
+        { op: "i32.le_u" } as Instr,
+        { op: "i32.and" } as Instr,
+        { op: "local.get", index: posLocal } as Instr,
+        { op: "i32.const", value: 1 } as Instr,
+        { op: "i32.add" } as Instr,
+        { op: "local.get", index: lenL } as Instr,
+        { op: "i32.lt_s" } as Instr,
+        { op: "i32.and" } as Instr,
+        {
+          op: "if",
+          blockType: { kind: "val", type: { kind: "f64" } },
+          then: [
+            // second = data[off+pos+1]
+            ...readUnit([
+              { op: "local.get", index: posLocal } as Instr,
+              { op: "i32.const", value: 1 } as Instr,
+              { op: "i32.add" } as Instr,
+            ]),
+            { op: "local.set", index: secondL } as Instr,
+            // isTrail = second in [0xDC00,0xDFFF]
+            { op: "local.get", index: secondL } as Instr,
+            { op: "i32.const", value: 0xdc00 } as Instr,
+            { op: "i32.ge_u" } as Instr,
+            { op: "local.get", index: secondL } as Instr,
+            { op: "i32.const", value: 0xdfff } as Instr,
+            { op: "i32.le_u" } as Instr,
+            { op: "i32.and" } as Instr,
+            {
+              op: "if",
+              blockType: { kind: "val", type: { kind: "f64" } },
+              then: [
+                // cp = (first-0xD800)*0x400 + (second-0xDC00) + 0x10000
+                { op: "local.get", index: firstL } as Instr,
+                { op: "i32.const", value: 0xd800 } as Instr,
+                { op: "i32.sub" } as Instr,
+                { op: "i32.const", value: 0x400 } as Instr,
+                { op: "i32.mul" } as Instr,
+                { op: "local.get", index: secondL } as Instr,
+                { op: "i32.const", value: 0xdc00 } as Instr,
+                { op: "i32.sub" } as Instr,
+                { op: "i32.add" } as Instr,
+                { op: "i32.const", value: 0x10000 } as Instr,
+                { op: "i32.add" } as Instr,
+                { op: "f64.convert_i32_u" } as Instr,
+              ],
+              else: [{ op: "local.get", index: firstL } as Instr, { op: "f64.convert_i32_u" } as Instr],
+            } as Instr,
+          ],
+          else: [{ op: "local.get", index: firstL } as Instr, { op: "f64.convert_i32_u" } as Instr],
+        } as Instr,
+        { op: "call", funcIdx: boxIdx! } as Instr, // f64 → externref
+      ],
+    } as Instr);
     return { kind: "externref" };
   }
 

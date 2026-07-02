@@ -155,7 +155,12 @@ import { tryCompileNodeFsCall, tryCompileNodeProcessCall } from "../node-fs-api.
 import { tryCompileDenoStdioCall } from "../deno-api.js";
 import { tryCompileRawWasiCall } from "../raw-wasi-api.js";
 import { resolvePromiseSubclassName, tryEmitPromiseSubclassReceiver } from "./promise-subclass.js";
-import { emitStandalonePromiseCombinator, isNativeCombinatorMethod } from "../promise-combinators.js";
+import {
+  emitStandalonePromiseCombinator,
+  emitStandalonePromiseCombinatorRuntime,
+  isNativeCombinatorMethod,
+  resolveExternrefVecArg,
+} from "../promise-combinators.js";
 import { isSupportedBuiltinStaticProperty, resolveBuiltinNamespaceValueName } from "../builtin-static-globals.js";
 import {
   defaultValueInstrs,
@@ -8739,32 +8744,88 @@ function compileCallExpression(
         // array literal under the native-`$Promise` carrier. Gated on
         // `isStandalonePromiseActive` (wasi-only today → widens to standalone at
         // slice 1d), so gc/host + still-host-backed standalone lanes are
-        // byte-unchanged. Only the literal, no-spread, non-subclass form is
-        // intercepted; `allSettled`/`any`, generic iterables, and subclass
-        // capability-ctor receivers fall through to the host path (follow-ups).
+        // byte-unchanged. Literal no-spread arguments unroll at compile time
+        // below; array-TYPED non-literal arguments take the (#2919 arm 1)
+        // runtime loop after that; `allSettled`/`any`, generic iterables,
+        // not-iterable→reject, and subclass capability-ctor receivers still
+        // fall through to the host path (follow-ups, #2919 arms 2/3).
         const arg0 = expr.arguments[0];
-        if (
+        const nativeCombinatorEligible =
           isStandalonePromiseActive(ctx) &&
           isNativeCombinatorMethod(methodName) &&
           !isPromiseSubclassReceiver &&
-          expr.arguments.length === 1 &&
+          expr.arguments.length === 1;
+        if (
+          nativeCombinatorEligible &&
           arg0 !== undefined &&
           ts.isArrayLiteralExpression(arg0) &&
           arg0.elements.every((el) => !ts.isSpreadElement(el) && !ts.isOmittedExpression(el))
         ) {
           const elementInstrs: Instr[][] = [];
-          for (const el of arg0.elements) {
-            const buf: Instr[] = [];
-            const savedBody = fctx.body;
-            fctx.body = buf;
-            try {
-              compileExpression(ctx, fctx, el, { kind: "externref" });
-            } finally {
-              fctx.body = savedBody;
+          // (#2919, same funcIdx-desync class as #2918) Keep the outer body AND
+          // every completed element buffer reachable while later elements (and
+          // the combinator-runtime registration inside
+          // emitStandalonePromiseCombinator) compile: a late import landing
+          // mid-compile walks fctx.body + fctx.savedBodies to shift baked
+          // `call`/`ref.func` indices — a bare local swap orphans them.
+          // NOTE the buffers are popped only AFTER emitStandalonePromiseCombinator
+          // returns; its ensure* registration (the only possible import trigger
+          // inside it) runs BEFORE it copies the buffers into fctx.body, so no
+          // instruction is ever reachable via two walked arrays at shift time
+          // (the shared-Instr double-remap hazard).
+          const savedBody = fctx.body;
+          fctx.savedBodies.push(savedBody);
+          let pushedBufs = 0;
+          try {
+            for (const el of arg0.elements) {
+              const buf: Instr[] = [];
+              fctx.body = buf;
+              try {
+                compileExpression(ctx, fctx, el, { kind: "externref" });
+              } finally {
+                fctx.body = savedBody;
+              }
+              elementInstrs.push(buf);
+              fctx.savedBodies.push(buf);
+              pushedBufs++;
             }
-            elementInstrs.push(buf);
+            return emitStandalonePromiseCombinator(ctx, fctx, methodName, elementInstrs);
+          } finally {
+            fctx.savedBodies.length -= pushedBufs + 1;
           }
-          return emitStandalonePromiseCombinator(ctx, fctx, methodName, elementInstrs);
+        }
+        // (#2919 arm 1) Native combinator over an ARRAY-TYPED non-literal
+        // argument — `Promise.all(arrVar)`, spread/holed literals, etc.
+        // Transactionally compile the argument with its natural type; if it
+        // lowers to an externref-backed vec (`Promise<T>[]`-shaped arrays do),
+        // KEEP the compiled arg and loop over it at runtime feeding
+        // `__combinator_subscribe`. Anything else (f64-backed `number[]` vecs —
+        // the Gap-4 output-representation escalation —, `any`/externref,
+        // strings, generic iterables) is rolled back — body AND any locals /
+        // late imports / errors the probe allocated — via the #1919 helper (a
+        // raw `body.length =` rollback would leak a phantom late import), and
+        // control falls through to the host path byte-unchanged.
+        if (nativeCombinatorEligible && arg0 !== undefined) {
+          const snap = snapshotSpeculative(ctx, fctx);
+          const argType = compileExpression(ctx, fctx, arg0);
+          const vecShape = resolveExternrefVecArg(ctx, argType);
+          if (vecShape) {
+            const argVecLocal = allocLocal(fctx, `__comb_argvec_${fctx.locals.length}`, {
+              kind: "ref_null",
+              typeIdx: vecShape.vecTypeIdx,
+            });
+            fctx.body.push({ op: "local.set", index: argVecLocal });
+            return emitStandalonePromiseCombinatorRuntime(
+              ctx,
+              fctx,
+              methodName,
+              argVecLocal,
+              vecShape.vecTypeIdx,
+              vecShape.arrTypeIdx,
+            );
+          }
+          // Didn't lower as an externref vec — roll back and use the host path.
+          rollbackSpeculative(ctx, fctx, snap);
         }
         const importName = `Promise_${methodName}`;
         // Three-arg signature: (thisArg, iterable, directCall) → result

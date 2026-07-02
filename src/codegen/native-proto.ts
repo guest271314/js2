@@ -132,8 +132,12 @@ const BUILTIN_BRAND_TABLE: Readonly<Record<string, number>> = {
   // object is pure (member CSV only).
   DisposableStack: BUILTIN_BRAND_BASE + 41,
   AsyncDisposableStack: BUILTIN_BRAND_BASE + 42,
+  // (#2861) SuppressedError (ES2026 error aggregation) — an Error subclass, so
+  // its `.prototype` value read reuses the shared NativeError glue shape
+  // (`toString` member; constructor/name/message data props via the meta-fold).
+  SuppressedError: BUILTIN_BRAND_BASE + 43,
 
-  // Next free slot: BUILTIN_BRAND_BASE + 43 (append only).
+  // Next free slot: BUILTIN_BRAND_BASE + 44 (append only).
 };
 
 /**

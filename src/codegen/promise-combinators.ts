@@ -10,11 +10,15 @@
 // settle helpers. It forks NOTHING — it composes the same primitives the native
 // `.then` machinery and the #2895 async drive layer already use.
 //
-// Scope (this slice): the **array-literal** argument form — `Promise.all([a, b])`
-// — which is the dominant test262 shape and statically gives the element count.
-// Non-literal iterables (`Promise.all(genericIterable)`) and the `allSettled` /
-// `any` combinators (which additionally need per-element status objects /
-// `AggregateError`) fall through to the existing host path and are follow-ups.
+// Scope: the **array-literal** argument form — `Promise.all([a, b])` — which is
+// the dominant test262 shape and statically gives the element count
+// (`emitStandalonePromiseCombinator`), plus (#2919 arm 1) the **array-TYPED**
+// non-literal form — `Promise.all(arrVar)` — which loops over the argument vec
+// at runtime (`emitStandalonePromiseCombinatorRuntime`). Non-array iterables
+// (`Promise.all(set)`, custom `[Symbol.iterator]`), not-iterable→reject, and
+// the `allSettled` / `any` combinators (which additionally need per-element
+// status objects / `AggregateError`) fall through to the existing host path
+// and are follow-ups (#2919 arms 2/3).
 //
 // **Inert until the widen.** Every emission site is gated on
 // `isStandalonePromiseActive(ctx)`, which is `ctx.wasi`-only today, so the
@@ -472,6 +476,176 @@ export function emitStandalonePromiseCombinator(
       fctx.body.push({ op: "call", funcIdx: ids.subscribeFuncIdx });
     }
   }
+
+  fctx.body.push({ op: "local.get", index: resultLocal });
+  fctx.body.push({ op: "extern.convert_any" });
+  return EXTERNREF;
+}
+
+/**
+ * (#2919 arm 1) Decide whether a compiled combinator argument is an
+ * EXTERNREF-backed array vec — the only shape the runtime-loop combinator can
+ * feed to `__combinator_subscribe` without boxing. Returns the vec + backing
+ * array type indices, or `null` for anything else (f64-backed `number[]` vecs
+ * — the documented Gap-4 output-representation escalation, see module header —
+ * `any`/externref values, strings, non-vec structs), which must keep the host
+ * fallthrough unchanged.
+ */
+export function resolveExternrefVecArg(
+  ctx: CodegenContext,
+  argType: ValType | null,
+): { vecTypeIdx: number; arrTypeIdx: number } | null {
+  if (!argType || (argType.kind !== "ref" && argType.kind !== "ref_null")) return null;
+  const vecTypeIdx = (argType as { typeIdx?: number }).typeIdx;
+  if (typeof vecTypeIdx !== "number" || vecTypeIdx < 0) return null;
+  // Require a genuine `__vec_*` struct (registered by getOrRegisterVecType) —
+  // field-shape sniffing alone could false-positive on an unrelated struct
+  // whose field 1 happens to reference an externref array.
+  const structName = ctx.typeIdxToStructName.get(vecTypeIdx);
+  if (!structName || !structName.startsWith("__vec_")) return null;
+  const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
+  if (arrTypeIdx < 0) return null;
+  const arrDef = ctx.mod.types[arrTypeIdx];
+  if (!arrDef || arrDef.kind !== "array" || arrDef.element.kind !== "externref") return null;
+  return { vecTypeIdx, arrTypeIdx };
+}
+
+/**
+ * (#2919 arm 1) Emit a native `Promise.all(arrVar)` / `Promise.race(arrVar)`
+ * over an ARRAY-TYPED (non-literal) argument: the runtime-count analogue of the
+ * compile-time-unrolled `emitStandalonePromiseCombinator`. The argument vec is
+ * already compiled and stored in `argVecLocal` (a `ref null <vecTypeIdx>`
+ * local whose shape was validated by {@link resolveExternrefVecArg}); this
+ * loops `i = 0 .. vec.length` feeding each element (externref, no boxing) to
+ * `__combinator_subscribe`.
+ *
+ * Everything is emitted inline into `fctx.body` — no detached buffer — so a
+ * later late-import funcIdx shift (e.g. from a trailing `.then` compile) is
+ * applied by the standard `ctx.currentFunc.body`/`savedBodies` walk, and the
+ * cached combinator ids are kept in lockstep by
+ * `shiftAsyncSideChannelFuncIdxs` (#2918).
+ *
+ * Leaves the aggregate result `$Promise` on the stack as externref.
+ */
+export function emitStandalonePromiseCombinatorRuntime(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  method: NativeCombinator,
+  argVecLocal: number,
+  argVecTypeIdx: number,
+  argArrTypeIdx: number,
+): ValType {
+  const ids = ensureCombinatorFunctions(ctx);
+  const rt = ensureAsyncDriveRuntime(ctx);
+
+  const resultLocal = allocLocal(fctx, `__comb_result_${fctx.locals.length}`, {
+    kind: "ref",
+    typeIdx: ids.promiseTypeIdx,
+  });
+  const arrLocal = allocLocal(fctx, `__comb_arr_${fctx.locals.length}`, {
+    kind: "ref",
+    typeIdx: ids.arrTypeIdx,
+  });
+  const stateLocal = allocLocal(fctx, `__comb_state_${fctx.locals.length}`, {
+    kind: "ref",
+    typeIdx: ids.stateTypeIdx,
+  });
+  const nLocal = allocLocal(fctx, `__comb_n_${fctx.locals.length}`, { kind: "i32" });
+  const iLocal = allocLocal(fctx, `__comb_i_${fctx.locals.length}`, { kind: "i32" });
+
+  // n = argVec.length — the vec's LOGICAL length (field 0), not the backing
+  // array's capacity (`array.len` over-reports after push growth).
+  fctx.body.push({ op: "local.get", index: argVecLocal });
+  fctx.body.push({ op: "ref.as_non_null" });
+  fctx.body.push({ op: "struct.get", typeIdx: argVecTypeIdx, fieldIdx: 0 } as Instr);
+  fctx.body.push({ op: "local.set", index: nLocal });
+
+  // Pending result promise.
+  fctx.body.push({ op: "i32.const", value: PROMISE_STATE_PENDING });
+  fctx.body.push({ op: "ref.null.extern" });
+  fctx.body.push({ op: "ref.null.extern" });
+  fctx.body.push({ op: "struct.new", typeIdx: ids.promiseTypeIdx } as Instr);
+  fctx.body.push({ op: "local.set", index: resultLocal });
+
+  // Backing results array sized n (only meaningful for `all`; `race` ignores it).
+  fctx.body.push({ op: "local.get", index: nLocal });
+  fctx.body.push({ op: "array.new_default", typeIdx: ids.arrTypeIdx } as Instr);
+  fctx.body.push({ op: "local.set", index: arrLocal });
+
+  // $CombinatorState{ resultPromise, resultsArr, length=n, remaining=n }.
+  fctx.body.push({ op: "local.get", index: resultLocal });
+  fctx.body.push({ op: "local.get", index: arrLocal });
+  fctx.body.push({ op: "local.get", index: nLocal });
+  fctx.body.push({ op: "local.get", index: nLocal });
+  fctx.body.push({ op: "struct.new", typeIdx: ids.stateTypeIdx } as Instr);
+  fctx.body.push({ op: "local.set", index: stateLocal });
+
+  // `Promise.all(<empty>)` fulfills immediately with the empty results vec;
+  // `Promise.race(<empty>)` stays pending forever (spec). The subscribe loop
+  // below runs zero iterations either way.
+  if (method === "all") {
+    fctx.body.push({ op: "local.get", index: nLocal });
+    fctx.body.push({ op: "i32.eqz" });
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: resultLocal },
+        { op: "i32.const", value: 0 },
+        { op: "local.get", index: arrLocal },
+        { op: "struct.new", typeIdx: ids.vecTypeIdx } as Instr,
+        { op: "extern.convert_any" },
+        { op: "call", funcIdx: rt.fulfillFuncIdx },
+        { op: "drop" },
+      ],
+    } as Instr);
+  }
+
+  // for (i = 0; i < n; i++) __combinator_subscribe(argVec.data[i], state, i,
+  //                                                fulfillFn, rejectFn)
+  // Subscribe never settles synchronously (already-settled inputs only ENQUEUE),
+  // so `remaining` stays == n through the whole loop — no mid-loop settle race.
+  const fulfillFn = method === "all" ? ids.allFulfillFuncIdx : ids.raceFulfillFuncIdx;
+  fctx.body.push({ op: "i32.const", value: 0 });
+  fctx.body.push({ op: "local.set", index: iLocal });
+  fctx.body.push({
+    op: "block",
+    blockType: { kind: "empty" },
+    body: [
+      {
+        op: "loop",
+        blockType: { kind: "empty" },
+        body: [
+          { op: "local.get", index: iLocal },
+          { op: "local.get", index: nLocal },
+          { op: "i32.ge_s" },
+          // depth 1: exit the enclosing block (skip the loop label).
+          { op: "br_if", depth: 1 },
+
+          // element: argVec.data[i] — externref, subscribe's input directly.
+          { op: "local.get", index: argVecLocal },
+          { op: "ref.as_non_null" },
+          { op: "struct.get", typeIdx: argVecTypeIdx, fieldIdx: 1 } as Instr,
+          { op: "local.get", index: iLocal },
+          { op: "array.get", typeIdx: argArrTypeIdx } as Instr,
+          { op: "local.get", index: stateLocal },
+          { op: "extern.convert_any" },
+          { op: "local.get", index: iLocal },
+          { op: "ref.func", funcIdx: fulfillFn } as Instr,
+          { op: "ref.func", funcIdx: ids.rejectFuncIdx } as Instr,
+          { op: "call", funcIdx: ids.subscribeFuncIdx },
+
+          // i++
+          { op: "local.get", index: iLocal },
+          { op: "i32.const", value: 1 },
+          { op: "i32.add" },
+          { op: "local.set", index: iLocal },
+          // depth 0: re-enter the loop label.
+          { op: "br", depth: 0 },
+        ],
+      },
+    ],
+  } as Instr);
 
   fctx.body.push({ op: "local.get", index: resultLocal });
   fctx.body.push({ op: "extern.convert_any" });
