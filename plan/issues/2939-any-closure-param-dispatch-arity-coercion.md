@@ -1,7 +1,9 @@
 ---
 id: 2939
 title: "codegen: dynamic dispatch of an any-typed closure param (fn(...)) must honor JS arity semantics + coerce arg kinds (blocks #2940, unblocks 468+ BigInt tests)"
-status: ready
+status: done
+completed: 2026-07-02
+assignee: ttraenkler/opus-10c
 sprint: current
 priority: high
 horizon: l
