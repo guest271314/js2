@@ -57,6 +57,11 @@ on:
         required: false
         default: ""
         type: string
+      ir_first:
+        description: "(#2947) Measurement lane for the #2138 IR-first inversion: export JS2WASM_IR_FIRST=1 into the shard env. NEVER promotes a baseline (promote-baseline is hard-skipped for ir_first runs) — the merged report artifact is the measurement output."
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -441,6 +446,13 @@ jobs:
       # retry (10/shard) and excluded from regression counts by diff-test262.
       # Dispatch input allows dropping back to 2 if flake rates spike.
       COMPILER_POOL_SIZE: ${{ inputs.compiler_pool_size || '3' }}
+      # (#2947) The #2138 IR-first measurement lane: '1' ONLY on a
+      # workflow_dispatch that opted in via the ir_first input; the empty
+      # string on every other event/run is falsy for the compiler's truthyEnv
+      # reader, so all default lanes stay byte-identical. The runner's compile
+      # workers inherit the job env, and results are never cached across runs,
+      # so a flag-on dispatch measures a full fresh compile of every test.
+      JS2WASM_IR_FIRST: ${{ github.event_name == 'workflow_dispatch' && inputs.ir_first && '1' || '' }}
       TEST262_INCLUDE_PROPOSALS: ${{ github.event_name != 'workflow_dispatch' && '1' || (inputs.include_proposals && '1' || '0') }}
       RUN_TIMESTAMP: ${{ github.run_id }}-${{ matrix.target.name }}-chunk${{ matrix.chunk }}
       TEST262_TARGET: ${{ matrix.target.test262_target }}
@@ -1383,7 +1395,12 @@ jobs:
           exit 1
 
   promote-baseline:
-    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.actor != 'github-actions[bot]'
+    # (#2947) `!(… && inputs.ir_first)` — an IR-first measurement dispatch
+    # (JS2WASM_IR_FIRST=1 in the shards) must NEVER promote its merged report:
+    # promoting a flagged run's pass-set would poison the regression baseline
+    # every PR gates against. The merged-report ARTIFACT is the measurement
+    # deliverable; the baseline stays owned by unflagged runs.
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.actor != 'github-actions[bot]' && !(github.event_name == 'workflow_dispatch' && inputs.ir_first)
     name: promote merged report to main baseline
     needs: merge-report
     runs-on: ubuntu-latest

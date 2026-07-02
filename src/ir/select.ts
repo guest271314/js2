@@ -56,6 +56,7 @@
 
 import { ts, forEachChild } from "../ts-api.js";
 
+import { binaryOpCapability, prefixOpCapability } from "./capability.js";
 import type { LatticeType, TypeMap } from "./propagate.js";
 
 /**
@@ -192,6 +193,16 @@ export interface IrSelection {
    *  paired with the rejection reason. Only populated when
    *  `IrSelectionOptions.trackFallbacks` is true. */
   readonly fallbacks?: ReadonlyArray<IrFallback>;
+  /** (#2138) Local call-graph edges (top-level FunctionDeclaration name →
+   *  set of top-level FunctionDeclaration callee names in the same source
+   *  file), exactly as computed by `buildLocalCallGraph` for the Step-2
+   *  closure. Exposed so the IR-first compile-once inversion
+   *  (`JS2WASM_IR_FIRST=1`) can decide which claimed functions are safe to
+   *  skip on the legacy body pass WITHOUT re-deriving the call graph.
+   *  Present only when Step 2 ran (i.e. at least one function was
+   *  individually claimed); callers must treat a missing map as "no edge
+   *  information" and behave conservatively. */
+  readonly localCallees?: ReadonlyMap<string, ReadonlySet<string>>;
 }
 
 export interface IrSelectionOptions {
@@ -475,13 +486,17 @@ export function planIrCompilation(
   const classMembers = individuallyClaimedClassMembers.size > 0 ? individuallyClaimedClassMembers : undefined;
 
   if (!trackFallbacks) {
-    return classMembers ? { funcs: claimed, classMembers } : { funcs: claimed };
+    return classMembers
+      ? { funcs: claimed, classMembers, localCallees: callees }
+      : { funcs: claimed, localCallees: callees };
   }
 
   const fallbacks: IrFallback[] = [];
   for (const [name, reason] of fallbackReasons) fallbacks.push({ name, reason, detail: fallbackDetails.get(name) });
   for (let i = 0; i < unnamedCount; i++) fallbacks.push({ name: `<unnamed:${i}>`, reason: "unnamed" });
-  return classMembers ? { funcs: claimed, classMembers, fallbacks } : { funcs: claimed, fallbacks };
+  return classMembers
+    ? { funcs: claimed, classMembers, fallbacks, localCallees: callees }
+    : { funcs: claimed, fallbacks, localCallees: callees };
 }
 
 // ---------------------------------------------------------------------------
@@ -1969,50 +1984,19 @@ function phase1MemberName(name: ts.PropertyName): string | null {
   return null;
 }
 
+// #2135 — the operator predicates consume the shared capability table
+// (`src/ir/capability.ts`), the SAME source `from-ast.ts`'s lowering dispatch
+// asserts against. "claim-partial" is selector-accepted (the builder owns the
+// documented residual fallback); "defer" is selector-rejected up-front. The
+// former slice-11 "shape-only acceptance" block (`%` / `**` / `in` /
+// `instanceof` accepted here while the lowerer threw) is retired: those ops
+// are table-deferred, so the claim can no longer disagree with the builder.
 function isPhase1PrefixOp(op: ts.PrefixUnaryOperator): boolean {
-  return op === ts.SyntaxKind.MinusToken || op === ts.SyntaxKind.PlusToken || op === ts.SyntaxKind.ExclamationToken;
+  return prefixOpCapability(op) !== "defer";
 }
 
 function isPhase1BinaryOp(op: ts.SyntaxKind): boolean {
-  switch (op) {
-    case ts.SyntaxKind.PlusToken:
-    case ts.SyntaxKind.MinusToken:
-    case ts.SyntaxKind.AsteriskToken:
-    case ts.SyntaxKind.SlashToken:
-    case ts.SyntaxKind.LessThanToken:
-    case ts.SyntaxKind.LessThanEqualsToken:
-    case ts.SyntaxKind.GreaterThanToken:
-    case ts.SyntaxKind.GreaterThanEqualsToken:
-    case ts.SyntaxKind.EqualsEqualsEqualsToken:
-    case ts.SyntaxKind.EqualsEqualsToken:
-    case ts.SyntaxKind.ExclamationEqualsEqualsToken:
-    case ts.SyntaxKind.ExclamationEqualsToken:
-    case ts.SyntaxKind.AmpersandAmpersandToken:
-    case ts.SyntaxKind.BarBarToken:
-      return true;
-    // Slice 11 (#1169n) — bitwise ops on f64 operands. JS ToInt32
-    // each operand, apply the i32 op, convert back to f64. Lowering
-    // emits this sequence inline using a per-function scratch local.
-    case ts.SyntaxKind.AmpersandToken:
-    case ts.SyntaxKind.BarToken:
-    case ts.SyntaxKind.CaretToken:
-    case ts.SyntaxKind.LessThanLessThanToken:
-    case ts.SyntaxKind.GreaterThanGreaterThanToken:
-    case ts.SyntaxKind.GreaterThanGreaterThanGreaterThanToken:
-      return true;
-    // Slice 11 (#1169n) — shape-only acceptance for ops the lowerer
-    // doesn't yet implement. Lowering throws cleanly so the function
-    // falls back to legacy via `safeSelection`. Listed individually
-    // so future slices can flip them on without touching the selector.
-    case ts.SyntaxKind.PercentToken: // % — needs JS-conformant fmod-style remainder
-    case ts.SyntaxKind.AsteriskAsteriskToken: // ** — needs Math.pow host call
-    case ts.SyntaxKind.QuestionQuestionToken: // ?? — needs nullable-LHS handling
-    case ts.SyntaxKind.InKeyword: // in — needs prototype-chain probe
-    case ts.SyntaxKind.InstanceOfKeyword: // instanceof — needs class-shape check
-      return true;
-    default:
-      return false;
-  }
+  return binaryOpCapability(op) !== "defer";
 }
 
 // ---------------------------------------------------------------------------

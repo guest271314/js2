@@ -527,3 +527,33 @@ Files touched: `scripts/prove-emit-identity.mjs` (new), `src/ir/types.ts`
 ## Residual (as of #2199, PO reconcile 2026-06-28)
 
 NOT done — multi-slice refactor. Slices 0 (proof harness, no behavior change) + 1 (foundation) landed. Slices 2-4 — the actual late-bind of func/global/type indices that retires the late-index-shift class, each byte-identity-provable — remain. Stays in-progress.
+
+### Slice 2 — resolver seam landed under #1916 S1 (dev-1916f, 2026-07-02)
+
+#1916 (symbolic function references — Fable-gated, unblocked when #2167
+resolved 2026-07-02) is the same migration for the function index space;
+its slices are being executed AGAINST THIS PLAN, not as a parallel
+mechanism — see the "Reconciliation with #2710 + staged plan" section in
+`plan/issues/1916-symbolic-function-references-codegen.md` for the
+mapping (#1916 S1/S2/S3 = this issue's slices 2/3/4b+4c; slice 4a globals
++ 4d types stay here as S4).
+
+Slice 2 as landed: `src/emit/resolve-layout.ts` (`ModuleLayout` +
+identity `resolveLayout`, with the flip preconditions documented in the
+header) is armed per-emit in `emitBinaryWithSourceMap` (same lifecycle as
+`valCtx`); every func/global reference serialization in `binary.ts`
+dereferences through `fIdx`/`gIdx`: `call`, `return_call`, `ref.func`,
+`global.{get,set}`, func/global export descriptors, element-segment
+function lists, `declaredFuncRefs`, start section. Exported encode
+helpers run unarmed (raw passthrough) for the object-emitter path —
+identical to historical behaviour. Type-index seams intentionally NOT
+wired yet (slice 4d; the module-scoped arming pattern means no exported
+signature needs to change when they are). Proof: byte-identical over
+1215 (file,target) records (992 real binaries; playground + 392-file
+test262 sample × {gc, standalone, wasi}); late-shift regression suites
+(329/1677/1809/1839/1899/2191/2193/2918) green.
+
+Claim note: this issue's git lock (`ttraenkler/sd-indexshift`,
+2026-06-26) is stale — no active agent, no open PR on
+`issue-2710-late-bind-handles`. Work continues under #1916's claim
+(`ttraenkler/dev-1916f`).

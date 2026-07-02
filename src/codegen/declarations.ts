@@ -2217,7 +2217,7 @@ export function collectEmptyObjectWidening(
           // Scan all following statements in the same block for property assignments
           collectPropsFromStatements(checker, ctx, stmts, varName, extraProps, seenProps);
 
-          // (#2584/#2849) If this var is ALSO the subject of any
+          // (#2584/#2849/#2944) If this var is ALSO the subject of any
           // `$Object`-hash-only consumer (bracket read/write, `in`, Object.keys
           // / values / entries / GOPD / GOPN / assign, for-in), a widened closed
           // struct would be invisible to that consumer (`o.a=7; o["a"]` → 0).
@@ -2225,18 +2225,21 @@ export function collectEmptyObjectWidening(
           // stays a `$Object`. Scan the whole enclosing statement list (the same
           // tree `collectPropsFromStatements` walks).
           //
-          // (#2849) This was ORIGINALLY `ctx.standalone`-gated on the assumption
-          // "host keeps the struct fast path via the live-mirror Proxy". That
-          // assumption is false for the for-in copy pattern
-          // (`o={}; for (k in d) o[k]=src[k]; … o.prop`): the dynamic-key writes
-          // `o[k]=` land in the sidecar, but a STATIC-named write `o.prop = c`
-          // anywhere (even an unreached branch) widens `prop` into a real struct
-          // field via `collectPropsFromStatements`, so the read `o.prop` lowers
-          // to `struct.get` of the empty field (0) — the Proxy never bridges the
-          // for-in-write→struct-read divergence. Applying the poison in host mode
-          // too keeps such objects on `$Object` so writes + reads share one
-          // representation. Vars with only static access are NOT poisoned, so the
-          // struct fast path (and its byte output) is unchanged.
+          // History: originally `ctx.standalone`-gated (#2584) on the assumption
+          // "host keeps the struct fast path via the live-mirror Proxy". #2849
+          // dropped the gate (the Proxy does NOT bridge the for-in-write →
+          // static-struct-read divergence, so host mis-read `getOptions`-shaped
+          // objects). That extension alone REGRESSED compiled-acorn to a uniform
+          // null-deref (#2937) because the poison was honored only at THIS
+          // widening decision, while in JS-mode sources the checker's EVOLVED
+          // type for the var still resolved to a colliding `__anon` struct at
+          // the local/receiver/return/field positions — so it was reverted
+          // (#2462). Re-landed here TOGETHER with the #2944 escape discipline:
+          // the poison branch below records the var's evolved checker type in
+          // `objectHashConsumerTypes`, and resolveWasmType / ensureStructForType
+          // / resolveStructName refuse struct resolution for it, keeping the
+          // value externref/host-MOP through every escape. Both constraints now
+          // hold: the #2849 host arms pass AND compiled-acorn parses.
           for (const s of stmts) {
             markObjectHashConsumers(s, varName, ctx.objectHashConsumerVars);
           }
@@ -2260,6 +2263,53 @@ export function collectEmptyObjectWidening(
           // above — the var stays a `$Object` so bracket/`in`/keys/GOPD see the
           // same representation the dot-writes land in.
           if (ctx.objectHashConsumerVars.has(varName)) {
+            // (#2937) Suppressing the widening pre-pass is NOT enough in a
+            // JS-mode source file: the checker EVOLVES `var o = {}` through its
+            // later static-named writes into an anonymous object type WITH
+            // those props, and `resolveWasmType`/`ensureStructForType` would
+            // independently register that evolved type as a closed `__anon_N`
+            // struct — typing the local (and the var's every flow position:
+            // returns, class fields, receivers) as `(ref null __anon_N)` while
+            // the poisoned initializer builds a host plain object. The
+            // declaration's guarded cast then stores ref.null and every static
+            // read null-derefs (the compiled-acorn `getOptions` uniform throw).
+            // Record the var's EVOLVED checker type so struct resolution
+            // refuses it and the var stays externref / host-MOP end to end.
+            //
+            // Scope guards keep everything else byte-identical:
+            //   - `!ctx.standalone`: standalone keeps its pre-existing codegen
+            //     byte-identical (its matching read-back gap for this shape is
+            //     tracked separately; see #2849's follow-up note).
+            //   - skip `any` (singleton type object shared by all any-typed
+            //     vars — same hazard as the anonTypeMap guard below).
+            //   - a 0-props (TS-mode, non-evolved `{}`) type is added ONLY when
+            //     its provenance is THIS var's own initializer literal
+            //     (`symbol.declarations[0] === decl.initializer`). The widened
+            //     literal type is a fresh per-var instance (measured — two `{}`
+            //     vars get distinct instances), but the type of a `: {}`
+            //     ANNOTATION is an interned instance SHARED by every var so
+            //     annotated — poisoning it would demote unrelated vars. The
+            //     provenance check admits the safe per-var case and rejects the
+            //     shared one.
+            //
+            // (#2944 residual) The 0-props TS-mode case MUST be poisoned too —
+            // "already resolves to externref" does NOT hold for it: the
+            // signature pre-pass `ensureStructForType(returnType)` on a function
+            // that RETURNS the poisoned var registers the SAME 0-props ts.Type
+            // as an EMPTY anon struct ("empty objects get an empty struct"), so
+            // the local/return/field slots type `(ref null $__anon_N)`, the `{}`
+            // host `$Object` fails the decl-init cast, and the var is null from
+            // the first instruction — the acorn `Parser`/`getOptions` escape
+            // shape in TS-mode typing (tests/issue-2944.test.ts).
+            if (!ctx.standalone) {
+              const vt = checker.getTypeAtLocation(decl.name);
+              if (
+                !(vt.flags & ts.TypeFlags.Any) &&
+                (vt.getProperties().length > 0 || vt.symbol?.declarations?.[0] === decl.initializer)
+              ) {
+                ctx.objectHashConsumerTypes.add(vt);
+              }
+            }
             continue;
           }
 
@@ -4390,7 +4440,28 @@ export function collectObjectType(ctx: CodegenContext, name: string, type: ts.Ty
 }
 
 /** Compile all function bodies (including class constructors and methods) */
-export function compileDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFile): void {
+/**
+ * Third pass — compile function bodies into the slots pre-allocated by
+ * `collectDeclarations`.
+ *
+ * (#2138) `skipBodies` — IR-first compile-once inversion, ONLY passed when
+ * `JS2WASM_IR_FIRST=1`: top-level FunctionDeclarations named in the set get
+ * an `unreachable` placeholder body instead of a legacy compile (the IR
+ * overlay overwrites the slot afterwards, so each claimed function is
+ * compiled ONCE). The funcIdx/typeIdx slot itself is untouched — this is a
+ * body-emission change, never an index-layout change. Skipped functions are
+ * deliberately NOT registered as inlinable (callers must emit a real `call`
+ * to the slot; inlining the placeholder — or a legacy body that will be
+ * discarded — would defeat the inversion). Returns the names actually
+ * skipped (undefined when `skipBodies` is not passed — the default path
+ * allocates nothing).
+ */
+export function compileDeclarations(
+  ctx: CodegenContext,
+  sourceFile: ts.SourceFile,
+  skipBodies?: ReadonlySet<string>,
+): string[] | undefined {
+  const skippedNames: string[] | undefined = skipBodies ? [] : undefined;
   // Build a map from function name → index within ctx.mod.functions
   const funcByName = new Map<string, number>();
   for (let i = 0; i < ctx.mod.functions.length; i++) {
@@ -4715,6 +4786,17 @@ export function compileDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
         const idx = funcByName.get(fnName);
         if (idx !== undefined) {
           const func = ctx.mod.functions[idx]!;
+          // (#2138) IR-first: skip legacy body emission — the IR overlay owns
+          // this slot. Emit an `unreachable` placeholder so the module stays
+          // structurally valid between the passes; `generateModule` promotes
+          // any IR failure on a skipped function to a hard compile error, so
+          // the placeholder can never ship. Do NOT register as inlinable
+          // (see the function doc comment).
+          if (skipBodies?.has(fnName)) {
+            func.body = [{ op: "unreachable" }];
+            skippedNames!.push(fnName);
+            continue;
+          }
           try {
             compileFunctionBody(ctx, stmt, func);
             registerInlinableFunction(ctx, fnName, func);
@@ -4875,6 +4957,10 @@ export function compileDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
     // `deferTopLevelInit` (#2796) the JS host calls the exported `__module_init`
     // directly after `setExports`.
   }
+
+  // (#2138) Names whose legacy body was skipped under IR-first; undefined on
+  // the default (no-skip) path.
+  return skippedNames;
 }
 
 /**

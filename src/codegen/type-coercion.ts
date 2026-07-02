@@ -16,7 +16,14 @@ import { ensureAnyToStringHelper, stringConstantExternrefInstrs } from "./native
 import { emitNativeNumberFormat } from "./number-format-native.js";
 import { addStringConstantGlobal } from "./registry/imports.js";
 import { addFuncType, getArrTypeIdxFromVec } from "./registry/types.js";
-import { ensureLateImport, flushLateImportShifts, materializeStructAsObject, registerCoerceType } from "./shared.js";
+import {
+  elemGetOp,
+  ensureLateImport,
+  flushLateImportShifts,
+  materializeStructAsObject,
+  registerCoerceType,
+  unpackedElemType,
+} from "./shared.js";
 
 /**
  * Emit a guarded ref.cast: use ref.test to check if the cast will succeed.
@@ -736,6 +743,15 @@ function buildTupleFromExternref(
       { op: "local.set", index: lenLocal } as Instr,
     ];
 
+    // (#2934) Packed i8/i16 vec elements (byte/short typed arrays) read with
+    // `array.get_u`/`get_s` and live on the stack widened to i32 — a plain
+    // `array.get` on a packed array and a packed `if` result type are both
+    // invalid Wasm. This chain tests every vec type at runtime (the shared
+    // i8_byte vec serves Int8Array AND Uint8Array), so no view name exists
+    // here — use the storage-kind heuristic for the read op.
+    const readType = unpackedElemType(elemType);
+    const readOp = elemGetOp(elemType, undefined);
+
     // For each tuple field, bounds-checked read from the vec
     for (let i = 0; i < tupleFields.length; i++) {
       const fieldType = tupleFields[i]!;
@@ -744,10 +760,10 @@ function buildTupleFromExternref(
       const readInstrs: Instr[] = [
         { op: "local.get", index: dataLocal } as Instr,
         { op: "i32.const", value: i } as Instr,
-        { op: "array.get", typeIdx: arrTypeIdx } as Instr,
+        { op: readOp, typeIdx: arrTypeIdx } as Instr,
       ];
 
-      const defaultInstrs: Instr[] = defaultValueInstrs(elemType);
+      const defaultInstrs: Instr[] = defaultValueInstrs(readType);
 
       thenInstrs.push(
         { op: "i32.const", value: i } as Instr,
@@ -755,44 +771,54 @@ function buildTupleFromExternref(
         { op: "i32.lt_u" } as Instr,
         {
           op: "if",
-          blockType: { kind: "val" as const, type: elemType },
+          blockType: { kind: "val" as const, type: readType },
           then: readInstrs,
           else: defaultInstrs,
         } as Instr,
       );
 
+      // (#2934) A packed element arrives as the widened i32; lift it to f64 (a
+      // JS number) so the generic coercion arms below (which only know
+      // f64/externref/ref) apply. `convert_i32_s` is correct for both
+      // signednesses — get_u/get_s already produced the small-range i32.
+      let effElemType = elemType;
+      if (readType.kind === "i32" && elemType.kind !== "i32") {
+        thenInstrs.push({ op: "f64.convert_i32_s" } as Instr);
+        effElemType = { kind: "f64" };
+      }
+
       // Coerce element type to tuple field type if needed
       if (
-        elemType.kind !== fieldType.kind ||
-        ((elemType.kind === "ref" || elemType.kind === "ref_null") &&
+        effElemType.kind !== fieldType.kind ||
+        ((effElemType.kind === "ref" || effElemType.kind === "ref_null") &&
           (fieldType.kind === "ref" || fieldType.kind === "ref_null") &&
-          (elemType as { typeIdx: number }).typeIdx !== (fieldType as { typeIdx: number }).typeIdx)
+          (effElemType as { typeIdx: number }).typeIdx !== (fieldType as { typeIdx: number }).typeIdx)
       ) {
         // Ensure __box_number / __unbox_number are imported before use (#822)
         if (
-          (elemType.kind === "f64" && fieldType.kind === "externref") ||
-          (elemType.kind === "externref" && fieldType.kind === "f64")
+          (effElemType.kind === "f64" && fieldType.kind === "externref") ||
+          (effElemType.kind === "externref" && fieldType.kind === "f64")
         ) {
           addUnionImports(ctx);
         }
         // Inline coercion: most common case is f64 → externref (box) or externref → f64 (unbox)
-        if (elemType.kind === "f64" && fieldType.kind === "externref") {
+        if (effElemType.kind === "f64" && fieldType.kind === "externref") {
           const boxIdx = ctx.funcMap.get("__box_number");
           if (boxIdx !== undefined) {
             thenInstrs.push({ op: "call", funcIdx: boxIdx } as Instr);
           }
-        } else if (elemType.kind === "externref" && fieldType.kind === "f64") {
+        } else if (effElemType.kind === "externref" && fieldType.kind === "f64") {
           const unboxIdx = ctx.funcMap.get("__unbox_number");
           if (unboxIdx !== undefined) {
             thenInstrs.push({ op: "call", funcIdx: unboxIdx } as Instr);
           }
-        } else if (elemType.kind === "f64" && fieldType.kind === "f64") {
+        } else if (effElemType.kind === "f64" && fieldType.kind === "f64") {
           // same type, no coercion needed
-        } else if (elemType.kind === "externref" && fieldType.kind === "externref") {
+        } else if (effElemType.kind === "externref" && fieldType.kind === "externref") {
           // same type, no coercion needed
-        } else if ((elemType.kind === "ref" || elemType.kind === "ref_null") && fieldType.kind === "externref") {
+        } else if ((effElemType.kind === "ref" || effElemType.kind === "ref_null") && fieldType.kind === "externref") {
           thenInstrs.push({ op: "extern.convert_any" } as Instr);
-        } else if (elemType.kind === "externref" && (fieldType.kind === "ref" || fieldType.kind === "ref_null")) {
+        } else if (effElemType.kind === "externref" && (fieldType.kind === "ref" || fieldType.kind === "ref_null")) {
           const toRefIdx = (fieldType as { typeIdx: number }).typeIdx;
           thenInstrs.push({ op: "any.convert_extern" } as Instr, { op: "ref.cast_null", typeIdx: toRefIdx } as Instr);
         }
@@ -975,6 +1001,13 @@ function emitVecToTupleBody(
   fctx.body.push({ op: "struct.get", typeIdx: fromTypeIdx, fieldIdx: 0 });
   fctx.body.push({ op: "local.set", index: lenLocal });
 
+  // (#2934) Packed i8/i16 vec elements read with `array.get_u`/`get_s` and
+  // arrive on the stack widened to i32 — a plain `array.get` on a packed array
+  // and a packed `if` result type are both invalid Wasm. No view name is
+  // available on this generic coercion path, so use the storage-kind heuristic.
+  const readType = unpackedElemType(elemType);
+  const readOp = elemGetOp(elemType, undefined);
+
   // For each tuple field, read from the vec's data array with bounds check and coerce
   for (let i = 0; i < tupleFields.length; i++) {
     const fieldType = tupleFields[i]!;
@@ -987,22 +1020,23 @@ function emitVecToTupleBody(
     const thenInstrs: Instr[] = [
       { op: "local.get", index: dataLocal } as Instr,
       { op: "i32.const", value: i } as Instr,
-      { op: "array.get", typeIdx: arrTypeIdx } as Instr,
+      { op: readOp, typeIdx: arrTypeIdx } as Instr,
     ];
-    const elseInstrs: Instr[] = defaultValueInstrs(elemType);
+    const elseInstrs: Instr[] = defaultValueInstrs(readType);
 
     fctx.body.push({
       op: "if",
-      blockType: { kind: "val" as const, type: elemType },
+      blockType: { kind: "val" as const, type: readType },
       then: thenInstrs,
       else: elseInstrs,
     } as Instr);
 
-    // Coerce the vec element type to the tuple field type if needed
-    if (elemType.kind !== fieldType.kind) {
-      coerceType(ctx, fctx, elemType, fieldType);
+    // Coerce the READ value's type (widened i32 for packed elements, #2934) to
+    // the tuple field type if needed
+    if (readType.kind !== fieldType.kind) {
+      coerceType(ctx, fctx, readType, fieldType);
     } else if (
-      (elemType.kind === "ref" || elemType.kind === "ref_null") &&
+      (readType.kind === "ref" || readType.kind === "ref_null") &&
       (fieldType.kind === "ref" || fieldType.kind === "ref_null")
     ) {
       const fromRefIdx = (elemType as { typeIdx: number }).typeIdx;

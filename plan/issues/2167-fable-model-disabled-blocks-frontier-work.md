@@ -1,10 +1,11 @@
 ---
 id: 2167
 title: "Fable model disabled — frontier-reasoning work blocked"
-status: blocked
+status: done
+completed: 2026-07-02
 sprint: current
 created: 2026-06-15
-updated: 2026-06-24
+updated: 2026-07-02
 priority: high
 feasibility: external
 reasoning_effort: low
@@ -56,6 +57,23 @@ Issues judged **Opus-doable** and intentionally NOT blocked: #1712, #1917
 Close (`done`) when Fable access is restored; at that point the dependent
 issues unblock (`blocked_by` cleared, `status` → `ready`) and route back to
 `model: fable` dispatch. Until then they stay parked — no Opus attempt.
+
+### RESOLVED — Fable re-enabled 2026-07-02
+
+**Fable access is restored.** Evidence: this very dispatch — the tech lead
+spawned `dev-2138f` (a `claude-fable-5` senior-developer) on 2026-07-02 to
+implement #2138 (IR-first compile-once inversion), the keystone issue on
+this blocker's list, and the implementation PR landed with this status
+change. The gate this issue represented no longer exists.
+
+**Dependent-issue unblocking**: #2138 flips to `in-progress` in the same PR
+(dev-2138f holds the claim lock). The remaining `blocked_by: 2167` issues
+(#1916, #1930, #1985, #2044, #2134, #2135, #2140, #2141, #2039) should be
+flipped `blocked → ready` by the PO/lead at dispatch time — deliberately NOT
+mass-flipped in the #2138 impl PR to keep its planning-file conflict surface
+minimal and to leave `model: fable` routing decisions with the lead. Per the
+recommended cluster order in #2138's plan, #2135 is the natural next Fable
+dispatch after #2138 Slice 2.
 
 ## Notes
 

@@ -15,6 +15,17 @@
 //   if (o.ecmaVersion === "latest") …            // static-named guard write
 //   else if (o.ecmaVersion == null) …
 //   else if (o.ecmaVersion >= 2015) o.ecmaVersion -= 2009;   // 2022 → 13
+//
+// History (#2937/#2462/#2944): the #2849 host extension alone regressed
+// compiled-acorn to a uniform null-deref (#2937) — in JS-mode sources the
+// poisoned value ESCAPES into struct-typed slots (return / `this.options`
+// field) that the widening-decision poison never re-typed. It was reverted
+// (#2462, owner admin-merge) and these host arms were `it.fails`-pinned. The
+// re-land ships the poison TOGETHER with the #2944 escape discipline
+// (`objectHashConsumerTypes` — the evolved checker type of a poisoned var
+// refuses struct resolution everywhere), so BOTH constraints hold: these arms
+// pass again AND compiled-acorn parses (guarded by tests/issue-2937.test.ts +
+// the dogfood corpus).
 
 import { describe, it, expect } from "vitest";
 import { compile } from "../src/index.js";
