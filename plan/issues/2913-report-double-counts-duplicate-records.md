@@ -77,3 +77,28 @@ slightly wrong and can drift run-to-run.
 - A merged JSONL with N distinct files produces a report whose
   `summary.total === N_official`; duplicate rows never double-count.
 - No same-file duplicate rows emitted by the runner for the retry path.
+
+## Implementation status (2026-07-02, dev-callback — handoff to dev-f1)
+
+**Fix Direction 1 (defensive dedup) — DONE + verified on branch
+`issue-2913-report-dedup`:**
+- `scripts/build-test262-report.mjs`: streaming pass now collects one row per
+  `record.file` into a Map with a deterministic WORST-status precedence
+  (`compile_error > fail > timeout/crash > pass > skip`), then counts the deduped
+  set; prints `#2913: dropped N duplicate row(s); counting M distinct file(s)`.
+- `scripts/generate-editions.ts`: same file-keyed worst-status dedup before
+  bucketing. Verified against the committed baseline: **48142 → 48088 distinct,
+  dropped 54** — exactly the documented duplicate set.
+- Regression test `tests/issue-2913-report-dedup.test.ts` (3 cases: worst-status
+  on disagreeing dups, order-independence, no-dup passthrough) — green. Report
+  builder verified on a synthetic fixture (5 rows → total 3, worst-status wins).
+- Byte-safe: only affects duplicate-row counting; a no-dup input is unchanged.
+
+**Fix Direction 2 (source of the duplicate WRITE) — NOT done, now NON-URGENT
+follow-up.** With the report deduping, the counts are correct/deterministic
+regardless of source. The 54 dups are all `language/module-code`, disagreeing
+`compile_error` vs `fail` — the signature of a negative-module test recording
+across two handlers (`tests/test262-shared.ts` negative-module path ~L656-728 +
+the exec/catch path ~L779-798, which is #1221-guarded for FIXTURE but not the
+module-goal path). Deep runner-infra change; recommend a scoped follow-up so the
+JSONL itself carries one row per test (matters for baseline promotion hygiene).
