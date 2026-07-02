@@ -1,7 +1,8 @@
 ---
 id: 2940
 title: "standalone: __make_callback sole-leak is the harness-wrapper vacuous pass — gated on dynamic-closure-dispatch arity/type tolerance (sub-front 4 of #2903 yields 0)"
-status: blocked
+status: done
+completed: 2026-07-02
 sprint: current
 priority: high
 feasibility: hard
@@ -10,7 +11,7 @@ task_type: research+bugfix
 area: codegen
 language_feature: closures, dynamic-dispatch, typed-arrays, test262-harness
 goal: host-independence
-assignee: ttraenkler/dev-callback
+assignee: ttraenkler/dev-f1
 related: [2939, 2903, 2879, 2075]
 blocked_on: "#2939 (formerly #2923; arity half landed via PR #2441): dynamic dispatch of `fn(...)` on an any-typed closure param must tolerate arity mismatch + coerce arg type-kinds (calls-closures.ts) — otherwise removing the import yields DISHONEST vacuous host-free passes"
 created: 2026-07-02
@@ -137,3 +138,60 @@ Blocked pending the dynamic-dispatch fix (part 2). Genuine-flip yield with a
 bounded fix = 0 (< the 200 build-gate). Analysis delivered; claim released;
 recommend spinning part (2) as its own scoped codegen issue (broad value beyond
 this leak). Import-gate hypothesis disproven; sub-front 4 disproven.
+
+---
+
+## Resolution (dev-f1, 2026-07-02) — vacuity scorer (PR1) + dynamic-dispatch fix (PR2)
+
+The metric-safety caveat above is now ENFORCED IN THE RUNNER, and the
+dynamic-dispatch fix (part 2 / #2939) is built. Delivered as two sequenced PRs.
+
+### PR1 — runner vacuity scorer (this issue) — the integrity correction
+
+**Mechanism (runner-only, no codegen change):** the preamble adds a
+`__harness_cb_expected` sentinel that the `testWith*Constructors` wrappers bump
+per callback invocation they attempt; `test()` returns a distinct `-262` when a
+would-be-pass had an invoked harness wrapper but ZERO counted asserts (the
+callback was dead). That is scored `status: fail` + `vacuous: true` marker so
+`host_free_pass` / the standalone floor structurally EXCLUDE it (a dead callback
+is not a pass — the durable vacuity rule, now enforced not just documented).
+Wired through all three exec paths (`runTest262File`, the compiler-pool worker,
+the fixture path) + a `build-test262-report` counter. Chose `fail`+marker over a
+new status enum (206 status-consumers → too much blast radius for a one-way-door
+change). Also ships the BigInt-TA runner shim (`testWithBigIntTypedArrayConstructors`
+
+- passthrough `makeCtorArg`, fixed `needsTestBigIntTypedArray` regex) so the
+  BigInt wrappers are invocable and thus measurable.
+
+**Integrity correction (measured, all 1,612 harness-invoking files, standalone):**
+**1,433** tests reclassify pass → vacuous-fail — **1,421** in
+`built-ins/TypedArray{,Constructors}` (696 BigInt-variant + 725 non-BigInt) +
+**12** in outside-dir harness-invokers (`built-ins/Array/*/callbackfn-resize-arraybuffer.js`).
+`host_free_pass` **17,802 → 16,369**. CE rate unchanged (~3.5%, pre-existing
+BigInt unsupported-feature CEs — the shim adds none). ZERO non-vacuous pass→fail
+collateral (the `__assert_count === 1` guard never flags a test that ran any
+real assertion). The committed standalone high-water mark is re-seeded to
+`host_free_pass: 16369` (the floor asserts-then-raises and never auto-lowers, so
+a deliberate downward correction is committed; post-merge `promote-baseline
+--update` raises it to the true CI number). The #1897 standalone regression guard
+(external baseline JSONL) bot-parks the merge_group as the expected −1,433
+signature; the shepherd verifies the delta is EXACTLY this set (zero collateral)
+and force-promotes once.
+
+### PR2 — dynamic closure-dispatch fix (#2939)
+
+The nested-scope root cause: a callback function-expression defined INSIDE
+another function (the runner's `export function test()` wrap) registered its
+funcref-wrapper type only lazily at its later-compiled value site, so the
+higher-order body's `fn(...)` dispatch saw ZERO candidates and dropped the call.
+Fix: `computeClosureWrapperSig` extraction + pre-registering the identical
+wrapper type for inner-scope callbacks (restricted to the all-externref harness
+shape — which also fixed 5 invalid-Wasm CEs from over-arity numeric-param
+candidates). Standalone-gated; gc byte-identical. With PR1's scorer already in
+place, PR2's vacuous→executing conversions can only move `host_free_pass` UP
+(genuine passes gained; honest fails stay excluded either way).
+
+**Sub-front-4 conclusion stands:** the win was never a HOF-body flip — it was
+(a) making the dead callbacks EXECUTE (PR2) and (b) scoring the still-dead ones
+honestly (PR1). The final honest `host_free_pass` + gap are reported once both
+land.
