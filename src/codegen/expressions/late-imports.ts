@@ -439,6 +439,31 @@ export function ensureLateImport(
   refuseStandaloneToPrimitive(ctx, name);
   // Record importsBefore on the FIRST deferred addition in this batch
   if (ctx.pendingLateImportShift === null) {
+    // (#2930) Settle any un-reconciled RAW-import drift BEFORE opening a
+    // deferred batch. Raw `addImport` additions (the finalize regime — e.g.
+    // `__make_callback` in finalizeUnifiedCollector) leave every defined-func
+    // reference baked under `nativeStrHelperImportBase` stale-low, with the
+    // repair deferred to `reconcileNativeStrFinalizeShift`. If a deferred batch
+    // opens while that repair is still pending, the two shift regimes mix
+    // irrecoverably: the batch flush (a) shifts only refs >= importsBefore —
+    // missing base-regime refs whose stale value sits BELOW the raw imports'
+    // insertion point (e.g. `__str_flatten`'s baked `call __str_copy_tree` at
+    // index 0) — and (b) re-bases `nativeStrHelperImportBase` (#1903),
+    // permanently CANCELLING the pending raw repair. The baked call then
+    // resolves to a host import (`__str_flatten call[1] expected externref,
+    // found i32` — the #2930 invalid-module blocker for #2933's no-yield native
+    // generators). Whether it fired depended on whether an interleaved pass like
+    // addUnionImportsAsNativeFuncs happened to run the reconcile in between —
+    // on main the hole is hit by a native-CANDIDATE generator that captures an
+    // outer local (candidate ⇒ the decl skips the `unionFound` trigger, so no
+    // union finalize reconcile; capture ⇒ sourceNeedsGeneratorHostImports still
+    // pulls the host gen-suite batch right after the raw `__make_callback`).
+    // Settling here puts every map/body on the current-numImportFuncs basis, so
+    // recording `importsBefore` below is consistent and the #1903 re-base is
+    // sound. No-op (added=0) unless a raw import actually landed since the last
+    // settle, and a hard no-op on the JS-host/GC path (base stays -1) — so
+    // gc/host and gap-free standalone output is byte-identical.
+    reconcileNativeStrFinalizeShift(ctx);
     ctx.pendingLateImportShift = { importsBefore: ctx.numImportFuncs };
   }
   const typeIdx = addFuncType(ctx, paramTypes, resultTypes);
