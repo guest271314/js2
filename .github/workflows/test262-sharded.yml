@@ -1256,6 +1256,17 @@ jobs:
           # #1954 — scoped PR runs: restrict the baseline to the scope or
           # every out-of-scope baseline pass reads as a pass→absent regression.
           TEST262_SCOPE: ${{ needs.changes.outputs.test262_scope }}
+          # TEMPORARY (#2920): intentional-drop budget for the maintainer-approved
+          # −439 negative-verdict tightening (strict compile-SUCCEEDED arm). The
+          # CI shard JSONL has no wasm_sha, so diff-test262 can't classify the
+          # byte-identical verdict-only flips as wasm-identical noise and counts
+          # them as real regressions here. This waives diff-test262's
+          # net/ratio/bucket gates when the wasm-change regression count is ≤ 500
+          # (a real regression > 500 still fails). Mirrors the #1668 200→500 raise
+          # in the merge-report guard above. REVERT to remove (set back to
+          # default 0) together with the #1668 restore — see the #2920 revert PR.
+          # Permanent fix: #2926 (emit wasm_sha in the shard JSONL).
+          INTENTIONAL_REGRESSION_BUDGET: "500"
         run: |
           BASELINE="benchmarks/results/test262-current.jsonl"
           if [ ! -f "$BASELINE" ]; then

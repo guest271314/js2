@@ -738,12 +738,32 @@ async function run(
     }
   }
 
+  // (#2920, TEMPORARY) Intentional-drop budget. A maintainer-approved
+  // conformance drop — an ORACLE/verdict tightening that flips N tests
+  // pass→fail with NO codegen change — would otherwise trip these gates,
+  // because the CI shard JSONL carries no `wasm_sha`, so a byte-identical
+  // verdict-only flip can't be classified as "wasm-identical noise" and counts
+  // as a real regression. When `INTENTIONAL_REGRESSION_BUDGET` is set and the
+  // wasm-change regression count is within it, waive the net/ratio/bucket gates
+  // for this run. Default 0 (no effect); the only setter is the merge_group
+  // regression-diff step in test262-sharded.yml, TEMPORARY, mirroring the #1668
+  // 200→500 raise. REVERT together with that (#2920 revert PR); a real
+  // regression > budget still fails. The permanent fix is #2926 (emit wasm_sha
+  // in the shard JSONL so the wasm-identical filter works in CI).
+  const intentionalBudget = Number(process.env.INTENTIONAL_REGRESSION_BUDGET ?? "0") || 0;
+  const withinIntentionalBudget = intentionalBudget > 0 && regressionsWasmChange <= intentionalBudget;
+  if (withinIntentionalBudget) {
+    console.log(
+      `=== INTENTIONAL-DROP WAIVER (#2920, TEMPORARY): ${regressionsWasmChange} wasm-change regressions ≤ budget ${intentionalBudget} — net/ratio/bucket gates waived for this run. ===`,
+    );
+  }
+
   // Exit code: non-zero when the change is a net negative using wasm-hash-filtered regressions.
   // Compile_timeout flaps (timing noise) and wasm-identical flips are excluded via
   // regressionsWasmChange. Gate: improvements.length - regressionsWasmChange < 0.
   const netPerTest = improvements.length - regressionsWasmChange;
   let gateFailed = false;
-  if (netPerTest < 0) {
+  if (!withinIntentionalBudget && netPerTest < 0) {
     console.log(
       `=== GATE FAIL: net_per_test ${netPerTest} < 0 (${improvements.length} improvements − ${regressionsWasmChange} regressions) ===`,
     );
@@ -754,14 +774,16 @@ async function run(
   // that previously lived only in the dev-self-merge skill text. Same
   // wasm-hash-filtered count the net gate uses (`noiseFiltered`), so
   // compile_timeout flaps and byte-identical flips never trip these either.
-  const thresholdFailures = evaluateRegressionThresholds({
-    improvements: improvements.length,
-    regressionsWasmChange,
-    regressedFiles: noiseFiltered.map((r) => r.file),
-  });
-  for (const reason of thresholdFailures) {
-    console.log(`=== GATE FAIL: ${reason} ===`);
-    gateFailed = true;
+  if (!withinIntentionalBudget) {
+    const thresholdFailures = evaluateRegressionThresholds({
+      improvements: improvements.length,
+      regressionsWasmChange,
+      regressedFiles: noiseFiltered.map((r) => r.file),
+    });
+    for (const reason of thresholdFailures) {
+      console.log(`=== GATE FAIL: ${reason} ===`);
+      gateFailed = true;
+    }
   }
 
   if (gateFailed) {

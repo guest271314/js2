@@ -83,14 +83,31 @@ score flips). The #2912 resolution assumed the drop could land via a maintainer
 So an intentional −439 needs a coordinated infra step beyond the issue's stated
 plan. **Lead decision (2026-07-02): Option A, executed in this PR.**
 
-- **(A) — CHOSEN & EXECUTED:** temporarily raise
-  `CATASTROPHIC_REGRESSION_THRESHOLD` **200 → 500** in
-  `.github/workflows/test262-sharded.yml` (with a loud TEMPORARY comment
-  referencing the revert). 439 < 500 lets the merged tree through its own
-  `merge_group` run; `promote-baseline` on push:main then re-seeds the honest
-  baseline. A **revert PR** restoring the threshold to 200 follows immediately
-  after this merges (the 500-window is kept as short as possible; the standalone
-  floor is left at its new honest value — it re-ratchets on its own).
+- **(A) — CHOSEN & EXECUTED:** three TEMPORARY, same-PR levers (all reverted
+  together in the #2920 revert PR), each with a loud comment referencing the
+  revert:
+  1. `.github/workflows/test262-sharded.yml`
+     `CATASTROPHIC_REGRESSION_THRESHOLD` **200 → 500** (the `#1668` guard inside
+     `merge shard reports`). 439 < 500 lets the merged tree through.
+  2. The `check for test262 regressions` job is a SEPARATE required gate
+     (deliberately does NOT need merge-report; self-builds the host JSONL and
+     diffs the fresh baselines-repo baseline via `diff-test262.ts`). It is NOT
+     covered by the `#1668` raise, and it bot-parked #2424 on the first
+     merge_group. Fix: a new `INTENTIONAL_REGRESSION_BUDGET` env in
+     `diff-test262.ts` (default 0 = no effect) that waives the net/ratio/bucket
+     gates when the wasm-change regression count is ≤ the budget; set to **500**
+     on the merge_group regression-diff step. A real regression > 500 still
+     fails (verified). Mirrors lever 1.
+  3. `benchmarks/results/test262-standalone-highwater.json` — see below.
+
+  After this merges, `promote-baseline` on push:main re-seeds the honest
+  baseline; the **revert PR** (restore `#1668` to 200, set the budget back to 0)
+  follows immediately, keeping the temporary-window as short as possible. The
+  standalone floor is left at its re-ratcheted honest value. NOTE: the standalone
+  `#1897` net-guard and `#2097` floor both PASSED on the first merge_group run
+  (the standalone flip count is within tolerance and the floor lower by 439 was
+  sufficient) — only the host `check for test262 regressions` gate needed lever 2.
+
 - **(B)** (deferred to a Backlog improvement issue) — emit `wasm_sha` in the CI
   shard JSONL so `diff-test262`'s wasm-identical-noise filter works in CI; that
   is the _permanent_ fix for this whole class of verdict-only landing, removing
