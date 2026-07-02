@@ -7,6 +7,7 @@
  */
 import { ts } from "../../ts-api.js";
 import type { WasmModule } from "../../ir/types.js";
+import { TsCheckerOracle } from "../../checker/oracle.js";
 import { getOrRegisterVecType, registerNativeStringTypes } from "../registry/types.js";
 import { nativeLiteralRegExpEngineConfig } from "../regexp-standalone.js";
 import { createFallbackCounts } from "../fallback-telemetry.js";
@@ -41,6 +42,12 @@ export function createCodegenContext(
   const ctx: CodegenContext = {
     mod,
     checker,
+    // (#1930) THE type-query boundary. New codegen code MUST prefer
+    // `ctx.oracle` over raw `ctx.checker` access — the oracle-ratchet CI gate
+    // (`pnpm run check:oracle-ratchet`) fails on any growth of direct checker
+    // usage under src/codegen/. Contract: registry-free, side-effect-free,
+    // memoized (see src/checker/oracle.ts and issue #1930's Design section).
+    oracle: new TsCheckerOracle(checker),
     funcMap: new Map(),
     structMap: new Map(),
     typeIdxToStructName: new Map(),
