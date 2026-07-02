@@ -82,6 +82,16 @@ export interface CodegenOptions {
    *  `__unbox_string` JS-host string imports. Used so the compiled module is
    *  runnable under pure-Wasm engines (wasmtime, wasmer) without a JS host. */
   standalone?: boolean;
+  /**
+   * (#2141 S1) Honest generic `any` boxing — the Stage-B regime flag. When ON,
+   * `boxToAny`'s externref arm routes through `__any_box_extern` (runtime
+   * classification → true `JsTag`) instead of the historical tag-5
+   * "box-the-externref" lie (#1888). Default OFF: byte-identical to the legacy
+   * regime (the honest helper is not even registered). Flips to default-on for
+   * standalone/wasi in slice S4 after the consumer migration (S2/S3) lands —
+   * see plan/issues/2141-tag5-abi-untangle-honest-boxing.md.
+   */
+  honestAnyBoxing?: boolean;
   /** (#2796) Diff-test-harness fidelity: in JS-host mode, export the top-level
    *  `__module_init` and do NOT run it via the wasm `start` section, so the host
    *  invokes it AFTER `setExports` (symmetric with the standalone `_start`
@@ -1835,6 +1845,10 @@ export interface CodegenContext {
    *  `__unbox_string`, `__str_from_mem`, `__str_to_mem`,
    *  `__str_extern_len`). Implies `nativeStrings === true`. */
   standalone: boolean;
+  /** (#2141 S1) Honest generic `any` boxing regime flag — see the
+   *  `CodegenOptions.honestAnyBoxing` doc. Default false (legacy tag-5
+   *  box-the-externref ABI, byte-identical). */
+  honestAnyBoxing: boolean;
   /** (#2796) Diff-test-harness fidelity: in JS-host mode, export the top-level
    *  `__module_init` and do NOT wire the wasm `start` section to it, so the host
    *  runs it after `setExports` (symmetric with the standalone `_start` model).

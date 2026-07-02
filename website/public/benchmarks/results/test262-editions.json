@@ -10,8 +10,8 @@
   },
   {
     "edition": "ES5",
-    "pass": 10119,
-    "fail": 2824,
+    "pass": 10122,
+    "fail": 2821,
     "ce": 132,
     "skip": 0,
     "total": 13075,
@@ -57,8 +57,8 @@
   },
   {
     "edition": "ES2015",
-    "pass": 11691,
-    "fail": 3524,
+    "pass": 11693,
+    "fail": 3522,
     "ce": 171,
     "skip": 0,
     "total": 15386,
@@ -2620,12 +2620,12 @@
   },
   {
     "edition": "ES2023",
-    "pass": 231,
-    "fail": 97,
+    "pass": 233,
+    "fail": 95,
     "ce": 6,
     "skip": 0,
     "total": 334,
-    "pct": 69,
+    "pct": 70,
     "features": [
       {
         "name": "change-array-by-copy",
@@ -2647,12 +2647,12 @@
       },
       {
         "name": "array-find-from-last",
-        "pass": 98,
-        "fail": 11,
+        "pass": 100,
+        "fail": 9,
         "ce": 0,
         "skip": 0,
         "total": 109,
-        "pct": 90
+        "pct": 92
       },
       {
         "name": "ShadowRealm",
