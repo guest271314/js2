@@ -13,7 +13,7 @@
 import { describe, expect, it } from "vitest";
 
 import { WasmGcEmitter } from "../src/ir/backend/wasmgc-emitter.js";
-import type { IrVecLowering } from "../src/ir/backend/handles.js";
+import type { IrRefCellLowering, IrVecLowering } from "../src/ir/backend/handles.js";
 import type { Instr } from "../src/ir/types.js";
 
 const emitter = new WasmGcEmitter();
@@ -115,5 +115,31 @@ describe("#1713 WasmGcEmitter — pass-through group byte-identity", () => {
       { op: "br", depth: 0 },
       { op: "br_if", depth: 1 },
     ]);
+  });
+});
+
+describe("#2953 WasmGcEmitter — ref-cell family byte-identity", () => {
+  // A representative ref-cell layout: a 1-field mutable struct { value: T }.
+  // The exact indices are arbitrary — the test asserts the emitter threads them
+  // through unchanged into the same struct.new/get/set shapes the inline
+  // refcell.new/get/set arms of lower.ts produced.
+  const cell: IrRefCellLowering = { typeIdx: 11, fieldIdx: 0 };
+
+  it("emitRefCellNew → struct.new $cell (value already on the stack)", () => {
+    const out: Instr[] = [];
+    emitter.emitRefCellNew(cell, out);
+    expect(out).toEqual([{ op: "struct.new", typeIdx: 11 }]);
+  });
+
+  it("emitRefCellGet → struct.get $cell $value", () => {
+    const out: Instr[] = [];
+    emitter.emitRefCellGet(cell, out);
+    expect(out).toEqual([{ op: "struct.get", typeIdx: 11, fieldIdx: 0 }]);
+  });
+
+  it("emitRefCellSet → struct.set $cell $value", () => {
+    const out: Instr[] = [];
+    emitter.emitRefCellSet(cell, out);
+    expect(out).toEqual([{ op: "struct.set", typeIdx: 11, fieldIdx: 0 }]);
   });
 });

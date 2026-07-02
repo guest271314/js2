@@ -1,7 +1,8 @@
 ---
 id: 2953
 title: "Close the BackendEmitter pushRaw gap: route unions/closures/refcells/coercions/null/funcref through the trait"
-status: ready
+status: in-progress
+assignee: ttraenkler/opus-1a
 sprint: current
 created: 2026-07-02
 updated: 2026-07-02
@@ -60,3 +61,23 @@ value/aggregate families.
 - Byte-identical output on the 233-file corpus; equivalence green.
 - `emitBox`/`emitUnbox`/`emitTagLoad`/`emitNull`/`emitFuncRef` + closure
   and refcell methods implemented on WasmGcEmitter with unit coverage.
+
+## Slice progress (one PR per family)
+
+- [x] **(a5) ref-cell family** — `emitRefCellNew`/`emitRefCellGet`/`emitRefCellSet`
+  promoted from declared-optional to REQUIRED on `BackendEmitter`, implemented
+  byte-identically on `WasmGcEmitter` (struct.new / struct.get / struct.set over
+  the cell's typeIdx/fieldIdx), stubbed (`notImplemented`/throw) on Linear +
+  Bytecode emitters, and the 3 `refcell.new/get/set` pushRaw sites in `lower.ts`
+  converted to trait calls. pushRaw in lower.ts: 77 → 74. Golden-Instr unit
+  coverage added (`tests/ir-backend-emitter.test.ts`); cross-backend + closure
+  runtime suites green. (opus-1a)
+- [ ] unions/boxing (`emitBox`/`emitUnbox`/`emitTagLoad`) — note the box arm
+  interleaves an emitter-synthesized tag const with the caller's value push by
+  field order; needs a small orchestration decision (tag const stays
+  emitter-owned for the backend-agnostic tag encoding).
+- [ ] closures (`emitClosureNew`/`emitClosureFuncGet`/`emitCaptureGet`)
+- [ ] coercions/null (`emitNull`/`emitToExternref`/`emitFromExternref`)
+- [ ] funcref (`emitFuncRef`)
+- [ ] Promise ops
+- [ ] ratchet: pushRaw count check + `// pushraw-ok(#issue)` justification tag
