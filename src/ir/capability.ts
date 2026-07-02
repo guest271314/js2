@@ -99,8 +99,15 @@ const BINARY_OP_CAPABILITY: ReadonlyMap<ts.SyntaxKind, IrOpCapability> = new Map
   [ts.SyntaxKind.LessThanLessThanToken, "claim"],
   [ts.SyntaxKind.GreaterThanGreaterThanToken, "claim"],
   [ts.SyntaxKind.GreaterThanGreaterThanGreaterThanToken, "claim"],
+  // `%` — lowered as a call to the Wasm-native exact-remainder helper
+  // (`__fmod`, #2056) — the SAME helper legacy's `emitModulo` calls, so IR
+  // and legacy agree bit-for-bit (incl. `x % 0` → NaN, `-0 % x` → -0,
+  // `Inf % x` → NaN, `x % Inf` → x, and large-quotient exactness where the
+  // naive `a - trunc(a/b)*b` formula collapses or overflows). f64 operands
+  // only; i32-typed / string operands demote via the type-resolution lane
+  // (legacy's i32 fast mode keeps `emitSafeI32Rem`). Claimed via #2945.
+  [ts.SyntaxKind.PercentToken, "claim"],
   // Deferred — no IR lowering exists. Selector rejects; builder asserts.
-  [ts.SyntaxKind.PercentToken, "defer"], // #2945 — needs JS-conformant fmod-style remainder
   [ts.SyntaxKind.AsteriskAsteriskToken, "defer"], // needs Math.pow-equivalent lowering
   [ts.SyntaxKind.InKeyword, "defer"], // needs property/prototype-chain probe
   [ts.SyntaxKind.InstanceOfKeyword, "defer"], // needs class-shape / brand check
