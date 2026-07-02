@@ -864,6 +864,8 @@ function runPipeline(input: PipelineInput): CompileResult {
   let mod;
   let capturedFallbackCounts: import("./index.js").CompileResult["fallbackCounts"];
   let capturedIrPostClaimErrors: import("./index.js").CompileResult["irPostClaimErrors"];
+  // (#2138) IR-first skip telemetry — populated only under JS2WASM_IR_FIRST=1.
+  let capturedIrFirstSkipped: import("./index.js").CompileResult["irFirstSkipped"];
   try {
     if (useLinear) {
       mod = multiAst
@@ -881,6 +883,9 @@ function runPipeline(input: PipelineInput): CompileResult {
       mod = result.module;
       capturedFallbackCounts = result.fallbackCounts;
       capturedIrPostClaimErrors = result.irPostClaimErrors;
+      capturedIrFirstSkipped = multiAst
+        ? undefined // generateMultiModule has no IR overlay yet — the #2138 multi seam is a follow-on slice
+        : (result as ReturnType<typeof generateModule>).irFirstSkipped;
       // Propagate codegen errors with source locations. #1921 — a deliberate
       // "degrade" diagnostic is surfaced as a non-fatal "warning"; the fatal
       // decision is made by isFatalCodegenDiagnostic on the raw severity.
@@ -1001,6 +1006,7 @@ function runPipeline(input: PipelineInput): CompileResult {
     exportSignatures: mod.exportSignatures,
     fallbackCounts: capturedFallbackCounts,
     irPostClaimErrors: capturedIrPostClaimErrors,
+    irFirstSkipped: capturedIrFirstSkipped,
   };
 }
 

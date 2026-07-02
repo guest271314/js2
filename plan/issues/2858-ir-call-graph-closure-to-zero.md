@@ -4,8 +4,8 @@ title: "IR: drive call-graph-closure fallback bucket to zero (derivative of body
 status: ready
 sprint: current
 created: 2026-06-30
-updated: 2026-06-30
-priority: low
+updated: 2026-07-02
+priority: high
 horizon: m
 feasibility: medium
 reasoning_effort: high
