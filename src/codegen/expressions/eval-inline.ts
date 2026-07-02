@@ -187,13 +187,17 @@ function allNodesInlineSupported(node: ts.Node): boolean {
   const visit = (n: ts.Node): void => {
     if (!ok) return;
     switch (n.kind) {
-      case ts.SyntaxKind.FunctionDeclaration:
+      // (#2923) Still bail — these need checker bindings the foreign
+      // `ts.createSourceFile` lacks, and their codegen THROWS on a binding-less
+      // node (an internal error that would fail the whole compile, worse than a
+      // clean fall-through to the dynamic path):
+      //   - function/arrow EXPRESSIONS + class declarations/expressions resolve
+      //     their signature/heritage via the checker (`Cannot read 'escapedName'`).
+      //   - yield/await/import/export are out of scope for a Script eval body.
       case ts.SyntaxKind.FunctionExpression:
       case ts.SyntaxKind.ArrowFunction:
       case ts.SyntaxKind.ClassDeclaration:
       case ts.SyntaxKind.ClassExpression:
-      case ts.SyntaxKind.ForOfStatement:
-      case ts.SyntaxKind.ForInStatement:
       case ts.SyntaxKind.YieldExpression:
       case ts.SyntaxKind.AwaitExpression:
       case ts.SyntaxKind.ImportDeclaration:
@@ -201,10 +205,62 @@ function allNodesInlineSupported(node: ts.Node): boolean {
       case ts.SyntaxKind.ExportAssignment:
         ok = false;
         return;
+      // (#2923) `for-of` / `for-in` are liftable ONLY when the iterable is a
+      // literal whose iteration needs no checker-resolved iterator type — an
+      // array/string literal (for-of) or an object/array literal (for-in). A
+      // general iterable (a Map/Set/user iterator, or a bare identifier whose
+      // type the foreign SourceFile can't resolve) keeps bailing to the dynamic
+      // path. When the iterable IS a literal we fall through to recurse into the
+      // loop body (which may itself contain a bail node).
+      case ts.SyntaxKind.ForOfStatement: {
+        if (!isLiftableForOfIterable((n as ts.ForOfStatement).expression)) {
+          ok = false;
+          return;
+        }
+        n.forEachChild(visit);
+        return;
+      }
+      case ts.SyntaxKind.ForInStatement: {
+        if (!isLiftableForInIterable((n as ts.ForInStatement).expression)) {
+          ok = false;
+          return;
+        }
+        n.forEachChild(visit);
+        return;
+      }
+      // FunctionDeclaration falls through to `default` → hoisted +
+      // signature-tolerant (see compileNestedFunctionDeclaration, #2923). Nested
+      // bail nodes inside its body are still caught by the recursion.
       default:
         n.forEachChild(visit);
     }
   };
   node.forEachChild(visit);
   return ok;
+}
+
+/** Unwrap parens to the underlying expression. */
+function unwrapParens(e: ts.Expression): ts.Expression {
+  let x = e;
+  while (ts.isParenthesizedExpression(x)) x = x.expression;
+  return x;
+}
+
+/**
+ * (#2923) A `for-of` iterable is liftable in a foreign eval body when it is an
+ * array literal or a string literal — their iteration lowers with no
+ * checker-resolved iterator type.
+ */
+function isLiftableForOfIterable(expr: ts.Expression): boolean {
+  const e = unwrapParens(expr);
+  return ts.isArrayLiteralExpression(e) || ts.isStringLiteral(e) || ts.isNoSubstitutionTemplateLiteral(e);
+}
+
+/**
+ * (#2923) A `for-in` iterable is liftable when it is an object or array literal
+ * — enumeration walks the literal's own keys / indices without a resolved type.
+ */
+function isLiftableForInIterable(expr: ts.Expression): boolean {
+  const e = unwrapParens(expr);
+  return ts.isObjectLiteralExpression(e) || ts.isArrayLiteralExpression(e);
 }

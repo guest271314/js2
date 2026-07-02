@@ -1,0 +1,155 @@
+// Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
+// #2923 — broaden the constant-string `eval` compile-away (slice A of the
+// runtime-eval roadmap, docs/architecture/runtime-eval-interpreter.md §6-A).
+//
+// `tryStaticEvalInline` (#1163) splices a constant `eval("<literal>")` body
+// inline at compile time. It previously BAILED the moment the body contained a
+// function declaration, function/arrow expression, class, or for-of/for-in —
+// falling through to the dynamic `__extern_eval` host import, which TRAPS at
+// instantiation in standalone mode. This slice lifts the SAFELY-liftable kinds:
+//
+//   - function DECLARATIONS (hoisted; signature-tolerant for the foreign,
+//     checker-binding-less eval SourceFile — params/return degrade to externref),
+//   - for-of over an array/string LITERAL and for-in over an object/array literal.
+//
+// Function/arrow EXPRESSIONS and CLASSES keep bailing (their codegen dereferences
+// a checker signature/heritage the foreign SourceFile lacks and would THROW an
+// internal error — worse than a clean fall-through). They fall to the dynamic
+// path (host eval; the Tier-2 interpreter #2928 handles them standalone later).
+//
+// Pure AOT — no host imports in the lifted standalone modules.
+import { describe, it, expect } from "vitest";
+import { compile } from "../src/index.js";
+
+async function runStandalone(src: string): Promise<number> {
+  const r = await compile(src, { target: "standalone" });
+  expect(r.success, JSON.stringify(r.errors)).toBe(true);
+  // A lifted eval body must not leak the dynamic `__extern_eval` host import.
+  expect((r.imports ?? []).map((i) => i.name)).toEqual([]);
+  expect(WebAssembly.validate(r.binary), "module must be valid Wasm").toBe(true);
+  const { instance } = await WebAssembly.instantiate(r.binary, {});
+  return (instance.exports as { test(): number }).test();
+}
+
+/** Compile standalone and report whether the eval bailed to the dynamic path. */
+async function bailsToDynamic(src: string): Promise<boolean> {
+  const r = await compile(src, { target: "standalone" });
+  expect(r.success, JSON.stringify(r.errors)).toBe(true); // clean bail, NOT a compile error
+  return (r.imports ?? []).some((i) => i.name === "__extern_eval");
+}
+
+describe("#2923 — constant eval: function declarations lift (standalone)", () => {
+  it('eval("function add(a,b){return a+b} add(2,3)") === 5', async () => {
+    expect(
+      await runStandalone(
+        `export function test(): number { return eval("function add(a,b){return a+b} add(2,3)") as number; }`,
+      ),
+    ).toBe(5);
+  });
+
+  it("a recursive function declaration works", async () => {
+    expect(
+      await runStandalone(
+        `export function test(): number { return eval("function fac(n){return n<=1?1:n*fac(n-1)} fac(5)") as number; }`,
+      ),
+    ).toBe(120);
+  });
+
+  it("two mutually-referencing function declarations work (forward-reference pre-reserve)", async () => {
+    expect(
+      await runStandalone(
+        `export function test(): number { return eval("function a(x){return x+1} function b(x){return x*2} a(b(3))") as number; }`,
+      ),
+    ).toBe(7);
+  });
+
+  it("a zero-parameter function declaration works", async () => {
+    expect(
+      await runStandalone(
+        `export function test(): number { return eval("function five(){return 5} five()") as number; }`,
+      ),
+    ).toBe(5);
+  });
+});
+
+describe("#2923 — constant eval: for-of / for-in over literals lift (standalone)", () => {
+  it('eval("var s=0; for (const x of [1,2,3]) s+=x; s") === 6', async () => {
+    expect(
+      await runStandalone(
+        `export function test(): number { return eval("var s=0; for (const x of [1,2,3]) s+=x; s") as number; }`,
+      ),
+    ).toBe(6);
+  });
+
+  it("for-of over a string literal iterates code units", async () => {
+    expect(
+      await runStandalone(
+        `export function test(): number { return eval("var n=0; for (const c of 'abcd') n++; n") as number; }`,
+      ),
+    ).toBe(4);
+  });
+
+  it("for-of + a lifted function declaration compose", async () => {
+    expect(
+      await runStandalone(
+        `export function test(): number { return eval("function sq(x){return x*x} var s=0; for (const x of [1,2,3]) s+=sq(x); s") as number; }`,
+      ),
+    ).toBe(14);
+  });
+});
+
+describe("#2923 — unsafe-to-lift kinds still bail cleanly to the dynamic path", () => {
+  it("a class declaration bails (needs checker heritage/method bindings) — not a compile error", async () => {
+    // Acceptance criterion 2: returns 7 OR provably bails with a documented
+    // reason. It bails: class codegen dereferences a checker signature the
+    // foreign eval SourceFile lacks. Standalone-CE only lifts once the Tier-2
+    // interpreter (#2928) lands.
+    expect(
+      await bailsToDynamic(
+        `export function test(): number { return eval("class P{get x(){return 7}} new P().x") as number; }`,
+      ),
+    ).toBe(true);
+  });
+
+  it("a function EXPRESSION bails (checker binding-less closure signature)", async () => {
+    expect(
+      await bailsToDynamic(
+        `export function test(): number { return eval("var f=function(a){return a+1}; f(9)") as number; }`,
+      ),
+    ).toBe(true);
+  });
+
+  it("an arrow expression bails", async () => {
+    expect(
+      await bailsToDynamic(`export function test(): number { return eval("var f=(a)=>a*2; f(21)") as number; }`),
+    ).toBe(true);
+  });
+
+  it("a function declaration whose body nests an arrow bails (recursion catches the arrow)", async () => {
+    expect(
+      await bailsToDynamic(
+        `export function test(): number { return eval("function f(){return (x)=>x} typeof f()") as any; }`,
+      ),
+    ).toBe(true);
+  });
+
+  it("for-of over a non-literal iterable (a Map) bails", async () => {
+    expect(
+      await bailsToDynamic(
+        `export function test(): number { return eval("var m=new Map(); var n=0; for (const e of m) n++; n") as number; }`,
+      ),
+    ).toBe(true);
+  });
+});
+
+describe("#2923 — host (gc) mode unchanged (lifted bodies still compute correctly)", () => {
+  it("a lifted function-declaration eval body computes in host mode too", async () => {
+    const r = await compile(
+      `export function test(): number { return eval("function add(a,b){return a+b} add(2,3)") as number; }`,
+      {},
+    );
+    expect(r.success, JSON.stringify(r.errors)).toBe(true);
+    // Host mode also lifts it (no __extern_eval needed for the constant body).
+    expect((r.imports ?? []).some((i) => i.name === "__extern_eval")).toBe(false);
+  });
+});
