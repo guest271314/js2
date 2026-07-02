@@ -1612,33 +1612,81 @@ jobs:
             echo "No baseline changes to push."
           else
             git commit -m "chore(test262): refresh baselines — ${PASS}/${TOTAL} host, ${STANDALONE_PASS}/${STANDALONE_TOTAL} standalone (${{ github.sha }})"
-            # The baselines repo can advance under us when two promote-baseline
-            # runs (from concurrent main pushes) race. Retry with
-            # fetch + rebase so the refreshed baseline lands on top of the
-            # concurrent run instead of being dropped (#1861). The clone is
-            # shallow (--depth=1); --unshallow on first fetch so the rebase has
-            # a merge base.
+            # (#2942, supersedes the #1861 fetch+rebase loop) Two promote-baseline
+            # runs racing on the baselines repo both REWRITE the same generated
+            # files (test262-current.jsonl etc.), so once the remote advances,
+            # `git rebase` hits the SAME content conflict on every retry and the
+            # loop exhausts deterministically (run 28554922430 stranded the
+            # baseline pre-#2873; every later PR then diffed a stale floor →
+            # phantom regressions, bot park-holds on innocent PRs). Generated
+            # files must never be line-merged — RE-ANCHOR instead (Option-A,
+            # the same pattern as the main-repo summary push below): snapshot
+            # the files THIS run promoted, hard-reset onto the fresh remote
+            # tip, re-apply the snapshot wholesale, re-commit, push. Latest
+            # wins, with an ordering guard: if the remote tip already promotes
+            # a main SHA that DESCENDS from ours, our promote is superseded —
+            # drop it and succeed. Do NOT "fix" this with a job-level
+            # concurrency group instead: the per-SHA push groups are
+            # load-bearing (#2178, header comment) and a shared group's single
+            # pending slot silently cancels intermediate promotes.
             BR=$(git rev-parse --abbrev-ref HEAD)
-            BASELINE_PUSHED=0
-            for attempt in 1 2 3 4 5; do
-              git fetch --unshallow origin "$BR" 2>/dev/null \
-                || git fetch origin "$BR"
-              if ! git rebase --autostash "origin/$BR"; then
-                git rebase --abort || true
-                echo "baselines rebase failed (attempt ${attempt}) — retrying"
-                sleep $((attempt * 5))
-                continue
+            OUR_COMMIT=$(git rev-parse HEAD)
+            MSG=$(git log -1 --format=%s)
+            SNAP=$(mktemp -d)
+            git diff-tree --no-commit-id --name-only -r "$OUR_COMMIT" | while IFS= read -r f; do
+              if [ -f "$f" ]; then
+                mkdir -p "$SNAP/$(dirname "$f")"
+                cp "$f" "$SNAP/$f"
               fi
+            done
+            # Deepen MAIN-repo history once so the ancestry guard can resolve
+            # ancestor checks (the workspace checkout is depth-1).
+            git -C "$GITHUB_WORKSPACE" fetch --depth=200 --filter=blob:none origin main 2>/dev/null || true
+            BASELINE_PUSHED=0
+            for attempt in 1 2 3 4 5 6 7 8; do
               if git push origin "HEAD:$BR"; then
                 echo "Pushed baselines (attempt ${attempt})."
                 BASELINE_PUSHED=1
                 break
               fi
-              echo "baselines push race lost (attempt ${attempt}) — refetching and retrying"
-              sleep $((attempt * 5))
+              echo "baselines push race lost (attempt ${attempt}) — re-anchoring on the fresh remote tip"
+              git fetch origin "$BR" || { sleep 5; continue; }
+              # Ordering guard: baseline commit subjects end with the promoted
+              # main SHA (the same convention the #1668 stale guard parses).
+              # If OUR sha is an ancestor of the remote tip's promoted sha, a
+              # newer promote already landed — ours is superseded. Fail-open
+              # (proceed with the overwrite) when either sha is unresolvable.
+              REMOTE_MSHA=$(git log -1 --format=%s "origin/$BR" | grep -oE '[0-9a-f]{7,40}' | tail -1 || true)
+              if [ -n "$REMOTE_MSHA" ] \
+                && git -C "$GITHUB_WORKSPACE" cat-file -e "${REMOTE_MSHA}^{commit}" 2>/dev/null \
+                && git -C "$GITHUB_WORKSPACE" merge-base --is-ancestor "${{ github.sha }}" "$REMOTE_MSHA" 2>/dev/null; then
+                echo "Remote baseline already promotes ${REMOTE_MSHA} (descendant of ${{ github.sha }}) — this promote is superseded; dropping."
+                BASELINE_PUSHED=1
+                break
+              fi
+              git checkout -f -B "$BR" "origin/$BR"
+              (cd "$SNAP" && find . -type f | sed 's|^\./||') | while IFS= read -r f; do
+                mkdir -p "$(dirname "$f")"
+                cp "$SNAP/$f" "$f"
+              done
+              git add -A
+              if git diff --cached --quiet; then
+                echo "Re-anchored tree is identical to the remote tip — nothing left to promote."
+                BASELINE_PUSHED=1
+                break
+              fi
+              git commit -m "$MSG"
+              SLEEP=$((attempt * 5)); [ "$SLEEP" -gt 30 ] && SLEEP=30
+              sleep "$SLEEP"
             done
             if [ "$BASELINE_PUSHED" != "1" ]; then
-              echo "::error::Failed to push baselines after 5 attempts (persistent, not a transient race)."
+              echo "::error::Failed to push baselines after 8 re-anchor attempts (persistent failure, not a transient race). The promoted baseline is STRANDED at the previous main SHA — every subsequent PR's regression gate diffs a stale floor (phantom regressions / park-holds) until a later push:main promote succeeds or this workflow is re-run via workflow_dispatch. See #2942."
+              {
+                echo "## promote-baseline FAILED (#2942)"
+                echo ""
+                echo "Baselines push exhausted 8 re-anchor attempts; baseline stranded pre-\`${{ github.sha }}\`."
+                echo "PR regression gates will show phantom drift until the next successful promote."
+              } >> "$GITHUB_STEP_SUMMARY"
               exit 1
             fi
           fi
