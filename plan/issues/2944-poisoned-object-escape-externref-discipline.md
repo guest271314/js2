@@ -150,11 +150,12 @@ construction, zero shared-identity risk. Same identity domain the widening
 registration (`anonTypeMap.set(varType, …)`) already relies on.
 
 Validation: escape probe host `test(2022)` → 13 (return + `this.options` field
-+ method read); alias-binding arm; `tests/issue-2944.test.ts` added (fails on
-pre-residual main); acorn corpus re-verified 21 equal±quirks / 0 REAL / 2
-pre-existing throws; standalone sha256 byte-identical (set stays host-only);
-equivalence: the 56 local failures reproduce IDENTICALLY (same per-file counts)
-on pristine main — pre-existing env, zero delta.
+
+- method read); alias-binding arm; `tests/issue-2944.test.ts` added (fails on
+  pre-residual main); acorn corpus re-verified 21 equal±quirks / 0 REAL / 2
+  pre-existing throws; standalone sha256 byte-identical (set stays host-only);
+  equivalence: the 56 local failures reproduce IDENTICALLY (same per-file counts)
+  on pristine main — pre-existing env, zero delta.
 
 ### Design-premise validation (prior art for #2856 / extern-in-IR)
 
