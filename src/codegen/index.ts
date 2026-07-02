@@ -99,6 +99,7 @@ import {
   isStandalonePromiseActive,
   shiftAsyncSideChannelFuncIdxs,
 } from "./async-scheduler.js";
+import { inLiveShiftRange } from "../emit/resolve-layout.js"; // (#1916 S3) stable handles never shift
 import {
   brandExternMethodResult,
   ensureLateImport,
@@ -9521,12 +9522,12 @@ export function addStringImports(ctx: CodegenContext): void {
   if (delta > 0 && ctx.mod.functions.length > 0) {
     const newImportNames = new Set(["concat", "length", "equals", "substring", "charCodeAt"]);
     for (const [name, idx] of ctx.funcMap) {
-      if (!newImportNames.has(name) && idx >= importsBefore) {
+      if (!newImportNames.has(name) && inLiveShiftRange(idx, importsBefore)) {
         ctx.funcMap.set(name, idx + delta);
       }
     }
     for (const exp of ctx.mod.exports) {
-      if (exp.desc.kind === "func" && exp.desc.index >= importsBefore) {
+      if (exp.desc.kind === "func" && inLiveShiftRange(exp.desc.index, importsBefore)) {
         exp.desc.index += delta;
       }
     }
@@ -9537,10 +9538,10 @@ export function addStringImports(ctx: CodegenContext): void {
       if (shifted.has(instrs)) return;
       shifted.add(instrs);
       for (const instr of instrs) {
-        if ((instr.op === "call" || instr.op === "return_call") && instr.funcIdx >= importsBefore) {
+        if ((instr.op === "call" || instr.op === "return_call") && inLiveShiftRange(instr.funcIdx, importsBefore)) {
           instr.funcIdx += delta;
         }
-        if (instr.op === "ref.func" && instr.funcIdx >= importsBefore) {
+        if (instr.op === "ref.func" && inLiveShiftRange(instr.funcIdx, importsBefore)) {
           instr.funcIdx += delta;
         }
         const a = instr as any;
@@ -9590,20 +9591,22 @@ export function addStringImports(ctx: CodegenContext): void {
     for (const elem of ctx.mod.elements) {
       if (elem.funcIndices) {
         for (let i = 0; i < elem.funcIndices.length; i++) {
-          if (elem.funcIndices[i]! >= importsBefore) {
+          if (inLiveShiftRange(elem.funcIndices[i]!, importsBefore)) {
             elem.funcIndices[i]! += delta;
           }
         }
       }
     }
     if (ctx.mod.declaredFuncRefs.length > 0) {
-      ctx.mod.declaredFuncRefs = ctx.mod.declaredFuncRefs.map((idx) => (idx >= importsBefore ? idx + delta : idx));
+      ctx.mod.declaredFuncRefs = ctx.mod.declaredFuncRefs.map((idx) =>
+        inLiveShiftRange(idx, importsBefore) ? idx + delta : idx,
+      );
     }
     // (#1525b) Shift pendingMethodTrampolines side-channel indices in lockstep
     // — see the matching block in addUnionImports / shiftLateImportIndices.
     for (const t of ctx.pendingMethodTrampolines) {
-      if (t.methodFuncIdx >= importsBefore) t.methodFuncIdx += delta;
-      if (t.trampolineFuncIdx >= importsBefore) t.trampolineFuncIdx += delta;
+      if (inLiveShiftRange(t.methodFuncIdx, importsBefore)) t.methodFuncIdx += delta;
+      if (inLiveShiftRange(t.trampolineFuncIdx, importsBefore)) t.trampolineFuncIdx += delta;
     }
     // (#1839) `nativeStrHelpers` is read directly by string-lowering call sites
     // and helper emitters — it is NOT a copy of funcMap, so it must be shifted
@@ -9611,14 +9614,14 @@ export function addStringImports(ctx: CodegenContext): void {
     // every entry >= importsBefore moves up by `delta`. Omitting this left the
     // map stale under plain `--nativeStrings` JS-host mode.
     for (const [name, idx] of ctx.nativeStrHelpers) {
-      if (idx >= importsBefore) {
+      if (inLiveShiftRange(idx, importsBefore)) {
         ctx.nativeStrHelpers.set(name, idx + delta);
       }
     }
     // (#1913) Regex helper map moves in lockstep too — regexp-standalone call
     // sites bake `call` indices straight from this map.
     for (const [name, idx] of ctx.nativeRegexHelpers) {
-      if (idx >= importsBefore) {
+      if (inLiveShiftRange(idx, importsBefore)) {
         ctx.nativeRegexHelpers.set(name, idx + delta);
       }
     }
@@ -9627,7 +9630,7 @@ export function addStringImports(ctx: CodegenContext): void {
     // indices straight from this map (see shiftLateImportIndices for the full
     // rationale / the WeakMap stale-index validation failure it fixes).
     for (const [name, idx] of ctx.mapHelpers) {
-      if (idx >= importsBefore) {
+      if (inLiveShiftRange(idx, importsBefore)) {
         ctx.mapHelpers.set(name, idx + delta);
       }
     }
@@ -9646,7 +9649,7 @@ export function addStringImports(ctx: CodegenContext): void {
     }
     // (#1839) The module start function index also moves if it was a defined
     // function at or above the insertion point. Matches addUnionImports.
-    if (ctx.mod.startFuncIdx !== undefined && ctx.mod.startFuncIdx >= importsBefore) {
+    if (ctx.mod.startFuncIdx !== undefined && inLiveShiftRange(ctx.mod.startFuncIdx, importsBefore)) {
       ctx.mod.startFuncIdx += delta;
     }
   }
@@ -10977,7 +10980,7 @@ export function addUnionImports(ctx: CodegenContext): void {
     ]);
     // Update funcMap entries for defined functions (not imports)
     for (const [name, idx] of ctx.funcMap) {
-      if (!newImportNames.has(name) && idx >= importsBefore) {
+      if (!newImportNames.has(name) && inLiveShiftRange(idx, importsBefore)) {
         ctx.funcMap.set(name, idx + delta);
       }
     }
@@ -10990,13 +10993,13 @@ export function addUnionImports(ctx: CodegenContext): void {
     // (e.g. `__box_number` for a numeric key/value) land between helper
     // registration and the call, so `wm.has` called `__map_get` → invalid Wasm.
     for (const [name, idx] of ctx.mapHelpers) {
-      if (idx >= importsBefore) {
+      if (inLiveShiftRange(idx, importsBefore)) {
         ctx.mapHelpers.set(name, idx + delta);
       }
     }
     // Update export indices
     for (const exp of ctx.mod.exports) {
-      if (exp.desc.kind === "func" && exp.desc.index >= importsBefore) {
+      if (exp.desc.kind === "func" && inLiveShiftRange(exp.desc.index, importsBefore)) {
         exp.desc.index += delta;
       }
     }
@@ -11007,10 +11010,10 @@ export function addUnionImports(ctx: CodegenContext): void {
       if (shifted.has(instrs)) return;
       shifted.add(instrs);
       for (const instr of instrs) {
-        if ((instr.op === "call" || instr.op === "return_call") && instr.funcIdx >= importsBefore) {
+        if ((instr.op === "call" || instr.op === "return_call") && inLiveShiftRange(instr.funcIdx, importsBefore)) {
           instr.funcIdx += delta;
         }
-        if (instr.op === "ref.func" && instr.funcIdx >= importsBefore) {
+        if (instr.op === "ref.func" && inLiveShiftRange(instr.funcIdx, importsBefore)) {
           instr.funcIdx += delta;
         }
         const a = instr as any;
@@ -11057,7 +11060,7 @@ export function addUnionImports(ctx: CodegenContext): void {
     for (const elem of ctx.mod.elements) {
       if (elem.funcIndices) {
         for (let i = 0; i < elem.funcIndices.length; i++) {
-          if (elem.funcIndices[i]! >= importsBefore) {
+          if (inLiveShiftRange(elem.funcIndices[i]!, importsBefore)) {
             elem.funcIndices[i]! += delta;
           }
         }
@@ -11065,11 +11068,13 @@ export function addUnionImports(ctx: CodegenContext): void {
     }
     // Update declaredFuncRefs
     if (ctx.mod.declaredFuncRefs.length > 0) {
-      ctx.mod.declaredFuncRefs = ctx.mod.declaredFuncRefs.map((idx) => (idx >= importsBefore ? idx + delta : idx));
+      ctx.mod.declaredFuncRefs = ctx.mod.declaredFuncRefs.map((idx) =>
+        inLiveShiftRange(idx, importsBefore) ? idx + delta : idx,
+      );
     }
     // Update Wasm start function index (#907) — late-added imports shift the
     // defined-function index that __module_init lives at.
-    if (ctx.mod.startFuncIdx !== undefined && ctx.mod.startFuncIdx >= importsBefore) {
+    if (ctx.mod.startFuncIdx !== undefined && inLiveShiftRange(ctx.mod.startFuncIdx, importsBefore)) {
       ctx.mod.startFuncIdx += delta;
     }
     // Sync nativeStrHelpers and re-base so reconcileNativeStrFinalizeShift is a no-op
@@ -11077,11 +11082,11 @@ export function addUnionImports(ctx: CodegenContext): void {
     // native-string helper bodies. Without this, reconcile double-shifts them (#1677-fast-path).
     if (ctx.nativeStrHelperImportBase >= 0) {
       for (const [name, idx] of ctx.nativeStrHelpers) {
-        if (idx >= importsBefore) ctx.nativeStrHelpers.set(name, idx + delta);
+        if (inLiveShiftRange(idx, importsBefore)) ctx.nativeStrHelpers.set(name, idx + delta);
       }
       // (#1913) Regex helper map shares the same lifecycle.
       for (const [name, idx] of ctx.nativeRegexHelpers) {
-        if (idx >= importsBefore) ctx.nativeRegexHelpers.set(name, idx + delta);
+        if (inLiveShiftRange(idx, importsBefore)) ctx.nativeRegexHelpers.set(name, idx + delta);
       }
       ctx.nativeStrHelperImportBase = ctx.numImportFuncs;
     }
@@ -11090,8 +11095,8 @@ export function addUnionImports(ctx: CodegenContext): void {
     // reachable from any Instr — without this, finalizeMethodTrampolines later
     // resolves the wrong (import) signature, producing invalid Wasm.
     for (const t of ctx.pendingMethodTrampolines) {
-      if (t.methodFuncIdx >= importsBefore) t.methodFuncIdx += delta;
-      if (t.trampolineFuncIdx >= importsBefore) t.trampolineFuncIdx += delta;
+      if (inLiveShiftRange(t.methodFuncIdx, importsBefore)) t.methodFuncIdx += delta;
+      if (inLiveShiftRange(t.trampolineFuncIdx, importsBefore)) t.trampolineFuncIdx += delta;
     }
     // (#2918) Async-scheduler + Promise.all/race combinator side-channel funcIdxs
     // move in lockstep too (addUnionImports missed them). Same complete key list
