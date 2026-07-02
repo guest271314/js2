@@ -2,11 +2,11 @@
 id: 2972
 title: "IR selector accepts string element access with computed index; from-ast throws 'not in slice 12' — 14 test262 CEs under IR-first"
 status: done
-completed: 2026-07-02
 assignee: ttraenkler/dev-2138f
 sprint: current
 created: 2026-07-02
 updated: 2026-07-02
+completed: 2026-07-02
 priority: medium
 feasibility: medium
 horizon: s
@@ -149,3 +149,32 @@ Slice-3 post-claim errors), and the from-ast fix is declaration-kind-
 agnostic — the 14 tests should flip back under the next `ir_first`
 measurement dispatch (#2947 lane), which is the acceptance check for the
 flag-on criterion.
+
+## Parallel resolution (sr session, 2026-07-02, landed first as PR #2519): gate 5 stopgap
+
+A parallel session independently landed option 3 (the stopgap from the
+scoping analysis above) while the 2a lowering PR was in flight: **gate 5**
+(`irFirstBodyReadsStringElement` in `src/codegen/ir-first-gate.ts`, wired
+into `computeIrFirstSkipSet`) keeps any function whose body reads an element
+of a syntactically-string receiver on the compile-twice path, converting the
+flag-on hard error back into a silent demote. Its notes correctly confirmed
+two of the scoping-analysis findings (no string-receiver arm existed at all;
+the checker-free selector cannot defer this) but its premise "no
+string-element read can validly be IR-first today" is retired by the 2a
+lowering in this PR.
+
+## Merge reconciliation (dev-2138f) — the two layers compose
+
+- **The 2a lowering (this PR)** makes PROVEN-in-bounds string element reads
+  genuinely IR-lowerable — for those, compile-once is correct and desirable.
+- **Gate 5 (landed)** remains the guard for the UNPROVEN residual — but as
+  landed it excluded ALL string-element reads, which would waste the new
+  lowering (proven functions stay compile-twice forever) and contradict the
+  skip-set's purpose. **Refined in this PR**: gate 5 now consults the SAME
+  single-source proof (`stringIndexProvenBelow` + literal-length receiver
+  facts from `capability.ts`) and only keeps functions with UNPROVEN string
+  element reads on the compile-twice path. Proven-only functions re-enter
+  the compile-once skip set. One predicate, two consumers — exactly the
+  acceptance criterion.
+- Gate 5's "lifting trigger" note stands, narrowed: the remaining lift is
+  the unproven residual (OOB→undefined widening or broader proofs).
