@@ -24,7 +24,7 @@ import { hoistLetConstWithTdz, hoistVarDeclarations } from "../index.js";
 import type { InnerResult } from "../shared.js";
 import { coerceType, compileExpression, compileStatement } from "../shared.js";
 import { emitUndefined } from "./late-imports.js";
-import { emitFuncRefAsClosure } from "../closures.js";
+import { emitFuncRefAsClosure, getFuncSignature } from "../closures.js";
 
 /**
  * Synthetic file name for the foreign `SourceFile` an inlined `eval("<literal>")`
@@ -390,6 +390,34 @@ export function tryStaticNewFunction(
   fctx: FunctionContext,
   args: readonly ts.Expression[],
 ): ValType | undefined {
+  const synth = synthesizeStaticNewFunction(ctx, fctx, args);
+  if (!synth) return undefined;
+
+  // Materialize the callable value (closure struct over the funcref), then wrap
+  // to externref to match `new Function`'s `any`/callable result.
+  const closureRef = emitFuncRefAsClosure(ctx, fctx, synth.fnName, synth.funcIdx);
+  if (!closureRef) {
+    fctx.body.push({ op: "ref.null.extern" });
+    return { kind: "externref" };
+  }
+  if (closureRef.kind !== "externref") {
+    fctx.body.push({ op: "extern.convert_any" });
+  }
+  return { kind: "externref" };
+}
+
+/**
+ * (#2924) Synthesize + hoist the constant-argument `Function(...)` body as a
+ * real AOT function over GLOBAL scope. Shared by the value form
+ * (`tryStaticNewFunction` → closure materialization) and the direct-call form
+ * (`tryStaticFunctionCtorCall` → immediate `call`). Returns the registered
+ * name/funcIdx (and the parsed parameter list) — emits NO instructions itself.
+ */
+function synthesizeStaticNewFunction(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  args: readonly ts.Expression[],
+): { fnName: string; funcIdx: number; params: readonly ts.ParameterDeclaration[] } | undefined {
   // Every argument must be a compile-time-constant string. A single non-constant
   // arg → dynamic body → fall through (Tier-2 interpreter, #2928).
   const consts: string[] = [];
@@ -458,15 +486,125 @@ export function tryStaticNewFunction(
   const funcIdx = ctx.funcMap.get(fnName);
   if (funcIdx === undefined) return undefined;
 
-  // Materialize the callable value (closure struct over the funcref), then wrap
-  // to externref to match `new Function`'s `any`/callable result.
-  const closureRef = emitFuncRefAsClosure(ctx, fctx, fnName, funcIdx);
-  if (!closureRef) {
-    fctx.body.push({ op: "ref.null.extern" });
+  return { fnName, funcIdx, params: fnDecl.parameters };
+}
+
+/**
+ * (#2924) Resolve whether an identifier named `Function` refers to the global
+ * `Function` intrinsic (declared only in `.d.ts`) rather than a local shadow.
+ * Mirrors `isGlobalEvalIdentifier` (eval-tiering.ts / calls.ts).
+ */
+export function isGlobalFunctionIdentifier(ident: ts.Identifier, checker: ts.TypeChecker): boolean {
+  if (ident.text !== "Function") return false;
+  const sym = checker.getSymbolAtLocation(ident);
+  if (!sym) return true; // unresolved → assume the global
+  const decls = sym.declarations;
+  if (!decls || decls.length === 0) return true;
+  return decls.every((d) => d.getSourceFile().isDeclarationFile);
+}
+
+/** Unwrap parens around an expression (local copy of the calls.ts idiom). */
+function unwrapParenExpr(e: ts.Expression): ts.Expression {
+  let x = e;
+  while (ts.isParenthesizedExpression(x)) x = x.expression;
+  return x;
+}
+
+/**
+ * (#2924) Early guard for `compileCallExpression` — covers the two call-shapes
+ * of the constant `Function` compile-away:
+ *
+ *  1. **Value form** `Function("<const>", …)` (plain call, §20.2.1.1: identical
+ *     to `new Function(...)`): synthesize and push the callable closure.
+ *  2. **Immediate-call form** `new Function(...)(args)` / `Function(...)(args)`:
+ *     the callee itself is the ctor expression. We know the synthesized
+ *     funcIdx, so emit a DIRECT `call` with the outer args marshalled to the
+ *     synthesized signature (all-externref params / externref result, the
+ *     #2923 foreign-tolerance shape): coerce args, pad missing with
+ *     `undefined`, evaluate-and-drop extras (JS §7.3.14 arity semantics).
+ *     This bypasses the generic any-callee dispatch, which does not currently
+ *     route a NewExpression callee.
+ *
+ * Returns undefined to fall through to the existing paths (non-constant args,
+ * local `Function` shadow, unsupported body, non-plain params, …).
+ */
+export function tryStaticFunctionCtorCall(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.CallExpression,
+): InnerResult | undefined {
+  const callee = unwrapParenExpr(expr.expression);
+
+  // Shape 1: `Function("...")` — plain-call value form.
+  if (ts.isIdentifier(callee) && isGlobalFunctionIdentifier(callee, ctx.checker)) {
+    return tryStaticNewFunction(ctx, fctx, expr.arguments);
+  }
+
+  // Shape 2: immediate call — callee is `new Function(...)` or `Function(...)`.
+  let ctorArgs: readonly ts.Expression[] | undefined;
+  if (ts.isNewExpression(callee)) {
+    const target = unwrapParenExpr(callee.expression);
+    if (ts.isIdentifier(target) && isGlobalFunctionIdentifier(target, ctx.checker)) {
+      ctorArgs = callee.arguments ?? [];
+    }
+  } else if (ts.isCallExpression(callee) && !callee.questionDotToken) {
+    const target = unwrapParenExpr(callee.expression);
+    if (ts.isIdentifier(target) && isGlobalFunctionIdentifier(target, ctx.checker)) {
+      ctorArgs = callee.arguments;
+    }
+  }
+  if (ctorArgs === undefined) return undefined;
+
+  const synth = synthesizeStaticNewFunction(ctx, fctx, ctorArgs);
+  if (!synth) return undefined;
+
+  // Direct-call fast path only for PLAIN identifier params (no defaults /
+  // destructuring / rest — those need the optional-param sentinel machinery).
+  for (const p of synth.params) {
+    if (!ts.isIdentifier(p.name) || p.initializer || p.dotDotDotToken) return undefined;
+  }
+
+  // Marshal against the REAL reserved signature: foreign-tolerant hoisting
+  // usually degrades params/result to externref, but a simple body (e.g.
+  // `return 42`) can still checker-resolve to f64 — never assume externref.
+  const sig = getFuncSignature(ctx, synth.funcIdx);
+  if (!sig) return undefined;
+  const paramCount = sig.params.length;
+  const callArgs = expr.arguments;
+
+  // Pre-scan: every formal beyond the provided args must be paddable BEFORE
+  // any instruction is emitted (a mid-marshal bail would strand operands).
+  for (let i = callArgs.length; i < paramCount; i++) {
+    const k = sig.params[i]!.kind;
+    if (k !== "externref" && k !== "f64") return undefined;
+  }
+
+  // Marshal min(A,P) args in order (coerced to the formal's type), pad missing
+  // with `undefined` (NaN in an f64 formal — undefined ToNumber), then evaluate
+  // extras for side effects and drop them (JS §7.3.14 arity semantics).
+  for (let i = 0; i < paramCount; i++) {
+    const pType = sig.params[i]!;
+    if (i < callArgs.length) {
+      compileExpression(ctx, fctx, callArgs[i]!, pType);
+    } else if (pType.kind === "externref") {
+      emitUndefined(ctx, fctx);
+    } else {
+      fctx.body.push({ op: "f64.const", value: Number.NaN });
+    }
+  }
+  for (let i = paramCount; i < callArgs.length; i++) {
+    const t = compileExpression(ctx, fctx, callArgs[i]!);
+    if (t !== null) fctx.body.push({ op: "drop" });
+  }
+  fctx.body.push({ op: "call", funcIdx: synth.funcIdx });
+  const resType = sig.results.length > 0 ? sig.results[0]! : null;
+  if (resType === null) {
+    // Void result — a JS call still evaluates to `undefined`.
+    emitUndefined(ctx, fctx);
     return { kind: "externref" };
   }
-  if (closureRef.kind !== "externref") {
-    fctx.body.push({ op: "extern.convert_any" });
+  if (resType.kind !== "externref") {
+    coerceType(ctx, fctx, resType, { kind: "externref" });
   }
   return { kind: "externref" };
 }

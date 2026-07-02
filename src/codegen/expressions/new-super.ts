@@ -42,7 +42,7 @@ import {
 } from "../regexp-standalone.js";
 import { emitStandaloneTest262Error, emitWasiErrorConstructor, isWasiErrorName } from "../registry/error-types.js";
 import type { InnerResult } from "../shared.js";
-import { tryStaticNewFunction } from "./eval-inline.js";
+import { isGlobalFunctionIdentifier, tryStaticNewFunction } from "./eval-inline.js";
 import {
   coerceType,
   compileExpression,
@@ -3178,8 +3178,11 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     const args = expr.arguments ?? [];
     // (#2924) Constant param list + body → compile-away to a real AOT callable
     // (global scope, no capture). Dynamic bodies fall through to the no-op stub
-    // below (the Tier-2 interpreter, #2928, handles them).
-    const staticFn = tryStaticNewFunction(ctx, fctx, args);
+    // below (the Tier-2 interpreter, #2928, handles them). Guarded on the
+    // GLOBAL `Function` intrinsic (a local shadow keeps the legacy stub path).
+    const staticFn = isGlobalFunctionIdentifier(expr.expression, ctx.checker)
+      ? tryStaticNewFunction(ctx, fctx, args)
+      : undefined;
     if (staticFn !== undefined) return staticFn;
     // Fallback (dynamic body): evaluate args for side effects, return a no-op
     // function value (undefined). Tests that CALL a dynamic-body function fail
