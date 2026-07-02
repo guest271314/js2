@@ -1303,6 +1303,16 @@ export interface CodegenContext {
   preRegisteredBodyless?: Set<string>;
   /** Map from module-level variable name → global index in mod.globals */
   moduleGlobals: Map<string, number>;
+  /**
+   * (#2931) Names of function declarations that are *reassigned* somewhere in the
+   * realm (`fn = …`). ES function bindings are live/mutable, so such a name is
+   * backed by a mutable `externref` module global (registered in `moduleGlobals`)
+   * that both the reassignment (`global.set`) and every read (`global.get`) go
+   * through. Import aliases of a reassigned function propagate into this set too
+   * (see `registerImportBindingAliases`). Empty for the common case (no function
+   * declaration is ever reassigned), so non-affected programs stay byte-identical.
+   */
+  liveFuncBindingGlobals?: Set<string>;
   /** Deferred `export default <variable>` where variable is a module global (#1108).
    *  Resolved after all collectDeclarations calls when global indices are final. */
   deferredDefaultGlobalExport?: string;

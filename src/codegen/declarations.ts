@@ -22,7 +22,7 @@ import { collectShapes } from "../shape-inference.js";
 import { ensureWrapperTypes } from "./any-helpers.js";
 import { ASYNC_CPS_ENABLED, analyzeAsyncBody, asyncFnNeedsCps } from "./async-cps.js";
 import { collectClassDeclaration, compileClassBodies } from "./class-bodies.js";
-import { collectReferencedIdentifiers } from "./closures.js";
+import { collectReferencedIdentifiers, emitCachedFuncClosureAccess } from "./closures.js";
 import { addFunctionOwnLocals } from "./binding-info.js"; // (#2103) memoized own-locals oracle
 import { reportError } from "./context/errors.js";
 import type { CodegenContext, FunctionContext, OptionalParamInfo } from "./context/types.js";
@@ -4600,7 +4600,11 @@ export function compileDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
   // Compile module-level init statements BEFORE function bodies so that
   // closureMap is populated for module-level arrow function variables.
   // This allows function bodies (e.g. test()) to reference module-level closures.
-  const hasModuleInits = ctx.moduleInitStatements.length > 0;
+  // (#2931) A reassigned-function live-binding global must be seeded with its
+  // closure in __module_init even when the program has no other init statements,
+  // so a read before the reassignment still yields the function.
+  const hasLiveFuncSeeds = (ctx.liveFuncBindingGlobals?.size ?? 0) > 0;
+  const hasModuleInits = ctx.moduleInitStatements.length > 0 || hasLiveFuncSeeds;
   const hasStaticInits = ctx.staticInitExprs.length > 0;
   let compiledInitFctx: FunctionContext | null = null;
 
@@ -4619,6 +4623,31 @@ export function compileDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
       savedBodies: [],
     };
     ctx.currentFunc = initFctx;
+
+    // (#2931) Seed each reassigned-function live-binding global with the
+    // function's closure BEFORE any user init statement runs, so a read of the
+    // name before its reassignment still yields the function. Emitted via
+    // `emitCachedFuncClosureAccess` (NOT the identifier read-path, which would
+    // recurse into the live-binding `global.get` arm). Dedupe by global index so
+    // an import alias sharing the same global is seeded once.
+    if (ctx.liveFuncBindingGlobals && ctx.liveFuncBindingGlobals.size > 0) {
+      const seededGlobals = new Set<number>();
+      for (const liveName of ctx.liveFuncBindingGlobals) {
+        const liveGlobalIdx = ctx.moduleGlobals.get(liveName);
+        const liveFuncIdx = ctx.funcMap.get(liveName);
+        if (liveGlobalIdx === undefined || liveFuncIdx === undefined) continue;
+        if (seededGlobals.has(liveGlobalIdx)) continue;
+        const closureType = emitCachedFuncClosureAccess(ctx, initFctx, liveName, liveFuncIdx);
+        if (closureType === null) {
+          // Could not build the closure — leave the global null-initialised.
+          continue;
+        }
+        // Closure struct (internal ref) → externref for the externref global.
+        initFctx.body.push({ op: "extern.convert_any" });
+        initFctx.body.push({ op: "global.set", index: liveGlobalIdx });
+        seededGlobals.add(liveGlobalIdx);
+      }
+    }
 
     // Compile static property initializers. (#1395) Each initializer is
     // scoped to its owning class — set `enclosingClassName` +
