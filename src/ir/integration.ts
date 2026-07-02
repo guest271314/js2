@@ -24,6 +24,7 @@
 
 import { ts } from "../ts-api.js";
 
+import { ensureAnyValueType } from "../codegen/any-helpers.js"; // (#2949) boxed-any carrier for IrType.dynamic
 import { getOrRegisterPromiseType } from "../codegen/async-scheduler.js";
 import { addGeneratorImports, addIteratorImports, addStringImports } from "../codegen/index.js";
 import { classMemberFuncKey } from "../codegen/class-member-keys.js"; // (#1983) collision-free class-member funcMap keys
@@ -1091,6 +1092,23 @@ function makeResolver(
       }
       return { kind: "externref" };
     },
+    // -------------------------------------------------------------------
+    // Dynamic (boxed-any) carrier dispatch (#2949 slice 1).
+    //
+    // MUST match legacy `resolveWasmType`'s any/unknown arm EXACTLY
+    // (codegen/index.ts — "any/unknown → ref_null $AnyValue in fast mode,
+    // externref otherwise") so IR-claimed and legacy-compiled functions
+    // agree on the `any` ABI. `ensureAnyValueType` is idempotent and only
+    // APPENDS a type (never shifts existing indices), the same lazy
+    // registration legacy performs at its own first `any` use.
+    // -------------------------------------------------------------------
+    resolveDynamic(): ValType {
+      if (ctx.fast) {
+        ensureAnyValueType(ctx);
+        return { kind: "ref_null", typeIdx: ctx.anyValueTypeIdx };
+      }
+      return { kind: "externref" };
+    },
     // Slice 6 part 4 refactor (#1185): expose the nativeStrings mode
     // discriminator so the from-ast for-of arms can dispatch without
     // needing the per-feature shortcut threaded through LowerCtx.
@@ -1550,6 +1568,10 @@ function irTypeKey(t: IrType): string {
   if (t.kind === "extern") return `extern:${t.className}`;
   // #1926 — union members / boxed inner are IrTypes; recurse.
   if (t.kind === "union") return `union<${t.members.map(irTypeKey).join(",")}>`;
+  // #2949 — dynamic is keyed with its optional JsTag refinement: two
+  // dynamics with different refinements are distinct types (irTypeEquals is
+  // exact on the tag), so their keys must differ too.
+  if (t.kind === "dynamic") return t.tag === undefined ? "dynamic" : `dynamic:${t.tag}`;
   return `boxed<${irTypeKey(t.inner)}>`;
 }
 
