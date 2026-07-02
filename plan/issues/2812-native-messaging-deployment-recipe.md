@@ -1,9 +1,11 @@
 ---
 id: 2812
 title: "Native Messaging deployment recipe: ship a Chrome NM host from js2wasm output (wasmtime shebang / bun -b / deno compile + manifest)"
-status: ready
+status: done
+completed: 2026-07-02
+assignee: ttraenkler/agent-a45493
 created: 2026-06-29
-updated: 2026-06-29
+updated: 2026-07-02
 priority: medium
 feasibility: medium
 task_type: docs
