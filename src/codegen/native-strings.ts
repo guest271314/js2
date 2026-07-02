@@ -2438,6 +2438,20 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       { op: "local.get", index: 1 },
       { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 },
       { op: "local.set", index: 4 },
+      // (#2875) §22.1.3.9 step 8: start candidates are bounded by
+      // min(max(pos, 0), …) — clamp fromIndex to ≥ 0 ONCE here so both the
+      // empty-needle arm (min(fromIndex, hLen)) and the scan init
+      // (min(fromIndex, hLen - nLen)) see the spec's max(pos, 0). Without it,
+      // lastIndexOf('a', -1) started the reverse scan at -1 and returned -1
+      // instead of checking position 0.
+      // fromIndex = max(fromIndex, 0)
+      { op: "local.get", index: 2 },
+      { op: "i32.const", value: 0 },
+      { op: "local.get", index: 2 },
+      { op: "i32.const", value: 0 },
+      { op: "i32.gt_s" },
+      { op: "select" },
+      { op: "local.set", index: 2 },
       // if nLen == 0, return min(fromIndex, hLen)
       { op: "local.get", index: 4 },
       { op: "i32.eqz" },
@@ -2607,6 +2621,27 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       { op: "local.get", index: 1 },
       { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 },
       { op: "local.set", index: 4 },
+      // (#2875) §22.1.3.23 step 12: start = min(max(pos, 0), len). Without the
+      // clamp, position=INT_MAX (the trunc-sat of Infinity) overflows the
+      // `position + pLen` check below into a negative and the scan reads OOB
+      // (trap), and a negative position reads sData[sOff-…] (trap) instead of
+      // searching from 0 — startsWith('!', Infinity) / ('The', -1).
+      // position = max(position, 0)
+      { op: "local.get", index: 2 },
+      { op: "i32.const", value: 0 },
+      { op: "local.get", index: 2 },
+      { op: "i32.const", value: 0 },
+      { op: "i32.gt_s" },
+      { op: "select" },
+      { op: "local.set", index: 2 },
+      // position = min(position, sLen)
+      { op: "local.get", index: 2 },
+      { op: "local.get", index: 3 },
+      { op: "local.get", index: 2 },
+      { op: "local.get", index: 3 },
+      { op: "i32.lt_s" },
+      { op: "select" },
+      { op: "local.set", index: 2 },
       // if position + pLen > sLen, return 0
       { op: "local.get", index: 2 },
       { op: "local.get", index: 4 },
@@ -2713,6 +2748,17 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       { op: "local.get", index: 0 },
       { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 },
       { op: "local.set", index: 8 },
+      // (#2875) §22.1.3.6 step 7: end = min(max(pos, 0), len). The max(0) arm
+      // was missing — endsWith('', -1) computed startPos = -1 - 0 < 0 → false,
+      // but the spec clamps a negative endPosition to 0 (empty suffix → true).
+      // endPos = max(endPos, 0)
+      { op: "local.get", index: 2 },
+      { op: "i32.const", value: 0 },
+      { op: "local.get", index: 2 },
+      { op: "i32.const", value: 0 },
+      { op: "i32.gt_s" },
+      { op: "select" },
+      { op: "local.set", index: 2 },
       // endPos = min(endPos, sLen)
       { op: "local.get", index: 2 },
       { op: "local.get", index: 8 },
