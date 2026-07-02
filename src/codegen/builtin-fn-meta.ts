@@ -53,6 +53,130 @@ export const STANDALONE_STATIC_METHOD_META: Record<string, { name: string; lengt
 };
 
 /**
+ * (#2896) Spec arity of every standard builtin STATIC method (own
+ * function-valued data properties of the global constructors/namespaces), for
+ * the direct-access `<Builtin>.<method>.length` / `.name` meta fold. `.name`
+ * equals the property key for all of these (§10.2.9); `.length` values are the
+ * ECMA-262 declared arities (generated from a conforming host — V8/Node — and
+ * spot-checked against the spec). This is a compile-time COMPANION of the
+ * runtime metadata substrate above: the fold answers direct syntactic reads
+ * (no closure materialization, so it also covers methods whose value-read is
+ * not yet wired host-free); the meta subtypes answer reflective/runtime reads
+ * for the wired closures.
+ */
+export const BUILTIN_STATIC_METHOD_ARITY: Record<string, Record<string, number>> = {
+  Array: { isArray: 1, from: 1, fromAsync: 1, of: 0 },
+  ArrayBuffer: { isView: 1 },
+  BigInt: { asUintN: 2, asIntN: 2 },
+  Date: { now: 0, parse: 1, UTC: 7 },
+  Error: { isError: 1 },
+  Map: { groupBy: 2 },
+  Number: { isFinite: 1, isInteger: 1, isNaN: 1, isSafeInteger: 1, parseFloat: 1, parseInt: 2 },
+  Object: {
+    assign: 2,
+    getOwnPropertyDescriptor: 2,
+    getOwnPropertyDescriptors: 1,
+    getOwnPropertyNames: 1,
+    getOwnPropertySymbols: 1,
+    hasOwn: 2,
+    is: 2,
+    preventExtensions: 1,
+    seal: 1,
+    create: 2,
+    defineProperties: 2,
+    defineProperty: 3,
+    freeze: 1,
+    getPrototypeOf: 1,
+    setPrototypeOf: 2,
+    isExtensible: 1,
+    isFrozen: 1,
+    isSealed: 1,
+    keys: 1,
+    entries: 1,
+    fromEntries: 1,
+    values: 1,
+    groupBy: 2,
+  },
+  Promise: { all: 1, allSettled: 1, any: 1, race: 1, resolve: 1, reject: 1, withResolvers: 0, try: 1 },
+  Proxy: { revocable: 2 },
+  Reflect: {
+    defineProperty: 3,
+    deleteProperty: 2,
+    apply: 3,
+    construct: 2,
+    get: 2,
+    getOwnPropertyDescriptor: 2,
+    getPrototypeOf: 1,
+    has: 2,
+    isExtensible: 1,
+    ownKeys: 1,
+    preventExtensions: 1,
+    set: 3,
+    setPrototypeOf: 2,
+  },
+  RegExp: { escape: 1 },
+  String: { fromCharCode: 1, fromCodePoint: 1, raw: 1 },
+  Symbol: { for: 1, keyFor: 1 },
+  Math: {
+    abs: 1,
+    acos: 1,
+    acosh: 1,
+    asin: 1,
+    asinh: 1,
+    atan: 1,
+    atanh: 1,
+    atan2: 2,
+    ceil: 1,
+    cbrt: 1,
+    expm1: 1,
+    clz32: 1,
+    cos: 1,
+    cosh: 1,
+    exp: 1,
+    floor: 1,
+    fround: 1,
+    hypot: 2,
+    imul: 2,
+    log: 1,
+    log1p: 1,
+    log2: 1,
+    log10: 1,
+    max: 2,
+    min: 2,
+    pow: 2,
+    random: 0,
+    round: 1,
+    sign: 1,
+    sin: 1,
+    sinh: 1,
+    sqrt: 1,
+    tan: 1,
+    tanh: 1,
+    trunc: 1,
+    f16round: 1,
+  },
+  JSON: { parse: 2, stringify: 3, rawJSON: 1, isRawJSON: 1 },
+  Atomics: {
+    load: 2,
+    store: 3,
+    add: 3,
+    sub: 3,
+    and: 3,
+    or: 3,
+    xor: 3,
+    exchange: 3,
+    compareExchange: 4,
+    isLockFree: 1,
+    wait: 4,
+    waitAsync: 4,
+    notify: 3,
+    pause: 0,
+  },
+  Iterator: { from: 1 },
+  Uint8Array: { fromBase64: 1, fromHex: 1 },
+};
+
+/**
  * Register (idempotently, keyed by `cacheKey`) the unique metadata-carrying
  * struct subtype for one builtin function closure and return its type index.
  *
