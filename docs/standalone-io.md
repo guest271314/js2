@@ -21,7 +21,7 @@ wasmtime -W gc=y,function-references=y,tail-call=y,exceptions=y program.wasm
 > Use this targeted flag set, **not** `-W all-proposals=y`: all-proposals also
 > enables the stack-switching proposal, which Wasmtime 44/45 rejects at module
 > load (`the wasm_stack_switching feature is not supported on this compiler
-> configuration`), so the module exits before running anything.
+configuration`), so the module exits before running anything.
 
 ## Writing STDOUT
 
@@ -110,11 +110,11 @@ A `--target wasi` build is a **WasmGC** module. Any runtime that runs it must
 support the proposals the codegen relies on — **GC, typed function references,
 tail calls, and exception handling**. The flags differ per runtime:
 
-| Runtime | Command | Notes |
-| --- | --- | --- |
-| **Wasmtime** (44+) | `wasmtime -W gc=y,function-references=y,tail-call=y,exceptions=y program.wasm` | Use this **targeted** flag set, **not** `-W all-proposals=y` — all-proposals also turns on stack-switching, which Wasmtime 44/45 rejects at module load (`the wasm_stack_switching feature is not supported on this compiler configuration`), so the module exits before running. Add `--dir .` to grant filesystem access (see [Writing arbitrary files](#writing-arbitrary-files)). |
-| **Bun** | `bun -b program.wasm` | Executes the WasmGC module directly; the required proposals are on by default — no extra flags. |
-| **Deno** | `deno run --allow-read --allow-write program.wasm` (or via a small `WebAssembly.instantiate` loader) | Runs the module on the V8 WasmGC engine; grant the `--allow-*` permissions the program needs. |
+| Runtime            | Command                                                                                                                | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Wasmtime** (44+) | `wasmtime -W gc=y,function-references=y,tail-call=y,exceptions=y program.wasm`                                         | Use this **targeted** flag set, **not** `-W all-proposals=y` — all-proposals also turns on stack-switching, which Wasmtime 44/45 rejects at module load (`the wasm_stack_switching feature is not supported on this compiler configuration`), so the module exits before running. Add `--dir .` to grant filesystem access (see [Writing arbitrary files](#writing-arbitrary-files)).                                                                                                                              |
+| **Bun**            | `bun -b program.wasm`                                                                                                  | Executes the WasmGC module directly; the required proposals are on by default — no extra flags.                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| **Deno**           | a small `WebAssembly.instantiate` / `node:wasi` loader `.ts`, run with `deno run --allow-read --allow-write loader.ts` | Deno runs the V8 WasmGC engine, but `deno run program.wasm` on a `--target wasi` command module does **not** work — Deno loads a bare `.wasm` as a WASM ES module and leaves `wasi_snapshot_preview1` unresolved (`error: Import "wasi_snapshot_preview1"…`). Instantiate it from a loader that supplies WASI (or, for a native Deno host, write against `Deno.stdin`/`Deno.stdout` directly — see [examples/native-messaging](../examples/native-messaging/README.md#deploy-it-turnkey-chrome-host-recipe-2812)). |
 
 > **STDIN/STDOUT/STDERR** map to WASI fds 0/1/2 in every runtime above — the I/O
 > patterns on this page are runtime-independent. Only the launch flags differ.
@@ -127,7 +127,7 @@ source uses `readSync`/`writeSync` from `node:fs`), there are two ways to run it
 - **`--target wasi` alone** (no `--link`): the `node:fs` calls are lowered
   **inline** to WASI `fd_read`/`fd_write`, so the module is a self-contained WASI
   command — run it under any runtime in the table above.
-- **`--link node:fs`**: the module instead *imports* a stable `node:fs`
+- **`--link node:fs`**: the module instead _imports_ a stable `node:fs`
   interface and must be linked against a provider before it runs — the
   [`node-fs.wat`](../examples/native-messaging/node-fs.wat) adapter (maps
   `node:fs` → WASI `fd_read`/`fd_write`), a native WASI host, or the real
@@ -139,9 +139,9 @@ source uses `readSync`/`writeSync` from `node:fs`), there are two ways to run it
 
 ## Summary
 
-| Operation | JS you write | WASI mechanism |
-| --- | --- | --- |
-| Read all of STDIN | `readStdin()` | `fd_read` on fd 0 |
-| Write STDOUT | `console.log(...)` | `fd_write` on fd 1 |
-| Write STDERR | `console.warn` / `console.error` | `fd_write` on fd 2 |
-| Write a file | `writeFileSync(path, data)` | `path_open` + `fd_write` |
+| Operation         | JS you write                     | WASI mechanism           |
+| ----------------- | -------------------------------- | ------------------------ |
+| Read all of STDIN | `readStdin()`                    | `fd_read` on fd 0        |
+| Write STDOUT      | `console.log(...)`               | `fd_write` on fd 1       |
+| Write STDERR      | `console.warn` / `console.error` | `fd_write` on fd 2       |
+| Write a file      | `writeFileSync(path, data)`      | `path_open` + `fd_write` |
