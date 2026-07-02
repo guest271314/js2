@@ -21,6 +21,7 @@ import type { FieldDef, Instr, StructTypeDef, ValType, WasmFunction } from "../i
 import { collectShapes } from "../shape-inference.js";
 import { ensureWrapperTypes } from "./any-helpers.js";
 import { ASYNC_CPS_ENABLED, analyzeAsyncBody, asyncFnNeedsCps } from "./async-cps.js";
+import { asyncFnNeedsHostDrive } from "./async-frame.js";
 import { collectClassDeclaration, compileClassBodies } from "./class-bodies.js";
 import { collectReferencedIdentifiers, emitCachedFuncClosureAccess } from "./closures.js";
 import { addFunctionOwnLocals } from "./binding-info.js"; // (#2103) memoized own-locals oracle
@@ -124,6 +125,11 @@ interface UnifiedCollectorState {
   // ctx.liveBodies during emission, so a late import would not have its `call`
   // opcodes shifted — the #1384 hazard). Only set when ASYNC_CPS_ENABLED.
   asyncCpsFound: boolean;
+  // (#1042 host drive) A host-drive-eligible async fn (linear multi-await /
+  // try-finally-across-await, shapes the CPS lane rejects) needs the six host
+  // settle-backend imports registered UPFRONT — same #1384 stable-index
+  // rationale as asyncCpsFound.
+  asyncHostDriveFound: boolean;
   // -- collectFunctionalArrayImports --
   funcArrayNeed1: boolean;
   funcArrayNeed2: boolean;
@@ -212,6 +218,7 @@ export function createUnifiedCollectorState(sourceFile: ts.SourceFile): UnifiedC
     callbackFound: false,
     getterCallbackFound: false,
     asyncCpsFound: false,
+    asyncHostDriveFound: false,
     funcArrayNeed1: false,
     funcArrayNeed2: false,
     unionFound: false,
@@ -766,7 +773,7 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
   // exactly (single tail-await canonical shape, no try-across-await, JS-host).
   if (
     ASYNC_CPS_ENABLED &&
-    !state.asyncCpsFound &&
+    (!state.asyncCpsFound || !state.asyncHostDriveFound) &&
     !ctx.wasi &&
     !ctx.standalone &&
     ts.isFunctionDeclaration(node) &&
@@ -779,8 +786,16 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
     // shape. Pre-registering imports for a fn that won't actually be CPS-lowered
     // would add unused imports (harmless) but a mismatch the other way would
     // re-introduce the late-import shift hazard, so keep the predicates identical.
-    if (asyncFnNeedsCps(node, plan)) {
+    if (!state.asyncCpsFound && asyncFnNeedsCps(node, plan)) {
       state.asyncCpsFound = true;
+    }
+    // (#1042 host drive) Same discipline for the host settle backend of the
+    // #2906 N-state resume machine: mirror `asyncFnNeedsHostDrive` exactly so
+    // its six imports (__make_callback / Promise_resolve / Promise_then2 /
+    // Promise_new_pending / Promise_settle_resolve / Promise_settle_reject)
+    // carry stable import indices.
+    if (!state.asyncHostDriveFound && asyncFnNeedsHostDrive(ctx, node, plan)) {
+      state.asyncHostDriveFound = true;
     }
   }
   // (#1239) Object literals carrying get/set accessor declarations also
@@ -1468,7 +1483,7 @@ export function finalizeUnifiedCollector(ctx: CodegenContext, state: UnifiedColl
   // the late-import path (its `call` opcodes would not be shifted — #1384).
   // `__make_callback` is registered above. Idempotent via funcMap guard so a
   // module that also uses `.then(cb1,cb2)` / `Promise.resolve` is unaffected.
-  if (state.asyncCpsFound) {
+  if (state.asyncCpsFound || state.asyncHostDriveFound) {
     if (!ctx.funcMap.has("Promise_resolve")) {
       const typeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "externref" }]);
       addImport(ctx, "env", "Promise_resolve", { kind: "func", typeIdx });
@@ -1480,6 +1495,33 @@ export function finalizeUnifiedCollector(ctx: CodegenContext, state: UnifiedColl
         [{ kind: "externref" }],
       );
       addImport(ctx, "env", "Promise_then2", { kind: "func", typeIdx });
+    }
+  }
+
+  // ── collectAsyncHostDriveImports finalize (#1042 host drive) ──
+  // The host settle backend of the #2906 resume machine additionally needs
+  // `__make_callback` (its step adapters are `__cb_<id>` reactions) and the
+  // deferred-promise trio: `Promise_new_pending` allocates the result promise
+  // the async fn returns; the resume machine settles it later from a microtask
+  // via `Promise_settle_resolve`/`Promise_settle_reject` (runtime.ts stashes
+  // the resolve/reject capabilities on the promise as `__r`/`__j`). The settle
+  // imports declare an externref result (the JS fns return undefined) so the
+  // shared `call <fulfill>; drop` settle shape stays uniform across backends.
+  if (state.asyncHostDriveFound) {
+    if (!ctx.funcMap.has("__make_callback")) {
+      const typeIdx = addFuncType(ctx, [{ kind: "i32" }, { kind: "externref" }], [{ kind: "externref" }]);
+      addImport(ctx, "env", "__make_callback", { kind: "func", typeIdx });
+    }
+    if (!ctx.funcMap.has("Promise_new_pending")) {
+      const typeIdx = addFuncType(ctx, [], [{ kind: "externref" }]);
+      addImport(ctx, "env", "Promise_new_pending", { kind: "func", typeIdx });
+    }
+    const settleTypeIdx = addFuncType(ctx, [{ kind: "externref" }, { kind: "externref" }], [{ kind: "externref" }]);
+    if (!ctx.funcMap.has("Promise_settle_resolve")) {
+      addImport(ctx, "env", "Promise_settle_resolve", { kind: "func", typeIdx: settleTypeIdx });
+    }
+    if (!ctx.funcMap.has("Promise_settle_reject")) {
+      addImport(ctx, "env", "Promise_settle_reject", { kind: "func", typeIdx: settleTypeIdx });
     }
   }
 

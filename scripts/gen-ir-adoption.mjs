@@ -249,7 +249,7 @@ This file is generated. To move a row:
    union in \`src/ir/select.ts\` **and** to \`BUCKETS\` here — the generator
    cross-checks the two and fails otherwise.
 
-The aim of #1530 is that every "unintended" bucket reaches zero. The
+The aim of #2855 is that every "unintended" bucket reaches zero. The
 "deferred" buckets are stable — they're a documented decision, not a TODO.`;
 
 // --- table rendering -------------------------------------------------------
