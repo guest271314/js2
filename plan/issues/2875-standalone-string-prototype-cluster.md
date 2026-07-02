@@ -2,7 +2,7 @@
 id: 2875
 title: "Standalone: String.prototype.* cluster (159 host-pass/standalone-fail, de-masked from #2862)"
 status: in-progress
-assignee: ttraenkler/dev-2873
+assignee: ttraenkler/dev-2875b
 created: 2026-06-30
 updated: 2026-07-02
 priority: high
@@ -161,3 +161,24 @@ IsRegExp (~6) buckets. **NOT** the 69-test #2862 ToPrimitive substrate bucket.
   full 1223-file String triage **and** a ~1k-file Array/Object/Number standalone
   sweep → require zero new fails (the standalone floor gate only fires in
   `merge_group`).
+
+## Progress log
+
+The staging above was re-sliced during implementation (the index-accessor
+family split across two PRs):
+
+- **Slice 1 — MERGED (PR #2440):** `emitStringProtoMemberBody` glue skeleton +
+  `calls.ts` String-brand enablement + `charAt`/`at`.
+- **Slice 2 — in PR (this branch, dev-2875b):** the two number-returning index
+  accessors `charCodeAt`/`codePointAt`. RequireObjectCoercible(this) (host-free
+  `ref.is_null` throw) → ToString(this) → UTF-16 read; `charCodeAt` NaN out of
+  range (§22.1.3.3), `codePointAt` undefined out of range + surrogate-pair
+  combine (§22.1.3.4); f64 result boxed via `__box_number` ensured in the same
+  first late-import batch as `__unbox_number` (funcidx-shift discipline). 10/10
+  host-free tests pass; byte-diff neutrality re-verified after `git merge
+  origin/main` (12/12 unrelated programs byte-identical to main; only the two
+  target reflective programs change output).
+- **Slice 3 — next:** search family — `indexOf`, `lastIndexOf`, `includes`,
+  `endsWith`, `startsWith` (+ IsRegExp-arg throw for the last three).
+- **Out of scope (routed elsewhere):** the 69-test #2862 ToPrimitive substrate
+  bucket.
