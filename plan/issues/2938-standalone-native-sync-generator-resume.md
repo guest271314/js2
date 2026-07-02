@@ -1,7 +1,7 @@
 ---
 id: 2938
 title: "Standalone: native SYNC-generator resume substrate — widen native generator lowering to eliminate __create_generator / __gen_* host imports"
-status: in-progress
+status: blocked
 assignee: ttraenkler/sr-funcidx
 created: 2026-07-01
 priority: high
@@ -21,7 +21,7 @@ umbrella: 2860
 > merge_group dup-id-gate failure + auto-park churn). The funcIdx-shift
 > prerequisite is #2936 (PR #2444, merged).
 
-## ✅ RELAX LANDED (2026-07-02, branch issue-2933-noyield-relax, stacked on #2936)
+## ⚠️ RELAX ATTEMPTED — BLOCKED (2026-07-02, branch issue-2933-noyield-relax, stacked on #2936)
 
 The two no-yield bails are relaxed (lockstep: `buildNativeGeneratorPlan`
 suspendCount + `isNativeGeneratorCandidate` terminal yield-require), unblocked
@@ -41,18 +41,56 @@ added, both gate-consistent (in `isNativeGeneratorCandidate` /
   emits against the first's `NativeGeneratorInfo` (mismatched
   `synthesizedThis` → "local index out of range", fn-name-gen-method.js).
 
-**Validation (542-file no-yield corpus, deterministic sample):**
+### ⛔ BLOCKED — full merge_group found 20 REAL standalone regressions (2026-07-02)
 
-- Host-free (no `__gen_*`/`__create_generator`/`__get_caught_exception`
-  imports): **4 → 58 files** (+54; ×4 sampling ⇒ ~216 of the 2163-file
-  candidate population, consistent with the ~250–350 estimate on the 1780).
-- **0 per-file status flips** vs main baseline (368 pass both sides).
-- **10 invalid modules, ALL pre-existing on pristine main without the relax**
-  (verified per-lane; unrelated standalone bugs — dstr-default struct.new
-  arity, forbidden-ext/b2 externref coercion, closure local.set typing).
-  **0 relax-attributable invalids.**
-- gc/host byte-inert (120 sha256 A/B vs origin/main generators-native.ts).
-- Generator equivalence suites + tests/issue-2930.test.ts green.
+**The relax is NOT ready. PR #2445 is bot-auto-parked (`hold`) on a real
+merge_group regression and must stay held.** My scoped 542-file corpus sample
+gave a false-clean signal (see the retraction below); the full standalone lane
+(48k tests, runs ONLY on `merge_group` — memory
+`project_standalone_floor_only_on_merge_group`) failed with **net −17,
+20 regressions, ratio 1800%** (run 28558982675, job "merge shard reports").
+
+Regressions (verified pass-on-main → fail-on-branch, NOT baseline drift; CI's
+error-categoriser mislabelled them "promise_error" — they are generator bugs):
+
+1. **~16 class-element static generator tests** (`class/elements/*-gen-rs-static-*`,
+   `*-static-gen-*`) → `compile_error: invalid Wasm` —
+   "not enough arguments on the stack for call (need 4, got 1)". A funcIdx/arity
+   desync in the **class-STATIC** generator emit path — a #2936-CLASS bug the
+   #2936 fix did NOT cover (it fixed the free-function / instance path). The
+   relax makes these shapes native candidates, exposing the broken static emit.
+2. **`generators/no-yield.js` + `generators/return.js`** → `fail` (wrong value):
+   the **canonical** no-yield semantics — `function *foo(a){}; g.next().value`
+   must be `undefined` — return the wrong value through the test262 harness path.
+   NB an isolated typed-param probe PASSES but the harness path FAILS, so the
+   bug is subtle/representation-dependent (elem carrier / `.value` read on a
+   done-from-start result), which makes it MORE dangerous, not less.
+3. **`module-code/parse-err-hoist-lex-gen.js`** → negative test no longer errors
+   (native path skips an early-error the host path caught).
+4. **`AsyncFromSyncIteratorPrototype/next/...`** → invalid Wasm.
+
+**Retraction of the earlier "0 status flips" claim:** the 542-file sample was
+(a) too narrow — it excluded class-element generators (they carry `yield`, so
+the no-yield filter dropped them) and did not sample `no-yield.js`/`return.js`;
+and (b) the A/B diff compared relax-vs-main both through the same scoped script,
+which cannot surface a semantic wrong-value flip the script doesn't assert. The
+full `merge_group` standalone lane is the authoritative gate and it is RED.
+
+**gc/host lane IS byte-inert** (240 sha256 A/B) and #2936 (PR #2444, the
+funcIdx-shift fix) merged independently and stands — this block is scoped to the
+no-yield RELAX only.
+
+### Remaining work to unblock (each its own concern)
+
+- **Fix the class-static generator funcIdx/arity desync** ("need 4, got 1") —
+  the class-static emit path in `class-bodies.ts` + the resume-call arity. This
+  is the larger codegen bug (#2936 sibling for the static path).
+- **Fix the no-yield `.value` semantic bug** — done-from-start result's `value`
+  field must read `undefined` through the standalone harness/value-read path;
+  reproduce via the test262 wrapper, not just an isolated typed probe.
+- **Bail the negative-test / async-from-sync shapes** if not cleanly supported.
+- **Re-validate on the FULL merge_group**, not a scoped sample — broad-impact
+  changes validate on full CI (memory `project_broad_impact_validate_full_ci`).
 
 ## Handoff to #2936 (funcIdx-shift fix — the unblocker) [historical]
 
