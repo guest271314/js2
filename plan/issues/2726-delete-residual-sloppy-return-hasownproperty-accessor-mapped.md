@@ -11,7 +11,7 @@ es_edition: ES5
 language_feature: delete
 task_type: bug
 created: 2026-06-26
-updated: 2026-06-29
+updated: 2026-07-02
 ---
 
 > **Partial resolution (2026-06-29, del2726).** Group **(a)** is now DONE
@@ -197,9 +197,9 @@ Regression test: `tests/issue-2726.test.ts`.
 ## Residual (as of #2199, PO reconcile 2026-06-28; updated 2026-06-29 del2726)
 
 NOT done — partially resolved. DONE so far: (a) sloppy unresolvable-identifier
-oracle (+4 test262, 0 regressions, 2026-06-29), (c) hasOwnProperty-after-
-configurable-delete + (d) non-configurable accessor delete (+6 test262, 0
-regressions). Remaining OPEN: **(b) sloppy global-object model** — now 3/4
+oracle (+4 test262, 0 regressions, 2026-06-29, **PR #2296**), (c) hasOwnProperty-
+after-configurable-delete + (d) non-configurable accessor delete (+6 test262, 0
+regressions, **PR #2177**). Remaining OPEN: **(b) sloppy global-object model** — now 3/4
 (`S11.4.1_A3.2_T1` implicit-global was carried by the (a) oracle; still failing:
 `S11.4.1_A3.1` `delete this.y === false`, `S11.4.1_A3.3_T1` `delete x; x` →
 ReferenceError, `11.4.1-4.a-8` `delete JSON === true`). (b) is STRUCTURAL (needs

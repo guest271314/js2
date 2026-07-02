@@ -2,7 +2,7 @@
 id: 2934
 title: "Standalone: invalid-Wasm heterogeneous tail after #2878 (test/__closure_*/__cb_0 — distinct codegen bugs)"
 status: in-progress
-assignee: ttraenkler/dev-2878
+assignee: ttraenkler/dev-2934b
 created: 2026-07-02
 updated: 2026-07-02
 priority: medium
@@ -63,11 +63,32 @@ not one — triaged 2026-07-02:
   likely warrants an architect spec.
 - [ ] **(1d) simple `for (const v of u.values())`** — demotes to the IR path
   (`ir/from-ast: unknown class`), a separate IR-adoption gap.
-- [ ] **(2) `call[0]/call[1] expected type …` in `test`/`__closure_*`** — a
-  wrong-typed argument at a call site (`String/concat` → `call[0] expected (ref
-  null 6), found call of externref`; `RegExp/test` → `call[0] expected externref,
-  found struct.new of (ref 101)` — a missing `extern.convert_any`; Array
-  map/filter `create-species-*` callbacks). Each a coercion/typing site.
+- [x] **(2a) `RegExp/test` receiver → `hasOwnProperty`/`propertyIsEnumerable`
+  missing `extern.convert_any`** — DONE (dev-2934b, slice 2). `RegExp.prototype.
+  test.hasOwnProperty('length')` — the receiver `RegExp.prototype.test` is a
+  function object, compiled to a concrete function-object struct `(ref $fn)`.
+  `compilePropertyIntrospection` (`object-ops.ts`) takes the `receiverWasm.kind
+  === "externref"` branch because `resolveWasmType` reports the receiver's
+  *static* (method) type as `externref` — then pushed the receiver with
+  `compileExpression` but **did not coerce** the actually-emitted `(ref $fn)` to
+  externref, while the key argument WAS coerced. Result: `call[0] expected type
+  externref, found struct.new of type (ref …)` invalid Wasm. Fix: coerce the
+  receiver's *compiled* type (`recvType.kind !== "externref"` → `coerceType`
+  → `extern.convert_any`), mirroring the existing key-arg coercion. Verified
+  before/after over the 90-file `.hasOwnProperty/.propertyIsEnumerable('length')`
+  DontEnum-length family: **9 standalone INVALID → 0** (RegExp `test`/`exec`/
+  `toString` `_A8/_A9/_A10`); the other 81 were already valid and stay valid.
+  Host-mode byte-neutral (host receiver is already externref → guard skips it;
+  `S15.10.6.3_A8` et al. still pass host). Standalone runtime still fails these
+  on the separate `__hasOwnProperty` function-`.length`-own semantics gap — a
+  distinct issue, not this slice.
+- [ ] **(2b) remaining `call[0]/call[1] expected type …` coercion sites** — still
+  open, DISTINCT from (2a): `String/concat` → `call[0] expected (ref null 6),
+  found call of externref` (reverse direction — an internal ref expected, an
+  externref supplied); `RegExp.prototype.exec(...).toString()` → `call[0]
+  expected externref, found if of (ref null 98)` (nullable-ref receiver to
+  `.toString()`); Array map/filter `create-species-*` callbacks in `__closure_*`.
+  Each a separate coercion/typing site.
 - [ ] **(3) `__closure_5` `not enough arguments on the stack`** — the one
   funcIdx-shift-shaped failure (for-await async path); may share the #2918
   late-import class.
