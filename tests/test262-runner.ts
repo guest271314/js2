@@ -1538,6 +1538,16 @@ class Test262Error {
   constructor(msg: string = "") {
     this.message = msg;
   }
+  // (#2671) Real sta.js defines \`Test262Error.thrower\` — the Promise
+  // capability tests pass it as the executor's reject callback
+  // (\`executor(resolve, Test262Error.thrower)\`). The synthesized prelude
+  // lacked it, so those tests read undefined and V8's NewPromiseCapability
+  // threw "Promise resolve or reject function is not callable" regardless of
+  // compiler correctness. A static METHOD (not the sta.js assignment form)
+  // marshals host-callable when passed as a value.
+  static thrower(msg: string = ""): void {
+    throw new Test262Error(msg);
+  }
 }
 
 function isSameValue(a: any, b: any): number {
