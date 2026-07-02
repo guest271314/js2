@@ -3622,6 +3622,26 @@ function compileFromCharCodeFamily(
           // Already f64 in the temp above — trunc to the i32 the native helper wants.
           buf.push({ op: "i32.trunc_sat_f64_s" });
         } else if (argType && argType.kind !== "i32") {
+          // (#2875 slice 5) §7.1.8 ToUint16 computed in the f64 domain BEFORE
+          // the i32 conversion: t = trunc(x); m = t − floor(t/2^16)·2^16 ∈
+          // [0, 65535]. Division by 2^16 is a pure exponent shift, so every
+          // step is exact for all finite f64s; NaN and ±Inf propagate to a NaN
+          // m (Inf−Inf), which i32.trunc_sat then maps to the spec's +0.
+          // A bare `i32.trunc_sat_f64_s` SATURATES first — +Inf → 0x7FFFFFFF,
+          // which the helper's low-16 mask turns into 0xFFFF instead of 0
+          // (S9.7_A1 #5), and any |x| ≥ 2^31 loses its true modulo the same
+          // way. (The i32-typed arg arm needs none of this: the helper's mask
+          // IS ToUint16 for i32-representable integers.)
+          const u16Tmp = allocLocal(fctx, `__fcc_u16_${fctx.locals.length}`, { kind: "f64" });
+          buf.push({ op: "f64.trunc" });
+          buf.push({ op: "local.tee", index: u16Tmp });
+          buf.push({ op: "local.get", index: u16Tmp });
+          buf.push({ op: "f64.const", value: 65536 });
+          buf.push({ op: "f64.div" });
+          buf.push({ op: "f64.floor" });
+          buf.push({ op: "f64.const", value: 65536 });
+          buf.push({ op: "f64.mul" });
+          buf.push({ op: "f64.sub" });
           buf.push({ op: "i32.trunc_sat_f64_s" });
         }
       } else {
@@ -5658,11 +5678,16 @@ function compileCallExpression(
     }
 
     // Handle String.fromCharCode(code) — native helper (nativeStrings) or host import
+    // (#2875 slice 5) No `arguments.length >= 1` gate: zero-arg
+    // `String.fromCharCode()` is spec-valid (§22.1.2.1 — empty codeUnits list
+    // → "") and folds through the same family lowering
+    // (`emitVariadicStringConcat` returns the empty-string literal for zero
+    // parts). The old gate dropped it to the generic member-call path, which
+    // is a `__get_builtin` Phase-B refusal → CE in standalone (S15.5.3.2_A2).
     if (
       ts.isIdentifier(propAccess.expression) &&
       propAccess.expression.text === "String" &&
-      propAccess.name.text === "fromCharCode" &&
-      expr.arguments.length >= 1
+      propAccess.name.text === "fromCharCode"
     ) {
       // #1598: nativeStrings mode (forced on for --target wasi / standalone) uses
       // a pure-Wasm __str_fromCharCode helper — no env.String_fromCharCode import.
@@ -5698,11 +5723,12 @@ function compileCallExpression(
     }
 
     // Handle String.fromCodePoint(code) — native helper (nativeStrings) or host import
+    // (#2875 slice 5) No arity gate — zero-arg → "" (§22.1.2.2), same
+    // empty-parts fold as fromCharCode above.
     if (
       ts.isIdentifier(propAccess.expression) &&
       propAccess.expression.text === "String" &&
-      propAccess.name.text === "fromCodePoint" &&
-      expr.arguments.length >= 1
+      propAccess.name.text === "fromCodePoint"
     ) {
       // Native strings mode: use pure-Wasm __str_fromCodePoint (no host import).
       // #2088: shares the variadic concat fold via compileFromCharCodeFamily.
