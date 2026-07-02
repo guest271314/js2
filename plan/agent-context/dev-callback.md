@@ -18,7 +18,7 @@ the spun-out dispatch fix.
   `origin/issue-2921-standalone-make-callback-leak` (the main-merge + re-id).
   The suspend commit (this file) is being pushed now, which carries all of it.
 - **BLOCKER — unresolved 2923 dup-id.** The branch has TWO `id: 2923` files:
-  - `plan/issues/2923-any-closure-param-dispatch-arity-coercion.md` (MINE — the
+  - `plan/issues/2939-any-closure-param-dispatch-arity-coercion.md` (then id 2923; MINE — the
     dispatch-arity fix spun out of the make-callback analysis)
   - `plan/issues/2923-eval-constant-string-compile-away-broaden.md` (from main —
     landed via docs commit `3ff19e4e1`, a parallel session)
