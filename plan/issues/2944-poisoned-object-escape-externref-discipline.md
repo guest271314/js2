@@ -1,7 +1,8 @@
 ---
 id: 2944
 title: "Substrate: poisoned $Object values escape into struct-typed slots — externref-typed escape discipline for hash-consumer vars"
-status: ready
+status: in-progress
+assignee: ttraenkler/sr-escape
 created: 2026-07-02
 priority: high
 horizon: xl
@@ -103,3 +104,124 @@ stays fixed.
   (superseded by the revert; recover from git if useful).
 - Instrumentation recipe: `DBG_THROW_SITES` env hooks in `typeErrorThrowInstrs`
   / `resolveStructNameForExpr` / `markObjectHashConsumers` (see #2937 analysis).
+
+## Design (2026-07-02, sr-escape) — TYPE-keyed poison at the type-resolution chokepoint
+
+### Measured root cause (sharper than the seed's framing)
+
+Minimal repro (host, poison re-enabled, **no type annotations** — the reduced
+E1/E2/E3 shapes in #2937 all passed because their `: any` annotations already
+lowered every slot to externref; acorn is unannotated JS, so its types are
+INFERRED object types, and that is the load-bearing difference):
+
+```ts
+// @ts-nocheck
+var defaults = { ecmaVersion: 5, sourceType: "script" };
+function getOptions(opts) {
+  var options = {};
+  for (var opt in defaults) { options[opt] = opts && opt in opts ? opts[opt] : defaults[opt]; }
+  if (options.ecmaVersion === "latest") { options.ecmaVersion = 1e8; }
+  else if (options.ecmaVersion == null) { options.ecmaVersion = 11; }
+  else if (options.ecmaVersion >= 2015) { options.ecmaVersion -= 2009; }
+  return options;
+}
+class Parser {
+  constructor(opts) { this.options = getOptions(opts); }
+  read() { return this.options.ecmaVersion; }
+}
+export function test(ev) { return new Parser({ ecmaVersion: ev, sourceType: "module" }).read(); }
+```
+
+- poison OFF (main today): `test(2022)` → `0` (the #2849 shadow bug, via the class shape)
+- poison ON (#2432 state): `test(2022)` → throws `TypeError … at 17:19` (`this.options` reads null)
+
+WAT + ts.Type-identity probes pin the chain:
+
+1. `checker.getTypeAtLocation` returns **one shared ts.Type instance** (call it
+   `T2`) for the `options` declaration, every `options.…` receiver, AND
+   `getOptions`'s inferred return type. (Distinct `{}` vars get distinct
+   instances — no cross-var sharing in the probe.)
+2. The function-signature pre-pass calls **`ensureStructForType(ctx,
+   unwrappedRetType)` (`declarations.ts:2971`)** on `getOptions`'s return type =
+   `T2`. `ensureStructForType` registers **"empty objects get an empty struct"**
+   → `anonTypeMap.set(T2, $__anon_0)`. The poison suppressed the *widening*
+   registration of T2, but this TYPE-keyed registrar doesn't consult the poison.
+3. `collectDeclarations` then types the `options` local via `resolveWasmType(T2)`
+   → anonTypeMap hit → `(ref null $__anon_0)`. The `{}` initializer compiles to
+   a HOST `$Object` (externref); the decl-init coercion emits
+   `any.convert_extern` + `ref.test $__anon_0` → host object is not a wasm
+   struct → **`options` local is NULL from the first instruction**.
+4. All for-in `options[opt]=` writes `__extern_set(null, …)` silently no-op;
+   `return options` returns null; `this.options` field (externref — acorn class
+   fields type as `any`) stores null; `read()`'s null-guard throws. In full
+   acorn the same chain nukes parser setup on every input (#2937), and other
+   registrars (closure param `ensureStructForType`, literal registration,
+   destructuring) can bind the same type the same way — this is why the
+   receiver-identifier bail (#2937 WIP) could never win: the DECLARED SLOT
+   types, not the read sites, are what poison must reach.
+
+So: the poison is **var-name-keyed and consulted only at the widening
+decision**, while representation actually flows from **ts.Type-keyed**
+machinery (`ensureStructForType` / `anonTypeMap` / `resolveWasmType` /
+`resolveStructName`). Any type-keyed registrar re-binds every slot (local,
+return, param, field) and every read of the poisoned value back to a struct.
+
+### The fix — poison the TYPE, not (just) the var
+
+Record the poisoned var's ts.Type instance(s) in a new context set and consult
+it at the three type-resolution chokepoints everything else derives from:
+
+- `ctx.objectHashConsumerTypes: Set<ts.Type>` (context/types.ts +
+  create-context.ts).
+- **Populate** in `collectEmptyObjectWidening` (declarations.ts): when a var is
+  poisoned, add `checker.getTypeAtLocation(decl.name)` and
+  `getTypeAtLocation(decl.initializer)` — skipping `any`-flagged types (the
+  `any` singleton is shared by all any-typed vars, same guard as the existing
+  anonTypeMap skip). **Host-gated (`!ctx.standalone`)** so standalone bytes are
+  untouched (standalone has the same latent escape, but that is a separate
+  byte-affecting slice; its poison behavior is unchanged here).
+- **Consult** in:
+  1. `ensureStructForType` (index.ts) — early return. Kills the empty-struct /
+     shaped-struct registration from return-type/param/closure/destructuring
+     pre-passes.
+  2. `resolveWasmType` (index.ts, top of the Object-flags branch) — return
+     `externref`. Every slot the value flows into (local, return, param, field,
+     alias) lowers to externref, matching the `$Object` host value.
+  3. `resolveStructName` (property-access.ts) — return `undefined`. Every
+     member read/write on an expression of that type routes through the dynamic
+     host path (`__extern_get`/`__extern_set` + the #2655 multi-struct
+     dispatch), which handles both host `$Object`s and genuine structs.
+- **Re-drop the host gate** on the `markObjectHashConsumers` loop (restore
+  #2432's behavior) in the same PR — with the type discipline in place the
+  escape that killed acorn is closed.
+
+Why this shape: it is exactly the existing precedent — `#1287` (.d.ts types),
+`#2542` (index-signature dictionaries), `#2724` (mixed accessor literals) all
+"skip registration → type lowers to externref everywhere → `$Object` dynamic
+path services it". The poison becomes one more citizen of that discipline, and
+the decision lives at the type-resolution chokepoint rather than being patched
+at N read sites. (North-star note: this is representation-decision
+centralisation — when the IR value model (#2856 D1) takes over slot typing, the
+poisoned-type set maps 1:1 onto an IR-side `extern` value-kind decision; the
+chokepoint consult means the IR migration replaces ONE lookup, not N scattered
+bails.)
+
+Escape coverage follows automatically: assignments/aliases (`const y = o` —
+y's slot types via resolveWasmType(T2) → externref), returns (signature
+pre-pass consults ensureStructForType/resolveWasmType), params + closure params
+(closures.ts calls ensureStructForType(tsParamType) → skipped → externref),
+struct fields typed from the RHS/declared type (index.ts:12663 propType →
+externref), array elements (vec elem type resolution → externref elem key).
+A shared-type demotion (two vars sharing one annotated ts.Type, one poisoned)
+demotes both to `$Object` — conservative but CONSISTENT (both representations
+agree), and unannotated `{}` vars (the acorn class) have per-var types.
+
+### Validation gates (acceptance)
+
+- probe above: poison-on host → 13; acorn corpus ≥ 2026-06-30 baseline
+  (≥13 equal±quirks, 0 `compiled-parse-threw` beyond the 2 known);
+- `tests/issue-2849.test.ts`: 4 `it.fails` host arms flip back to plain `it`;
+- standalone: byte-identical (sha256 over the #2849 test corpus + a standalone
+  compile of the probe);
+- equivalence tests green; full `merge_group` (broad-impact rule) for the 137
+  recovered + no regressions.
