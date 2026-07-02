@@ -55,9 +55,27 @@ by a **full test262 diff** (merge_group), and likely wants its **own dedicated r
 slot** so its large delta does not overlap with another baseline swing in one
 window. Do NOT implement without tech-lead sign-off on the option and timing.
 
+## Second runner-side gap — the wrapped import is placed INSIDE `test()` (dev-2900, 2026-07-02)
+
+With #2930 + #2931 landed, an end-to-end trace shows a **second** runner-side blocker
+beyond `allowJs`: `tests/test262-runner.ts` `wrapTest` naively wraps the _entire_
+test body — **including the top-level `import` statement** — into
+`export function test() { try { … } }`. An `import` nested in a function body is not
+a real module import; the checker does not resolve its binding, and #2930's
+`registerImportBindingAliases` (which scans **top-level** `ImportDeclaration`s only)
+does not see it.
+
+Proof: the real fixture with `allowJs: true` and the import **hoisted to module top
+level** returns `1` (**PASS**); the same fixture with the runner's actual wrapping
+(import inside `test()`) returns `2` (FAIL). So #2932 must ALSO hoist module `import`
+statements out of the wrapped `test()` to module top level (or otherwise keep the
+module goal's imports at top level) for `flags: [module]` tests. This is a
+`wrapTest` change, bounded to the module-goal wrapping path.
+
 ## Acceptance
 
 - `.js` module dependencies compile and link in multi-file mode.
 - `tests/issue-1015.test.ts` positive case passes.
+- Module-goal test imports are emitted at module top level (not inside `test()`).
 - Full test262 diff reviewed; net conformance change is understood and accepted.
-- #2900 (needs #2930 + #2931 + this) passes.
+- #2900 (needs #2930 + #2931 + this) passes end-to-end via the runner.
