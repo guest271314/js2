@@ -120,10 +120,15 @@ flagged to the lead, out of scope here.)
   miscompiles) — the test262 runner wraps bodies in `test()`, so the corpus
   barely exercises it, but the playground/diff lanes do.
 
-## Follow-ups (from the triage — not filed as issues yet)
+## Follow-ups (from the triage — filed as issues, #38)
 
-- gOPD-on-builtin (~178): extend #2861/#2863/#2896 `__builtinfn_gopd` machinery
-- arguments-object defineProperty MOP (~82, #2667 lineage)
-- boxed-wrapper receivers (~18) · global-object receivers (~10, needs #2907)
-- missing spec TypeErrors (~32: array length, non-extensible)
-- `__obj_find` illegal-cast on residual dynamic non-string keys (2 files)
+- **#2984** gOPD-on-builtin (~178): extend #2861/#2863/#2896 `__builtinfn_gopd`
+  machinery
+- **#2985** defineProperties 5-b/6-a slab residual (~250: array/arguments own-prop
+  MOP + accessor fidelity + destructive `verifyProperty`); folds in the
+  `__obj_find` illegal-cast on residual dynamic non-string keys (2 files)
+- **#2986** arguments-object defineProperty MOP (~82, #2667 lineage)
+- **#2987** boxed-wrapper receivers (~18)
+- **#2988** global-object receivers (~10, blocked on #2907)
+- **#2989** missing spec TypeErrors (~32: array length, non-extensible,
+  non-configurable redefine)
