@@ -190,7 +190,7 @@ import {
   tryExternClassMethodOnAny,
 } from "./calls-closures.js";
 import { compileOptionalCallExpression } from "./calls-optional.js";
-import { tryStaticEvalInline } from "./eval-inline.js";
+import { tryStaticEvalInline, tryStaticFunctionCtorCall } from "./eval-inline.js";
 import { compileExternMethodCall, compileSpreadCallArgs, emitLazyProtoGet } from "./extern.js";
 import {
   compileStandaloneRegExpConstructor,
@@ -3973,6 +3973,15 @@ function compileCallExpression(
     if (r !== undefined) return r;
   }
 
+  // (#2924) Constant `Function("<params>", …, "<body>")` compile-away — both
+  // the plain-call value form and the immediate-call form
+  // (`new Function(...)(args)` / `Function(...)(args)`). Non-constant args or
+  // a local `Function` shadow fall through to the existing paths.
+  {
+    const r = tryStaticFunctionCtorCall(ctx, fctx, expr);
+    if (r !== undefined) return r;
+  }
+
   // (#2921) `__drain_microtasks()` — explicit microtask-queue drain intrinsic
   // (banked from the closed #2367/#2867 PR-B; the funcIdx-shift half already
   // landed via #2918). Lets a standalone/WASI embedder — and, once the carrier
@@ -7102,10 +7111,36 @@ function compileCallExpression(
       // no standalone carrier — the module would trap). Idempotent.
       if (ctx.standalone) ensureObjectRuntime(ctx);
 
-      // Try compile-time fast path: known struct + literal property name
+      // Try compile-time fast path: known struct + literal property name.
+      // (#2965) Standalone also canonicalizes NON-string literal keys
+      // (`gOPD(obj, -20)` / `gOPD(obj, true)`) to their §7.1.19 ToPropertyKey
+      // string form ("-20"/"true") so they hit the SAME struct fast path a
+      // string-literal key takes. Without this they fell through to the
+      // dynamic `__getOwnPropertyDescriptor` native, which answers `undefined`
+      // for a typed-struct receiver (it only walks `$Object`s), so
+      // `gOPD(obj, -20).value` threw on a property that exists as "-20"
+      // (test262 15.2.3.3-2-* — argument 'P' is a number/boolean). Host/gc
+      // mode is NOT rerouted (its dynamic path delegates ToPropertyKey to the
+      // host import and already passes) — gated on ctx.standalone so host
+      // bytes stay identical.
       const arg0TsType = ctx.checker.getTypeAtLocation(arg0);
       const structName = resolveStructName(ctx, arg0TsType);
-      const propLiteral = ts.isStringLiteral(arg1) ? arg1.text : undefined;
+      const literalKeyText = (e: ts.Expression): string | undefined => {
+        if (ts.isStringLiteral(e)) return e.text;
+        if (!ctx.standalone) return undefined;
+        if (ts.isNumericLiteral(e)) return String(Number(e.text));
+        if (
+          ts.isPrefixUnaryExpression(e) &&
+          e.operator === ts.SyntaxKind.MinusToken &&
+          ts.isNumericLiteral(e.operand)
+        ) {
+          return String(-Number(e.operand.text));
+        }
+        if (e.kind === ts.SyntaxKind.TrueKeyword) return "true";
+        if (e.kind === ts.SyntaxKind.FalseKeyword) return "false";
+        return undefined;
+      };
+      const propLiteral = literalKeyText(arg1);
 
       if (structName && propLiteral !== undefined) {
         const structTypeIdx = ctx.structMap.get(structName);
@@ -11665,7 +11700,17 @@ function compileCallExpression(
         const toStrIdx = ensureLateImport(ctx, "__extern_toString", [{ kind: "externref" }], [{ kind: "externref" }]);
         flushLateImportShifts(ctx, fctx);
         if (toStrIdx !== undefined) {
-          compileExpression(ctx, fctx, propAccess.expression);
+          // (#2934 2b) The STATIC type says externref, but the receiver can
+          // COMPILE to a concrete ref — e.g. `regObj.exec(str).toString()`
+          // standalone lowers exec natively to a capture-array vec `(ref null
+          // $Vec)`. Feeding that raw ref to `__extern_toString(externref)` is
+          // invalid Wasm (`call[0] expected externref, found (ref null …)`).
+          // Coerce the COMPILED type, mirroring the #2934 2a receiver fix in
+          // compilePropertyIntrospection (object-ops.ts).
+          const recvType = compileExpression(ctx, fctx, propAccess.expression);
+          if (recvType && recvType.kind !== "externref" && recvType.kind !== "ref_extern") {
+            coerceType(ctx, fctx, recvType, { kind: "externref" });
+          }
           fctx.body.push({ op: "call", funcIdx: toStrIdx });
           return { kind: "externref" };
         }

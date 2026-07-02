@@ -1511,6 +1511,7 @@ function buildPreamble(
   needsBoolAssert: boolean,
   needsCompareArray: boolean,
   needsAssertCompareArray: boolean,
+  needsAssertDeepEqual: boolean,
   needsPropertyHelper: boolean,
   needsFnGlobalObject: boolean,
   needsIsConstructor: boolean,
@@ -1537,6 +1538,16 @@ class Test262Error {
   message: string;
   constructor(msg: string = "") {
     this.message = msg;
+  }
+  // (#2671) Real sta.js defines \`Test262Error.thrower\` — the Promise
+  // capability tests pass it as the executor's reject callback
+  // (\`executor(resolve, Test262Error.thrower)\`). The synthesized prelude
+  // lacked it, so those tests read undefined and V8's NewPromiseCapability
+  // threw "Promise resolve or reject function is not callable" regardless of
+  // compiler correctness. A static METHOD (not the sta.js assignment form)
+  // marshals host-callable when passed as a value.
+  static thrower(msg: string = ""): void {
+    throw new Test262Error(msg);
   }
 }
 
@@ -1656,6 +1667,46 @@ function assert_compareArray(actual: any[], expected: any[]): void {
   for (let i: number = 0; i < actual.length; i++) {
     if (actual[i] !== expected[i]) { if (!__fail) __fail = __assert_count; return; }
   }
+}`;
+  }
+
+  if (needsAssertDeepEqual) {
+    // (#2671) Real harness deepEqual.js analog for the shapes the suite
+    // exercises (nested arrays incl. holes/undefined, plain objects like
+    // match-indices \`groups\`, primitives with SameValue NaN handling). The
+    // RegExp match-indices family includes deepEqual.js and previously died
+    // with "assert is not defined" because no shim existed.
+    p += `
+
+function __deepEq(a: any, b: any): number {
+  if (a === b) { return 1; }
+  if (a !== a && b !== b) { return 1; }
+  if (a == null && b == null) { return 1; }
+  if (a == null || b == null) { return 0; }
+  if (typeof a !== "object" || typeof b !== "object") { return 0; }
+  var aArr = Array.isArray(a);
+  var bArr = Array.isArray(b);
+  if (aArr || bArr) {
+    if (!aArr || !bArr) { return 0; }
+    if (a.length !== b.length) { return 0; }
+    for (let i: number = 0; i < a.length; i++) {
+      if (!__deepEq(a[i], b[i])) { return 0; }
+    }
+    return 1;
+  }
+  var ka = Object.keys(a);
+  var kb = Object.keys(b);
+  if (ka.length !== kb.length) { return 0; }
+  for (let i: number = 0; i < ka.length; i++) {
+    var k = ka[i];
+    if (!__deepEq(a[k], b[k])) { return 0; }
+  }
+  return 1;
+}
+
+function assert_deepEqual(actual: any, expected: any): void {
+  __assert_count = __assert_count + 1;
+  if (!__deepEq(actual, expected)) { if (!__fail) __fail = __assert_count; }
 }`;
   }
 
@@ -1982,6 +2033,7 @@ export function wrapTest(source: string, meta?: Test262Meta): WrapResult {
   body = body.replace(/\bassert\.sameValue\b/g, "assert_sameValue");
   body = body.replace(/\bassert\.notSameValue\b/g, "assert_notSameValue");
   body = body.replace(/\bassert\.compareArray\b/g, "assert_compareArray");
+  body = body.replace(/\bassert\.deepEqual\b/g, "assert_deepEqual");
   body = body.replace(/\bassert\s*\(/g, "assert_true(");
 
   // Strip 3rd argument from assert_sameValue / assert_notSameValue calls
@@ -1989,6 +2041,7 @@ export function wrapTest(source: string, meta?: Test262Meta): WrapResult {
   body = stripThirdArg(body, "assert_sameValue");
   body = stripThirdArg(body, "assert_notSameValue");
   body = stripThirdArg(body, "assert_compareArray");
+  body = stripThirdArg(body, "assert_deepEqual");
 
   // Convert typeof assertions to direct comparisons (our assert shims only handle numbers)
   // assert_sameValue(typeof X, "Y"); → increment counter, set __fail on mismatch
@@ -2146,6 +2199,7 @@ export function wrapTest(source: string, meta?: Test262Meta): WrapResult {
   const needsBoolAssert = /\bassert_(sameValue|notSameValue)_bool\b/.test(body);
   const needsCompareArray = /\bcompareArray\b/.test(body);
   const needsAssertCompareArray = /\bassert_compareArray\b/.test(body);
+  const needsAssertDeepEqual = /\bassert_deepEqual\b/.test(body);
   const needsAssertThrows = /\bassert_throws\b/.test(body);
   const needsAssertThrowsAsync = /\bassert_throwsAsync\b/.test(body);
 
@@ -2235,6 +2289,7 @@ export function wrapTest(source: string, meta?: Test262Meta): WrapResult {
     needsBoolAssert,
     needsCompareArray,
     needsAssertCompareArray,
+    needsAssertDeepEqual,
     needsPropertyHelper,
     needsFnGlobalObject,
     needsIsConstructor,
@@ -2265,6 +2320,7 @@ export function wrapTest(source: string, meta?: Test262Meta): WrapResult {
       needsBoolAssert,
       needsCompareArray,
       needsAssertCompareArray,
+      needsAssertDeepEqual,
       needsPropertyHelper,
       needsFnGlobalObject,
       needsIsConstructor,
@@ -2497,6 +2553,50 @@ export function test(): number {
     };
   }
 
+  // (#2932) Module-goal tests: hoist top-level `import` / `export … from`
+  // statements whose specifier references a `_FIXTURE` module OUT of the
+  // synthetic `export function test()` wrapper to module top level. An
+  // `import` nested inside a function body is not a real module import — the
+  // TS checker never resolves its binding, and the compiler's top-level
+  // import-alias scan (#2930) only sees top-level ImportDeclarations — so
+  // every fixture-importing module test read `null`. Each hoisted statement is
+  // replaced in the body by a placeholder comment padded to the same line
+  // count (keeps error line citations stable); the hoisted copies are emitted
+  // ahead of the preamble (bodyLineOffset is computed from preBody, so it
+  // adjusts automatically).
+  //
+  // Scope: `_FIXTURE` specifiers ONLY — the exact class the multi-file
+  // fixture branch links via `allowJs` (#2932's purpose). Hoisting is NOT
+  // applied to other specifiers: test262's module-namespace tests SELF-import
+  // (`import * as ns from './<own-filename>.js'`), and under the runner the
+  // test compiles under the virtual key `./test.ts`, so a hoisted self-import
+  // cannot resolve — 4 namespace/internals tests flipped pass→fail with
+  // "ns is not defined" in PR #2471's merge_group run. Non-fixture module
+  // imports keep their pre-#2932 (nested, leniently-ignored) behavior.
+  let hoistedImports = "";
+  if (resolvedMeta.flags?.includes("module")) {
+    const hoistedStmts: string[] = [];
+    const hoistOne = (m: string, stmt: string): string => {
+      hoistedStmts.push(stmt);
+      const newlines = m.split("\n").length - 1;
+      return "/* #2932: import/export-from hoisted to module top level */" + "\n".repeat(newlines);
+    };
+    // import x from '…_FIXTURE.js'; / import {a as b} from …; / import * as ns from …;
+    // import x, {a} from …; / import '…_FIXTURE.js';  ([^'";]*? forbids crossing statements)
+    bodyForFunc = bodyForFunc.replace(
+      /^[ \t]*(import\s+(?:[^'";]*?\bfrom\s*)?['"][^'"]*_FIXTURE[^'"]*['"]\s*;)/gm,
+      (m, stmt) => hoistOne(m, stmt),
+    );
+    // export * from '…'; / export * as ns from '…'; / export {a, b as c} from '…';
+    bodyForFunc = bodyForFunc.replace(
+      /^[ \t]*(export\s+(?:\*(?:\s+as\s+[A-Za-z_$][\w$]*)?|\{[^}]*\})\s*from\s*['"][^'"]*_FIXTURE[^'"]*['"]\s*;)/gm,
+      (m, stmt) => hoistOne(m, stmt),
+    );
+    if (hoistedStmts.length > 0) {
+      hoistedImports = hoistedStmts.join("\n") + "\n";
+    }
+  }
+
   // (#2895 PATH B) Async tests: pump the microtask ring before reading the
   // result so genuinely-pending async-frame continuations (which carry the
   // assertions) run. `__drain_microtasks()` is a compiler intrinsic — the native
@@ -2507,7 +2607,7 @@ export function test(): number {
   const asyncDrainDecl = isAsyncTest ? `declare function __drain_microtasks(): void;\n` : "";
   const asyncDrainCall = isAsyncTest ? `  __drain_microtasks();\n` : "";
   const preBody = `${strictDirective}
-${asyncDrainDecl}${preamble}
+${hoistedImports}${asyncDrainDecl}${preamble}
 ${hoistedDecls}
 export function test(): number {
   ${implicitDecls}
@@ -2852,7 +2952,8 @@ export async function handleNegativeTest(
  * We try to extract the quoted function name from the stack trace.
  */
 export function extractWasmFuncName(err: any): string | undefined {
-  const stack = err?.stack ?? String(err);
+  // (#2962) guarded stringify — see extractWasmCallStack.
+  const stack = err?.stack ?? safeStringifyThrown(err);
   // V8 format: at funcName (wasm://...)
   const atMatch = stack.match(/at\s+(\w[\w$]*)\s+\(wasm:\/\//);
   if (atMatch) return atMatch[1];
@@ -2982,6 +3083,33 @@ function safeStringifyThrown(v: any): string {
   }
 }
 
+/**
+ * (#2962) Render a natively-thrown Wasm-GC payload through the module's own
+ * `__exn_render_prepare` / `__exn_render_char` exports (standalone/wasi
+ * binaries emit them at finalize). The module runs the payload through the
+ * same `__any_to_string` chain its in-module `String(x)` uses — so an
+ * `$Error_struct` renders "TypeError: boom" per §20.5.3.4 and a Test262Error
+ * yields its real assertion message — then exposes the flat string one code
+ * unit at a time (WasmGC arrays are not host-indexable). Returns `null`
+ * when the exports are absent (JS-host binaries), the payload renders empty,
+ * or anything throws — the caller then falls back to the #2870 opaque label.
+ * The 64k cap is defensive (a corrupt length must not build a giant string).
+ */
+function tryNativeExnRender(instance: any, payload: any): string | null {
+  try {
+    const prep = instance?.exports?.__exn_render_prepare;
+    const chr = instance?.exports?.__exn_render_char;
+    if (typeof prep !== "function" || typeof chr !== "function") return null;
+    const len = prep(payload);
+    if (typeof len !== "number" || len <= 0 || len > 65536) return null;
+    let out = "";
+    for (let i = 0; i < len; i++) out += String.fromCharCode(chr(i));
+    return out;
+  } catch {
+    return null;
+  }
+}
+
 export function extractWasmExceptionMessage(err: any, instance: any): string {
   if (typeof WebAssembly !== "undefined" && err instanceof (WebAssembly as any).Exception) {
     let payload: any = null;
@@ -2996,7 +3124,17 @@ export function extractWasmExceptionMessage(err: any, instance: any): string {
     if (payload instanceof Error) {
       return payload.message ?? safeStringifyThrown(payload);
     }
-    if (payload != null) return safeStringifyThrown(payload);
+    if (payload != null) {
+      // (#2962) A host-opaque GC payload (typeof "object"/"function") renders
+      // through the module's own exports before falling back to the #2870
+      // label. Host-readable primitives keep the direct String() path.
+      const t = typeof payload;
+      if (t === "object" || t === "function") {
+        const native = tryNativeExnRender(instance, payload);
+        if (native != null) return native;
+      }
+      return safeStringifyThrown(payload);
+    }
     return instance ? "TypeError (null/undefined access)" : "wasm exception during module init";
   }
   if (err instanceof Error) {
@@ -3019,7 +3157,11 @@ export function extractWasmExceptionMessage(err: any, instance: any): string {
  *    { name: "test",  offset: 0x1e7 }]
  */
 export function extractWasmCallStack(err: any): Array<{ name: string; offset: number }> {
-  const stack: string = err?.stack ?? String(err);
+  // (#2962) Same #2870 hazard one level up: `String(err)` on an exotic thrown
+  // value (poisoned/prototype-less object) throws a host TypeError that would
+  // crash the runner mid-test instead of recording the failure. Route through
+  // the guarded stringifier.
+  const stack: string = err?.stack ?? safeStringifyThrown(err);
   const frames: Array<{ name: string; offset: number }> = [];
   // V8 format: `at <name> (wasm://wasm/<hash>:wasm-function[N]:0xOFFSET)`
   const re = /at\s+(\S+)\s+\(wasm:\/\/[^:]*:wasm-function\[\d+\]:0x([0-9a-fA-F]+)\)/g;
@@ -3594,6 +3736,13 @@ export function classifyError(errorMsg: string | undefined): string | undefined 
   // Assertion failures (returned N patterns)
   if (/^returned -1\b/.test(errorMsg)) return "exception_in_test";
   if (/^returned \d+/.test(errorMsg)) return "assertion_fail";
+  // (#2962) A thrown Test262Error IS an assertion failure by definition. The
+  // standalone exception renderer (#2962) surfaces these as
+  // "Test262Error: <assert text>" — before it, such failures were the opaque
+  // #2870 label and fell to "other". Host-lane records are unaffected: there
+  // the payload is a real JS Error and the recorded message is `.message`
+  // WITHOUT the constructor-name prefix.
+  if (/^Test262Error\b/.test(errorMsg)) return "assertion_fail";
 
   // Wasm compile/validation errors (from instantiation)
   if (/Compiling function|No dependency provided|not a function/i.test(errorMsg)) return "wasm_compile";
