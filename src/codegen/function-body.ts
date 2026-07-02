@@ -53,7 +53,7 @@ import { collectI32SpecializedArrays } from "./array-element-typing.js";
 import { detectArrayReduceFusion, applyArrayReduceFusion } from "./array-reduce-fusion.js";
 import { compileNativeGeneratorFunction } from "./generators-native.js";
 import { ASYNC_CPS_ENABLED, analyzeAsyncBody, asyncFnNeedsCps, emitAsyncStateMachine } from "./async-cps.js";
-import { emitAsyncFrameStateMachine, asyncFnNeedsDrive } from "./async-frame.js";
+import { emitAsyncFrameStateMachine, asyncFnNeedsDrive, asyncFnNeedsHostDrive } from "./async-frame.js";
 import { isStandalonePromiseActive } from "./async-scheduler.js";
 import {
   functionHasLinearU8Params,
@@ -1193,6 +1193,17 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
           fctx.returnType = { kind: "externref" };
           fctx.asyncCpsActive = true;
           emitAsyncStateMachine(ctx, fctx, decl, asyncPlan);
+          asyncCpsHandled = true;
+        } else if (asyncFnNeedsHostDrive(ctx, decl, asyncPlan)) {
+          // (#1042 July re-scope) JS-host lane onto the #2906 N-state resume
+          // machine with HOST-Promise settle adapters. Claims only the linear
+          // shapes the single-tail-await CPS lane rejects (multi-await,
+          // try/finally-across-await) — those previously fell through to the
+          // legacy synchronous fakery and returned wrong values under genuine
+          // suspension. Same externref result contract as the CPS lane.
+          rewriteFuncResultType(ctx, func, { kind: "externref" });
+          fctx.returnType = { kind: "externref" };
+          emitAsyncFrameStateMachine(ctx, fctx, decl, asyncPlan, /*host*/ true);
           asyncCpsHandled = true;
         }
       }

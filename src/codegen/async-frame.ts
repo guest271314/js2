@@ -51,7 +51,7 @@ import {
 } from "./frame-core.js";
 import { ensureExnTag } from "./registry/imports.js";
 import type { AsyncCpsPlan, LinearAwaitPlan } from "./async-cps.js";
-import { planLinearAwaits, awaitedExprIsPromiseCombinator, ASYNC_CPS_ENABLED } from "./async-cps.js";
+import { planLinearAwaits, awaitedExprIsPromiseCombinator, ASYNC_CPS_ENABLED, asyncFnNeedsCps } from "./async-cps.js";
 import { resolveSpillLocalValType } from "./statements/variables.js";
 import { allocLocal } from "./context/locals.js";
 import { addFuncType } from "./registry/types.js";
@@ -84,6 +84,99 @@ import {
  */
 export function isAsyncDriveActive(ctx: CodegenContext): boolean {
   return ctx.standalone === true || ctx.wasi === true;
+}
+
+/**
+ * (#1042) Stable funcMap indices of the six JS-host imports the **host settle
+ * backend** of the resume machine emits. All six are pre-registered upfront by
+ * the `collectAsyncCpsImports` finalize in `declarations.ts` when a
+ * host-drive-eligible async fn exists (see {@link asyncFnNeedsHostDrive}), so
+ * every index here is an IMPORT index — stable under late-import appends (new
+ * imports append after existing ones; only *defined*-function indices shift).
+ */
+export interface HostAsyncImports {
+  /** `Promise_resolve(v) -> Promise` — §27.7.5.3 PromiseResolve assimilation. */
+  promiseResolveIdx: number;
+  /** `Promise_then2(p, onFulfilled, onRejected) -> Promise`. */
+  then2Idx: number;
+  /** `__make_callback(cbId, caps) -> jsFunction` — dispatches `exports.__cb_<id>`. */
+  makeCbIdx: number;
+  /** `Promise_new_pending() -> Promise` (resolve/reject stashed as `__r`/`__j`). */
+  newPendingIdx: number;
+  /** `Promise_settle_resolve(p, v) -> externref(undefined)`. */
+  settleResolveIdx: number;
+  /** `Promise_settle_reject(p, reason) -> externref(undefined)`. */
+  settleRejectIdx: number;
+}
+
+/**
+ * Resolve the six host settle-backend imports from `ctx.funcMap`, or `null`
+ * when any is missing (the declarations prepass did not fire — a producer bug;
+ * the caller reports and falls back rather than emitting a broken machine).
+ */
+export function resolveHostAsyncImports(ctx: CodegenContext): HostAsyncImports | null {
+  const promiseResolveIdx = ctx.funcMap.get("Promise_resolve");
+  const then2Idx = ctx.funcMap.get("Promise_then2");
+  const makeCbIdx = ctx.funcMap.get("__make_callback");
+  const newPendingIdx = ctx.funcMap.get("Promise_new_pending");
+  const settleResolveIdx = ctx.funcMap.get("Promise_settle_resolve");
+  const settleRejectIdx = ctx.funcMap.get("Promise_settle_reject");
+  if (
+    promiseResolveIdx === undefined ||
+    then2Idx === undefined ||
+    makeCbIdx === undefined ||
+    newPendingIdx === undefined ||
+    settleResolveIdx === undefined ||
+    settleRejectIdx === undefined
+  ) {
+    return null;
+  }
+  return { promiseResolveIdx, then2Idx, makeCbIdx, newPendingIdx, settleResolveIdx, settleRejectIdx };
+}
+
+/**
+ * (#1042 July re-scope) JS-host drive-layer eligibility — the host-lane
+ * analogue of {@link asyncFnNeedsDrive}. Routes a genuinely-suspending async
+ * function whose body is a LINEAR (multi-)await shape through the SAME #2906
+ * N-state resume machine, with **host-Promise settle adapters** (reactions via
+ * `Promise_resolve`/`__make_callback`/`Promise_then2`, settle via
+ * `Promise_new_pending`/`Promise_settle_*`) instead of the native `$Promise`
+ * callback list. One lowering engine, two settle primitives.
+ *
+ * **Deliberately disjoint from {@link asyncFnNeedsCps}**: every shape the
+ * proven single-tail-await CPS lane accepts today keeps taking that lane
+ * (byte-stable), so this predicate claims ONLY shapes that today fall through
+ * to the legacy synchronous fakery and produce wrong values under genuine
+ * suspension (measured 2026-07-02: multi-await → null, spill-across-await →
+ * null, try/finally-across-await → null, rejected 2nd await → uncaught wasm
+ * exception). Additive by construction: `false` ⇒ output unchanged.
+ */
+export function asyncFnNeedsHostDrive(
+  ctx: CodegenContext,
+  fn: ts.FunctionLikeDeclaration,
+  plan: AsyncCpsPlan,
+): boolean {
+  if (!ASYNC_CPS_ENABLED) return false;
+  if (ctx.wasi === true || ctx.standalone === true) return false; // host lane only
+  if (plan.awaitPoints.length === 0) return false;
+  const anyRealSuspension = plan.awaitPoints.some((a) => plan.awaitedStaticallyResolved.get(a) !== true);
+  if (!anyRealSuspension) return false; // fully await-elidable → legacy sync path
+  // The single-tail-await CPS lane owns its shapes — never re-route them.
+  if (asyncFnNeedsCps(fn, plan)) return false;
+  const linear = planLinearAwaits(fn, plan);
+  if (linear === null) return false;
+  // Parity with asyncFnNeedsCps/asyncFnNeedsDrive: a lone `await Promise.all(...)`
+  // already yields a real Promise the legacy identity path resolves correctly.
+  if (linear.segments.length === 1 && awaitedExprIsPromiseCombinator(linear.segments[0]!.awaitedExpr)) return false;
+  // Type gate: a resume binding spilled across a later await needs a spill-safe
+  // type (same rule as the wasi drive layer).
+  for (let k = 0; k < linear.segments.length; k++) {
+    const rb = linear.segments[k]!.resumeBinding;
+    if (!rb) continue;
+    if (!bindingLiveAcrossLaterAwait(rb.name, k, plan)) continue;
+    if (!isSpillSafeType(resumeBindingValType(ctx, rb))) return false;
+  }
+  return true;
 }
 
 /**
@@ -121,8 +214,27 @@ export interface AsyncFrameInfo {
   spillFieldOffset: number;
   /** Field index of the result `$Promise` the async fn returns / settles. */
   resultPromiseFieldIdx: number;
-  /** `$Promise` struct typeIdx (the result-promise field's element type). */
+  /**
+   * `$Promise` struct typeIdx (the result-promise field's element type).
+   * `-1` under the host settle backend (`host: true`) — the result promise is a
+   * host Promise (externref), never a native `$Promise` struct.
+   */
   promiseTypeIdx: number;
+  /**
+   * (#1042) `true` when this frame is driven with the **host settle backend**:
+   * result promise = host pending Promise (externref field), suspension =
+   * `Promise_resolve` assimilation + `Promise_then2` reactions through
+   * `__make_callback`-wrapped step adapters (exported `__cb_<id>`), settle =
+   * `Promise_settle_resolve`/`Promise_settle_reject`. `false` = the native
+   * `$Promise` + microtask-ring backend (standalone/wasi).
+   */
+  host: boolean;
+  /** Host backend import indices (present iff `host`). */
+  hostImports?: HostAsyncImports;
+  /** Host backend: `__cb_<id>` callback id of the fulfill step adapter. */
+  stepFulfillCbId?: number;
+  /** Host backend: `__cb_<id>` callback id of the reject step adapter. */
+  stepRejectCbId?: number;
   /** `__async_resume_f<name>(frame) -> void` funcIdx — filled by the emitter slice. */
   resumeFuncIdx?: number;
   /** `__async_step_fulfill_f<name>(caps, value) -> externref` funcIdx — emitter slice. */
@@ -151,7 +263,11 @@ export interface AsyncFrameInfo {
  *
  * @param promiseTypeIdx the module's `$Promise` struct typeIdx (from
  *   `getOrRegisterPromiseType` — caller registers the drive runtime first so the
- *   type exists and the funcIdx baseline is stable).
+ *   type exists and the funcIdx baseline is stable). Pass `-1` with
+ *   `hostImports` set for the host settle backend (the result-promise field is
+ *   then externref — a host Promise object).
+ * @param hostImports host settle-backend import indices — presence selects the
+ *   host backend (#1042).
  */
 export function buildAsyncFrameInfo(
   ctx: CodegenContext,
@@ -160,6 +276,7 @@ export function buildAsyncFrameInfo(
   paramNames: string[],
   paramTypes: ValType[],
   promiseTypeIdx: number,
+  hostImports?: HostAsyncImports,
 ): AsyncFrameInfo {
   const functionName = asyncFnName(decl);
 
@@ -184,8 +301,13 @@ export function buildAsyncFrameInfo(
   }
 
   // Trailing result-promise field — after spills so `spillFieldOffset` is stable.
+  // Host backend: the result promise is a host Promise object (externref); there
+  // is no native `$Promise` struct in the module at all.
   const resultPromiseFieldIdx = spillFieldOffset + spillNames.length;
-  stateFields.push({ name: "result_promise", type: { kind: "ref", typeIdx: promiseTypeIdx }, mutable: true });
+  const resultPromiseFieldType: ValType = hostImports
+    ? { kind: "externref" }
+    : { kind: "ref", typeIdx: promiseTypeIdx };
+  stateFields.push({ name: "result_promise", type: resultPromiseFieldType, mutable: true });
 
   const stateName = `$AsyncFrame_${sanitizeTypeName(functionName)}`;
   const stateTypeIdx = ctx.mod.types.length;
@@ -209,6 +331,8 @@ export function buildAsyncFrameInfo(
     spillFieldOffset,
     resultPromiseFieldIdx,
     promiseTypeIdx,
+    host: hostImports !== undefined,
+    hostImports,
   };
 }
 
@@ -424,13 +548,22 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
     return -1;
   }
 
-  const rt = ensureAsyncDriveRuntime(ctx);
+  // Host backend never touches the native scheduler (no `$Promise` struct, no
+  // microtask ring) — the JS host's own microtask queue drives resumption.
+  const rt = info.host ? null : ensureAsyncDriveRuntime(ctx);
+  const hostImports = info.hostImports;
   const frameRef: ValType = { kind: "ref", typeIdx: info.stateTypeIdx };
   const stem = sanitizeTypeName(info.functionName);
 
   // Reserve slots: resume fn, then the two step adapters. The microtask wrapper
   // ABI is (caps externref, value externref) -> externref (result dropped). N
   // states reuse the SAME two adapters (no per-state ABI change — #2906).
+  //
+  // Host backend (#1042): the adapters are the reaction callbacks the host
+  // invokes through `__make_callback`, whose runtime dispatch is BY EXPORT NAME
+  // (`exports["__cb_" + id](caps, value)`), so they are named `__cb_<id>` and
+  // exported. Same (caps, value) -> externref ABI — the shapes coincide by
+  // design (the wasi adapters were built to the `__cb_` ABI from the start).
   const resumeName = `__async_resume_f${stem}`;
   const resumeTypeIdx = addFuncType(ctx, [frameRef], [], `${resumeName}_type`);
   const stepName = `__async_step_f${stem}`;
@@ -440,6 +573,12 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
     [{ kind: "externref" }],
     `${stepName}_type`,
   );
+  if (info.host) {
+    info.stepFulfillCbId = ctx.callbackCounter++;
+    info.stepRejectCbId = ctx.callbackCounter++;
+  }
+  const stepFulfillName = info.host ? `__cb_${info.stepFulfillCbId}` : `${stepName}_fulfill`;
+  const stepRejectName = info.host ? `__cb_${info.stepRejectCbId}` : `${stepName}_reject`;
 
   const resumeFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
   info.resumeFuncIdx = resumeFuncIdx;
@@ -455,25 +594,36 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
 
   const stepFulfillFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
   info.stepFulfillFuncIdx = stepFulfillFuncIdx;
-  ctx.funcMap.set(`${stepName}_fulfill`, stepFulfillFuncIdx);
+  ctx.funcMap.set(stepFulfillName, stepFulfillFuncIdx);
   ctx.mod.functions.push({
-    name: `${stepName}_fulfill`,
+    name: stepFulfillName,
     typeIdx: stepTypeIdx,
     locals: buildStepAdapterLocals(info),
     body: buildStepAdapterBody(info, resumeFuncIdx, /*reject*/ false),
-    exported: false,
+    exported: info.host,
   });
+  // Host backend: the `__make_callback` host bridge dispatches by the exported
+  // `__cb_<id>` NAME, so the adapters need real export entries (the `exported`
+  // flag alone only opts into the module-init guard). The late-import shift
+  // walker patches `mod.exports` func indices, so pushing at reservation time
+  // is safe.
+  if (info.host) {
+    ctx.mod.exports.push({ name: stepFulfillName, desc: { kind: "func", index: stepFulfillFuncIdx } });
+  }
 
   const stepRejectFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
   info.stepRejectFuncIdx = stepRejectFuncIdx;
-  ctx.funcMap.set(`${stepName}_reject`, stepRejectFuncIdx);
+  ctx.funcMap.set(stepRejectName, stepRejectFuncIdx);
   ctx.mod.functions.push({
-    name: `${stepName}_reject`,
+    name: stepRejectName,
     typeIdx: stepTypeIdx,
     locals: buildStepAdapterLocals(info),
     body: buildStepAdapterBody(info, resumeFuncIdx, /*reject*/ true),
-    exported: false,
+    exported: info.host,
   });
+  if (info.host) {
+    ctx.mod.exports.push({ name: stepRejectName, desc: { kind: "func", index: stepRejectFuncIdx } });
+  }
 
   // ── Build the resume function body. ──
   const resumeFctx: FunctionContext = {
@@ -506,18 +656,25 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
     resumeFctx.body.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: info.spillFieldOffset + i });
     resumeFctx.body.push({ op: "local.set", index: idx });
   }
-  // Load the result promise into a local; wire the `return` settle hook.
-  const resultPromiseLocal = allocLocal(resumeFctx, "__async_result", {
-    kind: "ref",
-    typeIdx: info.promiseTypeIdx,
-  });
+  // Load the result promise into a local; wire the `return` settle hook. Both
+  // backends settle through `call <fulfill>(promise, value) -> value; drop` —
+  // native `__promise_fulfill` takes `(ref $Promise)`, host
+  // `Promise_settle_resolve` takes externref; the import is declared with an
+  // externref result so the shared `drop` stays valid.
+  const resultPromiseLocal = allocLocal(
+    resumeFctx,
+    "__async_result",
+    info.host ? { kind: "externref" } : { kind: "ref", typeIdx: info.promiseTypeIdx },
+  );
   resumeFctx.body.push({ op: "local.get", index: frameLocal });
   resumeFctx.body.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: info.resultPromiseFieldIdx });
   resumeFctx.body.push({ op: "local.set", index: resultPromiseLocal });
+  const settleFulfillIdx = info.host ? hostImports!.settleResolveIdx : rt!.fulfillFuncIdx;
+  const settleRejectIdx = info.host ? hostImports!.settleRejectIdx : rt!.rejectFuncIdx;
   resumeFctx.asyncDriveReturn = {
     resultPromiseLocal,
     promiseTypeIdx: info.promiseTypeIdx,
-    fulfillFuncIdx: rt.fulfillFuncIdx,
+    fulfillFuncIdx: settleFulfillIdx,
   };
 
   // Resume-binding locals. A binding that survives a later await is ALREADY a
@@ -535,10 +692,14 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
   }
 
   // Transient locals reused across every state arm (only one await is processed
-  // per resume-call dispatch, so a single set suffices).
+  // per resume-call dispatch, so a single set suffices). The native backend
+  // needs the typed `$Promise` classification locals; the host backend cannot
+  // inspect a host Promise synchronously (opaque externref), so it keeps only
+  // an externref slot for the assimilated promise.
   const awaitedLocal = allocLocal(resumeFctx, "__async_awaited", { kind: "externref" });
-  const pLocal = allocLocal(resumeFctx, "__async_p", { kind: "ref", typeIdx: info.promiseTypeIdx });
-  const suspendedLocal = allocLocal(resumeFctx, "__async_suspended", { kind: "i32" });
+  const pLocal = info.host ? -1 : allocLocal(resumeFctx, "__async_p", { kind: "ref", typeIdx: info.promiseTypeIdx });
+  const suspendedLocal = info.host ? -1 : allocLocal(resumeFctx, "__async_suspended", { kind: "i32" });
+  const pHostLocal = info.host ? allocLocal(resumeFctx, "__async_p_host", { kind: "externref" }) : -1;
   const exnTag = ensureExnTag(ctx);
   const reasonLocal = allocLocal(resumeFctx, "__async_reason", { kind: "externref" });
   const N = linear.segments.length;
@@ -625,6 +786,39 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
       }
       out.push({ op: "local.set", index: awaitedLocal });
 
+      if (info.host) {
+        // (#1042 host settle backend) A host Promise is an opaque externref — no
+        // synchronous state inspection is possible, so EVERY await suspends:
+        // assimilate the awaited value via PromiseResolve (§27.7.5.3 — a
+        // non-thenable becomes an already-resolved Promise, a promise passes
+        // through unchanged), park the frame (STATE=s+1 + spills), register the
+        // two `__cb_<id>` step adapters as reactions via
+        // `Promise_then2(p, __make_callback(fulfillId, frame),
+        // __make_callback(rejectId, frame))`, and return. The HOST microtask
+        // queue resumes us — there is no synchronous fast-path advance, which
+        // also makes await timing spec-correct (every await yields ≥1 tick).
+        // The cbId constants are shift-immune (runtime dispatch is by export
+        // NAME); the five import indices are import-space stable.
+        out.push({ op: "local.get", index: awaitedLocal });
+        out.push({ op: "call", funcIdx: hostImports!.promiseResolveIdx });
+        out.push({ op: "local.set", index: pHostLocal });
+        out.push(...setStateI32FromConst(info, frameLocal, STATE_FIELD, s + 1));
+        out.push(...storeSpills(info, resumeFctx, frameLocal));
+        out.push({ op: "local.get", index: pHostLocal });
+        out.push({ op: "i32.const", value: info.stepFulfillCbId! });
+        out.push({ op: "local.get", index: frameLocal });
+        out.push({ op: "extern.convert_any" } as Instr);
+        out.push({ op: "call", funcIdx: hostImports!.makeCbIdx });
+        out.push({ op: "i32.const", value: info.stepRejectCbId! });
+        out.push({ op: "local.get", index: frameLocal });
+        out.push({ op: "extern.convert_any" } as Instr);
+        out.push({ op: "call", funcIdx: hostImports!.makeCbIdx });
+        out.push({ op: "call", funcIdx: hostImports!.then2Idx });
+        out.push({ op: "drop" });
+        out.push({ op: "return" });
+        return out;
+      }
+
       // Classify the assimilated value; set suspendedLocal + SENT/ERROR/MODE.
       // No `br` inside these nested ifs — the single advance/suspend `br`/`return`
       // is emitted flat below at a known control depth.
@@ -697,7 +891,7 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
         { op: "extern.convert_any" } as Instr,
         { op: "local.get", index: pLocal },
         { op: "struct.get", typeIdx: info.promiseTypeIdx, fieldIdx: 2 } as Instr,
-        { op: "struct.new", typeIdx: rt.callbackTypeIdx } as Instr,
+        { op: "struct.new", typeIdx: rt!.callbackTypeIdx } as Instr,
         { op: "extern.convert_any" } as Instr,
         { op: "struct.set", typeIdx: info.promiseTypeIdx, fieldIdx: 2 } as Instr,
         { op: "return" },
@@ -730,7 +924,7 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
         out.push({ op: "local.get", index: resultPromiseLocal });
         out.push({ op: "local.get", index: frameLocal });
         out.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: SENT_FIELD });
-        out.push({ op: "call", funcIdx: rt.fulfillFuncIdx });
+        out.push({ op: "call", funcIdx: settleFulfillIdx });
         out.push({ op: "drop" });
         out.push({ op: "return" });
       } else {
@@ -745,7 +939,7 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
         }
         out.push({ op: "local.get", index: resultPromiseLocal });
         out.push({ op: "ref.null.extern" } as Instr);
-        out.push({ op: "call", funcIdx: rt.fulfillFuncIdx });
+        out.push({ op: "call", funcIdx: settleFulfillIdx });
         out.push({ op: "drop" });
         out.push({ op: "return" });
       }
@@ -828,7 +1022,7 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
           ...catchFinallyInstrs,
           { op: "local.get", index: resultPromiseLocal },
           { op: "local.get", index: reasonLocal },
-          { op: "call", funcIdx: rt.rejectFuncIdx },
+          { op: "call", funcIdx: settleRejectIdx },
           { op: "drop" },
         ],
       },
@@ -899,12 +1093,30 @@ export function emitAsyncFrameStateMachine(
   fctx: FunctionContext,
   decl: ts.FunctionLikeDeclaration,
   plan: AsyncCpsPlan,
+  host = false,
 ): void {
-  const rt = ensureAsyncDriveRuntime(ctx);
-  const promiseTypeIdx = getOrRegisterPromiseType(ctx);
+  // Host settle backend (#1042): no native scheduler, no `$Promise` struct —
+  // the result promise is a host pending Promise (`Promise_new_pending`) and
+  // reactions ride the host microtask queue.
+  let hostImports: HostAsyncImports | undefined;
+  if (host) {
+    const resolved = resolveHostAsyncImports(ctx);
+    if (resolved === null) {
+      reportError(
+        ctx,
+        decl,
+        "internal: host async-drive imports not pre-registered (collectAsyncCpsImports prepass missing) (#1042)",
+      );
+      fctx.body.push({ op: "ref.null.extern" } as Instr);
+      return;
+    }
+    hostImports = resolved;
+  }
+  if (!host) ensureAsyncDriveRuntime(ctx);
+  const promiseTypeIdx = host ? -1 : getOrRegisterPromiseType(ctx);
   const paramNames = fctx.params.map((p) => p.name);
   const paramTypes = fctx.params.map((p) => p.type);
-  const info = buildAsyncFrameInfo(ctx, decl, plan, paramNames, paramTypes, promiseTypeIdx);
+  const info = buildAsyncFrameInfo(ctx, decl, plan, paramNames, paramTypes, promiseTypeIdx, hostImports);
   const resumeFuncIdx = ensureAsyncResumeFunction(ctx, info, plan);
   if (resumeFuncIdx < 0) {
     reportError(ctx, decl, "internal: async-frame resume function unavailable (#2895 slice 1)");
@@ -913,11 +1125,19 @@ export function emitAsyncFrameStateMachine(
   }
 
   // Fresh pending result promise → local.
-  const resultPromiseLocal = allocLocal(fctx, "__async_resultp", { kind: "ref", typeIdx: promiseTypeIdx });
-  fctx.body.push({ op: "i32.const", value: PROMISE_STATE_PENDING });
-  fctx.body.push({ op: "ref.null.extern" } as Instr);
-  fctx.body.push({ op: "ref.null.extern" } as Instr);
-  fctx.body.push({ op: "struct.new", typeIdx: promiseTypeIdx } as Instr);
+  const resultPromiseLocal = allocLocal(
+    fctx,
+    "__async_resultp",
+    host ? { kind: "externref" } : { kind: "ref", typeIdx: promiseTypeIdx },
+  );
+  if (host) {
+    fctx.body.push({ op: "call", funcIdx: hostImports!.newPendingIdx });
+  } else {
+    fctx.body.push({ op: "i32.const", value: PROMISE_STATE_PENDING });
+    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    fctx.body.push({ op: "struct.new", typeIdx: promiseTypeIdx } as Instr);
+  }
   fctx.body.push({ op: "local.set", index: resultPromiseLocal });
 
   // Build the $AsyncFrame: state=0, sent=null, mode=0, abrupt=null, error=null,
@@ -939,12 +1159,19 @@ export function emitAsyncFrameStateMachine(
   fctx.body.push({ op: "local.set", index: frameLocal });
 
   // Kick the resume function once (runs the entry segment to the first real
-  // suspension or to synchronous completion).
+  // suspension or to synchronous completion). Re-read the funcIdx from
+  // `ctx.funcMap` BY NAME rather than trusting the number captured before the
+  // resume body was emitted: compiling the segments' lead/tail statements can
+  // add late imports, which shifts every defined-function index — the shift
+  // walker patches already-emitted bodies and funcMap, but not a stale JS-side
+  // capture (#2936/#2941 side-channel lesson). Identical value (and bytes)
+  // when no late import fired.
+  const kickIdx = ctx.funcMap.get(`__async_resume_f${sanitizeTypeName(info.functionName)}`) ?? resumeFuncIdx;
   fctx.body.push({ op: "local.get", index: frameLocal });
-  fctx.body.push({ op: "call", funcIdx: resumeFuncIdx });
+  fctx.body.push({ op: "call", funcIdx: kickIdx });
 
-  // Return the result promise (externref).
+  // Return the result promise (externref; the host result promise already is one).
   fctx.body.push({ op: "local.get", index: resultPromiseLocal });
-  fctx.body.push({ op: "extern.convert_any" } as Instr);
+  if (!host) fctx.body.push({ op: "extern.convert_any" } as Instr);
   fctx.body.push({ op: "return" });
 }
