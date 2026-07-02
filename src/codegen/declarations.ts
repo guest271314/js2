@@ -4338,6 +4338,34 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
           ctx.moduleInitStatements.push(stmt);
           continue;
         }
+        // (#2671) `F.<prop> = …` — a STATIC property write on a top-level
+        // FUNCTION DECLARATION (`Test262Error.thrower = function () {…}`, the
+        // test262 harness-prelude shape every Promise capability test passes
+        // as its reject callback). `F` is not a module global, so the generic
+        // check below dropped the statement: the static silently never
+        // existed at runtime (wasm-side reads → null → call traps; the host
+        // mirror shows undefined → V8's NewPromiseCapability throws "Promise
+        // resolve or reject function is not callable"). Keep the statement in
+        // __module_init so the ordinary property-write arm runs — the same
+        // write from inside a function already worked; only the top-level
+        // collection dropped it. Scoped narrowly:
+        //   - DIRECT `F.<name> = …` only (bare-identifier receiver);
+        //     `F.prototype = …` / `F.prototype.m = …` chains stay excluded —
+        //     those are consumed by the compile-time fnctor-prototype lift,
+        //     and re-running them at init would double-apply.
+        //   - Host/GC lanes only: standalone's write-arm for fnctor statics
+        //     is separate work (its prototype case has its own #2660 S2 keep
+        //     above); standalone codegen stays byte-identical.
+        if (
+          !ctx.standalone &&
+          ts.isPropertyAccessExpression(expr.left) &&
+          ts.isIdentifier(expr.left.expression) &&
+          expr.left.name.text !== "prototype" &&
+          ctx.topLevelFunctionNames.has(expr.left.expression.text)
+        ) {
+          ctx.moduleInitStatements.push(stmt);
+          continue;
+        }
         const targetName = getAssignmentRootIdentifier(expr.left);
         if (targetName && ctx.moduleGlobals.has(targetName)) {
           ctx.moduleInitStatements.push(stmt);
