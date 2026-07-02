@@ -73,7 +73,7 @@ import { reserveAccessorGetDriver, reserveAccessorSetDriver } from "./accessor-d
 import { ensureSymbolCarrier } from "./symbol-native.js";
 import { reserveArrayToPrimitiveString } from "./array-to-primitive.js";
 import { reserveClassToPrimitive } from "./class-to-primitive.js";
-import { definedFuncAt } from "./func-space.js"; // (#1916 S2) positional-read chokepoint
+import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S2/S3) positional-read chokepoint + stable-regime minting
 
 /** Initial `$PropMap` capacity. Must be a power of two (mask = cap - 1). */
 const INITIAL_CAP = 8;
@@ -424,9 +424,9 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     body: Instr[],
   ): number => {
     const typeIdx = addFuncType(ctx, paramTypes, resultTypes);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.funcMap.set(name, funcIdx);
-    ctx.mod.functions.push({ name, typeIdx, locals, body, exported: false });
+    pushDefinedFunc(ctx, funcIdx, { name, typeIdx, locals, body, exported: false });
     return funcIdx;
   };
 
@@ -6874,8 +6874,8 @@ function ensureProxyRuntime(
     const existing = ctx.funcMap.get(name);
     if (existing !== undefined) return existing;
     const typeIdx = addFuncType(ctx, params, [externref]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-    ctx.mod.functions.push({
+    const funcIdx = mintDefinedFunc(ctx);
+    pushDefinedFunc(ctx, funcIdx, {
       name,
       typeIdx,
       locals: [],
@@ -8268,9 +8268,9 @@ export function ensureObjectGroupBy(ctx: CodegenContext): number {
   ];
 
   const typeIdx = addFuncType(ctx, [{ kind: "externref" }, { kind: "externref" }], [{ kind: "externref" }]);
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const funcIdx = mintDefinedFunc(ctx);
   ctx.funcMap.set("__object_groupBy", funcIdx);
-  ctx.mod.functions.push({
+  pushDefinedFunc(ctx, funcIdx, {
     name: "__object_groupBy",
     typeIdx,
     locals: [
@@ -8307,8 +8307,8 @@ export function reserveApplyClosure(ctx: CodegenContext): number {
     [{ kind: "externref" }],
     "$apply_closure_type",
   );
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-  ctx.mod.functions.push({
+  const funcIdx = mintDefinedFunc(ctx);
+  pushDefinedFunc(ctx, funcIdx, {
     name: "__apply_closure",
     typeIdx,
     locals: [],

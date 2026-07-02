@@ -481,8 +481,15 @@ function emitBinaryWithSourceMapUnguarded(mod: WasmModule): EmitResult {
         s.byte(0x00); // elemkind = funcref
         s.u32(mod.declaredFuncRefs.length);
         if (valCtx) valCtx.where = "declared func ref";
-        for (const h of mod.declaredFuncRefs) {
-          const resolved = fIdx(h);
+        // (#1916 S3) Emit in RESOLVED-index order. The declarative segment is
+        // order-independent, and its codegen-time determinism sort
+        // (class-bodies.ts) sorts by RAW handle value — but a stable func handle's
+        // raw magnitude (STABLE_FUNC_BASE + ordinal) differs from its final index,
+        // so once ref.func'd functions flip to the stable regime the raw sort no
+        // longer yields ascending FINAL indices. Resolving then sorting here keeps
+        // the segment byte-identical regardless of which refs are stable handles.
+        const resolvedDeclaredRefs = mod.declaredFuncRefs.map((h) => fIdx(h)).sort((a, b) => a - b);
+        for (const resolved of resolvedDeclaredRefs) {
           if (valCtx) vIdx("function", resolved, valCtx.numFuncs);
           s.u32(resolved);
         }
