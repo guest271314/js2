@@ -11,7 +11,6 @@ import {
   isBooleanType,
   isNumberType,
   isStringType,
-  isSymbolType,
   isWrapperObjectType,
 } from "../checker/type-mapper.js";
 import type { Instr, ValType } from "../ir/types.js";
@@ -298,8 +297,11 @@ export function compileBinaryExpression(
   // compare Symbols by identity and never coerce. Symbols are lowered to i32 ids,
   // so without this guard the operator would silently treat the id as a number.
   if (SYMBOL_TONUMERIC_OPS.has(op)) {
-    const leftSym = isSymbolType(ctx.checker.getTypeAtLocation(expr.left));
-    const rightSym = isSymbolType(ctx.checker.getTypeAtLocation(expr.right));
+    // (#1930 Slice 2) oracle fold: was a direct isSymbolType check on the
+    // checker type — flag-identical (ESSymbol|UniqueESSymbol → "symbol")
+    // through the boundary.
+    const leftSym = ctx.oracle.staticJsTypeOf(expr.left) === "symbol";
+    const rightSym = ctx.oracle.staticJsTypeOf(expr.right) === "symbol";
     if (leftSym || rightSym) {
       // Evaluate operands left-to-right for side effects, then throw.
       const lt = compileExpression(ctx, fctx, expr.left);
