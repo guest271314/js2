@@ -18,7 +18,40 @@ umbrella: 2860
 > Formerly #2920; id ceded to PR #2424's negative-verdict issue (parallel
 > session, earlier reservation).
 
-## Handoff to #2930 (funcIdx-shift fix — the unblocker)
+## ✅ RELAX LANDED (2026-07-02, branch issue-2933-noyield-relax, stacked on #2930)
+
+The two no-yield bails are relaxed (lockstep: `buildNativeGeneratorPlan`
+suspendCount + `isNativeGeneratorCandidate` terminal yield-require), unblocked
+by #2930's late-import shift-regime fix (see
+`plan/issues/2930-resume-lazy-emit-funcidx-shift.md` for the corrected root
+cause — the shift never fired during the resume emit; it was a raw-import +
+deferred-batch regime mix in `ensureLateImport`). Two new corpus-found bails
+added, both gate-consistent (in `isNativeGeneratorCandidate` /
+`buildNativeGeneratorPlan`, the single source of truth):
+
+- **Whole-param default on a binding pattern** (`*method({} = undefined)`) —
+  the resume prelude has no defaulted-raw-arg arm; mis-typed the state struct
+  (`struct.new[k] expected i32, found externref`).
+- **Duplicate-name / computed-name generator METHODS** (`*id(){}` +
+  `static *id(){}`, `*[sym]()`) — the class collection pass keys on
+  `${className}_${methodName}` and skips the duplicate, so the second member
+  emits against the first's `NativeGeneratorInfo` (mismatched
+  `synthesizedThis` → "local index out of range", fn-name-gen-method.js).
+
+**Validation (542-file no-yield corpus, deterministic sample):**
+
+- Host-free (no `__gen_*`/`__create_generator`/`__get_caught_exception`
+  imports): **4 → 58 files** (+54; ×4 sampling ⇒ ~216 of the 2163-file
+  candidate population, consistent with the ~250–350 estimate on the 1780).
+- **0 per-file status flips** vs main baseline (368 pass both sides).
+- **10 invalid modules, ALL pre-existing on pristine main without the relax**
+  (verified per-lane; unrelated standalone bugs — dstr-default struct.new
+  arity, forbidden-ext/b2 externref coercion, closure local.set typing).
+  **0 relax-attributable invalids.**
+- gc/host byte-inert (120 sha256 A/B vs origin/main generators-native.ts).
+- Generator equivalence suites + tests/issue-2930.test.ts green.
+
+## Handoff to #2930 (funcIdx-shift fix — the unblocker) [historical]
 
 #2920 is BLOCKED on #2930 (late-import funcIdx-shift for lazily-emitted resume
 functions). This issue's no-yield yield (~250–350 host-free tests) unlocks the
