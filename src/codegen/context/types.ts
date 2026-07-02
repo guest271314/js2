@@ -1842,6 +1842,19 @@ export interface CodegenContext {
    *  member name (e.g. `RegExp.prototype.test.length === 1`,
    *  `.name === "test"`). Populated by `ensureStandaloneNativeMethodClosure`. */
   nativeClosureMeta?: Map<number, { name: string; length: number }>;
+  /** (#2896) Struct-type index → static `{name, length}` metadata for builtin
+   *  function-closure values under `--target standalone`. Each (builtin, member)
+   *  closure gets a UNIQUE wrapper-struct SUBTYPE (fields `[funcref func,
+   *  (mut i32) bfnstate]`, supertype = its signature wrapper struct), so the
+   *  reflective runtime natives (`__getOwnPropertyDescriptor` / `__extern_get` /
+   *  `__hasOwnProperty` / `__getOwnPropertyNames` / `__delete_property`) can
+   *  `ref.test` the value at RUNTIME and answer its spec `name`/`length` own
+   *  properties. Populated by `ensureBuiltinFnMetaType` (builtin-fn-meta.ts);
+   *  consumed by `fillBuiltinFnMeta` (object-runtime.ts) at finalize. */
+  builtinFnMetaByTypeIdx?: Map<number, { name: string; length: number }>;
+  /** (#2896) Cache: `(builtin, member)` key → the meta struct-type index above.
+   *  Keeps `ensureBuiltinFnMetaType` idempotent per closure identity. */
+  builtinFnMetaTypeByKey?: Map<string, number>;
   /** (#2193 PR-B) Struct-type indices of `$NativeProto` member closures whose
    *  FIRST user param is the receiver (`this`) — e.g. `Array.prototype.slice`'s
    *  `(self, this, start, end)` closure. Unlike a plain user function (which

@@ -33,6 +33,7 @@
 import type { Instr, ValType } from "../ir/types.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { getOrCreateFuncRefWrapperTypes } from "./closures.js";
+import { ensureBuiltinFnMetaType } from "./builtin-fn-meta.js";
 import { addStringConstantGlobal, ensureExnTag } from "./registry/imports.js";
 import { stringConstantExternrefInstrs } from "./native-strings.js";
 import { emitWasiErrorConstructor } from "./registry/error-types.js";
@@ -131,8 +132,12 @@ const BUILTIN_BRAND_TABLE: Readonly<Record<string, number>> = {
   // object is pure (member CSV only).
   DisposableStack: BUILTIN_BRAND_BASE + 41,
   AsyncDisposableStack: BUILTIN_BRAND_BASE + 42,
+  // (#2861) SuppressedError (ES2026 error aggregation) — an Error subclass, so
+  // its `.prototype` value read reuses the shared NativeError glue shape
+  // (`toString` member; constructor/name/message data props via the meta-fold).
+  SuppressedError: BUILTIN_BRAND_BASE + 43,
 
-  // Next free slot: BUILTIN_BRAND_BASE + 43 (append only).
+  // Next free slot: BUILTIN_BRAND_BASE + 44 (append only).
 };
 
 /**
@@ -451,16 +456,38 @@ export function ensureStandaloneNativeMethodClosure(
     ctx.nativeClosureMeta.set(funcIdx, { name: accessorName, length: arity });
   }
 
+  // (#2896) The value struct is the UNIQUE per-(brand, member) metadata subtype
+  // of the signature wrapper, so the reflective runtime natives
+  // (`__getOwnPropertyDescriptor` / `__extern_get` / `__hasOwnProperty` /
+  // `__getOwnPropertyNames`) can `ref.test` the value and answer its spec
+  // `name`/`length` own properties at RUNTIME (test262 propertyHelper reads
+  // them through runtime params — a compile-time fold cannot satisfy it). All
+  // call paths are unaffected: the meta type subtypes the wrapper the lifted
+  // func expects. Getters carry the §10.2.9 accessor spelling ("get <key>").
+  const metaName = kind === "getter" ? `get ${member}` : member;
+  const metaTypeIdx = ensureBuiltinFnMetaType(
+    ctx,
+    wrapperTypes.structTypeIdx,
+    wrapperTypes.closureInfo,
+    `proto:${brand}:${kind}:${member}`,
+    metaName,
+    arity,
+  );
+
   // (#2193 PR-B) A `"method"` closure's first user param is the receiver
   // (`this`); record its struct type so a reflective `m.call(thisArg, …args)`
   // threads `thisArg` into param 1 instead of dropping it (the plain-function
   // `.call` default). Getters carry no user-visible receiver-arg semantics here.
+  // Both the base wrapper AND the meta subtype are recorded — call sites key
+  // this set by the ClosureInfo's structTypeIdx, which is the meta type for
+  // values produced by this factory.
   if (kind === "method") {
     if (!ctx.nativeProtoReceiverClosureStructTypes) ctx.nativeProtoReceiverClosureStructTypes = new Set();
     ctx.nativeProtoReceiverClosureStructTypes.add(wrapperTypes.structTypeIdx);
+    ctx.nativeProtoReceiverClosureStructTypes.add(metaTypeIdx);
   }
 
-  return { type: { kind: "ref", typeIdx: wrapperTypes.structTypeIdx }, funcIdx };
+  return { type: { kind: "ref", typeIdx: metaTypeIdx }, funcIdx };
 }
 
 /**

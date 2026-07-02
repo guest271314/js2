@@ -299,6 +299,24 @@ export function shiftLateImportIndices(
     if (t.methodFuncIdx >= importsBefore) t.methodFuncIdx += added;
     if (t.trampolineFuncIdx >= importsBefore) t.trampolineFuncIdx += added;
   }
+  // (#2941) Same lockstep for the native SYNC-generator resume-function indices.
+  // `ctx.nativeGenerators[].resumeFuncIdx` is a plain cached number read at every
+  // `.next()`/`.return()`/`.throw()`/for-of + `yield*` bake site (via
+  // `ensureNativeGeneratorResumeFunction`). It is NOT `funcMap` and was walked by
+  // NO shift pass, so a late import landing after a resume function was emitted
+  // left the cache stale-low — a NEW bake reading it targeted one function too
+  // early (`call[…] need N got 1` invalid module; the #2938 class-static-generator
+  // merge_group regression). `ensureNativeGeneratorResumeFunction` now re-reads
+  // funcMap on cached hits (the primary fix); this keeps the cached field itself
+  // in lockstep for any direct reader — mirrors the trampoline / async
+  // side-channel walks above. Inert unless native generators were emitted.
+  if (ctx.nativeGenerators) {
+    for (const info of ctx.nativeGenerators.values()) {
+      if (typeof info.resumeFuncIdx === "number" && info.resumeFuncIdx >= importsBefore) {
+        info.resumeFuncIdx += added;
+      }
+    }
+  }
   // (#2632 / #2918) Same lockstep for the async-scheduler / event-loop helper
   // func indices AND the Promise.all/race combinator helper indices. They are
   // stored as plain numbers on `ctx.asyncScheduler` / `ctx.__promiseCombinators`

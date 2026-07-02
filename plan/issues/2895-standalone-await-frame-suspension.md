@@ -300,6 +300,6 @@ new XL substrate issue) landing AND the full `merge_group` standalone corpus
 measuring net-positive.
 
 
-## Reconciliation note (shepherd, 2026-07-01)
+## Reconciliation note (shepherd, 2026-07-01; extended 2026-07-02)
 
-Landed slices: async-drive **1b** (PR #2394) and the **`__drain_microtasks` intrinsic + test262 runner hook** (PR #2404 — 1d scaffolding, inert). Issue stays `in-progress` for the active drive layer (PATH B).
+Landed slices: the **resumable-frame core extraction** (PR #2384 — PR1, byte-identical for generators), **slice 1a** frame-layout foundation (PR #2393), **slices 1b/1c** host-free async resume fn + live wiring (PR #2394 — genuinely-pending await suspends & resumes), and the **`__drain_microtasks` intrinsic + test262 runner hook** (PR #2404 — 1d scaffolding, inert). Issue stays `in-progress` for the remaining PATH B work (the measured slice-1d carrier gate-widen; the general multi-state machine continues under #2906, slices 1+2 of which landed as PRs #2413/#2416).
