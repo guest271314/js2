@@ -137,26 +137,38 @@ strings and the classification arms become dead — retired in S5, restoring
 plain tag dispatch (V1 established).
 
 The two regimes coexist from S1 (like #1916's dual-regime id spaces):
-`honestAnyBoxing` OFF = today's lie (default until S4); ON = `boxToAny`
-externref arm routes to a new `__any_box_extern` helper that runs the SAME
-classification at box time and writes the true tag (null→`$undefined`
-tag-1 singleton, `$BoxedNumber`→tag 3 unboxed f64, `$BoxedBoolean`→tag 4,
-`$AnyString`→tag 5, else tag 6 with the externref parked in externval —
-note: tag-6-with-externval is today only produced by hosts; refval stays
-null; consumers of tag 6 must read refval-else-externval, audited in S3).
-Every consumer slice must keep BOTH regimes green; per-slice merge_group
-proof is the gate.
+`honestAnyBoxing` OFF = today's lie (default until S4); ON = HONEST
+classification at box time writing the true tag (null→`$undefined` tag-1
+singleton, `$BoxedNumber`→tag 3 unboxed f64, `$BoxedBoolean`→tag 4,
+`$AnyString`→tag 5, other eq-castable GC ref→tag 6 identity in refval, else
+tag 6 with the externref parked in externval — note: tag-6-with-externval
+is today only produced by hosts; consumers of tag 6 must read
+refval-else-externval, audited in S3). As-built (S1): rather than a new
+helper, the honest arms live as a flag-gated regime branch INSIDE
+`__any_from_extern` (null + fallback arms), and `boxToAny`'s externref arm
+calls it under the flag — one helper covers BOTH producer chokepoints, and
+the plain-standalone runtime-recovery path becomes honest under the same
+flag for free. Every consumer slice must keep BOTH regimes green;
+per-slice merge_group proof is the gate.
 
 ### C. Slices (each an independently green PR with its own proof)
 
-- **S1 (this PR):** design (this section) + `honestAnyBoxing` plumbing
-  (CompileOptions → compiler.ts → create-context.ts → context/types.ts,
-  default off) + `__any_box_extern` helper + `emitTag5TrueClass` +
-  probe suite `tests/value-repr-tag5-abi.test.ts`: (a) flag-off standalone
-  modules byte-identical to main for a representative corpus (SHA
-  compare); (b) flag-on acceptance probes (typeof/String()/eq matrix over
-  the ambiguous vector), `it.fails`-marked where consumers still
-  mis-handle honest tags — the migration ratchet that flips as S2-S4 land.
+- **S1 (landed in this PR):** design (this section) + `honestAnyBoxing`
+  plumbing (CompileOptions → compiler.ts → create-context.ts →
+  context/types.ts, default off) + the honest `__any_from_extern` regime
+  arms + probe suite `tests/value-repr-tag5-abi.test.ts` (44): (a)
+  flag-absent vs flag-false SHA-identical binaries per lane (inertness);
+  (b) flag-on exercised proof; (c) a 10-shape × {legacy,honest} ×
+  {fast,plain} measured behavior-PIN matrix — known-wrong pins are the
+  migration ratchet that flips as S2-S4 land; (d) the "honesty may only
+  fix, never break" pin-table invariant. Measured S1 win:
+  `typeof (obj as any)` through the generic path answers "object" under
+  the honest regime in fast standalone (legacy: "string"). Documented
+  pre-existing wrongs (both regimes, S3 backlog): `undefined===undefined`
+  via any locals in plain standalone → false; laundered
+  `undefined === undefined` in fast → false (mixed-provenance cross-tag).
+  `emitTag5TrueClass` (the shared consumer-side classifier) deferred to
+  S3 where its first consumers land.
 - **S2 (verification slice):** root-cause the dstr reliance. Faithful
   `runTest262File` standalone canary
   (`language/statements/class/dstr/meth-dflt-ary-ptrn-empty` + siblings),
