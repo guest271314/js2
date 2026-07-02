@@ -234,6 +234,18 @@ export interface NativeProtoBuiltinGlue {
   /** Static arity advertised by a member's closure value (`fn.length`). */
   memberLength: (member: string) => number;
   /**
+   * (#2875 slice 3) ABI param-slot count for members whose trailing OPTIONAL
+   * args are not counted by `fn.length` — e.g. `String.prototype.indexOf(
+   * searchString, position)` is spec length 1 but needs TWO arg slots. The
+   * closure's lifted func type declares `max(memberLength, memberParamSlots)`
+   * user-arg params; every call surface pads missing args with
+   * `ref.null.extern` (undefined), and `.length` reads stay honest via
+   * `nativeClosureMeta`, which records the SPEC arity. Absent / not larger
+   * than `memberLength` → no effect (slot count falls back to the spec
+   * arity), so families that don't define it emit byte-identical modules.
+   */
+  memberParamSlots?: (member: string) => number;
+  /**
    * Emit a method/getter closure BODY into `fctx`, given the externref `this`
    * already bound to closure-param index 1 and any further args at indices
    * 2.. . The implementation runs the brand-recovery prologue (externref `this`
@@ -409,9 +421,15 @@ export function ensureStandaloneNativeMethodClosure(
   // S1 RegExp closures take at most one string arg; over-declaring args is
   // harmless (the call path pads/truncates), but we size to the advertised
   // arity to keep the signature honest for `.length`.
+  // (#2875 slice 3) …except for members with UNCOUNTED optional trailing args
+  // (`indexOf(searchString, position)` — length 1, two slots): those size to
+  // `memberParamSlots` so the optional arg has a real param index. `.length`
+  // stays honest regardless — it reads `nativeClosureMeta` (set below from the
+  // spec arity), never the func type.
   const arity = kind === "getter" ? 0 : glue.memberLength(member);
+  const paramSlots = kind === "getter" ? 0 : Math.max(arity, glue.memberParamSlots?.(member) ?? 0);
   const userParams: ValType[] = [{ kind: "externref" }];
-  for (let i = 0; i < arity; i++) userParams.push({ kind: "externref" });
+  for (let i = 0; i < paramSlots; i++) userParams.push({ kind: "externref" });
 
   // Probe the member body to learn its result type by emitting into a throwaway
   // fctx, then keep that body (it's the real body — no double emission).

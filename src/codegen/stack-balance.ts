@@ -28,6 +28,20 @@
 import { coercionPlan } from "./coercion-plan.js";
 import type { BlockType, FuncTypeDef, Instr, TypeDef, ValType, WasmFunction, WasmModule } from "../ir/types.js";
 
+/**
+ * (#2934) Widen a packed i8/i16 STORAGE type to the i32 that actually lives on
+ * the Wasm value stack. `array.get_u`/`array.get_s` (and `struct.get_s/_u`)
+ * zero/sign-extend packed elements to i32 — the packed kind itself never exists
+ * as a stack value. The type-stack simulation must model the widened type:
+ * propagating the raw packed kind poisons downstream repairs (the struct.new
+ * arg-coercion fixup materializes stack types into `$sn_tmp` temp locals, and a
+ * local declared `i8` is invalid Wasm — "packed storage type is not valid in a
+ * value position").
+ */
+function widenPackedToI32(t: ValType): ValType {
+  return t.kind === "i8" || t.kind === "i16" ? { kind: "i32" } : t;
+}
+
 /** Sentinel: the instruction sequence is unreachable (after return/br/throw/unreachable). */
 const UNREACHABLE = -999;
 
@@ -1286,14 +1300,16 @@ function inferInstrType(
     const fieldIdx = (instr as any).fieldIdx as number;
     const td = types[typeIdx];
     if (td?.kind === "struct" && td.fields[fieldIdx]) {
-      return td.fields[fieldIdx]!.type;
+      // Packed i8/i16 fields arrive on the stack widened to i32 (#2934).
+      return widenPackedToI32(td.fields[fieldIdx]!.type);
     }
     return null;
   }
   if (op === "array.get" || op === "array.get_s" || op === "array.get_u") {
     const typeIdx = (instr as any).typeIdx as number;
     const td = types[typeIdx];
-    if (td?.kind === "array") return td.element;
+    // Packed i8/i16 elements arrive on the stack widened to i32 (#2934).
+    if (td?.kind === "array") return widenPackedToI32(td.element);
     return null;
   }
   if (op === "ref.null") {
@@ -1909,7 +1925,9 @@ function fixStructNewFieldCoercion(
               const tempLocals: number[] = [];
               const paramCount = resolveFuncType(types, func.typeIdx)?.params.length ?? 0;
               for (let fi = 0; fi < numFields; fi++) {
-                const actualType = fieldTypes[fi] ?? fields[fi]!.type;
+                // Widen defensively: the declared-field-type fallback can be a
+                // packed i8/i16, which is invalid as a local type (#2934).
+                const actualType = widenPackedToI32(fieldTypes[fi] ?? fields[fi]!.type);
                 const localIdx = paramCount + func.locals.length;
                 func.locals.push({ name: `$sn_tmp_${localIdx}`, type: actualType });
                 // Update localTypes for future inference
@@ -2225,7 +2243,8 @@ function updateTypeStack(
     const fieldIdx = (instr as any).fieldIdx as number;
     const td = types[typeIdx];
     if (td?.kind === "struct" && (td as any).fields[fieldIdx]) {
-      stack.push((td as any).fields[fieldIdx].type);
+      // Packed i8/i16 fields arrive on the stack widened to i32 (#2934).
+      stack.push(widenPackedToI32((td as any).fields[fieldIdx].type));
     } else {
       stack.push(null);
     }
@@ -2246,7 +2265,8 @@ function updateTypeStack(
     const typeIdx = (instr as any).typeIdx as number;
     const td = types[typeIdx];
     if (td?.kind === "array") {
-      stack.push(td.element);
+      // Packed i8/i16 elements arrive on the stack widened to i32 (#2934).
+      stack.push(widenPackedToI32(td.element));
     } else {
       stack.push(null);
     }

@@ -23,7 +23,7 @@ import {
 } from "./index.js";
 import { addStringConstantGlobal, ensureExnTag, localGlobalIdx } from "./registry/imports.js";
 import { emitToBoolean } from "./coercion-engine.js";
-import { compileStringLiteral, valTypesMatch } from "./shared.js";
+import { compileStringLiteral, elemGetOp, unpackedElemType, valTypesMatch } from "./shared.js";
 import {
   getArrTypeIdxFromVec,
   getOrRegisterArrayType,
@@ -144,19 +144,11 @@ function throwStringInstrs(ctx: CodegenContext, message: string): Instr[] {
   return [...stringConstantExternrefInstrs(ctx, message), { op: "throw", tagIdx } as Instr];
 }
 
-/**
- * Value-position type for a (possibly packed) array element. A packed `i8`/`i16`
- * storage type is only valid as a struct field / array element — it MUST NOT
- * appear in a param/result/local/global position (the binary emitter rejects it
- * with "packed storage type … is not valid in a value position"). A packed
- * element loaded via `array.get_s`/`array.get_u` is already widened to `i32`, so
- * a search-value local / comparison operand for the sub-32-bit typed arrays
- * (Int8/Uint8/Int16/Uint16) must use `i32`, not the raw packed `elemType`
- * (#2648 — `Int8Array.prototype.{indexOf,lastIndexOf,includes}` standalone CE).
- */
-function unpackedElemType(elemType: ValType): ValType {
-  return elemType.kind === "i8" || elemType.kind === "i16" ? { kind: "i32" } : elemType;
-}
+// unpackedElemType / elemGetOp are canonical in shared.ts (#2934 — needed by
+// loops.ts and type-coercion.ts too, and array-methods.ts is not importable
+// from type-coercion.ts without a cycle). Imported below and re-exported for
+// existing users of this module's surface.
+export { elemGetOp, unpackedElemType };
 
 /**
  * (#2648, mirrors #2593) Recover the packed-element load signedness ("s"/"u") of
@@ -168,25 +160,13 @@ function unpackedElemType(elemType: ValType): ValType {
  * load off the view name, not the storage kind. Returns undefined for a
  * non-integer-view receiver (caller falls back to the storage-kind heuristic).
  */
-function typedArraySearchSignedness(ctx: CodegenContext, receiver: ts.Expression): "s" | "u" | undefined {
+export function typedArraySearchSignedness(ctx: CodegenContext, receiver: ts.Expression): "s" | "u" | undefined {
   const t = ctx.checker.getTypeAtLocation(receiver);
   let name = t.getSymbol()?.name ?? t.aliasSymbol?.name;
   if (!name && ts.isNewExpression(receiver) && ts.isIdentifier(receiver.expression)) {
     name = receiver.expression.text;
   }
   return name ? typedArrayPackedSignedness(name) : undefined;
-}
-
-/** Pick the element-load op for a (possibly packed) typed-array element, driven
- *  by the view-name signedness when available, else the legacy storage-kind
- *  heuristic (i8→get_u, i16→get_s). i32/f64/ref elements use plain `array.get`. */
-function elemGetOp(elemType: ValType, signedness: "s" | "u" | undefined): "array.get" | "array.get_s" | "array.get_u" {
-  if (elemType.kind === "i8" || elemType.kind === "i16") {
-    if (signedness === "s") return "array.get_s";
-    if (signedness === "u") return "array.get_u";
-    return elemType.kind === "i8" ? "array.get_u" : "array.get_s";
-  }
-  return "array.get";
 }
 
 /**
