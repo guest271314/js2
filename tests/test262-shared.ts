@@ -609,6 +609,12 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
                   skipSemanticDiagnostics: true,
                   target: TEST262_TARGET,
                   inferModuleStrictArguments,
+                  // (#2932) Without allowJs, TypeScript excludes the `.js`
+                  // _FIXTURE root files from the program entirely — their
+                  // top-level declarations are never codegen'd and every
+                  // import of them resolves to null. Harness-scoped by
+                  // decision (lead, 2026-07-02); NOT a compiler default.
+                  allowJs: true,
                 });
                 const compileRecordMetadata = metadataFromImports(result.imports, false);
                 const reachedRecordMetadata = metadataFromImports(result.imports, true);
