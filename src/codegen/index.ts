@@ -12520,6 +12520,20 @@ export function resolveWasmType(ctx: CodegenContext, tsType: ts.Type, _depth = 0
     // Check externref AFTER Array check — Array is declared in lib but should use wasm GC arrays
     if (isExternalDeclaredClass(tsType, ctx.checker)) return { kind: "externref" };
 
+    // (#2937) The checker type of a `{}` var poisoned as an `$Object`-hash
+    // consumer (#2584/#2849) must NOT resolve to a closed struct. In JS-mode
+    // sources the checker EVOLVES `var o = {}` through its later static-named
+    // writes into an anonymous object type WITH those props; auto-registering
+    // it below would type the local — and every flow position the object
+    // passes through (returns, class fields, receivers) — as `(ref null
+    // __anon_N)` while the poisoned initializer builds a host plain object
+    // (externref). The declaration's guarded cast then stores ref.null and
+    // every static read null-derefs (compiled-acorn `getOptions`, #2937).
+    // Externref keeps ALL access forms on the poisoned var routed through the
+    // host MOP coherently. The set is empty in standalone mode (recorded
+    // host-only), so standalone codegen is unaffected.
+    if (ctx.objectHashConsumerTypes.has(tsType)) return { kind: "externref" };
+
     // (#1712) Function-style-constructor instance types resolve to EXTERNREF,
     // never to a synthesized checker-shape struct. The runtime instance struct
     // (compileFnctorNew, `__fnctor_<name>`) is built from ctor `this.*` writes
@@ -12690,6 +12704,10 @@ function ensureDateStructForCtx(ctx: CodegenContext): number {
 export function ensureStructForType(ctx: CodegenContext, tsType: ts.Type): void {
   if (!(tsType.flags & ts.TypeFlags.Object)) return;
   if (isExternalDeclaredClass(tsType, ctx.checker)) return;
+  // (#2937) Never register a struct for the evolved checker type of a poisoned
+  // `$Object`-hash-consumer `{}` var — it must stay externref/host-MOP end to
+  // end (see resolveWasmType's matching guard for the full rationale).
+  if (ctx.objectHashConsumerTypes.has(tsType)) return;
   // Types declared in `.d.ts` files (interfaces, type aliases, classes
   // exported from declaration-file-only packages) have no JS implementation
   // we can lower to a WasmGC struct. Registering them as anon structs

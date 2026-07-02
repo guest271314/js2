@@ -1,7 +1,9 @@
 ---
 id: 2944
 title: "Substrate: poisoned $Object values escape into struct-typed slots — externref-typed escape discipline for hash-consumer vars"
-status: ready
+status: done
+completed: 2026-07-02
+assignee: ttraenkler/dev-2937f
 created: 2026-07-02
 priority: high
 horizon: xl
@@ -17,6 +19,23 @@ blocks: [2849, 2937]
 ---
 
 # #2944 — externref-typed escape discipline for poisoned `$Object` (hash-consumer) vars
+
+> **DONE 2026-07-02 — implemented TYPE-KEYED, not per-escape-site (same PR as
+> the #2849 re-land / #2937).** Key insight that collapsed the XL scope: the
+> struct type a poisoned var mis-binds to comes from the checker's **evolved
+> JS-mode `ts.Type`**, and the return type, class-field type, params, aliases
+> and receivers all resolve through the **same type object identity**. So one
+> set — `ctx.objectHashConsumerTypes` (recorded at the poison decision in
+> `collectEmptyObjectWidening`; guards: host-only / not-`any` / props>0) —
+> checked in the three resolution funnels (`resolveWasmType`,
+> `ensureStructForType`, `resolveStructName`) delivers the return/field/param/
+> alias escape discipline enumerated below without chasing individual escape
+> sites. The "colliding `__anon` struct" is simply never registered for a
+> poisoned type, so nothing can bind to it. Acceptance, measured: host gate
+> re-dropped + all 4 `it.fails` arms flipped back to plain `it` and passing;
+> dogfood corpus 21/23 equal±quirks (≥13 required), 0 REAL divergences;
+> standalone byte-identical (sha256); mechanism details + known residual in
+> the #2937 issue file (`## Fix (the re-land)`).
 
 **[SENIOR-DEV ONLY] — substrate slice.** This is the proper home for BOTH #2849
 (dynamic-object static-write shadows sidecar, host mode) and #2937 (the acorn
@@ -103,3 +122,50 @@ stays fixed.
   (superseded by the revert; recover from git if useful).
 - Instrumentation recipe: `DBG_THROW_SITES` env hooks in `typeErrorThrowInstrs`
   / `resolveStructNameForExpr` / `markObjectHashConsumers` (see #2937 analysis).
+
+## Residual fixed (TS-mode 0-props escape) — 2026-07-02, sr-escape
+
+The landed fix's population guard (`vt.getProperties().length > 0`) admitted
+only the JS-mode EVOLVED type, on the assumption that the TS-mode (non-evolved)
+empty `{}` type "already resolves to externref". **Measured false**: the
+signature pre-pass `ensureStructForType(returnType)` on a function that RETURNS
+the poisoned var registers the SAME 0-props ts.Type as an **empty anon struct**
+("empty objects get an empty struct" in `ensureStructForType`), so the
+local/return/field slots type `(ref null $__anon_N)`, the `{}` host `$Object`
+fails the decl-init cast, and the var is null from the first instruction. Probe
+(unannotated acorn `Parser`/`getOptions` shape, `fileName: t.ts`): threw
+`TypeError … Cannot access property on null or undefined` on main WITH the
+landed fix; the #2937 reduced shapes (E1/E2/E3) missed this because their
+`: any` annotations pre-lowered every slot to externref.
+
+**Why the guard couldn't just be dropped**: the type of a `: {}` ANNOTATION is
+an interned ts.Type **shared** by every var so annotated (measured: two
+annotated vars → one instance), so poisoning it would demote unrelated vars.
+But the **widened literal type** of an unannotated `var o = {}` is a fresh
+per-var instance whose `symbol.declarations[0]` IS the var's own initializer
+literal (measured; the shared annotation type fails this check — `symbol` has
+no such declaration). The residual fix admits the 0-props type **only when
+`vt.symbol?.declarations?.[0] === decl.initializer`** — per-var by
+construction, zero shared-identity risk. Same identity domain the widening
+registration (`anonTypeMap.set(varType, …)`) already relies on.
+
+Validation: escape probe host `test(2022)` → 13 (return + `this.options` field
+
+- method read); alias-binding arm; `tests/issue-2944.test.ts` added (fails on
+  pre-residual main); acorn corpus re-verified 21 equal±quirks / 0 REAL / 2
+  pre-existing throws; standalone sha256 byte-identical (set stays host-only);
+  equivalence: the 56 local failures reproduce IDENTICALLY (same per-file counts)
+  on pristine main — pre-existing env, zero delta.
+
+### Design-premise validation (prior art for #2856 / extern-in-IR)
+
+Both the landed fix and this residual empirically validate the substrate
+premise: **representation must follow the VALUE, keyed by the ts.Type instance
+the checker threads through every slot** (decl, reads, inferred return, field,
+alias — one shared instance, measured). One decision recorded once + consulted
+at the three type-resolution chokepoints fixed ALL escape shapes at once — no
+per-site bails. This maps 1:1 onto the IR value model direction (June audit D1,
+#2856 extern-in-IR): when IR owns slot typing, `objectHashConsumerTypes`
+becomes an IR-side `extern` value-kind decision at exactly one point, and the
+three legacy chokepoint consults are the migration seam. Cite as prior art in
+the #2856 spec work.
