@@ -1169,6 +1169,10 @@ function isBindResultExpr(ctx: CodegenContext, expr: ts.Expression): boolean {
  * classExprNameMap, and anonTypeMap.
  */
 export function resolveStructName(ctx: CodegenContext, tsType: ts.Type): string | undefined {
+  // (#2937) The evolved checker type of a poisoned `$Object`-hash-consumer
+  // `{}` var never resolves to a struct — receivers of that type route through
+  // the externref host-MOP path (see resolveWasmType's matching guard).
+  if (ctx.objectHashConsumerTypes.has(tsType)) return undefined;
   const name = tsType.symbol?.name;
   if (name && name !== "__type" && name !== "__object" && ctx.structMap.has(name)) {
     return name;

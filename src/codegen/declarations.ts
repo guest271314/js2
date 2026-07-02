@@ -2260,6 +2260,35 @@ export function collectEmptyObjectWidening(
           // above — the var stays a `$Object` so bracket/`in`/keys/GOPD see the
           // same representation the dot-writes land in.
           if (ctx.objectHashConsumerVars.has(varName)) {
+            // (#2937) Suppressing the widening pre-pass is NOT enough in a
+            // JS-mode source file: the checker EVOLVES `var o = {}` through its
+            // later static-named writes into an anonymous object type WITH
+            // those props, and `resolveWasmType`/`ensureStructForType` would
+            // independently register that evolved type as a closed `__anon_N`
+            // struct — typing the local (and the var's every flow position:
+            // returns, class fields, receivers) as `(ref null __anon_N)` while
+            // the poisoned initializer builds a host plain object. The
+            // declaration's guarded cast then stores ref.null and every static
+            // read null-derefs (the compiled-acorn `getOptions` uniform throw).
+            // Record the var's EVOLVED checker type so struct resolution
+            // refuses it and the var stays externref / host-MOP end to end.
+            //
+            // Scope guards keep everything else byte-identical:
+            //   - `getProperties().length > 0`: only a JS-mode EVOLVED type
+            //     qualifies. In TS mode the poisoned var's type stays the empty
+            //     `{}` (no evolution), which already resolves to externref —
+            //     recording it would only risk shared-type-identity collisions.
+            //   - `!ctx.standalone`: standalone keeps its pre-existing codegen
+            //     byte-identical (its matching read-back gap for this shape is
+            //     tracked separately; see #2849's follow-up note).
+            //   - skip `any` (singleton type object shared by all any-typed
+            //     vars — same hazard as the anonTypeMap guard below).
+            if (!ctx.standalone) {
+              const vt = checker.getTypeAtLocation(decl.name);
+              if (!(vt.flags & ts.TypeFlags.Any) && vt.getProperties().length > 0) {
+                ctx.objectHashConsumerTypes.add(vt);
+              }
+            }
             continue;
           }
 
