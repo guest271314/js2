@@ -82,6 +82,16 @@ export interface CodegenOptions {
    *  `__unbox_string` JS-host string imports. Used so the compiled module is
    *  runnable under pure-Wasm engines (wasmtime, wasmer) without a JS host. */
   standalone?: boolean;
+  /**
+   * (#2141 S1) Honest generic `any` boxing — the Stage-B regime flag. When ON,
+   * `boxToAny`'s externref arm routes through `__any_box_extern` (runtime
+   * classification → true `JsTag`) instead of the historical tag-5
+   * "box-the-externref" lie (#1888). Default OFF: byte-identical to the legacy
+   * regime (the honest helper is not even registered). Flips to default-on for
+   * standalone/wasi in slice S4 after the consumer migration (S2/S3) lands —
+   * see plan/issues/2141-tag5-abi-untangle-honest-boxing.md.
+   */
+  honestAnyBoxing?: boolean;
   /** (#2796) Diff-test-harness fidelity: in JS-host mode, export the top-level
    *  `__module_init` and do NOT run it via the wasm `start` section, so the host
    *  invokes it AFTER `setExports` (symmetric with the standalone `_start`
@@ -96,6 +106,15 @@ export interface CodegenOptions {
    * direct-emission path (bit-by-bit divergence tests or emergency revert).
    */
   experimentalIR?: boolean;
+  /**
+   * (#2973) Opt out of the `JS2WASM_IR_FIRST` compile-once inversion for this
+   * compile, regardless of the ambient env flag. Set by semantics-critical
+   * in-process sub-compiles (the `eval` / `new Function` host shims) so an
+   * IR-first post-claim hard error there is not swallowed by the shim's
+   * fallback `catch` and silently turned into `undefined`. Leaves the ordinary
+   * IR overlay (`experimentalIR`) untouched. Default: false.
+   */
+  disableIrFirst?: boolean;
   /**
    * #2089 — count silent codegen fallbacks via `reportSilentFallback` and, when
    * set, surface each as a warning diagnostic. Used by
@@ -317,6 +336,18 @@ export interface FunctionContext {
   generatorReturnDepth?: number;
   /** Map from variable name → ref cell info (for mutable closure captures) */
   boxedCaptures?: Map<string, { refCellTypeIdx: number; valType: ValType }>;
+  /**
+   * (#2976) Per-activation memo locals for capture-carrying nested function
+   * declarations referenced as VALUES: funcName → local holding the
+   * `(ref null $__fn_cap_<name>_struct)` closure instance. Every reference
+   * site emits a `ref.is_null`-guarded lazy build into this local instead of
+   * constructing a fresh struct per reference, so `f === f` holds and
+   * sidecar/static writes land on the same instance every reference sees.
+   * The guard (rather than a prologue hoist) preserves the existing
+   * value-capture semantics: immutable captures are copied at the FIRST
+   * dynamic reference, exactly where the old per-site build copied them.
+   */
+  nestedFnClosureMemos?: Map<string, number>;
   /** Whether this function is a class constructor (for new.target support) */
   isConstructor?: boolean;
   /** Whether this constructor belongs to a class declared with `extends`. Spec §10.2.1.3
@@ -826,8 +857,11 @@ export interface CodegenContext {
   exportSignatures: Map<string, import("../../ir/types.js").ExportSignature>;
   /** Map from className → parent className (for inheritance chain walk) */
   externClassParent: Map<string, string>;
-  /** Map from global name (e.g. "document") → import info */
-  declaredGlobals: Map<string, { type: ValType; funcIdx: number }>;
+  /** Map from global name (e.g. "document") → import info. `className` is
+   *  the extern class of the global's declared type ("Document") — recorded
+   *  at registration for the IR host-extern path (#2856), which types the
+   *  `call global_<name>` handle as `IrType.extern { className }`. */
+  declaredGlobals: Map<string, { type: ValType; funcIdx: number; className?: string }>;
   /** Counter for generated callback functions (__cb_0, __cb_1, ...) */
   callbackCounter: number;
   /** Map from captured variable name → global index in mod.globals */
@@ -1318,6 +1352,16 @@ export interface CodegenContext {
   deferredDefaultGlobalExport?: string;
   /** Module-level variable initializers (compiled into __module_init) */
   moduleInitStatements: ts.Statement[];
+  /**
+   * (#2976) Module-level dedupe of the value-closure artifacts for a
+   * capture-carrying nested function declaration: funcName → its ONE custom
+   * closure struct type and trampoline. Previously every reference site
+   * minted a fresh struct type + trampoline function (and a fresh instance —
+   * the identity bug). The trampoline is stored by NAME and re-resolved
+   * through `ctx.funcMap` at each emission so late-import funcIdx shifts
+   * cannot desync a cached raw index.
+   */
+  nestedFnClosureArtifacts?: Map<string, { structTypeIdx: number; trampolineName: string }>;
   /** Nested function capture info. */
   nestedFuncCaptures: Map<
     string,
@@ -1801,6 +1845,10 @@ export interface CodegenContext {
    *  `__unbox_string`, `__str_from_mem`, `__str_to_mem`,
    *  `__str_extern_len`). Implies `nativeStrings === true`. */
   standalone: boolean;
+  /** (#2141 S1) Honest generic `any` boxing regime flag — see the
+   *  `CodegenOptions.honestAnyBoxing` doc. Default false (legacy tag-5
+   *  box-the-externref ABI, byte-identical). */
+  honestAnyBoxing: boolean;
   /** (#2796) Diff-test-harness fidelity: in JS-host mode, export the top-level
    *  `__module_init` and do NOT wire the wasm `start` section to it, so the host
    *  runs it after `setExports` (symmetric with the standalone `_start` model).

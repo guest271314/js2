@@ -1,7 +1,9 @@
 ---
 id: 2973
 title: "eval-shim sub-compiles inherit JS2WASM_IR_FIRST and swallow its hard errors — silent `undefined` instead of fail-loud"
-status: ready
+status: done
+assignee: ttraenkler/dev-2973
+completed: 2026-07-02
 sprint: current
 created: 2026-07-02
 updated: 2026-07-02
@@ -63,3 +65,37 @@ visible failures; the shim's contract is graceful fallback.
 - Sub-compile opt-out is structural (options-based), not ambient env
   mutation, OR documented why env save/restore is safe (single-threaded
   compile path).
+
+## Resolution (2026-07-02)
+
+Structural options-based opt-out, not ambient env mutation:
+
+- Added `disableIrFirst?: boolean` to `CompileOptions` (`src/index.ts`) and the
+  backend `CodegenOptions` (`src/codegen/context/types.ts`), threaded through
+  `buildCodegenOptions` (`src/compiler.ts`).
+- `generateModule` (`src/codegen/index.ts`) now computes
+  `irFirst = experimentalIR && !disableIrFirst && truthyEnv(JS2WASM_IR_FIRST)`
+  — the opt-out disables ONLY the fail-loud skip-body inversion; the ordinary
+  IR overlay (`experimentalIR`) is untouched.
+- Both `compileSourceSync` sub-compiles in `runtime-eval.ts` (expression-form
+  and statement-form wrappers) pass `disableIrFirst: true`. These are the only
+  in-process sub-compile sites in the tree today (the env.ts `new Function` is
+  host-side introspection, not a compiler sub-compile; #2924's compile-away is
+  not yet a sub-compile site — the `CompileOptions` doc notes it for forward
+  compat).
+
+Byte-inert for default builds: `disableIrFirst` only short-circuits a boolean
+already gated on `truthyEnv(JS2WASM_IR_FIRST)`, which default/CI compiles never
+set — so no test262 baseline movement.
+
+## Test Results
+
+`tests/issue-2973.test.ts` — 4/4 pass:
+
+- flag-off `eval("5+1|0===0")` = 7 (control)
+- flag-ON `eval("5+1|0===0")` = 7 (was `undefined` before the fix)
+- flag-on result === flag-off result
+- unit: same wrapper compiles `success=false` under flag-on without the opt-out,
+  `success=true` with `disableIrFirst: true`
+
+Measured on origin/main @ 1062b8b38.

@@ -217,6 +217,16 @@ export interface CompileOptions {
    *  Enabled automatically when fast: true or target: "wasi".
    *  Required for non-browser runtimes (wasmtime, wasmer, etc.) */
   nativeStrings?: boolean;
+  /**
+   * (#2141 S1) Honest generic `any` boxing — Stage-B regime flag of the tag-5
+   * ABI retirement. When true, boxing an externref-carried dynamic value into
+   * `$AnyValue` runtime-classifies it to its true `JsTag` (undefined/number/
+   * boolean/string/object) instead of the historical blanket tag-5 "string"
+   * (#1888 box-the-externref ABI). Default false (legacy, byte-identical).
+   * Standalone/wasi only — host (gc) mode dynamic values stay host-owned.
+   * Do not enable in production until slice S4 of #2141 flips the default.
+   */
+  honestAnyBoxing?: boolean;
   /** #1588 PR-B: dual i8/i16 string storage. When true, string allocation
    *  sites the encoding analysis proves `ascii`/`utf8-guaranteed` are stored
    *  as i8-backed `Utf8String`; all others stay i16. Default false →
@@ -275,6 +285,18 @@ export interface CompileOptions {
    * direct-emission path (bit-by-bit divergence tests or emergency revert).
    */
   experimentalIR?: boolean;
+  /**
+   * (#2973) Opt this compile out of the `JS2WASM_IR_FIRST` compile-once
+   * inversion, regardless of the ambient env flag. Semantics-critical
+   * in-process sub-compiles — the `eval` / `new Function` host shims — MUST
+   * set this: they are a proven fast path, not an IR-first *measurement*
+   * target, and an IR-first post-claim hard error there is swallowed by the
+   * shim's fallback `catch` arms and silently degraded to `undefined` (a wrong
+   * answer, not a fail-loud error). Only the fail-loud skip-body inversion is
+   * disabled; the ordinary IR overlay (`experimentalIR`) is untouched.
+   * Default: false.
+   */
+  disableIrFirst?: boolean;
   /** Compile-time constant definitions. Substitutes identifiers/dotted paths with literal values
    *  before TypeScript parsing. Example: `{ "process.env.NODE_ENV": '"production"' }`.
    *  Values must be valid JS expression literals (strings need inner quotes).
