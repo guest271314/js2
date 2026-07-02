@@ -190,6 +190,22 @@ jobs:
           git fetch --no-tags --depth=1 origin main 2>/dev/null || true
           ISSUE_COVERAGE_BASE=origin/main pnpm run check:issue-spec-coverage
 
+      - name: Verdict-logic must bump oracle_version (#3003)
+        # A test262 VERDICT-LOGIC change (how a per-test result is SCORED:
+        # test262-worker.mjs / test262-shared.ts / negative-verdict.mjs / the
+        # runners) diffs new-policy-vs-old-policy as a mass pass→fail cluster.
+        # If it does NOT bump ORACLE_VERSION (#2096) the #1668 catastrophic guard
+        # fails the push-to-main run, promote-baseline never runs, and the merge
+        # queue WEDGES against the un-promotable old-policy baseline — this
+        # happened TWICE in 2026-07 (the −439 strict-negative-verdict change and
+        # PR #2463's vacuity scorer; see #3003). This gate fails a verdict-signal
+        # change that neither bumps the oracle nor carries an in-diff
+        # `oracle-version-exempt:` override. Runs on the same origin/main diff
+        # base as the issue-ID gates; skips cleanly when no base resolves.
+        run: |
+          git fetch --no-tags --depth=50 origin main 2>/dev/null || true
+          VERDICT_ORACLE_BASE=origin/main pnpm run check:verdict-oracle
+
       - name: Host-import allowlist + strict-mode gate (#1524)
         env:
           # PRs that intentionally grow the allowlist must include
