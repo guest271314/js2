@@ -31,11 +31,23 @@ async function runStandalone(src: string): Promise<number> {
   return (instance.exports as { test(): number }).test();
 }
 
-/** Compile standalone and report whether the eval bailed to the dynamic path. */
+/**
+ * Compile standalone and report whether the eval bailed to the dynamic path.
+ *
+ * (#2960) The dynamic standalone-eval path no longer leaks the unsatisfiable
+ * `__extern_eval` host import (which trapped at instantiation). It now emits a
+ * source-located WARNING and a catchable throw at the eval call site. So a
+ * clean bail is discriminated by that warning diagnostic — AND the module must
+ * still be host-free (no `__extern_eval` import).
+ */
 async function bailsToDynamic(src: string): Promise<boolean> {
   const r = await compile(src, { target: "standalone" });
   expect(r.success, JSON.stringify(r.errors)).toBe(true); // clean bail, NOT a compile error
-  return (r.imports ?? []).some((i) => i.name === "__extern_eval");
+  // #2960 — the dynamic path must never leak the host eval import standalone.
+  expect((r.imports ?? []).some((i) => i.name === "__extern_eval")).toBe(false);
+  return (r.errors ?? []).some(
+    (e) => (e as { severity?: string }).severity === "warning" && /dynamic eval is not supported/.test(e.message),
+  );
 }
 
 describe("#2923 — constant eval: function declarations lift (standalone)", () => {
