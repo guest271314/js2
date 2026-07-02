@@ -870,6 +870,67 @@ export function compileCallableElementAccessCall(
 }
 
 /**
+ * (#2994) Statically decide `Object.prototype.isPrototypeOf(arg)` /
+ * `Function.prototype.isPrototypeOf(arg)` when the receiver is written
+ * syntactically as `Object.prototype` or `Function.prototype` and the argument's
+ * TypeScript type makes the answer provable:
+ *   - `Object.prototype.isPrototypeOf(x)`   → true for any non-primitive object
+ *     value (§20.1.3.4 / §10.4 — every ordinary object's [[Prototype]] chain
+ *     ends at %Object.prototype%).
+ *   - `Function.prototype.isPrototypeOf(x)`  → true when `x` is callable /
+ *     constructable (its chain passes through %Function.prototype%).
+ * Returns `true` for a provable yes, `undefined` otherwise (fall through to the
+ * existing host dispatch — conservatively no false-negatives / no behaviour
+ * change for undecidable shapes).
+ */
+function tryStaticIsPrototypeOf(
+  ctx: CodegenContext,
+  receiver: ts.Expression,
+  argExpr: ts.Expression | undefined,
+): boolean | undefined {
+  if (!argExpr) return undefined;
+  if (!ts.isPropertyAccessExpression(receiver)) return undefined;
+  if (receiver.name.text !== "prototype") return undefined;
+  if (!ts.isIdentifier(receiver.expression)) return undefined;
+  const base = receiver.expression.text;
+  if (base !== "Object" && base !== "Function") return undefined;
+
+  // A `new X()` expression always evaluates to an object (§13.3.5 EvaluateNew /
+  // OrdinaryCreateFromConstructor — even a constructor that returns a
+  // non-object yields the freshly-created instance), regardless of what
+  // TypeScript infers for its (possibly `any`) instance type. Every object
+  // descends from %Object.prototype%, so `Object.prototype.isPrototypeOf(new X())`
+  // is unconditionally true.
+  if (base === "Object" && ts.isNewExpression(argExpr)) return true;
+
+  const argType = ctx.checker.getTypeAtLocation(argExpr);
+  const f = argType.flags;
+  const isPrimitiveOrIndeterminate =
+    (f &
+      (ts.TypeFlags.Any |
+        ts.TypeFlags.Unknown |
+        ts.TypeFlags.NumberLike |
+        ts.TypeFlags.StringLike |
+        ts.TypeFlags.BooleanLike |
+        ts.TypeFlags.BigIntLike |
+        ts.TypeFlags.ESSymbolLike |
+        ts.TypeFlags.Null |
+        ts.TypeFlags.Undefined |
+        ts.TypeFlags.Void |
+        ts.TypeFlags.Never)) !==
+    0;
+  if (isPrimitiveOrIndeterminate) return undefined;
+  // Functions carry the Object type flag too, so this admits both plain objects
+  // and callables — correct for the `Object.prototype` receiver.
+  if ((f & ts.TypeFlags.Object) === 0) return undefined;
+
+  if (base === "Object") return true;
+  // base === "Function": require a call or construct signature.
+  const callable = argType.getCallSignatures().length > 0 || argType.getConstructSignatures().length > 0;
+  return callable ? true : undefined;
+}
+
+/**
  * Try to resolve a method call on an `any`-typed receiver through registered extern classes.
  * When the type checker resolves the receiver as `any` (e.g. when lib files aren't loaded
  * in ESM/bundled contexts), we dispatch known collection methods (Set.union, Map.get, etc.)
@@ -882,6 +943,36 @@ export function tryExternClassMethodOnAny(
   propAccess: ts.PropertyAccessExpression,
   methodName: string,
 ): InnerResult {
+  // (#2994) `Object.prototype.isPrototypeOf` / `Function.prototype.isPrototypeOf`
+  // static fold. On an `any`-typed receiver — which is how `Function.prototype`
+  // / `Object.prototype` (builtin prototype objects) surface here — the
+  // extern-class iteration below finds `isPrototypeOf` on the `Object` base
+  // extern class and emits an `Object_isPrototypeOf` host import the standalone
+  // runtime can't satisfy (round-5 leak analysis: 12 execution-verified
+  // sole-import leaky passes). The WasmGC-native `__isPrototypeOf` walks the
+  // `$Object.$proto` chain, but builtin prototypes/constructors (Object.prototype,
+  // Function.prototype, Number, …) are not linked into that chain in standalone
+  // mode, so routing there returns a spurious `false` (substrate gap — out of
+  // scope here). Instead statically fold the provably-true shapes — mirroring
+  // tryStaticInstanceOf's `instanceof Object` short-circuit (#1729): every
+  // non-primitive object descends from `Object.prototype`, and every
+  // callable/constructable value descends from `Function.prototype`. Undecidable
+  // shapes fall through to the existing host path unchanged (no regression).
+  if (methodName === "isPrototypeOf") {
+    const staticResult = tryStaticIsPrototypeOf(ctx, propAccess.expression, expr.arguments[0]);
+    if (staticResult !== undefined) {
+      // Compile receiver + arg for side effects (evaluation order), then const.
+      const recvType = compileExpression(ctx, fctx, propAccess.expression);
+      if (recvType !== null && recvType !== VOID_RESULT) fctx.body.push({ op: "drop" });
+      if (expr.arguments.length > 0) {
+        const argType = compileExpression(ctx, fctx, expr.arguments[0]!);
+        if (argType !== null && argType !== VOID_RESULT) fctx.body.push({ op: "drop" });
+      }
+      fctx.body.push({ op: "i32.const", value: staticResult ? 1 : 0 });
+      return { kind: "i32" };
+    }
+  }
+
   // `.slice` is ambiguous across String, Array, ArrayBuffer, Blob, and every
   // TypedArray. When a RegExp literal elsewhere in the module causes typed
   // array extern classes to register before the call is compiled, first-match
