@@ -42,19 +42,32 @@ this ~3–4×.)
 
 ## Slices (each a separate net-positive PR)
 
-- [ ] **(1) TypedArray packed-i8 `array.get`** — the
-  `array.get: Array type N has packed type i8` / `array.set[2] expected i32,
-  found array.get` family (TypedArray `set` with a resizable `ArrayBuffer`,
-  `Uint8Array.toBase64`, cross-type `set`). Root cause: an emission site reads a
-  **packed i8** array with plain `array.get`, which is a validator error — the
-  codebase already has the correct idiom elsewhere
-  (`elemType.kind === "i8" ? "array.get_u" : elemType.kind === "i16" ?
-  "array.get_s" : "array.get"`, `array-methods.ts`); the buggy site just doesn't
-  use it.
+The TypedArray packed-array surface turned out to be **several DISTINCT bugs**,
+not one — triaged 2026-07-02:
+
+- [x] **(1) TypedArray packed iterator READ (`.values()`/`.keys()`)** — DONE.
+  `emitBoxedElem` (`array-methods.ts`) read a packed i8/i16 backing array with a
+  plain `array.get` (validator error `Array type N has packed type i8`). Fixed
+  with the established `getOp` idiom (`i8 → array.get_u`, `i16 → array.get_s`).
+  Flips `TypedArray/prototype/values/make-{in,out-of}-bounds-after-exhausted.js`
+  standalone invalid → valid.
+- [ ] **(1b) TypedArray `.entries()`** — a DISTINCT `Binary emit error:
+  encodeValType: packed …` (a packed array type reaching a valtype position the
+  encoder rejects). Not the same site as (1).
+- [ ] **(1c) `TypedArray.prototype.set` / `Uint8Array.toBase64`** — the
+  `array.set[2] expected i32, found array.get of externref` / packed-`array.get`
+  errors here are a DISTINCT **DCE type-index remap** (`project_type_index_shift_
+  and_deadelim`): the pre-encode module has NO packed plain-`array.get`, so a
+  post-codegen dead-type-elimination / dedup pass mis-remaps an `array.get`
+  typeIdx onto a packed array. Needs a `dead-elimination.ts` audit — harder,
+  likely warrants an architect spec.
+- [ ] **(1d) simple `for (const v of u.values())`** — demotes to the IR path
+  (`ir/from-ast: unknown class`), a separate IR-adoption gap.
 - [ ] **(2) `call[0]/call[1] expected type …` in `test`/`__closure_*`** — a
-  wrong-typed argument at a call site (String/concat, RegExp/test, Array
-  map/filter species callbacks; several are `create-species-*`). Likely a
-  Symbol.species / callback-thunk typing issue.
+  wrong-typed argument at a call site (`String/concat` → `call[0] expected (ref
+  null 6), found call of externref`; `RegExp/test` → `call[0] expected externref,
+  found struct.new of (ref 101)` — a missing `extern.convert_any`; Array
+  map/filter `create-species-*` callbacks). Each a coercion/typing site.
 - [ ] **(3) `__closure_5` `not enough arguments on the stack`** — the one
   funcIdx-shift-shaped failure (for-await async path); may share the #2918
   late-import class.
