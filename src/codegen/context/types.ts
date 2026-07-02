@@ -1568,6 +1568,23 @@ export interface CodegenContext {
    */
   objectHashConsumerVars: Set<string>;
   /**
+   * (#2937) HOST-mode companion to `objectHashConsumerVars`, keyed by ts.Type
+   * identity instead of variable name. In a JS-mode source file (acorn.mjs),
+   * the checker EVOLVES `var o = {}` through its later static-named writes into
+   * an anonymous object type WITH those properties. `resolveWasmType` /
+   * `ensureStructForType` would auto-register that evolved type as a closed
+   * `__anon_N` struct and type the LOCAL (and every flow position: returns,
+   * class fields, receivers) as `(ref null __anon_N)` — while the poisoned
+   * initializer builds a host plain object (externref). The declaration's
+   * guarded cast then stores ref.null and every static read null-derefs (the
+   * compiled-acorn `getOptions` uniform throw). Types recorded here refuse
+   * struct resolution and stay externref end to end, so ALL access forms on a
+   * poisoned var route through the host MOP (`__extern_get`/`__extern_set`)
+   * coherently. Populated only in host/gc/wasi mode (standalone keeps its
+   * pre-existing codegen byte-identical; its matching gap is filed separately).
+   */
+  objectHashConsumerTypes: Set<ts.Type>;
+  /**
    * (#2837) Variable names initialized by a NON-EMPTY object literal that later
    * receives an OUT-OF-SHAPE property write (a direct `V.k=` with `k` not in the
    * literal's static shape, or a nested depth-≥2 write `V.a.b…=` onto a nested
@@ -1825,6 +1842,19 @@ export interface CodegenContext {
    *  member name (e.g. `RegExp.prototype.test.length === 1`,
    *  `.name === "test"`). Populated by `ensureStandaloneNativeMethodClosure`. */
   nativeClosureMeta?: Map<number, { name: string; length: number }>;
+  /** (#2896) Struct-type index → static `{name, length}` metadata for builtin
+   *  function-closure values under `--target standalone`. Each (builtin, member)
+   *  closure gets a UNIQUE wrapper-struct SUBTYPE (fields `[funcref func,
+   *  (mut i32) bfnstate]`, supertype = its signature wrapper struct), so the
+   *  reflective runtime natives (`__getOwnPropertyDescriptor` / `__extern_get` /
+   *  `__hasOwnProperty` / `__getOwnPropertyNames` / `__delete_property`) can
+   *  `ref.test` the value at RUNTIME and answer its spec `name`/`length` own
+   *  properties. Populated by `ensureBuiltinFnMetaType` (builtin-fn-meta.ts);
+   *  consumed by `fillBuiltinFnMeta` (object-runtime.ts) at finalize. */
+  builtinFnMetaByTypeIdx?: Map<number, { name: string; length: number }>;
+  /** (#2896) Cache: `(builtin, member)` key → the meta struct-type index above.
+   *  Keeps `ensureBuiltinFnMetaType` idempotent per closure identity. */
+  builtinFnMetaTypeByKey?: Map<string, number>;
   /** (#2193 PR-B) Struct-type indices of `$NativeProto` member closures whose
    *  FIRST user param is the receiver (`this`) — e.g. `Array.prototype.slice`'s
    *  `(self, this, start, end)` closure. Unlike a plain user function (which

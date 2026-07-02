@@ -2,7 +2,7 @@
 id: 2934
 title: "Standalone: invalid-Wasm heterogeneous tail after #2878 (test/__closure_*/__cb_0 — distinct codegen bugs)"
 status: in-progress
-assignee: ttraenkler/dev-2934b
+assignee: ttraenkler/dev-2934f
 created: 2026-07-02
 updated: 2026-07-02
 priority: medium
@@ -28,14 +28,14 @@ the eqref/funcIdx-shift class), so each is fixed as a **separate slice**.
 `built-ins` stride sample, AFTER #2878: **26 invalid binaries** remaining.
 Clustered by failing function + validator signature:
 
-| failing fn | count | validator signature (representative) | example test |
-| ---------- | ----- | ------------------------------------ | ------------ |
-| `test` | ~15 | `call[0] expected type (ref null …)` | `String/prototype/concat/S15.5.4.6_A1_T8.js` |
-| `test` | (in above) | `call[0] expected type externref` | `RegExp/prototype/test/S15.10.6.3_A8.js` |
-| `test` | (in above) | `array.get: Array type N has packed…` / `array.set[2] expected type i32` | `TypedArray/prototype/set/array-arg-value-conversion-resizes-array-buffer.js`, `Uint8Array/prototype/toBase64/results.js` |
-| `__closure_2/4/7/20` | ~8 | `call[1] expected type f64` / `call[0] expected type (…)` / `struct.get[0]` | `Array/prototype/map/15.4.4.19-4-7.js`, `Array/prototype/filter/create-species-poisoned.js`, `Proxy/revocable/tco-fn-realm.js` |
-| `__closure_5` | 1 | `not enough arguments on the stack` (funcIdx-shift-shaped) | `AsyncFromSyncIteratorPrototype/next/for-await-next-rejected-promise-close.js` |
-| `__cb_0` | 1 | `array.set[2] expected type i32` | `TypedArray/prototype/set/typedarray-arg-set-values-diff-buffer-other-type-conversions-sab.js` |
+| failing fn           | count      | validator signature (representative)                                        | example test                                                                                                                   |
+| -------------------- | ---------- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `test`               | ~15        | `call[0] expected type (ref null …)`                                        | `String/prototype/concat/S15.5.4.6_A1_T8.js`                                                                                   |
+| `test`               | (in above) | `call[0] expected type externref`                                           | `RegExp/prototype/test/S15.10.6.3_A8.js`                                                                                       |
+| `test`               | (in above) | `array.get: Array type N has packed…` / `array.set[2] expected type i32`    | `TypedArray/prototype/set/array-arg-value-conversion-resizes-array-buffer.js`, `Uint8Array/prototype/toBase64/results.js`      |
+| `__closure_2/4/7/20` | ~8         | `call[1] expected type f64` / `call[0] expected type (…)` / `struct.get[0]` | `Array/prototype/map/15.4.4.19-4-7.js`, `Array/prototype/filter/create-species-poisoned.js`, `Proxy/revocable/tco-fn-realm.js` |
+| `__closure_5`        | 1          | `not enough arguments on the stack` (funcIdx-shift-shaped)                  | `AsyncFromSyncIteratorPrototype/next/for-await-next-rejected-promise-close.js`                                                 |
+| `__cb_0`             | 1          | `array.set[2] expected type i32`                                            | `TypedArray/prototype/set/typedarray-arg-set-values-diff-buffer-other-type-conversions-sab.js`                                 |
 
 (3,500-file sample → the full `built-ins` corpus + `language`/other roots scale
 this ~3–4×.)
@@ -46,52 +46,85 @@ The TypedArray packed-array surface turned out to be **several DISTINCT bugs**,
 not one — triaged 2026-07-02:
 
 - [x] **(1) TypedArray packed iterator READ (`.values()`/`.keys()`)** — DONE.
-  `emitBoxedElem` (`array-methods.ts`) read a packed i8/i16 backing array with a
-  plain `array.get` (validator error `Array type N has packed type i8`). Fixed
-  with the established `getOp` idiom (`i8 → array.get_u`, `i16 → array.get_s`).
-  Flips `TypedArray/prototype/values/make-{in,out-of}-bounds-after-exhausted.js`
-  standalone invalid → valid.
-- [ ] **(1b) TypedArray `.entries()`** — a DISTINCT `Binary emit error:
-  encodeValType: packed …` (a packed array type reaching a valtype position the
-  encoder rejects). Not the same site as (1).
+      `emitBoxedElem` (`array-methods.ts`) read a packed i8/i16 backing array with a
+      plain `array.get` (validator error `Array type N has packed type i8`). Fixed
+      with the established `getOp` idiom (`i8 → array.get_u`, `i16 → array.get_s`).
+      Flips `TypedArray/prototype/values/make-{in,out-of}-bounds-after-exhausted.js`
+      standalone invalid → valid.
+- [x] **(1b) packed-element for-of / vec→tuple `encodeValType: packed`** — DONE
+      (dev-2934f, slice 3). Bigger than the `.entries()` label: EVERY
+      `for (const v of u)` / `of u.values()` / `of u.entries()` over a packed
+      (i8/i16) typed array was a standalone emit error, plus the manual-iterator
+      `it.next().value` tuple destructure. THREE distinct leak sites of one class
+      ("a packed STORAGE type reached a VALUE position"):
+  1. `compileForOfArray`/`compileForOfArrayEntries` (`statements/loops.ts`)
+     allocated the **loop variable local** with the raw `arrDef.element`
+     (i8/i16 — invalid local type) and read with plain `array.get` (invalid on
+     packed arrays). Fixed: bind as `unpackedElemType` (i32), read with
+     `elemGetOp` driven by **view-name signedness** (`Int*` → get_s, `Uint*` →
+     get_u — the storage kind alone can't distinguish, #2648), coerce/destructure
+     from the widened i32.
+  2. `stack-balance.ts` type simulation pushed the raw packed element/field
+     type for `array.get_s/_u`/`struct.get`; the struct.new arg-coercion repair
+     then materialized it into a `$sn_tmp` **temp local** → invalid. Fixed:
+     the simulator now models the widened i32 that is physically on the stack
+     (`widenPackedToI32` at all 4 producer sites + defensive widen at the
+     temp-local alloc).
+  3. `type-coercion.ts` vec→tuple paths (`buildTupleFromExternref` runtime
+     ref.test chain over ALL vec types incl. the packed i8_byte vec, and
+     `emitVecToTupleBody`) used plain `array.get` + a packed `if` **blockType**.
+     Fixed: `elemGetOp` (storage heuristic — no view name exists on the shared
+     vec type) + widened blockType + `f64.convert_i32_s` lift before the
+     f64/externref coercion arms.
+     Helpers `unpackedElemType`/`elemGetOp` are now canonical in `shared.ts` (the
+     acyclic sink — type-coercion.ts can't import array-methods.ts). Flips
+     `language/statements/for-of/{u,}int{8,16}array{,-mutate}.js` +
+     `uint8clampedarray{,-mutate}.js` (10 files) standalone CE → **pass**;
+     byte-identical on host mode and standalone non-packed paths (verified by
+     SHA over plain-array/string/entries for-of). Tests:
+     `tests/issue-2934-packed-forof-valtype.test.ts` (12 cases incl. signedness
+     semantics: Int8 −56, Uint8 200, Uint16 40000, Int16 −30000).
 - [ ] **(1c) `TypedArray.prototype.set` / `Uint8Array.toBase64`** — the
-  `array.set[2] expected i32, found array.get of externref` / packed-`array.get`
-  errors here are a DISTINCT **DCE type-index remap** (`project_type_index_shift_
-  and_deadelim`): the pre-encode module has NO packed plain-`array.get`, so a
-  post-codegen dead-type-elimination / dedup pass mis-remaps an `array.get`
-  typeIdx onto a packed array. Needs a `dead-elimination.ts` audit — harder,
-  likely warrants an architect spec.
+      `array.set[2] expected i32, found array.get of externref` / packed-`array.get`
+      errors here are a DISTINCT **DCE type-index remap** (`project_type_index_shift_
+and_deadelim`): the pre-encode module has NO packed plain-`array.get`, so a
+      post-codegen dead-type-elimination / dedup pass mis-remaps an `array.get`
+      typeIdx onto a packed array. Needs a `dead-elimination.ts` audit — harder,
+      likely warrants an architect spec.
 - [ ] **(1d) simple `for (const v of u.values())`** — demotes to the IR path
-  (`ir/from-ast: unknown class`), a separate IR-adoption gap.
+      (`ir/from-ast: unknown class`), a separate IR-adoption gap. NOTE: after (1b)
+      the legacy-path fallback now compiles these shapes correctly (valid Wasm,
+      right semantics), so this is a pure IR-adoption item, no longer an
+      invalid-Wasm producer.
 - [x] **(2a) `RegExp/test` receiver → `hasOwnProperty`/`propertyIsEnumerable`
-  missing `extern.convert_any`** — DONE (dev-2934b, slice 2). `RegExp.prototype.
-  test.hasOwnProperty('length')` — the receiver `RegExp.prototype.test` is a
-  function object, compiled to a concrete function-object struct `(ref $fn)`.
-  `compilePropertyIntrospection` (`object-ops.ts`) takes the `receiverWasm.kind
-  === "externref"` branch because `resolveWasmType` reports the receiver's
-  *static* (method) type as `externref` — then pushed the receiver with
-  `compileExpression` but **did not coerce** the actually-emitted `(ref $fn)` to
-  externref, while the key argument WAS coerced. Result: `call[0] expected type
-  externref, found struct.new of type (ref …)` invalid Wasm. Fix: coerce the
-  receiver's *compiled* type (`recvType.kind !== "externref"` → `coerceType`
-  → `extern.convert_any`), mirroring the existing key-arg coercion. Verified
-  before/after over the 90-file `.hasOwnProperty/.propertyIsEnumerable('length')`
-  DontEnum-length family: **9 standalone INVALID → 0** (RegExp `test`/`exec`/
-  `toString` `_A8/_A9/_A10`); the other 81 were already valid and stay valid.
-  Host-mode byte-neutral (host receiver is already externref → guard skips it;
-  `S15.10.6.3_A8` et al. still pass host). Standalone runtime still fails these
-  on the separate `__hasOwnProperty` function-`.length`-own semantics gap — a
-  distinct issue, not this slice.
+      missing `extern.convert_any`** — DONE (dev-2934b, slice 2). `RegExp.prototype.
+test.hasOwnProperty('length')` — the receiver `RegExp.prototype.test` is a
+      function object, compiled to a concrete function-object struct `(ref $fn)`.
+      `compilePropertyIntrospection` (`object-ops.ts`) takes the `receiverWasm.kind
+=== "externref"` branch because `resolveWasmType` reports the receiver's
+      _static_ (method) type as `externref` — then pushed the receiver with
+      `compileExpression` but **did not coerce** the actually-emitted `(ref $fn)` to
+      externref, while the key argument WAS coerced. Result: `call[0] expected type
+externref, found struct.new of type (ref …)` invalid Wasm. Fix: coerce the
+      receiver's _compiled_ type (`recvType.kind !== "externref"` → `coerceType`
+      → `extern.convert_any`), mirroring the existing key-arg coercion. Verified
+      before/after over the 90-file `.hasOwnProperty/.propertyIsEnumerable('length')`
+      DontEnum-length family: **9 standalone INVALID → 0** (RegExp `test`/`exec`/
+      `toString` `_A8/_A9/_A10`); the other 81 were already valid and stay valid.
+      Host-mode byte-neutral (host receiver is already externref → guard skips it;
+      `S15.10.6.3_A8` et al. still pass host). Standalone runtime still fails these
+      on the separate `__hasOwnProperty` function-`.length`-own semantics gap — a
+      distinct issue, not this slice.
 - [ ] **(2b) remaining `call[0]/call[1] expected type …` coercion sites** — still
-  open, DISTINCT from (2a): `String/concat` → `call[0] expected (ref null 6),
-  found call of externref` (reverse direction — an internal ref expected, an
-  externref supplied); `RegExp.prototype.exec(...).toString()` → `call[0]
-  expected externref, found if of (ref null 98)` (nullable-ref receiver to
-  `.toString()`); Array map/filter `create-species-*` callbacks in `__closure_*`.
-  Each a separate coercion/typing site.
+      open, DISTINCT from (2a): `String/concat` → `call[0] expected (ref null 6),
+found call of externref` (reverse direction — an internal ref expected, an
+      externref supplied); `RegExp.prototype.exec(...).toString()` → `call[0]
+expected externref, found if of (ref null 98)` (nullable-ref receiver to
+      `.toString()`); Array map/filter `create-species-*` callbacks in `__closure_*`.
+      Each a separate coercion/typing site.
 - [ ] **(3) `__closure_5` `not enough arguments on the stack`** — the one
-  funcIdx-shift-shaped failure (for-await async path); may share the #2918
-  late-import class.
+      funcIdx-shift-shaped failure (for-await async path); may share the #2918
+      late-import class.
 
 ## Approach
 

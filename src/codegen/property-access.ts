@@ -26,6 +26,12 @@ import { snapshotSpeculative, rollbackSpeculative } from "./context/speculative.
 import { emitDynGet } from "./dyn-read.js"; // (#2580 M2 slice 1)
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { emitCachedMethodClosureAccess, emitFuncRefAsClosure, getOrCreateFuncRefWrapperTypes } from "./closures.js";
+import {
+  BUILTIN_STATIC_METHOD_ARITY,
+  ensureBuiltinFnMetaType,
+  pushBuiltinFnClosureValueInstrs,
+  STANDALONE_STATIC_METHOD_META,
+} from "./builtin-fn-meta.js";
 import { emitLazyClassObjectGet, emitLazyProtoGet, findExternInfoForMember } from "./expressions/extern.js";
 import {
   classifyPrivateMember,
@@ -967,6 +973,26 @@ function tryCompileStandaloneBuiltinProtoMemberMeta(
   const memberAccess = skipTransparentExpressions(expr.expression);
   if (!ts.isPropertyAccessExpression(memberAccess)) return undefined;
   const inner = skipTransparentExpressions(memberAccess.expression);
+  // (#2896) `<Builtin>.<staticMethod>.length` / `.name` — fold the spec
+  // metadata for direct reads of ANY standard builtin static method (the
+  // BUILTIN_STATIC_METHOD_ARITY table; `.name` === the property key per
+  // §10.2.9). No closure is materialized, so this also answers methods whose
+  // VALUE-read is not yet wired host-free (`Number.isNaN.length` etc.).
+  // Sibling of the `<Builtin>.prototype.<member>` fold below; the runtime
+  // reflective reads for wired closures resolve through the #2896 meta
+  // subtypes instead (same values — STANDALONE_STATIC_METHOD_META agrees with
+  // this table).
+  if (ts.isIdentifier(inner)) {
+    const staticShadowed = fctx.localMap.has(inner.text) || (fctx.boxedCaptures?.has(inner.text) ?? false);
+    const staticArity = BUILTIN_STATIC_METHOD_ARITY[inner.text]?.[memberAccess.name.text];
+    if (!staticShadowed && staticArity !== undefined) {
+      if (metaProp === "length") {
+        fctx.body.push({ op: "f64.const", value: staticArity } as Instr);
+        return { kind: "f64" };
+      }
+      return compileStringLiteral(ctx, fctx, memberAccess.name.text) ?? undefined;
+    }
+  }
   if (!ts.isPropertyAccessExpression(inner)) return undefined;
   if (inner.name.text !== "prototype" || !ts.isIdentifier(inner.expression)) return undefined;
   const builtinName = inner.expression.text;
@@ -1032,8 +1058,7 @@ function tryCompileStandaloneBuiltinProtoMemberRead(
     if (!closureInfo) return undefined;
 
     // self struct (param 0) — unused by the body (no captures) but type-required.
-    fctx.body.push({ op: "ref.func", funcIdx: closure.funcIdx } as Instr);
-    fctx.body.push({ op: "struct.new", typeIdx: closure.type.typeIdx } as Instr);
+    fctx.body.push(...pushBuiltinFnClosureValueInstrs(ctx, closure));
     // `this` arg (param 1): the builtin proto object externref.
     if (!emitLazyNativeProtoGet(ctx, fctx, brand)) return undefined;
     // call_ref operand: the typed funcref. `ref.func` yields `(ref liftedType)`
@@ -1044,8 +1069,7 @@ function tryCompileStandaloneBuiltinProtoMemberRead(
     return closureInfo.returnType ?? { kind: "externref" };
   }
 
-  fctx.body.push({ op: "ref.func", funcIdx: closure.funcIdx } as Instr);
-  fctx.body.push({ op: "struct.new", typeIdx: closure.type.typeIdx } as Instr);
+  fctx.body.push(...pushBuiltinFnClosureValueInstrs(ctx, closure));
   return closure.type;
 }
 
@@ -1124,6 +1148,23 @@ function ensureStandaloneBuiltinStaticMethodClosure(
     ctx.funcMap.set(funcName, funcIdx);
   }
 
+  // (#2896) The value struct is the UNIQUE per-(builtin, method) metadata
+  // subtype of the signature wrapper, so the reflective runtime natives can
+  // `ref.test` it and answer its spec `name`/`length` own properties. All call
+  // paths are unaffected (subtype of the wrapper the lifted func expects).
+  const meta = STANDALONE_STATIC_METHOD_META[key];
+  if (meta) {
+    const metaTypeIdx = ensureBuiltinFnMetaType(
+      ctx,
+      wrapperTypes.structTypeIdx,
+      wrapperTypes.closureInfo,
+      `static:${key}`,
+      meta.name,
+      meta.length,
+    );
+    return { type: { kind: "ref", typeIdx: metaTypeIdx }, funcIdx };
+  }
+
   return { type: { kind: "ref", typeIdx: wrapperTypes.structTypeIdx }, funcIdx };
 }
 
@@ -1176,6 +1217,10 @@ function isBindResultExpr(ctx: CodegenContext, expr: ts.Expression): boolean {
  * classExprNameMap, and anonTypeMap.
  */
 export function resolveStructName(ctx: CodegenContext, tsType: ts.Type): string | undefined {
+  // (#2937) The evolved checker type of a poisoned `$Object`-hash-consumer
+  // `{}` var never resolves to a struct — receivers of that type route through
+  // the externref host-MOP path (see resolveWasmType's matching guard).
+  if (ctx.objectHashConsumerTypes.has(tsType)) return undefined;
   const name = tsType.symbol?.name;
   if (name && name !== "__type" && name !== "__object" && ctx.structMap.has(name)) {
     return name;
@@ -3920,8 +3965,7 @@ export function compilePropertyAccess(
       }
       const closure = ensureStandaloneBuiltinStaticMethodClosure(ctx, builtinName, propName, expr);
       if (closure) {
-        fctx.body.push({ op: "ref.func", funcIdx: closure.funcIdx });
-        fctx.body.push({ op: "struct.new", typeIdx: closure.type.typeIdx });
+        fctx.body.push(...pushBuiltinFnClosureValueInstrs(ctx, closure));
         return closure.type;
       }
       reportUnsupportedStandaloneBuiltinValueRead(ctx, builtinName, propName);

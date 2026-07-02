@@ -448,6 +448,79 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   const strFlattenIdx = ctx.nativeStrHelpers.get("__str_flatten")!;
   const strEqualsIdx = ctx.nativeStrHelpers.get("__str_equals")!;
 
+  // ── (#2896) Reserved builtin-fn metadata natives (standalone only) ────────
+  //
+  // Builtin function values (the per-(builtin, member) closure meta subtypes —
+  // see builtin-fn-meta.ts) answer their spec `name`/`length` own properties at
+  // RUNTIME through these four helpers. They are REGISTERED here with valid
+  // constant default bodies (so a module with no builtin closures is
+  // unaffected), and their `ref.test <metaType>` arms are SPLICED IN AT
+  // FINALIZE by `fillBuiltinFnMeta` once every meta type is known — the same
+  // reserve/fill discipline as `__extern_is_array` above. The reflective
+  // consumers below (`__extern_get` / `__hasOwnProperty` /
+  // `__getOwnPropertyDescriptor` / `__getOwnPropertyNames` /
+  // `__delete_property`) bake eager `call`s to these funcIdxs at their own
+  // registration, keeping the late-import shift invariant intact.
+  //
+  //   __builtinfn_get_meta(v, key)  -> externref   name string / boxed length,
+  //                                                 null when not a builtin fn,
+  //                                                 not "name"/"length", or the
+  //                                                 property was deleted.
+  //   __builtinfn_gopd(v, key)      -> externref   full data descriptor
+  //                                                 ({writable:false,
+  //                                                 enumerable:false,
+  //                                                 configurable:true}) or null.
+  //   __builtinfn_delete(v, key)    -> i32          1 = handled (deleted-bit
+  //                                                 set on the instance).
+  //   __builtinfn_push_ownnames(v, vec) -> i32      1 = v is a builtin fn (its
+  //                                                 undeleted own names were
+  //                                                 pushed into vec).
+  //
+  // Gated on ctx.standalone: in gc/host mode this runtime is also pulled in
+  // (Object.keys etc.) but builtin function values are host objects there — the
+  // host imports own their metadata, and registering these would only shift
+  // funcMap indices (gc bytes must stay unchanged).
+  const bfnMetaLocals = [
+    { name: "any", type: { kind: "anyref" } as ValType },
+    { name: "fkey", type: { kind: "ref_null", typeIdx: nativeStrTypeIdx } as ValType },
+    { name: "isName", type: { kind: "i32" } as ValType },
+    { name: "isLen", type: { kind: "i32" } as ValType },
+  ];
+  if (ctx.standalone) {
+    registerNative(
+      "__builtinfn_get_meta",
+      [{ kind: "externref" }, { kind: "externref" }],
+      [{ kind: "externref" }],
+      bfnMetaLocals,
+      [{ op: "ref.null.extern" } as Instr],
+    );
+    registerNative(
+      "__builtinfn_gopd",
+      [{ kind: "externref" }, { kind: "externref" }],
+      [{ kind: "externref" }],
+      [{ name: "v", type: { kind: "externref" } as ValType }],
+      [{ op: "ref.null.extern" } as Instr],
+    );
+    registerNative(
+      "__builtinfn_delete",
+      [{ kind: "externref" }, { kind: "externref" }],
+      [{ kind: "i32" }],
+      bfnMetaLocals,
+      [{ op: "i32.const", value: 0 } as Instr],
+    );
+    registerNative(
+      "__builtinfn_push_ownnames",
+      [{ kind: "externref" }, { kind: "externref" }],
+      [{ kind: "i32" }],
+      [{ name: "any", type: { kind: "anyref" } as ValType }],
+      [{ op: "i32.const", value: 0 } as Instr],
+    );
+  }
+  const bfnGetMetaIdx = ctx.standalone ? ctx.funcMap.get("__builtinfn_get_meta") : undefined;
+  const bfnGopdIdx = ctx.standalone ? ctx.funcMap.get("__builtinfn_gopd") : undefined;
+  const bfnDeleteIdx = ctx.standalone ? ctx.funcMap.get("__builtinfn_delete") : undefined;
+  const bfnPushOwnNamesIdx = ctx.standalone ? ctx.funcMap.get("__builtinfn_push_ownnames") : undefined;
+
   // #2042 R2 — held reference to `__to_property_key`'s body so the object-key
   // arm can be spliced in after `__extern_toString` is registered later in this
   // pass (forward dependency; see the splice below the `__extern_toString` reg).
@@ -950,6 +1023,24 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     // keeps the late-import shifter in sync (#329/#1899).
     const callAccessorGetIdx = reserveAccessorGetDriver(ctx);
     const body: Instr[] = [
+      // (#2896) Builtin-fn metadata arm: `fn[key]` for key "name"/"length" on a
+      // builtin function value answers its spec metadata (host-free). Non-meta
+      // receivers/keys fall through unchanged (the helper returns null).
+      ...(bfnGetMetaIdx !== undefined
+        ? ([
+            { op: "local.get", index: 0 },
+            { op: "local.get", index: 1 },
+            { op: "call", funcIdx: bfnGetMetaIdx },
+            { op: "local.tee", index: 6 },
+            { op: "ref.is_null" },
+            { op: "i32.eqz" },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [{ op: "local.get", index: 6 }, { op: "return" }],
+            },
+          ] as Instr[])
+        : []),
       // any = any.convert_extern(obj)
       { op: "local.get", index: 0 },
       { op: "any.convert_extern" },
@@ -1054,6 +1145,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
         { name: "e", type: entryRefNull },
         { name: "any", type: { kind: "anyref" } },
         { name: "getter", type: { kind: "externref" } }, // (#1888 S5b) accessor $get
+        { name: "bfmeta", type: { kind: "externref" } }, // (#2896) builtin-fn meta
       ],
       body,
     );
@@ -1771,6 +1863,22 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   // locals: 2=any(anyref) 3=o(ref null $Object) 4=e(ref null $PropEntry)
   {
     const body: Instr[] = [
+      // (#2896) Builtin-fn metadata arm: `delete fn.name` / `delete fn.length`
+      // on a builtin function value marks the instance's deleted bit (the
+      // properties are configurable, §10.2.9) and reports success. Other
+      // receivers/keys fall through (the helper returns 0).
+      ...(bfnDeleteIdx !== undefined
+        ? ([
+            { op: "local.get", index: 0 },
+            { op: "local.get", index: 1 },
+            { op: "call", funcIdx: bfnDeleteIdx },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [{ op: "i32.const", value: 1 }, { op: "return" }],
+            },
+          ] as Instr[])
+        : []),
       // any = any.convert_extern(obj) ; if !ref.test $Object → return 1 (no-op success)
       { op: "local.get", index: 0 },
       { op: "any.convert_extern" },
@@ -2029,6 +2137,23 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   // own-only predicate, so both names register the same body.
   const emitHasOwn = (name: string): void => {
     const body: Instr[] = [
+      // (#2896) Builtin-fn metadata arm: name/length are OWN properties of a
+      // builtin function value (until deleted). get_meta returns non-null
+      // exactly when the own property exists.
+      ...(bfnGetMetaIdx !== undefined
+        ? ([
+            { op: "local.get", index: 0 },
+            { op: "local.get", index: 1 },
+            { op: "call", funcIdx: bfnGetMetaIdx },
+            { op: "ref.is_null" },
+            { op: "i32.eqz" },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [{ op: "i32.const", value: 1 }, { op: "return" }],
+            },
+          ] as Instr[])
+        : []),
       // any = any.convert_extern(obj); if !ref.test $Object → 0
       { op: "local.get", index: 0 },
       { op: "any.convert_extern" },
@@ -5604,6 +5729,26 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     ];
 
     const body: Instr[] = [
+      // (#2896) Builtin-fn metadata arm: gOPD over a builtin function value
+      // synthesizes the spec data descriptor for its "name"/"length" own
+      // properties ({writable:false, enumerable:false, configurable:true}).
+      // The helper is filled at finalize; non-meta receivers return null and
+      // fall through to the `$Object` path below.
+      ...(bfnGopdIdx !== undefined
+        ? ([
+            { op: "local.get", index: 0 },
+            { op: "local.get", index: 1 },
+            { op: "call", funcIdx: bfnGopdIdx },
+            { op: "local.tee", index: 6 }, // desc local (externref) — reused
+            { op: "ref.is_null" },
+            { op: "i32.eqz" },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [{ op: "local.get", index: 6 }, { op: "return" }],
+            },
+          ] as Instr[])
+        : []),
       // any = any.convert_extern(obj) ; if !$Object → return undefined (null)
       { op: "local.get", index: 0 },
       { op: "any.convert_extern" },
@@ -5842,6 +5987,21 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     const body: Instr[] = [
       { op: "call", funcIdx: objVecNewIdx },
       { op: "local.set", index: 7 },
+      // (#2896) Builtin-fn metadata arm: a builtin function value's own string
+      // keys are ["length", "name"] in spec order (minus deleted ones). The
+      // filled helper pushes them into the vec and returns 1 on a hit.
+      ...(bfnPushOwnNamesIdx !== undefined
+        ? ([
+            { op: "local.get", index: 0 },
+            { op: "local.get", index: 7 },
+            { op: "call", funcIdx: bfnPushOwnNamesIdx },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [{ op: "local.get", index: 7 }, { op: "return" }],
+            },
+          ] as Instr[])
+        : []),
       { op: "local.get", index: 0 },
       { op: "any.convert_extern" },
       { op: "local.tee", index: 1 },
@@ -8499,6 +8659,271 @@ export function fillExternGetIdxVecArms(ctx: CodegenContext): void {
 }
 
 /**
+ * (#2896) Finalize-time fill for the reserved builtin-fn metadata natives
+ * (`__builtinfn_get_meta` / `__builtinfn_gopd` / `__builtinfn_delete` /
+ * `__builtinfn_push_ownnames` — registered by `ensureObjectRuntime` under
+ * `--target standalone` with constant default bodies). Runs from index.ts
+ * finalize, right after `fillExternGetIdxVecArms`, once EVERY builtin closure
+ * meta type (`ctx.builtinFnMetaByTypeIdx`, see builtin-fn-meta.ts) is known —
+ * a meta type registered after an eagerly-baked ref.test chain would otherwise
+ * be invisible (the same compile-order snapshot bug `fillExternIsArray` fixes
+ * for Array.isArray).
+ *
+ * Shift-safety: the arms are SPLICED into the existing default bodies (never
+ * rebuilt — see `reference_no_rebuild_helper_body_at_finalize`); the `call`
+ * funcIdxs baked here read `funcMap` at fill time, and any later import shift
+ * walks + adjusts spliced instrs like all others. `ref.test`/`ref.cast`/
+ * `struct.get`/`struct.set` use TYPE indices (rec-group stable, no funcidx
+ * hazard).
+ */
+export function fillBuiltinFnMeta(ctx: CodegenContext): void {
+  const metaMap = ctx.builtinFnMetaByTypeIdx;
+  if (!metaMap || metaMap.size === 0) return;
+  const getMetaFuncIdx = ctx.funcMap.get("__builtinfn_get_meta");
+  if (getMetaFuncIdx === undefined) return; // object runtime never ensured
+  const boxNumIdx = ctx.funcMap.get("__box_number");
+  const strFlattenIdx = ctx.nativeStrHelpers.get("__str_flatten");
+  const strEqualsIdx = ctx.nativeStrHelpers.get("__str_equals");
+  const anyStrTypeIdx = ctx.anyStrTypeIdx;
+  if (boxNumIdx === undefined || strFlattenIdx === undefined || strEqualsIdx === undefined || anyStrTypeIdx < 0) {
+    return;
+  }
+  // Resolve fill targets BY NAME (funcIdx math across phases is shift-sensitive).
+  const findFn = (name: string) => ctx.mod.functions.find((f) => f.name === name);
+  const getMetaFn = findFn("__builtinfn_get_meta");
+  const gopdFn = findFn("__builtinfn_gopd");
+  const deleteFn = findFn("__builtinfn_delete");
+  const pushOwnFn = findFn("__builtinfn_push_ownnames");
+
+  // Deterministic arm order.
+  const entries = Array.from(metaMap.entries()).sort((a, b) => a[0] - b[0]);
+
+  // Shared preamble for get_meta / delete (locals: 2=any 3=fkey 4=isName 5=isLen):
+  // convert the receiver, classify the key ONCE (string → flattened; isName /
+  // isLen flags). A non-string key can never be "name"/"length" — the flags
+  // stay 0 and the guarded arm block is skipped (falls to the default tail).
+  // A FACTORY (fresh Instr objects per call): the same preamble goes into TWO
+  // function bodies, and aliasing one Instr[] into both would double-remap
+  // (see reference_shared_instr_object_dce_double_remap).
+  const classifyPreamble = (): Instr[] => [
+    { op: "local.get", index: 0 },
+    { op: "any.convert_extern" },
+    { op: "local.set", index: 2 },
+    { op: "local.get", index: 1 },
+    { op: "any.convert_extern" },
+    { op: "ref.test", typeIdx: anyStrTypeIdx },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: 1 },
+        { op: "any.convert_extern" },
+        { op: "ref.cast", typeIdx: anyStrTypeIdx },
+        { op: "call", funcIdx: strFlattenIdx },
+        { op: "local.set", index: 3 },
+        { op: "local.get", index: 3 },
+        { op: "ref.as_non_null" },
+        ...nativeStringLiteralInstrs(ctx, "name"),
+        { op: "call", funcIdx: strEqualsIdx },
+        { op: "local.set", index: 4 },
+        { op: "local.get", index: 3 },
+        { op: "ref.as_non_null" },
+        ...nativeStringLiteralInstrs(ctx, "length"),
+        { op: "call", funcIdx: strEqualsIdx },
+        { op: "local.set", index: 5 },
+      ],
+    } as Instr,
+  ];
+
+  // ── __builtinfn_get_meta arms ──
+  if (getMetaFn) {
+    const arms: Instr[] = [];
+    for (const [typeIdx, meta] of entries) {
+      arms.push({ op: "local.get", index: 2 }, { op: "ref.test", typeIdx }, {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: 4 }, // isName
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [
+              // deleted? (state & NAME_DELETED)
+              { op: "local.get", index: 2 },
+              { op: "ref.cast", typeIdx },
+              { op: "struct.get", typeIdx, fieldIdx: 1 },
+              { op: "i32.const", value: 1 },
+              { op: "i32.and" },
+              { op: "i32.eqz" },
+              {
+                op: "if",
+                blockType: { kind: "empty" },
+                then: [
+                  ...nativeStringLiteralInstrs(ctx, meta.name),
+                  { op: "extern.convert_any" } as Instr,
+                  { op: "return" },
+                ],
+              },
+              { op: "ref.null.extern" },
+              { op: "return" },
+            ],
+          },
+          // length: deleted? (state & LENGTH_DELETED)
+          { op: "local.get", index: 2 },
+          { op: "ref.cast", typeIdx },
+          { op: "struct.get", typeIdx, fieldIdx: 1 },
+          { op: "i32.const", value: 2 },
+          { op: "i32.and" },
+          { op: "i32.eqz" },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [{ op: "f64.const", value: meta.length }, { op: "call", funcIdx: boxNumIdx }, { op: "return" }],
+          },
+          { op: "ref.null.extern" },
+          { op: "return" },
+        ],
+      } as Instr);
+    }
+    getMetaFn.body.splice(
+      0,
+      0,
+      ...classifyPreamble(),
+      // Guard: only enter the arm block when the key is "name" or "length".
+      { op: "local.get", index: 4 } as Instr,
+      { op: "local.get", index: 5 } as Instr,
+      { op: "i32.or" } as Instr,
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: arms,
+      } as Instr,
+    );
+  }
+
+  // ── __builtinfn_gopd: get_meta(v, key) → __create_descriptor(value, 0x04) ──
+  const createDescIdx = ctx.funcMap.get("__create_descriptor");
+  if (gopdFn && createDescIdx !== undefined) {
+    gopdFn.body.splice(
+      0,
+      0,
+      { op: "local.get", index: 0 } as Instr,
+      { op: "local.get", index: 1 } as Instr,
+      { op: "call", funcIdx: getMetaFuncIdx } as Instr,
+      { op: "local.tee", index: 2 } as Instr,
+      { op: "ref.is_null" } as Instr,
+      { op: "i32.eqz" } as Instr,
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: 2 },
+          { op: "i32.const", value: FLAG_CONFIGURABLE }, // {writable:F, enumerable:F, configurable:T}
+          { op: "call", funcIdx: createDescIdx },
+          { op: "return" },
+        ],
+      } as Instr,
+    );
+  }
+
+  // ── __builtinfn_delete arms: set the instance's deleted bit, return 1 ──
+  if (deleteFn) {
+    const arms: Instr[] = [];
+    for (const [typeIdx] of entries) {
+      arms.push({ op: "local.get", index: 2 }, { op: "ref.test", typeIdx }, {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          // state |= isName ? 1 : 2
+          { op: "local.get", index: 2 },
+          { op: "ref.cast", typeIdx },
+          { op: "local.get", index: 2 },
+          { op: "ref.cast", typeIdx },
+          { op: "struct.get", typeIdx, fieldIdx: 1 },
+          { op: "local.get", index: 4 },
+          {
+            op: "if",
+            blockType: { kind: "val", type: { kind: "i32" } },
+            then: [{ op: "i32.const", value: 1 }],
+            else: [{ op: "i32.const", value: 2 }],
+          },
+          { op: "i32.or" },
+          { op: "struct.set", typeIdx, fieldIdx: 1 },
+          { op: "i32.const", value: 1 },
+          { op: "return" },
+        ],
+      } as Instr);
+    }
+    deleteFn.body.splice(
+      0,
+      0,
+      ...classifyPreamble(),
+      { op: "local.get", index: 4 } as Instr,
+      { op: "local.get", index: 5 } as Instr,
+      { op: "i32.or" } as Instr,
+      { op: "if", blockType: { kind: "empty" }, then: arms } as Instr,
+    );
+  }
+
+  // ── __builtinfn_push_ownnames arms: push undeleted ["length","name"] ──
+  const objVecPushIdx = ctx.funcMap.get("__objvec_push");
+  if (pushOwnFn && objVecPushIdx !== undefined) {
+    const arms: Instr[] = [];
+    for (const [typeIdx] of entries) {
+      arms.push({ op: "local.get", index: 2 }, { op: "ref.test", typeIdx }, {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          // "length" first (spec order: OrdinaryOwnPropertyKeys creation order).
+          { op: "local.get", index: 2 },
+          { op: "ref.cast", typeIdx },
+          { op: "struct.get", typeIdx, fieldIdx: 1 },
+          { op: "i32.const", value: 2 },
+          { op: "i32.and" },
+          { op: "i32.eqz" },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [
+              { op: "local.get", index: 1 }, // vec
+              ...nativeStringLiteralInstrs(ctx, "length"),
+              { op: "extern.convert_any" } as Instr,
+              { op: "call", funcIdx: objVecPushIdx },
+            ],
+          },
+          { op: "local.get", index: 2 },
+          { op: "ref.cast", typeIdx },
+          { op: "struct.get", typeIdx, fieldIdx: 1 },
+          { op: "i32.const", value: 1 },
+          { op: "i32.and" },
+          { op: "i32.eqz" },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [
+              { op: "local.get", index: 1 }, // vec
+              ...nativeStringLiteralInstrs(ctx, "name"),
+              { op: "extern.convert_any" } as Instr,
+              { op: "call", funcIdx: objVecPushIdx },
+            ],
+          },
+          { op: "i32.const", value: 1 },
+          { op: "return" },
+        ],
+      } as Instr);
+    }
+    pushOwnFn.body.splice(
+      0,
+      0,
+      { op: "local.get", index: 0 } as Instr,
+      { op: "any.convert_extern" } as Instr,
+      { op: "local.set", index: 2 } as Instr,
+      ...arms,
+    );
+  }
+}
+
+/**
  * Names of the object-runtime host imports that `ensureObjectRuntime` provides
  * Wasm-native implementations for. `ensureLateImport` routes these here under
  * `ctx.standalone` (mirrors `UNION_NATIVE_HELPER_NAMES` for the #1471 boxing
@@ -8508,6 +8933,8 @@ export function fillExternGetIdxVecArms(ctx: CodegenContext): void {
  * `ensureLateImport`.
  */
 export const OBJECT_RUNTIME_HELPER_NAMES: ReadonlySet<string> = new Set([
+  // (#2896) builtin-fn metadata read (dyn-read `.length` closure arm routes here).
+  "__builtinfn_get_meta",
   "__new_plain_object",
   "__extern_is_array",
   "__extern_get",

@@ -1,7 +1,9 @@
 ---
 id: 2896
 title: "Standalone: native function-object metadata + property descriptors (.name/.length, getOwnPropertyDescriptor) — blocks builtin static-method value-read cluster"
-status: ready
+status: done
+completed: 2026-07-02
+assignee: ttraenkler/dev-f1
 created: 2026-06-30
 priority: medium
 feasibility: hard
@@ -34,15 +36,15 @@ do **not** carry faithful function-object metadata:
 This is true **even for already-wired methods** (verified against the control
 `Array.isArray`, which has a registered static closure):
 
-| read (standalone)                                    | result |
-| ---------------------------------------------------- | ------ |
-| `typeof Array.isArray === "function"`                | ✅ 1   |
-| value-call `let f = Array.isArray; f([1,2])`         | ✅ 1   |
-| `new (Array.isArray)()` throws (not-a-constructor)   | ✅ 1   |
-| `Array.isArray.name === "isArray"`                   | ❌ 0   |
-| `Array.isArray.length === 1`                         | ❌ 0   |
-| `[[1],2].filter(Array.isArray)` (pass as callback)   | ❌ 0   |
-| `getOwnPropertyDescriptor(Array.isArray,"name")`     | ❌ 0   |
+| read (standalone)                                  | result |
+| -------------------------------------------------- | ------ |
+| `typeof Array.isArray === "function"`              | ✅ 1   |
+| value-call `let f = Array.isArray; f([1,2])`       | ✅ 1   |
+| `new (Array.isArray)()` throws (not-a-constructor) | ✅ 1   |
+| `Array.isArray.name === "isArray"`                 | ❌ 0   |
+| `Array.isArray.length === 1`                       | ❌ 0   |
+| `[[1],2].filter(Array.isArray)` (pass as callback) | ❌ 0   |
+| `getOwnPropertyDescriptor(Array.isArray,"name")`   | ❌ 0   |
 
 ## Why it matters
 
@@ -54,7 +56,7 @@ native closures expose no descriptor-visible `name`/`length` property, those
 tests fail (or CE) regardless of any direct-access meta-fold.
 
 This is the substrate blocker behind the **builtin static-method value-read
-cluster** (#2861 residual / #2863 Phase 1): direct *calls* of builtin static
+cluster** (#2861 residual / #2863 Phase 1): direct _calls_ of builtin static
 methods already work host-free (`Number.isInteger(5)`, `ArrayBuffer.isView(...)`),
 and bare value-reads can be wired per-method — but per-method wiring flips only
 the `not-a-constructor.js`-style test each, while `name.js`/`length.js`/
@@ -100,7 +102,7 @@ per-builtin value-read wiring in #2861/#2863:
 
 - `Object.getOwnPropertyDescriptor(fn, "name")` / `(fn, "length")` over a native
   builtin function value returns the spec value + `{writable:false,
-  enumerable:false, configurable:true}`.
+enumerable:false, configurable:true}`.
 - test262 `built-ins/**/{name,length,prop-desc}.js` flip to **pass** host-free
   for the wired builtin functions (and unblock the #2861/#2863 static-method
   value-read cluster once individual methods are wired).
@@ -157,23 +159,23 @@ those flips only `not-a-constructor.js` until this lands).
 
 Direct probes (`.tmp/mech*.mts`, host-free unless noted):
 
-| read (standalone)                                       | today | want |
-| ------------------------------------------------------- | ----- | ---- |
-| `typeof Array.isArray === "function"`                   | ✅    | ✅   |
-| `Array.isArray.name === "isArray"` (direct)             | ✅    | ✅   |
-| `Array.isArray.length === 1` (direct)                   | ❌ 0  | ✅   |
-| `String.prototype.charAt.name/.length` (direct)         | ✅    | ✅   |
-| `Object.getOwnPropertyDescriptor(fn,"name").value`      | ❌ und | ✅   |
-| `Object.getOwnPropertyDescriptor(fn,"length").value`    | ❌ und | ✅   |
-| `fn["name"]` dynamic (computed key)                     | ❌ **leaks host import** | ✅ host-free |
-| `Object.prototype.hasOwnProperty.call(fn,"name")`       | ❌ 0  | ✅   |
-| `Object.getOwnPropertyNames(fn)` includes name/length   | ❌    | ✅   |
-| `[[1],2].filter(Array.isArray)` (callback)              | ❌ 0  | ✅   |
+| read (standalone)                                     | today                    | want         |
+| ----------------------------------------------------- | ------------------------ | ------------ |
+| `typeof Array.isArray === "function"`                 | ✅                       | ✅           |
+| `Array.isArray.name === "isArray"` (direct)           | ✅                       | ✅           |
+| `Array.isArray.length === 1` (direct)                 | ❌ 0                     | ✅           |
+| `String.prototype.charAt.name/.length` (direct)       | ✅                       | ✅           |
+| `Object.getOwnPropertyDescriptor(fn,"name").value`    | ❌ und                   | ✅           |
+| `Object.getOwnPropertyDescriptor(fn,"length").value`  | ❌ und                   | ✅           |
+| `fn["name"]` dynamic (computed key)                   | ❌ **leaks host import** | ✅ host-free |
+| `Object.prototype.hasOwnProperty.call(fn,"name")`     | ❌ 0                     | ✅           |
+| `Object.getOwnPropertyNames(fn)` includes name/length | ❌                       | ✅           |
+| `[[1],2].filter(Array.isArray)` (callback)            | ❌ 0                     | ✅           |
 
 **Root cause (two distinct gaps):**
 
-1. **No metadata on the value.** A native function value is a *closure wrapper
-   struct* (`getOrCreateFuncRefWrapperTypes` → field 0 = the funcref;
+1. **No metadata on the value.** A native function value is a _closure wrapper
+   struct_ (`getOrCreateFuncRefWrapperTypes` → field 0 = the funcref;
    `makeBuiltinClosureFctx` builds the static/proto builtin closures). It carries
    **no name/length**. The `.length` direct read in
    `src/codegen/dyn-read.ts` (`closureBaseWrapperTypeIdxs`, the closure arm of
@@ -229,7 +231,7 @@ shared user-closure wrapper struct. Two viable shapes (pick at build time;
   registration never shifts it — see `reference_subview_type_idx_stability` /
   `project_type_index_shift_and_deadelim`. User closures and gc mode are
   untouched → gc bytes stable.
-  - *Cost:* the value is no longer the bare funcref-wrapper the call sites expect;
+  - _Cost:_ the value is no longer the bare funcref-wrapper the call sites expect;
     `call_ref` and callback-dispatch must read `$BuiltinFn.$fn` before the indirect
     call. This is the `filter(Array.isArray)` fix too (see gap 1/callback below).
 
@@ -276,7 +278,7 @@ the carrier shape before the broad reflective work:
 4. **Slice 4 — callback dispatch + destructive `verifyProperty`.** Ensure
    passing a `$BuiltinFn` value where a callback funcref is expected reads
    `$BuiltinFn.$fn` (fixes `filter(Array.isArray) → 0`). `verifyProperty` is
-   *destructive* (it `delete`s the configurable prop then redefines): name/length
+   _destructive_ (it `delete`s the configurable prop then redefines): name/length
    are `configurable:true`, so `delete fn.name` / `Object.defineProperty(fn,…)`
    on a `$BuiltinFn` must at least not trap. Decide scope: a faithful mutable
    own-property table on function values is a large extension — if too big, gate
@@ -323,3 +325,59 @@ the carrier shape before the broad reflective work:
   `__hasOwnProperty`; new `$BuiltinFn` type reservation alongside the other
   shared standalone runtime types.
 - `src/codegen/closures.ts` — `getOrCreateFuncRefWrapperTypes` (only if Option B).
+
+---
+
+## Implementation (dev-f1, 2026-07-02 — PR)
+
+Shipped a variant of the spec's Option B that avoids BOTH hazards the spec
+flagged (no shared-wrapper widening, no early type-index reservation needed):
+
+- **Per-(builtin, member) meta SUBTYPE** (`builtin-fn-meta.ts`
+  `ensureBuiltinFnMetaType`): each builtin closure value gets a unique struct
+  subtype of its signature wrapper — `{funcref func; (mut i32) bfnstate}`.
+  Subtyping keeps every call path untouched (static closure call, reflective
+  `.call`, any-typed callback dispatch all cast to the sig wrapper/root).
+  `name`/`length` are NOT fields — they are compile-time constants keyed by the
+  meta type index (`ctx.builtinFnMetaByTypeIdx`); `bfnstate` is a per-instance
+  deleted-bits mask (bit0 name / bit1 length) so `verifyProperty`'s destructive
+  `isConfigurable` (`delete fn.name` → `!hasOwnProperty`) genuinely works.
+- **Reserve/fill reflective natives** (`object-runtime.ts`):
+  `__builtinfn_get_meta` / `__builtinfn_gopd` / `__builtinfn_delete` /
+  `__builtinfn_push_ownnames` registered with constant default bodies
+  (standalone-gated; gc bytes untouched); `ref.test <metaType>` arms SPLICED at
+  finalize by `fillBuiltinFnMeta` (index.ts, next to `fillExternGetIdxVecArms`)
+  — same discipline as `fillExternIsArray`, so compile-order can't freeze an
+  incomplete type list. Eager arms in `__extern_get`, `__hasOwnProperty` /
+  `__object_hasOwn`, `__getOwnPropertyDescriptor`, `__getOwnPropertyNames`,
+  `__delete_property` call the reserved helpers (funcIdx baked at registration
+  → shift-invariant preserved).
+- **dyn-read `.length` closure arm** now consults `__builtinfn_get_meta`
+  (standalone) instead of flat `box_number(0)`; null → 0 (matches
+  `Function.prototype.length` after delete).
+- **Direct-read meta fold generalized**: `BUILTIN_STATIC_METHOD_ARITY` (spec
+  arities of every standard builtin static method, host-generated) folds
+  `<Builtin>.<staticMethod>.length/.name` — subsumes the wired-closure-only
+  path and answers methods whose VALUE-read is not yet wired (the dominant
+  corpus shape after the runner's `verifyProperty` transform).
+
+### Test Results (A/B vs branch base d0bfaa7d6, standalone, real runner)
+
+| corpus                                                        | base               | patched            | delta                                                                                                                |
+| ------------------------------------------------------------- | ------------------ | ------------------ | -------------------------------------------------------------------------------------------------------------------- |
+| mechanism probes (13)                                         | 5 pass             | 12 pass            | +7 (13th is the pre-existing `hasOwnProperty.call` invalid-wasm bug, unchanged — separate issue)                     |
+| `built-ins/**/{name,length,prop-desc}.js` sample (184/1836)   | 99 pass / 31 fail  | 109 pass / 21 fail | **+10 flips, 0 regressions** (≈ +100 extrapolated)                                                                   |
+| direct-reflective corpus (281 files with gOPD-on-fn reads)    | 53 pass / 225 fail | 66 pass / 212 fail | **+13 flips, 0 regressions** (accessor-getter name tests: `gOPD(RegExp.prototype,"dotAll").get.name` → "get dotAll") |
+| `tests/issue-2896.test.ts` (new, 11 tests)                    | —                  | 11 pass            | host-free asserted (zero env imports)                                                                                |
+| related suites (2885/2876/2923/2193/2861/2580/2175, 69 tests) | —                  | all pass           | no regression                                                                                                        |
+
+**Honest-scope note (measure-first):** the spec's ≈250–360 "directly
+addressable" estimate assumed test262's `propertyHelper.js` runs verbatim; this
+repo's runner TRANSFORMS `verifyProperty(obj, k, {value: X})` into a direct
+`assert_sameValue(obj[k], X)` read and strips attribute checks
+(`tests/test262-runner.ts:1333`). So the reflective descriptor substrate is
+exercised by the corpus mainly via dynamic receivers (accessor `.get`
+extraction, harness-loop receivers), and the DIRECT-read fold is the bigger
+corpus lever today. The substrate is in place for when the runner shim is
+retired. The `Object.prototype.hasOwnProperty.call(fn, k)` invalid-wasm CE
+(`call[0] expected type externref`) is pre-existing on base and unrelated.

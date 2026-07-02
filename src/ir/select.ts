@@ -56,6 +56,7 @@
 
 import { ts, forEachChild } from "../ts-api.js";
 
+import { binaryOpCapability, prefixOpCapability } from "./capability.js";
 import type { LatticeType, TypeMap } from "./propagate.js";
 
 /**
@@ -101,6 +102,44 @@ export type IrFallbackReason =
 export interface IrFallback {
   readonly name: string;
   readonly reason: IrFallbackReason;
+  /**
+   * (#2856 Step-1) Opt-in diagnostic detail for `body-shape-rejected` — the
+   * proximate reject arm + offending node kind (e.g. `stmt-assign-nonprop:
+   * BinaryExpression`). Populated only when `JS2WASM_IR_SHAPE_DIAG=1`; `undefined`
+   * on the normal path so the fallback record and the CI gate are byte-unchanged.
+   */
+  readonly detail?: string;
+}
+
+/**
+ * (#2856 Step-1) Opt-in reject-arm recorder for the `body-shape-rejected`
+ * bucket. The bucket's reason string ("body-shape-rejected") is uniform, so the
+ * 31 rejections cannot be attributed to a specific `isPhase1*` reject arm from
+ * the reason alone. When `JS2WASM_IR_SHAPE_DIAG=1`, every instrumented
+ * `return false` in the Phase-1 shape gate first calls {@link shapeNo}, which
+ * records a `"<arm>:<NodeKind>"` label. `whyNotIrClaimable` resets the recorder
+ * per function and, when it ultimately returns `body-shape-rejected`, exposes
+ * the FIRST recorded label (the proximate cause) via {@link takeShapeRejectDetail}.
+ *
+ * Behaviour is byte-identical when the env var is unset: `shapeNo` becomes a
+ * bare `return false`, the recorder stays null, and no `detail` is attached.
+ */
+const SHAPE_DIAG_ON = process.env.JS2WASM_IR_SHAPE_DIAG === "1";
+let shapeRejectDetail: string | null = null;
+
+/** Record the proximate reject arm (first-wins) and return false. */
+function shapeNo(arm: string, node: ts.Node): false {
+  if (SHAPE_DIAG_ON && shapeRejectDetail === null) {
+    shapeRejectDetail = `${arm}:${ts.SyntaxKind[node.kind]}`;
+  }
+  return false;
+}
+
+/** Read and clear the recorded reject detail (used by `planIrCompilation`). */
+function takeShapeRejectDetail(): string | undefined {
+  const d = shapeRejectDetail ?? undefined;
+  shapeRejectDetail = null;
+  return d;
 }
 
 /**
@@ -154,6 +193,16 @@ export interface IrSelection {
    *  paired with the rejection reason. Only populated when
    *  `IrSelectionOptions.trackFallbacks` is true. */
   readonly fallbacks?: ReadonlyArray<IrFallback>;
+  /** (#2138) Local call-graph edges (top-level FunctionDeclaration name →
+   *  set of top-level FunctionDeclaration callee names in the same source
+   *  file), exactly as computed by `buildLocalCallGraph` for the Step-2
+   *  closure. Exposed so the IR-first compile-once inversion
+   *  (`JS2WASM_IR_FIRST=1`) can decide which claimed functions are safe to
+   *  skip on the legacy body pass WITHOUT re-deriving the call graph.
+   *  Present only when Step 2 ran (i.e. at least one function was
+   *  individually claimed); callers must treat a missing map as "no edge
+   *  information" and behave conservatively. */
+  readonly localCallees?: ReadonlyMap<string, ReadonlySet<string>>;
 }
 
 export interface IrSelectionOptions {
@@ -228,6 +277,18 @@ export function planIrCompilation(
   // log/throw on legacy fallback. Only populated when trackFallbacks is on.
   const trackFallbacks = options?.trackFallbacks === true;
   const fallbackReasons = new Map<string, IrFallbackReason>();
+  // (#2856 Step-1) Parallel to `fallbackReasons`: the opt-in reject-arm detail
+  // for `body-shape-rejected` entries (populated only when JS2WASM_IR_SHAPE_DIAG=1).
+  const fallbackDetails = new Map<string, string>();
+  const captureShapeDetail = (name: string, reason: IrFallbackReason): void => {
+    if (!SHAPE_DIAG_ON) return;
+    if (reason !== "body-shape-rejected") return;
+    // A `body-shape-rejected` that reached an as-yet-uninstrumented helper arm
+    // (e.g. inside `isPhase1ObjectLiteral` / `isPhase1TryStatement` /
+    // `isPhase1ClosureLiteral`) records nothing; label it `unattributed-arm`
+    // so the histogram still accounts for all rejections (completeness).
+    fallbackDetails.set(name, takeShapeRejectDetail() ?? "unattributed-arm:helper-internal");
+  };
   // Track unnamed FunctionDeclarations too (rare but possible — `default`
   // export of an anonymous function, etc.) so callers can see them.
   let unnamedCount = 0;
@@ -247,6 +308,7 @@ export function planIrCompilation(
       individuallyClaimed.add(stmt.name.text);
     } else if (trackFallbacks) {
       fallbackReasons.set(stmt.name.text, reason);
+      captureShapeDetail(stmt.name.text, reason);
     }
   }
 
@@ -339,6 +401,7 @@ export function planIrCompilation(
         individuallyClaimedClassMembers.add(memberName);
       } else if (trackFallbacks) {
         fallbackReasons.set(memberName, reason);
+        captureShapeDetail(memberName, reason);
       }
     }
   }
@@ -352,7 +415,7 @@ export function planIrCompilation(
       return { funcs: new Set<string>(), classMembers: individuallyClaimedClassMembers };
     }
     const fallbacks: IrFallback[] = [];
-    for (const [name, reason] of fallbackReasons) fallbacks.push({ name, reason });
+    for (const [name, reason] of fallbackReasons) fallbacks.push({ name, reason, detail: fallbackDetails.get(name) });
     for (let i = 0; i < unnamedCount; i++) fallbacks.push({ name: `<unnamed:${i}>`, reason: "unnamed" });
     if (individuallyClaimedClassMembers.size === 0) {
       return { funcs: new Set<string>(), fallbacks };
@@ -423,13 +486,17 @@ export function planIrCompilation(
   const classMembers = individuallyClaimedClassMembers.size > 0 ? individuallyClaimedClassMembers : undefined;
 
   if (!trackFallbacks) {
-    return classMembers ? { funcs: claimed, classMembers } : { funcs: claimed };
+    return classMembers
+      ? { funcs: claimed, classMembers, localCallees: callees }
+      : { funcs: claimed, localCallees: callees };
   }
 
   const fallbacks: IrFallback[] = [];
-  for (const [name, reason] of fallbackReasons) fallbacks.push({ name, reason });
+  for (const [name, reason] of fallbackReasons) fallbacks.push({ name, reason, detail: fallbackDetails.get(name) });
   for (let i = 0; i < unnamedCount; i++) fallbacks.push({ name: `<unnamed:${i}>`, reason: "unnamed" });
-  return classMembers ? { funcs: claimed, classMembers, fallbacks } : { funcs: claimed, fallbacks };
+  return classMembers
+    ? { funcs: claimed, classMembers, fallbacks, localCallees: callees }
+    : { funcs: claimed, fallbacks, localCallees: callees };
 }
 
 // ---------------------------------------------------------------------------
@@ -510,6 +577,9 @@ function whyNotIrClaimable(
   localClasses: ReadonlySet<string>,
   isMethod: boolean = false,
 ): IrFallbackReason | null {
+  // (#2856 Step-1) Clear any stale reject detail from a prior subject; the body
+  // walk below repopulates it via `shapeNo` when SHAPE_DIAG_ON.
+  if (SHAPE_DIAG_ON) shapeRejectDetail = null;
   // Top-level FunctionDeclaration must be named; constructor declarations
   // never carry a `name`; a MethodDeclaration with an undefined / computed
   // name is rejected as a Phase-A method-shape failure.
@@ -763,12 +833,13 @@ function isPhase1StatementList(
   // (the lowerer synthesizes the implicit empty-values return).
   isVoidReturn: boolean = false,
 ): boolean {
-  if (stmts.length < 1) return false;
+  if (stmts.length < 1)
+    return shapeNo("stmt-list-empty", stmts.length ? stmts[0]! : ({ kind: ts.SyntaxKind.Block } as ts.Node));
   for (let i = 0; i < stmts.length - 1; i++) {
     const s = stmts[i]!;
     // Phase 1: VariableStatements before the tail.
     if (ts.isVariableStatement(s)) {
-      if (!isPhase1VarDecl(s, scope, localClasses)) return false;
+      if (!isPhase1VarDecl(s, scope, localClasses)) return shapeNo("nontail-vardecl", s);
       continue;
     }
     // Slice 3 (#1169c): nested function declaration. Treated like a
@@ -789,7 +860,7 @@ function isPhase1StatementList(
     // shape; if not, the function falls back to legacy.
     if (ts.isExpressionStatement(s)) {
       if (ts.isCallExpression(s.expression)) {
-        if (!isPhase1Expr(s.expression, scope, localClasses)) return false;
+        if (!isPhase1Expr(s.expression, scope, localClasses)) return shapeNo("nontail-callstmt", s.expression);
         continue;
       }
       // Slice 7a/7b (#1169f): `yield`/`yield <expr>`/`yield* <expr>` as a
@@ -813,11 +884,12 @@ function isPhase1StatementList(
       //                             gen.yieldStar(coerced_iterable).
       if (ts.isYieldExpression(s.expression)) {
         if (s.expression.expression) {
-          if (!isPhase1Expr(s.expression.expression, scope, localClasses)) return false;
+          if (!isPhase1Expr(s.expression.expression, scope, localClasses))
+            return shapeNo("nontail-yield-expr", s.expression);
         } else if (s.expression.asteriskToken) {
           // `yield*` MUST have an expression — TS parser enforces this,
           // but be defensive.
-          return false;
+          return shapeNo("nontail-yieldstar-noexpr", s.expression);
         }
         continue;
       }
@@ -827,21 +899,39 @@ function isPhase1StatementList(
         ts.isPropertyAccessExpression(s.expression.left)
       ) {
         // LHS: <expr>.<id> — receiver expr must be Phase-1, prop must be Identifier.
-        if (!ts.isIdentifier(s.expression.left.name)) return false;
-        if (!isPhase1Expr(s.expression.left.expression, scope, localClasses)) return false;
+        if (!ts.isIdentifier(s.expression.left.name)) return shapeNo("nontail-assign-computedprop", s.expression);
+        if (!isPhase1Expr(s.expression.left.expression, scope, localClasses))
+          return shapeNo("nontail-assign-recv", s.expression.left.expression);
         // RHS: any Phase-1 expression.
-        if (!isPhase1Expr(s.expression.right, scope, localClasses)) return false;
+        if (!isPhase1Expr(s.expression.right, scope, localClasses))
+          return shapeNo("nontail-assign-rhs", s.expression.right);
         continue;
       }
-      return false;
+      // (#2856) Catch-all for ExpressionStatements outside the accepted set:
+      // mutable local assignment `x = e` / element assignment `arr[i] = e`
+      // (LHS not a PropertyAccess), postfix/prefix `++`/`--`, compound
+      // assignment `+=`, etc. Label by the offending expression kind + operator
+      // so the histogram distinguishes assignment from inc-dec.
+      const es = s.expression;
+      let arm = "nontail-exprstmt-other";
+      if (ts.isBinaryExpression(es)) {
+        arm =
+          es.operatorToken.kind === ts.SyntaxKind.EqualsToken
+            ? "nontail-assign-nonprop-lhs"
+            : "nontail-compound-or-binary-stmt";
+      } else if (ts.isPrefixUnaryExpression(es) || ts.isPostfixUnaryExpression(es)) {
+        arm = "nontail-incdec-stmt";
+      }
+      return shapeNo(arm, es);
     }
     // Phase 2 extension: an `if (cond) <tail>` with NO else and the rest
     // of the statements forming a tail. This is the classic early-return
     // pattern: `if (base) return x; <recursive body>`. We structurally
     // reinterpret as `if (cond) <tail> else { <rest> }`.
     if (ts.isIfStatement(s) && !s.elseStatement) {
-      if (!isPhase1Expr(s.expression, scope, localClasses)) return false;
-      if (!isPhase1Tail(s.thenStatement, new Set(scope), localClasses, isGenerator, isVoidReturn)) return false;
+      if (!isPhase1Expr(s.expression, scope, localClasses)) return shapeNo("nontail-if-cond", s.expression);
+      if (!isPhase1Tail(s.thenStatement, new Set(scope), localClasses, isGenerator, isVoidReturn))
+        return shapeNo("nontail-if-then", s.thenStatement);
       const rest = stmts.slice(i + 1);
       return isPhase1StatementList(rest, new Set(scope), localClasses, isGenerator, isVoidReturn);
     }
@@ -851,18 +941,18 @@ function isPhase1StatementList(
     // the iterable's IR type resolves to a vec ref; non-vec iterables
     // throw and the function falls back to legacy.
     if (ts.isForOfStatement(s)) {
-      if (!isPhase1ForOf(s, scope, localClasses)) return false;
+      if (!isPhase1ForOf(s, scope, localClasses)) return shapeNo("nontail-forof", s);
       continue;
     }
     // Slice 12 (#1280) — `while` / `for` (C-style) as non-tail
     // statements. The body is shape-checked via `isPhase1BodyStatement`
     // (same restrictions as for-of).
     if (ts.isWhileStatement(s)) {
-      if (!isPhase1WhileStatement(s, scope, localClasses)) return false;
+      if (!isPhase1WhileStatement(s, scope, localClasses)) return shapeNo("nontail-while", s);
       continue;
     }
     if (ts.isForStatement(s)) {
-      if (!isPhase1ForStatement(s, scope, localClasses)) return false;
+      if (!isPhase1ForStatement(s, scope, localClasses)) return shapeNo("nontail-for", s);
       // Add init's let-declared names into outer scope so subsequent
       // statements can reference the loop counter (TypeScript would
       // narrow scope to the for-statement, but our scope tracker is
@@ -880,14 +970,17 @@ function isPhase1StatementList(
     // implicit unreachable. (Code AFTER a throw in the same block is
     // dead but structurally valid.)
     if (ts.isThrowStatement(s)) {
-      if (!isPhase1ThrowStatement(s, scope, localClasses)) return false;
+      if (!isPhase1ThrowStatement(s, scope, localClasses)) return shapeNo("nontail-throw", s);
       continue;
     }
     if (ts.isTryStatement(s)) {
-      if (!isPhase1TryStatement(s, scope, localClasses)) return false;
+      if (!isPhase1TryStatement(s, scope, localClasses)) return shapeNo("nontail-try", s);
       continue;
     }
-    return false;
+    // (#2856) Unhandled statement KIND at non-tail position — `if`-with-`else`,
+    // `switch`, `do`, labeled, `break`/`continue`, `for-in`, empty, etc. The
+    // node kind is the discriminator.
+    return shapeNo("nontail-unhandled-stmt", s);
   }
   return isPhase1Tail(stmts[stmts.length - 1]!, scope, localClasses, isGenerator, isVoidReturn);
 }
@@ -1185,7 +1278,7 @@ function isPhase1BodyStatement(stmt: ts.Statement, scope: Set<string>, localClas
         return ts.isIdentifier(stmt.expression.operand) && scope.has(stmt.expression.operand.text);
       }
     }
-    return false;
+    return shapeNo("body-exprstmt-other", stmt.expression);
   }
   if (ts.isForOfStatement(stmt)) {
     return isPhase1ForOf(stmt, scope, localClasses);
@@ -1214,7 +1307,7 @@ function isPhase1BodyStatement(stmt: ts.Statement, scope: Set<string>, localClas
   if (ts.isTryStatement(stmt)) {
     return isPhase1TryStatement(stmt, scope, localClasses);
   }
-  return false;
+  return shapeNo("body-unhandled-stmt", stmt);
 }
 
 function isPhase1Tail(
@@ -1232,14 +1325,14 @@ function isPhase1Tail(
     //
     // Slice 14 (#1228): bare `return;` is also allowed in void-returning
     // functions. The lowerer's void branch terminates with empty values.
-    if (!stmt.expression) return isGenerator || isVoidReturn;
+    if (!stmt.expression) return isGenerator || isVoidReturn ? true : shapeNo("tail-bare-return-nonvoid", stmt);
     return isPhase1Expr(stmt.expression, scope, localClasses);
   }
   if (ts.isBlock(stmt)) {
     return isPhase1StatementList(stmt.statements, new Set(scope), localClasses, isGenerator, isVoidReturn);
   }
   if (ts.isIfStatement(stmt)) {
-    if (!stmt.elseStatement) return false;
+    if (!stmt.elseStatement) return shapeNo("tail-if-noelse", stmt);
     if (!isPhase1Expr(stmt.expression, scope, localClasses)) return false;
     if (!isPhase1Tail(stmt.thenStatement, new Set(scope), localClasses, isGenerator, isVoidReturn)) return false;
     if (!isPhase1Tail(stmt.elseStatement, new Set(scope), localClasses, isGenerator, isVoidReturn)) return false;
@@ -1258,13 +1351,13 @@ function isPhase1Tail(
   if (isVoidReturn && ts.isExpressionStatement(stmt)) {
     return isPhase1Expr(stmt.expression, scope, localClasses);
   }
-  return false;
+  return shapeNo("tail-unhandled", stmt);
 }
 
 function isPhase1VarDecl(stmt: ts.VariableStatement, scope: Set<string>, localClasses: ReadonlySet<string>): boolean {
   const flags = stmt.declarationList.flags;
-  if (!(flags & ts.NodeFlags.Let) && !(flags & ts.NodeFlags.Const)) return false;
-  if (stmt.modifiers && stmt.modifiers.length > 0) return false;
+  if (!(flags & ts.NodeFlags.Let) && !(flags & ts.NodeFlags.Const)) return shapeNo("vardecl-var-kind", stmt);
+  if (stmt.modifiers && stmt.modifiers.length > 0) return shapeNo("vardecl-modifier", stmt);
   const isConst = !!(flags & ts.NodeFlags.Const);
   for (const d of stmt.declarationList.declarations) {
     // Slice 8a (#1169g): destructuring binding patterns for `const`-bound
@@ -1274,39 +1367,40 @@ function isPhase1VarDecl(stmt: ts.VariableStatement, scope: Set<string>, localCl
     // rest. Anything wider (rest, defaults, nested patterns) defers to
     // slice 8.5+ — the legacy `destructuring.ts` path remains for those.
     if (ts.isObjectBindingPattern(d.name) || ts.isArrayBindingPattern(d.name)) {
-      if (!isConst) return false;
-      if (!d.initializer) return false;
-      if (!isPhase1BindingPattern(d.name, scope)) return false;
+      if (!isConst) return shapeNo("vardecl-dstr-let", d.name);
+      if (!d.initializer) return shapeNo("vardecl-dstr-noinit", d.name);
+      if (!isPhase1BindingPattern(d.name, scope)) return shapeNo("vardecl-dstr-pattern", d.name);
       // Initializer must be Phase-1 expressible. The lowerer inspects
       // its IrType to decide between object.get (object pattern) and
       // vec.get (array pattern); if the resolved IrType isn't compatible
       // with the pattern shape, lowering throws and the function falls
       // back to legacy.
-      if (!isPhase1Expr(d.initializer, scope, localClasses)) return false;
+      if (!isPhase1Expr(d.initializer, scope, localClasses)) return shapeNo("vardecl-dstr-init", d.initializer);
       // Pre-add every leaf identifier to scope so subsequent statements
       // see the new names.
       collectPatternNames(d.name, scope);
       continue;
     }
-    if (!ts.isIdentifier(d.name)) return false;
-    if (scope.has(d.name.text)) return false;
-    if (!d.initializer) return false;
+    if (!ts.isIdentifier(d.name)) return shapeNo("vardecl-nonident-name", d.name);
+    if (scope.has(d.name.text)) return shapeNo("vardecl-shadow", d.name);
+    if (!d.initializer) return shapeNo("vardecl-noinit", d);
     // Slice 3 (#1169c): closure-literal initializer. Only accepted for
     // `const` (no `let` arrow rebinding in slice 3). The closure
     // shape-check enforces the slice-3 surface (every param + return
     // annotated, body is a Phase-1 tail, no generator/async/named).
     if (ts.isArrowFunction(d.initializer) || ts.isFunctionExpression(d.initializer)) {
-      if (!isConst) return false;
+      if (!isConst) return shapeNo("vardecl-let-closure", d.initializer);
       // Permit an explicit closure type annotation (like `: (n: number) => number`)
       // — it's a shape-only signal, not a primitive type. Since the IR doesn't
       // syntactically check the annotation against the body, just accept any
       // annotation (the lowerer enforces semantic match).
-      if (!isPhase1ClosureLiteral(d.initializer, scope, localClasses)) return false;
+      if (!isPhase1ClosureLiteral(d.initializer, scope, localClasses))
+        return shapeNo("vardecl-closure-init", d.initializer);
       scope.add(d.name.text);
       continue;
     }
-    if (d.type && !isPhase1TypeNode(d.type)) return false;
-    if (!isPhase1Expr(d.initializer, scope, localClasses)) return false;
+    if (d.type && !isPhase1TypeNode(d.type)) return shapeNo("vardecl-typenode", d.type);
+    if (!isPhase1Expr(d.initializer, scope, localClasses)) return shapeNo("vardecl-init-expr", d.initializer);
     scope.add(d.name.text);
   }
   return true;
@@ -1603,11 +1697,13 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
     return scope.has("this");
   }
   if (ts.isPrefixUnaryExpression(expr)) {
-    if (!isPhase1PrefixOp(expr.operator)) return false;
+    if (!isPhase1PrefixOp(expr.operator))
+      return shapeNo(`expr-prefix-op-${ts.tokenToString(expr.operator) ?? expr.operator}`, expr);
     return isPhase1Expr(expr.operand, scope, localClasses);
   }
   if (ts.isBinaryExpression(expr)) {
-    if (!isPhase1BinaryOp(expr.operatorToken.kind)) return false;
+    if (!isPhase1BinaryOp(expr.operatorToken.kind))
+      return shapeNo(`expr-binary-op-${ts.tokenToString(expr.operatorToken.kind) ?? expr.operatorToken.kind}`, expr);
     return isPhase1Expr(expr.left, scope, localClasses) && isPhase1Expr(expr.right, scope, localClasses);
   }
   if (ts.isConditionalExpression(expr)) {
@@ -1758,10 +1854,10 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
     // loop's cond/body blocks — distinct from the working forof.vec path). When
     // this function contains such a loop, withhold the claim so the whole
     // function reverts to the (correct) legacy path, as it did pre-#1804.
-    if (currentFnHasCStyleLoop) return false;
+    if (currentFnHasCStyleLoop) return shapeNo("expr-arraylit-cloop-guard-1804", expr);
     for (const el of expr.elements) {
-      if (ts.isSpreadElement(el)) return false; // out of scope
-      if (ts.isOmittedExpression(el)) return false; // sparse — out of scope
+      if (ts.isSpreadElement(el)) return shapeNo("expr-arraylit-spread", el); // out of scope
+      if (ts.isOmittedExpression(el)) return shapeNo("expr-arraylit-sparse", expr); // sparse — out of scope
       if (!isPhase1Expr(el, scope, localClasses)) return false;
     }
     return true;
@@ -1781,7 +1877,9 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
   if (ts.isVoidExpression(expr)) {
     return isPhase1Expr(expr.expression, scope, localClasses);
   }
-  return false;
+  // (#2856) Unhandled expression KIND — closures (Arrow/FunctionExpression),
+  // await, spread outside the accepted sites, etc. The node kind discriminates.
+  return shapeNo("expr-unhandled", expr);
 }
 
 /**
@@ -1886,50 +1984,19 @@ function phase1MemberName(name: ts.PropertyName): string | null {
   return null;
 }
 
+// #2135 — the operator predicates consume the shared capability table
+// (`src/ir/capability.ts`), the SAME source `from-ast.ts`'s lowering dispatch
+// asserts against. "claim-partial" is selector-accepted (the builder owns the
+// documented residual fallback); "defer" is selector-rejected up-front. The
+// former slice-11 "shape-only acceptance" block (`%` / `**` / `in` /
+// `instanceof` accepted here while the lowerer threw) is retired: those ops
+// are table-deferred, so the claim can no longer disagree with the builder.
 function isPhase1PrefixOp(op: ts.PrefixUnaryOperator): boolean {
-  return op === ts.SyntaxKind.MinusToken || op === ts.SyntaxKind.PlusToken || op === ts.SyntaxKind.ExclamationToken;
+  return prefixOpCapability(op) !== "defer";
 }
 
 function isPhase1BinaryOp(op: ts.SyntaxKind): boolean {
-  switch (op) {
-    case ts.SyntaxKind.PlusToken:
-    case ts.SyntaxKind.MinusToken:
-    case ts.SyntaxKind.AsteriskToken:
-    case ts.SyntaxKind.SlashToken:
-    case ts.SyntaxKind.LessThanToken:
-    case ts.SyntaxKind.LessThanEqualsToken:
-    case ts.SyntaxKind.GreaterThanToken:
-    case ts.SyntaxKind.GreaterThanEqualsToken:
-    case ts.SyntaxKind.EqualsEqualsEqualsToken:
-    case ts.SyntaxKind.EqualsEqualsToken:
-    case ts.SyntaxKind.ExclamationEqualsEqualsToken:
-    case ts.SyntaxKind.ExclamationEqualsToken:
-    case ts.SyntaxKind.AmpersandAmpersandToken:
-    case ts.SyntaxKind.BarBarToken:
-      return true;
-    // Slice 11 (#1169n) — bitwise ops on f64 operands. JS ToInt32
-    // each operand, apply the i32 op, convert back to f64. Lowering
-    // emits this sequence inline using a per-function scratch local.
-    case ts.SyntaxKind.AmpersandToken:
-    case ts.SyntaxKind.BarToken:
-    case ts.SyntaxKind.CaretToken:
-    case ts.SyntaxKind.LessThanLessThanToken:
-    case ts.SyntaxKind.GreaterThanGreaterThanToken:
-    case ts.SyntaxKind.GreaterThanGreaterThanGreaterThanToken:
-      return true;
-    // Slice 11 (#1169n) — shape-only acceptance for ops the lowerer
-    // doesn't yet implement. Lowering throws cleanly so the function
-    // falls back to legacy via `safeSelection`. Listed individually
-    // so future slices can flip them on without touching the selector.
-    case ts.SyntaxKind.PercentToken: // % — needs JS-conformant fmod-style remainder
-    case ts.SyntaxKind.AsteriskAsteriskToken: // ** — needs Math.pow host call
-    case ts.SyntaxKind.QuestionQuestionToken: // ?? — needs nullable-LHS handling
-    case ts.SyntaxKind.InKeyword: // in — needs prototype-chain probe
-    case ts.SyntaxKind.InstanceOfKeyword: // instanceof — needs class-shape check
-      return true;
-    default:
-      return false;
-  }
+  return binaryOpCapability(op) !== "defer";
 }
 
 // ---------------------------------------------------------------------------
