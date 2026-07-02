@@ -962,11 +962,13 @@ export function tryExternClassMethodOnAny(
     const staticResult = tryStaticIsPrototypeOf(ctx, propAccess.expression, expr.arguments[0]);
     if (staticResult !== undefined) {
       // Compile receiver + arg for side effects (evaluation order), then const.
+      // compileExpression returns `ValType | null` (never VOID_RESULT), so a
+      // non-null result always left one value on the stack that must be dropped.
       const recvType = compileExpression(ctx, fctx, propAccess.expression);
-      if (recvType !== null && recvType !== VOID_RESULT) fctx.body.push({ op: "drop" });
+      if (recvType !== null) fctx.body.push({ op: "drop" });
       if (expr.arguments.length > 0) {
         const argType = compileExpression(ctx, fctx, expr.arguments[0]!);
-        if (argType !== null && argType !== VOID_RESULT) fctx.body.push({ op: "drop" });
+        if (argType !== null) fctx.body.push({ op: "drop" });
       }
       fctx.body.push({ op: "i32.const", value: staticResult ? 1 : 0 });
       return { kind: "i32" };
