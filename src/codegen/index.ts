@@ -24,7 +24,7 @@ import { createEmptyModule } from "../ir/types.js";
 import { compileIrPathFunctions, type IrIntegrationError } from "../ir/integration.js";
 import { irVal, type IrType } from "../ir/nodes.js";
 import { buildTypeMap, type LatticeType } from "../ir/propagate.js";
-import { planIrCompilation, type IrFallbackReason } from "../ir/select.js";
+import { planIrCompilation, irClosureSignatureFromFunctionTypeNode, type IrFallbackReason } from "../ir/select.js";
 import { createCodegenContext } from "./context/create-context.js";
 import type { FallbackCounts } from "./fallback-telemetry.js";
 import { buildLeakedHostImportError, scanForLeakedHostImports } from "./host-import-allowlist.js";
@@ -46,6 +46,7 @@ import { scanForNewTarget } from "./new-target.js"; // (#2023)
 import { scanForArrayHoles, ensureHoleType } from "./array-holes.js"; // (#2001 S1)
 import { ensureDynReadHelpers } from "./dyn-read.js"; // (#2580 M0)
 import { ensureNativeIteratorRuntime, fillNativeIteratorUserArms } from "./iterator-native.js";
+import { fillCombinatorToVec } from "./promise-combinators.js"; // (#2922) dynamic combinator-arg drain fill
 import { fillClosedMethodDispatch } from "./closed-method-dispatch.js";
 import { fillMemberSetDispatch, reserveVecFieldMaterializers } from "./member-set-dispatch.js";
 import { fillMemberGetDispatch } from "./member-get-dispatch.js";
@@ -682,6 +683,17 @@ function resolvePositionType(
       const ir = objectIrTypeFromTsType(ctx, tsType);
       if (ir) return ir;
       throw new Error(`object TypeNode ${ts.SyntaxKind[node.kind]} could not be lowered to IrType.object`);
+    }
+    // #2859 — function-typed position (`fn: () => number`). Mirrors the
+    // selector's `resolveParamType` FunctionTypeNode arm: the signature is
+    // built by the SAME helper, so the override the lowerer receives compares
+    // `irTypeEquals`-equal to the signature a slice-3 closure literal argument
+    // produces. A claimed function reaching the throw below means selector and
+    // override builder diverged (the standard out-of-sync guard → legacy).
+    if (ts.isFunctionTypeNode(node)) {
+      const signature = irClosureSignatureFromFunctionTypeNode(node);
+      if (signature) return { kind: "closure", signature };
+      throw new Error(`function TypeNode not expressible as an IR closure signature`);
     }
     throw new Error(`unsupported TypeNode kind ${ts.SyntaxKind[node.kind]}`);
   }
@@ -1937,6 +1949,12 @@ export function generateModule(
       addUnionImports(ctx);
     }
     fillNativeIteratorUserArms(ctx);
+
+    // (#2922) Rebuild `__combinator_to_vec`'s user-iterable arm with the same
+    // closed-struct dispatchers (identical five-dispatcher condition, so the
+    // combinator drain and the native iterator carrier can never disagree).
+    // No-op unless a dynamic Promise.all/race argument site registered it.
+    fillCombinatorToVec(ctx);
 
     // (#1716) Emit __call_@@toPrimitive(self, hint) for runtime ToPrimitive
     // dispatch of a class's [Symbol.toPrimitive] *method* on opaque structs.
@@ -12509,6 +12527,20 @@ export function resolveWasmType(ctx: CodegenContext, tsType: ts.Type, _depth = 0
     // Check externref AFTER Array check — Array is declared in lib but should use wasm GC arrays
     if (isExternalDeclaredClass(tsType, ctx.checker)) return { kind: "externref" };
 
+    // (#2937) The checker type of a `{}` var poisoned as an `$Object`-hash
+    // consumer (#2584/#2849) must NOT resolve to a closed struct. In JS-mode
+    // sources the checker EVOLVES `var o = {}` through its later static-named
+    // writes into an anonymous object type WITH those props; auto-registering
+    // it below would type the local — and every flow position the object
+    // passes through (returns, class fields, receivers) — as `(ref null
+    // __anon_N)` while the poisoned initializer builds a host plain object
+    // (externref). The declaration's guarded cast then stores ref.null and
+    // every static read null-derefs (compiled-acorn `getOptions`, #2937).
+    // Externref keeps ALL access forms on the poisoned var routed through the
+    // host MOP coherently. The set is empty in standalone mode (recorded
+    // host-only), so standalone codegen is unaffected.
+    if (ctx.objectHashConsumerTypes.has(tsType)) return { kind: "externref" };
+
     // (#1712) Function-style-constructor instance types resolve to EXTERNREF,
     // never to a synthesized checker-shape struct. The runtime instance struct
     // (compileFnctorNew, `__fnctor_<name>`) is built from ctor `this.*` writes
@@ -12679,6 +12711,10 @@ function ensureDateStructForCtx(ctx: CodegenContext): number {
 export function ensureStructForType(ctx: CodegenContext, tsType: ts.Type): void {
   if (!(tsType.flags & ts.TypeFlags.Object)) return;
   if (isExternalDeclaredClass(tsType, ctx.checker)) return;
+  // (#2937) Never register a struct for the evolved checker type of a poisoned
+  // `$Object`-hash-consumer `{}` var — it must stay externref/host-MOP end to
+  // end (see resolveWasmType's matching guard for the full rationale).
+  if (ctx.objectHashConsumerTypes.has(tsType)) return;
   // Types declared in `.d.ts` files (interfaces, type aliases, classes
   // exported from declaration-file-only packages) have no JS implementation
   // we can lower to a WasmGC struct. Registering them as anon structs

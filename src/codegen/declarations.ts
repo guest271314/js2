@@ -21,6 +21,7 @@ import type { FieldDef, Instr, StructTypeDef, ValType, WasmFunction } from "../i
 import { collectShapes } from "../shape-inference.js";
 import { ensureWrapperTypes } from "./any-helpers.js";
 import { ASYNC_CPS_ENABLED, analyzeAsyncBody, asyncFnNeedsCps } from "./async-cps.js";
+import { asyncFnNeedsHostDrive } from "./async-frame.js";
 import { collectClassDeclaration, compileClassBodies } from "./class-bodies.js";
 import { collectReferencedIdentifiers, emitCachedFuncClosureAccess } from "./closures.js";
 import { addFunctionOwnLocals } from "./binding-info.js"; // (#2103) memoized own-locals oracle
@@ -124,6 +125,11 @@ interface UnifiedCollectorState {
   // ctx.liveBodies during emission, so a late import would not have its `call`
   // opcodes shifted — the #1384 hazard). Only set when ASYNC_CPS_ENABLED.
   asyncCpsFound: boolean;
+  // (#1042 host drive) A host-drive-eligible async fn (linear multi-await /
+  // try-finally-across-await, shapes the CPS lane rejects) needs the six host
+  // settle-backend imports registered UPFRONT — same #1384 stable-index
+  // rationale as asyncCpsFound.
+  asyncHostDriveFound: boolean;
   // -- collectFunctionalArrayImports --
   funcArrayNeed1: boolean;
   funcArrayNeed2: boolean;
@@ -212,6 +218,7 @@ export function createUnifiedCollectorState(sourceFile: ts.SourceFile): UnifiedC
     callbackFound: false,
     getterCallbackFound: false,
     asyncCpsFound: false,
+    asyncHostDriveFound: false,
     funcArrayNeed1: false,
     funcArrayNeed2: false,
     unionFound: false,
@@ -766,7 +773,7 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
   // exactly (single tail-await canonical shape, no try-across-await, JS-host).
   if (
     ASYNC_CPS_ENABLED &&
-    !state.asyncCpsFound &&
+    (!state.asyncCpsFound || !state.asyncHostDriveFound) &&
     !ctx.wasi &&
     !ctx.standalone &&
     ts.isFunctionDeclaration(node) &&
@@ -779,8 +786,16 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
     // shape. Pre-registering imports for a fn that won't actually be CPS-lowered
     // would add unused imports (harmless) but a mismatch the other way would
     // re-introduce the late-import shift hazard, so keep the predicates identical.
-    if (asyncFnNeedsCps(node, plan)) {
+    if (!state.asyncCpsFound && asyncFnNeedsCps(node, plan)) {
       state.asyncCpsFound = true;
+    }
+    // (#1042 host drive) Same discipline for the host settle backend of the
+    // #2906 N-state resume machine: mirror `asyncFnNeedsHostDrive` exactly so
+    // its six imports (__make_callback / Promise_resolve / Promise_then2 /
+    // Promise_new_pending / Promise_settle_resolve / Promise_settle_reject)
+    // carry stable import indices.
+    if (!state.asyncHostDriveFound && asyncFnNeedsHostDrive(ctx, node, plan)) {
+      state.asyncHostDriveFound = true;
     }
   }
   // (#1239) Object literals carrying get/set accessor declarations also
@@ -1468,7 +1483,7 @@ export function finalizeUnifiedCollector(ctx: CodegenContext, state: UnifiedColl
   // the late-import path (its `call` opcodes would not be shifted — #1384).
   // `__make_callback` is registered above. Idempotent via funcMap guard so a
   // module that also uses `.then(cb1,cb2)` / `Promise.resolve` is unaffected.
-  if (state.asyncCpsFound) {
+  if (state.asyncCpsFound || state.asyncHostDriveFound) {
     if (!ctx.funcMap.has("Promise_resolve")) {
       const typeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "externref" }]);
       addImport(ctx, "env", "Promise_resolve", { kind: "func", typeIdx });
@@ -1480,6 +1495,33 @@ export function finalizeUnifiedCollector(ctx: CodegenContext, state: UnifiedColl
         [{ kind: "externref" }],
       );
       addImport(ctx, "env", "Promise_then2", { kind: "func", typeIdx });
+    }
+  }
+
+  // ── collectAsyncHostDriveImports finalize (#1042 host drive) ──
+  // The host settle backend of the #2906 resume machine additionally needs
+  // `__make_callback` (its step adapters are `__cb_<id>` reactions) and the
+  // deferred-promise trio: `Promise_new_pending` allocates the result promise
+  // the async fn returns; the resume machine settles it later from a microtask
+  // via `Promise_settle_resolve`/`Promise_settle_reject` (runtime.ts stashes
+  // the resolve/reject capabilities on the promise as `__r`/`__j`). The settle
+  // imports declare an externref result (the JS fns return undefined) so the
+  // shared `call <fulfill>; drop` settle shape stays uniform across backends.
+  if (state.asyncHostDriveFound) {
+    if (!ctx.funcMap.has("__make_callback")) {
+      const typeIdx = addFuncType(ctx, [{ kind: "i32" }, { kind: "externref" }], [{ kind: "externref" }]);
+      addImport(ctx, "env", "__make_callback", { kind: "func", typeIdx });
+    }
+    if (!ctx.funcMap.has("Promise_new_pending")) {
+      const typeIdx = addFuncType(ctx, [], [{ kind: "externref" }]);
+      addImport(ctx, "env", "Promise_new_pending", { kind: "func", typeIdx });
+    }
+    const settleTypeIdx = addFuncType(ctx, [{ kind: "externref" }, { kind: "externref" }], [{ kind: "externref" }]);
+    if (!ctx.funcMap.has("Promise_settle_resolve")) {
+      addImport(ctx, "env", "Promise_settle_resolve", { kind: "func", typeIdx: settleTypeIdx });
+    }
+    if (!ctx.funcMap.has("Promise_settle_reject")) {
+      addImport(ctx, "env", "Promise_settle_reject", { kind: "func", typeIdx: settleTypeIdx });
     }
   }
 
@@ -2217,7 +2259,7 @@ export function collectEmptyObjectWidening(
           // Scan all following statements in the same block for property assignments
           collectPropsFromStatements(checker, ctx, stmts, varName, extraProps, seenProps);
 
-          // (#2584/#2849) If this var is ALSO the subject of any
+          // (#2584/#2849/#2944) If this var is ALSO the subject of any
           // `$Object`-hash-only consumer (bracket read/write, `in`, Object.keys
           // / values / entries / GOPD / GOPN / assign, for-in), a widened closed
           // struct would be invisible to that consumer (`o.a=7; o["a"]` → 0).
@@ -2225,29 +2267,23 @@ export function collectEmptyObjectWidening(
           // stays a `$Object`. Scan the whole enclosing statement list (the same
           // tree `collectPropsFromStatements` walks).
           //
-          // (#2849 extended this poison to host; #2937 REVERTS that extension —
-          // restored to standalone-only.) Why the revert: extending the poison to
-          // host kept acorn's for-in-copied `{}` vars (e.g. `getOptions`'s
-          // `options`) on `$Object`, but the poison is honored ONLY at this
-          // widening DECISION — the read/write codegen still resolves such a
-          // receiver via `resolveStructName(TS-type)`, which mis-binds it to a
-          // colliding `__anon` struct registered under the same TS object type.
-          // Worse, the poisoned `$Object` value ESCAPES the identifier (returned
-          // from `getOptions`, stored in the struct-typed `this.options` field,
-          // read via `this.options.ecmaVersion`) into struct-typed slots a
-          // receiver-level bail cannot reach → compiled-acorn null-dereferenced on
-          // EVERY host-mode input (#2937). A total host-mode parse break is
-          // strictly worse than the narrow `getOptions` shape bug the host
-          // extension fixed (which existed quietly for months), so the gate is
-          // restored to standalone-only. The proper cure — externref-typed escape
-          // discipline for poisoned `$Object` values — is the substrate slice
-          // #2944 (see #2937 / #2849). Standalone keeps the poison (unchanged; the
-          // #2584/#2372 divergences it guards are real there, and standalone
-          // codegen stays byte-identical).
-          if (ctx.standalone) {
-            for (const s of stmts) {
-              markObjectHashConsumers(s, varName, ctx.objectHashConsumerVars);
-            }
+          // History: originally `ctx.standalone`-gated (#2584) on the assumption
+          // "host keeps the struct fast path via the live-mirror Proxy". #2849
+          // dropped the gate (the Proxy does NOT bridge the for-in-write →
+          // static-struct-read divergence, so host mis-read `getOptions`-shaped
+          // objects). That extension alone REGRESSED compiled-acorn to a uniform
+          // null-deref (#2937) because the poison was honored only at THIS
+          // widening decision, while in JS-mode sources the checker's EVOLVED
+          // type for the var still resolved to a colliding `__anon` struct at
+          // the local/receiver/return/field positions — so it was reverted
+          // (#2462). Re-landed here TOGETHER with the #2944 escape discipline:
+          // the poison branch below records the var's evolved checker type in
+          // `objectHashConsumerTypes`, and resolveWasmType / ensureStructForType
+          // / resolveStructName refuse struct resolution for it, keeping the
+          // value externref/host-MOP through every escape. Both constraints now
+          // hold: the #2849 host arms pass AND compiled-acorn parses.
+          for (const s of stmts) {
+            markObjectHashConsumers(s, varName, ctx.objectHashConsumerVars);
           }
 
           // (#2372) Standalone: if any `Object.defineProperty(varName, …)` on
@@ -2269,6 +2305,53 @@ export function collectEmptyObjectWidening(
           // above — the var stays a `$Object` so bracket/`in`/keys/GOPD see the
           // same representation the dot-writes land in.
           if (ctx.objectHashConsumerVars.has(varName)) {
+            // (#2937) Suppressing the widening pre-pass is NOT enough in a
+            // JS-mode source file: the checker EVOLVES `var o = {}` through its
+            // later static-named writes into an anonymous object type WITH
+            // those props, and `resolveWasmType`/`ensureStructForType` would
+            // independently register that evolved type as a closed `__anon_N`
+            // struct — typing the local (and the var's every flow position:
+            // returns, class fields, receivers) as `(ref null __anon_N)` while
+            // the poisoned initializer builds a host plain object. The
+            // declaration's guarded cast then stores ref.null and every static
+            // read null-derefs (the compiled-acorn `getOptions` uniform throw).
+            // Record the var's EVOLVED checker type so struct resolution
+            // refuses it and the var stays externref / host-MOP end to end.
+            //
+            // Scope guards keep everything else byte-identical:
+            //   - `!ctx.standalone`: standalone keeps its pre-existing codegen
+            //     byte-identical (its matching read-back gap for this shape is
+            //     tracked separately; see #2849's follow-up note).
+            //   - skip `any` (singleton type object shared by all any-typed
+            //     vars — same hazard as the anonTypeMap guard below).
+            //   - a 0-props (TS-mode, non-evolved `{}`) type is added ONLY when
+            //     its provenance is THIS var's own initializer literal
+            //     (`symbol.declarations[0] === decl.initializer`). The widened
+            //     literal type is a fresh per-var instance (measured — two `{}`
+            //     vars get distinct instances), but the type of a `: {}`
+            //     ANNOTATION is an interned instance SHARED by every var so
+            //     annotated — poisoning it would demote unrelated vars. The
+            //     provenance check admits the safe per-var case and rejects the
+            //     shared one.
+            //
+            // (#2944 residual) The 0-props TS-mode case MUST be poisoned too —
+            // "already resolves to externref" does NOT hold for it: the
+            // signature pre-pass `ensureStructForType(returnType)` on a function
+            // that RETURNS the poisoned var registers the SAME 0-props ts.Type
+            // as an EMPTY anon struct ("empty objects get an empty struct"), so
+            // the local/return/field slots type `(ref null $__anon_N)`, the `{}`
+            // host `$Object` fails the decl-init cast, and the var is null from
+            // the first instruction — the acorn `Parser`/`getOptions` escape
+            // shape in TS-mode typing (tests/issue-2944.test.ts).
+            if (!ctx.standalone) {
+              const vt = checker.getTypeAtLocation(decl.name);
+              if (
+                !(vt.flags & ts.TypeFlags.Any) &&
+                (vt.getProperties().length > 0 || vt.symbol?.declarations?.[0] === decl.initializer)
+              ) {
+                ctx.objectHashConsumerTypes.add(vt);
+              }
+            }
             continue;
           }
 
