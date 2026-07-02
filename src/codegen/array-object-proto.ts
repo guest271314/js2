@@ -38,7 +38,12 @@ import { getArrTypeIdxFromVec, getOrRegisterVecType } from "./registry/types.js"
 import { ensureLateImport, flushLateImportShifts } from "./shared.js";
 import { ensureObjectRuntime } from "./object-runtime.js";
 import { addStringConstantGlobal } from "./registry/imports.js";
-import { stringConstantExternrefInstrs } from "./native-strings.js";
+import {
+  ensureAnyToStringHelper,
+  ensureNativeStringHelpers,
+  flatStringType,
+  stringConstantExternrefInstrs,
+} from "./native-strings.js";
 
 /**
  * `Array.prototype`'s own enumerable+non-enumerable method names (ES2024
@@ -695,6 +700,113 @@ function emitArrayProtoMemberBody(ctx: CodegenContext, fctx: FunctionContext, me
 }
 
 /**
+ * (#2875 slice 1) Native body for a reflective `String.prototype.<member>`
+ * closure. `this` is closure-param 1 (externref); user args at 2.. (externref-
+ * boxed). Implements §22.1.3.x steps: `? RequireObjectCoercible(this)` →
+ * `? ToString(this)` → the member core → box the result to the uniform closure
+ * result (externref). This is what makes `String.prototype.X.call(thisArg, …)`
+ * (`emitReflectiveNativeProtoClosureCall`, calls.ts) work instead of falling
+ * through to the legacy `.call` that drops `thisArg` and returns 0.
+ *
+ * Slice 1 wires the index-accessor family (`charAt`, `at`); other members return
+ * a catchable-TypeError refusal (`null` → the reflective call falls through
+ * unchanged, so behaviour for un-wired members is byte-identical to today).
+ *
+ * Funcidx/type-index discipline: the ONLY late-import adder here is
+ * `unboxArgToI32` (its `__unbox_number`); it runs FIRST (mirroring
+ * `emitArrayProtoMemberBody`) and flushes, so every helper funcIdx fetched by
+ * NAME afterwards is post-shift-correct. The native-string helpers and
+ * `$__any_to_string` are functions (append-only, no index shift).
+ */
+function emitStringProtoMemberBody(ctx: CodegenContext, fctx: FunctionContext, member: string): ValType | null {
+  const SLICE1 = new Set(["charAt", "at"]);
+  if (!SLICE1.has(member)) return emitProtoMemberBodyRefusal(ctx, fctx, "String", member);
+
+  ensureNativeStringHelpers(ctx);
+  // Unbox the integer position arg FIRST (the sole late-import site → flushes).
+  const posLocal = unboxArgToI32(ctx, fctx, 2);
+  // Fetch helper funcIdxs AFTER the import shift, by name.
+  const anyToStrIdx = ensureAnyToStringHelper(ctx);
+  const flattenIdx = ctx.nativeStrHelpers.get("__str_flatten");
+  const charAtIdx = ctx.nativeStrHelpers.get("__str_charAt");
+  if (flattenIdx === undefined || charAtIdx === undefined) {
+    return emitProtoMemberBodyRefusal(ctx, fctx, "String", member);
+  }
+
+  // (1) RequireObjectCoercible(this): param 1 externref. In standalone,
+  // undefined is conflated with null as `ref.null.extern`, so a bare
+  // `ref.is_null` catches both → throw a catchable TypeError.
+  const rocThrow: Instr[] = [];
+  emitBrandCheckTypeError(ctx, rocThrow, `String.prototype.${member} called on null or undefined`);
+  fctx.body.push({ op: "local.get", index: 1 } as Instr);
+  fctx.body.push({ op: "ref.is_null" } as Instr);
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: rocThrow } as Instr);
+
+  // (2) S = ToString(this): externref → anyref → $__any_to_string → $AnyString →
+  // flatten. Store the flat string in a local.
+  fctx.body.push({ op: "local.get", index: 1 } as Instr);
+  fctx.body.push({ op: "any.convert_extern" } as Instr);
+  fctx.body.push({ op: "call", funcIdx: anyToStrIdx } as Instr);
+  fctx.body.push({ op: "call", funcIdx: flattenIdx } as Instr);
+  const flatLocal = allocLocal(fctx, `__str_pm_flat_${fctx.locals.length}`, flatStringType(ctx));
+  fctx.body.push({ op: "local.set", index: flatLocal } as Instr);
+
+  if (member === "charAt") {
+    // §22.1.3.1: __str_charAt(flat, pos) → 1-char string (out-of-range → "").
+    fctx.body.push({ op: "local.get", index: flatLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: posLocal } as Instr);
+    fctx.body.push({ op: "call", funcIdx: charAtIdx } as Instr);
+    fctx.body.push({ op: "extern.convert_any" } as Instr); // native string → externref
+    return { kind: "externref" };
+  }
+
+  // member === "at": §22.1.3.2 — resolve a relative index, out-of-range → undefined.
+  const lenLocal = allocLocal(fctx, `__str_pm_len_${fctx.locals.length}`, { kind: "i32" });
+  const idxLocal = allocLocal(fctx, `__str_pm_idx_${fctx.locals.length}`, { kind: "i32" });
+  const strTypeIdx = ctx.nativeStrTypeIdx;
+  // len = flat.length (field 0)
+  fctx.body.push({ op: "local.get", index: flatLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 } as Instr);
+  fctx.body.push({ op: "local.set", index: lenLocal } as Instr);
+  // idx = pos < 0 ? pos + len : pos
+  fctx.body.push({ op: "local.get", index: posLocal } as Instr);
+  fctx.body.push({ op: "local.set", index: idxLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: idxLocal } as Instr);
+  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+  fctx.body.push({ op: "i32.lt_s" } as Instr);
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: [
+      { op: "local.get", index: idxLocal } as Instr,
+      { op: "local.get", index: lenLocal } as Instr,
+      { op: "i32.add" } as Instr,
+      { op: "local.set", index: idxLocal } as Instr,
+    ],
+  } as Instr);
+  // out-of-range (idx<0 || idx>=len) → undefined (ref.null.extern); else charAt.
+  fctx.body.push({ op: "local.get", index: idxLocal } as Instr);
+  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+  fctx.body.push({ op: "i32.lt_s" } as Instr);
+  fctx.body.push({ op: "local.get", index: idxLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
+  fctx.body.push({ op: "i32.ge_s" } as Instr);
+  fctx.body.push({ op: "i32.or" } as Instr);
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "val", type: { kind: "externref" } as ValType },
+    then: [{ op: "ref.null.extern" } as Instr],
+    else: [
+      { op: "local.get", index: flatLocal } as Instr,
+      { op: "local.get", index: idxLocal } as Instr,
+      { op: "call", funcIdx: charAtIdx } as Instr,
+      { op: "extern.convert_any" } as Instr,
+    ],
+  } as Instr);
+  return { kind: "externref" };
+}
+
+/**
  * (#2893 PR-1) The integer-view standalone vec storage keys and their
  * compile-time element widths (BYTES_PER_ELEMENT). Post-#2593/#2835 each is a
  * DISJOINT `$Vec` struct on current main (see `TYPED_ARRAY_PACKED_STORAGE`,
@@ -900,10 +1012,15 @@ function makeGlue(
     // not the proto).
     memberKind: () => "method",
     memberLength: (member) => PROTO_METHOD_LENGTH[member] ?? 1,
-    // (#2193 PR-B) Array.prototype.slice is now a real native closure body; other
-    // Array members + all Object members still degrade to a catchable TypeError.
+    // (#2193 PR-B) Array.prototype.slice is now a real native closure body;
+    // (#2875 slice 1) String.prototype.{charAt,at} likewise. Other Array/String
+    // members + all Object members still degrade to a catchable TypeError.
     emitMemberBody: (c, fctx, member) =>
-      name === "Array" ? emitArrayProtoMemberBody(c, fctx, member) : emitProtoMemberBodyRefusal(c, fctx, name, member),
+      name === "Array"
+        ? emitArrayProtoMemberBody(c, fctx, member)
+        : name === "String"
+          ? emitStringProtoMemberBody(c, fctx, member)
+          : emitProtoMemberBodyRefusal(c, fctx, name, member),
   };
 }
 
