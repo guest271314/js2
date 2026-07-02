@@ -2225,28 +2225,46 @@ export function collectEmptyObjectWidening(
           // stays a `$Object`. Scan the whole enclosing statement list (the same
           // tree `collectPropsFromStatements` walks).
           //
-          // (#2849 extended this poison to host; #2937 REVERTS that extension —
-          // restored to standalone-only.) Why the revert: extending the poison to
-          // host kept acorn's for-in-copied `{}` vars (e.g. `getOptions`'s
-          // `options`) on `$Object`, but the poison is honored ONLY at this
-          // widening DECISION — the read/write codegen still resolves such a
-          // receiver via `resolveStructName(TS-type)`, which mis-binds it to a
-          // colliding `__anon` struct registered under the same TS object type.
-          // Worse, the poisoned `$Object` value ESCAPES the identifier (returned
-          // from `getOptions`, stored in the struct-typed `this.options` field,
-          // read via `this.options.ecmaVersion`) into struct-typed slots a
-          // receiver-level bail cannot reach → compiled-acorn null-dereferenced on
-          // EVERY host-mode input (#2937). A total host-mode parse break is
-          // strictly worse than the narrow `getOptions` shape bug the host
-          // extension fixed (which existed quietly for months), so the gate is
-          // restored to standalone-only. The proper cure — externref-typed escape
-          // discipline for poisoned `$Object` values — is the substrate slice
-          // #2944 (see #2937 / #2849). Standalone keeps the poison (unchanged; the
-          // #2584/#2372 divergences it guards are real there, and standalone
-          // codegen stays byte-identical).
-          if (ctx.standalone) {
-            for (const s of stmts) {
-              markObjectHashConsumers(s, varName, ctx.objectHashConsumerVars);
+          // (#2849) This was ORIGINALLY `ctx.standalone`-gated on the assumption
+          // "host keeps the struct fast path via the live-mirror Proxy". That
+          // assumption is false for the for-in copy pattern
+          // (`o={}; for (k in d) o[k]=src[k]; … o.prop`): the dynamic-key writes
+          // land in the sidecar, but a STATIC-named write anywhere (even an
+          // unreached branch) widens `prop` into a real struct field, so the read
+          // lowers to `struct.get` of the empty field (0). #2432 therefore
+          // extended the poison to host — which #2937 had to REVERT, because the
+          // var-name poison was honored ONLY at this widening decision while the
+          // value's REPRESENTATION flows from the ts.Type-keyed machinery: the
+          // signature pre-pass `ensureStructForType(returnType)` re-registered
+          // the SAME ts.Type as an (empty) anon struct, the local typed as
+          // `(ref null $__anon_N)`, the `{}` host `$Object` failed the decl-init
+          // cast → the var was NULL from the first instruction and compiled-acorn
+          // null-dereferenced on every input. (#2944) The cure is the TYPE-keyed
+          // poison below (`objectHashConsumerTypes`), consulted at the
+          // type-resolution chokepoints (`ensureStructForType` / `resolveWasmType`
+          // / `resolveStructName`) so the `$Object` decision follows the value
+          // through every slot it escapes into. With that in place the host
+          // extension is safe, so the gate stays dropped. Standalone keeps its
+          // var-level poison semantics unchanged (byte-identical; the type set is
+          // host-only).
+          for (const s of stmts) {
+            markObjectHashConsumers(s, varName, ctx.objectHashConsumerVars);
+          }
+          // (#2944) HOST: promote the var-level poison to a TYPE-level poison so
+          // every slot the value flows into (return, param, field, alias) lowers
+          // to externref and every member access on it routes through the dynamic
+          // host path. Keyed by ts.Type identity; the declaration + initializer
+          // types are the instances the checker hands back at reads, at the
+          // inferred return type, and at slot-typing sites (measured in the #2944
+          // probe). Skip `any` — a singleton shared by ALL any-typed vars.
+          if (!ctx.standalone && ctx.objectHashConsumerVars.has(varName)) {
+            const poisonVarType = checker.getTypeAtLocation(decl.name);
+            if (!(poisonVarType.flags & ts.TypeFlags.Any)) {
+              ctx.objectHashConsumerTypes.add(poisonVarType);
+            }
+            const poisonInitType = checker.getTypeAtLocation(decl.initializer);
+            if (!(poisonInitType.flags & ts.TypeFlags.Any)) {
+              ctx.objectHashConsumerTypes.add(poisonInitType);
             }
           }
 

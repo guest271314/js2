@@ -1,7 +1,8 @@
 ---
 id: 2849
 title: "dynamic-object numeric property reads back 0 when the same property is also compared via === string / == null (acorn ecmaVersion 2022 not normalised → spurious import attributes)"
-status: blocked
+status: done
+completed: 2026-07-02
 assignee: ttraenkler/fable-dev
 sprint: current
 priority: medium
@@ -15,23 +16,22 @@ language_feature: dynamic-object-property-type-inference
 goal: acorn-dogfood
 related: [2841, 2836, 1712, 2937, 2944]
 depends_on: []
-blocked_on: 2944
 blocks: [1712]
 umbrella: 1712
 ---
 
-> **REOPENED 2026-07-02 (was `done`).** The host-mode fix (PR #2432, extend the
-> `objectHashConsumerVars` poison to host) was **REVERTED in #2937**: keeping
-> acorn's poisoned `{}` vars on `$Object` in host mode broke compiled-acorn with
-> a uniform null-deref on EVERY input, because the poisoned value ESCAPES the
-> identifier into struct-typed slots (`getOptions` return, `this.options` field)
-> that the poison never re-types — a total host-mode parse break, strictly worse
-> than this narrow `getOptions` quirk. So this host bug is live again. The
-> **real cure is the escape-discipline substrate slice #2944** (externref-typed
-> escapes for poisoned `$Object` values); this issue is `blocked_on: 2944`.
-> Standalone is UNAFFECTED (its poison was never reverted). The reduced host
-> arms in `tests/issue-2849.test.ts` are marked `it.fails` pinned here — they
-> flip red (forcing restoration) when #2944 lands.
+> **RE-CLOSED 2026-07-02 by #2944 (was briefly reopened/blocked).** The host-mode
+> fix (PR #2432, extend the `objectHashConsumerVars` poison to host) had broken
+> compiled-acorn (#2937): the var-name poison was honored only at the widening
+> decision, so the poisoned `$Object` value ESCAPED into struct-typed slots
+> (`getOptions`'s inferred return type / `this.options` field, all typed from
+> the SAME ts.Type via `ensureStructForType`) and nulled at the cast. **#2944
+> fixed the escape properly** — the poison is now also keyed by ts.Type
+> identity (`ctx.objectHashConsumerTypes`) and consulted at the type-resolution
+> chokepoints, so the host poison stays active AND compiled-acorn parses. The
+> host arms in `tests/issue-2849.test.ts` are plain `it` again;
+> `tests/issue-2944.test.ts` covers the escape shape. Standalone was never
+> affected (byte-identical throughout).
 
 # #2849 — dynamic-object property mis-typed when read in heterogeneous (string-`===` / `==null` AND numeric) contexts
 

@@ -1568,6 +1568,28 @@ export interface CodegenContext {
    */
   objectHashConsumerVars: Set<string>;
   /**
+   * (#2944) HOST-mode companion to `objectHashConsumerVars`, keyed by ts.Type
+   * IDENTITY instead of var name. The var-name poison is consulted only at the
+   * widening DECISION, but representation actually flows from the ts.Type-keyed
+   * machinery: `ensureStructForType` (e.g. on a function's inferred RETURN type
+   * — `declarations.ts` signature pre-pass — or a closure/destructured param
+   * type) registers the SAME ts.Type instance the poisoned var carries as an
+   * anon struct, so the local/return/param/field slots all type as
+   * `(ref null $__anon_N)` while the value is a host `$Object` externref → the
+   * decl-init cast nulls the var and every downstream read null-derefs (the
+   * #2937 compiled-acorn total break). Membership here is consulted at the three
+   * type-resolution chokepoints — `ensureStructForType` (skip registration),
+   * `resolveWasmType` (→ externref), `resolveStructName` (→ undefined, dynamic
+   * host path) — so the "stays a `$Object`" decision follows the value through
+   * every slot it ESCAPES into (returns, params, fields, aliases, elements).
+   * Populated in `collectEmptyObjectWidening` with the poisoned var's declared
+   * + initializer types (never `any` — that singleton is shared by all
+   * any-typed vars). HOST-only (`!ctx.standalone`): standalone keeps its
+   * var-level poison unchanged and stays byte-identical; its matching latent
+   * escape is a separate slice.
+   */
+  objectHashConsumerTypes: Set<ts.Type>;
+  /**
    * (#2837) Variable names initialized by a NON-EMPTY object literal that later
    * receives an OUT-OF-SHAPE property write (a direct `V.k=` with `k` not in the
    * literal's static shape, or a nested depth-≥2 write `V.a.b…=` onto a nested

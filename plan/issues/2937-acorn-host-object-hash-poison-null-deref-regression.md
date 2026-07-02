@@ -19,6 +19,19 @@ depends_on: []
 related: [2849, 2584, 2432, 1712, 1710, 2850, 2853, 2944]
 ---
 
+> **FIXED-BY-REVERT, THEN PROPERLY RE-FIXED BY #2944 (2026-07-02).** The revert
+> (PR #2462, merged) restored the standalone-only gate as the interim fix —
+> acorn un-broken at the accepted cost of the #2432 host wins. #2944 then
+> RE-ENABLED the host poison with the proper cure: the poison is ALSO keyed by
+> ts.Type identity (`ctx.objectHashConsumerTypes`) and consulted at the
+> type-resolution chokepoints (`ensureStructForType` / `resolveWasmType` /
+> `resolveStructName`), so the poisoned value's externref representation follows
+> it through every escaping slot. Compiled-acorn parses on all corpus inputs
+> (21 equal±quirks / 0 real / 2 pre-existing throws) WITH the host poison
+> active, AND #2849 stays fixed (the #2432 host wins recover). Standalone
+> codegen byte-identical (sha256-verified) throughout both steps. Historical
+> context of the revert decision below:
+>
 > **FIXED BY REVERT (2026-07-02, tech-lead decision).** Backed out PR #2432's
 > host extension of the `objectHashConsumerVars` poison — restored the
 > `if (ctx.standalone)` gate at `declarations.ts` `collectEmptyObjectWidening`.

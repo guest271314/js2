@@ -1,7 +1,8 @@
 ---
 id: 2944
 title: "Substrate: poisoned $Object values escape into struct-typed slots — externref-typed escape discipline for hash-consumer vars"
-status: in-progress
+status: done
+completed: 2026-07-02
 assignee: ttraenkler/sr-escape
 created: 2026-07-02
 priority: high
@@ -119,17 +120,29 @@ INFERRED object types, and that is the load-bearing difference):
 var defaults = { ecmaVersion: 5, sourceType: "script" };
 function getOptions(opts) {
   var options = {};
-  for (var opt in defaults) { options[opt] = opts && opt in opts ? opts[opt] : defaults[opt]; }
-  if (options.ecmaVersion === "latest") { options.ecmaVersion = 1e8; }
-  else if (options.ecmaVersion == null) { options.ecmaVersion = 11; }
-  else if (options.ecmaVersion >= 2015) { options.ecmaVersion -= 2009; }
+  for (var opt in defaults) {
+    options[opt] = opts && opt in opts ? opts[opt] : defaults[opt];
+  }
+  if (options.ecmaVersion === "latest") {
+    options.ecmaVersion = 1e8;
+  } else if (options.ecmaVersion == null) {
+    options.ecmaVersion = 11;
+  } else if (options.ecmaVersion >= 2015) {
+    options.ecmaVersion -= 2009;
+  }
   return options;
 }
 class Parser {
-  constructor(opts) { this.options = getOptions(opts); }
-  read() { return this.options.ecmaVersion; }
+  constructor(opts) {
+    this.options = getOptions(opts);
+  }
+  read() {
+    return this.options.ecmaVersion;
+  }
 }
-export function test(ev) { return new Parser({ ecmaVersion: ev, sourceType: "module" }).read(); }
+export function test(ev) {
+  return new Parser({ ecmaVersion: ev, sourceType: "module" }).read();
+}
 ```
 
 - poison OFF (main today): `test(2022)` → `0` (the #2849 shadow bug, via the class shape)
@@ -142,9 +155,9 @@ WAT + ts.Type-identity probes pin the chain:
    `getOptions`'s inferred return type. (Distinct `{}` vars get distinct
    instances — no cross-var sharing in the probe.)
 2. The function-signature pre-pass calls **`ensureStructForType(ctx,
-   unwrappedRetType)` (`declarations.ts:2971`)** on `getOptions`'s return type =
+unwrappedRetType)` (`declarations.ts:2971`)** on `getOptions`'s return type =
    `T2`. `ensureStructForType` registers **"empty objects get an empty struct"**
-   → `anonTypeMap.set(T2, $__anon_0)`. The poison suppressed the *widening*
+   → `anonTypeMap.set(T2, $__anon_0)`. The poison suppressed the _widening_
    registration of T2, but this TYPE-keyed registrar doesn't consult the poison.
 3. `collectDeclarations` then types the `options` local via `resolveWasmType(T2)`
    → anonTypeMap hit → `(ref null $__anon_0)`. The `{}` initializer compiles to
@@ -225,3 +238,39 @@ agree), and unannotated `{}` vars (the acorn class) have per-var types.
   compile of the probe);
 - equivalence tests green; full `merge_group` (broad-impact rule) for the 137
   recovered + no regressions.
+
+## Test Results (2026-07-02, implementation branch)
+
+- **Escape probe** (acorn `Parser`/`getOptions` shape, unannotated): host
+  `test(2022)` → **13** (was: throw with poison-on, `0` with poison-off).
+- **Acorn corpus** (`tests/dogfood/acorn-corpus.mjs`, full 23 inputs):
+  **21 equal±quirks / 0 REAL / 2 threw** (`corpus/regex.js`, `real/acorn.mjs`
+  self-stress — the same 2 pre-existing throws as the #2462 revert state; above
+  the 2026-06-30 baseline of 13 equal). Poison ACTIVE in host throughout.
+- **`tests/issue-2849.test.ts`**: all 11 pass with the 4 former `it.fails` host
+  arms flipped to plain `it` (2022 → 13 on all guard variants + dead-branch
+  2022 read-back).
+- **`tests/issue-2944.test.ts`** (new): return+field escape (13), default arm
+  (5), alias escape (13), standalone purity — all pass.
+- **Standalone byte-diff**: sha256 identical main↔branch for ALL 6 corpus
+  sources under `--target standalone` (poison + codegen untouched). Host bytes
+  change ONLY for poisoned-with-guard shapes (the fix); `static-only` and
+  `no-guard` host compiles byte-identical.
+- **Sequencing vs #2462**: the revert (PR #2462) MERGED first (project-lead
+  directive — acorn un-broken at the accepted interim cost of the #2432 host
+  wins, ~137 tests). This PR is the RE-ENABLEMENT: it re-drops the
+  `ctx.standalone` gate WITH the ts.Type-keyed escape discipline, so the host
+  wins recover as positive deltas in the `merge_group` and acorn stays green.
+
+### Design-premise validation (prior art for #2856 / extern-in-IR)
+
+The fix empirically validates the substrate premise: **representation must
+follow the VALUE, and the correct key is the ts.Type instance the checker
+threads through every slot** (decl, reads, inferred return, field, alias — one
+shared instance, measured). A single decision recorded once and consulted at
+the type-resolution chokepoints fixed ALL escape shapes at once — no per-site
+bails, no read-path patches. This maps 1:1 onto the IR value model direction
+(June audit D1, #2856 extern-in-IR): when IR owns slot typing, the
+`objectHashConsumerTypes` set becomes an IR-side `extern` value-kind decision
+at exactly one point, and the three legacy chokepoint consults are the
+migration seam to replace. Cite this as prior art in the #2856 spec work.

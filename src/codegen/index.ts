@@ -12203,6 +12203,16 @@ export function resolveWasmType(ctx: CodegenContext, tsType: ts.Type, _depth = 0
   // Check Array<T> / T[] BEFORE isExternalDeclaredClass, because Array is declared
   // in the lib as `declare var Array: ArrayConstructor` which would match externref
   if (tsType.flags & ts.TypeFlags.Object) {
+    // (#2944) A hash-consumer-poisoned type (host mode): the value is a dynamic
+    // `$Object` externref by decision (`objectHashConsumerVars` — dynamic-key
+    // writes + static-named access must share ONE representation). Every slot
+    // typed from this ts.Type (local, inferred return, param, field, alias)
+    // must be externref so the value survives the flow instead of nulling on a
+    // struct cast (the #2937 acorn break). Checked FIRST — before any
+    // struct/anon registration lookup can re-bind the type.
+    if (ctx.objectHashConsumerTypes.has(tsType)) {
+      return { kind: "externref" };
+    }
     const sym = (tsType as ts.TypeReference).symbol ?? (tsType as ts.Type).symbol;
     // `TemplateStringsArray` (the first parameter of a tag function) is the
     // template object built by `compileTaggedTemplateExpression` — a vec struct
@@ -12511,6 +12521,14 @@ function ensureDateStructForCtx(ctx: CodegenContext): number {
  */
 export function ensureStructForType(ctx: CodegenContext, tsType: ts.Type): void {
   if (!(tsType.flags & ts.TypeFlags.Object)) return;
+  // (#2944) Never register a struct for a hash-consumer-poisoned type (host
+  // mode) — the value stays a dynamic `$Object` externref, and registering the
+  // type here (e.g. from the signature pre-pass on a function that RETURNS the
+  // poisoned var, where "empty objects get an empty struct") would re-bind
+  // every slot of this type to `(ref null $__anon_N)` and null the value at
+  // the cast (#2937). The type lowers to externref everywhere instead (same
+  // discipline as the #1287 / #2542 / #2724 skips below).
+  if (ctx.objectHashConsumerTypes.has(tsType)) return;
   if (isExternalDeclaredClass(tsType, ctx.checker)) return;
   // Types declared in `.d.ts` files (interfaces, type aliases, classes
   // exported from declaration-file-only packages) have no JS implementation

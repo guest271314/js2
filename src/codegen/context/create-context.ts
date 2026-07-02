@@ -191,6 +191,7 @@ export function createCodegenContext(
     widenedDefinePropertyKeys: new Set(),
     dynamicDescriptorWidenVars: new Set(),
     objectHashConsumerVars: new Set(),
+    objectHashConsumerTypes: new Set(), // (#2944) host-mode ts.Type-keyed poison
     growableObjectLiteralVars: new Set(),
     externrefAccessorVars: new Set(),
     pendingMathMethods: new Set(),
