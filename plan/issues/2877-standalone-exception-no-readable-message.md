@@ -1,15 +1,19 @@
 ---
 id: 2877
 title: "Standalone exceptions expose no JS-readable message (__sget_message returns null) — blocks message-level triage"
-status: ready
+status: done
 created: 2026-06-30
+updated: 2026-07-02
+completed: 2026-07-02
+assignee: ttraenkler/dev-2912f
+resolved_by: 2962
 priority: medium
 task_type: enhancement
 area: tooling
 goal: standalone
 sprint: current
 horizon: s
-related: [2870, 2862, 2860]
+related: [2870, 2862, 2860, 2962]
 umbrella: 2860
 ---
 
@@ -53,3 +57,39 @@ The harness records the real error message (or a precise class label) for a
 standalone-thrown exception instead of the generic #2870 fallback, with zero
 pass/fail movement (tooling-only). Enables message-level re-triage of #2862's
 de-masked clusters.
+
+## Resolution (2026-07-02, dev-2912f) — satisfied by #2962
+
+**Closed as done-via-#2962** (PR #2481, merged 2026-07-02): the "native
+error-object identity + payload stringification" work landed a strict
+superset of this issue's fix sketch while a parallel #2877 implementation was
+in flight in this session. #2962's mechanism:
+
+- in-module `__error_to_string` (§20.5.3.4) + Error arms in
+  `__any_to_string`, so `String(e)` / `` `${e}` `` render `"Name: message"`
+  natively;
+- harness render exports `__exn_render_prepare(externref) -> i32` /
+  `__exn_render_char(i32) -> i32` (finalize, gated
+  `noJsHost && nativeStrings && exnTagIdx >= 0`) — the payload runs through
+  the module's OWN `__any_to_string` chain, superior to a dedicated
+  message-field accessor because it spec-formats any payload kind;
+- `extractWasmExceptionMessage` wired in BOTH mandated sites
+  (`tests/test262-runner.ts` + `scripts/test262-worker.mjs`).
+
+**Acceptance verified against main `46e390c` (probe, this session):**
+`throw new TypeError("boom")` → `"TypeError: boom"`; rope message
+(`"hello " + x + "!"`) → `"RangeError: hello world!"`; `new Error()` →
+`"Error"` (spec name-only); `throw "bare string payload"` → decoded raw;
+Test262Error → `"Test262Error: Expected a to equal b"`. Known residual
+(documented in #2962): a thrown boxed number renders `"[object Object]"`
+(construction-time ToString residual class) — still a stable, non-crashing
+label.
+
+This session's parallel implementation (dedicated `__exn_msg_*`/`__exn_name_*`
+per-char accessors + `$Error_struct` root-cause analysis: the struct is
+registered directly in `mod.types`, invisible to `emitStructFieldGetters`,
+which is WHY `__sget_message` never covered it) was verified working (7/7
+tests) but **discarded unlanded** — two parallel export families would
+duplicate binary surface and harness decode paths for zero additional triage
+value. The harness-level acceptance test for THIS issue's criteria rides the
+closeout PR as `tests/issue-2877.test.ts`, pinned to the #2962 mechanism.
