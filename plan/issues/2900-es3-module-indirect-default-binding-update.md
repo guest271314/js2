@@ -1,10 +1,11 @@
 ---
 id: 2900
 title: "≤ES3 (edition bucket): module indirect default-export binding update returns wrong value"
-status: blocked
+status: done
 priority: high
 sprint: current
 created: 2026-06-30
+completed: 2026-07-02
 feasibility: hard
 task_type: bug
 area: codegen
@@ -13,8 +14,13 @@ language_feature: module-code
 goal: spec-completeness
 related: [2898]
 assignee: ttraenkler/dev-2900
-blocked_reason: "Umbrella — split into #2930 (RC2 alias, DONE — PR #2437), #2931 (RC3 live bindings, DONE — PR #2446), #2932 (RC1 .js module-dep compile, broad-impact/needs full test262 diff — still blocked). Closes when all three land; only #2932 remains."
 ---
+
+> Closed 2026-07-02 with the #2932 PR — umbrella split into #2930 (RC2 alias,
+> PR #2437), #2931 (RC3 live bindings, PR #2446), #2932 (RC1 .js module-dep
+> compile + wrapTest import hoist). With all three in,
+> `eval-gtbndng-indirect-update-dflt.js` returns 1 (PASS) through the runner
+> path (verified locally by dev-2900f; confirmed by the #2932 PR's sharded CI).
 
 # #2900 — module indirect global-binding update of a default export reads stale
 
