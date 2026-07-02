@@ -77,6 +77,7 @@ import { isArrayProtoIteratorAssignTarget } from "./expressions/proto-override.j
 import { isFnctorPrototypeAssignTarget } from "./expressions/fnctor-prototype.js";
 import { compileExpression, compileStatement } from "./shared.js";
 import { expandLinearU8ParamTypes } from "./linear-uint8-signatures.js";
+import { definedFuncAt } from "./func-space.js"; // (#1916 S2) positional-read chokepoint
 import { inferStandaloneRegExpMatchGlobalType } from "./regexp-standalone.js";
 
 /** Accumulated state for the single-pass collector */
@@ -3747,7 +3748,7 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
         const funcIdx = ctx.funcMap.get(targetName)!;
 
         // Mark the function as exported (for dead-code elimination etc.)
-        const func = ctx.mod.functions[funcIdx - ctx.numImportFuncs];
+        const func = definedFuncAt(ctx, funcIdx);
         if (func && !func.exported) {
           func.exported = true;
         }
@@ -3788,7 +3789,7 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
         const exportedName = spec.name.text;
         if (!ctx.funcMap.has(localName)) continue;
         const funcIdx = ctx.funcMap.get(localName)!;
-        const func = ctx.mod.functions[funcIdx - ctx.numImportFuncs];
+        const func = definedFuncAt(ctx, funcIdx);
         if (func && !func.exported) func.exported = true;
         if (!ctx.mod.exports.some((e) => e.name === exportedName)) {
           ctx.mod.exports.push({ name: exportedName, desc: { kind: "func", index: funcIdx } });
@@ -3835,7 +3836,7 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
         if (ctx.funcMap.has(targetName)) {
           hasModuleExportsDefault = true;
           const funcIdx = ctx.funcMap.get(targetName)!;
-          const func = ctx.mod.functions[funcIdx - ctx.numImportFuncs];
+          const func = definedFuncAt(ctx, funcIdx);
           if (func && !func.exported) func.exported = true;
 
           const alreadyExported = ctx.mod.exports.some((e) => e.desc.kind === "func" && e.desc.index === funcIdx);
@@ -3907,7 +3908,7 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
           if (!key || !valName) continue;
           if (!ctx.funcMap.has(valName)) continue;
           const funcIdx = ctx.funcMap.get(valName)!;
-          const func = ctx.mod.functions[funcIdx - ctx.numImportFuncs];
+          const func = definedFuncAt(ctx, funcIdx);
           if (func && !func.exported) func.exported = true;
           if (!ctx.mod.exports.some((e) => e.name === key)) {
             ctx.mod.exports.push({ name: key, desc: { kind: "func", index: funcIdx } });
@@ -3951,7 +3952,7 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
         } else {
           // Function already registered (e.g., as a FunctionDeclaration) — just export it
           const funcIdx = ctx.funcMap.get(name)!;
-          const func = ctx.mod.functions[funcIdx - ctx.numImportFuncs];
+          const func = definedFuncAt(ctx, funcIdx);
           if (func && !func.exported) func.exported = true;
           if (!ctx.mod.exports.some((e) => e.name === name)) {
             ctx.mod.exports.push({ name, desc: { kind: "func", index: funcIdx } });
@@ -3962,7 +3963,7 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
         const targetName = expr.right.text;
         if (ctx.funcMap.has(targetName)) {
           const funcIdx = ctx.funcMap.get(targetName)!;
-          const func = ctx.mod.functions[funcIdx - ctx.numImportFuncs];
+          const func = definedFuncAt(ctx, funcIdx);
           if (func && !func.exported) func.exported = true;
           if (!ctx.mod.exports.some((e) => e.name === exportName)) {
             ctx.mod.exports.push({ name: exportName, desc: { kind: "func", index: funcIdx } });
@@ -4909,7 +4910,7 @@ export function compileDeclarations(
   if (ctx.preRegisteredBodyless?.size) {
     for (const name of Array.from(ctx.preRegisteredBodyless)) {
       const funcIdx = ctx.funcMap.get(name);
-      const func = funcIdx !== undefined ? ctx.mod.functions[funcIdx - ctx.numImportFuncs] : undefined;
+      const func = funcIdx !== undefined ? definedFuncAt(ctx, funcIdx) : undefined;
       if (func && func.body.length === 0) {
         const typeDef = ctx.mod.types[func.typeIdx];
         const returnType = typeDef?.kind === "func" ? typeDef.results[0] : undefined;

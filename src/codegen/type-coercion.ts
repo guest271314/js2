@@ -11,6 +11,7 @@ import { coercionPlan } from "./coercion-plan.js";
 import { boxToAny } from "./value-tags.js";
 import { allocLocal, allocTempLocal, releaseTempLocal } from "./context/locals.js";
 import type { ClosureInfo, CodegenContext, FunctionContext, OptionalParamInfo } from "./context/types.js";
+import { definedFuncAt } from "./func-space.js";
 import { addUnionImports, ensureAnyHelpers, ensureAnyToExternHelper, isAnyValue } from "./index.js";
 import { ensureAnyToStringHelper, stringConstantExternrefInstrs } from "./native-strings.js";
 import { emitNativeNumberFormat } from "./number-format-native.js";
@@ -1838,8 +1839,7 @@ export function coerceType(
         pushStringHint(ctx, fctx, hint);
         fctx.body.push({ op: "call", funcIdx: toPrimFuncIdx });
         // Coerce result to externref if needed
-        const funcDefIdx = toPrimFuncIdx - ctx.numImportFuncs;
-        const funcDef = funcDefIdx >= 0 ? ctx.mod.functions[funcDefIdx] : undefined;
+        const funcDef = definedFuncAt(ctx, toPrimFuncIdx);
         const funcType = funcDef ? ctx.mod.types[funcDef.typeIdx] : undefined;
         // Default to "externref" for imports (funcDefIdx < 0) which typically return externref
         const retKind = (funcType?.kind === "func" && funcType.results?.[0]?.kind) || "externref";
@@ -2101,7 +2101,7 @@ export function coerceType(
         pushStringHint(ctx, fctx, hint);
         fctx.body.push({ op: "call", funcIdx: toPrimFuncIdx });
         // Coerce result to f64 if needed
-        const funcDef = ctx.mod.functions[toPrimFuncIdx - ctx.numImportFuncs];
+        const funcDef = definedFuncAt(ctx, toPrimFuncIdx);
         const funcType = funcDef ? ctx.mod.types[funcDef.typeIdx] : undefined;
         const retKind = (funcType?.kind === "func" && funcType.results?.[0]?.kind) || "f64";
         if (retKind === "i32") {
@@ -2130,8 +2130,7 @@ export function coerceType(
             // Call ClassName_valueOf(self) — self is already on stack
             fctx.body.push({ op: "call", funcIdx: valueOfFuncIdx });
             // Check return type — if not f64, convert to f64
-            const voFuncDefIdx = valueOfFuncIdx - ctx.numImportFuncs;
-            const voFuncDef = voFuncDefIdx >= 0 ? ctx.mod.functions[voFuncDefIdx] : undefined;
+            const voFuncDef = definedFuncAt(ctx, valueOfFuncIdx);
             const funcType = voFuncDef ? ctx.mod.types[voFuncDef.typeIdx] : undefined;
             if (funcType?.kind === "func" && funcType.results?.[0]?.kind === "i32") {
               fctx.body.push({ op: "f64.convert_i32_s" });
@@ -2438,7 +2437,7 @@ export function coerceType(
           // function rather than a closure stored in the struct field.
           const standaloneValueOf = ctx.funcMap.get(`${name}_valueOf`);
           if (standaloneValueOf !== undefined) {
-            const funcType = ctx.mod.types[ctx.mod.functions[standaloneValueOf - ctx.numImportFuncs]?.typeIdx ?? -1];
+            const funcType = ctx.mod.types[definedFuncAt(ctx, standaloneValueOf)?.typeIdx ?? -1];
             const retKind = funcType?.kind === "func" ? funcType.results?.[0]?.kind : undefined;
             // (#1525b §7.1.1.1 step 6) For object-ref return, we must re-route
             // through the host helper using the ORIGINAL struct. Save it before
@@ -2635,7 +2634,7 @@ function tryToStringFallback(
   const toStrFuncIdx = ctx.funcMap.get(`${structName}_toString`);
   if (toStrFuncIdx !== undefined) {
     fctx.body.push({ op: "call", funcIdx: toStrFuncIdx });
-    const funcType = ctx.mod.types[ctx.mod.functions[toStrFuncIdx - ctx.numImportFuncs]?.typeIdx ?? -1];
+    const funcType = ctx.mod.types[definedFuncAt(ctx, toStrFuncIdx)?.typeIdx ?? -1];
     const retKind = funcType?.kind === "func" ? funcType.results?.[0]?.kind : undefined;
     emitToStringResultToF64ByKind(ctx, fctx, retKind);
     return true;
@@ -2721,8 +2720,7 @@ export function tryStructToString(ctx: CodegenContext, fctx: FunctionContext, fr
   };
 
   const funcResultKind = (funcIdx: number): string | undefined => {
-    const defIdx = funcIdx - ctx.numImportFuncs;
-    const def = defIdx >= 0 ? ctx.mod.functions[defIdx] : undefined;
+    const def = definedFuncAt(ctx, funcIdx);
     const ft = def ? ctx.mod.types[def.typeIdx] : undefined;
     return ft?.kind === "func" ? ft.results?.[0]?.kind : undefined;
   };
