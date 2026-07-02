@@ -2911,11 +2911,28 @@ function tryEmitInlineDynamicCall(
 
   const allCandidates: Cand[] = [];
   for (const [typeIdx, info] of ctx.closureInfoByTypeIdx) {
-    if (info.paramTypes.length < arity) continue;
-    // (#1837) Over-arity padding only for candidates with a NON-VOID result.
-    // Void-result closures (Promise resolve/reject element fns) marshal their
-    // padded self/args into a stack-invalid call_ref; the async-gen-meth-dflt
-    // win (the reason for padding) all have a non-void result (the generator).
+    // (#2923) JS §7.3.14: a call whose arg count differs from the callee's
+    // declared param count still INVOKES the callee — extra args are ignored,
+    // missing params are `undefined`. The per-candidate dispatch arm below
+    // already honours this: it marshals exactly `info.paramTypes.length`
+    // formals (pulling `argLocals[i]` for `i < arity`, padding `undefined` for
+    // `i >= arity`), so an UNDER-arity candidate (fewer params than args)
+    // simply drops the extra args, and an OVER-arity candidate pads. Every
+    // call-site arg is still evaluated into a temp local above, so a truncated
+    // extra arg keeps its side effects. The old `paramTypes.length < arity`
+    // hard filter therefore SILENTLY DROPPED an entire class of higher-order
+    // calls (the test262 `testWith*TypedArrayConstructors(fn)` harness calls
+    // `fn(ctor, makeCtorArg)` — 2 args — but the callback declares `(TA)` — 1
+    // param — so the whole test body was dead; 468+ BigInt tests). Removing it
+    // adopts the JS arity semantics the direct-closure path (`compileClosureCall`
+    // L122-129) already implements.
+    //
+    // (#1837) Over-arity padding stays gated to NON-VOID results: a void-result
+    // closure padded past its arity marshals its padded self/args into a
+    // stack-invalid `call_ref` (the async-gen-meth-dflt win — the reason padding
+    // exists — all have a non-void generator result). An UNDER-arity void
+    // candidate is fine (no padding, just truncation), so only skip when the
+    // candidate is strictly OVER-arity AND void.
     if (info.paramTypes.length > arity && info.returnType === null) continue;
     if (!supported(info.returnType)) continue;
     let ok = true;

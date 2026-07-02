@@ -2217,18 +2217,28 @@ export function collectEmptyObjectWidening(
           // Scan all following statements in the same block for property assignments
           collectPropsFromStatements(checker, ctx, stmts, varName, extraProps, seenProps);
 
-          // (#2584) Standalone: if this var is ALSO the subject of any
+          // (#2584/#2849) If this var is ALSO the subject of any
           // `$Object`-hash-only consumer (bracket read/write, `in`, Object.keys
           // / values / entries / GOPD / GOPN / assign, for-in), a widened closed
           // struct would be invisible to that consumer (`o.a=7; o["a"]` → 0).
           // Mark it poisoned so widening is suppressed below and the receiver
           // stays a `$Object`. Scan the whole enclosing statement list (the same
-          // tree `collectPropsFromStatements` walks). Standalone-gated — host
-          // keeps the struct fast path via the live-mirror Proxy.
-          if (ctx.standalone) {
-            for (const s of stmts) {
-              markObjectHashConsumers(s, varName, ctx.objectHashConsumerVars);
-            }
+          // tree `collectPropsFromStatements` walks).
+          //
+          // (#2849) This was ORIGINALLY `ctx.standalone`-gated on the assumption
+          // "host keeps the struct fast path via the live-mirror Proxy". That
+          // assumption is false for the for-in copy pattern
+          // (`o={}; for (k in d) o[k]=src[k]; … o.prop`): the dynamic-key writes
+          // `o[k]=` land in the sidecar, but a STATIC-named write `o.prop = c`
+          // anywhere (even an unreached branch) widens `prop` into a real struct
+          // field via `collectPropsFromStatements`, so the read `o.prop` lowers
+          // to `struct.get` of the empty field (0) — the Proxy never bridges the
+          // for-in-write→struct-read divergence. Applying the poison in host mode
+          // too keeps such objects on `$Object` so writes + reads share one
+          // representation. Vars with only static access are NOT poisoned, so the
+          // struct fast path (and its byte output) is unchanged.
+          for (const s of stmts) {
+            markObjectHashConsumers(s, varName, ctx.objectHashConsumerVars);
           }
 
           // (#2372) Standalone: if any `Object.defineProperty(varName, …)` on

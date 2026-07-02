@@ -595,8 +595,11 @@ export function emitDefaultValueCheck(
       } else if ((fieldType as { typeIdx?: number }).typeIdx !== undefined) {
         fctx.body.push({ op: "ref.cast_null", typeIdx: (fieldType as { typeIdx: number }).typeIdx } as Instr);
       }
-      if (targetType && !valTypesMatch(fieldType, targetType)) {
-        coerceType(ctx, fctx, fieldType, targetType);
+      // (#2878 Class A) Coerce to the binding local's actual type, not targetType.
+      const localType = getLocalType(fctx, localIdx);
+      const coerceTo = localType ?? targetType;
+      if (coerceTo && !valTypesMatch(fieldType, coerceTo)) {
+        coerceType(ctx, fctx, fieldType, coerceTo);
       }
       fctx.body.push({ op: "local.set", index: localIdx } as Instr);
     });
@@ -609,13 +612,24 @@ export function emitDefaultValueCheck(
     return;
   }
 
-  // Build the else branch (value is NOT undefined — use it as-is, with coercion)
+  // Build the else branch (value is NOT undefined — use it as-is, with coercion).
+  //
+  // (#2878 Class A) Coerce to the BINDING LOCAL's actual declared type
+  // (`getLocalType(localIdx)`), NOT to `targetType`. The `local.set` below must
+  // match the local's Wasm type, and `targetType` can be absent or diverge from
+  // it (e.g. a heterogeneous object literal boxes every field to externref, so
+  // `fieldType` is externref while the binding local is f64 for a `number`
+  // binding). Coercing externref→f64 here unboxes the boxed number correctly;
+  // the old `targetType`-only path skipped coercion and stored an externref into
+  // an f64 local → "local.set expected f64, found externref" invalid Wasm. This
+  // mirrors `emitDefaultIntoLocal` above, which already keys off `getLocalType`.
   const buildElseBranch = (tmpField: number): Instr[] => {
-    if (targetType && !valTypesMatch(fieldType, targetType)) {
-      // Need coercion from fieldType to targetType before storing
+    const localType = getLocalType(fctx, localIdx);
+    const coerceTo = localType ?? targetType;
+    if (coerceTo && !valTypesMatch(fieldType, coerceTo)) {
       return collectInstrs(fctx, () => {
         fctx.body.push({ op: "local.get", index: tmpField } as Instr);
-        coerceType(ctx, fctx, fieldType, targetType);
+        coerceType(ctx, fctx, fieldType, coerceTo);
         fctx.body.push({ op: "local.set", index: localIdx } as Instr);
       });
     }
@@ -661,9 +675,12 @@ export function emitDefaultValueCheck(
       else: buildElseBranch(tmpField),
     });
   } else {
-    // i32 and other types — no reliable undefined sentinel, just assign
-    if (targetType && !valTypesMatch(fieldType, targetType)) {
-      coerceType(ctx, fctx, fieldType, targetType);
+    // i32 and other types — no reliable undefined sentinel, just assign.
+    // (#2878 Class A) Coerce to the binding local's actual type, not targetType.
+    const localType = getLocalType(fctx, localIdx);
+    const coerceTo = localType ?? targetType;
+    if (coerceTo && !valTypesMatch(fieldType, coerceTo)) {
+      coerceType(ctx, fctx, fieldType, coerceTo);
     }
     fctx.body.push({ op: "local.set", index: localIdx });
   }

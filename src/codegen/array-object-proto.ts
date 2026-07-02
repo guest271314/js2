@@ -583,6 +583,36 @@ const WEAKREF_PROTO_METHODS = ["deref"] as const;
 // PROTO_METHOD_LENGTH table (no cross-builtin collision).
 const FINALIZATIONREGISTRY_PROTO_METHODS = ["register", "unregister"] as const;
 
+// ── DisposableStack.prototype (TC39 Explicit Resource Management §12.3) ───────
+// `use`(1) / `adopt`(2) / `defer`(1) / `move`(0) / `dispose`(0) data methods +
+// the `disposed` accessor getter (folds `.length` to 0). The `[Symbol.dispose]`
+// / `[Symbol.toStringTag]` symbol members are keyed by symbol, not string, so
+// they are outside the string member CSV (same as every other glue). The
+// resource list lives on the INSTANCE, so the proto value object is pure.
+const DISPOSABLESTACK_PROTO_METHODS = ["dispose", "use", "adopt", "defer", "move", "disposed"] as const;
+const DISPOSABLESTACK_PROTO_GETTERS: ReadonlySet<string> = new Set(["disposed"]);
+const DISPOSABLESTACK_PROTO_METHOD_LENGTH: Readonly<Record<string, number>> = {
+  dispose: 0,
+  use: 1,
+  adopt: 2,
+  defer: 1,
+  move: 0,
+};
+
+// ── AsyncDisposableStack.prototype (TC39 Explicit Resource Management §12.4) ──
+// Mirror of DisposableStack with `disposeAsync`(0) in place of `dispose`; the
+// `[Symbol.asyncDispose]` / `[Symbol.toStringTag]` symbol members stay outside
+// the string CSV.
+const ASYNCDISPOSABLESTACK_PROTO_METHODS = ["disposeAsync", "use", "adopt", "defer", "move", "disposed"] as const;
+const ASYNCDISPOSABLESTACK_PROTO_GETTERS: ReadonlySet<string> = new Set(["disposed"]);
+const ASYNCDISPOSABLESTACK_PROTO_METHOD_LENGTH: Readonly<Record<string, number>> = {
+  disposeAsync: 0,
+  use: 1,
+  adopt: 2,
+  defer: 1,
+  move: 0,
+};
+
 /**
  * Graceful member-body refusal: the value-read object (PR-A) does not need
  * member bodies, but if a reflective member closure is materialized for a member
@@ -1483,6 +1513,54 @@ export function ensureFinalizationRegistryNativeProtoGlue(ctx: CodegenContext): 
   if (brand === undefined) return undefined;
   if (!getNativeProtoBuiltinGlue(ctx, brand)) {
     registerNativeProtoBuiltin(ctx, makeGlue(ctx, brand, "FinalizationRegistry", FINALIZATIONREGISTRY_PROTO_METHODS));
+  }
+  return brand;
+}
+
+/**
+ * (#2861) Register `DisposableStack.prototype` glue (idempotent). The
+ * DisposableStack brand is newly appended to `BUILTIN_BRAND_TABLE` (slot 41).
+ * `use`/`adopt`/`defer`/`move`/`dispose` methods + the `disposed` accessor
+ * getter (folds `.length` to 0) → `makeGlueWithGetters`. The resource list
+ * lives on the instance, so the proto value object is pure (member CSV only).
+ */
+export function ensureDisposableStackNativeProtoGlue(ctx: CodegenContext): number | undefined {
+  const brand = getBuiltinBrand(ctx, "DisposableStack");
+  if (brand === undefined) return undefined;
+  if (!getNativeProtoBuiltinGlue(ctx, brand)) {
+    registerNativeProtoBuiltin(
+      ctx,
+      makeGlueWithGetters(
+        brand,
+        "DisposableStack",
+        DISPOSABLESTACK_PROTO_METHODS,
+        DISPOSABLESTACK_PROTO_GETTERS,
+        DISPOSABLESTACK_PROTO_METHOD_LENGTH,
+      ),
+    );
+  }
+  return brand;
+}
+
+/**
+ * (#2861) Register `AsyncDisposableStack.prototype` glue (idempotent). The
+ * AsyncDisposableStack brand is newly appended to `BUILTIN_BRAND_TABLE` (slot
+ * 42). Same shape as DisposableStack with `disposeAsync` in place of `dispose`.
+ */
+export function ensureAsyncDisposableStackNativeProtoGlue(ctx: CodegenContext): number | undefined {
+  const brand = getBuiltinBrand(ctx, "AsyncDisposableStack");
+  if (brand === undefined) return undefined;
+  if (!getNativeProtoBuiltinGlue(ctx, brand)) {
+    registerNativeProtoBuiltin(
+      ctx,
+      makeGlueWithGetters(
+        brand,
+        "AsyncDisposableStack",
+        ASYNCDISPOSABLESTACK_PROTO_METHODS,
+        ASYNCDISPOSABLESTACK_PROTO_GETTERS,
+        ASYNCDISPOSABLESTACK_PROTO_METHOD_LENGTH,
+      ),
+    );
   }
   return brand;
 }
