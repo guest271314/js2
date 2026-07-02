@@ -692,8 +692,15 @@ jobs:
             exit 0
           fi
           set +e
+          # #2940 (TEMPORARY, removal follow-up #3001) — excuse #2940 vacuity
+          # reclassifications here too. The HOST baseline is already re-promoted
+          # to new-policy, so this excuses ZERO flips today (host has no
+          # pass→vacuous transitions); it is defense-in-depth so a host lane
+          # that ever diffs against a stale old-policy baseline is not tripped by
+          # the same policy delta. Remove alongside the standalone flag (#3001).
           npx tsx scripts/diff-test262.ts /tmp/cat-baselines/test262-current.jsonl \
             merged-reports/test262-results-merged.jsonl --quiet \
+            --exclude-vacuous-reclassification \
             ${TEST262_SCOPE:+--path-filter "$TEST262_SCOPE"} > /tmp/cat-diff.txt 2>&1
           diff_exit=$?
           set -e
@@ -775,9 +782,19 @@ jobs:
           # counted toward host_free_pass). A baseline that was already host-free
           # flipping to fail STILL trips at full strength. The js-host
           # catastrophic guard (line ~683) deliberately omits this flag.
+          # #2940 (TEMPORARY, removal follow-up #3001) — also excuse pass→fail
+          # flips whose NEW row is a #2940 vacuity reclassification. #2463's
+          # vacuity scorer rescored ~1438 vacuous "passes" as fail WITHOUT
+          # bumping oracle_version; the standalone baseline is still stale
+          # old-policy, so the diff reads the policy delta (the d822f85a −1438
+          # cluster) as a mass regression and wedges the queue. This flag drops
+          # those reclassifications out of the gated REG count. Once the next
+          # push-to-main promotes the standalone baseline to new-policy the flag
+          # excuses zero flips and MUST be removed (see #3001).
           npx tsx scripts/diff-test262.ts /tmp/cat-baselines/test262-standalone-current.jsonl \
             merged-reports/test262-standalone-results-merged.jsonl --quiet \
             --exclude-leaky-baseline-regressions \
+            --exclude-vacuous-reclassification \
             ${TEST262_SCOPE:+--path-filter "$TEST262_SCOPE"} > /tmp/standalone-diff.txt 2>&1
           diff_exit=$?
           set -e
