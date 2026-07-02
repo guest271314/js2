@@ -272,55 +272,6 @@ function remapTD(td: TypeDef, remap: Map<number, number>): TypeDef {
  * case mid-finalize.
  */
 export function eliminateDeadImports(mod: WasmModule, ctx?: CodegenContext): void {
-  // TEMP-DEBUG-2934-1c
-  if (process.env.DEBUG_2934_DCE) {
-    const scanPacked = (label: string) => {
-      let n = 0;
-      for (const f of mod.functions) {
-        // flat top-level walk with index context
-        const dump = (arr: any[], path: string) => {
-          for (let i = 0; i < arr.length; i++) {
-            const a = arr[i];
-            if (a?.op === "array.get" || a?.op === "array.get_u" || a?.op === "array.get_s") {
-              const prev = arr[i - 2] as any; // [arrRef, idx, get] → arrRef at i-2
-              if (prev?.op === "local.get") {
-                const fType = mod.types[f.typeIdx] as any;
-                const nParams = fType?.params?.length ?? 0;
-                const lt =
-                  prev.index < nParams ? fType.params[prev.index] : (f.locals[prev.index - nParams]?.type as any);
-                if (lt && (lt.kind === "ref" || lt.kind === "ref_null") && lt.typeIdx !== a.typeIdx) {
-                  n++;
-                  if (n <= 6) {
-                    const ctxSlice = arr
-                      .slice(Math.max(0, i - 6), i + 4)
-                      .map(
-                        (x: any, j: number) =>
-                          `${j + Math.max(0, i - 6) === i ? ">>" : "  "}${x.op}${x.typeIdx !== undefined ? " t" + x.typeIdx : ""}${x.index !== undefined ? " l" + x.index : ""}${x.funcIdx !== undefined ? " f" + x.funcIdx : ""}${x.value !== undefined ? " v" + x.value : ""}`,
-                      )
-                      .join(" | ");
-                    console.error(
-                      `TEMP-2934-1c [${label}] fn=${f.name} ${path}[${i}] MISMATCH imm=t${a.typeIdx} operandLocal l${prev.index}=(ref${lt.kind === "ref_null" ? " null" : ""} ${lt.typeIdx}) :: ${ctxSlice}`,
-                    );
-                  }
-                }
-              }
-            }
-            if (a?.then) dump(a.then, path + `[${i}].then`);
-            if (a?.else) dump(a.else, path + `[${i}].else`);
-            if (a?.body) dump(a.body, path + `[${i}].body`);
-            if (a?.catches)
-              for (let c = 0; c < a.catches.length; c++)
-                if (a.catches[c]?.body) dump(a.catches[c].body, path + `[${i}].catch${c}`);
-            if (a?.catchAll) dump(a.catchAll, path + `[${i}].catchAll`);
-          }
-        };
-        dump(f.body as any[], "body");
-      }
-      console.error(`TEMP-2934-1c [${label}] total packed plain-array.get = ${n}, types=${mod.types.length}`);
-    };
-    scanPacked("DCE-entry");
-    (globalThis as any).__scan2934 = scanPacked;
-  }
   const numImpF = mod.imports.filter((i) => i.desc.kind === "func").length;
   const usedF = new Set<number>();
   const usedT = new Set<number>();
@@ -555,16 +506,6 @@ export function eliminateDeadImports(mod: WasmModule, ctx?: CodegenContext): voi
       if (m1 !== undefined) t.methodFuncIdx = m1;
       const t1 = fR.get(t.trampolineFuncIdx);
       if (t1 !== undefined) t.trampolineFuncIdx = t1;
-    }
-  }
-  // TEMP-DEBUG-2934-1c
-  if (process.env.DEBUG_2934_DCE) {
-    (globalThis as any).__scan2934?.("DCE-exit");
-    for (let i = 0; i < Math.min(25, mod.types.length); i++) {
-      const td = mod.types[i] as any;
-      console.error(
-        `TEMP-2934-1c type[${i}] ${td.kind}${td.kind === "array" ? ":" + td.element?.kind : ""}${td.kind === "struct" ? ":" + td.fields?.map((f: any) => f.type?.kind).join(",") : ""}`,
-      );
     }
   }
 }

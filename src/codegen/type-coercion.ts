@@ -1112,6 +1112,9 @@ function emitVecToVecBody(
   // coercion path (the i8_byte array type is shared by Int8Array AND
   // Uint8Array), so use the storage-kind heuristic; the read value is the
   // widened i32.
+  fctx.body.push({ op: "local.get", index: srcLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: fromTypeIdx, fieldIdx: 1 });
+  fctx.body.push({ op: "local.get", index: iLocal });
   fctx.body.push({ op: elemGetOp(srcVec.elemType, undefined), typeIdx: srcVec.arrTypeIdx } as Instr);
   const readElemType = unpackedElemType(srcVec.elemType);
   // Coerce element type. Important: comparing only `.kind` is insufficient
