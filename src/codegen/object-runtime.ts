@@ -5477,6 +5477,20 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     const HOST_FLAG_WRITABLE = FLAG_WRITABLE; // bit 0
     const HOST_FLAG_ENUMERABLE = FLAG_ENUMERABLE; // bit 1
     const HOST_FLAG_CONFIGURABLE = FLAG_CONFIGURABLE; // bit 2
+    // (#2989) "Desc has a [[X]] field" specified-bits + hasValue bit — the
+    // §10.1.6.3 ValidateAndApplyPropertyDescriptor preflight in
+    // `__defineProperty_value` gates every spec TypeError on THESE bits (a
+    // configurable/enumerable/writable change is only forbidden when the Desc
+    // actually *specifies* that attribute). The inline-literal fast path
+    // (`computeRuntimeFlags`, object-ops.ts) sets them; this dynamic-descriptor
+    // applier previously set only the value bits 0/1/2, so the preflight read
+    // "no attribute specified / no value" for every field → it never threw and
+    // an invalid redefine silently no-op'd (array length non-writable→writable,
+    // non-configurable redefine, non-extensible new prop via a `var` descriptor).
+    const HOST_WRITABLE_SPECIFIED = 1 << 3;
+    const HOST_ENUMERABLE_SPECIFIED = 1 << 4;
+    const HOST_CONFIGURABLE_SPECIFIED = 1 << 5;
+    const HOST_HAS_VALUE = 1 << 7;
 
     const L_DESC = 3; // desc as externref (after $Object validation)
     const L_DESC_ANY = 4;
@@ -5516,12 +5530,15 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       ];
     };
     // ToBoolean(getField(key)) → set valueBit; always set hasData when marksData.
-    const readBooleanFlag = (key: string, valueBit: number, marksData: boolean): Instr[] => [
+    // (#2989) When the field is present, ALSO set its "specified" bit so the
+    // `__defineProperty_value` §10.1.6.3 preflight can gate the spec TypeErrors.
+    const readBooleanFlag = (key: string, valueBit: number, marksData: boolean, specifiedBit: number): Instr[] => [
       ...hasField(key),
       {
         op: "if",
         blockType: { kind: "empty" },
         then: [
+          ...setFlag(specifiedBit),
           ...(marksData
             ? ([
                 { op: "i32.const", value: 1 },
@@ -5598,7 +5615,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       { op: "ref.null.extern" },
       { op: "local.set", index: L_SETTER },
 
-      // value present → hasData, capture value.
+      // value present → hasData + hasValue bit (#2989), capture value.
       ...hasField("value"),
       {
         op: "if",
@@ -5606,13 +5623,14 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
         then: [
           { op: "i32.const", value: 1 },
           { op: "local.set", index: L_HAS_DATA },
+          ...setFlag(HOST_HAS_VALUE),
           ...getField("value"),
           { op: "local.set", index: L_VALUE },
         ],
       },
-      ...readBooleanFlag("writable", HOST_FLAG_WRITABLE, true),
-      ...readBooleanFlag("enumerable", HOST_FLAG_ENUMERABLE, false),
-      ...readBooleanFlag("configurable", HOST_FLAG_CONFIGURABLE, false),
+      ...readBooleanFlag("writable", HOST_FLAG_WRITABLE, true, HOST_WRITABLE_SPECIFIED),
+      ...readBooleanFlag("enumerable", HOST_FLAG_ENUMERABLE, false, HOST_ENUMERABLE_SPECIFIED),
+      ...readBooleanFlag("configurable", HOST_FLAG_CONFIGURABLE, false, HOST_CONFIGURABLE_SPECIFIED),
       ...readAccessor("get", L_GETTER),
       ...readAccessor("set", L_SETTER),
 
