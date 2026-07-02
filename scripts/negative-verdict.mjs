@@ -71,3 +71,38 @@ export function negativeCompileErrorMatches(expectedType, errorCodes = [], messa
   void codes;
   return false;
 }
+
+/**
+ * STRICT verdict for the compile-SUCCEEDED arm of a negative
+ * parse/early/resolution test (#2920 — the follow-up that tightens the arm
+ * #2912 deliberately left lenient).
+ *
+ * The compiler emitted NO diagnostic, so it did NOT detect the expected early
+ * error. The historical policy scored a conformance PASS whenever the produced
+ * Wasm merely failed to instantiate/link — an INCIDENTAL pass (the #2898
+ * fragility). A full-corpus audit (2026-07-01) found ~439 host-lane negatives
+ * passing ONLY this way (`await`/`yield` as a binding identifier, escaped
+ * keywords, duplicate module exports, unresolved imports) — real
+ * early-error-detection GAPS, not conformance passes. Strict verdict: this is
+ * always a FAIL. Whether the produced Wasm subsequently instantiates or links
+ * is irrelevant — an incidental link failure is not spec-conformant
+ * early-error detection.
+ *
+ * This is an intentional conformance-verdict tightening (a ~439 host-lane
+ * pass->fail drop), NOT a code regression — it lands with a coordinated
+ * baseline refresh (see plan/issues/2920). Applies identically across the host
+ * (`gc`) and `standalone` targets and across all three runners
+ * (scripts/test262-worker.mjs, tests/test262-shared.ts fixture path,
+ * tests/test262-vitest.test.ts) so the gate stays byte-identical.
+ *
+ * @param {string|undefined} expectedType e.g. "SyntaxError"
+ * @param {string|undefined} phase        e.g. "parse" | "early" | "resolution"
+ * @returns {{status: "fail", error: string}}
+ */
+export function negativeCompileSucceededVerdict(expectedType, phase) {
+  const what = `${phase ? `${phase} ` : ""}${expectedType || "early error"}`;
+  return {
+    status: "fail",
+    error: `expected ${what} but compiled with no diagnostic (early error not detected)`,
+  };
+}
