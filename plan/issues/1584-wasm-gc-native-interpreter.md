@@ -3,20 +3,38 @@ id: 1584
 title: "Wasm-GC-native bytecode interpreter with Acorn for eval and dynamic fallback"
 status: ready
 created: 2026-05-23
-updated: 2026-05-23
+updated: 2026-07-02
 priority: medium
 feasibility: hard
 reasoning_effort: max
 task_type: feature
 area: runtime
 language_feature: eval
-goal: spec-completeness
+goal: runtime-eval
 sprint: Backlog
 depends_on: [1058, 1006, 1066, 1102]
 required_by: [1743]
+children: [2923, 2924, 2925, 2927, 2928, 2929]
 es_edition: multi
 ---
 # #1584 — Wasm-GC-native bytecode interpreter with Acorn for eval and dynamic fallback
+
+> **DECOMPOSED (2026-07, architect).** This issue is now the **umbrella /
+> strategy-of-record** for the `runtime-eval` goal. The full architecture —
+> strategy comparison, hard-problem answers (direct-eval scope reification,
+> the value-rep bridge, global/realm access, `new Function` ordering), test262
+> quantification, and the milestone roadmap — lives in
+> [docs/architecture/runtime-eval-interpreter.md](../../docs/architecture/runtime-eval-interpreter.md).
+> Two key refinements vs. the original text below: (1) Tiers 0 and 1
+> (constant-string compile-away #1163, JS-host meta-circular #1164) are
+> **already shipped** — the interpreter is the *third* leg, not a greenfield;
+> (2) the work is staged into landable slices, not one 8–12-week issue:
+> **#2923** (broaden compile-away, S), **#2924** (`new Function` compile-away,
+> M), **#2925** (direct-eval scope reification in JS-host, L), **#2927**
+> (Acorn-via-js2wasm + generic-built-in audit, L), **#2928** (bytecode VM core
+> + standalone `new Function`/indirect eval, XL), **#2929** (direct eval +
+> `with` + Proxy-MOP convergence, XL). The original strategy write-up below
+> remains accurate and is preserved as the rationale of record.
 
 Strategy proposal for executing genuinely dynamic JavaScript inside the
 standalone Wasm-GC module without bundling a third-party engine. The

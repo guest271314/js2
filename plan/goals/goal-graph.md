@@ -112,6 +112,24 @@ and a goal being "ready" doesn't mean it should be worked on immediately.
    ── both feed #1584 (in-Wasm bytecode interpreter), which needs ──
    ── compiled-acorn (self-hosting-dogfood) AND a non-Wasm IR     ──
    ── backend (backend-agnostic-ir) ──
+
+   +-----------------------------+
+   |  runtime-eval               |  NEW (Tier-0 slices activatable)
+   |  (eval / indirect eval /    |
+   |   new Function: tiered       |
+   |   compile-away -> JS-host    |
+   |   meta-circular -> standalone|
+   |   bytecode interpreter)      |
+   +-----------------------------+
+   Depends on:
+   standalone-mode (the standalone dynamic-code leg)
+   backend-agnostic-ir (#1713/#1715 IR->bytecode seam)
+   self-hosting-dogfood (#1710 Acorn-via-js2wasm)
+   substrate: #2864 ($Frame), #2527 (core-wasm linking)
+   ── umbrella #1584; docs/architecture/runtime-eval-interpreter.md. ──
+   ── Tiers 0/1 shipped (#1163/#1164); interpreter = Tier 2.        ──
+   ── env-reification + dynamic-MOP substrate CONVERGES with        ──
+   ── `with` and Proxy (#1355) — built once, shared.               ──
 ```
 
 ## Goal Status Summary
@@ -132,6 +150,7 @@ and a goal being "ready" doesn't mean it should be worked on immediately.
 | **spec-completeness** | Blocked | ~90% | async-model, symbol-protocol, builtin-methods, property-model | #696, #661, #674, #671 |
 | **full-conformance** | Blocked | 100% | spec-completeness | All remaining |
 | **standalone-mode** | Activatable | WASI works | iterator-protocol, generator-model | #680, #681, #682 |
+| **runtime-eval** | Activatable (Tier-0 now) | eval/`new Function` work standalone, not a trap | standalone-mode, backend-agnostic-ir, self-hosting-dogfood; substrate #2864/#2527 | #1584 (umbrella/strategy), #2923/#2924 (compile-away, current), #2925 (direct-eval reification), #2927/#2928/#2929 (interpreter) |
 | **wasi-async-runtime** | New (not active) | event-loop reactor on WASI; real `process.stdin` Readable, timers, promise-driven I/O | async-model (microtask substrate #1326), standalone-mode (WASI + poll_oneoff #1484) | #2632 (refs #389 reporter; #2631 is the orthogonal synchronous host) |
 | **performance** | Activatable | faster output | core-semantics | #743, #773, #745, #744, #824 (timeouts) |
 | **platform** | Blocked | edge deploy | standalone-mode | #639, #640, #641, #644 |

@@ -31,7 +31,15 @@ desync.
 
 ```ts
 export function test(): string {
-  { let s = "outer"; class C { m(): string { return s; } } return new C().m(); }
+  {
+    let s = "outer";
+    class C {
+      m(): string {
+        return s;
+      }
+    }
+    return new C().m();
+  }
 }
 // => null   (should be "outer")
 ```
@@ -41,6 +49,7 @@ Also fails for an **arrow inside the method** (`m(){ const g = () => s; return g
 reach `s` either.
 
 Controls that PASS:
+
 - `let s` at **function scope** (not in a block) → "outer" (promotion fires;
   `$C_m` reads `global.get __captured_s`).
 - the same with a hoisted **function declaration** instead of a class → "outer"
@@ -100,6 +109,130 @@ local — already scanned via `extraNodes`), `-static` methods, generator /
 async-generator methods, private methods, and the TDZ flag promotion
 (`__tdz_<name>` global) for a `let`/`const` read before init.
 
+## Implementation Plan
+
+_(architect spec, senior-conflicts 2026-07-02 — written after closing the broad
+attempt PR #2335. Read the `## Merge-group regression` section below FIRST: the
+whole-hog `insideFunction` propagation is proven **−471** and must NOT be retried.)_
+
+### Root cause (exact site)
+
+`compileClassesFromStatements` (`src/codegen/declarations.ts:4431`, nested closure
+in `compileDeclarations`) recurses into the control-flow carriers — `if`
+(~4477), bare `block` (~4484), the `for*`/`while`/`do` loop bodies (~4487),
+`switch` clauses, `try`/`catch`/`finally`, and labeled blocks (~4477–4507) —
+**without forwarding its `insideFunction` parameter**, so those recursions run
+with the default `insideFunction = false`. A class textually nested in a block
+_inside a function body_ is therefore collected + compiled **eagerly** via the
+`else` arm (line 4448 `compileClassBodies` for a declaration; line 4461 for a
+`const C = class{}` expression) at module-collection time — **before** the
+enclosing block's `let`s have been allocated/initialised. Its method body then
+resolves the captured `let` to the `ref.null.extern` graceful fallback
+(`identifiers.ts`), and no `local.get <slot>; global.set __captured_s` value-sync
+is emitted in the enclosing function → the method reads **null**. The fn-scope
+control (a `let` NOT in a block) passes because that class is collected at a
+point where `promoteAccessorCapturesToGlobals`
+(`src/codegen/statements/nested-declarations.ts:128–136`) can promote the local.
+
+### Why the broad fix regressed (PR #2335, net −471) — DO NOT retry
+
+PR #2335 forwarded `insideFunction` through **every** control-flow recursion
+(`compileClassesFromStatements(…, insideFunction)` everywhere). That routes
+**every** block-nested class — including non-capturing ones **and class
+expressions** (`const C = class{}`, line 4458) — into `ctx.deferredClassBodies`
+(lines 4447 / 4460). But the deferred-compile path
+(`compileNestedClassDeclaration`, `nested-declarations.ts:82`) is only reached
+from `compileStatement` for class **declaration statements**; a class
+**expression** in a variable initializer, and some deeply-nested declaration
+shapes, are **never revisited**, so their method/element bodies are silently
+dropped. Merge_group proof: net −471 (545 regressions / 74 improvements, ratio
+736%), two buckets over the 50-gate — `class/dstr` (335) + `class/elements`
+(165); on `class/dstr/async-gen-meth-obj-ptrn-list-err.js` the WAT shrinks
+54869→51844 bytes (≈3 KB of class codegen dropped) and a `runTest262File` probe
+flips it pass→fail. **The invariant this violated: never add a class to
+`deferredClassBodies` unless the deferred path is guaranteed to re-compile that
+exact shape.**
+
+### Work Item A: narrow the deferral to genuine block-`let` capturers only
+
+**Risk**: Medium — touches class-collection ordering, but strictly shrinks the
+set of deferred classes vs PR #2335. **Priority**: 1st.
+
+**File: `src/codegen/declarations.ts`**, `compileClassesFromStatements`
+(line ~4431) and its control-flow recursions (~4477–4507):
+
+- Forward `insideFunction` into the control-flow recursions **only for class
+  _declarations_ that actually capture** an enclosing block-scoped `let`/`const`
+  — never for class expressions, never for non-capturing classes. Concretely,
+  gate the `ctx.deferredClassBodies.add(...)` at line 4447 behind a capture
+  pre-scan: `classMethodCapturesEnclosingBlockLet(stmt, enclosingBlockLets)` —
+  a member-body identifier walk (mirror the existing accessor-capture scan used
+  by `promoteAccessorCapturesToGlobals`) that returns true iff a method/getter/
+  setter/param-default of the class references a name declared `let`/`const` in
+  an enclosing block of the **same function** (not module scope, not a param).
+- All other block-nested classes (non-capturing declarations **and every class
+  expression**, line 4458) stay on the **eager** `else` arm — byte-identical to
+  today, so the −471 `class/dstr` + `class/elements` clusters do not move.
+- Do NOT change the module-level (`insideFunction` already false at top) path.
+
+The #2818 repro (`class C { m(){ return s; } }` capturing block-`let s`) is a
+capturing block-nested **declaration** → it is the _only_ shape this newly
+defers, and it IS reachable by `compileNestedClassDeclaration` via
+`compileStatement` when the block is compiled.
+
+### Work Item B: make the deferred capturer promote in-scope (ordering fix)
+
+**Risk**: Medium — the #1672 stale-global-sync subsystem. **Priority**: 2nd
+(coupled to A; land together).
+
+**File: `src/codegen/statements/nested-declarations.ts`**,
+`compileNestedClassDeclaration` (line ~82):
+
+- With the class now in `deferredClassBodies`, `isDeferred` (line 97) is true so
+  the `structMap.has && !isDeferred` early-return (line 99) is correctly skipped
+  and the body is compiled at the class's **textual position in the block** —
+  i.e. after `let s = "outer"` has executed and been allocated. Verify
+  `promoteAccessorCapturesToGlobals` (lines 128–136) now sees `s` as a live
+  promotable local and emits `(global $__captured_s …)` + the enclosing-function
+  `local.get <s-slot>; global.set __captured_s` sync, and the method body reads
+  `global.get __captured_s`.
+- **#1672 guard**: the `global.set` sync MUST run **after** the block-`let`'s
+  store (not at the pre-hoist slot), and re-sync on any later mutation the method
+  observes. Confirm against the fn-scope accessor-capture regression controls.
+
+### Edge cases (must all be covered by `tests/issue-2818.test.ts`)
+
+- `meth-` / `gen-meth-` / `private-meth-` (+ `-dflt` / `-static`) cluster members
+  return 1. `-dflt`: param-default initializers referencing the outer local are
+  scanned via `extraNodes` — include them in the capture pre-scan.
+- Arrow inside the method (`m(){ const g = () => s; return g(); }`) — the
+  method's capture channel must fire so the inner closure reaches `s`.
+- TDZ: a block-`let`/`const` read before init through the method still throws
+  (promote the `__tdz_<name>` flag global in lockstep).
+- **Non-capturing** block-nested class + **`const C = class{}`** expression stay
+  on the eager path (regression control — these are the −471 shapes).
+- generator / async-generator / static / private methods as capturers.
+
+### Test / validation (REQUIRED)
+
+`tests/issue-2818.test.ts` with the repros + the cluster slice + the fn-scope
+capture regression control + the non-capturing/class-expression eager-path
+controls. **This class of flip only manifests on the merged baseline** — the PR
+checks stub test262. **Validate on a full `merge_group` / local-CI test262 run
+BEFORE re-enqueue** (`JS2WASM_LOCAL_CI=1 ./scripts/local-ci.sh`), and confirm
+**zero** movement in `class/dstr` + `class/elements` (the −471 buckets). A scoped
+sweep cannot see this 545-test cluster.
+
+### Residual design risk to resolve during implementation
+
+The completeness invariant (Work Item A) assumes every _capturing declaration_
+shape the pre-scan defers is reachable by `compileNestedClassDeclaration`.
+Confirm this for capturing classes nested inside `for`/`switch`/`try` bodies
+(not just a bare block) — if any such shape is NOT revisited by
+`compileStatement`, either (i) extend the eager arm to compile it in-scope
+instead of deferring, or (ii) add the missing deferred-compile entry point. Do
+not defer a shape you have not proven is re-compiled.
+
 ## Acceptance criteria
 
 - `{ let s="outer"; class C { m(){ return s; } } new C().m(); }` returns "outer"
@@ -124,6 +257,7 @@ Full conformance is only validated in `merge_group`. So "PR-green" never
 validated test262 here.
 
 **Delta (merge_group, baseline f8c1aa5):**
+
 - **545 regressions / 74 improvements → net −471**, ratio 736%, signature `9c6151da5837060f`.
 - Two buckets EACH over the 50-test gate limit:
   `language/expressions/class/dstr` (335) + `language/expressions/class/elements` (165),
@@ -148,6 +282,7 @@ eager path compiled them correctly (at the cost of the one narrow capture bug
 this issue targets).
 
 **Narrowing direction for the rework — two viable options:**
+
 1. **Defer only when there is an actual capture:** restrict the
    `insideFunction` deferral to classes that genuinely capture a block-scoped
    `let` declared in the enclosing block (the exact #2818 case), and keep all
