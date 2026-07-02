@@ -270,6 +270,20 @@ is never a moment where one value means two functions.
   files → `mintDefinedFunc`/`pushDefinedFunc`). Byte-identity after
   every batch. Import handles stay live-regime (prefix-stable) until
   S3-final.
+  - **S3b batch 1 — LANDED (PR 4)**: `number-ryu.ts` (3 helpers:
+    `__ryu_mul_shift`/`__num_ryu_digits`/`__num_ryu_to_buf`) +
+    `parse-number-native.ts` (3: `parseFloat`/`__str_to_number`/
+    `parseInt`) — completes the number cluster (number-format flipped in
+    S3a calls into Ryū). Also carries the S3a audit-completeness fixes
+    (compiler/output.ts, emit/c-header.ts, codegen-linear/c-abi.ts,
+    promise-combinators.ts — four funcIdx interpreters outside the S2
+    sweep scope, normalized) that missed #2499's queue window. Proof:
+    1215-record corpus byte-IDENTICAL; issue-1537 (33) + parseint-edge +
+    #1916 suites green.
+  - Batch discipline (for the next executor): flip whole FILES (a
+    producer family), never partial files; `nextFuncIdx`-style local
+    helpers redefine in place; verify `grep -c mod.functions.push <file>`
+    is 0 after; corpus check per batch; run the family's test suites.
 - S3-final: zero live-regime defined-func mints remain → delete
   `shiftLateImportIndices`, `reconcileNativeStrFinalizeShift`, both
   inline shifters, `flushLateImportShifts`, the `liveBodies`/
