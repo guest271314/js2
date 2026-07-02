@@ -115,6 +115,35 @@ handle native generator result structs, then a FULL `merge_group` re-validation
 (never a scoped sample — `project_broad_impact_validate_full_ci`) with a
 construct-strided corpus (see the corpus-design note above).
 
+## Suspended Work (2026-07-02, fable-3 — revival attempt, budget wind-down)
+
+The `.value` blocker (VERDICT item b) is **root-caused and code-complete** —
+it was NOT an unbounded dynamic-read substrate gap. The done-result's f64
+`value` field stored `0` (value-space collision; `undefined` unrepresentable
+in the f64 carrier). Fix: UNDEF_F64-sentinel producer + sentinel-aware
+readers/`__extern_is_undefined` — full design, probe validation (identity
+matrix all JS-correct; the exhausted **with-yield** `.value` was ALSO wrong on
+plain main, so the fix stands alone), and resume steps live in
+**`plan/issues/2970-genresult-undefined-carrier.md`** on branch
+**`issue-2938-genresult-undefined-carrier`** (pushed, commit `d1ec95a26`,
+based on main `fa399fd70`).
+
+Revival sequence for the successor:
+
+1. Finish PR A from that branch (tsc/prettier/lint + scoped generator suites +
+   `tests/issue-2970.test.ts` — checklist in the 2970 file) and land it.
+2. Merge main into THIS branch (`issue-2933-noyield-relax`, PR #2445, parked
+   `hold` + BEHIND); bails are already relaxed here.
+3. Re-run the 4 repros (`language/{statements,expressions}/generators/{no-yield,return}.js`)
+   + the readVal probe — should pass natively with the carrier fix.
+4. Re-check the two REMAINING parked blockers (negative-test early-error miss,
+   async-from-sync invalid module) — still unaddressed.
+5. Construct-strided corpus re-validation (class-static / no-yield /
+   return-arm / async-from-sync / negative-test shapes), then ONE re-admission
+   of PR #2445 via the shepherd (bot park-hold diagnosis rules apply).
+
+Claims #2938/#2970 released on suspend; re-claim with `--force`.
+
 ## Handoff to #2936 (funcIdx-shift fix — the unblocker) [historical]
 
 #2920 is BLOCKED on #2936 (late-import funcIdx-shift for lazily-emitted resume
