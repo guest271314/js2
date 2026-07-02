@@ -86,6 +86,8 @@ import {
   ensureSharedArrayBufferNativeProtoGlue,
   ensureWeakRefNativeProtoGlue,
   ensureFinalizationRegistryNativeProtoGlue,
+  ensureDisposableStackNativeProtoGlue,
+  ensureAsyncDisposableStackNativeProtoGlue,
   ensureTypedArrayViewNativeProtoGlue,
   ensureTypedArrayIntrinsicNativeProtoGlue,
   emitTypedArrayIntrinsicCtorObject,
@@ -822,6 +824,15 @@ export function tryEnsureNativeProtoBrand(ctx: CodegenContext, builtinName: stri
   }
   if (builtinName === "FinalizationRegistry") {
     return ensureFinalizationRegistryNativeProtoGlue(ctx);
+  }
+  // (#2861) DisposableStack / AsyncDisposableStack — TC39 Explicit Resource
+  // Management. The resource list lives on the instance, so the proto value
+  // object is pure (member CSV only).
+  if (builtinName === "DisposableStack") {
+    return ensureDisposableStackNativeProtoGlue(ctx);
+  }
+  if (builtinName === "AsyncDisposableStack") {
+    return ensureAsyncDisposableStackNativeProtoGlue(ctx);
   }
   // (#2651 M1 / D2) Concrete TypedArray view protos — `Int8Array.prototype`,
   // `Uint8Array.prototype`, … This is the measured Slice-0 lever: the
