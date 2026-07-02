@@ -345,6 +345,66 @@ export function getArrTypeIdxFromVec(ctx: CodegenContext, vecTypeIdx: number): n
 }
 
 /**
+ * Get or register the `$Error_struct` WasmGC type. Idempotent — returns the
+ * cached type index on subsequent calls.
+ *
+ * (#2962) Moved here from `registry/error-types.ts` (which re-exports it for
+ * its existing importers) so `native-strings.ts` can reach the error struct
+ * type for the `__error_to_string` §20.5.3.4 arm without creating an
+ * error-types ⇄ native-strings import cycle (error-types.ts imports
+ * `stringConstantExternrefInstrs` from native-strings.ts). Field-layout
+ * documentation lives with the constructors in error-types.ts.
+ */
+export function getOrRegisterErrorStructType(ctx: CodegenContext): number {
+  if (ctx.errorStructTypeIdx >= 0) return ctx.errorStructTypeIdx;
+
+  const idx = ctx.mod.types.length;
+  ctx.mod.types.push({
+    kind: "struct",
+    name: "$Error_struct",
+    fields: [
+      { name: "tag", type: { kind: "i32" }, mutable: false },
+      { name: "message", type: { kind: "externref" }, mutable: true },
+      { name: "name", type: { kind: "externref" }, mutable: false },
+      // (#1536) $stack — fieldIdx 3, kept AFTER message(1)/name(2) so their
+      // indices stay stable. `error.stack` is non-standard (no normative
+      // test262 coverage); materializing a real stack trace needs no Wasm
+      // primitive, so standalone constructs it as `ref.null.extern` (reads
+      // back as `undefined`, not a trap). Mutable so a future `err.stack = …`
+      // write can land here without a struct-type change.
+      { name: "stack", type: { kind: "externref" }, mutable: true },
+      // (#2188) $userClassId — fieldIdx 4. Per-user-Error-subclass brand that
+      // distinguishes sibling `extends Error` classes which all share the SAME
+      // builtin parent `$tag` (field 0). `__new_<Parent>` writes the sentinel
+      // `-1` (a plain builtin Error / the shared parent ctor has no user-class
+      // brand); the subclass `super()` site overwrites it with the subclass's
+      // `classTagMap` id (see emitSetSubclassUserBrand in class-bodies.ts). The
+      // standalone `instanceof <UserSubclass>` path reads this field instead of
+      // the shared builtin tag, so `(new A) instanceof B` is false for distinct
+      // siblings A,B. Mutable: the brand is written AFTER struct.new at the
+      // per-subclass construction site, not baked into the shared parent ctor.
+      // Kept LAST so fields 0..3 stay stable.
+      { name: "userClassId", type: { kind: "i32" }, mutable: true },
+      // (#2101a R5) $props — fieldIdx 5. Backing store for user-declared OWN
+      // fields on an externref-backed Error subclass (`class A extends Error {
+      // code = 0 }`). Such an instance IS this `$Error_struct` (no per-subclass
+      // WasmGC struct), so own fields have nowhere to live — `this.code = …`
+      // previously cast `this` to the vestigial `$A` struct and trapped. Holds
+      // an externref to an open `$Object` (the LANDED object-runtime), lazily
+      // allocated via `__new_plain_object()` on the first own-field write;
+      // reads/writes route through `__extern_get`/`__extern_set`. `ref.null`
+      // until first written. Stored as externref (not `ref null $Object`) to
+      // avoid a forward type-reference to `$Object` here — `$Object` is
+      // registered lazily by the object-runtime, which may run AFTER this
+      // struct. Kept LAST so fields 0..4 stay stable.
+      { name: "props", type: { kind: "externref" }, mutable: true },
+    ],
+  });
+  ctx.errorStructTypeIdx = idx;
+  return idx;
+}
+
+/**
  * Register the WasmGC types for native strings (rope/cons-string support).
  */
 export function registerNativeStringTypes(ctx: CodegenContext): void {

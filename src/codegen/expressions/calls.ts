@@ -11639,7 +11639,17 @@ function compileCallExpression(
         const toStrIdx = ensureLateImport(ctx, "__extern_toString", [{ kind: "externref" }], [{ kind: "externref" }]);
         flushLateImportShifts(ctx, fctx);
         if (toStrIdx !== undefined) {
-          compileExpression(ctx, fctx, propAccess.expression);
+          // (#2934 2b) The STATIC type says externref, but the receiver can
+          // COMPILE to a concrete ref — e.g. `regObj.exec(str).toString()`
+          // standalone lowers exec natively to a capture-array vec `(ref null
+          // $Vec)`. Feeding that raw ref to `__extern_toString(externref)` is
+          // invalid Wasm (`call[0] expected externref, found (ref null …)`).
+          // Coerce the COMPILED type, mirroring the #2934 2a receiver fix in
+          // compilePropertyIntrospection (object-ops.ts).
+          const recvType = compileExpression(ctx, fctx, propAccess.expression);
+          if (recvType && recvType.kind !== "externref" && recvType.kind !== "ref_extern") {
+            coerceType(ctx, fctx, recvType, { kind: "externref" });
+          }
           fctx.body.push({ op: "call", funcIdx: toStrIdx });
           return { kind: "externref" };
         }
