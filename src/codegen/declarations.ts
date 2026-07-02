@@ -4689,6 +4689,37 @@ export function compileDeclarations(
   const hasStaticInits = ctx.staticInitExprs.length > 0;
   let compiledInitFctx: FunctionContext | null = null;
 
+  // (#2965) The module-init body is compiled TWICE (the second pass, below,
+  // re-runs after top-level function bodies so call sites see the final
+  // inlinable-function registry). Statement compilation mutates ctx state that
+  // encodes PROGRAM ORDER — `definedPropertyFlags` ("this key was already
+  // defined with these attributes") and `frozenVars`/`sealedVars`/
+  // `nonExtensibleVars` ("this object is frozen from here on"). If pass 2
+  // starts from pass 1's END state, every first `Object.defineProperty` at the
+  // top level looks like a REDEFINE — the struct call-site then emits its
+  // runtime SameValue guard comparing the field's ZERO-INIT default against
+  // the descriptor value, so `defineProperty(o, "x", { value: <non-zero> })`
+  // spuriously throws "Cannot redefine property" in the shipped body — and
+  // defines that PRECEDE an `Object.freeze(o)` compile as if the object were
+  // already frozen. Snapshot the order-sensitive state before pass 1 and
+  // restore it before pass 2 so both passes compile from the same initial
+  // state. (Function bodies compiled BETWEEN the passes keep seeing pass-1 end
+  // state — a function called post-init observes the final integrity state;
+  // that behavior is unchanged. After pass 2 the maps converge back to the
+  // same end state pass 1 produced, so later consumers see no difference.)
+  const propOrderStateSnapshot = {
+    definedPropertyFlags: new Map(ctx.definedPropertyFlags),
+    frozenVars: new Set(ctx.frozenVars),
+    sealedVars: new Set(ctx.sealedVars),
+    nonExtensibleVars: new Set(ctx.nonExtensibleVars),
+  };
+  function restorePropOrderState(): void {
+    ctx.definedPropertyFlags = new Map(propOrderStateSnapshot.definedPropertyFlags);
+    ctx.frozenVars = new Set(propOrderStateSnapshot.frozenVars);
+    ctx.sealedVars = new Set(propOrderStateSnapshot.sealedVars);
+    ctx.nonExtensibleVars = new Set(propOrderStateSnapshot.nonExtensibleVars);
+  }
+
   function compileModuleInitBody(): FunctionContext {
     const initFctx: FunctionContext = {
       name: "__module_init",
@@ -4881,6 +4912,10 @@ export function compileDeclarations(
   // inside module-level code can see the final inlinable-function registry.
   // The first compile above still serves early closure/setup discovery.
   if (hasModuleInits || hasStaticInits) {
+    // (#2965) Reset the program-order-sensitive property state to its
+    // pre-pass-1 value so this recompile does not treat pass 1's own
+    // defineProperty/freeze effects as pre-existing (see snapshot above).
+    restorePropOrderState();
     compiledInitFctx = compileModuleInitBody();
     ctx.pendingInitBody = compiledInitFctx.body;
   }

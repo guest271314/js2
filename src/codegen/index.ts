@@ -11697,12 +11697,80 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
   //     callable JS functions to the outside, so this is conservatively 0.
   registerNative("__typeof_function", externrefToI32, [{ op: "i32.const", value: 0 }]);
 
-  // 15. __typeof(externref) -> externref — returns null externref under
-  //     wasi. Producing real type-tag strings would require a NativeString
-  //     per tag; defer until a wasi caller needs the typeof RESULT as a
-  //     string (today's callers compare against literal tags via the
-  //     __typeof_* helpers above).
-  registerNative("__typeof", externrefToExternref, [{ op: "ref.null.extern" }]);
+  // 15. __typeof(externref) -> externref — the MATERIALIZED typeof result.
+  //     (#2965) This was a `ref.null.extern` stub ("defer until a wasi caller
+  //     needs the typeof RESULT as a string"), which silently broke every
+  //     standalone site where the typeof string is a VALUE rather than an
+  //     inline `typeof x === "…"` compare: `var t = typeof x`,
+  //     `assert_sameValue_str(typeof(o.p), "undefined")` (the test262 runner's
+  //     paren-form transform miss), any typeof flowing through a param. The
+  //     result was a null externref, so `t === "undefined"` was false for
+  //     EVERY tag and `t.length` trapped. Classify with the same dispatch the
+  //     `__typeof_*` predicates above use (null → "undefined", box_number →
+  //     "number", box_boolean → "boolean", $BigInt → "bigint", $AnyString →
+  //     "string", else → "object"; functions stay "object", matching the
+  //     conservative `__typeof_function` = 0 predicate) and return the tag as
+  //     an inline NativeString (sentinel-safe, no funcidx baked — the #2515
+  //     discipline; string literals here are type-index-only instructions, so
+  //     the late-import finalize shift cannot desync this body). Falls back to
+  //     the old stub only when no native-string type is registered (then no
+  //     string content could be represented anyway).
+  if (ctx.nativeStrings && ctx.nativeStrTypeIdx >= 0) {
+    const typeofTagArm = (test: Instr[], tag: string): Instr[] => [
+      ...test,
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [...stringConstantExternrefInstrs(ctx, tag), { op: "return" }],
+      },
+    ];
+    registerNative(
+      "__typeof",
+      externrefToExternref,
+      [
+        // null externref → undefined (matches __typeof_undefined = ref.is_null)
+        ...typeofTagArm([{ op: "local.get", index: 0 }, { op: "ref.is_null" }], "undefined"),
+        { op: "local.get", index: 0 },
+        { op: "any.convert_extern" },
+        { op: "local.set", index: 1 },
+        ...typeofTagArm(
+          [
+            { op: "local.get", index: 1 },
+            { op: "ref.test", typeIdx: boxNumStructIdx },
+          ],
+          "number",
+        ),
+        ...typeofTagArm(
+          [
+            { op: "local.get", index: 1 },
+            { op: "ref.test", typeIdx: boxBoolStructIdx },
+          ],
+          "boolean",
+        ),
+        ...typeofTagArm(
+          [
+            { op: "local.get", index: 1 },
+            { op: "ref.test", typeIdx: bigIntStructIdx },
+          ],
+          "bigint",
+        ),
+        ...(ctx.anyStrTypeIdx >= 0
+          ? typeofTagArm(
+              [
+                { op: "local.get", index: 1 },
+                { op: "ref.test", typeIdx: ctx.anyStrTypeIdx },
+              ],
+              "string",
+            )
+          : []),
+        // non-null, not a boxed primitive, not a string → object
+        ...stringConstantExternrefInstrs(ctx, "object"),
+      ],
+      [{ name: "$any_temp", type: { kind: "anyref" } as ValType }],
+    );
+  } else {
+    registerNative("__typeof", externrefToExternref, [{ op: "ref.null.extern" }]);
+  }
 
   // #2508 — native `__host_eq` (Strict Equality, §7.2.16) and
   // `__same_value_zero` (SameValueZero, §7.2.11) over two boxed externrefs, so
