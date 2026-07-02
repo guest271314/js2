@@ -142,13 +142,36 @@ externref, found struct.new of type (ref …)` invalid Wasm. Fix: coerce the
       `S15.10.6.3_A8` et al. still pass host). Standalone runtime still fails these
       on the separate `__hasOwnProperty` function-`.length`-own semantics gap — a
       distinct issue, not this slice.
-- [ ] **(2b) remaining `call[0]/call[1] expected type …` coercion sites** — still
-      open, DISTINCT from (2a): `String/concat` → `call[0] expected (ref null 6),
-found call of externref` (reverse direction — an internal ref expected, an
-      externref supplied); `RegExp.prototype.exec(...).toString()` → `call[0]
-expected externref, found if of (ref null 98)` (nullable-ref receiver to
-      `.toString()`); Array map/filter `create-species-*` callbacks in `__closure_*`.
-      Each a separate coercion/typing site.
+- [x] **(2b) `String(x).<method>()` + `exec(...).toString()` receiver
+      coercion** — DONE (dev-2934f, slice 4). Two more "static type says X,
+      compiled value is Y" receiver gaps, same class as (2a):
+  1. `String(42).concat(void 0)` — `number_toString` returns the native string
+     EXTERNALIZED (`extern.convert_any`), so a statically-string-typed receiver
+     COMPILES to externref; `compileNativeStringMethodCall`'s `emitReceiver`
+     (`string-ops.ts`) fed it uncoerced to `__str_concat((ref null $AnyString),
+…)` → `call[0] expected (ref null 6), found call of externref`. Fix:
+     emitReceiver casts an externref result back via the established
+     `emitNativeStringRefFromExternref` inverse — covers EVERY string-method
+     arm (concat/charAt/indexOf/slice/…) in one place.
+  2. `regObj.exec(str).toString()` — static receiver type resolves externref,
+     but standalone lowers exec natively to a capture-array vec `(ref null
+   $Vec)`; the generic `.toString()` fallback (`expressions/calls.ts`) passed
+     the raw ref to `__extern_toString(externref)` → `call[0] expected
+   externref, found if of (ref null 98)`. Fix: coerce the COMPILED type
+     (mirrors the 2a fix). Runtime ToString-of-match-array semantics is a
+     separate pre-existing gap (2a precedent) — this slice is validity.
+     Verified: 120-file concat/exec/toString sweep 115→117 VALID (+2, 0 new
+     invalid); byte-identical host mode + standalone literal-receiver paths.
+     Tests: `tests/issue-2934-receiver-coercion-2b.test.ts`.
+     **Residual (NOT this slice):** (i) `concat/S15.5.4.6_A4_T2.js` — "not enough
+     arguments on the stack" (wasm-dis can't even parse: stack-arity/body-mutation
+     class, belongs with slice 3); (ii) Array map/filter `create-species-*` /
+     `__closure_*` `call[1] expected f64, found array.get of externref` — the
+     non-closure callback path bridges through the HOST import `env.__call_1_f64`
+     even in standalone (`setupArrayCallback`, `array-methods.ts:~6033`) AND
+     mismatches the boxed-any (externref) element rep of `new Array(N)`; needs a
+     standalone-native callback-bridge design (host-import leak + IsCallable +
+     hole semantics), likely an architect spec — split to its own slice.
 - [ ] **(3) `__closure_5` `not enough arguments on the stack`** — the one
       funcIdx-shift-shaped failure (for-await async path); may share the #2918
       late-import class.
