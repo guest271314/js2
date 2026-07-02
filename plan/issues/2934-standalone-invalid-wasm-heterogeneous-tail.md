@@ -206,12 +206,97 @@ externref, found if of (ref null 98)`. Fix: coerce the COMPILED type
      invalid; throwing-toString family (plus-concat/template/concat-method/
      reflective-call) all valid + right exception semantics; 71/71 string
      equivalence tests. Tests: `tests/issue-2934-tostring-dispatch-s3.test.ts`.
-- [ ] **(3b) `__closure_5` `not enough arguments on the stack for drop`** —
-      the for-await async CPS path (`AsyncFromSyncIteratorPrototype/next/
-for-await-next-rejected-promise-close.js`) — NOT the bridge/toString class
-      (still invalid after slice 6); a drop-balance bug in the async closure
-      lowering. The last open invalid-Wasm slice besides the `__closure_*`
-      host-bridge item above.
+- [ ] **(3b) void-`return()` IteratorClose drop underflow** — DIAGNOSED
+      (dev-2934f, 2026-07-02), fix verified but **deliberately HELD — see the
+      PAIRING CONSTRAINT below**. Root cause: the for-of IteratorClose
+      lowering (`statements/loops.ts` ~5035) emits an UNCONDITIONAL `drop`
+      after `call <iter>_return`; a VOID `return() { … }` method (no Wasm
+      result — common in test262 close-count probes) underflows the stack
+      ("not enough arguments on the stack for drop") — this is what made
+      `__closure_5` in `AsyncFromSyncIteratorPrototype/next/
+for-await-next-rejected-promise-close.js` invalid (the for-await drives the
+      same close path inside the lifted async closure). The one-line fix:
+      guard the drop on the callee's result arity (`retFt.results.length >
+0`). Verified: all validity probes green, close-count semantics correct
+      (`rc === 1` after `break`), 21/21 iterator equivalence tests.
+      **PAIRING CONSTRAINT (#2978)**: landing the validity fix ALONE exposes a
+      runtime JS-heap OOM — the async scheduler loops forever on `for await`
+      over a sync iterator yielding rejected promises (~3 GB in ~14 s, racing
+      the 15 s test timeout → CI shard-worker OOM flake). Today the file
+      fail-fasts as invalid Wasm, so CI is safe. **Land the drop-arity fix
+      together with, or after, the #2978 scheduler fix — never alone.**
+
+## Implementation Plan — `__closure_*` host-bridge slice (spec by dev-2934f, /architect-spec, 2026-07-02)
+
+### Root cause
+
+`setupArrayCallback` (`src/codegen/array-methods.ts` ~6033): when the map/
+filter/forEach callback argument is NOT a recognized closure (arrow/function
+expression), it bridges through the JS-HOST import `env::__call_1_f64`
+(`ctx.fast ? "__call_1_i32" : "__call_1_f64"`, registered `(externref, f64) →
+f64`). Two independent defects meet at that call:
+
+1. **Host-import leak**: `env::__call_1_f64` survives into `--target
+standalone` binaries (zero-import instantiation impossible).
+2. **Element-rep mismatch**: `new Array(N)` standalone has BOXED-ANY
+   (externref) elements (`reference_2379`); the loop feeds `array.get` →
+   externref into the bridge's `f64` param → `call[1] expected type f64,
+found array.get of type externref` — the `__closure_2/4/7/20` invalid-Wasm
+   cluster (`Array/prototype/map/15.4.4.19-4-7.js`,
+   `filter/create-species-poisoned.js`, `Proxy/revocable/tco-fn-realm.js`).
+
+### Work Item A: compile-time IsCallable TypeError (LOW risk, do FIRST)
+
+**Patterns addressed**: `map/15.4.4.19-4-7.js` (`arr.map(new Object())`) and
+every `create-species-*` sibling where the callback is statically a
+non-function object.
+**Spec**: §23.1.3.18 step 3 — `If IsCallable(callbackfn) is false, throw a
+TypeError` BEFORE any iteration.
+
+**File `src/codegen/array-methods.ts`** — `setupArrayCallback` (~6033): the
+file already has `isKnownNonCallable(ctx, arg)` (line ~176) and uses it at two
+other call sites (215, 7583). In the `!closureInfo` arm, BEFORE resolving the
+bridge: if `isKnownNonCallable(ctx, cbArg)` — extend it to cover
+`new Object()` / object-literal-typed expressions (TS type has no call
+signatures and is an object type) — emit the spec TypeError throw
+(`emitThrowTypeError`) and return a sentinel so the caller skips the loop
+emission entirely. No bridge import is registered, no loop is emitted: the
+invalid-Wasm shape AND the host-import leak disappear for these tests, and the
+runtime behavior is the spec throw the tests assert.
+
+**Edge cases**: `arr.map(undefined)` / explicit-undefined (see the 7583
+`isExplicitUndefined` guard precedent); a `Function`-typed identifier must NOT
+be gated (stays dynamic).
+
+**Test**: `Array/prototype/map/15.4.4.19-4-7.js` standalone invalid → pass;
+`filter/create-species-poisoned.js` → valid.
+
+### Work Item B: standalone-native dynamic callback dispatch (MEDIUM risk)
+
+For a genuinely dynamic callback (externref at runtime — e.g. a function
+value passed through `any`), standalone must not import `env::__call_1_f64`.
+Replace the bridge under `ctx.standalone || ctx.wasi` with the native
+dispatch the codebase already uses elsewhere (`emitReflectiveNativeProto
+ClosureCall` / the #2151 any-receiver dispatch family):
+`any.convert_extern` → `ref.test` each tracked closure type
+(`ctx.closureInfoByTypeIdx`) → `call_ref` with the loop element coerced to
+that closure's param type (via `coercionPlan`) → else-arm: spec TypeError
+("not a function"). Register NO env import. JS-host mode keeps the
+`__call_1_f64` fast path byte-identical.
+
+### Work Item C: element-rep coercion at the bridge call (host mode too)
+
+Wherever the bridge/`call_ref` consumes the loop element, coerce from the
+ACTUAL element stack type (externref for boxed-any vecs, i32 for packed —
+`unpackedElemType`) to the callee param type via `coercionPlan` — never assume
+f64. This is the same "coerce the COMPILED type, not the static assumption"
+class as slices 2a/2b.
+
+**Ordering**: A first (small, unblocks the named tests), then B+C together
+(they share the dispatch site). Hole semantics (`new Array(10)` is all holes —
+map must SKIP holes, §23.1.3.18 step 5.b) should be audited in B's loop but is
+NOT required for the named invalid-Wasm tests (they throw before iterating
+once A lands).
 
 ## Approach
 
