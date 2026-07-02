@@ -67,6 +67,21 @@ export function addImport(ctx: CodegenContext, module: string, name: string, des
       // legitimately drop-and-degrade unsupported host APIs under WASI (e.g.
       // examples/native-messaging/nm_js2wasm.ts: setTimeout/fetch/…).
       ctx.errors.push({ message, line: 0, column: 0, severity: "degrade" });
+      // (#3001) Record the dropped host import on the MODULE so finalize-time
+      // handle resolution can name it. When a producer bakes this dropped
+      // import's (now `undefined`) function index into a helper body coupled to
+      // a stable handle — e.g. console.log's native-string extern bridge
+      // `__str_to_extern` calling the dropped `__str_from_mem`/`__str_to_mem`/
+      // `__str_extern_len` — `absoluteFuncIndex` would otherwise crash with an
+      // opaque "stable handle undefined (ordinal NaN)". With the coupling
+      // recorded, that resolution point surfaces a clean, actionable leak
+      // diagnostic naming these imports instead of an internal-error stack.
+      if (desc.kind === "func") {
+        const recorded = (ctx.mod.strictDroppedHostImports ??= []);
+        if (!recorded.some((d) => d.module === module && d.name === name)) {
+          recorded.push({ module, name });
+        }
+      }
       // Skip registration. The caller may record a stale funcMap index if it
       // looks the import up by name; if that index is ever emitted into the
       // binary the emit-time leak scan / link step catches it.

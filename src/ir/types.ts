@@ -102,6 +102,21 @@ export interface WasmModule {
    * `local.set` after an unhandled `String.prototype.repeat`).
    */
   codegenErrors?: { message: string; line: number; column: number; severity?: "error" | "warning" | "degrade" }[];
+  /**
+   * (#3001) Host imports dropped by the strict `--no-host-imports` gate
+   * (`addImport` under `ctx.strictNoHostImports`). The gate drops the import
+   * and pushes a `degrade` diagnostic, but a producer that baked the dropped
+   * import's (now `undefined`) function index into a helper body — e.g.
+   * console.log's native-string extern bridge `__str_to_extern` calling the
+   * dropped `__str_from_mem` / `__str_to_mem` / `__str_extern_len` — would then
+   * hit `absoluteFuncIndex` with `funcIdx=undefined` and crash with an opaque
+   * "stable handle undefined (ordinal NaN)" internal error. Recorded here so
+   * finalize-time handle resolution can turn that crash into a clean, actionable
+   * leak diagnostic that NAMES the dropped-and-coupled host import(s). Lives on
+   * the module (not the codegen context) because the emit/resolve chokepoints
+   * that dereference baked handles only have `mod`.
+   */
+  strictDroppedHostImports?: { module: string; name: string }[];
 }
 
 /** TS-level kind hint for a single export parameter or result (#1700). */

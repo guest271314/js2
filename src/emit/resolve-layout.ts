@@ -123,6 +123,32 @@ export function absoluteFuncIndex(mod: WasmModule, h: FuncHandle): number {
  * passes keep in lockstep).
  */
 export function absoluteFuncIndexCached(mod: WasmModule, numImportFuncs: number, h: FuncHandle): number {
+  // (#3001) A baked funcIdx of `undefined` / NaN is NOT a stable-handle producer
+  // bug: it is the strict `--no-host-imports` degrade path leaking. `addImport`
+  // dropped an `env` host import (pushing a `degrade` diagnostic) but a producer
+  // baked the dropped import's now-`undefined` index into a helper body — e.g.
+  // console.log's native-string extern bridge `__str_to_extern` calling the
+  // dropped `__str_from_mem`/`__str_to_mem`/`__str_extern_len`. Resolving it via
+  // the stable-handle path below yields `funcOrdinalToPosition[NaN]` → the opaque
+  // "stable handle undefined (ordinal NaN)" crash. Detect it here and throw a
+  // clean, actionable leak diagnostic that names the dropped-and-coupled import(s)
+  // (recorded on `mod.strictDroppedHostImports`). The `generate*` try/catch
+  // prefixes `Codegen error:` and flips `result.success` to false, so the
+  // degraded binary is never handed to a consumer.
+  if (h === undefined || h === null || Number.isNaN(h as unknown as number)) {
+    const dropped = mod.strictDroppedHostImports;
+    const coupling =
+      dropped && dropped.length > 0
+        ? ` Under --no-host-imports / standalone strict mode the strict gate dropped these host import(s), one of which was baked into a compiled helper body rather than degrading cleanly: ${dropped
+            .map((d) => `${d.module}.${d.name}`)
+            .join(
+              ", ",
+            )}. This feature has no Wasm-native standalone path yet — provide one, or keep the feature off the strict path (see the preceding host-import degrade diagnostics; #2961/#3001).`
+        : ` No dropped host imports were recorded, so this is a codegen producer bug: a call/ref instr was emitted with an undefined function target.`;
+    throw new Error(
+      `absoluteFuncIndex: unresolved call target (funcIdx=${String(h)}) baked into a compiled function body — the call has no resolvable function index.${coupling}`,
+    );
+  }
   if (h < STABLE_FUNC_BASE) return h;
   const pos = mod.funcOrdinalToPosition[h - STABLE_FUNC_BASE];
   // undefined = never minted; NaN = minted but never pushed (the
