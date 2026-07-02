@@ -1,4 +1,4 @@
-// #2970 — the native generator done-result carried `f64 0` as its absent
+// #2979 — the native generator done-result carried `f64 0` as its absent
 // `value`, so an exhausted `g.next().value` read back as a genuine number 0
 // (`v === 0` was TRUE, `v === undefined` false, `v * 2 + 5` → 5) instead of
 // `undefined`. The f64 carrier cannot represent undefined, so the fix stores
@@ -42,7 +42,7 @@ const exhausted = (body: string): string => `export function test(): number {
   ${body}
 }`;
 
-describe("#2970 exhausted generator .value is undefined (dynamic read)", () => {
+describe("#2979 exhausted generator .value is undefined (dynamic read)", () => {
   it("v === undefined is true", async () => {
     expect(await runStandalone(exhausted(`return v === undefined ? 1 : 2;`))).toBe(1);
   });
@@ -84,7 +84,7 @@ describe("#2970 exhausted generator .value is undefined (dynamic read)", () => {
   });
 });
 
-describe("#2970 real values are NOT disturbed", () => {
+describe("#2979 real values are NOT disturbed", () => {
   it("first .value is the yielded 42", async () => {
     expect(
       await runStandalone(`export function test(): number {
@@ -151,7 +151,7 @@ describe("#2970 real values are NOT disturbed", () => {
   });
 });
 
-describe("#2970 .return() / bare return produce undefined values", () => {
+describe("#2979 .return() / bare return produce undefined values", () => {
   it("gen.return() with no argument → value undefined", async () => {
     expect(
       await runStandalone(`export function test(): number {

@@ -6487,7 +6487,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   // precisely the "value is undefined" cases, matching §14.3.3 (keyed/iterator
   // binding initialization defaults fire when the bound value is `undefined`).
   //
-  // (#2970) SECOND arm — the boxed UNDEF_F64 sentinel. An `undefined` that
+  // (#2979) SECOND arm — the boxed UNDEF_F64 sentinel. An `undefined` that
   // travels through an **f64 carrier** (the native generator done-result
   // `.value` field is the producer today) carries the UNDEF_F64 signaling-NaN
   // bit pattern (value-tags.ts); a generic f64→externref boxing site that isn't

@@ -1271,7 +1271,7 @@ function ensureRegisteredNativeGenerator(ctx: CodegenContext, name: string): Nat
   return null;
 }
 
-// (#2171/#2970) The default `value` for a done/empty result. The old comment
+// (#2171/#2979) The default `value` for a done/empty result. The old comment
 // claimed "the consumer never reads value when done=1" — FALSE: JS reads
 // `.value` off a done result routinely, and it must be `undefined`
 // (`g.next().value` after exhaustion — test262 `generators/{no-yield,return}.js`).
@@ -1326,7 +1326,7 @@ function nativeReturnResultFromLocal(info: NativeGeneratorInfo, valueLocal: numb
 function emitExpressionAsF64(ctx: CodegenContext, fctx: FunctionContext, expr: ts.Expression | undefined): number {
   if (!expr) {
     const tmp = allocLocal(fctx, `__gen_value_${fctx.locals.length}`, { kind: "f64" });
-    // (#2970) A missing expression is JS `undefined` (bare `return;`,
+    // (#2979) A missing expression is JS `undefined` (bare `return;`,
     // `.next()` / `.return()` with no argument). Use the UNDEF_F64 sentinel —
     // numerically identical to the old quiet NaN (still a NaN), but
     // distinguishable by sentinel-aware readers so `gen.return().value` /
@@ -2481,7 +2481,7 @@ export function tryCompileNativeGeneratorResultProperty(
 
   // `value`: choose the return ValType from the STATIC type of the result's
   // `value` property. A STATICALLY-NUMERIC `.value` keeps the f64 fast path
-  // (byte-identical to before, and — with the #2970 sentinel producer — an
+  // (byte-identical to before, and — with the #2979 sentinel producer — an
   // exhausted read yields NaN, which is the spec ToNumber(undefined)).
   // Everything else (ref-typed OR no static info — the `g: any` harness shape)
   // now takes the externref path below.
@@ -2501,7 +2501,7 @@ export function tryCompileNativeGeneratorResultProperty(
     return fieldType;
   }
 
-  // (#2970) Dynamic / ref-typed `.value` read → externref, covering EVERY
+  // (#2979) Dynamic / ref-typed `.value` read → externref, covering EVERY
   // registered result carrier (the old split covered only externref-elem
   // carriers here and sent the no-static-info shape — exactly the test262
   // harness path `assert.sameValue(g.next().value, undefined)` — down the f64
@@ -2516,7 +2516,7 @@ export function tryCompileNativeGeneratorResultProperty(
 }
 
 /**
- * (#2970) True when `typeIdx` is one of the native generator IteratorResult
+ * (#2979) True when `typeIdx` is one of the native generator IteratorResult
  * structs (`__NativeGeneratorResult_<kind>`), whose f64 `value` field uses the
  * UNDEF_F64 sentinel as the absent/done marker. Generic struct-field readers
  * (member-get dispatch) use this to apply sentinel-aware boxing for exactly
@@ -2528,7 +2528,7 @@ export function isNativeGeneratorResultStruct(ctx: CodegenContext, typeIdx: numb
 }
 
 /**
- * (#2970) Instruction tail that converts an f64 already on the stack into an
+ * (#2979) Instruction tail that converts an f64 already on the stack into an
  * externref with sentinel canonicalization: the UNDEF_F64 bit pattern becomes
  * the null externref (standalone canonical `undefined`), anything else is
  * boxed via `__box_number`. Needs a caller-provided f64 scratch local.
@@ -2549,7 +2549,7 @@ export function sentinelAwareF64BoxInstrs(f64ScratchIdx: number, boxNumberIdx: n
 }
 
 /**
- * (#2970) Build the externref-producing `.value` read chain over ALL candidate
+ * (#2979) Build the externref-producing `.value` read chain over ALL candidate
  * result carriers, canonicalizing the absent/done value to the null externref
  * (the standalone canonical `undefined`). Mirrors `buildOpenResultRead`'s
  * nested ref.test chain; the no-match default is the null externref.

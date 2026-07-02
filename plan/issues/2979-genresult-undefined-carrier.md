@@ -1,5 +1,5 @@
 ---
-id: 2970
+id: 2979
 title: "Standalone: native gen-result done `.value` reads back as 0/garbage — canonical-undefined carrier (UNDEF_F64 sentinel producer + sentinel-aware readers)"
 status: done
 completed: 2026-07-02
@@ -18,7 +18,11 @@ related: [2938, 2920, 2106, 2966]
 blocks: [2938]
 ---
 
-# #2970 — canonical undefined for the native generator done-result `.value`
+# #2979 — canonical undefined for the native generator done-result `.value`
+
+> **Provenance**: formerly #2970; re-id'd because id 2970 was taken on main by
+> the import-meta per-module identity issue (parallel session, #2531 allocator
+> race). Code comments and the test file were renamed in the same commit.
 
 Carved out of the #2938 revival (task #4). **This fix stands alone on main**:
 the exhausted **with-yield** native generator `.value` is wrong on current main
@@ -105,7 +109,7 @@ awareness (bounded — NOT the #2106 40-site wiring):
 the completion record.)
 
 - `npx tsc --noEmit` clean; prettier + `biome lint` clean on all touched files.
-- `tests/issue-2970.test.ts` (new, 16 cases): exhausted-`.value` identity
+- `tests/issue-2979.test.ts` (new, 16 cases): exhausted-`.value` identity
   matrix (===undefined / ==null / ===null / ===0 / arithmetic NaN / truthiness /
   default-param application), real-value preservation (first yield 42, yielded
   0 stays 0 and is NOT undefined, return-arm 7, computed-NaN NOT undefined —

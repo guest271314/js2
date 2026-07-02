@@ -174,7 +174,7 @@ export function fillMemberGetDispatch(ctx: CodegenContext): void {
       // #2108) — box helpers were registered at reserve so this is funcMap-read
       // only. externref field → no-op; f64/i32 → __box_number; ref → extern.convert_any.
       //
-      // (#2970) EXCEPTION — native generator IteratorResult structs: their f64
+      // (#2979) EXCEPTION — native generator IteratorResult structs: their f64
       // `value` field uses the UNDEF_F64 sentinel as the absent/done marker
       // (`g.next().value` after exhaustion is `undefined`, not a number). Box
       // sentinel-aware: sentinel → null externref (the standalone canonical
@@ -208,7 +208,7 @@ export function fillMemberGetDispatch(ctx: CodegenContext): void {
     };
 
     // Build the body FIRST so `usedSentinelBox` is known, then append the f64
-    // scratch local (index 2) only when a (#2970) sentinel-aware gen-result arm
+    // scratch local (index 2) only when a (#2979) sentinel-aware gen-result arm
     // actually referenced it — keeps every dispatcher without such an arm
     // byte-identical (host mode never has gen-result structs).
     const dispatchBody: Instr[] = [
