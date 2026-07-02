@@ -1,5 +1,5 @@
 ---
-id: 2930
+id: 2936
 title: "Standalone: late-import funcIdx-shift desync (raw-import + deferred-batch regime mix) — the __str_flatten invalid-module class blocking no-yield native generators"
 status: done
 assignee: ttraenkler/sr-funcidx
@@ -17,6 +17,10 @@ umbrella: 2860
 ---
 
 # Late-import funcIdx-shift desync: raw-import drift + deferred-batch flush
+
+> Formerly #2930; id ceded to the parallel session's
+> `2930-import-alias-name-mismatch-resolution.md` (landed on main first —
+> same allocator race as the 2920→2933 re-id).
 
 Blocking bug for #2933 (formerly tracked as #2920 in this session; id ceded to
 PR #2424's issue): with the no-yield native-generator bails relaxed, ~1-3% of
@@ -65,7 +69,7 @@ interleaved reconcile → the window opens.
 candidate generator that **captures an outer local** skips the `unionFound`
 trigger (candidate) but still pulls the host gen-suite
 (`sourceNeedsGeneratorHostImports` checks `generatorCapturesOuterScope`
-separately). Minimal main-lane repro (tests/issue-2930.test.ts):
+separately). Minimal main-lane repro (tests/issue-2936.test.ts):
 
 ```ts
 const greet = (n: string): string => "hi " + n; // arrow → raw __make_callback
@@ -127,7 +131,7 @@ Rejected alternatives:
     the no-yield candidate path (or fix the typing) before relaxing.**
 - **Byte-inert**: 60 non-generator + 60 generator test262 files × {gc,
   standalone}, sha256 vs origin/main — all 240 identical.
-- **Tests**: tests/issue-2930.test.ts (main-lane repro, standalone validates +
+- **Tests**: tests/issue-2936.test.ts (main-lane repro, standalone validates +
   gc lane unchanged); generator equivalence suite (36) green;
   issue-1461/1677 suites — 4 failures in issue-1461.test.ts
   (Symbol.isConcatSpreadable) are pre-existing on pristine main (verified A/B).

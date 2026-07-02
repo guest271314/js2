@@ -1,4 +1,4 @@
-// #2930 — late-import funcIdx-shift desync: a raw (finalize-regime) host
+// #2936 — late-import funcIdx-shift desync: a raw (finalize-regime) host
 // import (`env.__make_callback`) followed by a deferred late-import batch
 // (`addGeneratorImports`'s `__gen_*` suite) corrupted the native-string
 // helpers' baked sibling calls: the batch flush only shifted refs >=
@@ -29,10 +29,10 @@ export function test(): string {
 }
 `;
 
-describe("issue #2930 — raw-import + deferred-batch shift-regime mix", () => {
+describe("issue #2936 — raw-import + deferred-batch shift-regime mix", () => {
   it("standalone module with arrow + outer-capturing candidate generator validates", async () => {
     const r = await compile(SRC, {
-      fileName: "issue-2930.ts",
+      fileName: "issue-2936.ts",
       target: "standalone",
       skipSemanticDiagnostics: true,
     });
@@ -46,7 +46,7 @@ describe("issue #2930 — raw-import + deferred-batch shift-regime mix", () => {
 
   it("gc/host lane compiles and validates unchanged", async () => {
     const r = await compile(SRC, {
-      fileName: "issue-2930.ts",
+      fileName: "issue-2936.ts",
       skipSemanticDiagnostics: true,
     });
     expect(r.success).toBe(true);
