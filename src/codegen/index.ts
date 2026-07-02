@@ -24,7 +24,7 @@ import { createEmptyModule } from "../ir/types.js";
 import { compileIrPathFunctions, type IrIntegrationError } from "../ir/integration.js";
 import { irVal, type IrType } from "../ir/nodes.js";
 import { buildTypeMap, type LatticeType } from "../ir/propagate.js";
-import { planIrCompilation, type IrFallbackReason } from "../ir/select.js";
+import { planIrCompilation, irClosureSignatureFromFunctionTypeNode, type IrFallbackReason } from "../ir/select.js";
 import { createCodegenContext } from "./context/create-context.js";
 import type { FallbackCounts } from "./fallback-telemetry.js";
 import { buildLeakedHostImportError, scanForLeakedHostImports } from "./host-import-allowlist.js";
@@ -682,6 +682,17 @@ function resolvePositionType(
       const ir = objectIrTypeFromTsType(ctx, tsType);
       if (ir) return ir;
       throw new Error(`object TypeNode ${ts.SyntaxKind[node.kind]} could not be lowered to IrType.object`);
+    }
+    // #2859 — function-typed position (`fn: () => number`). Mirrors the
+    // selector's `resolveParamType` FunctionTypeNode arm: the signature is
+    // built by the SAME helper, so the override the lowerer receives compares
+    // `irTypeEquals`-equal to the signature a slice-3 closure literal argument
+    // produces. A claimed function reaching the throw below means selector and
+    // override builder diverged (the standard out-of-sync guard → legacy).
+    if (ts.isFunctionTypeNode(node)) {
+      const signature = irClosureSignatureFromFunctionTypeNode(node);
+      if (signature) return { kind: "closure", signature };
+      throw new Error(`function TypeNode not expressible as an IR closure signature`);
     }
     throw new Error(`unsupported TypeNode kind ${ts.SyntaxKind[node.kind]}`);
   }

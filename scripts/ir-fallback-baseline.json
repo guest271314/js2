@@ -1,8 +1,7 @@
 {
-  "generated": "2026-06-16",
+  "generated": "2026-07-02",
   "unintended": {
-    "body-shape-rejected": 31,
-    "param-type-not-resolvable": 1,
+    "body-shape-rejected": 32,
     "call-graph-closure": 7,
     "class-method": 6
   },
