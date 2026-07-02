@@ -2,9 +2,10 @@
 id: 2856
 title: "IR: drive body-shape-rejected fallback bucket to zero (dominant unintended bucket)"
 status: ready
+spec: ready
 sprint: current
 created: 2026-06-30
-updated: 2026-06-30
+updated: 2026-07-02
 priority: low
 horizon: l
 feasibility: hard
@@ -14,7 +15,7 @@ area: ir, codegen
 language_feature: compiler-internals
 goal: ir-full-coverage
 parent: 2855
-related: [1376, 1131]
+related: [1376, 1131, 2138, 2135, 2134]
 ---
 
 # #2856 — IR: `body-shape-rejected` → 0
@@ -208,3 +209,189 @@ internals) for full sub-attribution of the class-member rejects.
 - `scripts/ir-fallback-baseline.json` — ratchet down as slices land.
 - `src/codegen/index.ts:1013` — `STRICT_IR_REASONS` once at zero.
 - `plan/log/ir-adoption.md` — promote rows (regenerated).
+
+## Implementation Plan — extern-in-IR (host-global member access)
+
+> Spec'd 2026-07-02 (sr-funcidx) against `origin/main` post-#2454 (the Step-1
+> recorder is merged). **Re-`grep` the function names before editing** —
+> `isPhase1Expr`, `whyNotIrClaimable`, `isKnownExternClass`, `getExternClassInfo`,
+> the `from-ast.ts` member-read/call lowering, `IrType`. This plan covers the
+> **first slice** (host-global member access, 17/31); the smaller arms are listed
+> separately at the end for dev-lane pickup.
+
+### What the bucket actually is (grounded by the Step-1 histogram)
+
+17 of 31 `body-shape-rejected` functions reject on host-global member access in
+`const` initializers — all DOM: `const host = document.body` (13
+`PropertyAccessExpression`) and `const box = document.createElement("div")` (4
+`CallExpression`). The receiver identifier (`document`, `window`, …) is a host
+ambient global, so `isPhase1Expr`'s identifier arm rejects it
+(`scope.has("document") === false`, `select.ts` ~line 1594), which cascades: the
+property-access / call arm rejects because its receiver sub-expression isn't
+Phase-1. There is **no bounded partial** that flips these without an actual
+extern host-object member-access path in the IR (the `Math.*` unary whitelist
+`IR_MATH_UNARY_WHITELIST` and the extern-_class_ `new`/`getExternClassInfo`
+slice-10 machinery do NOT cover ambient host-object receivers).
+
+### The representation (front-end axis — IR, backend-agnostic)
+
+The IR type system already has the pieces (no new IrType needed):
+
+- `IrType` `{ kind: "extern"; className: string }` (`nodes.ts:225`) — already
+  used for slice-10 extern-class instances (RegExp, Uint8Array). A host-global
+  receiver resolves to this with a synthetic className (e.g. `"HostGlobal"` or
+  the ambient symbol name `"Document"`).
+- `ValType` `ref_extern` / `externref` (`types.ts:165-166`) — the lowered carrier.
+- `Instr` already has `extern.convert_any` / `any.convert_extern` (`types.ts:327`).
+
+Add two IR **node kinds** (in `nodes.ts`), both carrying an `extern` result type:
+
+1. `HostMemberGet { recv: IrExpr; name: string }` — `document.body`.
+2. `HostMethodCall { recv: IrExpr; name: string; args: IrExpr[] }` —
+   `document.createElement("div")`.
+
+`recv` is itself an IR expr that resolves to an extern (the host-global
+identifier, lowered to a `__get_globalThis`-style host handle — see
+`identifiers.ts:825-831` for the legacy `globalThis` handle the receiver reuses).
+
+**Effect annotation (coordinates with #2134 IR effect model).** Host member
+reads and host calls are **effectful/opaque**: they may observe or mutate host
+state and must NOT be reordered, CSE'd, or dropped-if-unused by any IR pass. Mark
+both new nodes with an `effect: "host"` (or the #2134 effect lattice's top
+element) so the IR scheduler treats them as ordering barriers. This is the one
+genuinely new IR-semantics addition; get it reviewed against #2134's model before
+lowering work. Until #2134 lands, the conservative stance is "never reorder a
+host node relative to any other host node or side-effecting node" — encode that
+as a pinned/sequenced flag on the node.
+
+### Lowering (backend axis — differs ONLY at lower.ts / codegen-linear)
+
+Per the north star (everything routes through IR; backends differ only at
+lowering), the two new nodes lower differently per backend but are represented
+once:
+
+- **WasmGC (`src/ir/lower.ts`, JS-host lane):**
+  - `HostMemberGet` → the existing host dynamic-get path: `recv` (externref) →
+    `__extern_get(recv, nameGlobal)` → externref. Reuse the exact import +
+    string-constant-global machinery the legacy `expressions/property-access.ts`
+    emits for `document.body` today (do NOT invent a new import — resolve the
+    same `__extern_get` via `ensureLateImport`, and mind the funcIdx-shift
+    discipline: `__extern_get` is a late import, so its idx must flow through
+    `funcMap`, never a cached number — this is the #2941 lineage, keep it
+    name-based).
+  - `HostMethodCall` → `__proto_method_call(recv, nameGlobal, argsVec)` (or the
+    exact host-method-call import the legacy call path uses — confirm in
+    `expressions/calls.ts`). Args lower as IR exprs coerced to externref.
+  - Result stays `extern`; a `const x = document.body` binding gives `x` IrType
+    `extern`, which the IR already carries through locals/returns.
+
+- **Linear / standalone (`src/codegen-linear` + the standalone gate):** there is
+  **NO host** — `document.*` cannot be satisfied. **Dual-mode rule:** this is not
+  a "new host import without a standalone story" violation because the standalone
+  story is the _existing_ #1472 refusal — `HostMemberGet`/`HostMethodCall` on a
+  host-global receiver must route to the same compile-time refusal the legacy
+  standalone path already emits (`STANDALONE_REFUSED_IMPORT` → `__extern_*`
+  refusal in `late-imports.ts`). So: the IR **selector** may only claim these
+  nodes when NOT `noJsHostTarget(ctx)`; under standalone/wasi the function stays
+  `body-shape-rejected` → host path → the existing clean #1472 refusal. Net: the
+  bucket reaches zero **in the JS-host lane** (which is what the playground/
+  website example corpus targets — it runs in the browser); standalone keeps its
+  honest refusal. Document this scope explicitly in the ratchet note: the
+  `body-shape-rejected` STRICT promotion applies to the JS-host lane; a
+  standalone `document.*` legitimately routes to `deferred`, not `unintended`.
+
+### Selector change (`select.ts`)
+
+`isPhase1Expr` gains a host-global-receiver arm, gated on JS-host mode:
+
+- Recognise a host-global receiver: an identifier whose checker symbol resolves
+  to an **ambient `declare` global** (lib.dom.d.ts / lib.es\*.d.ts) rather than a
+  local binding. Prefer the checker (`ctx.checker.getSymbolAtLocation` →
+  `symbol.declarations` has an ambient/`.d.ts` source) over a hardcoded name
+  list — a hardcoded `{document,window,console,performance}` set is the
+  fallback if the checker resolution proves flaky, but the checker path
+  generalises to any host global and avoids a maintenance list.
+- `PropertyAccessExpression` with a host-global receiver + Identifier name →
+  accept (lower to `HostMemberGet`).
+- `CallExpression` whose callee is `<host-global>.<method>` → accept (lower to
+  `HostMethodCall`); args must be Phase-1.
+- **`whyNotIrClaimable` must stay in lockstep with `from-ast.ts`** — this is the
+  #2135 (single capability predicate) concern, and it is **load-bearing here
+  because of #2138** (see next).
+
+### Coordination with #2138 (compile-once inversion) — SEQUENCING DEPENDENCY
+
+Under `#2138` Slice 2 (`JS2WASM_IR_FIRST`), a fully-claimed function's legacy
+body is **skipped** (placeholder `unreachable`) and only the IR overlay fills it.
+So a function this slice claims for host-global access **must be genuinely
+IR-lowerable end-to-end** — if `select.ts` claims it but `from-ast.ts` throws
+(select↔builder drift), under IR-first that is a **live `unreachable` trap**, not
+a silent demote. Two hard requirements:
+
+1. **select↔from-ast parity is mandatory, not nice-to-have.** Every shape
+   `isPhase1Expr` accepts here, `from-ast.ts` MUST lower without throwing. Add
+   the parity to the #2135 predicate if #2135 lands first; otherwise mirror the
+   accept/throw sites exactly and add a parity test (compile each of the 17
+   corpus functions through `from-ast` and assert no throw).
+2. **Explicit sequencing:** land this slice's `from-ast` lowering + parity
+   **before** #2138 Slice 2 adds host-global-reading functions to its
+   `skippable` set — OR, if #2138 Slice 2 lands first, its skippable-closure
+   computation must exclude any function whose claim depends on a host node
+   until this slice proves the lowering. Note in #2138 Slice 2's trap list:
+   "host-global member reads (#2856) are only skippable once their IR lowering
+   is proven — until then treat a host-node-claiming function as non-skippable."
+   Cross-reference both directions (added to this issue; #2138 owner to mirror).
+
+Because #2138 is itself `blocked_by: [2167]` (Fable gate), this slice is not
+blocked ON #2138 — it can land first and _reduce_ #2138's risk (one fewer
+select↔builder drift class). Recommended order: **this slice → #2135 →
+#2138 Slice 2**.
+
+### Decomposition into dev slices
+
+1. **`HostMemberGet` (property read)** — the 13-function majority.
+   selector arm + `nodes.ts` node + `lower.ts` WasmGC `__extern_get` lowering +
+   from-ast parity + JS-host-only gate. Ratchet `body-shape-rejected` down ~13.
+2. **`HostMethodCall`** — the 4 `document.createElement(...)` cases. Adds the
+   host-method-call lowering + args. Ratchet down ~4.
+3. **STRICT promotion** — once the JS-host-lane bucket is zero for these,
+   scope-add `body-shape-rejected` to `STRICT_IR_REASONS` **for the JS-host lane**
+   (verify the standalone-refusal path still routes `document.*` to a graceful
+   CE, not a STRICT hard-error). Promote `plan/log/ir-adoption.md` rows.
+
+Each slice: verify adopted functions **actually take the IR path** — re-run
+`JS2WASM_IR_SHAPE_DIAG=1 pnpm run check:ir-fallbacks -- --shape-diag` and confirm
+the target functions leave the `body-shape-rejected` set (not merely that tests
+stay green — the hazard is a silent legacy fallback keeping tests green while the
+IR path is NOT exercised). Full `merge_group` validation, not a scoped sample
+(broad-impact rule).
+
+### Constraints honored (coordinator's checklist)
+
+- **(a) North star:** the two host nodes are IR-represented once; WasmGC lowers
+  to `__extern_get`/host-call, linear/standalone routes to the existing #1472
+  refusal — backends differ only at lowering, nothing bypasses IR.
+- **(b) #2138:** select↔from-ast parity is made mandatory (a wrong claim traps
+  under IR-first); explicit two-way sequencing note added; recommended order
+  puts this slice before #2138 Slice 2.
+- **(c) Dual-mode:** no NEW host import — reuses the existing `__extern_get` /
+  host-method-call imports; the standalone story is the existing #1472 refusal,
+  so the JS-host claim never leaks an unsatisfiable import into a standalone
+  build.
+
+### Smaller dev-sized arms (leave for dev-lane pickup — NOT this slice)
+
+From the same histogram, independent of extern-in-IR, mechanical additions:
+
+- `vardecl-typenode:ArrayType` (2) — `const x: number[] = …`: widen
+  `isPhase1TypeNode` to accept array type annotations (the value already lowers).
+- `body-unhandled-stmt:IfStatement` (3) + `nontail-unhandled-stmt:IfStatement`
+  (1) + `nontail-if-cond` (1) + `tail-unhandled` (1) — `if`/`else` at
+  constructor-body / non-tail positions; a from-ast `if`-statement handler in
+  body-statement position.
+- `unattributed-arm:helper-internal` (4) — instrument
+  `isPhase1ObjectLiteral`/`TryStatement`/`ClosureLiteral`/`ForStatement`
+  internals (Step-1b) to sub-attribute, then handle.
+  These ~9 are dev-lane; the coordinator authorized folding at most ONE trivial arm
+  as a recorder-discipline validation slice — deferred here to keep this a
+  docs-only spec PR.
