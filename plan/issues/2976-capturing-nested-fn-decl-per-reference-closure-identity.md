@@ -1,7 +1,9 @@
 ---
 id: 2976
 title: "Capture-carrying nested function declaration materializes a FRESH closure per reference — F === F is false; statics/sidecar writes land on dead instances"
-status: ready
+status: done
+completed: 2026-07-02
+assignee: ttraenkler/dev-2937f
 created: 2026-07-02
 priority: high
 horizon: l
@@ -16,6 +18,48 @@ depends_on: []
 ---
 
 # #2976 — capturing nested fn decl: fresh closure struct per reference
+
+> **DONE 2026-07-02 (dev-2937f).** Fixed in `src/codegen/closures.ts`
+> `emitFuncRefAsClosure` with two layers:
+>
+> 1. **Module-level artifact dedupe** (`ctx.nestedFnClosureArtifacts`): ONE
+>    closure struct type + trampoline per funcName (previously minted fresh
+>    per reference site — type/function bloat on top of the identity bug).
+>    The trampoline is stored by NAME and re-resolved through `ctx.funcMap`
+>    at each emission, so late-import funcIdx shifts cannot desync a cached
+>    raw index (the #1461/#2191/#2193 hazard family).
+> 2. **Per-activation instance memo** (`fctx.nestedFnClosureMemos`,
+>    `emitMemoizedNestedFnClosure`): every reference emits a
+>    `ref.is_null`-guarded lazy build into one memo local. The RUNTIME guard
+>    — deliberately NOT a prologue hoist and NOT compile-order memoization —
+>    is load-bearing twice: (a) it preserves the existing value-capture
+>    semantics (immutable captures copy their value at the first DYNAMIC
+>    reference, exactly where the old per-site build copied them; a prologue
+>    hoist would run before hoisted-over initializers), and (b) it is
+>    control-flow-safe (compile-order memoization would let a reference in a
+>    runtime-skipped branch strand a later branch reading an uninitialized
+>    local).
+>
+> **Measured**: `F === F` / `a === b` now true; `Constructor.resolve` statics
+> visible through V8's capability protocol end to end — the #2671
+> `call-resolve-element*` / `resolve-before-loop-exit*` /
+> `resolve-from-same-thenable*` family advances from capability rejection
+> ("resolve is not a function") to the NEXT layer: in-callback value
+> marshaling (`values.length`, capture write-back counts) — that residual is
+> the documented **#2623** cluster (multi-hop host→wasm resolve-element
+> callback cast), not this issue. Guards: `tests/issue-2976.test.ts` (4/4).
+>
+> **Neutrality**: byte-identical (sha256 corpus) for programs without
+> capture-carrying nested-fn value references; compiled-acorn binary
+> byte-identical; closure/callback vitest battery failure set identical to
+> base (all pre-existing).
+>
+> **Pre-existing residual (unchanged, pinned in the guard test)**: a capture
+> reassigned AFTER materialization reads back the stale snapshot
+> (`var n=1; function f(){return n} var g=f; n=42; g()` → 1, spec says 42) —
+> the capture-mutability analysis treats `n` as an immutable value-copy both
+> pre- and post-fix (pre-fix: `1|42|false`; post-fix: `1|42|true`). Separate
+> mutability-analysis gap; candidate follow-up in the #2826 capture family.
 
 ## Problem (measured, minimal repro)
 
