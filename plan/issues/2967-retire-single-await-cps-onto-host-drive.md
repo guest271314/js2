@@ -58,6 +58,22 @@ population), so it must be measured, not assumed.
    - nested/buried await (await in non-canonical statement positions),
    - await in loops/branches (needs a real CFG, coordinate with #1373b).
 
+## Producer fix owed (stack-balance ratchet, from the #1042 PR)
+
+An UNTYPED resume binding (`const seq = await f()` with no annotation) is
+externref on the host lane (`resumeBindingValType` falls back to externref),
+so downstream numeric uses (`seq.toString()`, arithmetic through call args)
+lean on the stack-balance fixup net's externref→f64 unbox — the #1042 PR grew
+`call-arg-coerce` 6→7 (playground `js/async.ts` `main`) and refreshed the
+baseline (sanctioned path; the same PR banked `default-value-lossy` 78→42).
+The producer fix: resolve unannotated resume-binding types from the checker's
+awaited type (`Promise<T>` → T → `resolveWasmType`) — but it must be applied
+CONSISTENTLY in all three `resumeBindingValType` consumers (spill fields,
+resume-fn binding locals, the spill-safe gate) and decided per-lane (typing
+wasi bindings changes the wasi lane's frames — measure). Fold into this
+issue's engine-convergence pass; ratchet `call-arg-coerce` back to ≤6 as the
+acceptance check.
+
 ## Also filed here (pre-existing, probe-verified on main 2026-07-02)
 
 - `const p = f(); return await p;` — awaiting a promise held in a LOCAL
@@ -66,7 +82,7 @@ population), so it must be measured, not assumed.
   promise (likely the call-site wrap / consumed-as-value classification, not
   the suspension engine).
 - `tests/async-function.test.ts` fails to LOAD on main (`Cannot find module
-  './helpers.js'` — helpers moved to `tests/equivalence/` long ago); the suite
+'./helpers.js'` — helpers moved to `tests/equivalence/` long ago); the suite
   silently runs 0 tests. Fix the import path or fold the file into
   `tests/equivalence/async-function.test.ts`.
 
