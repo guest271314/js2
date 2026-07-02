@@ -229,7 +229,55 @@ backend decision at lowering), Null/Undefined → `null` (no payload).
   boxed-fallthrough describe/key helpers + 2 optional-`tag` consumers,
   all fixed with explicit dynamic arms.
 
-Slice 1 landed via PR (this branch). Slices 2–4 remain — issue stays
-`in-progress`; slice 2 must coordinate with #2138's skip-set contract
-(in flight on `issue-2138-ir-first-slice1`) before touching `select.ts`
-/ the from-ast producers.
+- **Equivalence-suite classification** (`tests/equivalence/`, 211 files /
+  1638 tests): a triple-concurrent run showed 56 failures — re-run SOLO the
+  count collapses to **4 failures in 2 files**
+  (`arguments-nested-and-loops` 1, `iife-and-call-expressions` 3), and
+  clean main (`affc55523`) solo on the same 2 files shows the **identical
+  2-files / 4-failed / 112-passed** result. Verdict: 4 pre-existing main
+  failures + ~52 load flakes (the known pass→compile-timeout mode under
+  CPU contention). **Zero equivalence regressions from this branch**,
+  consistent with the 39/39 byte-identity proof.
+
+## Handoff — Slice 2+ (written at 2026-07-02 budget wind-down, fable-1)
+
+Slice 1 is complete and PR'd from branch `issue-2949-ir-dynamic-value-rep`
+(worktree was `agent-a581bd5866af72b4b`, disposable). The claim lock will be
+released at termination so the next window's senior-dev can pick this up.
+
+**Slice 2 (producers + selector) — start here:**
+
+1. `src/ir/propagate.ts` already computes a `dynamic` lattice top; today
+   from-ast REJECTS when it converges there. Map lattice-`dynamic` →
+   `irDynamic()` for params/locals/returns instead of throwing
+   (`param-type-not-resolvable` / `type-resolution-failure` /
+   `return-type-not-resolvable` shapes first).
+2. Widen the #2135 capability rows in `select.ts` to claim those shapes.
+   **Coordinate with #2138 first** — sr-irfirst's
+   `issue-2138-ir-first-slice1` (in flight at wind-down, touches
+   `src/codegen/index.ts`) owns the skip-set contract; a
+   claimed-because-dynamic function must still satisfy the skipped-slot
+   hard-error rules. Merge their landed work before touching select.ts.
+3. The verifier is already strict (R1–R4 enforced, hard-fail lane on) —
+   producers that emit un-unboxed dynamic uses will fail verify, which is
+   the designed backstop while slice 3 lowering is absent. Until slice 3,
+   producers may only emit MOVE-shaped dynamic flows (param→return,
+   param→call-arg with dynamic signature) — the lowering arms for dynamic
+   box/unbox/tag.test throw staged errors on purpose.
+
+**Slice 3 (lowering):** route dynamic box/unbox/tag.test through
+`emitBox`/`emitUnbox`/`emitTagLoad` + a new `IrDynamicLowering` handle
+(shape spec'd in §4 above) backed by the `__any_box_*`/`$AnyValue` family
+(`ensureAnyValueType` / `boxToAny` / `__any_from_extern`). Coordinate with
+#2953 (BackendEmitter pushRaw routing — unowned at wind-down).
+
+**Slice 4 (measurement):** 233-file corpus + `ir_first` test262 lane
+(#2947); record claim-rate + bucket deltas HERE per acceptance criteria.
+
+**Gotchas discovered:** (a) `resolveWasmType`'s any-arm is mode-split
+(`ctx.fast` → `ref_null $AnyValue`, else externref) — `resolveDynamic` in
+`integration.ts` mirrors it and MUST stay in lockstep; (b) `valKindOf`
+returns null for non-val IrTypes, so any new per-op verifier rule must
+explicitly check `kind === "dynamic"` or it silently skips; (c)
+`prove-emit-identity.mjs` (baseline on main, check on branch) is the cheap
+byte-inertness oracle — use it on every producer-free slice.
