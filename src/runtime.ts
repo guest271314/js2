@@ -11790,19 +11790,9 @@ assert._isSameValue = isSameValue;
       // A thenable's pre-fix behavior was an unconditional reject, so there is
       // no working identity to preserve for the wrapped class.
       const _wrapThenableElement = (v: any): any => {
-        const dbg = process.env.JS2WASM_DEBUG_THENABLE === "1";
-        if (v == null || typeof v !== "object" || !_isWasmStruct(v)) {
-          if (dbg)
-            console.error(
-              `[thenable] skip: type=${typeof v} isStruct=${v != null && typeof v === "object" ? _isWasmStruct(v) : "n/a"}`,
-            );
-          return v;
-        }
+        if (v == null || typeof v !== "object" || !_isWasmStruct(v)) return v;
         const exports = callbackState?.getExports();
-        if (!exports) {
-          if (dbg) console.error("[thenable] no exports");
-          return v;
-        }
+        if (!exports) return v;
         try {
           // A struct-SHAPE `then` field is read via the compiled `__sget_then`
           // getter — `_safeGet` reads only the sidecar/accessor/proto layers by
@@ -11816,15 +11806,11 @@ assert._isSameValue = isSameValue;
             t = undefined;
           }
           if (t == null) t = _safeGet(v, "then", callbackState);
-          if (dbg)
-            console.error(
-              `[thenable] then=${typeof t} isClosure=${t != null && typeof t === "object" ? _isWasmClosureValue(t, callbackState) : "n/a"}`,
-            );
           if (t != null && (typeof t === "function" || _isWasmClosureValue(t, callbackState))) {
             return _wrapForHost(v, exports);
           }
-        } catch (e) {
-          if (dbg) console.error(`[thenable] threw: ${(e as Error)?.message}`);
+        } catch {
+          /* not a thenable — pass through raw */
         }
         return v;
       };
