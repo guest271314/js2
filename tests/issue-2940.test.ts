@@ -26,12 +26,21 @@ async function score(name: string, body: string): Promise<{ status: string; vacu
 
 describe("#2940 runner vacuity scorer", () => {
   it("dead harness callback (asserts inside, never runs) → fail + vacuous", async () => {
-    // Under standalone WITHOUT the #2939 dispatch fix, this nested-scope callback
-    // is dropped by the inline dynamic dispatch, so the assertion never runs and
-    // the test would vacuously "pass". The scorer must catch it.
+    // The nested-scope harness-wrapper callback is dropped by the inline dynamic
+    // dispatch, so the assertion never runs and the test would vacuously "pass".
+    // The scorer must catch it.
+    //
+    // NOTE (post-#2939): the #2939 dispatch fix now rescues all-externref-param
+    // callbacks (e.g. `function(TA)` → any/externref), so that shape EXECUTES and
+    // is no longer a dead callback. To keep exercising a genuinely-dropped
+    // callback, this fixture uses a numeric-typed param — a shape #2939 does NOT
+    // register as a dispatch candidate (its restriction is all-externref params +
+    // externref/void return). It stays dropped → vacuous, so the scorer is still
+    // validated. Verified 2026-07-02: `function(TA: number)` → fail + vacuous on
+    // the merged tree, while `function(TA)` → genuine pass (executes).
     const { status, vacuous } = await score(
       "dead-callback",
-      `testWithTypedArrayConstructors(function(TA) {
+      `testWithTypedArrayConstructors(function(TA: number) {
          assert.sameValue(1, 1, "this assert never runs when the callback is dropped");
        });`,
     );
