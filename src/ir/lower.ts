@@ -1328,7 +1328,9 @@ export function lowerIrFunctionBody<S>(
           throw new Error(`ir/lower: resolver cannot lower refcell<${inner.kind}> (${func.name})`);
         }
         emitValue(instr.value, out);
-        emitter.pushRaw(out, { op: "struct.new", typeIdx: cell.typeIdx });
+        // (a5) ref-cell family (#2953): route through emitRefCellNew —
+        // byte-identical {op:"struct.new"} on WasmGC.
+        emitter.emitRefCellNew(cell, out);
         return;
       }
       case "refcell.get": {
@@ -1343,11 +1345,9 @@ export function lowerIrFunctionBody<S>(
           throw new Error(`ir/lower: resolver cannot lower refcell<${getInner.kind}> (${func.name})`);
         }
         emitValue(instr.cell, out);
-        emitter.pushRaw(out, {
-          op: "struct.get",
-          typeIdx: cell.typeIdx,
-          fieldIdx: cell.fieldIdx,
-        });
+        // (a5) ref-cell family (#2953): route through emitRefCellGet —
+        // byte-identical {op:"struct.get"} on WasmGC.
+        emitter.emitRefCellGet(cell, out);
         return;
       }
       case "refcell.set": {
@@ -1363,11 +1363,9 @@ export function lowerIrFunctionBody<S>(
         }
         emitValue(instr.cell, out);
         emitValue(instr.value, out);
-        emitter.pushRaw(out, {
-          op: "struct.set",
-          typeIdx: cell.typeIdx,
-          fieldIdx: cell.fieldIdx,
-        });
+        // (a5) ref-cell family (#2953): route through emitRefCellSet —
+        // byte-identical {op:"struct.set"} on WasmGC.
+        emitter.emitRefCellSet(cell, out);
         return;
       }
       // Slice 4 (#1169d): class ops.

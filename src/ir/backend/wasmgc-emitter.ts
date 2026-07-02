@@ -19,7 +19,7 @@ import { emitConstInstr } from "../lower.js";
 import type { IrBinop, IrInstr, IrUnop } from "../nodes.js";
 import type { BlockType, Instr } from "../types.js";
 import type { BackendEmitter } from "./emitter.js";
-import type { IrClassLowering, IrObjectStructLowering, IrVecLowering } from "./handles.js";
+import type { IrClassLowering, IrObjectStructLowering, IrRefCellLowering, IrVecLowering } from "./handles.js";
 
 export class WasmGcEmitter implements BackendEmitter<Instr[]> {
   readonly backend = "wasmgc" as const;
@@ -219,6 +219,23 @@ export class WasmGcEmitter implements BackendEmitter<Instr[]> {
       catches,
       ...(catchAll ? { catchAll } : {}),
     });
+  }
+
+  // ---- (a5) ref-cell family (#2953) — byte-identical to the prior inline
+  // `out.push({op:"struct.new"/"struct.get"/"struct.set"...})` in the
+  // refcell.new/get/set arms of lower.ts. The WasmGC stream is unchanged; this
+  // moves the push behind the trait so a second backend can realize the same
+  // intent (a 1-field mutable struct) as STRUCT_NEW / STRUCT_GET / STRUCT_SET.
+  emitRefCellNew(layout: IrRefCellLowering, out: Instr[]): void {
+    out.push({ op: "struct.new", typeIdx: layout.typeIdx });
+  }
+
+  emitRefCellGet(layout: IrRefCellLowering, out: Instr[]): void {
+    out.push({ op: "struct.get", typeIdx: layout.typeIdx, fieldIdx: layout.fieldIdx });
+  }
+
+  emitRefCellSet(layout: IrRefCellLowering, out: Instr[]): void {
+    out.push({ op: "struct.set", typeIdx: layout.typeIdx, fieldIdx: layout.fieldIdx });
   }
 }
 

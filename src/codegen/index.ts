@@ -1700,7 +1700,12 @@ export function generateModule(
     // an `unreachable` placeholder that the IR overlay MUST overwrite (a
     // post-claim IR failure on a skipped function is promoted to a hard
     // compile error below, never a silent legacy demote).
-    const irFirst = !!options?.experimentalIR && truthyEnv(process.env.JS2WASM_IR_FIRST);
+    // (#2973) `disableIrFirst` opts a compile out of the IR-first inversion
+    // regardless of the ambient env flag — semantics-critical sub-compiles
+    // (eval / new Function host shims) set it so a post-claim IR-first hard
+    // error is not swallowed by the shim's fallback catch into a silent
+    // `undefined`. The ordinary IR overlay (`experimentalIR`) still runs.
+    const irFirst = !!options?.experimentalIR && !options?.disableIrFirst && truthyEnv(process.env.JS2WASM_IR_FIRST);
     let irPlan: IrOverlayPlan | null = null;
     let irSkipBodies: ReadonlySet<string> | undefined;
     if (irFirst) {
