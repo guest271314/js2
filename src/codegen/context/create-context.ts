@@ -129,6 +129,7 @@ export function createCodegenContext(
     nativeGeneratorResultTypeIdx: -1,
     nativeGenerators: new Map(),
     moduleGlobals: new Map(),
+    liveFuncBindingGlobals: new Set(),
     moduleInitStatements: [],
     nestedFuncCaptures: new Map(),
     classParentMap: new Map(),
