@@ -4390,7 +4390,28 @@ export function collectObjectType(ctx: CodegenContext, name: string, type: ts.Ty
 }
 
 /** Compile all function bodies (including class constructors and methods) */
-export function compileDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFile): void {
+/**
+ * Third pass — compile function bodies into the slots pre-allocated by
+ * `collectDeclarations`.
+ *
+ * (#2138) `skipBodies` — IR-first compile-once inversion, ONLY passed when
+ * `JS2WASM_IR_FIRST=1`: top-level FunctionDeclarations named in the set get
+ * an `unreachable` placeholder body instead of a legacy compile (the IR
+ * overlay overwrites the slot afterwards, so each claimed function is
+ * compiled ONCE). The funcIdx/typeIdx slot itself is untouched — this is a
+ * body-emission change, never an index-layout change. Skipped functions are
+ * deliberately NOT registered as inlinable (callers must emit a real `call`
+ * to the slot; inlining the placeholder — or a legacy body that will be
+ * discarded — would defeat the inversion). Returns the names actually
+ * skipped (undefined when `skipBodies` is not passed — the default path
+ * allocates nothing).
+ */
+export function compileDeclarations(
+  ctx: CodegenContext,
+  sourceFile: ts.SourceFile,
+  skipBodies?: ReadonlySet<string>,
+): string[] | undefined {
+  const skippedNames: string[] | undefined = skipBodies ? [] : undefined;
   // Build a map from function name → index within ctx.mod.functions
   const funcByName = new Map<string, number>();
   for (let i = 0; i < ctx.mod.functions.length; i++) {
@@ -4715,6 +4736,17 @@ export function compileDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
         const idx = funcByName.get(fnName);
         if (idx !== undefined) {
           const func = ctx.mod.functions[idx]!;
+          // (#2138) IR-first: skip legacy body emission — the IR overlay owns
+          // this slot. Emit an `unreachable` placeholder so the module stays
+          // structurally valid between the passes; `generateModule` promotes
+          // any IR failure on a skipped function to a hard compile error, so
+          // the placeholder can never ship. Do NOT register as inlinable
+          // (see the function doc comment).
+          if (skipBodies?.has(fnName)) {
+            func.body = [{ op: "unreachable" }];
+            skippedNames!.push(fnName);
+            continue;
+          }
           try {
             compileFunctionBody(ctx, stmt, func);
             registerInlinableFunction(ctx, fnName, func);
@@ -4875,6 +4907,10 @@ export function compileDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
     // `deferTopLevelInit` (#2796) the JS host calls the exported `__module_init`
     // directly after `setExports`.
   }
+
+  // (#2138) Names whose legacy body was skipped under IR-first; undefined on
+  // the default (no-skip) path.
+  return skippedNames;
 }
 
 /**
