@@ -139,6 +139,17 @@ bounded fix = 0 (< the 200 build-gate). Analysis delivered; claim released;
 recommend spinning part (2) as its own scoped codegen issue (broad value beyond
 this leak). Import-gate hypothesis disproven; sub-front 4 disproven.
 
+**Re-measured 2026-07-02 (dev-f2, task #16) after PR #2441 (arity fix)
+landed: STILL BLOCKED — genuine flips remain 0.** The arity half works at
+module top level, but the runner wraps every test body inside
+`export function test()`, and a callback function-expression defined in a
+nested scope is NOT a dispatch candidate — so the shimmed wrapper compiles
+host-free with a dead body (9/9 sampled host-free files VACUOUS by
+inject-throw; control on main = honestly leaky). Shim NOT shipped. Full data +
+the deferred shim text now live in #2939 ("Re-measurement post PR #2441").
+Remaining blocker = #2939 (a) nested-scope candidate registration, then
+(b) kind coercion.
+
 ---
 
 ## Resolution (dev-f1, 2026-07-02) — vacuity scorer (PR1) + dynamic-dispatch fix (PR2)
@@ -170,13 +181,18 @@ change). Also ships the BigInt-TA runner shim (`testWithBigIntTypedArrayConstruc
 `host_free_pass` **17,802 → 16,369**. CE rate unchanged (~3.5%, pre-existing
 BigInt unsupported-feature CEs — the shim adds none). ZERO non-vacuous pass→fail
 collateral (the `__assert_count === 1` guard never flags a test that ran any
-real assertion). The committed standalone high-water mark is re-seeded to
-`host_free_pass: 16369` (the floor asserts-then-raises and never auto-lowers, so
-a deliberate downward correction is committed; post-merge `promote-baseline
---update` raises it to the true CI number). The #1897 standalone regression guard
-(external baseline JSONL) bot-parks the merge_group as the expected −1,433
-signature; the shepherd verifies the delta is EXACTLY this set (zero collateral)
-and force-promotes once.
+real assertion). The committed standalone high-water mark is re-seeded downward
+(the floor asserts-then-raises and never auto-lowers, so a deliberate correction
+must be committed; post-merge `promote-baseline --update` raises it to the true
+CI number). **Re-ground after the 12-PR merge wave:** main's mark rose 17,802 →
+18,790 while the PR was parked, so the committed re-seed is **17,357 = 18,790 −
+1,433**, with a documented caveat that the −1,433 delta is from base 854ad5729
+(re-measurement on the merged tree timed out at budget wind-down; #2470/#2480
+plausibly shifted vacuity membership slightly). The #1897 standalone regression
+guard bot-parks the merge_group with the vacuity signature; the shepherd
+verifies the delta is ALL-vacuous (every flip carries `vacuous: true`, zero
+non-vacuous collateral) rather than an exact count, and the tech lead
+admin-merges.
 
 ### PR2 — dynamic closure-dispatch fix (#2939)
 
