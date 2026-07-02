@@ -1511,6 +1511,7 @@ function buildPreamble(
   needsBoolAssert: boolean,
   needsCompareArray: boolean,
   needsAssertCompareArray: boolean,
+  needsAssertDeepEqual: boolean,
   needsPropertyHelper: boolean,
   needsFnGlobalObject: boolean,
   needsIsConstructor: boolean,
@@ -1666,6 +1667,46 @@ function assert_compareArray(actual: any[], expected: any[]): void {
   for (let i: number = 0; i < actual.length; i++) {
     if (actual[i] !== expected[i]) { if (!__fail) __fail = __assert_count; return; }
   }
+}`;
+  }
+
+  if (needsAssertDeepEqual) {
+    // (#2671) Real harness deepEqual.js analog for the shapes the suite
+    // exercises (nested arrays incl. holes/undefined, plain objects like
+    // match-indices \`groups\`, primitives with SameValue NaN handling). The
+    // RegExp match-indices family includes deepEqual.js and previously died
+    // with "assert is not defined" because no shim existed.
+    p += `
+
+function __deepEq(a: any, b: any): number {
+  if (a === b) { return 1; }
+  if (a !== a && b !== b) { return 1; }
+  if (a == null && b == null) { return 1; }
+  if (a == null || b == null) { return 0; }
+  if (typeof a !== "object" || typeof b !== "object") { return 0; }
+  var aArr = Array.isArray(a);
+  var bArr = Array.isArray(b);
+  if (aArr || bArr) {
+    if (!aArr || !bArr) { return 0; }
+    if (a.length !== b.length) { return 0; }
+    for (let i: number = 0; i < a.length; i++) {
+      if (!__deepEq(a[i], b[i])) { return 0; }
+    }
+    return 1;
+  }
+  var ka = Object.keys(a);
+  var kb = Object.keys(b);
+  if (ka.length !== kb.length) { return 0; }
+  for (let i: number = 0; i < ka.length; i++) {
+    var k = ka[i];
+    if (!__deepEq(a[k], b[k])) { return 0; }
+  }
+  return 1;
+}
+
+function assert_deepEqual(actual: any, expected: any): void {
+  __assert_count = __assert_count + 1;
+  if (!__deepEq(actual, expected)) { if (!__fail) __fail = __assert_count; }
 }`;
   }
 
@@ -1992,6 +2033,7 @@ export function wrapTest(source: string, meta?: Test262Meta): WrapResult {
   body = body.replace(/\bassert\.sameValue\b/g, "assert_sameValue");
   body = body.replace(/\bassert\.notSameValue\b/g, "assert_notSameValue");
   body = body.replace(/\bassert\.compareArray\b/g, "assert_compareArray");
+  body = body.replace(/\bassert\.deepEqual\b/g, "assert_deepEqual");
   body = body.replace(/\bassert\s*\(/g, "assert_true(");
 
   // Strip 3rd argument from assert_sameValue / assert_notSameValue calls
@@ -1999,6 +2041,7 @@ export function wrapTest(source: string, meta?: Test262Meta): WrapResult {
   body = stripThirdArg(body, "assert_sameValue");
   body = stripThirdArg(body, "assert_notSameValue");
   body = stripThirdArg(body, "assert_compareArray");
+  body = stripThirdArg(body, "assert_deepEqual");
 
   // Convert typeof assertions to direct comparisons (our assert shims only handle numbers)
   // assert_sameValue(typeof X, "Y"); → increment counter, set __fail on mismatch
@@ -2156,6 +2199,7 @@ export function wrapTest(source: string, meta?: Test262Meta): WrapResult {
   const needsBoolAssert = /\bassert_(sameValue|notSameValue)_bool\b/.test(body);
   const needsCompareArray = /\bcompareArray\b/.test(body);
   const needsAssertCompareArray = /\bassert_compareArray\b/.test(body);
+  const needsAssertDeepEqual = /\bassert_deepEqual\b/.test(body);
   const needsAssertThrows = /\bassert_throws\b/.test(body);
   const needsAssertThrowsAsync = /\bassert_throwsAsync\b/.test(body);
 
@@ -2245,6 +2289,7 @@ export function wrapTest(source: string, meta?: Test262Meta): WrapResult {
     needsBoolAssert,
     needsCompareArray,
     needsAssertCompareArray,
+    needsAssertDeepEqual,
     needsPropertyHelper,
     needsFnGlobalObject,
     needsIsConstructor,
@@ -2275,6 +2320,7 @@ export function wrapTest(source: string, meta?: Test262Meta): WrapResult {
       needsBoolAssert,
       needsCompareArray,
       needsAssertCompareArray,
+      needsAssertDeepEqual,
       needsPropertyHelper,
       needsFnGlobalObject,
       needsIsConstructor,

@@ -1,5 +1,5 @@
 ---
-id: 2951
+id: 2977
 title: "infra: claim-issue --allocate livelocks under multi-session load (6 concurrent allocators observed)"
 status: ready
 created: 2026-07-02
@@ -15,7 +15,7 @@ related: [2531, 2155]
 depends_on: []
 ---
 
-# #2951 — `claim-issue --allocate` livelocks under multi-session load
+# #2977 — `claim-issue --allocate` livelocks under multi-session load
 
 ## Problem
 
@@ -60,6 +60,11 @@ error.
 ## Evidence / references
 
 - Observation: dev-2856f (six-allocator livelock, id renumbering).
+- **This issue file itself was renumbered 2951→2977**: the original #2951
+  reservation (confirmed pushed 05:35Z) was lost to a parallel session whose
+  own #2951 merged first (`2951-ir-first-skip-set-generators-class-members`),
+  tripping the dup-id gate on the filing PR — plus two further `--allocate`
+  timeouts (>150s, >240s window) before #2977 was obtained.
 - This session: two 90s+ `claim-issue` timeouts + the `refs/claim-issue/base`
   lock error, all during the same window; instant completion after the herd
   cleared.
