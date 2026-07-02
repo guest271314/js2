@@ -116,3 +116,33 @@ constant-string (Tier-0 liftable)**, 210 dynamic (need the interpreter #2928),
 Tests: `tests/issue-2923-eval-const-broaden.test.ts` (13). No regression in the
 existing #1163 / eval-tiering tests. The #2861 namespace-reads follow-up (#2933)
 rides this PR.
+
+## Merge-group park fix (dev-eval design, landed by dev-evalf, 2026-07-02)
+
+PR #2442 was auto-parked (`auto-park-bot:merge-group-failure`, 00:50Z): the
+merge_group test262 run showed **123 regressions / net −73** vs baseline —
+all eval-related, 100% PR-caused (PR-level shards had been SKIPPED by the
+path filter, so the merge_group was the first test262 exposure):
+
+- **102× `annexB/language/eval-code/{direct,indirect}`** — the splice hoisted
+  function declarations nested in a script-scope block/if/switch/for
+  unconditionally; AnnexB §B.3.3 web-legacy semantics require a *conditional*
+  hoist (skipped entirely when it would conflict with a lexical binding —
+  the `skip-early-err-*` variants assert `f` stays undeclared). Includes 6
+  `for-in` variants that crashed compile (`reading 'flags'`) — the bail now
+  precedes the crashing splice.
+- **~21× strict-mode** (`13.*-s`, `*-eval-stricteval`, `*strict*` eval-code) —
+  strict early-errors (`function f(eval){}` → SyntaxError) and strict
+  block-scoping of decls are not enforced by the splice.
+
+Fix (`eval-inline.ts`, FunctionDeclaration case in `allNodesInlineSupported`):
+bail to the dynamic `__extern_eval` path when (A) the eval body has a
+`"use strict"` directive prologue, or (B) the decl is nested in script-scope
+lexical statements without an intervening function boundary
+(`funcDeclNeedsDynamicEvalPath`). Top-level sloppy decls — the headline win —
+still lift; probe re-ran 12 regressed files (all 3 clusters) → all PASS, and
+the surviving improvements (`language/statementList/eval-fn-*`) still pass.
+~45 annexB `*-block-scoping`/`func-*` improvements that had come from the
+same (unsound) unconditional hoist revert to baseline-fail; implementing real
+AnnexB conditional hoisting in the splice is future work (Tier-2 #2928 era).
+Guard tests added (17 total in the test file).

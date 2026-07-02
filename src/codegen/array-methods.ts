@@ -3748,7 +3748,12 @@ function compileNativeArrayIterator(
     fctx.body.push({ op: "ref.as_non_null" } as Instr);
     fctx.body.push({ op: "struct.get", typeIdx: srcVecTypeIdx, fieldIdx: 1 });
     fctx.body.push({ op: "local.get", index: iLocal });
-    fctx.body.push({ op: "array.get", typeIdx: srcArrTypeIdx });
+    // (#2934) A packed (i8/i16) backing array — a Uint8Array/Int8Array etc.
+    // source vec — MUST be read with array.get_u/array.get_s; a plain array.get
+    // on a packed array is a hard validator error ("Array type N has packed
+    // type i8"). Mirrors the established `getOp` idiom used across this file.
+    const getOp = srcElemType.kind === "i8" ? "array.get_u" : srcElemType.kind === "i16" ? "array.get_s" : "array.get";
+    fctx.body.push({ op: getOp, typeIdx: srcArrTypeIdx } as Instr);
     if (srcElemType.kind !== "externref") {
       coerceType(ctx, fctx, srcElemType, { kind: "externref" });
     }

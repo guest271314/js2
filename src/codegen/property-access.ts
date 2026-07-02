@@ -26,6 +26,12 @@ import { snapshotSpeculative, rollbackSpeculative } from "./context/speculative.
 import { emitDynGet } from "./dyn-read.js"; // (#2580 M2 slice 1)
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { emitCachedMethodClosureAccess, emitFuncRefAsClosure, getOrCreateFuncRefWrapperTypes } from "./closures.js";
+import {
+  BUILTIN_STATIC_METHOD_ARITY,
+  ensureBuiltinFnMetaType,
+  pushBuiltinFnClosureValueInstrs,
+  STANDALONE_STATIC_METHOD_META,
+} from "./builtin-fn-meta.js";
 import { emitLazyClassObjectGet, emitLazyProtoGet, findExternInfoForMember } from "./expressions/extern.js";
 import {
   classifyPrivateMember,
@@ -434,6 +440,68 @@ const TYPED_ARRAY_BYTES_PER_ELEMENT: Record<string, number> = {
 };
 
 /**
+ * (#2861) A built-in **constructor**'s own `length` (declared arity, a
+ * non-configurable data property) — statically known per ctor name, so
+ * `<Ctor>.length` folds to a numeric constant and `<Ctor>.name` folds to the
+ * ctor-name string (`Ctor.name === "Ctor"` for every standard builtin). Both
+ * refuse under `--target standalone` today (`#1907`/`#1888 S6-b` builtin static
+ * value read); host mode reads the identical value via `__get_builtin`, so the
+ * fold is observationally identical and host-mode never reaches the fold (the
+ * `__get_builtin` branch returns first).
+ *
+ * Values verified against the host runtime (Node). The NAMESPACES `Math` / `JSON`
+ * / `Reflect` / `Atomics` are deliberately EXCLUDED — they are not functions, so
+ * their `.length`/`.name` are `undefined`; folding a name/arity for them would be
+ * wrong, so they keep refusing (namespace static reads are a separate #2860
+ * follow-up).
+ */
+const BUILTIN_CTOR_ARITY: Record<string, number> = {
+  Object: 1,
+  Array: 1,
+  Function: 1,
+  Symbol: 0,
+  Proxy: 2,
+  BigInt: 1,
+  Date: 7,
+  RegExp: 2,
+  ArrayBuffer: 1,
+  SharedArrayBuffer: 1,
+  DataView: 1,
+  Promise: 1,
+  WeakMap: 0,
+  WeakSet: 0,
+  WeakRef: 1,
+  FinalizationRegistry: 1,
+  Iterator: 0,
+  Map: 0,
+  Set: 0,
+  Error: 1,
+  TypeError: 1,
+  RangeError: 1,
+  SyntaxError: 1,
+  URIError: 1,
+  EvalError: 1,
+  ReferenceError: 1,
+  SuppressedError: 3,
+  String: 1,
+  Number: 1,
+  Boolean: 1,
+  Int8Array: 3,
+  Uint8Array: 3,
+  Uint8ClampedArray: 3,
+  Int16Array: 3,
+  Uint16Array: 3,
+  Int32Array: 3,
+  Uint32Array: 3,
+  Float32Array: 3,
+  Float64Array: 3,
+  BigInt64Array: 3,
+  BigUint64Array: 3,
+  DisposableStack: 0,
+  AsyncDisposableStack: 0,
+};
+
+/**
  * (#2593) Recover the packed-element signedness ("s"/"u") of a typed-array
  * element-access receiver from its TS type. Returns undefined when the receiver
  * is not a recognised integer typed-array view (callers then fall back to the
@@ -470,6 +538,14 @@ function typedArrayViewSignedness(ctx: CodegenContext, receiver: ts.Expression):
  * to the S6-b builtins-as-globals lever.
  */
 function hasNativeBuiltinConstantHandler(builtinName: string, propName: string): boolean {
+  // (#2861) `<Ctor>.length` (declared arity) / `<Ctor>.name` (ctor name string)
+  // have a downstream constant emitter; defer the standalone refusal to it. Only
+  // for real constructors (BUILTIN_CTOR_ARITY excludes the Math/JSON/Reflect/
+  // Atomics namespaces, whose `.length`/`.name` are undefined). Checked FIRST so
+  // it isn't pre-empted by the per-builtin branches below (e.g. the `Symbol`
+  // branch returns for any non-well-known prop, which would refuse `Symbol.length`).
+  // `length`/`name` never collide with a Math/Number constant name.
+  if ((propName === "length" || propName === "name") && builtinName in BUILTIN_CTOR_ARITY) return true;
   if (builtinName === "Math") return MATH_CONSTANT_PROPS.has(propName);
   if (builtinName === "Number") return NUMBER_CONSTANT_PROPS.has(propName);
   // (#2610) `Symbol.<wellKnown>` as a VALUE folds to its small i32 sentinel id
@@ -834,6 +910,13 @@ export function tryEnsureNativeProtoBrand(ctx: CodegenContext, builtinName: stri
   if (builtinName === "AsyncDisposableStack") {
     return ensureAsyncDisposableStackNativeProtoGlue(ctx);
   }
+  // (#2861) SuppressedError (ES2026 error aggregation) is an Error subclass —
+  // its prototype's own method set mirrors Error's (`toString`), with
+  // `constructor`/`name`/`message` data props handled by the shared meta-fold.
+  // Reuse the NativeError glue (its own-brand slot 43).
+  if (builtinName === "SuppressedError") {
+    return ensureNativeErrorNativeProtoGlue(ctx, builtinName);
+  }
   // (#2651 M1 / D2) Concrete TypedArray view protos — `Int8Array.prototype`,
   // `Uint8Array.prototype`, … This is the measured Slice-0 lever: the
   // `<View>.prototype` value read (the #1907 / #1888 S6-b `Int8Array.prototype`
@@ -890,6 +973,26 @@ function tryCompileStandaloneBuiltinProtoMemberMeta(
   const memberAccess = skipTransparentExpressions(expr.expression);
   if (!ts.isPropertyAccessExpression(memberAccess)) return undefined;
   const inner = skipTransparentExpressions(memberAccess.expression);
+  // (#2896) `<Builtin>.<staticMethod>.length` / `.name` — fold the spec
+  // metadata for direct reads of ANY standard builtin static method (the
+  // BUILTIN_STATIC_METHOD_ARITY table; `.name` === the property key per
+  // §10.2.9). No closure is materialized, so this also answers methods whose
+  // VALUE-read is not yet wired host-free (`Number.isNaN.length` etc.).
+  // Sibling of the `<Builtin>.prototype.<member>` fold below; the runtime
+  // reflective reads for wired closures resolve through the #2896 meta
+  // subtypes instead (same values — STANDALONE_STATIC_METHOD_META agrees with
+  // this table).
+  if (ts.isIdentifier(inner)) {
+    const staticShadowed = fctx.localMap.has(inner.text) || (fctx.boxedCaptures?.has(inner.text) ?? false);
+    const staticArity = BUILTIN_STATIC_METHOD_ARITY[inner.text]?.[memberAccess.name.text];
+    if (!staticShadowed && staticArity !== undefined) {
+      if (metaProp === "length") {
+        fctx.body.push({ op: "f64.const", value: staticArity } as Instr);
+        return { kind: "f64" };
+      }
+      return compileStringLiteral(ctx, fctx, memberAccess.name.text) ?? undefined;
+    }
+  }
   if (!ts.isPropertyAccessExpression(inner)) return undefined;
   if (inner.name.text !== "prototype" || !ts.isIdentifier(inner.expression)) return undefined;
   const builtinName = inner.expression.text;
@@ -955,8 +1058,7 @@ function tryCompileStandaloneBuiltinProtoMemberRead(
     if (!closureInfo) return undefined;
 
     // self struct (param 0) — unused by the body (no captures) but type-required.
-    fctx.body.push({ op: "ref.func", funcIdx: closure.funcIdx } as Instr);
-    fctx.body.push({ op: "struct.new", typeIdx: closure.type.typeIdx } as Instr);
+    fctx.body.push(...pushBuiltinFnClosureValueInstrs(ctx, closure));
     // `this` arg (param 1): the builtin proto object externref.
     if (!emitLazyNativeProtoGet(ctx, fctx, brand)) return undefined;
     // call_ref operand: the typed funcref. `ref.func` yields `(ref liftedType)`
@@ -967,8 +1069,7 @@ function tryCompileStandaloneBuiltinProtoMemberRead(
     return closureInfo.returnType ?? { kind: "externref" };
   }
 
-  fctx.body.push({ op: "ref.func", funcIdx: closure.funcIdx } as Instr);
-  fctx.body.push({ op: "struct.new", typeIdx: closure.type.typeIdx } as Instr);
+  fctx.body.push(...pushBuiltinFnClosureValueInstrs(ctx, closure));
   return closure.type;
 }
 
@@ -1045,6 +1146,23 @@ function ensureStandaloneBuiltinStaticMethodClosure(
       exported: false,
     });
     ctx.funcMap.set(funcName, funcIdx);
+  }
+
+  // (#2896) The value struct is the UNIQUE per-(builtin, method) metadata
+  // subtype of the signature wrapper, so the reflective runtime natives can
+  // `ref.test` it and answer its spec `name`/`length` own properties. All call
+  // paths are unaffected (subtype of the wrapper the lifted func expects).
+  const meta = STANDALONE_STATIC_METHOD_META[key];
+  if (meta) {
+    const metaTypeIdx = ensureBuiltinFnMetaType(
+      ctx,
+      wrapperTypes.structTypeIdx,
+      wrapperTypes.closureInfo,
+      `static:${key}`,
+      meta.name,
+      meta.length,
+    );
+    return { type: { kind: "ref", typeIdx: metaTypeIdx }, funcIdx };
   }
 
   return { type: { kind: "ref", typeIdx: wrapperTypes.structTypeIdx }, funcIdx };
@@ -3843,8 +3961,7 @@ export function compilePropertyAccess(
       }
       const closure = ensureStandaloneBuiltinStaticMethodClosure(ctx, builtinName, propName, expr);
       if (closure) {
-        fctx.body.push({ op: "ref.func", funcIdx: closure.funcIdx });
-        fctx.body.push({ op: "struct.new", typeIdx: closure.type.typeIdx });
+        fctx.body.push(...pushBuiltinFnClosureValueInstrs(ctx, closure));
         return closure.type;
       }
       reportUnsupportedStandaloneBuiltinValueRead(ctx, builtinName, propName);
@@ -4849,6 +4966,35 @@ export function compilePropertyAccess(
       const bytes = TYPED_ARRAY_BYTES_PER_ELEMENT[builtinName]!;
       fctx.body.push({ op: ctx.fast ? "i32.const" : "f64.const", value: bytes });
       return ctx.fast ? { kind: "i32" } : { kind: "f64" };
+    }
+  }
+
+  // (#2861) `<Ctor>.length` (declared arity) / `<Ctor>.name` (ctor name string)
+  // — a built-in constructor's own function properties. Statically known per ctor
+  // name, so emit as a constant. Standalone otherwise reaches
+  // `reportUnsupportedStandaloneBuiltinValueRead` (the generic builtin-static-value
+  // -read refusal); host mode reads the same value via `__get_builtin` and returns
+  // BEFORE this point, so folding here is observationally identical and never
+  // fires in host mode for a ctor. Namespaces (Math/JSON/Reflect/Atomics) are not
+  // in BUILTIN_CTOR_ARITY (their `.length`/`.name` are undefined), so they keep
+  // refusing. Skip when the name is shadowed by a local.
+  if (
+    (propName === "length" || propName === "name") &&
+    ts.isIdentifier(expr.expression) &&
+    expr.expression.text in BUILTIN_CTOR_ARITY
+  ) {
+    const builtinName = expr.expression.text;
+    const isShadowed = fctx.localMap.has(builtinName) || (fctx.boxedCaptures?.has(builtinName) ?? false);
+    if (!isShadowed) {
+      if (propName === "length") {
+        const arity = BUILTIN_CTOR_ARITY[builtinName]!;
+        fctx.body.push({ op: ctx.fast ? "i32.const" : "f64.const", value: arity });
+        return ctx.fast ? { kind: "i32" } : { kind: "f64" };
+      }
+      // `<Ctor>.name` === "<Ctor>" for every standard builtin constructor.
+      addStringConstantGlobal(ctx, builtinName);
+      fctx.body.push(...stringConstantExternrefInstrs(ctx, builtinName));
+      return { kind: "externref" };
     }
   }
 

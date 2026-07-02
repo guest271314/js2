@@ -16,7 +16,7 @@ import { createHash } from "crypto";
 import { join, relative, dirname, basename } from "path";
 import { buildImports } from "../src/runtime.js";
 import { findNthAssert } from "./test262-assert-locator.js";
-import { negativeCompileErrorMatches } from "../scripts/negative-verdict.mjs";
+import { negativeCompileErrorMatches, negativeCompileSucceededVerdict } from "../scripts/negative-verdict.mjs";
 // Lazy-load compileMulti only when needed (FIXTURE tests) to avoid
 // loading the full compiler into the fork alongside the pool worker.
 let _compileMulti: typeof import("../src/index.js").compileMulti | null = null;
@@ -643,25 +643,18 @@ for (const category of TEST_CATEGORIES) {
               }
               return;
             }
-            // Compilation succeeded — try instantiation (Wasm validation may catch errors).
-            // (#2912) DELIBERATELY-LENIENT fallback, mirrored in
-            // scripts/test262-worker.mjs: the compiler emitted NO error, so the
-            // "pass" below is INCIDENTAL (the Wasm merely fails to
-            // instantiate/link). ~439 host-lane negatives pass ONLY this way
-            // (real early-error-detection gaps). Strictly gating this is the
-            // #2912 follow-up — a ~439-flip intentional-drop needing a
-            // coordinated re-baseline (PO/lead sign-off).
-            try {
-              const binary = compileResult.cachePath ? readFileSync(compileResult.cachePath) : compileResult.binary;
-              const imports = buildImports(compileResult.result.imports, undefined, compileResult.result.stringPool);
-              await WebAssembly.instantiate(binary, imports as any);
-            } catch {
-              recordResult(relPath, category, "pass", undefined, undefined, scopeInfo, wasmSha);
-              return;
-            }
-            const desc = meta.description?.substring(0, 100) ?? "";
-            const info = `expected ${meta.negative!.phase} ${meta.negative!.type} but compiled${desc ? `: ${desc}` : ""}`;
-            recordResult(relPath, category, "fail", info, undefined, scopeInfo, wasmSha);
+            // (#2920) STRICT compile-SUCCEEDED arm (the follow-up to #2912's
+            // deliberately-lenient fallback, mirrored in
+            // scripts/test262-worker.mjs + tests/test262-shared.ts): the
+            // compiler emitted NO diagnostic, so it did NOT detect the expected
+            // parse/early error. This is a conformance FAIL regardless of
+            // whether the produced Wasm instantiates/links — an incidental link
+            // failure is not spec-conformant detection. Previously the
+            // instantiate-fails catch scored `pass` (~439 host-lane false
+            // passes). No instantiate attempt is needed. Intentional verdict
+            // tightening (coordinated baseline refresh, plan/issues/2920).
+            const { status, error } = negativeCompileSucceededVerdict(meta.negative!.type, meta.negative!.phase);
+            recordResult(relPath, category, status, error, undefined, scopeInfo, wasmSha);
             return;
           }
 

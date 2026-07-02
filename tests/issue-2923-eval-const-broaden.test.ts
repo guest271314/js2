@@ -140,6 +140,44 @@ describe("#2923 — unsafe-to-lift kinds still bail cleanly to the dynamic path"
       ),
     ).toBe(true);
   });
+
+  // (#2923 park fix, PR #2442 merge_group) The two guards that un-parked the
+  // PR: the naive splice regressed 123 test262 files by hoisting function
+  // declarations it must not hoist. See eval-inline.ts FunctionDeclaration case.
+  it("a function declaration in a STRICT eval body bails (strict early-errors not enforced by the splice)", async () => {
+    expect(
+      await bailsToDynamic(
+        `export function test(): number { return eval("'use strict'; function g(){return 3} g()") as number; }`,
+      ),
+    ).toBe(true);
+  });
+
+  it("a block-nested function declaration bails (AnnexB B.3.3 conditional hoist not implemented)", async () => {
+    expect(
+      await bailsToDynamic(
+        `export function test(): number { return eval("{ function h(){return 4} } typeof h") as any; }`,
+      ),
+    ).toBe(true);
+  });
+
+  it("an if-nested function declaration bails (AnnexB)", async () => {
+    expect(
+      await bailsToDynamic(
+        `export function test(): number { return eval("if (true) function k(){return 5} typeof k") as any; }`,
+      ),
+    ).toBe(true);
+  });
+
+  it("a function declaration nested inside another function's body bails CLEANLY (hoist fallback), not a compile error", async () => {
+    // The park-fix guard classifies an inner fn (inside another function) as
+    // not-AnnexB-sensitive, but the foreign-SourceFile hoist path still can't
+    // compile it today — it must fall back to the dynamic path cleanly.
+    expect(
+      await bailsToDynamic(
+        `export function test(): number { return eval("function outer(){ function inner(){return 6} return inner() } outer()") as number; }`,
+      ),
+    ).toBe(true);
+  });
 });
 
 describe("#2923 — host (gc) mode unchanged (lifted bodies still compute correctly)", () => {

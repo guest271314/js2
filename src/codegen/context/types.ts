@@ -1303,6 +1303,16 @@ export interface CodegenContext {
   preRegisteredBodyless?: Set<string>;
   /** Map from module-level variable name → global index in mod.globals */
   moduleGlobals: Map<string, number>;
+  /**
+   * (#2931) Names of function declarations that are *reassigned* somewhere in the
+   * realm (`fn = …`). ES function bindings are live/mutable, so such a name is
+   * backed by a mutable `externref` module global (registered in `moduleGlobals`)
+   * that both the reassignment (`global.set`) and every read (`global.get`) go
+   * through. Import aliases of a reassigned function propagate into this set too
+   * (see `registerImportBindingAliases`). Empty for the common case (no function
+   * declaration is ever reassigned), so non-affected programs stay byte-identical.
+   */
+  liveFuncBindingGlobals?: Set<string>;
   /** Deferred `export default <variable>` where variable is a module global (#1108).
    *  Resolved after all collectDeclarations calls when global indices are final. */
   deferredDefaultGlobalExport?: string;
@@ -1815,6 +1825,19 @@ export interface CodegenContext {
    *  member name (e.g. `RegExp.prototype.test.length === 1`,
    *  `.name === "test"`). Populated by `ensureStandaloneNativeMethodClosure`. */
   nativeClosureMeta?: Map<number, { name: string; length: number }>;
+  /** (#2896) Struct-type index → static `{name, length}` metadata for builtin
+   *  function-closure values under `--target standalone`. Each (builtin, member)
+   *  closure gets a UNIQUE wrapper-struct SUBTYPE (fields `[funcref func,
+   *  (mut i32) bfnstate]`, supertype = its signature wrapper struct), so the
+   *  reflective runtime natives (`__getOwnPropertyDescriptor` / `__extern_get` /
+   *  `__hasOwnProperty` / `__getOwnPropertyNames` / `__delete_property`) can
+   *  `ref.test` the value at RUNTIME and answer its spec `name`/`length` own
+   *  properties. Populated by `ensureBuiltinFnMetaType` (builtin-fn-meta.ts);
+   *  consumed by `fillBuiltinFnMeta` (object-runtime.ts) at finalize. */
+  builtinFnMetaByTypeIdx?: Map<number, { name: string; length: number }>;
+  /** (#2896) Cache: `(builtin, member)` key → the meta struct-type index above.
+   *  Keeps `ensureBuiltinFnMetaType` idempotent per closure identity. */
+  builtinFnMetaTypeByKey?: Map<string, number>;
   /** (#2193 PR-B) Struct-type indices of `$NativeProto` member closures whose
    *  FIRST user param is the receiver (`this`) — e.g. `Array.prototype.slice`'s
    *  `(self, this, start, end)` closure. Unlike a plain user function (which
