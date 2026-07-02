@@ -1,7 +1,9 @@
 ---
 id: 2913
 title: "test262 report + editions double-count duplicate result rows (no dedup by file)"
-status: ready
+status: done
+completed: 2026-07-02
+assignee: ttraenkler/dev-f2
 priority: medium
 sprint: current
 created: 2026-07-01
@@ -26,7 +28,7 @@ Evidence (committed baselines, measured 2026-07-01):
 
 - `benchmarks/results/test262-current.jsonl` (host): 48,142 records over 48,088
   distinct files → **54 duplicate rows**; **all** in category
-  `language/module-code`; **27 of the 54** have *disagreeing* statuses
+  `language/module-code`; **27 of the 54** have _disagreeing_ statuses
   (`compile_error` on one row, `fail` on the other) for the same file.
 - `benchmarks/results/test262-standalone-results.jsonl`: 48,117 records over
   48,088 distinct files → **29 duplicate rows**.
@@ -46,7 +48,7 @@ Not enumeration: `findTestFiles` (`tests/test262-runner.ts:2630-2644`) is a
 `readdirSync` directory walk + `.sort()` that returns each file once, and
 `runTest262Chunk` iterates each `TEST_CATEGORIES` entry once
 (`tests/test262-shared.ts:456-470`). The dups are same-category, same-file, and
-sometimes carry *different* statuses — the signature of a **double-WRITE**, most
+sometimes carry _different_ statuses — the signature of a **double-WRITE**, most
 likely the poison/flake **retry path** in `tests/test262-shared.ts:826-964`
 recording both the original and the retry row (the code even warns about a
 double-write hazard at `tests/test262-shared.ts:766-774`), or a shard artifact
@@ -70,10 +72,11 @@ slightly wrong and can drift run-to-run.
    counting. Same in `scripts/generate-editions.ts`.
 2. **Fix the source of the duplicate write** — trace the retry path in
    `tests/test262-shared.ts:826-964`: ensure exactly one `recordResult` per test
-   (the retry must *replace*, not append). Confirm `merge-report` isn't
+   (the retry must _replace_, not append). Confirm `merge-report` isn't
    concatenating a shard artifact twice.
 
 ## Acceptance
+
 - A merged JSONL with N distinct files produces a report whose
   `summary.total === N_official`; duplicate rows never double-count.
 - No same-file duplicate rows emitted by the runner for the retry path.
@@ -82,6 +85,7 @@ slightly wrong and can drift run-to-run.
 
 **Fix Direction 1 (defensive dedup) — DONE + verified on branch
 `issue-2913-report-dedup`:**
+
 - `scripts/build-test262-report.mjs`: streaming pass now collects one row per
   `record.file` into a Map with a deterministic WORST-status precedence
   (`compile_error > fail > timeout/crash > pass > skip`), then counts the deduped
