@@ -2277,18 +2277,36 @@ export function collectEmptyObjectWidening(
             // refuses it and the var stays externref / host-MOP end to end.
             //
             // Scope guards keep everything else byte-identical:
-            //   - `getProperties().length > 0`: only a JS-mode EVOLVED type
-            //     qualifies. In TS mode the poisoned var's type stays the empty
-            //     `{}` (no evolution), which already resolves to externref —
-            //     recording it would only risk shared-type-identity collisions.
             //   - `!ctx.standalone`: standalone keeps its pre-existing codegen
             //     byte-identical (its matching read-back gap for this shape is
             //     tracked separately; see #2849's follow-up note).
             //   - skip `any` (singleton type object shared by all any-typed
             //     vars — same hazard as the anonTypeMap guard below).
+            //   - a 0-props (TS-mode, non-evolved `{}`) type is added ONLY when
+            //     its provenance is THIS var's own initializer literal
+            //     (`symbol.declarations[0] === decl.initializer`). The widened
+            //     literal type is a fresh per-var instance (measured — two `{}`
+            //     vars get distinct instances), but the type of a `: {}`
+            //     ANNOTATION is an interned instance SHARED by every var so
+            //     annotated — poisoning it would demote unrelated vars. The
+            //     provenance check admits the safe per-var case and rejects the
+            //     shared one.
+            //
+            // (#2944 residual) The 0-props TS-mode case MUST be poisoned too —
+            // "already resolves to externref" does NOT hold for it: the
+            // signature pre-pass `ensureStructForType(returnType)` on a function
+            // that RETURNS the poisoned var registers the SAME 0-props ts.Type
+            // as an EMPTY anon struct ("empty objects get an empty struct"), so
+            // the local/return/field slots type `(ref null $__anon_N)`, the `{}`
+            // host `$Object` fails the decl-init cast, and the var is null from
+            // the first instruction — the acorn `Parser`/`getOptions` escape
+            // shape in TS-mode typing (tests/issue-2944.test.ts).
             if (!ctx.standalone) {
               const vt = checker.getTypeAtLocation(decl.name);
-              if (!(vt.flags & ts.TypeFlags.Any) && vt.getProperties().length > 0) {
+              if (
+                !(vt.flags & ts.TypeFlags.Any) &&
+                (vt.getProperties().length > 0 || vt.symbol?.declarations?.[0] === decl.initializer)
+              ) {
                 ctx.objectHashConsumerTypes.add(vt);
               }
             }
