@@ -1,10 +1,11 @@
 ---
 id: 2968
 title: "wasi _start uncaught-exception printer: catch_all → __error_to_string → fd_write + proc_exit(1)"
-status: in-progress
+status: done
 assignee: ttraenkler/fable-dev
 sprint: Backlog
 created: 2026-07-02
+completed: 2026-07-02
 priority: medium
 horizon: m
 feasibility: medium
@@ -111,4 +112,4 @@ on `origin/main`, an ordinary user `try { … } catch { … }` fails under wasmt
 today. Making binaries run under modern wasmtime needs a separate
 `try` → `try_table` (new EH proposal) migration touching the emitter + the
 instruction-tree walkers (dead-elim / fixups / stack-balance / wat) — filed as
-follow-up, out of this issue's M scope.
+follow-up **#2997**, out of this issue's M scope.
