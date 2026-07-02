@@ -1,8 +1,9 @@
 ---
 id: 2970
 title: "Standalone: native gen-result done `.value` reads back as 0/garbage — canonical-undefined carrier (UNDEF_F64 sentinel producer + sentinel-aware readers)"
-status: in-progress
-assignee: (released — suspended 2026-07-02 budget wind-down)
+status: done
+completed: 2026-07-02
+assignee: ttraenkler/fable-3
 sprint: current
 created: 2026-07-02
 updated: 2026-07-02
@@ -26,13 +27,16 @@ today, independent of the parked no-yield relax (PR #2445).
 ## Problem (measured on main `fa399fd70`, standalone)
 
 ```ts
-function* foo(): any { yield 42; }
-const g: any = foo(); g.next();
+function* foo(): any {
+  yield 42;
+}
+const g: any = foo();
+g.next();
 const v: any = g.next().value; // exhausted → JS: undefined
-v === undefined  // → false (want true)
-v === 0          // → TRUE  (value-space collision — silent wrong value)
-v * 2 + 5        // → 5 (want NaN)
-v == null        // → false (want true)
+v === undefined; // → false (want true)
+v === 0; // → TRUE  (value-space collision — silent wrong value)
+v * 2 + 5; // → 5 (want NaN)
+v == null; // → false (want true)
 ```
 
 ## Root cause
@@ -95,28 +99,36 @@ awareness (bounded — NOT the #2106 40-site wiring):
 - `typeof <any>` TRAPS — **pre-existing on main for every any-typed value**
   (non-generator control traps too); separate issue, not this scope.
 
-## Suspended Work (2026-07-02, fable-3, budget wind-down)
+## Final validation (2026-07-02, fable-3 — resumed after budget restore)
 
-- **Branch**: `issue-2938-genresult-undefined-carrier` (origin, this commit).
-  Base: upstream/main `fa399fd70`. All code changes committed; probes in
-  `.tmp/` (gitignored — recreate from this file's Problem section if needed).
-- **Remaining for PR A (this issue)**:
-  1. `npx tsc --noEmit` + `npx prettier --write` + `npx biome lint` on the 4
-     touched files (`src/codegen/generators-native.ts`, `member-get-dispatch.ts`,
-     `object-runtime.ts` + this file).
-  2. Scoped suites: existing generator tests (`tests/issue-2171*`, `issue-2864*`,
-     `issue-2571*`, `issue-2170*`, iterator/for-of suites) + write
-     `tests/issue-2970.test.ts` from the identity matrix above.
-  3. `gh pr create -R loopdive/js2 --head ttraenkler:issue-2938-genresult-undefined-carrier`.
-- **Then the #2938 revival** (task #4, plan per lead routing): merge main
-  (incl. this PR) into `issue-2933-noyield-relax` (PR #2445, parked `hold`,
-  BEHIND); the two relax bails are already relaxed there; re-run the 4 repros +
-  the readVal probe (should all pass natively); re-check the OTHER two parked
-  blockers (negative-test early-error miss, async-from-sync invalid module —
-  see the #2938 file's VERDICT section on that branch); re-validate on a
-  CONSTRUCT-STRIDED corpus (class-static / no-yield / return-arm /
-  async-from-sync / negative-test shapes — the 542-directory sample lied);
-  #2941 on main already covers 16/20 of the old class-static regressions.
-  When the full merge_group-equivalent is clean: ONE re-admission of PR #2445
-  via the shepherd (bot park-hold rules apply — diagnose before unlabel).
-- **Claims**: #2938 + #2970 released on suspend (re-claim with `--force`).
+(The interim "Suspended Work" state was superseded by the resume; kept here as
+the completion record.)
+
+- `npx tsc --noEmit` clean; prettier + `biome lint` clean on all touched files.
+- `tests/issue-2970.test.ts` (new, 16 cases): exhausted-`.value` identity
+  matrix (===undefined / ==null / ===null / ===0 / arithmetic NaN / truthiness /
+  default-param application), real-value preservation (first yield 42, yielded
+  0 stays 0 and is NOT undefined, return-arm 7, computed-NaN NOT undefined —
+  sentinel unforgeable, `.done`, typed for-of), `.return()` no-arg → undefined /
+  `.return(5)` → 5. All pass, host-free asserted.
+- Scoped generator suites: issue-2170 (yield\* delegation), issue-2171 (string
+  yields), issue-2571 (native method generators), issue-2864 (any carrier),
+  issue-2941 (class-static funcIdx) — 44/44 pass.
+- Byte-inertness (sha256 A/B vs main): all HOST-lane cases identical; the only
+  standalone diff outside generator modules is the intended
+  `__extern_is_undefined` body change.
+- Gate checks: `check:any-box-sites`, `check:coercion-sites`,
+  `check:stack-balance` — no unsanctioned growth.
+
+## Next (the #2938 revival — task #4, separate PR)
+
+Merge main (incl. this PR) into `issue-2933-noyield-relax` (PR #2445, parked
+`hold`, BEHIND); the two relax bails are already relaxed there; re-run the 4
+repros + the readVal probe (expect native pass); re-check the OTHER two parked
+blockers (negative-test early-error miss, async-from-sync invalid module — see
+the #2938 file's VERDICT section on that branch); re-validate on a
+CONSTRUCT-STRIDED corpus (class-static / no-yield / return-arm /
+async-from-sync / negative-test shapes — the 542-directory sample lied);
+#2941 on main already covers 16/20 of the old class-static regressions. When
+the full merge_group-equivalent is clean: ONE re-admission of PR #2445 via the
+shepherd (bot park-hold rules apply — diagnose before unlabel).
