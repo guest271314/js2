@@ -46,6 +46,7 @@ import { scanForNewTarget } from "./new-target.js"; // (#2023)
 import { scanForArrayHoles, ensureHoleType } from "./array-holes.js"; // (#2001 S1)
 import { ensureDynReadHelpers } from "./dyn-read.js"; // (#2580 M0)
 import { ensureNativeIteratorRuntime, fillNativeIteratorUserArms } from "./iterator-native.js";
+import { fillCombinatorToVec } from "./promise-combinators.js"; // (#2922) dynamic combinator-arg drain fill
 import { fillClosedMethodDispatch } from "./closed-method-dispatch.js";
 import { fillMemberSetDispatch, reserveVecFieldMaterializers } from "./member-set-dispatch.js";
 import { fillMemberGetDispatch } from "./member-get-dispatch.js";
@@ -1937,6 +1938,12 @@ export function generateModule(
       addUnionImports(ctx);
     }
     fillNativeIteratorUserArms(ctx);
+
+    // (#2922) Rebuild `__combinator_to_vec`'s user-iterable arm with the same
+    // closed-struct dispatchers (identical five-dispatcher condition, so the
+    // combinator drain and the native iterator carrier can never disagree).
+    // No-op unless a dynamic Promise.all/race argument site registered it.
+    fillCombinatorToVec(ctx);
 
     // (#1716) Emit __call_@@toPrimitive(self, hint) for runtime ToPrimitive
     // dispatch of a class's [Symbol.toPrimitive] *method* on opaque structs.
