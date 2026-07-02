@@ -1073,6 +1073,254 @@ export function formatIrPathFallbackDiagnostic(err: IrIntegrationError): {
   };
 }
 
+// ---------------------------------------------------------------------------
+// #2138 — IR-first compile-once inversion (flag-gated investigation)
+//
+// `planIrOverlay` is the IR *planning* phase extracted verbatim from the
+// `if (options?.experimentalIR)` overlay block in `generateModule`: it runs
+// `buildTypeMap` → `planIrCompilation` → `buildIrClassShapes` → the
+// overrideMap/safeSelection resolution (including the STRICT_IR_REASONS
+// promotion and the #2023 `new.target` coarse gate). Extraction exists so
+// the SAME code can run at two different pipeline positions:
+//
+//   - flag OFF (default): called AFTER `compileDeclarations`, exactly where
+//     the inline block sat — the pipeline is byte-identical to pre-#2138.
+//   - `JS2WASM_IR_FIRST=1` (+ experimentalIR): called BEFORE
+//     `compileDeclarations`, so the body pass can SKIP legacy emission for
+//     functions the IR will own — every claimed function stops being
+//     compiled twice.
+//
+// Why the reorder is flag-gated rather than unconditional (a deliberate
+// deviation from the issue's original Slice-1 spec, which assumed the hoist
+// was byte-identical): the planning block is NOT side-effect-free —
+//   (a) `resolvePositionType` calls `getOrRegisterVecType` /
+//       `typedArrayVecStorage`, which can first-register Wasm types; moving
+//       it above the body pass can permute type-section index assignment;
+//   (b) `buildIrClassShapes` reads `ctx.structFields`, which body
+//       compilation can mutate (dynamic field additions, #516).
+// Gating the ORDER on the flag makes acceptance criterion 1 (byte-identical
+// output without the flag) true by construction instead of by corpus diff.
+// ---------------------------------------------------------------------------
+
+interface IrOverlayPlan {
+  readonly selection: import("../ir/select.js").IrSelection;
+  readonly classShapes: Map<string, import("../ir/nodes.js").IrClassShape>;
+  readonly overrideMap: Map<string, { params: IrType[]; returnType: IrType | null }>;
+  readonly safeSelection: { funcs: Set<string>; classMembers?: ReadonlySet<string> };
+  readonly trackFallbacks: boolean;
+  readonly declByName: ReadonlyMap<string, ts.FunctionDeclaration>;
+}
+
+/**
+ * (#2138) Decide which claimed functions may have their LEGACY body emission
+ * skipped under `JS2WASM_IR_FIRST=1`. Deliberately conservative — a function
+ * qualifies only when:
+ *
+ *   1. It survived overrideMap resolution (`safeSelection.funcs` — computed
+ *      strictly AFTER the #2023 `new.target` clear and after resolve-time
+ *      drops), so the IR path WILL attempt it.
+ *   2. It is not a generator (`function*`). Legacy generator compilation
+ *      creates auxiliary machinery beyond the slot body; whether the IR
+ *      generator lowering is fully standalone without the legacy compile's
+ *      side effects is unproven, so the first cut keeps generators on the
+ *      compile-twice path. Lift only after a dedicated measurement.
+ *   3. Every DIRECT local callee is also in `safeSelection.funcs`. The
+ *      selector's Step-2 closure already guarantees this against
+ *      `selection.funcs`, but overrideMap resolution can re-open the closure
+ *      (a callee dropped at resolve time). Such a caller's IR build then
+ *      throws "call to unknown function" — a KNOWN-benign legacy fallback
+ *      that must not become a skipped-slot hard error. Non-transitive is
+ *      sufficient: only the function's own IR success is load-bearing for
+ *      its slot, and a callee that is claimed-but-not-skipped still occupies
+ *      its pre-allocated slot with a working body either way.
+ *
+ * Class members are NEVER skipped in this slice (their slot pre-allocation
+ * lives in `class-bodies.ts` and carries a typeIdx parity contract with
+ * legacy callers — see the parity guard in `integration.ts`); they stay on
+ * the legacy-then-overwrite path.
+ *
+ * Every skipped function gets an `unreachable` placeholder body, so the
+ * skip is a *body-emission* change, never an *index-layout* change: the
+ * funcIdx/typeIdx slot assignment from `collectDeclarations` is untouched.
+ * If the IR path then fails to compile a skipped function, the overlay in
+ * `generateModule` promotes that failure to a hard compile error (the
+ * placeholder must never ship) — surfacing exactly the selector↔builder
+ * divergences this investigation exists to find (#2135).
+ */
+function computeIrFirstSkipSet(plan: IrOverlayPlan): ReadonlySet<string> {
+  const skip = new Set<string>();
+  const funcs = plan.safeSelection.funcs;
+  if (funcs.size === 0) return skip;
+  const edges = plan.selection.localCallees;
+  for (const name of funcs) {
+    const fn = plan.declByName.get(name);
+    if (!fn || fn.asteriskToken) continue; // gate 2 — generators
+    if (!edges) continue; // no edge info (defensive) — stay conservative
+    const callees = edges.get(name);
+    let closed = true;
+    if (callees) {
+      for (const c of callees) {
+        if (!funcs.has(c)) {
+          closed = false;
+          break;
+        }
+      }
+    }
+    if (closed) skip.add(name); // gates 1 + 3
+  }
+  return skip;
+}
+
+function planIrOverlay(ctx: CodegenContext, ast: TypedAST): IrOverlayPlan {
+  const typeMap = buildTypeMap(ast.sourceFile, ast.checker);
+  // #1169q telemetry — when JS2WASM_LOG_IR_FALLBACKS is set, request the
+  // selector to track every top-level FunctionDeclaration that didn't
+  // make it into `funcs` along with the rejection reason. Logged to
+  // stderr at end of compile. Off by default (zero overhead).
+  // #1530 — `trackFallbacks` is also enabled when one or more
+  // selector-rejection reasons are in `STRICT_IR_REASONS`. The set
+  // starts empty (purely a hook for follow-up PRs); when populated,
+  // selector rejections of those reasons promote from a silent skip
+  // to a hard error so the IR path becomes the only path for the
+  // affected node kinds. Telemetry mode (`JS2WASM_LOG_IR_FALLBACKS=1`)
+  // continues to enable the histogram log; the strict set additionally
+  // forces collection.
+  const trackFallbacks = process.env.JS2WASM_LOG_IR_FALLBACKS === "1" || STRICT_IR_REASONS.size > 0;
+  const selection = planIrCompilation(ast.sourceFile, { experimentalIR: true, trackFallbacks }, typeMap);
+  // #1530 — when a rejection reason is listed in STRICT_IR_REASONS,
+  // promote every fallback with that reason to a hard compile error
+  // instead of letting the legacy path silently catch it. The set
+  // starts empty; once a bucket hits zero against
+  // `scripts/ir-fallback-baseline.json`, that bucket's reason can be
+  // added here in a follow-up PR.
+  if (STRICT_IR_REASONS.size > 0 && selection.fallbacks) {
+    for (const fb of selection.fallbacks) {
+      if (STRICT_IR_REASONS.has(fb.reason)) {
+        reportErrorNoNode(
+          ctx,
+          `IR path strict mode: ${fb.name} rejected with reason "${fb.reason}" — this reason is required to be zero (see plan/log/ir-adoption.md).`,
+        );
+      }
+    }
+  }
+  // Slice 4 (#1169d) — build the class-shape registry from the
+  // legacy class collection (`ctx.classSet`, `ctx.structFields`,
+  // `ctx.funcMap`). Done BEFORE override resolution so class-typed
+  // positions (`p: Point`) lower to `IrType.class` rather than
+  // throwing in `resolvePositionType`.
+  const classShapes = buildIrClassShapes(ctx, ast.sourceFile);
+  // Build per-function IR type overrides from the propagated TypeMap.
+  //
+  // For a claimed function, the selector must have resolved each
+  // param + return to a concrete primitive via either an explicit
+  // TS annotation OR the TypeMap. We mirror that resolution here to
+  // build the override map: for each position, prefer the AST
+  // annotation (authoritative) and fall back to the TypeMap only
+  // when the AST lacks one. If neither yields a concrete primitive,
+  // that position is a compiler bug — the selector should not have
+  // claimed this function.
+  //
+  // The override map also feeds the `calleeTypes` in the lowerer so
+  // direct calls to IR-path callees see the right signature.
+  // Slice 14 (#1228) — `returnType: IrType | null` where `null` means
+  // a void-returning function (zero Wasm result types). Plumbs through
+  // `compileIrPathFunctions` to `from-ast.ts` so the IR builder can be
+  // constructed with `[]` results and the lowerer can accept bare
+  // `return;` / fall-through tails.
+  const overrideMap = new Map<string, { params: IrType[]; returnType: IrType | null }>();
+  const declByName = new Map<string, ts.FunctionDeclaration>();
+  for (const stmt of ast.sourceFile.statements) {
+    if (ts.isFunctionDeclaration(stmt) && stmt.name) declByName.set(stmt.name.text, stmt);
+  }
+  for (const name of selection.funcs) {
+    const fn = declByName.get(name);
+    if (!fn) continue;
+    const entry = typeMap.get(name);
+    try {
+      // Slice 7a (#1169f) — generator functions return an externref
+      // (the JS Generator-like object built by `__create_generator`)
+      // regardless of the source-level annotation
+      // (`Generator<number>`, `IterableIterator<T>`, etc.). The IR
+      // lowerer enforces this; the override map needs to agree so
+      // the cross-function `calleeTypes` lookup sees the right
+      // signature. Bypass `resolvePositionType` for the return type
+      // — `Generator<T>` doesn't resolve as `IrType.object` and
+      // would otherwise drop the generator from `safeSelection`.
+      const isGenerator = !!fn.asteriskToken;
+      // Slice 14 (#1228) — VoidKeyword return: bypass resolvePositionType
+      // (it has no representation for void in IrType) and set returnType
+      // to null. The lowerer treats null returnType as "no result".
+      const isVoidReturn = !isGenerator && fn.type?.kind === ts.SyntaxKind.VoidKeyword;
+      const returnType: IrType | null = isGenerator
+        ? ({ kind: "val", val: { kind: "externref" } } as IrType)
+        : isVoidReturn
+          ? null
+          : resolvePositionType(fn.type, entry?.returnType, ctx, classShapes);
+      const params: IrType[] = [];
+      for (let i = 0; i < fn.parameters.length; i++) {
+        const p = fn.parameters[i]!;
+        params.push(resolvePositionType(p.type, entry?.params[i], ctx, classShapes));
+      }
+      overrideMap.set(name, { params, returnType });
+    } catch (e) {
+      // Selector claimed a function whose types can't be resolved —
+      // skip the IR path for this one. Fall through to legacy.
+      //
+      // #1921 — this is a deliberate IR→legacy fallback, not a compile
+      // error: the legacy path still produces a working body for `name`.
+      // Emit severity "warning" so it stays visible to bridge tests but
+      // does NOT fail the build (consistent with the IR-fallback channel
+      // at `formatIrPathFallbackDiagnostic` above). Defaulting to "error"
+      // would fail every program with a class-typed cross-function return
+      // that the IR lowerer can't yet represent (e.g. a `Builder` chain).
+      //
+      // #2137 — also record this on the structured `irPostClaimErrors`
+      // channel (kind "resolve") so consumers (bridge tests, the
+      // check:ir-fallbacks gate) can query IR-path fallbacks without
+      // string-matching the diagnostics array. The warning line below is
+      // retained one sprint for back-compat.
+      //
+      // (#2138) NOTE: a resolve-time drop is exactly why `safeSelection`
+      // — not the raw `selection` — feeds `computeIrFirstSkipSet`: this
+      // function keeps its legacy body under IR-first.
+      const resolveMsg = e instanceof Error ? e.message : String(e);
+      (ctx.irPostClaimErrors ??= []).push({
+        kind: "resolve",
+        func: name,
+        message: resolveMsg,
+      });
+      reportErrorNoNode(ctx, `IR path: could not resolve types for ${name}: ${resolveMsg}`, "warning");
+    }
+  }
+  // Only request IR compilation for functions we successfully built
+  // overrides for (the selector may have claimed more, but if we
+  // couldn't map types safely we leave them to legacy).
+  //
+  // #1370 Phase B: thread `classMembers` through to the integration
+  // loop. Class methods don't go through `overrideMap` (they're
+  // typed via the class shape, not the TypeMap-derived overrides);
+  // the integration's class-member walk consults `classShapes`
+  // directly. Pass the set unmodified.
+  const safeSelection: { funcs: Set<string>; classMembers?: ReadonlySet<string> } = {
+    funcs: new Set<string>([...selection.funcs].filter((n) => overrideMap.has(n))),
+    classMembers: selection.classMembers,
+  };
+  // (#2023) The IR `new C(...)` lowering does not thread the new.target
+  // class-id (that machinery lives only on the legacy path). When the
+  // program uses `new.target`, route every function through legacy so the
+  // outermost-`new` global is set/restored at each construction site. This
+  // is a coarse but safe gate — `new.target` is rare, so the perf cost is
+  // negligible and it avoids a parallel IR implementation of the threading.
+  // (#2138: `ctx.usesNewTarget` is written only by `scanForNewTarget`, which
+  // runs BEFORE `collectDeclarations` — so this gate reads the same value at
+  // either pipeline position, plan-before or plan-after the body pass.)
+  if (ctx.usesNewTarget) {
+    safeSelection.funcs.clear();
+    safeSelection.classMembers = new Set();
+  }
+  return { selection, classShapes, overrideMap, safeSelection, trackFallbacks, declByName };
+}
+
 /** Compile a typed AST into a WasmModule IR */
 export function generateModule(
   ast: TypedAST,
@@ -1084,9 +1332,15 @@ export function generateModule(
   fallbackCounts?: FallbackCounts;
   // #1923 — IR post-claim demotions (only when trackIrPostClaim is set).
   irPostClaimErrors?: { kind: string; func: string; message: string }[];
+  // #2138 — legacy bodies skipped under JS2WASM_IR_FIRST=1 (undefined when off).
+  irFirstSkipped?: readonly string[];
 } {
   const mod = createEmptyModule();
   const ctx = createCodegenContext(mod, ast.checker, options);
+  // (#2138) Populated only under JS2WASM_IR_FIRST=1 — the top-level functions
+  // whose legacy body emission was skipped (IR owns the slot). Declared out
+  // here so the return statement below (outside the try) can surface it.
+  let irFirstSkipped: readonly string[] | undefined;
   // (#1983) Pre-scan top-level user `function` declaration names BEFORE any
   // class member registers a funcMap key, so `classMemberFuncKey` can detect a
   // `${className}_${member}` ↔ user-function collision (e.g. `class A { m() {} }`
@@ -1419,8 +1673,27 @@ export function generateModule(
     // No-op unless a function declaration is reassigned.
     registerReassignedFunctionGlobals(ctx, [ast.sourceFile]);
 
+    // (#2138) IR-first compile-once inversion — flag-gated investigation.
+    // Default OFF: with `JS2WASM_IR_FIRST` unset this block is dead and the
+    // pipeline below is byte-identical to the legacy order (IR planning runs
+    // AFTER the body pass, inside the experimentalIR overlay). With the flag
+    // set (+ experimentalIR), the IR plan is computed BEFORE
+    // `compileDeclarations` and legacy body emission is skipped for claimed
+    // functions that pass `computeIrFirstSkipSet`'s gates — those slots get
+    // an `unreachable` placeholder that the IR overlay MUST overwrite (a
+    // post-claim IR failure on a skipped function is promoted to a hard
+    // compile error below, never a silent legacy demote).
+    const irFirst = !!options?.experimentalIR && truthyEnv(process.env.JS2WASM_IR_FIRST);
+    let irPlan: IrOverlayPlan | null = null;
+    let irSkipBodies: ReadonlySet<string> | undefined;
+    if (irFirst) {
+      irPlan = planIrOverlay(ctx, ast);
+      irSkipBodies = computeIrFirstSkipSet(irPlan);
+    }
+
     // Third pass: compile function bodies
-    compileDeclarations(ctx, ast.sourceFile);
+    const actuallySkipped = compileDeclarations(ctx, ast.sourceFile, irSkipBodies);
+    if (irFirst) irFirstSkipped = actuallySkipped ?? [];
 
     // (#1602) Rebuild object-method-as-closure trampoline bodies against the
     // method's now-final signature (param types/order may have been re-resolved
@@ -1442,145 +1715,14 @@ export function generateModule(
     // the claim set under call-graph edges so the IR path never emits a
     // cross-signature `call` against a legacy-compiled callee.
     if (options?.experimentalIR) {
-      const typeMap = buildTypeMap(ast.sourceFile, ast.checker);
-      // #1169q telemetry — when JS2WASM_LOG_IR_FALLBACKS is set, request the
-      // selector to track every top-level FunctionDeclaration that didn't
-      // make it into `funcs` along with the rejection reason. Logged to
-      // stderr at end of compile. Off by default (zero overhead).
-      // #1530 — `trackFallbacks` is also enabled when one or more
-      // selector-rejection reasons are in `STRICT_IR_REASONS`. The set
-      // starts empty (purely a hook for follow-up PRs); when populated,
-      // selector rejections of those reasons promote from a silent skip
-      // to a hard error so the IR path becomes the only path for the
-      // affected node kinds. Telemetry mode (`JS2WASM_LOG_IR_FALLBACKS=1`)
-      // continues to enable the histogram log; the strict set additionally
-      // forces collection.
-      const trackFallbacks = process.env.JS2WASM_LOG_IR_FALLBACKS === "1" || STRICT_IR_REASONS.size > 0;
-      const selection = planIrCompilation(ast.sourceFile, { experimentalIR: true, trackFallbacks }, typeMap);
-      // #1530 — when a rejection reason is listed in STRICT_IR_REASONS,
-      // promote every fallback with that reason to a hard compile error
-      // instead of letting the legacy path silently catch it. The set
-      // starts empty; once a bucket hits zero against
-      // `scripts/ir-fallback-baseline.json`, that bucket's reason can be
-      // added here in a follow-up PR.
-      if (STRICT_IR_REASONS.size > 0 && selection.fallbacks) {
-        for (const fb of selection.fallbacks) {
-          if (STRICT_IR_REASONS.has(fb.reason)) {
-            reportErrorNoNode(
-              ctx,
-              `IR path strict mode: ${fb.name} rejected with reason "${fb.reason}" — this reason is required to be zero (see plan/log/ir-adoption.md).`,
-            );
-          }
-        }
-      }
-      // Slice 4 (#1169d) — build the class-shape registry from the
-      // legacy class collection (`ctx.classSet`, `ctx.structFields`,
-      // `ctx.funcMap`). Done BEFORE override resolution so class-typed
-      // positions (`p: Point`) lower to `IrType.class` rather than
-      // throwing in `resolvePositionType`.
-      const classShapes = buildIrClassShapes(ctx, ast.sourceFile);
-      // Build per-function IR type overrides from the propagated TypeMap.
-      //
-      // For a claimed function, the selector must have resolved each
-      // param + return to a concrete primitive via either an explicit
-      // TS annotation OR the TypeMap. We mirror that resolution here to
-      // build the override map: for each position, prefer the AST
-      // annotation (authoritative) and fall back to the TypeMap only
-      // when the AST lacks one. If neither yields a concrete primitive,
-      // that position is a compiler bug — the selector should not have
-      // claimed this function.
-      //
-      // The override map also feeds the `calleeTypes` in the lowerer so
-      // direct calls to IR-path callees see the right signature.
-      // Slice 14 (#1228) — `returnType: IrType | null` where `null` means
-      // a void-returning function (zero Wasm result types). Plumbs through
-      // `compileIrPathFunctions` to `from-ast.ts` so the IR builder can be
-      // constructed with `[]` results and the lowerer can accept bare
-      // `return;` / fall-through tails.
-      const overrideMap = new Map<string, { params: IrType[]; returnType: IrType | null }>();
-      const declByName = new Map<string, ts.FunctionDeclaration>();
-      for (const stmt of ast.sourceFile.statements) {
-        if (ts.isFunctionDeclaration(stmt) && stmt.name) declByName.set(stmt.name.text, stmt);
-      }
-      for (const name of selection.funcs) {
-        const fn = declByName.get(name);
-        if (!fn) continue;
-        const entry = typeMap.get(name);
-        try {
-          // Slice 7a (#1169f) — generator functions return an externref
-          // (the JS Generator-like object built by `__create_generator`)
-          // regardless of the source-level annotation
-          // (`Generator<number>`, `IterableIterator<T>`, etc.). The IR
-          // lowerer enforces this; the override map needs to agree so
-          // the cross-function `calleeTypes` lookup sees the right
-          // signature. Bypass `resolvePositionType` for the return type
-          // — `Generator<T>` doesn't resolve as `IrType.object` and
-          // would otherwise drop the generator from `safeSelection`.
-          const isGenerator = !!fn.asteriskToken;
-          // Slice 14 (#1228) — VoidKeyword return: bypass resolvePositionType
-          // (it has no representation for void in IrType) and set returnType
-          // to null. The lowerer treats null returnType as "no result".
-          const isVoidReturn = !isGenerator && fn.type?.kind === ts.SyntaxKind.VoidKeyword;
-          const returnType: IrType | null = isGenerator
-            ? ({ kind: "val", val: { kind: "externref" } } as IrType)
-            : isVoidReturn
-              ? null
-              : resolvePositionType(fn.type, entry?.returnType, ctx, classShapes);
-          const params: IrType[] = [];
-          for (let i = 0; i < fn.parameters.length; i++) {
-            const p = fn.parameters[i]!;
-            params.push(resolvePositionType(p.type, entry?.params[i], ctx, classShapes));
-          }
-          overrideMap.set(name, { params, returnType });
-        } catch (e) {
-          // Selector claimed a function whose types can't be resolved —
-          // skip the IR path for this one. Fall through to legacy.
-          //
-          // #1921 — this is a deliberate IR→legacy fallback, not a compile
-          // error: the legacy path still produces a working body for `name`.
-          // Emit severity "warning" so it stays visible to bridge tests but
-          // does NOT fail the build (consistent with the IR-fallback channel
-          // at `formatIrPathFallbackDiagnostic` below). Defaulting to "error"
-          // would fail every program with a class-typed cross-function return
-          // that the IR lowerer can't yet represent (e.g. a `Builder` chain).
-          //
-          // #2137 — also record this on the structured `irPostClaimErrors`
-          // channel (kind "resolve") so consumers (bridge tests, the
-          // check:ir-fallbacks gate) can query IR-path fallbacks without
-          // string-matching the diagnostics array. The warning line below is
-          // retained one sprint for back-compat.
-          const resolveMsg = e instanceof Error ? e.message : String(e);
-          (ctx.irPostClaimErrors ??= []).push({
-            kind: "resolve",
-            func: name,
-            message: resolveMsg,
-          });
-          reportErrorNoNode(ctx, `IR path: could not resolve types for ${name}: ${resolveMsg}`, "warning");
-        }
-      }
-      // Only request IR compilation for functions we successfully built
-      // overrides for (the selector may have claimed more, but if we
-      // couldn't map types safely we leave them to legacy).
-      //
-      // #1370 Phase B: thread `classMembers` through to the integration
-      // loop. Class methods don't go through `overrideMap` (they're
-      // typed via the class shape, not the TypeMap-derived overrides);
-      // the integration's class-member walk consults `classShapes`
-      // directly. Pass the set unmodified.
-      const safeSelection = {
-        funcs: new Set<string>([...selection.funcs].filter((n) => overrideMap.has(n))),
-        classMembers: selection.classMembers,
-      };
-      // (#2023) The IR `new C(...)` lowering does not thread the new.target
-      // class-id (that machinery lives only on the legacy path). When the
-      // program uses `new.target`, route every function through legacy so the
-      // outermost-`new` global is set/restored at each construction site. This
-      // is a coarse but safe gate — `new.target` is rare, so the perf cost is
-      // negligible and it avoids a parallel IR implementation of the threading.
-      if (ctx.usesNewTarget) {
-        safeSelection.funcs.clear();
-        safeSelection.classMembers = new Set();
-      }
+      // (#2138) Under IR-first the plan was computed BEFORE
+      // `compileDeclarations` (see above); otherwise compute it here — the
+      // exact position the inline planning block occupied pre-#2138, so the
+      // flag-off pipeline is order-identical. `planIrOverlay` holds the
+      // planning code verbatim (typeMap → selection → STRICT_IR_REASONS →
+      // classShapes → overrideMap → safeSelection → new.target gate).
+      const plan = irPlan ?? planIrOverlay(ctx, ast);
+      const { selection, classShapes, overrideMap, safeSelection, trackFallbacks } = plan;
       const report = compileIrPathFunctions(ctx, ast.sourceFile, safeSelection, overrideMap, classShapes);
       // Slice 12 (#1169o) — most IR-path failures are NOT compile errors. The
       // legacy path has already produced a working `body` for every function
@@ -1619,18 +1761,42 @@ export function generateModule(
           message: err.message,
         });
         const diag = formatIrPathFallbackDiagnostic(err);
-        // #1858 C4: keep the leading "IR path failed for …" text intact — many
-        // bridge tests filter on `e.message.startsWith("IR path failed")` — but
-        // append a concise, greppable `[IR-FALLBACK]` tag so a regression in the
-        // fallback rate is visible in logs/CI even when the diagnostic is
-        // demoted to severity-"warning". #1850 promotes verifier failures in
-        // test/CI builds by prefixing the same diagnostic with `Codegen error:`.
+        // (#2138) Under IR-first, a post-claim IR failure on a function whose
+        // LEGACY body was SKIPPED cannot demote to a warning: there is no
+        // legacy body to fall back to — the slot holds an `unreachable`
+        // placeholder that would be a live runtime trap. Promote to a hard
+        // compile error. This is the intended investigation behavior: the
+        // flag's job is to surface exactly these selector↔builder
+        // divergences as loud, filable failures (#2135) instead of silent
+        // legacy demotes. Functions NOT in the skip set keep today's
+        // graceful demotion.
+        const skippedTrap = irSkipBodies !== undefined && irSkipBodies.has(err.func);
         ctx.errors.push({
-          message: diag.message,
+          message:
+            skippedTrap && diag.severity !== "error"
+              ? `Codegen error: ${diag.message} [IR-FIRST skipped-slot, #2138]`
+              : diag.message,
           line: 0,
           column: 0,
-          severity: diag.severity,
+          severity: skippedTrap ? "error" : diag.severity,
         });
+      }
+      // (#2138) Backstop for the skip contract: every function whose legacy
+      // body was skipped MUST have been IR-compiled into its slot. A skipped
+      // function that neither appears in `report.compiled` nor produced an
+      // entry in `report.errors` (which the loop above already promoted)
+      // means its placeholder would ship silently — fail the compile.
+      if (irSkipBodies !== undefined && irSkipBodies.size > 0) {
+        const compiledSet = new Set(report.compiled);
+        const erroredSet = new Set(report.errors.map((e) => e.func));
+        for (const name of irSkipBodies) {
+          if (!compiledSet.has(name) && !erroredSet.has(name)) {
+            reportErrorNoNode(
+              ctx,
+              `IR-first (#2138): legacy body for "${name}" was skipped but the IR path neither compiled it nor reported an error — the unreachable placeholder would ship. Selector/integration divergence; file an issue.`,
+            );
+          }
+        }
       }
       // #1169q telemetry — when JS2WASM_LOG_IR_FALLBACKS=1, log a one-line
       // summary per compile to stderr: total top-level FunctionDeclarations
@@ -2048,6 +2214,7 @@ export function generateModule(
     errors: ctx.errors,
     fallbackCounts: ctx.fallbackCounts,
     irPostClaimErrors: ctx.irPostClaimErrors,
+    irFirstSkipped,
   };
 }
 
