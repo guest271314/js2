@@ -58,7 +58,11 @@ describe("Promise / async equivalence", () => {
     await expect(wasm.main()).resolves.toBe(100);
   });
 
-  it("multiple sequential awaits", async () => {
+  it("multiple sequential awaits resolve through a real Promise (#1042 host drive)", async () => {
+    // #1042 re-targeted multi-await JS-host bodies onto the #2906 N-state
+    // resume machine — `sum` now returns a REAL Promise (the legacy synchronous
+    // fakery returned wrong values under genuine suspension). Consume through
+    // `await` per the #1796 contract migration, as the single-await siblings do.
     const src = `
       async function getA(): Promise<number> { return 10; }
       async function getB(): Promise<number> { return 20; }
@@ -69,12 +73,12 @@ describe("Promise / async equivalence", () => {
         const c = await getC();
         return a + b + c;
       }
-      export function main(): number {
-        return sum() as any as number;
+      export async function main(): Promise<number> {
+        return await sum();
       }
     `;
     const wasm = await compileToWasm(src);
-    expect(wasm.main()).toBe(60);
+    await expect(wasm.main()).resolves.toBe(60);
   });
 
   it("async function with conditional logic", async () => {

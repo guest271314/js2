@@ -143,6 +143,15 @@ export interface CompileResult {
    * class.
    */
   irPostClaimErrors?: { kind: string; func: string; message: string }[];
+  /**
+   * (#2138) IR-first compile-once inversion telemetry. Present ONLY when the
+   * `JS2WASM_IR_FIRST=1` flag was active for this compile: lists the
+   * top-level functions whose legacy body emission was skipped because the
+   * IR path owned the slot (compiled once instead of twice). `undefined`
+   * whenever the flag is off — the flag-off pipeline is byte-identical to
+   * the pre-#2138 behavior and pays zero cost for this field.
+   */
+  irFirstSkipped?: readonly string[];
 }
 
 export interface CompileError {

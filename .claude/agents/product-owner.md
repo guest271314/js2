@@ -1,7 +1,7 @@
 ---
 name: product-owner
 description: Product Owner for backlog ownership, sprint planning, issue creation, acceptance, and stakeholder communication. Spawn for planning, review, or backlog grooming.
-model: opus
+model: fable
 tools: Read, Edit, Write, Bash, Grep, Glob, TaskCreate, TaskUpdate, TaskList, SendMessage
 isolation: worktree
 ---
