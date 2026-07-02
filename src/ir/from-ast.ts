@@ -43,6 +43,7 @@ import { evaluateConstantCondition } from "../codegen/statements/control-flow.js
 import { isIncreasingStep, loopBodyMutatesIndexOrArray } from "../codegen/statements/loops.js";
 import { IrFunctionBuilder } from "./builder.js";
 import type { AllocSiteRegistry } from "./alloc-registry.js";
+import { assertNotDeferred, binaryOpCapability, prefixOpCapability } from "./capability.js";
 import type { IrLowerResolver, IrVecLowering } from "./lower.js";
 import { mathUnaryToIrOp } from "./select.js";
 import {
@@ -4095,6 +4096,13 @@ function lowerConditional(expr: ts.ConditionalExpression, cx: LowerCtx): IrValue
 }
 
 function lowerPrefixUnary(expr: ts.PrefixUnaryExpression, cx: LowerCtx): IrValueId {
+  // #2135 — capability-table invariant, mirroring `lowerBinary`. A deferred
+  // prefix op post-claim is a selector↔table disagreement (compiler bug).
+  assertNotDeferred(
+    prefixOpCapability(expr.operator),
+    `prefix operator '${ts.tokenToString(expr.operator) ?? expr.operator}'`,
+    cx.funcName,
+  );
   const rand = lowerExpr(expr.operand, cx, irVal({ kind: "f64" }));
   switch (expr.operator) {
     case ts.SyntaxKind.MinusToken: {
@@ -4289,18 +4297,15 @@ function lowerBinary(expr: ts.BinaryExpression, cx: LowerCtx, hint: IrType): IrV
     return lowerLogicalAndOr(expr, op, cx);
   }
 
-  // Slice 11 (#1169n) — early fallback for ops the selector accepts
-  // shape-only but the lowerer doesn't yet implement. Throwing BEFORE
-  // we lower operands keeps the error message short and avoids
-  // cascading errors from operand lowering.
-  if (
-    op === ts.SyntaxKind.PercentToken ||
-    op === ts.SyntaxKind.AsteriskAsteriskToken ||
-    op === ts.SyntaxKind.InKeyword ||
-    op === ts.SyntaxKind.InstanceOfKeyword
-  ) {
-    throw new Error(`ir/from-ast: operator '${ts.tokenToString(op)}' not in slice 11 (${cx.funcName})`);
-  }
+  // #2135 — capability-table invariant (shared with the selector via
+  // `src/ir/capability.ts`). The old slice-11 "shape-only acceptance" list
+  // (`%` / `**` / `in` / `instanceof` claimed by the selector, thrown here)
+  // is retired: those ops are table-deferred, the selector rejects them
+  // up-front, and an op arriving here with a "defer" capability is a
+  // claim-path BUG (loud internal error), not a legitimate legacy fallback.
+  // Checked BEFORE operand lowering so a violation reports cleanly without
+  // cascading operand errors.
+  assertNotDeferred(binaryOpCapability(op), `binary operator '${ts.tokenToString(op) ?? op}'`, cx.funcName);
 
   // === / !== / == / != with a `null` literal: slice 1 has no nullable IR
   // types yet, so every operand we can lower trivially evaluates to false

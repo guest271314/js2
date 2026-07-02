@@ -493,6 +493,25 @@ const PROTO_METHOD_LENGTH: Readonly<Record<string, number>> = {
   unregister: 1,
 };
 
+/**
+ * (#2875 slice 3) ABI param-slot counts for `String.prototype` members whose
+ * trailing OPTIONAL arg is NOT counted by `fn.length` — `indexOf(searchString,
+ * position)` etc. are spec length 1 but take a second arg. The reflective
+ * closure's lifted func type sizes to this slot count (so the optional arg has
+ * a real param index — reading a nonexistent param index lands on the first
+ * DECLARED LOCAL and emits invalid Wasm), while `.length` keeps reporting the
+ * spec arity via `nativeClosureMeta`. Call surfaces pad missing args with
+ * `ref.null.extern` (undefined). Scoped to String so every other family's
+ * closure types stay byte-identical.
+ */
+const STRING_PROTO_METHOD_PARAM_SLOTS: Readonly<Record<string, number>> = {
+  indexOf: 2, // (searchString, position) §22.1.3.8
+  lastIndexOf: 2, // (searchString, position) §22.1.3.9
+  includes: 2, // (searchString, position) §22.1.3.7
+  startsWith: 2, // (searchString, position) §22.1.3.23
+  endsWith: 2, // (searchString, endPosition) §22.1.3.6
+};
+
 // ── ArrayBuffer.prototype (ES2024 §25.1.5) ────────────────────────────────────
 // Method names + accessor getters. Getters (`byteLength`/`maxByteLength`/
 // `detached`/`resizable`) are marked below so their `.length` meta folds to 0.
@@ -720,6 +739,18 @@ function emitArrayProtoMemberBody(ctx: CodegenContext, fctx: FunctionContext, me
  */
 function emitStringProtoMemberBody(ctx: CodegenContext, fctx: FunctionContext, member: string): ValType | null {
   const IN_SCOPE = new Set(["charAt", "at", "charCodeAt", "codePointAt"]);
+  // (#2875 slice 3a) The number-returning search family — `indexOf` /
+  // `lastIndexOf` — has a DIFFERENT closure ABI from the index accessors
+  // (param 2 is the search STRING, not an integer position; the optional
+  // position is param 3), so it gets a dedicated body rather than the
+  // integer-position path below. Routed FIRST so it bypasses the index-accessor
+  // code entirely — keeping that path byte-identical to slices 1–2.
+  const SEARCH_NUMERIC = new Set(["indexOf", "lastIndexOf"]);
+  if (SEARCH_NUMERIC.has(member)) return emitStringSearchNumericMemberBody(ctx, fctx, member);
+  // (#2875 slice 3b) The BOOLEAN-returning search family shares the two-string
+  // ABI of 3a but boxes an i32 boolean result via __box_boolean.
+  const SEARCH_BOOLEAN = new Set(["includes", "startsWith", "endsWith"]);
+  if (SEARCH_BOOLEAN.has(member)) return emitStringSearchBooleanMemberBody(ctx, fctx, member);
   if (!IN_SCOPE.has(member)) return emitProtoMemberBodyRefusal(ctx, fctx, "String", member);
 
   ensureNativeStringHelpers(ctx);
@@ -944,6 +975,184 @@ function emitStringProtoMemberBody(ctx: CodegenContext, fctx: FunctionContext, m
 }
 
 /**
+ * (#2875 slice 3a) Native body for a reflective `String.prototype.<member>`
+ * closure of the NUMBER-returning search family — `indexOf` / `lastIndexOf`.
+ * Closure ABI: `this` = param 1 (externref), searchString = param 2 (externref-
+ * boxed), fromIndex/position = param 3 (externref-boxed). Param 3 exists ONLY
+ * because `STRING_PROTO_METHOD_PARAM_SLOTS` sizes these closures to 2 arg
+ * slots (spec `fn.length` is 1 — the optional `position` is uncounted, and
+ * sizing by arity alone made `local.get 3` read the first DECLARED LOCAL,
+ * emitting invalid Wasm — the original slice-3 blocker). Implements
+ * §22.1.3.{8,9}: `? RequireObjectCoercible(this)` → `? ToString(this)` →
+ * `? ToString(searchString)` → the native index scan → box the i32 index as a
+ * Number (externref). This is the search-family counterpart of `charCodeAt`'s
+ * number-box arm; it differs from the index-accessor path only in that param 2
+ * is a STRING (flattened) rather than an integer position.
+ *
+ * Funcidx/type-index discipline: the ONLY late-import adders here (`unboxArgToI32`'s
+ * `__unbox_number` and `__box_number`) run FIRST and flush, so every helper funcIdx
+ * fetched by NAME afterwards is post-shift-correct. Receiver + needle are flattened
+ * to `flatStringType` (`ref $FlatString`, a subtype of the helpers' `ref $AnyString`
+ * param — a valid implicit up-cast), mirroring `charAt`.
+ */
+function emitStringSearchNumericMemberBody(ctx: CodegenContext, fctx: FunctionContext, member: string): ValType | null {
+  ensureNativeStringHelpers(ctx);
+  const isLast = member === "lastIndexOf";
+  const helperName = isLast ? "__str_lastIndexOf" : "__str_indexOf";
+
+  // (1) Do ALL late-import-adding ops FIRST (mirrors charCodeAt), so every helper
+  // funcIdx fetched by NAME afterwards is post-shift-correct.
+  //   fromIndex: unbox param 3 → i32 (null/undefined → 0 via NaN→trunc_sat).
+  const fromLocal = unboxArgToI32(ctx, fctx, 3);
+  const boxIdx = ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
+  flushLateImportShifts(ctx, fctx);
+  if (boxIdx === undefined) return emitProtoMemberBodyRefusal(ctx, fctx, "String", member);
+
+  // (2) Fetch helper funcIdxs AFTER the import shifts, by name.
+  const anyToStrIdx = ensureAnyToStringHelper(ctx);
+  const flattenIdx = ctx.nativeStrHelpers.get("__str_flatten");
+  const searchIdx = ctx.nativeStrHelpers.get(helperName);
+  if (flattenIdx === undefined || searchIdx === undefined) {
+    return emitProtoMemberBodyRefusal(ctx, fctx, "String", member);
+  }
+
+  // (3) RequireObjectCoercible(this) [param 1]: undefined≡null≡ref.null.extern in
+  // standalone, so a bare ref.is_null throw covers both → catchable TypeError.
+  const rocThrow: Instr[] = [];
+  emitBrandCheckTypeError(ctx, rocThrow, `String.prototype.${member} called on null or undefined`);
+  fctx.body.push({ op: "local.get", index: 1 } as Instr);
+  fctx.body.push({ op: "ref.is_null" } as Instr);
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: rocThrow } as Instr);
+
+  // (4) lastIndexOf default position: §22.1.3.9 — an absent / `undefined` position
+  // is ToIntegerOrInfinity → +∞ ⇒ search from the end. In standalone both map to a
+  // null externref, so ref.is_null selects the from-end sentinel (0x7fffffff). An
+  // explicit numeric position (incl. saturating large values) keeps its unboxed i32.
+  // `indexOf`'s default of 0 is exactly what unboxArgToI32 already yields for null.
+  if (isLast) {
+    fctx.body.push({ op: "local.get", index: 3 } as Instr);
+    fctx.body.push({ op: "ref.is_null" } as Instr);
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "val", type: { kind: "i32" } },
+      then: [{ op: "i32.const", value: 0x7fffffff } as Instr],
+      else: [{ op: "local.get", index: fromLocal } as Instr],
+    } as Instr);
+    fctx.body.push({ op: "local.set", index: fromLocal } as Instr);
+  }
+
+  // (5) recv = flatten(ToString(this)); needle = flatten(ToString(searchString)).
+  const flattenExtern = (paramIdx: number, label: string): number => {
+    fctx.body.push({ op: "local.get", index: paramIdx } as Instr);
+    fctx.body.push({ op: "any.convert_extern" } as Instr);
+    fctx.body.push({ op: "call", funcIdx: anyToStrIdx } as Instr);
+    fctx.body.push({ op: "call", funcIdx: flattenIdx } as Instr);
+    const local = allocLocal(fctx, `${label}_${fctx.locals.length}`, flatStringType(ctx));
+    fctx.body.push({ op: "local.set", index: local } as Instr);
+    return local;
+  };
+  const recvLocal = flattenExtern(1, "__str_srch_recv");
+  const needleLocal = flattenExtern(2, "__str_srch_needle");
+
+  // (6) call __str_indexOf/__str_lastIndexOf(recv, needle, fromIndex) → i32 index.
+  fctx.body.push({ op: "local.get", index: recvLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: needleLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: fromLocal } as Instr);
+  fctx.body.push({ op: "call", funcIdx: searchIdx } as Instr);
+  // (7) box the i32 index as a Number (externref).
+  fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+  fctx.body.push({ op: "call", funcIdx: boxIdx } as Instr);
+  return { kind: "externref" };
+}
+
+/**
+ * (#2875 slice 3b) Native body for a reflective `String.prototype.<member>`
+ * closure of the BOOLEAN-returning search family — `includes` / `startsWith` /
+ * `endsWith`. Same two-string ABI as the 3a numeric family (`this` = param 1,
+ * searchString = param 2, position/endPosition = param 3 — the second slot
+ * exists via STRING_PROTO_METHOD_PARAM_SLOTS), but the i32 core result is
+ * boxed via the standalone-native `__box_boolean` so the externref carries a
+ * real JS boolean (NOT `__box_number` — `1 === true` is false; see the
+ * array-methods.ts SameValueZero note). Implements §22.1.3.{7,23,6} steps:
+ * `? RequireObjectCoercible(this)` → `? ToString(this)` →
+ * `? ToString(searchString)` → clamp position → the native core.
+ *
+ * Known spec gap (documented, matches the DIRECT path's static-only fold):
+ * step 3's IsRegExp(searchString) throw is folded STATICALLY at direct call
+ * sites (`argIsStaticRegExp`, string-ops.ts); this reflective body does not
+ * re-check at runtime, so a RegExp arg reaching a reflective call falls
+ * through to ToString instead of throwing. No test262 case exercises that
+ * combination today; a runtime `ref.test $RegExp` arm can be added when one
+ * does.
+ */
+function emitStringSearchBooleanMemberBody(ctx: CodegenContext, fctx: FunctionContext, member: string): ValType | null {
+  ensureNativeStringHelpers(ctx);
+  const helperName =
+    member === "includes" ? "__str_includes" : member === "startsWith" ? "__str_startsWith" : "__str_endsWith";
+
+  // (1) Do ALL late-import-adding ops FIRST (mirrors the 3a body), so every
+  // helper funcIdx fetched by NAME afterwards is post-shift-correct.
+  //   position/endPosition: unbox param 3 → i32 (null/undefined → 0).
+  const posLocal = unboxArgToI32(ctx, fctx, 3);
+  const boxBoolIdx = ensureLateImport(ctx, "__box_boolean", [{ kind: "i32" }], [{ kind: "externref" }]);
+  flushLateImportShifts(ctx, fctx);
+  if (boxBoolIdx === undefined) return emitProtoMemberBodyRefusal(ctx, fctx, "String", member);
+
+  // (2) Fetch helper funcIdxs AFTER the import shifts, by name.
+  const anyToStrIdx = ensureAnyToStringHelper(ctx);
+  const flattenIdx = ctx.nativeStrHelpers.get("__str_flatten");
+  const coreIdx = ctx.nativeStrHelpers.get(helperName);
+  if (flattenIdx === undefined || coreIdx === undefined) {
+    return emitProtoMemberBodyRefusal(ctx, fctx, "String", member);
+  }
+
+  // (3) RequireObjectCoercible(this) [param 1]: undefined≡null≡ref.null.extern in
+  // standalone, so a bare ref.is_null throw covers both → catchable TypeError.
+  const rocThrow: Instr[] = [];
+  emitBrandCheckTypeError(ctx, rocThrow, `String.prototype.${member} called on null or undefined`);
+  fctx.body.push({ op: "local.get", index: 1 } as Instr);
+  fctx.body.push({ op: "ref.is_null" } as Instr);
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: rocThrow } as Instr);
+
+  // (4) endsWith default endPosition: §22.1.3.6 step 6 — absent/`undefined`
+  // endPosition ⇒ end = len. Mirror the DIRECT path's 0x7fffffff sentinel
+  // (string-ops.ts), which the core clamps to sLen. `includes`/`startsWith`
+  // default position 0 is exactly what unboxArgToI32 already yields for null.
+  if (member === "endsWith") {
+    fctx.body.push({ op: "local.get", index: 3 } as Instr);
+    fctx.body.push({ op: "ref.is_null" } as Instr);
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "val", type: { kind: "i32" } },
+      then: [{ op: "i32.const", value: 0x7fffffff } as Instr],
+      else: [{ op: "local.get", index: posLocal } as Instr],
+    } as Instr);
+    fctx.body.push({ op: "local.set", index: posLocal } as Instr);
+  }
+
+  // (5) recv = flatten(ToString(this)); needle = flatten(ToString(searchString)).
+  const flattenExtern = (paramIdx: number, label: string): number => {
+    fctx.body.push({ op: "local.get", index: paramIdx } as Instr);
+    fctx.body.push({ op: "any.convert_extern" } as Instr);
+    fctx.body.push({ op: "call", funcIdx: anyToStrIdx } as Instr);
+    fctx.body.push({ op: "call", funcIdx: flattenIdx } as Instr);
+    const local = allocLocal(fctx, `${label}_${fctx.locals.length}`, flatStringType(ctx));
+    fctx.body.push({ op: "local.set", index: local } as Instr);
+    return local;
+  };
+  const recvLocal = flattenExtern(1, "__str_srchb_recv");
+  const needleLocal = flattenExtern(2, "__str_srchb_needle");
+
+  // (6) call the core (recv, needle, pos) → i32 boolean → box as JS boolean.
+  fctx.body.push({ op: "local.get", index: recvLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: needleLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: posLocal } as Instr);
+  fctx.body.push({ op: "call", funcIdx: coreIdx } as Instr);
+  fctx.body.push({ op: "call", funcIdx: boxBoolIdx } as Instr);
+  return { kind: "externref" };
+}
+
+/**
  * (#2893 PR-1) The integer-view standalone vec storage keys and their
  * compile-time element widths (BYTES_PER_ELEMENT). Post-#2593/#2835 each is a
  * DISJOINT `$Vec` struct on current main (see `TYPED_ARRAY_PACKED_STORAGE`,
@@ -1149,6 +1358,11 @@ function makeGlue(
     // not the proto).
     memberKind: () => "method",
     memberLength: (member) => PROTO_METHOD_LENGTH[member] ?? 1,
+    // (#2875 slice 3) String search-family members carry an uncounted optional
+    // `position` arg — give their closures a real param slot for it. Non-String
+    // families return 0 (= "no override": the slot count falls back to the spec
+    // arity), keeping their closure types byte-identical.
+    memberParamSlots: (member) => (name === "String" ? (STRING_PROTO_METHOD_PARAM_SLOTS[member] ?? 0) : 0),
     // (#2193 PR-B) Array.prototype.slice is now a real native closure body;
     // (#2875 slice 1) String.prototype.{charAt,at} likewise. Other Array/String
     // members + all Object members still degrade to a catchable TypeError.

@@ -1687,9 +1687,19 @@ function fnGlobalObject(): number { return 0; }`;
   }
 
   if (needsIsConstructor) {
+    // (#2875 slice 4) Harness stub pending a real standalone Reflect.construct
+    // (#1472 Phase C): everything reports non-constructor. The stub MUST return
+    // a real `false`, not the number 0 — `assert.sameValue(isConstructor(x),
+    // false)` compiles to a strict `===` where `0 === false` is (correctly)
+    // false in the standalone lane, so the typed-number stub failed every
+    // `*/not-a-constructor.js` at assert #1 even though the test's second
+    // assert (`new X()` throws TypeError) exercises real compiled semantics
+    // and passes. `is-a-constructor.js` tests (assert true) keep failing under
+    // this stub by design — no false conformance for constructors until the
+    // real Reflect.construct newTarget-validation lands.
     p += `
 
-function isConstructor(f: number): number { return 0; }`;
+function isConstructor(f: any): boolean { return false; }`;
   }
 
   if (needsDecimalToHex) {

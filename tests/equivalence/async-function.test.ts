@@ -63,7 +63,13 @@ describe("Async function support (synchronous compilation)", () => {
     expect(exports.main()).toBe(49);
   });
 
-  it("multiple awaits in sequence", async () => {
+  it("multiple awaits in sequence resolve through a real Promise (#1042 host drive)", async () => {
+    // `sum` awaits two async calls (not statically resolved), so it genuinely
+    // suspends. Since #1042 re-targeted the JS-host lane onto the #2906 N-state
+    // resume machine, a multi-await body returns a REAL Promise (previously the
+    // legacy synchronous fakery — which returned wrong values the moment an
+    // operand was genuinely pending). Same #1796 migration as the single-await
+    // sibling above: consume the result through `await`, not a raw-number cast.
     const src = `
       async function getA(): Promise<number> { return 10; }
       async function getB(): Promise<number> { return 20; }
@@ -72,12 +78,12 @@ describe("Async function support (synchronous compilation)", () => {
         const b = await getB();
         return a + b;
       }
-      export function main(): number {
-        return sum() as any as number;
+      export async function main(): Promise<number> {
+        return await sum();
       }
     `;
     const exports = await compileToWasm(src);
-    expect(exports.main()).toBe(30);
+    await expect(exports.main()).resolves.toBe(30);
   });
 
   // #1730: calling a module-level `const` arrow internally USED to trap with
