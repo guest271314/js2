@@ -3299,8 +3299,22 @@ export function emitStandalonePromiseThen(
  * once the drive layer makes native async results observable.
  */
 export function isStandalonePromiseActive(ctx: CodegenContext): boolean {
+  if (ASYNC_CARRIER_WIDEN_MEASURE) return ctx.wasi === true || ctx.standalone === true;
   return ctx.wasi === true;
 }
+
+/**
+ * (#2980) MEASUREMENT INSTRUMENT for the slice-1d carrier widen decision — NOT
+ * the widen itself. When the `JS2WASM_ASYNC_CARRIER_WIDEN` env var is `"1"`,
+ * both carrier gates ({@link isStandalonePromiseActive} +
+ * {@link isStandaloneThenChainNativeActive}) include `--target standalone`, so
+ * the full-corpus A/B (gate on vs off) can be measured WITHOUT committing the
+ * flip. Unset (the default, including all of CI), both gates are exactly
+ * `ctx.wasi === true` — behaviour and output are unchanged. The real widen
+ * lands as its own tiny PR ONLY on a measured net-positive corpus result
+ * (#2867 slice-1d protocol; flipping both together is the AG0-safe coupling).
+ */
+const ASYNC_CARRIER_WIDEN_MEASURE = typeof process !== "undefined" && process.env?.JS2WASM_ASYNC_CARRIER_WIDEN === "1";
 
 /**
  * (#2895) Gate for the **native `.then` / `.catch` chaining** lowering
@@ -3321,6 +3335,7 @@ export function isStandalonePromiseActive(ctx: CodegenContext): boolean {
  * PATH B re-enables native chaining for standalone by widening this predicate.
  */
 export function isStandaloneThenChainNativeActive(ctx: CodegenContext): boolean {
+  if (ASYNC_CARRIER_WIDEN_MEASURE) return ctx.wasi === true || ctx.standalone === true;
   return ctx.wasi === true;
 }
 
