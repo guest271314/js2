@@ -82,15 +82,38 @@ no-yield RELAX only.
 
 ### Remaining work to unblock (each its own concern)
 
-- **Fix the class-static generator funcIdx/arity desync** ("need 4, got 1") —
-  the class-static emit path in `class-bodies.ts` + the resume-call arity. This
-  is the larger codegen bug (#2936 sibling for the static path).
-- **Fix the no-yield `.value` semantic bug** — done-from-start result's `value`
-  field must read `undefined` through the standalone harness/value-read path;
-  reproduce via the test262 wrapper, not just an isolated typed probe.
-- **Bail the negative-test / async-from-sync shapes** if not cleanly supported.
-- **Re-validate on the FULL merge_group**, not a scoped sample — broad-impact
-  changes validate on full CI (memory `project_broad_impact_validate_full_ci`).
+- **[DONE → #2941, PR #2458] class-static generator funcIdx desync.** Was the
+  un-shifted `ctx.nativeGenerators[].resumeFuncIdx` side-channel. Fixed
+  independently of this relax; proven to flip all ~16 class-static invalid
+  modules to valid (18/20 on the reg corpus). See `plan/issues/2941-*.md`.
+- **[SPIRAL — deferred] no-yield `.value` semantic bug.** Root-caused
+  (2026-07-02): the done-from-start native result struct's `.value` reads
+  correctly in a **typed** context but returns a non-`undefined` value in an
+  **any / dynamic** context — which is exactly how the test262 harness reads it
+  (`assert.sameValue(g.next().value, undefined)` takes `any`). Confirmed with a
+  minimal probe: `readVal(g.next().value)` where `readVal(x: any)` returns
+  "other", not "undefined". This is the **any-receiver / dynamic-read-of-native-
+  result-struct substrate** class (memory `project_2151_any_receiver_dispatch_slices`,
+  `project_standalone_any_string_value_read_substrate`): the dynamic member-read
+  dispatch must recognise the native generator result struct type and yield
+  proper `undefined` for a done/absent value. That is substrate-level work, **not
+  bounded within the time-box** → per the decision tree, **option B: #2445 stays
+  parked** with this analysis; the no-yield relax does not ship until the
+  dynamic-read substrate handles native result structs.
+- **[deferred with option B] negative-test early-error miss + async-from-sync
+  invalid module** — separate smaller concerns, only relevant once the relax is
+  revived.
+
+### VERDICT (2026-07-02): option B — #2445 PARKED, A′ (#2941) banked
+
+The no-yield relax has two independent blockers: (a) the class-static funcIdx
+desync — **fixed and banked as #2941** (general hardening, ships regardless);
+(b) the no-yield `.value` any-context semantic bug — **substrate-level, spirals
+past the time-box**. So the relax itself is deferred: PR #2445 stays parked (bot
+`hold`) with this analysis. Reviving it requires the dynamic-read substrate to
+handle native generator result structs, then a FULL `merge_group` re-validation
+(never a scoped sample — `project_broad_impact_validate_full_ci`) with a
+construct-strided corpus (see the corpus-design note above).
 
 ## Handoff to #2936 (funcIdx-shift fix — the unblocker) [historical]
 
