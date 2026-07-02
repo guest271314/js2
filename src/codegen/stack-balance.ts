@@ -2483,31 +2483,35 @@ export function stackBalance(mod: WasmModule): number {
   // #1918 — reset the fixup-telemetry collector for this run.
   fixupEvents = [];
 
-  // Count import functions and find __box_number/__unbox_number indices
+  // Count import functions.
   let numImports = 0;
-  let boxNumberIdx: number | null = null;
-  let unboxNumberIdx: number | null = null;
   for (const imp of mod.imports) {
-    if (imp.desc.kind === "func") {
-      if (imp.name === "__box_number") boxNumberIdx = numImports;
-      if (imp.name === "__unbox_number") unboxNumberIdx = numImports;
-      numImports++;
-    }
+    if (imp.desc.kind === "func") numImports++;
   }
-  // (#2140) In standalone/WASI the box/unbox helpers are DEFINED functions
-  // (Wasm-native UNION helpers, see late-imports.ts), not env imports — the
-  // import-only scan above left them null there, so every coercionPlan
+  // (#2140) Resolve the box/unbox helper indices. The helpers may be env
+  // imports (JS-host lane) OR DEFINED functions (standalone/WASI — the
+  // Wasm-native UNION helpers, see late-imports.ts). The previous import-only
+  // scan left them null in the host-less lane, so every coercionPlan
   // box/unbox row silently degraded to its fall-through (no coerce) or lossy
-  // arm in exactly the lane with no host to absorb the damage. Scan defined
-  // functions too (defined idx = numImports + position; import names win on
-  // the impossible-in-practice duplicate).
-  if (boxNumberIdx === null || unboxNumberIdx === null) {
-    for (let i = 0; i < mod.functions.length; i++) {
-      const name = mod.functions[i]!.name;
-      if (boxNumberIdx === null && name === "__box_number") boxNumberIdx = numImports + i;
-      if (unboxNumberIdx === null && name === "__unbox_number") unboxNumberIdx = numImports + i;
+  // arm exactly where no host could absorb the damage. Imports win on the
+  // impossible-in-practice duplicate; defined idx = numImports + position.
+  // (Single name-literal per helper — the #2108 drift gate counts quoted
+  // coercion-vocabulary occurrences per file.)
+  const findFuncByName = (helperName: string): number | null => {
+    let importIdx = 0;
+    for (const imp of mod.imports) {
+      if (imp.desc.kind === "func") {
+        if (imp.name === helperName) return importIdx;
+        importIdx++;
+      }
     }
-  }
+    for (let i = 0; i < mod.functions.length; i++) {
+      if (mod.functions[i]!.name === helperName) return numImports + i;
+    }
+    return null;
+  };
+  const boxNumberIdx: number | null = findFuncByName("__box_number");
+  const unboxNumberIdx: number | null = findFuncByName("__unbox_number");
 
   // Build global types array
   const globalTypes: ValType[] = [];
