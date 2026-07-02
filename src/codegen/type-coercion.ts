@@ -14,6 +14,7 @@ import type { ClosureInfo, CodegenContext, FunctionContext, OptionalParamInfo } 
 import { definedFuncAt } from "./func-space.js";
 import { addUnionImports, ensureAnyHelpers, ensureAnyToExternHelper, isAnyValue } from "./index.js";
 import { ensureAnyToStringHelper, stringConstantExternrefInstrs } from "./native-strings.js";
+import { emitThrowTypeError } from "./expressions/helpers.js";
 import { emitNativeNumberFormat } from "./number-format-native.js";
 import { addStringConstantGlobal } from "./registry/imports.js";
 import { addFuncType, getArrTypeIdxFromVec } from "./registry/types.js";
@@ -2691,6 +2692,19 @@ export function tryStructToString(ctx: CodegenContext, fctx: FunctionContext, fr
   // (which handles AnyValue boxes + AnyString passthrough). A bare ref_null
   // string is cast to the concrete $AnyString so the value type is exact.
   const normaliseToString = (retKind: string | undefined): void => {
+    // (#2934 slice 3) A dispatched method whose Wasm func type has NO result —
+    // it either always throws (never; e.g. `toString(){ throw "x"; }`,
+    // S15.5.4.6_A4_T2) or returns undefined (void). Nothing is on the stack, so
+    // the arms below would under-feed their consumer (`call $__any_to_string`
+    // with 0 operands — "not enough arguments on the stack"). Per §7.1.1
+    // OrdinaryToPrimitive, a toString that yields no primitive ends in
+    // TypeError; emit that throw — for the always-throwing case it is dead
+    // code after the call, and `throw` leaves the stack polymorphic so the
+    // enclosing arm's declared `ref $AnyString` result validates.
+    if (retKind === undefined || retKind === "void") {
+      emitThrowTypeError(ctx, fctx, "Cannot convert object to primitive value");
+      return;
+    }
     if (retKind === "externref" || retKind === "ref_extern") {
       // externref holding a native string → any.convert_extern + cast.
       fctx.body.push({ op: "any.convert_extern" } as Instr);
