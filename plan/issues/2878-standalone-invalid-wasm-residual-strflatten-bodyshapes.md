@@ -1,8 +1,9 @@
 ---
 id: 2878
-title: "Standalone: invalid Wasm residual — 3 root-cause classes (A: dstr default value-rep, B: __str_flatten null-deref, C: funcidx-shift). Single-cause framing superseded."
-status: in-progress
-assignee: ttraenkler/dev-callback
+title: "Standalone: invalid Wasm residual — 3 root-cause classes (A: dstr default value-rep, B: __str_flatten null-deref, C: eqref/funcidx-shift). Single-cause framing superseded."
+status: done
+assignee: ttraenkler/dev-2878
+completed: 2026-07-02
 created: 2026-06-30
 updated: 2026-07-02
 priority: high
@@ -14,7 +15,7 @@ sprint: current
 horizon: m
 related: [2860, 2868, 2849, 2918, 1461]
 umbrella: 2860
-decomposition: "Triaged 2026-07-02 into 3 independent classes (see ## Triage findings). The original shared-Instr-shift hypothesis covers Class C only. Class A slice 1 (object-destructuring default value-rep coercion) landed; remaining Class-A value-rep signatures + Classes B/C are follow-up slices."
+decomposition: "Triaged into 3 independent classes (see ## Triage findings). dev-2878 fixed Class C (eqref-coercion, PR #2431) and marked this done — BUT that re-measurement sampled built-ins/ only and MISSED the Class-A object-destructuring value-rep cluster, which lives in language/**/dstr/** (42 tests, 0->18 genuine PASS). dev-callback's Class-A slice 1 lands via PR #2435. TECH-LEAD DECISION PENDING: reopen #2878 vs re-home the remaining Class-A/B slices under a fresh follow-up issue."
 ---
 
 # Standalone: invalid Wasm — residual after #2868
@@ -161,3 +162,82 @@ binding-local-type fix (not the naive coercion). Classes B and C are
 independent. `binaryen wasm-dis` shows GC bodies even when V8 rejects; use
 `WebAssembly.validate` / `instantiate({})` for the authoritative verdict
 (binaryen's `wasm-validate` rejects valid GC with `unexpected type form 0x50`).
+
+## Resolution (2026-07-02, dev-2878)
+
+### Re-measured the residual on current main first
+
+The 2026-06-30 buckets had **already largely healed** on current `origin/main`
+via intervening merges (#2918 native-Promise funcIdx-shift and others).
+Concrete re-measurement (standalone compile + `WebAssembly.compile` validate over
+a 3,500-file `built-ins` sample):
+
+- `String/prototype/split/**`: **119/120 valid** (the `__str_flatten` bucket was
+  already gone — the RegExp-arg split path validates). The `test`/`inner`/`fn`
+  buckets (199/81/42 on 2026-06-30) had collapsed to a small heterogeneous tail.
+- The **largest remaining coherent cluster** was a `local.tee/struct.set expected
+  type eqref, found any.convert_extern of type anyref` family, surfacing as
+  `__call_toString` / `__call_valueOf` (ToPrimitive dispatch) and
+  `__set_member_toString` (member-write dispatch).
+
+### Root cause — `externref → eqref` coercion produced ANYREF
+
+`any.convert_extern` yields `anyref`, the **supertype** of `eqref`. Three sites
+emitted the bare conversion and stored the result straight into an `eqref` slot
+(`struct.set` / `local.set`), which the Wasm validator rejects — an invalid
+binary (worst-class correctness bug). Fixed by narrowing `anyref → eqref` with a
+nullable `ref.cast` to the abstract `eq` heap type (`-19` signed-LEB):
+
+1. `src/codegen/coercion-plan.ts` — the #1917 **single coercion table** (the
+   authoritative site; splits the old `externref → anyref/eqref` row so `eqref`
+   narrows). This is what `fillMemberSetDispatch` uses to coerce an externref
+   value into an `eqref` struct field → fixed `__set_member_*`.
+2. `src/codegen/index.ts` `emitToPrimitiveMethodExports` `closure-extern` arm —
+   the ToPrimitive dispatcher recovers an externref-stored method closure
+   (`struct.get → any.convert_extern → local.set eqref`); narrow to the concrete
+   closure struct type before the store → fixed `__call_toString` /
+   `__call_valueOf`.
+3. `src/codegen/type-coercion.ts` `coerceType` (fctx variant) + the
+   `coercionInstrs` fallback arm — mirror the table fix for the inline-emit path.
+
+Host (gc) mode is unaffected: this coercion only appears on the host-free
+standalone/wasi path, and the change only *adds a valid narrowing cast* — a bare
+`anyref`-into-`eqref` store was never valid in any mode, so there is no
+valid-before case to regress.
+
+### Measured effect
+
+3,500-file `built-ins` standalone sample: invalid-Wasm **32 → 26** — the entire
+`__call_toString`(5) / `__call_valueOf`(1) / `__set_member_toString`(1) family is
+eliminated, **no new invalid functions**. Host (gc) sample unchanged (6 invalid,
+all pre-existing heterogeneous `test`/`__cb_0`, none eqref-family).
+
+### Residual (out of scope — candidate follow-on)
+
+A small **heterogeneous** tail remains (not a single mechanism, not the
+`eqref`/funcIdx-shift class): `test` (~15/sample, e.g. String/concat
+`call[0] expected (ref null …)`, RegExp/test, TypedArray resizable-buffer
+`array.get/array.set` type-mismatch) and a few `__closure_*` (species-poisoned
+Array, for-await close, Proxy tco-realm) + `__cb_0`. Each is a distinct
+codegen bug warranting its own triage; recommend a follow-on umbrella'd under
+#2860 if the counts justify it.
+
+### Tests
+
+`tests/issue-2878-externref-eqref-narrow.test.ts` — deterministic unit assertions
+that `coercionPlan` / `coercionInstrs` narrow `externref → eqref` (and leave
+`externref → anyref` unchanged), plus standalone compile-and-validate of
+ToPrimitive / dynamic-member shapes.
+
+## Correction to the dev-2878 re-measurement (2026-07-02, dev-callback)
+
+The dev-2878 re-measurement above sampled **`built-ins/` only**, so it did not
+see the **Class A object-destructuring value-rep** cluster, which lives in
+**`language/**/dstr/**`** (`const {u:v=…}={u:0}` over a heterogeneous/boxed
+object → `local.set expected f64, found externref`). Independently measured on
+the same current main: 42 tests in the targeted signature, **0 pass / 40 CE**
+baseline → **18 genuine PASS / 11 honest FAIL / 11 CE** with the Class-A slice
+(PR #2435). So #2878 was marked `done` on a corpus that missed this class; the
+Class-A slice is a genuine, complementary fix (different file —
+`statements/destructuring.ts` — untouched by PR #2431). Tech-lead to decide:
+reopen #2878, or re-home remaining Class-A/B slices under a fresh follow-up.
