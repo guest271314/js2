@@ -55,7 +55,9 @@
 //     `localClasses` set drives that exemption.
 
 import { ts, forEachChild } from "../ts-api.js";
+import type { IrClosureSignature, IrType } from "./nodes.js";
 
+import { binaryOpCapability, hostExternCapability, prefixOpCapability } from "./capability.js";
 import type { LatticeType, TypeMap } from "./propagate.js";
 
 /**
@@ -192,6 +194,16 @@ export interface IrSelection {
    *  paired with the rejection reason. Only populated when
    *  `IrSelectionOptions.trackFallbacks` is true. */
   readonly fallbacks?: ReadonlyArray<IrFallback>;
+  /** (#2138) Local call-graph edges (top-level FunctionDeclaration name →
+   *  set of top-level FunctionDeclaration callee names in the same source
+   *  file), exactly as computed by `buildLocalCallGraph` for the Step-2
+   *  closure. Exposed so the IR-first compile-once inversion
+   *  (`JS2WASM_IR_FIRST=1`) can decide which claimed functions are safe to
+   *  skip on the legacy body pass WITHOUT re-deriving the call graph.
+   *  Present only when Step 2 ran (i.e. at least one function was
+   *  individually claimed); callers must treat a missing map as "no edge
+   *  information" and behave conservatively. */
+  readonly localCallees?: ReadonlyMap<string, ReadonlySet<string>>;
 }
 
 export interface IrSelectionOptions {
@@ -214,6 +226,25 @@ export interface IrSelectionOptions {
    * Threaded from `CodegenContext.supportsAsyncIr` via `integration.ts`.
    */
   readonly supportsAsyncIr?: boolean;
+  /**
+   * (#2856) Host-extern support — resolves a bare identifier that is NOT a
+   * local/param binding to an ambient host global (`document`, `console`, …).
+   * Returns the extern class name (`"Document"`, `"Console"`) when the
+   * identifier's real binding (checker-resolved, so user shadowing wins) is a
+   * lib `declare var` of extern-class shape that the legacy backend would
+   * register (`isExternalDeclaredClass` parity); `undefined` otherwise.
+   *
+   * Provided by the `planIrCompilation` call sites (codegen index /
+   * check-ir-fallbacks), which own a TypeChecker; select.ts stays
+   * checker-free. Only consulted when `jsHostExterns` is true — the
+   * capability is mode-gated via `hostExternCapability` (capability.ts):
+   * standalone/wasi/strictNoHostImports defer to legacy, which routes
+   * `document.*` to the existing #1472/#2907 refusal.
+   */
+  readonly resolveHostGlobal?: (node: ts.Identifier) => string | undefined;
+  /** (#2856) True iff the compile targets a JS host (NOT standalone / wasi /
+   *  strictNoHostImports). Gates the host-extern capability. */
+  readonly jsHostExterns?: boolean;
 }
 
 /**
@@ -265,6 +296,13 @@ export function planIrCompilation(
   // #1169q telemetry — collect rejection reasons so the dispatcher can
   // log/throw on legacy fallback. Only populated when trackFallbacks is on.
   const trackFallbacks = options?.trackFallbacks === true;
+  // (#2856) Arm the host-extern identifier resolution for this run. Mode-gated
+  // via the capability table: only a JS-host compile may claim host-global
+  // shapes; standalone/wasi defer so legacy keeps its #1472/#2907 refusal.
+  currentHostGlobalResolver =
+    options?.resolveHostGlobal && hostExternCapability(options?.jsHostExterns === true) !== "defer"
+      ? options.resolveHostGlobal
+      : null;
   const fallbackReasons = new Map<string, IrFallbackReason>();
   // (#2856 Step-1) Parallel to `fallbackReasons`: the opt-in reject-arm detail
   // for `body-shape-rejected` entries (populated only when JS2WASM_IR_SHAPE_DIAG=1).
@@ -475,13 +513,17 @@ export function planIrCompilation(
   const classMembers = individuallyClaimedClassMembers.size > 0 ? individuallyClaimedClassMembers : undefined;
 
   if (!trackFallbacks) {
-    return classMembers ? { funcs: claimed, classMembers } : { funcs: claimed };
+    return classMembers
+      ? { funcs: claimed, classMembers, localCallees: callees }
+      : { funcs: claimed, localCallees: callees };
   }
 
   const fallbacks: IrFallback[] = [];
   for (const [name, reason] of fallbackReasons) fallbacks.push({ name, reason, detail: fallbackDetails.get(name) });
   for (let i = 0; i < unnamedCount; i++) fallbacks.push({ name: `<unnamed:${i}>`, reason: "unnamed" });
-  return classMembers ? { funcs: claimed, classMembers, fallbacks } : { funcs: claimed, fallbacks };
+  return classMembers
+    ? { funcs: claimed, classMembers, fallbacks, localCallees: callees }
+    : { funcs: claimed, fallbacks, localCallees: callees };
 }
 
 // ---------------------------------------------------------------------------
@@ -528,6 +570,18 @@ type IrClaimableSubject = ts.FunctionDeclaration | ts.MethodDeclaration | ts.Con
  * fix (thread the constructed vec through the loop block-args) is a follow-up.
  */
 let currentFnHasCStyleLoop = false;
+
+/**
+ * (#2856) Host-extern resolution for the CURRENT `planIrCompilation` run.
+ * Set (and cleared) at the selector entry from `IrSelectionOptions` —
+ * module-level for the same reason as `currentFnHasCStyleLoop`: the
+ * `isPhase1*` predicates are a deep recursion whose signatures are shared
+ * with every in-flight selector slice, and threading a param through all of
+ * them would conflict with each of those PRs for zero behavioural gain.
+ * `null` = host-extern claiming disabled (no callback, or a host-free mode —
+ * see `hostExternCapability` in capability.ts).
+ */
+let currentHostGlobalResolver: ((node: ts.Identifier) => string | undefined) | null = null;
 
 /** True if `node` (a function body) contains a `while`/`for` (C-style) loop
  *  anywhere, NOT descending into nested function/class scopes. */
@@ -737,7 +791,46 @@ function isIrClaimable(
 //     `return;` / fall-through tails. `void` in param position is rejected
 //     (no JS source emits a `void`-typed param value, so there's nothing to
 //     accept).
-type ResolvedKind = "f64" | "bool" | "string" | "object" | "any" | "void" | null;
+// #2859 — `closure` (param only): a FunctionTypeNode annotation whose params
+//   and return are all primitive-annotated (the same surface slice-3 closure
+//   literals support). Lowers to `IrType.closure`; calls through the param
+//   dispatch via `lowerClosureCall` exactly like a closure-typed local.
+type ResolvedKind = "f64" | "bool" | "string" | "object" | "any" | "void" | "closure" | null;
+
+/**
+ * #2859 — build an `IrClosureSignature` from an explicit function-type
+ * annotation (`(a: number, b: string) => number`), or return `null` when the
+ * annotation is outside the expressible surface. The primitive mapping MUST
+ * stay identical to `typeNodeToIr` in `from-ast.ts` (number→f64, boolean→i32,
+ * string→string): a closure-literal argument's signature is built there, and
+ * `lowerClosureCall` / `irTypeEquals` compare the two structurally — any
+ * divergence would reject valid calls at lowering time (post-claim demotion).
+ *
+ * Out-of-surface shapes (→ null, so the selector keeps the honest
+ * `param-type-not-resolvable` rejection): non-primitive param/return types,
+ * void returns (`emitClosureCall` is value-producing), rest/optional/default
+ * params, type parameters.
+ */
+export function irClosureSignatureFromFunctionTypeNode(node: ts.FunctionTypeNode): IrClosureSignature | null {
+  if (node.typeParameters && node.typeParameters.length > 0) return null;
+  const prim = (t: ts.TypeNode | undefined): IrType | null => {
+    if (!t) return null;
+    if (t.kind === ts.SyntaxKind.NumberKeyword) return { kind: "val", val: { kind: "f64" } };
+    if (t.kind === ts.SyntaxKind.BooleanKeyword) return { kind: "val", val: { kind: "i32" } };
+    if (t.kind === ts.SyntaxKind.StringKeyword) return { kind: "string" };
+    return null;
+  };
+  const params: IrType[] = [];
+  for (const p of node.parameters) {
+    if (p.questionToken || p.dotDotDotToken || p.initializer) return null;
+    const ir = prim(p.type);
+    if (!ir) return null;
+    params.push(ir);
+  }
+  const returnType = prim(node.type);
+  if (!returnType) return null;
+  return { params, returnType };
+}
 
 function resolveParamType(p: ts.ParameterDeclaration, mapped: LatticeType | undefined): ResolvedKind {
   if (p.type) {
@@ -749,6 +842,13 @@ function resolveParamType(p: ts.ParameterDeclaration, mapped: LatticeType | unde
     // AnyKeyword. JS spec leaves operations on `any` to runtime semantics,
     // and externref is the catch-all that already accepts any host value.
     if (p.type.kind === ts.SyntaxKind.AnyKeyword) return "any";
+    // #2859 — function-typed param (`fn: () => number`). Accepted when the
+    // signature is expressible with the slice-3 closure surface; the param
+    // lowers to the closure supertype struct and `fn()` dispatches through
+    // `lowerClosureCall`. Inexpressible function types stay rejected.
+    if (ts.isFunctionTypeNode(p.type)) {
+      return irClosureSignatureFromFunctionTypeNode(p.type) ? "closure" : null;
+    }
     // Slice 2 (#1169b) — accept TypeLiteral / TypeReference at the
     // selector level. The actual shape resolution happens in
     // codegen/index.ts:resolvePositionType, which materializes an
@@ -1669,8 +1769,21 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
   if (ts.isIdentifier(expr)) {
     // Identifier may name either a param/local (scope) or a function
     // (only valid as the callee of a CallExpression, handled below).
-    // A bare identifier that isn't in scope is not a valid Phase-1 expr.
-    return scope.has(expr.text);
+    // A bare identifier that isn't in scope is not a valid Phase-1 expr —
+    // UNLESS it resolves to an ambient host global (#2856, JS-host lane
+    // only; see `hostExternCapability`): the receiver in
+    // `document.getElementById(...)`, `console.log(...)`, `document.body`.
+    // The checker-backed resolver settles shadowing: a user binding named
+    // `document` resolves to the USER declaration, not the lib global, so
+    // this arm never hijacks a module-scope/local shadow. `localClasses` is
+    // excluded for symmetry with the legacy user-class-shadows-extern rule
+    // (#1284).
+    if (scope.has(expr.text)) return true;
+    return (
+      currentHostGlobalResolver !== null &&
+      !localClasses.has(expr.text) &&
+      currentHostGlobalResolver(expr) !== undefined
+    );
   }
   // #1370 Phase A — `this` reference inside a method or constructor body.
   // The selector marks `this` as an in-scope binding for class members
@@ -1969,50 +2082,19 @@ function phase1MemberName(name: ts.PropertyName): string | null {
   return null;
 }
 
+// #2135 — the operator predicates consume the shared capability table
+// (`src/ir/capability.ts`), the SAME source `from-ast.ts`'s lowering dispatch
+// asserts against. "claim-partial" is selector-accepted (the builder owns the
+// documented residual fallback); "defer" is selector-rejected up-front. The
+// former slice-11 "shape-only acceptance" block (`%` / `**` / `in` /
+// `instanceof` accepted here while the lowerer threw) is retired: those ops
+// are table-deferred, so the claim can no longer disagree with the builder.
 function isPhase1PrefixOp(op: ts.PrefixUnaryOperator): boolean {
-  return op === ts.SyntaxKind.MinusToken || op === ts.SyntaxKind.PlusToken || op === ts.SyntaxKind.ExclamationToken;
+  return prefixOpCapability(op) !== "defer";
 }
 
 function isPhase1BinaryOp(op: ts.SyntaxKind): boolean {
-  switch (op) {
-    case ts.SyntaxKind.PlusToken:
-    case ts.SyntaxKind.MinusToken:
-    case ts.SyntaxKind.AsteriskToken:
-    case ts.SyntaxKind.SlashToken:
-    case ts.SyntaxKind.LessThanToken:
-    case ts.SyntaxKind.LessThanEqualsToken:
-    case ts.SyntaxKind.GreaterThanToken:
-    case ts.SyntaxKind.GreaterThanEqualsToken:
-    case ts.SyntaxKind.EqualsEqualsEqualsToken:
-    case ts.SyntaxKind.EqualsEqualsToken:
-    case ts.SyntaxKind.ExclamationEqualsEqualsToken:
-    case ts.SyntaxKind.ExclamationEqualsToken:
-    case ts.SyntaxKind.AmpersandAmpersandToken:
-    case ts.SyntaxKind.BarBarToken:
-      return true;
-    // Slice 11 (#1169n) — bitwise ops on f64 operands. JS ToInt32
-    // each operand, apply the i32 op, convert back to f64. Lowering
-    // emits this sequence inline using a per-function scratch local.
-    case ts.SyntaxKind.AmpersandToken:
-    case ts.SyntaxKind.BarToken:
-    case ts.SyntaxKind.CaretToken:
-    case ts.SyntaxKind.LessThanLessThanToken:
-    case ts.SyntaxKind.GreaterThanGreaterThanToken:
-    case ts.SyntaxKind.GreaterThanGreaterThanGreaterThanToken:
-      return true;
-    // Slice 11 (#1169n) — shape-only acceptance for ops the lowerer
-    // doesn't yet implement. Lowering throws cleanly so the function
-    // falls back to legacy via `safeSelection`. Listed individually
-    // so future slices can flip them on without touching the selector.
-    case ts.SyntaxKind.PercentToken: // % — needs JS-conformant fmod-style remainder
-    case ts.SyntaxKind.AsteriskAsteriskToken: // ** — needs Math.pow host call
-    case ts.SyntaxKind.QuestionQuestionToken: // ?? — needs nullable-LHS handling
-    case ts.SyntaxKind.InKeyword: // in — needs prototype-chain probe
-    case ts.SyntaxKind.InstanceOfKeyword: // instanceof — needs class-shape check
-      return true;
-    default:
-      return false;
-  }
+  return binaryOpCapability(op) !== "defer";
 }
 
 // ---------------------------------------------------------------------------
@@ -2166,6 +2248,22 @@ function collectLocalClasses(sourceFile: ts.SourceFile): Set<string> {
 function collectLocalClosureBindings(fn: ts.FunctionDeclaration): Set<string> {
   const names = new Set<string>();
   if (!fn.body) return names;
+  // #2859 — function-typed params (`fn: () => number`). A call through such a
+  // param dispatches via the IR's closure machinery (`lowerClosureCall`),
+  // exactly like a slice-3 closure local — it is NOT an external call. Only
+  // expressible signatures count; an inexpressible function type keeps the
+  // function on `param-type-not-resolvable` anyway, so its call sites never
+  // reach the IR.
+  for (const p of fn.parameters) {
+    if (
+      ts.isIdentifier(p.name) &&
+      p.type &&
+      ts.isFunctionTypeNode(p.type) &&
+      irClosureSignatureFromFunctionTypeNode(p.type)
+    ) {
+      names.add(p.name.text);
+    }
+  }
   // Top-level walk: only direct children of the outer body. Nested
   // bindings inside an `if` arm or another function-like don't escape
   // their lexical scope, so they don't shadow the call-graph path.

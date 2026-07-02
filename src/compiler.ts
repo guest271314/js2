@@ -721,6 +721,8 @@ function buildCodegenOptions(
     // boolean was removed.
     link: [...new Set(options.link ?? [])],
     standalone: options.target === "standalone",
+    // (#2141 S1) honest any-boxing regime flag (default off = legacy tag-5 ABI).
+    honestAnyBoxing: options.honestAnyBoxing,
     // (#2796) Diff-test-harness fidelity — defer top-level init to an export so
     // the host runs it after setExports (symmetric with standalone `_start`).
     deferTopLevelInit: options.deferTopLevelInit,
@@ -734,6 +736,10 @@ function buildCodegenOptions(
     // revert. Forwarded to ALL drivers now (#1927); `generateMultiModule`
     // ignores it until #2138 wires the IR overlay into the multi generator.
     experimentalIR: options.experimentalIR !== false,
+    // (#2973) Forward the IR-first opt-out. The eval / new Function host shims
+    // set this so a post-claim IR-first hard error in a sub-compile is not
+    // swallowed by the shim's fallback catch into a silent wrong answer.
+    disableIrFirst: options.disableIrFirst === true,
     // Single-source-only import-preprocessing results (undefined in multi mode).
     // #1927: multi paths do not yet collect node-builtin / fs / jsx imports —
     // they resolve imports through the TS program; closing that gap is a
@@ -864,6 +870,8 @@ function runPipeline(input: PipelineInput): CompileResult {
   let mod;
   let capturedFallbackCounts: import("./index.js").CompileResult["fallbackCounts"];
   let capturedIrPostClaimErrors: import("./index.js").CompileResult["irPostClaimErrors"];
+  // (#2138) IR-first skip telemetry — populated only under JS2WASM_IR_FIRST=1.
+  let capturedIrFirstSkipped: import("./index.js").CompileResult["irFirstSkipped"];
   try {
     if (useLinear) {
       mod = multiAst
@@ -881,6 +889,9 @@ function runPipeline(input: PipelineInput): CompileResult {
       mod = result.module;
       capturedFallbackCounts = result.fallbackCounts;
       capturedIrPostClaimErrors = result.irPostClaimErrors;
+      capturedIrFirstSkipped = multiAst
+        ? undefined // generateMultiModule has no IR overlay yet — the #2138 multi seam is a follow-on slice
+        : (result as ReturnType<typeof generateModule>).irFirstSkipped;
       // Propagate codegen errors with source locations. #1921 — a deliberate
       // "degrade" diagnostic is surfaced as a non-fatal "warning"; the fatal
       // decision is made by isFatalCodegenDiagnostic on the raw severity.
@@ -1001,6 +1012,7 @@ function runPipeline(input: PipelineInput): CompileResult {
     exportSignatures: mod.exportSignatures,
     fallbackCounts: capturedFallbackCounts,
     irPostClaimErrors: capturedIrPostClaimErrors,
+    irFirstSkipped: capturedIrFirstSkipped,
   };
 }
 

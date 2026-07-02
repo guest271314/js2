@@ -5,6 +5,7 @@ import { emitWasiErrorConstructor } from "./registry/error-types.js";
 import { analyzeLinearUint8 } from "./linear-uint8-analysis.js";
 import { analyzeFnctorEscapeGate, deriveFnctorFields } from "./fnctor-escape-gate.js";
 import { isLinearU8RepresentableNew } from "./linear-uint8-signatures.js";
+import { definedFuncAt } from "./func-space.js"; // (#1916 S2) positional-read chokepoint
 import type { MultiTypedAST, TypedAST } from "../checker/index.js";
 import {
   isBigIntType,
@@ -24,8 +25,14 @@ import { createEmptyModule } from "../ir/types.js";
 import { compileIrPathFunctions, type IrIntegrationError } from "../ir/integration.js";
 import { irVal, type IrType } from "../ir/nodes.js";
 import { buildTypeMap, type LatticeType } from "../ir/propagate.js";
-import { planIrCompilation, type IrFallbackReason } from "../ir/select.js";
+import { planIrCompilation, irClosureSignatureFromFunctionTypeNode, type IrFallbackReason } from "../ir/select.js";
+import { makeIrHostGlobalResolver } from "../ir/host-extern.js"; // (#2856)
 import { createCodegenContext } from "./context/create-context.js";
+import {
+  collectModuleTopLevelNames,
+  irFirstBodyReadsHostNode,
+  irFirstBodyReadsStringElement,
+} from "./ir-first-gate.js";
 import type { FallbackCounts } from "./fallback-telemetry.js";
 import { buildLeakedHostImportError, scanForLeakedHostImports } from "./host-import-allowlist.js";
 import { reportError, reportErrorNoNode } from "./context/errors.js";
@@ -46,6 +53,7 @@ import { scanForNewTarget } from "./new-target.js"; // (#2023)
 import { scanForArrayHoles, ensureHoleType } from "./array-holes.js"; // (#2001 S1)
 import { ensureDynReadHelpers } from "./dyn-read.js"; // (#2580 M0)
 import { ensureNativeIteratorRuntime, fillNativeIteratorUserArms } from "./iterator-native.js";
+import { fillCombinatorToVec } from "./promise-combinators.js"; // (#2922) dynamic combinator-arg drain fill
 import { fillClosedMethodDispatch } from "./closed-method-dispatch.js";
 import { fillMemberSetDispatch, reserveVecFieldMaterializers } from "./member-set-dispatch.js";
 import { fillMemberGetDispatch } from "./member-get-dispatch.js";
@@ -96,6 +104,7 @@ import {
   isStandalonePromiseActive,
   shiftAsyncSideChannelFuncIdxs,
 } from "./async-scheduler.js";
+import { inLiveShiftRange } from "../emit/resolve-layout.js"; // (#1916 S3) stable handles never shift
 import {
   brandExternMethodResult,
   ensureLateImport,
@@ -142,6 +151,7 @@ import {
   destructureParamObjectExternref,
 } from "./destructuring-params.js";
 import {
+  emitExceptionRenderExports,
   emitTestRuntimeStringHelpers,
   ensureNativeStringExternBridge,
   ensureNativeStringHelpers,
@@ -678,10 +688,40 @@ function resolvePositionType(
           return irVal({ kind: "externref" });
         }
       }
+      // (#2856) Host extern class annotation (`: HTMLElement`, `: Element`,
+      // …) — an ambient lib interface the legacy backend models as an extern
+      // class (opaque externref + per-member `<Class>_get_<p>` /
+      // `<Class>_<m>` imports). JS-host lane only; in host-free modes the
+      // object-lowering fallback below keeps throwing (→ legacy → the
+      // existing #1472 refusal). Placed AFTER the local-class / typed-array /
+      // Array / iterable arms so it can't shadow them, and BEFORE
+      // `objectIrTypeFromTsType`, which rejects method-carrying interfaces
+      // anyway.
+      if (
+        ts.isTypeReferenceNode(node) &&
+        ts.isIdentifier(node.typeName) &&
+        !(ctx.standalone || ctx.wasi || ctx.strictNoHostImports)
+      ) {
+        const refType = ctx.checker.getTypeFromTypeNode(node);
+        if (isExternalDeclaredClass(refType, ctx.checker)) {
+          return { kind: "extern", className: refType.getSymbol()?.name ?? node.typeName.text };
+        }
+      }
       const tsType = ctx.checker.getTypeFromTypeNode(node);
       const ir = objectIrTypeFromTsType(ctx, tsType);
       if (ir) return ir;
       throw new Error(`object TypeNode ${ts.SyntaxKind[node.kind]} could not be lowered to IrType.object`);
+    }
+    // #2859 — function-typed position (`fn: () => number`). Mirrors the
+    // selector's `resolveParamType` FunctionTypeNode arm: the signature is
+    // built by the SAME helper, so the override the lowerer receives compares
+    // `irTypeEquals`-equal to the signature a slice-3 closure literal argument
+    // produces. A claimed function reaching the throw below means selector and
+    // override builder diverged (the standard out-of-sync guard → legacy).
+    if (ts.isFunctionTypeNode(node)) {
+      const signature = irClosureSignatureFromFunctionTypeNode(node);
+      if (signature) return { kind: "closure", signature };
+      throw new Error(`function TypeNode not expressible as an IR closure signature`);
     }
     throw new Error(`unsupported TypeNode kind ${ts.SyntaxKind[node.kind]}`);
   }
@@ -1062,6 +1102,285 @@ export function formatIrPathFallbackDiagnostic(err: IrIntegrationError): {
   };
 }
 
+// ---------------------------------------------------------------------------
+// #2138 — IR-first compile-once inversion (flag-gated investigation)
+//
+// `planIrOverlay` is the IR *planning* phase extracted verbatim from the
+// `if (options?.experimentalIR)` overlay block in `generateModule`: it runs
+// `buildTypeMap` → `planIrCompilation` → `buildIrClassShapes` → the
+// overrideMap/safeSelection resolution (including the STRICT_IR_REASONS
+// promotion and the #2023 `new.target` coarse gate). Extraction exists so
+// the SAME code can run at two different pipeline positions:
+//
+//   - flag OFF (default): called AFTER `compileDeclarations`, exactly where
+//     the inline block sat — the pipeline is byte-identical to pre-#2138.
+//   - `JS2WASM_IR_FIRST=1` (+ experimentalIR): called BEFORE
+//     `compileDeclarations`, so the body pass can SKIP legacy emission for
+//     functions the IR will own — every claimed function stops being
+//     compiled twice.
+//
+// Why the reorder is flag-gated rather than unconditional (a deliberate
+// deviation from the issue's original Slice-1 spec, which assumed the hoist
+// was byte-identical): the planning block is NOT side-effect-free —
+//   (a) `resolvePositionType` calls `getOrRegisterVecType` /
+//       `typedArrayVecStorage`, which can first-register Wasm types; moving
+//       it above the body pass can permute type-section index assignment;
+//   (b) `buildIrClassShapes` reads `ctx.structFields`, which body
+//       compilation can mutate (dynamic field additions, #516).
+// Gating the ORDER on the flag makes acceptance criterion 1 (byte-identical
+// output without the flag) true by construction instead of by corpus diff.
+// ---------------------------------------------------------------------------
+
+interface IrOverlayPlan {
+  readonly selection: import("../ir/select.js").IrSelection;
+  readonly classShapes: Map<string, import("../ir/nodes.js").IrClassShape>;
+  readonly overrideMap: Map<string, { params: IrType[]; returnType: IrType | null }>;
+  readonly safeSelection: { funcs: Set<string>; classMembers?: ReadonlySet<string> };
+  readonly trackFallbacks: boolean;
+  readonly declByName: ReadonlyMap<string, ts.FunctionDeclaration>;
+}
+
+/**
+ * (#2138) Decide which claimed functions may have their LEGACY body emission
+ * skipped under `JS2WASM_IR_FIRST=1`. Deliberately conservative — a function
+ * qualifies only when:
+ *
+ *   1. It survived overrideMap resolution (`safeSelection.funcs` — computed
+ *      strictly AFTER the #2023 `new.target` clear and after resolve-time
+ *      drops), so the IR path WILL attempt it.
+ *   2. It is not a generator (`function*`). Legacy generator compilation
+ *      creates auxiliary machinery beyond the slot body; whether the IR
+ *      generator lowering is fully standalone without the legacy compile's
+ *      side effects is unproven, so the first cut keeps generators on the
+ *      compile-twice path. Lift only after a dedicated measurement.
+ *   3. Every DIRECT local callee is also in `safeSelection.funcs`. The
+ *      selector's Step-2 closure already guarantees this against
+ *      `selection.funcs`, but overrideMap resolution can re-open the closure
+ *      (a callee dropped at resolve time). Such a caller's IR build then
+ *      throws "call to unknown function" — a KNOWN-benign legacy fallback
+ *      that must not become a skipped-slot hard error. Non-transitive is
+ *      sufficient: only the function's own IR success is load-bearing for
+ *      its slot, and a callee that is claimed-but-not-skipped still occupies
+ *      its pre-allocated slot with a working body either way.
+ *   4. Its body does not read a HOST node (property/element access or bare
+ *      call rooted at an identifier that is neither function-local nor a
+ *      module top-level binding) — see `irFirstBodyReadsHostNode` (#2138
+ *      Trap 4 / #2856 sequencing). A no-op today (the selector still rejects
+ *      host-global receivers), load-bearing the moment #2856's extern-in-IR
+ *      selector arm lands: host-node functions stay compile-twice until that
+ *      lowering is proven, keeping the flag-on measurement clean.
+ *
+ * Class members are NEVER skipped in this slice (their slot pre-allocation
+ * lives in `class-bodies.ts` and carries a typeIdx parity contract with
+ * legacy callers — see the parity guard in `integration.ts`); they stay on
+ * the legacy-then-overwrite path.
+ *
+ * Every skipped function gets an `unreachable` placeholder body, so the
+ * skip is a *body-emission* change, never an *index-layout* change: the
+ * funcIdx/typeIdx slot assignment from `collectDeclarations` is untouched.
+ * If the IR path then fails to compile a skipped function, the overlay in
+ * `generateModule` promotes that failure to a hard compile error (the
+ * placeholder must never ship) — surfacing exactly the selector↔builder
+ * divergences this investigation exists to find (#2135).
+ */
+function computeIrFirstSkipSet(plan: IrOverlayPlan, sourceFile: ts.SourceFile): ReadonlySet<string> {
+  const skip = new Set<string>();
+  const funcs = plan.safeSelection.funcs;
+  if (funcs.size === 0) return skip;
+  const edges = plan.selection.localCallees;
+  // Gate 4 (#2138 Trap 4, coordinated with the extern-in-IR plan in #2856):
+  // module-level user bindings, computed once — receivers/callees rooted at
+  // these are user code, never host globals.
+  const moduleNames = collectModuleTopLevelNames(sourceFile);
+  for (const name of funcs) {
+    const fn = plan.declByName.get(name);
+    if (!fn || fn.asteriskToken) continue; // gate 2 — generators
+    if (irFirstBodyReadsHostNode(fn, moduleNames)) continue; // gate 4 — host nodes
+    if (irFirstBodyReadsStringElement(fn)) continue; // gate 5 — string element read (#2972)
+    if (!edges) continue; // no edge info (defensive) — stay conservative
+    const callees = edges.get(name);
+    let closed = true;
+    if (callees) {
+      for (const c of callees) {
+        if (!funcs.has(c)) {
+          closed = false;
+          break;
+        }
+      }
+    }
+    if (closed) skip.add(name); // gates 1 + 3
+  }
+  return skip;
+}
+
+function planIrOverlay(ctx: CodegenContext, ast: TypedAST): IrOverlayPlan {
+  const typeMap = buildTypeMap(ast.sourceFile, ast.checker);
+  // #1169q telemetry — when JS2WASM_LOG_IR_FALLBACKS is set, request the
+  // selector to track every top-level FunctionDeclaration that didn't
+  // make it into `funcs` along with the rejection reason. Logged to
+  // stderr at end of compile. Off by default (zero overhead).
+  // #1530 — `trackFallbacks` is also enabled when one or more
+  // selector-rejection reasons are in `STRICT_IR_REASONS`. The set
+  // starts empty (purely a hook for follow-up PRs); when populated,
+  // selector rejections of those reasons promote from a silent skip
+  // to a hard error so the IR path becomes the only path for the
+  // affected node kinds. Telemetry mode (`JS2WASM_LOG_IR_FALLBACKS=1`)
+  // continues to enable the histogram log; the strict set additionally
+  // forces collection.
+  const trackFallbacks = process.env.JS2WASM_LOG_IR_FALLBACKS === "1" || STRICT_IR_REASONS.size > 0;
+  // (#2856) Host-extern claiming: mode gate + checker-backed ambient-global
+  // resolution. Selection runs BEFORE `collectDeclaredGlobals` /
+  // `collectUsedExternImports` populate the ctx registries, so the selector
+  // cannot read them — it gets the checker-derived answer instead (which is
+  // also shadow-exact: a user binding named `document` resolves to the user
+  // declaration, never the lib global). The registries ARE populated by the
+  // time from-ast lowers (post-`compileDeclarations`), which is where member
+  // resolution happens.
+  const jsHostExterns = !(ctx.standalone || ctx.wasi || ctx.strictNoHostImports);
+  const selection = planIrCompilation(
+    ast.sourceFile,
+    {
+      experimentalIR: true,
+      trackFallbacks,
+      jsHostExterns,
+      resolveHostGlobal: makeIrHostGlobalResolver(ast.checker),
+    },
+    typeMap,
+  );
+  // #1530 — when a rejection reason is listed in STRICT_IR_REASONS,
+  // promote every fallback with that reason to a hard compile error
+  // instead of letting the legacy path silently catch it. The set
+  // starts empty; once a bucket hits zero against
+  // `scripts/ir-fallback-baseline.json`, that bucket's reason can be
+  // added here in a follow-up PR.
+  if (STRICT_IR_REASONS.size > 0 && selection.fallbacks) {
+    for (const fb of selection.fallbacks) {
+      if (STRICT_IR_REASONS.has(fb.reason)) {
+        reportErrorNoNode(
+          ctx,
+          `IR path strict mode: ${fb.name} rejected with reason "${fb.reason}" — this reason is required to be zero (see plan/log/ir-adoption.md).`,
+        );
+      }
+    }
+  }
+  // Slice 4 (#1169d) — build the class-shape registry from the
+  // legacy class collection (`ctx.classSet`, `ctx.structFields`,
+  // `ctx.funcMap`). Done BEFORE override resolution so class-typed
+  // positions (`p: Point`) lower to `IrType.class` rather than
+  // throwing in `resolvePositionType`.
+  const classShapes = buildIrClassShapes(ctx, ast.sourceFile);
+  // Build per-function IR type overrides from the propagated TypeMap.
+  //
+  // For a claimed function, the selector must have resolved each
+  // param + return to a concrete primitive via either an explicit
+  // TS annotation OR the TypeMap. We mirror that resolution here to
+  // build the override map: for each position, prefer the AST
+  // annotation (authoritative) and fall back to the TypeMap only
+  // when the AST lacks one. If neither yields a concrete primitive,
+  // that position is a compiler bug — the selector should not have
+  // claimed this function.
+  //
+  // The override map also feeds the `calleeTypes` in the lowerer so
+  // direct calls to IR-path callees see the right signature.
+  // Slice 14 (#1228) — `returnType: IrType | null` where `null` means
+  // a void-returning function (zero Wasm result types). Plumbs through
+  // `compileIrPathFunctions` to `from-ast.ts` so the IR builder can be
+  // constructed with `[]` results and the lowerer can accept bare
+  // `return;` / fall-through tails.
+  const overrideMap = new Map<string, { params: IrType[]; returnType: IrType | null }>();
+  const declByName = new Map<string, ts.FunctionDeclaration>();
+  for (const stmt of ast.sourceFile.statements) {
+    if (ts.isFunctionDeclaration(stmt) && stmt.name) declByName.set(stmt.name.text, stmt);
+  }
+  for (const name of selection.funcs) {
+    const fn = declByName.get(name);
+    if (!fn) continue;
+    const entry = typeMap.get(name);
+    try {
+      // Slice 7a (#1169f) — generator functions return an externref
+      // (the JS Generator-like object built by `__create_generator`)
+      // regardless of the source-level annotation
+      // (`Generator<number>`, `IterableIterator<T>`, etc.). The IR
+      // lowerer enforces this; the override map needs to agree so
+      // the cross-function `calleeTypes` lookup sees the right
+      // signature. Bypass `resolvePositionType` for the return type
+      // — `Generator<T>` doesn't resolve as `IrType.object` and
+      // would otherwise drop the generator from `safeSelection`.
+      const isGenerator = !!fn.asteriskToken;
+      // Slice 14 (#1228) — VoidKeyword return: bypass resolvePositionType
+      // (it has no representation for void in IrType) and set returnType
+      // to null. The lowerer treats null returnType as "no result".
+      const isVoidReturn = !isGenerator && fn.type?.kind === ts.SyntaxKind.VoidKeyword;
+      const returnType: IrType | null = isGenerator
+        ? ({ kind: "val", val: { kind: "externref" } } as IrType)
+        : isVoidReturn
+          ? null
+          : resolvePositionType(fn.type, entry?.returnType, ctx, classShapes);
+      const params: IrType[] = [];
+      for (let i = 0; i < fn.parameters.length; i++) {
+        const p = fn.parameters[i]!;
+        params.push(resolvePositionType(p.type, entry?.params[i], ctx, classShapes));
+      }
+      overrideMap.set(name, { params, returnType });
+    } catch (e) {
+      // Selector claimed a function whose types can't be resolved —
+      // skip the IR path for this one. Fall through to legacy.
+      //
+      // #1921 — this is a deliberate IR→legacy fallback, not a compile
+      // error: the legacy path still produces a working body for `name`.
+      // Emit severity "warning" so it stays visible to bridge tests but
+      // does NOT fail the build (consistent with the IR-fallback channel
+      // at `formatIrPathFallbackDiagnostic` above). Defaulting to "error"
+      // would fail every program with a class-typed cross-function return
+      // that the IR lowerer can't yet represent (e.g. a `Builder` chain).
+      //
+      // #2137 — also record this on the structured `irPostClaimErrors`
+      // channel (kind "resolve") so consumers (bridge tests, the
+      // check:ir-fallbacks gate) can query IR-path fallbacks without
+      // string-matching the diagnostics array. The warning line below is
+      // retained one sprint for back-compat.
+      //
+      // (#2138) NOTE: a resolve-time drop is exactly why `safeSelection`
+      // — not the raw `selection` — feeds `computeIrFirstSkipSet`: this
+      // function keeps its legacy body under IR-first.
+      const resolveMsg = e instanceof Error ? e.message : String(e);
+      (ctx.irPostClaimErrors ??= []).push({
+        kind: "resolve",
+        func: name,
+        message: resolveMsg,
+      });
+      reportErrorNoNode(ctx, `IR path: could not resolve types for ${name}: ${resolveMsg}`, "warning");
+    }
+  }
+  // Only request IR compilation for functions we successfully built
+  // overrides for (the selector may have claimed more, but if we
+  // couldn't map types safely we leave them to legacy).
+  //
+  // #1370 Phase B: thread `classMembers` through to the integration
+  // loop. Class methods don't go through `overrideMap` (they're
+  // typed via the class shape, not the TypeMap-derived overrides);
+  // the integration's class-member walk consults `classShapes`
+  // directly. Pass the set unmodified.
+  const safeSelection: { funcs: Set<string>; classMembers?: ReadonlySet<string> } = {
+    funcs: new Set<string>([...selection.funcs].filter((n) => overrideMap.has(n))),
+    classMembers: selection.classMembers,
+  };
+  // (#2023) The IR `new C(...)` lowering does not thread the new.target
+  // class-id (that machinery lives only on the legacy path). When the
+  // program uses `new.target`, route every function through legacy so the
+  // outermost-`new` global is set/restored at each construction site. This
+  // is a coarse but safe gate — `new.target` is rare, so the perf cost is
+  // negligible and it avoids a parallel IR implementation of the threading.
+  // (#2138: `ctx.usesNewTarget` is written only by `scanForNewTarget`, which
+  // runs BEFORE `collectDeclarations` — so this gate reads the same value at
+  // either pipeline position, plan-before or plan-after the body pass.)
+  if (ctx.usesNewTarget) {
+    safeSelection.funcs.clear();
+    safeSelection.classMembers = new Set();
+  }
+  return { selection, classShapes, overrideMap, safeSelection, trackFallbacks, declByName };
+}
+
 /** Compile a typed AST into a WasmModule IR */
 export function generateModule(
   ast: TypedAST,
@@ -1073,9 +1392,15 @@ export function generateModule(
   fallbackCounts?: FallbackCounts;
   // #1923 — IR post-claim demotions (only when trackIrPostClaim is set).
   irPostClaimErrors?: { kind: string; func: string; message: string }[];
+  // #2138 — legacy bodies skipped under JS2WASM_IR_FIRST=1 (undefined when off).
+  irFirstSkipped?: readonly string[];
 } {
   const mod = createEmptyModule();
   const ctx = createCodegenContext(mod, ast.checker, options);
+  // (#2138) Populated only under JS2WASM_IR_FIRST=1 — the top-level functions
+  // whose legacy body emission was skipped (IR owns the slot). Declared out
+  // here so the return statement below (outside the try) can surface it.
+  let irFirstSkipped: readonly string[] | undefined;
   // (#1983) Pre-scan top-level user `function` declaration names BEFORE any
   // class member registers a funcMap key, so `classMemberFuncKey` can detect a
   // `${className}_${member}` ↔ user-function collision (e.g. `class A { m() {} }`
@@ -1408,8 +1733,32 @@ export function generateModule(
     // No-op unless a function declaration is reassigned.
     registerReassignedFunctionGlobals(ctx, [ast.sourceFile]);
 
+    // (#2138) IR-first compile-once inversion — flag-gated investigation.
+    // Default OFF: with `JS2WASM_IR_FIRST` unset this block is dead and the
+    // pipeline below is byte-identical to the legacy order (IR planning runs
+    // AFTER the body pass, inside the experimentalIR overlay). With the flag
+    // set (+ experimentalIR), the IR plan is computed BEFORE
+    // `compileDeclarations` and legacy body emission is skipped for claimed
+    // functions that pass `computeIrFirstSkipSet`'s gates — those slots get
+    // an `unreachable` placeholder that the IR overlay MUST overwrite (a
+    // post-claim IR failure on a skipped function is promoted to a hard
+    // compile error below, never a silent legacy demote).
+    // (#2973) `disableIrFirst` opts a compile out of the IR-first inversion
+    // regardless of the ambient env flag — semantics-critical sub-compiles
+    // (eval / new Function host shims) set it so a post-claim IR-first hard
+    // error is not swallowed by the shim's fallback catch into a silent
+    // `undefined`. The ordinary IR overlay (`experimentalIR`) still runs.
+    const irFirst = !!options?.experimentalIR && !options?.disableIrFirst && truthyEnv(process.env.JS2WASM_IR_FIRST);
+    let irPlan: IrOverlayPlan | null = null;
+    let irSkipBodies: ReadonlySet<string> | undefined;
+    if (irFirst) {
+      irPlan = planIrOverlay(ctx, ast);
+      irSkipBodies = computeIrFirstSkipSet(irPlan, ast.sourceFile);
+    }
+
     // Third pass: compile function bodies
-    compileDeclarations(ctx, ast.sourceFile);
+    const actuallySkipped = compileDeclarations(ctx, ast.sourceFile, irSkipBodies);
+    if (irFirst) irFirstSkipped = actuallySkipped ?? [];
 
     // (#1602) Rebuild object-method-as-closure trampoline bodies against the
     // method's now-final signature (param types/order may have been re-resolved
@@ -1431,145 +1780,14 @@ export function generateModule(
     // the claim set under call-graph edges so the IR path never emits a
     // cross-signature `call` against a legacy-compiled callee.
     if (options?.experimentalIR) {
-      const typeMap = buildTypeMap(ast.sourceFile, ast.checker);
-      // #1169q telemetry — when JS2WASM_LOG_IR_FALLBACKS is set, request the
-      // selector to track every top-level FunctionDeclaration that didn't
-      // make it into `funcs` along with the rejection reason. Logged to
-      // stderr at end of compile. Off by default (zero overhead).
-      // #1530 — `trackFallbacks` is also enabled when one or more
-      // selector-rejection reasons are in `STRICT_IR_REASONS`. The set
-      // starts empty (purely a hook for follow-up PRs); when populated,
-      // selector rejections of those reasons promote from a silent skip
-      // to a hard error so the IR path becomes the only path for the
-      // affected node kinds. Telemetry mode (`JS2WASM_LOG_IR_FALLBACKS=1`)
-      // continues to enable the histogram log; the strict set additionally
-      // forces collection.
-      const trackFallbacks = process.env.JS2WASM_LOG_IR_FALLBACKS === "1" || STRICT_IR_REASONS.size > 0;
-      const selection = planIrCompilation(ast.sourceFile, { experimentalIR: true, trackFallbacks }, typeMap);
-      // #1530 — when a rejection reason is listed in STRICT_IR_REASONS,
-      // promote every fallback with that reason to a hard compile error
-      // instead of letting the legacy path silently catch it. The set
-      // starts empty; once a bucket hits zero against
-      // `scripts/ir-fallback-baseline.json`, that bucket's reason can be
-      // added here in a follow-up PR.
-      if (STRICT_IR_REASONS.size > 0 && selection.fallbacks) {
-        for (const fb of selection.fallbacks) {
-          if (STRICT_IR_REASONS.has(fb.reason)) {
-            reportErrorNoNode(
-              ctx,
-              `IR path strict mode: ${fb.name} rejected with reason "${fb.reason}" — this reason is required to be zero (see plan/log/ir-adoption.md).`,
-            );
-          }
-        }
-      }
-      // Slice 4 (#1169d) — build the class-shape registry from the
-      // legacy class collection (`ctx.classSet`, `ctx.structFields`,
-      // `ctx.funcMap`). Done BEFORE override resolution so class-typed
-      // positions (`p: Point`) lower to `IrType.class` rather than
-      // throwing in `resolvePositionType`.
-      const classShapes = buildIrClassShapes(ctx, ast.sourceFile);
-      // Build per-function IR type overrides from the propagated TypeMap.
-      //
-      // For a claimed function, the selector must have resolved each
-      // param + return to a concrete primitive via either an explicit
-      // TS annotation OR the TypeMap. We mirror that resolution here to
-      // build the override map: for each position, prefer the AST
-      // annotation (authoritative) and fall back to the TypeMap only
-      // when the AST lacks one. If neither yields a concrete primitive,
-      // that position is a compiler bug — the selector should not have
-      // claimed this function.
-      //
-      // The override map also feeds the `calleeTypes` in the lowerer so
-      // direct calls to IR-path callees see the right signature.
-      // Slice 14 (#1228) — `returnType: IrType | null` where `null` means
-      // a void-returning function (zero Wasm result types). Plumbs through
-      // `compileIrPathFunctions` to `from-ast.ts` so the IR builder can be
-      // constructed with `[]` results and the lowerer can accept bare
-      // `return;` / fall-through tails.
-      const overrideMap = new Map<string, { params: IrType[]; returnType: IrType | null }>();
-      const declByName = new Map<string, ts.FunctionDeclaration>();
-      for (const stmt of ast.sourceFile.statements) {
-        if (ts.isFunctionDeclaration(stmt) && stmt.name) declByName.set(stmt.name.text, stmt);
-      }
-      for (const name of selection.funcs) {
-        const fn = declByName.get(name);
-        if (!fn) continue;
-        const entry = typeMap.get(name);
-        try {
-          // Slice 7a (#1169f) — generator functions return an externref
-          // (the JS Generator-like object built by `__create_generator`)
-          // regardless of the source-level annotation
-          // (`Generator<number>`, `IterableIterator<T>`, etc.). The IR
-          // lowerer enforces this; the override map needs to agree so
-          // the cross-function `calleeTypes` lookup sees the right
-          // signature. Bypass `resolvePositionType` for the return type
-          // — `Generator<T>` doesn't resolve as `IrType.object` and
-          // would otherwise drop the generator from `safeSelection`.
-          const isGenerator = !!fn.asteriskToken;
-          // Slice 14 (#1228) — VoidKeyword return: bypass resolvePositionType
-          // (it has no representation for void in IrType) and set returnType
-          // to null. The lowerer treats null returnType as "no result".
-          const isVoidReturn = !isGenerator && fn.type?.kind === ts.SyntaxKind.VoidKeyword;
-          const returnType: IrType | null = isGenerator
-            ? ({ kind: "val", val: { kind: "externref" } } as IrType)
-            : isVoidReturn
-              ? null
-              : resolvePositionType(fn.type, entry?.returnType, ctx, classShapes);
-          const params: IrType[] = [];
-          for (let i = 0; i < fn.parameters.length; i++) {
-            const p = fn.parameters[i]!;
-            params.push(resolvePositionType(p.type, entry?.params[i], ctx, classShapes));
-          }
-          overrideMap.set(name, { params, returnType });
-        } catch (e) {
-          // Selector claimed a function whose types can't be resolved —
-          // skip the IR path for this one. Fall through to legacy.
-          //
-          // #1921 — this is a deliberate IR→legacy fallback, not a compile
-          // error: the legacy path still produces a working body for `name`.
-          // Emit severity "warning" so it stays visible to bridge tests but
-          // does NOT fail the build (consistent with the IR-fallback channel
-          // at `formatIrPathFallbackDiagnostic` below). Defaulting to "error"
-          // would fail every program with a class-typed cross-function return
-          // that the IR lowerer can't yet represent (e.g. a `Builder` chain).
-          //
-          // #2137 — also record this on the structured `irPostClaimErrors`
-          // channel (kind "resolve") so consumers (bridge tests, the
-          // check:ir-fallbacks gate) can query IR-path fallbacks without
-          // string-matching the diagnostics array. The warning line below is
-          // retained one sprint for back-compat.
-          const resolveMsg = e instanceof Error ? e.message : String(e);
-          (ctx.irPostClaimErrors ??= []).push({
-            kind: "resolve",
-            func: name,
-            message: resolveMsg,
-          });
-          reportErrorNoNode(ctx, `IR path: could not resolve types for ${name}: ${resolveMsg}`, "warning");
-        }
-      }
-      // Only request IR compilation for functions we successfully built
-      // overrides for (the selector may have claimed more, but if we
-      // couldn't map types safely we leave them to legacy).
-      //
-      // #1370 Phase B: thread `classMembers` through to the integration
-      // loop. Class methods don't go through `overrideMap` (they're
-      // typed via the class shape, not the TypeMap-derived overrides);
-      // the integration's class-member walk consults `classShapes`
-      // directly. Pass the set unmodified.
-      const safeSelection = {
-        funcs: new Set<string>([...selection.funcs].filter((n) => overrideMap.has(n))),
-        classMembers: selection.classMembers,
-      };
-      // (#2023) The IR `new C(...)` lowering does not thread the new.target
-      // class-id (that machinery lives only on the legacy path). When the
-      // program uses `new.target`, route every function through legacy so the
-      // outermost-`new` global is set/restored at each construction site. This
-      // is a coarse but safe gate — `new.target` is rare, so the perf cost is
-      // negligible and it avoids a parallel IR implementation of the threading.
-      if (ctx.usesNewTarget) {
-        safeSelection.funcs.clear();
-        safeSelection.classMembers = new Set();
-      }
+      // (#2138) Under IR-first the plan was computed BEFORE
+      // `compileDeclarations` (see above); otherwise compute it here — the
+      // exact position the inline planning block occupied pre-#2138, so the
+      // flag-off pipeline is order-identical. `planIrOverlay` holds the
+      // planning code verbatim (typeMap → selection → STRICT_IR_REASONS →
+      // classShapes → overrideMap → safeSelection → new.target gate).
+      const plan = irPlan ?? planIrOverlay(ctx, ast);
+      const { selection, classShapes, overrideMap, safeSelection, trackFallbacks } = plan;
       const report = compileIrPathFunctions(ctx, ast.sourceFile, safeSelection, overrideMap, classShapes);
       // Slice 12 (#1169o) — most IR-path failures are NOT compile errors. The
       // legacy path has already produced a working `body` for every function
@@ -1608,18 +1826,42 @@ export function generateModule(
           message: err.message,
         });
         const diag = formatIrPathFallbackDiagnostic(err);
-        // #1858 C4: keep the leading "IR path failed for …" text intact — many
-        // bridge tests filter on `e.message.startsWith("IR path failed")` — but
-        // append a concise, greppable `[IR-FALLBACK]` tag so a regression in the
-        // fallback rate is visible in logs/CI even when the diagnostic is
-        // demoted to severity-"warning". #1850 promotes verifier failures in
-        // test/CI builds by prefixing the same diagnostic with `Codegen error:`.
+        // (#2138) Under IR-first, a post-claim IR failure on a function whose
+        // LEGACY body was SKIPPED cannot demote to a warning: there is no
+        // legacy body to fall back to — the slot holds an `unreachable`
+        // placeholder that would be a live runtime trap. Promote to a hard
+        // compile error. This is the intended investigation behavior: the
+        // flag's job is to surface exactly these selector↔builder
+        // divergences as loud, filable failures (#2135) instead of silent
+        // legacy demotes. Functions NOT in the skip set keep today's
+        // graceful demotion.
+        const skippedTrap = irSkipBodies !== undefined && irSkipBodies.has(err.func);
         ctx.errors.push({
-          message: diag.message,
+          message:
+            skippedTrap && diag.severity !== "error"
+              ? `Codegen error: ${diag.message} [IR-FIRST skipped-slot, #2138]`
+              : diag.message,
           line: 0,
           column: 0,
-          severity: diag.severity,
+          severity: skippedTrap ? "error" : diag.severity,
         });
+      }
+      // (#2138) Backstop for the skip contract: every function whose legacy
+      // body was skipped MUST have been IR-compiled into its slot. A skipped
+      // function that neither appears in `report.compiled` nor produced an
+      // entry in `report.errors` (which the loop above already promoted)
+      // means its placeholder would ship silently — fail the compile.
+      if (irSkipBodies !== undefined && irSkipBodies.size > 0) {
+        const compiledSet = new Set(report.compiled);
+        const erroredSet = new Set(report.errors.map((e) => e.func));
+        for (const name of irSkipBodies) {
+          if (!compiledSet.has(name) && !erroredSet.has(name)) {
+            reportErrorNoNode(
+              ctx,
+              `IR-first (#2138): legacy body for "${name}" was skipped but the IR path neither compiled it nor reported an error — the unreachable placeholder would ship. Selector/integration divergence; file an issue.`,
+            );
+          }
+        }
       }
       // #1169q telemetry — when JS2WASM_LOG_IR_FALLBACKS=1, log a one-line
       // summary per compile to stderr: total top-level FunctionDeclarations
@@ -1772,9 +2014,22 @@ export function generateModule(
     }
     fillNativeIteratorUserArms(ctx);
 
+    // (#2922) Rebuild `__combinator_to_vec`'s user-iterable arm with the same
+    // closed-struct dispatchers (identical five-dispatcher condition, so the
+    // combinator drain and the native iterator carrier can never disagree).
+    // No-op unless a dynamic Promise.all/race argument site registered it.
+    fillCombinatorToVec(ctx);
+
     // (#1716) Emit __call_@@toPrimitive(self, hint) for runtime ToPrimitive
     // dispatch of a class's [Symbol.toPrimitive] *method* on opaque structs.
     emitToPrimitiveMethodExport(ctx);
+
+    // (#2962) Emit __exn_render_prepare / __exn_render_char so the test262
+    // harness can render a natively-thrown GC payload ("TypeError: boom")
+    // with zero host imports. No-op unless (standalone || wasi) &&
+    // nativeStrings && the `$exc` tag was registered (i.e. the module can
+    // actually throw).
+    emitExceptionRenderExports(ctx);
 
     // Emit __call_fn_0 export for calling zero-arg closures from JS (#851)
     emitClosureCallExport(ctx);
@@ -2037,6 +2292,7 @@ export function generateModule(
     errors: ctx.errors,
     fallbackCounts: ctx.fallbackCounts,
     irPostClaimErrors: ctx.irPostClaimErrors,
+    irFirstSkipped,
   };
 }
 
@@ -2268,9 +2524,8 @@ function addWasiStartExport(ctx: CodegenContext): void {
 
   const mainIdx = ctx.funcMap.get("main");
   if (mainIdx !== undefined) {
-    const funcArrayIdx = mainIdx - ctx.numImportFuncs;
-    if (funcArrayIdx >= 0 && funcArrayIdx < ctx.mod.functions.length) {
-      const func = ctx.mod.functions[funcArrayIdx]!;
+    const func = definedFuncAt(ctx, mainIdx);
+    if (func) {
       const funcType = ctx.mod.types[func.typeIdx];
       // Only an EXPORTED, no-arg, no-result `main` is a valid `_start` entry.
       // A non-exported `main` (the `main()`-calls-itself convention) is reached
@@ -3146,7 +3401,7 @@ function emitIteratorMethodExport(ctx: CodegenContext): void {
       const funcIdx = ctx.funcMap.get(methodFullName);
       if (funcIdx === undefined) continue;
 
-      const funcDef = mod.functions[funcIdx - ctx.numImportFuncs];
+      const funcDef = definedFuncAt(ctx, funcIdx);
       const funcType = funcDef ? mod.types[funcDef.typeIdx] : undefined;
       const resultType: ValType =
         funcType && funcType.kind === "func" && funcType.results.length > 0
@@ -3292,7 +3547,7 @@ function emitToPrimitiveMethodExport(ctx: CodegenContext): void {
     const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, `${structName}_${methodSuffix}`)); // (#1983)
     if (funcIdx === undefined) continue;
 
-    const funcDef = mod.functions[funcIdx - ctx.numImportFuncs];
+    const funcDef = definedFuncAt(ctx, funcIdx);
     const funcType = funcDef ? mod.types[funcDef.typeIdx] : undefined;
     const resultType: ValType =
       funcType && funcType.kind === "func" && funcType.results.length > 0
@@ -3411,7 +3666,7 @@ function toPrimitiveNeedsBoxing(ctx: CodegenContext, methodSuffix: string): bool
       continue;
     const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, `${structName}_${methodSuffix}`));
     if (funcIdx === undefined) continue;
-    const funcDef = mod.functions[funcIdx - ctx.numImportFuncs];
+    const funcDef = definedFuncAt(ctx, funcIdx);
     const funcType = funcDef ? mod.types[funcDef.typeIdx] : undefined;
     const resultType =
       funcType && funcType.kind === "func" && funcType.results.length > 0 ? funcType.results[0] : undefined;
@@ -4550,7 +4805,7 @@ function emitToPrimitiveMethodExports(ctx: CodegenContext): void {
       // nominal class methods and structs whose method has no stored closure.
       const funcIdx = ctx.funcMap.get(methodFullName);
       if (funcIdx !== undefined) {
-        const funcDef = mod.functions[funcIdx - ctx.numImportFuncs];
+        const funcDef = definedFuncAt(ctx, funcIdx);
         const funcType = funcDef ? mod.types[funcDef.typeIdx] : undefined;
         const resultType: ValType =
           funcType && funcType.kind === "func" && funcType.results.length > 0
@@ -5173,7 +5428,7 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
     // pass; fill it in place if reserved.
     const reservedGet = ctx.funcMap.get("__vec_get");
     if (reservedGet !== undefined) {
-      const fn = mod.functions[reservedGet - ctx.numImportFuncs]! as { locals: typeof getLocals; body: Instr[] };
+      const fn = definedFuncAt(ctx, reservedGet)! as { locals: typeof getLocals; body: Instr[] };
       fn.locals = getLocals;
       fn.body = body;
     } else {
@@ -5420,7 +5675,7 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
     // fresh and register in funcMap (shift-tracked) so a same-pass lookup resolves.
     const reservedPush = ctx.funcMap.get("__vec_push");
     if (reservedPush !== undefined) {
-      const fn = mod.functions[reservedPush - ctx.numImportFuncs]! as { locals: typeof locals; body: Instr[] };
+      const fn = definedFuncAt(ctx, reservedPush)! as { locals: typeof locals; body: Instr[] };
       fn.locals = locals;
       fn.body = body;
     } else {
@@ -5520,7 +5775,7 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
     // (#2784 S3) FILL-or-build (see __vec_push above).
     const reservedPop = ctx.funcMap.get("__vec_pop");
     if (reservedPop !== undefined) {
-      const fn = mod.functions[reservedPop - ctx.numImportFuncs]! as { locals: typeof locals; body: Instr[] };
+      const fn = definedFuncAt(ctx, reservedPop)! as { locals: typeof locals; body: Instr[] };
       fn.locals = locals;
       fn.body = body;
     } else {
@@ -5677,9 +5932,8 @@ function hasExportedVecParam(ctx: CodegenContext): boolean {
   const vecTypeIdxs = new Set<number>(ctx.vecTypeMap.values());
   for (const exp of mod.exports) {
     if (exp.desc.kind !== "func") continue;
-    const idx = exp.desc.index - ctx.numImportFuncs;
-    if (idx < 0 || idx >= mod.functions.length) continue;
-    const fn = mod.functions[idx]!;
+    const fn = definedFuncAt(ctx, exp.desc.index);
+    if (!fn) continue;
     const typeDef = mod.types[fn.typeIdx];
     if (!typeDef) continue;
     // Resolve sub-type wrappers (some FuncTypeDefs are nested under SubTypeDef).
@@ -6444,6 +6698,13 @@ export function generateMultiModule(
     // (#1716) Emit __call_@@toPrimitive(self, hint) for runtime ToPrimitive
     // dispatch of a class's [Symbol.toPrimitive] *method* on opaque structs.
     emitToPrimitiveMethodExport(ctx);
+
+    // (#2962) Emit __exn_render_prepare / __exn_render_char so the test262
+    // harness can render a natively-thrown GC payload ("TypeError: boom")
+    // with zero host imports. No-op unless (standalone || wasi) &&
+    // nativeStrings && the `$exc` tag was registered (i.e. the module can
+    // actually throw).
+    emitExceptionRenderExports(ctx);
 
     // #1326c Phase 1C-A — export __drain_microtasks BEFORE WASI _start so the
     // _start wrapper (which appends a drain call) can find its funcIdx.
@@ -9309,12 +9570,12 @@ export function addStringImports(ctx: CodegenContext): void {
   if (delta > 0 && ctx.mod.functions.length > 0) {
     const newImportNames = new Set(["concat", "length", "equals", "substring", "charCodeAt"]);
     for (const [name, idx] of ctx.funcMap) {
-      if (!newImportNames.has(name) && idx >= importsBefore) {
+      if (!newImportNames.has(name) && inLiveShiftRange(idx, importsBefore)) {
         ctx.funcMap.set(name, idx + delta);
       }
     }
     for (const exp of ctx.mod.exports) {
-      if (exp.desc.kind === "func" && exp.desc.index >= importsBefore) {
+      if (exp.desc.kind === "func" && inLiveShiftRange(exp.desc.index, importsBefore)) {
         exp.desc.index += delta;
       }
     }
@@ -9325,10 +9586,10 @@ export function addStringImports(ctx: CodegenContext): void {
       if (shifted.has(instrs)) return;
       shifted.add(instrs);
       for (const instr of instrs) {
-        if ((instr.op === "call" || instr.op === "return_call") && instr.funcIdx >= importsBefore) {
+        if ((instr.op === "call" || instr.op === "return_call") && inLiveShiftRange(instr.funcIdx, importsBefore)) {
           instr.funcIdx += delta;
         }
-        if (instr.op === "ref.func" && instr.funcIdx >= importsBefore) {
+        if (instr.op === "ref.func" && inLiveShiftRange(instr.funcIdx, importsBefore)) {
           instr.funcIdx += delta;
         }
         const a = instr as any;
@@ -9378,20 +9639,22 @@ export function addStringImports(ctx: CodegenContext): void {
     for (const elem of ctx.mod.elements) {
       if (elem.funcIndices) {
         for (let i = 0; i < elem.funcIndices.length; i++) {
-          if (elem.funcIndices[i]! >= importsBefore) {
+          if (inLiveShiftRange(elem.funcIndices[i]!, importsBefore)) {
             elem.funcIndices[i]! += delta;
           }
         }
       }
     }
     if (ctx.mod.declaredFuncRefs.length > 0) {
-      ctx.mod.declaredFuncRefs = ctx.mod.declaredFuncRefs.map((idx) => (idx >= importsBefore ? idx + delta : idx));
+      ctx.mod.declaredFuncRefs = ctx.mod.declaredFuncRefs.map((idx) =>
+        inLiveShiftRange(idx, importsBefore) ? idx + delta : idx,
+      );
     }
     // (#1525b) Shift pendingMethodTrampolines side-channel indices in lockstep
     // — see the matching block in addUnionImports / shiftLateImportIndices.
     for (const t of ctx.pendingMethodTrampolines) {
-      if (t.methodFuncIdx >= importsBefore) t.methodFuncIdx += delta;
-      if (t.trampolineFuncIdx >= importsBefore) t.trampolineFuncIdx += delta;
+      if (inLiveShiftRange(t.methodFuncIdx, importsBefore)) t.methodFuncIdx += delta;
+      if (inLiveShiftRange(t.trampolineFuncIdx, importsBefore)) t.trampolineFuncIdx += delta;
     }
     // (#1839) `nativeStrHelpers` is read directly by string-lowering call sites
     // and helper emitters — it is NOT a copy of funcMap, so it must be shifted
@@ -9399,14 +9662,14 @@ export function addStringImports(ctx: CodegenContext): void {
     // every entry >= importsBefore moves up by `delta`. Omitting this left the
     // map stale under plain `--nativeStrings` JS-host mode.
     for (const [name, idx] of ctx.nativeStrHelpers) {
-      if (idx >= importsBefore) {
+      if (inLiveShiftRange(idx, importsBefore)) {
         ctx.nativeStrHelpers.set(name, idx + delta);
       }
     }
     // (#1913) Regex helper map moves in lockstep too — regexp-standalone call
     // sites bake `call` indices straight from this map.
     for (const [name, idx] of ctx.nativeRegexHelpers) {
-      if (idx >= importsBefore) {
+      if (inLiveShiftRange(idx, importsBefore)) {
         ctx.nativeRegexHelpers.set(name, idx + delta);
       }
     }
@@ -9415,7 +9678,7 @@ export function addStringImports(ctx: CodegenContext): void {
     // indices straight from this map (see shiftLateImportIndices for the full
     // rationale / the WeakMap stale-index validation failure it fixes).
     for (const [name, idx] of ctx.mapHelpers) {
-      if (idx >= importsBefore) {
+      if (inLiveShiftRange(idx, importsBefore)) {
         ctx.mapHelpers.set(name, idx + delta);
       }
     }
@@ -9434,7 +9697,7 @@ export function addStringImports(ctx: CodegenContext): void {
     }
     // (#1839) The module start function index also moves if it was a defined
     // function at or above the insertion point. Matches addUnionImports.
-    if (ctx.mod.startFuncIdx !== undefined && ctx.mod.startFuncIdx >= importsBefore) {
+    if (ctx.mod.startFuncIdx !== undefined && inLiveShiftRange(ctx.mod.startFuncIdx, importsBefore)) {
       ctx.mod.startFuncIdx += delta;
     }
   }
@@ -10765,7 +11028,7 @@ export function addUnionImports(ctx: CodegenContext): void {
     ]);
     // Update funcMap entries for defined functions (not imports)
     for (const [name, idx] of ctx.funcMap) {
-      if (!newImportNames.has(name) && idx >= importsBefore) {
+      if (!newImportNames.has(name) && inLiveShiftRange(idx, importsBefore)) {
         ctx.funcMap.set(name, idx + delta);
       }
     }
@@ -10778,13 +11041,13 @@ export function addUnionImports(ctx: CodegenContext): void {
     // (e.g. `__box_number` for a numeric key/value) land between helper
     // registration and the call, so `wm.has` called `__map_get` → invalid Wasm.
     for (const [name, idx] of ctx.mapHelpers) {
-      if (idx >= importsBefore) {
+      if (inLiveShiftRange(idx, importsBefore)) {
         ctx.mapHelpers.set(name, idx + delta);
       }
     }
     // Update export indices
     for (const exp of ctx.mod.exports) {
-      if (exp.desc.kind === "func" && exp.desc.index >= importsBefore) {
+      if (exp.desc.kind === "func" && inLiveShiftRange(exp.desc.index, importsBefore)) {
         exp.desc.index += delta;
       }
     }
@@ -10795,10 +11058,10 @@ export function addUnionImports(ctx: CodegenContext): void {
       if (shifted.has(instrs)) return;
       shifted.add(instrs);
       for (const instr of instrs) {
-        if ((instr.op === "call" || instr.op === "return_call") && instr.funcIdx >= importsBefore) {
+        if ((instr.op === "call" || instr.op === "return_call") && inLiveShiftRange(instr.funcIdx, importsBefore)) {
           instr.funcIdx += delta;
         }
-        if (instr.op === "ref.func" && instr.funcIdx >= importsBefore) {
+        if (instr.op === "ref.func" && inLiveShiftRange(instr.funcIdx, importsBefore)) {
           instr.funcIdx += delta;
         }
         const a = instr as any;
@@ -10845,7 +11108,7 @@ export function addUnionImports(ctx: CodegenContext): void {
     for (const elem of ctx.mod.elements) {
       if (elem.funcIndices) {
         for (let i = 0; i < elem.funcIndices.length; i++) {
-          if (elem.funcIndices[i]! >= importsBefore) {
+          if (inLiveShiftRange(elem.funcIndices[i]!, importsBefore)) {
             elem.funcIndices[i]! += delta;
           }
         }
@@ -10853,11 +11116,13 @@ export function addUnionImports(ctx: CodegenContext): void {
     }
     // Update declaredFuncRefs
     if (ctx.mod.declaredFuncRefs.length > 0) {
-      ctx.mod.declaredFuncRefs = ctx.mod.declaredFuncRefs.map((idx) => (idx >= importsBefore ? idx + delta : idx));
+      ctx.mod.declaredFuncRefs = ctx.mod.declaredFuncRefs.map((idx) =>
+        inLiveShiftRange(idx, importsBefore) ? idx + delta : idx,
+      );
     }
     // Update Wasm start function index (#907) — late-added imports shift the
     // defined-function index that __module_init lives at.
-    if (ctx.mod.startFuncIdx !== undefined && ctx.mod.startFuncIdx >= importsBefore) {
+    if (ctx.mod.startFuncIdx !== undefined && inLiveShiftRange(ctx.mod.startFuncIdx, importsBefore)) {
       ctx.mod.startFuncIdx += delta;
     }
     // Sync nativeStrHelpers and re-base so reconcileNativeStrFinalizeShift is a no-op
@@ -10865,11 +11130,11 @@ export function addUnionImports(ctx: CodegenContext): void {
     // native-string helper bodies. Without this, reconcile double-shifts them (#1677-fast-path).
     if (ctx.nativeStrHelperImportBase >= 0) {
       for (const [name, idx] of ctx.nativeStrHelpers) {
-        if (idx >= importsBefore) ctx.nativeStrHelpers.set(name, idx + delta);
+        if (inLiveShiftRange(idx, importsBefore)) ctx.nativeStrHelpers.set(name, idx + delta);
       }
       // (#1913) Regex helper map shares the same lifecycle.
       for (const [name, idx] of ctx.nativeRegexHelpers) {
-        if (idx >= importsBefore) ctx.nativeRegexHelpers.set(name, idx + delta);
+        if (inLiveShiftRange(idx, importsBefore)) ctx.nativeRegexHelpers.set(name, idx + delta);
       }
       ctx.nativeStrHelperImportBase = ctx.numImportFuncs;
     }
@@ -10878,8 +11143,8 @@ export function addUnionImports(ctx: CodegenContext): void {
     // reachable from any Instr — without this, finalizeMethodTrampolines later
     // resolves the wrong (import) signature, producing invalid Wasm.
     for (const t of ctx.pendingMethodTrampolines) {
-      if (t.methodFuncIdx >= importsBefore) t.methodFuncIdx += delta;
-      if (t.trampolineFuncIdx >= importsBefore) t.trampolineFuncIdx += delta;
+      if (inLiveShiftRange(t.methodFuncIdx, importsBefore)) t.methodFuncIdx += delta;
+      if (inLiveShiftRange(t.trampolineFuncIdx, importsBefore)) t.trampolineFuncIdx += delta;
     }
     // (#2918) Async-scheduler + Promise.all/race combinator side-channel funcIdxs
     // move in lockstep too (addUnionImports missed them). Same complete key list
@@ -11530,12 +11795,80 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
   //     callable JS functions to the outside, so this is conservatively 0.
   registerNative("__typeof_function", externrefToI32, [{ op: "i32.const", value: 0 }]);
 
-  // 15. __typeof(externref) -> externref — returns null externref under
-  //     wasi. Producing real type-tag strings would require a NativeString
-  //     per tag; defer until a wasi caller needs the typeof RESULT as a
-  //     string (today's callers compare against literal tags via the
-  //     __typeof_* helpers above).
-  registerNative("__typeof", externrefToExternref, [{ op: "ref.null.extern" }]);
+  // 15. __typeof(externref) -> externref — the MATERIALIZED typeof result.
+  //     (#2965) This was a `ref.null.extern` stub ("defer until a wasi caller
+  //     needs the typeof RESULT as a string"), which silently broke every
+  //     standalone site where the typeof string is a VALUE rather than an
+  //     inline `typeof x === "…"` compare: `var t = typeof x`,
+  //     `assert_sameValue_str(typeof(o.p), "undefined")` (the test262 runner's
+  //     paren-form transform miss), any typeof flowing through a param. The
+  //     result was a null externref, so `t === "undefined"` was false for
+  //     EVERY tag and `t.length` trapped. Classify with the same dispatch the
+  //     `__typeof_*` predicates above use (null → "undefined", box_number →
+  //     "number", box_boolean → "boolean", $BigInt → "bigint", $AnyString →
+  //     "string", else → "object"; functions stay "object", matching the
+  //     conservative `__typeof_function` = 0 predicate) and return the tag as
+  //     an inline NativeString (sentinel-safe, no funcidx baked — the #2515
+  //     discipline; string literals here are type-index-only instructions, so
+  //     the late-import finalize shift cannot desync this body). Falls back to
+  //     the old stub only when no native-string type is registered (then no
+  //     string content could be represented anyway).
+  if (ctx.nativeStrings && ctx.nativeStrTypeIdx >= 0) {
+    const typeofTagArm = (test: Instr[], tag: string): Instr[] => [
+      ...test,
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [...stringConstantExternrefInstrs(ctx, tag), { op: "return" }],
+      },
+    ];
+    registerNative(
+      "__typeof",
+      externrefToExternref,
+      [
+        // null externref → undefined (matches __typeof_undefined = ref.is_null)
+        ...typeofTagArm([{ op: "local.get", index: 0 }, { op: "ref.is_null" }], "undefined"),
+        { op: "local.get", index: 0 },
+        { op: "any.convert_extern" },
+        { op: "local.set", index: 1 },
+        ...typeofTagArm(
+          [
+            { op: "local.get", index: 1 },
+            { op: "ref.test", typeIdx: boxNumStructIdx },
+          ],
+          "number",
+        ),
+        ...typeofTagArm(
+          [
+            { op: "local.get", index: 1 },
+            { op: "ref.test", typeIdx: boxBoolStructIdx },
+          ],
+          "boolean",
+        ),
+        ...typeofTagArm(
+          [
+            { op: "local.get", index: 1 },
+            { op: "ref.test", typeIdx: bigIntStructIdx },
+          ],
+          "bigint",
+        ),
+        ...(ctx.anyStrTypeIdx >= 0
+          ? typeofTagArm(
+              [
+                { op: "local.get", index: 1 },
+                { op: "ref.test", typeIdx: ctx.anyStrTypeIdx },
+              ],
+              "string",
+            )
+          : []),
+        // non-null, not a boxed primitive, not a string → object
+        ...stringConstantExternrefInstrs(ctx, "object"),
+      ],
+      [{ name: "$any_temp", type: { kind: "anyref" } as ValType }],
+    );
+  } else {
+    registerNative("__typeof", externrefToExternref, [{ op: "ref.null.extern" }]);
+  }
 
   // #2508 — native `__host_eq` (Strict Equality, §7.2.16) and
   // `__same_value_zero` (SameValueZero, §7.2.11) over two boxed externrefs, so
@@ -12342,6 +12675,20 @@ export function resolveWasmType(ctx: CodegenContext, tsType: ts.Type, _depth = 0
     // Check externref AFTER Array check — Array is declared in lib but should use wasm GC arrays
     if (isExternalDeclaredClass(tsType, ctx.checker)) return { kind: "externref" };
 
+    // (#2937) The checker type of a `{}` var poisoned as an `$Object`-hash
+    // consumer (#2584/#2849) must NOT resolve to a closed struct. In JS-mode
+    // sources the checker EVOLVES `var o = {}` through its later static-named
+    // writes into an anonymous object type WITH those props; auto-registering
+    // it below would type the local — and every flow position the object
+    // passes through (returns, class fields, receivers) — as `(ref null
+    // __anon_N)` while the poisoned initializer builds a host plain object
+    // (externref). The declaration's guarded cast then stores ref.null and
+    // every static read null-derefs (compiled-acorn `getOptions`, #2937).
+    // Externref keeps ALL access forms on the poisoned var routed through the
+    // host MOP coherently. The set is empty in standalone mode (recorded
+    // host-only), so standalone codegen is unaffected.
+    if (ctx.objectHashConsumerTypes.has(tsType)) return { kind: "externref" };
+
     // (#1712) Function-style-constructor instance types resolve to EXTERNREF,
     // never to a synthesized checker-shape struct. The runtime instance struct
     // (compileFnctorNew, `__fnctor_<name>`) is built from ctor `this.*` writes
@@ -12512,6 +12859,10 @@ function ensureDateStructForCtx(ctx: CodegenContext): number {
 export function ensureStructForType(ctx: CodegenContext, tsType: ts.Type): void {
   if (!(tsType.flags & ts.TypeFlags.Object)) return;
   if (isExternalDeclaredClass(tsType, ctx.checker)) return;
+  // (#2937) Never register a struct for the evolved checker type of a poisoned
+  // `$Object`-hash-consumer `{}` var — it must stay externref/host-MOP end to
+  // end (see resolveWasmType's matching guard for the full rationale).
+  if (ctx.objectHashConsumerTypes.has(tsType)) return;
   // Types declared in `.d.ts` files (interfaces, type aliases, classes
   // exported from declaration-file-only packages) have no JS implementation
   // we can lower to a WasmGC struct. Registering them as anon structs
@@ -14096,7 +14447,11 @@ function collectDeclaredGlobals(ctx: CodegenContext, libFile: ts.SourceFile, use
       addImport(ctx, "env", importName, { kind: "func", typeIdx });
       const funcIdx = ctx.funcMap.get(importName);
       if (funcIdx !== undefined) {
-        ctx.declaredGlobals.set(name, { type: { kind: "externref" }, funcIdx });
+        // (#2856) Record the extern class of the global's declared type so
+        // the IR host-extern path can type the `call global_<name>` handle
+        // as `IrType.extern { className }` and dispatch member access on it.
+        const className = type.getSymbol()?.name;
+        ctx.declaredGlobals.set(name, { type: { kind: "externref" }, funcIdx, className });
       }
     }
   }

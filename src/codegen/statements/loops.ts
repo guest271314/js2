@@ -34,7 +34,7 @@ import { ensureNativeIteratorRuntime } from "../iterator-native.js";
 import { containsLinearU8Allocation, emitLinearU8ArenaMark, linearU8ArenaResetInstrs } from "../linear-uint8-arena.js";
 import { resolveComputedKeyExpression } from "../literals.js";
 import { emitCollectionIteratorVec, ensureMapHelpers, MAP_LAYOUT } from "../map-runtime.js";
-import { resolveArrayInfo } from "../array-methods.js";
+import { elemGetOp, resolveArrayInfo, typedArraySearchSignedness, unpackedElemType } from "../array-methods.js";
 import { flatStringType, stringConstantExternrefInstrs } from "../native-strings.js";
 import { emitNativeNumberFormat } from "../number-format-native.js";
 import { ensureObjectRuntime } from "../object-runtime.js";
@@ -65,6 +65,7 @@ import {
 import { adjustRethrowDepth, collectInstrs, restoreBlockScopedShadows, saveBlockScopedShadows } from "./shared.js";
 import { collectPatternBindingNames } from "./tdz.js";
 import { emitHoleToUndefined } from "../array-holes.js"; // (#2001 S1)
+import { definedFuncAt } from "../func-space.js"; // (#1916 S2) positional-read chokepoint
 
 export function compileWhileStatement(ctx: CodegenContext, fctx: FunctionContext, stmt: ts.WhileStatement): void {
   // block $break
@@ -3913,6 +3914,17 @@ function compileForOfArray(
     return;
   }
   const elemType = arrDef.element;
+  // (#2934 1b) Packed i8/i16 typed-array elements (Uint8Array/Int8Array/
+  // Int16Array/… standalone, #2593) are STORAGE-only types: a local declared
+  // `i8` is invalid Wasm ("packed storage type is not valid in a value
+  // position") and a plain `array.get` on a packed array fails validation. Bind
+  // the loop variable as the unpacked `i32` and read with the view-name-driven
+  // extension — `Int*` sign-extends (`array.get_s`), `Uint*` zero-extends
+  // (`array.get_u`); the storage kind alone cannot distinguish them (#2648).
+  // For non-packed elements both are identity (`readElemType === elemType`,
+  // plain `array.get`), so host mode and plain arrays emit byte-identical code.
+  const readElemType = unpackedElemType(elemType);
+  const elemReadOp = elemGetOp(elemType, typedArraySearchSignedness(ctx, iterableOverride ?? stmt.expression));
 
   // Save vec ref to temp local. With `preVec` the vec is already in `vecLocal`.
   const vecLocal = preVec ? preVec.vecLocal : allocLocal(fctx, `__forof_vec_${fctx.locals.length}`, vecType);
@@ -3968,7 +3980,7 @@ function compileForOfArray(
     if (ts.isObjectBindingPattern(decl.name) || ts.isArrayBindingPattern(decl.name)) {
       destructPattern = decl.name;
       // Allocate a temp local to hold the element for destructuring
-      elemLocal = allocLocal(fctx, `__forof_elem_${fctx.locals.length}`, elemType);
+      elemLocal = allocLocal(fctx, `__forof_elem_${fctx.locals.length}`, readElemType);
       // Track const bindings for all identifiers in the destructuring pattern
       if (isConst) {
         collectBindingNames(decl.name).forEach((n) => {
@@ -3978,7 +3990,7 @@ function compileForOfArray(
       }
     } else {
       const varName = ts.isIdentifier(decl.name) ? decl.name.text : `__forof_elem_${fctx.locals.length}`;
-      elemLocal = allocLocal(fctx, varName, elemType);
+      elemLocal = allocLocal(fctx, varName, readElemType);
       // Track const bindings — assignment to const in for-of should throw TypeError
       if (isConst && ts.isIdentifier(decl.name)) {
         if (!fctx.constBindings) fctx.constBindings = new Set();
@@ -3989,13 +4001,13 @@ function compileForOfArray(
     // Expression form with destructuring: for ({a, b} of arr) or for ([x, y] of arr)
     // These assign to already-declared variables
     assignDestructExpr = stmt.initializer;
-    elemLocal = allocLocal(fctx, `__forof_elem_${fctx.locals.length}`, elemType);
+    elemLocal = allocLocal(fctx, `__forof_elem_${fctx.locals.length}`, readElemType);
   } else if (ts.isIdentifier(stmt.initializer)) {
     // Expression form: for (x of arr) — x is already declared
     const varName = stmt.initializer.text;
-    elemLocal = fctx.localMap.get(varName) ?? allocLocal(fctx, varName, elemType);
+    elemLocal = fctx.localMap.get(varName) ?? allocLocal(fctx, varName, readElemType);
   } else {
-    elemLocal = allocLocal(fctx, `__forof_elem_${fctx.locals.length}`, elemType);
+    elemLocal = allocLocal(fctx, `__forof_elem_${fctx.locals.length}`, readElemType);
   }
 
   // Build loop body
@@ -4034,26 +4046,36 @@ function compileForOfArray(
     fctx.body.push({ op: "local.get", index: dataLocal });
   }
   fctx.body.push({ op: "local.get", index: iLocal });
-  fctx.body.push({ op: "array.get", typeIdx: arrTypeIdx });
+  fctx.body.push({ op: elemReadOp, typeIdx: arrTypeIdx } as Instr);
   // (#2001 S1) A for-of over an `any[]` with a literal hole reads `$Hole` at the
   // hole index; map it back to `undefined` (the iteration value of an absent
   // index — for-of uses array iterator Get, which yields undefined for holes).
   // Gated on externref element + `usesArrayHoles`.
   if (ctx.usesArrayHoles && elemType.kind === "externref") emitHoleToUndefined(ctx, fctx);
-  // Coerce from Wasm array element type to the local's declared type
+  // Coerce from the READ value's type (packed i8/i16 arrive on the stack as the
+  // widened i32, #2934) to the local's declared type.
   const elemLocalType = getLocalType(fctx, elemLocal);
-  if (elemLocalType && !valTypesMatch(elemType, elemLocalType)) {
-    coerceType(ctx, fctx, elemType, elemLocalType);
+  if (elemLocalType && !valTypesMatch(readElemType, elemLocalType)) {
+    coerceType(ctx, fctx, readElemType, elemLocalType);
   }
-  emitCoercedLocalSet(ctx, fctx, elemLocal, elemType);
+  emitCoercedLocalSet(ctx, fctx, elemLocal, readElemType);
 
   // If destructuring pattern (binding form), destructure from the element
   if (destructPattern) {
-    compileForOfDestructuring(ctx, fctx, destructPattern, elemLocal, elemType, stmt);
+    compileForOfDestructuring(ctx, fctx, destructPattern, elemLocal, readElemType, stmt);
   }
   // If assignment destructuring expression, assign to existing locals
   if (assignDestructExpr) {
-    compileForOfAssignDestructuring(ctx, fctx, assignDestructExpr, elemLocal, elemType, vecTypeIdx, arrTypeIdx, stmt);
+    compileForOfAssignDestructuring(
+      ctx,
+      fctx,
+      assignDestructExpr,
+      elemLocal,
+      readElemType,
+      vecTypeIdx,
+      arrTypeIdx,
+      stmt,
+    );
   }
 
   const savedLoopBody = pushBody(fctx);
@@ -4249,6 +4271,12 @@ function compileForOfArrayEntries(
     return;
   }
   const elemType = arrDef.element;
+  // (#2934 1b) Same packed-element discipline as compileForOfArray: bind the
+  // value local as the unpacked i32 and read with the view-name signedness —
+  // a raw packed i8/i16 local or a plain `array.get` on a packed array is
+  // invalid Wasm. Identity for non-packed elements.
+  const readElemType = unpackedElemType(elemType);
+  const elemReadOp = elemGetOp(elemType, typedArraySearchSignedness(ctx, receiver));
 
   // Identify the two binding targets [k, v]. Holes (`[, v]`) and rest
   // (`[k, ...rest]`) are not handled in this slice → fall back.
@@ -4277,14 +4305,14 @@ function compileForOfArrayEntries(
       return;
     }
     keyLocal = allocLocal(fctx, keyEl.name.text, { kind: "f64" });
-    valLocal = allocLocal(fctx, valEl.name.text, elemType);
+    valLocal = allocLocal(fctx, valEl.name.text, readElemType);
   } else {
     if (!ts.isIdentifier(keyEl) || !ts.isIdentifier(valEl)) {
       if (!compileForOfArrayTentative(ctx, fctx, stmt)) compileForOfIterator(ctx, fctx, stmt);
       return;
     }
     keyLocal = fctx.localMap.get(keyEl.text) ?? allocLocal(fctx, keyEl.text, { kind: "f64" });
-    valLocal = fctx.localMap.get(valEl.text) ?? allocLocal(fctx, valEl.text, elemType);
+    valLocal = fctx.localMap.get(valEl.text) ?? allocLocal(fctx, valEl.text, readElemType);
   }
 
   emitArrayKeysEntriesLoop(ctx, fctx, stmt, receiver, (lenLocal, iLocal, dataLocal, loopArrTypeIdx) => {
@@ -4292,15 +4320,15 @@ function compileForOfArrayEntries(
     fctx.body.push({ op: "local.get", index: iLocal });
     fctx.body.push({ op: "f64.convert_i32_s" });
     fctx.body.push({ op: "local.set", index: keyLocal! });
-    // value = data[i]
+    // value = data[i] (packed i8/i16 widens to i32 on read, #2934)
     fctx.body.push({ op: "local.get", index: dataLocal });
     fctx.body.push({ op: "local.get", index: iLocal });
-    fctx.body.push({ op: "array.get", typeIdx: loopArrTypeIdx });
+    fctx.body.push({ op: elemReadOp, typeIdx: loopArrTypeIdx } as Instr);
     const valLocalType = getLocalType(fctx, valLocal!);
-    if (valLocalType && !valTypesMatch(elemType, valLocalType)) {
-      coerceType(ctx, fctx, elemType, valLocalType);
+    if (valLocalType && !valTypesMatch(readElemType, valLocalType)) {
+      coerceType(ctx, fctx, readElemType, valLocalType);
     }
-    emitCoercedLocalSet(ctx, fctx, valLocal!, elemType);
+    emitCoercedLocalSet(ctx, fctx, valLocal!, readElemType);
     void lenLocal;
   });
 }
@@ -4759,7 +4787,7 @@ function compileForOfDirectIterator(
   iterMethodIdx: number,
 ): boolean {
   // Get the return type of the @@iterator method to find the iterator struct
-  const iterMethodDef = ctx.mod.functions[iterMethodIdx - ctx.numImportFuncs];
+  const iterMethodDef = definedFuncAt(ctx, iterMethodIdx);
   if (!iterMethodDef) return false;
   const iterMethodType = ctx.mod.types[iterMethodDef.typeIdx];
   if (!iterMethodType || iterMethodType.kind !== "func" || iterMethodType.results.length === 0) return false;
@@ -4785,7 +4813,7 @@ function compileForOfDirectIterator(
   if (nextMethodIdx === undefined) return false;
 
   // Get the return type of next() to find the result struct ({value, done})
-  const nextMethodDef = ctx.mod.functions[nextMethodIdx - ctx.numImportFuncs];
+  const nextMethodDef = definedFuncAt(ctx, nextMethodIdx);
   if (!nextMethodDef) return false;
   const nextMethodType = ctx.mod.types[nextMethodDef.typeIdx];
   if (!nextMethodType || nextMethodType.kind !== "func" || nextMethodType.results.length === 0) return false;

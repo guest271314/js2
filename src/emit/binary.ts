@@ -14,6 +14,7 @@ import type {
 } from "../ir/types.js";
 import { WasmEncoder } from "./encoder.js";
 import { GC, OP, SECTION, SIMD, TYPE } from "./opcodes.js";
+import { resolveLayout, type ModuleLayout } from "./resolve-layout.js";
 
 /** A source map entry: maps a wasm byte offset to a source position */
 export interface SourceMapEntry {
@@ -153,6 +154,34 @@ interface EmitValidationCtx {
 
 let valCtx: EmitValidationCtx | null = null;
 
+// ---------------------------------------------------------------------------
+// #1916/#2710 — handle→final-index resolution seam.
+//
+// `layout` is armed per-emit in `emitBinaryWithSourceMap` (same lifecycle as
+// `valCtx`) and dereferenced by `fIdx`/`gIdx` at every seam where a function or
+// global reference becomes bytes: `call`, `return_call`, `ref.func`,
+// `global.{get,set}`, export descriptors, element-segment function lists,
+// `declaredFuncRefs`, and the start section. When unarmed (the relocatable
+// object emitter and other direct callers of the exported encode helpers),
+// handles pass through raw — identical to the historical behaviour.
+//
+// IDENTITY PHASE: `resolveLayout` is the identity map (handles == live
+// indices), so this seam is byte-neutral (proven by
+// `scripts/prove-emit-identity.mjs`). The flip to real permutation happens in
+// `resolve-layout.ts` ONLY — see the preconditions documented there.
+// ---------------------------------------------------------------------------
+let layout: ModuleLayout | null = null;
+
+/** Resolve a function handle to its final function-index-space position. */
+function fIdx(h: number): number {
+  return layout ? layout.func(h) : h;
+}
+
+/** Resolve a global handle to its final global-index-space position. */
+function gIdx(h: number): number {
+  return layout ? layout.global(h) : h;
+}
+
 function makeValidationCtx(mod: WasmModule): EmitValidationCtx {
   let numImportFuncs = 0;
   let numImportGlobals = 0;
@@ -266,10 +295,15 @@ export function emitBinary(mod: WasmModule): Uint8Array {
  */
 export function emitBinaryWithSourceMap(mod: WasmModule): EmitResult {
   valCtx = process.env.JS2WASM_SKIP_INDEX_VALIDATION ? null : makeValidationCtx(mod);
+  // #1916/#2710 — resolve the final index layout once, at serialization: the
+  // single point that sees the fully-settled index space (post late imports,
+  // post DCE). All func/global references below dereference through it.
+  layout = resolveLayout(mod);
   try {
     return emitBinaryWithSourceMapUnguarded(mod);
   } finally {
     valCtx = null;
+    layout = null;
   }
 }
 
@@ -408,11 +442,12 @@ function emitBinaryWithSourceMapUnguarded(mod: WasmModule): EmitResult {
   // Start section — auto-run function on instantiation (#907)
   if (mod.startFuncIdx !== undefined) {
     enc.section(SECTION.start, (s) => {
+      const start = fIdx(mod.startFuncIdx!);
       if (valCtx) {
         valCtx.where = "start function";
-        vIdx("function", mod.startFuncIdx!, valCtx.numFuncs);
+        vIdx("function", start, valCtx.numFuncs);
       }
-      s.u32(mod.startFuncIdx!);
+      s.u32(start);
     });
   }
 
@@ -434,9 +469,10 @@ function emitBinaryWithSourceMapUnguarded(mod: WasmModule): EmitResult {
         s.byte(OP.end);
         s.u32(elem.funcIndices.length);
         if (valCtx) valCtx.where = "element-segment function list";
-        for (const idx of elem.funcIndices) {
-          if (valCtx) vIdx("function", idx, valCtx.numFuncs);
-          s.u32(idx);
+        for (const h of elem.funcIndices) {
+          const resolved = fIdx(h);
+          if (valCtx) vIdx("function", resolved, valCtx.numFuncs);
+          s.u32(resolved);
         }
       }
       // Declarative element segment for ref.func targets
@@ -445,9 +481,10 @@ function emitBinaryWithSourceMapUnguarded(mod: WasmModule): EmitResult {
         s.byte(0x00); // elemkind = funcref
         s.u32(mod.declaredFuncRefs.length);
         if (valCtx) valCtx.where = "declared func ref";
-        for (const idx of mod.declaredFuncRefs) {
-          if (valCtx) vIdx("function", idx, valCtx.numFuncs);
-          s.u32(idx);
+        for (const h of mod.declaredFuncRefs) {
+          const resolved = fIdx(h);
+          if (valCtx) vIdx("function", resolved, valCtx.numFuncs);
+          s.u32(resolved);
         }
       }
     });
@@ -510,7 +547,11 @@ function emitBinaryWithSourceMapUnguarded(mod: WasmModule): EmitResult {
     });
   }
 
-  // Custom "name" section — function names for debugging/treemap
+  // Custom "name" section — function names for debugging/treemap.
+  // NOTE (#1916/#2710): this section is built POSITIONALLY (imports in
+  // declaration order, then mod.functions in array order), which IS the final
+  // layout order by construction — it reads no handles, so it needs no
+  // resolution and stays correct after the handle flip.
   {
     const nameEntries: { index: number; name: string }[] = [];
     // Import functions
@@ -810,13 +851,16 @@ export function encodeGlobal(g: GlobalDef, enc: WasmEncoder): void {
 }
 
 export function encodeExport(exp: WasmExport, enc: WasmEncoder, _numImportFuncs: number): void {
+  // #1916/#2710 — func/global export descriptors carry handles; resolve to
+  // final indices here. Table/memory/tag spaces never shift and stay raw.
+  const k = exp.desc.kind;
+  const resolved = k === "func" ? fIdx(exp.desc.index) : k === "global" ? gIdx(exp.desc.index) : exp.desc.index;
   if (valCtx) {
-    const k = exp.desc.kind;
-    if (k === "func") vIdx("function", exp.desc.index, valCtx.numFuncs);
-    else if (k === "global") vIdx("global", exp.desc.index, valCtx.numGlobals);
-    else if (k === "table") vIdx("table", exp.desc.index, valCtx.numTables);
-    else if (k === "tag") vIdx("exception tag", exp.desc.index, valCtx.numTags);
-    else vIdx("memory", exp.desc.index, valCtx.numMemories);
+    if (k === "func") vIdx("function", resolved, valCtx.numFuncs);
+    else if (k === "global") vIdx("global", resolved, valCtx.numGlobals);
+    else if (k === "table") vIdx("table", resolved, valCtx.numTables);
+    else if (k === "tag") vIdx("exception tag", resolved, valCtx.numTags);
+    else vIdx("memory", resolved, valCtx.numMemories);
   }
   enc.name(exp.name);
   const kindByte =
@@ -830,7 +874,7 @@ export function encodeExport(exp: WasmExport, enc: WasmEncoder, _numImportFuncs:
             ? 0x04
             : 0x03;
   enc.byte(kindByte);
-  enc.u32(exp.desc.index);
+  enc.u32(resolved);
 }
 
 export function encodeFunction(f: WasmFunction, enc: WasmEncoder): void {
@@ -944,16 +988,20 @@ export function encodeInstr(instr: Instr, enc: WasmEncoder): void {
     case "return":
       enc.byte(OP.return);
       break;
-    case "call":
-      if (valCtx) vIdx("function", instr.funcIdx, valCtx.numFuncs);
+    case "call": {
+      const target = fIdx(instr.funcIdx);
+      if (valCtx) vIdx("function", target, valCtx.numFuncs);
       enc.byte(OP.call);
-      enc.u32(instr.funcIdx);
+      enc.u32(target);
       break;
-    case "return_call":
-      if (valCtx) vIdx("function", instr.funcIdx, valCtx.numFuncs);
+    }
+    case "return_call": {
+      const target = fIdx(instr.funcIdx);
+      if (valCtx) vIdx("function", target, valCtx.numFuncs);
       enc.byte(OP.return_call);
-      enc.u32(instr.funcIdx);
+      enc.u32(target);
       break;
+    }
     case "call_indirect":
       if (valCtx) {
         vIdx("type", instr.typeIdx, valCtx.numTypes);
@@ -984,16 +1032,20 @@ export function encodeInstr(instr: Instr, enc: WasmEncoder): void {
       enc.byte(OP.local_tee);
       enc.u32(instr.index);
       break;
-    case "global.get":
-      if (valCtx) vIdx("global", instr.index, valCtx.numGlobals);
+    case "global.get": {
+      const g = gIdx(instr.index);
+      if (valCtx) vIdx("global", g, valCtx.numGlobals);
       enc.byte(OP.global_get);
-      enc.u32(instr.index);
+      enc.u32(g);
       break;
-    case "global.set":
-      if (valCtx) vIdx("global", instr.index, valCtx.numGlobals);
+    }
+    case "global.set": {
+      const g = gIdx(instr.index);
+      if (valCtx) vIdx("global", g, valCtx.numGlobals);
       enc.byte(OP.global_set);
-      enc.u32(instr.index);
+      enc.u32(g);
       break;
+    }
     case "i32.const":
       enc.byte(OP.i32_const);
       enc.i32(instr.value);
@@ -1384,11 +1436,13 @@ export function encodeInstr(instr: Instr, enc: WasmEncoder): void {
       enc.byte(GC.array_fill);
       enc.u32(instr.typeIdx);
       break;
-    case "ref.func":
-      if (valCtx) vIdx("function", instr.funcIdx, valCtx.numFuncs);
+    case "ref.func": {
+      const target = fIdx(instr.funcIdx);
+      if (valCtx) vIdx("function", target, valCtx.numFuncs);
       enc.byte(OP.ref_func);
-      enc.u32(instr.funcIdx);
+      enc.u32(target);
       break;
+    }
     case "call_ref":
       if (valCtx) vIdx("type", instr.typeIdx, valCtx.numTypes);
       enc.byte(OP.call_ref);

@@ -1,12 +1,13 @@
 ---
 id: 2856
 title: "IR: drive body-shape-rejected fallback bucket to zero (dominant unintended bucket)"
-status: ready
+status: in-progress
+assignee: ttraenkler/dev-2856f
 spec: ready
 sprint: current
 created: 2026-06-30
 updated: 2026-07-02
-priority: low
+priority: high
 horizon: l
 feasibility: hard
 reasoning_effort: high
@@ -189,6 +190,49 @@ Instrument the 4 `unattributed-arm` helper internals (`isPhase1ObjectLiteral`,
 `isPhase1TryStatement`, `isPhase1ClosureLiteral`, `isPhase1ForStatement`
 internals) for full sub-attribution of the class-member rejects.
 
+### Leaf-level identifier attribution (2026-07-02, dev-2856f) — complements the arm histogram
+
+An independent leaf-level recorder run (same first-wins discipline, but firing
+at the deepest failing node with a source snippet — built in parallel, dropped
+in favour of the landed `shapeNo` recorder) confirms the arm histogram above
+and adds the **which-identifier** split the arm:NodeKind labels can't see:
+
+- `expr:ident-not-in-scope` fires 21× total at the leaf level. Split:
+  **`document` ×16, `console` ×2** (host globals — the extern-in-IR plan
+  below), and **module-scope bindings ×3**: `fibCache`
+  (`js/algorithms.ts::fibMemo`), `gridEl` (`dom/calendar.ts::renderCal`),
+  `selStart` (`dom/calendar.ts::updFoot`). The module-scope arm is NOT in the
+  extern-in-IR plan's scope — it's a separate dev-lane arm (added below).
+- **Step-1b answered**: the class-member rejects the arm recorder couldn't
+  sub-attribute are the `js/classes.ts` private-field accesses — `Animal_new`
+  writes `this.#name` (`assign-prop-name-not-ident`), `Animal_speak` reads
+  `this.#name` (`prop:name-not-ident`). `#private` names are not
+  `ts.Identifier`s, so both property arms reject on `isIdentifier(name)`.
+- The 2 `nontail-callstmt:CallExpression` rows are the `console.log(…)`
+  statements in `js/algorithms.ts::main` / `js/classes.ts::main` — i.e. the
+  SAME host-global root as the 17 `vardecl-init-expr` rows, just reached via a
+  call-statement arm. Host-global work should count 17+2 = **19 functions**.
+- `new:type-args` ×1 is `new Promise<number>(…)` in `js/async.ts::delay`.
+
+### ⚠ Sequencing constraint — demotion is CONTAGIOUS (read before picking up ANY arm)
+
+The selector's fixpoint loop (`src/ir/select.ts` ~line 415 — the
+`call-graph-closure` demotion) removes a claimed function whenever ANY local
+caller or callee is unclaimed. The host-global rejects sit in the `main` /
+`bench_*` **drivers — the call-graph roots** — so they pin every example's
+whole call graph out of the IR. Consequence: **landing a leaf arm (if-in-loop,
+ArrayType annotation, module-scope binding, …) BEFORE the extern-in-IR slice
+does not reduce the unintended total — it MOVES the count from
+`body-shape-rejected` into `call-graph-closure`, and the gate FAILS on that
+bucket's growth** (demonstrated empirically: shape-fixing a leaf in
+`benchmarks/fib.ts` grew `call-graph-closure` by the same amount). So:
+
+- The extern-in-IR slice (below) lands **first**; it shrinks BOTH buckets in
+  one PR and the ratchet (`--update-on-decrease`) banks them together.
+- Any smaller arm picked up before that must land as part of the same PR as
+  its callers' unblocking, or explicitly verify `call-graph-closure` does not
+  grow (`pnpm run check:ir-fallbacks` locally before pushing).
+
 ## Acceptance criteria
 
 1. `body-shape-rejected` count in `scripts/ir-fallback-baseline.json` is `0`
@@ -218,6 +262,94 @@ internals) for full sub-attribution of the class-member rejects.
 > the `from-ast.ts` member-read/call lowering, `IrType`. This plan covers the
 > **first slice** (host-global member access, 17/31); the smaller arms are listed
 > separately at the end for dev-lane pickup.
+
+### Implementation notes (2026-07-02, dev-2856f) — verified corrections to this plan
+
+Probe-verified against a real compile (`.tmp/probe-2856-doc-imports.mts`): the
+legacy surface for `document.*` is NOT `__extern_get` — it is the
+**extern-class per-member import surface**: `global_document` (declared-globals
+handle, `collectDeclaredGlobals`), `Document_getElementById` /
+`Document_get_body` / `Element_set_textContent` / `Node_appendChild`
+(`collectUsedExternImports` source pre-scan over `ctx.externClasses`, chain
+walk via `ctx.externClassParent`; DOM classes enter the registry from
+lib.dom's `declare var X: { new(): X; … }` constructor-vars via
+`collectExternFromDeclareVar` + `collectInterfaceMembers`), and
+`console_<method>_<number|bool|string|externref>` per-arg-type variants
+(`collectConsoleImports`). All are **source-scan pre-passes independent of
+which front-end compiles the body**, so IR-claimed functions get their imports
+registered anyway; the IR lowering resolves them **by name**
+(`resolver.resolveFunc`) — funcIdx-shift-safe by construction.
+
+Design deltas vs the plan above:
+
+1. **No new IR node kinds.** `IrInstrCall` takes a symbolic `{kind:"func",
+name}` target and an explicit result IrType, so `document` lowers as
+   `call global_document : {kind:"extern", className:"Document"}`, and
+   `console.log(s)` as a void `call console_log_string`. Member get/set/call
+   reuse the existing `extern.prop` / `extern.propSet` / `extern.call` instrs
+   (their lowering already emits `<prefix>_get_<p>` / `<prefix>_<m>` by name;
+   effects analysis already marks `extern.*` full heap read+write, covering
+   the plan's #2134 barrier concern).
+2. **Selection runs EARLY (index.ts ~1178), before the registries populate
+   (~1471-1524)** — the selector can NOT read `ctx.externClasses` /
+   `ctx.declaredGlobals`. Split: the selector uses a **checker-backed
+   callback** threaded via `IrSelectionOptions`
+   (`resolveHostGlobal(node: ts.Identifier) → className | undefined`:
+   symbol → ambient declare-var in a `.d.ts` → `isExternalDeclaredClass`
+   parity gate → type symbol name; shadow-safe because the checker resolves
+   the real binding), while **from-ast (which runs late) uses the authoritative
+   registry** via new resolver callbacks (`getHostGlobalInfo(name)`,
+   `resolveExternMember(className, member, kind)` — the chain walk). The gate
+   script keeps its direct `planIrCompilation` call and builds the same
+   checker callback from its own program — no script rewrite.
+3. **Capability integration (#2135, agreed with dev-2138f):** mode-gated
+   `hostExternCapability(jsHost): IrOpCapability` in `src/ir/capability.ts` —
+   `"claim-partial"` in JS-host mode, `"defer"` under
+   standalone/wasi/strictNoHostImports; selector consumes it, from-ast entry
+   asserts via `assertNotDeferred` (uniform message class for the #1923 meter
+   and #2138's IR-first channel). Branch is predecessor-stacked on
+   `issue-2135-ir-capability-predicate` (#2476); enqueue only after it lands.
+4. **Two from-ast gaps to close** (pre-existing in the slice-10 extern arms):
+   member resolution does NOT walk `externClassParent` (an `Element` receiver
+   would miss `Node.appendChild`), and `extern.prop`/`extern.call` results
+   lose the class brand (registered as bare ValType, breaking chained
+   `document.body.appendChild`). Fix: chain-walk in the new
+   `resolveExternMember` + record `resultClassName` at registration
+   (`collectInterfaceMembers` et al.) when the mapped result is externref.
+5. **Standalone**: `"defer"` ⇒ the selector never claims ⇒ legacy ⇒ the
+   existing #1472/#2907 refusal — unchanged, as the plan requires. The
+   `console` arm is also host-only (WASI console lowers natively via
+   fd*write, no `console*\*` host imports).
+
+### Slice 1 RESULTS (2026-07-02, dev-2856f — extern-in-IR landed)
+
+- Gate: `body-shape-rejected` **34 → 27** (−7); post-claim demotions **0**
+  (the two `<f64>.toString()` demotions the first run surfaced were fixed by
+  the `number_toString` arm). `call-graph-closure` 5 → 8: the predicted
+  contagion shuffle — `el`/`bcrd`/helpers are now IR-CAPABLE but pinned by
+  callers whose own first blockers are **closure-valued args**
+  (`addBenchCard(…, bench_fib)`), **imported callees** (cross-module calls),
+  `%`-defer (#2945), and misc arms — all separately tracked. Banked via
+  `--update` in the slice PR (net unintended 45 → 41).
+- Runtime parity: IR-on vs IR-off **identical observable behavior** on
+  benchmarks/dom.ts, benchmarks/helpers.ts, js/algorithms.ts, js/classes.ts
+  (full console-output equality on the executable ones; identical
+  failure-mode on DOM files under Node's shimless host).
+- Landmine fixed en route: extern method imports have FIXED Wasm arity
+  including optional params (`createElement(tag, options?)` = 3 slots) — the
+  IR extern.call arm must pad missing optionals with default sentinels like
+  legacy's `pushDefaultValue`, or the module fails validation ("not enough
+  arguments on the stack"). Regression-tested in
+  `tests/issue-2856-extern-in-ir.test.ts`.
+- Use-site branding replaced registration-time branding (the plan's note 4):
+  overloads collapse at registration (`createElement`'s first overload
+  returns a type param), so `resolveExternMember` brands from the checker at
+  the USE SITE (`getTypeAtLocation` + `getNonNullableType`).
+- Remaining body-shape (27): 8 `nontail-callstmt` (mains calling
+  imported/closure-valued fns), 4 helper-internal (incl. the `#private`
+  pair), 3 if-in-loop, 2 ArrayType annotation, 2 `%` (#2945-deferred), 1
+  each arrow-value / tail-expr / if-cond / if-else-nontail / assign-nonprop
+  / vardecl-call / cloop-guard / instanceof.
 
 ### What the bucket actually is (grounded by the Step-1 histogram)
 
@@ -388,10 +520,33 @@ From the same histogram, independent of extern-in-IR, mechanical additions:
 - `body-unhandled-stmt:IfStatement` (3) + `nontail-unhandled-stmt:IfStatement`
   (1) + `nontail-if-cond` (1) + `tail-unhandled` (1) — `if`/`else` at
   constructor-body / non-tail positions; a from-ast `if`-statement handler in
-  body-statement position.
+  body-statement position. NB `binarySearch` has a `return` INSIDE a while
+  loop — the lowering must handle early-exit-from-loop, not just
+  statement-shaped conditionals.
+- **Module-scope bindings (3)** — `fibCache` / `gridEl` / `selStart` (see the
+  leaf-level attribution above): the selector's scope set only holds
+  params/locals, so module-level `let`/`const` references reject. Needs a
+  module-scope binding set threaded into the shape walk + IR module-global
+  read/write lowering that shares the SAME storage slots the legacy backend
+  allocates (the two front-ends coexist per function — a module global written
+  by an IR function and read by a legacy one must be one location; add a mixed
+  IR/legacy read-write equivalence test).
+- Private-field member access (2) — `this.#name` read/write in
+  `js/classes.ts` (`Animal_new`/`Animal_speak`); `ts.PrivateIdentifier` is not
+  an `Identifier`, both property arms reject on the name check.
 - `unattributed-arm:helper-internal` (4) — instrument
   `isPhase1ObjectLiteral`/`TryStatement`/`ClosureLiteral`/`ForStatement`
-  internals (Step-1b) to sub-attribute, then handle.
+  internals (Step-1b) to sub-attribute, then handle. (The class-member pair is
+  already identified as the private-field arm above.)
   These ~9 are dev-lane; the coordinator authorized folding at most ONE trivial arm
   as a recorder-discipline validation slice — deferred here to keep this a
   docs-only spec PR.
+
+**Dispatch note (2026-07-02, dev-2856f):** these arms were drafted as three
+child issues, but the ids allocated for them (2939/2940/2941) were lost to a
+cross-session allocation race (those ids now name unrelated issues on `main`),
+and the allocator ref is under heavy multi-agent contention — so the arms stay
+in-file for now. When splitting them out, get fresh ids via
+`claim-issue.mjs --allocate` and carry over the ⚠ contagion sequencing
+constraint above (an arm landed before extern-in-IR must prove
+`call-graph-closure` does not grow).

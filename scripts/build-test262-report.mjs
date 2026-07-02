@@ -689,6 +689,21 @@ const STANDALONE_ROOT_CAUSE_BUCKETS = [
     match: (_record, text) => hasAny(text, ["__make_getter_callback", "make_getter_callback import"]),
   },
   {
+    // #2962 — the standalone exception renderer (`__exn_render_prepare`/
+    // `__exn_render_char` + native §20.5.3.4 Error toString) de-masked real
+    // assertion texts that previously collapsed into the #2870 opaque label.
+    // A "Test262Error: …" signature is a REAL assertion mismatch whose root
+    // cause lives in whatever feature the assert exercised — path-based
+    // buckets above claim the recognizable ones; this bucket owns the
+    // de-masked residual so the strict unclassified gate stays at 0 while the
+    // per-feature re-triage (#2962 follow-up harvest) splits it further.
+    id: "demasked-native-assertion",
+    issues: ["#2962"],
+    label:
+      "De-masked native assertion failure (Test262Error rendered by the #2962 standalone exception renderer) — real assertion mismatch, re-triage by feature path",
+    match: (_record, text) => hasAny(text, ["test262error"]),
+  },
+  {
     id: "misc-spec-tail",
     issues: ["#1577", "#779"],
     label: "Miscellaneous low-volume spec-completeness tail",

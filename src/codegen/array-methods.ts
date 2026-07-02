@@ -23,7 +23,7 @@ import {
 } from "./index.js";
 import { addStringConstantGlobal, ensureExnTag, localGlobalIdx } from "./registry/imports.js";
 import { emitToBoolean } from "./coercion-engine.js";
-import { compileStringLiteral, valTypesMatch } from "./shared.js";
+import { compileStringLiteral, elemGetOp, unpackedElemType, valTypesMatch } from "./shared.js";
 import {
   getArrTypeIdxFromVec,
   getOrRegisterArrayType,
@@ -144,19 +144,11 @@ function throwStringInstrs(ctx: CodegenContext, message: string): Instr[] {
   return [...stringConstantExternrefInstrs(ctx, message), { op: "throw", tagIdx } as Instr];
 }
 
-/**
- * Value-position type for a (possibly packed) array element. A packed `i8`/`i16`
- * storage type is only valid as a struct field / array element — it MUST NOT
- * appear in a param/result/local/global position (the binary emitter rejects it
- * with "packed storage type … is not valid in a value position"). A packed
- * element loaded via `array.get_s`/`array.get_u` is already widened to `i32`, so
- * a search-value local / comparison operand for the sub-32-bit typed arrays
- * (Int8/Uint8/Int16/Uint16) must use `i32`, not the raw packed `elemType`
- * (#2648 — `Int8Array.prototype.{indexOf,lastIndexOf,includes}` standalone CE).
- */
-function unpackedElemType(elemType: ValType): ValType {
-  return elemType.kind === "i8" || elemType.kind === "i16" ? { kind: "i32" } : elemType;
-}
+// unpackedElemType / elemGetOp are canonical in shared.ts (#2934 — needed by
+// loops.ts and type-coercion.ts too, and array-methods.ts is not importable
+// from type-coercion.ts without a cycle). Imported below and re-exported for
+// existing users of this module's surface.
+export { elemGetOp, unpackedElemType };
 
 /**
  * (#2648, mirrors #2593) Recover the packed-element load signedness ("s"/"u") of
@@ -168,25 +160,13 @@ function unpackedElemType(elemType: ValType): ValType {
  * load off the view name, not the storage kind. Returns undefined for a
  * non-integer-view receiver (caller falls back to the storage-kind heuristic).
  */
-function typedArraySearchSignedness(ctx: CodegenContext, receiver: ts.Expression): "s" | "u" | undefined {
+export function typedArraySearchSignedness(ctx: CodegenContext, receiver: ts.Expression): "s" | "u" | undefined {
   const t = ctx.checker.getTypeAtLocation(receiver);
   let name = t.getSymbol()?.name ?? t.aliasSymbol?.name;
   if (!name && ts.isNewExpression(receiver) && ts.isIdentifier(receiver.expression)) {
     name = receiver.expression.text;
   }
   return name ? typedArrayPackedSignedness(name) : undefined;
-}
-
-/** Pick the element-load op for a (possibly packed) typed-array element, driven
- *  by the view-name signedness when available, else the legacy storage-kind
- *  heuristic (i8→get_u, i16→get_s). i32/f64/ref elements use plain `array.get`. */
-function elemGetOp(elemType: ValType, signedness: "s" | "u" | undefined): "array.get" | "array.get_s" | "array.get_u" {
-  if (elemType.kind === "i8" || elemType.kind === "i16") {
-    if (signedness === "s") return "array.get_s";
-    if (signedness === "u") return "array.get_u";
-    return elemType.kind === "i8" ? "array.get_u" : "array.get_s";
-  }
-  return "array.get";
 }
 
 /**
@@ -211,6 +191,23 @@ function isKnownNonCallable(ctx: CodegenContext, arg: ts.Expression): boolean {
     ts.TypeFlags.StringLike |
     ts.TypeFlags.BigIntLike;
   if (tsType.flags & NON_CALLABLE_FLAGS) return true;
+  // (#2934 host-bridge A) A plain OBJECT type with NO call and NO construct
+  // signatures is statically non-callable — `arr.map(new Object())`
+  // (map/15.4.4.19-4-7) must throw the §23.1.3.18 step-3 TypeError BEFORE
+  // iterating, instead of falling to the host callback bridge (which leaks
+  // `env::__call_1_f64` into standalone AND mis-types the element arg —
+  // "call[1] expected f64, found array.get of externref"). `any`/`unknown`
+  // and union types stay dynamic (their flags are not Object), so an
+  // imprecisely-typed value that may hold a function at runtime is never
+  // gated.
+  if (
+    tsType.flags & ts.TypeFlags.Object &&
+    !(tsType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) &&
+    (tsType.getCallSignatures?.() ?? []).length === 0 &&
+    (tsType.getConstructSignatures?.() ?? []).length === 0
+  ) {
+    return true;
+  }
   return false;
 }
 
@@ -6336,21 +6333,46 @@ function buildBridgeCallInstrs(
   loop: ArrayLoopLocals,
   elemSource: { kind: "local"; index: number } | { kind: "inline" },
 ): Instr[] {
+  const conv = bridgeElemConvertInstrs(ctx, elemType);
   return [
     { op: "local.get", index: setup.cbTmp! } as Instr,
     ...(elemSource.kind === "local"
-      ? [
-          { op: "local.get", index: elemSource.index } as Instr,
-          ...(!ctx.fast && elemType.kind === "i32" ? [{ op: "f64.convert_i32_s" } as Instr] : []),
-        ]
+      ? [{ op: "local.get", index: elemSource.index } as Instr, ...conv]
       : [
           { op: "local.get", index: loop.dataTmp } as Instr,
           { op: "local.get", index: loop.iTmp } as Instr,
           { op: loop.getOp, typeIdx: arrTypeIdx } as Instr,
-          ...(!ctx.fast && elemType.kind === "i32" ? [{ op: "f64.convert_i32_s" } as Instr] : []),
+          ...conv,
         ]),
     { op: "call", funcIdx: setup.callBridgeIdx! } as Instr,
   ];
+}
+
+/**
+ * (#2934 host-bridge C) Convert a loop ELEMENT (as read from the backing
+ * array) to the host bridge's numeric arg kind (`f64` in non-fast mode, `i32`
+ * in fast mode). The old inline conversion only knew `i32 → f64`, so:
+ *   - a BOXED-ANY (externref) element — `new Array(N)` / `any[]` vecs — flowed
+ *     raw into the f64 param: `call[1] expected type f64, found array.get of
+ *     type externref` (the `__closure_2/4` invalid-Wasm cluster,
+ *     `filter/create-species-poisoned.js`);
+ *   - a PACKED i8/i16 element reads as the widened i32 but compared as
+ *     `elemType.kind === "i32"` → no convert → i32 into f64 (same class).
+ * externref unboxes via `__unbox_number` (ToNumber; registered by
+ * `addUnionImports` — native in standalone, import in host mode, resolved at
+ * build time so the funcIdx is post-shift-correct and the pushed body is
+ * walked by any later shifts).
+ */
+function bridgeElemConvertInstrs(ctx: CodegenContext, elemType: ValType): Instr[] {
+  if (ctx.fast) return [];
+  const readKind = elemType.kind === "i8" || elemType.kind === "i16" ? "i32" : elemType.kind;
+  if (readKind === "i32") return [{ op: "f64.convert_i32_s" } as Instr];
+  if (readKind === "externref" || readKind === "ref_extern") {
+    addUnionImports(ctx);
+    const unboxIdx = ctx.funcMap.get("__unbox_number");
+    if (unboxIdx !== undefined) return [{ op: "call", funcIdx: unboxIdx } as Instr];
+  }
+  return [];
 }
 
 /** Build instructions to check truthiness of a callback result (-> i32). */
@@ -6830,7 +6852,9 @@ function compileArrayReduce(
       { op: "local.get", index: loop.dataTmp } as Instr,
       { op: "local.get", index: loop.iTmp } as Instr,
       { op: loop.getOp, typeIdx: arrTypeIdx } as Instr,
-      ...(!ctx.fast && elemType.kind === "i32" ? [{ op: "f64.convert_i32_s" } as Instr] : []),
+      // (#2934 host-bridge C) externref/packed elems convert to the bridge's
+      // numeric arg kind — see bridgeElemConvertInstrs.
+      ...bridgeElemConvertInstrs(ctx, elemType),
       { op: "call", funcIdx: setup.callBridgeIdx! } as Instr,
       { op: "local.set", index: accTmp } as Instr,
     ];
@@ -7016,7 +7040,9 @@ function compileArrayReduceRight(
       { op: "local.get", index: dataTmp } as Instr,
       { op: "local.get", index: iTmp } as Instr,
       { op: getOp, typeIdx: arrTypeIdx } as Instr,
-      ...(!ctx.fast && elemType.kind === "i32" ? [{ op: "f64.convert_i32_s" } as Instr] : []),
+      // (#2934 host-bridge C) externref/packed elems convert to the bridge's
+      // numeric arg kind — see bridgeElemConvertInstrs.
+      ...bridgeElemConvertInstrs(ctx, elemType),
       { op: "call", funcIdx: setup.callBridgeIdx! } as Instr,
       { op: "local.set", index: accTmp } as Instr,
     ];

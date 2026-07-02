@@ -4,8 +4,8 @@ title: "IR: drive class-method fallback bucket to zero (#1370 Phase C/D/E residu
 status: ready
 sprint: current
 created: 2026-06-30
-updated: 2026-06-30
-priority: low
+updated: 2026-07-02
+priority: high
 horizon: m
 feasibility: hard
 reasoning_effort: high

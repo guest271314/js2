@@ -195,3 +195,14 @@ place, PR2's vacuous→executing conversions can only move `host_free_pass` UP
 (a) making the dead callbacks EXECUTE (PR2) and (b) scoring the still-dead ones
 honestly (PR1). The final honest `host_free_pass` + gap are reported once both
 land.
+
+**Re-measured 2026-07-02 (dev-f2, task #16) after PR #2441 (arity fix)
+landed: STILL BLOCKED — genuine flips remain 0.** The arity half works at
+module top level, but the runner wraps every test body inside
+`export function test()`, and a callback function-expression defined in a
+nested scope is NOT a dispatch candidate — so the shimmed wrapper compiles
+host-free with a dead body (9/9 sampled host-free files VACUOUS by
+inject-throw; control on main = honestly leaky). Shim NOT shipped. Full data +
+the deferred shim text now live in #2939 ("Re-measurement post PR #2441").
+Remaining blocker = #2939 (a) nested-scope candidate registration, then
+(b) kind coercion.

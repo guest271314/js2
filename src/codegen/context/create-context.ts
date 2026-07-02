@@ -191,6 +191,7 @@ export function createCodegenContext(
     widenedDefinePropertyKeys: new Set(),
     dynamicDescriptorWidenVars: new Set(),
     objectHashConsumerVars: new Set(),
+    objectHashConsumerTypes: new Set(),
     growableObjectLiteralVars: new Set(),
     externrefAccessorVars: new Set(),
     pendingMathMethods: new Set(),
@@ -240,6 +241,9 @@ export function createCodegenContext(
     nodeFsReadSyncIdx: -1,
     nodeFsWriteSyncIdx: -1,
     standalone: options?.standalone ?? false,
+    // (#2141 S1) Honest generic any-boxing regime — default OFF (legacy tag-5
+    // box-the-externref ABI, byte-identical modules). Flips in S4.
+    honestAnyBoxing: options?.honestAnyBoxing ?? false,
     // (#2796) Diff-test-harness fidelity — export __module_init + skip the wasm
     // start section so the host runs top-level code after setExports.
     deferTopLevelInit: options?.deferTopLevelInit ?? false,
