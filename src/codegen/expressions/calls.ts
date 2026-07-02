@@ -190,7 +190,7 @@ import {
   tryExternClassMethodOnAny,
 } from "./calls-closures.js";
 import { compileOptionalCallExpression } from "./calls-optional.js";
-import { tryStaticEvalInline } from "./eval-inline.js";
+import { tryStaticEvalInline, tryStaticFunctionCtorCall } from "./eval-inline.js";
 import { compileExternMethodCall, compileSpreadCallArgs, emitLazyProtoGet } from "./extern.js";
 import {
   compileStandaloneRegExpConstructor,
@@ -3950,6 +3950,15 @@ function compileCallExpression(
   // falls through to the JS-host import path unchanged.
   {
     const r = tryWasiTimerCall(ctx, fctx, expr);
+    if (r !== undefined) return r;
+  }
+
+  // (#2924) Constant `Function("<params>", …, "<body>")` compile-away — both
+  // the plain-call value form and the immediate-call form
+  // (`new Function(...)(args)` / `Function(...)(args)`). Non-constant args or
+  // a local `Function` shadow fall through to the existing paths.
+  {
+    const r = tryStaticFunctionCtorCall(ctx, fctx, expr);
     if (r !== undefined) return r;
   }
 
