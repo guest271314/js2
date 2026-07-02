@@ -1,9 +1,10 @@
 {
-  "pass": 17802,
-  "host_free_pass": 17802,
-  "official_pass": 17451,
+  "pass": 16369,
+  "host_free_pass": 16369,
+  "official_pass": 16018,
   "official_total": 43137,
-  "sha": "20445a0625b576e8d4d1ddd0b1c6c7377939c965",
-  "generated_at": "2026-07-01T03:12:42Z",
-  "tolerance": 50
+  "sha": "854ad5729",
+  "generated_at": "2026-07-02T00:00:00Z",
+  "tolerance": 50,
+  "reseed_note": "#2940 vacuity-scorer integrity correction: -1433 host_free_pass reclassified pass->vacuous-fail (harness-wrapper callback never executed; 1421 in built-ins/TypedArray{,Constructors} + 12 outside). Deliberate downward re-seed with stakeholder sign-off; post-merge promote-baseline --update raises to the true CI number."
 }
