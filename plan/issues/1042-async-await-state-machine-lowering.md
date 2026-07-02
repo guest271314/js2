@@ -1,7 +1,9 @@
 ---
 id: 1042
 title: "async/await state-machine lowering (AwaitExpression is currently a no-op)"
-status: ready
+status: done
+assignee: ttraenkler/fable-5
+completed: 2026-07-02
 created: 2026-04-11
 updated: 2026-07-02
 priority: high
@@ -14,6 +16,7 @@ parent: 1032
 depends_on: [2906]
 related: [2957, 1373b, 2895]
 required_by: [1058, 1766, 1774]
+follow_up: [2967]
 note: "Verified 2026-05-21: AwaitExpression no-op at expressions.ts:973 (drifted from cited L790). Multiple other line refs in this issue may need re-verification before dispatch."
 reconcile_note: "2026-06-24 (PO reconcile vs upstream/main): DEFERRED EPIC, not dev-claimable this sprint. The async CPS state machine (async-cps.ts) is built+correct but gated OFF behind the synchronous-consumption-contract architecture wall (commit 3897722bf async re-measure: cluster 76.6% via legacy sync-async path). #1042 remains the CPS *acceptance owner*, not a sprint driver. Bounded slices harvested into #2612/#2613/#2614. → backlog."
 reconcile_note_2: "2026-06-25 (sdev-async-sm reground vs origin/main @d28fdb2c5): KEYSTONE LANDED — the note above is now stale. The synchronous-consumption-contract WALL that blocked every prior #1042 pass was RESOLVED by #1796 + #1936 (both status: done). ASYNC_CPS_ENABLED=true on main; the global kill-switch is replaced by the per-function predicate asyncFnNeedsCps (async-cps.ts:292), which routes a fn through real CPS state-machine lowering only when it GENUINELY suspends (a non-statically-resolved await) in a splitBodyAtAwait-supported shape. Genuinely-suspending async/await now resolves through a REAL Promise + microtask tick — #1042's core deliverable. VERIFIED: tests/equivalence/{async-function,promise-chains}.test.ts (15 tests incl. the '#1796 CPS' real-suspension cases — `await getValue()`, nested async, sequential awaits, conditional, loop, arrow) all GREEN on main. Acceptance #2 (await Promise.resolve(42)→43) + sequential-awaits + return-await collapse all pass. REMAINING (NOT dev-sliceable as new core codegen now): multi-await-in-one-segment + nested/buried await + try-across-await are gated to the legacy path via the cps-unsupported-shape census bucket (analysis surface in analyzeAsyncBody is ready; no architect decision pending — these are incremental follow-up slices); standalone/WASI CPS → #1373b (backlog, blocked on no-host microtask drain, NOT this issue); Promise-combinator operands intentionally take the legacy real-Promise path (awaitedExprIsPromiseCombinator guard — correct). No tractable new independently-validatable phase remained for the sprint-66 session — a fresh PR would re-implement landed work. #1042 stays the acceptance OWNER; its eventual close is verifying the 5 acceptance criteria (incl. try/catch-across-await + axios Tier-4 #1032), which depend on #1373b + #1032, not on new core codegen here. Claim RELEASED, no PR opened. Prior conformance slices: #2612 done; #2613/#2614 blocked."
@@ -489,13 +492,11 @@ async function f(a, b) {
    - Restores locals from capture struct (`struct.get`).
    - Binds `y = awaitValue`.
    - Compiles `const z = y + x;`.
-   - Compiles `return z;` as: settle `captures.outerPromise` to FULFILLED with `z`.
-     - JS-host mode: `Promise_resolve_with_promise(outerPromise, z)` (new
-       import — see step 5).
-     - Standalone mode: `struct.set $Promise.state := FULFILLED;
+   - Compiles `return z;` as: settle `captures.outerPromise` to FULFILLED with `z`. - JS-host mode: `Promise_resolve_with_promise(outerPromise, z)` (new
+     import — see step 5). - Standalone mode: `struct.set $Promise.state := FULFILLED;
 struct.set $Promise.value := z;` plus draining any registered
-       callbacks (delegate to `emitStandalonePromiseSettle` — add as a new
-       helper in `async-scheduler.ts`).
+     callbacks (delegate to `emitStandalonePromiseSettle` — add as a new
+     helper in `async-scheduler.ts`).
 
 3. **`__cont_1_reject` (rejection of the first await)** — receives `(captures: externref, reason: externref)`:
    - Settles `captures.outerPromise` to REJECTED with `reason`.
@@ -1462,3 +1463,89 @@ slices that do **not** require flipping `ASYNC_CPS_ENABLED`:
 criteria still gate the eventual gate-flip), but is not the sprint-65 driver.
 The consumption-contract architecture decision is the true predecessor to any
 further #1042/#1373b progress.
+
+---
+
+## Implementation — host lane onto the #2906 N-state resume machine (fable-5, 2026-07-02)
+
+**What landed (PR: `issue-1042-host-async-await`).** Per the July Fable audit
+re-scope (plan/log/analysis-2026-07 §Gap 5 convergence): instead of extending
+`splitBodyAtAwait`/`emitAsyncStateMachine` (the single-tail-await CPS special
+case), the JS-host lane now routes genuinely-suspending **linear multi-await
+and try/finally-across-await bodies** through the SAME `$AsyncFrame` N-state
+resume engine the wasi lane uses (`async-frame.ts`, #2906), parameterized with
+a **host settle backend**. One lowering engine, two settle primitives.
+
+### WHY this shape
+
+- **Measured premise (2026-07-02, current main):** the JS-host lane CPS-lowers
+  ONLY `asyncFnNeedsCps` shapes (single tail await, no try). Every other
+  genuinely-suspending body fell to the legacy synchronous fakery and returned
+  WRONG values: 2 sequential pending awaits → `null`; prefix local crossing a
+  later await → `null`; try/finally-across-await → `null`; a rejected 2nd
+  await → uncaught wasm exception. The wasi lane's #2906 engine already
+  handled all of these (control: tests/issue-2906-\*.test.ts green).
+- **Host backend mechanics** (all in `src/codegen/async-frame.ts`):
+  - result promise: `Promise_new_pending()` (externref frame field), settled
+    via `Promise_settle_resolve`/`Promise_settle_reject` (runtime.ts already
+    had all three from the June slice — verified, not re-added);
+  - suspension: a host Promise is an opaque externref (no synchronous state
+    inspection), so EVERY await suspends — `Promise_resolve(awaited)`
+    (§27.7.5.3 assimilation) then `Promise_then2(p, __make_callback(fulfillId,
+frame), __make_callback(rejectId, frame))`. No fast-path advance arm; this
+    also makes await timing spec-correct (≥1 microtask per await);
+  - step adapters: the engine's `(caps, value) -> externref` adapters are
+    named + exported `__cb_<id>` so the host `callback_maker` dispatch (BY
+    EXPORT NAME) reaches them. Export entries must be pushed into
+    `ctx.mod.exports` explicitly — the `exported` flag alone only opts into
+    the module-init guard (found via runtime trace: reactions fired
+    `__make_callback` but the `__cb_` export was missing).
+- **Predicate is disjoint by construction** (`asyncFnNeedsHostDrive`):
+  excludes everything `asyncFnNeedsCps` accepts (that lane stays
+  byte-identical), requires genuine suspension + `planLinearAwaits` acceptance
+  - the spill-safe-type gate, keeps the lone-combinator parity guard. So the
+    change is ADDITIVE: only shapes that were previously wrong change behavior.
+- **funcIdx discipline (#2936/#2941):** the six host imports are
+  pre-registered upfront by the `collectAsyncCpsImports` finalize in
+  `declarations.ts` (import indices are stable under late-import appends);
+  the reaction callbacks use compile-time `cbId` CONSTANTS (shift-immune,
+  name-dispatched) instead of `ref.func`; the entry shim re-reads the resume
+  funcIdx from `ctx.funcMap` BY NAME after body emission (a late import
+  during segment compilation shifts defined-function indices; the walker
+  patches bodies+funcMap but not stale JS-side captures).
+
+### Byte-inertness proof (sha256, main affc55523 vs branch)
+
+8/8 untouched-lane corpus hashes IDENTICAL: wasi multi-await, wasi
+try/finally, standalone async, host single-await CPS, host no-await async,
+host elidable-await, host sync-plain, host await-in-loop (unclaimed shape).
+
+### Test-contract migration (same precedent as #1796)
+
+Two equivalence tests (`async-function.test.ts` "multiple awaits in
+sequence", `promise-chains.test.ts` "multiple sequential awaits") consumed a
+genuinely-suspending multi-await fn as a raw number (`sum() as any as
+number`). They now await the real Promise — exactly the migration #1796
+applied to their single-await siblings when `asyncFnNeedsCps` landed.
+
+### Verified behavior (tests/issue-1042-host-drive.test.ts, 11 green)
+
+multi-await value threading, frame spill across a later await, bare-await
+ordering, `return await` final segment, multi-await over legacy async
+callees, try/finally normal + rejected paths (finally runs, then rejects),
+rejected-2nd-await rejection routing (reason parity with the CPS lane —
+both surface the wasm-exception-wrapped reason today), and the unclaimed
+shapes (await-in-loop, await-elidable) still compile via the legacy path.
+
+### Filed forward
+
+- **#2967** — retire `emitAsyncStateMachine`/`splitBodyAtAwait` by routing
+  the single-tail-await shapes through this engine too (measured A/B; the
+  audit's full convergence), then widen the remaining `planLinearAwaits`
+  gaps (try/catch-across-await, return-in-try, nested/buried await) ONCE for
+  both lanes.
+- Pre-existing, NOT introduced here (probe-verified broken on main in both
+  source orders): `const p = f(); return await p` (awaiting a promise held in
+  a local) resolves to `null` — worth its own issue when triaged.
+- Activation-shape widening (arrows/methods/function-expressions) stays
+  #2957's lane — this PR routes `FunctionDeclaration`s only, same as CPS.
