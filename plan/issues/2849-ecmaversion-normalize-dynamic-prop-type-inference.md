@@ -1,8 +1,9 @@
 ---
 id: 2849
 title: "dynamic-object numeric property reads back 0 when the same property is also compared via === string / == null (acorn ecmaVersion 2022 not normalised → spurious import attributes)"
-status: blocked
-assignee: ttraenkler/fable-dev
+status: done
+completed: 2026-07-02
+assignee: ttraenkler/dev-2937f
 sprint: current
 priority: medium
 horizon: l
@@ -15,23 +16,27 @@ language_feature: dynamic-object-property-type-inference
 goal: acorn-dogfood
 related: [2841, 2836, 1712, 2937, 2944]
 depends_on: []
-blocked_on: 2944
 blocks: [1712]
 umbrella: 1712
 ---
 
-> **REOPENED 2026-07-02 (was `done`).** The host-mode fix (PR #2432, extend the
-> `objectHashConsumerVars` poison to host) was **REVERTED in #2937**: keeping
-> acorn's poisoned `{}` vars on `$Object` in host mode broke compiled-acorn with
-> a uniform null-deref on EVERY input, because the poisoned value ESCAPES the
-> identifier into struct-typed slots (`getOptions` return, `this.options` field)
-> that the poison never re-types — a total host-mode parse break, strictly worse
-> than this narrow `getOptions` quirk. So this host bug is live again. The
-> **real cure is the escape-discipline substrate slice #2944** (externref-typed
-> escapes for poisoned `$Object` values); this issue is `blocked_on: 2944`.
-> Standalone is UNAFFECTED (its poison was never reverted). The reduced host
-> arms in `tests/issue-2849.test.ts` are marked `it.fails` pinned here — they
-> flip red (forcing restoration) when #2944 lands.
+> **RE-LANDED 2026-07-02 (chain: done → reverted → done).** Factual chain:
+> the host-mode fix (PR #2432, extend the `objectHashConsumerVars` poison to
+> host) **alone** regressed compiled-acorn to a uniform null-deref on every
+> host input (#2937) — the poisoned value ESCAPES the identifier into
+> struct-typed slots (`getOptions` return, `this.options` field) that the
+> widening-decision poison never re-typed. PR **#2462** (a plain revert of
+> #2432) was bot-parked at −137 on the strict gate (it un-fixed these flips),
+> then **owner admin-merged at 2026-07-02T04:50:32Z** (`06e47fd`), re-breaking
+> ~146 #2849 flips pending a fix-forward. This issue was briefly
+> `blocked_on: 2944`. The **re-land PR** (same PR as #2937/#2944) ships the
+> poison TOGETHER with the #2944 escape discipline
+> (`ctx.objectHashConsumerTypes` — the evolved checker type of a poisoned var
+> refuses struct resolution in `resolveWasmType`/`ensureStructForType`/
+> `resolveStructName`), so BOTH constraints hold: the host arms in
+> `tests/issue-2849.test.ts` are back to plain `it` and pass, AND
+> compiled-acorn parses (guarded by `tests/issue-2937.test.ts` + the dogfood
+> corpus, 21/23 equal±quirks). Standalone byte-identical throughout.
 
 # #2849 — dynamic-object property mis-typed when read in heterogeneous (string-`===` / `==null` AND numeric) contexts
 

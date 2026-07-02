@@ -1,7 +1,9 @@
 ---
 id: 2944
 title: "Substrate: poisoned $Object values escape into struct-typed slots — externref-typed escape discipline for hash-consumer vars"
-status: ready
+status: done
+completed: 2026-07-02
+assignee: ttraenkler/dev-2937f
 created: 2026-07-02
 priority: high
 horizon: xl
@@ -17,6 +19,23 @@ blocks: [2849, 2937]
 ---
 
 # #2944 — externref-typed escape discipline for poisoned `$Object` (hash-consumer) vars
+
+> **DONE 2026-07-02 — implemented TYPE-KEYED, not per-escape-site (same PR as
+> the #2849 re-land / #2937).** Key insight that collapsed the XL scope: the
+> struct type a poisoned var mis-binds to comes from the checker's **evolved
+> JS-mode `ts.Type`**, and the return type, class-field type, params, aliases
+> and receivers all resolve through the **same type object identity**. So one
+> set — `ctx.objectHashConsumerTypes` (recorded at the poison decision in
+> `collectEmptyObjectWidening`; guards: host-only / not-`any` / props>0) —
+> checked in the three resolution funnels (`resolveWasmType`,
+> `ensureStructForType`, `resolveStructName`) delivers the return/field/param/
+> alias escape discipline enumerated below without chasing individual escape
+> sites. The "colliding `__anon` struct" is simply never registered for a
+> poisoned type, so nothing can bind to it. Acceptance, measured: host gate
+> re-dropped + all 4 `it.fails` arms flipped back to plain `it` and passing;
+> dogfood corpus 21/23 equal±quirks (≥13 required), 0 REAL divergences;
+> standalone byte-identical (sha256); mechanism details + known residual in
+> the #2937 issue file (`## Fix (the re-land)`).
 
 **[SENIOR-DEV ONLY] — substrate slice.** This is the proper home for BOTH #2849
 (dynamic-object static-write shadows sidecar, host mode) and #2937 (the acorn

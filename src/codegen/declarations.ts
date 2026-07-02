@@ -2217,7 +2217,7 @@ export function collectEmptyObjectWidening(
           // Scan all following statements in the same block for property assignments
           collectPropsFromStatements(checker, ctx, stmts, varName, extraProps, seenProps);
 
-          // (#2584/#2849) If this var is ALSO the subject of any
+          // (#2584/#2849/#2944) If this var is ALSO the subject of any
           // `$Object`-hash-only consumer (bracket read/write, `in`, Object.keys
           // / values / entries / GOPD / GOPN / assign, for-in), a widened closed
           // struct would be invisible to that consumer (`o.a=7; o["a"]` → 0).
@@ -2225,29 +2225,23 @@ export function collectEmptyObjectWidening(
           // stays a `$Object`. Scan the whole enclosing statement list (the same
           // tree `collectPropsFromStatements` walks).
           //
-          // (#2849 extended this poison to host; #2937 REVERTS that extension —
-          // restored to standalone-only.) Why the revert: extending the poison to
-          // host kept acorn's for-in-copied `{}` vars (e.g. `getOptions`'s
-          // `options`) on `$Object`, but the poison is honored ONLY at this
-          // widening DECISION — the read/write codegen still resolves such a
-          // receiver via `resolveStructName(TS-type)`, which mis-binds it to a
-          // colliding `__anon` struct registered under the same TS object type.
-          // Worse, the poisoned `$Object` value ESCAPES the identifier (returned
-          // from `getOptions`, stored in the struct-typed `this.options` field,
-          // read via `this.options.ecmaVersion`) into struct-typed slots a
-          // receiver-level bail cannot reach → compiled-acorn null-dereferenced on
-          // EVERY host-mode input (#2937). A total host-mode parse break is
-          // strictly worse than the narrow `getOptions` shape bug the host
-          // extension fixed (which existed quietly for months), so the gate is
-          // restored to standalone-only. The proper cure — externref-typed escape
-          // discipline for poisoned `$Object` values — is the substrate slice
-          // #2944 (see #2937 / #2849). Standalone keeps the poison (unchanged; the
-          // #2584/#2372 divergences it guards are real there, and standalone
-          // codegen stays byte-identical).
-          if (ctx.standalone) {
-            for (const s of stmts) {
-              markObjectHashConsumers(s, varName, ctx.objectHashConsumerVars);
-            }
+          // History: originally `ctx.standalone`-gated (#2584) on the assumption
+          // "host keeps the struct fast path via the live-mirror Proxy". #2849
+          // dropped the gate (the Proxy does NOT bridge the for-in-write →
+          // static-struct-read divergence, so host mis-read `getOptions`-shaped
+          // objects). That extension alone REGRESSED compiled-acorn to a uniform
+          // null-deref (#2937) because the poison was honored only at THIS
+          // widening decision, while in JS-mode sources the checker's EVOLVED
+          // type for the var still resolved to a colliding `__anon` struct at
+          // the local/receiver/return/field positions — so it was reverted
+          // (#2462). Re-landed here TOGETHER with the #2944 escape discipline:
+          // the poison branch below records the var's evolved checker type in
+          // `objectHashConsumerTypes`, and resolveWasmType / ensureStructForType
+          // / resolveStructName refuse struct resolution for it, keeping the
+          // value externref/host-MOP through every escape. Both constraints now
+          // hold: the #2849 host arms pass AND compiled-acorn parses.
+          for (const s of stmts) {
+            markObjectHashConsumers(s, varName, ctx.objectHashConsumerVars);
           }
 
           // (#2372) Standalone: if any `Object.defineProperty(varName, …)` on
