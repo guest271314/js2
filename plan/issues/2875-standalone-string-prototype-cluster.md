@@ -229,10 +229,32 @@ family split across two PRs):
     (matches the direct path's static-only `argIsStaticRegExp` fold); no
     test262 case exercises a runtime-only RegExp arg reaching a reflective
     call today.
-- **Slice 4 — next:** `not-a-constructor` bucket (~14 tests: `new
-  String.prototype.X` / `Reflect.construct` must throw TypeError; needs
-  closure-IsConstructor=false machinery). Then the misc bucket
-  (`fromCharCode` static read, `Symbol.iterator`, `matchAll`, …).
+- **Slice 4 — in PR (dev-2875f): the `not-a-constructor` bucket was a harness
+  STUB TYPE BUG, not compiler work.** The runner replaces the test262
+  `isConstructor` harness entirely (`needsIsConstructor` preamble,
+  test262-runner.ts) because real `Reflect.construct` is a #1472 Phase C
+  compile refusal standalone. The stub was
+  `function isConstructor(f: number): number { return 0; }` — and
+  `assert.sameValue(isConstructor(x), false)` compiles to a strict `===`
+  where `0 === false` is (correctly!) false in the standalone lane, so every
+  `*/not-a-constructor.js` failed at assert #1. (The host lane passed the same
+  comparison via a lax host-eq quirk — worth its own look.) The tests' second
+  assert — `new String.prototype.X()` throws TypeError — already exercises
+  real compiled semantics and passes standalone. Fix: stub returns a real
+  `boolean false`. Verified: all 5 String search + charAt + Array indexOf
+  `not-a-constructor.js` → pass/pass both lanes; `is-a-constructor.js` stays
+  fail/fail both lanes (no false conformance for constructors until real
+  standalone `Reflect.construct` newTarget-validation lands — that is the
+  honest Phase C follow-up, out of this cluster). Blast radius: 533
+  `not-a-constructor.js` + 45 `is-a-constructor.js` + ~58 other harness users
+  — standalone wins only in sampling (18 diverse files + 5 base-compared);
+  full validation in `merge_group`.
+  - Adjacent gap (documented, not in-bucket): `const C: any =
+    String.prototype.indexOf; new C()` silently does NOT throw (the direct
+    member form does) — generic new-on-non-constructor-closure runtime check
+    missing.
+- **Slice 5 — next:** the misc bucket (`fromCharCode` static read,
+  `Symbol.iterator`, `matchAll`, …).
 - **Out of scope (routed elsewhere):** the 69-test #2862 ToPrimitive substrate
   bucket; the property-attribute `compile_error` tests (S15.5.4.7_A8–A11
   et al — `delete`/for-in over builtins, a different mechanism).
