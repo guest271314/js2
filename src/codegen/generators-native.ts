@@ -851,6 +851,14 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
     if (ts.isIdentifier(param.name)) continue;
     const pat = param.name;
     if (!ts.isArrayBindingPattern(pat) && !ts.isObjectBindingPattern(pat)) return null;
+    // (#2933) A WHOLE-PARAM default on a binding pattern (`{} = undefined`,
+    // `{x} = {}`) evaluates the initializer when the argument is `undefined`.
+    // The resume-prelude destructure has no defaulted-raw-arg arm yet — on the
+    // no-yield corpus this shape mis-typed the state struct
+    // (`struct.new[k] expected i32, found externref`,
+    // gen-meth-dflt-obj-init-undefined.js + static variant) — so bail to the
+    // host path, same policy as the element-default bail below.
+    if (param.initializer) return null;
     // Slice-1 conservative gate (correct-or-legacy — no regressions):
     //  • FLAT patterns only — every element binds an identifier (a nested
     //    array/object sub-pattern is a follow-up; bail so it stays on host).
@@ -912,19 +920,18 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
   // Final fallthrough state completes the generator.
   finishState(curId, { kind: "done" });
 
-  // Reject if there is no actual suspension point or the state count is too
-  // large. (#2170) A `yield*` delegation state is a suspension point too.
+  // Reject when the state count is too large. (#2170) A `yield*` delegation
+  // state is a suspension point too.
   //
-  // (#2920) NO-YIELD generator support (relaxing this bail so a zero-suspend body
-  // lowers to a done-from-start trampoline) is PREPARED but held OFF: at test262
-  // harness scale a late/union import fired during the resume-function emit
-  // shifts function indices and desyncs an already-emitted runtime helper
-  // (`__str_flatten call[1] expected externref, found i32`), producing an invalid
-  // module for ~1.4% of no-yield generators. That late-import funcIdx-shift is
-  // the real blocker (the reference_1461 / #2918 class), independent of
-  // destructuring; it must be fixed before this bail is relaxed. See the issue.
-  const suspendCount = states.filter((s) => s.terminator.kind === "yield" || s.terminator.kind === "yield-star").length;
-  if (suspendCount === 0) return null;
+  // (#2933) NO-YIELD generators now lower natively: a zero-suspend body runs to
+  // completion in state 0 and produces a done-from-start trampoline. This was
+  // held off behind the late-import funcIdx-shift bug (`__str_flatten call[1]
+  // expected externref, found i32` at harness scale) fixed by #2930 (the
+  // raw-import + deferred-batch shift-regime mix in ensureLateImport). The
+  // 1780-file no-yield dstr-binding corpus is the payoff (~250-350 host-free
+  // flips). This bail relaxes in LOCKSTEP with the candidate gate's terminal
+  // yield-require (`isNativeGeneratorCandidate`) — a mismatch is an
+  // undefined-funcidx invalid module.
   if (states.length > MAX_NATIVE_GENERATOR_STATES) return null;
 
   // (#2864 F1b) Type every spilled local at its ACTUAL wasm ValType so a live-
@@ -1124,7 +1131,10 @@ export function isNativeGeneratorCandidate(ctx: CodegenContext, decl: GeneratorD
     return false;
   }
   const plan = buildNativeGeneratorPlan(ctx, decl);
-  return plan !== null && plan.states.some((s) => s.terminator.kind === "yield" || s.terminator.kind === "yield-star");
+  // (#2933) No terminal yield-require — no-yield (zero-suspend) generators are
+  // native candidates now that #2930 fixed the late-import funcIdx-shift class.
+  // Relaxed in LOCKSTEP with buildNativeGeneratorPlan's suspendCount bail.
+  return plan !== null;
 }
 
 /**

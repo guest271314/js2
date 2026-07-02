@@ -1,9 +1,8 @@
 ---
-id: 2920
+id: 2933
 title: "Standalone: native SYNC-generator resume substrate — widen native generator lowering to eliminate __create_generator / __gen_* host imports"
-status: blocked
-blocked_on: 2930
-assignee: ttraenkler/sr-generators
+status: in-progress
+assignee: ttraenkler/sr-funcidx
 created: 2026-07-01
 priority: high
 feasibility: hard
@@ -12,9 +11,12 @@ area: codegen
 goal: standalone
 sprint: current
 horizon: xl
-related: [2906, 2413, 2864, 2171, 2170, 2571, 2581, 2203]
+related: [2930, 2906, 2413, 2864, 2171, 2170, 2571, 2581, 2203]
 umbrella: 2860
 ---
+
+> Formerly #2920; id ceded to PR #2424's negative-verdict issue (parallel
+> session, earlier reservation).
 
 ## Handoff to #2930 (funcIdx-shift fix — the unblocker)
 
@@ -49,6 +51,7 @@ moment #2930 lands. Everything the successor needs:
 ## 🚧 SLICE-1 BUILD STATUS (2026-07-02) — no-yield BLOCKED on a funcIdx-shift bug
 
 **On the branch now (safe, byte-inert on real test262):**
+
 - Destructuring generator params (object + typed-array, with-yield) — native
   lowering via a state-0-guarded resume-prelude destructure. Correct on synthetic
   cases; **flips ~0 real test262** (the dstr corpus is no-yield, see below) and is
@@ -68,8 +71,8 @@ js-host-matching, 0 wrong-value failures on a 500-file corpus sample). It flips
 **BLOCKER — late-import funcIdx-shift at harness scale.** With no-yield enabled,
 ~1.4% of no-yield generators (7/500) produce an **invalid module**:
 `__str_flatten call[1] expected externref, found i32` — an already-emitted runtime
-string helper (func #6/#7) desyncs because a late/union import fired *during the
-lazily-emitted resume function's body/param emit* and shifted function indices
+string helper (func #6/#7) desyncs because a late/union import fired _during the
+lazily-emitted resume function's body/param emit_ and shifted function indices
 without repointing that helper's `call`. This is the **reference_1461 /
 reference_2193 / #2918 `shiftAsyncSideChannelFuncIdxs` class** of bug, NOT specific
 to destructuring: it reproduces on `obj-ptrn-empty.js` (destructure-triggered) AND
@@ -90,8 +93,8 @@ Escalated to tech lead for scheduling.
 
 The original import-set measurement below (1396 dstr-param / 1851 flippable) was
 **methodologically wrong**: it counted files whose imports ⊆ gen-suite, which
-conflates *"a generator exists and `.next()` is called"* (leaks
-`__create_generator`/`__gen_next`) with *"the generator actually yields."*
+conflates _"a generator exists and `.next()` is called"_ (leaks
+`__create_generator`/`__gen_next`) with _"the generator actually yields."_
 
 **Grounded re-measurement** (compiled real corpus files through the runner's
 standalone path, `.tmp/2920/corpus-verify.mjs`):
@@ -105,10 +108,10 @@ standalone path, `.tmp/2920/corpus-verify.mjs`):
   `suspendCount===0 → return null`, and `:987`). So every no-yield generator
   bails to the host eager-buffer path — that is what 1780 of the 1851 leak on.
 - **The destructuring-param slice (committed) flips ~0 corpus tests** (verified
-  0/70 on the with-yield files: the few with-yield dstr tests use *untyped*
+  0/70 on the with-yield files: the few with-yield dstr tests use _untyped_
   array patterns, which the slice correctly bails; the rest are no-yield).
   It IS correct + byte-inert (gc/host sha256-identical; non-dstr generators
-  byte-unchanged) and flips ~10-20 *synthetic* with-yield object-param cases —
+  byte-unchanged) and flips ~10-20 _synthetic_ with-yield object-param cases —
   a valid prerequisite, but ~0 real test262 on its own.
 
 **The real opportunity = native NO-YIELD generators (the 1780).** A naive relax
@@ -120,8 +123,8 @@ result), fix the i32/externref result typing, and verify `.next()`/`.return()`
 dispatch on a done-from-start generator. The committed dstr-param work is the
 prerequisite (no-yield dstr-binding tests need BOTH) and stays on the branch.
 
-*Status: reported to tech lead; awaiting direction on re-scope (A: build no-yield
-generators on this branch keeping dstr-params; vs B: hold).* The dstr-param
+_Status: reported to tech lead; awaiting direction on re-scope (A: build no-yield
+generators on this branch keeping dstr-params; vs B: hold)._ The dstr-param
 commit is safe on origin regardless.
 
 ## Problem / goal
@@ -146,7 +149,7 @@ imports touching the sync-gen suite):
 - **NO test** has `imports ⊆ gen-suite` alone — **every** gen test also
   co-leaks `env::__get_caught_exception`. That import is emitted by the native
   generator **trampoline's own catch** (the `try { block { loop { if-chain } } }
-  catch $exn` dispatch), NOT by user code — it disappears when the generator
+catch $exn` dispatch), NOT by user code — it disappears when the generator
   lowers natively. So the honest "fully host-free" corpus is
   `imports ⊆ gen-suite ∪ {__get_caught_exception}`.
 - **Honest full-build yield: 1851 PASS tests** flip fully host-free
