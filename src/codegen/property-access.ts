@@ -31,6 +31,7 @@ import {
   BUILTIN_STATIC_METHOD_ARITY,
   ensureBuiltinFnMetaType,
   pushBuiltinFnClosureValueInstrs,
+  pushBuiltinFnSingletonValueInstrs,
   STANDALONE_STATIC_METHOD_META,
 } from "./builtin-fn-meta.js";
 import { emitLazyClassObjectGet, emitLazyProtoGet, findExternInfoForMember } from "./expressions/extern.js";
@@ -3965,7 +3966,12 @@ export function compilePropertyAccess(
       }
       const closure = ensureStandaloneBuiltinStaticMethodClosure(ctx, builtinName, propName, expr);
       if (closure) {
-        fctx.body.push(...pushBuiltinFnClosureValueInstrs(ctx, closure));
+        // (#2963) IDENTITY-STABLE reified builtin value: read via a module-level
+        // singleton so `Array.isArray === Array.isArray`, `Number.isInteger ===
+        // Number.isInteger`, etc. hold (a fresh `struct.new` per read gave two
+        // distinct instances → `!==`). Distinct builtins keep distinct singleton
+        // globals, so `Array.isArray !== Number.isInteger` still holds.
+        fctx.body.push(...pushBuiltinFnSingletonValueInstrs(ctx, closure));
         return closure.type;
       }
       reportUnsupportedStandaloneBuiltinValueRead(ctx, builtinName, propName);
