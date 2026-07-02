@@ -1,13 +1,13 @@
 ---
 id: 2138
 title: "IR-first compile-once inversion: selector decides before compileDeclarations (flag-gated investigation)"
-status: blocked
-blocked_by: [2167]
+status: in-progress
+assignee: ttraenkler/dev-2138f
 pipeline_unblocked: 1927
 spec: ready
 sprint: current
 created: 2026-06-12
-updated: 2026-06-24
+updated: 2026-07-02
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -338,3 +338,120 @@ gate for *implementation dispatch*; the spec is written now so it is
 ready-to-dispatch the moment #2167 closes. The frontmatter therefore keeps
 `status: blocked` / `blocked_by: [2167]` but records `pipeline_unblocked: 1927`
 to mark that the technical prerequisite is satisfied.
+
+**2026-07-02 update (dev-2138f): #2167 RESOLVED — Fable re-enabled; this
+dispatch is the evidence. `blocked_by` cleared, status → in-progress.**
+
+## Implementation Notes (dev-2138f, Fable, 2026-07-02 — Slices 1+2)
+
+### What landed
+
+Behind `JS2WASM_IR_FIRST=1` (default OFF, requires the default-on
+`experimentalIR`):
+
+- `planIrOverlay(ctx, ast)` (`src/codegen/index.ts`) — the IR planning block
+  extracted **verbatim** from the `experimentalIR` overlay (typeMap →
+  `planIrCompilation` → STRICT_IR_REASONS → `buildIrClassShapes` →
+  overrideMap → safeSelection → `new.target` gate). Flag OFF it runs at the
+  exact pre-#2138 position (after `compileDeclarations`); flag ON it runs
+  BEFORE, and `computeIrFirstSkipSet` derives the legacy-skip set.
+- `compileDeclarations(ctx, sourceFile, skipBodies?)`
+  (`src/codegen/declarations.ts`) — skipped top-level functions get an
+  `unreachable` placeholder body (slot/typeIdx untouched — body-emission
+  change, never index-layout) and are NOT registered inlinable. Returns the
+  actually-skipped names.
+- `IrSelection.localCallees` (`src/ir/select.ts`, additive) — the Step-2
+  call-graph callee edges, exposed so the skip-set derivation reuses the
+  selector's own edges instead of re-deriving them.
+- Fail-loud contract: a post-claim IR failure on a *skipped* function is
+  promoted from the warning demote to a **hard compile error**
+  (`[IR-FIRST skipped-slot, #2138]`), plus a backstop that errors when a
+  skipped function is neither in `report.compiled` nor `report.errors`.
+  The placeholder can never ship silently.
+- Telemetry: `CompileResult.irFirstSkipped` (present only when the flag is
+  on) lists skipped bodies — the compile-once win is directly observable.
+
+### Deliberate deviations from the spec above (and WHY)
+
+1. **The Slice-1 hoist is flag-CONDITIONAL, not unconditional.** The spec
+   assumed the planning block was side-effect-light and the hoist
+   byte-identical. Code analysis refutes that premise:
+   - `resolvePositionType` calls `getOrRegisterVecType` /
+     `typedArrayVecStorage` — planning can FIRST-register Wasm types, so
+     hoisting it above the body pass can permute type-section index
+     assignment (different bytes flag-off);
+   - `buildIrClassShapes` reads `ctx.structFields`, which body compilation
+     mutates (dynamic field additions, #516) — a hoisted read sees
+     pre-body-compile shapes.
+   Making the ORDER conditional on the flag turns acceptance criterion 1
+   (byte-identical without the flag) into a property that holds by
+   construction. Slices 1+2 therefore landed as ONE PR: with no
+   unconditional reorder there is no standalone "low-risk hoist" left to
+   de-risk separately.
+2. **Skip-set closure check is DIRECT-callee, not transitive.** The
+   selector's Step-2 closure is already bidirectional (callers AND callees),
+   so `selection.funcs` is closed; the only re-opening is overrideMap
+   resolve-time drops. A function's own IR build consults only its DIRECT
+   callees' signatures (`calleeTypes`; `from-ast.ts` `lowerCall` throws on a
+   missing callee), and only the function's own IR success is load-bearing
+   for its slot — callees keep working bodies (legacy or IR) in their
+   pre-allocated slots either way. Transitivity would add conservatism
+   without adding safety; the compiled-set backstop catches everything else.
+3. **Generators are excluded from the skip set** (first cut). Legacy
+   generator compilation creates auxiliary machinery beyond the slot body;
+   IR generator lowering registers its own imports (`addGeneratorImports`)
+   but full standalone-ness without the legacy compile's side effects is
+   unproven. They stay on compile-twice until measured separately.
+4. **Class members are never skipped** (per spec — typeIdx parity contract
+   with legacy callers, `integration.ts` parity guard).
+
+### Verification (acceptance criterion 1 — flag-off byte-identity)
+
+233-file corpus (13 `website/playground/examples` + 220 test262 files
+sampled across `language/expressions`, `language/statements`,
+`built-ins/Array`, `built-ins/String`): compiled flag-OFF on this branch and
+on the merge-base compiler (76a92eec923f0) — **SHA-256 identical for all 233**
+(188 binaries, 45 error-text hashes). `tests/issue-2138.test.ts` adds:
+flag-off default-unchanged, flag-on all-claimed skip+run, partial-closure
+legacy preservation, funcIdx-layout invariance (flag-on vs flag-off), the
+hard-error trap contract, and flag-off determinism.
+
+### Divergence found (acceptance criterion 3)
+
+- **`%` (modulo) selector↔builder drift** — `select.ts` claims a function
+  containing `a % b`; `from-ast.ts` throws `operator '%' not in slice 11`.
+  Flag-off: silent legacy demote (post-claim `build` error, warning). Flag-on:
+  hard error — surfaced exactly as designed. This is the #2135 drift class;
+  filed as **#2945** (`plan/issues/2945-ir-selector-claims-modulo-from-ast-throws.md`).
+- Corpus sweep (233 files, flag-on): **0 new compile failures** vs flag-off —
+  the corpus' claimed closures all IR-compile. (The corpus is JS-heavy /
+  untyped, so the claim rate — and thus skip exposure — is low: 8 skipped
+  bodies across 4 files. The playground examples supply nearly all skips.)
+
+## Measurement (JS2WASM_IR_FIRST) — scoped, 2026-07-02 (dev-2138f)
+
+Scoped local measurement per the flag-gated first deliverable; the FULL
+test262 + compile-time run is the remaining Slice-3 item (see procedure
+below).
+
+- **Correctness delta (scoped)**: 233-file corpus (13 playground examples +
+  220 sampled test262 files), flag-ON vs flag-OFF: **0 new compile
+  failures**, all executed probes behave identically (fib/partial-closure
+  programs return identical results; see `tests/issue-2138.test.ts`).
+- **Compile-once effect**: 8 legacy body compiles skipped across the corpus
+  (4 files with claims); on claim-dense inputs (e.g. the `fib` probe) 100%
+  of claimed top-level functions skip legacy compilation. Directly
+  observable via `CompileResult.irFirstSkipped`.
+- **Compile-time delta**: NOT reliably measurable this session — the shared
+  dev box ran at load ≈ 12–14 on 8 cores; alternating fresh-process runs of
+  the 13-example corpus varied ±45% between repeats of the SAME mode
+  (12.4s→28.8s flag-off), swamping the per-claimed-function saving. The
+  structural saving is exactly one legacy body compilation per skipped
+  function. Record a real number in Slice 3 (idle box / CI).
+- **Divergences**: one, filed — #2945 (`%` selector↔builder drift).
+- **What the FULL run needs (Slice 3)**: `JS2WASM_IR_FIRST=1 pnpm run
+  test:262` on an idle box or CI, diffed against the current baseline JSONL
+  (`scripts/fetch-baseline-jsonl.mjs`) via `/analyze-regression`; compile
+  time from the runner's per-run timing in `runs/index.json`. Every
+  flag-ON-only failure is by construction a loud selector↔builder/skip
+  divergence — bucket by error class, file per class.
