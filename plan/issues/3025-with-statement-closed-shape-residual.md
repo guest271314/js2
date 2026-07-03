@@ -15,7 +15,7 @@ language_feature: with-statement, dynamic-scope
 goal: spec-completeness
 test262_category: language/statements/with
 test262_fail: 167
-related: [1387]
+related: [1387, 2663, 2580]
 ---
 
 # #3025 — `with` statement: closed-shape residual
@@ -54,3 +54,78 @@ property-get error propagation) not fully wired.
   a representative sample of the 27 currently-affected files, without
   regressing any test that correctly relies on the refusal for genuinely
   unprovable shapes.
+
+## Measure-first findings (2026-07-03, dev-3025)
+
+Reproduced against current `origin/main` (HEAD `014b49b1d`) by compiling all
+181 `test262/test/language/statements/with/*.js` files and cross-checking the
+stale baseline jsonl (run `20260703-2109`, 40 CE entries for this dir).
+
+**1. The "proven closed object-literal shape" CE gate is ALREADY RESOLVED.**
+Of the 40 files the baseline still records as failing with that exact CE,
+**0 reproduce the CE on current main**: 22 now compile cleanly, 18 are correct
+`'with' statements are not allowed in strict mode` rejections (`onlyStrict`
+negative tests). A full sweep of all 181 files produced **zero** closed-shape
+CEs. The gate was superseded by the #2663 Tier-2 dynamic-scope path
+(`compileDynamicWithStatement` in `src/codegen/with-scope.ts:244`), which routes
+every non-proven `with` target to a runtime HasBinding+Get select instead of
+refusing at compile time. The only surviving CE from that file fires solely for
+a `with` body containing a nested function/class boundary
+(`with-scope.ts:245-251`) — not hit by any test262 `with` file. **The baseline
+jsonl is stale; the CE portion of this issue is effectively done.** The issue's
+suggested approach #1 ("relax the closed-shape prover") is therefore moot.
+
+**2. The real remaining tail is a substrate bug in the Tier-2 dynamic path,
+NOT a prover-relaxation problem.** The dominant runtime buckets
+(`p1 ===null` x35, `p1 is not defined` x20, `result ===null` x8) all trace to
+one cause: **the dynamic-with path does not work when the `with` target is a
+WasmGC struct** (the common test262 pattern `var myObj = {...}; with(myObj){...}`).
+
+Minimal reproduction (host lane, `src/runtime.ts` `buildImports`):
+
+```ts
+// PASSES — Tier-1 static path (target is a direct object literal):
+with ({ p1: 7, p2: 8 }) { out = p1 + p2; }        // => 15  OK
+
+// FAILS — Tier-2 dynamic path (target is a struct-typed variable):
+const myObj = { p1: 7, p2: 8 };
+with (myObj) { out = p1 + p2; }                    // RUNTIME ReferenceError: p1 is not defined
+```
+
+Root cause: `compileDynamicWithStatement` coerces the target to `externref`
+(`with-scope.ts:256-263`, `extern.convert_any` on the GC struct ref) and gates
+reads with the host import `__extern_has(recv,name)` + `emitDynGet`
+(`emitDynamicWithGet`, `with-scope.ts:317`). But a WasmGC struct wrapped as an
+opaque externref does **not** expose its fields to host `name in recv` /
+property-get reflection, so `__extern_has` returns `false` for every own field →
+the else/fallback arm resolves `p1` as a bare global → ReferenceError (or `null`
+when an outer binding of that name exists). This is the same "$Object dynamic
+reader can't see native/struct values" substrate family as #2580/#2151. The
+dynamic path was built for genuine host objects, not for locally-constructed
+struct literals bound to a variable.
+
+## Re-scoped remaining work (for the next window)
+
+- **CE acceptance criterion: MET** — no change needed for the closed-shape CE.
+- **Tractable primary fix (biggest bucket, ~55 files):** extend the **Tier-1
+  static** path to accept a `with(<expr>)` whose TS static type
+  `resolveStructName`s to a closed struct (not just a syntactic object-literal
+  expression). Compile the target via `compileExpression` into a struct-typed
+  local and push a `static` `WithScope` so field reads/writes route to direct
+  struct get/set — exactly as the literal path already does. Gate carefully:
+  refuse (fall to dynamic) when the body references an inherited
+  `Object.prototype` key, or when the static type could be a widened
+  supertype whose runtime value carries extra own fields (soundness — `with`
+  must see ALL own+inherited props of the actual object).
+  Touch points: `proveObjectLiteralWithTarget` / `compileWithStatement`
+  / `compileClosedObjectLiteralTarget` in `src/codegen/with-scope.ts`.
+- **Deeper substrate fix (or alternative):** teach the dynamic reader
+  (`emitDynGet` / the `__extern_has` gate) to resolve WasmGC struct fields, so
+  the Tier-2 path works for struct targets too. Larger; overlaps #2580.
+- **Unscopables / accessor-error tail** (`unscopables-prop-get-err.js`,
+  `has-property-err.js` — small buckets): issue's suggested approach #2 still
+  applies, but is a minor tail relative to the struct-target fix.
+
+Status left `ready` (unclaimed) — this window banked measurement + root cause
+only; no code change, so no risk of regression. The next dev can go straight to
+the Tier-1 struct-target extension above.
