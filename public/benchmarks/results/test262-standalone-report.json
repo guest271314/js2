@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-07-03T13:35:32.325Z",
-  "baseline_generated_at": "2026-07-03T13:35:32.325Z",
-  "baseline_sha": "b2a1ab5dbad1350c7fa09a3ab9aaf0a3f4d95537",
+  "timestamp": "2026-07-03T16:18:24.399Z",
+  "baseline_generated_at": "2026-07-03T16:18:24.399Z",
+  "baseline_sha": "241b47e86133e110ca5de9e98c8acafcf6953609",
   "oracle_version": 1,
   "mode": {
     "target": "standalone",
@@ -16,8 +16,8 @@
     "compile_timeout": 3,
     "skip": 18,
     "compilable": 41259,
-    "host_free_pass": 18415,
-    "leaky_pass": 6497,
+    "host_free_pass": 18422,
+    "leaky_pass": 6490,
     "stale": 0,
     "by_category": {
       "standard": {
@@ -28,8 +28,8 @@
         "compile_timeout": 3,
         "skip": 18,
         "compilable": 40214,
-        "host_free_pass": 18171,
-        "leaky_pass": 6495,
+        "host_free_pass": 18178,
+        "leaky_pass": 6488,
         "stale": 0,
         "label": "ECMAScript current standard"
       },
@@ -67,8 +67,8 @@
         "compile_timeout": 3,
         "skip": 18,
         "compilable": 41259,
-        "host_free_pass": 18415,
-        "leaky_pass": 6497,
+        "host_free_pass": 18422,
+        "leaky_pass": 6490,
         "stale": 0,
         "label": "standard + annex_b (default)"
       },
@@ -80,8 +80,8 @@
         "compile_timeout": 4,
         "skip": 123,
         "compilable": 45901,
-        "host_free_pass": 18766,
-        "leaky_pass": 7286,
+        "host_free_pass": 18773,
+        "leaky_pass": 7279,
         "stale": 0,
         "label": "standard + annex_b + proposals"
       }
@@ -95,8 +95,8 @@
     "compile_timeout": 3,
     "skip": 18,
     "compilable": 41259,
-    "host_free_pass": 18415,
-    "leaky_pass": 6497,
+    "host_free_pass": 18422,
+    "leaky_pass": 6490,
     "stale": 0
   },
   "full_summary": {
@@ -107,8 +107,8 @@
     "compile_timeout": 4,
     "skip": 123,
     "compilable": 45901,
-    "host_free_pass": 18766,
-    "leaky_pass": 7286,
+    "host_free_pass": 18773,
+    "leaky_pass": 7279,
     "stale": 0
   },
   "strict_summary": {
@@ -119,8 +119,8 @@
     "compile_timeout": 3,
     "skip": 18,
     "compilable": 38857,
-    "host_free_pass": 17661,
-    "leaky_pass": 6269,
+    "host_free_pass": 17662,
+    "leaky_pass": 6268,
     "stale": 0
   },
   "scope_summaries": {
@@ -156,8 +156,8 @@
       "compile_timeout": 3,
       "skip": 18,
       "compilable": 40214,
-      "host_free_pass": 18171,
-      "leaky_pass": 6495,
+      "host_free_pass": 18178,
+      "leaky_pass": 6488,
       "stale": 0
     }
   },
@@ -974,7 +974,7 @@
       "compile_timeout": 0,
       "skip": 0,
       "total": 347,
-      "host_free_pass": 102
+      "host_free_pass": 108
     },
     {
       "name": "language/export",
@@ -1106,7 +1106,7 @@
       "compile_timeout": 0,
       "skip": 0,
       "total": 592,
-      "host_free_pass": 420
+      "host_free_pass": 421
     },
     {
       "name": "language/punctuators",
@@ -1309,10 +1309,10 @@
         },
         "sample_files": [
           "test/built-ins/Temporal/Now/zonedDateTimeISO/return-value.js",
-          "test/built-ins/Temporal/PlainDateTime/subclass.js",
           "test/built-ins/Temporal/ZonedDateTime/prototype/eraYear/prop-desc.js",
+          "test/built-ins/Temporal/PlainDateTime/subclass.js",
           "test/built-ins/Temporal/PlainDateTime/prototype/month/prop-desc.js",
-          "test/built-ins/Temporal/Duration/prototype/toLocaleString/branding.js"
+          "test/built-ins/Temporal/PlainMonthDay/refisoyear-undefined.js"
         ],
         "sample_signatures": [
           "other:ReferenceError: Temporal is not defined",
@@ -1459,15 +1459,15 @@
         "sample_files": [
           "test/built-ins/JSON/parse/15.12.2-2-2.js",
           "test/built-ins/JSON/stringify/space-wrong-type.js",
-          "test/built-ins/JSON/parse/reviver-array-define-prop-err.js",
           "test/built-ins/JSON/stringify/replacer-array-empty.js",
+          "test/built-ins/JSON/parse/reviver-array-define-prop-err.js",
           "test/built-ins/JSON/parse/15.12.2-2-6.js"
         ],
         "sample_signatures": [
           "illegal_cast:L#:## illegal cast [in test()]",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(JSON.stringify(obj), JSON.stringify(obj, null, null));",
-          "assertion_fail:returned # — assert ## at L#: throw new Test262Error();",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue( JSON.stringify([#, {a: #}], []), '[#,{}]' );",
+          "assertion_fail:returned # — assert ## at L#: throw new Test262Error();",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(JSON.stringify(obj, null, ' '), [ '{' , ' \"a1\": {' , ' \"b1\": [' , ' #,' , ' #,' , ' #,' , ' #' , ' ],' , ' \"b2\": {' , ' \"c1\": #,' , ' \"c2\": #'"
         ]
       },
@@ -1566,7 +1566,7 @@
           "test/annexB/built-ins/RegExp/legacy-accessors/leftContext/this-not-regexp-constructor.js",
           "test/language/literals/regexp/S7.8.5_A2.3_T4.js",
           "test/built-ins/Proxy/has/trap-is-missing-target-is-proxy.js",
-          "test/built-ins/RegExp/S15.10.4.1_A3_T2.js"
+          "test/built-ins/RegExp/duplicate-named-capturing-groups-syntax.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: throw new Test262Error();",
@@ -1637,8 +1637,8 @@
           "test/language/expressions/object/dstr/gen-meth-dflt-obj-ptrn-rest-skip-non-enumerable.js",
           "test/language/expressions/object/dstr/meth-dflt-obj-ptrn-rest-val-obj.js",
           "test/language/expressions/async-function/named-dflt-params-ref-prior.js",
-          "test/built-ins/Iterator/concat/return-is-not-forwarded-after-exhaustion.js",
-          "test/built-ins/Iterator/zipKeyed/iterator-zip-iteration-strict-iterator-close-i-is-zero-abrupt-completion.js"
+          "test/built-ins/Iterator/zipKeyed/iterator-zip-iteration-strict-iterator-close-i-is-zero-abrupt-completion.js",
+          "test/built-ins/Iterator/concat/return-is-not-forwarded-after-exhaustion.js"
         ],
         "sample_signatures": [
           "type_error:TypeError: Cannot destructure 'null' or 'undefined'",
@@ -1748,8 +1748,8 @@
         },
         "sample_files": [
           "test/language/statements/for-await-of/async-func-dstr-const-obj-ptrn-id-init-skipped.js",
-          "test/built-ins/AsyncGeneratorFunction/instance-name.js",
           "test/built-ins/AsyncGeneratorFunction/prototype/extensibility.js",
+          "test/built-ins/AsyncGeneratorFunction/instance-name.js",
           "test/built-ins/GeneratorFunction/prototype/extensibility.js",
           "test/language/statements/for-await-of/async-func-dstr-let-obj-ptrn-id-init-skipped.js"
         ],
@@ -1868,9 +1868,9 @@
         "sample_files": [
           "test/built-ins/TypedArray/out-of-bounds-has.js",
           "test/built-ins/TypedArray/resizable-buffer-length-tracking-1.js",
-          "test/built-ins/TypedArrayConstructors/ctors/buffer-arg/defined-length-sab.js",
           "test/built-ins/TypedArrayConstructors/internals/Set/detached-buffer.js",
-          "test/built-ins/TypedArrayConstructors/internals/HasProperty/indexed-value.js"
+          "test/built-ins/TypedArrayConstructors/ctors/buffer-arg/defined-length-sab.js",
+          "test/built-ins/TypedArrayConstructors/ctors/typedarray-arg/same-ctor-returns-new-cloned-typedarray.js"
         ],
         "sample_signatures": [
           "other:ReferenceError: ctors is not defined",
@@ -2013,15 +2013,15 @@
         },
         "sample_files": [
           "test/annexB/language/global-code/if-decl-no-else-global-skip-early-err-try.js",
-          "test/annexB/language/eval-code/direct/func-if-decl-else-stmt-eval-func-skip-early-err-for-in.js",
           "test/annexB/language/global-code/switch-case-global-no-skip-try.js",
+          "test/annexB/language/eval-code/direct/func-if-decl-else-stmt-eval-func-skip-early-err-for-in.js",
           "test/annexB/language/eval-code/direct/global-if-decl-no-else-eval-global-block-scoping.js",
           "test/annexB/language/eval-code/indirect/global-if-decl-else-decl-b-eval-global-update.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert.throws(ReferenceError, function() { f; }, 'An initialized binding is not created following evaluation');",
-          "type_error:TypeError: dynamic eval is not supported in standalone mode (##)",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue( f, undefined, 'Initialized binding created prior to evaluation' );",
+          "type_error:TypeError: dynamic eval is not supported in standalone mode (##)",
           "runtime_error:L#:## Invalid left-hand side in for-in/for-of",
           "other:L#:## ';' expected."
         ]
@@ -2330,8 +2330,8 @@
           "assertion_fail:returned # — assert ## at L#: assert(called, 'called !== true');",
           "assertion_fail:Test262Error: ##: arguments object don't exists",
           "assertion_fail:returned # — assert ## at L#: assert.throws(TypeError, function() { f_10_6_1_gs(); });",
-          "assertion_fail:returned # — assert ## at L#: assert(_10_5_7_b_4_fun(#, #), '_10_5_7_b_4_fun(#, #) !== true');",
-          "assertion_fail:returned # — assert ## at L#: assert.throws(TypeError, function() { arguments.callee; });"
+          "assertion_fail:returned # — assert ## at L#: assert.throws(TypeError, function() { arguments.callee; });",
+          "assertion_fail:returned # — assert ## at L#: assert(_10_5_7_b_4_fun(#, #), '_10_5_7_b_4_fun(#, #) !== true');"
         ]
       },
       {
@@ -2472,8 +2472,8 @@
         "sample_files": [
           "test/language/module-code/instn-star-iee-cycle.js",
           "test/language/module-code/top-level-await/syntax/early-does-not-propagate-to-fn-declaration-params.js",
-          "test/language/module-code/parse-err-hoist-lex-fun.js",
           "test/language/module-code/top-level-await/new-await-parens.js",
+          "test/language/module-code/parse-err-hoist-lex-fun.js",
           "test/language/module-code/top-level-await/syntax/export-var-await-expr-obj-literal.js"
         ],
         "sample_signatures": [
