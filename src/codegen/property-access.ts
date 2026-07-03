@@ -101,6 +101,7 @@ import {
   ensureTypedArrayIntrinsicNativeProtoGlue,
   emitTypedArrayIntrinsicCtorObject,
   isWiredTypedArrayViewName,
+  emitNativeGlobalThisObject,
 } from "./array-object-proto.js";
 import { isBuiltinSubtype, isBuiltinTypeName } from "./builtin-tags.js";
 import { getOrRegisterErrorStructType, isWasiErrorName } from "./registry/error-types.js";
@@ -4013,13 +4014,32 @@ export function compilePropertyAccess(
     return { kind: "externref" };
   }
 
-  // Handle globalThis.prop — compile as __extern_get(__get_globalThis(), key)
+  // Handle globalThis.prop — compile as __extern_get(<globalThis>, key)
   // globalThis is a genuine JS object (externref), not a WasmGC struct.
   // Without this handler, the TS type `typeof globalThis` resolves to a struct
   // type and struct.get on a real JS object traps with null deref.
+  //
+  // (#2988) Receiver resolution is dual-mode:
+  //   - host/gc: the `env::__get_globalThis` host import (unchanged).
+  //   - standalone/WASI (no-JS-host): the native `globalThis` `$Object`
+  //     singleton (#2996, `emitNativeGlobalThisObject`) — the SAME singleton that
+  //     `Object.defineProperty(globalThis, k, desc)` and `globalThis.x = v`
+  //     already write onto (both proven host-free), so reflective reads
+  //     round-trip host-free. This retires the last `env::__get_globalThis`
+  //     sole-import leak on the `globalThis.prop` member-read path. `__extern_get`
+  //     itself is already a DEFINED native helper in these modes (routed via
+  //     `ensureLateImport` → `ensureObjectRuntime`), so the read is fully
+  //     host-free. If the native object runtime is unavailable, falls through to
+  //     the host-import path.
   if (ts.isIdentifier(expr.expression) && expr.expression.text === "globalThis") {
-    const gtFuncIdx = ensureLateImport(ctx, "__get_globalThis", [], [{ kind: "externref" }]);
-    // Ensure __extern_get import exists
+    const nativeGlobal = ctx.standalone || ctx.wasi;
+    // Import registration order is preserved for the host/gc path
+    // (`__get_globalThis` then `__extern_get`, as it was before #2988) so that
+    // path stays byte-identical. In standalone/WASI both names resolve to DEFINED
+    // native helpers (no host import added, so ordering is immaterial), and the
+    // `__extern_get` lookup also brings up the object runtime (incl.
+    // `__new_plain_object`) that `emitNativeGlobalThisObject` needs.
+    const gtFuncIdx = nativeGlobal ? undefined : ensureLateImport(ctx, "__get_globalThis", [], [{ kind: "externref" }]);
     const getIdx = ensureLateImport(
       ctx,
       "__extern_get",
@@ -4028,19 +4048,31 @@ export function compilePropertyAccess(
     );
     flushLateImportShifts(ctx, fctx);
 
-    if (gtFuncIdx === undefined || getIdx === undefined) {
+    if (getIdx === undefined || (!nativeGlobal && gtFuncIdx === undefined)) {
       // Fallback: return null externref if imports couldn't be registered
       fctx.body.push({ op: "ref.null.extern" });
       return { kind: "externref" };
     }
 
-    // Emit: __extern_get(__get_globalThis(), key) -> externref
-    fctx.body.push({ op: "call", funcIdx: gtFuncIdx });
+    // Emit: __extern_get(<globalThis receiver>, key) -> externref
+    if (nativeGlobal) {
+      const nativeVt = emitNativeGlobalThisObject(ctx, fctx);
+      if (!nativeVt) {
+        // Native runtime unavailable — fall back to the host import.
+        const gt2 = ensureLateImport(ctx, "__get_globalThis", [], [{ kind: "externref" }]);
+        flushLateImportShifts(ctx, fctx);
+        if (gt2 === undefined) {
+          fctx.body.push({ op: "ref.null.extern" });
+          return { kind: "externref" };
+        }
+        fctx.body.push({ op: "call", funcIdx: gt2 });
+      }
+    } else {
+      fctx.body.push({ op: "call", funcIdx: gtFuncIdx! });
+    }
     addStringConstantGlobal(ctx, propName);
     fctx.body.push(...stringConstantExternrefInstrs(ctx, propName));
-    if (getIdx !== undefined) {
-      fctx.body.push({ op: "call", funcIdx: getIdx });
-    }
+    fctx.body.push({ op: "call", funcIdx: getIdx });
 
     // Coerce externref to expected type
     const accessType = ctx.checker.getTypeAtLocation(expr);
