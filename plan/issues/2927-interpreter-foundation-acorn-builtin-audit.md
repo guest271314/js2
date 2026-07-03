@@ -1,10 +1,9 @@
 ---
 id: 2927
 title: "Interpreter foundation: Acorn-via-js2wasm runtime parser + generic-built-in audit"
-status: in-progress
-assignee: ttraenkler/sr-interp
+status: ready
 created: 2026-07-02
-updated: 2026-07-03
+updated: 2026-07-04
 priority: medium
 horizon: l
 feasibility: hard
@@ -352,3 +351,16 @@ half of this foundation. See `## Suspended Work`.
 - **Resume**: pick up Part 2 gap #1 (Map/Set native brand arms) next — it is the
   highest-value host-free gap and mirrors the push/pop pattern (a `$Map`/`$Set`
   `ref.test` arm in the closed-method dispatcher routing to `map-runtime.ts`).
+
+## Architect update (2026-07-04)
+
+- Stale claim from the dead `sr-interp` session released
+  (`claim-issue.mjs --release`); status flipped back to `ready`. The push/pop
+  fix + audit refinement above are MERGED (PR #2592) — the roll-forward items
+  are what remains.
+- This issue's remaining work is now sequenced in the unified spec:
+  `docs/architecture/runtime-eval-interpreter.md` **Part II §15–§16** and the
+  `## Implementation Plan` in **#2928**. Mapping: the in-Wasm AST consumer
+  probe = slice **E0**; the #2853-A/B parser blockers = **P1/P2**; the Part-2
+  gaps 1–3 = **G1/G3/G4** (plus **G2** args-passing/arity). Devs picking this
+  up should claim one named slice, not the whole umbrella.

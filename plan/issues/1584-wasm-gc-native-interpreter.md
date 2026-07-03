@@ -35,6 +35,19 @@ es_edition: multi
 > + standalone `new Function`/indirect eval, XL), **#2929** (direct eval +
 > `with` + Proxy-MOP convergence, XL). The original strategy write-up below
 > remains accurate and is preserved as the rationale of record.
+>
+> **UNIFIED (2026-07-04, architect).** The architecture doc gained **Part II
+> (§12–§16)**, which is now authoritative: the complete **4-tier ladder**
+> (compile-away → host shim → interpreter → refuse-loudly; Tiers 0/1/3
+> **landed** via #2923/#2924/#1164/#2960) with normative routing rules; the
+> representation **ADR: register+accumulator bytecode, tree-walking
+> rejected**; the **two-producer** generalization (runtime ESTree emitter now,
+> build-time IR→bytecode deopt for `with`-class features later — #1715);
+> unified **name-resolution semantics** shared by the host shim and the
+> interpreter (fixes #3017 gap 2 by construction); the compiled-acorn
+> **feasibility verdict** (confirmed; #2853-A/B are the remaining hard
+> blockers); and the Opus-executable slice sequence **E0/P1/P2/E1–E6 +
+> G1–G4** (detailed in #2928's `## Implementation Plan`).
 
 Strategy proposal for executing genuinely dynamic JavaScript inside the
 standalone Wasm-GC module without bundling a third-party engine. The
