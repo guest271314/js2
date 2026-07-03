@@ -738,13 +738,34 @@ export function emitExternrefDestructureGuard(ctx: CodegenContext, fctx: Functio
   fctx.body.push({ op: "ref.is_null" } as Instr);
   fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: buildDestructureNullThrow(ctx, fctx), else: [] });
 
-  // Also check JS undefined via __extern_is_undefined import
-  const undefIdx = ensureLateImport(ctx, "__extern_is_undefined", [{ kind: "externref" }], [{ kind: "i32" }]);
-  if (undefIdx !== undefined) {
-    flushLateImportShifts(ctx, fctx);
-    fctx.body.push({ op: "local.get", index: paramIdx });
-    fctx.body.push({ op: "call", funcIdx: undefIdx });
-    fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: buildDestructureNullThrow(ctx, fctx), else: [] });
+  // Also check JS undefined via __extern_is_undefined import.
+  //
+  // (#3010) HOST-MODE ONLY for the *container* guard. In host mode this catches a
+  // genuine JS `undefined` container (`let {x} = undefined` → TypeError) which is
+  // a real externref distinct from `null`. In standalone/wasi it must NOT run:
+  //   - The canonical standalone undefined is the null externref, already caught
+  //     by the `ref.is_null` check above — so this second call was historically
+  //     redundant (pre-#2979 `__extern_is_undefined` *was* bare `ref.is_null`).
+  //   - After #2979 `__extern_is_undefined` became sentinel-aware: it also reports
+  //     `true` for a `$BoxedNumber` carrying the UNDEF_F64 sentinel. That is
+  //     correct for *value* sites (`g.next().value === undefined`, element-default
+  //     application) but WRONG for a destructure *container*: a single-element
+  //     array-literal argument `f([undefined])` is scalarized at the call site to
+  //     exactly that boxed-sentinel, so the sentinel-aware container guard misread
+  //     the array as "undefined" and threw "Cannot destructure 'null' or
+  //     'undefined'" at runtime — regressing 55 `class/dstr/*meth-ary-ptrn-elem-
+  //     id-init-*` test262 files. Element-level default checks (which DO want the
+  //     sentinel awareness) call `__extern_is_undefined` directly elsewhere and
+  //     are unaffected. So: keep the sentinel-aware call for value sites, but for
+  //     the container guard rely on `ref.is_null` alone under standalone/wasi.
+  if (!ctx.standalone && !ctx.wasi) {
+    const undefIdx = ensureLateImport(ctx, "__extern_is_undefined", [{ kind: "externref" }], [{ kind: "i32" }]);
+    if (undefIdx !== undefined) {
+      flushLateImportShifts(ctx, fctx);
+      fctx.body.push({ op: "local.get", index: paramIdx });
+      fctx.body.push({ op: "call", funcIdx: undefIdx });
+      fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: buildDestructureNullThrow(ctx, fctx), else: [] });
+    }
   }
 }
 
