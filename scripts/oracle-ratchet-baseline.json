@@ -17,8 +17,8 @@
       "ctxChecker": 1
     },
     "src/codegen/binary-ops.ts": {
-      "getTypeAtLocation": 13,
-      "ctxChecker": 16
+      "getTypeAtLocation": 11,
+      "ctxChecker": 14
     },
     "src/codegen/builtin-static-globals.ts": {
       "getTypeAtLocation": 0,
@@ -53,8 +53,8 @@
       "ctxChecker": 32
     },
     "src/codegen/expressions/builtins.ts": {
-      "getTypeAtLocation": 5,
-      "ctxChecker": 5
+      "getTypeAtLocation": 4,
+      "ctxChecker": 4
     },
     "src/codegen/expressions/calls-closures.ts": {
       "getTypeAtLocation": 5,
@@ -69,8 +69,8 @@
       "ctxChecker": 5
     },
     "src/codegen/expressions/calls.ts": {
-      "getTypeAtLocation": 62,
-      "ctxChecker": 136
+      "getTypeAtLocation": 60,
+      "ctxChecker": 134
     },
     "src/codegen/expressions/eval-inline.ts": {
       "getTypeAtLocation": 2,
@@ -97,12 +97,12 @@
       "ctxChecker": 5
     },
     "src/codegen/expressions/new-super.ts": {
-      "getTypeAtLocation": 23,
-      "ctxChecker": 47
+      "getTypeAtLocation": 21,
+      "ctxChecker": 45
     },
     "src/codegen/expressions/unary-updates.ts": {
-      "getTypeAtLocation": 5,
-      "ctxChecker": 5
+      "getTypeAtLocation": 4,
+      "ctxChecker": 4
     },
     "src/codegen/expressions/unary.ts": {
       "getTypeAtLocation": 1,

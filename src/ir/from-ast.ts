@@ -1961,6 +1961,17 @@ function lowerOptionalExternPropertyAccess(
 }
 
 /**
+ * #3000 — map a property name to the struct-slot key the class registry uses.
+ * A `PrivateIdentifier` (`#x`) is mangled to `__priv_x`, byte-for-byte matching
+ * the legacy `resolveClassMemberName` (`src/codegen/class-bodies.ts`) so the IR
+ * `class.get`/`class.set` resolve the identical `structFields` slot the legacy
+ * path allocated. A plain `Identifier` passes through unchanged.
+ */
+function irPrivateFieldName(name: ts.Identifier | ts.PrivateIdentifier): string {
+  return ts.isPrivateIdentifier(name) ? "__priv_" + name.text.slice(1) : name.text;
+}
+
+/**
  * Lower a property access expression.
  *
  * Slice 1 (#1169a) handles `<string>.length` (the only `.length` form
@@ -1974,10 +1985,17 @@ function lowerOptionalExternPropertyAccess(
  * containing function falls back to legacy.
  */
 function lowerPropertyAccess(expr: ts.PropertyAccessExpression, cx: LowerCtx): IrValueId {
-  if (!ts.isIdentifier(expr.name)) {
+  // #3000 — private-field read (`this.#x`). A PrivateIdentifier is not an
+  // Identifier, so the pre-#3000 guard rejected it. Private names lower to the
+  // SAME mangled struct-slot key the legacy path registers
+  // (`resolveClassMemberName`: `#x` → `__priv_x`), so the class shape / fieldIdx
+  // resolve the identical slot. Only class receivers carry private slots; on any
+  // other receiver kind the mangled name won't be found and the function
+  // demotes to legacy cleanly.
+  if (!ts.isIdentifier(expr.name) && !ts.isPrivateIdentifier(expr.name)) {
     throw new Error(`ir/from-ast: computed property access not in slice 2 (${cx.funcName})`);
   }
-  const propName = expr.name.text;
+  const propName = irPrivateFieldName(expr.name);
 
   // Receiver type is unknown until we lower it; pass an f64 hint (the
   // numeric default) and inspect the resulting IrType. The hint is
@@ -3250,10 +3268,12 @@ function lowerStringMethodCall(
  */
 function lowerPropertyAssignment(expr: ts.BinaryExpression, cx: LowerCtx): void {
   const lhs = expr.left;
-  if (!ts.isPropertyAccessExpression(lhs) || !ts.isIdentifier(lhs.name)) {
+  // #3000 — private-field write (`this.#x = v`). Same mangling as the read
+  // path so the write targets the identical legacy struct slot.
+  if (!ts.isPropertyAccessExpression(lhs) || (!ts.isIdentifier(lhs.name) && !ts.isPrivateIdentifier(lhs.name))) {
     throw new Error(`ir/from-ast: malformed property assignment LHS in ${cx.funcName}`);
   }
-  const fieldName = lhs.name.text;
+  const fieldName = irPrivateFieldName(lhs.name);
   const recv = lowerExpr(lhs.expression, cx, irVal({ kind: "f64" }));
   const recvType = cx.builder.typeOf(recv);
 
