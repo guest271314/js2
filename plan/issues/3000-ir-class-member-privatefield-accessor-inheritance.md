@@ -4,7 +4,7 @@ title: "IR: class-member residual — private fields, accessors, inheritance/sup
 status: ready
 sprint: current
 created: 2026-07-02
-updated: 2026-07-02
+updated: 2026-07-03
 priority: medium
 horizon: xl
 feasibility: hard
@@ -106,3 +106,113 @@ Animal` needs parent-prefixed struct field layout, `super(...)` constructor
 Scoped out of #2857 (2026-07-02). #2857's original "drive class-method to zero"
 framing was mis-sized as `M`; the measure-first pass found only static-methods
 was a bounded win. This carries the XL remainder.
+
+## Implementation Notes — Phase 1a: private-field read/write substrate (2026-07-03, PR TBD)
+
+**Landed (this PR):** the private-field *shape gate + lowering* — the smallest
+independently-shippable slice of Phase 1. Clears the two class-member
+`body-shape-rejected` attributions on `classes.ts` (`Animal_new`,
+`Animal_speak`); `body-shape-rejected` corpus total 25 → 23.
+
+**Root cause of the rejection (verified on `upstream/main` @ bc8a1d4ca):** IR's
+Phase-1 shape gate and AST→IR lowerer both gated field access on
+`ts.isIdentifier(name)`. A `#x` name is a `ts.PrivateIdentifier`, *not* an
+`Identifier`, so `this.#x` read/write fell into `body-shape-rejected` *before*
+any `class.get`/`class.set` logic ran. Everything downstream was already in
+place: `buildIrClassShapes` (`src/codegen/index.ts`) reads fields straight from
+`ctx.structFields`, which *already includes* private slots, and
+`ClassRegistry.fieldIdx` (`src/ir/integration.ts`) resolves by the same
+`structFields` name → identical index. So the fix is purely at the gate + lower
+entry points.
+
+**The load-bearing detail — name mangling.** The legacy `resolveClassMemberName`
+(`src/codegen/class-bodies.ts:522`) stores a private field `#name` as
+`"__priv_name"` (strip `#`, prefix `__priv_`). The IR shape and `fieldIdx` both
+read that mangled name from `structFields`, so from-ast MUST mangle the
+`PrivateIdentifier` the *same* way (`irPrivateFieldName` in `from-ast.ts`) or the
+field lookup misses. Plain `Identifier` passes through unchanged.
+
+**Edits (5, all narrow):**
+- `src/ir/from-ast.ts` — `irPrivateFieldName` helper; `lowerPropertyAccess`
+  (read) and `lowerPropertyAssignment` (write) accept `PrivateIdentifier` +
+  mangle.
+- `src/ir/select.ts` — accept `PrivateIdentifier` in the `isPhase1Expr`
+  property-access read arm, the `isPhase1StatementList` non-tail assignment arm,
+  and the `isPhase1BodyStatement` (ctor/for-of body) assignment arm.
+- `scripts/ir-fallback-baseline.json` — ratchet body-shape-rejected 25 → 23.
+- `tests/issue-3000.test.ts` — selector + runtime (incl. super-dispatch) parity.
+
+**Key architectural findings (correct the issue's original phasing):**
+
+1. **Constructors are NOT emitted by Phase B integration.** `compileIrPathFunctions`
+   only builds `MethodDeclaration`s (`integration.ts:304`); it never builds a
+   `ConstructorDeclaration`. So even though the selector now *claims* `Animal_new`
+   (clearing its `body-shape-rejected`), Phase B skips it → the **legacy ctor
+   body still emits, byte-inert**. Real IR constructor emission (`struct.new` +
+   `__self` epilogue + field-init) is a **separate substrate = the issue's
+   "Phase C"**, independent of and larger than the private-field gate. The
+   issue's Phase 1 lumped "ctor private write" with "method private read"; in
+   the code they are two different integration paths.
+
+2. **`Animal_speak` (private read in a flat-class instance method) IS a real,
+   non-byte-inert codegen change** — it flows through Phase B, gets its body
+   replaced by IR-lowered Wasm (subject to the typeIdx parity guard at
+   `integration.ts:715`). Validated: `classes.ts`'s `Dog.speak()` override calls
+   `super.speak()` → the IR-emitted `Animal_speak` with a **Dog** receiver
+   (WasmGC subtype of Animal); `class.get __priv_name` reads the correct
+   parent-prefixed slot across the subtype boundary. Output matches legacy
+   exactly. **Contrast with #2857**, whose static-method claim was byte-inert —
+   #3000 has *no* byte-inert reduction; every metric drop that reaches Phase B
+   is a real emission change gated by test262.
+
+3. **Private-field *write* as a void-method tail is a pre-existing, non-private
+   gap.** `set(v){ this.#x = v }` is rejected at `isPhase1Tail` → `isPhase1Expr`
+   (`select.ts:~1821`), which rejects **all** `=` expressions (public or
+   private). Out of scope for this substrate; belongs to a general
+   "assignment-expression-statement as void tail" slice.
+
+**Validation:** `tests/issue-3000.test.ts` (5, pass); `private-class-members` +
+`ir-slice4-classes` + 3 other class equivalence files (22, pass); `tests/ir/*`
+and the class test files show **zero new failures vs base** (the `classes.ts` /
+`abstract-classes` / `issue-private-access-brand` / `ir/passes` / `inline-small`
+failures observed locally are **pre-existing** — stale `{ env: {} }` harnesses
+and unrelated inline/CF tests, identical with and without this change). Full
+test262 conformance is the CI gate.
+
+## Remaining surface — decomposition for future windows
+
+`class-method` is still **5** on `classes.ts`; the two class-member
+`body-shape-rejected` are cleared. The remainder splits into three
+independently-dispatchable slices, in dependency order:
+
+- **#3000-B — Accessors (get/set over the private slot)** [M].
+  Members: `Animal_name` (get+set), `Animal_age` (get), `Dog_breed` (get).
+  Needs: (a) selector — stop bucketing `GetAccessorDeclaration` /
+  `SetAccessorDeclaration` as `class-method` (`select.ts:411`) and claim them
+  like no-arg / one-arg methods over the (now-supported) private slot; note
+  get+set collapse to one `${Class}_${name}` funcMap key today. (b) Phase B
+  integration walk (`integration.ts:303`) currently only iterates
+  `MethodDeclaration`s — extend to accessor declarations, mapping to the legacy
+  accessor funcMap key. (c) the void-tail-assignment gap (finding 3 above) blocks
+  the *setter* body `set name(v){ this.#name = v }` — either lift the setter’s
+  lone assignment out of tail position in the gate, or land the general
+  void-tail-assignment slice first. **Depends on Phase 1a (this PR).**
+  `Dog_breed` additionally needs Phase E (it’s on the `extends` subclass).
+
+- **#3000-C — Constructor IR emission (Phase C)** [L]. Build
+  `ConstructorDeclaration`s in Phase B: allocate the struct, run field
+  initialisers + ctor body private/public writes, synthesise the `return this`
+  epilogue, and register under the `${Class}_new` funcMap key. Only after this
+  does `Animal_new`'s claim become a *real* IR emission (today byte-inert).
+  Prerequisite for making the ctor claim honest and for Phase E's `super(...)`.
+
+- **#3000-E — Inheritance / `super` (Phase E)** [XL, the big rock]. `Dog extends
+  Animal`. Needs: parent-prefixed `IrClassShape` (today `buildIrClassShapes`
+  skips any `extends` class — `index.ts:874`; and Phase B integration skips them
+  wholesale — `integration.ts:294`), `super(...)` ctor chaining (on top of
+  Phase C), and `super.method()` dispatch to the parent slot. Members:
+  `Dog_new`, `Dog_speak`. Loosen the selector `hasParent` arm (`select.ts:430`)
+  and both skip guards once the substrate exists. **Consider its own issue.**
+
+`"class-method"` joins `STRICT_IR_REASONS` (`src/codegen/index.ts`) only once
+B + C + E all land and the bucket is 0.

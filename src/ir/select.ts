@@ -995,8 +995,10 @@ function isPhase1StatementList(
         s.expression.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
         ts.isPropertyAccessExpression(s.expression.left)
       ) {
-        // LHS: <expr>.<id> — receiver expr must be Phase-1, prop must be Identifier.
-        if (!ts.isIdentifier(s.expression.left.name)) return shapeNo("nontail-assign-computedprop", s.expression);
+        // LHS: <expr>.<id> — receiver expr must be Phase-1, prop must be an
+        // Identifier or (#3000) a PrivateIdentifier (`this.#x = v`).
+        if (!ts.isIdentifier(s.expression.left.name) && !ts.isPrivateIdentifier(s.expression.left.name))
+          return shapeNo("nontail-assign-computedprop", s.expression);
         if (!isPhase1Expr(s.expression.left.expression, scope, localClasses))
           return shapeNo("nontail-assign-recv", s.expression.left.expression);
         // RHS: any Phase-1 expression.
@@ -1346,7 +1348,10 @@ function isPhase1BodyStatement(stmt: ts.Statement, scope: Set<string>, localClas
           return isPhase1Expr(stmt.expression.right, scope, localClasses);
         }
         if (ts.isPropertyAccessExpression(stmt.expression.left)) {
-          if (!ts.isIdentifier(stmt.expression.left.name)) return false;
+          // #3000 — allow `this.#x = v` (PrivateIdentifier) in method / ctor
+          // bodies, in addition to plain-Identifier field writes.
+          if (!ts.isIdentifier(stmt.expression.left.name) && !ts.isPrivateIdentifier(stmt.expression.left.name))
+            return false;
           if (!isPhase1Expr(stmt.expression.left.expression, scope, localClasses)) return false;
           return isPhase1Expr(stmt.expression.right, scope, localClasses);
         }
@@ -1928,7 +1933,11 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
   // class instance (recv is Phase-1; lowerer dispatches by the recv's
   // resolved IrType).
   if (ts.isPropertyAccessExpression(expr)) {
-    if (!ts.isIdentifier(expr.name)) return false;
+    // #3000 — accept private-field reads (`this.#x`). A PrivateIdentifier is a
+    // valid class-instance field access; from-ast lowers it to `class.get` on
+    // the mangled `__priv_x` slot. Non-class receivers with a private name are
+    // a TS error and never reach here.
+    if (!ts.isIdentifier(expr.name) && !ts.isPrivateIdentifier(expr.name)) return false;
     // Slice 11 (#1169n) — optional chaining (`obj?.prop`). The lowerer
     // doesn't yet emit the null-guard branch, so accept the shape
     // structurally but the lowerer will throw clean fallback when it
