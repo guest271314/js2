@@ -310,6 +310,26 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
     }
   }
 
+  // ── (#2972) string element access with a computed index ──
+  // The IR lowers a proven-in-bounds `s[i]` (string receiver, non-literal
+  // index) through the SAME charAt machinery as `s.charAt(i)` — but the
+  // element-access syntax never mentions `.charAt`, so the method-syntax
+  // scan below can't see it and the `string_charAt` env import would be
+  // missing at IR lower time (post-claim demote flag-off; a hard error
+  // under JS2WASM_IR_FIRST — the 14-test #2972 class). Pre-register the
+  // import whenever the shape appears with a string-typed receiver. If the
+  // IR ends up not claiming the function the import is simply unused (and
+  // eliminated by eliminateDeadImports), so over-registration is harmless.
+  // NOTE for #1930 (TypeOracle): this getTypeAtLocation site is a
+  // query-only fact read — migrate to `oracle.typeOf` when the facade lands.
+  if (
+    ts.isElementAccessExpression(node) &&
+    !ts.isStringLiteralLike(node.argumentExpression) &&
+    isStringType(ctx.checker.getTypeAtLocation(node.expression))
+  ) {
+    state.stringMethodNeeded.add("charAt");
+  }
+
   // ── collectPrimitiveMethodImports ──
   if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
     const prop = node.expression;
