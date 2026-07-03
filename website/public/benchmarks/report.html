@@ -2625,13 +2625,13 @@
 
           // Mode switch (only shown when standalone data is available).
           const conformanceHost = el("div");
-          let activeMode = "host";
+          let activeMode = standaloneView && localStorage.getItem("t262-mode") === "standalone" ? "standalone" : "host";
           const renderActive = () => {
             conformanceHost.textContent = "";
             const view = activeMode === "standalone" && standaloneView ? standaloneView : hostView;
             renderConformance(view, conformanceHost, conformanceRuns);
           };
-          if (false) {
+          if (standaloneView) {
             const modeSwitch = el("div", { className: "mode-switch" });
             const mkBtn = (mode, main, sub) => {
               const b = el(
