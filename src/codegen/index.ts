@@ -23,7 +23,7 @@ import {
 import type { FieldDef, Instr, StructTypeDef, ValType, WasmFunction, WasmModule } from "../ir/types.js";
 import { createEmptyModule } from "../ir/types.js";
 import { compileIrPathFunctions, type IrIntegrationError } from "../ir/integration.js";
-import { irVal, type IrType } from "../ir/nodes.js";
+import { irDynamic, isDynamic, irVal, type IrType } from "../ir/nodes.js";
 import { buildTypeMap, type LatticeType } from "../ir/propagate.js";
 import { planIrCompilation, irClosureSignatureFromFunctionTypeNode, type IrFallbackReason } from "../ir/select.js";
 import { makeIrHostGlobalResolver } from "../ir/host-extern.js"; // (#2856)
@@ -737,6 +737,22 @@ function resolvePositionType(
     if (ir) return ir;
     throw new Error(`object position type — lattice shape not lowerable to IrType.object`);
   }
+  // #2949 slice 2 — UNANNOTATED position whose lattice converged to `unknown`
+  // (no evidence) or `dynamic` (top): the position is honestly dynamic. MUST
+  // stay predicate-identical to the selector's `resolveParamType` /
+  // `resolveReturnType` dynamic arms (select.ts) — the selector claims
+  // exactly the functions this resolver maps, so a drift here would either
+  // drop claimed functions at resolve time (kind "resolve" demotions) or
+  // hand the from-ast builder types the move-only scan never approved.
+  // Lowering: `lowerIrTypeToValType`'s dynamic arm → `resolveDynamic()` =
+  // legacy `resolveWasmType`'s any/unknown carrier (fast: ref_null $AnyValue,
+  // host: externref), so the claimed function's Wasm signature equals what
+  // legacy gives the same declaration. `node` is undefined here (annotated
+  // positions — including element/field recursion, which always passes a
+  // node — returned or threw above).
+  if (mapped && (mapped.kind === "unknown" || mapped.kind === "dynamic")) {
+    return irDynamic();
+  }
   throw new Error(`no concrete type (mapped=${mapped?.kind ?? "missing"})`);
 }
 
@@ -1198,6 +1214,19 @@ function computeIrFirstSkipSet(plan: IrOverlayPlan, sourceFile: ts.SourceFile): 
     if (!fn || fn.asteriskToken) continue; // gate 2 — generators
     if (irFirstBodyReadsHostNode(fn, moduleNames)) continue; // gate 4 — host nodes
     if (irFirstBodyReadsStringElement(fn)) continue; // gate 5 — string element read (#2972)
+    // Gate 6 (#2949 slice 2) — dynamic-signature functions stay compile-twice
+    // under IR-first while the dynamic surface is move-only (no box/unbox
+    // lowering yet). The selector's `dynamicUsesAreMoveOnly` scan is designed
+    // to make claims build-proof, but a scan↔builder divergence on this brand-
+    // new surface would otherwise become a skipped-slot HARD error; keep the
+    // legacy body as the demotion target until slice 3 lowering + an ir_first
+    // lane measurement prove the claims robust, then lift this gate.
+    {
+      const o = plan.overrideMap.get(name);
+      if (o && (o.params.some((p) => isDynamic(p)) || (o.returnType !== null && isDynamic(o.returnType)))) {
+        continue;
+      }
+    }
     if (!edges) continue; // no edge info (defensive) — stay conservative
     const callees = edges.get(name);
     let closed = true;
