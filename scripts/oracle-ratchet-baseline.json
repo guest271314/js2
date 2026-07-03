@@ -70,11 +70,11 @@
     },
     "src/codegen/expressions/calls.ts": {
       "getTypeAtLocation": 62,
-      "ctxChecker": 135
+      "ctxChecker": 136
     },
     "src/codegen/expressions/eval-inline.ts": {
-      "getTypeAtLocation": 0,
-      "ctxChecker": 3
+      "getTypeAtLocation": 2,
+      "ctxChecker": 5
     },
     "src/codegen/expressions/extern.ts": {
       "getTypeAtLocation": 1,
@@ -98,7 +98,7 @@
     },
     "src/codegen/expressions/new-super.ts": {
       "getTypeAtLocation": 23,
-      "ctxChecker": 46
+      "ctxChecker": 47
     },
     "src/codegen/expressions/unary-updates.ts": {
       "getTypeAtLocation": 5,
