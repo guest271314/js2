@@ -231,3 +231,65 @@ differs.
 - Pre-existing unrelated failure `tests/ir-if-else-equivalence.test.ts`
   (`env "__unbox_number" requires a callable` — a harness import-stub gap)
   confirmed identical on clean `origin/main`; not touched by this slice.
+
+## Merge-park investigation (PR #2596, 2026-07-03, sr-multiexit-2)
+
+PR #2596 was bot-parked (`hold` + `auto-park-bot:merge-group-failure`) after
+the merge_group re-validation reported **net -4 pass (33369→33365)**, 4
+regressions / 0 improvements, bucket signature `eecf8e25208aade6`, failed run
+`28670066683` (`test262-sharded.yml`), js-host lane.
+
+**Verdict: NOT a real regression — a CI shared-worker flake. The PR is
+correct; no code fix needed.**
+
+### The 4 flagged tests (all js-host lane; standalone lane = 0 regressions)
+
+- `test/built-ins/DataView/prototype/setFloat16/length.js`
+- `test/built-ins/DisposableStack/length.js`
+- `test/built-ins/Promise/try/return-value.js`
+- `test/built-ins/SuppressedError/newtarget-is-undefined.js`
+
+### Why it cannot be this PR (structural)
+
+Every line #2596 changes is guarded by `ts.isDoStatement(...)` (from-ast.ts,
+select.ts) or `instr.postCond === true` (lower.ts). The non-`postCond`
+`while.loop`/`for.loop` emission is byte-for-byte the original code path, and
+the builder's `postCond` spread adds nothing when the flag is absent. **All 4
+flagged tests contain no loops at all** (and their harness includes —
+propertyHelper.js / asyncHelpers.js — contain no do-while). So none exercises
+a single changed path.
+
+### Empirical proof (see `.tmp/repro-2596.mjs`, `.tmp/run-2596.mjs`, `.tmp/dowhile-outcome.mjs`)
+
+1. **Byte-identical wasm** for all 4 tests across three commits — merge-base
+   `bc8a1d4` (pre-PR), PR-head `a53cacd0`, current `origin/main` `6b71c93`:
+   `dfd62ae67a556df2` / `b8938d4451e6acec` / `0ece0241fc27df9c` /
+   `1689c19edf1aef7b`. The PR does not change these tests' output; neither
+   does any commit currently on main.
+2. **All 4 pass in isolation** at HEAD (compile + instantiate + run test()).
+3. **Real test262 runner** (`pnpm run test:262`, gc target, the same worker
+   path the merge_group uses) scoped to the 4 files at HEAD: **4 pass / 4
+   (100%)**.
+4. **Full do-while blast radius neutral**: 113 drivable test262 do-while tests
+   have *identical outcomes* at merge-base vs HEAD (24 COMPILE_FAIL, 56 OK, 25
+   WASM_EXN — all pre-existing break/continue/negative cases, unchanged). No
+   do-while test's status flips, so the IR do-while lowering is
+   behaviour-equivalent to the direct path and does not poison any worker.
+5. **Standalone lane**: 0 regressions.
+
+### Mechanism of the flake
+
+The gate's baseline recorded these newer-feature tests as `pass`; the
+merge_group shard recorded `fail` with a wasm_sha bookkeeping delta but the
+actual compiled+run behaviour is identical and passing. These four
+newer-feature tests (setFloat16 / DisposableStack / Promise.try /
+SuppressedError) are exactly the kind that get collateral-failed by
+shared-worker built-in poisoning (adjacent prototype-mutation tests in the
+same shard fork), a known class the worker recycles for but can leak. Per
+auto-park rule (c), a confirmed flake/collateral may be re-admitted.
+
+### Recommendation
+
+Remove the `hold` and let `auto-enqueue` re-admit #2596 (do NOT re-enqueue by
+hand). No branch change is required. Escalated to the tech lead for the
+label removal per auto-park protocol.
