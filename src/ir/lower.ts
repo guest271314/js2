@@ -1693,13 +1693,30 @@ export function lowerIrFunctionBody<S>(
       }
       // Slice 6 part 3 (#1182) — coercion + iterator protocol ops.
       case "coerce.to_externref": {
-        // Push the value, then convert any (ref) → externref. If the
-        // input is already externref, the convert is a wasm validation
-        // no-op (it's permitted on already-externref values). For all
-        // ref-typed inputs the wasm engine simply re-tags the reference
-        // so it can flow into externref-typed positions.
+        // Push the value, then re-tag an anyref subtype → externref.
+        //
+        // #2955 — whether the operand is ALREADY externref is a string-mode
+        // decision that belongs HERE, at lower time, not in the from-ast
+        // front-end. `extern.convert_any` maps an anyref subtype into
+        // externref, but it is INVALID over an operand whose Wasm valtype is
+        // already externref (externref is not itself an anyref subtype). In
+        // host-strings mode `IrType.string` lowers to externref, so the
+        // convert must be ELIDED; in native-strings mode it lowers to
+        // `(ref $AnyString)` (an anyref subtype) and the convert is REQUIRED.
+        // An operand already typed `(val) externref` is likewise a no-op.
+        // Emitting the convert over an already-externref operand is dead
+        // today (from-ast guards every site), so this elision is byte-inert
+        // for existing callers while letting from-ast drop those guards and
+        // emit `coerce.to_externref` mode-agnostically (identical IR in both
+        // string modes; per-mode lowered bytes unchanged).
         emitValue(instr.value, out);
-        emitter.pushRaw(out, { op: "extern.convert_any" });
+        const opTy = typeOf(instr.value);
+        const alreadyExternref =
+          (opTy.kind === "val" && opTy.val.kind === "externref") ||
+          (opTy.kind === "string" && resolver.resolveString?.()?.kind === "externref");
+        if (!alreadyExternref) {
+          emitter.pushRaw(out, { op: "extern.convert_any" });
+        }
         return;
       }
       case "iter.new": {
