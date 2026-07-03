@@ -51,3 +51,22 @@ Mirror Node's default behavior at the natural exit points:
 - Late attach within the same drain (reject → microtask → attach) does NOT
   report (matches JS semantics for same-turn handling).
 - No behavior change in host mode; host-free floor net-positive or neutral.
+
+## Deferral note (2026-07-02)
+
+Deferred after an initial measure-first sizing pass. Two reasons:
+
+1. **Mis-sized S → M.** The frontmatter `horizon: s` understates the work.
+   Unhandled-rejection tracking requires a `$Promise` struct-layout change
+   (an `unhandled` flag + a list-link field for the intrusive
+   `$rejectedUnhandled` list), plus new logic at the settle/attach sites and
+   at both exit points (`__drain_microtasks` empty-ring and `__run_event_loop`
+   termination). That is an M, not an S.
+
+2. **Contended core file.** `src/codegen/async-scheduler.ts` is under active
+   edit by 6+ concurrent branches doing Promise-carrier work. Landing a
+   struct-layout change here now would collide heavily.
+
+**Recommendation:** sequence this after the carrier work settles — specifically
+after #2867 / #2959 land — then re-scope as `horizon: m` and reclaim. Claim was
+released on the `issue-assignments` ref; `status` left `ready`.
