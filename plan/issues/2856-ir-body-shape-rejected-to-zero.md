@@ -1,12 +1,12 @@
 ---
 id: 2856
 title: "IR: drive body-shape-rejected fallback bucket to zero (dominant unintended bucket)"
-status: in-progress
-assignee: ttraenkler/dev-2856f
-spec: ready
+status: blocked
+assignee: ttraenkler/sr-bodyshape2
+spec: needs-rescope
 sprint: current
 created: 2026-06-30
-updated: 2026-07-02
+updated: 2026-07-03
 priority: high
 horizon: l
 feasibility: hard
@@ -550,3 +550,126 @@ in-file for now. When splitting them out, get fresh ids via
 `claim-issue.mjs --allocate` and carry over the ⚠ contagion sequencing
 constraint above (an arm landed before extern-in-IR must prove
 `call-graph-closure` does not grow).
+
+## Step-2 root-cause analysis (2026-07-03, sr-bodyshape2) — the "dev-sized arms" framing is EMPIRICALLY DISPROVEN; no single mergeable PR can reduce this bucket
+
+Re-grounded from a clean `upstream/main` (@ 93ab47912). Confirmed the extern-in-IR
+Slice-1 (#2454's recorder + `2fcfbe06a`) **did** land and the baseline is now
+`body-shape-rejected: 25 / call-graph-closure: 10 / class-method: 5` (the 31→25
+reduction is banked — the "reduction never happened" premise some dispatch notes
+carried is stale). Fresh `JS2WASM_IR_SHAPE_DIAG=1 pnpm run check:ir-fallbacks -- --shape-diag`
+histogram of the current 25:
+
+| count | reject arm                                    | functions |
+| ----- | --------------------------------------------- | --------- |
+| 8 | `nontail-callstmt:CallExpression` | the 8 benchmark-harness `main`s (benchmarks.ts, benchmarks/{array,dom,fib,loop,string,style}.ts, js/builtins.ts) |
+| 4 | `unattributed-arm:helper-internal` | calendar `updFoot`, async `delay`, classes `Animal_new`/`Animal_speak` |
+| 3 | `body-unhandled-stmt:IfStatement` | algorithms `binarySearch`/`quicksort`/`joinNums` |
+| 2 | `vardecl-typenode:ArrayType` | benchmarks.ts + benchmarks/array.ts `bench_array` |
+| 1 each | `expr-unhandled:ArrowFunction` (helpers `addBenchCard`), `tail-unhandled:ExpressionStatement` (calendar `fdow`), `nontail-if-cond:BinaryExpression` (calendar `renderCal`), `nontail-unhandled-stmt:IfStatement` (calendar `onDay`), `nontail-assign-nonprop-lhs:BinaryExpression` (calendar `main`), `vardecl-init-expr:CallExpression` (algorithms `fibMemo`), `expr-arraylit-cloop-guard-1804:ArrayLiteralExpression` (algorithms `main`), `expr-binary-op-instanceof:BinaryExpression` (classes `main`) | — |
+
+### The two structural blockers that make every "dev-sized arm" a dead end
+
+**(1) Demotion is contagious (verified in source, `select.ts:492-518`).** Step-2's
+`call-graph-closure` fixpoint removes ANY shape-claimable function whose local
+caller OR callee is unclaimed. `buildLocalCallGraph` (`select.ts:2193-2198`) only
+creates edges for real `CallExpression`s with a local-decl callee — a function
+passed *by reference* (e.g. `addBenchCard(…, bench_fib)`) or called *inside a
+nested arrow* (`select.ts:2164` does not descend into nested function-likes) is
+**not** an edge. Consequence: fixing a leaf statement/expression arm inside a
+function whose call-component root (`main`) stays unclaimed does not reduce the
+gated total — it **moves** the count from `body-shape-rejected` into
+`call-graph-closure`, and the gate fails on that bucket's growth. So the unit of
+reduction is a **whole call-component**, never a single arm.
+
+**(2) The gate compiles each corpus file as a per-file program**
+(`scripts/check-ir-fallbacks.ts:217` — `ts.createProgram([filePath], …)`). Imports
+from sibling modules (`el`, `addBenchCard` from `benchmarks/helpers.ts`) are
+therefore genuinely **external**, landing in the `external-call` bucket.
+
+### Empirical proof that the highest-value arm is net-zero
+
+Temporarily accepting *any* out-of-scope identifier in `isPhase1Expr` (the
+"top-level function passed as a `() => number` value" arm the 8 benchmark `main`s
+need) moved the gate to:
+
+```
+body-shape-rejected   25 → 17   (-8)      ← the 8 benchmark mains leave body-shape
+external-call          0 →  7   (+7)      ← …but land here (imported el/addBenchCard)
+call-graph-closure    10 → 11   (+1)
+```
+
+Net unintended change: **0**. The gate FAILS on `external-call` + `call-graph-closure`
+growth. So the benchmark `main`s' `body-shape` rejection is **blocked BY #2858's
+domain (cross-module imported calls), not the reverse** — the dispatch claim that
+#2858 is "blocked on #2856" is backwards for this cluster: they are mutually
+entangled, and the benchmark mains need cross-module import lowering **and**
+first-class function-reference (closure-wrap ABI) lowering **together** before
+they can leave any unintended bucket.
+
+### Per-cluster capability requirements (each is a WHOLE-COMPONENT slice)
+
+- **Benchmark harness (8 `main`s + `helpers.ts`):** cross-module imported-call
+  lowering (#2858 / `external-call`) **+** top-level-function-reference as a
+  first-class `() => T` value (closure/`$__fn_wrap` ABI parity with legacy —
+  see `builtin-fn-meta.ts`, `closures.ts`) **+** the `addEventListener(…, () => …)`
+  arrow-closure value in `addBenchCard`. Contagion-safe leaves, but multi-capability.
+- **`bench_array` ×2 (contagion-safe leaves):** `ArrayType` annotation
+  (`isPhase1TypeNode`, trivial) **+** empty-array-literal + **growable-array
+  `.push`** (IR from-ast/lower have NO `.push` method arm — verified) **+** the
+  #1804 C-style-loop vec-SSA-threading correctness fix (the guard at
+  `select.ts:1967` protects a real lowering bug, not a shape check). Widening
+  `isPhase1TypeNode` alone is a no-op: `bench_array` immediately falls through to
+  `expr-arraylit-cloop-guard-1804` (verified).
+- **algorithms.ts (5 fns, one call-component rooted at `main`):**
+  `if`-in-non-tail-body-statement selector arm (`isPhase1BodyStatement` has no
+  `IfStatement` arm — `select.ts:1407`) **+** element-store `arr[i] = e`
+  (quicksort) **+** module-scope `Map` global with `.get`/`.set` sharing the
+  legacy backend's storage slot (fibMemo) **+** array-literal-under-C-style-loop
+  SSA (main's `const sorted = […]`). All pure computation (no host/closure), the
+  most self-contained cluster, but ≥3 real capabilities that MUST land together.
+- **classes.ts (3 fns):** `#private` field read/write (`ts.PrivateIdentifier`
+  is not an `Identifier`) **+** `instanceof` (`isPhase1BinaryOp` rejects it) **+**
+  `super`/inheritance interplay.
+- **calendar.ts (5 fns):** module-scope **mutable** bindings (`selStart`, `gridEl`,
+  …) **+** DOM member chains **+** if-in-body **+** `new Date()`.
+- **async.ts `delay`:** `new Promise((resolve) => …)` executor closure (borders
+  the `deferred`/async lane).
+
+### Why NO incremental capability PR is mergeable against this corpus
+
+Because the gate ratchets on this fixed corpus, any capability a
+contagion-locked corpus function needs (e.g. the `if`-in-body arm, which is
+genuinely useful and reusable) **cannot** be added incrementally: relaxing the
+selector for it flips `binarySearch`/`quicksort`/`joinNums` to shape-claimable,
+which the `call-graph-closure` fixpoint then demotes (their `main` is
+unclaimable) — the gate fails on `call-graph-closure` growth. Verified by
+inspection of the fixpoint. There is no corpus file whose whole call-component is
+one capability away from fully claiming.
+
+### Recommendation (routing)
+
+`body-shape-rejected → 0` is **not a dev-lane ticket and not decomposable into the
+"smaller dev-sized arms" listed in the earlier spec** — every one of those arms is
+either contagion-locked to an unclaimable `main` or has a deeper co-blocker in the
+same function. It is a **multi-capability program** that must be scheduled as
+whole-call-component slices, several of which (cross-module calls, first-class
+function values, growable arrays, module-scope mutable Map) are substantial IR
+features in their own right and overlap #2858 (cross-module/`external-call`),
+#2135 (capability predicate), #2138 (compile-once). Recommend PO/architect:
+
+1. Re-scope #2856 as a **tracking epic** under #2855, not an executable ticket.
+2. Cut capability sub-issues sized as whole-component slices, ordered by
+   self-containment: **algorithms.ts** (pure-compute; `if`-in-body + element-store
+   + Map-global + arraylit-SSA) is the cleanest first real reduction (−5, all
+   contagion-internal to one file). The benchmark-harness cluster (−8) should be
+   sequenced **after** #2858's cross-module-call lowering, since it is a hard
+   dependency, not a dependent.
+3. Do NOT dispatch the `ArrayType` / `if-in-body` / module-scope-binding arms as
+   standalone dev tasks — each is provably net-zero-or-worse against the gate in
+   isolation.
+
+No source change accompanies this analysis (the gate stays at 25/10/5); this PR is
+the corrected root-cause record so the team stops bouncing off the disproven
+"arms" decomposition. Marking `status: blocked` (on the capability program /
+#2858), `spec: needs-rescope`.
