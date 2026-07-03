@@ -57,21 +57,21 @@
   },
   {
     "edition": "ES2015",
-    "pass": 11080,
-    "fail": 4133,
-    "ce": 173,
+    "pass": 11084,
+    "fail": 4132,
+    "ce": 170,
     "skip": 0,
     "total": 15386,
     "pct": 72,
     "features": [
       {
         "name": "destructuring-binding",
-        "pass": 2038,
-        "fail": 459,
+        "pass": 2042,
+        "fail": 455,
         "ce": 36,
         "skip": 0,
         "total": 2533,
-        "pct": 80
+        "pct": 81
       },
       {
         "name": "generators",
@@ -3925,9 +3925,9 @@
   {
     "edition": "Proposals",
     "pass": 1491,
-    "fail": 3180,
+    "fail": 3171,
     "ce": 215,
-    "skip": 96,
+    "skip": 105,
     "total": 4982,
     "pct": 30
   }

@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-07-03T16:18:24.399Z",
-  "baseline_generated_at": "2026-07-03T16:18:24.399Z",
-  "baseline_sha": "241b47e86133e110ca5de9e98c8acafcf6953609",
+  "timestamp": "2026-07-03T18:07:07.935Z",
+  "baseline_generated_at": "2026-07-03T18:07:07.935Z",
+  "baseline_sha": "6b71c93e391ab778a15abd6e11175338a5e50d19",
   "oracle_version": 1,
   "mode": {
     "target": "standalone",
@@ -10,25 +10,25 @@
   },
   "summary": {
     "total": 43106,
-    "pass": 24912,
-    "fail": 16347,
+    "pass": 24916,
+    "fail": 16343,
     "compile_error": 1826,
     "compile_timeout": 3,
     "skip": 18,
     "compilable": 41259,
-    "host_free_pass": 18422,
+    "host_free_pass": 18426,
     "leaky_pass": 6490,
     "stale": 0,
     "by_category": {
       "standard": {
         "total": 42020,
-        "pass": 24666,
-        "fail": 15548,
+        "pass": 24670,
+        "fail": 15544,
         "compile_error": 1785,
         "compile_timeout": 3,
         "skip": 18,
         "compilable": 40214,
-        "host_free_pass": 18178,
+        "host_free_pass": 18182,
         "leaky_pass": 6488,
         "stale": 0,
         "label": "ECMAScript current standard"
@@ -61,26 +61,26 @@
       },
       "official": {
         "total": 43106,
-        "pass": 24912,
-        "fail": 16347,
+        "pass": 24916,
+        "fail": 16343,
         "compile_error": 1826,
         "compile_timeout": 3,
         "skip": 18,
         "compilable": 41259,
-        "host_free_pass": 18422,
+        "host_free_pass": 18426,
         "leaky_pass": 6490,
         "stale": 0,
         "label": "standard + annex_b (default)"
       },
       "full": {
         "total": 48088,
-        "pass": 26052,
-        "fail": 19849,
+        "pass": 26056,
+        "fail": 19845,
         "compile_error": 2060,
         "compile_timeout": 4,
         "skip": 123,
         "compilable": 45901,
-        "host_free_pass": 18773,
+        "host_free_pass": 18777,
         "leaky_pass": 7279,
         "stale": 0,
         "label": "standard + annex_b + proposals"
@@ -89,37 +89,37 @@
   },
   "official_summary": {
     "total": 43106,
-    "pass": 24912,
-    "fail": 16347,
+    "pass": 24916,
+    "fail": 16343,
     "compile_error": 1826,
     "compile_timeout": 3,
     "skip": 18,
     "compilable": 41259,
-    "host_free_pass": 18422,
+    "host_free_pass": 18426,
     "leaky_pass": 6490,
     "stale": 0
   },
   "full_summary": {
     "total": 48088,
-    "pass": 26052,
-    "fail": 19849,
+    "pass": 26056,
+    "fail": 19845,
     "compile_error": 2060,
     "compile_timeout": 4,
     "skip": 123,
     "compilable": 45901,
-    "host_free_pass": 18773,
+    "host_free_pass": 18777,
     "leaky_pass": 7279,
     "stale": 0
   },
   "strict_summary": {
     "total": 40597,
-    "pass": 23930,
-    "fail": 14927,
+    "pass": 23934,
+    "fail": 14923,
     "compile_error": 1719,
     "compile_timeout": 3,
     "skip": 18,
     "compilable": 38857,
-    "host_free_pass": 17662,
+    "host_free_pass": 17666,
     "leaky_pass": 6268,
     "stale": 0
   },
@@ -150,13 +150,13 @@
     },
     "standard": {
       "total": 42020,
-      "pass": 24666,
-      "fail": 15548,
+      "pass": 24670,
+      "fail": 15544,
       "compile_error": 1785,
       "compile_timeout": 3,
       "skip": 18,
       "compilable": 40214,
-      "host_free_pass": 18178,
+      "host_free_pass": 18182,
       "leaky_pass": 6488,
       "stale": 0
     }
@@ -990,13 +990,13 @@
     {
       "name": "language/expressions",
       "path": "language/expressions",
-      "pass": 7941,
-      "fail": 2770,
+      "pass": 7943,
+      "fail": 2768,
       "compile_error": 306,
       "compile_timeout": 1,
       "skip": 18,
       "total": 11036,
-      "host_free_pass": 5074
+      "host_free_pass": 5076
     },
     {
       "name": "language/function-code",
@@ -1166,13 +1166,13 @@
     {
       "name": "language/statements",
       "path": "language/statements",
-      "pass": 6545,
-      "fail": 2570,
+      "pass": 6547,
+      "fail": 2568,
       "compile_error": 221,
       "compile_timeout": 1,
       "skip": 0,
       "total": 9337,
-      "host_free_pass": 3754
+      "host_free_pass": 3756
     },
     {
       "name": "language/types",
@@ -1200,7 +1200,7 @@
   "error_categories": {
     "assertion_fail": 11217,
     "illegal_cast": 805,
-    "negative_test_fail": 78,
+    "negative_test_fail": 74,
     "null_deref": 395,
     "oob": 40,
     "other": 5015,
@@ -1220,8 +1220,8 @@
   },
   "root_cause_map": {
     "target": "standalone",
-    "total_non_pass_non_skip": 21913,
-    "classified": 21913,
+    "total_non_pass_non_skip": 21909,
+    "classified": 21909,
     "unclassified_threshold": null,
     "buckets": [
       {
@@ -1274,14 +1274,14 @@
         "sample_files": [
           "test/language/expressions/dynamic-import/catch/nested-arrow-import-catch-import-source-source-text-module.js",
           "test/language/expressions/dynamic-import/syntax/valid/nested-block-labeled-import-source-empty-str-is-valid-assign-expr.js",
-          "test/language/expressions/dynamic-import/syntax/valid/nested-async-function-import-defer-script-code-valid.js",
           "test/language/expressions/dynamic-import/syntax/valid/nested-function-import-source-script-code-valid.js",
+          "test/language/expressions/dynamic-import/syntax/valid/nested-async-function-import-defer-script-code-valid.js",
           "test/language/expressions/dynamic-import/syntax/valid/nested-async-function-await-import-defer-empty-str-is-valid-assign-expr.js"
         ],
         "sample_signatures": [
           "other:L#:## SyntaxError: import.source(...) is not supported (Stage # proposal — import-defer / source-phase-imports)",
-          "other:L#:## SyntaxError: import.defer(...) is not supported (Stage # proposal — import-defer / source-phase-imports)",
-          "runtime_error:L#:## Cannot redeclare block-scoped variable 'smoosh'; L#:## SyntaxError: import.source(...) is not supported (Stage # proposal — import-defer / source-phase-imports)"
+          "runtime_error:L#:## Cannot redeclare block-scoped variable 'smoosh'; L#:## SyntaxError: import.source(...) is not supported (Stage # proposal — import-defer / source-phase-imports)",
+          "other:L#:## SyntaxError: import.defer(...) is not supported (Stage # proposal — import-defer / source-phase-imports)"
         ]
       },
       {
@@ -1300,8 +1300,8 @@
         },
         "error_categories": {
           "other": 2478,
-          "illegal_cast": 8,
           "wasm_compile": 68,
+          "illegal_cast": 8,
           "null_deref": 51,
           "type_error": 182,
           "assertion_fail": 781,
@@ -1309,16 +1309,16 @@
         },
         "sample_files": [
           "test/built-ins/Temporal/Now/zonedDateTimeISO/return-value.js",
-          "test/built-ins/Temporal/ZonedDateTime/prototype/eraYear/prop-desc.js",
           "test/built-ins/Temporal/PlainDateTime/subclass.js",
+          "test/built-ins/Temporal/ZonedDateTime/prototype/eraYear/prop-desc.js",
           "test/built-ins/Temporal/PlainDateTime/prototype/month/prop-desc.js",
-          "test/built-ins/Temporal/PlainMonthDay/refisoyear-undefined.js"
+          "test/built-ins/Temporal/Instant/prototype/toString/timezone-wrong-type.js"
         ],
         "sample_signatures": [
           "other:ReferenceError: Temporal is not defined",
           "other:ReferenceError: TemporalHelpers is not defined",
-          "illegal_cast:illegal cast [in __str_to_number() ← test]",
           "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: extern.convert_any[#] expected type shared anyref, found array.get of type i64 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $instance",
+          "illegal_cast:illegal cast [in __str_to_number() ← test]",
           "null_deref:L#:## dereferencing a null pointer [in test()]"
         ]
       },
@@ -1459,15 +1459,15 @@
         "sample_files": [
           "test/built-ins/JSON/parse/15.12.2-2-2.js",
           "test/built-ins/JSON/stringify/space-wrong-type.js",
-          "test/built-ins/JSON/stringify/replacer-array-empty.js",
           "test/built-ins/JSON/parse/reviver-array-define-prop-err.js",
+          "test/built-ins/JSON/stringify/replacer-array-empty.js",
           "test/built-ins/JSON/parse/15.12.2-2-6.js"
         ],
         "sample_signatures": [
           "illegal_cast:L#:## illegal cast [in test()]",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(JSON.stringify(obj), JSON.stringify(obj, null, null));",
-          "assertion_fail:returned # — assert ## at L#: assert.sameValue( JSON.stringify([#, {a: #}], []), '[#,{}]' );",
           "assertion_fail:returned # — assert ## at L#: throw new Test262Error();",
+          "assertion_fail:returned # — assert ## at L#: assert.sameValue( JSON.stringify([#, {a: #}], []), '[#,{}]' );",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(JSON.stringify(obj, null, ' '), [ '{' , ' \"a1\": {' , ' \"b1\": [' , ' #,' , ' #,' , ' #,' , ' #' , ' ],' , ' \"b2\": {' , ' \"c1\": #,' , ' \"c2\": #'"
         ]
       },
@@ -1566,7 +1566,7 @@
           "test/annexB/built-ins/RegExp/legacy-accessors/leftContext/this-not-regexp-constructor.js",
           "test/language/literals/regexp/S7.8.5_A2.3_T4.js",
           "test/built-ins/Proxy/has/trap-is-missing-target-is-proxy.js",
-          "test/built-ins/RegExp/duplicate-named-capturing-groups-syntax.js"
+          "test/built-ins/RegExp/S15.10.4.1_A3_T2.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: throw new Test262Error();",
@@ -1686,14 +1686,14 @@
         "id": "standalone-iterator-protocol",
         "issues": ["#1665", "#681", "#1718"],
         "label": "Generic iterator protocol still needs a pure-Wasm standalone path",
-        "count": 3086,
+        "count": 3084,
         "statuses": {
           "pass": 0,
-          "fail": 3020,
+          "fail": 3018,
           "compile_error": 65,
           "compile_timeout": 1,
           "skip": 0,
-          "total": 3086,
+          "total": 3084,
           "host_free_pass": 0
         },
         "error_categories": {
@@ -1706,7 +1706,7 @@
           "null_deref": 42,
           "promise_error": 12,
           "range_error": 2,
-          "negative_test_fail": 5,
+          "negative_test_fail": 3,
           "unreachable": 3
         },
         "sample_files": [
@@ -1748,8 +1748,8 @@
         },
         "sample_files": [
           "test/language/statements/for-await-of/async-func-dstr-const-obj-ptrn-id-init-skipped.js",
-          "test/built-ins/AsyncGeneratorFunction/prototype/extensibility.js",
           "test/built-ins/AsyncGeneratorFunction/instance-name.js",
+          "test/built-ins/AsyncGeneratorFunction/prototype/extensibility.js",
           "test/built-ins/GeneratorFunction/prototype/extensibility.js",
           "test/language/statements/for-await-of/async-func-dstr-let-obj-ptrn-id-init-skipped.js"
         ],
@@ -2195,21 +2195,21 @@
         "id": "assignment-private-short-circuit",
         "issues": ["#334", "#1456", "#540"],
         "label": "Assignment targets, private refs, and short-circuit semantics",
-        "count": 82,
+        "count": 80,
         "statuses": {
           "pass": 0,
-          "fail": 81,
+          "fail": 79,
           "compile_error": 1,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 82,
+          "total": 80,
           "host_free_pass": 0
         },
         "error_categories": {
           "assertion_fail": 70,
           "other": 2,
           "null_deref": 5,
-          "negative_test_fail": 3,
+          "negative_test_fail": 1,
           "type_error": 1,
           "illegal_cast": 1
         },
@@ -2386,8 +2386,8 @@
         },
         "error_categories": {
           "wasm_compile": 13,
-          "type_error": 5,
           "assertion_fail": 102,
+          "type_error": 5,
           "promise_error": 4,
           "other": 46,
           "negative_test_fail": 13,
@@ -2397,15 +2397,15 @@
         },
         "sample_files": [
           "test/language/statements/for/dstr/let-obj-ptrn-prop-obj.js",
-          "test/language/module-code/namespace/internals/delete-non-exported.js",
           "test/language/module-code/instn-local-bndng-cls.js",
+          "test/language/module-code/namespace/internals/delete-non-exported.js",
           "test/language/statements/for/dstr/const-ary-ptrn-elem-id-iter-val-err.js",
           "test/language/statements/for/dstr/const-ary-ptrn-rest-id-iter-val-err.js"
         ],
         "sample_signatures": [
           "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: not enough arguments on the stack for struct.new (need #, got #) @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $iterCount f64) (local ",
-          "type_error:TypeError: Cannot destructure 'null' or 'undefined'",
           "assertion_fail:returned # — assert ## at L#: assert.throws(ReferenceError, function() { typeof test262; }, 'Binding is created but not initialized.');",
+          "type_error:TypeError: Cannot destructure 'null' or 'undefined'",
           "assertion_fail:returned # — assert ## at L#: throw new Test262Error();",
           "assertion_fail:returned # — assert ## at L#: assert.throws(TypeError, function() { const { w: [x, y, z] = [#, #, #] } = { w: null }; });"
         ]
