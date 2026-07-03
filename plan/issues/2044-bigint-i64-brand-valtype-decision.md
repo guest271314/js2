@@ -1,11 +1,12 @@
 ---
 id: 2044
 title: "architect decision: BigInt value representation — i64-bigint-brand ValType vs TS-type-driven boxing (gates #1644 slices, implicated in #2039 i64 ABI bucket)"
-status: blocked
-blocked_by: [2167]
+status: done
+completed: 2026-07-03
+# was blocked_by: [2167] (fable-model gate) — resolved; decision ratified below
 sprint: current
 created: 2026-06-10
-updated: 2026-06-24
+updated: 2026-07-03
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -81,3 +82,75 @@ every coercion site and both backends — the same class of decision as #1852
   root cause or explicitly ruled out), with the evidence cited.
 - No regression in native-i64 benchmark code paths
   (`benchmarks/` numeric suites) under the chosen design.
+
+---
+
+## Architect Decision (2026-07-03, fable) — RATIFIED: option (a), the `bigint`-branded ValType
+
+**Decision: `{kind:"i64", bigint?: boolean}` is the permanent BigInt
+representation.** This ratifies the design **as-built**: while this issue sat
+behind the #2167 model gate, #1644 implemented option (a) end-to-end and is
+`done` on main (#1349 is wont-fix). The decision is therefore a ratification
+with evidence, not a fork in the road — re-grounded against current main
+(2026-07-03):
+
+### Evidence the design is landed and satisfies every stated constraint
+
+| Constraint | Where satisfied (current main) |
+|---|---|
+| Brand in the type lattice | `src/ir/types.ts:180` — `{ kind: "i64"; bigint?: boolean }` |
+| Producers brand at birth | declared storage: `src/checker/type-mapper.ts:41-45`; bigint literals: `src/codegen/expressions.ts:967`; arithmetic re-brands both-bigint results: `src/codegen/binary-ops.ts:1483-1488` |
+| Boxing consults the brand | `coerceType` i64→externref honours `from.bigint` → `__box_bigint` (`src/codegen/type-coercion.ts:1816-1822`) |
+| Unboxing / ToBigInt | externref→branded-i64 → `__to_bigint` (§7.1.13 ToBigInt) at `type-coercion.ts:1680-1690` |
+| `typeof 1n === "bigint"` | `__typeof_bigint` dispatch (`binary-ops.ts:2298`) |
+| Mixed-operand semantics | mixed bigint/number comparison + TypeError paths (`binary-ops.ts:1256-1330`) |
+| `BigInt(x)` ctor semantics | `__bigint_ctor` (NumberToBigInt RangeError, StringToBigInt, Symbol TypeError) |
+| Native i64 keeps raw perf | brand is **optional + inert** — an unbranded `{kind:"i64"}` (the `type i64 = number` annotation) matches every `.kind === "i64"` check and keeps raw-i64 codegen; no boxing introduced |
+| Both modes identical at the boundary | the brand lives in the front-end ValType, not in a backend; host `__box_bigint` is identity under JS-BigInt-integration, standalone carries the raw i64 payload |
+
+### Why (a) over (b), recorded for posterity
+
+Option (b) (TS-checker consultation at call sites) distributes the brand
+decision across every boxing site — exactly the divergence pattern that
+produces silent number-vs-bigint confusion. Landed history vindicates (a):
+the same inert-brand mechanism generalized cleanly to **boolean**
+(`i32.boolean`, #1788/#2795) and **symbol** (`i32.symbol`, #2785), so the
+lattice now has a uniform rule — **JS types that ride a scalar Wasm carrier
+get an optional, structurally-inert brand on the carrier's ValType, branded
+at production and consulted only at the box/unbox choke points**
+(`coerceType` + the #1917 coercion engine). See the paired #2712 decision
+(same date), which ratifies the boolean lane on this same pattern and
+declines a first-class `{kind:"bool"}`.
+
+### #2039 attribution (acceptance item) — NOT BigInt
+
+The ~230-row `call[0] expected type i64, found extern.convert_any`
+async-generator bucket is **ruled out as BigInt-related** — the attribution
+is recorded in `plan/issues/2039-standalone-invalid-wasm-residual-bucket.md`
+("Attribution: the ~230-row i64 bucket is NOT BigInt", 2026-06-10, citing
+this issue): the i64 in the validator message is an async-generator **resume
+ABI** slot (state/brand param) receiving an externref, i.e. an async-gen ABI
+bug that shares the physical i64↔externref boundary but not the
+representation-brand confusion. No action lands under this issue; the bucket
+stays with #2039 / the async-gen ABI work.
+
+### Risks / open edges (recorded, not blocking)
+
+- **>64-bit BigInt is out of scope.** Values are a single i64; arithmetic
+  wraps rather than growing arbitrary-precision. Documented honestly: the
+  supported range is `[-2^63, 2^63)`; `asIntN`/`asUintN` are exact for
+  bits ≤ 64. A future arbitrary-precision plan replaces the **carrier**
+  (i64 → limb array/struct) while keeping the same brand seam — the brand
+  is what makes that swap localized.
+- **Optional brands cannot force exhaustive switches.** The compensating
+  control is architectural: box/unbox decisions are legal ONLY in
+  `coerceType`/the #1917 engine (single choke point). Same mitigation as
+  #2712 invariant I2.
+
+### Downstream
+
+- #1644 / #1349: the historical gate this issue existed for — already
+  resolved (done / wont-fix); no re-sizing needed.
+- #2712: the boolean analog — unblocked by this ratification (paired
+  decision written 2026-07-03).
+- #2039: i64 bucket attributed away from BigInt (above).
