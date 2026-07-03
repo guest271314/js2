@@ -23,6 +23,11 @@
 //   node scripts/claim-issue.mjs --complete <id>
 //   node scripts/claim-issue.mjs --list
 //
+// --dry-run works for --allocate AND for the claim/release/complete write modes:
+// it previews the action and returns BEFORE any commit/push, so the
+// issue-assignments ref is never touched. It is position-independent (the flag
+// may appear anywhere in argv).
+//
 // ATOMIC ID ALLOCATION (#2531): `--allocate` is the canonical, collision-proof
 // way to reserve a FRESH issue id. Picking an id by hand ("next free off main")
 // races: two devs on separate branches each pick the same number because none
@@ -516,6 +521,29 @@ function writeMode(target, assignee, kind) {
     if (!main) {
       console.error(`warning: no issue file for #${base} found on ${MAIN_REF}; claiming anyway.`);
     }
+  }
+
+  // --dry-run: preview WITHOUT mutating the ref (no commit, no push). This MUST
+  // short-circuit BEFORE the retry/push loop below, regardless of where the flag
+  // appears in argv — `flags` is a position-independent Set built from every
+  // `--`-prefixed arg, so `claim-issue.mjs <id> <name> --dry-run` and
+  // `claim-issue.mjs --dry-run <id> <name>` both land here. Previously only
+  // --allocate honored --dry-run; a claim/release/complete probe with --dry-run
+  // silently performed a REAL mutation (agents accidentally claimed live issues
+  // twice this way).
+  if (flags.has("--dry-run")) {
+    const sha = remoteAssignSha();
+    fetchAssign(sha);
+    const existing = readEntry(sha, key);
+    const held = isHeld(existing);
+    console.error(
+      `(dry-run) would ${kind} ${label}${assignee ? ` -> ${assignee}` : ""}${branch ? ` (branch ${branch})` : ""}. ` +
+        (held
+          ? `Currently held by ${existing.assignee} (since ${existing.claimed_at || "?"}).`
+          : "Currently unassigned.") +
+        ` No push performed; ${REMOTE}/${ASSIGN_REF} untouched.`,
+    );
+    return;
   }
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {

@@ -72,6 +72,7 @@ import { addUnionImportsViaRegistry, flushLateImportShifts } from "./shared.js";
 import { reserveAccessorGetDriver, reserveAccessorSetDriver } from "./accessor-driver.js";
 import { ensureSymbolCarrier } from "./symbol-native.js";
 import { reserveArrayToPrimitiveString } from "./array-to-primitive.js";
+import { UNDEF_F64_BITS } from "./value-tags.js";
 import { reserveClassToPrimitive } from "./class-to-primitive.js";
 import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S2/S3) positional-read chokepoint + stable-regime minting
 
@@ -6656,12 +6657,53 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   // same value `undefined` lowers to. So `ref.is_null` applies the default in
   // precisely the "value is undefined" cases, matching §14.3.3 (keyed/iterator
   // binding initialization defaults fire when the bound value is `undefined`).
+  //
+  // (#2979) SECOND arm — the boxed UNDEF_F64 sentinel. An `undefined` that
+  // travels through an **f64 carrier** (the native generator done-result
+  // `.value` field is the producer today) carries the UNDEF_F64 signaling-NaN
+  // bit pattern (value-tags.ts); a generic f64→externref boxing site that isn't
+  // sentinel-aware wraps it in a `$BoxedNumber`. Recognize that box here so
+  // `x === undefined` / default-application still answer true after the value
+  // crossed a sentinel-blind boxing site. JS arithmetic only produces the
+  // quiet NaN 0x7FF8… — it can never forge the sentinel bits — and host mode
+  // never builds this native (native generators are standalone/wasi-only), so
+  // this cannot misfire on a genuine number. Gated on the carrier type
+  // existing; without it the body is the legacy bare `ref.is_null`.
   registerNative(
     "__extern_is_undefined",
     [{ kind: "externref" }],
     [{ kind: "i32" }],
-    [],
-    [{ op: "local.get", index: 0 }, { op: "ref.is_null" }],
+    ctx.nativeBoxNumberTypeIdx >= 0 ? [{ name: "any", type: { kind: "anyref" } }] : [],
+    ctx.nativeBoxNumberTypeIdx >= 0
+      ? [
+          { op: "local.get", index: 0 },
+          { op: "ref.is_null" },
+          {
+            op: "if",
+            blockType: { kind: "val", type: { kind: "i32" } },
+            then: [{ op: "i32.const", value: 1 }],
+            else: [
+              { op: "local.get", index: 0 },
+              { op: "any.convert_extern" },
+              { op: "local.tee", index: 1 },
+              { op: "ref.test", typeIdx: ctx.nativeBoxNumberTypeIdx },
+              {
+                op: "if",
+                blockType: { kind: "val", type: { kind: "i32" } },
+                then: [
+                  { op: "local.get", index: 1 },
+                  { op: "ref.cast", typeIdx: ctx.nativeBoxNumberTypeIdx },
+                  { op: "struct.get", typeIdx: ctx.nativeBoxNumberTypeIdx, fieldIdx: 0 },
+                  { op: "i64.reinterpret_f64" },
+                  { op: "i64.const", value: UNDEF_F64_BITS },
+                  { op: "i64.eq" },
+                ],
+                else: [{ op: "i32.const", value: 0 }],
+              } as Instr,
+            ],
+          } as Instr,
+        ]
+      : [{ op: "local.get", index: 0 }, { op: "ref.is_null" }],
   );
 
   // ── __extern_method_call(externref recv, externref name, externref args)
