@@ -2,10 +2,10 @@
 id: 2141
 title: "Retire the tag-5 box-the-externref ABI: make consumers tag-agnostic, then allow honest generic boxing"
 status: in-progress
-assignee: ttraenkler/dev-evalf
+assignee: ttraenkler/fable-tag5
 sprint: current
 created: 2026-06-12
-updated: 2026-07-02
+updated: 2026-07-04
 unblocked_note: "2026-07-02: blocked_by #2167 (Fable disabled) is done — Fable restored; flipped on claim per owner directive (task #32)."
 priority: high
 feasibility: hard
