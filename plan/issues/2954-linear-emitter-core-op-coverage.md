@@ -4,9 +4,9 @@ title: "LinearEmitter core-op coverage (const/binary/locals/control-flow/call) +
 status: done
 completed: 2026-07-02
 assignee: ttraenkler/opus-dev-a
-sprint: current
+sprint: 69
 created: 2026-07-02
-updated: 2026-07-02
+updated: 2026-07-03
 priority: medium
 horizon: m
 feasibility: medium

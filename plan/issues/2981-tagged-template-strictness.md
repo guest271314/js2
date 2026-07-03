@@ -2,7 +2,7 @@
 id: 2981
 title: Tagged-template equivalence tests reconcile to spec-correct TemplateStringsArray param type
 status: done
-sprint: current
+sprint: 69
 priority: high
 horizon: m
 assignee: ttraenkler/opus-3

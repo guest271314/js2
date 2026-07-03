@@ -4,7 +4,7 @@ title: "Standalone %ArrayIteratorPrototype% shared identity + Object-subclass na
 status: done
 assignee: ttraenkler/sendev-iterproto
 completed: 2026-07-03
-sprint: current
+sprint: 69
 created: 2026-07-03
 updated: 2026-07-03
 priority: medium

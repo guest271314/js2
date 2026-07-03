@@ -2,7 +2,7 @@
 id: 3019
 title: "Restore 106 silently-dead test files whose ./helpers.js import broke when helpers moved to tests/equivalence/"
 status: done
-sprint: current
+sprint: 69
 priority: medium
 created: 2026-07-03
 completed: 2026-07-03

@@ -2,7 +2,7 @@
 id: 2814
 title: All Native-Messaging example hosts must re-chunk (≤1 MiB JSON frames)
 status: done
-sprint: current
+sprint: 69
 priority: medium
 area: examples
 related: [389, 2807, 2810, 2775]

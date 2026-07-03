@@ -4,14 +4,14 @@ title: "Standalone: native Test262Error construction eliminates env::__new_Test2
 status: done
 created: 2026-06-30
 completed: 2026-06-30
-updated: 2026-06-30
+updated: 2026-07-03
 assignee: ttraenkler/sendev-error
 priority: high
 feasibility: hard
 task_type: feature
 area: codegen
 goal: standalone
-sprint: current
+sprint: 69
 horizon: m
 related: [1104, 1536, 2188, 2862]
 ---

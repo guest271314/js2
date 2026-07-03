@@ -10,7 +10,7 @@ feasibility: hard
 task_type: feature
 area: codegen
 goal: standalone
-sprint: current
+sprint: 69
 horizon: l
 related: [2866, 2696, 2520, 1888, 1065]
 ---

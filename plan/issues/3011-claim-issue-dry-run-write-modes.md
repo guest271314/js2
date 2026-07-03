@@ -3,7 +3,7 @@ id: 3011
 title: claim-issue.mjs --dry-run does not short-circuit in claim/release/complete modes
 status: done
 completed: 2026-07-03
-sprint: current
+sprint: 69
 priority: high
 horizon: s
 assignee: ttraenkler/dev-dryrun-fix

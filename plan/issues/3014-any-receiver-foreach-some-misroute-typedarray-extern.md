@@ -12,7 +12,7 @@ task_type: bugfix
 area: codegen
 language_feature: arrays
 goal: standalone-host-free
-sprint: current
+sprint: 69
 horizon: s
 assignee: ttraenkler/agent-opus
 origin: "2026-07-03 leak-analysis round 6 §sole-lever ranking — Uint8ClampedArray_forEach/some 16 sole-import passes (GENUINE)"

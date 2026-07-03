@@ -3,7 +3,7 @@ id: 2930
 title: "codegen: import binding whose local name differs from the target declaration name resolves to null"
 status: done
 priority: high
-sprint: current
+sprint: 69
 created: 2026-07-02
 completed: 2026-07-02
 assignee: ttraenkler/dev-2900

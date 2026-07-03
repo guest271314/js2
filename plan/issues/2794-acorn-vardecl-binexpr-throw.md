@@ -3,13 +3,13 @@ id: 2794
 title: "[SENIOR-DEV ONLY] acorn parse() var-declaration THROW — AST-Node-as-closureBridge + vec read-methods (host-proxy layer); closes #2681"
 status: done
 assignee: ttraenkler/sendev-acorn
-sprint: current
+sprint: 69
 priority: high
 horizon: l
 feasibility: hard
 reasoning_effort: high
 created: 2026-06-28
-updated: 2026-06-28
+updated: 2026-07-03
 completed: 2026-06-28
 task_type: bugfix
 area: codegen

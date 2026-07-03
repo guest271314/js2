@@ -2,7 +2,7 @@
 id: 2774
 title: Landing-page edition card summary % doesn't reconcile with its feature rows
 status: done
-sprint: current
+sprint: 69
 priority: low
 horizon: s
 feasibility: easy

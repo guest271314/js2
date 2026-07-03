@@ -4,7 +4,7 @@ title: "Array-pattern element with an object-literal / class-expression default 
 status: done
 assignee: ttraenkler/sd-dstr-objdefault
 created: 2026-06-28
-updated: 2026-06-28
+updated: 2026-07-03
 completed: 2026-06-28
 priority: high
 feasibility: hard
@@ -16,7 +16,7 @@ language_feature: destructuring
 goal: spec-completeness
 parent: 2669
 related: [2669, 2203, 2032]
-sprint: current
+sprint: 69
 ---
 
 # #2756 — array-pattern element with object/class default value null-derefs

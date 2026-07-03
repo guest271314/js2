@@ -4,13 +4,13 @@ title: "[SENIOR-DEV ONLY] S3 of #2773 — array-element / host-boundary native s
 status: done
 completed: 2026-06-28
 assignee: ttraenkler/sendev-substrate
-sprint: current
+sprint: 69
 priority: high
 horizon: l
 feasibility: hard
 reasoning_effort: high
 created: 2026-06-28
-updated: 2026-06-28
+updated: 2026-07-03
 task_type: bugfix
 area: codegen
 language_feature: value-representation

@@ -2,10 +2,10 @@
 id: 3009
 title: "Harden host-import degrade path: dropped stable-handle-coupled import must yield clean leak diagnostic, not absoluteFuncIndex crash"
 status: done
-sprint: current
+sprint: 69
 created: 2026-07-02
 completed: 2026-07-02
-updated: 2026-07-02
+updated: 2026-07-03
 assignee: ttraenkler/agent-a840cb644c42d6eab
 priority: medium
 horizon: m

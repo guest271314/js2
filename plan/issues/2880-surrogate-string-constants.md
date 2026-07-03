@@ -4,7 +4,7 @@ title: "Host mode: string constants containing lone surrogates arrive as `undefi
 status: done
 assignee: ttraenkler/explore2
 created: 2026-06-30
-updated: 2026-06-30
+updated: 2026-07-03
 completed: 2026-06-30
 priority: medium
 feasibility: medium
@@ -12,7 +12,7 @@ task_type: bug
 area: runtime
 language_feature: string-literals
 goal: test262
-sprint: current
+sprint: 69
 horizon: m
 related: [679]
 ---

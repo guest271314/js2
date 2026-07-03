@@ -5,14 +5,14 @@ status: done
 completed: 2026-07-02
 assignee: ttraenkler/agent-a45493
 created: 2026-06-29
-updated: 2026-07-02
+updated: 2026-07-03
 priority: medium
 feasibility: medium
 task_type: docs
 area: examples
 language_feature: native-messaging
 goal: platform
-sprint: current
+sprint: 69
 horizon: m
 related: [389, 2778, 2807]
 ---

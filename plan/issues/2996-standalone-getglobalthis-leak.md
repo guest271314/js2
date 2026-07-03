@@ -3,7 +3,7 @@ id: 2996
 title: "Eliminate env::__get_globalThis read leak in standalone mode (native globalThis value)"
 status: done
 completed: 2026-07-02
-sprint: current
+sprint: 69
 priority: medium
 horizon: m
 assignee: ttraenkler/agent-af6e582225dfb945b

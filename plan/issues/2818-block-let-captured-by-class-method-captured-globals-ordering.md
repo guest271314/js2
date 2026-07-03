@@ -15,7 +15,7 @@ area: codegen
 es_edition: 2015
 language_feature: closures
 goal: spec-completeness
-sprint: current
+sprint: 69
 horizon: m
 architect_spec: done
 ---

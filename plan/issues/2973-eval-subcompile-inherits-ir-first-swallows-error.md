@@ -4,9 +4,9 @@ title: "eval-shim sub-compiles inherit JS2WASM_IR_FIRST and swallow its hard err
 status: done
 assignee: ttraenkler/dev-2973
 completed: 2026-07-02
-sprint: current
+sprint: 69
 created: 2026-07-02
-updated: 2026-07-02
+updated: 2026-07-03
 priority: high
 feasibility: easy
 horizon: s

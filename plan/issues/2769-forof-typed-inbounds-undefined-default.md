@@ -5,7 +5,7 @@ status: done
 assignee: ttraenkler/forof769
 completed: 2026-06-28
 created: 2026-06-28
-updated: 2026-06-28
+updated: 2026-07-03
 priority: medium
 feasibility: hard
 reasoning_effort: high
@@ -15,7 +15,7 @@ es_edition: 2015
 language_feature: destructuring
 goal: spec-completeness
 related: [2669, 2216]
-sprint: current
+sprint: 69
 ---
 
 # #2769 — for-of typed in-bounds `undefined`/hole default-init (architect carve)

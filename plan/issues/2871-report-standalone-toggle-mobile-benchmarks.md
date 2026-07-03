@@ -2,7 +2,7 @@
 id: 2871
 title: "Conformance report page: standalone pass-rate toggle, mobile overflow, empty benchmarks, edition-scoped error patterns, standalone differential"
 status: done
-sprint: current
+sprint: 69
 priority: medium
 horizon: m
 feasibility: medium

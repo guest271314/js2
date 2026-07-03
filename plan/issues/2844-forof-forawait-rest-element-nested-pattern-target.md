@@ -2,7 +2,7 @@
 id: 2844
 parent: 2669
 related: [2602, 2826]
-sprint: current
+sprint: 69
 status: done
 completed: 2026-06-29
 assignee: ttraenkler/restobj

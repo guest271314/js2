@@ -4,7 +4,7 @@ title: "Object spread copies values but the copied keys are not enumerable (Obje
 status: done
 assignee: ttraenkler/sendev-soundness
 created: 2026-06-26
-updated: 2026-06-28
+updated: 2026-07-03
 completed: 2026-06-28
 priority: medium
 feasibility: medium
@@ -12,7 +12,7 @@ task_type: bugfix
 area: codegen
 language_feature: object-spread, Object.keys
 goal: spec-completeness
-sprint: current
+sprint: 69
 parent: 2709
 related: [2709, 1551]
 ---

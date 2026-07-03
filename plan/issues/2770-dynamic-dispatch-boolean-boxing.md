@@ -3,10 +3,10 @@ id: 2770
 title: "dynamic builtin boolean-method on a bare-var/dynamic receiver boxes the i32 result as a NUMBER not a boolean (set.has/map.has/re.test → 1 not true)"
 status: done
 assignee: ttraenkler/sendev-s5b-bool-brand
-sprint: current
+sprint: 69
 priority: high
 created: 2026-06-28
-updated: 2026-06-28
+updated: 2026-07-03
 completed: 2026-06-28
 feasibility: medium
 reasoning_effort: high

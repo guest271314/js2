@@ -3,7 +3,7 @@ id: 2882
 title: "Date.UTC: MakeFullYear, MakeDay month-overflow, non-finite/TimeClip → NaN"
 status: done
 completed: 2026-06-30
-sprint: current
+sprint: 69
 priority: medium
 horizon: m
 area: codegen

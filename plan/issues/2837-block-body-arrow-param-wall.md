@@ -4,7 +4,7 @@ title: "[SENIOR-DEV ONLY] dynamic property-add to a NON-EMPTY object literal is 
 status: done
 completed: 2026-06-29
 assignee: ttraenkler/sendev-arrowparam
-sprint: current
+sprint: 69
 priority: high
 horizon: l
 feasibility: hard

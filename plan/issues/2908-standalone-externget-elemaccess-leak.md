@@ -7,7 +7,7 @@ status: done
 completed: 2026-07-01
 assignee: ttraenkler/sdev-2908-externget-leak
 related: [2748, 2879, 2372, 2572, 1472]
-sprint: current
+sprint: 69
 priority: high
 horizon: m
 ---
