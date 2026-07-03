@@ -42,6 +42,7 @@
  */
 import type { Instr, ValType } from "../ir/types.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
+import { isNativeGeneratorResultStruct, sentinelAwareF64BoxInstrs } from "./generators-native.js";
 import { stringConstantExternrefInstrs } from "./native-strings.js";
 import { findAlternateStructsForField } from "./property-access.js";
 import { addStringConstantGlobal } from "./registry/imports.js";
@@ -165,6 +166,7 @@ export function fillMemberGetDispatch(ctx: CodegenContext): void {
           ]
         : [{ op: "ref.null.extern" } as Instr];
 
+    let usedSentinelBox = false;
     const buildGetDispatch = (idx: number): Instr[] => {
       if (idx >= candidates.length) return fallback;
       const cand = candidates[idx]!;
@@ -172,7 +174,22 @@ export function fillMemberGetDispatch(ctx: CodegenContext): void {
       // dispatcher's uniform result). Via the single coercion engine (#1917 /
       // #2108) — box helpers were registered at reserve so this is funcMap-read
       // only. externref field → no-op; f64/i32 → __box_number; ref → extern.convert_any.
-      const box = coercionInstrs(ctx, cand.fieldType, { kind: "externref" });
+      //
+      // (#2979) EXCEPTION — native generator IteratorResult structs: their f64
+      // `value` field uses the UNDEF_F64 sentinel as the absent/done marker
+      // (`g.next().value` after exhaustion is `undefined`, not a number). Box
+      // sentinel-aware: sentinel → null externref (the standalone canonical
+      // undefined), else __box_number. `__box_number` is a union native
+      // registered at reserve time, so this stays funcMap-read-only.
+      const boxNumIdx = ctx.funcMap.get("__box_number");
+      const useSentinelBox =
+        cand.fieldType.kind === "f64" &&
+        boxNumIdx !== undefined &&
+        isNativeGeneratorResultStruct(ctx, cand.structTypeIdx);
+      if (useSentinelBox) usedSentinelBox = true;
+      const box = useSentinelBox
+        ? sentinelAwareF64BoxInstrs(2, boxNumIdx)
+        : coercionInstrs(ctx, cand.fieldType, { kind: "externref" });
       const readInstrs: Instr[] = [
         { op: "local.get", index: 1 } as Instr, // __any
         { op: "ref.cast", typeIdx: cand.structTypeIdx } as Instr,
@@ -191,12 +208,22 @@ export function fillMemberGetDispatch(ctx: CodegenContext): void {
       ];
     };
 
-    dispFn.locals = [{ name: "__any", type: { kind: "anyref" } }];
-    dispFn.body = [
+    // Build the body FIRST so `usedSentinelBox` is known, then append the f64
+    // scratch local (index 2) only when a (#2979) sentinel-aware gen-result arm
+    // actually referenced it — keeps every dispatcher without such an arm
+    // byte-identical (host mode never has gen-result structs).
+    const dispatchBody: Instr[] = [
       { op: "local.get", index: 0 } as Instr, // recv (externref)
       { op: "any.convert_extern" } as Instr,
       { op: "local.set", index: 1 } as Instr, // __any
       ...buildGetDispatch(0),
     ];
+    dispFn.locals = usedSentinelBox
+      ? [
+          { name: "__any", type: { kind: "anyref" } },
+          { name: "__f64tmp", type: { kind: "f64" } },
+        ]
+      : [{ name: "__any", type: { kind: "anyref" } }];
+    dispFn.body = dispatchBody;
   }
 }

@@ -44,7 +44,14 @@ import { evaluateConstantCondition } from "../codegen/statements/control-flow.js
 import { isIncreasingStep, loopBodyMutatesIndexOrArray } from "../codegen/statements/loops.js";
 import { IrFunctionBuilder } from "./builder.js";
 import type { AllocSiteRegistry } from "./alloc-registry.js";
-import { assertNotDeferred, binaryOpCapability, hostExternCapability, prefixOpCapability } from "./capability.js";
+import {
+  assertNotDeferred,
+  binaryOpCapability,
+  collectStringLiteralLens,
+  hostExternCapability,
+  prefixOpCapability,
+  stringIndexProvenBelow,
+} from "./capability.js";
 import type { IrLowerResolver, IrVecLowering } from "./lower.js";
 import { mathUnaryToIrOp } from "./select.js";
 import {
@@ -452,6 +459,9 @@ export function lowerFunctionAstToIr(
     lifted,
     liftedCounter,
     mutatedLets,
+    // (#2972) statically-known literal string lengths — proven-in-bounds
+    // string element reads (`hex[(n >> 4) & 0xf]`) consult this.
+    stringLiteralLens: collectStringLiteralLens(fn),
     funcKind: isGenerator ? "generator" : "regular",
     generatorBufferSlot,
     checker: options.checker,
@@ -916,6 +926,14 @@ interface LowerCtx {
    * `lowerFunctionAstToIr` via `collectMutatedLetNames`.
    */
   readonly mutatedLets: ReadonlySet<string>;
+  /**
+   * (#2972) Locals bound once to a string literal and never reassigned
+   * (incl. nested-function writes) → the literal's code-unit length. Feeds
+   * the proven-in-bounds string element read in `lowerElementAccess`.
+   * Populated for the OUTER function only; nested/lifted contexts omit it
+   * (shadowing across closure scopes would make the fact unsound there).
+   */
+  readonly stringLiteralLens?: ReadonlyMap<string, number>;
   /**
    * Slice 7a (#1169f): kind of function being lowered. `lowerYield`
    * checks this to refuse `yield` outside generators (defensive — the
@@ -2338,6 +2356,35 @@ function lowerElementAccess(expr: ts.ElementAccessExpression, cx: LowerCtx): IrV
       }
       // SAFE path — index not proven → bounds-checked read, no trap.
       return emitSafeVecGet(recv, idxI32, vec.elementValType, cx);
+    }
+  }
+
+  // (#2972) String receiver with a PROVEN-in-bounds computed index: lower
+  // through the SAME charAt machinery as `s.charAt(i)`. For an integer index
+  // i with 0 ≤ i < s.length, `s[i]` ≡ `s.charAt(i)` exactly (§22.1.3.1 vs
+  // §10.4.3 String-exotic indexed access — both yield the single code unit).
+  // The PROOF is what makes typing the result `string` sound: an UNPROVEN
+  // index could be out of bounds, where `s[i]` is `undefined` but charAt is
+  // `""` — that residual deliberately stays on the demote path below (the
+  // documented element-access claim-partial residual; see
+  // plan/issues/2972-*.md for the widen-to-undefined alternative that was
+  // rejected). Proof = receiver is a never-reassigned local bound to a
+  // string literal (statically known length, `cx.stringLiteralLens`) AND the
+  // index is a non-negative integer literal < len, or bit-masked by `& K`
+  // with K < len (JS `x & K` = ToInt32 each, so for 0 ≤ K ≤ 2^31−1 the
+  // result's set bits ⊆ K's bits ⇒ result ∈ [0, K] — the test262 harness
+  // shape `hex[(n >> 4) & 0xf]` on a 16-char literal). BOTH lanes' helpers
+  // are pre-registered by the #2972 element-access arm of the unified
+  // collector scan (`declarations.ts`): it adds "charAt" to
+  // `stringMethodNeeded`, whose finalize loop registers the `string_charAt`
+  // env import (host lane) or calls `ensureNativeStringHelpers` for
+  // `__str_charAt` (native lane) — no late-import shift at IR lower time.
+  if (recvType.kind === "string" && ts.isIdentifier(expr.expression)) {
+    const litLen = cx.stringLiteralLens?.get(expr.expression.text);
+    if (litLen !== undefined && stringIndexProvenBelow(arg, litLen)) {
+      const r = lowerStringMethodCall("charAt", recv, ts.factory.createNodeArray([arg]), cx);
+      if (r !== null) return r;
+      throw new Error(`ir/from-ast: internal — charAt delegation produced no value in ${cx.funcName}`);
     }
   }
 
