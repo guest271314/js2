@@ -14,6 +14,7 @@
  */
 
 import type { Instr, LocalDef, ValType } from "../ir/types.js";
+import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S3b) stable-regime minting
 import type { CodegenContext } from "./context/types.js";
 import { addFuncType, getOrRegisterArrayType } from "./registry/types.js";
 
@@ -77,9 +78,9 @@ function emitFunc(
   body: Instr[],
 ): number {
   const typeIdx = addFuncType(ctx, params, results, `${name}_type`);
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const funcIdx = mintDefinedFunc(ctx);
   ctx.funcMap.set(name, funcIdx);
-  ctx.mod.functions.push({ name, typeIdx, locals, body, exported: false });
+  pushDefinedFunc(ctx, funcIdx, { name, typeIdx, locals, body, exported: false });
   return funcIdx;
 }
 

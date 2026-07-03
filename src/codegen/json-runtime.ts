@@ -33,6 +33,7 @@
  * - ECMA-262 §25.5.4.3 `QuoteJSONString`
  */
 import type { Instr, ValType } from "../ir/types.js";
+import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S3b) stable-regime minting
 import { ensureAnyValueType } from "./any-helpers.js";
 import type { CodegenContext } from "./context/types.js";
 import { ensureNativeStringHelpers, nativeStringType } from "./native-strings.js";
@@ -76,7 +77,7 @@ export function emitJsonQuoteString(ctx: CodegenContext): number {
 
   const strRef = nativeStringType(ctx);
   const typeIdx = addFuncType(ctx, [extern], [strRef]);
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const funcIdx = mintDefinedFunc(ctx);
   ctx.funcMap.set("__json_quote_string", funcIdx);
 
   // params: 0 s:externref
@@ -370,7 +371,7 @@ export function emitJsonQuoteString(ctx: CodegenContext): number {
 
   const body: Instr[] = [...preamble, ...sizingLoop, ...allocOut, ...fillLoop, ...finalize];
 
-  ctx.mod.functions.push({
+  pushDefinedFunc(ctx, funcIdx, {
     name: "__json_quote_string",
     typeIdx,
     locals: [
@@ -435,7 +436,7 @@ export function emitJsonParsePrimitive(ctx: CodegenContext): number {
 
   const anyRef: ValType = { kind: "ref", typeIdx: anyTypeIdx };
   const typeIdx = addFuncType(ctx, [extern], [anyRef]);
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const funcIdx = mintDefinedFunc(ctx);
   ctx.funcMap.set("__json_parse_primitive", funcIdx);
 
   // params: 0 s:externref
@@ -931,7 +932,7 @@ export function emitJsonParsePrimitive(ctx: CodegenContext): number {
 
   const body: Instr[] = [...preamble, ...skipWs, ...dispatch];
 
-  ctx.mod.functions.push({
+  pushDefinedFunc(ctx, funcIdx, {
     name: "__json_parse_primitive",
     typeIdx,
     locals: [

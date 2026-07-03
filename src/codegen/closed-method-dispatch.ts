@@ -44,7 +44,7 @@ import { ensureObjVecBuilders } from "./object-runtime.js";
 import { addStringConstantGlobal } from "./registry/imports.js";
 import { addFuncType, getOrRegisterVecBaseType } from "./registry/types.js";
 import { addUnionImportsViaRegistry } from "./shared.js";
-import { definedFuncAt } from "./func-space.js"; // (#1916 S2) positional-read chokepoint
+import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S2 read chokepoint / S3b stable-regime minting)
 
 /**
  * (#2583) The callback-free, argument-taking array search/predicate methods
@@ -160,8 +160,8 @@ export function reserveClosedMethodDispatch(ctx: CodegenContext, methodName: str
   // Signature: (recv, arg0..arg{arity-1}) all externref → externref.
   const params: ValType[] = Array.from({ length: arity + 1 }, () => ({ kind: "externref" }) as ValType);
   const typeIdx = addFuncType(ctx, params, [{ kind: "externref" }], `$closed_method_dispatch_type_${arity}`);
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-  ctx.mod.functions.push({
+  const funcIdx = mintDefinedFunc(ctx);
+  pushDefinedFunc(ctx, funcIdx, {
     name,
     typeIdx,
     locals: [],
@@ -211,8 +211,8 @@ export function reserveClosedMethodDispatchVararg(ctx: CodegenContext, methodNam
     [{ kind: "externref" }],
     "$closed_method_dispatch_vararg_type",
   );
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-  ctx.mod.functions.push({
+  const funcIdx = mintDefinedFunc(ctx);
+  pushDefinedFunc(ctx, funcIdx, {
     name,
     typeIdx,
     locals: [],
