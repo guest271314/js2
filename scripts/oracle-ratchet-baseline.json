@@ -41,8 +41,8 @@
       "ctxChecker": 1
     },
     "src/codegen/declarations.ts": {
-      "getTypeAtLocation": 52,
-      "ctxChecker": 85
+      "getTypeAtLocation": 53,
+      "ctxChecker": 86
     },
     "src/codegen/destructuring-params.ts": {
       "getTypeAtLocation": 7,
@@ -57,8 +57,8 @@
       "ctxChecker": 5
     },
     "src/codegen/expressions/calls-closures.ts": {
-      "getTypeAtLocation": 4,
-      "ctxChecker": 12
+      "getTypeAtLocation": 5,
+      "ctxChecker": 13
     },
     "src/codegen/expressions/calls-guards.ts": {
       "getTypeAtLocation": 2,
@@ -89,8 +89,8 @@
       "ctxChecker": 1
     },
     "src/codegen/expressions/identifiers.ts": {
-      "getTypeAtLocation": 6,
-      "ctxChecker": 14
+      "getTypeAtLocation": 7,
+      "ctxChecker": 15
     },
     "src/codegen/expressions/misc.ts": {
       "getTypeAtLocation": 2,
@@ -126,7 +126,7 @@
     },
     "src/codegen/index.ts": {
       "getTypeAtLocation": 53,
-      "ctxChecker": 113
+      "ctxChecker": 115
     },
     "src/codegen/json-standalone.ts": {
       "getTypeAtLocation": 0,
@@ -213,12 +213,5 @@
       "ctxChecker": 3
     }
   },
-  "preauthorized": [
-    {
-      "file": "src/codegen/declarations.ts",
-      "field": "getTypeAtLocation",
-      "extra": 1,
-      "reason": "#2972 (dev-2138f, in-flight at ratchet seed time): string-element-access pre-scan arm adds one site; agreed 2026-07-02"
-    }
-  ]
+  "preauthorized": []
 }
