@@ -38,6 +38,7 @@
 import type { Instr, ValType } from "../ir/types.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { addFuncType } from "./registry/types.js";
+import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S3) stable-regime minting
 import { ensureGetUndefined } from "./expressions/late-imports.js";
 import { ensureObjectRuntime } from "./object-runtime.js";
 import { stringConstantExternrefInstrs } from "./native-strings.js";
@@ -109,8 +110,8 @@ export function ensureDynReadHelpers(ctx: CodegenContext): void {
   ): void {
     if (ctx.funcMap.has(name)) return;
     const typeIdx = addFuncType(ctx, params, results, name);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-    ctx.mod.functions.push({ name, typeIdx, locals, body, exported: false } as never);
+    const funcIdx = mintDefinedFunc(ctx);
+    pushDefinedFunc(ctx, funcIdx, { name, typeIdx, locals, body, exported: false } as never);
     ctx.funcMap.set(name, funcIdx);
   }
 
