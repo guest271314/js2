@@ -406,6 +406,42 @@ lowering exists until slice 3), enforced by a new selector gate.
   clean main (pre-existing, verified side-by-side).
 - `npx tsc --noEmit` clean; prettier + biome clean.
 
+## Claim-rate measurement — Slice 2, corpus scale (2026-07-04, fable-2949)
+
+Production-exact sweep (captures the `[ir-fallback]` selector telemetry from
+real `compile()` calls) over the #2138-style corpus: 287 files = 13 playground
+examples + `examples/` + stride-200 test262 sample. Script pattern banked in
+the slice-2 session (`.tmp/claim-sweep.mts`, gitignored; STRIDE=200).
+
+| metric | main (4f68ed670) | slice 2 | delta |
+| --- | --- | --- | --- |
+| files compiled OK | 248/287 | 248/287 | 0 |
+| top-level fns (claim denominator) | 178 | 178 | 0 |
+| **claimed** | **13** | **13** | **0 (identical claim SET, per-file diff)** |
+| `return-type-not-resolvable` | 30 | 14 | **−16** |
+| `param-type-not-resolvable` | 3 | 1 | **−2** |
+| `body-shape-rejected` | 50 | 67 | **+17** |
+| `destructuring-param-complex` | 1 | 2 | +1 (re-bucket) |
+| post-claim demotions | 0 | 0 | 0 |
+
+**The honest reading — the type gate was NOT the binding constraint at
+test262 scale; the body-shape gate is.** Unlocking dynamic types converts
+type-resolution rejections into shape rejections nearly 1:1 on this corpus
+(the −18 type buckets reappear as +17 shape / +1 destructuring); the bodies
+that pass Phase-1 shape were mostly typed already. The claim mechanism itself
+is proven (targeted tests + equivalence-corpus shapes claim, build, run), but
+the audit's "dynamic values make untyped JS claimable" is **necessary, not
+sufficient**: the measured claim-rate delta materializes only as (a) slice-3
+producers widen past move-only (real bodies USE their params — truthiness,
+arith, property access), and (b) the #1370/#2855 shape surface widens. Plan
+slice-4's measurement against BOTH levers, and expect the near-term needle to
+move from (a).
+
+Risk implication (good news): slice 2's test262/merge-group exposure is
+minimal — identical claim sets on the 287-file sample means the behavioral
+flips are confined to move-only-shaped helpers (rare in test bodies, more
+common in harness-style pass-throughs).
+
 ---
 
 ## Implementation Plan — Slice 3: dynamic op lowering (Opus-executable)
