@@ -10,21 +10,21 @@
   },
   {
     "edition": "ES5",
-    "pass": 10123,
-    "fail": 2821,
+    "pass": 10165,
+    "fail": 2779,
     "ce": 131,
     "skip": 0,
     "total": 13075,
-    "pct": 77,
+    "pct": 78,
     "features": [
       {
         "name": "caller",
-        "pass": 20,
-        "fail": 3,
+        "pass": 19,
+        "fail": 4,
         "ce": 0,
         "skip": 0,
         "total": 23,
-        "pct": 87
+        "pct": 83
       },
       {
         "name": "Reflect.construct",
@@ -57,8 +57,8 @@
   },
   {
     "edition": "ES2015",
-    "pass": 11078,
-    "fail": 4138,
+    "pass": 11080,
+    "fail": 4136,
     "ce": 170,
     "skip": 0,
     "total": 15386,
@@ -1026,8 +1026,8 @@
   },
   {
     "edition": "ES2018",
-    "pass": 3793,
-    "fail": 429,
+    "pass": 3797,
+    "fail": 425,
     "ce": 29,
     "skip": 0,
     "total": 4251,
@@ -1035,8 +1035,8 @@
     "features": [
       {
         "name": "async-iteration",
-        "pass": 2942,
-        "fail": 314,
+        "pass": 2946,
+        "fail": 310,
         "ce": 28,
         "skip": 0,
         "total": 3284,
@@ -1462,8 +1462,8 @@
   },
   {
     "edition": "ES2020",
-    "pass": 847,
-    "fail": 990,
+    "pass": 848,
+    "fail": 989,
     "ce": 41,
     "skip": 18,
     "total": 1896,
@@ -1615,12 +1615,12 @@
       },
       {
         "name": "optional-chaining",
-        "pass": 27,
-        "fail": 11,
+        "pass": 28,
+        "fail": 10,
         "ce": 6,
         "skip": 0,
         "total": 44,
-        "pct": 61
+        "pct": 64
       },
       {
         "name": "async-iteration",
@@ -2141,8 +2141,8 @@
   },
   {
     "edition": "ES2022",
-    "pass": 3107,
-    "fail": 1093,
+    "pass": 3109,
+    "fail": 1091,
     "ce": 34,
     "skip": 0,
     "total": 4234,
@@ -2150,8 +2150,8 @@
     "features": [
       {
         "name": "class",
-        "pass": 2177,
-        "fail": 596,
+        "pass": 2178,
+        "fail": 595,
         "ce": 17,
         "skip": 0,
         "total": 2790,
@@ -2168,8 +2168,8 @@
       },
       {
         "name": "class-fields-private",
-        "pass": 979,
-        "fail": 130,
+        "pass": 980,
+        "fail": 129,
         "ce": 17,
         "skip": 0,
         "total": 1126,
@@ -2177,8 +2177,8 @@
       },
       {
         "name": "class-methods-private",
-        "pass": 821,
-        "fail": 143,
+        "pass": 822,
+        "fail": 142,
         "ce": 2,
         "skip": 0,
         "total": 966,
@@ -2195,8 +2195,8 @@
       },
       {
         "name": "async-iteration",
-        "pass": 680,
-        "fail": 38,
+        "pass": 681,
+        "fail": 37,
         "ce": 0,
         "skip": 0,
         "total": 718,
@@ -2402,12 +2402,12 @@
       },
       {
         "name": "class-fields-private-in",
-        "pass": 9,
-        "fail": 5,
+        "pass": 10,
+        "fail": 4,
         "ce": 5,
         "skip": 0,
         "total": 19,
-        "pct": 47
+        "pct": 53
       },
       {
         "name": "object-spread",
