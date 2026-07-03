@@ -18,6 +18,8 @@
 //
 // Host lanes are byte-identical (the guard's sentinel-aware arm is gated on
 // `!ctx.standalone && !ctx.wasi`, i.e. the original code path unchanged).
+import { existsSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { compile } from "../src/index.js";
 
@@ -75,4 +77,39 @@ describe("#3010 standalone dstr-param undefined-element does not throw", () => {
     }`;
     expect(await runStandalone(src)).toBe(1);
   });
+
+  // (#3010 follow-up regression) The FIRST fix attempt (#2570) gated the ENTIRE
+  // `__extern_is_undefined` block — including its `ensureLateImport` +
+  // `flushLateImportShifts` side effects — behind `!ctx.standalone && !ctx.wasi`.
+  // Skipping the registration/flush in standalone perturbed the late-import /
+  // funcIdx bookkeeping for the rest of the enclosing method body, so an empty
+  // array pattern `[]` (which per §13.3.3.6 performs NO iterator observation)
+  // instead invoked the argument generator's `.next()`. This broke all 24
+  // `class/dstr/*ary-ptrn-empty` test262 files (iterator observed twice). The
+  // corrected fix keeps ensureLateImport/flush unconditional and gates only the
+  // emitted throw check, so the empty pattern observes the iterator ZERO times.
+  //
+  // Reproducing the miswiring faithfully REQUIRES a real generator argument (the
+  // regression is generator-runtime specific; a hand-rolled iterable does not
+  // trigger it) which in standalone pulls the real `__create_generator` /
+  // `__gen_*` runtime imports — so no-op stubs cannot express it as a pure-import
+  // unit test. We therefore drive the actual test262 files through the exact
+  // standalone harness that discriminated the fix (48/48 pass) from #2570 (24/48
+  // pass). Skips gracefully when the test262 submodule is not checked out.
+  const T262 = resolve(process.cwd(), "test262");
+  const emptyClusterFiles = [
+    "test/language/statements/class/dstr/gen-meth-ary-ptrn-empty.js",
+    "test/language/statements/class/dstr/meth-ary-ptrn-empty.js",
+    "test/language/expressions/class/dstr/gen-meth-ary-ptrn-empty.js",
+    "test/language/expressions/class/dstr/async-gen-meth-ary-ptrn-empty.js",
+  ];
+  for (const rel of emptyClusterFiles) {
+    const abs = join(T262, rel);
+    const present = existsSync(abs);
+    it.skipIf(!present)(`empty-pattern observes iterator 0 times, standalone: ${rel.split("/").pop()}`, async () => {
+      const { runTest262File } = await import("./test262-runner.ts");
+      const r = await runTest262File(abs, "class-dstr", 15000, "standalone");
+      expect(r.status, `${r.status}: ${(r as { reason?: string }).reason ?? ""}`).toBe("pass");
+    });
+  }
 });

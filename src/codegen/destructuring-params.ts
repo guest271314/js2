@@ -758,10 +758,30 @@ export function emitExternrefDestructureGuard(ctx: CodegenContext, fctx: Functio
   //     sentinel awareness) call `__extern_is_undefined` directly elsewhere and
   //     are unaffected. So: keep the sentinel-aware call for value sites, but for
   //     the container guard rely on `ref.is_null` alone under standalone/wasi.
-  if (!ctx.standalone && !ctx.wasi) {
-    const undefIdx = ensureLateImport(ctx, "__extern_is_undefined", [{ kind: "externref" }], [{ kind: "i32" }]);
-    if (undefIdx !== undefined) {
-      flushLateImportShifts(ctx, fctx);
+  //
+  // (#3010 follow-up) CRITICAL: the `ensureLateImport` + `flushLateImportShifts`
+  // side effects MUST run UNCONDITIONALLY in both host and standalone/wasi modes.
+  // The first #2570 attempt gated the ENTIRE block (registration + flush + the
+  // three emitted instructions) behind `!standalone && !wasi`. Skipping the
+  // registration/flush in standalone perturbed the late-import/funcIdx
+  // bookkeeping for the rest of the function body: a later `call funcIdx` in the
+  // enclosing method got miswired, so `method([])` (an empty array pattern, which
+  // per §13.3.3.6 must perform NO iterator observation) instead invoked the
+  // argument generator's `.next()` — regressing all 24 `class/dstr/*ary-ptrn-
+  // empty` files (statement + expression meth/gen/private/static/async variants),
+  // which PASS on plain main. `__extern_is_undefined` is already registered
+  // unconditionally at the value-default sites below (and pre-#2570 this guard
+  // registered it in every mode), so the registration itself is host-free-safe —
+  // it resolves to the native impl under standalone with no leaked host import.
+  // Therefore: keep registration + flush identical to main in ALL modes, and gate
+  // ONLY the three emitted throw-check instructions to host mode. This makes the
+  // change byte-identical to main for host mode and, for standalone, a pure
+  // removal of the three erroneous instructions with the funcIdx accounting
+  // preserved exactly as main computed it.
+  const undefIdx = ensureLateImport(ctx, "__extern_is_undefined", [{ kind: "externref" }], [{ kind: "i32" }]);
+  if (undefIdx !== undefined) {
+    flushLateImportShifts(ctx, fctx);
+    if (!ctx.standalone && !ctx.wasi) {
       fctx.body.push({ op: "local.get", index: paramIdx });
       fctx.body.push({ op: "call", funcIdx: undefIdx });
       fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: buildDestructureNullThrow(ctx, fctx), else: [] });
