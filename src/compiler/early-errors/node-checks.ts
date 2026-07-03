@@ -567,6 +567,22 @@ export function runNodeChecks(ctx: EarlyErrorContext, node: ts.Node): void {
         foundRest = true;
       }
     }
+    // Trailing comma after a binding rest element: `const [...x,] = y` — a
+    // SyntaxError. TS accepts it without a trailing OmittedExpression, so
+    // detect it via the NodeArray's hasTrailingComma flag.
+    const lastEl = node.elements[node.elements.length - 1];
+    if (node.elements.hasTrailingComma && lastEl && ts.isBindingElement(lastEl) && lastEl.dotDotDotToken) {
+      ctx.addError(lastEl, "A rest element must be last in a destructuring pattern");
+    }
+  }
+
+  // ES spec: Trailing comma after an object binding rest is a SyntaxError.
+  // e.g. const {...x,} = y;  BindingRestProperty must be last, no trailing comma.
+  if (ts.isObjectBindingPattern(node)) {
+    const lastEl = node.elements[node.elements.length - 1];
+    if (node.elements.hasTrailingComma && lastEl && ts.isBindingElement(lastEl) && lastEl.dotDotDotToken) {
+      ctx.addError(lastEl, "A rest element must be last in a destructuring pattern");
+    }
   }
 
   // ES spec: Trailing comma after rest parameter is a SyntaxError.

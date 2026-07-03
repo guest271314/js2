@@ -59,9 +59,14 @@ export function validateArrayAssignmentPattern(
       validateAssignmentTarget(ctx, target, strict);
     }
   }
-  // If there's a trailing comma after a rest, it creates an elision — already caught above.
-  // But TS may also insert an OmittedExpression at the end for trailing commas.
-  // The check above handles it via "elision after rest".
+  // Trailing comma after a rest element: `[...x,] = y` — a SyntaxError (an
+  // elision may not follow AssignmentRestElement). TS's parser accepts this
+  // without inserting a trailing OmittedExpression, so detect it via the
+  // NodeArray's hasTrailingComma flag when the last element is the rest.
+  const lastElem = arr.elements[arr.elements.length - 1];
+  if (arr.elements.hasTrailingComma && lastElem && ts.isSpreadElement(lastElem)) {
+    ctx.addError(restNode ?? lastElem, "Rest element must be last in a destructuring pattern");
+  }
 }
 
 /**
@@ -101,6 +106,12 @@ export function validateObjectAssignmentPattern(
     if (ts.isMethodDeclaration(prop) || ts.isGetAccessorDeclaration(prop) || ts.isSetAccessorDeclaration(prop)) {
       ctx.addError(prop, "Method definitions are not allowed in assignment patterns");
     }
+  }
+  // Trailing comma after an object rest property: `({...x,} = y)` — a
+  // SyntaxError (AssignmentRestProperty must be last, no trailing comma).
+  const lastProp = obj.properties[obj.properties.length - 1];
+  if (obj.properties.hasTrailingComma && lastProp && ts.isSpreadAssignment(lastProp)) {
+    ctx.addError(lastProp, "Rest element must be last in a destructuring pattern");
   }
 }
 
