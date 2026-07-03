@@ -1929,14 +1929,14 @@ export function emitTypedArrayIntrinsicCtorObject(ctx: CodegenContext, fctx: Fun
  * `$Object` singleton (stable identity: `globalThis === globalThis`) built with
  * the same `__new_plain_object` runtime an empty `{}` uses — zero host imports.
  *
- * Scope note: this is READ-value substrate only. Reflective READS of specific
- * global bindings (`globalThis.Array`, defineProperty-on-globalThis own-property
- * table, etc.) are the much larger MOP work deferred to #2988 — those go through
- * `compilePropertyAccess`'s dedicated `globalThis.prop` path, which is untouched
- * here (host/gc keeps `__extern_get(__get_globalThis(), key)`; standalone still
- * leaks there, tracked separately). Standalone/WASI only; returns the externref
- * ValType, or `null` if the `$Object` runtime is unavailable (caller falls
- * through to the host-import path).
+ * Scope note: this reifies the READ-value substrate. As of #2988,
+ * `compilePropertyAccess`'s dedicated `globalThis.prop` reflective-read path also
+ * routes to THIS singleton in standalone/WASI (host/gc still uses
+ * `__extern_get(__get_globalThis(), key)`), so reflective reads round-trip with
+ * `Object.defineProperty(globalThis, …)` / `globalThis.x = v` writes host-free
+ * (all three resolve to the one native singleton). Standalone/WASI only; returns
+ * the externref ValType, or `null` if the `$Object` runtime is unavailable
+ * (caller falls through to the host-import path).
  */
 export function emitNativeGlobalThisObject(ctx: CodegenContext, fctx: FunctionContext): ValType | null {
   ensureObjectRuntime(ctx);
