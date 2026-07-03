@@ -1794,6 +1794,22 @@ export interface IrInstrWhileLoop extends IrInstrBase {
   readonly condValue: IrValueId;
   /** Body instructions executed each iteration when the cond is truthy. */
   readonly body: readonly IrInstr[];
+  /**
+   * #2952 slice 1 — `do { body } while (cond)`. When `true`, the lowerer
+   * emits the body BEFORE the cond check so the body runs at least once
+   * (post-test loop). The IR structure is otherwise identical to a `while`
+   * (same `cond` / `condValue` / `body` buffers), so every pass — verify,
+   * hygiene, effects, propagate — treats a do-while exactly as a while.
+   * Only the lowering emission order differs. Absent/`false` ↔ pre-test
+   * (`while`).
+   *
+   * SAFETY of sharing the kind: the verifier walks `cond` before `body`
+   * only to register `condValue`'s def ahead of its use; a do-while body
+   * never has a cross-buffer SSA dependency on the cond buffer (each buffer's
+   * SSA values are buffer-local; the only shared state is outer-scope slots),
+   * so the cond-first walk order is sound for both loop shapes.
+   */
+  readonly postCond?: boolean;
 }
 
 /**
