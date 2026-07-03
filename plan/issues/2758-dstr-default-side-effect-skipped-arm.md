@@ -5,7 +5,7 @@ status: done
 assignee: ttraenkler/dstr758
 completed: 2026-06-28
 created: 2026-06-28
-updated: 2026-06-28
+updated: 2026-07-03
 priority: medium
 feasibility: hard
 reasoning_effort: high
@@ -16,7 +16,7 @@ language_feature: destructuring
 goal: spec-completeness
 parent: 2669
 related: [2669, 2692]
-sprint: current
+sprint: 69
 ---
 # #2758 — dstr default-init side-effect on init-skipped
 

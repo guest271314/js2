@@ -2,7 +2,7 @@
 id: 2993
 title: "standalone: generator-closure lowering emits i64/BigInt where externref expected → invalid-wasm CE (`__closure_3`) on BigInt generator-iterable TypedArray ctor"
 status: done
-sprint: current
+sprint: 69
 priority: medium
 feasibility: hard
 task_type: bugfix

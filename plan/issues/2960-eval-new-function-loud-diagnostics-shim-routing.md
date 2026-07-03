@@ -4,9 +4,9 @@ title: "eval / new Function: loud standalone diagnostics + call-time-throwing st
 status: done
 completed: 2026-07-02
 assignee: ttraenkler/agent-dev-opus
-sprint: current
+sprint: 69
 created: 2026-07-02
-updated: 2026-07-02
+updated: 2026-07-03
 priority: medium
 horizon: m
 feasibility: medium

@@ -4,7 +4,7 @@ title: "Genuine reified builtin-constructor identity: <Builtin>.prototype.constr
 status: done
 completed: 2026-07-03
 assignee: ttraenkler/senior-dev
-sprint: current
+sprint: 69
 priority: medium
 horizon: m
 feasibility: hard

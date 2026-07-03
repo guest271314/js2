@@ -5,13 +5,13 @@ status: done
 assignee: ttraenkler/dev-2878
 completed: 2026-07-02
 created: 2026-06-30
-updated: 2026-07-02
+updated: 2026-07-03
 priority: high
 feasibility: medium
 task_type: bug
 area: codegen
 goal: standalone
-sprint: current
+sprint: 69
 horizon: m
 related: [2860, 2868, 2849, 2918, 1461]
 umbrella: 2860

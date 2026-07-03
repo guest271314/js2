@@ -3,7 +3,7 @@ id: 2946
 title: "promote-baseline loses its baselines-repo push race under overlapping main runs (rebase retries can never resolve)"
 status: done
 completed: 2026-07-02
-sprint: current
+sprint: 69
 created: 2026-07-02
 priority: medium
 horizon: m

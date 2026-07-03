@@ -4,9 +4,9 @@ title: "for-in on $Object: prototype-chain enumeration + integer-key-ascending o
 status: done
 assignee: ttraenkler/opus-2964
 completed: 2026-07-02
-sprint: current
+sprint: 69
 created: 2026-07-02
-updated: 2026-07-02
+updated: 2026-07-03
 priority: low
 horizon: m
 feasibility: medium

@@ -5,7 +5,7 @@ status: done
 assignee: ttraenkler/agent-dev
 completed: 2026-06-28
 created: 2026-06-28
-updated: 2026-06-28
+updated: 2026-07-03
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -16,7 +16,7 @@ language_feature: destructuring
 goal: spec-completeness
 parent: 2669
 related: [2669]
-sprint: current
+sprint: 69
 ---
 # #2757 — assignment-destructuring rest/hole wrong value
 

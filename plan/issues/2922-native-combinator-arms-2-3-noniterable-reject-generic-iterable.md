@@ -2,7 +2,7 @@
 id: 2922
 title: "Standalone async widen: native Promise.all/race arms 2 & 3 — not-iterable→reject + generic iterable (residual receiver-cast layer after #2919 arm 1)"
 status: done
-sprint: current
+sprint: 69
 assignee: ttraenkler/fable-4
 created: 2026-07-02
 completed: 2026-07-02

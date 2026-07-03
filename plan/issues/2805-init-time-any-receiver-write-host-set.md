@@ -3,13 +3,13 @@ id: 2805
 title: "init-time `any`-receiver field WRITE dropped at module-init (symmetric write side of #2800)"
 status: done
 assignee: ttraenkler/senior-developer
-sprint: current
+sprint: 69
 priority: medium
 horizon: m
 feasibility: hard
 reasoning_effort: max
 created: 2026-06-28
-updated: 2026-07-02
+updated: 2026-07-03
 completed: 2026-07-02
 task_type: bugfix
 area: codegen

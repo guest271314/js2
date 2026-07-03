@@ -4,7 +4,7 @@ title: "Strict compile-SUCCEEDED arm of the negative-test verdict (the #2912 fol
 status: done
 assignee: ttraenkler/dev-2912
 priority: medium
-sprint: current
+sprint: 69
 created: 2026-07-02
 completed: 2026-07-02
 feasibility: medium

@@ -3,9 +3,9 @@ id: 2947
 title: "test262-sharded workflow_dispatch ir_first lane — repeatable off-box #2138 measurement"
 status: done
 completed: 2026-07-02
-sprint: current
+sprint: 69
 created: 2026-07-02
-updated: 2026-07-02
+updated: 2026-07-03
 priority: medium
 feasibility: easy
 horizon: s

@@ -2,7 +2,7 @@
 id: 2998
 title: "Eliminate env::__instanceof_check leak for static-primitive LHS in standalone"
 status: done
-sprint: current
+sprint: 69
 priority: medium
 horizon: s
 assignee: ttraenkler/agent-instanceof

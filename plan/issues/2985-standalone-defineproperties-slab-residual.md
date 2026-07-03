@@ -4,7 +4,7 @@ title: "Standalone: __obj_find illegal-cast on non-string computed keys (bool/bi
 status: done
 completed: 2026-07-02
 assignee: ttraenkler/agent-dev-opus
-sprint: current
+sprint: 69
 priority: high
 horizon: s
 feasibility: hard

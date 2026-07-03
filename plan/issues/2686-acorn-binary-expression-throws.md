@@ -4,9 +4,9 @@ title: "[ARCH] acorn parse() — binary-expression statement throws (parse(\"1 +
 status: done
 completed: 2026-06-29
 assignee: ttraenkler/sendev-substrate
-sprint: current
+sprint: 69
 created: 2026-06-26
-updated: 2026-06-28
+updated: 2026-07-03
 priority: medium
 feasibility: hard
 reasoning_effort: high

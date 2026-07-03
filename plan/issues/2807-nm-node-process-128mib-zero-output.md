@@ -5,14 +5,14 @@ status: done
 assignee: ttraenkler/sendev-2807
 completed: 2026-06-28
 created: 2026-06-28
-updated: 2026-06-28
+updated: 2026-07-03
 priority: high
 feasibility: hard
 task_type: bug
 area: runtime
 language_feature: native-messaging
 goal: platform
-sprint: current
+sprint: 69
 horizon: l
 related: [389, 2754, 2775, 2777, 1767]
 ---

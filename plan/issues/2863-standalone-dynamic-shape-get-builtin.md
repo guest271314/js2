@@ -3,14 +3,14 @@ id: 2863
 title: "Standalone: dynamic-shape object/property ops refused — __get_builtin (reflective builtin/namespace read), __extern_toLocaleString, __object_groupBy/fromEntries"
 status: done
 created: 2026-06-30
-updated: 2026-07-02
+updated: 2026-07-03
 completed: 2026-07-02
 priority: high
 feasibility: medium
 task_type: feature
 area: codegen
 goal: standalone
-sprint: current
+sprint: 69
 horizon: m
 related: [2860, 1472, 2861, 2864]
 umbrella: 2860

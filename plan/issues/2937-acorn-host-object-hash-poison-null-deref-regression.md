@@ -4,7 +4,7 @@ title: "Regression: host-mode $Object-hash poison (#2849) makes compiled-acorn p
 status: done
 completed: 2026-07-02
 created: 2026-07-02
-updated: 2026-07-02
+updated: 2026-07-03
 priority: high
 horizon: m
 feasibility: hard
@@ -13,7 +13,7 @@ task_type: bug
 area: codegen
 language_feature: object
 goal: runtime-eval
-sprint: current
+sprint: 69
 parent: 2927
 depends_on: []
 related: [2849, 2584, 2432, 1712, 1710, 2850, 2853, 2944]

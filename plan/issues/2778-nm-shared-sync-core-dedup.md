@@ -11,7 +11,7 @@ task_type: refactor
 area: examples
 goal: platform
 related: [2775, 2771, 389, 2655, 2779]
-sprint: current
+sprint: 69
 ---
 
 # #2778 — share one sync framing core for nm_deno + nm_node_fs

@@ -2,7 +2,7 @@
 id: 2828
 title: Ship examples/ in the npm tarball
 status: done
-sprint: current
+sprint: 69
 priority: high
 area: packaging
 related: [389]

@@ -4,14 +4,14 @@ title: "Standalone: built-in static/prototype property value read not supported 
 status: done
 assignee: ttraenkler/dev-2863
 created: 2026-06-30
-updated: 2026-07-02
+updated: 2026-07-03
 completed: 2026-07-02
 priority: high
 feasibility: medium
 task_type: feature
 area: codegen
 goal: standalone
-sprint: current
+sprint: 69
 horizon: l
 related: [2860, 1907, 1888, 2175, 2651, 2193]
 umbrella: 2860

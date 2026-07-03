@@ -2,7 +2,7 @@
 id: 3004
 title: "CI wedge fix: excuse #2940 vacuity reclassifications in the standalone (#1897) regression gate"
 status: done
-sprint: current
+sprint: 69
 priority: high
 feasibility: medium
 reasoning_effort: max
@@ -13,7 +13,7 @@ goal: merge-queue-health
 assignee: ttraenkler/dev-unwedge
 related: [2940, 2463, 3001, 1897, 1668, 2879]
 created: 2026-07-02
-updated: 2026-07-02
+updated: 2026-07-03
 completed: 2026-07-02
 origin: "2026-07-02 merge-queue wedge. #2463's vacuity scorer (merged 0670ea4) rescored ~1438 vacuous passes → fail without bumping oracle_version; HOST baseline re-promoted new-policy but STANDALONE baseline left stale old-policy (sha cab96808), so every code PR's merge_group standalone diff trips #1897 on the d822f85a −1438 cluster. Diagnosis: shepherd-o (run 28618870469)."
 ---
