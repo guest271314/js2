@@ -96,3 +96,32 @@ comma after a non-rest element (`[a,]`, `{a,}`) all remain valid.
 **Remaining:** the other unenforced-`SyntaxError` samples (private-name grammar,
 `prop-def-invalid-async-prefix`, etc.) are independent point-fixes per the
 issue's own triage note — issue stays open for follow-up slices.
+
+## Slice 2 landed — `async` prefix on a shorthand property (2026-07-03)
+
+**Delivered:** a precise parse-time early error for `async` used as the prefix
+of a shorthand object property. `PropertyDefinition : IdentifierReference`
+(shorthand) is a bare IdentifierReference and admits no modifier; `async` is
+only valid as the prefix of an `AsyncMethod`, which requires a `(` parameter
+list. Covers the issue sample
+`language/expressions/object/prop-def-invalid-async-prefix.js` (`({async async})`)
+and the cover-initialized-name form `({async x = 1})`.
+
+**Root cause:** TypeScript's parser silently accepts `({async async})` /
+`({async x = 1})` as a `ShorthandPropertyAssignment` carrying an `AsyncKeyword`
+modifier with **no** parse diagnostic — unlike `({get x})` / `({set x})` /
+`({* x})`, which it already flags. So nothing in the early-error pass detected
+it. The fix checks for an `AsyncKeyword` modifier on a
+`ShorthandPropertyAssignment` (the only modifier that produces this node shape
+without a TS parse diagnostic).
+
+**Files:** `src/compiler/early-errors/node-checks.ts` (one additive check next
+to the existing shorthand-property checks). Tests: `tests/issue-3026.test.ts`
+(+2 reject, +4 valid-control cases). Byte-inert for all valid programs —
+`async` as a plain shorthand name (`({async})`), alongside other shorthands
+(`({async, x})`), as an async method (`({async foo(){}})`), and as a normal key
+(`({async: 1})`) all remain valid.
+
+**Remaining:** further unenforced-`SyntaxError` samples (private-name grammar on
+class heritage, `array-rest-elision-invalid` residuals, etc.) remain independent
+point-fixes — issue stays open for follow-up slices.
