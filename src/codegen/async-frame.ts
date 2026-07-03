@@ -1,3 +1,4 @@
+import type { Instr, ValType, WasmFunction } from "../ir/types.js";
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 /**
  * Host-free async-frame substrate (#2895 PATH B, slice 1 — foundation).
@@ -34,39 +35,44 @@
  * `standalone` only *together with* that drive layer (re-widening it before the
  * drive layer exists is precisely the AG0 −31 regression).
  */
-import { ts, forEachChild } from "../ts-api.js";
-import type { CodegenContext, FunctionContext } from "./context/types.js";
-import type { Instr, ValType, WasmFunction } from "../ir/types.js";
+import { forEachChild, ts } from "../ts-api.js";
+import type { AsyncCfgPlan, AsyncCfgState, AsyncCpsPlan, AsyncResumePoint, LinearAwaitPlan } from "./async-cps.js";
 import {
-  PARAM_FIELD_OFFSET,
-  STATE_FIELD,
-  SENT_FIELD,
-  MODE_FIELD,
-  MODE_THROW,
-  ERROR_FIELD,
-  sanitizeTypeName,
-  storeSpills,
-  setStateI32FromConst,
-  defaultSpillInstr,
-} from "./frame-core.js";
-import { ensureExnTag } from "./registry/imports.js";
+  ASYNC_CPS_ENABLED,
+  asyncFnNeedsCps,
+  awaitedExprIsPromiseCombinator,
+  linearPlanToCfg,
+  planLinearAwaits,
+} from "./async-cps.js";
 import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S3 / #2710) stable-regime minting
-import type { AsyncCpsPlan, LinearAwaitPlan } from "./async-cps.js";
-import { planLinearAwaits, awaitedExprIsPromiseCombinator, ASYNC_CPS_ENABLED, asyncFnNeedsCps } from "./async-cps.js";
-import { resolveSpillLocalValType } from "./statements/variables.js";
-import { allocLocal } from "./context/locals.js";
-import { addFuncType } from "./registry/types.js";
-import { compileExpression, compileStatement, coerceType } from "./shared.js";
-import { reportError } from "./context/errors.js";
-import { resolveWasmType } from "./index.js";
 import {
+  type AsyncDriveRuntime,
+  PROMISE_STATE_FULFILLED,
+  PROMISE_STATE_PENDING,
+  PROMISE_STATE_REJECTED,
   ensureAsyncDriveRuntime,
   getOrRegisterPromiseType,
-  type AsyncDriveRuntime,
-  PROMISE_STATE_PENDING,
-  PROMISE_STATE_FULFILLED,
-  PROMISE_STATE_REJECTED,
 } from "./async-scheduler.js";
+import { reportError } from "./context/errors.js";
+import { allocLocal } from "./context/locals.js";
+import type { CodegenContext, FunctionContext } from "./context/types.js";
+import {
+  ERROR_FIELD,
+  MODE_FIELD,
+  MODE_THROW,
+  PARAM_FIELD_OFFSET,
+  SENT_FIELD,
+  STATE_FIELD,
+  defaultSpillInstr,
+  sanitizeTypeName,
+  setStateI32FromConst,
+  storeSpills,
+} from "./frame-core.js";
+import { ensureI32Condition, resolveWasmType } from "./index.js";
+import { ensureExnTag } from "./registry/imports.js";
+import { addFuncType } from "./registry/types.js";
+import { coerceType, compileExpression, compileStatement } from "./shared.js";
+import { resolveSpillLocalValType } from "./statements/variables.js";
 
 /**
  * Is the host-free async **drive layer** (#2895 PATH B) active for this module?
@@ -132,7 +138,14 @@ export function resolveHostAsyncImports(ctx: CodegenContext): HostAsyncImports |
   ) {
     return null;
   }
-  return { promiseResolveIdx, then2Idx, makeCbIdx, newPendingIdx, settleResolveIdx, settleRejectIdx };
+  return {
+    promiseResolveIdx,
+    then2Idx,
+    makeCbIdx,
+    newPendingIdx,
+    settleResolveIdx,
+    settleRejectIdx,
+  };
 }
 
 /**
@@ -292,13 +305,21 @@ export function buildAsyncFrameInfo(
   ];
 
   for (let i = 0; i < paramTypes.length; i++) {
-    stateFields.push({ name: `param_${paramNames[i] ?? i}`, type: paramTypes[i]!, mutable: false });
+    stateFields.push({
+      name: `param_${paramNames[i] ?? i}`,
+      type: paramTypes[i]!,
+      mutable: false,
+    });
   }
 
   const spillFieldOffset = PARAM_FIELD_OFFSET + paramTypes.length;
   const { spillNames, spillTypes } = computeAsyncSpills(ctx, decl, plan, paramNames);
   for (let i = 0; i < spillNames.length; i++) {
-    stateFields.push({ name: `spill_${spillNames[i]}`, type: spillTypes[i]!, mutable: true });
+    stateFields.push({
+      name: `spill_${spillNames[i]}`,
+      type: spillTypes[i]!,
+      mutable: true,
+    });
   }
 
   // Trailing result-promise field — after spills so `spillFieldOffset` is stable.
@@ -308,7 +329,11 @@ export function buildAsyncFrameInfo(
   const resultPromiseFieldType: ValType = hostImports
     ? { kind: "externref" }
     : { kind: "ref", typeIdx: promiseTypeIdx };
-  stateFields.push({ name: "result_promise", type: resultPromiseFieldType, mutable: true });
+  stateFields.push({
+    name: "result_promise",
+    type: resultPromiseFieldType,
+    mutable: true,
+  });
 
   const stateName = `$AsyncFrame_${sanitizeTypeName(functionName)}`;
   const stateTypeIdx = ctx.mod.types.length;
@@ -503,6 +528,42 @@ function isNestedScope(node: ts.Node): boolean {
   );
 }
 
+/**
+ * Defensive check of the {@link AsyncCfgPlan} emitter contract (see the
+ * contract block in async-cps.ts). Returns a human-readable violation, or
+ * `null` when the plan is emittable. Cheap (O(states)); run once per machine so
+ * a future planner bug becomes a hard compile error instead of an emitted
+ * machine with wrong `br` depths or a mis-routed abrupt completion.
+ */
+function validateAsyncCfg(cfg: AsyncCfgPlan): string | null {
+  const n = cfg.states.length;
+  const inRange = (id: number): boolean => id >= 0 && id < n;
+  for (let i = 0; i < n; i++) {
+    const st = cfg.states[i]!;
+    if (st.id !== i) return `state ids not dense (states[${i}].id === ${st.id})`;
+    const t = st.terminator;
+    if (t.kind === "suspend" && !inRange(t.resumeState)) return `suspend.resumeState ${t.resumeState} out of range`;
+    if (t.kind === "goto" && !inRange(t.target)) return `goto.target ${t.target} out of range`;
+    if (t.kind === "condGoto" && (!inRange(t.whenTrue) || !inRange(t.whenFalse))) {
+      return `condGoto targets ${t.whenTrue}/${t.whenFalse} out of range`;
+    }
+    // goto/condGoto targets must not carry a resume prelude (contract rule 2).
+    const targets: number[] = t.kind === "goto" ? [t.target] : t.kind === "condGoto" ? [t.whenTrue, t.whenFalse] : [];
+    for (const target of targets) {
+      if (cfg.states[target]!.resumeFrom !== null) {
+        return `goto/condGoto target ${target} has a resume prelude (only a suspend may enter it)`;
+      }
+    }
+  }
+  for (let i = 0; i < cfg.handlers.length; i++) {
+    const h = cfg.handlers[i]!;
+    if (h.id !== i + 1) return `handler ids not dense (handlers[${i}].id === ${h.id})`;
+    // Nested regions need parent-chain replay in the catch — 3c follow-up.
+    if (h.parent !== 0) return `nested handler region ${h.id} (parent ${h.parent}) not yet supported`;
+  }
+  return null;
+}
+
 // ── PATH B slice 1b: resume function + step adapters + call-site shim ─────────
 
 /**
@@ -545,6 +606,18 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
   const linear = planLinearAwaits(info.decl, plan);
   if (linear === null) {
     reportError(ctx, info.decl, "internal: async-frame resume built on an unsupported body shape (#2906 slice 1)");
+    info.resumeFuncIdx = -1;
+    return -1;
+  }
+
+  // (#2906 slice 3) Lower the linear plan into the general CFG plan the emitter
+  // drives. `linearPlanToCfg` is the only producer today, so the emitted machine
+  // is byte-identical to the pre-CFG emitter for every accepted shape; richer
+  // planners (loops, try/catch, for-await) plug in HERE without emitter changes.
+  const cfg = linearPlanToCfg(linear);
+  const cfgError = validateAsyncCfg(cfg);
+  if (cfgError !== null) {
+    reportError(ctx, info.decl, `internal: async CFG plan violates the emitter contract — ${cfgError} (#2906)`);
     info.resumeFuncIdx = -1;
     return -1;
   }
@@ -615,7 +688,10 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
   // walker patches `mod.exports` func indices, so pushing at reservation time
   // is safe.
   if (info.host) {
-    ctx.mod.exports.push({ name: stepFulfillName, desc: { kind: "func", index: stepFulfillFuncIdx } });
+    ctx.mod.exports.push({
+      name: stepFulfillName,
+      desc: { kind: "func", index: stepFulfillFuncIdx },
+    });
   }
 
   const stepRejectFuncIdx = mintDefinedFunc(ctx);
@@ -629,7 +705,10 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
     exported: info.host,
   });
   if (info.host) {
-    ctx.mod.exports.push({ name: stepRejectName, desc: { kind: "func", index: stepRejectFuncIdx } });
+    ctx.mod.exports.push({
+      name: stepRejectName,
+      desc: { kind: "func", index: stepRejectFuncIdx },
+    });
   }
 
   // ── Build the resume function body. ──
@@ -652,7 +731,11 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
   for (let i = 0; i < info.paramNames.length; i++) {
     const idx = allocLocal(resumeFctx, info.paramNames[i]!, info.paramTypes[i]!);
     resumeFctx.body.push({ op: "local.get", index: frameLocal });
-    resumeFctx.body.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: info.paramFieldOffset + i });
+    resumeFctx.body.push({
+      op: "struct.get",
+      typeIdx: info.stateTypeIdx,
+      fieldIdx: info.paramFieldOffset + i,
+    });
     resumeFctx.body.push({ op: "local.set", index: idx });
   }
   // Load spills from the frame into locals (overwritten by a segment's lead on
@@ -660,7 +743,11 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
   for (let i = 0; i < info.spillNames.length; i++) {
     const idx = allocLocal(resumeFctx, info.spillNames[i]!, info.spillTypes[i]!);
     resumeFctx.body.push({ op: "local.get", index: frameLocal });
-    resumeFctx.body.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: info.spillFieldOffset + i });
+    resumeFctx.body.push({
+      op: "struct.get",
+      typeIdx: info.stateTypeIdx,
+      fieldIdx: info.spillFieldOffset + i,
+    });
     resumeFctx.body.push({ op: "local.set", index: idx });
   }
   // Load the result promise into a local; wire the `return` settle hook. Both
@@ -674,7 +761,11 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
     info.host ? { kind: "externref" } : { kind: "ref", typeIdx: info.promiseTypeIdx },
   );
   resumeFctx.body.push({ op: "local.get", index: frameLocal });
-  resumeFctx.body.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: info.resultPromiseFieldIdx });
+  resumeFctx.body.push({
+    op: "struct.get",
+    typeIdx: info.stateTypeIdx,
+    fieldIdx: info.resultPromiseFieldIdx,
+  });
   resumeFctx.body.push({ op: "local.set", index: resultPromiseLocal });
   const settleFulfillIdx = info.host ? hostImports!.settleResolveIdx : rt!.fulfillFuncIdx;
   const settleRejectIdx = info.host ? hostImports!.settleRejectIdx : rt!.rejectFuncIdx;
@@ -690,12 +781,13 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
   // its own continuation gets a fresh delivery-only local. Typed via
   // `resumeBindingValType` (== the spill field type for the spilled ones).
   const bindingLocal = new Map<string, { local: number; type: ValType }>();
-  for (const seg of linear.segments) {
-    if (!seg.resumeBinding) continue;
-    const t = resumeBindingValType(ctx, seg.resumeBinding);
-    const existing = resumeFctx.localMap.get(seg.resumeBinding.name);
-    const local = existing !== undefined ? existing : allocLocal(resumeFctx, seg.resumeBinding.name, t);
-    bindingLocal.set(seg.resumeBinding.name, { local, type: t });
+  for (const st of cfg.states) {
+    const rb = st.resumeFrom?.binding;
+    if (!rb) continue;
+    const t = resumeBindingValType(ctx, rb);
+    const existing = resumeFctx.localMap.get(rb.name);
+    const local = existing !== undefined ? existing : allocLocal(resumeFctx, rb.name, t);
+    bindingLocal.set(rb.name, { local, type: t });
   }
 
   // Transient locals reused across every state arm (only one await is processed
@@ -703,252 +795,353 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
   // needs the typed `$Promise` classification locals; the host backend cannot
   // inspect a host Promise synchronously (opaque externref), so it keeps only
   // an externref slot for the assimilated promise.
-  const awaitedLocal = allocLocal(resumeFctx, "__async_awaited", { kind: "externref" });
-  const pLocal = info.host ? -1 : allocLocal(resumeFctx, "__async_p", { kind: "ref", typeIdx: info.promiseTypeIdx });
+  const awaitedLocal = allocLocal(resumeFctx, "__async_awaited", {
+    kind: "externref",
+  });
+  const pLocal = info.host
+    ? -1
+    : allocLocal(resumeFctx, "__async_p", {
+        kind: "ref",
+        typeIdx: info.promiseTypeIdx,
+      });
   const suspendedLocal = info.host ? -1 : allocLocal(resumeFctx, "__async_suspended", { kind: "i32" });
   const pHostLocal = info.host ? allocLocal(resumeFctx, "__async_p_host", { kind: "externref" }) : -1;
   const exnTag = ensureExnTag(ctx);
-  const reasonLocal = allocLocal(resumeFctx, "__async_reason", { kind: "externref" });
-  const N = linear.segments.length;
+  const reasonLocal = allocLocal(resumeFctx, "__async_reason", {
+    kind: "externref",
+  });
 
-  // (#2906 Gap 3) try/finally-across-await. When the body has a single
-  // try/finally spanning an await, `inSrcTryLocal` (an i32 resume-local) records
-  // whether control is currently inside the try region. The outer catch runs the
-  // `finally` before rejecting when the flag is set (an abrupt completion — a
-  // throw or a rejected await — while inside the try); the `finally` also runs
-  // inline on the normal path (`planLinearAwaits` appends it to the post-try
-  // lead). The local + all associated instrs are emitted ONLY when a finalizer
-  // exists, so non-try async stays byte-identical to slice 1.
-  const theFinalizer = linear.finalizer;
-  const hasFinalizer = theFinalizer !== null;
-  const inSrcTryLocal = hasFinalizer ? allocLocal(resumeFctx, "__async_in_try", { kind: "i32" }) : -1;
-  const setInTry = (v: number): Instr[] => [
+  // (#2906 Gap 3 → slice 3) Handler regions. `inSrcTryLocal` (an i32
+  // resume-local) records the id of the handler region control is currently in
+  // (0 = none; slice-2's boolean is the single-region special case, so the
+  // emitted i32.const 0/1 toggles are byte-identical). The outer catch routes an
+  // abrupt completion by it: run the active region's await-free finalizer, then
+  // reject. The local + all associated instrs are emitted ONLY when the plan has
+  // handler regions, so non-try async stays byte-identical to slice 1.
+  const hasHandlers = cfg.handlers.length > 0;
+  const inSrcTryLocal = hasHandlers ? allocLocal(resumeFctx, "__async_in_try", { kind: "i32" }) : -1;
+  const setHandler = (v: number): Instr[] => [
     { op: "i32.const", value: v },
     { op: "local.set", index: inSrcTryLocal },
   ];
 
-  // Emit `SENT_FIELD → predecessor await's resume binding`, guarded by a
-  // MODE_THROW re-throw of a rejected predecessor. `s` is the state whose
-  // predecessor await is `s-1` (used by state s≥1 and the final state N).
-  const emitDeliverPrev = (out: Instr[], s: number): void => {
-    const prev = linear.segments[s - 1]!;
-    // A rejected predecessor await that sat inside a try must run the finally
-    // before the result promise rejects — arm `inSrcTry` so the outer catch does.
+  // Emit a state's resume prelude: re-throw a rejected predecessor await
+  // (MODE_THROW — arming its handler region first so the finalizer runs), then
+  // bind the delivered `SENT_FIELD` value to the await's resume binding.
+  // MUST be called while `resumeFctx.body === out` (coerceType pushes there).
+  const emitDeliver = (out: Instr[], rp: AsyncResumePoint): void => {
     const throwArm: Instr[] = [];
-    if (hasFinalizer && prev.awaitInTry) throwArm.push(...setInTry(1));
+    if (hasHandlers && rp.handler !== 0) throwArm.push(...setHandler(rp.handler));
     throwArm.push(
       { op: "local.get", index: frameLocal },
-      { op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: ERROR_FIELD } as Instr,
+      {
+        op: "struct.get",
+        typeIdx: info.stateTypeIdx,
+        fieldIdx: ERROR_FIELD,
+      } as Instr,
       { op: "throw", tagIdx: exnTag } as Instr,
     );
     out.push({ op: "local.get", index: frameLocal });
-    out.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: MODE_FIELD });
+    out.push({
+      op: "struct.get",
+      typeIdx: info.stateTypeIdx,
+      fieldIdx: MODE_FIELD,
+    });
     out.push({ op: "i32.const", value: MODE_THROW });
     out.push({ op: "i32.eq" });
-    out.push({ op: "if", blockType: { kind: "empty" }, then: throwArm } as Instr);
-    if (prev.resumeBinding) {
-      const bl = bindingLocal.get(prev.resumeBinding.name)!;
+    out.push({
+      op: "if",
+      blockType: { kind: "empty" },
+      then: throwArm,
+    } as Instr);
+    if (rp.binding) {
+      const bl = bindingLocal.get(rp.binding.name)!;
       out.push({ op: "local.get", index: frameLocal });
-      out.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: SENT_FIELD });
+      out.push({
+        op: "struct.get",
+        typeIdx: info.stateTypeIdx,
+        fieldIdx: SENT_FIELD,
+      });
       coerceType(ctx, resumeFctx, { kind: "externref" }, bl.type);
       out.push({ op: "local.set", index: bl.local });
     }
   };
 
-  // State s (0 ≤ s < N): run await s, then advance (br to re-dispatch) or suspend.
-  const buildAwaitSegment = (s: number): Instr[] => {
-    const seg = linear.segments[s]!;
+  // One CFG state → its dispatch-arm body (#2906 slice 3). Every state emits:
+  // handler-region reset, the resume prelude (when this state is an await's
+  // `resumeState`), the handler-annotated lead statements, then its TERMINATOR.
+  // Suspend keeps the slice-1/2 emission verbatim (parameterized by
+  // `resumeState`); `goto`/`condGoto` are `STATE=<target>; br <re-dispatch
+  // loop>` — a target ≤ the current id is a loop back-edge, which is how
+  // while-await / for-await planners express iteration with NO emitter change.
+  const buildStateBody = (st: AsyncCfgState): Instr[] => {
     const saved = resumeFctx.body;
     ctx.liveBodies.add(saved);
     const out: Instr[] = [];
     resumeFctx.body = out;
+    // `br` depth of the re-dispatch loop from this arm's top level: br0 = this
+    // arm's own `if`, br1..br(st.id) = the enclosing if-chain arms, br(st.id+1)
+    // = if(state==0), br(st.id+2) = the loop. Valid because state ids are dense
+    // and equal to their if-chain nesting depth (validateAsyncCfg).
+    const loopDepth = st.id + 2;
     try {
-      // (#2906 Gap 3) Reset the in-try flag at arm entry (a resume enters here
-      // fresh; a fast-path advance re-dispatched from an earlier in-try state).
-      let curFlag = false;
-      if (hasFinalizer) out.push(...setInTry(0));
-      if (s >= 1) emitDeliverPrev(out, s);
+      // Reset the handler-region local at arm entry (a resume enters here
+      // fresh; a fast-path advance may re-dispatch from an in-region state).
+      let curHandler = 0;
+      if (hasHandlers) out.push(...setHandler(0));
+      if (st.resumeFrom) emitDeliver(out, st.resumeFrom);
 
-      // Compile the lead, toggling `inSrcTry` at each in-try/out-of-try boundary
-      // (`leadInTry[i]`) so a throw in an in-try statement (or the await eval)
-      // runs the finally; a throw in an out-of-try statement (or the inline
-      // finally itself) does not.
-      for (let i = 0; i < seg.leadStmts.length; i++) {
-        if (hasFinalizer && seg.leadInTry[i]! !== curFlag) {
-          curFlag = seg.leadInTry[i]!;
-          out.push(...setInTry(curFlag ? 1 : 0));
+      // Compile the lead, toggling the region local at each boundary so a throw
+      // in an in-region statement (or the terminator's own evaluation) runs the
+      // region's finalizer; a throw outside (or in the inline finally itself)
+      // does not.
+      for (const { stmt, handler } of st.lead) {
+        if (hasHandlers && handler !== curHandler) {
+          curHandler = handler;
+          out.push(...setHandler(curHandler));
         }
-        compileStatement(ctx, resumeFctx, seg.leadStmts[i]!);
-      }
-      if (hasFinalizer && seg.awaitInTry !== curFlag) {
-        curFlag = seg.awaitInTry;
-        out.push(...setInTry(curFlag ? 1 : 0));
+        compileStatement(ctx, resumeFctx, stmt);
       }
 
-      const awaitedType = compileExpression(ctx, resumeFctx, seg.awaitedExpr);
-      if (awaitedType !== null && awaitedType !== undefined) {
-        coerceType(ctx, resumeFctx, awaitedType as ValType, { kind: "externref" });
-      } else {
-        out.push({ op: "ref.null.extern" } as Instr);
-      }
-      out.push({ op: "local.set", index: awaitedLocal });
+      const term = st.terminator;
+      switch (term.kind) {
+        case "suspend": {
+          if (hasHandlers && term.handler !== curHandler) {
+            curHandler = term.handler;
+            out.push(...setHandler(curHandler));
+          }
+          const awaitedType = compileExpression(ctx, resumeFctx, term.awaited);
+          if (awaitedType !== null && awaitedType !== undefined) {
+            coerceType(ctx, resumeFctx, awaitedType as ValType, {
+              kind: "externref",
+            });
+          } else {
+            out.push({ op: "ref.null.extern" } as Instr);
+          }
+          out.push({ op: "local.set", index: awaitedLocal });
 
-      if (info.host) {
-        // (#1042 host settle backend) A host Promise is an opaque externref — no
-        // synchronous state inspection is possible, so EVERY await suspends:
-        // assimilate the awaited value via PromiseResolve (§27.7.5.3 — a
-        // non-thenable becomes an already-resolved Promise, a promise passes
-        // through unchanged), park the frame (STATE=s+1 + spills), register the
-        // two `__cb_<id>` step adapters as reactions via
-        // `Promise_then2(p, __make_callback(fulfillId, frame),
-        // __make_callback(rejectId, frame))`, and return. The HOST microtask
-        // queue resumes us — there is no synchronous fast-path advance, which
-        // also makes await timing spec-correct (every await yields ≥1 tick).
-        // The cbId constants are shift-immune (runtime dispatch is by export
-        // NAME); the five import indices are import-space stable.
-        out.push({ op: "local.get", index: awaitedLocal });
-        out.push({ op: "call", funcIdx: hostImports!.promiseResolveIdx });
-        out.push({ op: "local.set", index: pHostLocal });
-        out.push(...setStateI32FromConst(info, frameLocal, STATE_FIELD, s + 1));
-        out.push(...storeSpills(info, resumeFctx, frameLocal));
-        out.push({ op: "local.get", index: pHostLocal });
-        out.push({ op: "i32.const", value: info.stepFulfillCbId! });
-        out.push({ op: "local.get", index: frameLocal });
-        out.push({ op: "extern.convert_any" } as Instr);
-        out.push({ op: "call", funcIdx: hostImports!.makeCbIdx });
-        out.push({ op: "i32.const", value: info.stepRejectCbId! });
-        out.push({ op: "local.get", index: frameLocal });
-        out.push({ op: "extern.convert_any" } as Instr);
-        out.push({ op: "call", funcIdx: hostImports!.makeCbIdx });
-        out.push({ op: "call", funcIdx: hostImports!.then2Idx });
-        out.push({ op: "drop" });
-        out.push({ op: "return" });
-        return out;
-      }
+          if (info.host) {
+            // (#1042 host settle backend) A host Promise is an opaque externref
+            // — no synchronous state inspection is possible, so EVERY await
+            // suspends: assimilate the awaited value via PromiseResolve
+            // (§27.7.5.3 — a non-thenable becomes an already-resolved Promise,
+            // a promise passes through unchanged), park the frame
+            // (STATE=resumeState + spills), register the two `__cb_<id>` step
+            // adapters as reactions via `Promise_then2(p,
+            // __make_callback(fulfillId, frame), __make_callback(rejectId,
+            // frame))`, and return. The HOST microtask queue resumes us — there
+            // is no synchronous fast-path advance, which also makes await
+            // timing spec-correct (every await yields ≥1 tick). The cbId
+            // constants are shift-immune (runtime dispatch is by export NAME);
+            // the five import indices are import-space stable.
+            out.push({ op: "local.get", index: awaitedLocal });
+            out.push({ op: "call", funcIdx: hostImports!.promiseResolveIdx });
+            out.push({ op: "local.set", index: pHostLocal });
+            out.push(...setStateI32FromConst(info, frameLocal, STATE_FIELD, term.resumeState));
+            out.push(...storeSpills(info, resumeFctx, frameLocal));
+            out.push({ op: "local.get", index: pHostLocal });
+            out.push({ op: "i32.const", value: info.stepFulfillCbId! });
+            out.push({ op: "local.get", index: frameLocal });
+            out.push({ op: "extern.convert_any" } as Instr);
+            out.push({ op: "call", funcIdx: hostImports!.makeCbIdx });
+            out.push({ op: "i32.const", value: info.stepRejectCbId! });
+            out.push({ op: "local.get", index: frameLocal });
+            out.push({ op: "extern.convert_any" } as Instr);
+            out.push({ op: "call", funcIdx: hostImports!.makeCbIdx });
+            out.push({ op: "call", funcIdx: hostImports!.then2Idx });
+            out.push({ op: "drop" });
+            out.push({ op: "return" });
+            break;
+          }
 
-      // Classify the assimilated value; set suspendedLocal + SENT/ERROR/MODE.
-      // No `br` inside these nested ifs — the single advance/suspend `br`/`return`
-      // is emitted flat below at a known control depth.
-      out.push({ op: "i32.const", value: 0 });
-      out.push({ op: "local.set", index: suspendedLocal });
+          // Classify the assimilated value; set suspendedLocal + SENT/ERROR/MODE.
+          // No `br` inside these nested ifs — the single advance/suspend
+          // `br`/`return` is emitted flat below at a known control depth.
+          out.push({ op: "i32.const", value: 0 });
+          out.push({ op: "local.set", index: suspendedLocal });
 
-      const deliverFromP: Instr[] = [
-        { op: "local.get", index: frameLocal },
-        { op: "local.get", index: pLocal },
-        { op: "struct.get", typeIdx: info.promiseTypeIdx, fieldIdx: 1 } as Instr,
-        { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: SENT_FIELD } as Instr,
-      ];
-      const rejectFromP: Instr[] = [
-        { op: "local.get", index: frameLocal },
-        { op: "local.get", index: pLocal },
-        { op: "struct.get", typeIdx: info.promiseTypeIdx, fieldIdx: 1 } as Instr,
-        { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: ERROR_FIELD } as Instr,
-        ...setStateI32FromConst(info, frameLocal, MODE_FIELD, MODE_THROW),
-      ];
-      const markPending: Instr[] = [
-        { op: "i32.const", value: 1 },
-        { op: "local.set", index: suspendedLocal },
-      ];
-      const deliverPlain: Instr[] = [
-        { op: "local.get", index: frameLocal },
-        { op: "local.get", index: awaitedLocal },
-        { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: SENT_FIELD } as Instr,
-      ];
-      const pendingOrRejected: Instr[] = [
-        { op: "local.get", index: pLocal },
-        { op: "struct.get", typeIdx: info.promiseTypeIdx, fieldIdx: 0 } as Instr,
-        { op: "i32.const", value: PROMISE_STATE_REJECTED },
-        { op: "i32.eq" },
-        { op: "if", blockType: { kind: "empty" }, then: rejectFromP, else: markPending } as Instr,
-      ];
-      out.push(
-        { op: "local.get", index: awaitedLocal },
-        { op: "any.convert_extern" } as Instr,
-        { op: "ref.test", typeIdx: info.promiseTypeIdx } as Instr,
-        {
-          op: "if",
-          blockType: { kind: "empty" },
-          then: [
+          const deliverFromP: Instr[] = [
+            { op: "local.get", index: frameLocal },
+            { op: "local.get", index: pLocal },
+            {
+              op: "struct.get",
+              typeIdx: info.promiseTypeIdx,
+              fieldIdx: 1,
+            } as Instr,
+            {
+              op: "struct.set",
+              typeIdx: info.stateTypeIdx,
+              fieldIdx: SENT_FIELD,
+            } as Instr,
+          ];
+          const rejectFromP: Instr[] = [
+            { op: "local.get", index: frameLocal },
+            { op: "local.get", index: pLocal },
+            {
+              op: "struct.get",
+              typeIdx: info.promiseTypeIdx,
+              fieldIdx: 1,
+            } as Instr,
+            {
+              op: "struct.set",
+              typeIdx: info.stateTypeIdx,
+              fieldIdx: ERROR_FIELD,
+            } as Instr,
+            ...setStateI32FromConst(info, frameLocal, MODE_FIELD, MODE_THROW),
+          ];
+          const markPending: Instr[] = [
+            { op: "i32.const", value: 1 },
+            { op: "local.set", index: suspendedLocal },
+          ];
+          const deliverPlain: Instr[] = [
+            { op: "local.get", index: frameLocal },
+            { op: "local.get", index: awaitedLocal },
+            {
+              op: "struct.set",
+              typeIdx: info.stateTypeIdx,
+              fieldIdx: SENT_FIELD,
+            } as Instr,
+          ];
+          const pendingOrRejected: Instr[] = [
+            { op: "local.get", index: pLocal },
+            {
+              op: "struct.get",
+              typeIdx: info.promiseTypeIdx,
+              fieldIdx: 0,
+            } as Instr,
+            { op: "i32.const", value: PROMISE_STATE_REJECTED },
+            { op: "i32.eq" },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: rejectFromP,
+              else: markPending,
+            } as Instr,
+          ];
+          out.push(
             { op: "local.get", index: awaitedLocal },
             { op: "any.convert_extern" } as Instr,
-            { op: "ref.cast", typeIdx: info.promiseTypeIdx } as Instr,
-            { op: "local.set", index: pLocal },
+            { op: "ref.test", typeIdx: info.promiseTypeIdx } as Instr,
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                { op: "local.get", index: awaitedLocal },
+                { op: "any.convert_extern" } as Instr,
+                { op: "ref.cast", typeIdx: info.promiseTypeIdx } as Instr,
+                { op: "local.set", index: pLocal },
+                { op: "local.get", index: pLocal },
+                {
+                  op: "struct.get",
+                  typeIdx: info.promiseTypeIdx,
+                  fieldIdx: 0,
+                } as Instr,
+                { op: "i32.const", value: PROMISE_STATE_FULFILLED },
+                { op: "i32.eq" },
+                {
+                  op: "if",
+                  blockType: { kind: "empty" },
+                  then: deliverFromP,
+                  else: pendingOrRejected,
+                } as Instr,
+              ],
+              else: deliverPlain,
+            } as Instr,
+          );
+
+          // Advance-or-suspend. STATE = resumeState for both (suspend → the
+          // microtask resume enters it; advance → the re-dispatch enters it).
+          out.push(...setStateI32FromConst(info, frameLocal, STATE_FIELD, term.resumeState));
+          const suspendArm: Instr[] = [
+            ...storeSpills(info, resumeFctx, frameLocal),
+            // promise.callbacks = $PromiseCallback{stepFulfill, frame, stepReject, frame, promise.callbacks}
             { op: "local.get", index: pLocal },
-            { op: "struct.get", typeIdx: info.promiseTypeIdx, fieldIdx: 0 } as Instr,
-            { op: "i32.const", value: PROMISE_STATE_FULFILLED },
-            { op: "i32.eq" },
-            { op: "if", blockType: { kind: "empty" }, then: deliverFromP, else: pendingOrRejected } as Instr,
-          ],
-          else: deliverPlain,
-        } as Instr,
-      );
-
-      // Advance-or-suspend. STATE = s+1 for both (suspend → resume enters s+1;
-      // advance → re-dispatch enters s+1).
-      out.push(...setStateI32FromConst(info, frameLocal, STATE_FIELD, s + 1));
-      const suspendArm: Instr[] = [
-        ...storeSpills(info, resumeFctx, frameLocal),
-        // promise.callbacks = $PromiseCallback{stepFulfill, frame, stepReject, frame, promise.callbacks}
-        { op: "local.get", index: pLocal },
-        { op: "ref.func", funcIdx: info.stepFulfillFuncIdx! } as Instr,
-        { op: "local.get", index: frameLocal },
-        { op: "extern.convert_any" } as Instr,
-        { op: "ref.func", funcIdx: info.stepRejectFuncIdx! } as Instr,
-        { op: "local.get", index: frameLocal },
-        { op: "extern.convert_any" } as Instr,
-        { op: "local.get", index: pLocal },
-        { op: "struct.get", typeIdx: info.promiseTypeIdx, fieldIdx: 2 } as Instr,
-        { op: "struct.new", typeIdx: rt!.callbackTypeIdx } as Instr,
-        { op: "extern.convert_any" } as Instr,
-        { op: "struct.set", typeIdx: info.promiseTypeIdx, fieldIdx: 2 } as Instr,
-        { op: "return" },
-      ];
-      // Advance: `br` to the dispatch `loop` to re-enter at STATE=s+1. Control
-      // depth from inside this `else`: br0 = this if, br1 = if(state==s), … ,
-      // br(s+1) = if(state==0), br(s+2) = loop.
-      const advanceArm: Instr[] = [{ op: "br", depth: s + 2 } as Instr];
-      out.push({ op: "local.get", index: suspendedLocal });
-      out.push({ op: "if", blockType: { kind: "empty" }, then: suspendArm, else: advanceArm } as Instr);
-    } finally {
-      resumeFctx.body = saved;
-      ctx.liveBodies.delete(saved);
-    }
-    return out;
-  };
-
-  // State N (final): deliver the last await's value, then run the tail / settle.
-  const buildFinalSegment = (): Instr[] => {
-    const saved = resumeFctx.body;
-    ctx.liveBodies.add(saved);
-    const out: Instr[] = [];
-    resumeFctx.body = out;
-    try {
-      let curFlag = false;
-      if (hasFinalizer) out.push(...setInTry(0));
-      emitDeliverPrev(out, N);
-      const last = linear.segments[N - 1]!;
-      if (last.isReturnAwait) {
-        out.push({ op: "local.get", index: resultPromiseLocal });
-        out.push({ op: "local.get", index: frameLocal });
-        out.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: SENT_FIELD });
-        out.push({ op: "call", funcIdx: settleFulfillIdx });
-        out.push({ op: "drop" });
-        out.push({ op: "return" });
-      } else {
-        // Run the tail, toggling `inSrcTry` per statement (`tailInTry[i]`) —
-        // covers in-try post-await statements that precede the inline finally.
-        for (let i = 0; i < linear.tail.length; i++) {
-          if (hasFinalizer && linear.tailInTry[i]! !== curFlag) {
-            curFlag = linear.tailInTry[i]!;
-            out.push(...setInTry(curFlag ? 1 : 0));
-          }
-          compileStatement(ctx, resumeFctx, linear.tail[i]!);
+            { op: "ref.func", funcIdx: info.stepFulfillFuncIdx! } as Instr,
+            { op: "local.get", index: frameLocal },
+            { op: "extern.convert_any" } as Instr,
+            { op: "ref.func", funcIdx: info.stepRejectFuncIdx! } as Instr,
+            { op: "local.get", index: frameLocal },
+            { op: "extern.convert_any" } as Instr,
+            { op: "local.get", index: pLocal },
+            {
+              op: "struct.get",
+              typeIdx: info.promiseTypeIdx,
+              fieldIdx: 2,
+            } as Instr,
+            { op: "struct.new", typeIdx: rt!.callbackTypeIdx } as Instr,
+            { op: "extern.convert_any" } as Instr,
+            {
+              op: "struct.set",
+              typeIdx: info.promiseTypeIdx,
+              fieldIdx: 2,
+            } as Instr,
+            { op: "return" },
+          ];
+          // Advance: `br` to the dispatch `loop` to re-enter at STATE=resumeState.
+          const advanceArm: Instr[] = [{ op: "br", depth: loopDepth } as Instr];
+          out.push({ op: "local.get", index: suspendedLocal });
+          out.push({
+            op: "if",
+            blockType: { kind: "empty" },
+            then: suspendArm,
+            else: advanceArm,
+          } as Instr);
+          break;
         }
-        out.push({ op: "local.get", index: resultPromiseLocal });
-        out.push({ op: "ref.null.extern" } as Instr);
-        out.push({ op: "call", funcIdx: settleFulfillIdx });
-        out.push({ op: "drop" });
-        out.push({ op: "return" });
+        case "goto": {
+          // Unconditional state transition (loop back-edge when target ≤ id).
+          out.push(...setStateI32FromConst(info, frameLocal, STATE_FIELD, term.target));
+          out.push({ op: "br", depth: loopDepth } as Instr);
+          break;
+        }
+        case "condGoto": {
+          // Two-way state transition on a source condition (loop heads / ifs).
+          if (hasHandlers && term.handler !== curHandler) {
+            curHandler = term.handler;
+            out.push(...setHandler(curHandler));
+          }
+          const condType = compileExpression(ctx, resumeFctx, term.cond);
+          ensureI32Condition(resumeFctx, condType, ctx);
+          out.push({
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [
+              ...setStateI32FromConst(info, frameLocal, STATE_FIELD, term.whenTrue),
+              // +1: the `br` sits inside this `if` arm, one level below the arm
+              // top where `loopDepth` is measured.
+              { op: "br", depth: loopDepth + 1 } as Instr,
+            ],
+            else: [
+              ...setStateI32FromConst(info, frameLocal, STATE_FIELD, term.whenFalse),
+              { op: "br", depth: loopDepth + 1 } as Instr,
+            ],
+          } as Instr);
+          break;
+        }
+        case "settleSent": {
+          // `return await P` — fulfil the result promise with SENT directly.
+          out.push({ op: "local.get", index: resultPromiseLocal });
+          out.push({ op: "local.get", index: frameLocal });
+          out.push({
+            op: "struct.get",
+            typeIdx: info.stateTypeIdx,
+            fieldIdx: SENT_FIELD,
+          });
+          out.push({ op: "call", funcIdx: settleFulfillIdx });
+          out.push({ op: "drop" });
+          out.push({ op: "return" });
+          break;
+        }
+        case "settleUndefined": {
+          // Fall off the body — fulfil with undefined. (`return v` inside the
+          // lead already settles via the `asyncDriveReturn` hook and returns.)
+          out.push({ op: "local.get", index: resultPromiseLocal });
+          out.push({ op: "ref.null.extern" } as Instr);
+          out.push({ op: "call", funcIdx: settleFulfillIdx });
+          out.push({ op: "drop" });
+          out.push({ op: "return" });
+          break;
+        }
       }
     } finally {
       resumeFctx.body = saved;
@@ -957,10 +1150,10 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
     return out;
   };
 
-  // (#2710) COMPLETED-but-unassembled segment arrays must stay reachable by the
-  // late-import shifters. `buildStateArm` builds segments depth-first: while
-  // segment s+1 compiles (and may register late imports via ensureLateImport /
-  // addStringImports / addUnionImports), segment s's finished array is a plain
+  // (#2710) COMPLETED-but-unassembled state-body arrays must stay reachable by
+  // the late-import shifters. `buildStateArm` builds states depth-first: while
+  // state i+1 compiles (and may register late imports via ensureLateImport /
+  // addStringImports / addUnionImports), state i's finished array is a plain
   // local — not resumeFctx.body, not in ctx.liveBodies, not yet nested under any
   // walked root (its wrapping `if` instr is only created after the recursion
   // returns). Any LIVE-regime defined-func immediate already baked into it would
@@ -978,49 +1171,70 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
     return arr;
   };
 
-  // Nested if-chain dispatch (`if(state==s){seg}else{…}`), mirroring the
-  // generator trampoline. Recursion depth == stateId, so each arm's `br`-to-loop
-  // depth is computed as `stateId + 2` inside `buildAwaitSegment`.
-  const buildStateArm = (s: number): Instr[] => {
-    if (s > N) return [{ op: "unreachable" } as Instr];
-    const then = trackDetached(s === N ? buildFinalSegment() : buildAwaitSegment(s));
+  // Nested if-chain dispatch (`if(state==s){body}else{…}`), mirroring the
+  // generator trampoline. Recursion depth == state id (dense, validated), so
+  // each arm's `br`-to-loop depth is `id + 2` inside `buildStateBody`.
+  const buildStateArm = (i: number): Instr[] => {
+    if (i >= cfg.states.length) return [{ op: "unreachable" } as Instr];
+    const st = cfg.states[i]!;
+    const then = trackDetached(buildStateBody(st));
     return [
       { op: "local.get", index: frameLocal },
       { op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: STATE_FIELD },
-      { op: "i32.const", value: s },
+      { op: "i32.const", value: st.id },
       { op: "i32.eq" },
-      { op: "if", blockType: { kind: "empty" }, then, else: buildStateArm(s + 1) } as Instr,
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then,
+        else: buildStateArm(i + 1),
+      } as Instr,
     ];
   };
 
   const savedFunc = ctx.currentFunc;
   ctx.currentFunc = resumeFctx;
   let chain: Instr[];
-  // (#2906 Gap 3) The finally, compiled a SECOND time for the abrupt path (the
-  // first copy runs inline on the normal path via the post-try lead). Fresh
-  // Instr[] — never aliased with the inline copy. Guarded by `inSrcTry` in the
-  // catch so it runs only for a throw/rejected-await that crossed the try.
-  let catchFinallyInstrs: Instr[] = [];
+  // (#2906 Gap 3 → slice 3) Each handler region's finalizer, compiled a SECOND
+  // time for the abrupt path (the first copy runs inline on the normal path via
+  // the region's post-try lead). Fresh Instr[] — never aliased with the inline
+  // copy. Guarded in the catch by the region-id local so it runs only for a
+  // throw/rejected-await that crossed THAT try region. With a single region the
+  // guard is the slice-2 truthiness test (byte-identical); sibling regions get
+  // an id-equality guard each. Nested regions (parent !== 0) need parent-chain
+  // replay and are rejected by validateAsyncCfg until the 3c follow-up.
+  const catchFinallyInstrs: Instr[] = [];
   try {
-    // The returned chain nests every segment, but stays detached from all
-    // shifter roots until the `dispatch` push below — track it too (the
-    // finalizer compile between here and there can register late imports).
+    // (#2710) The returned chain nests every state body, but stays detached
+    // from all shifter roots until the `dispatch` push below — track it too
+    // (the handler-finalizer compiles between here and there can register
+    // late imports).
     chain = trackDetached(buildStateArm(0));
-    if (hasFinalizer) {
+    for (const region of cfg.handlers) {
       const saved = resumeFctx.body;
       ctx.liveBodies.add(saved);
       const fbody: Instr[] = [];
       resumeFctx.body = fbody;
       try {
-        for (const f of theFinalizer!) compileStatement(ctx, resumeFctx, f);
+        for (const f of region.finalizer) compileStatement(ctx, resumeFctx, f);
       } finally {
         resumeFctx.body = saved;
         ctx.liveBodies.delete(saved);
       }
-      catchFinallyInstrs = [
-        { op: "local.get", index: inSrcTryLocal },
-        { op: "if", blockType: { kind: "empty" }, then: fbody } as Instr,
-      ];
+      if (cfg.handlers.length === 1) {
+        catchFinallyInstrs.push({ op: "local.get", index: inSrcTryLocal }, {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: fbody,
+        } as Instr);
+      } else {
+        catchFinallyInstrs.push(
+          { op: "local.get", index: inSrcTryLocal },
+          { op: "i32.const", value: region.id },
+          { op: "i32.eq" },
+          { op: "if", blockType: { kind: "empty" }, then: fbody } as Instr,
+        );
+      }
     }
   } finally {
     ctx.currentFunc = savedFunc;
@@ -1094,7 +1308,11 @@ function buildStepAdapterBody(info: AsyncFrameInfo, resumeFuncIdx: number, rejec
     // SENT_FIELD = value (the settled awaited value the continuation reads).
     { op: "local.get", index: frameLocal },
     { op: "local.get", index: valueLocal },
-    { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: SENT_FIELD } as Instr,
+    {
+      op: "struct.set",
+      typeIdx: info.stateTypeIdx,
+      fieldIdx: SENT_FIELD,
+    } as Instr,
   ];
   if (reject) {
     // ERROR_FIELD = reason; MODE_FIELD = MODE_THROW (2). (Slice-1 surfaces the
@@ -1103,7 +1321,11 @@ function buildStepAdapterBody(info: AsyncFrameInfo, resumeFuncIdx: number, rejec
     body.push(
       { op: "local.get", index: frameLocal },
       { op: "local.get", index: valueLocal },
-      { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: ERROR_FIELD } as Instr,
+      {
+        op: "struct.set",
+        typeIdx: info.stateTypeIdx,
+        fieldIdx: ERROR_FIELD,
+      } as Instr,
       ...setStateI32FromConst(info, frameLocal, MODE_FIELD, 2),
     );
   }
@@ -1191,7 +1413,10 @@ export function emitAsyncFrameStateMachine(
   }
   fctx.body.push({ op: "local.get", index: resultPromiseLocal });
   fctx.body.push({ op: "struct.new", typeIdx: info.stateTypeIdx } as Instr);
-  const frameLocal = allocLocal(fctx, "__async_frame", { kind: "ref", typeIdx: info.stateTypeIdx });
+  const frameLocal = allocLocal(fctx, "__async_frame", {
+    kind: "ref",
+    typeIdx: info.stateTypeIdx,
+  });
   fctx.body.push({ op: "local.set", index: frameLocal });
 
   // Kick the resume function once (runs the entry segment to the first real

@@ -319,6 +319,15 @@ export function planIrCompilation(
   // Track unnamed FunctionDeclarations too (rare but possible — `default`
   // export of an anonymous function, etc.) so callers can see them.
   let unnamedCount = 0;
+  // #2949 slice 2 — pre-collect ALL top-level FunctionDeclarations before the
+  // per-function claim loop so `dynamicUsesAreMoveOnly` can resolve CALLEE
+  // param/return dynamic-ness independent of declaration order (the loop
+  // below fills `declByName` incrementally, which would miss later-declared
+  // callees). Module-level for the usual isPhase1* threading reason.
+  for (const stmt of sourceFile.statements) {
+    if (ts.isFunctionDeclaration(stmt) && stmt.name) declByName.set(stmt.name.text, stmt);
+  }
+  currentDynScanDecls = declByName;
   for (const stmt of sourceFile.statements) {
     if (!ts.isFunctionDeclaration(stmt)) continue;
     if (!stmt.name) {
@@ -693,6 +702,9 @@ function whyNotIrClaimable(
   const entry = !isMethod && ts.isFunctionDeclaration(fn) && fn.name ? typeMap?.get(fn.name.text) : undefined;
 
   let isVoidReturn = false;
+  // #2949 slice 2 — true when the return position resolved `dynamic`
+  // (unannotated + lattice unknown/dynamic). Feeds the move-only scan below.
+  let isDynamicReturn = false;
   if (!isGenerator) {
     if (ts.isConstructorDeclaration(fn)) {
       // Constructors have no source-level return type — they always return
@@ -705,10 +717,16 @@ function whyNotIrClaimable(
       const returnResolved = resolveReturnType(fn, entry?.returnType);
       if (returnResolved === null) return "return-type-not-resolvable";
       isVoidReturn = returnResolved === "void";
+      isDynamicReturn = returnResolved === "dynamic";
     }
   }
 
   const scope = new Set<string>();
+  // #2949 slice 2 — names bound to DYNAMIC-typed values (unannotated params
+  // whose lattice type is unknown/dynamic; extended with const/let aliases by
+  // the move-only scan). Non-empty ⇒ the claim is additionally gated on
+  // `dynamicUsesAreMoveOnly` below.
+  const dynNames = new Set<string>();
   // Method bodies and constructor bodies see `this` as an implicit local;
   // mark it so a `return this;` / `this.field` reference passes the
   // identifier-in-scope check at Phase-1 expression position.
@@ -730,6 +748,10 @@ function whyNotIrClaimable(
       const mapped = entry?.params[i];
       const paramResolved = resolveParamType(p, mapped);
       if (paramResolved === null) return "param-type-not-resolvable";
+      // #2949 slice 2 — a DYNAMIC binding pattern (`function f({x}) …` with no
+      // annotation/evidence) would need dynamic property access to destructure;
+      // that's box/unbox territory (slice 3). Keep the honest rejection.
+      if (paramResolved === "dynamic") return "param-type-not-resolvable";
 
       collectPatternNames(p.name, scope);
       continue;
@@ -744,6 +766,8 @@ function whyNotIrClaimable(
     const mapped = entry?.params[i];
     const paramResolved = resolveParamType(p, mapped);
     if (paramResolved === null) return "param-type-not-resolvable";
+    // #2949 slice 2 — collect dynamic-typed param names for the move-only scan.
+    if (paramResolved === "dynamic") dynNames.add(p.name.text);
 
     scope.add(p.name.text);
   }
@@ -769,6 +793,31 @@ function whyNotIrClaimable(
   }
   if (!isPhase1StatementList(body.statements, scope, localClasses, isGenerator, isVoidReturn))
     return "body-shape-rejected";
+
+  // -------------------------------------------------------------------------
+  // #2949 slice 2 — dynamic move-only gate.
+  //
+  // A function whose params/return resolved `dynamic` is claimable ONLY when
+  // every dynamic value strictly MOVES (return position, dyn-arg → dyn-param
+  // of a local direct call, const/let alias). Slice 2 deliberately has no
+  // box/unbox/tag.test lowering, so any other use (arithmetic, truthiness,
+  // property access, mixed concrete/dynamic returns, …) cannot be built; the
+  // scan keeps such functions in their existing rejection buckets instead of
+  // claim-then-demote. Precision here is LOAD-BEARING for `JS2WASM_IR_FIRST`:
+  // a claimed+skipped function that later build-demotes is a hard compile
+  // error there (see `computeIrFirstSkipSet`; gate 6 additionally keeps
+  // dynamic-signature functions compile-twice as insurance while slice 3
+  // lowering is absent).
+  //
+  // Generators with dynamic params stay rejected — the generator prologue /
+  // yield machinery has no dynamic arm yet.
+  // -------------------------------------------------------------------------
+  if (dynNames.size > 0 && isGenerator) return "param-type-not-resolvable";
+  if (dynNames.size > 0 || isDynamicReturn) {
+    if (!dynamicUsesAreMoveOnly(fn, dynNames, isDynamicReturn, typeMap)) {
+      return dynNames.size > 0 ? "param-type-not-resolvable" : "return-type-not-resolvable";
+    }
+  }
 
   return null;
 }
@@ -807,7 +856,20 @@ function isIrClaimable(
 //   and return are all primitive-annotated (the same surface slice-3 closure
 //   literals support). Lowers to `IrType.closure`; calls through the param
 //   dispatch via `lowerClosureCall` exactly like a closure-typed local.
-type ResolvedKind = "f64" | "bool" | "string" | "object" | "any" | "void" | "closure" | null;
+// #2949 slice 2 — `dynamic`: an UNANNOTATED position whose propagated lattice
+//   type converged to `unknown` (no evidence) or `dynamic` (top). Lowers to
+//   `IrType.dynamic` → the module's boxed-any carrier via
+//   `IrLowerResolver.resolveDynamic()` (fast/standalone: `ref_null $AnyValue`;
+//   JS-host: externref) — the SAME carrier legacy `resolveWasmType`'s
+//   any/unknown arm gives these positions, so IR-claimed and legacy functions
+//   agree on the ABI by construction. The claim is additionally gated by
+//   `dynamicUsesAreMoveOnly`: slice 2 has no box/unbox/tag.test lowering, so
+//   dynamic values may only MOVE. NOTE the deliberate asymmetry with the
+//   explicit `any` ANNOTATION, which keeps its historical externref mapping
+//   (the AnyKeyword arms): unifying `any` onto `dynamic` changes currently-
+//   claimed functions' fast-mode signatures and is deferred to slice 3 (where
+//   it fixes a real fast-mode ABI divergence — see the issue file).
+type ResolvedKind = "f64" | "bool" | "string" | "object" | "any" | "void" | "closure" | "dynamic" | null;
 
 /**
  * #2859 — build an `IrClosureSignature` from an explicit function-type
@@ -879,6 +941,13 @@ function resolveParamType(p: ts.ParameterDeclaration, mapped: LatticeType | unde
   if (mapped?.kind === "bool") return "bool";
   if (mapped?.kind === "string") return "string";
   if (mapped?.kind === "object") return "object";
+  // #2949 slice 2 — unannotated + lattice unknown (no evidence) or dynamic
+  // (top): the position is honestly DYNAMIC. `mapped` must be present (a
+  // TypeMap entry exists for every top-level FunctionDeclaration): class
+  // members don't participate in propagation (`entry` is undefined there) and
+  // must keep the null rejection, not silently become dynamic-claimable.
+  // Lattice `union` stays null: #2135's union rows own that shape.
+  if (mapped && (mapped.kind === "unknown" || mapped.kind === "dynamic")) return "dynamic";
   return null;
 }
 
@@ -907,7 +976,262 @@ function resolveReturnType(
   if (mapped?.kind === "bool") return "bool";
   if (mapped?.kind === "string") return "string";
   if (mapped?.kind === "object") return "object";
+  // #2949 slice 2 — same dynamic arm as `resolveParamType` (see the rationale
+  // there). A dynamic return is claimable only when every return statement
+  // returns a dynamic-typed MOVE (enforced by `dynamicUsesAreMoveOnly`).
+  if (mapped && (mapped.kind === "unknown" || mapped.kind === "dynamic")) return "dynamic";
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// #2949 slice 2 — dynamic move-only scan
+// ---------------------------------------------------------------------------
+
+/**
+ * All top-level FunctionDeclarations of the CURRENT `planIrCompilation` run,
+ * pre-collected before Step 1 so the move-only scan can resolve CALLEE
+ * param/return dynamic-ness regardless of declaration order. Module-level for
+ * the same reason as `currentFnHasCStyleLoop` (threading a param through the
+ * shared `isPhase1*` recursion would conflict with every in-flight selector
+ * slice). `null` outside a selector run — the scan then treats every callee
+ * as non-dynamic (conservative: dyn args to it reject the claim).
+ */
+let currentDynScanDecls: ReadonlyMap<string, ts.FunctionDeclaration> | null = null;
+
+/** Resolve whether param `argIdx` of local function `calleeName` is dynamic
+ *  (same `resolveParamType` verdict the callee's own claim check uses, so the
+ *  caller-side scan and the callee's signature can never drift). */
+function calleeParamIsDynamic(calleeName: string, argIdx: number, typeMap: TypeMap | undefined): boolean {
+  const decl = currentDynScanDecls?.get(calleeName);
+  if (!decl) return false;
+  const p = decl.parameters[argIdx];
+  if (!p || !ts.isIdentifier(p.name)) return false;
+  return resolveParamType(p, typeMap?.get(calleeName)?.params[argIdx]) === "dynamic";
+}
+
+function calleeHasAnyDynamicParam(calleeName: string, typeMap: TypeMap | undefined): boolean {
+  const decl = currentDynScanDecls?.get(calleeName);
+  if (!decl) return false;
+  for (let i = 0; i < decl.parameters.length; i++) {
+    if (calleeParamIsDynamic(calleeName, i, typeMap)) return true;
+  }
+  return false;
+}
+
+/** Resolve whether local function `calleeName`'s return is dynamic. */
+function calleeReturnIsDynamic(calleeName: string, typeMap: TypeMap | undefined): boolean {
+  const decl = currentDynScanDecls?.get(calleeName);
+  if (!decl || decl.asteriskToken) return false;
+  return resolveReturnType(decl, typeMap?.get(calleeName)?.returnType) === "dynamic";
+}
+
+/**
+ * True when the subtree contains NO value-use of a dynamic name. Property
+ * NAMES (`obj.<name>`, non-computed object-literal keys) are not value uses
+ * and are excluded; everything else that mentions a dyn name counts as a
+ * touch. Used as the conservative fallback for constructs the move-only scan
+ * doesn't model: untouched-by-dynamic subtrees are exactly as claimable as
+ * they were before slice 2.
+ */
+function subtreeTouchesDynamic(root: ts.Node, dynNames: ReadonlySet<string>): boolean {
+  let found = false;
+  const visit = (n: ts.Node): void => {
+    if (found) return;
+    if (ts.isIdentifier(n) && dynNames.has(n.text)) {
+      found = true;
+      return;
+    }
+    if (ts.isPropertyAccessExpression(n)) {
+      visit(n.expression); // skip `.name` — not a value use
+      return;
+    }
+    if (ts.isPropertyAssignment(n)) {
+      if (ts.isComputedPropertyName(n.name)) visit(n.name);
+      visit(n.initializer); // skip the literal key
+      return;
+    }
+    forEachChild(n, visit);
+  };
+  visit(root);
+  return found;
+}
+
+/**
+ * #2949 slice 2 — verify every use of a dynamic value in `fn`'s body is a
+ * MOVE the from-ast builder can lower withOUT box/unbox/tag.test (which land
+ * in slice 3). Allowed sinks for a dynamic value:
+ *
+ *   - `return <dyn>` when the function's return resolved dynamic;
+ *   - argument position of a DIRECT call to a local function whose
+ *     corresponding param also resolved dynamic (`irTypeEquals` at the
+ *     from-ast call site then holds by construction);
+ *   - `const`/`let` initializer that is exactly a dyn identifier or a
+ *     dyn-returning local call — the declared name joins `dynNames`;
+ *   - re-assignment `<dynLocal> = <dyn move>`;
+ *   - statement-position calls (a dropped dynamic result is fine).
+ *
+ * Dually, a position that REQUIRES a dynamic value (dyn-param argument, dyn
+ * return) must receive one — a concrete value there would need a box.
+ * Everything else is rejected so the function keeps its existing rejection
+ * bucket (never claim-then-demote; see the IR-first hard-error contract).
+ *
+ * The walker mutates `dynNames` (alias tracking). Shadowing is already
+ * rejected by the Phase-1 scope rules, so a flat set is sound.
+ */
+function dynamicUsesAreMoveOnly(
+  fn: IrClaimableSubject,
+  dynNames: Set<string>,
+  returnIsDynamic: boolean,
+  typeMap: TypeMap | undefined,
+): boolean {
+  const body = fn.body;
+  if (!body) return false;
+
+  const unwrap = (e: ts.Expression): ts.Expression => {
+    while (ts.isParenthesizedExpression(e)) e = e.expression;
+    return e;
+  };
+
+  /** Is `e` shaped like a dynamic-typed value? (dyn name | dyn-returning local call) */
+  const isDynShaped = (e: ts.Expression): boolean => {
+    e = unwrap(e);
+    if (ts.isIdentifier(e)) return dynNames.has(e.text);
+    if (ts.isCallExpression(e) && ts.isIdentifier(e.expression) && !dynNames.has(e.expression.text)) {
+      return calleeReturnIsDynamic(e.expression.text, typeMap);
+    }
+    return false;
+  };
+
+  /** Scan a direct-call's arguments against the callee's per-param verdicts. */
+  const scanDirectCallArgs = (e: ts.CallExpression, calleeName: string): boolean => {
+    for (let i = 0; i < e.arguments.length; i++) {
+      const a = e.arguments[i]!;
+      if (ts.isSpreadElement(a)) {
+        // Spread shifts arg→param index mapping (`expandStaticSpreadArgs`);
+        // don't try to track it — safe only when the callee has no dynamic
+        // params and the spread source doesn't touch dynamic values.
+        if (calleeHasAnyDynamicParam(calleeName, typeMap)) return false;
+        if (subtreeTouchesDynamic(a, dynNames)) return false;
+        continue;
+      }
+      if (!scanExpr(a, calleeParamIsDynamic(calleeName, i, typeMap))) return false;
+    }
+    return true;
+  };
+
+  /**
+   * `expectDyn` is the type the POSITION requires: true ⇒ a dynamic value
+   * must flow here (box needed otherwise → reject); false ⇒ a concrete value
+   * must flow here (unbox needed otherwise → reject).
+   */
+  const scanExpr = (expr: ts.Expression, expectDyn: boolean): boolean => {
+    const e = unwrap(expr);
+    if (ts.isIdentifier(e)) {
+      return dynNames.has(e.text) === expectDyn;
+    }
+    if (ts.isCallExpression(e)) {
+      // Direct call to a (possibly) top-level function. A dyn-NAMED callee
+      // (`x()` where x is dynamic) is calling a dynamic value — slice 3.
+      if (ts.isIdentifier(e.expression)) {
+        if (dynNames.has(e.expression.text)) return false;
+        const calleeName = e.expression.text;
+        if (calleeReturnIsDynamic(calleeName, typeMap) !== expectDyn) return false;
+        return scanDirectCallArgs(e, calleeName);
+      }
+      // Method-shaped / other callees: no dynamic involvement allowed.
+      if (expectDyn) return false;
+      if (!scanExpr(e.expression, false)) return false;
+      for (const a of e.arguments) {
+        if (ts.isSpreadElement(a)) {
+          if (subtreeTouchesDynamic(a, dynNames)) return false;
+          continue;
+        }
+        if (!scanExpr(a, false)) return false;
+      }
+      return true;
+    }
+    if (ts.isBinaryExpression(e)) {
+      // Plain assignment re-binds; scan the RHS against the LHS's dyn-ness.
+      if (e.operatorToken.kind === ts.SyntaxKind.EqualsToken && ts.isIdentifier(e.left)) {
+        if (expectDyn) return false; // assignment-as-value in a dyn position — slice 3
+        return scanExpr(e.right, dynNames.has(e.left.text));
+      }
+      if (expectDyn) return false; // operator results are concrete-shaped
+      return scanExpr(e.left, false) && scanExpr(e.right, false);
+    }
+    if (ts.isPrefixUnaryExpression(e) || ts.isPostfixUnaryExpression(e)) {
+      if (expectDyn) return false;
+      const op = e.operand;
+      return scanExpr(op, false);
+    }
+    if (ts.isConditionalExpression(e)) {
+      // Dyn joins in cond-expr arms need refinement widening at the join —
+      // slice 3. Concrete conditional expressions pass through.
+      if (expectDyn) return false;
+      return scanExpr(e.condition, false) && scanExpr(e.whenTrue, false) && scanExpr(e.whenFalse, false);
+    }
+    if (ts.isPropertyAccessExpression(e)) {
+      if (expectDyn) return false;
+      return scanExpr(e.expression, false);
+    }
+    if (ts.isElementAccessExpression(e)) {
+      if (expectDyn) return false;
+      return scanExpr(e.expression, false) && scanExpr(e.argumentExpression, false);
+    }
+    // Everything else (literals, templates, object/array literals, closures,
+    // new-expressions, typeof, …): fine exactly when no dynamic value is
+    // involved AND the position doesn't require one.
+    return !expectDyn && !subtreeTouchesDynamic(e, dynNames);
+  };
+
+  const scanStmt = (s: ts.Statement): boolean => {
+    if (ts.isVariableStatement(s)) {
+      for (const d of s.declarationList.declarations) {
+        if (!ts.isIdentifier(d.name) || !d.initializer) {
+          if (subtreeTouchesDynamic(d, dynNames)) return false;
+          continue;
+        }
+        const initIsDyn = isDynShaped(d.initializer);
+        if (!scanExpr(d.initializer, initIsDyn)) return false;
+        if (initIsDyn) dynNames.add(d.name.text);
+      }
+      return true;
+    }
+    if (ts.isReturnStatement(s)) {
+      if (!s.expression) return true;
+      return scanExpr(s.expression, returnIsDynamic);
+    }
+    if (ts.isExpressionStatement(s)) {
+      const e = unwrap(s.expression);
+      // Statement-position direct call: the result is DROPPED, so a dynamic
+      // return is fine here regardless of the callee's return verdict.
+      if (ts.isCallExpression(e) && ts.isIdentifier(e.expression) && !dynNames.has(e.expression.text)) {
+        return scanDirectCallArgs(e, e.expression.text);
+      }
+      return scanExpr(s.expression, false);
+    }
+    if (ts.isIfStatement(s)) {
+      return (
+        scanExpr(s.expression, false) && scanStmt(s.thenStatement) && (!s.elseStatement || scanStmt(s.elseStatement))
+      );
+    }
+    if (ts.isBlock(s)) {
+      for (const inner of s.statements) if (!scanStmt(inner)) return false;
+      return true;
+    }
+    if (ts.isWhileStatement(s)) {
+      return scanExpr(s.expression, false) && scanStmt(s.statement);
+    }
+    // For / for-of / for-in / switch / try / throw / nested functions /
+    // anything else: conservative — claimable exactly when the statement
+    // doesn't touch a dynamic value at all.
+    return !subtreeTouchesDynamic(s, dynNames);
+  };
+
+  for (const s of body.statements) {
+    if (!scanStmt(s)) return false;
+  }
+  return true;
 }
 
 // ---------------------------------------------------------------------------
