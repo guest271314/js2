@@ -1915,3 +1915,58 @@ export function emitTypedArrayIntrinsicCtorObject(ctx: CodegenContext, fctx: Fun
   fctx.body.push({ op: "global.get", index: globalIdx } as Instr);
   return { kind: "externref" };
 }
+
+/**
+ * (#2996) Native standalone `globalThis` value. In host/gc mode a bare
+ * `globalThis` identifier read leaks the `env::__get_globalThis` host import
+ * (see `compileIdentifier`), which a no-JS-host binary can't satisfy — yet the
+ * value still leaks into the standalone import section. The 47 sole-import
+ * `__get_globalThis` leaky-passes (annexB `emulates-undefined`, `global-code`,
+ * Array/Proxy cross-realm) never actually *read* a property off the resulting
+ * object; they only need `globalThis` to be a valid object value (it lands in
+ * the test262 `$262 = { global: globalThis, … }` harness stub, or an unread
+ * slot). This resolves bare `globalThis` to a native, lazily-created, cached
+ * `$Object` singleton (stable identity: `globalThis === globalThis`) built with
+ * the same `__new_plain_object` runtime an empty `{}` uses — zero host imports.
+ *
+ * Scope note: this is READ-value substrate only. Reflective READS of specific
+ * global bindings (`globalThis.Array`, defineProperty-on-globalThis own-property
+ * table, etc.) are the much larger MOP work deferred to #2988 — those go through
+ * `compilePropertyAccess`'s dedicated `globalThis.prop` path, which is untouched
+ * here (host/gc keeps `__extern_get(__get_globalThis(), key)`; standalone still
+ * leaks there, tracked separately). Standalone/WASI only; returns the externref
+ * ValType, or `null` if the `$Object` runtime is unavailable (caller falls
+ * through to the host-import path).
+ */
+export function emitNativeGlobalThisObject(ctx: CodegenContext, fctx: FunctionContext): ValType | null {
+  ensureObjectRuntime(ctx);
+  const newObjectIdx = ctx.funcMap.get("__new_plain_object");
+  if (newObjectIdx === undefined) return null;
+
+  const globalName = "__native_globalThis";
+  let globalIdx = ctx.builtinObjectGlobals.get(globalName);
+  if (globalIdx === undefined) {
+    globalIdx = ctx.numImportGlobals + ctx.mod.globals.length;
+    ctx.mod.globals.push({
+      name: globalName,
+      type: { kind: "externref" },
+      mutable: true,
+      init: [{ op: "ref.null.extern" }],
+    });
+    ctx.builtinObjectGlobals.set(globalName, globalIdx);
+  }
+
+  // Lazy init: `if (global == null) global = __new_plain_object();` then read it.
+  // The init body is nested directly inside the `if` (part of `fctx.body`), so
+  // any later late-import funcIdx shift walks it naturally — no detached-body
+  // (`liveBodies`) registration needed.
+  const initBody: Instr[] = [
+    { op: "call", funcIdx: newObjectIdx } as Instr,
+    { op: "global.set", index: globalIdx } as Instr,
+  ];
+  fctx.body.push({ op: "global.get", index: globalIdx } as Instr);
+  fctx.body.push({ op: "ref.is_null" } as Instr);
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: initBody, else: [] } as Instr);
+  fctx.body.push({ op: "global.get", index: globalIdx } as Instr);
+  return { kind: "externref" };
+}
