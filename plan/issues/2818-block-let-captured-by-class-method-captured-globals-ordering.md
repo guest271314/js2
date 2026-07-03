@@ -371,3 +371,61 @@ The `expressions/class/dstr/*meth-*` cluster half (`var C = class{…}` capturin
 the #2335 hazard (the deferred path does not re-compile class expressions in
 variable initializers). Fixing it needs Option 2 (complete the deferred path for
 class expressions) and should be a separate, independently-validated issue.
+
+## Standalone follow-up (2026-07-03, sendev-2818) — derived-class capturers stay eager
+
+PR #2567 (this branch) was park-held on a **6-test standalone regression**
+(distinct from the separate ~55-test base-drift being fixed elsewhere):
+
+- `language/expressions/super/call-spread-obj-getter-init.js`
+- `built-ins/Iterator/prototype/{map,take,drop,filter}/return-is-forwarded*.js`
+- `built-ins/Iterator/prototype/flatMap/return-is-forwarded-to-underlying-iterator.js`
+
+### Root cause (measured, both lanes, branch vs `origin/main`)
+
+The test262 harness (`wrapTest`) wraps every test body in
+`export function test(){ try { <body> } catch(e){…} }`. So a top-level
+`let returnCount = 0; class TestIterator extends Iterator { return(){ ++returnCount; } }`
+becomes a class **nested in the `try` block** — a control-flow carrier. The
+#2818 capture-defer branch therefore fired for it and moved the class into
+`deferredClassBodies`.
+
+The deferred, in-block-recompiled path promotes the captured `let` to a
+`__captured_<name>` global and emits the `global.set`/`global.get` sync **in
+both lanes** (verified: the WAT sync structure is identical GC vs standalone).
+But for a class with a **base class** (`extends …`), the derived-constructor
+`super(...)` invocation + any spread/getter in its arguments **desyncs the
+promoted-global read in the standalone lane only** — the captured value reads
+stale/empty through the super/spread machinery. The WasmGC/host lane lowers it
+correctly (it actually *fixed* `super/call-spread-obj-getter-init` fail→pass in
+host/gc). The **eager** path — exactly how `origin/main` compiled these — is
+correct in standalone. So on `origin/main` all 6 passed standalone (eager);
+deferring them broke standalone while (coincidentally) improving host/gc.
+
+Full lane matrix (branch pre-fix vs main), e.g. `take/return-is-forwarded`:
+main(gc FAIL, sa PASS) → pre-fix branch(gc FAIL, sa **FAIL**). `super`:
+main(gc FAIL, sa PASS) → pre-fix(gc PASS, sa **FAIL**).
+
+### Fix
+
+`classDeclCapturesNames` (`src/codegen/declarations.ts`) now returns `false` for
+any class with an `extends` heritage clause, so **derived classes are never
+deferred** — they compile eagerly, byte-identically to `origin/main`. Base-less
+capturers (the genuine #2818 target: `class C { m(){ return s; } }` reading a
+block-`let`) still defer and are fixed in **both** lanes (they have no
+super-constructor path and lower identically GC vs standalone). The edit is
+strictly **subtractive** vs the pre-fix branch: it can only *reduce* the set of
+deferred classes, so it cannot introduce a new regression beyond `origin/main`.
+
+### Validation
+
+- The 6 regressions: **fail→pass in standalone**, and host/gc now == `origin/main`
+  (no regression; the one incidental host/gc gain on `super` is foregone).
+- Exhaustive standalone sweep of **all 700 `extends`+`let`/`const` candidates**
+  (`class/dstr` + `class/elements` + external), FIXED vs `origin/main`:
+  **0 regressions, +2 improvements**.
+- `tests/issue-2818.test.ts`: the 22 existing repros + 3 new standalone
+  regression guards (derived-class method / super-ctor capturer stays correct;
+  base-less capturer still works) — all green.
+- Typecheck clean.
+

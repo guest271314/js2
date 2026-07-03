@@ -253,3 +253,71 @@ describe.runIf(test262Available())("#2818 — class-method capture cluster (test
     });
   }
 });
+
+/**
+ * (#2818 standalone follow-up) A class with a base class (`extends …`) that
+ * captures a block-scoped `let` must compile EAGERLY (as `origin/main` does),
+ * never via the capture-defer path. The deferred, block-recompiled path lowers
+ * the `super(...)` constructor invocation + captured-global read correctly in
+ * the WasmGC/host lane but DESYNCS in the standalone lane, which regressed 6
+ * standalone test262 files (`class X extends Iterator` /`extends Parent`
+ * capturers). `classDeclCapturesNames` now returns false for any class with an
+ * `extends` heritage clause, so derived-class capturers stay eager. Base-less
+ * capturers (the genuine #2818 target) still defer and are fixed in both lanes.
+ */
+async function runStandalone(src: string): Promise<number> {
+  const r = await compile(src, { fileName: "test.ts", target: "standalone" });
+  expect(r.success, r.success ? "" : `compile error: ${r.errors?.[0]?.message}`).toBe(true);
+  const mod = await WebAssembly.compile(r.binary!);
+  const imports = WebAssembly.Module.imports(mod).map((i) => `${i.module}::${i.name}`);
+  expect(imports, "standalone module must have zero host imports").toEqual([]);
+  const { instance } = await WebAssembly.instantiate(r.binary!, {});
+  return (instance.exports as { test(): number }).test();
+}
+
+describe("#2818 — derived-class capturer stays eager (standalone lane)", () => {
+  it("derived class method captures a block-`let` — standalone returns the mutated count", async () => {
+    // Mirrors the `Iterator.prototype.*` `return-is-forwarded*` cluster shape:
+    // a `let` mutated through a derived class's method, then read from outside.
+    expect(
+      await runStandalone(
+        `export function test(): number {
+           let count = 0;
+           class Base { base(): void {} }
+           class Derived extends Base { hit(): void { count = count + 1; } }
+           const d = new Derived();
+           d.hit(); d.hit(); d.hit();
+           return count;
+         }`,
+      ),
+    ).toBe(3);
+  });
+
+  it("derived-class constructor with super() captures a block-`let` — standalone", async () => {
+    // Mirrors `super/call-spread-obj-getter-init`: a `let` mutated in a derived
+    // constructor that calls super().
+    expect(
+      await runStandalone(
+        `export function test(): number {
+           let seen = 0;
+           class Base { constructor() {} }
+           class Derived extends Base { constructor() { super(); seen = seen + 1; } }
+           new Derived(); new Derived();
+           return seen;
+         }`,
+      ),
+    ).toBe(2);
+  });
+
+  it("base-less block-`let` capturer still works standalone (the #2818 fix, unaffected)", async () => {
+    expect(
+      await runStandalone(
+        `export function test(): number {
+           let s = 42;
+           class C { get(): number { return s; } }
+           return new C().get();
+         }`,
+      ),
+    ).toBe(42);
+  });
+});
