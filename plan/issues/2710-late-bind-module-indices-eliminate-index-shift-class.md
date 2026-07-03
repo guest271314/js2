@@ -2,10 +2,10 @@
 id: 2710
 title: "Late-bind module indices (func/global/type) to eliminate the late-index-shift bug class"
 status: in-progress
-assignee: ttraenkler/sd-indexshift
+assignee: ttraenkler/fable-2710
 sprint: current
 created: 2026-06-26
-updated: 2026-06-26
+updated: 2026-07-04
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -16,6 +16,7 @@ language_feature: compiler-internals
 goal: backend-agnostic-ir
 related: [1839, 1819, 1851, 1530, 2182]
 ---
+
 # #2710 — Late-bind module indices to eliminate the index-shift bug class
 
 **Source:** 2026-06-26 codebase audit (tech lead). Recurring "bug factory" #1:
@@ -27,15 +28,15 @@ optional-direct-call funcIdx not repointed; three drifted shifters).
 ## Problem — eager index binding
 
 The compiler **binds module indices eagerly**: at instruction-construction time
-it bakes `ctx.funcMap.get(name)` (a *live position* in the function index space)
-directly into the `Instr` as `funcIdx`. Globals and types do the same. A *live
-position* is a value that keeps changing:
+it bakes `ctx.funcMap.get(name)` (a _live position_ in the function index space)
+directly into the `Instr` as `funcIdx`. Globals and types do the same. A _live
+position_ is a value that keeps changing:
 
 - **Late imports** (`addUnionImports`, `addStringImports`, `ensureLateImport`)
   append before defined functions → every defined-function index shifts by +N.
 - **String-constant / import globals** insert into the global space → every
   `global.get`/`global.set` index shifts.
-- **Dead-code elimination** *removes* type entries → a full type renumber.
+- **Dead-code elimination** _removes_ type entries → a full type renumber.
 
 Because the concrete index is already baked into thousands of emitted
 instructions, every such change must be **chased by hand** into all bodies +
@@ -49,16 +50,16 @@ instructions, every such change must be **chased by hand** into all bodies +
    generic-vs-op-allowlist funcIdx test).
 2. **An unwritten invariant applied ad hoc** — the "re-read the index after
    compiling a sub-expression" rule is correct in some arms and forgotten in
-   adjacent arms of the *same* function (the `?? funcIdx` repoint hacks). Every
+   adjacent arms of the _same_ function (the `?? funcIdx` repoint hacks). Every
    new emit site is a fresh opportunity to forget it.
 
-The bug class is definitionally: *a concrete index baked into instruction X went
-stale when the index space changed.* As long as instructions hold concrete
+The bug class is definitionally: _a concrete index baked into instruction X went
+stale when the index space changed._ As long as instructions hold concrete
 indices, the class is reachable by construction.
 
 ## Preconditions that make this tractable (verified on main 2026-06-26)
 
-1. **One serialization chokepoint** — `src/emit/binary.ts` is the *sole* place a
+1. **One serialization chokepoint** — `src/emit/binary.ts` is the _sole_ place a
    `funcIdx`/`globalIdx` becomes bytes (`enc.u32(instr.funcIdx)` at lines
    950/955/1390). Every reference funnels through there.
 2. **A relocation/symbol model already exists** — `src/emit/object.ts` builds
@@ -72,11 +73,11 @@ indices, the class is reachable by construction.
 
 Scale (construction sites, current main): `op:"call"` ×1892, `op:"ref.func"` ×22,
 `global.get/set` ×409; index-bearing fields referenced: `funcIdx` ×3280,
-`globalIdx` ×198, `typeIdx` ×5988. Mid-compile *positional reads* of a numeric
+`globalIdx` ×198, `typeIdx` ×5988. Mid-compile _positional reads_ of a numeric
 module index (the real migration surface): `mod.functions[idx]` ×94,
 `mod.globals[idx]` ×55.
 
-## Recommendation — bind indices *last*, not eagerly
+## Recommendation — bind indices _last_, not eagerly
 
 Instructions reference functions/globals/types by a **stable handle**: an opaque
 id minted at registration that is **never renumbered and never reused**. One
@@ -86,10 +87,10 @@ post-DCE) and produces `handle → finalIndex` maps. `binary.ts` dereferences
 handle→index as it writes bytes.
 
 **Why this is structurally immune** (not merely better-tested): if no instruction
-ever holds a concrete index — only a handle *defined* to be layout-independent —
+ever holds a concrete index — only a handle _defined_ to be layout-independent —
 there is nothing a late import can invalidate. "Late additions don't disturb
 emitted code" stops being a discipline every author must remember and becomes
-true *by construction*. The reactive sweep disappears because there was never
+true _by construction_. The reactive sweep disappears because there was never
 anything to sweep.
 
 ### Minimal-churn form (recommended)
@@ -105,14 +106,14 @@ are unchanged. Work concentrates at two seams:
   care);
 - one `resolveLayout()` + the `binary.ts` dereference.
 
-### Enforcement that makes it a *single safe process*
+### Enforcement that makes it a _single safe process_
 
 Brand the handle types:
 
 ```ts
-type FuncHandle   = number & { readonly __func:   unique symbol };
+type FuncHandle = number & { readonly __func: unique symbol };
 type GlobalHandle = number & { readonly __global: unique symbol };
-type TypeHandle   = number & { readonly __type:   unique symbol };
+type TypeHandle = number & { readonly __type: unique symbol };
 ```
 
 Any code that uses a handle as a raw array index now **fails to typecheck**.
@@ -123,7 +124,7 @@ concrete-index use."
 
 ### Bonus: subsumes the type-DCE renumber factory for free
 
-funcIdx shift is monotonic (+N); type DCE is *remove-and-renumber* — a worse
+funcIdx shift is monotonic (+N); type DCE is _remove-and-renumber_ — a worse
 problem the current shifters don't fully handle (see project memory
 `project_type_index_shift_and_deadelim`). Under late binding both are identical:
 types get handles, `resolveLayout` emits the live-type ordering after DCE,
@@ -178,7 +179,7 @@ factories** (functions, globals, types — and tags/tables/elems/data come along
 
 ## Notes
 
-- Net performance is *better*: one resolve pass replaces N reactive full-body
+- Net performance is _better_: one resolve pass replaces N reactive full-body
   sweeps run today.
 - Coordinates with the (done) #1851 legalization boundary; this is the
   index-binding analogue of that seam work.
@@ -199,14 +200,16 @@ Module indices (`funcIdx` / global `index` / `typeIdx`) are bound **eagerly** at
 instruction-construction time, so every late import (`addUnionImports`,
 `addStringImports`, `ensureLateImport`→`flushLateImportShifts`), every late
 string-constant global (`addStringConstantGlobal`), and DCE's type/func removal
-must *chase* the new live positions into thousands of already-emitted instructions
-+ ~40 cached side-channel index fields; any emit site that read an index **before**
-the chase and reused it **after** emits an off-by-N instruction that only fails in
-the merge_group standalone/harness shape (PR-CI host-masked — #2078, #2191/#2193).
+must _chase_ the new live positions into thousands of already-emitted instructions
+
+- ~40 cached side-channel index fields; any emit site that read an index **before**
+  the chase and reused it **after** emits an off-by-N instruction that only fails in
+  the merge_group standalone/harness shape (PR-CI host-masked — #2078, #2191/#2193).
 
 ### Current shift-site map (verified line anchors on main)
 
 **A. Function-index shifters (4 divergent implementations of one idea):**
+
 1. `shiftLateImportIndices` — `src/codegen/expressions/late-imports.ts:144`. The
    canonical walker. Beyond `mod.functions` bodies it ALSO chases ~9 side-channels:
    `funcMap` (232), `nativeStrHelpers` (245), `nativeRegexHelpers` (256),
@@ -231,12 +234,13 @@ the merge_group standalone/harness shape (PR-CI host-masked — #2078, #2191/#21
 
    **Correction to the issue body:** there are NOT "two forked copies of
    `flushLateImportShifts`". `src/codegen/shared.ts:376` is now a thin registry
-   *delegate* (`_flushLateImportShifts`, registered via `registerFlushLateImportShifts`
+   _delegate_ (`_flushLateImportShifts`, registered via `registerFlushLateImportShifts`
    at 362) — a single implementation behind an indirection, not a fork. The real
-   duplication is the four func-index *shifters* above (#1–#4) plus
+   duplication is the four func-index _shifters_ above (#1–#4) plus
    `reconcileNativeStrFinalizeShift`.
 
 **B. Global-index shifter (1, with ~25 cached fields — the #2078 site):**
+
 - `fixupModuleGlobalIndices` — `src/codegen/registry/imports.ts:153`, invoked from
   `addStringConstantGlobal` (imports.ts:122) whenever a string-constant global is
   inserted after module globals exist. Walks `global.get`/`global.set` bodies (187)
@@ -251,10 +255,11 @@ the merge_group standalone/harness shape (PR-CI host-masked — #2078, #2191/#21
   re-used it after the +1 shift → `global.set expected f64 found externref`.
 - `localGlobalIdx(ctx, absIdx) = absIdx - ctx.numImportGlobals` (imports.ts:132) and
   `nextModuleGlobalIdx = numImportGlobals + mod.globals.length` (127) are the
-  imports-first *relative-offset* readers — the analogue of the func
+  imports-first _relative-offset_ readers — the analogue of the func
   `idx - numImportFuncs` sites the migration must convert carefully.
 
 **C. Type-index renumber (remove-and-renumber — the harder factory):**
+
 - `eliminateDeadImports` — `src/codegen/dead-elimination.ts:274`, called once from
   `index.ts:1901` / `index.ts:5768`. Collects live funcs+types
   (`collectRefsFromBody` 19), removes dead, and remaps ALL survivors via
@@ -264,6 +269,7 @@ the merge_group standalone/harness shape (PR-CI host-masked — #2078, #2191/#21
   remove-and-renumber, which the A/B shifters do not even attempt.
 
 **D. The single serialization chokepoint (the resolve seam):**
+
 - `src/emit/binary.ts` `emitBinary` (255) → `encodeInstr`. Concrete index → bytes
   happens at exactly: `funcIdx` lines **950** (`call`) and **955** (`return_call`/
   `ref.func`); global `index` lines **990** (`global.get`) / **995** (`global.set`);
@@ -272,6 +278,7 @@ the merge_group standalone/harness shape (PR-CI host-masked — #2078, #2191/#21
   already precedes each (948/988/…) — keep it; it is the runtime backstop.
 
 **E. Proven relocation precedent (reuse, don't reinvent):**
+
 - `src/emit/object.ts` already builds stable symbols + `funcIdxToSymIdx` (70) /
   `globalIdxToSymIdx` (72) and dereferences at emit (`encodeInstrWithReloc` 399).
   Wired only to the latent `.o` linker path, but it is the exact "resolve a stable
@@ -293,18 +300,21 @@ field to carry a stable handle**, not a live index. A handle is an opaque id min
 at registration from a per-kind monotonic counter (`ctx.nextFuncHandle++` /
 `nextGlobalHandle` / `nextTypeHandle`), **never renumbered, never reused**. The
 ~2300 construction sites already do `funcMap.get(name)` / `moduleGlobals.get(name)`
-/ `addFuncType(...)` — make those registries *return handles* and the sites are
+/ `addFuncType(...)` — make those registries _return handles_ and the sites are
 unchanged. One `resolveLayout(ctx, mod)` computes `handle → finalIndex` once;
 `binary.ts` dereferences at the 14 encode seams in (D).
 
 **Brand the handle types** (`src/ir/types.ts`, alongside the `Instr` union):
+
 ```ts
-export type FuncHandle   = number & { readonly __func:   unique symbol };
+export type FuncHandle = number & { readonly __func: unique symbol };
 export type GlobalHandle = number & { readonly __global: unique symbol };
-export type TypeHandle   = number & { readonly __type:   unique symbol };
+export type TypeHandle = number & { readonly __type: unique symbol };
 ```
+
 Apply per **union arm** (TS allows distinct field types per discriminated member —
 this is what disambiguates the shared `index` field):
+
 - `{op:"call"; funcIdx: FuncHandle}`, `{op:"return_call"; funcIdx: FuncHandle}`,
   `{op:"ref.func"; funcIdx: FuncHandle}`.
 - `{op:"global.get"; index: GlobalHandle}`, `{op:"global.set"; index: GlobalHandle}`
@@ -327,10 +337,11 @@ enumerates the migration surface and permanently forbids reintroducing the bug.
 
 **`resolveLayout(ctx, mod): ModuleLayout` contract** (new file
 `src/emit/resolve-layout.ts`):
+
 - Input: the registered handle→def registries + liveness. Reuse
   `collectRefsFromBody` from dead-elimination to compute the live handle set.
 - Output: `{ func(h: FuncHandle): number; global(h: GlobalHandle): number;
-  type(h: TypeHandle): number; numFuncs/numGlobals/numTypes }` backed by dense
+type(h: TypeHandle): number; numFuncs/numGlobals/numTypes }` backed by dense
   `Map<handle, finalIndex>`.
 - Canonical ordering — **must reproduce the current final layout byte-for-byte**
   (this is what makes the whole migration byte-identical, see proof below):
@@ -343,15 +354,16 @@ enumerates the migration surface and permanently forbids reintroducing the bug.
     rec-group computation).
 - `resolveLayout` is the **sole** place a module index is assigned. It SUBSUMES
   `eliminateDeadImports`'s renumber (DCE keeps liveness analysis + section removal,
-  but stops *renumbering instructions* — it just drops dead defs; the layout skips
+  but stops _renumbering instructions_ — it just drops dead defs; the layout skips
   dead handles).
 
 **Tradeoffs vs. alternatives (evaluated, rejected as primary):**
-- *Single authoritative post-shift fixup* (keep eager indices, run one final
+
+- _Single authoritative post-shift fixup_ (keep eager indices, run one final
   re-derive): simpler, but an index is still concrete between registration and
   fixup — any read in that window is still stale. No structural immunity. Reject.
-- *Reserve index ranges up-front* (pad N import slots): fragile (must guess N,
-  wastes slots) and does nothing for type-DCE *removal*. Reject.
+- _Reserve index ranges up-front_ (pad N import slots): fragile (must guess N,
+  wastes slots) and does nothing for type-DCE _removal_. Reject.
 - Handles win because **one mechanism kills all three factories** (func shift,
   global shift, type remove-and-renumber) and the brand makes regression a compile
   error, not a discipline.
@@ -395,14 +407,15 @@ at a time.** Switch counters to mint stable registration-order handles;
 Then delete, each behind a FULL CI run (equivalence + test262 + standalone floor /
 merge_group — broad-impact, never a scoped sweep, per project memory
 `project_broad_impact_validate_full_ci`):
-  - 4a: `fixupModuleGlobalIndices` + the ~25 cached global-idx chases
-    (registry/imports.ts) — self-contained, and it is the #2078 site, so land first.
-  - 4b: `shiftLateImportIndices` + `flushLateImportShifts` (late-imports.ts) and the
-    hand-rolled `addStringImports`/`addUnionImports` inline shifters (index.ts).
-  - 4c: `reconcileNativeStrFinalizeShift` + `nativeStrHelperImportBase` re-base
-    machinery.
-  - 4d: route type-DCE through `resolveLayout` — `eliminateDeadImports` stops
-    renumbering instructions (drops dead defs only).
+
+- 4a: `fixupModuleGlobalIndices` + the ~25 cached global-idx chases
+  (registry/imports.ts) — self-contained, and it is the #2078 site, so land first.
+- 4b: `shiftLateImportIndices` + `flushLateImportShifts` (late-imports.ts) and the
+  hand-rolled `addStringImports`/`addUnionImports` inline shifters (index.ts).
+- 4c: `reconcileNativeStrFinalizeShift` + `nativeStrHelperImportBase` re-base
+  machinery.
+- 4d: route type-DCE through `resolveLayout` — `eliminateDeadImports` stops
+  renumbering instructions (drops dead defs only).
   Because `resolveLayout` reproduces the current final order, **prove:**
   `prove-emit-identity` stays byte-identical through 4a–4d (strongest possible proof
   — the migration changes representation, not output).
@@ -469,7 +482,7 @@ unreachable by construction.
 
 ### Slices 0 + 1 — foundation landed (sd-indexshift, 2026-06-26)
 
-**Scope of this PR:** the *safe foundation* only — slice 0 (proof harness) and
+**Scope of this PR:** the _safe foundation_ only — slice 0 (proof harness) and
 slice 1 (handle vocabulary as transparent aliases). It does **not** add
 `resolveLayout`, wire `binary.ts`, convert positional reads, mint
 non-renumbering handles, or delete any shifter. The umbrella issue therefore
@@ -489,7 +502,8 @@ row counts).
 
 **Slice 1 — branded handle types as pure aliases (`src/ir/types.ts`).** Defined
 `FuncHandle` / `GlobalHandle` / `TypeHandle` and pinned them onto the correct,
-*discriminated* `Instr` arms + type defs:
+_discriminated_ `Instr` arms + type defs:
+
 - `funcIdx: FuncHandle` on `call` / `return_call` / `ref.func`; func-index
   side-channels in this file (`WasmModule.startFuncIdx`, `declaredFuncRefs`,
   `Element.funcIndices`).
@@ -509,7 +523,7 @@ row counts).
   func/table/memory/global/tag).
 
 **Why aliases, not the real `unique symbol` brand, in this slice.** The brand's
-*enforcement* (turning `mod.functions[h]` / `h - numImportFuncs` / `h + delta`
+_enforcement_ (turning `mod.functions[h]` / `h - numImportFuncs` / `h + delta`
 into compile errors) only becomes safe AFTER the ~150 positional reads are
 converted (slices 3–4) and registration sites mint handles. Flipping the brand
 now would leave the tree red. So slice 1 ships the alias form: zero runtime
@@ -536,7 +550,8 @@ its slices are being executed AGAINST THIS PLAN, not as a parallel
 mechanism — see the "Reconciliation with #2710 + staged plan" section in
 `plan/issues/1916-symbolic-function-references-codegen.md` for the
 mapping (#1916 S1/S2/S3 = this issue's slices 2/3/4b+4c; slice 4a globals
-+ 4d types stay here as S4).
+
+- 4d types stay here as S4).
 
 Slice 2 as landed: `src/emit/resolve-layout.ts` (`ModuleLayout` +
 identity `resolveLayout`, with the flip preconditions documented in the
@@ -557,3 +572,76 @@ Claim note: this issue's git lock (`ttraenkler/sd-indexshift`,
 2026-06-26) is stale — no active agent, no open PR on
 `issue-2710-late-bind-handles`. Work continues under #1916's claim
 (`ttraenkler/dev-1916f`).
+
+### S3b deferred-producer flip landed — the "stackBalance consumer-audit" gate was a MISDIAGNOSIS (fable-2710, 2026-07-04)
+
+**What landed** (branch `issue-2710-latebind-core`): the three producer files
+S3b had deferred — `declarations.ts` (5 mints: bodyless pre-registration,
+second-pass placeholder, the two CJS function-expression exports,
+`__module_init`), `async-frame.ts` (3: resume placeholder + the two `__cb_`
+step adapters), `promise-combinators.ts` (5: the `base + k` four-sibling
+derivation → four explicit mints, plus `__combinator_to_vec`) — all flipped to
+`mintDefinedFunc`/`pushDefinedFunc`. Zero `mod.functions.push` remains in the
+three files. Remaining live-regime mints in the WasmGC front-end after this:
+**`src/codegen/index.ts` ×39 + `src/ir/integration.ts` ×1** (then S3-final).
+
+**The finding that unblocked it.** The prior executor (dev-1916b) observed that
+flipping `declarations.ts` drifts `async.ts::gc` by −6 bytes (different call
+target, drop×3 → drop×1), concluded a "funcIdx-interpreting consumer between
+freeze and emit reads a stable handle positionally (prime suspect:
+stackBalance)", and deferred the three files on a consumer-audit gate. That
+diagnosis is **wrong in direction**: the drift was the flip **fixing** a real,
+latent, invalid-Wasm bug on main. Measured on `origin/main` @ fdfe7e546:
+
+- `compile(playground js/async.ts, {target:"gc"})` emits a binary that FAILS
+  `WebAssembly.validate` — `Compiling function #34:"__async_resume_fmain"
+failed: not enough arguments on the stack for call (need 2, got 1)`.
+- First-parent bisect: broken since merge `89676d232` (PR #2483, #1042 host
+  async drive). Nobody noticed because playground examples are not validated
+  per-PR and test262's async tests don't hit this exact shape.
+- Mechanism (traced instruction-level): with 99 speculative func imports
+  pre-DCE, `__closure_0` (the `new Promise` executor in `delay`) bakes
+  `call funcMap.get("setTimeout")` (the #1501 injected timer-shim stub — a
+  DECLARATION-registered defined function, live index 87 at bake). Twelve more
+  func imports arrive while later bodies compile (`__js_array_new` …
+  `__concat_5`). The batch flushes DID run (traced with instrumentation) — but
+  the closure body and the resume machine's already-built state segments were
+  **detached from every shifter root** at flush time, so their baked 87/100
+  never became 99/102. Dead-import elimination then renumbered the stale values
+  onto UNRELATED live imports/functions (87→13 = `__js_array_new`; 100→26 =
+  `$delay`), and stackBalance — behaving CORRECTLY on wrong input — balanced
+  the stack against the wrong callee's signature (the drop×3). stackBalance was
+  never the bug; it has been dual-regime since S3a.
+- The second reachability hole, precisely: `async-frame.ts buildStateArm`
+  builds state segments depth-first into plain local arrays; while state s+1
+  compiles (and registers late imports: `__date_now`,
+  `__extern_to_string_default`, `__concat_5`), state s's finished array is in
+  no `mod.functions[].body`, not `resumeFctx.body`, not `ctx.liveBodies` —
+  unreachable by ALL FOUR shifters.
+
+**The fix is the migration itself** — stable handles make the baked callee
+immediates layout-independent, so there is nothing for a missed walk to
+corrupt. Plus one transitional patch: `buildStateArm`/chain/finalizer detached
+arrays are now tracked in `ctx.liveBodies` until assembly (covers calls to the
+~39 still-live-regime `index.ts` helper mints until S3-final; delete the
+tracking together with the shifters).
+
+**Proof (regressed-rows-style, per this plan's "Proving no regression" §2,
+since baseline is provably wrong):** byte-identity over playground + a 119-file
+deterministic test262 sample × {gc, standalone, wasi} (396 records) shows
+EXACTLY ONE drift — `async.ts::gc`, the invalid→valid flip (9060→9054 bytes,
+now validates; standalone/wasi byte-identical). Suites: issue-1042-host-drive
+(11) green, new `tests/issue-2710-late-bind.test.ts` (minimized-repro validity
+× 3 targets + end-to-end run) green, tsc clean. NOTE for the next executor: an
+end-to-end run of the full playground shape still returns wrong VALUES (not
+invalid wasm) because `fetchAllSequential` awaits in a loop, which
+`planLinearAwaits` rejects → legacy synchronous lane — the documented
+pre-#1042 limitation, out of scope here.
+
+**Method lesson (bank this):** "byte-identical or defer" is the right default
+but the WRONG stop condition when the baseline itself is broken. A drift must
+be CLASSIFIED before deferring — validate BOTH binaries (`WebAssembly.validate`
+
+- `WebAssembly.compile` for the error text), diff the compiler's own WAT, and
+  bisect main — because a byte-identity oracle faithfully reproduces latent bugs.
+  Here the deferral gate sat on top of a shipped invalid-Wasm regression.

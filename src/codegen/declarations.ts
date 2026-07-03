@@ -77,7 +77,7 @@ import { isArrayProtoIteratorAssignTarget } from "./expressions/proto-override.j
 import { isFnctorPrototypeAssignTarget } from "./expressions/fnctor-prototype.js";
 import { compileExpression, compileStatement } from "./shared.js";
 import { expandLinearU8ParamTypes } from "./linear-uint8-signatures.js";
-import { definedFuncAt } from "./func-space.js"; // (#1916 S2) positional-read chokepoint
+import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S2/S3) positional-read chokepoint + stable mint/push
 import { inferStandaloneRegExpMatchGlobalType } from "./regexp-standalone.js";
 
 /** Accumulated state for the single-pass collector */
@@ -3186,7 +3186,7 @@ function registerBodylessFunctionDeclaration(
   }
 
   const typeIdx = addFuncType(ctx, params, results, `${name}_type`);
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const funcIdx = mintDefinedFunc(ctx); // (#1916 S3) stable handle
   const func: WasmFunction = {
     name,
     typeIdx,
@@ -3195,7 +3195,7 @@ function registerBodylessFunctionDeclaration(
     exported: false,
   };
   ctx.funcMap.set(name, funcIdx);
-  ctx.mod.functions.push(func);
+  pushDefinedFunc(ctx, funcIdx, func);
   if (!ctx.preRegisteredBodyless) ctx.preRegisteredBodyless = new Set();
   ctx.preRegisteredBodyless.add(name);
   return func;
@@ -3706,7 +3706,7 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
       }
 
       const typeIdx = addFuncType(ctx, params, results, `${name}_type`);
-      const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+      const funcIdx = mintDefinedFunc(ctx); // (#1916 S3) stable handle
       ctx.funcMap.set(name, funcIdx);
 
       // Create placeholder function to be filled in second pass
@@ -3719,7 +3719,7 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
         body: [],
         exported: isExported,
       };
-      ctx.mod.functions.push(func);
+      pushDefinedFunc(ctx, funcIdx, func);
 
       if (isExported) {
         ctx.mod.exports.push({
@@ -3894,10 +3894,10 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
                 : retType;
             const results = isVoidType(effRetType) ? [] : [resolveWasmType(ctx, effRetType)];
             const typeIdx = addFuncType(ctx, params, results, `${name}_type`);
-            const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+            const funcIdx = mintDefinedFunc(ctx); // (#1916 S3) stable handle
             ctx.funcMap.set(name, funcIdx);
             ctx.functionNameMap.set(name, fnExpr.name?.text ?? name);
-            ctx.mod.functions.push({ name, typeIdx, locals: [], body: [], exported: true });
+            pushDefinedFunc(ctx, funcIdx, { name, typeIdx, locals: [], body: [], exported: true });
             ctx.mod.exports.push({ name, desc: { kind: "func", index: funcIdx } });
             if (name !== "default") {
               ctx.mod.exports.push({ name: "default", desc: { kind: "func", index: funcIdx } });
@@ -3964,10 +3964,10 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
               : retType;
           const results = isVoidType(effRetType) ? [] : [resolveWasmType(ctx, effRetType)];
           const typeIdx = addFuncType(ctx, params, results, `${name}_type`);
-          const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+          const funcIdx = mintDefinedFunc(ctx); // (#1916 S3) stable handle
           ctx.funcMap.set(name, funcIdx);
           ctx.functionNameMap.set(name, fnExpr.name?.text ?? name);
-          ctx.mod.functions.push({ name, typeIdx, locals: [], body: [], exported: true });
+          pushDefinedFunc(ctx, funcIdx, { name, typeIdx, locals: [], body: [], exported: true });
           ctx.mod.exports.push({ name, desc: { kind: "func", index: funcIdx } });
         } else {
           // Function already registered (e.g., as a FunctionDeclaration) — just export it
@@ -5185,8 +5185,8 @@ export function compileDeclarations(
     // shifted alongside every other export by the late-import shift logic.
     const exportModuleInit = ctx.deferTopLevelInit && !ctx.wasi;
     const initTypeIdx = addFuncType(ctx, [], [], "__module_init_type");
-    const initFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-    ctx.mod.functions.push({
+    const initFuncIdx = mintDefinedFunc(ctx); // (#1916 S3) stable handle
+    pushDefinedFunc(ctx, initFuncIdx, {
       name: "__module_init",
       typeIdx: initTypeIdx,
       locals: compiledInitFctx.locals,
