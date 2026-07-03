@@ -1,0 +1,217 @@
+{
+  "files": {
+    "src/codegen/array-methods.ts": {
+      "getTypeAtLocation": 10,
+      "ctxChecker": 13
+    },
+    "src/codegen/array-reduce-fusion.ts": {
+      "getTypeAtLocation": 0,
+      "ctxChecker": 1
+    },
+    "src/codegen/async-cps.ts": {
+      "getTypeAtLocation": 2,
+      "ctxChecker": 1
+    },
+    "src/codegen/async-frame.ts": {
+      "getTypeAtLocation": 1,
+      "ctxChecker": 1
+    },
+    "src/codegen/binary-ops.ts": {
+      "getTypeAtLocation": 13,
+      "ctxChecker": 16
+    },
+    "src/codegen/builtin-static-globals.ts": {
+      "getTypeAtLocation": 0,
+      "ctxChecker": 1
+    },
+    "src/codegen/class-bodies.ts": {
+      "getTypeAtLocation": 13,
+      "ctxChecker": 24
+    },
+    "src/codegen/closures.ts": {
+      "getTypeAtLocation": 10,
+      "ctxChecker": 21
+    },
+    "src/codegen/context/create-context.ts": {
+      "getTypeAtLocation": 0,
+      "ctxChecker": 1
+    },
+    "src/codegen/context/types.ts": {
+      "getTypeAtLocation": 0,
+      "ctxChecker": 1
+    },
+    "src/codegen/declarations.ts": {
+      "getTypeAtLocation": 53,
+      "ctxChecker": 86
+    },
+    "src/codegen/destructuring-params.ts": {
+      "getTypeAtLocation": 7,
+      "ctxChecker": 7
+    },
+    "src/codegen/expressions/assignment.ts": {
+      "getTypeAtLocation": 21,
+      "ctxChecker": 32
+    },
+    "src/codegen/expressions/builtins.ts": {
+      "getTypeAtLocation": 5,
+      "ctxChecker": 5
+    },
+    "src/codegen/expressions/calls-closures.ts": {
+      "getTypeAtLocation": 5,
+      "ctxChecker": 13
+    },
+    "src/codegen/expressions/calls-guards.ts": {
+      "getTypeAtLocation": 2,
+      "ctxChecker": 2
+    },
+    "src/codegen/expressions/calls-optional.ts": {
+      "getTypeAtLocation": 1,
+      "ctxChecker": 5
+    },
+    "src/codegen/expressions/calls.ts": {
+      "getTypeAtLocation": 62,
+      "ctxChecker": 136
+    },
+    "src/codegen/expressions/eval-inline.ts": {
+      "getTypeAtLocation": 2,
+      "ctxChecker": 5
+    },
+    "src/codegen/expressions/extern.ts": {
+      "getTypeAtLocation": 1,
+      "ctxChecker": 1
+    },
+    "src/codegen/expressions/fnctor-prototype.ts": {
+      "getTypeAtLocation": 0,
+      "ctxChecker": 1
+    },
+    "src/codegen/expressions/helpers.ts": {
+      "getTypeAtLocation": 0,
+      "ctxChecker": 1
+    },
+    "src/codegen/expressions/identifiers.ts": {
+      "getTypeAtLocation": 7,
+      "ctxChecker": 15
+    },
+    "src/codegen/expressions/misc.ts": {
+      "getTypeAtLocation": 2,
+      "ctxChecker": 5
+    },
+    "src/codegen/expressions/new-super.ts": {
+      "getTypeAtLocation": 23,
+      "ctxChecker": 47
+    },
+    "src/codegen/expressions/unary-updates.ts": {
+      "getTypeAtLocation": 5,
+      "ctxChecker": 5
+    },
+    "src/codegen/expressions/unary.ts": {
+      "getTypeAtLocation": 1,
+      "ctxChecker": 1
+    },
+    "src/codegen/expressions.ts": {
+      "getTypeAtLocation": 7,
+      "ctxChecker": 16
+    },
+    "src/codegen/fnctor-escape-gate.ts": {
+      "getTypeAtLocation": 2,
+      "ctxChecker": 3
+    },
+    "src/codegen/function-body.ts": {
+      "getTypeAtLocation": 1,
+      "ctxChecker": 5
+    },
+    "src/codegen/generators-native.ts": {
+      "getTypeAtLocation": 3,
+      "ctxChecker": 7
+    },
+    "src/codegen/index.ts": {
+      "getTypeAtLocation": 53,
+      "ctxChecker": 115
+    },
+    "src/codegen/json-standalone.ts": {
+      "getTypeAtLocation": 0,
+      "ctxChecker": 1
+    },
+    "src/codegen/linear-uint8-analysis.ts": {
+      "getTypeAtLocation": 2,
+      "ctxChecker": 0
+    },
+    "src/codegen/linear-uint8-arena.ts": {
+      "getTypeAtLocation": 0,
+      "ctxChecker": 1
+    },
+    "src/codegen/linear-uint8-codegen.ts": {
+      "getTypeAtLocation": 0,
+      "ctxChecker": 2
+    },
+    "src/codegen/linear-uint8-signatures.ts": {
+      "getTypeAtLocation": 1,
+      "ctxChecker": 6
+    },
+    "src/codegen/literals.ts": {
+      "getTypeAtLocation": 25,
+      "ctxChecker": 55
+    },
+    "src/codegen/node-fs-api.ts": {
+      "getTypeAtLocation": 2,
+      "ctxChecker": 2
+    },
+    "src/codegen/object-ops.ts": {
+      "getTypeAtLocation": 14,
+      "ctxChecker": 22
+    },
+    "src/codegen/property-access.ts": {
+      "getTypeAtLocation": 28,
+      "ctxChecker": 52
+    },
+    "src/codegen/regexp-standalone.ts": {
+      "getTypeAtLocation": 14,
+      "ctxChecker": 22
+    },
+    "src/codegen/set-runtime.ts": {
+      "getTypeAtLocation": 1,
+      "ctxChecker": 1
+    },
+    "src/codegen/statements/control-flow.ts": {
+      "getTypeAtLocation": 7,
+      "ctxChecker": 7
+    },
+    "src/codegen/statements/destructuring.ts": {
+      "getTypeAtLocation": 2,
+      "ctxChecker": 2
+    },
+    "src/codegen/statements/loops.ts": {
+      "getTypeAtLocation": 16,
+      "ctxChecker": 16
+    },
+    "src/codegen/statements/nested-declarations.ts": {
+      "getTypeAtLocation": 2,
+      "ctxChecker": 8
+    },
+    "src/codegen/statements/variables.ts": {
+      "getTypeAtLocation": 9,
+      "ctxChecker": 14
+    },
+    "src/codegen/string-builder.ts": {
+      "getTypeAtLocation": 1,
+      "ctxChecker": 22
+    },
+    "src/codegen/string-ops.ts": {
+      "getTypeAtLocation": 8,
+      "ctxChecker": 13
+    },
+    "src/codegen/temporal-native.ts": {
+      "getTypeAtLocation": 0,
+      "ctxChecker": 1
+    },
+    "src/codegen/typeof-delete.ts": {
+      "getTypeAtLocation": 6,
+      "ctxChecker": 10
+    },
+    "src/codegen/with-scope.ts": {
+      "getTypeAtLocation": 3,
+      "ctxChecker": 3
+    }
+  },
+  "preauthorized": []
+}

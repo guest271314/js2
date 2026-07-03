@@ -7,7 +7,7 @@ import {
   compile,
   readFileSync,
   resolve,
-} from "./helpers.js";
+} from "./equivalence/helpers.js";
 
 describe("prefix/postfix increment on property access (#195)", () => {
   it("prefix increment on object property", async () => {

@@ -34,16 +34,20 @@
 // Safe everywhere: if no task store is present (e.g. CI runners), it exits 0
 // with "no task store" and never fails a build.
 //
-// SECOND DRIFT SOURCE (#2147): the task<->frontmatter reconciler above never
-// checks issue frontmatter against MERGED PRs. The sprint-62 triage found 11
-// sprint-61 issues still `ready` whose fixes had already merged — a dev WILL
+// SECOND DRIFT SOURCE (#2147 + #2048): the task<->frontmatter reconciler above
+// never checks issue frontmatter against MERGED PRs. The sprint-62 triage found
+// 11 sprint-61 issues still `ready` whose fixes had already merged — a dev WILL
 // claim already-fixed work. So we additionally fetch merged PR titles
 // (`gh pr list --state merged`), extract their `#NNNN` references, and report
-// every issue still at `ready`/`in-progress` whose number is cited by a merged
-// CODE PR. Plan/docs PRs (`plan:`/`docs:`/`chore(plan)` titles) are excluded so
-// a planning commit that merely *mentions* an issue can't false-flag it.
-// Report-only — the PO owns the actual frontmatter flips. The check is skipped
-// silently when `gh` is unavailable/unauthenticated (CI) or `--no-merged-prs`.
+// every OPEN issue (`ready`/`in-progress`/`in-review`) whose number is cited by
+// a merged CODE PR. The `in-review` half is #2048 layer 3: the "merged PR ⇒
+// done" flip is enforced by nobody, so `in-review` issues whose fix merged rot
+// and get re-validated by redispatch agents (sprint 61: 17 of 24 merged PRs
+// were zero-code metadata commits on such issues). Plan/docs PRs
+// (`plan:`/`docs:`/`chore(plan)` titles) are excluded so a planning commit that
+// merely *mentions* an issue can't false-flag it. Report-only — the PO/lead owns
+// the actual frontmatter flips. The check is skipped silently when `gh` is
+// unavailable/unauthenticated (CI) or `--no-merged-prs`.
 
 import { readdirSync, readFileSync, writeFileSync, existsSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -160,10 +164,17 @@ function subjectSaysDone(task) {
 // conventional-commit prefixes (`plan:`, `docs:`, `chore(plan): …`, etc.).
 const PLAN_DOCS_TITLE_RE = /^\s*(?:plan|docs|chore\(plan\)|chore\(docs\)|plan\([^)]*\)|docs\([^)]*\))\b/i;
 
-// Issues actively claimable by a dev — these are the ones a stale merged-PR
-// reference actually poisons (a dev would pick them up). `done`/`wont-fix`/
-// `in-review`/`blocked`/`backlog` are not at risk of a wrong claim.
-const AT_RISK_ISSUE_STATUSES = new Set(["ready", "in-progress"]);
+// Open statuses a merged-PR reference makes STALE. Two distinct hazards:
+//   - `ready`/`in-progress`: a dev would wrongly CLAIM already-fixed work
+//     (#2147 — the original dispatch-poison concern).
+//   - `in-review`: the issue's fix has MERGED but the frontmatter never got
+//     flipped to `done`, so redispatch/re-validation agents churn it (#2048 —
+//     17 of 24 merged PRs in sprint 61 were zero-code metadata commits on
+//     never-closed `in-review` issues). CLAUDE.md's "merged PR ⇒ done" rule is
+//     enforced by nobody; surfacing these here is layer 3 of #2048.
+// `done`/`wont-fix`/`blocked`/`backlog` are terminal or not-yet-actionable, so
+// a merged-PR reference to them is not a stale-status signal.
+const AT_RISK_ISSUE_STATUSES = new Set(["ready", "in-progress", "in-review"]);
 
 // List every issue file with its id, status, and title.
 function listIssues() {
@@ -295,7 +306,7 @@ if (JSON_OUT) {
   const prLine =
     mergedPr.flagged.length === 0
       ? ""
-      : ` | ${mergedPr.flagged.length} merged-but-ready: ${mergedPr.flagged.map((s) => "#" + s.id).join(",")}`;
+      : ` | ${mergedPr.flagged.length} merged-but-open: ${mergedPr.flagged.map((s) => "#" + s.id).join(",")}`;
   console.log(staleLine + prLine);
 } else {
   out(
@@ -310,19 +321,20 @@ if (JSON_OUT) {
     out(`\nOr best-effort direct rewrite: node scripts/reconcile-tasklist.mjs --apply`);
   }
 
-  // #2147 merged-PR cross-check report.
+  // #2147 + #2048 merged-PR cross-check report.
   if (mergedPr.skipped) {
-    out(`\nmerged-PR cross-check (#2147): skipped (${mergedPr.reason}).`);
+    out(`\nmerged-PR cross-check (#2147/#2048): skipped (${mergedPr.reason}).`);
   } else {
     out(
-      `\nmerged-PR cross-check (#2147): ${mergedPr.flagged.length} ready/in-progress issue(s) cited by a merged code PR:`,
+      `\nmerged-PR cross-check (#2147/#2048): ${mergedPr.flagged.length} open (ready/in-progress/in-review) issue(s) cited by a merged code PR:`,
     );
     for (const s of mergedPr.flagged) {
       out(`  #${s.id}  [${s.issueStatus}]  fixed by merged PR "${s.prTitle}"`);
     }
     if (mergedPr.flagged.length) {
-      out(`\n  → these fixes have merged but the issue frontmatter still reads ready/in-progress.`);
-      out(`    The PO should flip status: done (report-only — this script does not write frontmatter).`);
+      out(`\n  → these fixes have merged but the issue frontmatter still reads ready/in-progress/in-review.`);
+      out(`    The PO/lead should flip status: done (report-only — this script does not write frontmatter).`);
+      out(`    (in-review here = the "merged PR ⇒ done" flip never ran — #2048's doc-churn source.)`);
     }
   }
 }
