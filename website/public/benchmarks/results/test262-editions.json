@@ -10,21 +10,21 @@
   },
   {
     "edition": "ES5",
-    "pass": 10122,
-    "fail": 2820,
-    "ce": 133,
+    "pass": 10165,
+    "fail": 2779,
+    "ce": 131,
     "skip": 0,
     "total": 13075,
-    "pct": 77,
+    "pct": 78,
     "features": [
       {
         "name": "caller",
-        "pass": 20,
-        "fail": 3,
+        "pass": 19,
+        "fail": 4,
         "ce": 0,
         "skip": 0,
         "total": 23,
-        "pct": 87
+        "pct": 83
       },
       {
         "name": "Reflect.construct",
@@ -57,9 +57,9 @@
   },
   {
     "edition": "ES2015",
-    "pass": 11078,
-    "fail": 4135,
-    "ce": 173,
+    "pass": 11080,
+    "fail": 4136,
+    "ce": 170,
     "skip": 0,
     "total": 15386,
     "pct": 72,
@@ -130,8 +130,8 @@
       {
         "name": "Proxy",
         "pass": 201,
-        "fail": 222,
-        "ce": 3,
+        "fail": 223,
+        "ce": 2,
         "skip": 0,
         "total": 426,
         "pct": 47
@@ -193,8 +193,8 @@
       {
         "name": "cross-realm",
         "pass": 14,
-        "fail": 111,
-        "ce": 1,
+        "fail": 112,
+        "ce": 0,
         "skip": 0,
         "total": 126,
         "pct": 11
@@ -1026,8 +1026,8 @@
   },
   {
     "edition": "ES2018",
-    "pass": 3793,
-    "fail": 429,
+    "pass": 3797,
+    "fail": 425,
     "ce": 29,
     "skip": 0,
     "total": 4251,
@@ -1035,8 +1035,8 @@
     "features": [
       {
         "name": "async-iteration",
-        "pass": 2942,
-        "fail": 314,
+        "pass": 2946,
+        "fail": 310,
         "ce": 28,
         "skip": 0,
         "total": 3284,
@@ -1462,8 +1462,8 @@
   },
   {
     "edition": "ES2020",
-    "pass": 847,
-    "fail": 990,
+    "pass": 848,
+    "fail": 989,
     "ce": 41,
     "skip": 18,
     "total": 1896,
@@ -1615,12 +1615,12 @@
       },
       {
         "name": "optional-chaining",
-        "pass": 27,
-        "fail": 11,
+        "pass": 28,
+        "fail": 10,
         "ce": 6,
         "skip": 0,
         "total": 44,
-        "pct": 61
+        "pct": 64
       },
       {
         "name": "async-iteration",
@@ -2141,18 +2141,18 @@
   },
   {
     "edition": "ES2022",
-    "pass": 3107,
-    "fail": 1093,
-    "ce": 34,
+    "pass": 3110,
+    "fail": 1092,
+    "ce": 32,
     "skip": 0,
     "total": 4234,
     "pct": 73,
     "features": [
       {
         "name": "class",
-        "pass": 2177,
+        "pass": 2179,
         "fail": 596,
-        "ce": 17,
+        "ce": 15,
         "skip": 0,
         "total": 2790,
         "pct": 78
@@ -2168,8 +2168,8 @@
       },
       {
         "name": "class-fields-private",
-        "pass": 979,
-        "fail": 130,
+        "pass": 980,
+        "fail": 129,
         "ce": 17,
         "skip": 0,
         "total": 1126,
@@ -2177,9 +2177,9 @@
       },
       {
         "name": "class-methods-private",
-        "pass": 821,
-        "fail": 143,
-        "ce": 2,
+        "pass": 823,
+        "fail": 142,
+        "ce": 1,
         "skip": 0,
         "total": 966,
         "pct": 85
@@ -2187,16 +2187,16 @@
       {
         "name": "class-static-methods-private",
         "pass": 663,
-        "fail": 106,
-        "ce": 3,
+        "fail": 107,
+        "ce": 2,
         "skip": 0,
         "total": 772,
         "pct": 86
       },
       {
         "name": "async-iteration",
-        "pass": 680,
-        "fail": 38,
+        "pass": 681,
+        "fail": 37,
         "ce": 0,
         "skip": 0,
         "total": 718,
@@ -2402,12 +2402,12 @@
       },
       {
         "name": "class-fields-private-in",
-        "pass": 9,
-        "fail": 5,
+        "pass": 10,
+        "fail": 4,
         "ce": 5,
         "skip": 0,
         "total": 19,
-        "pct": 47
+        "pct": 53
       },
       {
         "name": "object-spread",
@@ -2785,8 +2785,8 @@
   {
     "edition": "ES2024",
     "pass": 327,
-    "fail": 308,
-    "ce": 10,
+    "fail": 310,
+    "ce": 8,
     "skip": 0,
     "total": 645,
     "pct": 51,
@@ -2794,8 +2794,8 @@
       {
         "name": "TypedArray",
         "pass": 24,
-        "fail": 212,
-        "ce": 6,
+        "fail": 214,
+        "ce": 4,
         "skip": 0,
         "total": 242,
         "pct": 10
@@ -2812,8 +2812,8 @@
       {
         "name": "align-detached-buffer-semantics-with-web-reality",
         "pass": 0,
-        "fail": 151,
-        "ce": 2,
+        "fail": 153,
+        "ce": 0,
         "skip": 0,
         "total": 153,
         "pct": 0
@@ -2974,8 +2974,8 @@
       {
         "name": "cross-realm",
         "pass": 1,
-        "fail": 8,
-        "ce": 2,
+        "fail": 10,
+        "ce": 0,
         "skip": 0,
         "total": 11,
         "pct": 9
@@ -3509,8 +3509,8 @@
   {
     "edition": "ES2026",
     "pass": 182,
-    "fail": 160,
-    "ce": 7,
+    "fail": 159,
+    "ce": 8,
     "skip": 0,
     "total": 349,
     "pct": 52,
@@ -3563,8 +3563,8 @@
       {
         "name": "legacy-regexp",
         "pass": 12,
-        "fail": 14,
-        "ce": 0,
+        "fail": 13,
+        "ce": 1,
         "skip": 0,
         "total": 26,
         "pct": 46
@@ -3635,8 +3635,8 @@
       {
         "name": "class",
         "pass": 2,
-        "fail": 9,
-        "ce": 0,
+        "fail": 8,
+        "ce": 1,
         "skip": 0,
         "total": 11,
         "pct": 18
@@ -3925,9 +3925,9 @@
   {
     "edition": "Proposals",
     "pass": 1491,
-    "fail": 3179,
-    "ce": 216,
-    "skip": 96,
+    "fail": 3171,
+    "ce": 215,
+    "skip": 105,
     "total": 4982,
     "pct": 30
   }

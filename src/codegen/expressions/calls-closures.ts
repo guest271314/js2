@@ -1004,6 +1004,23 @@ export function tryExternClassMethodOnAny(
   // `String.prototype.replace`. Mirrors the `.slice` ambiguity refusal above.
   if (methodName === "replace" || methodName === "replaceAll") return null;
 
+  // (#3014) `forEach` / `some` are core Array.prototype iteration methods, but
+  // every TypedArray extern class (Uint8ClampedArray, Int8Array, …) also
+  // declares them with an all-externref signature. When a TypedArray (or a
+  // DOM type whose lib.d.ts pulls the TypedArray declarations in) registers
+  // its extern class before this call is compiled, first-match iteration over
+  // `ctx.externClasses` binds an `any`-typed receiver's `xs.forEach(cb)` /
+  // `xs.some(pred)` to e.g. `Uint8ClampedArray_forEach` / `_some` — a host
+  // import the standalone runtime cannot satisfy (round-6 leak analysis:
+  // 16 execution-verified sole-import leaky passes, GENUINE via inject-throw).
+  // On an `any` receiver in untyped JS these are overwhelmingly Array
+  // operations; refuse extern-class dispatch and let the generic host /
+  // native-struct path handle the receiver by its real runtime shape. Mirrors
+  // the `.slice` and `.replace`/`.replaceAll` ambiguity refusals above.
+  // (A genuinely-`Uint8ClampedArray`-typed receiver never reaches here — it is
+  // handled by the native array-method path before the `any` fallback.)
+  if (methodName === "forEach" || methodName === "some") return null;
+
   // (#1283) The dispatch below emits `externref` hints for every arg and
   // assumes the call's params are all-externref. When iterating in
   // insertion order we may otherwise hit an extern class whose method has a

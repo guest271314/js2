@@ -23,7 +23,7 @@ import { ensureWrapperTypes } from "./any-helpers.js";
 import { ASYNC_CPS_ENABLED, analyzeAsyncBody, asyncFnNeedsCps } from "./async-cps.js";
 import { asyncFnNeedsHostDrive } from "./async-frame.js";
 import { collectClassDeclaration, compileClassBodies } from "./class-bodies.js";
-import { collectReferencedIdentifiers, emitCachedFuncClosureAccess } from "./closures.js";
+import { collectBindingPatternNames, collectReferencedIdentifiers, emitCachedFuncClosureAccess } from "./closures.js";
 import { addFunctionOwnLocals } from "./binding-info.js"; // (#2103) memoized own-locals oracle
 import { reportError } from "./context/errors.js";
 import type { CodegenContext, FunctionContext, OptionalParamInfo } from "./context/types.js";
@@ -4597,15 +4597,121 @@ export function compileDeclarations(
     }
   }
 
+  // (#2818) Collect the names of *block-scoped* (`let`/`const`) variables
+  // declared directly in a statement list (not descending into nested blocks
+  // or function bodies). Only `let`/`const` — a `var` is function-scoped and,
+  // when referenced by a class method, is already hoisted to a module global
+  // (see `wrapTest` and the module-global skip in
+  // `promoteAccessorCapturesToGlobals`), so it needs no deferral; including
+  // `var` needlessly perturbed the order-sensitive async-generator lowering.
+  function collectBlockScopedDeclNames(
+    stmts: ts.NodeArray<ts.Statement> | readonly ts.Statement[],
+    out: Set<string>,
+  ): void {
+    for (const stmt of stmts) {
+      if (!ts.isVariableStatement(stmt)) continue;
+      const isBlockScoped = (stmt.declarationList.flags & (ts.NodeFlags.Let | ts.NodeFlags.Const)) !== 0;
+      if (!isBlockScoped) continue;
+      for (const decl of stmt.declarationList.declarations) {
+        if (ts.isIdentifier(decl.name)) {
+          out.add(decl.name.text);
+        } else if (ts.isObjectBindingPattern(decl.name) || ts.isArrayBindingPattern(decl.name)) {
+          collectBindingPatternNames(decl.name, out);
+        }
+      }
+    }
+  }
+
+  // (#2818) True iff any method / constructor / accessor body — or a
+  // parameter-default initializer — of `decl` references a name in `names`
+  // that `promoteAccessorCapturesToGlobals` would actually promote. Mirrors the
+  // member set AND the skip conditions of that function (already a module /
+  // captured global, `this`, a user-function name), so we defer a class only
+  // when the in-scope promotion channel would genuinely fire — never on a name
+  // that is already global (a false-positive defer only churns codegen order).
+  function classDeclCapturesNames(decl: ts.ClassDeclaration, names: ReadonlySet<string>): boolean {
+    if (names.size === 0) return false;
+    // (#2818 standalone follow-up) NEVER defer a class that has a base class
+    // (`extends …`). A derived class routes its constructor through a
+    // `super(...)` call; the deferred, block-recompiled path lowers that
+    // super-constructor invocation + any spread/getter in the arguments
+    // *correctly in the WasmGC (host) lane* but produces a **desynced** result
+    // in the standalone lane (the promoted-global read of a captured `let`
+    // resolves to a stale/empty value through the super/spread machinery). The
+    // *eager* path — which is exactly how `origin/main` compiled these — is
+    // correct in the standalone lane, so we keep every derived class eager.
+    // This regressed 6 standalone test262 files (all `class X extends Iterator`
+    // / `extends Parent` capturers: the `Iterator.prototype.{map,flatMap,take,
+    // drop,filter}` `return-is-forwarded*` tests + `super/call-spread-obj-
+    // getter-init`). Base-less capturers (the genuine #2818 target — a plain
+    // `class C { m(){ return s; } }` reading a block-`let`) still defer and are
+    // fixed; they have no super-constructor path and lower identically in both
+    // lanes.
+    if (decl.heritageClauses?.some((h) => h.token === ts.SyntaxKind.ExtendsKeyword)) {
+      return false;
+    }
+    const wouldPromote = (name: string): boolean => {
+      if (!names.has(name)) return false;
+      if (name === "this") return false;
+      if (ctx.capturedGlobals.has(name)) return false;
+      if (ctx.moduleGlobals.has(name)) return false;
+      // A name bound to a *user* function is a function reference, not a
+      // captured variable (but a same-named wasm:js-string builtin import must
+      // not block capture — discriminate by index, as promotion does).
+      if (ctx.funcMap.has(name) && ctx.funcMap.get(name) !== ctx.jsStringImports.get(name)) return false;
+      return true;
+    };
+    for (const member of decl.members) {
+      const isBodied =
+        ts.isMethodDeclaration(member) ||
+        ts.isConstructorDeclaration(member) ||
+        ts.isGetAccessorDeclaration(member) ||
+        ts.isSetAccessorDeclaration(member);
+      if (!isBodied) continue;
+      const referenced = new Set<string>();
+      const body = (member as ts.MethodDeclaration).body;
+      if (body) {
+        for (const stmt of body.statements) collectReferencedIdentifiers(stmt, referenced);
+      }
+      for (const p of (member as ts.MethodDeclaration).parameters) {
+        if (p.initializer) collectReferencedIdentifiers(p.initializer, referenced);
+      }
+      for (const name of referenced) {
+        if (wouldPromote(name)) return true;
+      }
+    }
+    return false;
+  }
+
   // Compile class constructors and methods
   // Also compile class expressions in variable declarations
   // Scan recursively into function bodies for class expressions
   function compileClassesFromStatements(
     stmts: ts.NodeArray<ts.Statement> | readonly ts.Statement[],
     insideFunction = false,
+    // (#2818) When non-null, we are (transitively) inside a function body and
+    // this set carries the enclosing block/function-scoped `let`/`const`/`var`
+    // names in scope, so a control-flow-nested class *declaration* that
+    // genuinely captures one of them can be deferred (compiled in-scope by
+    // `compileNestedClassDeclaration`) instead of eagerly. `null` at module
+    // scope — nothing new is deferred there. See the block-`let`-captured-by-
+    // class-method ordering bug (#2818); the broad `insideFunction`-everywhere
+    // variant (PR #2335) regressed −471 by also deferring class *expressions*
+    // and non-capturing classes whose deferred shape is not re-compiled.
+    enclosingLocals: Set<string> | null = null,
   ): void {
     if (!insideFunction) {
       ensureSiblingFunctionsRegistered(stmts);
+    }
+    // (#2818) When inside a function, accumulate this statement list's own
+    // block-scoped decls onto the inherited set so a class nested deeper can
+    // detect a capture of a `let`/`const`/`var` from this or an enclosing
+    // block. A fresh copy per level keeps sibling blocks from polluting each
+    // other. `null` at module scope (no new deferral there).
+    let scopeLocals: Set<string> | null = enclosingLocals;
+    if (enclosingLocals) {
+      scopeLocals = new Set(enclosingLocals);
+      collectBlockScopedDeclNames(stmts, scopeLocals);
     }
     for (const stmt of stmts) {
       // Mirror the `.d.ts` ambient guard from `collectClassesFromStatements`:
@@ -4616,6 +4722,18 @@ export function compileDeclarations(
         if (insideFunction) {
           // Defer body compilation — will be compiled in compileNestedClassDeclaration
           // when the enclosing function is compiled (so captured locals are available)
+          ctx.deferredClassBodies.add(stmt.name.text);
+        } else if (scopeLocals && classDeclCapturesNames(stmt, scopeLocals)) {
+          // (#2818) A control-flow-nested class *declaration* (block / if /
+          // loop / switch / try / labeled body inside a function) that captures
+          // an enclosing block-scoped local. Eager compilation here runs before
+          // the block-`let` initialises, so `promoteAccessorCapturesToGlobals`
+          // never fires and the method reads null. Defer it: it is re-compiled
+          // in-scope by `compileNestedClassDeclaration` (reached from
+          // `compileStatement` for a class declaration in ANY statement
+          // position), where the local is live and promotion succeeds. Only
+          // genuine capturers are deferred — class expressions and
+          // non-capturing classes stay eager (the −471 PR #2335 shapes).
           ctx.deferredClassBodies.add(stmt.name.text);
         } else {
           try {
@@ -4645,16 +4763,22 @@ export function compileDeclarations(
           }
         }
       } else if (ts.isFunctionDeclaration(stmt) && stmt.body) {
-        compileClassesFromStatements(stmt.body.statements, true);
+        // Entering a function body: start a fresh enclosing-locals scope so
+        // nested classes can detect captures of this function's block-locals.
+        compileClassesFromStatements(stmt.body.statements, true, new Set());
       } else if (ts.isIfStatement(stmt)) {
+        // (#2818) Forward `scopeLocals` (not `insideFunction`) through control-
+        // flow bodies. This does NOT change the eager/deferred decision for
+        // non-capturing classes or class expressions — only enables the
+        // capture-defer branch above for genuine block-`let` capturers.
         if (ts.isBlock(stmt.thenStatement)) {
-          compileClassesFromStatements(stmt.thenStatement.statements);
+          compileClassesFromStatements(stmt.thenStatement.statements, false, scopeLocals);
         }
         if (stmt.elseStatement && ts.isBlock(stmt.elseStatement)) {
-          compileClassesFromStatements(stmt.elseStatement.statements);
+          compileClassesFromStatements(stmt.elseStatement.statements, false, scopeLocals);
         }
       } else if (ts.isBlock(stmt)) {
-        compileClassesFromStatements(stmt.statements);
+        compileClassesFromStatements(stmt.statements, false, scopeLocals);
       } else if (
         ts.isForStatement(stmt) ||
         ts.isForInStatement(stmt) ||
@@ -4664,23 +4788,23 @@ export function compileDeclarations(
       ) {
         const body = stmt.statement;
         if (ts.isBlock(body)) {
-          compileClassesFromStatements(body.statements);
+          compileClassesFromStatements(body.statements, false, scopeLocals);
         }
       } else if (ts.isSwitchStatement(stmt)) {
         for (const clause of stmt.caseBlock.clauses) {
-          compileClassesFromStatements(clause.statements);
+          compileClassesFromStatements(clause.statements, false, scopeLocals);
         }
       } else if (ts.isTryStatement(stmt)) {
-        compileClassesFromStatements(stmt.tryBlock.statements);
+        compileClassesFromStatements(stmt.tryBlock.statements, false, scopeLocals);
         if (stmt.catchClause) {
-          compileClassesFromStatements(stmt.catchClause.block.statements);
+          compileClassesFromStatements(stmt.catchClause.block.statements, false, scopeLocals);
         }
         if (stmt.finallyBlock) {
-          compileClassesFromStatements(stmt.finallyBlock.statements);
+          compileClassesFromStatements(stmt.finallyBlock.statements, false, scopeLocals);
         }
       } else if (ts.isLabeledStatement(stmt)) {
         if (ts.isBlock(stmt.statement)) {
-          compileClassesFromStatements(stmt.statement.statements);
+          compileClassesFromStatements(stmt.statement.statements, false, scopeLocals);
         }
       }
       // Compile bodies for anonymous class expressions in new expressions
@@ -4692,11 +4816,13 @@ export function compileDeclarations(
   function compileClassesFromFunctionBody(expr: ts.Expression): void {
     if (ts.isArrowFunction(expr)) {
       if (ts.isBlock(expr.body)) {
-        compileClassesFromStatements(expr.body.statements, true);
+        // Fresh enclosing-locals scope for the arrow's own body (#2818).
+        compileClassesFromStatements(expr.body.statements, true, new Set());
       }
     } else if (ts.isFunctionExpression(expr)) {
       if (expr.body) {
-        compileClassesFromStatements(expr.body.statements, true);
+        // Fresh enclosing-locals scope for the function expression body (#2818).
+        compileClassesFromStatements(expr.body.statements, true, new Set());
       }
       // Compile bodies for anonymous class expressions in new expressions
       compileAnonymousClassBodiesInNode(expr);

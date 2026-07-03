@@ -1,9 +1,11 @@
 ---
 id: 2974
 title: "infra: claim-issue --allocate livelock under multi-session load (6 concurrent allocators observed)"
-status: ready
+status: done
+assignee: ttraenkler/agent-opus-2109
 created: 2026-07-02
-updated: 2026-07-02
+updated: 2026-07-03
+completed: 2026-07-03
 priority: medium
 horizon: s
 feasibility: medium
@@ -11,7 +13,7 @@ reasoning_effort: medium
 task_type: chore
 area: infra
 sprint: Backlog
-related: [2531]
+related: [2531, 2977]
 ---
 
 # #2974 — `claim-issue --allocate` livelock under multi-session load
@@ -66,3 +68,40 @@ Filed from TaskList task #29 (evidence by dev-2856f; filed by dev-evalf).
 Sibling of the promote-baseline push-race issue (same first-push-wins ref
 pattern, being filed by dev-2912f). Related: #2531 (the original atomic
 `--allocate` design).
+
+## Resolution (2026-07-03)
+
+Adopted **direction 1 (backoff + jitter)** — the cheapest fix that turns the
+synchronized herd into a de-facto queue — plus the `refs/claim-issue/base`
+non-fast-forward crash fix that #2977 (the duplicate report) additionally
+flagged. Changes in `scripts/claim-issue.mjs`:
+
+- **`raceBackoffMs(attempt)`** — exponential backoff with full jitter
+  (`random[0, min(4000, 150·2^(attempt-1)) ms]`). Both first-push-wins loops
+  (`--allocate` and claim/release/complete) now sleep this amount after a
+  race-loss re-scan, so concurrent contenders spread out in time instead of
+  re-colliding in lock-step. The wait is skipped after the final attempt;
+  `MAX_RETRIES` still bounds the total.
+- **`fetchAssign` force-fetch** — the local mirror ref is now fetched with a
+  `+`-prefixed refspec, so a diverged `refs/claim-issue/base` overwrites cleanly
+  instead of hard-crashing the script with a non-ff lock error (previously
+  needed a manual `git update-ref -d refs/claim-issue/base`).
+
+Verified: syntax check, read-only `--check`/`--dry-run`, and a live
+release→reclaim round-trip all succeed; atomicity (the #2531 invariants,
+compare-and-swap on the ref sha) is unchanged — only retry timing and the
+mirror-ref fetch mode change.
+
+Acceptance status:
+
+- [x] Bounded retries, no lock-step re-collision (backoff+jitter; `MAX_RETRIES`
+      cap unchanged).
+- [ ] O(entries) `git show` per retry round — **deferred** (direction 5). The
+      backoff already breaks the livelock; the per-file scan cost is a separate,
+      independent optimization left as follow-up so this stays a small, safe
+      change to shared live infra.
+- [x] `--allocate` atomicity guarantees preserved (compare-and-swap unchanged).
+
+**Duplicate:** #2977 is the same report filed independently in the same window;
+it is marked `wont-fix` (dup of #2974). Its extra detail (the
+`refs/claim-issue/base` non-ff crash) is incorporated in this fix.
