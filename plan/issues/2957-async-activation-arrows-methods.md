@@ -4,9 +4,9 @@ title: "Async activation for arrows / methods / function expressions (both CPS +
 status: ready
 sprint: current
 created: 2026-07-02
-updated: 2026-07-02
+updated: 2026-07-03
 priority: medium
-horizon: m
+horizon: l
 feasibility: medium
 reasoning_effort: high
 task_type: feature
@@ -52,3 +52,97 @@ subset; test262 async tests overwhelmingly use arrows and methods.
 - Full merge_group net-positive; no regression in the async-\* equivalence
   suite (legacy-model tests updated only where the shape now genuinely
   returns a Promise — same migration rule as #1796).
+
+## Measurement (2026-07-03, dev, host lane, `upstream/main` @ 0369c1ee7)
+
+Canonical single-tail-await body `await g(x)` in all four shapes, compiled
+host-mode, `f(1)` inspected in JS for `typeof result.then === 'function'`:
+
+| shape                    | `f(1)` returns        | activated? |
+| ------------------------ | --------------------- | ---------- |
+| `async function` decl    | real Promise (→ 2)    | YES        |
+| `const f = async () =>`  | sync number `2`       | **NO**     |
+| `const f = async fn(){}` | sync number `2`       | **NO**     |
+| class `async method`     | sync number `2`       | **NO**     |
+
+Confirms the bug for all three non-declaration shapes. (Note a naive probe
+that assigns the result into an `any`/externref slot and checks
+`typeof === 'object'` FALSE-POSITIVES: the sync `f64` result is boxed by
+`__box_number`, so a boxed number reads as `object`. The authoritative
+signal is thenability of the raw exported externref — probe kept at
+`.tmp/probe2-2957.mjs`.)
+
+## Root-cause correction — the Approach's premise is wrong
+
+Approach step 1 ("factor the activation predicate" at
+`function-body.ts:1163/1185`) is **necessary but far from sufficient, and by
+itself accomplishes nothing for the three broken shapes.** The two async
+activation hooks live inside `compileFunctionBody`, and **arrows, function
+expressions, and methods never call `compileFunctionBody`:**
+
+- **arrows + function expressions** → `compileArrowFunction` in
+  `src/codegen/closures.ts` (its own lifted-`fctx` + `compileStatement` loops
+  at ~2421/2456). `compile­FunctionBody` is only reached by top-level
+  `ts.isFunctionDeclaration` and the CJS `module.exports.x = function(){}`
+  pattern (`declarations.ts:4981`) — not by `const f = async function(){}`.
+- **class methods** → `src/codegen/class-bodies.ts` (its own body loops at
+  ~1918/2293/2341/2445/2599/2778).
+- **object-literal methods** → `src/codegen/literals.ts` (~2705/2739).
+
+So broadening the `ts.isFunctionDeclaration` guard changes behaviour only for
+CJS-exported async function expressions (a near-empty set). The real work is
+**wiring the async-activation decision into each of the three separate
+body-compile paths.**
+
+## Implementation Plan (developer scoping, 2026-07-03) — L/XL, slice it
+
+Good news: the machinery is already shape-agnostic below the hook. All of
+`analyzeAsyncBody`, `asyncFnNeedsCps`, `asyncFnNeedsDrive`,
+`asyncFnNeedsHostDrive`, `emitAsyncStateMachine`, and
+`emitAsyncFrameStateMachine` already take `ts.FunctionLikeDeclaration` and
+build the frame from `fctx.params` + the body — no declaration assumption in
+the emitters themselves. The gap is purely that nobody *calls* them from the
+arrow/method paths.
+
+Recommended factoring: extract the activation block from `function-body.ts`
+(lines ~1160–1210) into a reusable
+`maybeActivateAsync(ctx, fctx, decl, func): boolean` in a shared module
+(e.g. `async-frame.ts` or a new `async-activation.ts`). It performs the
+carrier/host gating, calls the predicates, rewrites the result type to
+externref, and drives the right emitter. `compileFunctionBody` calls it; the
+three other paths call it at the equivalent "about to run the body statement
+loop" point.
+
+Slice order (each an independent, measurable PR):
+
+1. **Refactor-only (byte-inert net behaviour):** extract
+   `maybeActivateAsync` and have `compileFunctionBody` call it. Prove
+   fn-decl still activates and merge_group is net-zero. Establishes the shared
+   entry point with no shape change.
+2. **Function expressions + arrows (`closures.ts`).** Call
+   `maybeActivateAsync` in `compileArrowFunction` before its statement loop.
+   **The real risk lives here:** the lifted `fctx.params[0]` is the
+   closure-struct / `__self` ref, so `buildAsyncFrameInfo` (which spills every
+   `fctx.param`) and the resume-function reconstruction must treat param 0 as
+   the environment, not a user arg. Arrows also capture `this` lexically —
+   verify the spill/restore of captured cells survives suspension. Likely
+   needs a `selfParamCount`/`envParam` hint threaded into
+   `buildAsyncFrameInfo`. Measure fn-expr and arrow separately.
+3. **Methods (`class-bodies.ts` then `literals.ts`), riskiest last.**
+   Interacts with the #1370 class registry + `integration.ts` typeIdx parity
+   guard; `this` is param 0 with the instance struct type. Wire the same
+   entry point into each method body loop.
+4. **Equivalence coverage:** extend `tests/async-await.test.ts` with the
+   canonical single-tail-await body × {arrow, fn-expr, method} × {host, WASI}.
+   Migrate any legacy sync-model async tests that now genuinely return a
+   Promise (same rule as #1796).
+
+### Scheduling caution (hazard zone)
+
+The async frame/CPS substrate is being actively reshaped by ~8 concurrent
+branches (#2895 async-frame PR2 / drain-hook / drive-1b, #2865, #2867, #2906
+gap3-tryfinally, #2971 widen-final, #2905 promise-carrier, #2993). Slices 2–3
+edit `closures.ts` / `class-bodies.ts` and lean on `buildAsyncFrameInfo` /
+`ensureAsyncResumeFunction` — high collision surface. Recommend landing this
+**after** the #2895 async-frame series settles, and re-scoping to `horizon: l`
+(done). Slice 1 (the refactor) is safe to land now and de-risks the rest.
