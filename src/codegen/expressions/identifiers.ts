@@ -40,7 +40,12 @@ import { popBody, pushBody } from "../context/bodies.js";
 import { reportSilentFallback } from "../fallback-telemetry.js";
 import { emitThrowReferenceError, emitThrowTypeError, noJsHost } from "./helpers.js";
 import { emitDynamicWithGet, emitWithBindingGet, resolveWithBinding } from "../with-scope.js";
-import { emitBuiltinNamespaceObject, isSupportedBuiltinNamespace } from "../builtin-static-globals.js";
+import {
+  emitBuiltinConstructorIdentity,
+  emitBuiltinNamespaceObject,
+  isBuiltinConstructorIdentityName,
+  isSupportedBuiltinNamespace,
+} from "../builtin-static-globals.js";
 import { tryEmitPromiseSubclassValue } from "./promise-subclass.js";
 
 /**
@@ -784,6 +789,24 @@ function compileIdentifierCore(ctx: CodegenContext, fctx: FunctionContext, id: t
     if (tryEmitPromiseSubclassValue(ctx, fctx, name)) {
       return { kind: "externref" };
     }
+  }
+
+  // (#3006) Standalone bare builtin-CONSTRUCTOR identifier read as a VALUE
+  // (`… === Set`, `assert.sameValue(…, Set)`, `[Set, Map]`) → the GENUINE,
+  // identity-stable reified constructor object, NOT the null-externref carrier it
+  // otherwise falls through to. This is the RHS partner of the
+  // `<Builtin>.prototype.constructor` fold in property-access.ts: both resolve to
+  // the SAME per-name `__builtin_ctor_<Name>` singleton, so
+  // `Set.prototype.constructor === Set` is genuinely true and
+  // `Set.prototype.constructor === Map` genuinely false (distinct singletons).
+  // Scoped to the narrow constructor subset with no existing bare-value identity
+  // (Set/Map/Weak*/RegExp/FinalizationRegistry/Disposable*/SuppressedError) and to
+  // standalone; gc/host and the namespace-object / native-error-tag builtins are
+  // untouched. Order: AFTER local/module/declared-global shadowing and the
+  // class-object / promise-subclass singleton blocks (so a user binding or a real
+  // class always wins), BEFORE the null-externref fallback.
+  if (ctx.standalone && isBuiltinConstructorIdentityName(name)) {
+    return emitBuiltinConstructorIdentity(ctx, fctx, name);
   }
 
   // #1502 — Browser Storage globals (localStorage / sessionStorage). Emit
