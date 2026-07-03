@@ -747,7 +747,7 @@ function buildDrainBody(state: AsyncSchedulerState, funcArrIdx: number, argsArrI
   ];
 }
 
-function ensurePromiseSettleFunctions(ctx: CodegenContext): void {
+export function ensurePromiseSettleFunctions(ctx: CodegenContext): void {
   ensureMicrotaskQueue(ctx);
   const state = getOrInitState(ctx as CodegenContextWithScheduler);
   if (state.promiseFulfillFuncIdx !== -1) return;
