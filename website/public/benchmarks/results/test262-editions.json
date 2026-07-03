@@ -2141,18 +2141,18 @@
   },
   {
     "edition": "ES2022",
-    "pass": 3109,
-    "fail": 1091,
-    "ce": 34,
+    "pass": 3110,
+    "fail": 1092,
+    "ce": 32,
     "skip": 0,
     "total": 4234,
     "pct": 73,
     "features": [
       {
         "name": "class",
-        "pass": 2178,
-        "fail": 595,
-        "ce": 17,
+        "pass": 2179,
+        "fail": 596,
+        "ce": 15,
         "skip": 0,
         "total": 2790,
         "pct": 78
@@ -2177,9 +2177,9 @@
       },
       {
         "name": "class-methods-private",
-        "pass": 822,
+        "pass": 823,
         "fail": 142,
-        "ce": 2,
+        "ce": 1,
         "skip": 0,
         "total": 966,
         "pct": 85
@@ -2187,8 +2187,8 @@
       {
         "name": "class-static-methods-private",
         "pass": 663,
-        "fail": 106,
-        "ce": 3,
+        "fail": 107,
+        "ce": 2,
         "skip": 0,
         "total": 772,
         "pct": 86
@@ -3509,8 +3509,8 @@
   {
     "edition": "ES2026",
     "pass": 182,
-    "fail": 160,
-    "ce": 7,
+    "fail": 159,
+    "ce": 8,
     "skip": 0,
     "total": 349,
     "pct": 52,
@@ -3563,8 +3563,8 @@
       {
         "name": "legacy-regexp",
         "pass": 12,
-        "fail": 14,
-        "ce": 0,
+        "fail": 13,
+        "ce": 1,
         "skip": 0,
         "total": 26,
         "pct": 46
@@ -3635,8 +3635,8 @@
       {
         "name": "class",
         "pass": 2,
-        "fail": 9,
-        "ce": 0,
+        "fail": 8,
+        "ce": 1,
         "skip": 0,
         "total": 11,
         "pct": 18
