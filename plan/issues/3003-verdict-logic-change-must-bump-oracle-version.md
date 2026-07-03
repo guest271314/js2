@@ -9,7 +9,7 @@ priority: high
 feasibility: hard
 task_type: infra
 area: ci
-sprint: current
+sprint: 69
 horizon: m
 related: [2096, 2920, 2940, 1668, 1897, 2528, 2547]
 ---

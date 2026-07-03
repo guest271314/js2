@@ -3,7 +3,7 @@ id: 2924
 title: 'new Function("<const>") compile-away MVP — replace the no-op stub'
 status: done
 created: 2026-07-02
-updated: 2026-07-02
+updated: 2026-07-03
 completed: 2026-07-02
 assignee: ttraenkler/dev-evalf
 priority: high
@@ -14,7 +14,7 @@ task_type: feature
 area: codegen
 language_feature: eval
 goal: runtime-eval
-sprint: current
+sprint: 69
 parent: 1584
 depends_on: [2923]
 related: [1163, 1584]

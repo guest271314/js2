@@ -2,7 +2,7 @@
 id: 2829
 title: Retest all four native-messaging hosts in Chrome on 0.59.3
 status: done
-sprint: current
+sprint: 69
 priority: high
 area: examples
 task_type: bug

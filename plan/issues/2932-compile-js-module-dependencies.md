@@ -3,7 +3,7 @@ id: 2932
 title: "codegen: .js module dependencies are not compiled in multi-file mode (imports resolve to null)"
 status: done
 priority: high
-sprint: current
+sprint: 69
 created: 2026-07-02
 completed: 2026-07-02
 assignee: ttraenkler/dev-2900f

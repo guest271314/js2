@@ -12,7 +12,7 @@ feasibility: medium
 task_type: feature
 area: codegen
 goal: standalone
-sprint: current
+sprint: 69
 horizon: s
 ---
 

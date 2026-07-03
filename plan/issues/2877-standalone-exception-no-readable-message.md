@@ -3,7 +3,7 @@ id: 2877
 title: "Standalone exceptions expose no JS-readable message (__sget_message returns null) — blocks message-level triage"
 status: done
 created: 2026-06-30
-updated: 2026-07-02
+updated: 2026-07-03
 completed: 2026-07-02
 assignee: ttraenkler/dev-2912f
 resolved_by: 2962
@@ -11,7 +11,7 @@ priority: medium
 task_type: enhancement
 area: tooling
 goal: standalone
-sprint: current
+sprint: 69
 horizon: s
 related: [2870, 2862, 2860, 2962]
 umbrella: 2860

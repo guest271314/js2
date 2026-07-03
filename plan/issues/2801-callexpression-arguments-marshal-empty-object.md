@@ -4,13 +4,13 @@ title: "[SENIOR-DEV ONLY] compiled-acorn CallExpression `arguments` marshals as 
 status: done
 completed: 2026-06-29
 assignee: ttraenkler/unassigned
-sprint: current
+sprint: 69
 priority: high
 horizon: m
 feasibility: hard
 reasoning_effort: high
 created: 2026-06-28
-updated: 2026-06-28
+updated: 2026-07-03
 task_type: bugfix
 area: codegen
 language_feature: value-representation

@@ -14,7 +14,7 @@ area: codegen
 es_edition: 2015
 language_feature: destructuring
 goal: spec-completeness
-sprint: current
+sprint: 69
 horizon: m
 related: [2669, 2758, 2808, 1205, 1607, 1177]
 ---

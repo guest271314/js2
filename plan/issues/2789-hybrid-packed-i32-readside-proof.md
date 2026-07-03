@@ -2,10 +2,10 @@
 id: 2789
 title: "Hybrid fast-path Row 3: packed-i32 array read-side soundness — demote overflow/-0 writes to f64 (miscompile fix)"
 status: done
-sprint: current
+sprint: 69
 created: 2026-06-28
 completed: 2026-06-28
-updated: 2026-06-28
+updated: 2026-07-03
 assignee: ttraenkler/senior-developer
 priority: medium
 horizon: m

@@ -9,7 +9,7 @@ priority: high
 task_type: enhancement
 area: tooling
 goal: standalone
-sprint: current
+sprint: 69
 horizon: m
 related: [2860, 2097, 2870, 2864, 2865, 2866, 2867]
 umbrella: 2860

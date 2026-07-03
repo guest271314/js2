@@ -2,7 +2,7 @@
 id: 2830
 title: "Lower DataView/Uint8Array-over-WASI-memory to linear ops; rewrite wasi_p1 to standard DataView (drop the wasm:memory ghost intrinsic)"
 status: done
-sprint: current
+sprint: 69
 priority: medium
 area: codegen
 task_type: feature

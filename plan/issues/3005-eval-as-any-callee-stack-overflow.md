@@ -2,9 +2,9 @@
 id: 3005
 title: "Compiler stack-overflow on `(eval as any)()` — cast/parenthesized callee re-wrap recurses infinitely"
 status: done
-sprint: current
+sprint: 69
 created: 2026-07-02
-updated: 2026-07-02
+updated: 2026-07-03
 completed: 2026-07-02
 assignee: ttraenkler/agent-a736c48cc4ac5b6c4
 priority: medium

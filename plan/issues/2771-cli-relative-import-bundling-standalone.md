@@ -12,7 +12,7 @@ task_type: feature
 area: compiler
 goal: platform
 related: [2756, 389, 2655]
-sprint: current
+sprint: 69
 ---
 
 # #2771 — bundle relative imports for standalone WASI compilation

@@ -2,7 +2,7 @@
 id: 2915
 title: Native ToBoolean on the property-descriptor-attribute + Boolean() path (standalone leak)
 status: done
-sprint: current
+sprint: 69
 priority: medium
 horizon: s
 feasibility: medium

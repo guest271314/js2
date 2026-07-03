@@ -4,7 +4,7 @@ title: "Standalone defineProperty on the global object (~10, needs global-object
 status: done
 assignee: ttraenkler/sr-globaldefine
 completed: 2026-07-03
-sprint: current
+sprint: 69
 priority: low
 horizon: l
 feasibility: hard

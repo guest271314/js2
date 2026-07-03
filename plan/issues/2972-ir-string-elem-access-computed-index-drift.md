@@ -3,9 +3,9 @@ id: 2972
 title: "IR selector accepts string element access with computed index; from-ast throws 'not in slice 12' — 14 test262 CEs under IR-first"
 status: done
 assignee: ttraenkler/dev-2138f
-sprint: current
+sprint: 69
 created: 2026-07-02
-updated: 2026-07-02
+updated: 2026-07-03
 completed: 2026-07-02
 priority: medium
 feasibility: medium

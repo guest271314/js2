@@ -4,7 +4,7 @@ title: "Standalone: eliminate env::Object_isPrototypeOf host-import leak — sta
 status: done
 completed: 2026-07-02
 assignee: ttraenkler/agent-add922b5fc0765fbe
-sprint: current
+sprint: 69
 priority: medium
 horizon: s
 feasibility: medium

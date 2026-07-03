@@ -3,7 +3,7 @@ id: 2904
 title: Standalone fixed-arity array destructuring leaks env::__array_from_iter_n
 status: done
 assignee: ttraenkler/sendev-iterdrain
-sprint: current
+sprint: 69
 priority: high
 horizon: l
 feasibility: hard

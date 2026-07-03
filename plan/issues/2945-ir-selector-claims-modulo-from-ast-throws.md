@@ -4,9 +4,9 @@ title: "IR selector claims `%` (modulo) but from-ast throws — post-claim drift
 status: done
 completed: 2026-07-02
 assignee: ttraenkler/dev-2138f
-sprint: current
+sprint: 69
 created: 2026-07-02
-updated: 2026-07-02
+updated: 2026-07-03
 priority: medium
 feasibility: medium
 horizon: s

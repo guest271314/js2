@@ -9,7 +9,7 @@ priority: high
 task_type: tooling
 area: tooling
 goal: standalone
-sprint: current
+sprint: 69
 horizon: m
 related: [2879, 1897, 2867, 2864, 2865, 2866]
 ---

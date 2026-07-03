@@ -2,9 +2,9 @@
 id: 2751
 title: "Budget-windowed rolling sprint model: sprint:current queue + budget-triggered freeze + auto-sync to TaskList"
 status: done
-sprint: current
+sprint: 69
 created: 2026-06-27
-updated: 2026-06-27
+updated: 2026-07-03
 completed: 2026-06-27
 priority: high
 horizon: l

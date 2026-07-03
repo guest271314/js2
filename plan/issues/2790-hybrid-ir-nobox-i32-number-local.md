@@ -2,9 +2,9 @@
 id: 2790
 title: "Hybrid IR — no-box NUMBER-local proof gate, i32 arm (#2782 fast-follow, unblocked by #2785)"
 status: done
-sprint: current
+sprint: 69
 created: 2026-06-28
-updated: 2026-06-28
+updated: 2026-07-03
 completed: 2026-06-28
 priority: medium
 horizon: m

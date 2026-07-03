@@ -3,7 +3,7 @@ id: 2905
 title: "Standalone/WASI Promise carrier: resolveWasmType(Promise<T>) must lower to externref (stored/typed promise contract)"
 status: done
 created: 2026-07-01
-updated: 2026-07-01
+updated: 2026-07-03
 completed: 2026-07-01
 assignee: ttraenkler/sendev-promise
 priority: high
@@ -11,7 +11,7 @@ feasibility: medium
 task_type: bug
 area: codegen
 goal: standalone
-sprint: current
+sprint: 69
 horizon: m
 related: [2867, 2895, 2865, 1313, 1727, 1936]
 umbrella: 2860

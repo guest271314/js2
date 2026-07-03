@@ -2,7 +2,7 @@
 id: 3020
 title: "Delete the 2 stale duplicate flat test files PR #2588 missed (broken-import copies superseded by tests/equivalence/)"
 status: done
-sprint: current
+sprint: 69
 priority: low
 created: 2026-07-03
 completed: 2026-07-03

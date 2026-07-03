@@ -5,7 +5,7 @@ status: done
 assignee: ttraenkler/dev-2863
 completed: 2026-07-02
 created: 2026-07-02
-updated: 2026-07-02
+updated: 2026-07-03
 priority: high
 horizon: s
 feasibility: medium
@@ -14,7 +14,7 @@ task_type: feature
 area: codegen
 language_feature: eval
 goal: runtime-eval
-sprint: current
+sprint: 69
 parent: 1584
 related: [1163, 1261, 2924]
 ---

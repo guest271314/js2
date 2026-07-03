@@ -2,7 +2,7 @@
 id: 2840
 title: nm_js2wasm_node_process .ts-direct compile fails with linear-Uint8 helper-arg #1886 (module-scope buffer)
 status: done
-sprint: current
+sprint: 69
 priority: high
 area: codegen
 task_type: bug

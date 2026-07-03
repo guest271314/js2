@@ -4,7 +4,7 @@ title: "[SENIOR-DEV ONLY] dynamic prototype-accessor dispatch on statically-type
 status: done
 completed: 2026-06-29
 assignee: sendev-2838
-sprint: current
+sprint: 69
 priority: high
 horizon: l
 feasibility: hard

@@ -4,7 +4,7 @@ title: "arrow / function-expression param Identifier nodes lose name+type on HOS
 status: done
 completed: 2026-06-29
 assignee: ttraenkler/agent-senior-2841
-sprint: current
+sprint: 69
 priority: high
 horizon: m
 feasibility: hard

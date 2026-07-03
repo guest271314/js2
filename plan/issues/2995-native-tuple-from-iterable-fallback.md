@@ -3,7 +3,7 @@ id: 2995
 title: Standalone tuple-from-iterable destructure fallback leaks env::__array_from_iter
 status: done
 assignee: ttraenkler/agent-a67bcee7
-sprint: current
+sprint: 69
 priority: high
 horizon: s
 feasibility: medium

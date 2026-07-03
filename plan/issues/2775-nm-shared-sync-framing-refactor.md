@@ -11,7 +11,7 @@ task_type: refactor
 area: examples
 goal: developer-experience
 related: [389, 2655, 2657, 2684, 2752, 2776, 2771, 2777]
-sprint: current
+sprint: 69
 ---
 
 # #2775 — Native Messaging examples: rename to host scheme + scale matrix

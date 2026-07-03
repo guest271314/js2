@@ -2,7 +2,7 @@
 id: 3007
 title: "any-context computed-index read desyncs __vec_get funcIdx → invalid Wasm (f64.convert_i32_s on externref)"
 status: done
-sprint: current
+sprint: 69
 priority: medium
 assignee: ttraenkler/agent-a7e5749647e8f1219
 created: 2026-07-03

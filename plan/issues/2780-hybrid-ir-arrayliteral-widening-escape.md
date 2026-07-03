@@ -2,9 +2,9 @@
 id: 2780
 title: "Hybrid IR step 2: ArrayLiteral widening-escape check — vec.new_fixed only when the literal does not flow into an any/heterogeneous sink"
 status: done
-sprint: current
+sprint: 69
 created: 2026-06-28
-updated: 2026-06-28
+updated: 2026-07-03
 completed: 2026-06-28
 assignee: ttraenkler/sendev-arraylit-widening
 priority: medium

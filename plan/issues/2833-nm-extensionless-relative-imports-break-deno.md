@@ -2,7 +2,7 @@
 id: 2833
 title: Extension-less relative imports break Deno / `deno bundle` in native-messaging examples
 status: done
-sprint: current
+sprint: 69
 priority: medium
 area: examples
 task_type: bug

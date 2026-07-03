@@ -4,7 +4,7 @@ title: "Standalone regression: dstr-param `[x = init]` called with a single-elem
 status: done
 completed: 2026-07-03
 assignee: ttraenkler/senior-developer
-sprint: current
+sprint: 69
 created: 2026-07-03
 updated: 2026-07-03
 priority: high

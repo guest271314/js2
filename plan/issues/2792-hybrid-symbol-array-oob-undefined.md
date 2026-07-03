@@ -4,9 +4,9 @@ title: "Hybrid: host symbol[] OOB → undefined (completes #2785 F1 host half; s
 status: done
 completed: 2026-06-28
 assignee: ttraenkler/sendev-symbox
-sprint: current
+sprint: 69
 created: 2026-06-28
-updated: 2026-06-28
+updated: 2026-07-03
 priority: medium
 horizon: m
 feasibility: hard
