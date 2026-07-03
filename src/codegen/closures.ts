@@ -1191,6 +1191,21 @@ export function isHostCallbackArgument(node: ts.Node, ctx: CodegenContext): bool
     if (ts.isPropertyAccessExpression(parent.expression)) {
       const propAccess = parent.expression;
       const methodName = propAccess.name.text;
+      // (#3016) `Function.prototype.call`/`apply` NEVER invoke their arguments
+      // as callbacks — they invoke the *receiver* with those args as `thisArg`
+      // + forwarded params. So a function-expression/arrow passed to `.call`/
+      // `.apply` (e.g. `get.call(() => {})` using a function object as an
+      // invalid `this`, or `Array.prototype.find.call(undefined, fn)`) is a
+      // plain function-object VALUE, not a synchronously-invoked host callback.
+      // Routing it through `__make_callback` leaks an `env::` import in
+      // standalone mode for no reason; the GC closure-struct path produces a
+      // valid function-object value host-free (and any HOF that the *receiver*
+      // then invokes — `Array.prototype.forEach.call(arr, cb)` — dispatches the
+      // struct via `__call_fn_N`, verified host-free). Standalone-gated so the
+      // js-host lane stays byte-identical.
+      if (ctx.standalone && (methodName === "call" || methodName === "apply")) {
+        return false;
+      }
       try {
         const receiverType = ctx.checker.getTypeAtLocation(propAccess.expression);
         // Search the receiver type's symbol chain for a class name that
