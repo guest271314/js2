@@ -37,6 +37,8 @@ import { nativeStringType } from "./native-strings.js";
 import { emitBrandCheckTypeError } from "./native-proto.js";
 import { addFuncType } from "./registry/types.js";
 import { coerceType, compileExpression, compileStatement, valTypesMatch } from "./shared.js";
+import { UNDEF_F64_BITS } from "./value-tags.js";
+import { addUnionImports } from "./index.js";
 import { bodyUsesArguments } from "./helpers/body-uses-arguments.js";
 import { resolveSpillLocalValType } from "./statements/variables.js";
 import { ensureExnTag } from "./registry/imports.js";
@@ -1270,20 +1272,37 @@ function ensureRegisteredNativeGenerator(ctx: CodegenContext, name: string): Nat
   return null;
 }
 
-// (#2171) The default `value` for a done/empty result: f64 0 for numeric
-// generators, a null ref for string (the consumer never reads value when
-// done=1, so the null is inert — it only satisfies struct.new's type).
-function defaultElemValueInstr(elemValType: ValType): Instr {
-  if (elemValType.kind === "f64") return { op: "f64.const", value: 0 };
-  if (elemValType.kind === "i32") return { op: "i32.const", value: 0 };
+// (#2171/#2979) The default `value` for a done/empty result. The old comment
+// claimed "the consumer never reads value when done=1" — FALSE: JS reads
+// `.value` off a done result routinely, and it must be `undefined`
+// (`g.next().value` after exhaustion — test262 `generators/{no-yield,return}.js`).
+// So the default must be a *distinguishable absent marker*, not a value-space
+// collision:
+//   - f64 carrier: the UNDEF_F64 sentinel (value-tags.ts) — a signaling-NaN
+//     bit pattern JS arithmetic never produces. Numerically it already behaves
+//     as NaN (ToNumber(undefined) === NaN, so typed f64 reads become
+//     spec-correct: the old `f64 0` default made an exhausted `.value` read
+//     indistinguishable from a genuine yielded/returned 0). The dynamic
+//     `.value` reader canonicalizes the sentinel to the null externref — the
+//     standalone canonical `undefined` (`__extern_is_undefined` is
+//     `ref.is_null`, object-runtime.ts).
+//   - externref carrier: null externref (already the canonical undefined).
+//   - ref carrier (native string): null ref — `extern.convert_any(null)` is
+//     the null externref, canonical again.
+//   - i32 carrier: no sentinel space in i32; keep 0.
+function defaultElemValueInstrs(elemValType: ValType): Instr[] {
+  if (elemValType.kind === "f64") {
+    return [{ op: "i64.const", value: UNDEF_F64_BITS }, { op: "f64.reinterpret_i64" } as Instr];
+  }
+  if (elemValType.kind === "i32") return [{ op: "i32.const", value: 0 }];
   // (#2864 F1) The boxed-any carrier's inert default is a null externref.
-  if (elemValType.kind === "externref") return { op: "ref.null.extern" } as Instr;
-  return { op: "ref.null", typeIdx: (elemValType as { typeIdx: number }).typeIdx } as Instr;
+  if (elemValType.kind === "externref") return [{ op: "ref.null.extern" } as Instr];
+  return [{ op: "ref.null", typeIdx: (elemValType as { typeIdx: number }).typeIdx } as Instr];
 }
 
 function emptyResult(info: NativeGeneratorInfo): Instr[] {
   return [
-    defaultElemValueInstr(info.elemValType),
+    ...defaultElemValueInstrs(info.elemValType),
     { op: "i32.const", value: 1 },
     { op: "struct.new", typeIdx: info.resultTypeIdx },
   ];
@@ -1291,7 +1310,7 @@ function emptyResult(info: NativeGeneratorInfo): Instr[] {
 
 function emptyResultForType(resultTypeIdx: number): Instr[] {
   return [
-    { op: "f64.const", value: 0 },
+    ...defaultElemValueInstrs({ kind: "f64" }),
     { op: "i32.const", value: 1 },
     { op: "struct.new", typeIdx: resultTypeIdx },
   ];
@@ -1308,7 +1327,12 @@ function nativeReturnResultFromLocal(info: NativeGeneratorInfo, valueLocal: numb
 function emitExpressionAsF64(ctx: CodegenContext, fctx: FunctionContext, expr: ts.Expression | undefined): number {
   if (!expr) {
     const tmp = allocLocal(fctx, `__gen_value_${fctx.locals.length}`, { kind: "f64" });
-    fctx.body.push({ op: "f64.const", value: NaN });
+    // (#2979) A missing expression is JS `undefined` (bare `return;`,
+    // `.next()` / `.return()` with no argument). Use the UNDEF_F64 sentinel —
+    // numerically identical to the old quiet NaN (still a NaN), but
+    // distinguishable by sentinel-aware readers so `gen.return().value` /
+    // bare-`return` results canonicalize to `undefined` instead of NaN.
+    fctx.body.push(...defaultElemValueInstrs({ kind: "f64" }));
     fctx.body.push({ op: "local.set", index: tmp });
     return tmp;
   }
@@ -1400,13 +1424,13 @@ function emitYieldValueAsElem(
   const elem = info.elemValType;
   const tmp = allocLocal(fctx, `__gen_value_${fctx.locals.length}`, elem);
   if (!expr) {
-    fctx.body.push(defaultElemValueInstr(elem));
+    fctx.body.push(...defaultElemValueInstrs(elem));
     fctx.body.push({ op: "local.set", index: tmp });
     return tmp;
   }
   const t = compileExpression(ctx, fctx, expr, elem);
   if (t === null) {
-    fctx.body.push(defaultElemValueInstr(elem));
+    fctx.body.push(...defaultElemValueInstrs(elem));
   } else if (!valTypesMatch(t, elem)) {
     coerceType(ctx, fctx, t, elem);
   }
@@ -1590,7 +1614,7 @@ function compileState(
       returnBody.push({ op: "local.get", index: selfLocal });
       returnBody.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: info.abruptFieldIdx });
     } else {
-      returnBody.push(defaultElemValueInstr(info.elemValType));
+      returnBody.push(...defaultElemValueInstrs(info.elemValType));
     }
     returnBody.push({ op: "i32.const", value: 1 });
     returnBody.push({ op: "struct.new", typeIdx: info.resultTypeIdx });
@@ -2457,38 +2481,132 @@ export function tryCompileNativeGeneratorResultProperty(
   }
 
   // `value`: choose the return ValType from the STATIC type of the result's
-  // `value` property. A numeric generator keeps the f64 fast path (byte-identical
-  // to before); an object / mixed (boxed-any) generator returns externref. This
-  // is what keeps existing numeric `.next().value` reads unchanged.
-  let valueWantsRef = false;
+  // `value` property. A STATICALLY-NUMERIC `.value` keeps the f64 fast path
+  // (byte-identical to before, and — with the #2979 sentinel producer — an
+  // exhausted read yields NaN, which is the spec ToNumber(undefined)).
+  // Everything else (ref-typed OR no static info — the `g: any` harness shape)
+  // now takes the externref path below.
+  let valueStaticNumeric = false;
   const itType = ctx.checker.getTypeAtLocation(resultExpr);
   const valSym = itType.getProperty?.("value");
   if (valSym) {
     const mapped = mapTsTypeToWasm(ctx.checker.getTypeOfSymbolAtLocation(valSym, resultExpr), ctx.checker);
-    valueWantsRef =
-      mapped.kind === "externref" ||
-      mapped.kind === "anyref" ||
-      mapped.kind === "eqref" ||
-      mapped.kind === "ref" ||
-      mapped.kind === "ref_null";
+    valueStaticNumeric = mapped.kind === "f64" || mapped.kind === "i32";
   }
 
-  if (valueWantsRef) {
-    // Read the value off whichever boxed-any result type matched, leaving an
-    // externref. Only the any-carrier (externref-elem) result types carry an
-    // externref value; a numeric result's f64 value can't be returned here, so it
-    // falls to the inert null default (a numeric value statically typed `any` is
-    // not a shape F1 targets).
-    const anyEntries = resultEntries.filter((e) => e.elemValType.kind === "externref");
-    fctx.body.push(buildOpenResultRead(anyLocal, anyEntries, RESULT_VALUE_FIELD, { kind: "externref" }));
-    return { kind: "externref" };
+  if (valueStaticNumeric) {
+    // Statically-numeric `.value`: the historical f64-singleton fast path.
+    const fieldType: ValType = { kind: "f64" };
+    const f64Entries = resultEntries.filter((e) => e.elemValType.kind === "f64");
+    fctx.body.push(buildOpenResultRead(anyLocal, f64Entries, RESULT_VALUE_FIELD, fieldType));
+    return fieldType;
   }
 
-  // Numeric value (or no static info): the historical f64-singleton fast path.
-  const fieldType: ValType = { kind: "f64" };
-  const f64Entries = resultEntries.filter((e) => e.elemValType.kind === "f64");
-  fctx.body.push(buildOpenResultRead(anyLocal, f64Entries, RESULT_VALUE_FIELD, fieldType));
-  return fieldType;
+  // (#2979) Dynamic / ref-typed `.value` read → externref, covering EVERY
+  // registered result carrier (the old split covered only externref-elem
+  // carriers here and sent the no-static-info shape — exactly the test262
+  // harness path `assert.sameValue(g.next().value, undefined)` — down the f64
+  // fast path, where an f64-elem done result read back as a plain number and
+  // `undefined` was unrepresentable). Each arm canonicalizes:
+  //   - externref elem: field as-is (done default is null externref already);
+  //   - f64/i32 elem: UNDEF_F64 sentinel → null externref (canonical
+  //     undefined, `__extern_is_undefined` = ref.is_null), else __box_number;
+  //   - ref elem (native string): extern.convert_any (null ref → null extern).
+  fctx.body.push(buildOpenResultValueReadExtern(ctx, fctx, anyLocal, resultEntries));
+  return { kind: "externref" };
+}
+
+/**
+ * (#2979) True when `typeIdx` is one of the native generator IteratorResult
+ * structs (`__NativeGeneratorResult_<kind>`), whose f64 `value` field uses the
+ * UNDEF_F64 sentinel as the absent/done marker. Generic struct-field readers
+ * (member-get dispatch) use this to apply sentinel-aware boxing for exactly
+ * these structs and no others.
+ */
+export function isNativeGeneratorResultStruct(ctx: CodegenContext, typeIdx: number): boolean {
+  const name = ctx.typeIdxToStructName.get(typeIdx);
+  return name !== undefined && name.startsWith("__NativeGeneratorResult_");
+}
+
+/**
+ * (#2979) Instruction tail that converts an f64 already on the stack into an
+ * externref with sentinel canonicalization: the UNDEF_F64 bit pattern becomes
+ * the null externref (standalone canonical `undefined`), anything else is
+ * boxed via `__box_number`. Needs a caller-provided f64 scratch local.
+ */
+export function sentinelAwareF64BoxInstrs(f64ScratchIdx: number, boxNumberIdx: number): Instr[] {
+  return [
+    { op: "local.tee", index: f64ScratchIdx },
+    { op: "i64.reinterpret_f64" } as Instr,
+    { op: "i64.const", value: UNDEF_F64_BITS },
+    { op: "i64.eq" } as Instr,
+    {
+      op: "if",
+      blockType: { kind: "val", type: { kind: "externref" } },
+      then: [{ op: "ref.null.extern" } as Instr],
+      else: [{ op: "local.get", index: f64ScratchIdx } as Instr, { op: "call", funcIdx: boxNumberIdx } as Instr],
+    } as Instr,
+  ];
+}
+
+/**
+ * (#2979) Build the externref-producing `.value` read chain over ALL candidate
+ * result carriers, canonicalizing the absent/done value to the null externref
+ * (the standalone canonical `undefined`). Mirrors `buildOpenResultRead`'s
+ * nested ref.test chain; the no-match default is the null externref.
+ */
+function buildOpenResultValueReadExtern(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  anyLocal: number,
+  entries: { typeIdx: number; elemValType: ValType }[],
+): Instr {
+  // __box_number is a union native (standalone/wasi) registered via
+  // addUnionImports; in-body `call` instrs are repaired by the late-import
+  // shifter body walks, so funcMap resolution at emit time is safe (the #2941
+  // hazard is CACHED indices in side-channel registries, not body instrs).
+  addUnionImports(ctx);
+  const boxNumberIdx = ctx.funcMap.get("__box_number");
+  const externVT: ValType = { kind: "externref" };
+  // Scratch for the sentinel bit-test (allocated once; arms are alternatives).
+  const f64Scratch = allocLocal(fctx, `__gen_val_f64_${fctx.locals.length}`, { kind: "f64" });
+
+  const armFor = (e: { typeIdx: number; elemValType: ValType }): Instr[] => {
+    const read: Instr[] = [
+      { op: "local.get", index: anyLocal },
+      { op: "ref.cast", typeIdx: e.typeIdx },
+      { op: "struct.get", typeIdx: e.typeIdx, fieldIdx: RESULT_VALUE_FIELD },
+    ];
+    if (e.elemValType.kind === "externref") return read;
+    if (e.elemValType.kind === "f64" || e.elemValType.kind === "i32") {
+      if (boxNumberIdx === undefined) {
+        // No boxing available (defensive): undefined is the only safe answer.
+        return [...read, { op: "drop" }, { op: "ref.null.extern" } as Instr];
+      }
+      const toF64: Instr[] = e.elemValType.kind === "i32" ? [{ op: "f64.convert_i32_s" } as Instr] : [];
+      return [...read, ...toF64, ...sentinelAwareF64BoxInstrs(f64Scratch, boxNumberIdx)];
+    }
+    // ref/ref_null elem (native string / struct): wrap to externref. A null
+    // ref (the done default) converts to the null externref = canonical
+    // undefined.
+    return [...read, { op: "extern.convert_any" } as Instr];
+  };
+
+  const wrap = (i: number): Instr[] => {
+    if (i >= entries.length) return [{ op: "ref.null.extern" } as Instr];
+    const e = entries[i]!;
+    return [
+      { op: "local.get", index: anyLocal },
+      { op: "ref.test", typeIdx: e.typeIdx },
+      {
+        op: "if",
+        blockType: { kind: "val", type: externVT },
+        then: armFor(e),
+        else: wrap(i + 1),
+      } as Instr,
+    ];
+  };
+  return { op: "block", blockType: { kind: "val", type: externVT }, body: wrap(0) } as Instr;
 }
 
 /**

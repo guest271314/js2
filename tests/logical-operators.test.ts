@@ -7,7 +7,7 @@ import {
   compile,
   readFileSync,
   resolve,
-} from "./helpers.js";
+} from "./equivalence/helpers.js";
 
 describe("Logical operators returning values", () => {
   it("0 || 42 returns 42", async () => {

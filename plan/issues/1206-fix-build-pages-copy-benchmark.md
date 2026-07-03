@@ -1,9 +1,10 @@
 ---
 id: 1206
 title: "fix(build-pages): copy benchmark JSONs + frame-nav-sync.js to top-level pages-dist paths (404s on landing page)"
-status: ready
+status: done
+completed: 2026-07-03
 created: 2026-04-27
-updated: 2026-06-19
+updated: 2026-07-03
 priority: medium
 feasibility: easy
 reasoning_effort: low
@@ -129,3 +130,22 @@ source file exists; landing page references resolve.
 ## Frontmatter reconcile (2026-06-12)
 
 Was `in-progress` with no open PR, no active agent, and no Suspended Work section (session died sprints 42-52). Reset to `ready` during the sprint-62 issue review; re-validate against current main before claiming (#2148).
+
+## Reconciliation — DONE (2026-07-03)
+
+Verified genuinely resolved on `main` against the full acceptance criteria:
+
+- **Benchmark JSONs → top-level:** `scripts/build-pages.js` now defines
+  `TOP_BENCH_RESULTS = join(PAGES_DIST, "benchmarks", "results")` and copies
+  `size-benchmarks.json`, `loadtime-benchmarks.json`,
+  `playground-benchmark-sidebar.json` (+ `-no-jit`, wasm-host JSONs) to BOTH the
+  top-level path and the playground path — so the landing page's top-level
+  requests resolve (criteria 1–2).
+- **`frame-nav-sync.js`:** removed from the codebase entirely — it is referenced
+  by no HTML on `main` (`git grep frame-nav-sync` hits only plan/docs/dashboard
+  data), so there is no 404 to fix (criterion 1 "references removed").
+- **Sidebar source (criterion 3):** `benchmarks/results/playground-benchmark-sidebar.json`
+  exists (committed).
+
+No dedicated PR carried this to `done`; the copy loop + file removal landed
+incrementally. Flipped here during the 2026-07-03 stale-backlog reconciliation.

@@ -1,9 +1,10 @@
 ---
 id: 807
 title: "Extract Date/Math/console built-ins from expressions.ts → builtins.ts"
-status: ready
+status: done
+completed: 2026-07-03
 created: 2026-03-26
-updated: 2026-04-28
+updated: 2026-07-03
 priority: medium
 feasibility: easy
 reasoning_effort: medium
@@ -40,3 +41,20 @@ subtask_of: 688
 These are leaf functions — they emit Wasm but nothing calls back into them from other modules. Console/WASI helpers are entirely self-contained.
 
 ## Complexity: S
+
+## Reconciliation — DONE (2026-07-03)
+
+Verified the extraction is complete on `main`:
+
+- The built-in handlers now live in `src/codegen/expressions/builtins.ts`
+  (~3,700 LOC): `compileConsoleCall` / `compileConsoleCallWasi`,
+  `compileMathCall`, `compileDateMethodCall`, and the Date helper builders
+  (`ensureDateStruct`, `ensureDateCivilHelper`, `ensureDateIsoStringHelper`, …).
+- They are dispatched from `src/codegen/expressions/calls.ts` (imports at the
+  top `from "./builtins.js"`; call sites `compileConsoleCall(...)`,
+  `compileMathCall(...)`, `compileDateMethodCall(...)`).
+- `src/codegen/expressions.ts` has **zero** residual `Math`/`Date`/`console`
+  built-in dispatch (`grep -c` = 0) — so the logic was moved OUT of
+  `expressions.ts`, not duplicated. That is exactly this issue's ask.
+
+Flipped during the 2026-07-03 stale-backlog reconciliation.

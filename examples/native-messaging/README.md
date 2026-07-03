@@ -221,6 +221,57 @@ in Node via `WebAssembly.instantiate`), where the import wiring it provides is
 required. Treat it as the JS-host on-ramp for the module; for the standalone
 WASI path it is a harmless extra artifact you can ignore or delete.
 
+### Bundling `nm_js2wasm_wasi_p1.ts`: the `wasm:memory` / `wasi_snapshot_preview1` ghost imports (loopdive/js2#389)
+
+The raw-WASI host [`nm_js2wasm_wasi_p1.ts`](./nm_js2wasm_wasi_p1.ts) imports from
+two module specifiers that **have no resolvable JS module** — they are
+compile-time contracts js2wasm satisfies during codegen, not runtime packages:
+
+```ts
+import { fd_read, fd_write } from "wasi_snapshot_preview1"; // real WASI core module (host-supplied)
+import { store32, load32, store8, load8 } from "wasm:memory"; // js2wasm INTRINSIC — lowers to inline i32.load/store
+```
+
+`store32`/`load32`/`store8`/`load8` are js2wasm **intrinsics** (`wasm:memory`, a
+namespace mirroring `wasm:js-string`); the compiler lowers each to a single inline
+`i32.store`/`i32.load`/`i32.store8`/`i32.load8_u` over the module's own linear
+memory. `wasi_snapshot_preview1`'s `fd_read`/`fd_write` are satisfied by the WASI
+runtime at launch. **Neither specifier resolves to a file a JS bundler can find**,
+so a JS bundler (`bun build`, `esbuild`, `deno bundle`) that tries to walk and
+inline every import will **choke on both** with an unresolvable-import error.
+
+**Recipe — mark the ghost specifiers external.** When bundling the `.ts` source to
+`.js` (the JS-runtime distribution path, e.g. for `scale-test.mjs`), tell the
+bundler to leave both imports as bare externals rather than resolve them. This is
+the exact form [`scale-test.mjs`](./scale-test.mjs) uses:
+
+```bash
+bun build examples/native-messaging/nm_js2wasm_wasi_p1.ts \
+  --target node \
+  --external wasi_snapshot_preview1 --external 'wasm:memory' \
+  --outfile nm_js2wasm_wasi_p1.js
+```
+
+`esbuild` takes the same flags (`--external:wasi_snapshot_preview1
+--external:'wasm:memory'`); `deno bundle` uses `--no-bundle` (or an import map that
+maps the two specifiers to a shim). **Quote `'wasm:memory'`** — the `:` is
+shell-significant in some contexts.
+
+> **Ergonomics tradeoff.** This is the cost the #389 reporter flagged:
+> `nm_js2wasm_wasi_p1.ts` is the leanest, fastest of the hosts (raw inline
+> linear-memory ops, no GC roundtrip), but its `wasm:memory` intrinsics are
+> "ghost code" with **no JS implementation**, so the source does **not** run
+> unmodified in a plain JS runtime and its bundling needs the `--external` opt-out
+> above. The **other hosts have no `wasm:memory` import** — e.g.
+> [`nm_js2wasm_node_fs.ts`](./nm_js2wasm_node_fs.ts) uses `node:fs`
+> `readSync`/`writeSync` and runs unmodified under real `node` — so if you want a
+> single source that both bundles cleanly for a JS runtime **and** compiles to
+> standalone WASI, prefer a `node:fs` / `node:process` host. Pick `wasi_p1` when
+> you want the tightest possible pure-WASI module and can accept the ghost-import
+> bundling opt-out. (Note the `--external wasi_snapshot_preview1` is needed for
+> **any** raw-WASI host regardless — `fd_read`/`fd_write` are host-supplied and
+> equally unresolvable to a JS bundler.)
+
 ## Run it under a WASI runtime
 
 `nm_js2wasm_node_fs.sh` wraps the runtime invocation. `wasmtime` is **not bundled** with this

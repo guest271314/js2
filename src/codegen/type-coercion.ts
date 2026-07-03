@@ -15,6 +15,7 @@ import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js
 import { addUnionImports, ensureAnyHelpers, ensureAnyToExternHelper, isAnyValue } from "./index.js";
 import { ensureAnyToStringHelper, stringConstantExternrefInstrs } from "./native-strings.js";
 import { emitThrowTypeError } from "./expressions/helpers.js";
+import { ensureNativeArrayFromIterN } from "./iterator-native.js";
 import { emitNativeNumberFormat } from "./number-format-native.js";
 import { addStringConstantGlobal } from "./registry/imports.js";
 import { addFuncType, getArrTypeIdxFromVec } from "./registry/types.js";
@@ -598,16 +599,29 @@ function buildTupleFromIterableFallback(
   if (externLocal === undefined) {
     return [{ op: "ref.null", typeIdx: tupleTypeIdx } as Instr];
   }
+  // (#2995) In host-free targets (standalone / WASI) the host `__array_from_iter`
+  // import is unavailable — emitting it leaks `env::__array_from_iter` and breaks
+  // zero-import instantiation. Materialize through the NATIVE `__array_from_iter_n`
+  // instead (registered by `ensureNativeArrayFromIterN`, #2904), passing `-1` for
+  // an unbounded drain that is byte-semantics-equivalent to the host
+  // `__array_from_iter` (fully drain the iterable, then index each tuple slot via
+  // `__extern_get_idx`). Host mode keeps the JS-host `__array_from_iter` path
+  // unchanged (byte-inert). Mirrors the native ObjVec steering in
+  // `buildVecFromExternref`.
+  const useNativeFromIter = ctx.standalone || ctx.wasi;
+  if (useNativeFromIter) ensureNativeArrayFromIterN(ctx);
   // Register all helpers first so every ensureLateImport shift completes
   // before we freeze funcIdx values — otherwise a later ensureLateImport
   // could shift a previously-captured funcIdx and produce the wrong call.
-  ensureLateImport(ctx, "__array_from_iter", [{ kind: "externref" }], [{ kind: "externref" }]);
+  if (!useNativeFromIter) {
+    ensureLateImport(ctx, "__array_from_iter", [{ kind: "externref" }], [{ kind: "externref" }]);
+  }
   ensureLateImport(ctx, "__extern_get_idx", [{ kind: "externref" }, { kind: "f64" }], [{ kind: "externref" }]);
   ensureLateImport(ctx, "__extern_is_undefined", [{ kind: "externref" }], [{ kind: "i32" }]);
   ensureLateImport(ctx, "__unbox_number", [{ kind: "externref" }], [{ kind: "f64" }]);
   ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
   flushLateImportShifts(ctx, fctx);
-  const iterIdx = ctx.funcMap.get("__array_from_iter");
+  const iterIdx = useNativeFromIter ? ctx.funcMap.get("__array_from_iter_n") : ctx.funcMap.get("__array_from_iter");
   const getIdxFn = ctx.funcMap.get("__extern_get_idx");
   const isUndefFn = ctx.funcMap.get("__extern_is_undefined");
   const unboxIdx = ctx.funcMap.get("__unbox_number");
@@ -649,9 +663,12 @@ function buildTupleFromIterableFallback(
     }
   }
 
-  // Result shape: if (isNull || isUndefined) then ref.null else build tuple
+  // Result shape: if (isNull || isUndefined) then ref.null else build tuple.
+  // Native `__array_from_iter_n(externref, f64)` takes a count arg — pass `-1`
+  // (unbounded drain, byte-semantics-equivalent to the host `__array_from_iter`).
   const buildTupleInstrs: Instr[] = [
     { op: "local.get", index: externLocal } as Instr,
+    ...(useNativeFromIter ? [{ op: "f64.const", value: -1 } as Instr] : []),
     { op: "call", funcIdx: iterIdx } as Instr,
     { op: "local.set", index: matLocal } as Instr,
     ...fieldExtracts,

@@ -407,8 +407,125 @@ export function createEvalShim(options: EvalShimOptions = {}): (src: any, isDire
 }
 
 /**
+ * (#2960) Build a `__extern_new_function` host import for a JS-host runtime.
+ *
+ * `new Function(p0, …, pN, body)` is the meta-circular sibling of indirect
+ * eval: it constructs a GLOBAL-scoped function value (§20.2.1.1). This shim
+ * uses the SAME machinery as {@link createEvalShim} (js2wasm's own
+ * `compileSourceSync`, a fresh child module, `buildImports` auto-fill, and an
+ * LRU cache), but instead of evaluating an expression and returning its value,
+ * it compiles the body as an EXPORTED function and returns that export directly
+ * — a real JS-callable function the PARENT module can invoke (unlike the
+ * eval-path's child-module closure, whose type identity the parent can't cast).
+ *
+ * The compiler lowers a dynamic host-mode `new Function` to
+ * `__extern_new_function(paramString, bodyString)`, where `paramString` is the
+ * comma-joined parameter list and `bodyString` the function body source.
+ */
+export function createNewFunctionShim(options: EvalShimOptions = {}): (params: any, body: any) => any {
+  const filename = options.filename ?? "__new_function__.js";
+  const FN_CACHE_MAX = 256;
+  // key (`${params} ${body}`) → the callable wasm export.
+  const fnCache = new Map<string, Function>();
+  const fnNegCache = new Map<string, SyntaxError>();
+
+  return function __extern_new_function(params: any, body: any): any {
+    const paramStr = params == null ? "" : String(params);
+    const bodyStr = body == null ? "" : String(body);
+    const key = paramStr + " " + bodyStr;
+
+    const cached = fnCache.get(key);
+    if (cached !== undefined) {
+      fnCache.delete(key);
+      fnCache.set(key, cached);
+      return cached;
+    }
+    const neg = fnNegCache.get(key);
+    if (neg !== undefined) throw neg;
+
+    const src = `export function __new_fn(${paramStr}) {\n${bodyStr}\n}`;
+    let result:
+      | { success: boolean; binary: Uint8Array; imports: any; stringPool: string[]; errors?: { message: string }[] }
+      | undefined;
+    try {
+      result = compileSourceSync(src, {
+        fileName: filename,
+        allowJs: true,
+        skipSemanticDiagnostics: true,
+        // (#2973) Same rationale as the eval shim — take the proven legacy
+        // pipeline, not the IR-first measurement path.
+        disableIrFirst: true,
+      }) as typeof result;
+    } catch (e: any) {
+      const err = new SyntaxError(`new Function: failed to compile body: ${e?.message ?? String(e)}`);
+      if (fnNegCache.size >= FN_CACHE_MAX) fnNegCache.delete(fnNegCache.keys().next().value!);
+      fnNegCache.set(key, err);
+      throw err;
+    }
+    if (!result || !result.success) {
+      const msg = result?.errors?.[0]?.message ?? "unknown compile error";
+      const err = new SyntaxError(`new Function: ${msg}`);
+      if (fnNegCache.size >= FN_CACHE_MAX) fnNegCache.delete(fnNegCache.keys().next().value!);
+      fnNegCache.set(key, err);
+      throw err;
+    }
+
+    let mod: WebAssembly.Module;
+    try {
+      mod = new WebAssembly.Module(result.binary as BufferSource);
+    } catch (e: any) {
+      throw new SyntaxError(`new Function: Wasm compile failed: ${e?.message ?? String(e)}`);
+    }
+
+    // Non-sandbox auto-fill — the child gets the standard js2wasm helpers it
+    // declared, plus a recursive `__extern_new_function` for nested cases.
+    const auto = buildImports(result.imports, undefined, result.stringPool);
+    const autoSetExports = (auto as { setExports?: (exports: Record<string, Function>) => void }).setExports;
+    const importObj: Record<string, Record<string, unknown>> = {
+      env: { ...auto.env },
+      "wasm:js-string": auto["wasm:js-string"] as unknown as Record<string, unknown>,
+      string_constants: { ...auto.string_constants },
+    };
+    for (const desc of WebAssembly.Module.imports(mod)) {
+      const slot = importObj[desc.module] ?? (importObj[desc.module] = {});
+      if (slot[desc.name] !== undefined) continue;
+      if (desc.module === "env" && desc.name === "__extern_new_function") {
+        slot[desc.name] = __extern_new_function;
+      } else if (desc.module === "string_constants" && desc.kind === "global") {
+        slot[desc.name] = new WebAssembly.Global({ value: "externref", mutable: false }, desc.name);
+      } else if (desc.kind === "function") {
+        slot[desc.name] = () => {
+          throw new ReferenceError(`new Function: import '${desc.module}.${desc.name}' is not provided`);
+        };
+      }
+    }
+
+    let instance: WebAssembly.Instance;
+    try {
+      instance = new WebAssembly.Instance(mod, importObj as WebAssembly.Imports);
+    } catch (e: any) {
+      throw new Error(`new Function: Wasm instantiation failed: ${e?.message ?? String(e)}`);
+    }
+    if (typeof autoSetExports === "function") {
+      autoSetExports(instance.exports as Record<string, Function>);
+    }
+
+    const fn = (instance.exports as Record<string, unknown>).__new_fn;
+    if (typeof fn !== "function") {
+      throw new SyntaxError("new Function: compiled module did not export the constructed function");
+    }
+    if (fnCache.size >= FN_CACHE_MAX) fnCache.delete(fnCache.keys().next().value!);
+    fnCache.set(key, fn as Function);
+    return fn;
+  };
+}
+
+/**
  * Default eval shim — pure Wasm sandbox, no JS surface forwarded to the
  * child module.  Hosts that need a less restrictive policy should call
  * {@link createEvalShim} directly with their chosen `selectiveImports`.
  */
 export const defaultEvalShim: (src: any, isDirect: number) => any = createEvalShim();
+
+/** (#2960) Default `__extern_new_function` shim (non-sandbox). */
+export const defaultNewFunctionShim: (params: any, body: any) => any = createNewFunctionShim();

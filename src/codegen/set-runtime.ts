@@ -42,6 +42,7 @@ import {
   tryCompileNativeCollectionForEach,
 } from "./map-runtime.js";
 import { addFuncType } from "./registry/types.js";
+import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S3) stable-regime minting
 import type { InnerResult } from "./shared.js";
 import { VOID_RESULT, compileExpression } from "./shared.js";
 
@@ -73,9 +74,9 @@ export function ensureSetHelpers(ctx: CodegenContext): void {
     { op: "call", funcIdx: mapSetIdx } as Instr,
   ];
   const typeIdx = addFuncType(ctx, [mref, anyref], [mref]);
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const funcIdx = mintDefinedFunc(ctx);
   ctx.mapHelpers.set("__set_add", funcIdx);
-  ctx.mod.functions.push({
+  pushDefinedFunc(ctx, funcIdx, {
     name: "__set_add",
     typeIdx,
     locals: [],

@@ -1915,3 +1915,114 @@ export function emitTypedArrayIntrinsicCtorObject(ctx: CodegenContext, fctx: Fun
   fctx.body.push({ op: "global.get", index: globalIdx } as Instr);
   return { kind: "externref" };
 }
+
+/**
+ * (#2996) Native standalone `globalThis` value. In host/gc mode a bare
+ * `globalThis` identifier read leaks the `env::__get_globalThis` host import
+ * (see `compileIdentifier`), which a no-JS-host binary can't satisfy — yet the
+ * value still leaks into the standalone import section. The 47 sole-import
+ * `__get_globalThis` leaky-passes (annexB `emulates-undefined`, `global-code`,
+ * Array/Proxy cross-realm) never actually *read* a property off the resulting
+ * object; they only need `globalThis` to be a valid object value (it lands in
+ * the test262 `$262 = { global: globalThis, … }` harness stub, or an unread
+ * slot). This resolves bare `globalThis` to a native, lazily-created, cached
+ * `$Object` singleton (stable identity: `globalThis === globalThis`) built with
+ * the same `__new_plain_object` runtime an empty `{}` uses — zero host imports.
+ *
+ * Scope note: this reifies the READ-value substrate. As of #2988,
+ * `compilePropertyAccess`'s dedicated `globalThis.prop` reflective-read path also
+ * routes to THIS singleton in standalone/WASI (host/gc still uses
+ * `__extern_get(__get_globalThis(), key)`), so reflective reads round-trip with
+ * `Object.defineProperty(globalThis, …)` / `globalThis.x = v` writes host-free
+ * (all three resolve to the one native singleton). Standalone/WASI only; returns
+ * the externref ValType, or `null` if the `$Object` runtime is unavailable
+ * (caller falls through to the host-import path).
+ */
+export function emitNativeGlobalThisObject(ctx: CodegenContext, fctx: FunctionContext): ValType | null {
+  ensureObjectRuntime(ctx);
+  const newObjectIdx = ctx.funcMap.get("__new_plain_object");
+  if (newObjectIdx === undefined) return null;
+
+  const globalName = "__native_globalThis";
+  let globalIdx = ctx.builtinObjectGlobals.get(globalName);
+  if (globalIdx === undefined) {
+    globalIdx = ctx.numImportGlobals + ctx.mod.globals.length;
+    ctx.mod.globals.push({
+      name: globalName,
+      type: { kind: "externref" },
+      mutable: true,
+      init: [{ op: "ref.null.extern" }],
+    });
+    ctx.builtinObjectGlobals.set(globalName, globalIdx);
+  }
+
+  // Lazy init: `if (global == null) global = __new_plain_object();` then read it.
+  // The init body is nested directly inside the `if` (part of `fctx.body`), so
+  // any later late-import funcIdx shift walks it naturally — no detached-body
+  // (`liveBodies`) registration needed.
+  const initBody: Instr[] = [
+    { op: "call", funcIdx: newObjectIdx } as Instr,
+    { op: "global.set", index: globalIdx } as Instr,
+  ];
+  fctx.body.push({ op: "global.get", index: globalIdx } as Instr);
+  fctx.body.push({ op: "ref.is_null" } as Instr);
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: initBody, else: [] } as Instr);
+  fctx.body.push({ op: "global.get", index: globalIdx } as Instr);
+  return { kind: "externref" };
+}
+
+/**
+ * (#3013) Native standalone `%ArrayIteratorPrototype%` value — the ONE shared
+ * prototype object every array iterator (`[].values()` / `.keys()` / `.entries()`
+ * / `[][Symbol.iterator]()`) reports from `Object.getPrototypeOf`. ECMA-262
+ * §23.1.5.2: all array iterators are `ObjectCreate(%ArrayIteratorPrototype%, …)`,
+ * so `Object.getPrototypeOf([].values()) === Object.getPrototypeOf(
+ * [][Symbol.iterator]())` MUST hold by object identity.
+ *
+ * Standalone array iterators are native `$__IterRec` structs (array-methods.ts /
+ * iterator-native.ts); their [[Prototype]] is not modeled, so the pre-#3013
+ * `Object.getPrototypeOf(<iterator>)` standalone fallback returned
+ * `ref.null.extern` — which made the identity assertion pass only COINCIDENTALLY
+ * (null === null) and, worse, made `getPrototypeOf([].values()) ===
+ * getPrototypeOf([1, 2])` ALSO pass (both null). This reifies a genuine,
+ * identity-stable `$Object` singleton (same `__new_plain_object` runtime as
+ * `{}`), lazily materialized once, cached in a module-level mutable global. Every
+ * array-iterator `getPrototypeOf` routes to the SAME global, so identity is
+ * genuine: same singleton across all array iterators (true), distinct from array
+ * / plain-object / other-kind-iterator prototypes (false under the swap-guard).
+ *
+ * The routing is keyed on the STATIC type being `ArrayIterator<T>` (the TS
+ * checker's precise symbol name for all four array-iterator producers, distinct
+ * from `Generator`/`MapIterator`/`SetIterator`/`StringIterator`), so no
+ * cross-kind iterator is mis-routed to this prototype. Standalone/WASI only;
+ * returns the externref ValType, or `null` if the `$Object` runtime is
+ * unavailable (caller falls through to the host-import path).
+ */
+export function emitArrayIteratorPrototypeSingleton(ctx: CodegenContext, fctx: FunctionContext): ValType | null {
+  ensureObjectRuntime(ctx);
+  const newObjectIdx = ctx.funcMap.get("__new_plain_object");
+  if (newObjectIdx === undefined) return null;
+
+  const globalName = "__native_array_iterator_prototype";
+  let globalIdx = ctx.builtinObjectGlobals.get(globalName);
+  if (globalIdx === undefined) {
+    globalIdx = ctx.numImportGlobals + ctx.mod.globals.length;
+    ctx.mod.globals.push({
+      name: globalName,
+      type: { kind: "externref" },
+      mutable: true,
+      init: [{ op: "ref.null.extern" }],
+    });
+    ctx.builtinObjectGlobals.set(globalName, globalIdx);
+  }
+
+  const initBody: Instr[] = [
+    { op: "call", funcIdx: newObjectIdx } as Instr,
+    { op: "global.set", index: globalIdx } as Instr,
+  ];
+  fctx.body.push({ op: "global.get", index: globalIdx } as Instr);
+  fctx.body.push({ op: "ref.is_null" } as Instr);
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: initBody, else: [] } as Instr);
+  fctx.body.push({ op: "global.get", index: globalIdx } as Instr);
+  return { kind: "externref" };
+}

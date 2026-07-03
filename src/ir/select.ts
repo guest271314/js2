@@ -415,7 +415,19 @@ export function planIrCompilation(
         }
         continue;
       }
-      if (hasParent) {
+      // (#2857 static-method slice) A `static` method compiles to an ordinary
+      // function — no `self` injection, no dependency on the (parent-prefixed)
+      // instance layout. So even when the class `extends` a parent, a static
+      // method whose body does not reference `super` is exactly as IR-claimable
+      // as the same method in a flat class (cf. `Animal_kingdom`, already
+      // claimed). Let it fall through to the normal `whyNotIrClaimable` gate;
+      // only instance members and `super`-using statics need the inheritance
+      // substrate deferred to the Phase E slice, which stay `class-method`.
+      const isStaticMethod =
+        ts.isMethodDeclaration(memberNode) &&
+        (memberNode.modifiers?.some((m) => m.kind === ts.SyntaxKind.StaticKeyword) ?? false);
+      const claimableUnderParent = isStaticMethod && !referencesSuper(memberNode);
+      if (hasParent && !claimableUnderParent) {
         if (trackFallbacks) fallbackReasons.set(memberName, "class-method");
         continue;
       }
@@ -983,8 +995,10 @@ function isPhase1StatementList(
         s.expression.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
         ts.isPropertyAccessExpression(s.expression.left)
       ) {
-        // LHS: <expr>.<id> — receiver expr must be Phase-1, prop must be Identifier.
-        if (!ts.isIdentifier(s.expression.left.name)) return shapeNo("nontail-assign-computedprop", s.expression);
+        // LHS: <expr>.<id> — receiver expr must be Phase-1, prop must be an
+        // Identifier or (#3000) a PrivateIdentifier (`this.#x = v`).
+        if (!ts.isIdentifier(s.expression.left.name) && !ts.isPrivateIdentifier(s.expression.left.name))
+          return shapeNo("nontail-assign-computedprop", s.expression);
         if (!isPhase1Expr(s.expression.left.expression, scope, localClasses))
           return shapeNo("nontail-assign-recv", s.expression.left.expression);
         // RHS: any Phase-1 expression.
@@ -1047,6 +1061,12 @@ function isPhase1StatementList(
           if (ts.isIdentifier(d.name)) scope.add(d.name.text);
         }
       }
+      continue;
+    }
+    // #2952 slice 1 — `do { body } while (cond)` as a non-tail statement.
+    // Post-test loop; same body-shape restrictions as `while` / `for`.
+    if (ts.isDoStatement(s)) {
+      if (!isPhase1DoStatement(s, scope, localClasses)) return shapeNo("nontail-do", s);
       continue;
     }
     // Slice 9 (#1169h) — throw / try as a non-tail statement. A throw
@@ -1180,6 +1200,24 @@ function isPhase1ForOf(stmt: ts.ForOfStatement, scope: Set<string>, localClasses
  */
 function isPhase1WhileStatement(
   stmt: ts.WhileStatement,
+  scope: ReadonlySet<string>,
+  localClasses: ReadonlySet<string>,
+): boolean {
+  if (!isPhase1Expr(stmt.expression, scope, localClasses)) return false;
+  return isPhase1BodyStatement(stmt.statement, new Set(scope), localClasses);
+}
+
+/**
+ * #2952 slice 1 — shape-check `do { body } while (cond)`. Identical
+ * constraints to `while`: a Phase-1 condition expression and a Phase-1
+ * body statement. The only runtime difference (body-before-cond) is a
+ * lowering concern, not a shape concern — `break` / `continue` are still
+ * rejected by `isPhase1BodyStatement` (no arm accepts them), so the
+ * multi-exit-free subset is what's claimed. The claim is backed by
+ * `lowerDoStatement` (postCond `while.loop`) — selector↔builder parity.
+ */
+function isPhase1DoStatement(
+  stmt: ts.DoStatement,
   scope: ReadonlySet<string>,
   localClasses: ReadonlySet<string>,
 ): boolean {
@@ -1334,7 +1372,10 @@ function isPhase1BodyStatement(stmt: ts.Statement, scope: Set<string>, localClas
           return isPhase1Expr(stmt.expression.right, scope, localClasses);
         }
         if (ts.isPropertyAccessExpression(stmt.expression.left)) {
-          if (!ts.isIdentifier(stmt.expression.left.name)) return false;
+          // #3000 — allow `this.#x = v` (PrivateIdentifier) in method / ctor
+          // bodies, in addition to plain-Identifier field writes.
+          if (!ts.isIdentifier(stmt.expression.left.name) && !ts.isPrivateIdentifier(stmt.expression.left.name))
+            return false;
           if (!isPhase1Expr(stmt.expression.left.expression, scope, localClasses)) return false;
           return isPhase1Expr(stmt.expression.right, scope, localClasses);
         }
@@ -1380,6 +1421,10 @@ function isPhase1BodyStatement(stmt: ts.Statement, scope: Set<string>, localClas
       }
     }
     return true;
+  }
+  // #2952 slice 1 — nested `do { body } while (cond)` inside a body buffer.
+  if (ts.isDoStatement(stmt)) {
+    return isPhase1DoStatement(stmt, scope, localClasses);
   }
   // Slice 9 (#1169h) — throw / try inside a body statement list.
   // Accepting these here lets a try body / catch body / finally body
@@ -1916,7 +1961,11 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
   // class instance (recv is Phase-1; lowerer dispatches by the recv's
   // resolved IrType).
   if (ts.isPropertyAccessExpression(expr)) {
-    if (!ts.isIdentifier(expr.name)) return false;
+    // #3000 — accept private-field reads (`this.#x`). A PrivateIdentifier is a
+    // valid class-instance field access; from-ast lowers it to `class.get` on
+    // the mangled `__priv_x` slot. Non-class receivers with a private name are
+    // a TS error and never reach here.
+    if (!ts.isIdentifier(expr.name) && !ts.isPrivateIdentifier(expr.name)) return false;
     // Slice 11 (#1169n) — optional chaining (`obj?.prop`). The lowerer
     // doesn't yet emit the null-guard branch, so accept the shape
     // structurally but the lowerer will throw clean fallback when it
@@ -2080,6 +2129,29 @@ function phase1MemberName(name: ts.PropertyName): string | null {
   if (ts.isNumericLiteral(name)) return name.text;
   // ComputedPropertyName, PrivateIdentifier — Phase A skips both.
   return null;
+}
+
+/**
+ * (#2857 static-method slice) True if a `super` keyword appears anywhere in the
+ * subtree. A whole-subtree scan is deliberately conservative: a `super`
+ * reference inside a nested function still binds to the enclosing method's home
+ * object, so descending into nested boundaries never misses one. Used to keep a
+ * `super`-using static method on the legacy path (its inheritance substrate is
+ * the Phase E slice's job), while a plain static method is claimable even under
+ * `extends`.
+ */
+function referencesSuper(node: ts.Node): boolean {
+  let found = false;
+  const visit = (n: ts.Node): void => {
+    if (found) return;
+    if (n.kind === ts.SyntaxKind.SuperKeyword) {
+      found = true;
+      return;
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(node);
+  return found;
 }
 
 // #2135 — the operator predicates consume the shared capability table

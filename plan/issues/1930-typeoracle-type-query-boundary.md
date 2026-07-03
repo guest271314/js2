@@ -1,12 +1,12 @@
 ---
 id: 1930
 title: "TypeOracle — one type-query boundary between the TS checker and codegen (unblocks TS7, kills suppression heuristics)"
-status: blocked
-blocked_by: [2167]
+status: in-progress
+assignee: ttraenkler/dev-2937f
 sprint: current
 model: fable
 created: 2026-06-10
-updated: 2026-06-24
+updated: 2026-07-02
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -15,6 +15,10 @@ area: compiler
 language_feature: compiler-internals
 goal: maintainability
 ---
+
+> **Unblocked 2026-07-02**: `blocked_by: [2167]` removed — #2167 (Fable model
+> disabled) is `done`; the Fable lane is live and this design is executing on it.
+
 # #1930 — TypeOracle: one type-query boundary
 
 ## Problem
@@ -32,8 +36,8 @@ There is no abstraction between the TypeScript checker and codegen:
   TS checker, the IR lattice (`ir/propagate.ts:220`), `shape-inference.ts`,
   and import-resolver's syntactic `any` stubs.
 - The `number|null` → bare `f64` lowering spawned ~300 lines of heuristics
-  (`compiler.ts:98-391`) that *suppress the checker's own correct
-  diagnostics*, recognizing only direct `!== null` if-guards — suppression
+  (`compiler.ts:98-391`) that _suppress the checker's own correct
+  diagnostics_, recognizing only direct `!== null` if-guards — suppression
   is inconsistent, and `compiler.ts:387-390` reaches into the unsupported
   internal `isTypeAssignableTo` API.
 
@@ -78,3 +82,257 @@ not the full decomposition. CodegenContext is now measured at ~190 fields
 decomposition is sprint-64+ scale and blocks nothing if the thin slice
 lands first. Sequence: thin slice in sprint 62 alongside boxing P0; full
 boundary later.
+
+## Design (2026-07-02, dev-2937f — the authoritative spec for this issue)
+
+Measured on `origin/main` at design time (full categorization by the
+oracle-survey pass, 2026-07-02): **51 files** in `src/codegen/` use the
+checker directly, **~869** total checker/type-method calls, **446**
+`getTypeAtLocation` (51% of all queries — THE query). Concentration:
+`expressions/calls.ts` 62 · `index.ts` 54 · `declarations.ts` 52 ·
+`property-access.ts` 28 · `literals.ts` 27 · `new-super.ts` 23 ·
+`assignment.ts` 21.
+
+**Survey record (bucket → count):**
+
+| Intent bucket                            | Count                                                                                                                    | Notes                                                                                                                                                                                                       |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| valTypeOf                                | 446 raw `getTypeAtLocation` → 300 `resolveWasmType` + 28 `mapTsTypeToWasm` downstream                                    | only 22 inline compositions; **assign-then-multi-use dominates** — one query result feeds several intents, so `typeFactOf` must return a fact rich enough for all of them (drives the TypeFact shape below) |
+| nullable/union inspection                | ~299 `.flags &` (Null 34 / Undefined 43 / Void 40) + 15 `.isUnion()` + 14 `getNonNullableType`                           | post-query reads on the bound local                                                                                                                                                                         |
+| call signature                           | 169 (`getReturnTypeOfSignature` 65, `getCallSignatures` 49, `getResolvedSignature` 28, `getSignatureFromDeclaration` 25) |                                                                                                                                                                                                             |
+| symbol resolution (name/decl — NOT type) | 159 (`getSymbolAtLocation` 156)                                                                                          | excluded from type-ratchet v1 (name resolution)                                                                                                                                                             |
+| element/type-args                        | 24 `getTypeArguments`                                                                                                    |                                                                                                                                                                                                             |
+| property type                            | 21 (`getTypeOfSymbol` 16, `getTypeOfSymbolAtLocation` 5)                                                                 |                                                                                                                                                                                                             |
+| contextual type                          | 18 `getContextualType`                                                                                                   |                                                                                                                                                                                                             |
+| apparent/index-sig                       | 13                                                                                                                       |                                                                                                                                                                                                             |
+| ts.Type-as-Map-key                       | ~12 (`anonTypeMap` set/get)                                                                                              | Slice 5                                                                                                                                                                                                     |
+| typeToString                             | 4                                                                                                                        | diagnostics                                                                                                                                                                                                 |
+| isTypeAssignableTo                       | **0 in codegen**                                                                                                         | lives only in `compiler.ts` suppression                                                                                                                                                                     |
+
+**i32/boolean-safety matchers — FIVE divergent + 1 type-based, none share a
+predicate** (Slice 3 kill list): `isI32SafeExprForArray`
+(`array-element-typing.ts:58`, miscompile-strict #2789), `isI32PureExpr` +
+`isI32MulSafe` (`binary-ops.ts:1682/:1671`, ToInt32-context #1179),
+`isBooleanExpr` (`declarations.ts:2160`, kernel fixpoint #2795),
+`isNumericExpr` (`declarations.ts:1951`), `resultIsI32` (`binary-ops.ts:3124`,
+op-kind table), `isStrictBooleanReturnType` (`shared.ts:435`, ts.Type-based).
+Four are pure syntax walks that never touch the checker — first unification
+target.
+
+**Three fronted surfaces** (not one): (a) the 51 codegen files; (b)
+`src/checker/type-mapper.ts` — NOT small: **26 exports** forming a parallel
+predicate surface (`isNumberType/isStringType/isSymbolType/
+getNullablePrimitiveInfo/…`) that folds into the oracle in Slice 2; (c)
+`src/compiler.ts` `number|null` suppression — actual range **~117–461**
+(wider than the review's 98–391), an ~18-function flow-narrowing engine and
+a checker consumer OUTSIDE `src/codegen/` (Slice 7, needs #1852).
+
+Four uncoordinated type-knowledge mechanisms confirmed live: checker-direct
+(all 51 files), IR lattice (`ir/propagate.ts:220 buildTypeMap`, consumed
+only by IR selector + lowerer), `shape-inference.ts:33 collectShapes`
+(consumed by ONE file: `declarations.ts`), import-resolver `any`-stubs
+(`import-resolver.ts:626`, pre-checker). `--ts7` shim throws at
+`ts-api.ts:114–131`.
+
+### Agreed seams (recorded verbatim decisions, 2026-07-02)
+
+Three single-source efforts converge on the IR boundary. Seams were agreed
+by name with both owners BEFORE this design froze:
+
+- **#2134 effect model (dev-2912f, ACKED)**: effects table keyed strictly on
+  `IrInstr` kind, lives at `src/ir/effects.ts` as a dependency-free leaf,
+  needs zero type facts, imports nothing from `src/checker/`. If an
+  emission/reorder decision ever needs a type-ish fact it reads the IrType
+  resolved at from-ast time (oracle-produced); no new local matchers.
+- **#2135/#2138 capability predicate (dev-2138f, ACKED with two constraints
+  that SHAPE this design)**:
+  - **Constraint A (purity of inputs)**: oracle answers MUST be pure
+    functions of `(checker, AST node)` — NEVER of `ctx.mod`,
+    `ctx.structFields`, or any codegen registry. Proven need: under
+    `JS2WASM_IR_FIRST` the planning block MOVES (before vs after
+    `compileDeclarations`) and `ctx.structFields` mutates during body
+    compilation, so a registry-dependent "oracle" would answer differently
+    at the two pipeline positions. Registry-dependent knowledge (class
+    shapes, vec typeIdx) is NOT an oracle query.
+  - **Constraint B (query-only)**: no side effects. Today
+    `resolveWasmType`-family "resolution" REGISTERS Wasm types
+    (`getOrRegisterVecType`, `ensureStructForType`) as a side effect. The
+    oracle returns the type FACT; the CALLER registers. Absorbing
+    registration would smuggle mutable-state dependence back in.
+  - The capability predicate's type-resolvability legs
+    (`param-type-not-resolvable` / `return-type-not-resolvable` /
+    `type-resolution-failure`) will consume the oracle once the facade
+    lands, retiring the `select.ts resolveParamType` vs
+    `codegen/index.ts resolvePositionType` drift.
+  - Ratchet coordination: dev-2138f's in-flight #2972 adds ONE
+    `getTypeAtLocation` site in `src/codegen/declarations.ts` — the seeded
+    baseline carries a +1 pre-authorization for it (see Slice 1).
+
+### D1 — the fact vocabulary is registry-free (`TypeFact`, not `ValType`)
+
+Constraint A forces the central design decision: **`ValType` itself is
+registry-coupled** (`{kind:"ref", typeIdx}` indexes `ctx.mod.types`). The
+oracle therefore speaks a NEW compiler-owned fact language, `TypeFact`,
+strictly ABOVE `ValType` — primitives (number/boolean/string/bigint/symbol/
+undefined/null/void), `array(element)`, `tuple(elements)`,
+`function(signature)`, `class(name)`, `builtin(name)`, `object(shape)`,
+`union(parts, nullable, undefinable)`, `any`/`unknown`, and
+`unresolvable` (the #2135 resolvability signal). See
+`src/checker/oracle.ts` for the authoritative definition.
+
+The existing `mapTsTypeToWasm` (`src/checker/type-mapper.ts`) is ALREADY
+nearly pure (flags → ValType) — it becomes the internal flag-classifier the
+`TsCheckerOracle` uses to produce primitive facts. A codegen-side adapter
+(Slice 2: `src/codegen/oracle-adapter.ts`) maps `TypeFact → ValType`,
+performing registration (`ensureStructForType`, `getOrRegisterVecType`) in
+the CODEGEN lane where mutation belongs. Split = query (checker-side,
+memoizable, position-independent) / registration (codegen-side, ordered,
+mutating).
+
+### D2 — query-only, memoized, constructible without `createProgram`
+
+`TsCheckerOracle` wraps the checker; per-node `WeakMap` memo caches (the
+"gathered four times" perf theme dies here — identical answers at any
+pipeline position are a FEATURE under #2138's IR-first hoist). Constructor
+takes the checker interface only — the future `LspOracle` (TS7, `--ts7`
+acceptance) constructs from `src/checker/language-service.ts` without
+`createProgram`. `ts.Type` never appears in a parameter or return type of
+the public surface.
+
+### D3 — the frozen query surface (v1)
+
+| Query                                            | Replaces (bucket)                                                                                         |
+| ------------------------------------------------ | --------------------------------------------------------------------------------------------------------- |
+| `typeFactOf(node): TypeFact`                     | the valTypeOf majority (446 sites, via the adapter)                                                       |
+| `staticJsTypeOf(expr): JsTag \| "mixed"`         | the thin boxing-slice query (amendment); JsTag per #2104                                                  |
+| `isBooleanProducing(expr): boolean`              | the five divergent boolean/i32 matchers (Slice 3 deepens with the kernel analysis)                        |
+| `nullabilityOf(node): { nullable; undefinable }` | ~299 union-flags inspection reads                                                                         |
+| `unionPartsOf(node): TypeFact[] \| undefined`    | `.isUnion()` walkers                                                                                      |
+| `signatureOf(node): SignatureFact \| undefined`  | the 169 signature sites                                                                                   |
+| `propertyFactOf(node, name): TypeFact`           | `getTypeOfSymbol` chains                                                                                  |
+| `elementFactOf(node): TypeFact`                  | array/tuple element resolution                                                                            |
+| `contextualFactOf(expr): TypeFact \| undefined`  | 18 `getContextualType` sites                                                                              |
+| `builtinReceiverOf(node): string \| undefined`   | nominal-symbol gates (`symName !== "Date"`-class; the #2767 bare-`var` receiver family standardizes here) |
+| `typeKeyOf(node): OracleTypeKey`                 | `ts.Type`-as-Map-key identity uses (`anonTypeMap`, `objectHashConsumerTypes`) — opaque interned token     |
+| `declaredNameOf(node): string \| undefined`      | the type-NAME subset of symbol lookups                                                                    |
+
+**Explicitly OUT of the oracle** (agreed seams): capability/claimability
+(#2135), effect classification (#2134), anything registry-dependent
+(Constraint A), and pure SYMBOL/BINDING resolution (159 `getSymbolAtLocation`
+sites — name resolution, not type knowledge; stays on the checker, not
+counted by type-ratchet v1).
+
+### D4 — what dies (end state)
+
+1. The five-plus divergent i32/boolean-safety matchers →
+   `isBooleanProducing` / `staticJsTypeOf` (one definition, one brand
+   decision).
+2. Raw `ts.Type`/checker threading in `src/codegen/` → 0 via ratchet
+   (seed: 448 `getTypeAtLocation` / 843 `ctx.checker.` across 53 files —
+   post-#2495/#2510 counts, slightly above the survey's origin/main
+   numbers).
+3. `ts.Type`-keyed maps → `OracleTypeKey`-keyed (note: the #2937
+   `objectHashConsumerTypes` poison is type-identity-keyed — migrates with
+   `anonTypeMap` in Slice 5, identity semantics preserved by the token's
+   interning contract).
+4. The `number|null` suppression engine in `compiler.ts` (~117–461, incl.
+   the internal `isTypeAssignableTo`) — LAST, after nullable lowering lands
+   (coordinate #1852); it is OUTSIDE the v1 ratchet scope and gets its own
+   ratchet entry when Slice 7 starts.
+5. The `--ts7` shim throw (`src/ts-api.ts:114–131`) for the oracle-covered
+   surface.
+6. `type-mapper.ts`'s 26-export parallel predicate surface — folds into
+   oracle queries (Slice 2), leaving `mapTsTypeToWasm` as the oracle's
+   internal classifier.
+
+### D5 — migration order (staged slices, each with per-slice proof)
+
+Proof standard per slice (the #2976 standard): byte-diff neutrality on a
+no-affected-construct corpus (sha256), scoped vitest guards, ratchet
+decrease recorded, no test262 regressions via PR CI.
+
+- **Slice 1 (THIS PR)**: `src/checker/oracle.ts` (TypeFact + TypeOracle +
+  TsCheckerOracle) · `ctx.oracle` field · `scripts/check-oracle-ratchet.mjs`
+  - `pnpm run check:oracle-ratchet` wired into `quality` (per-file counts of
+    `getTypeAtLocation` + `ctx.checker.` under `src/codegen/`; baseline JSON;
+    growth fails; `--update-on-decrease` banks improvements — mechanics from
+    `check:ir-fallbacks` #2855) · ONE pilot migration (`expressions/unary.ts`
+    Symbol→number guard, byte-diff-verified neutral) · baseline carries a +1
+    pre-authorization for #2972's declarations.ts site.
+- **Slice 2**: the `typeFactOf` mechanical bucket + the codegen adapter,
+  file-by-file, largest first (`expressions/calls.ts` 62, `index.ts` 54,
+  `declarations.ts` 52); fold type-mapper predicates.
+- **Slice 3**: boolean/i32 matcher consolidation (`isBooleanProducing` +
+  a `toInt32SafetyOf` refinement if the #1179/#2789 contexts prove
+  irreconcilable under one predicate — they encode DIFFERENT questions:
+  pack-safety vs ToInt32-context cheapness; the oracle may need both,
+  but defined ONCE each).
+- **Slice 4**: signatures/properties/elements/contextual buckets.
+- **Slice 5**: `typeKeyOf` — `anonTypeMap` + `objectHashConsumerTypes` off
+  `ts.Type` keys.
+- **Slice 6**: #2135 adoption (dev-2138f's lane, their PR): resolvability
+  legs consume `typeFactOf(...).kind === "unresolvable"`.
+- **Slice 7**: nullable-primitive lowering + `compiler.ts` suppression
+  deletion (needs #1852 alignment) · `LspOracle` for `--ts7` smoke.
+
+### D6 — ratchet mechanics
+
+`scripts/oracle-ratchet-baseline.json`: `{ files: { file: {
+getTypeAtLocation, ctxChecker } }, preauthorized: [ { file, field, extra,
+reason } ] }`. CI (in `quality`) fails when any file's count exceeds
+baseline+preauth; `--update-on-decrease` banks lower counts;
+`--update` reseeds wholesale (intentional changes only, with a written
+reason). Seeded with a +1 pre-authorization for #2972
+(declarations.ts, agreed with dev-2138f 2026-07-02).
+
+## Slice 2 progress — mechanical symbol-fold (dev-1930o, 2026-07-02)
+
+**Shipped (PR branch `issue-1930-oracle-slice2`, stacked on Slice-1 #2517):**
+the first tranche of the Slice-2 `type-mapper`-predicate fold — the 8 codegen
+call sites that read a symbol type via
+`isSymbolType(<checker>.getTypeAtLocation(x))` now call
+`ctx.oracle.staticJsTypeOf(x) === "symbol"` (the Slice-1 pilot's pattern,
+generalised):
+
+- `binary-ops.ts` — to-numeric binary op, ×2 (`expr.left`/`expr.right`)
+- `expressions/new-super.ts` — `new Number` / `new Boolean` of a symbol arg, ×2
+- `expressions/calls.ts` — `Number(sym)`; native-strings `String(sym)`, ×2
+- `expressions/builtins.ts` — `Math.*` numeric-arg symbol guard
+- `expressions/unary-updates.ts` — `sym++` / prefix update
+
+Ratchet: `getTypeAtLocation` 448→440, `ctx.checker` 843→835 (−8 each), banked
+via `--update-on-decrease`. **Proof:** byte-diff-neutral on the #2138 corpus
+(examples ×2 modes + STRIDE-50 test262 = 1102 compiles), SHA-identical
+before/after; `tsc --noEmit` clean; scoped guards in
+`tests/issue-1930-oracle-slice2.test.ts`.
+
+**Why only symbol in this tranche (per-site divergence hazard — read before
+extending the fold):** the 26 `type-mapper` predicates are NOT all 1:1 with a
+v1 oracle query, so this is a per-predicate fold, not a blanket one:
+
+- `isStringType` ALSO matches the `String` **wrapper object** (`new String()`),
+  which the oracle classifies as `{kind:"builtin", name:"String"}` → jsTag
+  `"object"`; so `staticJsTypeOf(x) === "string"` is NOT equivalent. EXCLUDED
+  until a wrapper-aware query/composition exists.
+- `isBooleanType` diverges on a collapsed `true|false` union (the oracle folds
+  it to `boolean`); safe only where the site provably never sees that union.
+- `getNullablePrimitiveInfo` also needs `primitiveKind` — richer than v1's
+  `nullabilityOf`; deferred to Slice 4 (wants a `nullablePrimitiveOf` query).
+
+`isSymbolType` has no wrapper/union complication → provably equivalent, hence
+the safe first tranche. (Note: the Slice-1 pilot comment in `unary.ts` still
+contains the literal `…getTypeAtLocation(operand)` string, so it is still
+counted by the ratchet regex; a trivial reword there would bank 1 more −1 each.)
+
+## Reserved-judgment determination (dev-1930o, 2026-07-02)
+
+Per the senior-dev scoping split: the **five divergent i32/boolean-safety
+matchers (Slice 3)** require deciding WHICH i32-safety semantics is correct at
+each divergence — a value-judgment reserved for the frontier model. I checked
+this file for a recorded **divergence-verdict table** (each divergence resolved
+with a decision): **ABSENT.** The design (the i32/boolean-safety-matchers ¶,
+D4.1, D5 Slice 3) only _names_ the matchers and flags the open question
+(whether the #1179 ToInt32-context and #2789 pack-safety questions are
+reconcilable under one predicate). I therefore did the mechanical slices only
+and did NOT invent the verdicts. Slice 3 is separately in-flight on branch
+`issue-1930-slice3-i32-matchers` (the reserved lane) — left to that owner.
