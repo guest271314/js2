@@ -7,7 +7,7 @@ priority: low
 horizon: m
 feasibility: hard
 created: 2026-06-30
-updated: 2026-06-30
+updated: 2026-07-03
 task_type: bugfix
 area: codegen, runtime
 language_feature: regexp, tokenizer
@@ -103,3 +103,70 @@ node --import tsx tests/dogfood/acorn-corpus.mjs   # acorn-self input -> compile
 - compiled-acorn self-parses acorn.mjs without throwing (or the next-deeper gap
   is isolated + filed).
 - No test262 regression. Reconcile #2850 (char-class half already fixed).
+
+## Root cause — Bug A ISOLATED (2026-07-03, dev-team-a)
+
+**Bug A is NOT a RegExp-validator bug and NOT tokenizer-specific — it is a
+general codegen property-read aliasing bug, reduced to a 4-line non-acorn
+repro.** The "instrument the validator" framing was a red herring: the validator
+only *traps* because the tokenizer already mis-decided, and the tokenizer
+mis-decided because a boolean property read returned the wrong field.
+
+### Instrumentation evidence (patched acorn copy, current `upstream/main` e29c8c5b2)
+
+Logging acorn's `updateContext` else-branch + `readToken_slash` while parsing
+`var x = 1 / 2;`:
+
+```
+UC-else type=num beforeExpr=true -> exprAllowed=1     ← WRONG: num.beforeExpr must be FALSE
+SLASH exprAllowed=1 prevType=num                       ← so '/' after a number is read as a REGEX start
+THREW [object WebAssembly.Exception]                   ← malformed "regex" (the division) traps the validator
+```
+
+`num` is defined `new TokenType("num", startsExpr)` where
+`startsExpr = {startsExpr: true}` (no `beforeExpr` key), and the ctor does
+`this.beforeExpr = !!conf.beforeExpr`. Correct result: `num.beforeExpr === false`.
+Compiled-acorn computes `true`.
+
+### Minimal repro (no acorn — general codegen bug)
+
+```ts
+function TT(conf) { this.beforeExpr = !!conf.beforeExpr; }
+export function fromStartsExpr() { return new TT({ startsExpr: true }).beforeExpr; } // === true, MUST be false
+// and even more directly:
+export function readAbsent() { var c = { startsExpr: true }; return c.beforeExpr; }  // === true, MUST be undefined
+```
+
+`{ startsExpr: true }.beforeExpr` returns **`true`** — it **aliases the sibling
+field `startsExpr` at the same struct offset** instead of returning `undefined`.
+Two single-key object literals `{startsExpr:true}` and `{beforeExpr:true}` compile
+to structs whose field lands at the same offset, and the dynamic `.prop` read
+resolves **by offset, not by key**, so reading a key the object doesn't have
+returns whatever field sits at that offset. The manifestation is shape-dependent
+(a variant `rd(c){return c.beforeExpr}` exported fn returns a wrong constant
+instead), confirming a genuine dynamic/heterogeneous-shape property-read defect
+rather than a one-off.
+
+### Fix location + sizing
+
+The dynamic property-read lowering must **verify the receiver's struct actually
+has the named field before `struct.get`** (name-checked getter, e.g. the
+`__sget_<key>` ref.test-per-struct-type path, or the object-literal shape typing
+that currently lets two distinct single-key shapes collapse to one offset).
+Codegen sites: `src/codegen/object-ops.ts` / `src/codegen/expressions.ts`
+member-access + object-literal-shape lowering. This is a **general correctness
+bug** with broad blast radius (every heterogeneous-shape property read) —
+`feasibility: hard`, **senior-dev/architect scale**, must validate IN BATCH.
+Not a bounded dev slice. Bug A's acceptance can't be met without fixing this
+general read path; a `num`-token-specific hack would leave the underlying defect
+(acorn reads `beforeExpr`/`startsExpr` off shared conf shapes in many places).
+
+### Bug B (regex group `/(a)/`) — status: NOT yet root-caused here
+
+Confirmed still throwing (`/(a)/`, `/(?:a)/`, `/(?<n>a)/` throw; `/a/`,
+`/[a-z]/`, `/\d/` OK — so #2850's char-class half is indeed fixed). Whether B
+shares this property-read root cause or is a separate validator/array defect is
+**unverified** — re-check B against this root cause first (it may partly clear if
+the group path reads an absent property off a heterogeneous shape). Repro harness:
+`.tmp/repro2853.mts` pattern (compile pinned acorn once → parse snippets), and
+`.tmp/acorn-instr.mjs` instrumentation recipe above.

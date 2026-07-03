@@ -1274,9 +1274,10 @@ export function compileBinaryExpression(
 
       // Loose equality and comparisons: convert both operands to f64, then compare
       // For BigInt vs Number: i64 → f64 via f64.convert_i64_s
-      // For BigInt vs String: string → f64 via parseFloat, i64 → f64 (#295)
-      //   Incomparable strings (parseFloat returns NaN) make all comparisons false,
-      //   which matches the JS spec for BigInt vs non-numeric-string.
+      // For BigInt vs String: string → f64 via ToNumber (§7.1.4), i64 → f64
+      //   (#295, #2109). Incomparable strings (ToNumber returns NaN) make all
+      //   comparisons false, matching the JS spec for BigInt vs a
+      //   non-numeric-string.
       const isLooseEq = op === ts.SyntaxKind.EqualsEqualsToken;
       const isLooseNeq = op === ts.SyntaxKind.ExclamationEqualsToken;
       const isComparison =
@@ -1367,13 +1368,14 @@ export function compileBinaryExpression(
         if (leftType.kind === "i64") {
           fctx.body.push({ op: "f64.convert_i64_s" });
         } else if (leftType.kind === "externref") {
-          // String/externref → f64 via parseFloat (NaN for incomparable strings)
-          const pfIdx = ctx.funcMap.get("parseFloat");
-          if (pfIdx !== undefined) {
-            fctx.body.push({ op: "call", funcIdx: pfIdx });
-          } else {
-            coerceType(ctx, fctx, leftType, { kind: "f64" }, "number");
-          }
+          // (#2109) String/externref → f64 via ToNumber (§7.1.4), NOT parseFloat.
+          // parseFloat accepts trailing garbage and rejects the 0x/0o/0b and
+          // empty-string forms, so `"10abc" == 10n` wrongly became true and
+          // `"0x10" == 16n` wrongly became false — but ONLY when the module also
+          // used parseFloat (which registered it in funcMap and took this
+          // branch). ToNumber (`__unbox_number` = JS `Number()`) is spec
+          // StringToNumber: Number("10abc")=NaN, Number("0x10")=16, Number("")=0.
+          coerceType(ctx, fctx, leftType, { kind: "f64" }, "number");
         } else if (leftType.kind === "i32") {
           fctx.body.push({ op: "f64.convert_i32_s" });
         } else if (leftType.kind === "ref" || leftType.kind === "ref_null") {
@@ -1388,13 +1390,14 @@ export function compileBinaryExpression(
         if (rightType.kind === "i64") {
           fctx.body.push({ op: "f64.convert_i64_s" });
         } else if (rightType.kind === "externref") {
-          // String/externref → f64 via parseFloat (NaN for incomparable strings)
-          const pfIdx = ctx.funcMap.get("parseFloat");
-          if (pfIdx !== undefined) {
-            fctx.body.push({ op: "call", funcIdx: pfIdx });
-          } else {
-            coerceType(ctx, fctx, rightType, { kind: "f64" }, "number");
-          }
+          // (#2109) String/externref → f64 via ToNumber (§7.1.4), NOT parseFloat.
+          // parseFloat accepts trailing garbage and rejects the 0x/0o/0b and
+          // empty-string forms, so `10n == "10abc"` wrongly became true and
+          // `16n == "0x10"` wrongly became false — but ONLY when the module also
+          // used parseFloat (which registered it in funcMap and took this
+          // branch). ToNumber (`__unbox_number` = JS `Number()`) is spec
+          // StringToNumber: Number("10abc")=NaN, Number("0x10")=16, Number("")=0.
+          coerceType(ctx, fctx, rightType, { kind: "f64" }, "number");
         } else if (rightType.kind === "i32") {
           fctx.body.push({ op: "f64.convert_i32_s" });
         } else if (rightType.kind === "ref" || rightType.kind === "ref_null") {

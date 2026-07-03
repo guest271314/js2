@@ -7,7 +7,7 @@ import {
   compile,
   readFileSync,
   resolve,
-} from "./helpers.js";
+} from "./equivalence/helpers.js";
 
 describe("Function arity mismatch (#184)", () => {
   it("calling function with fewer args than params", async () => {

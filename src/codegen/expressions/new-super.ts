@@ -77,6 +77,7 @@ import {
 import { localGlobalIdx } from "../registry/imports.js";
 import { ensureLateImport, flushLateImportShifts } from "./late-imports.js";
 import { emitFnctorProtoGet } from "./fnctor-prototype.js"; // (#2660 S3a) reconstruct `new F()` as $Object
+import { emitStandalonePromiseFromExecutor } from "../promise-executor.js"; // (#2959) native new Promise(executor)
 import { deriveFnctorFields, resolveFnctorSymbol, resolveEnclosingFnctorOwner } from "../fnctor-escape-gate.js"; // (#2660 S3a) canonical fnctor-name key; (#2773 S1) shared field derivation; (#2681/#2686 A1) `new this()` owner
 import { funcSignatureOf } from "../func-space.js"; // (#1916 S2) positional-read chokepoint
 
@@ -2761,8 +2762,24 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     }
   }
 
-  // Handle `new Promise(executor)` — delegate to host import
+  // Handle `new Promise(executor)`.
   if (ts.isIdentifier(expr.expression) && expr.expression.text === "Promise") {
+    // (#2959) Native standalone/WASI path — construct the `$Promise` and run the
+    // executor with synthesised native resolve/reject closures, retiring the
+    // `Promise_new` host import. Gated inside the helper on
+    // `isStandalonePromiseActive` + a resolvable executor closure; when it can't
+    // apply it emits NOTHING and returns false, falling through to the host path
+    // below (byte-unchanged in host/gc mode). Guard the ambient-global binding so
+    // a user `class Promise {}` / local shadow keeps the normal ctor path.
+    const promiseArgs = expr.arguments ?? [];
+    if (
+      promiseArgs.length >= 1 &&
+      !ctx.classSet.has("Promise") &&
+      resolvesToAmbientGlobal(ctx, expr.expression) &&
+      emitStandalonePromiseFromExecutor(ctx, fctx, promiseArgs[0]!)
+    ) {
+      return { kind: "externref" };
+    }
     let funcIdx =
       ctx.funcMap.get("Promise_new") ??
       ensureLateImport(ctx, "Promise_new", [{ kind: "externref" }], [{ kind: "externref" }]);

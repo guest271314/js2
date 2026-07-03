@@ -1,7 +1,9 @@
 ---
 id: 2959
 title: "Standalone: native `new Promise(executor)` — retire the unconditional Promise_new host import"
-status: ready
+status: done
+assignee: sendev-promise-exec2
+completed: 2026-07-03
 sprint: current
 created: 2026-07-02
 updated: 2026-07-03
@@ -262,3 +264,68 @@ reasons:
 This spec PR carries only the enrichment; the fork code branch
 `issue-2959-native-promise-executor` has no salvageable code and can be
 recreated from `origin/main`.
+
+## Implementation (done, 2026-07-03, sendev-promise-exec2)
+
+Shipped as `src/codegen/promise-executor.ts` (new module) +
+`emitStandalonePromiseFromExecutor` wired into the `new Promise` block of
+`src/codegen/expressions/new-super.ts`, gated on `isStandalonePromiseActive`.
+
+### Key ABI discovery (why the banked "subtype the wrapper" plan is correct — and *why* it works)
+
+I re-verified the executor's resolve/reject dispatch against **true WASI mode**
+before implementing (the banked plan reasoned about it but hadn't traced the
+lowering). Findings that shaped the code:
+
+1. **The executor's `resolve`/`reject` params are BOTH `externref`.** A
+   Promise-executor `resolve` is always `(value: T | PromiseLike<T>) => void`
+   and `reject` is `(reason?: any) => void`; both value params resolve to
+   `externref` for *every* `T`. So the canonical `(externref) -> ()` func-ref
+   wrapper is the universal signature — no per-`T` variance. This is why the
+   settle closures can be a single `$__promise_settle_cap` subtype of that one
+   wrapper.
+
+2. **In WASI mode the executor's `resolve(x)` call has NO host fallback.** The
+   host `__call_function` reflective arm is gated `!ctx.standalone && !ctx.wasi`
+   (calls.ts). Under WASI, `resolve(x)` lowers to: `any.convert_extern;
+   ref.test (ref $wrap)` → **native** `struct.get 0 -> ref.cast $wrapFuncType ->
+   call_ref`, **else throw TypeError**. So a `resolve`/`reject` value that IS a
+   subtype of the canonical `(externref)->()` wrapper dispatches natively; the
+   only remaining host import in the whole executor program was `Promise_new`
+   itself. Constructing the settle closures as that subtype removes it → **zero
+   `env` imports** (verified: gc sha256 byte-identical, wasi env `[]`).
+
+3. **The `sub final` on the wrapper is a non-issue.** `markLeafStructsFinal`
+   marks a struct `final` only when *nothing* subtypes it — and it is *skipped
+   entirely* for standalone/WASI (`skipFinal`). Adding `$__promise_settle_cap`
+   as a subtype also un-finalises the wrapper in gc mode. So the capturing
+   subtype is legal.
+
+4. **The trampoline func type must be EXACTLY the wrapper's lifted type**
+   (`getOrCreateFuncRefWrapperTypes(...).liftedFuncTypeIdx`), so the executor's
+   `ref.cast (ref $wrapFuncType); call_ref` at the call site succeeds. The
+   trampoline body downcasts its `(ref null $wrap)` self param to the `cap`
+   subtype to recover the captured `$Promise` — the same self-param-downcast
+   trick the existing capturing-closure and `.then`-wrapper machinery use.
+
+### Correctness proofs (all host-free, env imports `[]`)
+
+- resolve-sync → `.then` sees `7`; reject → `.catch` sees `9`;
+  **executor-throw → `.catch` sees `42`** (inject-throw execution proof: a
+  vacuous native path would leave the observer at `-1`); double-settle →
+  first-settle-wins (`3`); resolve-with-a-promise → assimilates inner value
+  (`11`). All GC binaries `WebAssembly.validate` + instantiate + run `_start`
+  without trapping. Host (gc) mode sha256 byte-identical to `main`.
+
+### Scope / conservatism
+
+- Native path is narrow-gated to **inline arrow / (non-async, non-generator)
+  function-expression** executors whose `ClosureInfo` is recoverable. Anything
+  else (identifier-bound, non-resolvable) emits **nothing** and falls through to
+  the existing `Promise_new` host path — never a partial native path. Widening
+  to identifier-bound closures is a future increment.
+- `Promise_new` intentionally **left on the strict-gate allowlist**: removing it
+  would turn the host-fallback edge cases into hard compile errors under WASI (a
+  regression). The native path simply stops emitting it for the common case.
+- Gate stays WASI-only (couples to #2867 slice-1d; the −601 lesson — do not
+  pre-widen to all-standalone).

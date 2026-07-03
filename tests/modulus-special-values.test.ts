@@ -7,7 +7,7 @@ import {
   compile,
   readFileSync,
   resolve,
-} from "./helpers.js";
+} from "./equivalence/helpers.js";
 
 describe("Modulus with special values (#216)", () => {
   it("x % Infinity should be x (finite x)", async () => {

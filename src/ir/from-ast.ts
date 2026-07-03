@@ -3459,14 +3459,15 @@ function coerceYieldValueToExternref(value: IrValueId, cx: LowerCtx): IrValueId 
   if (t.kind === "val" && t.val.kind === "externref") {
     return value;
   }
-  // Host-strings mode: `IrType.string` flows as externref through Wasm.
-  // Skip the coerce so we don't emit a validation-rejected
-  // `extern.convert_any` over a global.get of externref-typed string
-  // global. Resolver presence follows the #1185 pattern (see
-  // `LowerCtx.resolver` doc) — when absent, treat as host-strings.
-  if (t.kind === "string" && !cx.resolver?.nativeStrings?.()) {
-    return value;
-  }
+  // #2955 — de-polymorph on string mode. A string operand IS externref in
+  // host-strings mode and `(ref $AnyString)` (an anyref subtype needing
+  // `extern.convert_any`) in native-strings mode. That per-mode decision no
+  // longer branches here in the front-end: emit the abstract
+  // `coerce.to_externref` unconditionally and let the lowerer resolve the
+  // mode (host → the convert is elided because the value is already
+  // externref; native → `extern.convert_any`). The lowered bytes stay
+  // byte-identical to the previous `!nativeStrings` guard in both modes,
+  // and the produced IR is now identical across string modes.
   return cx.builder.emitCoerceToExternref(value);
 }
 
