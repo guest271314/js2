@@ -8,7 +8,6 @@
  * (`+`, `-`, `!`, `~`) live in ./unary.ts.
  */
 import { ts } from "../../ts-api.js";
-import { isSymbolType } from "../../checker/type-mapper.js";
 import type { Instr, ValType } from "../../ir/types.js";
 import { emitBoundsCheckedArrayGet } from "../array-methods.js";
 import { tryEmitLinearU8ElementUpdate } from "../linear-uint8-codegen.js";
@@ -47,7 +46,9 @@ import { resolveStructName } from "./misc.js";
  * throw) when the operand's TS type is Symbol.
  */
 function emitSymbolUpdateThrow(ctx: CodegenContext, fctx: FunctionContext, operand: ts.Expression): boolean {
-  if (!isSymbolType(ctx.checker.getTypeAtLocation(unwrapParens(operand)))) return false;
+  // (#1930 Slice 2) oracle fold: was a direct isSymbolType check on the
+  // checker type of the paren-unwrapped operand.
+  if (ctx.oracle.staticJsTypeOf(unwrapParens(operand)) !== "symbol") return false;
   emitThrowTypeError(ctx, fctx, "Cannot convert a Symbol value to a number");
   return true;
 }

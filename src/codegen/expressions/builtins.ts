@@ -3,7 +3,7 @@
  * Host built-in compilation: console, Date, Math, and WASI output.
  */
 import { ts } from "../../ts-api.js";
-import { isBooleanType, isNumberType, isStringType, isSymbolType } from "../../checker/type-mapper.js";
+import { isBooleanType, isNumberType, isStringType } from "../../checker/type-mapper.js";
 import type { Instr, ValType } from "../../ir/types.js";
 import { popBody, pushBody } from "../context/bodies.js";
 import { resolveArrayInfo } from "../array-methods.js";
@@ -3098,7 +3098,7 @@ function compileMathCall(
   // (e.g. `Math.abs(Symbol())` returned the raw counter). Detect a symbol-typed
   // argument, evaluate every argument up to and including it for side effects in
   // source order, then throw — matching how `Number(Symbol())` is handled.
-  const symbolArgIdx = expr.arguments.findIndex((a) => isSymbolType(ctx.checker.getTypeAtLocation(a)));
+  const symbolArgIdx = expr.arguments.findIndex((a) => ctx.oracle.staticJsTypeOf(a) === "symbol");
   if (symbolArgIdx >= 0) {
     for (let i = 0; i <= symbolArgIdx; i++) {
       const t = compileExpression(ctx, fctx, expr.arguments[i]!);
