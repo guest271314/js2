@@ -3,8 +3,10 @@ id: 2818
 title: "Bug C (class-method half): block-scoped let captured by a class method reads null (captured-globals promotion ordering)"
 parent: 2669
 related: [2820, 2811, 1672]
-status: blocked
+status: done
+assignee: ttraenkler/sendev-2818
 created: 2026-06-29
+completed: 2026-07-03
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -15,7 +17,7 @@ language_feature: closures
 goal: spec-completeness
 sprint: current
 horizon: m
-architect_spec: needed
+architect_spec: done
 ---
 
 # #2818 — Bug C (class-method half): block-scoped `let` captured by a class method reads null
@@ -295,3 +297,135 @@ Option 1 is the lower-risk, more surgical fix. Either way, **validate against a
 full `merge_group` / local-CI test262 run BEFORE re-enqueue** — a scoped check
 cannot see this 545-test cluster. PR #2335 branch + this diagnosis must survive;
 re-open this issue for the narrowed attempt.
+
+## Resolution (2026-07-03, sendev-2818 — Option 1, narrowed)
+
+Implemented the architect's Option 1 (defer only genuine capturers), branch
+`issue-2818-classmethod-capture-v2`. Single source file touched:
+`src/codegen/declarations.ts` (`compileClassesFromStatements` + two new local
+helpers). No changes to `closures.ts` / `nested-declarations.ts` — the
+promotion channel (`promoteAccessorCapturesToGlobals`) was already correct; the
+only bug was that block-nested class bodies were compiled *eagerly* (out of
+scope) so promotion never got a chance to fire.
+
+### What the fix does
+
+1. `compileClassesFromStatements` now threads an `enclosingLocals: Set<string>`
+   through the control-flow recursions (block / if / loop / switch / try /
+   labeled) — **not** `insideFunction` (that was PR #2335's fatal move). The set
+   is `null` at module scope (nothing new deferred there) and seeded fresh
+   (`new Set()`) at each function/arrow/function-expression body, accumulating
+   this-level `let`/`const` names as it descends (fresh copy per level → no
+   sibling-block pollution).
+2. A control-flow-nested class **declaration** is added to
+   `deferredClassBodies` **iff** `classDeclCapturesNames` is true — i.e. a
+   method/ctor/accessor body or param-default references an enclosing
+   block-scoped `let`/`const` that `promoteAccessorCapturesToGlobals` would
+   actually promote. The scan **mirrors that function's skip conditions**
+   (already a module/captured global, `this`, a user-function name) so we never
+   defer on a name that is already global.
+3. Deferred capturers are re-compiled in-scope by `compileNestedClassDeclaration`
+   (reached from `compileStatement` for a class declaration in **any** statement
+   position — block, if, loop, switch, try, labeled), where the `let` is a live
+   local, promotion emits `(global $__captured_<name> …)` + the enclosing
+   `local.get; global.set` sync, and the method reads `global.get`.
+
+### Why this does NOT reproduce the −471 (PR #2335)
+
+- **Class *expressions* (`const C = class{}`) are never deferred** — they stay
+  on the eager `else` arm, byte-identical to before. That was the shape #2335
+  deferred-but-never-recompiled (dropped codegen).
+- **Non-capturing classes are never deferred** — only genuine `let`/`const`
+  capturers.
+- **`var` is excluded** from the capture scan: a function-scoped `var`
+  referenced by a class method is already hoisted to a module global by
+  `wrapTest`, so deferring on it is pointless and — as measured — perturbs the
+  order-sensitive async-generator lowering (it caused 8 `async-*gen-meth-*`
+  pass→fail regressions in an earlier over-broad draft; excluding `var` +
+  applying the module-global skip removed all 8).
+
+### Validation (measure-first, exhaustive over the affected set)
+
+Byte-inertness proven by compiling every test262 file the change *could* touch,
+on this branch vs `origin/main` HEAD, and sha256-diffing the wasm:
+
+- **All `class/dstr` + `class/elements` dirs (8426 files, wrapped via
+  `wrapTest`)**: 48 files change bytes, **0** compile-drops (the −471
+  mechanism), 0 `THROW`. Runner sweep of all 48: **+24 fail→pass, 0
+  regressions**.
+- **Every file outside the class dirs containing a class + `let`/`const`
+  (477 candidates across `language/` + `built-ins/`)**: 74 change bytes; runner
+  sweep: **+9 fail→pass, 0 regressions**.
+- **Combined: +33 test262 pass, 0 regressions, 0 compile-drops.**
+- `class/dstr` + `class/elements` (the −471 buckets) net movement: **0
+  regressions**.
+- New `tests/issue-2818.test.ts`: 18 unit repros (block/if/for/switch/try/nested,
+  ctor, param-default, post-capture mutation, arrow-in-method, static) + the
+  fn-scope / non-capturing / class-expression / shadowing regression controls +
+  the `meth-`/`gen-meth-`/`private-meth-` test262 cluster slice. All green.
+
+### Out of scope / follow-up
+
+The `expressions/class/dstr/*meth-*` cluster half (`var C = class{…}` capturing
+`let length`) is **not** fixed here — deferring a class *expression* is exactly
+the #2335 hazard (the deferred path does not re-compile class expressions in
+variable initializers). Fixing it needs Option 2 (complete the deferred path for
+class expressions) and should be a separate, independently-validated issue.
+
+## Standalone follow-up (2026-07-03, sendev-2818) — derived-class capturers stay eager
+
+PR #2567 (this branch) was park-held on a **6-test standalone regression**
+(distinct from the separate ~55-test base-drift being fixed elsewhere):
+
+- `language/expressions/super/call-spread-obj-getter-init.js`
+- `built-ins/Iterator/prototype/{map,take,drop,filter}/return-is-forwarded*.js`
+- `built-ins/Iterator/prototype/flatMap/return-is-forwarded-to-underlying-iterator.js`
+
+### Root cause (measured, both lanes, branch vs `origin/main`)
+
+The test262 harness (`wrapTest`) wraps every test body in
+`export function test(){ try { <body> } catch(e){…} }`. So a top-level
+`let returnCount = 0; class TestIterator extends Iterator { return(){ ++returnCount; } }`
+becomes a class **nested in the `try` block** — a control-flow carrier. The
+#2818 capture-defer branch therefore fired for it and moved the class into
+`deferredClassBodies`.
+
+The deferred, in-block-recompiled path promotes the captured `let` to a
+`__captured_<name>` global and emits the `global.set`/`global.get` sync **in
+both lanes** (verified: the WAT sync structure is identical GC vs standalone).
+But for a class with a **base class** (`extends …`), the derived-constructor
+`super(...)` invocation + any spread/getter in its arguments **desyncs the
+promoted-global read in the standalone lane only** — the captured value reads
+stale/empty through the super/spread machinery. The WasmGC/host lane lowers it
+correctly (it actually *fixed* `super/call-spread-obj-getter-init` fail→pass in
+host/gc). The **eager** path — exactly how `origin/main` compiled these — is
+correct in standalone. So on `origin/main` all 6 passed standalone (eager);
+deferring them broke standalone while (coincidentally) improving host/gc.
+
+Full lane matrix (branch pre-fix vs main), e.g. `take/return-is-forwarded`:
+main(gc FAIL, sa PASS) → pre-fix branch(gc FAIL, sa **FAIL**). `super`:
+main(gc FAIL, sa PASS) → pre-fix(gc PASS, sa **FAIL**).
+
+### Fix
+
+`classDeclCapturesNames` (`src/codegen/declarations.ts`) now returns `false` for
+any class with an `extends` heritage clause, so **derived classes are never
+deferred** — they compile eagerly, byte-identically to `origin/main`. Base-less
+capturers (the genuine #2818 target: `class C { m(){ return s; } }` reading a
+block-`let`) still defer and are fixed in **both** lanes (they have no
+super-constructor path and lower identically GC vs standalone). The edit is
+strictly **subtractive** vs the pre-fix branch: it can only *reduce* the set of
+deferred classes, so it cannot introduce a new regression beyond `origin/main`.
+
+### Validation
+
+- The 6 regressions: **fail→pass in standalone**, and host/gc now == `origin/main`
+  (no regression; the one incidental host/gc gain on `super` is foregone).
+- Exhaustive standalone sweep of **all 700 `extends`+`let`/`const` candidates**
+  (`class/dstr` + `class/elements` + external), FIXED vs `origin/main`:
+  **0 regressions, +2 improvements**.
+- `tests/issue-2818.test.ts`: the 22 existing repros + 3 new standalone
+  regression guards (derived-class method / super-ctor capturer stays correct;
+  base-less capturer still works) — all green.
+- Typecheck clean.
+

@@ -1,8 +1,9 @@
 ---
 id: 2977
 title: "infra: claim-issue --allocate livelocks under multi-session load (6 concurrent allocators observed)"
-status: ready
+status: wont-fix
 created: 2026-07-02
+updated: 2026-07-03
 priority: medium
 horizon: s
 feasibility: medium
@@ -11,9 +12,17 @@ task_type: infra
 area: tooling
 language_feature: n/a
 goal: dev-infra
-related: [2531, 2155]
+related: [2531, 2155, 2974]
 depends_on: []
 ---
+
+> **wont-fix — duplicate of #2974 (2026-07-03).** This is the same
+> `claim-issue --allocate` livelock report, filed independently in the same
+> busy window. Resolved under **#2974** (backoff + jitter on the first-push-wins
+> retry loops). The extra detail unique to this report — the stale
+> `refs/claim-issue/base` non-fast-forward crash — was **incorporated** into the
+> #2974 fix (`fetchAssign` now force-fetches the mirror ref). No separate work
+> remains here.
 
 # #2977 — `claim-issue --allocate` livelocks under multi-session load
 

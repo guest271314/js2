@@ -72,6 +72,7 @@ import { addUnionImportsViaRegistry, flushLateImportShifts } from "./shared.js";
 import { reserveAccessorGetDriver, reserveAccessorSetDriver } from "./accessor-driver.js";
 import { ensureSymbolCarrier } from "./symbol-native.js";
 import { reserveArrayToPrimitiveString } from "./array-to-primitive.js";
+import { UNDEF_F64_BITS } from "./value-tags.js";
 import { reserveClassToPrimitive } from "./class-to-primitive.js";
 import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S2/S3) positional-read chokepoint + stable-regime minting
 
@@ -3771,6 +3772,220 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     );
   }
 
+  // ── __object_keys_forin(externref obj) -> externref ──────────────────────
+  //
+  // #2964 — for-in enumeration over a dynamic `$Object`, INCLUDING inherited
+  // enumerable string keys from the prototype chain (§14.7.5.9
+  // EnumerateObjectProperties). `__object_keys` above is OWN-only (Object.keys
+  // semantics); for-in must additionally walk `$proto` links and, at each
+  // level, yield the enumerable own keys that are NOT shadowed by a
+  // closer-level own property (enumerable OR non-enumerable — a non-enumerable
+  // own property still shadows an inherited same-named key).
+  //
+  // Algorithm (per level, receiver → proto → …, until $proto is null):
+  //   1. enumerable own keys (`__obj_ordered`, OrdinaryOwnPropertyKeys order —
+  //      integer-index ascending then insertion order, #1837): yield each key
+  //      not already in the `seen` set.
+  //   2. ALL own keys (`__obj_ordered_all`, incl. non-enumerable): add each to
+  //      `seen` so it shadows the same name at lower (proto) levels.
+  // The `seen` set is a fresh empty `$Object` (null $proto) used purely as a
+  // membership table via `__extern_has`/`__extern_set` — this reuses the exact
+  // key hashing + equality the property map uses, so there is no native-string
+  // representation mismatch. `__extern_has` proto-walks, but `seen`'s $proto is
+  // null so it degenerates to an own-property check.
+  //
+  // params: 0=obj(externref)
+  // locals: 1=any(anyref) 2=cur(ref null $Object) 3=arr(ref null $PropMap)
+  //         4=cap(i32) 5=i(i32) 6=e(ref null $PropEntry) 7=vec(externref result)
+  //         8=seen(externref scratch $Object) 9=keyExt(externref)
+  {
+    const newPlainObjectIdx = ctx.funcMap.get("__new_plain_object")!;
+    const externHasIdx = ctx.funcMap.get("__extern_has")!;
+    const externSetIdx = ctx.funcMap.get("__extern_set")!;
+    const body: Instr[] = [
+      // vec = __objvec_new() ; seen = __new_plain_object()
+      { op: "call", funcIdx: objVecNewIdx },
+      { op: "local.set", index: 7 },
+      { op: "call", funcIdx: newPlainObjectIdx },
+      { op: "local.set", index: 8 },
+      // any = any.convert_extern(obj); if !$Object → return empty vec
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.tee", index: 1 },
+      { op: "ref.test", typeIdx: objectTypeIdx },
+      { op: "i32.eqz" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "local.get", index: 7 }, { op: "return" }],
+      },
+      // cur = cast<$Object>(any)
+      { op: "local.get", index: 1 },
+      { op: "ref.cast", typeIdx: objectTypeIdx },
+      { op: "local.set", index: 2 },
+      {
+        op: "block",
+        blockType: { kind: "empty" },
+        body: [
+          {
+            op: "loop",
+            blockType: { kind: "empty" },
+            body: [
+              // if cur == null break out of levels
+              { op: "local.get", index: 2 },
+              { op: "ref.is_null" },
+              { op: "br_if", depth: 1 },
+              // ---- yield enumerable own keys not already seen ----
+              // arr = __obj_ordered(cur) ; cap = arr.len ; i = 0
+              { op: "local.get", index: 2 },
+              { op: "ref.as_non_null" },
+              { op: "call", funcIdx: objOrderedIdx },
+              { op: "local.tee", index: 3 },
+              { op: "array.len" },
+              { op: "local.set", index: 4 },
+              { op: "i32.const", value: 0 },
+              { op: "local.set", index: 5 },
+              {
+                op: "block",
+                blockType: { kind: "empty" },
+                body: [
+                  {
+                    op: "loop",
+                    blockType: { kind: "empty" },
+                    body: [
+                      // if i >= cap break
+                      { op: "local.get", index: 5 },
+                      { op: "local.get", index: 4 },
+                      { op: "i32.ge_s" },
+                      { op: "br_if", depth: 1 },
+                      // e = arr[i] ; compacted — stop at first null
+                      { op: "local.get", index: 3 },
+                      { op: "ref.as_non_null" },
+                      { op: "local.get", index: 5 },
+                      { op: "array.get", typeIdx: propMapTypeIdx },
+                      { op: "local.tee", index: 6 },
+                      { op: "ref.is_null" },
+                      { op: "br_if", depth: 1 },
+                      // keyExt = extern.convert_any(e.key)
+                      { op: "local.get", index: 6 },
+                      { op: "ref.as_non_null" },
+                      { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 0 },
+                      { op: "extern.convert_any" },
+                      { op: "local.set", index: 9 },
+                      // if __extern_has(seen, keyExt) == 0 → __objvec_push(vec, keyExt)
+                      { op: "local.get", index: 8 },
+                      { op: "local.get", index: 9 },
+                      { op: "call", funcIdx: externHasIdx },
+                      { op: "i32.eqz" },
+                      {
+                        op: "if",
+                        blockType: { kind: "empty" },
+                        then: [
+                          { op: "local.get", index: 7 },
+                          { op: "local.get", index: 9 },
+                          { op: "call", funcIdx: objVecPushIdx },
+                        ],
+                      },
+                      // i++ ; loop
+                      { op: "local.get", index: 5 },
+                      { op: "i32.const", value: 1 },
+                      { op: "i32.add" },
+                      { op: "local.set", index: 5 },
+                      { op: "br", depth: 0 },
+                    ],
+                  },
+                ],
+              },
+              // ---- mark ALL own keys (incl. non-enumerable) into `seen` ----
+              // arr = __obj_ordered_all(cur) ; cap = arr.len ; i = 0
+              { op: "local.get", index: 2 },
+              { op: "ref.as_non_null" },
+              { op: "call", funcIdx: objOrderedAllIdx },
+              { op: "local.tee", index: 3 },
+              { op: "array.len" },
+              { op: "local.set", index: 4 },
+              { op: "i32.const", value: 0 },
+              { op: "local.set", index: 5 },
+              {
+                op: "block",
+                blockType: { kind: "empty" },
+                body: [
+                  {
+                    op: "loop",
+                    blockType: { kind: "empty" },
+                    body: [
+                      { op: "local.get", index: 5 },
+                      { op: "local.get", index: 4 },
+                      { op: "i32.ge_s" },
+                      { op: "br_if", depth: 1 },
+                      { op: "local.get", index: 3 },
+                      { op: "ref.as_non_null" },
+                      { op: "local.get", index: 5 },
+                      { op: "array.get", typeIdx: propMapTypeIdx },
+                      { op: "local.tee", index: 6 },
+                      { op: "ref.is_null" },
+                      { op: "br_if", depth: 1 },
+                      { op: "local.get", index: 6 },
+                      { op: "ref.as_non_null" },
+                      { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 0 },
+                      { op: "extern.convert_any" },
+                      { op: "local.set", index: 9 },
+                      // if !__extern_has(seen, keyExt) → __extern_set(seen, keyExt, keyExt)
+                      { op: "local.get", index: 8 },
+                      { op: "local.get", index: 9 },
+                      { op: "call", funcIdx: externHasIdx },
+                      { op: "i32.eqz" },
+                      {
+                        op: "if",
+                        blockType: { kind: "empty" },
+                        then: [
+                          { op: "local.get", index: 8 },
+                          { op: "local.get", index: 9 },
+                          { op: "local.get", index: 9 },
+                          { op: "call", funcIdx: externSetIdx },
+                        ],
+                      },
+                      { op: "local.get", index: 5 },
+                      { op: "i32.const", value: 1 },
+                      { op: "i32.add" },
+                      { op: "local.set", index: 5 },
+                      { op: "br", depth: 0 },
+                    ],
+                  },
+                ],
+              },
+              // cur = cur.$proto ; loop
+              { op: "local.get", index: 2 },
+              { op: "ref.as_non_null" },
+              { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 0 },
+              { op: "local.set", index: 2 },
+              { op: "br", depth: 0 },
+            ],
+          },
+        ],
+      },
+      // return vec
+      { op: "local.get", index: 7 },
+    ];
+    registerNative(
+      "__object_keys_forin",
+      [{ kind: "externref" }],
+      [{ kind: "externref" }],
+      [
+        { name: "any", type: { kind: "anyref" } },
+        { name: "cur", type: objRefNull },
+        { name: "arr", type: propMapRef },
+        { name: "cap", type: { kind: "i32" } },
+        { name: "i", type: { kind: "i32" } },
+        { name: "e", type: entryRefNull },
+        { name: "vec", type: { kind: "externref" } },
+        { name: "seen", type: { kind: "externref" } },
+        { name: "keyExt", type: { kind: "externref" } },
+      ],
+      body,
+    );
+  }
+
   // ── __extern_length(externref v) -> f64 ──────────────────────────────────
   //
   // Standalone numeric "length". Recognises a wrapped $ObjVec (enumeration
@@ -6656,12 +6871,53 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   // same value `undefined` lowers to. So `ref.is_null` applies the default in
   // precisely the "value is undefined" cases, matching §14.3.3 (keyed/iterator
   // binding initialization defaults fire when the bound value is `undefined`).
+  //
+  // (#2979) SECOND arm — the boxed UNDEF_F64 sentinel. An `undefined` that
+  // travels through an **f64 carrier** (the native generator done-result
+  // `.value` field is the producer today) carries the UNDEF_F64 signaling-NaN
+  // bit pattern (value-tags.ts); a generic f64→externref boxing site that isn't
+  // sentinel-aware wraps it in a `$BoxedNumber`. Recognize that box here so
+  // `x === undefined` / default-application still answer true after the value
+  // crossed a sentinel-blind boxing site. JS arithmetic only produces the
+  // quiet NaN 0x7FF8… — it can never forge the sentinel bits — and host mode
+  // never builds this native (native generators are standalone/wasi-only), so
+  // this cannot misfire on a genuine number. Gated on the carrier type
+  // existing; without it the body is the legacy bare `ref.is_null`.
   registerNative(
     "__extern_is_undefined",
     [{ kind: "externref" }],
     [{ kind: "i32" }],
-    [],
-    [{ op: "local.get", index: 0 }, { op: "ref.is_null" }],
+    ctx.nativeBoxNumberTypeIdx >= 0 ? [{ name: "any", type: { kind: "anyref" } }] : [],
+    ctx.nativeBoxNumberTypeIdx >= 0
+      ? [
+          { op: "local.get", index: 0 },
+          { op: "ref.is_null" },
+          {
+            op: "if",
+            blockType: { kind: "val", type: { kind: "i32" } },
+            then: [{ op: "i32.const", value: 1 }],
+            else: [
+              { op: "local.get", index: 0 },
+              { op: "any.convert_extern" },
+              { op: "local.tee", index: 1 },
+              { op: "ref.test", typeIdx: ctx.nativeBoxNumberTypeIdx },
+              {
+                op: "if",
+                blockType: { kind: "val", type: { kind: "i32" } },
+                then: [
+                  { op: "local.get", index: 1 },
+                  { op: "ref.cast", typeIdx: ctx.nativeBoxNumberTypeIdx },
+                  { op: "struct.get", typeIdx: ctx.nativeBoxNumberTypeIdx, fieldIdx: 0 },
+                  { op: "i64.reinterpret_f64" },
+                  { op: "i64.const", value: UNDEF_F64_BITS },
+                  { op: "i64.eq" },
+                ],
+                else: [{ op: "i32.const", value: 0 }],
+              } as Instr,
+            ],
+          } as Instr,
+        ]
+      : [{ op: "local.get", index: 0 }, { op: "ref.is_null" }],
   );
 
   // ── __extern_method_call(externref recv, externref name, externref args)

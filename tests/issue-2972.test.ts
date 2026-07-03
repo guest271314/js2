@@ -1,23 +1,28 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 //
-// #2972 — IR selector accepts string element access with a computed index, but
-// `from-ast.ts` has no string-element-read lowering (constant OR computed) and
-// throws "element access on string with index … not in slice 12". Flag-off that
-// throw silently demotes to legacy; flag-on (`JS2WASM_IR_FIRST=1`) a claimed
-// function whose lowering throws is promoted to a HARD compile error — turning
-// the test262 `decimalToHexString` / `decimalToPercentHexString` harness
-// (`hex[(n>>4)&0xf]`) into `pass → compile_error` regressions.
+// #2972 — string element access on the IR path: TWO composed layers.
 //
-// The selector is checker-free (`scope: ReadonlySet<string>`), so it cannot
-// distinguish a string receiver from a vec receiver and cannot defer this at the
-// element-access arm without over-rejecting vec `arr[i]`. Gate 5 of
-// `computeIrFirstSkipSet` (`irFirstBodyReadsStringElement`) therefore keeps any
-// string-element-reading function on the compile-twice path (legacy + silently
-// demoting overlay) — restoring flag-on/flag-off parity — until an actual
-// string-element-read lowering is proven in the IR builder.
+// Layer 1 (gate 5, PR #2519): `irFirstBodyReadsStringElement` keeps functions
+// with string-element reads the IR builder CANNOT lower on the compile-twice
+// path (legacy + demoting overlay), converting the #2138 flag-on hard error
+// back into a silent demote. The selector is checker-free and cannot defer
+// these at the element-access arm without over-rejecting vec `arr[i]`.
+//
+// Layer 2 (the 2a lowering, this PR): PROVEN-in-bounds reads on receivers
+// with a literal-known length lower through the EXISTING charAt machinery
+// (`s[i] ≡ s.charAt(i)` for integer 0 ≤ i < s.length — §22.1.3.1/§10.4.3).
+// Gate 5 consults the SAME single-source predicates
+// (`collectStringLiteralLens` + `stringElementReadLowerable` +
+// `stringIndexProvenBelow`, all in `src/ir/capability.ts`), so proven-only
+// functions re-enter the compile-once skip set while the UNPROVEN residual
+// (OOB `s[i]` is `undefined`, charAt is `""` — typing it `string` would be
+// silently wrong) stays compile-twice. One predicate, two consumers.
 import ts from "typescript";
 import { describe, expect, it, vi } from "vitest";
 import { irFirstBodyReadsStringElement } from "../src/codegen/ir-first-gate.js";
+import { stringIndexProvenBelow } from "../src/ir/capability.js";
+import { analyzeSource } from "../src/checker/index.js";
+import { planIrCompilation } from "../src/ir/select.js";
 import { compile, type CompileResult } from "../src/index.js";
 import { buildImports } from "../src/runtime.js";
 
@@ -68,8 +73,8 @@ export function test(): number {
 }
 `;
 
-// A minimal claimed function whose ONLY unclaimable shape is the string
-// element read — with the gate removed this is the exact #2138 hard error.
+// A claimed function whose string element read is PROVEN in-bounds — with
+// the 2a lowering it IR-compiles AND stays in the compile-once skip set.
 const CONST_STRING_INDEX_SRC = `
 export function f(n: number): string {
   const hex = "0123456789ABCDEF";
@@ -85,13 +90,22 @@ export function sum(arr: number[], i: number): number {
 }
 `;
 
-describe("#2972 string element access under IR-first (gate 5)", () => {
+// The annotated harness shape (const-declared so the selector's vardecl
+// gate accepts it in .ts mode — the real JS pipeline claims the var form).
+const PROVEN_HARNESS_SRC = `
+function decimalToPercentHexString(n: number): string {
+  const hex = "0123456789ABCDEF";
+  return "%" + hex[(n >> 4) & 0xf] + hex[n & 0xf];
+}
+export function run(n: number): string {
+  return decimalToPercentHexString(n);
+}
+`;
+
+describe("#2972 string element access under IR-first (gate 5 + 2a lowering)", () => {
   it("flag ON: string-computed-index harness compiles (no hard error) and runs correctly", async () => {
     const r = await compileFlag(true, HARNESS_SRC);
     expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
-    // Kept on the compile-twice path (NOT the IR-first compile-once set).
-    expect(r.irFirstSkipped).not.toContain("decimalToHexString");
-    expect(r.irFirstSkipped).not.toContain("decimalToPercentHexString");
     const exp = await instantiate(r);
     expect((exp.test as () => number)()).toBe(1);
   });
@@ -103,10 +117,14 @@ describe("#2972 string element access under IR-first (gate 5)", () => {
     expect((exp.test as () => number)()).toBe(1);
   });
 
-  it("flag ON: a claimed const-string-index function no longer hard-errors", async () => {
+  it("flag ON: a claimed const-string-index function IR-compiles AND is compile-once (2a lowering)", async () => {
+    // Pre-lowering, gate 5 excluded this function from the skip set (the
+    // landed PR #2519 asserted not-skipped here). With the 2a lowering + the
+    // refined gate, the proven read is IR-first-safe: the function is
+    // SKIPPED (compile-once) and the result comes from the IR body.
     const r = await compileFlag(true, CONST_STRING_INDEX_SRC);
     expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
-    expect(r.irFirstSkipped).not.toContain("f");
+    expect(r.irFirstSkipped).toContain("f");
     const exp = await instantiate(r);
     expect((exp.f as (n: number) => string)(200)).toBe("8"); // hex[200 & 0xf] = hex[8]
   });
@@ -117,20 +135,26 @@ describe("#2972 string element access under IR-first (gate 5)", () => {
     expect(r.irFirstSkipped).toContain("sum");
   });
 
-  describe("irFirstBodyReadsStringElement predicate", () => {
+  describe("irFirstBodyReadsStringElement predicate (refined: proven reads don't fire)", () => {
     it.each([
-      [
-        "var string-literal receiver, computed index",
-        `function f(n){ var hex="0123456789ABCDEF"; return "%"+hex[(n>>4)&0xf]+hex[n&0xf]; }`,
-      ],
-      ["const string-literal receiver, computed index", `function f(n){ const hex="ABCDEF"; return hex[n&1]; }`],
-      ["string-typed parameter receiver", `function f(s: string, i: number){ return s[i]; }`],
-      ["string-literal receiver in place", `function f(i){ return "abcdef"[i]; }`],
-    ])("fires: %s", (_label, src) => {
+      ["string-typed parameter receiver (length unknown)", `function f(s: string, i: number){ return s[i]; }`],
+      ["string-literal receiver in place (identifier-only lowering)", `function f(i){ return "abcdef"[i]; }`],
+      ["unproven index on literal-known receiver", `function f(i){ const hex="ABCDEF"; return hex[i]; }`],
+      ["mask too wide for the literal", `function f(n){ const hex="ABCDEF"; return hex[n & 0xf]; }`],
+      ["reassigned receiver loses the length fact", `function f(n){ let h="ABCDEF"; h="xy"; return h[n & 1]; }`],
+    ])("fires (unproven — compile-twice): %s", (_label, src) => {
       expect(irFirstBodyReadsStringElement(fnDecl(src))).toBe(true);
     });
 
     it.each([
+      // (#2972 2a) proven reads are lowerable — the gate must NOT exclude them.
+      [
+        "var string-literal receiver, mask-proven index (the harness shape)",
+        `function f(n){ var hex="0123456789ABCDEF"; return "%"+hex[(n>>4)&0xf]+hex[n&0xf]; }`,
+      ],
+      ["const string-literal receiver, mask-proven index", `function f(n){ const hex="ABCDEF"; return hex[n&1]; }`],
+      ["const string-literal receiver, literal index in range", `function f(){ const hex="ABCDEF"; return hex[3]; }`],
+      // non-string receivers — never fired, still don't.
       ["vec (number[]) receiver", `function f(arr: number[], i: number){ return arr[i]; }`],
       ["numeric-var-indexed vec receiver", `function f(a: number[]){ var j=0; return a[j]; }`],
       ["object string-literal key", `function f(o){ return o["k"]; }`],
@@ -138,6 +162,83 @@ describe("#2972 string element access under IR-first (gate 5)", () => {
       ["optional element access (out of IR scope anyway)", `function f(s: string, i){ return s?.[i]; }`],
     ])("does not fire: %s", (_label, src) => {
       expect(irFirstBodyReadsStringElement(fnDecl(src))).toBe(false);
+    });
+  });
+
+  describe("2a lowering (proven-in-bounds charAt delegation)", () => {
+    it("selector claims the proven harness shape; zero post-claim errors", async () => {
+      const ast = analyzeSource(PROVEN_HARNESS_SRC);
+      const sel = planIrCompilation(ast.sourceFile, { experimentalIR: true });
+      expect(sel.funcs.has("decimalToPercentHexString")).toBe(true);
+      const r = await compileFlag(false, PROVEN_HARNESS_SRC);
+      expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+      expect(r.irPostClaimErrors ?? []).toEqual([]);
+    });
+
+    it("bit-correct results, flag-off AND flag-on with the legacy body skipped", async () => {
+      for (const flag of [false, true]) {
+        const r = await compileFlag(flag, PROVEN_HARNESS_SRC);
+        expect(r.success).toBe(true);
+        if (flag) expect(r.irFirstSkipped).toContain("decimalToPercentHexString");
+        const exp = await instantiate(r);
+        const run = exp.run as (n: number) => string;
+        expect(run(0xab)).toBe("%AB");
+        expect(run(0)).toBe("%00");
+        expect(run(0xff)).toBe("%FF");
+        expect(run(0x5)).toBe("%05");
+      }
+    });
+
+    it("UNPROVEN index keeps the sound demote path (OOB semantics preserved)", async () => {
+      const src = `
+export function pick(i: number): string {
+  const hex = "0123456789ABCDEF";
+  return "" + hex[i];
+}
+`;
+      const r = await compileFlag(false, src);
+      expect(r.success).toBe(true);
+      const exp = await instantiate(r);
+      const pick = exp.pick as (i: number) => string;
+      expect(pick(3)).toBe("3");
+      expect(pick(99)).toBe("undefined"); // "" + undefined — OOB semantics preserved
+    });
+
+    it("proof predicate rows", () => {
+      const sf = ts.createSourceFile(
+        "p.ts",
+        "const a = s[5]; const b = s[(n >> 4) & 0xf]; const c = s[15 & n]; const d = s[n & 0x1f]; const e = s[n + 1]; const f = s[-1];",
+        ts.ScriptTarget.Latest,
+        true,
+      );
+      const idx: ts.Expression[] = [];
+      const visit = (node: ts.Node): void => {
+        if (ts.isElementAccessExpression(node)) idx.push(node.argumentExpression);
+        node.forEachChild(visit);
+      };
+      sf.forEachChild(visit);
+      const [lit5, mask0xf, maskLeft15, mask0x1f, addExpr, negLit] = idx;
+      expect(stringIndexProvenBelow(lit5!, 16)).toBe(true); // 5 < 16
+      expect(stringIndexProvenBelow(lit5!, 5)).toBe(false); // 5 !< 5
+      expect(stringIndexProvenBelow(mask0xf!, 16)).toBe(true); // [0,15] < 16
+      expect(stringIndexProvenBelow(maskLeft15!, 16)).toBe(true); // K on the left
+      expect(stringIndexProvenBelow(mask0x1f!, 16)).toBe(false); // [0,31] !< 16
+      expect(stringIndexProvenBelow(addExpr!, 16)).toBe(false); // unbounded
+      expect(stringIndexProvenBelow(negLit!, 16)).toBe(false); // not a non-neg literal
+    });
+
+    it("reassigned receiver loses the literal-length fact → demote (still correct)", async () => {
+      const src = `
+export function swap(n: number): string {
+  let hex = "0123456789ABCDEF";
+  hex = "abcdef";
+  return "" + hex[n & 0x3];
+}
+`;
+      const r = await compileFlag(false, src);
+      expect(r.success).toBe(true);
+      const exp = await instantiate(r);
+      expect((exp.swap as (n: number) => string)(1)).toBe("b"); // reassigned value governs
     });
   });
 });

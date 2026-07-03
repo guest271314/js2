@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 import { compileSource } from "./compiler.js";
 import type { ImportDescriptor, ImportIntent, ImportPolicy } from "./index.js";
-import { createEvalShim } from "./runtime-eval.js";
+import { createEvalShim, createNewFunctionShim } from "./runtime-eval.js";
 import { hasLoneSurrogate, hexCodeUnits, STRING_CONSTANTS16_NS } from "./string-surrogate.js";
 
 /**
@@ -8235,6 +8235,23 @@ assert._isSameValue = isSameValue;
           // biome-ignore lint/security/noGlobalEval: intentional test262 runtime eval for harness compatibility
           return (0, eval)(wrapped);
         }
+      }
+      if (name === "__extern_new_function") {
+        // (#2960) Dynamic `new Function(params, body)` — meta-circular
+        // construction via js2wasm's own compiler (see createNewFunctionShim).
+        // Returns a real JS-callable function the parent module can invoke.
+        // Falls back to native `Function(params, body)` when the js2wasm
+        // pipeline can't compile the body (mirrors __extern_eval's host
+        // fallback — keeps harness-shaped dynamic functions working).
+        const wasmNewFnShim = createNewFunctionShim({});
+        return (params: any, body: any) => {
+          try {
+            return wasmNewFnShim(params, body);
+          } catch {
+            // biome-ignore lint/security/noGlobalEval: intentional test262 runtime new Function
+            return new Function(String(params ?? ""), String(body ?? ""));
+          }
+        };
       }
       if (name === "__extern_get")
         return (obj: any, key: any) => {

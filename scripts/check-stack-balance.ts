@@ -54,6 +54,7 @@ const ALL_KINDS: readonly FixupKind[] = [
   "call-arg-coerce",
   "struct-field-coerce",
   "local-set-coerce",
+  "branch-type-unfixable", // (#2140) detected-unbridgeable branch mismatch — pinned at 0
 ];
 
 interface Baseline {

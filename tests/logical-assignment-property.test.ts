@@ -7,7 +7,7 @@ import {
   compile,
   readFileSync,
   resolve,
-} from "./helpers.js";
+} from "./equivalence/helpers.js";
 
 describe("logical assignment on property access (#415)", () => {
   it("obj.x ??= default when x is defined", async () => {

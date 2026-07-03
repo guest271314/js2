@@ -23,6 +23,11 @@
 //   node scripts/claim-issue.mjs --complete <id>
 //   node scripts/claim-issue.mjs --list
 //
+// --dry-run works for --allocate AND for the claim/release/complete write modes:
+// it previews the action and returns BEFORE any commit/push, so the
+// issue-assignments ref is never touched. It is position-independent (the flag
+// may appear anywhere in argv).
+//
 // ATOMIC ID ALLOCATION (#2531): `--allocate` is the canonical, collision-proof
 // way to reserve a FRESH issue id. Picking an id by hand ("next free off main")
 // races: two devs on separate branches each pick the same number because none
@@ -166,7 +171,13 @@ function remoteAssignSha() {
 
 function fetchAssign(sha) {
   if (!sha) return; // ref doesn't exist yet
-  git(["fetch", "--quiet", REMOTE, `${ASSIGN_REF}:refs/claim-issue/base`]);
+  // (#2974/#2977) Force-update the local mirror ref (`+` refspec). Without the
+  // `+`, a diverged local `refs/claim-issue/base` (the ref moved on the remote
+  // while we held a stale local copy) makes the fetch fail non-fast-forward
+  // ("cannot lock ref … is at <new> but expected <old>") and hard-crashes the
+  // script — previously requiring a manual `git update-ref -d`. The base ref is
+  // a disposable read mirror, so overwriting it unconditionally is safe.
+  git(["fetch", "--quiet", REMOTE, `+${ASSIGN_REF}:refs/claim-issue/base`]);
 }
 
 function readEntry(baseSha, id) {
@@ -278,6 +289,20 @@ function idsFromAssignRef(sha) {
 //     backstop) — but no longer fail-SILENT.
 function sleepMs(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+// (#2974/#2977) Exponential backoff + full jitter for the first-push-wins
+// retry loops (allocate / claim). Losers previously retried IMMEDIATELY and
+// re-collided, so N concurrent allocators degenerated into a livelock (six
+// observed re-scanning hundreds of ref entries in lock-step). Randomized
+// backoff turns the synchronized herd into a de-facto queue: retry at a random
+// point in [0, base·2^(attempt-1)], capped, so contenders spread out in time
+// and one makes progress each round. Bounded by MAX_RETRIES either way.
+function raceBackoffMs(attempt) {
+  const BASE_MS = 150;
+  const CAP_MS = 4000;
+  const ceil = Math.min(CAP_MS, BASE_MS * 2 ** (attempt - 1));
+  return Math.floor(Math.random() * ceil);
 }
 
 const PR_FILES_QUERY = `query($owner:String!,$name:String!,$cursor:String){
@@ -500,6 +525,9 @@ function doAllocate(assignee) {
       return;
     }
     console.error(`allocate: ref moved (attempt ${attempt}/${MAX_RETRIES}) — re-scanning for a fresh id…`);
+    // (#2974/#2977) Backoff+jitter before re-scanning so concurrent allocators
+    // don't re-collide in lock-step. Skip the wait after the final attempt.
+    if (attempt < MAX_RETRIES) sleepMs(raceBackoffMs(attempt));
   }
   die(5, `Could not reserve a fresh id after ${MAX_RETRIES} attempts (heavy contention). Re-run.`);
 }
@@ -516,6 +544,29 @@ function writeMode(target, assignee, kind) {
     if (!main) {
       console.error(`warning: no issue file for #${base} found on ${MAIN_REF}; claiming anyway.`);
     }
+  }
+
+  // --dry-run: preview WITHOUT mutating the ref (no commit, no push). This MUST
+  // short-circuit BEFORE the retry/push loop below, regardless of where the flag
+  // appears in argv — `flags` is a position-independent Set built from every
+  // `--`-prefixed arg, so `claim-issue.mjs <id> <name> --dry-run` and
+  // `claim-issue.mjs --dry-run <id> <name>` both land here. Previously only
+  // --allocate honored --dry-run; a claim/release/complete probe with --dry-run
+  // silently performed a REAL mutation (agents accidentally claimed live issues
+  // twice this way).
+  if (flags.has("--dry-run")) {
+    const sha = remoteAssignSha();
+    fetchAssign(sha);
+    const existing = readEntry(sha, key);
+    const held = isHeld(existing);
+    console.error(
+      `(dry-run) would ${kind} ${label}${assignee ? ` -> ${assignee}` : ""}${branch ? ` (branch ${branch})` : ""}. ` +
+        (held
+          ? `Currently held by ${existing.assignee} (since ${existing.claimed_at || "?"}).`
+          : "Currently unassigned.") +
+        ` No push performed; ${REMOTE}/${ASSIGN_REF} untouched.`,
+    );
+    return;
   }
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
@@ -568,6 +619,9 @@ function writeMode(target, assignee, kind) {
       return;
     }
     console.error(`push rejected (attempt ${attempt}/${MAX_RETRIES}) — someone else moved the ref, re-checking…`);
+    // (#2974/#2977) Backoff+jitter before re-checking so concurrent claimants
+    // don't re-collide in lock-step. Skip the wait after the final attempt.
+    if (attempt < MAX_RETRIES) sleepMs(raceBackoffMs(attempt));
   }
   die(5, `Could not acquire the claim ref after ${MAX_RETRIES} attempts. Try again.`);
 }
