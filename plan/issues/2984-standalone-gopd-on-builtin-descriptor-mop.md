@@ -104,6 +104,84 @@ measurement-grounded re-scope + split recommendation rather than a codegen
 edit. Bucket (3)'s host-free-accessor slice is the recommended next
 _implementable_ unit and is the only one that does not wait on #2949.
 
+### Bucket (3) re-measurement (2026-07-03, dev-2984-bucket3) — the WeakMap narrative is STALE; bucket (3) is effectively DONE for test262
+
+> **Re-measured against `upstream/main` @ `ab130543e`** (`target: standalone`,
+> instantiate with empty imports `{}`). This slice was dispatched to "retire the
+> `WeakMap_get`/`WeakMap_set` host import that accessor-closure invocation drags
+> in". **That import leak no longer reproduces on current main** — the split
+> recommendation above (item 1) is superseded by the findings here. Probes:
+> `.tmp/probe*.mjs` (gitignored) — `compile(src,{target:'standalone'})` then
+> `WebAssembly.instantiate(r.binary,{})` + `WebAssembly.Module.imports(mod)`.
+
+**Finding 1 — no WeakMap import; the module is fully host-free.** `gOPD(obj,'x')`
+on a plain object with `get x()`/`set x(v)` compiles with **zero imports**
+(`WebAssembly.Module.imports` is empty). There is **no `env::WeakMap_get` /
+`env::WeakMap_set`** — those symbols do not exist anywhere in `src/` on current
+main (`grep -rn 'WeakMap_get\|WeakMap_set' src/` → 0 hits). The "traps at
+instantiate under standalone (missing import)" narrative in the table above is
+against a pre-#2861/#2863/#2896 tree and no longer holds.
+
+**Finding 2 — descriptor SHAPE + accessor-closure STORAGE are correct.** All the
+shape assertions that real test262 gOPD tests make pass host-free:
+`typeof d.get === 'function'` ✓, `typeof d.set === 'function'` ✓,
+`d.hasOwnProperty('value') === false` ✓, `d.enumerable === true` ✓,
+`d.configurable === true` ✓. Direct accessor use also works: `obj.x` → `5`,
+`obj.x = 42; obj._x` → `42` (the `__extern_get`/`__extern_set` arms invoke the
+stored `$get`/`$set` closure via the `__call_accessor_get/set` drivers, threading
+`this` through `__current_this` — all native, no host).
+
+**Finding 3 — the residual gap is NOT accessor-specific and has ~zero test262
+yield.** The only thing that fails is *invoking the getter/setter as a
+first-class value pulled from the descriptor*: `d.get.call(obj)` → `0` (should be
+`5`), `d.get()` → traps. But this is a **general `Function.prototype.call`/
+`.apply`-on-a-first-class-closure-value** gap, not a descriptor/accessor bug — it
+reproduces with no descriptor at all:
+
+| probe (`--target standalone`) | result | expected |
+| --- | --- | --- |
+| `const m = o.m; m.call(o)` (method value, no `this`) | `0` | `5` |
+| `const m = o.m; m.call(o)` (method reads `this._x`) | `0` | `9` |
+| `const m = o.m; m.apply(o,[])` | `0` | `9` |
+| `const g = h; g.call(null)` (fn-decl value) | `0` | `7` |
+| `const m = o.m; m()` (direct, no `.call`) | `5` | `5` ✓ |
+| `const f = () => 5; f.call(null)` (arrow value) | `5` | `5` ✓ |
+
+Root cause: the `identifier.call(thisArg, …)` handler in
+`src/codegen/expressions/calls.ts` (~L4831-4838) statically resolves the closure
+and **drops `thisArg`**, treating every non-`$NativeProto` closure as
+`this`-ignoring; a receiver-extracted method / descriptor getter never gets its
+`this`. The `d.get.call(obj)` form is a *property-access* callee (not an
+identifier), so it doesn't even reach that arm — it falls through the generic
+closure-value dispatch, which has no path to recover the closure struct from an
+arbitrary `externref` and re-invoke it through `__call_fn_method_0/1` with
+`thisArg` bound. A correct fix is "route `.call`/`.apply` on a first-class
+closure value through the `__call_fn_method_N(thisArg, closure, …args)`
+dispatcher" — the **same method-value reification substrate that blocks buckets
+(1)+(2)** (D1 / #2949), *not* an independent accessor slice.
+
+**Finding 4 — no test262 gOPD test invokes the returned accessor.** In
+`test262/test/built-ins/Object/getOwnPropertyDescriptor/`, **zero** tests call
+`.get()`/`.set()`/`.get.call(…)` on the returned descriptor
+(`grep -rlE '\.get\.call|\.set\.call|desc\.get\(|\bget\(\)'` → 0). They assert
+descriptor *shape* only — which already passes (Finding 2). So the residual
+"invoke accessor host-free" work flips ≈0 test262 assertions here.
+
+**Corrected verdict for bucket (3):** it is **effectively done** for
+test262-conformance purposes on current main (shape correct + host-free). The
+"cleanest independent slice / highest test-flip-per-effort" framing in item 1 of
+the split above is **wrong on current main** — that slice's only residual gap is
+a general `.call`/`.apply`-on-closure-value substrate issue with near-zero
+conformance yield, and its real fix converges with the #2949 method-value
+reification that buckets (1)+(2) need. **Recommendation: do NOT spin bucket (3)
+out as a standalone S/M issue.** Fold any remaining first-class-closure-invoke
+work into the #2949 substrate track, and treat the accessor descriptor readback
+itself as closed. (No codegen edit is delivered in this pass — a `.call`/`.apply`
+drop-`thisArg` change risks regressing the many standalone tests that rely on
+"standalone functions ignore `this`", and the correct dispatch belongs on the
+#2949 substrate; per "banked measurement beats a risky codegen change" this pass
+records the measurement and closes the mis-scoped slice.)
+
 ## The three substrate sub-problems
 
 The ~178 failures decompose into three distinct substrate buckets, each with
