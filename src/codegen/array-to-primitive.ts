@@ -31,7 +31,7 @@ import type { CodegenContext } from "./context/types.js";
 import type { Instr, WasmFunction, ValType } from "../ir/types.js";
 import { addFuncType } from "./registry/types.js";
 import { nativeStringLiteralInstrs } from "./native-strings.js";
-import { definedFuncAt } from "./func-space.js"; // (#1916 S2) positional-read chokepoint
+import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S2 read chokepoint / S3b stable-regime minting)
 
 export const ARRAY_TO_PRIMITIVE_STRING = "__array_to_primitive_string";
 
@@ -46,7 +46,7 @@ export function reserveArrayToPrimitiveString(ctx: CodegenContext): number {
   const existing = ctx.funcMap.get(ARRAY_TO_PRIMITIVE_STRING);
   if (existing !== undefined) return existing;
   const sigIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "externref" }], "$array_to_primitive_string_type");
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const funcIdx = mintDefinedFunc(ctx);
   const placeholder: WasmFunction = {
     name: ARRAY_TO_PRIMITIVE_STRING,
     typeIdx: sigIdx,
@@ -57,7 +57,7 @@ export function reserveArrayToPrimitiveString(ctx: CodegenContext): number {
     body: [{ op: "unreachable" } as Instr],
     exported: false,
   };
-  ctx.mod.functions.push(placeholder);
+  pushDefinedFunc(ctx, funcIdx, placeholder);
   ctx.funcMap.set(ARRAY_TO_PRIMITIVE_STRING, funcIdx);
   ctx.arrayToPrimitiveReserved = true;
   return funcIdx;

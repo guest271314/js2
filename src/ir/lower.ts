@@ -2161,21 +2161,41 @@ export function lowerIrFunctionBody<S>(
           }
         };
 
-        // 1. Cond instructions (re-evaluated each iteration).
-        emitBodyBuffer(instr.cond, loopBody);
+        // #2952 slice 1 — `do { body } while (cond)` is a post-test loop:
+        // the body runs BEFORE the first cond check (runs at least once). It
+        // reuses the `while.loop` kind with `postCond: true`; only the
+        // emission order flips (body → cond-check), so the wrapping
+        // `block { loop { ... br 0 } }` and the `br_if 1` exit are identical.
+        const postTest = instr.kind === "while.loop" && instr.postCond === true;
 
-        // 2. Push the cond value, invert (i32.eqz), then br_if 1 to exit.
-        //    #1584 (a3): the control-flow ops route through the trait.
-        emitValue(instr.condValue, loopBody as unknown as S);
-        loopBody.push({ op: "i32.eqz" });
-        emitter.emitBrIf(1, loopBody as unknown as S);
+        if (postTest) {
+          // Post-test: body first, then evaluate cond and exit if falsy.
+          // 1. Body instructions.
+          emitBodyBuffer(instr.body, loopBody);
+          // 2. Cond instructions (re-evaluated each iteration, after body).
+          emitBodyBuffer(instr.cond, loopBody);
+          // 3. Push the cond value, invert (i32.eqz), then br_if 1 to exit.
+          emitValue(instr.condValue, loopBody as unknown as S);
+          loopBody.push({ op: "i32.eqz" });
+          emitter.emitBrIf(1, loopBody as unknown as S);
+        } else {
+          // Pre-test (`while` / `for`): cond first, exit before running body.
+          // 1. Cond instructions (re-evaluated each iteration).
+          emitBodyBuffer(instr.cond, loopBody);
 
-        // 3. Body instructions.
-        emitBodyBuffer(instr.body, loopBody);
+          // 2. Push the cond value, invert (i32.eqz), then br_if 1 to exit.
+          //    #1584 (a3): the control-flow ops route through the trait.
+          emitValue(instr.condValue, loopBody as unknown as S);
+          loopBody.push({ op: "i32.eqz" });
+          emitter.emitBrIf(1, loopBody as unknown as S);
 
-        // 4. Update instructions (for-loop only — empty array for while).
-        if (instr.kind === "for.loop") {
-          emitBodyBuffer(instr.update, loopBody);
+          // 3. Body instructions.
+          emitBodyBuffer(instr.body, loopBody);
+
+          // 4. Update instructions (for-loop only — empty array for while).
+          if (instr.kind === "for.loop") {
+            emitBodyBuffer(instr.update, loopBody);
+          }
         }
 
         // 5. Continue back to the loop header.
