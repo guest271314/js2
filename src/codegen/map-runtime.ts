@@ -33,7 +33,7 @@ import type { InnerResult } from "./shared.js";
 import { compileArrowAsClosure, compileExpression, VOID_RESULT } from "./shared.js";
 import { isNullOrUndefinedLiteral } from "./destructuring-params.js";
 import { coercionInstrs } from "./type-coercion.js";
-import { definedFuncAt } from "./func-space.js"; // (#1916 S2) positional-read chokepoint
+import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S2/S3) positional-read chokepoint + stable-regime minting
 
 /** WasmGC `eq` abstract heap type, signed-LEB `0x6d` = -19. Used for ref.eq on
  *  object keys (only GC eqrefs can be compared by identity). */
@@ -176,9 +176,9 @@ function addMapFunc(
   body: Instr[],
 ): number {
   const typeIdx = addFuncType(ctx, params, results);
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const funcIdx = mintDefinedFunc(ctx);
   ctx.mapHelpers.set(name, funcIdx);
-  ctx.mod.functions.push({ name, typeIdx, locals, body, exported: false });
+  pushDefinedFunc(ctx, funcIdx, { name, typeIdx, locals, body, exported: false });
   return funcIdx;
 }
 

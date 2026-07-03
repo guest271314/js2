@@ -9,7 +9,6 @@
  * `PlusPlusToken` / `MinusMinusToken` cases.
  */
 import { ts } from "../../ts-api.js";
-import { isSymbolType } from "../../checker/type-mapper.js";
 import type { ValType } from "../../ir/types.js";
 import { emitToInt32 } from "../binary-ops.js";
 import { reportError } from "../context/errors.js";
@@ -29,7 +28,10 @@ import { compileMemberIncDec, compilePostfixUnary, compilePrefixUpdate } from ".
  * (and emits the operand-drop + throw) when the operand's TS type is Symbol.
  */
 function emitSymbolToNumberThrow(ctx: CodegenContext, fctx: FunctionContext, operand: ts.Expression): boolean {
-  if (!isSymbolType(ctx.checker.getTypeAtLocation(operand))) return false;
+  // (#1930 Slice-1 pilot) The first oracle-migrated site: was
+  // `isSymbolType(ctx.checker.getTypeAtLocation(operand))` — flag-identical
+  // semantics through the boundary (ESSymbol|UniqueESSymbol → "symbol").
+  if (ctx.oracle.staticJsTypeOf(operand) !== "symbol") return false;
   const t = compileExpression(ctx, fctx, operand);
   if (t !== null) fctx.body.push({ op: "drop" });
   emitThrowTypeError(ctx, fctx, "Cannot convert a Symbol value to a number");

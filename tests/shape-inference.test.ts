@@ -7,7 +7,7 @@ import {
   compile,
   readFileSync,
   resolve,
-} from "./helpers.js";
+} from "./equivalence/helpers.js";
 
 describe("Shape inference: array-like objects", () => {
   it("Array.prototype.indexOf.call on array-like object", async () => {

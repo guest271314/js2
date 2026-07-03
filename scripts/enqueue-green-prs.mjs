@@ -356,12 +356,139 @@ function rerunClaCheck(prNumber, branch) {
   return { ok: true, why: `reran cla-check run ${runId}` };
 }
 
+// PARK-RACE GUARD (#2975). auto-enqueue (this script, primary enqueuer since
+// #2786, grace 0) and auto-park (#2547) both react to the same failed
+// `merge_group` run. When a PR fails merge_group re-validation GitHub removes it
+// from the queue; auto-park then adds the `hold` label — but ~5-16s later. In
+// that gap this sweep still sees the PR as CLEAN + green + un-`hold`-labelled and
+// re-adds it, wasting one full doomed 57-shard merge_group run (and the re-add
+// can reshuffle/cancel entries behind it). Deriving the park decision from the
+// LABEL loses the race; deriving it from the same FAILED-RUN signal auto-park
+// uses does not (issue direction (a), the "race-free" one).
+//
+// Parse a merge-queue synthetic branch `gh-readonly-queue/<base>/pr-<N>-<sha>`
+// into its PR number (mirrors prNumberFromQueueBranch in
+// auto-park-merge-group-failure.mjs). Returns null for any non-queue branch, so
+// a stray run can never be attributed to a PR. Pure + exported for unit tests.
+export function prNumberFromMergeQueueBranch(branch) {
+  if (typeof branch !== "string") return null;
+  const m = branch.match(/^gh-readonly-queue\/[^/]+\/pr-(\d+)-[0-9a-f]+$/);
+  return m ? Number(m[1]) : null;
+}
+
+// Pure park-race decision. Skip a candidate PR ONLY when it has a genuine recent
+// merge_group failure AND no human removed a `hold` label AFTER that failure
+// (i.e. nobody has deliberately re-admitted it). A later hold-removal means a
+// human/agent intentionally re-admitted the PR, so it must get its one prompt
+// re-admission (acceptance criterion 2). Exported for unit tests.
+export function shouldSkipParkingRace({ mergeGroupFailedAtMs, holdRemovedAtMs } = {}) {
+  if (!mergeGroupFailedAtMs) return false; // no failure signal -> enqueue as usual
+  if (holdRemovedAtMs && holdRemovedAtMs > mergeGroupFailedAtMs) return false; // re-admitted
+  return true; // genuinely failed and not re-admitted -> let auto-park hold it
+}
+
+// FAIL-SAFE by design (#2975): every live helper below returns the value that
+// makes the sweep fall back to CURRENT behavior (enqueue) on ANY error. So a bug
+// or API hiccup here can only ever FAIL TO SKIP (= today's behavior, which
+// auto-park still catches) — it can NEVER wrongly strand a good PR.
+
+// Map<prNumber, failedAtMs> of PRs with a RECENT, GENUINE merge_group failure.
+// "Genuine" mirrors auto-park's real-vs-cancellation guard: a run-level failure
+// can be a mere cancellation (membership change re-groups and cancels in-flight
+// runs — 0 failed jobs), so we require >= 1 job with conclusion "failure".
+function recentMergeGroupFailures({ windowMinutes = 30, maxRuns = 40 } = {}) {
+  const out = new Map();
+  try {
+    const cutoff = Date.now() - windowMinutes * 60 * 1000;
+    // Use the REST API (via `gh api`), NOT `gh run list --event/--status`: those
+    // CLI flags do not exist in gh 2.23 (the container), whereas the REST
+    // `event`/`status` query params work across every gh version — and let this
+    // be validated locally. `--jq` compacts to a single JSON array.
+    const res = ghMaybe([
+      "api",
+      `repos/${REPO}/actions/runs?event=merge_group&per_page=${maxRuns}`,
+      "--jq",
+      '[.workflow_runs[] | select(.conclusion == "failure") | {id: .id, headBranch: .head_branch, updatedAt: .updated_at}]',
+    ]);
+    if (!res.ok) return out; // fail-safe: no failures known -> enqueue as usual
+    let runs;
+    try {
+      runs = JSON.parse(res.stdout);
+    } catch {
+      return out;
+    }
+    if (!Array.isArray(runs)) return out;
+    for (const run of runs) {
+      const whenMs = Date.parse(run.updatedAt);
+      if (!Number.isFinite(whenMs) || whenMs < cutoff) continue; // stale / unparseable
+      const prNumber = prNumberFromMergeQueueBranch(run.headBranch);
+      if (!prNumber) continue;
+      // Keep only the most-recent failure per PR; skip the job probe if we
+      // already recorded a newer one.
+      const existing = out.get(prNumber);
+      if (existing && existing >= whenMs) continue;
+      if (!runHasFailedJob(run.id)) continue; // cancellation, not a real failure
+      out.set(prNumber, whenMs);
+    }
+  } catch {
+    return new Map(); // fail-safe
+  }
+  return out;
+}
+
+// True iff the run has >= 1 job that concluded "failure" (a genuine shard/check
+// failure, not a whole-run cancellation). Uses the REST jobs endpoint (`gh api`)
+// for cross-gh-version stability. Fail-safe: on any error return false so an
+// unreadable run is treated as NOT a genuine failure (enqueue as usual).
+function runHasFailedJob(runId) {
+  try {
+    const res = ghMaybe([
+      "api",
+      `repos/${REPO}/actions/runs/${runId}/jobs`,
+      "--jq",
+      '[.jobs[] | select(.conclusion == "failure")] | length',
+    ]);
+    if (!res.ok) return false;
+    return Number(res.stdout.trim()) > 0;
+  } catch {
+    return false;
+  }
+}
+
+// Timestamp (ms) of the most recent `hold`-label REMOVAL on the PR, or 0 if
+// none. A removal after a merge_group failure means someone deliberately
+// re-admitted the PR (see shouldSkipParkingRace). Fail-safe: on any error return
+// Infinity so the caller treats the PR as "re-admitted" and enqueues as usual
+// (never strands a PR because the timeline read hiccupped).
+function holdLabelRemovedAtMs(prNumber) {
+  try {
+    const res = ghMaybe([
+      "api",
+      "--paginate",
+      `repos/${REPO}/issues/${prNumber}/timeline`,
+      "-q",
+      '[.[] | select(.event == "unlabeled" and .label.name == "hold") | .created_at] | last // empty',
+    ]);
+    if (!res.ok) return Number.POSITIVE_INFINITY; // fail-safe -> treat as re-admitted
+    const ts = res.stdout.trim();
+    if (!ts) return 0; // no hold removal recorded
+    const ms = Date.parse(ts);
+    return Number.isFinite(ms) ? ms : Number.POSITIVE_INFINITY;
+  } catch {
+    return Number.POSITIVE_INFINITY; // fail-safe
+  }
+}
+
 // The live sweep is wrapped in runSweep() and only invoked when this file is
 // run as the main module (see the import.meta.url guard at the bottom). That
 // keeps `import { isTrustedAuthor } from "./enqueue-green-prs.mjs"` side-effect
 // free so the gate can be unit-tested without making any `gh` calls.
 function runSweep() {
   const { queued: inQueue, forming } = mergeQueueSnapshot();
+  // PARK-RACE GUARD (#2975): PRs with a genuine recent merge_group failure that
+  // are being (or should be) parked. Computed ONCE per sweep. Fail-safe: empty
+  // on any error, so the sweep behaves exactly as before.
+  const mergeGroupFailures = recentMergeGroupFailures();
 
   // GUARD 1 — TRAILING-ADD ONLY; never touch the forming head (#2560, was #1758).
   // A merge group mid-formation must not have its membership changed: dequeuing or
@@ -453,6 +580,25 @@ function runSweep() {
     }
     if (!ENQUEUEABLE.has(pr.mergeStateStatus)) {
       skipped.push([pr.number, pr.mergeStateStatus]); // BLOCKED/BEHIND/DIRTY/DRAFT/UNKNOWN
+      continue;
+    }
+    // PARK-RACE GUARD (#2975). A PR that just FAILED merge_group re-validation is
+    // removed from the queue but stays CLEAN + green, so it reaches here in the
+    // ~5-16s before auto-park's `hold` label lands. Re-adding it wastes a full
+    // doomed merge_group run. Skip it when it has a genuine recent merge_group
+    // failure AND nobody removed a `hold` after that failure (a later removal is a
+    // deliberate re-admission — honour it). Only PRs in the (usually empty)
+    // failure map pay the timeline read. Fail-safe: any error above yields no
+    // failure / a re-admit sentinel, so this never wrongly strands a PR.
+    const failedAtMs = mergeGroupFailures.get(pr.number);
+    if (
+      failedAtMs &&
+      shouldSkipParkingRace({ mergeGroupFailedAtMs: failedAtMs, holdRemovedAtMs: holdLabelRemovedAtMs(pr.number) })
+    ) {
+      skipped.push([
+        pr.number,
+        `merge_group-failure — awaiting auto-park hold (failed ${new Date(failedAtMs).toISOString()})`,
+      ]);
       continue;
     }
     // AUTHOR-TRUST GATE (#2549 + #2550 fork allowlist). Fail closed: a PR is

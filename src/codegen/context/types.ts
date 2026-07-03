@@ -7,6 +7,7 @@
  * to reference context/state shapes.
  */
 import { ts } from "../../ts-api.js";
+import type { TypeOracle } from "../../checker/oracle.js";
 import type { FieldDef, Instr, LocalDef, SourcePos, ValType, WasmModule } from "../../ir/types.js";
 import type { StandaloneRegExpEngineConfig } from "../regexp-standalone.js";
 import type { ObjectRuntimeTypes } from "../object-runtime.js";
@@ -754,6 +755,14 @@ export interface FunctionContext {
 export interface CodegenContext {
   mod: WasmModule;
   checker: ts.TypeChecker;
+  /**
+   * (#1930) THE type-query boundary. Prefer `ctx.oracle` over raw
+   * `ctx.checker` in ALL new code — the oracle-ratchet CI gate fails on
+   * growth of direct checker usage under src/codegen/. Registry-free,
+   * side-effect-free, memoized; returns TypeFact (never ts.Type). The
+   * codegen-side fact→ValType adapter performs registration separately.
+   */
+  oracle: TypeOracle;
   /** Map from function name to its absolute index (imports + locals) */
   funcMap: Map<string, number>;
   /** Map from struct/interface name to type index */
@@ -2166,13 +2175,6 @@ export interface CodegenContext {
    * declared externref.
    */
   jsxRuntime?: import("../../import-resolver.js").JsxRuntimeImport;
-  /**
-   * #1261 — module-wide worst-case eval tier (1=no eval … 5=direct sloppy).
-   * Computed read-only by `classifyEvalTier`; downstream optimization gating
-   * (#1262–#1265) consumes it. Optional because not every context constructs
-   * from a full source file.
-   */
-  evalTier?: import("../eval-tiering.js").EvalTier;
 }
 
 export type { SourcePos };

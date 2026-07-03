@@ -7,6 +7,7 @@
     "branch-type-cast": 0,
     "call-arg-coerce": 7,
     "struct-field-coerce": 0,
-    "local-set-coerce": 0
+    "local-set-coerce": 0,
+    "branch-type-unfixable": 0
   }
 }

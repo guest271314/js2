@@ -104,6 +104,13 @@ jobs:
       - name: IR fallback gate (#1376)
         run: pnpm run check:ir-fallbacks
 
+      - name: Oracle ratchet (#1930)
+        # Fails when direct TS-checker usage grows under src/codegen/ —
+        # new code must query ctx.oracle (src/checker/oracle.ts). Baseline:
+        # scripts/oracle-ratchet-baseline.json (--update for intentional
+        # reseeds; --update-on-decrease banks improvements).
+        run: pnpm run check:oracle-ratchet
+
       - name: IR adoption table freshness (#2145)
         # Fails when plan/log/ir-adoption.md drifts from its generator data or
         # from the IrFallbackReason union in src/ir/select.ts. Regenerate with
