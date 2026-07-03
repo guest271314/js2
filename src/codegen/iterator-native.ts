@@ -47,7 +47,7 @@ import type { Instr, ValType } from "../ir/types.js";
 import type { CodegenContext } from "./context/types.js";
 import { getArrTypeIdxFromVec, getOrRegisterVecType } from "./registry/types.js";
 import { addFuncType } from "./registry/types.js";
-import { definedFuncAt } from "./func-space.js"; // (#1916 S2) positional-read chokepoint
+import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S2 read chokepoint / S3b stable-regime minting)
 
 /** Slice-1 IterRec kind tag for a canonical externref `$Vec`. */
 const ITER_KIND_VEC = 3;
@@ -163,9 +163,9 @@ export function ensureNativeIteratorRuntime(ctx: CodegenContext): void {
     body: Instr[],
   ): number => {
     const typeIdx = addFuncType(ctx, paramTypes, resultTypes);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.funcMap.set(name, funcIdx);
-    ctx.mod.functions.push({ name, typeIdx, locals, body, exported: false });
+    pushDefinedFunc(ctx, funcIdx, { name, typeIdx, locals, body, exported: false });
     return funcIdx;
   };
 
@@ -282,9 +282,9 @@ export function ensureNativeArrayFromIterN(ctx: CodegenContext): number {
     // Should never happen (ensureNativeIteratorRuntime just ran) — fall back to
     // a host import so the caller still resolves a funcIdx by name.
     const typeIdx = addFuncType(ctx, [{ kind: "externref" }, { kind: "f64" }], [{ kind: "externref" }]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.funcMap.set("__array_from_iter_n", funcIdx);
-    ctx.mod.functions.push({ name: "__array_from_iter_n", typeIdx, locals: [], body: [], exported: false });
+    pushDefinedFunc(ctx, funcIdx, { name: "__array_from_iter_n", typeIdx, locals: [], body: [], exported: false });
     return funcIdx;
   }
 
@@ -441,9 +441,9 @@ export function ensureNativeArrayFromIterN(ctx: CodegenContext): number {
   ];
 
   const typeIdx = addFuncType(ctx, [{ kind: "externref" }, { kind: "f64" }], [{ kind: "externref" }]);
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const funcIdx = mintDefinedFunc(ctx);
   ctx.funcMap.set("__array_from_iter_n", funcIdx);
-  ctx.mod.functions.push({ name: "__array_from_iter_n", typeIdx, locals, body, exported: false });
+  pushDefinedFunc(ctx, funcIdx, { name: "__array_from_iter_n", typeIdx, locals, body, exported: false });
   return funcIdx;
 }
 

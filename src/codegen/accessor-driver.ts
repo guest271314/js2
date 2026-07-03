@@ -37,7 +37,7 @@
 import type { Instr, WasmFunction } from "../ir/types.js";
 import type { CodegenContext } from "./context/types.js";
 import { addFuncType } from "./registry/types.js";
-import { definedFuncAt } from "./func-space.js"; // (#1916 S2) positional-read chokepoint
+import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S2 read chokepoint / S3b stable-regime minting)
 
 /** Reserved name for the accessor-get driver (arity-0 getter wrapper). */
 export const CALL_ACCESSOR_GET = "__call_accessor_get";
@@ -79,7 +79,7 @@ export function reserveAccessorGetDriver(ctx: CodegenContext): number {
     [{ kind: "externref" }],
     "$call_accessor_get_type",
   );
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const funcIdx = mintDefinedFunc(ctx);
   const placeholder: WasmFunction = {
     name: CALL_ACCESSOR_GET,
     typeIdx: sigIdx,
@@ -90,7 +90,7 @@ export function reserveAccessorGetDriver(ctx: CodegenContext): number {
     body: [{ op: "unreachable" } as Instr],
     exported: false,
   };
-  ctx.mod.functions.push(placeholder);
+  pushDefinedFunc(ctx, funcIdx, placeholder);
   ctx.funcMap.set(CALL_ACCESSOR_GET, funcIdx);
   ctx.accessorGetDriverReserved = true;
   return funcIdx;
@@ -113,7 +113,7 @@ export function reserveAccessorSetDriver(ctx: CodegenContext): number {
     [],
     "$call_accessor_set_type",
   );
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const funcIdx = mintDefinedFunc(ctx);
   const placeholder: WasmFunction = {
     name: CALL_ACCESSOR_SET,
     typeIdx: sigIdx,
@@ -123,7 +123,7 @@ export function reserveAccessorSetDriver(ctx: CodegenContext): number {
     body: [{ op: "unreachable" } as Instr],
     exported: false,
   };
-  ctx.mod.functions.push(placeholder);
+  pushDefinedFunc(ctx, funcIdx, placeholder);
   ctx.funcMap.set(CALL_ACCESSOR_SET, funcIdx);
   ctx.accessorSetDriverReserved = true;
   return funcIdx;
@@ -152,7 +152,7 @@ export function reserveReviverDriver(ctx: CodegenContext): number {
     [{ kind: "externref" }],
     "$call_reviver_type",
   );
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const funcIdx = mintDefinedFunc(ctx);
   const placeholder: WasmFunction = {
     name: CALL_REVIVER,
     typeIdx: sigIdx,
@@ -163,7 +163,7 @@ export function reserveReviverDriver(ctx: CodegenContext): number {
     body: [{ op: "unreachable" } as Instr],
     exported: false,
   };
-  ctx.mod.functions.push(placeholder);
+  pushDefinedFunc(ctx, funcIdx, placeholder);
   ctx.funcMap.set(CALL_REVIVER, funcIdx);
   ctx.reviverDriverReserved = true;
   return funcIdx;
@@ -187,7 +187,7 @@ export function reserveToJsonDriver(ctx: CodegenContext): number {
     [{ kind: "externref" }],
     "$call_to_json_type",
   );
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const funcIdx = mintDefinedFunc(ctx);
   const placeholder: WasmFunction = {
     name: CALL_TO_JSON,
     typeIdx: sigIdx,
@@ -195,7 +195,7 @@ export function reserveToJsonDriver(ctx: CodegenContext): number {
     body: [{ op: "unreachable" } as Instr],
     exported: false,
   };
-  ctx.mod.functions.push(placeholder);
+  pushDefinedFunc(ctx, funcIdx, placeholder);
   ctx.funcMap.set(CALL_TO_JSON, funcIdx);
   ctx.toJsonDriverReserved = true;
   return funcIdx;
@@ -221,7 +221,7 @@ export function reserveReplacerDriver(ctx: CodegenContext): number {
     [{ kind: "externref" }],
     "$call_replacer_type",
   );
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const funcIdx = mintDefinedFunc(ctx);
   const placeholder: WasmFunction = {
     name: CALL_REPLACER,
     typeIdx: sigIdx,
@@ -229,7 +229,7 @@ export function reserveReplacerDriver(ctx: CodegenContext): number {
     body: [{ op: "unreachable" } as Instr],
     exported: false,
   };
-  ctx.mod.functions.push(placeholder);
+  pushDefinedFunc(ctx, funcIdx, placeholder);
   ctx.funcMap.set(CALL_REPLACER, funcIdx);
   ctx.replacerDriverReserved = true;
   return funcIdx;

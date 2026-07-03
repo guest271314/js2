@@ -339,6 +339,16 @@ is never a moment where one value means two functions.
     signatures — takes `mod` only, import-count context must be derivable
     from `mod`; audit"). Like closures, this file needs an infra fix before
     it can flip byte-identically; tracked here for the next executor.
+  - **S3b medium batch C — LANDED (dev-1916b)**: `accessor-driver.ts` (5:
+    reserve-then-fill placeholder accessors, uniform `funcIdx`/`placeholder`)
+    + `iterator-native.ts` (3: `__array_from_iter_n` + inline iterator
+    helpers). Corpus byte-IDENTICAL (stacked on A+B → inherits both infra
+    fixes). Non-async producers flipped cleanly with no new drift.
+  - **async-frame.ts (3) + promise-combinators.ts (2) — DEFERRED**
+    alongside `declarations.ts`: they build the same async/promise state
+    machines whose `__sset_*` helpers exposed the `stackBalance`-class
+    consumer bug; flipping them risks the same drift. They flip once the
+    consumer audit fix lands.
   - **S3b batch 4 — native-regex (dev-1916o, handoff from dev-1916f).**
     `native-regex.ts`: all 10 helper producers (`__regex_class_match` +
     the exec/match/replace/split/test family) flipped from the inline
