@@ -227,7 +227,10 @@ describe("#1850 — per-backend IR legality and hard verifier fallback", () => {
     );
   });
 
-  it("rejects non-vec whole-function lowering through the linear emitter boundary", () => {
+  it("#2954: accepts a core-op (const) whole-function lowering through the linear boundary", () => {
+    // #2954 opened the core-op families (const/binary/…/control-flow/call) on the
+    // linear boundary — a numeric const function now lowers cleanly (byte-identical
+    // to WasmGc). Cf. the divergent-family rejection test below.
     const v1 = asValueId(1);
     const fn: IrFunction = {
       name: "linearConst",
@@ -238,10 +241,33 @@ describe("#1850 — per-backend IR legality and hard verifier fallback", () => {
       valueCount: 2,
     };
 
+    expect(verifyIrBackendLegality(fn, "linear")).toEqual([]);
+    expect(() => lowerIrFunctionBody(fn, minimalResolver(), new LinearEmitter())).not.toThrow();
+  });
+
+  it("#2954: still rejects a representation-divergent (object.new) instr on the linear boundary", () => {
+    // The core-op opening (#2954) did NOT open the divergent families — objects
+    // lower to WasmGC `struct.*`; the linear analogue lands with #2956.
+    const objInstr: IrInstr = {
+      kind: "object.new",
+      shape: { fields: [] },
+      args: [],
+      result: asValueId(1),
+      resultType: { kind: "object", shape: { fields: [] } },
+    } as unknown as IrInstr;
+    const fn: IrFunction = {
+      name: "linearObject",
+      params: [],
+      resultTypes: [I32],
+      // object.new (v1, divergent) then a plain i32 const (v2) returned.
+      blocks: [block(0, [objInstr, constI32(2, 0)], { kind: "return", values: [asValueId(2)] })],
+      exported: false,
+      valueCount: 3,
+    };
+
     const errors = verifyIrBackendLegality(fn, "linear");
-    expect(errors.some((e) => /linear backend does not support IR instruction 'const'/.test(e.message))).toBe(true);
-    expect(() => lowerIrFunctionBody(fn, minimalResolver(), new LinearEmitter())).toThrow(
-      /linear backend legality failed.*const/,
+    expect(errors.some((e) => /linear backend does not support IR instruction 'object.new'/.test(e.message))).toBe(
+      true,
     );
   });
 

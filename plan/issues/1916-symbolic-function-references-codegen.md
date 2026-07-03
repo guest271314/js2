@@ -2,7 +2,7 @@
 id: 1916
 title: "Symbolic function references in WasmGC codegen — retire the late-import index-shift machinery"
 status: in-progress
-assignee: ttraenkler/dev-1916f
+assignee: ttraenkler/dev-1916o
 pipeline_unblocked: 1927
 sprint: current
 model: fable
@@ -293,6 +293,20 @@ is never a moment where one value means two functions.
     green. (The 3 `issue-1599` refusal failures are pre-existing on
     clean main — stale expectations after a recent JSON change; flagged
     to the lead, not this migration's doing.)
+  - **S3b batch 4 — native-regex (dev-1916o, handoff from dev-1916f).**
+    `native-regex.ts`: all 10 helper producers (`__regex_class_match` +
+    the exec/match/replace/split/test family) flipped from the inline
+    `numImportFuncs + mod.functions.length` mint to `mintDefinedFunc` /
+    `pushDefinedFunc`. All 10 are the simple mint→push shape — no
+    `funcIdx + k` sibling derivation, and (verified by push-order) no
+    intervening push between any mint and its push, so the resolved
+    index equals the live-regime index by construction. Proof: corpus
+    byte-IDENTICAL incl. `regex.ts::standalone` (65908 B, native-regex
+    helpers emitted); #1916/#1677/#1809/#2191/#2193 + regex functional
+    suites (682/1539/2588) green. (The 1 `issue-1539` "refuses dynamic
+    `new RegExp(var)`" failure is pre-existing on clean origin/main —
+    stale refusal expectation after a recent RegExp change; verified via
+    file-revert control, not this flip's doing.)
   - Batch discipline (for the next executor): flip whole FILES (a
     producer family), never partial files; `nextFuncIdx`-style local
     helpers redefine in place; multi-mint sibling derivations

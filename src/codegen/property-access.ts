@@ -16,7 +16,7 @@ import {
   isStringWrapperType,
 } from "../checker/type-mapper.js";
 import type { FieldDef, Instr, ValType } from "../ir/types.js";
-import { definedFuncAt } from "./func-space.js";
+import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js";
 import { emitBoundsCheckedArrayGet } from "./array-methods.js";
 import { emitHoleToUndefined } from "./array-holes.js"; // (#2001 S1)
 import { classMemberFuncKey } from "./class-member-keys.js"; // (#1983) collision-free class-member funcMap keys
@@ -418,6 +418,59 @@ const NUMBER_CONSTANT_PROPS = new Set([
   "NEGATIVE_INFINITY",
   "NaN",
 ]);
+
+/**
+ * (#2933) Numeric VALUES of the `Math` / `Number` namespace static constants —
+ * the single source of truth shared by the dot-access `f64.const` emitter (in
+ * `compilePropertyAccess`) and the reflective element-access fold
+ * (`tryEmitBuiltinNamespaceConstantValue`, used by `compileElementAccess` for
+ * `Math["PI"]` / `const k = "PI"; Math[k]`). Keeping these here means the
+ * reflective read and the direct read never drift.
+ */
+const MATH_CONSTANT_VALUES: Record<string, number> = {
+  PI: Math.PI,
+  E: Math.E,
+  LN2: Math.LN2,
+  LN10: Math.LN10,
+  SQRT2: Math.SQRT2,
+  SQRT1_2: Math.SQRT1_2,
+  LOG2E: Math.LOG2E,
+  LOG10E: Math.LOG10E,
+};
+const NUMBER_CONSTANT_VALUES: Record<string, number> = {
+  EPSILON: Number.EPSILON,
+  MAX_SAFE_INTEGER: Number.MAX_SAFE_INTEGER,
+  MIN_SAFE_INTEGER: Number.MIN_SAFE_INTEGER,
+  MAX_VALUE: Number.MAX_VALUE,
+  MIN_VALUE: Number.MIN_VALUE,
+  POSITIVE_INFINITY: Infinity,
+  NEGATIVE_INFINITY: -Infinity,
+  NaN: NaN,
+};
+
+/**
+ * (#2933) Fold a `<namespace>.<constant>` VALUE read to its `f64.const` when
+ * `builtinName` is `Math`/`Number` and `propName` is one of their numeric
+ * static data constants. Returns the emitted `ValType` (`f64`) or `undefined`
+ * when the pair is not a foldable namespace constant (caller falls through).
+ *
+ * Used by the reflective element-access path (`Math["PI"]`) so a computed read
+ * of a namespace constant emits the SAME constant the syntactic dot read does.
+ * Observationally identical in host mode (which would otherwise read the same
+ * value via `__get_builtin`/`__extern_get`) and the only host-free lowering in
+ * standalone (the generic computed read returns 0 there — #2933).
+ */
+function tryEmitBuiltinNamespaceConstantValue(
+  fctx: FunctionContext,
+  builtinName: string,
+  propName: string,
+): ValType | undefined {
+  const table =
+    builtinName === "Math" ? MATH_CONSTANT_VALUES : builtinName === "Number" ? NUMBER_CONSTANT_VALUES : undefined;
+  if (!table || !(propName in table)) return undefined;
+  fctx.body.push({ op: "f64.const", value: table[propName]! });
+  return { kind: "f64" };
+}
 
 /**
  * (#2595) Per-constructor element byte width for `TypedArray.BYTES_PER_ELEMENT`
@@ -1139,8 +1192,8 @@ function ensureStandaloneBuiltinStaticMethodClosure(
       closureFctx.body.push({ op: "call", funcIdx: gopdIdx });
     }
 
-    funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-    ctx.mod.functions.push({
+    funcIdx = mintDefinedFunc(ctx);
+    pushDefinedFunc(ctx, funcIdx, {
       name: funcName,
       typeIdx: wrapperTypes.liftedFuncTypeIdx,
       locals: closureFctx.locals,
@@ -6626,6 +6679,32 @@ export function compileElementAccess(
   // Handle super[expr] — access parent class property via computed key on `this`
   if (expr.expression.kind === ts.SyntaxKind.SuperKeyword) {
     return compileSuperElementAccess(ctx, fctx, expr);
+  }
+
+  // (#2933) Reflective read of a `Math`/`Number` namespace static CONSTANT via a
+  // statically-resolvable computed key: `Math["PI"]`, `Number["MAX_SAFE_INTEGER"]`,
+  // `const k = "PI"; Math[k]`. Fold to the SAME `f64.const` the syntactic dot read
+  // (`Math.PI`) emits. Without this, standalone returns `0` for the computed form
+  // (the generic dynamic computed read cannot resolve a namespace member — the
+  // namespace has no `$Object` sidecar), and even host mode round-trips through
+  // `__extern_get`. Gated on a resolvable key + a real namespace-constant name, so
+  // non-constant keys (`Math[i]`) and non-constant members (`Math["max"]`) fall
+  // through unchanged. Observationally identical in host mode.
+  {
+    const nsRecv = skipTransparentExpressions(expr.expression);
+    if (ts.isIdentifier(nsRecv)) {
+      const nsName = nsRecv.text;
+      if (nsName === "Math" || nsName === "Number") {
+        const isShadowed = fctx.localMap.has(nsName) || (fctx.boxedCaptures?.has(nsName) ?? false);
+        if (!isShadowed) {
+          const key = resolveComputedKeyExpression(ctx, expr.argumentExpression);
+          if (key !== undefined) {
+            const folded = tryEmitBuiltinNamespaceConstantValue(fctx, nsName, key);
+            if (folded !== undefined) return folded;
+          }
+        }
+      }
+    }
   }
 
   // #1482 — `process.env[<expr>]` under `--target wasi`. Mirrors the
