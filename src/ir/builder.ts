@@ -1153,12 +1153,19 @@ export class IrFunctionBuilder {
    * `block { loop { <cond>; i32.eqz; br_if 1; <body>; br 0 } }`
    * Wasm pattern.
    */
-  emitWhileLoop(args: { cond: readonly IrInstr[]; condValue: IrValueId; body: readonly IrInstr[] }): void {
+  emitWhileLoop(args: {
+    cond: readonly IrInstr[];
+    condValue: IrValueId;
+    body: readonly IrInstr[];
+    /** #2952 slice 1 — set for `do { body } while (cond)` (post-test loop). */
+    postCond?: boolean;
+  }): void {
     this.pushInstr({
       kind: "while.loop",
       cond: args.cond,
       condValue: args.condValue,
       body: args.body,
+      ...(args.postCond ? { postCond: true } : {}),
       result: null,
       resultType: null,
     });

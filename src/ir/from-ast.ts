@@ -583,6 +583,11 @@ function lowerStatementList(stmts: readonly ts.Statement[], cx: LowerCtx): void 
       lowerForStatement(s, cx);
       continue;
     }
+    // #2952 slice 1: `do { body } while (cond)` (post-test loop).
+    if (ts.isDoStatement(s)) {
+      lowerDoStatement(s, cx);
+      continue;
+    }
     // Slice 9 (#1169h): throw / try as a non-tail statement.
     if (ts.isThrowStatement(s)) {
       lowerThrowStatement(s, cx);
@@ -3660,7 +3665,7 @@ function lowerForOfStatement(stmt: ts.ForOfStatement, cx: LowerCtx): void {
  * MUST be called inside the `collectBodyInstrs` closure that builds the cond
  * buffer so the coercion instructions re-run each iteration.
  */
-function coerceLoopCondToBool(condValue: IrValueId, cx: LowerCtx, loopKind: "while" | "for"): IrValueId {
+function coerceLoopCondToBool(condValue: IrValueId, cx: LowerCtx, loopKind: "while" | "for" | "do"): IrValueId {
   const kind = asVal(cx.builder.typeOf(condValue))?.kind;
   if (kind === "i32") return condValue;
   if (kind === "f64") {
@@ -3700,6 +3705,46 @@ function lowerWhileStatement(stmt: ts.WhileStatement, cx: LowerCtx): void {
     cond: condInstrs,
     condValue: condResult,
     body: bodyInstrs,
+  });
+}
+
+/**
+ * #2952 slice 1 — lower `do { body } while (cond)` to a `while.loop` IR
+ * instr with `postCond: true`. A do-while is a POST-test loop: the body
+ * runs once unconditionally, then the cond decides whether to repeat. It
+ * reuses the `while.loop` node (same cond / body buffers) so no pass needs
+ * a new instr kind; the lowerer's `postCond` flag flips the emission order
+ * (body → cond-check) to `block { loop { <body>; <cond>; i32.eqz; br_if 1;
+ * br 0 } }`.
+ *
+ * Bodies containing `break` / `continue` are rejected up-front by the
+ * selector (`isPhase1BodyStatement` has no break/continue arm — same as
+ * the already-adopted `while` / `for`), so this slice only claims the
+ * multi-exit-free subset and never reaches a demote channel post-claim.
+ */
+function lowerDoStatement(stmt: ts.DoStatement, cx: LowerCtx): void {
+  // Body first (buffer built exactly as `while`, just emitted before cond
+  // at lower time). Scope mirrors the while path.
+  const bodyCx: LowerCtx = { ...cx, scope: new Map(cx.scope) };
+  const bodyInstrs = cx.builder.collectBodyInstrs(() => {
+    lowerStmt(stmt.statement, bodyCx);
+  });
+
+  // Cond buffer — re-evaluated each iteration (after the body).
+  let condResult: IrValueId | null = null;
+  const condInstrs = cx.builder.collectBodyInstrs(() => {
+    const raw = lowerExpr(stmt.expression, cx, irVal({ kind: "i32" }));
+    condResult = coerceLoopCondToBool(raw, cx, "do");
+  });
+  if (condResult === null || condResult === undefined) {
+    throw new Error(`ir/from-ast: do-while cond produced no SSA value (${cx.funcName})`);
+  }
+
+  cx.builder.emitWhileLoop({
+    cond: condInstrs,
+    condValue: condResult,
+    body: bodyInstrs,
+    postCond: true,
   });
 }
 
@@ -4211,6 +4256,11 @@ function lowerStmt(stmt: ts.Statement, cx: LowerCtx): void {
   }
   if (ts.isForStatement(stmt)) {
     lowerForStatement(stmt, cx);
+    return;
+  }
+  // #2952 slice 1: nested `do { body } while (cond)` inside a body buffer.
+  if (ts.isDoStatement(stmt)) {
+    lowerDoStatement(stmt, cx);
     return;
   }
   // Slice 9 (#1169h) — throw / try inside a body-statement context.

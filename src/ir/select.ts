@@ -1061,6 +1061,12 @@ function isPhase1StatementList(
       }
       continue;
     }
+    // #2952 slice 1 — `do { body } while (cond)` as a non-tail statement.
+    // Post-test loop; same body-shape restrictions as `while` / `for`.
+    if (ts.isDoStatement(s)) {
+      if (!isPhase1DoStatement(s, scope, localClasses)) return shapeNo("nontail-do", s);
+      continue;
+    }
     // Slice 9 (#1169h) — throw / try as a non-tail statement. A throw
     // doesn't fall through, but the selector accepts it in non-tail
     // position and the lowerer emits a `throw` instr followed by an
@@ -1192,6 +1198,24 @@ function isPhase1ForOf(stmt: ts.ForOfStatement, scope: Set<string>, localClasses
  */
 function isPhase1WhileStatement(
   stmt: ts.WhileStatement,
+  scope: ReadonlySet<string>,
+  localClasses: ReadonlySet<string>,
+): boolean {
+  if (!isPhase1Expr(stmt.expression, scope, localClasses)) return false;
+  return isPhase1BodyStatement(stmt.statement, new Set(scope), localClasses);
+}
+
+/**
+ * #2952 slice 1 — shape-check `do { body } while (cond)`. Identical
+ * constraints to `while`: a Phase-1 condition expression and a Phase-1
+ * body statement. The only runtime difference (body-before-cond) is a
+ * lowering concern, not a shape concern — `break` / `continue` are still
+ * rejected by `isPhase1BodyStatement` (no arm accepts them), so the
+ * multi-exit-free subset is what's claimed. The claim is backed by
+ * `lowerDoStatement` (postCond `while.loop`) — selector↔builder parity.
+ */
+function isPhase1DoStatement(
+  stmt: ts.DoStatement,
   scope: ReadonlySet<string>,
   localClasses: ReadonlySet<string>,
 ): boolean {
@@ -1392,6 +1416,10 @@ function isPhase1BodyStatement(stmt: ts.Statement, scope: Set<string>, localClas
       }
     }
     return true;
+  }
+  // #2952 slice 1 — nested `do { body } while (cond)` inside a body buffer.
+  if (ts.isDoStatement(stmt)) {
+    return isPhase1DoStatement(stmt, scope, localClasses);
   }
   // Slice 9 (#1169h) — throw / try inside a body statement list.
   // Accepting these here lets a try body / catch body / finally body
