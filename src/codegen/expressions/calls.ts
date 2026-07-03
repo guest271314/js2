@@ -12728,7 +12728,7 @@ function compileCallExpression(
       // ToNumber(Symbol) must throw TypeError (§7.1.4). Symbols are lowered to
       // i32 ids, so a numeric pass-through would silently leak the id; detect
       // the symbol TS type and throw instead.
-      if (isSymbolType(ctx.checker.getTypeAtLocation(expr.arguments[0]!))) {
+      if (ctx.oracle.staticJsTypeOf(expr.arguments[0]!) === "symbol") {
         const t = compileExpression(ctx, fctx, expr.arguments[0]!);
         if (t !== null) fctx.body.push({ op: "drop" });
         emitThrowTypeError(ctx, fctx, "Cannot convert a Symbol value to a number");
@@ -12935,7 +12935,7 @@ function compileCallExpression(
       // ("Symbol(" + (desc ?? "") + ")"). Implicit coercions (template literals,
       // `+`) still throw via tryThrowOnSymbolStringCoercion. In native-strings
       // mode build the descriptive string natively (zero host imports).
-      if (ctx.nativeStrings && isSymbolType(ctx.checker.getTypeAtLocation(strArg0))) {
+      if (ctx.nativeStrings && ctx.oracle.staticJsTypeOf(strArg0) === "symbol") {
         const recvType = compileExpression(ctx, fctx, strArg0, { kind: "i32" });
         if (recvType && recvType.kind !== "i32") {
           coerceType(ctx, fctx, recvType, { kind: "i32" });

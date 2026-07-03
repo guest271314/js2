@@ -284,3 +284,55 @@ baseline+preauth; `--update-on-decrease` banks lower counts;
 `--update` reseeds wholesale (intentional changes only, with a written
 reason). Seeded with a +1 pre-authorization for #2972
 (declarations.ts, agreed with dev-2138f 2026-07-02).
+
+## Slice 2 progress — mechanical symbol-fold (dev-1930o, 2026-07-02)
+
+**Shipped (PR branch `issue-1930-oracle-slice2`, stacked on Slice-1 #2517):**
+the first tranche of the Slice-2 `type-mapper`-predicate fold — the 8 codegen
+call sites that read a symbol type via
+`isSymbolType(<checker>.getTypeAtLocation(x))` now call
+`ctx.oracle.staticJsTypeOf(x) === "symbol"` (the Slice-1 pilot's pattern,
+generalised):
+
+- `binary-ops.ts` — to-numeric binary op, ×2 (`expr.left`/`expr.right`)
+- `expressions/new-super.ts` — `new Number` / `new Boolean` of a symbol arg, ×2
+- `expressions/calls.ts` — `Number(sym)`; native-strings `String(sym)`, ×2
+- `expressions/builtins.ts` — `Math.*` numeric-arg symbol guard
+- `expressions/unary-updates.ts` — `sym++` / prefix update
+
+Ratchet: `getTypeAtLocation` 448→440, `ctx.checker` 843→835 (−8 each), banked
+via `--update-on-decrease`. **Proof:** byte-diff-neutral on the #2138 corpus
+(examples ×2 modes + STRIDE-50 test262 = 1102 compiles), SHA-identical
+before/after; `tsc --noEmit` clean; scoped guards in
+`tests/issue-1930-oracle-slice2.test.ts`.
+
+**Why only symbol in this tranche (per-site divergence hazard — read before
+extending the fold):** the 26 `type-mapper` predicates are NOT all 1:1 with a
+v1 oracle query, so this is a per-predicate fold, not a blanket one:
+
+- `isStringType` ALSO matches the `String` **wrapper object** (`new String()`),
+  which the oracle classifies as `{kind:"builtin", name:"String"}` → jsTag
+  `"object"`; so `staticJsTypeOf(x) === "string"` is NOT equivalent. EXCLUDED
+  until a wrapper-aware query/composition exists.
+- `isBooleanType` diverges on a collapsed `true|false` union (the oracle folds
+  it to `boolean`); safe only where the site provably never sees that union.
+- `getNullablePrimitiveInfo` also needs `primitiveKind` — richer than v1's
+  `nullabilityOf`; deferred to Slice 4 (wants a `nullablePrimitiveOf` query).
+
+`isSymbolType` has no wrapper/union complication → provably equivalent, hence
+the safe first tranche. (Note: the Slice-1 pilot comment in `unary.ts` still
+contains the literal `…getTypeAtLocation(operand)` string, so it is still
+counted by the ratchet regex; a trivial reword there would bank 1 more −1 each.)
+
+## Reserved-judgment determination (dev-1930o, 2026-07-02)
+
+Per the senior-dev scoping split: the **five divergent i32/boolean-safety
+matchers (Slice 3)** require deciding WHICH i32-safety semantics is correct at
+each divergence — a value-judgment reserved for the frontier model. I checked
+this file for a recorded **divergence-verdict table** (each divergence resolved
+with a decision): **ABSENT.** The design (the i32/boolean-safety-matchers ¶,
+D4.1, D5 Slice 3) only _names_ the matchers and flags the open question
+(whether the #1179 ToInt32-context and #2789 pack-safety questions are
+reconcilable under one predicate). I therefore did the mechanical slices only
+and did NOT invent the verdicts. Slice 3 is separately in-flight on branch
+`issue-1930-slice3-i32-matchers` (the reserved lane) — left to that owner.
