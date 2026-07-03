@@ -34,6 +34,7 @@ import {
   pushBuiltinFnSingletonValueInstrs,
   STANDALONE_STATIC_METHOD_META,
 } from "./builtin-fn-meta.js";
+import { emitBuiltinConstructorIdentity, isBuiltinConstructorIdentityName } from "./builtin-static-globals.js";
 import { emitLazyClassObjectGet, emitLazyProtoGet, findExternInfoForMember } from "./expressions/extern.js";
 import {
   classifyPrivateMember,
@@ -3216,6 +3217,47 @@ export function compilePropertyAccess(
     if (isAnyOrUnknown) {
       const ctorIdn = tryEmitConstructorViaTag(ctx, fctx, expr, objType);
       if (ctorIdn !== undefined) return ctorIdn;
+    }
+  }
+
+  // (#3006) Standalone `<Builtin>.prototype.constructor` / `<instance>.constructor`
+  // → the GENUINE, identity-stable reified builtin-constructor object (supersedes
+  // the #2537 null-fold). Reading `.constructor` on a builtin extern-class receiver
+  // otherwise walks the inheritance chain (`compileExternPropertyGet`) to the
+  // `Object` base extern class — the only declarer of `constructor`,
+  // `importPrefix: "Object"` — and emits an `env::Object_get_constructor` host
+  // import (the leak the #2999 round-5 analysis flagged: 9 standalone passes for
+  // Set/WeakMap/WeakRef/WeakSet/RegExp/FinalizationRegistry/DisposableStack/
+  // SuppressedError plus instance forms). Route it to the SAME per-name
+  // `__builtin_ctor_<Name>` singleton the bare identifier now resolves to
+  // (identifiers.ts), so `<Builtin>.prototype.constructor === <Builtin>` is
+  // GENUINELY true (same object) and the swap-wrong-builtin cross-check
+  // `Set.prototype.constructor === Map` is GENUINELY false — NOT the null≡null
+  // tautology #2537 relied on.
+  //
+  // Placed HERE (before the builtin-specific `.prototype`/regexp/native-proto
+  // member paths further down) so it fires UNIFORMLY for every target builtin:
+  // routing `RegExp.prototype.constructor` through `compileExternPropertyGet` would
+  // never reach it (a RegExp-specific member path returns first). Gated on the
+  // receiver being a genuine ambient-declared builtin (`isExternalDeclaredClass` +
+  // the narrow `BUILTIN_CONSTRUCTOR_IDENTITY_NAMES` set) so a user `class Set {}`
+  // (not extern-declared) keeps its own `.constructor`. Standalone-only: gc/host
+  // keeps the real `Object_get_constructor` read (a genuine value there).
+  if (ctx.standalone && propName === "constructor") {
+    const builtinName = objType.getSymbol()?.name;
+    if (
+      builtinName !== undefined &&
+      isBuiltinConstructorIdentityName(builtinName) &&
+      isExternalDeclaredClass(objType, ctx.checker)
+    ) {
+      // Evaluate the receiver for its side effects (spec: the object expression is
+      // evaluated), then discard it — the constructor identity does not depend on
+      // the receiver instance.
+      const objResult = compileExpression(ctx, fctx, expr.expression);
+      if (objResult) {
+        fctx.body.push({ op: "drop" });
+      }
+      return emitBuiltinConstructorIdentity(ctx, fctx, builtinName);
     }
   }
 
