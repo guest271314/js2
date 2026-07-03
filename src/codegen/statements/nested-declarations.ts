@@ -50,7 +50,7 @@ import {
   registerEmitArgumentsObject,
   registerHoistFunctionDeclarations,
 } from "../shared.js";
-import { definedFuncAt } from "../func-space.js"; // (#1916 S2) positional-read chokepoint
+import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "../func-space.js"; // (#1916 S2 read chokepoint / S3b stable-regime minting)
 
 /**
  * §15.7.1 ClassDefinitionEvaluation: the class name binding is added to the
@@ -514,7 +514,7 @@ export function compileNestedFunctionDeclaration(
     // call, so pre-registering the call target does not affect it.
     let reservedEntryNC: WasmFunction | undefined;
     if (!opts.reuseReservedEntry) {
-      const reservedFuncIdxNC = ctx.numImportFuncs + ctx.mod.functions.length;
+      const reservedFuncIdxNC = mintDefinedFunc(ctx);
       reservedEntryNC = {
         name: funcName,
         typeIdx: funcTypeIdx,
@@ -522,7 +522,7 @@ export function compileNestedFunctionDeclaration(
         body: [],
         exported: false,
       };
-      ctx.mod.functions.push(reservedEntryNC);
+      pushDefinedFunc(ctx, reservedFuncIdxNC, reservedEntryNC);
       ctx.funcMap.set(funcName, reservedFuncIdxNC);
     }
 
@@ -784,7 +784,7 @@ export function compileNestedFunctionDeclaration(
     // across `addUnionImports` (which can grow `numImportFuncs` and so
     // shift the absolute funcIdx, but the array entry's identity is
     // preserved). funcMap auto-shifts during addUnionImports.
-    const reservedFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const reservedFuncIdx = mintDefinedFunc(ctx);
     const reservedEntry = {
       name: funcName,
       typeIdx: funcTypeIdx,
@@ -792,7 +792,7 @@ export function compileNestedFunctionDeclaration(
       body: [] as Instr[],
       exported: false,
     };
-    ctx.mod.functions.push(reservedEntry);
+    pushDefinedFunc(ctx, reservedFuncIdx, reservedEntry);
     ctx.funcMap.set(funcName, reservedFuncIdx);
     ctx.nestedFuncCaptures.set(
       funcName,
@@ -1483,7 +1483,7 @@ export function hoistFunctionDeclarations(
         if (!isVoidType(rt)) resultType = resolveWasmType(ctx, rt);
       }
       const funcTypeIdx = addFuncType(ctx, paramTypes, resultType ? [resultType] : [], `${funcName}_type`);
-      const reservedFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+      const reservedFuncIdx = mintDefinedFunc(ctx);
       const reserved: WasmFunction = {
         name: funcName,
         typeIdx: funcTypeIdx,
@@ -1491,7 +1491,7 @@ export function hoistFunctionDeclarations(
         body: [],
         exported: false,
       };
-      ctx.mod.functions.push(reserved);
+      pushDefinedFunc(ctx, reservedFuncIdx, reserved);
       ctx.funcMap.set(funcName, reservedFuncIdx);
       if (!ctx.preRegisteredBodyless) ctx.preRegisteredBodyless = new Set();
       ctx.preRegisteredBodyless.add(funcName);

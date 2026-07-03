@@ -5,6 +5,7 @@ status: ready
 sprint: current
 created: 2026-07-03
 updated: 2026-07-03
+status_note: "First slice landed (PR): trailing-comma-after-rest early error in destructuring patterns (all four forms). Issue stays open — remaining unenforced-SyntaxError samples decompose into further independent point-fixes per the issue's own triage note."
 priority: medium
 horizon: s
 feasibility: medium
@@ -63,3 +64,35 @@ individually before batching.
 - `negative_test_fail` count in the default lane drops materially below 79.
 - No new `negative_test_fail` regressions introduced (verify via a
   differential test262 run before/after).
+
+## Slice 1 landed — trailing comma after a rest element (2026-07-03)
+
+**Delivered:** a precise parse-time early error for a trailing comma following
+a rest element in every destructuring-pattern position — an
+`AssignmentRestElement` / `BindingRestElement` / `AssignmentRestProperty` /
+`BindingRestProperty` must be the final element with no trailing comma
+(elision) after it:
+
+- `[...x,] = y` (array assignment pattern) and the for-of/for-in head form
+  `for ([...x,] of ...)` — covers the issue sample
+  `language/statements/for-of/dstr/array-rest-elision-invalid.js`.
+- `const [...x,] = y` (array binding pattern).
+- `({...x,} = y)` (object assignment pattern).
+- `const {...x,} = y` (object binding pattern).
+
+**Root cause:** the pre-existing "rest must be last" check only fired when an
+*element* followed the rest (`[...x, y]`); TypeScript's parser accepts the bare
+trailing comma `[...x,]` silently and does NOT insert a trailing
+`OmittedExpression`, so nothing detected it. Fix keys off the NodeArray's
+`hasTrailingComma` flag when the last element is the rest.
+
+**Files:** `src/compiler/early-errors/assignment.ts` (array + object assignment
+patterns), `src/compiler/early-errors/node-checks.ts` (array + object binding
+patterns). Tests: `tests/issue-3026.test.ts` (5 reject + 5 valid-control
+cases). Byte-inert for all valid programs — spread-with-trailing-comma in an
+array/object literal *value* (`const v = [...x,]`, `{...x,}`) and a trailing
+comma after a non-rest element (`[a,]`, `{a,}`) all remain valid.
+
+**Remaining:** the other unenforced-`SyntaxError` samples (private-name grammar,
+`prop-def-invalid-async-prefix`, etc.) are independent point-fixes per the
+issue's own triage note — issue stays open for follow-up slices.

@@ -42,6 +42,7 @@
  */
 
 import type { CodegenContext } from "../context/types.js";
+import { mintDefinedFunc, pushDefinedFunc } from "../func-space.js"; // (#1916 S3b) stable-regime minting
 import type { Instr, ValType } from "../../ir/types.js";
 
 import { BUILTIN_TYPE_TAGS } from "../builtin-tags.js";
@@ -202,7 +203,7 @@ function emitErrorStructConstructor(
 
   const params: ValType[] = Array.from({ length: argCount }, () => ({ kind: "externref" }) as ValType);
   const typeIdx = addFuncType(ctx, params, [{ kind: "externref" }], `${importName}_type`);
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const funcIdx = mintDefinedFunc(ctx);
   ctx.funcMap.set(importName, funcIdx);
 
   // Body: push fields in struct field order (tag, message, name), then
@@ -230,7 +231,7 @@ function emitErrorStructConstructor(
     { op: "extern.convert_any" },
   ];
 
-  ctx.mod.functions.push({
+  pushDefinedFunc(ctx, funcIdx, {
     name: importName,
     typeIdx,
     locals: [],

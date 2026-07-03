@@ -293,6 +293,80 @@ is never a moment where one value means two functions.
     green. (The 3 `issue-1599` refusal failures are pre-existing on
     clean main — stale expectations after a recent JSON change; flagged
     to the lead, not this migration's doing.)
+  - **S3b medium batch A — LANDED (dev-1916b)**: `closures.ts` (8:
+    lifted-closure + `__cb_` continuations + method trampolines),
+    `any-helpers.ts` (8: `__any_from_extern`/`__any_to_extern` etc.,
+    separated mint/push — body built between reserve and push),
+    `class-bodies.ts` (6: ctor / `__onhost` / `_init` / method / getter /
+    setter). Corpus byte-IDENTICAL over playground + probe corpus ×
+    {gc,standalone,wasi}. **Surfaced two general infra fixes** (the
+    batch-8-style "drift reveals a latent assumption" — both are
+    order/shift bugs that bite ANY producer once its handle goes stable,
+    so they are load-bearing for every later batch AND S3-final):
+    1. **`collectDeclaredFuncRefs` sorted the declarative element segment
+       by RAW handle value** (`class-bodies.ts` `[...refs].sort((a,b)=>a-b)`).
+       A stable handle (`>= STABLE_FUNC_BASE`) is numerically huge, so it
+       was banished to the end → the emitted elem segment permuted vs the
+       all-live baseline (same bytes, reordered — caught only via
+       `async.ts::wasi`, two lifted closures). Fixed to sort by
+       `absoluteFuncIndex(mod, h)` (resolved index) → identical for live
+       handles, correct for stable. This is the elem-segment analogue of
+       the #1899 "identity must ride in the value" lesson.
+    2. **`closures.ts` manual `ntShift` bump used a bare
+       `methodFuncIdx >= importsBeforeNT`** (the "closure-creation import
+       machinery can't reach this captured callee, bump it ourselves"
+       path). A stable callee handle satisfies the bare `>=` and got
+       `+= ntShift` corrupted (only when `ntShift>0`, i.e. native-strings
+       under wasi/standalone). Fixed to `inLiveShiftRange(...)` per the
+       resolve-layout shifter contract (every shifter comparison must use
+       it). Byte-neutral for live handles.
+  - **S3b medium batch B — LANDED (dev-1916b)**: `expressions/builtins.ts`
+    (6), `literals.ts` (4: object-literal fresh-fn / getter / setter /
+    method), `statements/nested-declarations.ts` (3: the reserve-then-fill
+    placeholder pattern — mint/push effectively adjacent, body filled by
+    mutating the pushed object reference). Corpus byte-IDENTICAL (stacked
+    on batch A so it inherits the declaredFuncRefs sort fix — literals'
+    object-method funcrefs are ref.func'd).
+  - **`declarations.ts` (5 sites) — DEFERRED to its own batch (dev-1916b,
+    needs deeper analysis)**. Flipping it drifts `async.ts::gc` (−6 bytes,
+    code section): the async state-machine helper `__sset_state`'s body is
+    emitted calling a DIFFERENT function (`__js_array_new`→`setTimeout`)
+    with a different compile-time result arity (drop×3 → drop×1). Both the
+    call target AND the baked drop-count differ, so this is NOT a late
+    shift — it is a `funcIdx`-interpreting consumer between freeze and emit
+    reading a stable handle positionally (prime suspect: `stackBalance`,
+    already flagged in the S3-final consumer list as "reads callee
+    signatures — takes `mod` only, import-count context must be derivable
+    from `mod`; audit"). Like closures, this file needs an infra fix before
+    it can flip byte-identically; tracked here for the next executor.
+  - **S3b medium batch C — LANDED (dev-1916b)**: `accessor-driver.ts` (5:
+    reserve-then-fill placeholder accessors, uniform `funcIdx`/`placeholder`)
+    + `iterator-native.ts` (3: `__array_from_iter_n` + inline iterator
+    helpers). Corpus byte-IDENTICAL (stacked on A+B → inherits both infra
+    fixes). Non-async producers flipped cleanly with no new drift.
+  - **async-frame.ts (3) + promise-combinators.ts (2) — DEFERRED**
+    alongside `declarations.ts`: they build the same async/promise state
+    machines whose `__sset_*` helpers exposed the `stackBalance`-class
+    consumer bug; flipping them risks the same drift. They flip once the
+    consumer audit fix lands.
+  - **S3b medium batch D — LANDED (dev-1916b)**: the 15 single-/double-mint
+    producer files — `array-to-primitive`, `builtin-static-globals` (2),
+    `class-to-primitive`, `closed-method-dispatch` (2), `fmod`,
+    `generators-native`, `json-runtime` (2), `math-helpers`, `native-proto`,
+    `expressions/calls`, `expressions/new-super` (2), `expressions/proto-override`,
+    `registry/error-types`, `timsort`, `type-coercion` (19 sites total).
+    Corpus byte-IDENTICAL (stacked on A+B+C). NOTE: `generators-native`
+    (generator state machine, `__gen_*` reserve-then-fill) flipped clean —
+    its helper is not on the `stackBalance` drift path the async
+    `__sset_*` helpers hit, so generators are safe to flip while
+    async-frame/promise-combinators wait for the consumer-audit fix.
+  - **Remaining after batch D**: `index.ts` (~38 non-uniform sites,
+    shifter-adjacent — its own careful PR), plus the deferred
+    `declarations.ts` / `async-frame.ts` / `promise-combinators.ts` (all
+    gated on the `stackBalance` consumer-audit fix). Out of scope for the
+    WasmGC front-end flip: `codegen-linear/*` (converts with the linear
+    backend's own registry), `emit/binary.ts` + `ir/integration.ts` (the
+    resolver/patch surfaces, not producers).
   - **S3b batch 4 — native-regex (dev-1916o, handoff from dev-1916f).**
     `native-regex.ts`: all 10 helper producers (`__regex_class_match` +
     the exec/match/replace/split/test family) flipped from the inline
