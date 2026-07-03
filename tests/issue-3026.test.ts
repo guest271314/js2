@@ -62,3 +62,39 @@ describe("#3026 — trailing comma after rest element in destructuring pattern",
     expect(await isRejected("const {a,} = {a: 1};")).toBe(false);
   });
 });
+
+// Slice 2 — early error: `async` is not a valid prefix of a shorthand property.
+//
+// PropertyDefinition : IdentifierReference (shorthand) admits no modifier;
+// `async` is only valid as the prefix of an AsyncMethod (which requires a
+// `(` parameter list). TypeScript's parser silently accepts `({async async})`
+// and `({async x = 1})` as a ShorthandPropertyAssignment carrying an
+// AsyncKeyword modifier with NO parse diagnostic (unlike `get`/`set`/`*`,
+// which it already flags), so nothing detected it. Covers test262
+// language/expressions/object/prop-def-invalid-async-prefix.
+describe("#3026 — 'async' prefix on a shorthand property", () => {
+  it("rejects `({async async})`", async () => {
+    expect(await isRejected("({async async});")).toBe(true);
+  });
+
+  it("rejects `({async x = 1})` (async prefix on a cover-initialized name)", async () => {
+    expect(await isRejected("({async x = 1});")).toBe(true);
+  });
+
+  // ── Valid controls: must NOT be rejected ──────────────────────────────────
+  it("accepts `async` used as a plain shorthand property name", async () => {
+    expect(await isRejected("const async = 1; ({async});")).toBe(false);
+  });
+
+  it("accepts `async` as a shorthand alongside other properties", async () => {
+    expect(await isRejected("const async = 1, x = 2; ({async, x});")).toBe(false);
+  });
+
+  it("accepts an actual async method (`({async foo(){}})`)", async () => {
+    expect(await isRejected("({async foo(){}});")).toBe(false);
+  });
+
+  it("accepts `async` as a normal property key (`({async: 1})`)", async () => {
+    expect(await isRejected("({async: 1});")).toBe(false);
+  });
+});
