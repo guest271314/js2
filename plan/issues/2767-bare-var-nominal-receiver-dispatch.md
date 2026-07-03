@@ -2,12 +2,12 @@
 id: 2767
 title: "nominal value assigned into an uninitialized/untyped var loses its type → method dispatch goes dynamic and fails (var d; d = new Date(0); d.toISOString())"
 status: done
-sprint: current
+sprint: 69
 priority: high
 assignee: ttraenkler/agent-dev
 completed: 2026-06-28
 created: 2026-06-28
-updated: 2026-06-28
+updated: 2026-07-03
 feasibility: medium
 reasoning_effort: high
 task_type: bugfix

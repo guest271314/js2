@@ -3,13 +3,13 @@ id: 2800
 title: "[SENIOR-DEV ONLY] top-level `new X(objLiteral)` reads the literal arg's fields as null at module-init (type-index remap)"
 status: done
 assignee: ttraenkler/senior-developer
-sprint: current
+sprint: 69
 priority: high
 horizon: l
 feasibility: hard
 reasoning_effort: max
 created: 2026-06-28
-updated: 2026-06-28
+updated: 2026-07-03
 completed: 2026-06-28
 task_type: bugfix
 area: codegen

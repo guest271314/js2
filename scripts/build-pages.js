@@ -246,6 +246,11 @@ copyDirectory(PLAYGROUND_EXAMPLES_DIR, join(PAGES_DIST, "examples"));
 // copied below, so no Vite processing is required.
 copyFile(join(WEBSITE, "getting-started", "index.html"), join(PAGES_DIST, "getting-started", "index.html"));
 
+// Static blog page — same pattern as "Get started" above: a self-contained
+// HTML page that references the shared /components/site-nav.js, not a Vite
+// entry point.
+copyFile(join(WEBSITE, "blog", "index.html"), join(PAGES_DIST, "blog", "index.html"));
+
 // Overwrite Vite-built report pages with the latest public/ versions (which include
 // web components like <t262-donut> that Vite doesn't process).
 const PUBLIC_REPORT = join(WEBSITE, "public", "benchmarks", "results", "report.html");

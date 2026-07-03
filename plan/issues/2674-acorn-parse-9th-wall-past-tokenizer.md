@@ -3,9 +3,9 @@ id: 2674
 title: "acorn parse() 9th wall PAST tokenization (after #2664 type-write fix) — parseTopLevel/parseStatement array-push loop"
 status: done
 assignee: ttraenkler/sd-2674c
-sprint: current
+sprint: 69
 created: 2026-06-25
-updated: 2026-06-28
+updated: 2026-07-03
 completed: 2026-06-28
 priority: high
 feasibility: hard

@@ -2,9 +2,9 @@
 id: 2883
 title: "Hint-less object-literal [Symbol.toPrimitive]() emits invalid Wasm — __call_@@toPrimitive arity mismatch (expected externref, got (ref N))"
 status: done
-sprint: current
+sprint: 69
 created: 2026-06-30
-updated: 2026-06-30
+updated: 2026-07-03
 completed: 2026-06-30
 assignee: ttraenkler/explore4
 priority: medium

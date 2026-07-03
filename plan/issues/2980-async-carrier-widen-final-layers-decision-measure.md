@@ -2,9 +2,11 @@
 id: 2980
 title: "Standalone async widen — FINAL layers (async-fn drive −16 residual, Gap 5 for-await/async-gen −32) + the slice-1d carrier-widen DECISION MEASURE"
 status: ready
-# measure phase delivered by ttraenkler/fable-5 (2026-07-02); claim released — the four residual classes are the remaining work
+# measure phase delivered by ttraenkler/fable-5 (2026-07-02) — the four residual classes are the remaining work.
+# NB the 07-02 claim release had NOT landed on the issue-assignments ref; force-released
+# 2026-07-03 by the architect (`claim-issue.mjs --release 2980 ... --force`). Claimable now.
 created: 2026-07-02
-updated: 2026-07-02
+updated: 2026-07-03
 priority: high
 horizon: l
 feasibility: hard
@@ -128,3 +130,69 @@ next decision measure; classes 2+4 are #2906 slices 3/4, class 1 is a
 instead of casting), class 3 is `planLinearAwaits` Gap-3 widening
 (finally-override + return-through-finally) plus default-param abrupt
 routing.
+
+---
+
+## Architect Decision — slice-1d carrier widen (2026-07-03, fable)
+
+**RATIFIED: the widen gate does NOT flip now.** The 2026-07-02 decision
+measure above (main@461da1576, post arms 1-3 + #2483; net **−51** over the
+262-file construct-sampled corpus) is accepted as the deciding evidence.
+Post-measure drift check (2026-07-03): **two class-1-adjacent PRs have since
+landed on main** — #2959 (native `new Promise(executor)`, retiring the
+`Promise_new` host import) and #2671 slice 2 (Promise capability statics,
++28 test262) — both touch exactly the constructor-executor / capability
+shapes that dominate the −18 promise-then-all bucket. They plausibly shrink
+class 1 but cannot flip the total (classes 2-4, −33 combined, are unlanded),
+so the verdict stands without a full re-run; instead they move the interim
+re-measure of rule 5 EARLIER (see below). Standing rules until the flip:
+
+1. **Flip criterion (mechanical, no judgment call needed at flip time):**
+   re-run `.tmp/measure-carrier-ab.mts` after residual classes land; the
+   gate flips only on a measured **positive total net with no construct
+   bucket net-negative beyond noise (net ≤ −2 in any bucket blocks)**. The
+   flip is its own tiny PR: the two gate predicates
+   (`isStandalonePromiseActive`, `isStandaloneThenChainNativeActive`) plus
+   the recorded measure — nothing else rides along.
+2. **No partial / per-construct widening.** Flipping only the near-neutral
+   buckets (e.g. await-expr at net 0) is DECLINED: the two gates widen
+   together by design, and per-construct gating forks the carrier matrix
+   (every subsequent layer would need N gate combinations validated). One
+   gate, one flip, one measure.
+3. **Residual sequencing (by measured weight, largest first):**
+   - **Class 1 (−18)** `.then`-receiver classification hardening in
+     `async-scheduler.ts` — `emitStandalonePromiseThen` must fall back
+     (host/dynamic path) on a non-`$Promise` receiver instead of the
+     unconditional `ref.cast`. Independent of #2906; claimable on its own;
+     the single largest win.
+   - **Class 3 (−12)** `planLinearAwaits` Gap-3 widening (finally-override +
+     return-through-finally) + default-param abrupt rejection routing.
+     Independent of #2906.
+   - **Classes 2 (−15) + 4 (−6)** are **#2906 slices 3/4 by that issue's own
+     decomposition** — for-await drive (loop back-edges + async-iterator
+     protocol) and the async-gen yield/rejection routing. This decision
+     assigns no new direction to #2906; it is consistent with #2906's
+     in-progress multi-state CFG resume-machine work by construction, since
+     every layer lands carrier-gated + byte-inert (sha256 proof), so #2906's
+     landings cannot regress un-widened lanes and the next measure is purely
+     additive evidence.
+4. **Instrument is the contract.** `JS2WASM_ASYNC_CARRIER_WIDEN=1` remains
+   the ONLY widen mechanism until the flip PR; CI never sets it; no layer
+   may condition on anything else. Re-measures cite the main SHA they ran
+   at, appended to this file.
+5. **Re-measure cadence:** BEFORE writing class-1 code, regenerate the A/B
+   harness (the dead agent's `.tmp/measure-carrier-ab.mts` did not survive —
+   rebuild per the "Measurement instrument" section: construct-bucketed
+   spread-sample, `runTest262File(..., "standalone")` + #2404 drain hook,
+   `JS2WASM_ASYNC_CARRIER_WIDEN=1` for the on-arm) and re-run the
+   **promise-then-all bucket only** (~120 runs, cheap): #2959 + #2671-s2
+   may already have partially delivered the class-1 win, and the residual
+   listing tells the class-1 dev which receiver shapes are still hitting
+   the unconditional cast. Then after class 1 lands, an interim full A/B;
+   the flip decision waits for classes 2-4 or an explicitly-accepted
+   partial residual (a bucket may be accepted as a filed-forward
+   known-negative ONLY if the total net is positive per rule 1).
+
+Housekeeping: the stale in-progress claim from the dead 07-02 agent
+(`ttraenkler/agent-ab81b787ac6992334`) was force-released 2026-07-03; the
+issue is claimable.

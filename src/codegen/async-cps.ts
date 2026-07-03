@@ -21,20 +21,20 @@
 // The full lowering (segment emission, capture structs, Promise.then chaining)
 // lands in follow-up PRs. See plan/issues/backlog/1042-async-await-state-machine-lowering.md.
 
-import { ts, forEachChild } from "../ts-api.js";
-import { reportError } from "./context/errors.js";
-import type { CodegenContext, FunctionContext } from "./context/types.js";
-import type { Instr, ValType } from "../ir/types.js";
-import {
-  collectReferencedIdentifiers,
-  collectBindingPatternNames,
-  compileSyntheticAsyncContinuation,
-  type AsyncCapture,
-} from "./closures.js";
-import { compileExpression, compileStatement, coerceType } from "./shared.js";
-import { allocLocal } from "./context/locals.js";
-import { resolveWasmType } from "./index.js";
 import { isPromiseType } from "../checker/type-mapper.js";
+import type { Instr, ValType } from "../ir/types.js";
+import { forEachChild, ts } from "../ts-api.js";
+import {
+  type AsyncCapture,
+  collectBindingPatternNames,
+  collectReferencedIdentifiers,
+  compileSyntheticAsyncContinuation,
+} from "./closures.js";
+import { reportError } from "./context/errors.js";
+import { allocLocal } from "./context/locals.js";
+import type { CodegenContext, FunctionContext } from "./context/types.js";
+import { resolveWasmType } from "./index.js";
+import { coerceType, compileExpression, compileStatement } from "./shared.js";
 
 /**
  * Master gate for the AST-side async CPS lowering.
@@ -497,7 +497,11 @@ export function emitAsyncStateMachine(
 function emitMakeContinuationCallback(
   ctx: CodegenContext,
   fctx: FunctionContext,
-  cont: { cbId: number; capStructTypeIdx: number; captures: readonly AsyncCapture[] },
+  cont: {
+    cbId: number;
+    capStructTypeIdx: number;
+    captures: readonly AsyncCapture[];
+  },
   makeCbIdx: number,
 ): void {
   // arg0: the callback id (i32) — __make_callback dispatches exports[`__cb_${id}`].
@@ -510,7 +514,10 @@ function emitMakeContinuationCallback(
     for (const cap of cont.captures) {
       fctx.body.push({ op: "local.get", index: cap.localIdx } as Instr);
     }
-    fctx.body.push({ op: "struct.new", typeIdx: cont.capStructTypeIdx } as Instr);
+    fctx.body.push({
+      op: "struct.new",
+      typeIdx: cont.capStructTypeIdx,
+    } as Instr);
     fctx.body.push({ op: "extern.convert_any" } as Instr);
   } else {
     fctx.body.push({ op: "ref.null.extern" } as Instr);
@@ -569,7 +576,10 @@ export function emitAsyncStateMachineFromIr(): boolean {
 export interface AwaitSplit {
   readonly prefix: readonly ts.Statement[];
   readonly awaitedExpr: ts.Expression;
-  readonly resumeBinding: { readonly name: string; readonly type: ts.TypeNode | undefined } | null;
+  readonly resumeBinding: {
+    readonly name: string;
+    readonly type: ts.TypeNode | undefined;
+  } | null;
   readonly suffix: readonly ts.Statement[];
   readonly isReturnAwait: boolean;
 }
@@ -615,7 +625,13 @@ export function splitBodyAtAwait(fn: ts.FunctionLikeDeclaration, plan: AsyncCpsP
     // Shape 1: `return await P;`
     if (ts.isReturnStatement(stmt) && stmt.expression && stmt.expression === awaitNode) {
       if (suffix.length !== 0) return null; // dead code after return; reject for PR1
-      return { prefix, awaitedExpr: awaitNode.expression, resumeBinding: null, suffix: [], isReturnAwait: true };
+      return {
+        prefix,
+        awaitedExpr: awaitNode.expression,
+        resumeBinding: null,
+        suffix: [],
+        isReturnAwait: true,
+      };
     }
 
     // Shape 2: `const x = await P;` (single declarator, identifier name)
@@ -635,7 +651,13 @@ export function splitBodyAtAwait(fn: ts.FunctionLikeDeclaration, plan: AsyncCpsP
 
     // Shape 3: `await P;` (bare expression statement)
     if (ts.isExpressionStatement(stmt) && stmt.expression === awaitNode) {
-      return { prefix, awaitedExpr: awaitNode.expression, resumeBinding: null, suffix, isReturnAwait: false };
+      return {
+        prefix,
+        awaitedExpr: awaitNode.expression,
+        resumeBinding: null,
+        suffix,
+        isReturnAwait: false,
+      };
     }
 
     // The await sits inside an unsupported position within this statement.
@@ -673,7 +695,10 @@ export interface LinearAwaitSegment {
    * `null` for a bare `await P;` / `return await P`. Delivered fresh from
    * `SENT_FIELD` on resume — never snapshotted at suspend time.
    */
-  readonly resumeBinding: { readonly name: string; readonly type: ts.TypeNode | undefined } | null;
+  readonly resumeBinding: {
+    readonly name: string;
+    readonly type: ts.TypeNode | undefined;
+  } | null;
   /** `return await P` — the resolved value settles the result promise directly. */
   readonly isReturnAwait: boolean;
   /**
@@ -750,7 +775,12 @@ export function planLinearAwaits(fn: ts.FunctionLikeDeclaration, plan: AsyncCpsP
   // Every await must have been consumed into a segment (defensive; a stray await
   // in a `lead` statement would have made `awaitsHere > 0` and been handled).
   if (st.segments.length !== plan.awaitPoints.length) return null;
-  return { segments: st.segments, tail: st.lead, tailInTry: st.leadInTry, finalizer: st.theFinalizer };
+  return {
+    segments: st.segments,
+    tail: st.lead,
+    tailInTry: st.leadInTry,
+    finalizer: st.theFinalizer,
+  };
 }
 
 /** Mutable accumulator threaded through the recursive linear-await lowering. */
@@ -934,6 +964,175 @@ function statementContainsNode(stmt: ts.Node, node: ts.Node): boolean {
   };
   walk(stmt);
   return found;
+}
+
+// ---------------------------------------------------------------------------
+// CFG-aware resume-machine plan (#2906 slice 3 — the general state graph).
+//
+// `LinearAwaitPlan` above encodes control flow IMPLICITLY: state `s` always
+// continues at `s+1`, the tail runs last, and the single try/finally is a
+// per-statement boolean. That shape cannot express a loop back-edge (for-await /
+// while-with-await), a conditional branch between states, `try/catch` regions,
+// or completion replay through an awaited finally. `AsyncCfgPlan` is the general
+// contract between the PLANNER (which lowers an async body into states) and the
+// DRIVE-LAYER EMITTER (`async-frame.ts ensureAsyncResumeFunction`, which turns
+// states into the dispatch machine):
+//
+//   - a **state** is a basic block of the async CFG: an optional resume prelude
+//     (deliver the predecessor await's value / re-throw its rejection), a list
+//     of handler-annotated lead statements, and exactly one **terminator**;
+//   - a **terminator** transfers control: `suspend` (await → resume at
+//     `resumeState`), `goto` / `condGoto` (state transition, incl. back-edges —
+//     emitted as `STATE=<target>; br <re-dispatch loop>`, so a target ≤ the
+//     current id is a loop), and `settleSent` / `settleUndefined` (fulfil the
+//     result promise);
+//   - a **handler region** is a lexical try region; every statement/terminator
+//     carries the region id it executes in (0 = none). The emitter maintains a
+//     region-id local across the machine and the outer catch routes abrupt
+//     completions by it (slice-2 semantics: run the region's await-free
+//     finalizer, then reject).
+//
+// Emitter contract (MUST hold for every plan a planner produces):
+//   1. State ids are DENSE and equal to their index in `states` (the dispatch
+//      if-chain depth arithmetic depends on it).
+//   2. A state with `resumeFrom !== null` is entered ONLY through its await's
+//      resume/advance (it is exactly one suspend terminator's `resumeState`);
+//      `goto`/`condGoto` targets must have `resumeFrom: null`. State 0 (the
+//      entry) has `resumeFrom: null`.
+//   3. `suspend.resumeState` / `goto.target` / `condGoto.whenTrue|whenFalse`
+//      name existing state ids.
+//   4. Handler ids are 1-based and dense; `handlers[i].id === i + 1`.
+//
+// Slice 3 ships the emitter for this full contract plus `linearPlanToCfg` (the
+// trivial chain producer), so richer shapes — loops, try/catch, for-await —
+// are PLANNER-ONLY follow-ups that never touch the emitter again.
+// ---------------------------------------------------------------------------
+
+/** One handler-annotated statement of a state's straight-line lead. */
+export interface AsyncCfgStmt {
+  readonly stmt: ts.Statement;
+  /** Handler region this statement executes in (0 = none). */
+  readonly handler: number;
+}
+
+/**
+ * The resume prelude of a state that is some await's `resumeState`: re-throw a
+ * rejected predecessor (arming its handler region first so the finalizer runs),
+ * then bind the delivered `SENT_FIELD` value.
+ */
+export interface AsyncResumePoint {
+  readonly binding: {
+    readonly name: string;
+    readonly type: ts.TypeNode | undefined;
+  } | null;
+  /** Handler region the suspended await sat in (0 = none). */
+  readonly handler: number;
+}
+
+/** A state's single control-transfer. See the contract block above. */
+export type AsyncCfgTerminator =
+  | {
+      readonly kind: "suspend";
+      /** The await operand (assimilated to a `$Promise` / host promise). */
+      readonly awaited: ts.Expression;
+      /** State entered on resume AND on the synchronous fulfilled/rejected advance. */
+      readonly resumeState: number;
+      /** Handler region the await executes in (0 = none). */
+      readonly handler: number;
+    }
+  | { readonly kind: "goto"; readonly target: number }
+  | {
+      readonly kind: "condGoto";
+      /** Condition, compiled with `ensureI32Condition` truthiness. */
+      readonly cond: ts.Expression;
+      readonly whenTrue: number;
+      readonly whenFalse: number;
+      /** Handler region the condition evaluates in (0 = none). */
+      readonly handler: number;
+    }
+  | { readonly kind: "settleSent" } // `return await P` — fulfil with SENT directly
+  | { readonly kind: "settleUndefined" }; // fall off the body — fulfil with undefined
+
+/** One basic block of the async CFG. */
+export interface AsyncCfgState {
+  readonly id: number;
+  readonly resumeFrom: AsyncResumePoint | null;
+  readonly lead: readonly AsyncCfgStmt[];
+  readonly terminator: AsyncCfgTerminator;
+}
+
+/**
+ * A lexical try region whose completion routing the machine owns. Slice-3
+ * scope: an await-free `finalizer` run by the outer catch before rejecting
+ * (slice-2 semantics). The catch-body / replay-through-finally generalization
+ * (regions with `catchState`/`finallyState` entries that are themselves states)
+ * is the 3c planner+emitter follow-up — see the issue design notes.
+ */
+export interface AsyncHandlerRegion {
+  /** 1-based dense id (0 means "no region" everywhere else). */
+  readonly id: number;
+  /** Enclosing region id (0 = none). Single-region plans use 0. */
+  readonly parent: number;
+  /** Await-free finally body, compiled a second time into the outer catch. */
+  readonly finalizer: readonly ts.Statement[];
+}
+
+/** The full machine plan the drive-layer emitter consumes. */
+export interface AsyncCfgPlan {
+  readonly states: readonly AsyncCfgState[];
+  readonly handlers: readonly AsyncHandlerRegion[];
+}
+
+/**
+ * Lower a {@link LinearAwaitPlan} into the equivalent {@link AsyncCfgPlan}: the
+ * trivial chain 0 → 1 → … → N where state `k` suspends on await `k` and state
+ * `N` runs the tail (or settles SENT for `return await`). The single optional
+ * finalizer becomes handler region 1. Pure; emits nothing.
+ *
+ * This converter is deliberately the ONLY producer in slice 3, so the emitted
+ * machine is byte-identical to the pre-CFG emitter for every accepted shape —
+ * richer planners (loops, try/catch, for-await) plug in behind the same plan
+ * type without touching the emitter.
+ */
+export function linearPlanToCfg(linear: LinearAwaitPlan): AsyncCfgPlan {
+  const handlers: AsyncHandlerRegion[] =
+    linear.finalizer !== null ? [{ id: 1, parent: 0, finalizer: linear.finalizer }] : [];
+  const N = linear.segments.length;
+  const states: AsyncCfgState[] = [];
+  for (let k = 0; k < N; k++) {
+    const seg = linear.segments[k]!;
+    const prev = k > 0 ? linear.segments[k - 1]! : null;
+    states.push({
+      id: k,
+      resumeFrom: prev ? { binding: prev.resumeBinding, handler: prev.awaitInTry ? 1 : 0 } : null,
+      lead: seg.leadStmts.map((stmt, i) => ({
+        stmt,
+        handler: seg.leadInTry[i] ? 1 : 0,
+      })),
+      terminator: {
+        kind: "suspend",
+        awaited: seg.awaitedExpr,
+        resumeState: k + 1,
+        handler: seg.awaitInTry ? 1 : 0,
+      },
+    });
+  }
+  const last = linear.segments[N - 1]!;
+  states.push({
+    id: N,
+    resumeFrom: {
+      binding: last.resumeBinding,
+      handler: last.awaitInTry ? 1 : 0,
+    },
+    lead: last.isReturnAwait
+      ? []
+      : linear.tail.map((stmt, i) => ({
+          stmt,
+          handler: linear.tailInTry[i] ? 1 : 0,
+        })),
+    terminator: last.isReturnAwait ? { kind: "settleSent" } : { kind: "settleUndefined" },
+  });
+  return { states, handlers };
 }
 
 // ---------------------------------------------------------------------------

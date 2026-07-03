@@ -4,9 +4,9 @@ title: "Standalone: native gen-result done `.value` reads back as 0/garbage — 
 status: done
 completed: 2026-07-02
 assignee: ttraenkler/fable-3
-sprint: current
+sprint: 69
 created: 2026-07-02
-updated: 2026-07-02
+updated: 2026-07-03
 priority: high
 horizon: m
 feasibility: hard

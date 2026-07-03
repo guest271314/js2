@@ -6,9 +6,9 @@ completed: 2026-07-02
 assignee: ttraenkler/dev-2138f
 pipeline_unblocked: 1927
 spec: ready
-sprint: current
+sprint: 69
 created: 2026-06-12
-updated: 2026-07-02
+updated: 2026-07-03
 priority: high
 feasibility: hard
 reasoning_effort: max

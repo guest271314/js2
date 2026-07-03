@@ -2,9 +2,9 @@
 id: 2764
 title: "@@hasInstance handler invoked at unknown-arity (arguments.length wrong) — dispatcher half fixed by #2213; one-line residual"
 status: done
-sprint: current
+sprint: 69
 created: 2026-06-28
-updated: 2026-06-28
+updated: 2026-07-03
 completed: 2026-06-28
 assignee: ttraenkler/agent-a2da3f181c62e4768
 priority: medium

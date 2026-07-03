@@ -4,9 +4,9 @@ title: "malformed_wasm: __module_init call type mismatch (array/01-basic, closur
 status: done
 assignee: ttraenkler/sdev-2788-malformed
 completed: 2026-06-28
-sprint: current
+sprint: 69
 created: 2026-06-28
-updated: 2026-06-28
+updated: 2026-07-03
 priority: high
 feasibility: medium
 reasoning_effort: medium

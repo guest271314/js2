@@ -4,9 +4,9 @@ title: "Function.prototype.bind: bound partial-application arguments, bound `.le
 status: done
 completed: 2026-06-28
 assignee: ttraenkler/agent-a3bfd116a51704f18
-sprint: current
+sprint: 69
 created: 2026-06-27
-updated: 2026-06-28
+updated: 2026-07-03
 priority: medium
 feasibility: medium
 reasoning_effort: medium

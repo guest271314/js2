@@ -2,7 +2,7 @@
 id: 2839
 title: externref→wasm-vec materializer missing i8/i16 coerce + WASI host-import leak (#2311 regression)
 status: done
-sprint: current
+sprint: 69
 priority: high
 area: codegen
 task_type: bug

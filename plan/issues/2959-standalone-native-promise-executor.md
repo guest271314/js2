@@ -4,7 +4,7 @@ title: "Standalone: native `new Promise(executor)` — retire the unconditional 
 status: done
 assignee: sendev-promise-exec2
 completed: 2026-07-03
-sprint: current
+sprint: 69
 created: 2026-07-02
 updated: 2026-07-03
 priority: high

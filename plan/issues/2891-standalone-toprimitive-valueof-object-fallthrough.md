@@ -9,7 +9,7 @@ priority: high
 task_type: bug
 area: codegen
 goal: standalone
-sprint: current
+sprint: 69
 horizon: m
 related: [2873, 2862, 2638, 1900]
 umbrella: 2860

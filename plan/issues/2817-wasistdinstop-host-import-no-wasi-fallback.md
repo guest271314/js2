@@ -4,7 +4,7 @@ title: "nm_node_process: env.__wasiStdinStop host import has no WASI-native fall
 status: done
 assignee: ttraenkler/sendev
 created: 2026-06-29
-updated: 2026-06-29
+updated: 2026-07-03
 completed: 2026-06-29
 priority: medium
 feasibility: medium
@@ -12,7 +12,7 @@ task_type: bug
 area: codegen
 language_feature: process-stdin-async-reactor
 goal: platform
-sprint: current
+sprint: 69
 horizon: m
 related: [389, 2735, 2807, 2777]
 ---

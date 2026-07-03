@@ -4,7 +4,7 @@ title: "codegen: dynamic dispatch of an any-typed closure param (fn(...)) must h
 status: done
 completed: 2026-07-02
 assignee: ttraenkler/opus-10c
-sprint: current
+sprint: 69
 priority: high
 horizon: l
 feasibility: hard
@@ -15,7 +15,7 @@ language_feature: closures, dynamic-dispatch
 goal: host-independence
 related: [2940, 2903]
 created: 2026-07-02
-updated: 2026-07-02
+updated: 2026-07-03
 origin: "2026-07-02 spun out of #2940 yield-gate analysis (dev-callback). origin/main @ 4d5287afc."
 ---
 

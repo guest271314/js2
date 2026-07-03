@@ -4,9 +4,9 @@ title: "Hybrid: type-aware box primitive (box keyed on the TS type, not the Wasm
 status: done
 completed: 2026-06-28
 assignee: ttraenkler/sendev-box
-sprint: current
+sprint: 69
 created: 2026-06-28
-updated: 2026-06-28
+updated: 2026-07-03
 priority: high
 horizon: m
 feasibility: hard

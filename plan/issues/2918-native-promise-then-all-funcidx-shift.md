@@ -10,7 +10,7 @@ feasibility: hard
 task_type: bug
 area: codegen
 goal: standalone
-sprint: current
+sprint: 69
 horizon: l
 related: [2867, 2895, 2906, 2860]
 umbrella: 2860

@@ -2,7 +2,7 @@
 id: 2887
 title: "Runtime `**` / `**=` / Math.pow imprecise for integer exponents (3**3 → 26.99…)"
 status: done
-sprint: current
+sprint: 69
 priority: medium
 horizon: s
 area: codegen

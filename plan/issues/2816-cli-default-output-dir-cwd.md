@@ -2,7 +2,7 @@
 id: 2816
 title: CLI default output dir should be the cwd, not next to the input
 status: done
-sprint: current
+sprint: 69
 priority: medium
 area: cli
 related: [389]

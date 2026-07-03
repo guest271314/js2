@@ -4,7 +4,7 @@ title: "standalone: a func-expr/arrow passed to Function.prototype.call/apply is
 status: done
 completed: 2026-07-03
 assignee: ttraenkler/opus-callapply
-sprint: current
+sprint: 69
 priority: high
 horizon: s
 feasibility: medium

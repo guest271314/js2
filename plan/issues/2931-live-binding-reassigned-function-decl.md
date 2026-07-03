@@ -3,7 +3,7 @@ id: 2931
 title: "codegen: reassigned function declaration is not a live binding (fn = 2 is lost)"
 status: done
 priority: high
-sprint: current
+sprint: 69
 created: 2026-07-02
 completed: 2026-07-02
 assignee: ttraenkler/dev-2900b

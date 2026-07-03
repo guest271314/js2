@@ -5,7 +5,7 @@ status: done
 completed: 2026-06-29
 assignee: ttraenkler/senior-developer
 supersedes: 2284
-sprint: current
+sprint: 69
 priority: high
 horizon: l
 feasibility: hard

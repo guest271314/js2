@@ -4,9 +4,9 @@ title: "Hybrid floor F1: plain-array OOB read → JS `undefined` (HI-style #2198
 status: done
 assignee: ttraenkler/senior-dev-2760
 completed: 2026-06-28
-sprint: current
+sprint: 69
 created: 2026-06-28
-updated: 2026-06-28
+updated: 2026-07-03
 priority: high
 horizon: m
 feasibility: medium

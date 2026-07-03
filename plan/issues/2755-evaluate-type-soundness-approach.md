@@ -2,9 +2,9 @@
 id: 2755
 title: "Decide the type-soundness approach: trust-the-type-and-patch vs JS-semantics-first"
 status: done
-sprint: current
+sprint: 69
 created: 2026-06-28
-updated: 2026-06-28
+updated: 2026-07-03
 completed: 2026-06-28
 decision: hybrid
 priority: high

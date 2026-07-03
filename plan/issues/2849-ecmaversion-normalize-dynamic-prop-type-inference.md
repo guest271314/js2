@@ -4,7 +4,7 @@ title: "dynamic-object numeric property reads back 0 when the same property is a
 status: done
 completed: 2026-07-02
 assignee: ttraenkler/dev-2937f
-sprint: current
+sprint: 69
 priority: medium
 horizon: l
 feasibility: hard

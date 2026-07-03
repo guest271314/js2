@@ -5,9 +5,9 @@ status: done
 completed: 2026-07-02
 assignee: ttraenkler/dev-2875f
 blocked_by: [] # 2167 moot — Fable available (owner directive 2026-07-02)
-sprint: current
+sprint: 69
 created: 2026-06-12
-updated: 2026-07-02
+updated: 2026-07-03
 follow_up: 2991 # unconditional-throw promotion (staged; needs measured-zero evidence)
 priority: critical
 feasibility: hard

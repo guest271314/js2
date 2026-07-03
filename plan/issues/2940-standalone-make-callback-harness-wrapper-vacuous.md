@@ -3,7 +3,7 @@ id: 2940
 title: "standalone: __make_callback sole-leak is the harness-wrapper vacuous pass — gated on dynamic-closure-dispatch arity/type tolerance (sub-front 4 of #2903 yields 0)"
 status: done
 completed: 2026-07-02
-sprint: current
+sprint: 69
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -15,7 +15,7 @@ assignee: ttraenkler/dev-f1
 related: [2939, 2903, 2879, 2075]
 blocked_on: "#2939 (formerly #2923; arity half landed via PR #2441): dynamic dispatch of `fn(...)` on an any-typed closure param must tolerate arity mismatch + coerce arg type-kinds (calls-closures.ts) — otherwise removing the import yields DISHONEST vacuous host-free passes"
 created: 2026-07-02
-updated: 2026-07-02
+updated: 2026-07-03
 origin: "2026-07-02 __make_callback sole-leak-front measurement (dev-callback). origin/main @ 4d5287afc, target standalone, merged report run 28491700781."
 ---
 

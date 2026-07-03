@@ -14,7 +14,7 @@ area: codegen
 es_edition: 2015
 language_feature: destructuring
 goal: spec-completeness
-sprint: current
+sprint: 69
 ---
 
 # #2808 — for-of OBJECT-binding head drops nested sub-patterns

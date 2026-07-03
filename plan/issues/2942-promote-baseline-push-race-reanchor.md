@@ -5,9 +5,9 @@ status: done
 completed: 2026-07-02
 assignee: ttraenkler/dev-f2
 created: 2026-07-02
-updated: 2026-07-02
+updated: 2026-07-03
 priority: medium
-sprint: current
+sprint: 69
 horizon: m
 task_type: bug
 area: ci

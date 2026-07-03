@@ -2,7 +2,7 @@
 id: 3018
 title: "chore: remove 76 stale duplicate root-level test files orphaned by the tests/equivalence/ migration (broken ./helpers.js import, never run)"
 status: done
-sprint: current
+sprint: 69
 priority: low
 created: 2026-07-03
 completed: 2026-07-03

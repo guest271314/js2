@@ -3,9 +3,9 @@ id: 2962
 title: "Native error-object identity + payload stringification: retire `__get_caught_exception` (1,427 opaque standalone fails)"
 status: done
 assignee: ttraenkler/fable-2
-sprint: current
+sprint: 69
 created: 2026-07-02
-updated: 2026-07-02
+updated: 2026-07-03
 completed: 2026-07-02
 priority: high
 horizon: l

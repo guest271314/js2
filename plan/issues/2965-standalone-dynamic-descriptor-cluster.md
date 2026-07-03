@@ -4,9 +4,9 @@ title: "Standalone dynamic-descriptor/defineProperty cluster (~694 host-pass→s
 status: done
 completed: 2026-07-02
 assignee: ttraenkler/fable-6
-sprint: current
+sprint: 69
 created: 2026-07-02
-updated: 2026-07-02
+updated: 2026-07-03
 priority: high
 horizon: l
 feasibility: hard

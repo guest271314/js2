@@ -3,9 +3,9 @@ id: 2857
 title: "IR: claim static methods under `extends` (class-method 6 → 5)"
 status: done
 completed: 2026-07-02
-sprint: current
+sprint: 69
 created: 2026-06-30
-updated: 2026-07-02
+updated: 2026-07-03
 priority: high
 horizon: s
 feasibility: medium

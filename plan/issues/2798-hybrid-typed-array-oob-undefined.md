@@ -4,9 +4,9 @@ title: "Hybrid Row 9: typed-array element OOB → undefined (call-site policy, s
 status: done
 completed: 2026-06-28
 assignee: ttraenkler/sendev-taoob
-sprint: current
+sprint: 69
 created: 2026-06-28
-updated: 2026-06-28
+updated: 2026-07-03
 priority: medium
 horizon: m
 feasibility: hard
