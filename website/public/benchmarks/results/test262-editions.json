@@ -10,9 +10,9 @@
   },
   {
     "edition": "ES5",
-    "pass": 10165,
+    "pass": 10167,
     "fail": 2779,
-    "ce": 131,
+    "ce": 129,
     "skip": 0,
     "total": 13075,
     "pct": 78,
@@ -58,8 +58,8 @@
   {
     "edition": "ES2015",
     "pass": 11084,
-    "fail": 4132,
-    "ce": 170,
+    "fail": 4133,
+    "ce": 169,
     "skip": 0,
     "total": 15386,
     "pct": 72,
@@ -67,8 +67,8 @@
       {
         "name": "destructuring-binding",
         "pass": 2042,
-        "fail": 455,
-        "ce": 36,
+        "fail": 456,
+        "ce": 35,
         "skip": 0,
         "total": 2533,
         "pct": 81
@@ -76,8 +76,8 @@
       {
         "name": "generators",
         "pass": 942,
-        "fail": 428,
-        "ce": 21,
+        "fail": 429,
+        "ce": 20,
         "skip": 0,
         "total": 1391,
         "pct": 68
@@ -1027,8 +1027,8 @@
   {
     "edition": "ES2018",
     "pass": 3797,
-    "fail": 425,
-    "ce": 29,
+    "fail": 426,
+    "ce": 28,
     "skip": 0,
     "total": 4251,
     "pct": 89,
@@ -1036,8 +1036,8 @@
       {
         "name": "async-iteration",
         "pass": 2946,
-        "fail": 310,
-        "ce": 28,
+        "fail": 311,
+        "ce": 27,
         "skip": 0,
         "total": 3284,
         "pct": 90
@@ -1463,8 +1463,8 @@
   {
     "edition": "ES2020",
     "pass": 848,
-    "fail": 989,
-    "ce": 41,
+    "fail": 990,
+    "ce": 40,
     "skip": 18,
     "total": 1896,
     "pct": 45,
@@ -1616,8 +1616,8 @@
       {
         "name": "optional-chaining",
         "pass": 28,
-        "fail": 10,
-        "ce": 6,
+        "fail": 11,
+        "ce": 5,
         "skip": 0,
         "total": 44,
         "pct": 64
