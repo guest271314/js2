@@ -10,8 +10,8 @@
   },
   {
     "edition": "ES5",
-    "pass": 10142,
-    "fail": 2802,
+    "pass": 10165,
+    "fail": 2779,
     "ce": 131,
     "skip": 0,
     "total": 13075,
@@ -19,12 +19,12 @@
     "features": [
       {
         "name": "caller",
-        "pass": 20,
-        "fail": 3,
+        "pass": 19,
+        "fail": 4,
         "ce": 0,
         "skip": 0,
         "total": 23,
-        "pct": 87
+        "pct": 83
       },
       {
         "name": "Reflect.construct",
@@ -57,8 +57,8 @@
   },
   {
     "edition": "ES2015",
-    "pass": 11079,
-    "fail": 4137,
+    "pass": 11080,
+    "fail": 4136,
     "ce": 170,
     "skip": 0,
     "total": 15386,
