@@ -11,7 +11,7 @@ area: codegen
 goal: standalone
 sprint: current
 horizon: xl
-related: [2861, 2862, 2863, 2864, 2865, 2866, 2867, 2868, 2872, 2873, 2874, 2875, 2876, 2877, 2878, 2879]
+related: [2861, 2862, 2863, 2864, 2865, 2866, 2867, 2868, 2872, 2873, 2874, 2875, 2876, 2877, 2878, 2879, 3027]
 ---
 
 # Umbrella: close the standalone-vs-js-host test262 gap
@@ -79,9 +79,12 @@ single fix flips directly.
 ### Not-yet-issued follow-ons (tracked here)
 
 - **$Object dynamic-object-property reader** (`__extern_get`/`__extern_rest_object`
-  leak) — ~669 tests. The known substrate root
-  (`project_standalone_any_string_value_read_substrate`). Heavily overlaps
-  clusters 2/3; revisit after #2862/#2863 land to measure the true residual.
+  leak) — now filed as **[#3027](3027-standalone-dynamic-object-property-reader-residual.md)**
+  (2026-07-03 harvest re-measurement, post #2861/#2863 landing: residual is
+  **1,552**, larger than the original ~669 estimate). The known substrate root
+  (`project_standalone_any_string_value_read_substrate`). Heavily overlapped
+  clusters 2/3 — #2861 and #2863 are both `done`; #3027 is the promised
+  post-landing re-measurement.
 - **spread / `Array.from(iter, n)`** (`__array_from_iter_n`) — ~321 tests.
   Depends on the iterator-protocol carrier (#2864).
 - **Namespace static reads** (`Math.PI`, `JSON.stringify`, `Reflect.get`,

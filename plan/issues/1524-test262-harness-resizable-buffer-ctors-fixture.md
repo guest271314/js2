@@ -13,7 +13,7 @@ language_feature: test262-harness, typed-array
 sprint: Backlog
 es_edition: n/a
 test262_category: built-ins/Array/prototype, built-ins/TypedArray
-test262_count: 227
+test262_count: 259
 related: []
 ---
 # #1524 — `ctors` fixture not exposed in resizable-buffer test262 tests
@@ -79,3 +79,23 @@ references throw `ReferenceError`: `ctors is not defined` ×175,
 `floatCtors` ×5, `typedArrayConstructors` ×8 (plus `byteConversionValues` ×17
 from `byteConversion.js`). Root cause unchanged. Still `backlog`; recorded
 count bumped to 227.
+
+## Harvest update — 2026-07-03 (default run `20260703-092808`, standalone run confirmed fresh via `runs/index.json`)
+
+Confirmed cross-lane — same root cause fires in **both** test262 lanes:
+
+- **Default lane: 259** fails, `ctors is not defined` still the dominant
+  signature (`ReferenceError`), same `resizableArrayBufferUtils.js`
+  top-level-`var` scoping gap.
+- **Standalone lane: 175** fails, same signature
+  (`built-ins/TypedArrayConstructors/ctors/buffer-arg/*`,
+  `built-ins/Atomics/*`, `built-ins/Array/prototype/fill/resizable-buffer.js`
+  among the samples) — confirms the harness-scoping bug is orthogonal to
+  the standalone/host-import substrate work, i.e. fixing it here benefits
+  both lanes independently.
+
+Root cause and fix scope unchanged from the 2026-06-19 update. Recorded
+count bumped to 259 (default); still `feasibility: easy`, still `backlog`.
+Flagging as a good candidate for promotion to `sprint: current` — cheap,
+well-scoped, and now confirmed to unblock **259 + 175 = 434** combined
+test262 fails across both lanes (PO call, not made here).
