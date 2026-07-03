@@ -24,6 +24,7 @@ import { addUnionImports, cacheStringLiterals, getOrRegisterTupleType, resolveWa
 import { ensureObjectRuntime } from "./object-runtime.js";
 import { addStringConstantGlobal, ensureExnTag } from "./registry/imports.js";
 import { addFuncType, getArrTypeIdxFromVec, getOrRegisterRefCellType, getOrRegisterVecType } from "./registry/types.js";
+import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S3) stable-regime minting
 import type { InnerResult } from "./shared.js";
 import { coerceType, compileExpression, compileStatement, ensureLateImport, flushLateImportShifts } from "./shared.js";
 import {
@@ -1940,7 +1941,7 @@ export function compileObjectDefineProperty(
         }
 
         const getterTypeIdx = addFuncType(ctx, getterParams, getterResults, `${getterName}_type`);
-        const getterFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+        const getterFuncIdx = mintDefinedFunc(ctx);
         ctx.funcMap.set(getterName, getterFuncIdx);
 
         const getterFunc: WasmFunction = {
@@ -1950,7 +1951,7 @@ export function compileObjectDefineProperty(
           body: [],
           exported: false,
         };
-        ctx.mod.functions.push(getterFunc);
+        pushDefinedFunc(ctx, getterFuncIdx, getterFunc);
 
         // Compile getter body
         const getterFctx: FunctionContext = {
@@ -2030,7 +2031,7 @@ export function compileObjectDefineProperty(
         }
 
         const setterTypeIdx = addFuncType(ctx, setterParams, [], `${setterName}_type`);
-        const setterFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+        const setterFuncIdx = mintDefinedFunc(ctx);
         ctx.funcMap.set(setterName, setterFuncIdx);
 
         const setterFunc: WasmFunction = {
@@ -2040,7 +2041,7 @@ export function compileObjectDefineProperty(
           body: [],
           exported: false,
         };
-        ctx.mod.functions.push(setterFunc);
+        pushDefinedFunc(ctx, setterFuncIdx, setterFunc);
 
         // Compile setter body
         const setterFctxParams: { name: string; type: ValType }[] = [

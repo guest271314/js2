@@ -57,7 +57,7 @@
 import { ts, forEachChild } from "../ts-api.js";
 import type { IrClosureSignature, IrType } from "./nodes.js";
 
-import { binaryOpCapability, prefixOpCapability } from "./capability.js";
+import { binaryOpCapability, hostExternCapability, prefixOpCapability } from "./capability.js";
 import type { LatticeType, TypeMap } from "./propagate.js";
 
 /**
@@ -226,6 +226,25 @@ export interface IrSelectionOptions {
    * Threaded from `CodegenContext.supportsAsyncIr` via `integration.ts`.
    */
   readonly supportsAsyncIr?: boolean;
+  /**
+   * (#2856) Host-extern support — resolves a bare identifier that is NOT a
+   * local/param binding to an ambient host global (`document`, `console`, …).
+   * Returns the extern class name (`"Document"`, `"Console"`) when the
+   * identifier's real binding (checker-resolved, so user shadowing wins) is a
+   * lib `declare var` of extern-class shape that the legacy backend would
+   * register (`isExternalDeclaredClass` parity); `undefined` otherwise.
+   *
+   * Provided by the `planIrCompilation` call sites (codegen index /
+   * check-ir-fallbacks), which own a TypeChecker; select.ts stays
+   * checker-free. Only consulted when `jsHostExterns` is true — the
+   * capability is mode-gated via `hostExternCapability` (capability.ts):
+   * standalone/wasi/strictNoHostImports defer to legacy, which routes
+   * `document.*` to the existing #1472/#2907 refusal.
+   */
+  readonly resolveHostGlobal?: (node: ts.Identifier) => string | undefined;
+  /** (#2856) True iff the compile targets a JS host (NOT standalone / wasi /
+   *  strictNoHostImports). Gates the host-extern capability. */
+  readonly jsHostExterns?: boolean;
 }
 
 /**
@@ -277,6 +296,13 @@ export function planIrCompilation(
   // #1169q telemetry — collect rejection reasons so the dispatcher can
   // log/throw on legacy fallback. Only populated when trackFallbacks is on.
   const trackFallbacks = options?.trackFallbacks === true;
+  // (#2856) Arm the host-extern identifier resolution for this run. Mode-gated
+  // via the capability table: only a JS-host compile may claim host-global
+  // shapes; standalone/wasi defer so legacy keeps its #1472/#2907 refusal.
+  currentHostGlobalResolver =
+    options?.resolveHostGlobal && hostExternCapability(options?.jsHostExterns === true) !== "defer"
+      ? options.resolveHostGlobal
+      : null;
   const fallbackReasons = new Map<string, IrFallbackReason>();
   // (#2856 Step-1) Parallel to `fallbackReasons`: the opt-in reject-arm detail
   // for `body-shape-rejected` entries (populated only when JS2WASM_IR_SHAPE_DIAG=1).
@@ -389,7 +415,19 @@ export function planIrCompilation(
         }
         continue;
       }
-      if (hasParent) {
+      // (#2857 static-method slice) A `static` method compiles to an ordinary
+      // function — no `self` injection, no dependency on the (parent-prefixed)
+      // instance layout. So even when the class `extends` a parent, a static
+      // method whose body does not reference `super` is exactly as IR-claimable
+      // as the same method in a flat class (cf. `Animal_kingdom`, already
+      // claimed). Let it fall through to the normal `whyNotIrClaimable` gate;
+      // only instance members and `super`-using statics need the inheritance
+      // substrate deferred to the Phase E slice, which stay `class-method`.
+      const isStaticMethod =
+        ts.isMethodDeclaration(memberNode) &&
+        (memberNode.modifiers?.some((m) => m.kind === ts.SyntaxKind.StaticKeyword) ?? false);
+      const claimableUnderParent = isStaticMethod && !referencesSuper(memberNode);
+      if (hasParent && !claimableUnderParent) {
         if (trackFallbacks) fallbackReasons.set(memberName, "class-method");
         continue;
       }
@@ -544,6 +582,18 @@ type IrClaimableSubject = ts.FunctionDeclaration | ts.MethodDeclaration | ts.Con
  * fix (thread the constructed vec through the loop block-args) is a follow-up.
  */
 let currentFnHasCStyleLoop = false;
+
+/**
+ * (#2856) Host-extern resolution for the CURRENT `planIrCompilation` run.
+ * Set (and cleared) at the selector entry from `IrSelectionOptions` —
+ * module-level for the same reason as `currentFnHasCStyleLoop`: the
+ * `isPhase1*` predicates are a deep recursion whose signatures are shared
+ * with every in-flight selector slice, and threading a param through all of
+ * them would conflict with each of those PRs for zero behavioural gain.
+ * `null` = host-extern claiming disabled (no callback, or a host-free mode —
+ * see `hostExternCapability` in capability.ts).
+ */
+let currentHostGlobalResolver: ((node: ts.Identifier) => string | undefined) | null = null;
 
 /** True if `node` (a function body) contains a `while`/`for` (C-style) loop
  *  anywhere, NOT descending into nested function/class scopes. */
@@ -1731,8 +1781,21 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
   if (ts.isIdentifier(expr)) {
     // Identifier may name either a param/local (scope) or a function
     // (only valid as the callee of a CallExpression, handled below).
-    // A bare identifier that isn't in scope is not a valid Phase-1 expr.
-    return scope.has(expr.text);
+    // A bare identifier that isn't in scope is not a valid Phase-1 expr —
+    // UNLESS it resolves to an ambient host global (#2856, JS-host lane
+    // only; see `hostExternCapability`): the receiver in
+    // `document.getElementById(...)`, `console.log(...)`, `document.body`.
+    // The checker-backed resolver settles shadowing: a user binding named
+    // `document` resolves to the USER declaration, not the lib global, so
+    // this arm never hijacks a module-scope/local shadow. `localClasses` is
+    // excluded for symmetry with the legacy user-class-shadows-extern rule
+    // (#1284).
+    if (scope.has(expr.text)) return true;
+    return (
+      currentHostGlobalResolver !== null &&
+      !localClasses.has(expr.text) &&
+      currentHostGlobalResolver(expr) !== undefined
+    );
   }
   // #1370 Phase A — `this` reference inside a method or constructor body.
   // The selector marks `this` as an in-scope binding for class members
@@ -2029,6 +2092,29 @@ function phase1MemberName(name: ts.PropertyName): string | null {
   if (ts.isNumericLiteral(name)) return name.text;
   // ComputedPropertyName, PrivateIdentifier — Phase A skips both.
   return null;
+}
+
+/**
+ * (#2857 static-method slice) True if a `super` keyword appears anywhere in the
+ * subtree. A whole-subtree scan is deliberately conservative: a `super`
+ * reference inside a nested function still binds to the enclosing method's home
+ * object, so descending into nested boundaries never misses one. Used to keep a
+ * `super`-using static method on the legacy path (its inheritance substrate is
+ * the Phase E slice's job), while a plain static method is claimable even under
+ * `extends`.
+ */
+function referencesSuper(node: ts.Node): boolean {
+  let found = false;
+  const visit = (n: ts.Node): void => {
+    if (found) return;
+    if (n.kind === ts.SyntaxKind.SuperKeyword) {
+      found = true;
+      return;
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(node);
+  return found;
 }
 
 // #2135 — the operator predicates consume the shared capability table

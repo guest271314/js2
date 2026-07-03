@@ -17,12 +17,18 @@
 // through WasmGcEmitter via #1713). Together: same IR intent → two backends →
 // matching results.
 
+import ts from "typescript";
 import { describe, expect, it } from "vitest";
 
+import { analyzeSource } from "../src/checker/index.js";
 import { WasmGcEmitter } from "../src/ir/backend/wasmgc-emitter.js";
 import { LinearEmitter } from "../src/ir/backend/linear-emitter.js";
 import type { IrVecLowering, LinearVecLowering } from "../src/ir/backend/handles.js";
-import type { Instr } from "../src/ir/types.js";
+import { lowerFunctionAstToIr } from "../src/ir/from-ast.js";
+import { lowerIrFunctionToWasm } from "../src/ir/lower.js";
+import { emitBinary } from "../src/emit/binary.js";
+import { irVal, type IrLowerResolver } from "../src/ir/index.js";
+import type { BlockType, Instr, ValType, WasmFunction, WasmModule } from "../src/ir/types.js";
 
 const wasmgc = new WasmGcEmitter();
 const linear = new LinearEmitter();
@@ -130,5 +136,224 @@ describe("#1714 LinearEmitter ops execute correctly against the linear layout", 
     const sum = (instance.exports.sum as (b: number) => number)(0);
     expect(sum).toBe(60);
     parsed.destroy?.();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #2954 — the LinearEmitter's CORE-OP families are byte-identical to WasmGc.
+//
+// #1714 proved the seam with the vec primitives (which DIVERGE per backend).
+// #2954 extends LinearEmitter to the core-op families — const / binary / unary /
+// locals / globals / drop / select / return / unreachable / if / br / br_if /
+// block / loop / direct call. These emit CORE Wasm (both backends share the
+// `Instr` encoding), so — unlike the vec ops — they must be BYTE-IDENTICAL to
+// WasmGcEmitter. This block pins that method-by-method: same call, same
+// `Instr[]`. A future divergence in a core op would be a bug (the linear
+// backend does not get to lower `f64.add` differently), and this catches it.
+// ─────────────────────────────────────────────────────────────────────────────
+describe("#2954 LinearEmitter core-op families are byte-identical to WasmGc", () => {
+  const EMPTY: BlockType = { kind: "empty" };
+  /** Run the same emitter method on both backends and assert identical Instr[]. */
+  function bothEqual(fn: (e: WasmGcEmitter | LinearEmitter, out: Instr[]) => void): Instr[] {
+    const gc: Instr[] = [];
+    const lin: Instr[] = [];
+    fn(wasmgc, gc);
+    fn(linear, lin);
+    expect(lin).toEqual(gc);
+    return lin;
+  }
+
+  it("emitConst (f64 / i32 / bool) — identical literal ops", () => {
+    expect(
+      bothEqual((e, out) =>
+        e.emitConst({ kind: "const", result: null, resultType: null, value: { kind: "f64", value: 3.5 } }, "f", out),
+      ),
+    ).toEqual([{ op: "f64.const", value: 3.5 }]);
+    expect(
+      bothEqual((e, out) =>
+        e.emitConst({ kind: "const", result: null, resultType: null, value: { kind: "i32", value: 7 } }, "f", out),
+      ),
+    ).toEqual([{ op: "i32.const", value: 7 }]);
+    expect(
+      bothEqual((e, out) =>
+        e.emitConst({ kind: "const", result: null, resultType: null, value: { kind: "bool", value: true } }, "f", out),
+      ),
+    ).toEqual([{ op: "i32.const", value: 1 }]);
+  });
+
+  it("emitBinary / emitUnary — identical pass-through ops", () => {
+    expect(bothEqual((e, out) => e.emitBinary("f64.add", out))).toEqual([{ op: "f64.add" }]);
+    expect(bothEqual((e, out) => e.emitBinary("i32.lt_s", out))).toEqual([{ op: "i32.lt_s" }]);
+    expect(bothEqual((e, out) => e.emitUnary("f64.neg", out))).toEqual([{ op: "f64.neg" }]);
+  });
+
+  it("locals / globals — identical index ops", () => {
+    expect(bothEqual((e, out) => e.emitLocalGet(2, out))).toEqual([{ op: "local.get", index: 2 }]);
+    expect(bothEqual((e, out) => e.emitLocalSet(3, out))).toEqual([{ op: "local.set", index: 3 }]);
+    expect(bothEqual((e, out) => e.emitLocalTee(4, out))).toEqual([{ op: "local.tee", index: 4 }]);
+    expect(bothEqual((e, out) => e.emitGlobalGet(1, out))).toEqual([{ op: "global.get", index: 1 }]);
+    expect(bothEqual((e, out) => e.emitGlobalSet(5, out))).toEqual([{ op: "global.set", index: 5 }]);
+  });
+
+  it("stack / return ops — identical", () => {
+    expect(bothEqual((e, out) => e.emitDrop(out))).toEqual([{ op: "drop" }]);
+    expect(bothEqual((e, out) => e.emitSelect(out))).toEqual([{ op: "select" }]);
+    expect(bothEqual((e, out) => e.emitReturn(out))).toEqual([{ op: "return" }]);
+    expect(bothEqual((e, out) => e.emitUnreachable(out))).toEqual([{ op: "unreachable" }]);
+  });
+
+  it("structured control flow (if / block / loop) + br / br_if — identical", () => {
+    const then: Instr[] = [{ op: "i32.const", value: 1 }];
+    const els: Instr[] = [{ op: "i32.const", value: 0 }];
+    expect(bothEqual((e, out) => e.emitIf(EMPTY, [...then], [...els], out))).toEqual([
+      { op: "if", blockType: EMPTY, then, else: els },
+    ]);
+    expect(bothEqual((e, out) => e.emitBr(1, out))).toEqual([{ op: "br", depth: 1 }]);
+    expect(bothEqual((e, out) => e.emitBrIf(0, out))).toEqual([{ op: "br_if", depth: 0 }]);
+    const body: Instr[] = [{ op: "nop" } as Instr];
+    expect(bothEqual((e, out) => e.emitBlock(EMPTY, [...body], out))).toEqual([
+      { op: "block", blockType: EMPTY, body },
+    ]);
+    expect(bothEqual((e, out) => e.emitLoop(EMPTY, [...body], out))).toEqual([{ op: "loop", blockType: EMPTY, body }]);
+  });
+
+  it("direct call — identical", () => {
+    expect(bothEqual((e, out) => e.emitCall(9, out))).toEqual([{ op: "call", funcIdx: 9 }]);
+  });
+
+  it("representation-divergent families still fail loudly on LinearEmitter", () => {
+    // Aggregates, boxing-adjacent funcref call, exceptions, ref-cells lower to
+    // WasmGC-specific ops; the linear analogue lands with #2956/#2953. Each stays
+    // a loud stub (WasmGc implements them; Linear throws).
+    for (const call of [
+      () => linear.emitCallRef(),
+      () => linear.emitAggregateNew(),
+      () => linear.emitFieldGet(),
+      () => linear.emitFieldSet(),
+      () => linear.emitThrow(),
+      () => linear.emitTry(),
+      () => linear.emitRefCellNew(),
+      () => linear.emitVecNewFixed(),
+    ]) {
+      expect(call).toThrow(/LinearEmitter:/);
+    }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #2954 — a WHOLE function lowers through LinearEmitter and RUNS in a
+// linear-memory instantiation.
+//
+// The byte-identity block above is the unit proof; this is the integration
+// proof required by the issue's acceptance: a recursive numeric fib and a
+// loop/branch function are lowered from real IR (produced by the from-ast
+// frontend) through `LinearEmitter`, assembled into a module that declares a
+// LINEAR MEMORY, instantiated, and executed — with correct results. The SAME IR
+// lowered through `WasmGcEmitter` yields a byte-identical body (the core-op
+// stream does not diverge), so the WasmGC path — already covered for runtime
+// correctness by the equivalence suite — pins the linear one.
+//
+// (These core-op functions do not touch the memory: that is the point — core
+// ops are memory-independent. The memory is declared to model the linear
+// backend's module shape; the vec/aggregate families that WOULD use it are the
+// still-divergent surface, out of #2954 scope.)
+// ─────────────────────────────────────────────────────────────────────────────
+describe("#2954 whole-function lowering through LinearEmitter runs in linear memory", () => {
+  const F64: ValType = { kind: "f64" };
+
+  // Self-call → funcIdx 0; the numeric subset reaches no globals; one func type.
+  const resolver: IrLowerResolver = {
+    resolveFunc: () => 0,
+    resolveGlobal: () => {
+      throw new Error("numeric subset reaches no globals");
+    },
+    resolveType: () => 0,
+    internFuncType: () => 0,
+  };
+
+  /** Lower a named top-level function from `source` to IR via the frontend. */
+  function irOf(source: string, name: string, calleeTypes?: Map<string, { params: unknown[]; returnType: unknown }>) {
+    const ast = analyzeSource(source);
+    const decl = ast.sourceFile.statements.find(
+      (s): s is ts.FunctionDeclaration => ts.isFunctionDeclaration(s) && s.name?.text === name,
+    );
+    if (!decl) throw new Error(`no function ${name} in source`);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return lowerFunctionAstToIr(decl, { exported: true, calleeTypes: calleeTypes as any }).main;
+  }
+
+  /** Wrap one lowered WasmFunction (index 0, exported) in a linear-memory module. */
+  function singleFuncModule(fn: WasmFunction, params: ValType[], results: ValType[]): WasmModule {
+    return {
+      types: [{ kind: "func", name: "t0", params, results }],
+      imports: [],
+      functions: [fn],
+      exports: [{ name: fn.name, desc: { kind: "func", index: 0 } }],
+      tables: [],
+      elements: [],
+      globals: [],
+      tags: [],
+      stringPool: [],
+      externClasses: [],
+      nodeBuiltinModules: new Set(),
+      stringLiteralValues: new Map(),
+      asyncFunctions: new Set(),
+      declaredFuncRefs: [],
+      memories: [{ min: 1 }], // linear memory — the backend's module shape
+      dataSegments: [],
+    } as unknown as WasmModule;
+  }
+
+  async function runLinear(
+    source: string,
+    name: string,
+    params: ValType[],
+    results: ValType[],
+    calleeTypes?: Map<string, { params: unknown[]; returnType: unknown }>,
+  ): Promise<(...a: number[]) => number> {
+    const ir = irOf(source, name, calleeTypes);
+    const linFn = lowerIrFunctionToWasm(ir, resolver, new LinearEmitter()).func;
+    // Same IR through WasmGc must yield a byte-identical body (core ops don't diverge).
+    const gcFn = lowerIrFunctionToWasm(ir, resolver, new WasmGcEmitter()).func;
+    expect(linFn.body).toEqual(gcFn.body);
+    const binary = emitBinary(singleFuncModule(linFn, params, results));
+    const { instance } = await WebAssembly.instantiate(binary, {});
+    return instance.exports[name] as (...a: number[]) => number;
+  }
+
+  it("recursive numeric fib lowers through LinearEmitter and computes correctly", async () => {
+    const fib = await runLinear(
+      `export function fib(n: number): number { return n < 2 ? n : fib(n - 1) + fib(n - 2); }`,
+      "fib",
+      [F64],
+      [F64],
+      new Map([["fib", { params: [irVal(F64)], returnType: irVal(F64) }]]),
+    );
+    // 0,1,1,2,3,5,8,13,21,34,55,...
+    expect(fib(0)).toBe(0);
+    expect(fib(1)).toBe(1);
+    expect(fib(10)).toBe(55);
+    expect(fib(15)).toBe(610);
+    expect(fib(20)).toBe(6765);
+  });
+
+  it("a for-loop / branch function lowers through LinearEmitter and computes correctly", async () => {
+    // A `for` loop (structured for.loop IR + slots) carrying a BRANCH inside the
+    // body (a ternary → value-producing `if`). Exercises loop + branch + binary +
+    // const together on the linear boundary.
+    const sumTo = await runLinear(
+      `export function sumTo(n: number): number {
+         let t = 0;
+         for (let i = 0; i < n; i = i + 1) { t = t + (i > 1 ? i : 0); }
+         return t;
+       }`,
+      "sumTo",
+      [F64],
+      [F64],
+    );
+    expect(sumTo(0)).toBe(0);
+    expect(sumTo(2)).toBe(0); // i=0,1 gated to 0 by i>1
+    expect(sumTo(5)).toBe(9); // 2+3+4
+    expect(sumTo(100)).toBe(4949); // sum(2..99) = 4950 - 1
   });
 });
