@@ -59,6 +59,7 @@ class SiteNav extends HTMLElement {
       { label: "Compatibility", href: `${isLanding ? "" : base}#goals` },
       { label: "Benchmarks", href: `${isLanding ? "" : base}#benchmarks` },
       { label: "Approach", href: `${isLanding ? "" : base}#approach` },
+      { label: "Blog", href: `${isLanding ? "" : base}blog/` },
       { label: "FAQ", href: `${isLanding ? "" : base}#faq` },
       { label: "Roadmap", href: `${isLanding ? "" : base}#roadmap` },
     ];
