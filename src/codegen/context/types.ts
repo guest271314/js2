@@ -1903,6 +1903,18 @@ export interface CodegenContext {
   /** (#2896) Cache: `(builtin, member)` key → the meta struct-type index above.
    *  Keeps `ensureBuiltinFnMetaType` idempotent per closure identity. */
   builtinFnMetaTypeByKey?: Map<string, number>;
+  /** (#2963) Reified-builtin-value IDENTITY substrate. A builtin static method
+   *  read AS A VALUE (`const r = Promise.resolve`, `[1,2].map(Number.isInteger)`)
+   *  must be a MODULE-LEVEL SINGLETON: every read of the same (builtin, member)
+   *  yields the SAME ref so `Promise.resolve === Promise.resolve` holds and a
+   *  `delete fn.name` mutates the one shared object (ES: builtin methods are a
+   *  single function object). Keyed by the meta/wrapper struct-type index (the
+   *  per-(builtin, member) unique type from `ensureBuiltinFnMetaType`), the value
+   *  is the index of a `(ref null <structType>)` mutable global that
+   *  `pushBuiltinFnSingletonValueInstrs` lazily materializes once (a null-guarded
+   *  `struct.new` in a shift-covered function body — NOT a const-init, whose
+   *  embedded `ref.func` the late-import funcidx shifter does not walk). */
+  builtinFnSingletonGlobalByTypeIdx?: Map<number, number>;
   /** (#2193 PR-B) Struct-type indices of `$NativeProto` member closures whose
    *  FIRST user param is the receiver (`this`) — e.g. `Array.prototype.slice`'s
    *  `(self, this, start, end)` closure. Unlike a plain user function (which

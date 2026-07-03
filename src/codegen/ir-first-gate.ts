@@ -8,6 +8,12 @@
 // module and its init-order-sensitive cycles).
 import ts from "typescript";
 
+// (#2972) Single-source string-element-read predicates — shared with the
+// from-ast lowering arm so the gate and the builder cannot drift.
+// capability.ts is a dependency-free leaf (ts-api only), so this import
+// preserves this module's no-codegen-entry-cycle property.
+import { collectStringLiteralLens, stringElementReadLowerable } from "../ir/capability.js";
+
 /** Collect every top-level module binding name of a source file: function /
  *  class / enum declarations, `var`/`let`/`const` statements (including
  *  destructuring patterns), and import clause names. Used by the gate-4
@@ -160,12 +166,21 @@ export function irFirstBodyReadsHostNode(fn: ts.FunctionDeclaration, moduleNames
  * / `decimalToPercentHexString` harness, `hex[(n>>4)&0xf]`) into
  * `pass → compile_error` regressions flag-on.
  *
- * Since the selector cannot type-resolve the receiver, and no string-element
- * read can validly be IR-first today (it always throws), the guard lives here:
- * keep any string-element-reading function on the compile-twice path (legacy +
- * silently-demoting overlay) until an actual string-element-read lowering is
- * proven in the IR builder — exactly the compile-twice deferral gate 4 uses
- * for host nodes. Lifting this gate is the trigger for that future lowering.
+ * Since the selector cannot type-resolve the receiver, the guard lives here:
+ * keep any function with an UNPROVEN string-element read on the compile-twice
+ * path (legacy + silently-demoting overlay) — exactly the compile-twice
+ * deferral gate 4 uses for host nodes.
+ *
+ * (#2972 lowering refinement) The IR builder NOW lowers PROVEN-in-bounds
+ * string element reads (`lowerElementAccess` delegates to the charAt
+ * machinery when the receiver has a literal-known length and
+ * `stringIndexProvenBelow` holds — e.g. the harness `hex[(n>>4)&0xf]` on a
+ * 16-char literal). Those reads are genuinely IR-first-safe, so this gate
+ * consults the SAME single-source predicates (`collectStringLiteralLens` +
+ * `stringElementReadLowerable` from `src/ir/capability.ts`) and only flags
+ * reads the builder would still throw on. One predicate, two consumers —
+ * gate and builder cannot drift. The remaining lift is the unproven
+ * residual (OOB→undefined widening or broader proofs).
  *
  * Checker-free string detection (conservative — a false positive only keeps a
  * non-string element access on compile-twice, never a correctness risk; a
@@ -177,6 +192,8 @@ export function irFirstBodyReadsHostNode(fn: ts.FunctionDeclaration, moduleNames
  */
 export function irFirstBodyReadsStringElement(fn: ts.FunctionDeclaration): boolean {
   if (!fn.body) return false;
+  // (#2972) literal-length facts — same source the from-ast lowering uses.
+  const literalLens = collectStringLiteralLens(fn);
   // --- names known to hold a string value inside the function ---
   const stringNames = new Set<string>();
   const isStringInitializer = (e: ts.Expression | undefined): boolean =>
@@ -211,8 +228,14 @@ export function irFirstBodyReadsStringElement(fn: ts.FunctionDeclaration): boole
   const scan = (node: ts.Node): void => {
     if (found) return;
     if (ts.isElementAccessExpression(node) && !node.questionDotToken && isStringReceiver(node.expression)) {
-      found = true;
-      return;
+      // (#2972) A PROVEN-in-bounds read on a literal-known-length receiver is
+      // lowered by the IR builder's charAt arm — do NOT exclude its function
+      // from the compile-once skip set for it. Same predicate the builder
+      // consults (capability.ts), so gate and builder cannot disagree.
+      if (!stringElementReadLowerable(node, literalLens)) {
+        found = true;
+        return;
+      }
     }
     ts.forEachChild(node, scan);
   };

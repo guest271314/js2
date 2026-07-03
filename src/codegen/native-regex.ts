@@ -21,6 +21,7 @@ import { ensureLateImport } from "./expressions/late-imports.js";
 import { emitWasiErrorConstructor } from "./registry/error-types.js";
 import { addStringConstantGlobal, ensureExnTag } from "./registry/imports.js";
 import { addFuncType, getOrRegisterArrayType, getOrRegisterVecType } from "./registry/types.js";
+import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S3) stable-regime minting
 import { stringConstantExternrefInstrs } from "./native-strings.js";
 import { ReOp } from "./regex/bytecode.js";
 import { REGEX_STEP_CAP } from "./regex/vm.js";
@@ -113,7 +114,7 @@ function emitClassMatch(ctx: CodegenContext): number {
   const i32Arr = regexI32ArrayType(ctx);
   const i32ArrRef: ValType = { kind: "ref", typeIdx: i32Arr };
   const typeIdx = addFuncType(ctx, [i32ArrRef, { kind: "i32" }, { kind: "i32" }, { kind: "i32" }], [{ kind: "i32" }]);
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const funcIdx = mintDefinedFunc(ctx);
   ctx.nativeRegexHelpers.set("__regex_class_match", funcIdx);
 
   // params: table(0), offset(1), c(2), negated(3)
@@ -209,7 +210,7 @@ function emitClassMatch(ctx: CodegenContext): number {
     },
   ];
 
-  ctx.mod.functions.push({
+  pushDefinedFunc(ctx, funcIdx, {
     name: "__regex_class_match",
     typeIdx,
     locals: [
@@ -281,7 +282,7 @@ export function ensureRegexRun(ctx: CodegenContext): number {
     ],
     [{ kind: "i32" }],
   );
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const funcIdx = mintDefinedFunc(ctx);
   ctx.nativeRegexHelpers.set("__regex_run", funcIdx);
 
   // params
@@ -1332,7 +1333,7 @@ export function ensureRegexRun(ctx: CodegenContext): number {
     body,
     exported: false,
   };
-  ctx.mod.functions.push(fn);
+  pushDefinedFunc(ctx, funcIdx, fn);
   return funcIdx;
 }
 
@@ -1370,7 +1371,7 @@ export function ensureRegexSearch(ctx: CodegenContext): number {
     ],
     [{ kind: "i32" }],
   );
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const funcIdx = mintDefinedFunc(ctx);
   ctx.nativeRegexHelpers.set("__regex_search", funcIdx);
 
   const PROG = 0,
@@ -1448,7 +1449,7 @@ export function ensureRegexSearch(ctx: CodegenContext): number {
     { op: "i32.const", value: 0 },
   ];
 
-  ctx.mod.functions.push({
+  pushDefinedFunc(ctx, funcIdx, {
     name: "__regex_search",
     typeIdx,
     locals: [{ name: "i", type: { kind: "i32" } }],
@@ -1518,7 +1519,7 @@ export function ensureRegexReplace(ctx: CodegenContext): number {
     ],
     [strRef],
   );
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const funcIdx = mintDefinedFunc(ctx);
   ctx.nativeRegexHelpers.set("__regex_replace", funcIdx);
 
   // params
@@ -1667,7 +1668,7 @@ export function ensureRegexReplace(ctx: CodegenContext): number {
     body,
     exported: false,
   };
-  ctx.mod.functions.push(fn);
+  pushDefinedFunc(ctx, funcIdx, fn);
   return funcIdx;
 }
 
@@ -1787,7 +1788,7 @@ export function ensureRegexCaptureArray(ctx: CodegenContext): number {
     ],
     [nstrVecRef],
   );
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const funcIdx = mintDefinedFunc(ctx);
   ctx.nativeRegexHelpers.set("__regex_capture_array", funcIdx);
 
   // params
@@ -1879,7 +1880,7 @@ export function ensureRegexCaptureArray(ctx: CodegenContext): number {
     { op: "struct.new", typeIdx: nstrVecTypeIdx },
   ];
 
-  ctx.mod.functions.push({
+  pushDefinedFunc(ctx, funcIdx, {
     name: "__regex_capture_array",
     typeIdx,
     locals: [
@@ -1945,7 +1946,7 @@ export function ensureRegexSplit(ctx: CodegenContext): number {
     ],
     [nstrVecRef],
   );
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const funcIdx = mintDefinedFunc(ctx);
   ctx.nativeRegexHelpers.set("__regex_split", funcIdx);
 
   // params
@@ -2238,7 +2239,7 @@ export function ensureRegexSplit(ctx: CodegenContext): number {
     { op: "struct.new", typeIdx: nstrVecTypeIdx },
   ];
 
-  ctx.mod.functions.push({
+  pushDefinedFunc(ctx, funcIdx, {
     name: "__regex_split",
     typeIdx,
     locals: [
@@ -2310,7 +2311,7 @@ export function ensureRegexMatchAll(ctx: CodegenContext): number {
     ],
     [{ kind: "ref_null", typeIdx: matchVecTypeIdx }],
   );
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const funcIdx = mintDefinedFunc(ctx);
   ctx.nativeRegexHelpers.set("__regex_match_all", funcIdx);
 
   // params
@@ -2483,7 +2484,7 @@ export function ensureRegexMatchAll(ctx: CodegenContext): number {
     } as Instr,
   ];
 
-  ctx.mod.functions.push({
+  pushDefinedFunc(ctx, funcIdx, {
     name: "__regex_match_all",
     typeIdx,
     locals: [
@@ -2569,7 +2570,7 @@ export function ensureRegexMatchAllArrays(ctx: CodegenContext): number {
     ],
     [outerVecRef],
   );
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const funcIdx = mintDefinedFunc(ctx);
   ctx.nativeRegexHelpers.set("__regex_match_all_arrays", funcIdx);
 
   // params
@@ -2713,7 +2714,7 @@ export function ensureRegexMatchAllArrays(ctx: CodegenContext): number {
     { op: "struct.new", typeIdx: outerVecTypeIdx },
   ];
 
-  ctx.mod.functions.push({
+  pushDefinedFunc(ctx, funcIdx, {
     name: "__regex_match_all_arrays",
     typeIdx,
     locals: [
@@ -2794,7 +2795,7 @@ export function ensureRegexGetSubstitution(ctx: CodegenContext): number {
     ],
     [strRef],
   );
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const funcIdx = mintDefinedFunc(ctx);
   ctx.nativeRegexHelpers.set("__regex_get_substitution", funcIdx);
 
   // params
@@ -3467,7 +3468,7 @@ export function ensureRegexGetSubstitution(ctx: CodegenContext): number {
     { op: "local.get", index: RESULT },
   ];
 
-  ctx.mod.functions.push({
+  pushDefinedFunc(ctx, funcIdx, {
     name: "__regex_get_substitution",
     typeIdx,
     locals: [
@@ -3516,7 +3517,7 @@ export function ensureRegexFlagsStr(ctx: CodegenContext): number {
   const anyStrTypeIdx = ctx.anyStrTypeIdx;
 
   const typeIdx = addFuncType(ctx, [{ kind: "i32" }], [{ kind: "ref", typeIdx: anyStrTypeIdx }]);
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const funcIdx = mintDefinedFunc(ctx);
   ctx.nativeRegexHelpers.set("__regex_flags_str", funcIdx);
 
   const FLAGS = 0; // param
@@ -3568,7 +3569,7 @@ export function ensureRegexFlagsStr(ctx: CodegenContext): number {
     { op: "struct.new", typeIdx: strTypeIdx },
   );
 
-  ctx.mod.functions.push({
+  pushDefinedFunc(ctx, funcIdx, {
     name: "__regex_flags_str",
     typeIdx,
     locals: [

@@ -35,6 +35,7 @@ import { ts } from "../ts-api.js";
 import type { Instr, ValType } from "../ir/types.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { addFuncType } from "./registry/types.js";
+import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S3) stable-regime minting
 import type { InnerResult } from "./shared.js";
 import { compileExpression, VOID_RESULT } from "./shared.js";
 import { coerceMapKeyToAnyref, ensureMapHelpers } from "./map-runtime.js";
@@ -62,9 +63,9 @@ export function ensureWeakCollectionHelpers(ctx: CodegenContext): void {
     { op: "call", funcIdx: mapSetIdx } as Instr,
   ];
   const typeIdx = addFuncType(ctx, [mref, anyref], [mref]);
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const funcIdx = mintDefinedFunc(ctx);
   ctx.mapHelpers.set("__weakset_add", funcIdx);
-  ctx.mod.functions.push({ name: "__weakset_add", typeIdx, locals: [], body, exported: false });
+  pushDefinedFunc(ctx, funcIdx, { name: "__weakset_add", typeIdx, locals: [], body, exported: false });
 }
 
 /** Cast a compiled receiver to `ref $Map` (the weak-collection backing store).

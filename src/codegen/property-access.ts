@@ -16,7 +16,7 @@ import {
   isStringWrapperType,
 } from "../checker/type-mapper.js";
 import type { FieldDef, Instr, ValType } from "../ir/types.js";
-import { definedFuncAt } from "./func-space.js";
+import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js";
 import { emitBoundsCheckedArrayGet } from "./array-methods.js";
 import { emitHoleToUndefined } from "./array-holes.js"; // (#2001 S1)
 import { classMemberFuncKey } from "./class-member-keys.js"; // (#1983) collision-free class-member funcMap keys
@@ -31,6 +31,7 @@ import {
   BUILTIN_STATIC_METHOD_ARITY,
   ensureBuiltinFnMetaType,
   pushBuiltinFnClosureValueInstrs,
+  pushBuiltinFnSingletonValueInstrs,
   STANDALONE_STATIC_METHOD_META,
 } from "./builtin-fn-meta.js";
 import { emitLazyClassObjectGet, emitLazyProtoGet, findExternInfoForMember } from "./expressions/extern.js";
@@ -417,6 +418,59 @@ const NUMBER_CONSTANT_PROPS = new Set([
   "NEGATIVE_INFINITY",
   "NaN",
 ]);
+
+/**
+ * (#2933) Numeric VALUES of the `Math` / `Number` namespace static constants —
+ * the single source of truth shared by the dot-access `f64.const` emitter (in
+ * `compilePropertyAccess`) and the reflective element-access fold
+ * (`tryEmitBuiltinNamespaceConstantValue`, used by `compileElementAccess` for
+ * `Math["PI"]` / `const k = "PI"; Math[k]`). Keeping these here means the
+ * reflective read and the direct read never drift.
+ */
+const MATH_CONSTANT_VALUES: Record<string, number> = {
+  PI: Math.PI,
+  E: Math.E,
+  LN2: Math.LN2,
+  LN10: Math.LN10,
+  SQRT2: Math.SQRT2,
+  SQRT1_2: Math.SQRT1_2,
+  LOG2E: Math.LOG2E,
+  LOG10E: Math.LOG10E,
+};
+const NUMBER_CONSTANT_VALUES: Record<string, number> = {
+  EPSILON: Number.EPSILON,
+  MAX_SAFE_INTEGER: Number.MAX_SAFE_INTEGER,
+  MIN_SAFE_INTEGER: Number.MIN_SAFE_INTEGER,
+  MAX_VALUE: Number.MAX_VALUE,
+  MIN_VALUE: Number.MIN_VALUE,
+  POSITIVE_INFINITY: Infinity,
+  NEGATIVE_INFINITY: -Infinity,
+  NaN: NaN,
+};
+
+/**
+ * (#2933) Fold a `<namespace>.<constant>` VALUE read to its `f64.const` when
+ * `builtinName` is `Math`/`Number` and `propName` is one of their numeric
+ * static data constants. Returns the emitted `ValType` (`f64`) or `undefined`
+ * when the pair is not a foldable namespace constant (caller falls through).
+ *
+ * Used by the reflective element-access path (`Math["PI"]`) so a computed read
+ * of a namespace constant emits the SAME constant the syntactic dot read does.
+ * Observationally identical in host mode (which would otherwise read the same
+ * value via `__get_builtin`/`__extern_get`) and the only host-free lowering in
+ * standalone (the generic computed read returns 0 there — #2933).
+ */
+function tryEmitBuiltinNamespaceConstantValue(
+  fctx: FunctionContext,
+  builtinName: string,
+  propName: string,
+): ValType | undefined {
+  const table =
+    builtinName === "Math" ? MATH_CONSTANT_VALUES : builtinName === "Number" ? NUMBER_CONSTANT_VALUES : undefined;
+  if (!table || !(propName in table)) return undefined;
+  fctx.body.push({ op: "f64.const", value: table[propName]! });
+  return { kind: "f64" };
+}
 
 /**
  * (#2595) Per-constructor element byte width for `TypedArray.BYTES_PER_ELEMENT`
@@ -1138,8 +1192,8 @@ function ensureStandaloneBuiltinStaticMethodClosure(
       closureFctx.body.push({ op: "call", funcIdx: gopdIdx });
     }
 
-    funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-    ctx.mod.functions.push({
+    funcIdx = mintDefinedFunc(ctx);
+    pushDefinedFunc(ctx, funcIdx, {
       name: funcName,
       typeIdx: wrapperTypes.liftedFuncTypeIdx,
       locals: closureFctx.locals,
@@ -2799,8 +2853,9 @@ export function tryEmitDeleteAwareDynamicSet(
   const valLocal = allocLocal(fctx, `__daset_val_${fctx.locals.length}`, { kind: "externref" });
   fctx.body.push({ op: "local.set", index: valLocal });
 
-  // __extern_set_strict(obj, "prop", val) → _safeSet (clears tombstone, writes
-  // sidecar, mirrors __sset_<key>). Bare call — NOT the struct.set dispatcher.
+  // RUNTIME arm — __extern_set_strict(obj, "prop", val) → _safeSet (clears
+  // tombstone, writes sidecar, mirrors __sset_<key>). Bare call — NOT the
+  // struct.set dispatcher.
   //
   // (#2681/#2686) An EARLIER pinned-write path (`tryEmitPinnedStructMemberSet`,
   // assignment.ts) already routes writes to a RECONSTRUCTED-fnctor receiver
@@ -2809,17 +2864,80 @@ export function tryEmitDeleteAwareDynamicSet(
   // READ. This delete-aware path is the GENERAL `any`-receiver write in a
   // delete-using module, where the receiver is typically a PLAIN object literal
   // lowered to an anonymous `$__anon_N` struct. Routing THAT through the
-  // dispatcher's `struct.set` arm overwrites the field SLOT in place, which
-  // bypasses the delete+re-add ORDERING the JS-host sidecar tracks
+  // dispatcher's `struct.set` arm at RUNTIME overwrites the field SLOT in place,
+  // which bypasses the delete+re-add ORDERING the JS-host sidecar tracks
   // (`delete o.p; o.p = v` must re-insert `p` at the END — `for-in` order, #2179/
-  // #2731). So the general delete-aware write MUST stay on the bare sidecar
-  // `_safeSet`; only the narrowly-pinned reconstructed-fnctor write uses the slot
-  // dispatcher. (The broad reroute here regressed `for-in/order-simple-object`.)
-  fctx.body.push({ op: "local.get", index: objLocal });
+  // #2731). So the general delete-aware runtime write MUST stay on the bare
+  // sidecar `_safeSet`; only the narrowly-pinned reconstructed-fnctor write uses
+  // the slot dispatcher. (The broad runtime reroute here regressed
+  // `for-in/order-simple-object`.)
+  //
+  // (#2805) MODULE-INIT correctness — the symmetric WRITE side of #2800. gc/host
+  // runs `__module_init` via the Wasm `start` section, INSIDE
+  // `WebAssembly.instantiate`, BEFORE the host wires the struct setters via
+  // `__setExports`. The runtime host write above threads `__extern_set_strict` →
+  // `_safeSet` → `getExports()?.__sset_<key>`, so at init `getExports()` is
+  // undefined and the field write is SILENTLY DROPPED — a top-level
+  // `new X({...})` whose ctor does `this.<f> = conf.<f>` on an `any`-typed `this`
+  // stores nothing (the struct keeps its 0/null default), while the IDENTICAL
+  // construction at RUNTIME works. Mirror #2800's read-side gate: branch on the
+  // `__in_module_init` flag and, DURING INIT, write the slot host-free via the
+  // `__set_member_<name>` dispatcher (a `ref.test`+`struct.set` over the complete
+  // finalize-time candidate set; #2664) — no exports needed, and nothing has been
+  // `delete`d yet on a freshly-built object so the for-in re-add ordering the
+  // runtime arm preserves is moot. At runtime keep the sidecar `__extern_set_strict`.
+  //
+  // gc/host only: WASI/standalone have no host `__extern_set_strict` (this
+  // function already returns early for `ctx.standalone`), and WASI's
+  // `__module_init` lazy-init wrap must stay untouched — so WASI keeps the legacy
+  // bare sidecar write.
+  //
+  // The dispatcher is reserved HERE — AFTER both operands are evaluated into
+  // locals — deliberately. The `value` expression (e.g. `conf.zz || 0`) can
+  // itself reserve a `__get_member_<name>` dispatcher and pull late imports that
+  // shift the DEFINED-function index space; reserving `__set_member_<name>` after
+  // all that, with NOTHING emitted between its reserve+flush and the bake below,
+  // guarantees `setMemberIdx` is post-shift and each property's write bakes its
+  // OWN distinct funcIdx. Reserving it BEFORE the value eval (the #2800 write-side
+  // prototype) left the local stale-low so `this.label` and `this.zz` baked the
+  // SAME `call funcIdx` (a funcIdx desync). `setIdx` is an IMPORT (its index is
+  // stable once added — new imports insert at the import-section end and shift
+  // only defined funcs), so baking it late is safe.
+  const setMemberIdx = ctx.wasi ? undefined : reserveMemberSetDispatch(ctx, propName, /*strict*/ true, fctx);
   addStringConstantGlobal(ctx, propName);
-  fctx.body.push(...stringConstantExternrefInstrs(ctx, propName));
-  fctx.body.push({ op: "local.get", index: valLocal });
-  fctx.body.push({ op: "call", funcIdx: setIdx } as Instr);
+  flushLateImportShifts(ctx, fctx);
+
+  if (setMemberIdx === undefined) {
+    // WASI / no dispatcher — legacy bare tombstone-aware host write (byte-identical).
+    fctx.body.push({ op: "local.get", index: objLocal });
+    fctx.body.push(...stringConstantExternrefInstrs(ctx, propName));
+    fctx.body.push({ op: "local.get", index: valLocal });
+    fctx.body.push({ op: "call", funcIdx: setIdx } as Instr);
+    fctx.body.push({ op: "local.get", index: valLocal });
+    return { kind: "externref" };
+  }
+
+  // `__in_module_init ? __set_member_<name>(recv, val) : __extern_set_strict(recv, "prop", val)`.
+  // The flag-read `global.get` index is a PLACEHOLDER patched at finalize by
+  // `finalizeInModuleInitFlag` (after all import globals settle) — shared with the
+  // read-side gate via the same `ctx.inModuleInitFlagReads` list.
+  const flagGet = recordInModuleInitFlagRead(ctx);
+  fctx.body.push(flagGet);
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: [
+      { op: "local.get", index: objLocal } as Instr,
+      { op: "local.get", index: valLocal } as Instr,
+      { op: "call", funcIdx: setMemberIdx } as Instr,
+    ],
+    else: [
+      { op: "local.get", index: objLocal } as Instr,
+      ...stringConstantExternrefInstrs(ctx, propName),
+      { op: "local.get", index: valLocal } as Instr,
+      { op: "call", funcIdx: setIdx } as Instr,
+    ],
+  } as Instr);
 
   // `=` evaluates to the assigned value.
   fctx.body.push({ op: "local.get", index: valLocal });
@@ -3965,7 +4083,12 @@ export function compilePropertyAccess(
       }
       const closure = ensureStandaloneBuiltinStaticMethodClosure(ctx, builtinName, propName, expr);
       if (closure) {
-        fctx.body.push(...pushBuiltinFnClosureValueInstrs(ctx, closure));
+        // (#2963) IDENTITY-STABLE reified builtin value: read via a module-level
+        // singleton so `Array.isArray === Array.isArray`, `Number.isInteger ===
+        // Number.isInteger`, etc. hold (a fresh `struct.new` per read gave two
+        // distinct instances → `!==`). Distinct builtins keep distinct singleton
+        // globals, so `Array.isArray !== Number.isInteger` still holds.
+        fctx.body.push(...pushBuiltinFnSingletonValueInstrs(ctx, closure));
         return closure.type;
       }
       reportUnsupportedStandaloneBuiltinValueRead(ctx, builtinName, propName);
@@ -6556,6 +6679,32 @@ export function compileElementAccess(
   // Handle super[expr] — access parent class property via computed key on `this`
   if (expr.expression.kind === ts.SyntaxKind.SuperKeyword) {
     return compileSuperElementAccess(ctx, fctx, expr);
+  }
+
+  // (#2933) Reflective read of a `Math`/`Number` namespace static CONSTANT via a
+  // statically-resolvable computed key: `Math["PI"]`, `Number["MAX_SAFE_INTEGER"]`,
+  // `const k = "PI"; Math[k]`. Fold to the SAME `f64.const` the syntactic dot read
+  // (`Math.PI`) emits. Without this, standalone returns `0` for the computed form
+  // (the generic dynamic computed read cannot resolve a namespace member — the
+  // namespace has no `$Object` sidecar), and even host mode round-trips through
+  // `__extern_get`. Gated on a resolvable key + a real namespace-constant name, so
+  // non-constant keys (`Math[i]`) and non-constant members (`Math["max"]`) fall
+  // through unchanged. Observationally identical in host mode.
+  {
+    const nsRecv = skipTransparentExpressions(expr.expression);
+    if (ts.isIdentifier(nsRecv)) {
+      const nsName = nsRecv.text;
+      if (nsName === "Math" || nsName === "Number") {
+        const isShadowed = fctx.localMap.has(nsName) || (fctx.boxedCaptures?.has(nsName) ?? false);
+        if (!isShadowed) {
+          const key = resolveComputedKeyExpression(ctx, expr.argumentExpression);
+          if (key !== undefined) {
+            const folded = tryEmitBuiltinNamespaceConstantValue(fctx, nsName, key);
+            if (folded !== undefined) return folded;
+          }
+        }
+      }
+    }
   }
 
   // #1482 — `process.env[<expr>]` under `--target wasi`. Mirrors the
