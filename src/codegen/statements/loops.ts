@@ -5915,7 +5915,13 @@ export function compileForInStatement(ctx: CodegenContext, fctx: FunctionContext
       recvWasmType.kind === "externref" || recvWasmType.kind === "anyref" || recvWasmType.kind === "ref_extern";
     if (isDynamicReceiver) {
       ensureObjectRuntime(ctx);
-      keysIdx = ctx.funcMap.get("__object_keys");
+      // #2964 — for-in must enumerate inherited enumerable keys too, so route
+      // through `__object_keys_forin` (own ordered keys per level + `$proto`
+      // walk with shadow-skip), NOT the OWN-only `__object_keys` (which powers
+      // Object.keys). Same `$ObjVec` return shape, so the loop scaffolding and
+      // the `__extern_length`/`__extern_get_idx`/`__extern_has` accessors below
+      // are unchanged.
+      keysIdx = ctx.funcMap.get("__object_keys_forin");
       lenIdx = ctx.funcMap.get("__extern_length");
       getIdx = ctx.funcMap.get("__extern_get_idx");
       hasIdx = ctx.funcMap.get("__extern_has");
