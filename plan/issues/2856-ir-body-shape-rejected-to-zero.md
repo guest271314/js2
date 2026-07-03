@@ -673,3 +673,155 @@ No source change accompanies this analysis (the gate stays at 25/10/5); this PR 
 the corrected root-cause record so the team stops bouncing off the disproven
 "arms" decomposition. Marking `status: blocked` (on the capability program /
 #2858), `spec: needs-rescope`.
+
+## Implementation Plan — algorithms.ts whole-component slice (−5, first real reduction)
+
+**Author:** dev-team-c (2026-07-03), grounded against `origin/main` @ `17b09dd35`
+(includes the Step-2 correction). Verified with
+`JS2WASM_IR_SHAPE_DIAG=1 pnpm run check:ir-fallbacks -- --shape-diag`. This is
+the first executable slice of the re-scoped capability program — the cleanest
+because `website/playground/examples/js/algorithms.ts` has **zero imports**
+(`grep '^import' → none`; only `export function main`), so its whole call-graph
+is self-contained and its contagion is entirely **internal to one file** (unlike
+the benchmark-harness cluster, which needs #2858's cross-module-call lowering
+first).
+
+### The call-component (must claim atomically — one PR)
+
+`main` (the component root) calls `fibIter`, `fibMemo`, `joinNums`,
+`binarySearch`, `quicksort`. `fibIter` already claims. The **five** functions
+that currently reject (verified `--shape-diag`), and the capability each needs:
+
+| function | reject arm (current main) | capability required |
+| --- | --- | --- |
+| `fibMemo` | `vardecl-init-expr:CallExpression` | **C3** module-scope `Map` global + `.get`/`.set` |
+| `binarySearch` | `body-unhandled-stmt:IfStatement` | **C1** if-in-body (+ early-`return`-in-loop) |
+| `quicksort` | `body-unhandled-stmt:IfStatement` | **C1** if-in-body **+ C2** element-store `arr[i]=e` |
+| `joinNums` | `body-unhandled-stmt:IfStatement` | **C1** if-in-body |
+| `main` | `expr-arraylit-cloop-guard-1804:ArrayLiteralExpression` | **C4** array-literal-under-C-loop SSA |
+
+⚠ **Contagion (read `## ⚠ Sequencing constraint` above): all four capabilities
+must land in ONE PR.** The `call-graph-closure` fixpoint (`select.ts:492-518`)
+demotes any claimable function whose local caller/callee is unclaimed. `main`
+calls all five; fixing only some flips them to shape-claimable but `main` (still
+rejecting on C4) then demotes the whole component — the gate **fails on
+`call-graph-closure` growth**. The unit of reduction is the whole component. The
+merge gate to satisfy: `body-shape-rejected 25→20 (−5)` with `call-graph-closure`
+and `external-call` **unchanged** (net unintended −5); ratchet via
+`check:ir-fallbacks -- --update-on-decrease`.
+
+### C1 — `if`-in-non-tail-body-statement (+ early `return` inside a loop)
+
+`isPhase1BodyStatement` (`select.ts:1315`) has arms for Block, VariableStatement,
+ExpressionStatement, ForOf, While, For, Throw, Try — but **no `IfStatement`
+arm**, so it falls to `shapeNo("body-unhandled-stmt", stmt)` (`select.ts:1408`).
+A well-formed **tail** if already exists in `isPhase1Tail` (`select.ts:1430`:
+requires `else`, recurses both branches as tails). The body form differs: an
+`if` in statement position whose then/else are **statement lists** (not
+tail-expressions), and — critically for `binarySearch`/`fibMemo` — whose branch
+may contain an **early `return`** (`if (arr[mid] === t) return mid;` inside a
+`while`; `if (hit !== undefined) return hit;`). `isPhase1BodyStatement` has no
+`ReturnStatement` arm either.
+
+- **Selector:** add `if (ts.isIfStatement(stmt)) return isPhase1IfBodyStatement(stmt, scope, localClasses)` before the final `shapeNo`. New helper: cond via `isPhase1Expr`; then/else recurse via `isPhase1BodyStatement` (else optional, unlike the tail form). Add a `ReturnStatement` arm to `isPhase1BodyStatement` (guarded: allowed only when a lowerable early-exit target exists — i.e. the enclosing lower context can emit a `br` to the function epilogue).
+- **Lowerer (`from-ast.ts`):** the nested-buffer `if` lowering already exists for the tail path (`IrInstrIf` with nested then/else buffers, `forEachNestedBuffer`). The new work is **early-return from inside a nested buffer/loop**: lower `return e` in body position to eval `e` + `br` to the function's result/epilogue block. Verify the multi-exit path composes with the existing loop back-edge lowering (this is the `binarySearch` `return mid` inside `while` case). NB this borders #2952 (multi-exit control flow) — coordinate: if #2952's `IrInstrBrLabel` lands first, reuse it; else a scoped epilogue-br is sufficient here (single-level, no labeled target needed).
+
+### C2 — element-store `arr[i] = e`
+
+Element **read** `arr[i]` is accepted (`select.ts:1950`, `isPhase1Expr`) and
+lowered (`from-ast.ts:2276` `lowerElementAccess`). The **store** is not: in
+`isPhase1BodyStatement`'s ExpressionStatement→BinaryExpression→`EqualsToken` arm
+(`select.ts:1343-1352`) the LHS is checked for `Identifier` and
+`PropertyAccessExpression` only — an `ElementAccessExpression` LHS
+(`arr[i] = arr[j]`, quicksort:66-67,70-72) falls through and rejects. And there
+is **no `lowerElementStore`** in `from-ast.ts` (`grep lowerElementStore → none`).
+
+- **Selector:** add an `ElementAccessExpression` case to the `EqualsToken` LHS
+  check — accept when `expr.expression` and `expr.argumentExpression` are both
+  `isPhase1Expr` (mirror the read guard at `select.ts:1950`).
+- **Lowerer:** add `lowerElementStore(expr, valueId, cx)` — the write dual of
+  `lowerElementAccess`; emit `vec.set` (WasmGC array `array.set`; linear
+  backend the store dual) with the i32-coerced index, reusing the in-bounds
+  reasoning path (`isProvenInBoundsIr`, `from-ast.ts:2179`). No new host import.
+
+### C3 — module-scope `Map` global + `.get`/`.set`
+
+`fibMemo` rejects at `vardecl-init-expr:CallExpression` on
+`const hit = fibCache.get(n)` because (a) `fibCache` is a **module-scope**
+binding (`const fibCache = new Map<number,number>()`, algorithms.ts:25) not in
+the function's scope set — the selector's scope set holds params/locals only —
+and (b) `Map.get`/`Map.set` are method calls the IR does not yet lower. This is
+the substantial capability of the slice.
+
+- **Module-scope binding set:** thread a module-level binding set (the `const`/
+  `let` names declared at module scope) into the shape walk so member/reference
+  access to `fibCache` is in-scope. Must NOT admit arbitrary module globals as a
+  side effect — scope it to bindings with a proven IR-lowerable representation.
+- **Storage-slot parity (the hazard):** IR module-global read/write MUST share
+  the **same storage slot the legacy backend allocates** for `fibCache` — the two
+  front-ends coexist per function (a global written by an IR function and read by
+  a legacy one must be one location). Add a **mixed IR/legacy read-write
+  equivalence test** (`tests/ir-*.test.ts`): a module global written by an
+  IR-claimed function and read by a legacy-compiled one round-trips.
+- **`Map` lowering:** lower `new Map()`, `.get(k)` (returns value-or-`undefined`),
+  `.set(k,v)`. If a native `Map` substrate is absent in the IR, this pairs with
+  the object/Map runtime — confirm the legacy backend's `Map` representation and
+  emit the identical calls/slots (byte-parity per mode). **This is the item most
+  likely to need its own predecessor sub-issue** if the `Map` runtime is not yet
+  IR-reachable — measure first; if `Map` lowering is out of reach, the component
+  cannot claim and this whole slice defers behind a `Map`-in-IR capability.
+
+### C4 — array-literal under C-style loop (SSA threading)
+
+`main` rejects at `expr-arraylit-cloop-guard-1804` (`select.ts:1967`): the #1804
+guard **withholds** the claim whenever the function contains a C-style
+`while`/`for` loop, because a constructed vec read inside such a loop fails SSA
+hygiene (the vec value isn't threaded into the loop's cond/body blocks — distinct
+from the working `for-of` vec path). `main` has both `const sorted = [1,3,…]`
+(algorithms.ts:99) and C-style `for` loops.
+
+- The guard protects a **real lowering bug**, not a shape gap — the fix is to
+  **thread the constructed-vec SSA value into the loop cond/body blocks** so the
+  vec identity is stable across the back-edge (the same class as the #2784 S3
+  vec-identity fix). Once threaded, lift the guard for the threaded case.
+- If the SSA-threading fix is larger than this slice can absorb, an acceptable
+  fallback that still claims `main`: hoist/represent the literal so it is not
+  read *through* the C-loop region — but the guard exists precisely because that
+  is unsound in general, so **prefer the SSA-threading fix**; do not just delete
+  the guard.
+
+### Ordering, sizing, verification
+
+- **Order within the PR:** C2 (smallest, self-contained) → C1 (if-in-body +
+  early-return, reused by 3 fns) → C4 (SSA threading) → C3 (Map + module-global,
+  the gate). Land as ONE PR; the ratchet only moves when all five claim.
+- **Sizing / routing:** whole-component, **feasibility hard, ~L, senior-dev** —
+  C1's multi-exit and C3's Map-runtime + storage-slot parity are each real IR
+  capabilities. NOT a single-window dev slice; schedule at a **fresh budget
+  window** (big-rock). If C3's `Map`-in-IR proves out of reach on a measure-first
+  probe, split C3 into a predecessor `Map`-in-IR sub-issue; note that C3 is on
+  the critical path for the whole component (`main` calls `fibMemo`, so `fibMemo`
+  must claim for `main`'s component to claim), so the whole slice waits on it —
+  measure before committing.
+- **No-regression bar:** `body-shape-rejected 25→20`, `call-graph-closure` and
+  `external-call` unchanged (net unintended −5); `pnpm run check:ir-fallbacks`
+  green locally before push; `tests/ir-*.test.ts` green; per-mode lowered bytes
+  for every already-claimed function unchanged (byte-parity); test262 conformance
+  net-neutral-or-positive.
+- **Promotion:** this slice does NOT reach `body-shape-rejected: 0` on its own
+  (20 remain: benchmark-harness −8 behind #2858, calendar/classes clusters). It
+  is the first `−5`. `STRICT_IR_REASONS` promotion (acceptance #3 of the epic)
+  waits until the whole bucket is 0.
+
+### Files
+
+- `src/ir/select.ts` — `isPhase1BodyStatement` (:1315, add IfStatement + Return
+  arms), `EqualsToken` LHS ElementAccess case (:1343), module-scope binding set,
+  `expr-arraylit-cloop-guard-1804` guard (:1967).
+- `src/ir/from-ast.ts` — new `lowerElementStore`; early-`return`-in-body lowering;
+  Map `.get`/`.set`/`new Map` lowering; module-global read/write.
+- `src/ir/lower.ts` / `src/codegen-linear/` — backend duals for element-store,
+  module-global, Map (WasmGC vs linear differ only here).
+- `tests/ir-algorithms-cluster.test.ts` (new) — per-capability claim tests +
+  the mixed IR/legacy module-global round-trip equivalence test.
+- `scripts/ir-fallback-baseline.json` — ratchet `body-shape-rejected` 25→20.
