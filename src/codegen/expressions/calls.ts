@@ -131,6 +131,7 @@ import {
   ensureObjectNativeProtoGlue,
   ensureStringNativeProtoGlue,
   emitTypedArrayIntrinsicCtorObject,
+  emitArrayIteratorPrototypeSingleton,
   isWiredTypedArrayViewName,
 } from "../array-object-proto.js";
 import {
@@ -191,7 +192,7 @@ import {
   tryExternClassMethodOnAny,
 } from "./calls-closures.js";
 import { compileOptionalCallExpression } from "./calls-optional.js";
-import { tryStaticEvalInline, tryStaticFunctionCtorCall } from "./eval-inline.js";
+import { isFunctionCtorImmediateCall, tryStaticEvalInline, tryStaticFunctionCtorCall } from "./eval-inline.js";
 import { compileExternMethodCall, compileSpreadCallArgs, emitLazyProtoGet } from "./extern.js";
 import {
   compileStandaloneRegExpConstructor,
@@ -4045,6 +4046,18 @@ function compileCallExpression(
     if (r !== undefined) return r;
   }
 
+  // (#2960) DYNAMIC immediate-call `new Function(<non-const>)(args)` /
+  // `Function(<non-const>)(args)` in JS-host mode. The constant compile-away
+  // above declined (non-constant args), so the callee compiles to the
+  // meta-circular shim's real host-callable value. A wasm-side `f(args)` on a
+  // plain host-function externref returns undefined (the general any-callee
+  // host-function limitation), so route the call through the `__call_function`
+  // host helper (the same packer bound functions use).
+  if (!noJsHost(ctx) && !ctx.nativeStrings && isFunctionCtorImmediateCall(expr, ctx.checker)) {
+    const r = emitBoundFunctionCall(ctx, fctx, expr);
+    if (r !== null) return r;
+  }
+
   // (#2921) `__drain_microtasks()` — explicit microtask-queue drain intrinsic
   // (banked from the closed #2367/#2867 PR-B; the funcIdx-shift half already
   // landed via #2918). Lets a standalone/WASI embedder — and, once the carrier
@@ -4142,6 +4155,31 @@ function compileCallExpression(
       if (rewritten !== undefined) return rewritten;
       const inlined = tryStaticEvalInline(ctx, fctx, expr);
       if (inlined !== undefined) return inlined;
+      // (#2960) No-JS-host (standalone / wasi): the `__extern_eval` host import
+      // is unsatisfiable and previously leaked into the binary, trapping only at
+      // instantiation with zero compile-time signal. Instead emit a
+      // source-located WARNING and, for the dynamic case, a CATCHABLE throw at
+      // the eval call site (a program that never reaches this eval keeps
+      // working). The static-constant path (tryStaticEvalInline above) already
+      // splices inline and returned; only genuine dynamic eval reaches here.
+      if (noJsHost(ctx)) {
+        reportError(
+          ctx,
+          expr,
+          "Warning: dynamic eval is not supported in --target standalone/wasi — no " +
+            "runtime-eval host is available; this eval call throws at runtime " +
+            "(tracking: runtime-eval goal, bytecode interpreter #2928)",
+          "warning",
+        );
+        // Evaluate the argument expressions for their side effects first.
+        for (const a of expr.arguments) {
+          const t = compileExpression(ctx, fctx, a);
+          if (t !== null) fctx.body.push({ op: "drop" });
+        }
+        emitThrowTypeError(ctx, fctx, "dynamic eval is not supported in standalone mode (#2928)");
+        // The throw is stack-polymorphic; return the nominal eval result type.
+        return { kind: "externref" };
+      }
       let evalIdx = ctx.funcMap.get("__extern_eval");
       if (evalIdx === undefined) {
         const importsBefore = ctx.numImportFuncs;
@@ -6830,6 +6868,28 @@ function compileCallExpression(
       }
 
       const argTsType = ctx.checker.getTypeAtLocation(arg0);
+
+      // (#3013) `Object.getPrototypeOf(<array iterator>)` → the shared native
+      // `%ArrayIteratorPrototype%` singleton (standalone/WASI). Every array
+      // iterator (`[].values()` / `.keys()` / `.entries()` / `[][Symbol.iterator]()`
+      // and any value flowing through an `ArrayIterator<T>`-typed binding) reports
+      // the SAME prototype object by identity (§23.1.5.2). The TS checker names
+      // ALL four producers' result type `ArrayIterator` — distinct from
+      // `Generator`/`MapIterator`/`SetIterator`/`StringIterator` — so this routes
+      // genuinely and never mis-maps a different iterator kind. Without it the
+      // standalone fallback below returns `ref.null.extern`, which made the
+      // identity assertion pass only coincidentally (null === null). Host/gc mode
+      // keeps the `__getPrototypeOf` host import (byte-inert).
+      if ((ctx.standalone || ctx.wasi) && argTsType.getSymbol()?.name === "ArrayIterator") {
+        const argType = compileExpression(ctx, fctx, arg0);
+        if (argType) fctx.body.push({ op: "drop" });
+        const protoType = emitArrayIteratorPrototypeSingleton(ctx, fctx);
+        if (protoType) return protoType;
+        // Runtime unavailable: preserve the historical null return.
+        fctx.body.push({ op: "ref.null.extern" });
+        return { kind: "externref" };
+      }
+
       const className = resolveStructName(ctx, argTsType);
 
       // For known class instances, return the class prototype singleton
@@ -14661,6 +14721,21 @@ function compileCallExpression(
       //   - __call_@@iterator export for user-defined iterable classes
       //   - __vec_len/__vec_get fallback for vec structs (arrays)
       if (methodName === "@@iterator" || methodName === "@@asyncIterator") {
+        // (#3013) Standalone/WASI: `<array>[Symbol.iterator]()` is, per
+        // §23.1.3.40, the SAME operation as `Array.prototype.values` —
+        // `Array.prototype[Symbol.iterator] === Array.prototype.values`. Route an
+        // array receiver to the native `.values()` lowering so it produces the
+        // identical `$__IterRec` value host-free, instead of leaking the
+        // `env::__iterator` host import (the sole leak of the array-iterator
+        // conformance cluster). The `.values()`/`.keys()`/`.entries()` forms are
+        // already native; this closes the `[Symbol.iterator]()` gap. Host/gc mode
+        // keeps the existing `__iterator` bridge (byte-inert). Async iterator and
+        // non-array receivers fall through unchanged.
+        if (methodName === "@@iterator" && (ctx.standalone || ctx.wasi) && resolveArrayInfo(ctx, receiverType)) {
+          const nativeResult = compileArrayMethodCall(ctx, fctx, elemAccess, expr, receiverType, "values");
+          if (nativeResult !== undefined && nativeResult !== null) return nativeResult as ValType;
+          // Fall through to the host bridge if the native path declined.
+        }
         const importName = methodName === "@@iterator" ? "__iterator" : "__async_iterator";
         const recvType = compileExpression(ctx, fctx, elemAccess.expression);
         if (recvType) {
