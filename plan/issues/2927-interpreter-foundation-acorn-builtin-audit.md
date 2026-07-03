@@ -306,10 +306,22 @@ No regression: `#2151`/`#2583` suites (51) + array-methods/prototype (35) green;
 ### Remaining generic-built-in gaps (tracking items — gate #2928 sign-off)
 
 1. **Map/Set methods on an `any` receiver are NOT host-free** — emit
-   `env.WeakMap_get`/`WeakMap_set`/`WeakMap_has`/`Set_add`. The interpreter's
-   `CallBuiltin` on a boxed-any Map/Set receiver needs native brand arms routing
-   to the standalone Map/Set runtime (`src/codegen/map-runtime.ts`). *(new gap —
-   file as a #2928-prep child of #1584.)*
+   `env.WeakMap_get`/`WeakMap_set`/`WeakMap_has`/`Set_add`. **Root cause pinned:**
+   the native Map/Set/WeakMap interception in `compileExternMethodCall`
+   (`src/codegen/expressions/extern.ts:60-93`) keys on the receiver's **static
+   TypeScript class name** (`className === "Map"` / `"Set"` / …). A genuinely-`any`
+   receiver has no static class name, so the interception is skipped and the call
+   falls to the generic extern/host path → `env.WeakMap_*` / `Set_*` imports —
+   even though the WasmGC-native Map/Set runtime already exists
+   (`src/codegen/map-runtime.ts`: `__map_get`/`__map_set`/`__map_has`/
+   `__map_delete`/`__map_size`; `ctx.mapTypeIdx` `$Map` struct; `set-runtime.ts`).
+   **Turnkey fix (mirrors the #2927 push/pop arm):** a runtime `ref.test
+   ctx.mapTypeIdx` / `$Set` brand arm in the closed-method dispatcher
+   (`__call_m_get_1` / `__call_m_set_2` / `__call_m_has_1` / `__call_m_add_1`)
+   routing to the native `__map_*` / `__set_*` helpers with the boxed args, so an
+   `any` Map/Set receiver dispatches native. This is the highest-value host-free
+   gap and the next slice to pick up. *(new gap — file as a #2928-prep child of
+   #1584.)*
 2. **Array callback methods (map/filter/forEach/reduce) on an `any` receiver are
    NOT host-free** — emit `env.__make_callback`. Host callback marshalling on a
    dynamic receiver; the largest of the three (needs an in-Wasm callback bridge).
