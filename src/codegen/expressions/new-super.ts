@@ -42,7 +42,12 @@ import {
 } from "../regexp-standalone.js";
 import { emitStandaloneTest262Error, emitWasiErrorConstructor, isWasiErrorName } from "../registry/error-types.js";
 import type { InnerResult } from "../shared.js";
-import { isGlobalFunctionIdentifier, tryStaticNewFunction } from "./eval-inline.js";
+import {
+  emitDynamicNewFunctionHostEval,
+  emitStandaloneDynamicFunctionStub,
+  isGlobalFunctionIdentifier,
+  tryStaticNewFunction,
+} from "./eval-inline.js";
 import {
   coerceType,
   compileExpression,
@@ -71,6 +76,7 @@ import {
 import { localGlobalIdx } from "../registry/imports.js";
 import { ensureLateImport, flushLateImportShifts } from "./late-imports.js";
 import { emitFnctorProtoGet } from "./fnctor-prototype.js"; // (#2660 S3a) reconstruct `new F()` as $Object
+import { emitStandalonePromiseFromExecutor } from "../promise-executor.js"; // (#2959) native new Promise(executor)
 import { deriveFnctorFields, resolveFnctorSymbol, resolveEnclosingFnctorOwner } from "../fnctor-escape-gate.js"; // (#2660 S3a) canonical fnctor-name key; (#2773 S1) shared field derivation; (#2681/#2686 A1) `new this()` owner
 import { funcSignatureOf } from "../func-space.js"; // (#1916 S2) positional-read chokepoint
 
@@ -2755,8 +2761,24 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     }
   }
 
-  // Handle `new Promise(executor)` — delegate to host import
+  // Handle `new Promise(executor)`.
   if (ts.isIdentifier(expr.expression) && expr.expression.text === "Promise") {
+    // (#2959) Native standalone/WASI path — construct the `$Promise` and run the
+    // executor with synthesised native resolve/reject closures, retiring the
+    // `Promise_new` host import. Gated inside the helper on
+    // `isStandalonePromiseActive` + a resolvable executor closure; when it can't
+    // apply it emits NOTHING and returns false, falling through to the host path
+    // below (byte-unchanged in host/gc mode). Guard the ambient-global binding so
+    // a user `class Promise {}` / local shadow keeps the normal ctor path.
+    const promiseArgs = expr.arguments ?? [];
+    if (
+      promiseArgs.length >= 1 &&
+      !ctx.classSet.has("Promise") &&
+      resolvesToAmbientGlobal(ctx, expr.expression) &&
+      emitStandalonePromiseFromExecutor(ctx, fctx, promiseArgs[0]!)
+    ) {
+      return { kind: "externref" };
+    }
     let funcIdx =
       ctx.funcMap.get("Promise_new") ??
       ensureLateImport(ctx, "Promise_new", [{ kind: "externref" }], [{ kind: "externref" }]);
@@ -3168,9 +3190,23 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       ? tryStaticNewFunction(ctx, fctx, args)
       : undefined;
     if (staticFn !== undefined) return staticFn;
-    // Fallback (dynamic body): evaluate args for side effects, return a no-op
-    // function value (undefined). Tests that CALL a dynamic-body function fail
-    // at runtime rather than at compile time.
+    // (#2960) Dynamic body (non-constant args). No longer a silent no-op stub:
+    //  - JS-host mode → route to the meta-circular runtime-eval shim
+    //    (`__extern_eval`, global scope) so the constructed function actually
+    //    works — fixes the ~119 host Function-ctor test262 cluster.
+    //  - standalone/wasi (no host) → emit a source-located warning + a callable
+    //    value that throws catchably at CALL time (construction still succeeds,
+    //    so a program that never invokes it keeps working).
+    if (isGlobalFunctionIdentifier(expr.expression, ctx.checker)) {
+      const hostEval = emitDynamicNewFunctionHostEval(ctx, fctx, args);
+      if (hostEval !== undefined) return hostEval;
+      if (noJsHost(ctx)) {
+        return emitStandaloneDynamicFunctionStub(ctx, fctx, expr, args) as ValType;
+      }
+    }
+    // Legacy fallback (e.g. a local `Function` shadow, or JS-host with
+    // nativeStrings where the shim path is unavailable): evaluate args for side
+    // effects and return the historical null-value stub.
     for (const arg of args) {
       const argResult = compileExpression(ctx, fctx, arg);
       if (argResult) {

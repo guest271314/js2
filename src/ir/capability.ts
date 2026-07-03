@@ -48,7 +48,7 @@
 // Anything NOT in a table defaults to "defer" — new syntax is legacy-only
 // until a row (plus a lowering) claims it.
 
-import { ts } from "../ts-api.js";
+import { ts, forEachChild } from "../ts-api.js";
 
 export type IrOpCapability = "claim" | "claim-partial" | "defer";
 
@@ -128,6 +128,29 @@ const PREFIX_OP_CAPABILITY: ReadonlyMap<ts.PrefixUnaryOperator, IrOpCapability> 
   [ts.SyntaxKind.TildeToken, "defer"], // ToInt32 + i32.xor -1 — not lowered yet
 ]);
 
+// ── Host-extern member access (#2856 — document/console et al.) ────────────
+//
+// Host ambient globals (`document`, `window`, …) and their member
+// reads/writes/calls lower through the legacy extern-class per-member import
+// surface (`global_<name>`, `<Class>_get_<prop>`, `<Class>_<method>`,
+// `console_<method>_<variant>`), which only a JS host can satisfy. The
+// capability is therefore MODE-GATED:
+//
+//   - JS-host mode → "claim-partial": the selector accepts host-global
+//     identifiers and member shapes on them; from-ast lowers the subset whose
+//     members resolve in the extern registry (chain walk). Residuals (an
+//     unregistered member, an unbranded chained receiver) demote via the
+//     metered irPostClaimErrors channel. Tracking issue: #2856.
+//   - standalone / wasi / strictNoHostImports → "defer": there is no host;
+//     the selector rejects up-front and the function stays on the legacy
+//     path, which routes `document.*` to the existing #1472/#2907 refusal.
+//     from-ast guards with `assertNotDeferred` — a host-extern node arriving
+//     post-claim in a host-free mode is a capability violation, not a
+//     fallback.
+export function hostExternCapability(jsHost: boolean): IrOpCapability {
+  return jsHost ? "claim-partial" : "defer";
+}
+
 /** Capability of a BinaryExpression operator token. Unknown ops → "defer". */
 export function binaryOpCapability(op: ts.SyntaxKind): IrOpCapability {
   return BINARY_OP_CAPABILITY.get(op) ?? "defer";
@@ -152,4 +175,138 @@ export function assertNotDeferred(cap: IrOpCapability, what: string, funcName: s
       `ir/from-ast: internal capability violation — ${what} is capability-deferred (see src/ir/capability.ts) yet reached the builder post-claim in ${funcName}. The selector and the capability table disagree; this is a compiler bug, not a fallback.`,
     );
   }
+}
+
+// ── Element access (`lowerElementAccess` family) — claim-partial ───────────
+//
+// (#2972) The element-access family is CLAIM-PARTIAL by nature: the
+// selector's shape gate is receiver+index Phase-1-ness (it cannot see
+// receiver TYPES), while the builder dispatches by the lowered receiver's
+// IrType. Lowered arms today: string-literal key on an object shape; any
+// index on a vec receiver (#2766 prove-then-specialize bounds handling);
+// PROVEN-in-bounds computed index on a string receiver (predicate below).
+// The residual (unproven string index, other receiver types) demotes through
+// the metered post-claim channel — under #2138's IR-first flag a skipped
+// slot turns that residual into a hard error, which is what surfaced the
+// 14-test #2972 class. Retiring the residual = either widening the proof or
+// a string|undefined result representation (rejected for now — see
+// plan/issues/2972-*.md).
+//
+// The proof predicate lives HERE (not in from-ast) so a future selector
+// tightening or an IR-first skip gate consults the SAME guard — one
+// predicate, never two.
+
+/** (#2972) `e` as a non-negative integer NumericLiteral, else null. */
+function nonNegIntLiteral(e: ts.Expression): number | null {
+  if (!ts.isNumericLiteral(e)) return null;
+  const v = Number(e.text);
+  return Number.isInteger(v) && v >= 0 ? v : null;
+}
+
+/**
+ * (#2972) Conservative in-bounds proof for a string element read: is the
+ * index expression STATICALLY guaranteed to be an integer in [0, len)?
+ * Accepted shapes:
+ *   - a non-negative integer literal `< len`;
+ *   - `<expr> & K` / `K & <expr>` with a non-negative int32 literal K < len
+ *     (bitwise ops ToInt32 both operands; AND with a non-negative mask
+ *     yields an integer in [0, K] — the test262 harness shape
+ *     `hex[(n >> 4) & 0xf]` on a 16-char literal).
+ * Everything else → false (the caller demotes to legacy — sound default:
+ * an UNPROVEN index could be out of bounds, where JS `s[i]` is `undefined`
+ * but charAt is `""`, so typing the result `string` would be unsound).
+ */
+export function stringIndexProvenBelow(argExpr: ts.Expression, len: number): boolean {
+  let e: ts.Expression = argExpr;
+  while (ts.isParenthesizedExpression(e)) e = e.expression;
+  const lit = nonNegIntLiteral(e);
+  if (lit !== null) return lit < len;
+  if (ts.isBinaryExpression(e) && e.operatorToken.kind === ts.SyntaxKind.AmpersandToken) {
+    let l: ts.Expression = e.left;
+    let r: ts.Expression = e.right;
+    while (ts.isParenthesizedExpression(l)) l = l.expression;
+    while (ts.isParenthesizedExpression(r)) r = r.expression;
+    const k = nonNegIntLiteral(l) ?? nonNegIntLiteral(r);
+    if (k !== null && k <= 0x7fffffff) return k < len;
+  }
+  return false;
+}
+
+/**
+ * (#2972) Names bound EXACTLY ONCE to a string-literal initializer and never
+ * written anywhere in the function — including inside nested function bodies
+ * (a closure-captured write would invalidate the literal-length fact just the
+ * same, so this is deliberately stricter than from-ast's `mutatedLets`, which
+ * skips nested bodies). Value = the literal's UTF-16 code-unit length.
+ *
+ * TWO consumers, one source (#2972's acceptance criterion):
+ *   - from-ast's `lowerElementAccess` — a receiver in this map has a
+ *     statically known `.length`, enabling the proven-in-bounds charAt read;
+ *   - the IR-first skip gate (`irFirstBodyReadsStringElement`, gate 5) — a
+ *     proven read is LOWERABLE and must not exclude its function from the
+ *     compile-once skip set.
+ *
+ * Order-independence is safe for the from-ast consumer: a
+ * use-before-declaration identifier is not in the selector's scope set, so
+ * such functions are never claimed.
+ */
+export function collectStringLiteralLens(
+  fn: ts.FunctionDeclaration | ts.MethodDeclaration | ts.ConstructorDeclaration,
+): ReadonlyMap<string, number> {
+  const lens = new Map<string, number>();
+  const declared = new Set<string>();
+  const disqualified = new Set<string>();
+  if (!fn.body) return lens;
+  const visit = (node: ts.Node): void => {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
+      const name = node.name.text;
+      if (declared.has(name)) {
+        disqualified.add(name); // re-declaration (var shadowing) — drop the fact
+      } else {
+        declared.add(name);
+        if (
+          node.initializer &&
+          (ts.isStringLiteral(node.initializer) || ts.isNoSubstitutionTemplateLiteral(node.initializer))
+        ) {
+          lens.set(name, node.initializer.text.length);
+        }
+      }
+    }
+    if (ts.isBinaryExpression(node)) {
+      const op = node.operatorToken.kind;
+      if (
+        op === ts.SyntaxKind.EqualsToken ||
+        (op >= ts.SyntaxKind.PlusEqualsToken && op <= ts.SyntaxKind.CaretEqualsToken)
+      ) {
+        if (ts.isIdentifier(node.left)) disqualified.add(node.left.text);
+      }
+    }
+    if (ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) {
+      const op = node.operator;
+      if (op === ts.SyntaxKind.PlusPlusToken || op === ts.SyntaxKind.MinusMinusToken) {
+        if (ts.isIdentifier(node.operand)) disqualified.add(node.operand.text);
+      }
+    }
+    forEachChild(node, visit); // deliberately DOES descend into nested functions
+  };
+  forEachChild(fn.body, visit);
+  for (const name of disqualified) lens.delete(name);
+  return lens;
+}
+
+/**
+ * (#2972) Is this string element read LOWERABLE by the IR's
+ * proven-in-bounds charAt arm? True iff the receiver is an identifier with a
+ * literal-known length in `lens` AND the index proof holds. The from-ast arm
+ * and gate 5 both route through this — one predicate, two consumers.
+ */
+export function stringElementReadLowerable(
+  expr: ts.ElementAccessExpression,
+  lens: ReadonlyMap<string, number>,
+): boolean {
+  if (expr.questionDotToken) return false;
+  if (!ts.isIdentifier(expr.expression)) return false;
+  const len = lens.get(expr.expression.text);
+  if (len === undefined) return false;
+  return stringIndexProvenBelow(expr.argumentExpression, len);
 }

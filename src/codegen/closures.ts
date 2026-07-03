@@ -19,7 +19,8 @@ import { isVoidType, unwrapPromiseType, isPromiseType } from "../checker/type-ma
 import type { FieldDef, Instr, LocalDef, StructTypeDef, ValType } from "../ir/types.js";
 import { isStandalonePromiseActive } from "./async-scheduler.js"; // (#2867 Gap 1) native-$Promise carrier gate
 import { classMemberFuncKey } from "./class-member-keys.js"; // (#1983) collision-free class-member funcMap keys
-import { definedFuncAt, funcSignatureOf } from "./func-space.js"; // (#1916 S2) positional-read chokepoint
+import { definedFuncAt, funcSignatureOf, mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S2 read chokepoint / S3b stable-regime minting)
+import { inLiveShiftRange } from "../emit/resolve-layout.js"; // (#1916 S3b) manual import-shift must skip stable handles
 import { addStringConstantGlobal } from "./registry/imports.js"; // (#2025)
 import { stringConstantExternrefInstrs } from "./native-strings.js"; // (#2025)
 import { noJsHost } from "./expressions/helpers.js"; // (#2025)
@@ -1191,6 +1192,21 @@ export function isHostCallbackArgument(node: ts.Node, ctx: CodegenContext): bool
     if (ts.isPropertyAccessExpression(parent.expression)) {
       const propAccess = parent.expression;
       const methodName = propAccess.name.text;
+      // (#3016) `Function.prototype.call`/`apply` NEVER invoke their arguments
+      // as callbacks — they invoke the *receiver* with those args as `thisArg`
+      // + forwarded params. So a function-expression/arrow passed to `.call`/
+      // `.apply` (e.g. `get.call(() => {})` using a function object as an
+      // invalid `this`, or `Array.prototype.find.call(undefined, fn)`) is a
+      // plain function-object VALUE, not a synchronously-invoked host callback.
+      // Routing it through `__make_callback` leaks an `env::` import in
+      // standalone mode for no reason; the GC closure-struct path produces a
+      // valid function-object value host-free (and any HOF that the *receiver*
+      // then invokes — `Array.prototype.forEach.call(arr, cb)` — dispatches the
+      // struct via `__call_fn_N`, verified host-free). Standalone-gated so the
+      // js-host lane stays byte-identical.
+      if (ctx.standalone && (methodName === "call" || methodName === "apply")) {
+        return false;
+      }
       try {
         const receiverType = ctx.checker.getTypeAtLocation(propAccess.expression);
         // Search the receiver type's symbol chain for a class name that
@@ -1414,6 +1430,86 @@ function closureProvablyAfterLetDecl(
   return true;
 }
 
+/**
+ * (#2939) Compute the funcref-wrapper signature (user param ValTypes + return
+ * ValType) of an arrow / function-expression closure, WITHOUT emitting anything.
+ *
+ * This is the exact param+return-type logic `compileArrowAsClosure` uses to
+ * build its `getOrCreateFuncRefWrapperTypes(params, results)` wrapper type,
+ * factored out so the dynamic-dispatch candidate pre-scan
+ * (`ensureFuncValueWrappersRegistered`) can pre-register the SAME wrapper type
+ * for a callback function-expression defined in an inner scope — otherwise its
+ * wrapper is registered only LAZILY at the (later-compiled) value site, so an
+ * earlier-compiled higher-order body that dispatches the callback
+ * (`tryEmitInlineDynamicCall`) sees ZERO candidates and silently drops the call
+ * (the #2939 nested-scope gap: the test262 `testWith*Constructors(function(TA){…})`
+ * harness wrapper, ~814 vacuous passes). Capture analysis is intentionally NOT
+ * replicated here — the dispatch keys on the funcref signature (funcTypeIdx),
+ * which a capturing closure's custom subtype shares with this base wrapper.
+ *
+ * Pure: reads only `ctx` + the checker; no side effects, no `fctx`.
+ */
+export function computeClosureWrapperSig(
+  ctx: CodegenContext,
+  arrow: ts.ArrowFunction | ts.FunctionExpression,
+): { params: ValType[]; returnType: ValType | null } {
+  const isGenerator = ts.isFunctionExpression(arrow) && arrow.asteriskToken !== undefined;
+
+  // 1. Parameter types.
+  const arrowParams: ValType[] = [];
+  for (const p of arrow.parameters) {
+    const paramType = ctx.checker.getTypeAtLocation(p);
+    let wasmType = resolveWasmType(ctx, paramType);
+    if (p.initializer && wasmType.kind === "ref") {
+      wasmType = { kind: "ref_null", typeIdx: (wasmType as { kind: "ref"; typeIdx: number }).typeIdx };
+    }
+    const hasBindingPattern = ts.isArrayBindingPattern(p.name) || ts.isObjectBindingPattern(p.name);
+    if (hasBindingPattern && wasmType.kind !== "externref") {
+      wasmType = { kind: "externref" };
+    }
+    if (ctx.forceExternrefCallbackParams && isVecOrArrayRefType(ctx, wasmType)) {
+      wasmType = { kind: "externref" };
+    }
+    arrowParams.push(wasmType);
+  }
+
+  // 2. Return type (mirrors compileArrowAsClosure).
+  const isAsync = arrow.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) ?? false;
+  const sig = ctx.checker.getSignatureFromDeclaration(arrow);
+  let closureReturnType: ValType | null = null;
+  if (isGenerator) {
+    closureReturnType = { kind: "externref" };
+  } else if (sig) {
+    let retType = ctx.checker.getReturnTypeOfSignature(sig);
+    if (isAsync) {
+      retType = unwrapPromiseType(retType, ctx.checker);
+    }
+    if (!isAsync && isStandalonePromiseActive(ctx) && isPromiseType(retType)) {
+      closureReturnType = { kind: "externref" };
+    }
+    if (closureReturnType === null && !isVoidType(retType) && !(retType.flags & ts.TypeFlags.Never)) {
+      closureReturnType = resolveWasmType(ctx, retType);
+    }
+  }
+  if (closureReturnType === null && isAssignedToSymbolIterator(arrow)) {
+    closureReturnType = inferExplicitClosureReturnType(ctx, arrow);
+  }
+  if (closureReturnType !== null) {
+    const ctxType = ctx.checker.getContextualType(arrow);
+    if (ctxType) {
+      const ctxCallSigs = ctxType.getCallSignatures?.();
+      if (ctxCallSigs && ctxCallSigs.length > 0) {
+        const ctxRetType = ctx.checker.getReturnTypeOfSignature(ctxCallSigs[0]!);
+        if (isVoidType(ctxRetType) && !isAssignedToSymbolIterator(arrow)) {
+          closureReturnType = null;
+        }
+      }
+    }
+  }
+
+  return { params: arrowParams, returnType: closureReturnType };
+}
+
 export function compileArrowFunction(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -1443,107 +1539,17 @@ export function compileArrowAsClosure(
   if (isGenerator) {
     ctx.generatorFunctions.add(closureName);
   }
-
-  // 1. Determine arrow parameter types and return type
-  const arrowParams: ValType[] = [];
-  for (const p of arrow.parameters) {
-    const paramType = ctx.checker.getTypeAtLocation(p);
-    let wasmType = resolveWasmType(ctx, paramType);
-    // If the parameter has a default value and is a non-null ref type,
-    // widen to ref_null so callers can pass ref.null as a sentinel for "use default"
-    if (p.initializer && wasmType.kind === "ref") {
-      wasmType = { kind: "ref_null", typeIdx: (wasmType as { kind: "ref"; typeIdx: number }).typeIdx };
-    }
-    // Binding-pattern params MUST route through the externref destructure path
-    // so that (a) null/undefined trigger a spec-mandated synchronous TypeError and
-    // (b) nested patterns (e.g. `[[x]]`) recurse via the generic destructure logic.
-    // See #1151. Without this override:
-    //   * Pattern params inferred as f64/i32 fall through to allocBindingLocals
-    //     and emit no destructure code at all.
-    //   * Pattern params inferred as a tuple-struct ref bypass the nested-pattern
-    //     loop (which only handles identifier children) and skip the null guard,
-    //     so `f([null])` silently returns an empty result on an unannotated
-    //     pattern parameter.
-    const hasBindingPattern = ts.isArrayBindingPattern(p.name) || ts.isObjectBindingPattern(p.name);
-    if (hasBindingPattern && wasmType.kind !== "externref") {
-      wasmType = { kind: "externref" };
-    }
-    // (#2640) Array-like generic-method dispatch widens a callback parameter
-    // that TS inferred as a typed vec/array (`T[]` → `__vec_*`/`__arr_*`/
-    // `$__vec_base`) to `externref`. The receiver passed to such a callback by
-    // `compileArrayLikePrototypeCall` is a DYNAMIC (non-vec) array-like
-    // externref, not a typed vec; if the param stays a vec ref the dispatch
-    // loop must pass `ref.null` (the receiver fails the vec `ref.test`) and the
-    // callback's `obj.length`/`obj[i]` lowers to `struct.get` on null → a null
-    // deref. Widening to externref routes those reads through the tag-aware
-    // dynamic reader. Gated on the flag, set ONLY for the non-vec array-like
-    // path (typed `arr.forEach(cb)` never enters that path).
-    if (ctx.forceExternrefCallbackParams && isVecOrArrayRefType(ctx, wasmType)) {
-      wasmType = { kind: "externref" };
-    }
-    arrowParams.push(wasmType);
-  }
-
-  // Detect async functions/arrows — their TS return type is Promise<T> but the
-  // Wasm return should be T (matching the unwrap that top-level async functions use).
+  // `isAsync` is still consumed below (generator-create name selection); the
+  // return-type derivation moved into computeClosureWrapperSig.
   const isAsync = arrow.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) ?? false;
 
-  const sig = ctx.checker.getSignatureFromDeclaration(arrow);
-  let closureReturnType: ValType | null = null;
-  if (isGenerator) {
-    // Generator function expressions always return externref (JS Generator object)
-    closureReturnType = { kind: "externref" };
-  } else if (sig) {
-    let retType = ctx.checker.getReturnTypeOfSignature(sig);
-    // For async functions, unwrap Promise<T> to get T — matching the top-level
-    // async function handling in index.ts. Without this, async Promise<void>
-    // closures get externref return type and push ref.null.extern, breaking
-    // .then()/.catch() chains that expect a real Promise.
-    if (isAsync) {
-      retType = unwrapPromiseType(retType, ctx.checker);
-    }
-    // (#2867 Gap 1) A NON-async closure that returns a `Promise<T>` — e.g. a
-    // `.then`/`.catch` handler `v => Promise.resolve(...)` — produces a real
-    // Promise OBJECT at runtime, not a `T`. Under the host-free native-`$Promise`
-    // carrier, `resolveWasmType(Promise<T>)` would unwrap to `T` (e.g. f64),
-    // coercing the promise externref to NaN inside the body and breaking recursive
-    // thenable assimilation (the chained promise must ADOPT the returned inner
-    // promise's state). Keep the result `externref` so `__promise_resolve_value`
-    // at the settle site sees a real `$Promise`. Gated on the carrier predicate
-    // (wasi today; widens to standalone in lockstep at #2895 slice 1d) so the
-    // default gc/host `.then` path — and the standalone lane while its carrier is
-    // still host-backed — stay byte-unchanged.
-    if (!isAsync && isStandalonePromiseActive(ctx) && isPromiseType(retType)) {
-      closureReturnType = { kind: "externref" };
-    }
-    // Treat `never` the same as `void` — a function returning `never` (e.g.
-    // always throws) never produces a value, so it should have no Wasm result.
-    // Without this, `never` resolves to externref and creates a mismatched
-    // closure wrapper type vs. the `() => void` signature expected by callers.
-    if (closureReturnType === null && !isVoidType(retType) && !(retType.flags & ts.TypeFlags.Never)) {
-      closureReturnType = resolveWasmType(ctx, retType);
-    }
-  }
-  if (closureReturnType === null && isAssignedToSymbolIterator(arrow)) {
-    closureReturnType = inferExplicitClosureReturnType(ctx, arrow);
-  }
-
-  // (#585) Check the contextual type (e.g., a parameter type like `() => void`).
-  // If the contextual type expects a void-returning callable but the closure's
-  // actual return type is non-void, override to void so the closure uses the
-  // same wrapper struct type that callers will ref.cast against.
-  if (closureReturnType !== null) {
-    const ctxType = ctx.checker.getContextualType(arrow);
-    if (ctxType) {
-      const ctxCallSigs = ctxType.getCallSignatures?.();
-      if (ctxCallSigs && ctxCallSigs.length > 0) {
-        const ctxRetType = ctx.checker.getReturnTypeOfSignature(ctxCallSigs[0]!);
-        if (isVoidType(ctxRetType) && !isAssignedToSymbolIterator(arrow)) {
-          closureReturnType = null;
-        }
-      }
-    }
-  }
+  // 1. Determine arrow parameter types and return type. (#2939) Factored into
+  //    `computeClosureWrapperSig` so the dynamic-dispatch candidate pre-scan
+  //    registers the IDENTICAL wrapper type for inner-scope callbacks. The
+  //    (#585 contextual-void / #2867 Gap-1 / async-unwrap / #1151 binding-pattern
+  //    / #2640 array-callback-widen) logic all lives there now.
+  const { params: arrowParams, returnType: closureReturnTypeInit } = computeClosureWrapperSig(ctx, arrow);
+  let closureReturnType: ValType | null = closureReturnTypeInit;
 
   // 2. Analyze captured variables. Use scope-aware collection so that nested
   //    `var` declarations and parameter bindings inside the closure body shadow
@@ -2528,8 +2534,8 @@ export function compileArrowAsClosure(
   ctx.currentFunc = savedFunc;
 
   // 6. Register the lifted function
-  const liftedFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-  ctx.mod.functions.push({
+  const liftedFuncIdx = mintDefinedFunc(ctx);
+  pushDefinedFunc(ctx, liftedFuncIdx, {
     name: closureName,
     typeIdx: liftedFuncTypeIdx,
     locals: liftedFctx.locals,
@@ -3032,8 +3038,8 @@ export function compileArrowAsCallback(
   ctx.currentFunc = savedFunc;
 
   // 6. Register and export the callback function
-  const cbFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-  ctx.mod.functions.push({
+  const cbFuncIdx = mintDefinedFunc(ctx);
+  pushDefinedFunc(ctx, cbFuncIdx, {
     name: cbName,
     typeIdx: cbTypeIdx,
     locals: cbFctx.locals,
@@ -3286,8 +3292,8 @@ export function compileSyntheticAsyncContinuation(
 
   // 7. Register + export the continuation (the __make_callback host bridge
   //    dispatches by the exported `__cb_${cbId}` name).
-  const cbFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-  ctx.mod.functions.push({
+  const cbFuncIdx = mintDefinedFunc(ctx);
+  pushDefinedFunc(ctx, cbFuncIdx, {
     name: cbName,
     typeIdx: cbTypeIdx,
     locals: cbFctx.locals,
@@ -3649,8 +3655,8 @@ export function emitFuncRefAsClosure(
     }
     trampolineBody.push({ op: "call", funcIdx } as Instr);
 
-    const trampolineFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-    ctx.mod.functions.push({
+    const trampolineFuncIdx = mintDefinedFunc(ctx);
+    pushDefinedFunc(ctx, trampolineFuncIdx, {
       name: trampolineName,
       typeIdx: liftedFuncTypeIdx,
       locals: trampolineLocals,
@@ -3705,8 +3711,8 @@ export function emitFuncRefAsClosure(
   }
   trampolineBody.push({ op: "call", funcIdx } as Instr);
 
-  const trampolineFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-  ctx.mod.functions.push({
+  const trampolineFuncIdx = mintDefinedFunc(ctx);
+  pushDefinedFunc(ctx, trampolineFuncIdx, {
     name: trampolineName,
     typeIdx: liftedFuncTypeIdx,
     locals: [],
@@ -3938,7 +3944,7 @@ export function emitObjectMethodAsClosure(
   const importsBeforeNT = ctx.numImportFuncs;
   ensureNullThisTypeError(ctx, fctx);
   const ntShift = ctx.numImportFuncs - importsBeforeNT;
-  if (ntShift > 0 && methodFuncIdx >= importsBeforeNT) methodFuncIdx += ntShift;
+  if (ntShift > 0 && inLiveShiftRange(methodFuncIdx, importsBeforeNT)) methodFuncIdx += ntShift;
   const trampolineBody: Instr[] = buildTrampolineThisSlot(ctx, objStructTypeIdx, anyTempLocalIdx, methodUsesThis);
   for (let i = 0; i < userParams.length; i++) {
     // Skip closure_self at param 0; user params start at index 1
@@ -3946,8 +3952,8 @@ export function emitObjectMethodAsClosure(
   }
   trampolineBody.push({ op: "call", funcIdx: methodFuncIdx } as Instr);
 
-  const trampolineFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-  ctx.mod.functions.push({
+  const trampolineFuncIdx = mintDefinedFunc(ctx);
+  pushDefinedFunc(ctx, trampolineFuncIdx, {
     name: trampolineName,
     typeIdx: liftedFuncTypeIdx,
     locals: [{ name: "__this_any", type: { kind: "anyref" } }],
@@ -4256,7 +4262,7 @@ export function emitCachedMethodClosureAccess(
     const importsBeforeNT = ctx.numImportFuncs;
     ensureNullThisTypeError(ctx, fctx);
     const ntShift = ctx.numImportFuncs - importsBeforeNT;
-    if (ntShift > 0 && methodFuncIdx >= importsBeforeNT) methodFuncIdx += ntShift;
+    if (ntShift > 0 && inLiveShiftRange(methodFuncIdx, importsBeforeNT)) methodFuncIdx += ntShift;
     const trampolineBody: Instr[] = buildTrampolineThisSlot(
       ctx,
       objStructTypeIdx,
@@ -4267,8 +4273,8 @@ export function emitCachedMethodClosureAccess(
       trampolineBody.push({ op: "local.get", index: i + 1 } as Instr);
     }
     trampolineBody.push({ op: "call", funcIdx: methodFuncIdx } as Instr);
-    trampolineFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-    ctx.mod.functions.push({
+    trampolineFuncIdx = mintDefinedFunc(ctx);
+    pushDefinedFunc(ctx, trampolineFuncIdx, {
       name: trampolineName,
       typeIdx: liftedFuncTypeIdx,
       locals: [{ name: "__this_any", type: { kind: "anyref" } }],
@@ -4393,8 +4399,8 @@ export function emitCachedFuncClosureAccess(
       trampolineBody.push({ op: "local.get", index: i + 1 } as Instr);
     }
     trampolineBody.push({ op: "call", funcIdx } as Instr);
-    trampolineFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-    ctx.mod.functions.push({
+    trampolineFuncIdx = mintDefinedFunc(ctx);
+    pushDefinedFunc(ctx, trampolineFuncIdx, {
       name: trampolineName,
       typeIdx: liftedFuncTypeIdx,
       locals: [],

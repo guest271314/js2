@@ -64,8 +64,38 @@ Still refusing / wrong (this issue):
 - [ ] `const f: any = JSON.stringify; f({a:1})` works in standalone (returns the
       JSON string), zero host imports.
 - [ ] `const g: any = Math.max; g(1,2,3) === 3` in standalone.
-- [ ] `Math["PI"]` (reflective, `any`-typed key) reads π, not 0.
-- [ ] No host-mode regression (`ctx.standalone`-gated).
+- [x] `Math["PI"]` (reflective, `any`-typed key) reads π, not 0. — landed
+      2026-07-02, see Progress.
+- [x] No host-mode regression (`ctx.standalone`-gated). — the reflective fold is
+      observationally identical in host mode.
+
+## Progress (2026-07-02, opus-12c) — reflective namespace-constant read landed
+
+Sub-part 2 (reflective `namespace[computedKey]`) is fixed for the `Math`/`Number`
+**numeric constants**. A statically-resolvable computed key on `Math`/`Number`
+(`Math["PI"]`, `(Math as any)["PI"]`, `const k = "PI"; Math[k]`,
+`Number["MAX_SAFE_INTEGER"]`, …) now folds to the SAME `f64.const` the syntactic
+dot read (`Math.PI`) emits — via a new `tryEmitBuiltinNamespaceConstantValue`
+helper (single source of truth: `MATH_CONSTANT_VALUES` / `NUMBER_CONSTANT_VALUES`)
+called from an early branch in `compileElementAccess` (`src/codegen/property-access.ts`).
+Standalone previously returned `0`; host mode round-tripped `__extern_get`
+(same value) — the fold is host-observationally identical and the only host-free
+lowering for the computed form. Non-constant keys (`Math[i]`) and non-constant
+members (`Math["max"]`) fall through unchanged. Covered by `tests/issue-2933.test.ts`
+(9 cases incl. regression guards).
+
+**Remaining (this issue stays open):**
+
+1. Static-method VALUE reads (`const f = JSON.stringify; f(o)`,
+   `Reflect.ownKeys` as a value) — needs the `ensureStandaloneBuiltinStaticMethodClosure`
+   value-closure wiring. `JSON.stringify` carries a native-`$AnyString`-return →
+   externref coercion at the any-call boundary + a 7-arg `__json_stringify_value`
+   call, so it is not a one-line switch add; scope carefully.
+2. `Math.max` / `Math.min` **as a value** (`const g = Math.max; g(1,2,3)`) is
+   genuinely VARIADIC — value-closures are fixed-arity, so it needs
+   variadic-closure support. Recommended to split into its own follow-up.
+3. `Reflect.ownKeys(o).length` reflective-read-of-result and `globalThis.Math.PI`
+   (niche trap) also remain.
 
 ## Notes
 

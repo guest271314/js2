@@ -28,6 +28,9 @@ function emptyModule(): WasmModule {
     elements: [],
     dataSegments: [],
     tags: [],
+    // (#2140) #1916 S3 made buildFuncSigs iterate `mod.funcOrdinalToPosition`
+    // unconditionally; hand-built test modules must carry it.
+    funcOrdinalToPosition: [],
   } as unknown as WasmModule;
 }
 

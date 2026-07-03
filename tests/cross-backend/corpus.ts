@@ -478,4 +478,61 @@ export const CROSS_BACKEND_CORPUS: readonly CrossBackendProgram[] = [
     calls: [{ fn: "r", args: [] }],
     expectLinearUnsupported: true,
   },
+
+  // ── dynamic residue (#1852-G5, via #2954) ──────────────────────────────────
+  // The `any`/boxed-dynamic surface — typeof, dynamic truthiness, `===` on
+  // boxed values, box→unbox round-trips. WasmGC lowers all of these (the JSValue
+  // externref rep); the linear backend has no dynamic value representation yet,
+  // so each fails to compile OR to instantiate on linear. They are kept
+  // `expectLinearUnsupported` so the parity gap is MEASURED, not silent — the
+  // flag drops when #1852-G4/#2956 give linear a dynamic value rep. (For an
+  // expectLinearUnsupported row the harness only asserts WasmGC compiles+runs and
+  // linear does NOT; the calls are diffed once the flag is removed.)
+  {
+    name: "dynamic/typeof-residue",
+    category: "dynamic",
+    source: `
+      export function isNum(): number { const x: any = 42; return typeof x === "number" ? 1 : 0; }
+      export function isStr(): number { const x: any = "hi"; return typeof x === "string" ? 1 : 0; }
+    `,
+    calls: [
+      { fn: "isNum", args: [] },
+      { fn: "isStr", args: [] },
+    ],
+    expectLinearUnsupported: true,
+  },
+  {
+    name: "dynamic/truthiness",
+    category: "dynamic",
+    source: `
+      export function truthy(v: number): number { const x: any = v; return x ? 1 : 0; }
+    `,
+    calls: [
+      { fn: "truthy", args: [0] },
+      { fn: "truthy", args: [5] },
+    ],
+    expectLinearUnsupported: true,
+  },
+  {
+    name: "dynamic/strict-eq-boxed",
+    category: "dynamic",
+    source: `
+      export function eqNum(): number { const a: any = 5; const b: any = 5; return a === b ? 1 : 0; }
+      export function neNum(): number { const a: any = 5; const b: any = 6; return a === b ? 1 : 0; }
+    `,
+    calls: [
+      { fn: "eqNum", args: [] },
+      { fn: "neNum", args: [] },
+    ],
+    expectLinearUnsupported: true,
+  },
+  {
+    name: "dynamic/box-roundtrip",
+    category: "dynamic",
+    source: `
+      export function roundtrip(n: number): number { const x: any = n; const y = x as number; return y + 1; }
+    `,
+    calls: [{ fn: "roundtrip", args: [6] }],
+    expectLinearUnsupported: true,
+  },
 ];

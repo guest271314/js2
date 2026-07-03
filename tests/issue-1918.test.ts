@@ -33,6 +33,9 @@ function emptyModule(): WasmModule {
     elements: [],
     dataSegments: [],
     tags: [],
+    // (#2140) #1916 S3 made buildFuncSigs iterate `mod.funcOrdinalToPosition`
+    // unconditionally; hand-built test modules must carry it.
+    funcOrdinalToPosition: [],
   } as unknown as WasmModule;
 }
 
@@ -85,6 +88,7 @@ describe("#1918 stack-balance fixup telemetry", () => {
       [
         "branch-type-cast",
         "branch-type-coerce",
+        "branch-type-unfixable", // (#2140)
         "call-arg-coerce",
         "default-value-lossy",
         "drop-excess",
@@ -121,25 +125,31 @@ describe("#1918 stack-balance fixup telemetry", () => {
     expect(r.errors.filter((e) => /Stack-balance fixup/.test(e.message))).toEqual([]);
   });
 
-  it("JS2WASM_STRICT_BALANCE=1 surfaces fixups as warnings without failing the compile", async () => {
+  // (#2140) These two e2e cases originally pinned "SOURCE needs ≥1 fixup" —
+  // but a fixup is a masked emitter bug, and the emitter got FIXED (the
+  // IR-first path emits this shape cleanly now), so the >0 assertions went
+  // stale-red. The wiring (events → strictBalanceDiagnostics → ctx.errors →
+  // success gate) is covered at the unit level in
+  // tests/issue-2140-fixbranchtype.test.ts; here we keep the e2e as a
+  // conditional contract: IF any stack-balance diagnostics surface, they must
+  // carry the right severity and success semantics for the mode.
+  it("JS2WASM_STRICT_BALANCE=1: any surfaced fixups are warnings and never fail the compile", async () => {
     process.env.JS2WASM_STRICT_BALANCE = "1";
     const r = await compile(SOURCE, { fileName: "issue-1918.ts" });
     const warnings = r.errors.filter((e) => /Stack-balance fixup/.test(e.message));
-    expect(warnings.length).toBeGreaterThan(0);
     expect(warnings.every((e) => e.severity === "warning")).toBe(true);
     // Warnings must not fail the compile.
     expect(r.success).toBe(true);
   });
 
-  it("JS2WASM_STRICT_BALANCE=error fails the compile with error-severity diagnostics", async () => {
+  it("JS2WASM_STRICT_BALANCE=error: any surfaced fixups are Codegen-error-prefixed errors", async () => {
     process.env.JS2WASM_STRICT_BALANCE = "error";
     const r = await compile(SOURCE, { fileName: "issue-1918.ts" });
     const errs = r.errors.filter((e) => /Stack-balance fixup/.test(e.message));
-    expect(errs.length).toBeGreaterThan(0);
     expect(errs.every((e) => e.severity === "error")).toBe(true);
     // Error-severity stack-balance diagnostics carry the "Codegen error:" prefix
     // so the compiler's success gate fails the compile.
     expect(errs.every((e) => e.message.startsWith("Codegen error:"))).toBe(true);
-    expect(r.success).toBe(false);
+    if (errs.length > 0) expect(r.success).toBe(false);
   });
 });

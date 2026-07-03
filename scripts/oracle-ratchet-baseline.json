@@ -41,8 +41,8 @@
       "ctxChecker": 1
     },
     "src/codegen/declarations.ts": {
-      "getTypeAtLocation": 52,
-      "ctxChecker": 85
+      "getTypeAtLocation": 53,
+      "ctxChecker": 86
     },
     "src/codegen/destructuring-params.ts": {
       "getTypeAtLocation": 7,
@@ -57,8 +57,8 @@
       "ctxChecker": 4
     },
     "src/codegen/expressions/calls-closures.ts": {
-      "getTypeAtLocation": 4,
-      "ctxChecker": 12
+      "getTypeAtLocation": 5,
+      "ctxChecker": 13
     },
     "src/codegen/expressions/calls-guards.ts": {
       "getTypeAtLocation": 2,
@@ -70,11 +70,11 @@
     },
     "src/codegen/expressions/calls.ts": {
       "getTypeAtLocation": 60,
-      "ctxChecker": 133
+      "ctxChecker": 134
     },
     "src/codegen/expressions/eval-inline.ts": {
-      "getTypeAtLocation": 0,
-      "ctxChecker": 3
+      "getTypeAtLocation": 2,
+      "ctxChecker": 5
     },
     "src/codegen/expressions/extern.ts": {
       "getTypeAtLocation": 1,
@@ -89,8 +89,8 @@
       "ctxChecker": 1
     },
     "src/codegen/expressions/identifiers.ts": {
-      "getTypeAtLocation": 6,
-      "ctxChecker": 14
+      "getTypeAtLocation": 7,
+      "ctxChecker": 15
     },
     "src/codegen/expressions/misc.ts": {
       "getTypeAtLocation": 2,
@@ -98,7 +98,7 @@
     },
     "src/codegen/expressions/new-super.ts": {
       "getTypeAtLocation": 21,
-      "ctxChecker": 44
+      "ctxChecker": 45
     },
     "src/codegen/expressions/unary-updates.ts": {
       "getTypeAtLocation": 4,
@@ -126,7 +126,7 @@
     },
     "src/codegen/index.ts": {
       "getTypeAtLocation": 53,
-      "ctxChecker": 113
+      "ctxChecker": 115
     },
     "src/codegen/json-standalone.ts": {
       "getTypeAtLocation": 0,
@@ -162,7 +162,7 @@
     },
     "src/codegen/property-access.ts": {
       "getTypeAtLocation": 28,
-      "ctxChecker": 51
+      "ctxChecker": 52
     },
     "src/codegen/regexp-standalone.ts": {
       "getTypeAtLocation": 14,
@@ -213,12 +213,5 @@
       "ctxChecker": 3
     }
   },
-  "preauthorized": [
-    {
-      "file": "src/codegen/declarations.ts",
-      "field": "getTypeAtLocation",
-      "extra": 1,
-      "reason": "#2972 (dev-2138f, in-flight at ratchet seed time): string-element-access pre-scan arm adds one site; agreed 2026-07-02"
-    }
-  ]
+  "preauthorized": []
 }

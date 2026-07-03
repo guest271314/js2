@@ -126,6 +126,17 @@ interface TestResult {
    * is not present on a row.
    */
   imports?: string[] | null;
+  /**
+   * #2940 — vacuity correction marker. Set to `true` by the runner
+   * (`tests/test262-shared.ts` `recordResult`) on a `fail` row whose
+   * harness-wrapper callback never executed, so no assertion actually ran — the
+   * module "passed" only because nothing checked anything. Since #2463 such rows
+   * are scored `fail` and carry the canonical error string
+   * `"vacuous: harness-wrapper callback never executed (#2940) — no assertion
+   * ran"`. Pre-#2463 baselines never carry the field (they scored the same row
+   * `pass`). See `isVacuousResult`.
+   */
+  vacuous?: boolean;
 }
 
 /**
@@ -170,6 +181,49 @@ export function isLeakyBaselineToHostFreeRegression(
 ): boolean {
   if (!base || base.status !== "pass") return false;
   return isLeaky(base) && isHostFreeResult(cur);
+}
+
+/**
+ * #2940 — a row scored by the VACUITY scorer: the harness-wrapper callback
+ * never executed, so no assertion ran, and #2463 rescores such a row `fail`.
+ * Authoritatively flagged by `vacuous: true` (set by `recordResult`), with the
+ * canonical `vacuous:`-prefixed error string as a fallback for rows that carry
+ * only the message. A vacuous "pass" never actually asserted anything, so
+ * reclassifying it to fail is an integrity correction — not a conformance
+ * regression.
+ */
+export function isVacuousResult(entry: Pick<TestResult, "vacuous" | "error"> | undefined): boolean {
+  if (!entry) return false;
+  if (entry.vacuous === true) return true;
+  return typeof entry.error === "string" && entry.error.startsWith("vacuous:");
+}
+
+/**
+ * #2940 gate-excusal — **TEMPORARY, DEFAULT-ON** (remove after the post-#2463
+ * standalone baseline promotes to new-policy; removal follow-up #3001). True
+ * for the ONLY extra pass→fail flip excused: the BASELINE was a `pass` and the
+ * NEW row is a #2940 vacuity reclassification. The exclusion is applied
+ * UNCONDITIONALLY in `run` (no CLI flag) — see the long rationale at the
+ * `isExcusedVacuous` use-site: `merge_group` runs the base-branch YAML against
+ * the merged-tree script, so only a default-on (script-side) exclusion fires in
+ * the fixing PR's own merge_group.
+ *
+ * Root cause this bridges: #2463's vacuity scorer intentionally rescored
+ * ~1438 vacuous "passes" as `fail` WITHOUT bumping the #2096 oracle_version,
+ * so a diff against a STALE pre-#2463 baseline (which still records those rows
+ * `pass`) reads the policy delta as a mass regression. The host baseline was
+ * re-promoted to new-policy but the STANDALONE baseline was not, so every
+ * code PR's merge_group standalone diff trips the #1897 guard on the same
+ * `d822f85a` cluster — wedging the merge queue. This excusal drops those
+ * reclassifications out of the gated regression count so the queue clears; the
+ * next push-to-main then promotes the standalone baseline to new-policy, after
+ * which this excuses ZERO transitions and MUST be removed (else it would mask a
+ * genuine true-pass→"callback never executed" codegen break). A NEW row that is
+ * NOT vacuous still trips the guard at full strength.
+ */
+export function isVacuousReclassification(base: TestResult | undefined, cur: TestResult | undefined): boolean {
+  if (!base || base.status !== "pass") return false;
+  return isVacuousResult(cur);
 }
 
 type StatusMap = Map<string, TestResult>;
@@ -254,7 +308,19 @@ Environment:
                                 Used by #1954 scoped PR-time runs: the candidate JSONL only covers
                                 the scoped subset, so the baseline must be restricted the same way
                                 or every out-of-scope baseline pass counts as a pass→absent regression.
-  --help, -h                    Show this help`);
+  --exclude-leaky-baseline-regressions
+                                (#2879 §4, standalone lane) Excuse pass→fail flips where the baseline
+                                was a LEAKY pass (leaned on a host env:: import) and the new row is
+                                host-free — a carrier migration removing a host dep, not a regression.
+  --help, -h                    Show this help
+
+Note: #2940 vacuity reclassifications (pass → a NEW row scored 'vacuous' — the
+harness callback never ran, so nothing asserted) are excluded from the gated
+regression count UNCONDITIONALLY (default-on, like the #2167 stale-async flake),
+not behind a flag. This is REQUIRED for self-landing: merge_group runs main's
+workflow YAML against the merged-tree script, so a flag added only in a PR's YAML
+would not take effect in that PR's own merge_group. TEMPORARY — removal follow-up
+#3001.`);
     process.exit(args.includes("--help") || args.includes("-h") ? 0 : 1);
   }
 
@@ -402,6 +468,13 @@ async function run(
      * set. The js-host lane never sets the flag, so this is always counted there.
      */
     leakyBaselineToHostFree: boolean;
+    /**
+     * #2940 — true when the baseline was a `pass` and the NEW row is a #2940
+     * vacuity reclassification (harness callback never ran → scored `fail`).
+     * Excused from the gated regression count UNCONDITIONALLY (default-on,
+     * **TEMPORARY** — removal follow-up #3001). See `isVacuousReclassification`.
+     */
+    vacuousReclassification: boolean;
   }[] = [];
   const improvements: { file: string; from: string; to: string }[] = [];
   const otherChanges: { file: string; from: string; to: string }[] = [];
@@ -450,6 +523,10 @@ async function run(
         // the standalone flag). `base`/`cur` are the full rows; `base` is a pass
         // here by construction.
         leakyBaselineToHostFree: isLeakyBaselineToHostFreeRegression(base, cur),
+        // #2940 — vacuity reclassification (excused UNCONDITIONALLY / default-on,
+        // TEMPORARY #3001). `base` is a pass by construction; `cur` carries the
+        // vacuity marker.
+        vacuousReclassification: isVacuousReclassification(base, cur),
       });
     } else if (baseStatus !== "pass" && curStatus === "pass") {
       improvements.push({ file, from: baseStatus, to: curStatus });
@@ -619,8 +696,45 @@ async function run(
   const excusedLeakyToHostFree = regressions.filter(
     (r) => r.to !== "compile_timeout" && !r.wasmUnchanged && !isStaleAsyncArgsFlake(r) && isExcusedLeakyToHostFree(r),
   ).length;
+  // #2940 gate-excusal — **TEMPORARY, DEFAULT-ON** (removal follow-up #3001).
+  // A pass→fail flip whose NEW row is a #2940 vacuity reclassification is NOT a
+  // regression: #2463's vacuity scorer intentionally rescored vacuous "passes"
+  // (the harness-wrapper callback never ran, so nothing asserted) as `fail`
+  // WITHOUT bumping the #2096 oracle_version, so a diff against a stale
+  // pre-#2463 baseline reads the policy delta (the d822f85a −1438 cluster) as a
+  // mass regression and WEDGES the merge queue.
+  //
+  // Why UNCONDITIONAL (no flag), mirroring `isStaleAsyncArgsFlake` above and
+  // NOT the flag-gated leaky excusal: `merge_group` runs the workflow YAML from
+  // the BASE branch (main), but checks out the MERGED-tree scripts. A flag added
+  // only in a PR's YAML would therefore NOT be passed in that PR's own
+  // merge_group (main's YAML runs), so the excusal would not fire and the fixing
+  // PR would park itself — deadlock. Default-on in the merged-tree script fires
+  // in every merge_group regardless of which YAML runs, so the fix self-lands.
+  //
+  // Excused ONLY from the GATED count, and ONLY for genuine vacuity flips — a
+  // NEW row that is not vacuous (`vacuousReclassification === false`) still
+  // counts at full strength. MUST be removed once the standalone baseline
+  // promotes to new-policy (after which it excuses zero flips and would instead
+  // MASK a true-pass → "callback never executed" codegen break) — see #3001.
+  const isExcusedVacuous = (r: { vacuousReclassification: boolean }) => r.vacuousReclassification;
+  // Count vacuity-excused flips NOT already excused as leaky→host-free, so the
+  // two "excused" tallies partition the excused set (no double count).
+  const excusedVacuous = regressions.filter(
+    (r) =>
+      r.to !== "compile_timeout" &&
+      !r.wasmUnchanged &&
+      !isStaleAsyncArgsFlake(r) &&
+      !isExcusedLeakyToHostFree(r) &&
+      isExcusedVacuous(r),
+  ).length;
   const noiseFiltered = regressions.filter(
-    (r) => !r.wasmUnchanged && r.to !== "compile_timeout" && !isStaleAsyncArgsFlake(r) && !isExcusedLeakyToHostFree(r),
+    (r) =>
+      !r.wasmUnchanged &&
+      r.to !== "compile_timeout" &&
+      !isStaleAsyncArgsFlake(r) &&
+      !isExcusedLeakyToHostFree(r) &&
+      !isExcusedVacuous(r),
   );
   const regressionsWasmChange = noiseFiltered.length;
   const wasmIdenticalNoise = regressions.filter((r) => r.wasmUnchanged && r.to !== "compile_timeout").length;
@@ -628,6 +742,13 @@ async function run(
   if (excludeLeakyBaseline) {
     console.log(`=== Excused leaky→host-free regressions (#2879 §4, standalone): ${excusedLeakyToHostFree} ===`);
   }
+  // Loud, grep-able tally of the TEMPORARY DEFAULT-ON #2940 excusal (removal
+  // follow-up #3001). Always printed. Non-zero ⇒ the stale-baseline vacuity
+  // delta is being bridged; zero ⇒ the excusal is inert (baseline already
+  // new-policy) and it should be removed. See isVacuousReclassification.
+  console.log(
+    `=== Excused vacuous reclassifications (#2940 TEMPORARY default-on — remove after standalone baseline promotes to new-policy; see #3001): ${excusedVacuous} ===`,
+  );
   console.log(`=== Regressions with wasm-hash change: ${regressionsWasmChange} ===`);
   console.log();
 

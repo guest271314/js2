@@ -23,8 +23,12 @@ import { hoistFunctionDeclarations } from "../statements/nested-declarations.js"
 import { hoistLetConstWithTdz, hoistVarDeclarations } from "../index.js";
 import type { InnerResult } from "../shared.js";
 import { coerceType, compileExpression, compileStatement } from "../shared.js";
-import { emitUndefined } from "./late-imports.js";
+import { emitUndefined, ensureLateImport, flushLateImportShifts } from "./late-imports.js";
 import { emitFuncRefAsClosure, getFuncSignature } from "../closures.js";
+import { compileAndEmitToString } from "../coercion-engine.js";
+import { compileStringLiteral } from "../string-ops.js";
+import { emitThrowJsError, noJsHost } from "./helpers.js";
+import { reportError } from "../context/errors.js";
 
 /**
  * Synthetic file name for the foreign `SourceFile` an inlined `eval("<literal>")`
@@ -565,6 +569,29 @@ function unwrapParenExpr(e: ts.Expression): ts.Expression {
  * Returns undefined to fall through to the existing paths (non-constant args,
  * local `Function` shadow, unsupported body, non-plain params, …).
  */
+/**
+ * (#2960) True when `expr` is the IMMEDIATE-CALL form of a Function constructor
+ * — `new Function(...)(args)` or `Function(...)(args)` — targeting the GLOBAL
+ * `Function` intrinsic. Used by the host-mode dynamic path: when the constant
+ * compile-away (`tryStaticFunctionCtorCall`) declines (non-constant args), the
+ * callee compiles to the meta-circular shim's real host-callable value, so the
+ * outer call routes through `__call_function` (a wasm-side `f(...)` on a plain
+ * host-function externref otherwise returns undefined — the general any-callee
+ * host-function limitation). Only meaningful in JS-host mode.
+ */
+export function isFunctionCtorImmediateCall(expr: ts.CallExpression, checker: ts.TypeChecker): boolean {
+  const callee = unwrapParenExpr(expr.expression);
+  if (ts.isNewExpression(callee)) {
+    const target = unwrapParenExpr(callee.expression);
+    return ts.isIdentifier(target) && isGlobalFunctionIdentifier(target, checker);
+  }
+  if (ts.isCallExpression(callee) && !callee.questionDotToken) {
+    const target = unwrapParenExpr(callee.expression);
+    return ts.isIdentifier(target) && isGlobalFunctionIdentifier(target, checker);
+  }
+  return false;
+}
+
 export function tryStaticFunctionCtorCall(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -654,4 +681,193 @@ export function tryStaticFunctionCtorCall(
     coerceType(ctx, fctx, resType, { kind: "externref" });
   }
   return { kind: "externref" };
+}
+
+/**
+ * (#2960) DIAGNOSTIC message shared by every dynamic-code fall-through so the
+ * standalone warning and the call-time throw name the same tracking goal.
+ */
+const DYNAMIC_CODE_UNSUPPORTED_MSG =
+  "dynamic code evaluation (eval / new Function with a non-constant body) is not " +
+  "supported in --target standalone/wasi — no runtime-eval host is available " +
+  "(tracking: runtime-eval goal, bytecode interpreter #2928)";
+
+/**
+ * (#2960) Host-mode DYNAMIC `new Function(p0, …, pN, body)` — route to the
+ * meta-circular runtime-eval machinery via the `env::__extern_new_function`
+ * host shim (`createNewFunctionShim`, the same `compileSourceSync` + LRU-cache
+ * machinery indirect eval uses). `new Function` is global-scoped (§20.2.1.1),
+ * so the shim compiles a fresh global-scope module and returns a real
+ * JS-callable function value (unlike the eval path, whose child-module closure
+ * the parent can't cast/invoke).
+ *
+ * We build TWO runtime strings — a comma-joined `paramString` and the
+ * `bodyString` — by ToString-coercing each argument and (for ≥2 params)
+ * joining with `__concat_N`, then call `__extern_new_function(params, body)`.
+ * Replaces the silent `ref.null.extern` no-op stub for the dynamic-arg cluster
+ * (the constant-arg compile-away #2924 runs first).
+ *
+ * Returns `undefined` (caller falls through) when the shim path is unavailable:
+ * no-JS-host (`standalone`/`wasi`, handled by the throwing stub instead) or
+ * `nativeStrings` (js-string concat isn't wired there).
+ */
+export function emitDynamicNewFunctionHostEval(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  args: readonly ts.Expression[],
+): ValType | undefined {
+  if (noJsHost(ctx) || ctx.nativeStrings) return undefined;
+
+  const emitArgToString = (a: ts.Expression): void => {
+    let tsType: ts.Type;
+    try {
+      tsType = ctx.checker.getTypeAtLocation(a);
+    } catch {
+      tsType = ctx.checker.getTypeAtLocation(a.parent ?? a);
+    }
+    compileAndEmitToString(ctx, fctx, a, tsType, "string");
+  };
+
+  // ── paramString: the first k-1 args, comma-joined (empty when 0 params). ──
+  const numParams = Math.max(0, args.length - 1);
+  if (numParams === 0) {
+    compileStringLiteral(ctx, fctx, "");
+  } else if (numParams === 1) {
+    emitArgToString(args[0]!);
+  } else {
+    let pieces = 0;
+    for (let i = 0; i < numParams; i++) {
+      if (i > 0) {
+        compileStringLiteral(ctx, fctx, ",");
+        pieces++;
+      }
+      emitArgToString(args[i]!);
+      pieces++;
+    }
+    const concatParams: ValType[] = Array.from({ length: pieces }, () => ({ kind: "externref" }) as ValType);
+    const concatIdx = ensureLateImport(ctx, `__concat_${pieces}`, concatParams, [{ kind: "externref" }]);
+    flushLateImportShifts(ctx, fctx);
+    if (concatIdx === undefined) {
+      // Unwind the pushed pieces conservatively — bail to the null stub.
+      for (let i = 0; i < pieces; i++) fctx.body.push({ op: "drop" });
+      fctx.body.push({ op: "ref.null.extern" });
+      return { kind: "externref" };
+    }
+    fctx.body.push({ op: "call", funcIdx: concatIdx });
+  }
+
+  // ── bodyString: the last arg (empty when there are no args at all). ──
+  if (args.length >= 1) {
+    emitArgToString(args[args.length - 1]!);
+  } else {
+    compileStringLiteral(ctx, fctx, "");
+  }
+
+  // ── __extern_new_function(paramString, bodyString) → callable externref. ──
+  const newFnIdx = ensureLateImport(
+    ctx,
+    "__extern_new_function",
+    [{ kind: "externref" }, { kind: "externref" }],
+    [{ kind: "externref" }],
+  );
+  flushLateImportShifts(ctx, fctx);
+  if (newFnIdx === undefined) {
+    fctx.body.push({ op: "drop" });
+    fctx.body.push({ op: "drop" });
+    fctx.body.push({ op: "ref.null.extern" });
+    return { kind: "externref" };
+  }
+  fctx.body.push({ op: "call", funcIdx: newFnIdx });
+  return { kind: "externref" };
+}
+
+/**
+ * (#2960) No-JS-host (`standalone`/`wasi`) DYNAMIC `new Function` — replace the
+ * silent `ref.null.extern` stub with a callable value that throws a CATCHABLE
+ * error at call time, plus a source-located compile-time warning. Construction
+ * still succeeds, so a program that never CALLS the constructed function keeps
+ * working; only invoking it raises (`dynamic code evaluation not supported`).
+ *
+ * Implemented by hoisting a zero-parameter synthesized function whose body
+ * throws, then materializing it as a no-capture closure value. Falls back to a
+ * bare throw expression (still catchable) if the synthesis fails, so the result
+ * is never a silent wrong value again.
+ */
+export function emitStandaloneDynamicFunctionStub(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  node: ts.Node,
+  args: readonly ts.Expression[],
+): ValType {
+  // Source-located warning (non-fatal — informational channel, #1921).
+  reportError(ctx, node, `Warning: ${DYNAMIC_CODE_UNSUPPORTED_MSG}`, "warning");
+
+  // Per spec the argument expressions are evaluated (for side effects) at
+  // construction. Preserve that before materializing the stub value.
+  for (const arg of args) {
+    const t = compileExpression(ctx, fctx, arg);
+    if (t !== null) fctx.body.push({ op: "drop" });
+  }
+
+  const stub = synthesizeThrowingFunctionStub(ctx, fctx);
+  if (stub !== undefined) {
+    const closureRef = emitFuncRefAsClosure(ctx, fctx, stub.fnName, stub.funcIdx);
+    if (closureRef) {
+      if (closureRef.kind !== "externref") fctx.body.push({ op: "extern.convert_any" });
+      return { kind: "externref" };
+    }
+  }
+  // Synthesis unavailable — degrade to the previous null-value stub (still no
+  // silent wrong-VALUE regression relative to main; the warning was emitted).
+  fctx.body.push({ op: "ref.null.extern" });
+  return { kind: "externref" };
+}
+
+/**
+ * (#2960) Hoist a zero-parameter `function __dyn_fn_stub_<idx>() { throw new
+ * Error(...); }` over GLOBAL scope (no captures) and return its funcIdx. Reuses
+ * the same synthesized-declaration hoist machinery as
+ * `synthesizeStaticNewFunction`. Returns `undefined` if the hoist fails.
+ */
+function synthesizeThrowingFunctionStub(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+): { fnName: string; funcIdx: number } | undefined {
+  const fnName = `__dyn_fn_stub_${ctx.mod.functions.length}`;
+  const synthSrc = `function ${fnName}() { throw new Error(${JSON.stringify(DYNAMIC_CODE_UNSUPPORTED_MSG)}); }`;
+
+  const sf = ts.createSourceFile(
+    EVAL_SOURCE_FILENAME,
+    synthSrc,
+    ts.ScriptTarget.Latest,
+    /* setParentNodes */ true,
+    ts.ScriptKind.JS,
+  );
+  if (sf.statements.length !== 1 || !ts.isFunctionDeclaration(sf.statements[0]!)) return undefined;
+  const fnDecl = sf.statements[0] as ts.FunctionDeclaration;
+
+  const savedLocalMap = fctx.localMap;
+  const savedBoxed = fctx.boxedCaptures;
+  const savedFuncCount = ctx.mod.functions.length;
+  fctx.localMap = new Map();
+  fctx.boxedCaptures = undefined;
+  try {
+    hoistFunctionDeclarations(ctx, fctx, [fnDecl]);
+  } catch {
+    if (ctx.mod.functions.length > savedFuncCount) {
+      ctx.mod.functions.length = savedFuncCount;
+      const cutoff = ctx.numImportFuncs + savedFuncCount;
+      for (const [name, idx] of ctx.funcMap) {
+        if (idx >= cutoff) ctx.funcMap.delete(name);
+      }
+    }
+    return undefined;
+  } finally {
+    fctx.localMap = savedLocalMap;
+    fctx.boxedCaptures = savedBoxed;
+  }
+
+  const funcIdx = ctx.funcMap.get(fnName);
+  if (funcIdx === undefined) return undefined;
+  return { fnName, funcIdx };
 }

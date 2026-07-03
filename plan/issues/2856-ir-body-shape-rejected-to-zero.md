@@ -1,12 +1,12 @@
 ---
 id: 2856
 title: "IR: drive body-shape-rejected fallback bucket to zero (dominant unintended bucket)"
-status: in-progress
-assignee: ttraenkler/dev-2856f
-spec: ready
+status: blocked
+assignee: ttraenkler/sr-bodyshape2
+spec: needs-rescope
 sprint: current
 created: 2026-06-30
-updated: 2026-07-02
+updated: 2026-07-03
 priority: high
 horizon: l
 feasibility: hard
@@ -263,6 +263,94 @@ bucket's growth** (demonstrated empirically: shape-fixing a leaf in
 > **first slice** (host-global member access, 17/31); the smaller arms are listed
 > separately at the end for dev-lane pickup.
 
+### Implementation notes (2026-07-02, dev-2856f) — verified corrections to this plan
+
+Probe-verified against a real compile (`.tmp/probe-2856-doc-imports.mts`): the
+legacy surface for `document.*` is NOT `__extern_get` — it is the
+**extern-class per-member import surface**: `global_document` (declared-globals
+handle, `collectDeclaredGlobals`), `Document_getElementById` /
+`Document_get_body` / `Element_set_textContent` / `Node_appendChild`
+(`collectUsedExternImports` source pre-scan over `ctx.externClasses`, chain
+walk via `ctx.externClassParent`; DOM classes enter the registry from
+lib.dom's `declare var X: { new(): X; … }` constructor-vars via
+`collectExternFromDeclareVar` + `collectInterfaceMembers`), and
+`console_<method>_<number|bool|string|externref>` per-arg-type variants
+(`collectConsoleImports`). All are **source-scan pre-passes independent of
+which front-end compiles the body**, so IR-claimed functions get their imports
+registered anyway; the IR lowering resolves them **by name**
+(`resolver.resolveFunc`) — funcIdx-shift-safe by construction.
+
+Design deltas vs the plan above:
+
+1. **No new IR node kinds.** `IrInstrCall` takes a symbolic `{kind:"func",
+name}` target and an explicit result IrType, so `document` lowers as
+   `call global_document : {kind:"extern", className:"Document"}`, and
+   `console.log(s)` as a void `call console_log_string`. Member get/set/call
+   reuse the existing `extern.prop` / `extern.propSet` / `extern.call` instrs
+   (their lowering already emits `<prefix>_get_<p>` / `<prefix>_<m>` by name;
+   effects analysis already marks `extern.*` full heap read+write, covering
+   the plan's #2134 barrier concern).
+2. **Selection runs EARLY (index.ts ~1178), before the registries populate
+   (~1471-1524)** — the selector can NOT read `ctx.externClasses` /
+   `ctx.declaredGlobals`. Split: the selector uses a **checker-backed
+   callback** threaded via `IrSelectionOptions`
+   (`resolveHostGlobal(node: ts.Identifier) → className | undefined`:
+   symbol → ambient declare-var in a `.d.ts` → `isExternalDeclaredClass`
+   parity gate → type symbol name; shadow-safe because the checker resolves
+   the real binding), while **from-ast (which runs late) uses the authoritative
+   registry** via new resolver callbacks (`getHostGlobalInfo(name)`,
+   `resolveExternMember(className, member, kind)` — the chain walk). The gate
+   script keeps its direct `planIrCompilation` call and builds the same
+   checker callback from its own program — no script rewrite.
+3. **Capability integration (#2135, agreed with dev-2138f):** mode-gated
+   `hostExternCapability(jsHost): IrOpCapability` in `src/ir/capability.ts` —
+   `"claim-partial"` in JS-host mode, `"defer"` under
+   standalone/wasi/strictNoHostImports; selector consumes it, from-ast entry
+   asserts via `assertNotDeferred` (uniform message class for the #1923 meter
+   and #2138's IR-first channel). Branch is predecessor-stacked on
+   `issue-2135-ir-capability-predicate` (#2476); enqueue only after it lands.
+4. **Two from-ast gaps to close** (pre-existing in the slice-10 extern arms):
+   member resolution does NOT walk `externClassParent` (an `Element` receiver
+   would miss `Node.appendChild`), and `extern.prop`/`extern.call` results
+   lose the class brand (registered as bare ValType, breaking chained
+   `document.body.appendChild`). Fix: chain-walk in the new
+   `resolveExternMember` + record `resultClassName` at registration
+   (`collectInterfaceMembers` et al.) when the mapped result is externref.
+5. **Standalone**: `"defer"` ⇒ the selector never claims ⇒ legacy ⇒ the
+   existing #1472/#2907 refusal — unchanged, as the plan requires. The
+   `console` arm is also host-only (WASI console lowers natively via
+   fd*write, no `console*\*` host imports).
+
+### Slice 1 RESULTS (2026-07-02, dev-2856f — extern-in-IR landed)
+
+- Gate: `body-shape-rejected` **34 → 27** (−7); post-claim demotions **0**
+  (the two `<f64>.toString()` demotions the first run surfaced were fixed by
+  the `number_toString` arm). `call-graph-closure` 5 → 8: the predicted
+  contagion shuffle — `el`/`bcrd`/helpers are now IR-CAPABLE but pinned by
+  callers whose own first blockers are **closure-valued args**
+  (`addBenchCard(…, bench_fib)`), **imported callees** (cross-module calls),
+  `%`-defer (#2945), and misc arms — all separately tracked. Banked via
+  `--update` in the slice PR (net unintended 45 → 41).
+- Runtime parity: IR-on vs IR-off **identical observable behavior** on
+  benchmarks/dom.ts, benchmarks/helpers.ts, js/algorithms.ts, js/classes.ts
+  (full console-output equality on the executable ones; identical
+  failure-mode on DOM files under Node's shimless host).
+- Landmine fixed en route: extern method imports have FIXED Wasm arity
+  including optional params (`createElement(tag, options?)` = 3 slots) — the
+  IR extern.call arm must pad missing optionals with default sentinels like
+  legacy's `pushDefaultValue`, or the module fails validation ("not enough
+  arguments on the stack"). Regression-tested in
+  `tests/issue-2856-extern-in-ir.test.ts`.
+- Use-site branding replaced registration-time branding (the plan's note 4):
+  overloads collapse at registration (`createElement`'s first overload
+  returns a type param), so `resolveExternMember` brands from the checker at
+  the USE SITE (`getTypeAtLocation` + `getNonNullableType`).
+- Remaining body-shape (27): 8 `nontail-callstmt` (mains calling
+  imported/closure-valued fns), 4 helper-internal (incl. the `#private`
+  pair), 3 if-in-loop, 2 ArrayType annotation, 2 `%` (#2945-deferred), 1
+  each arrow-value / tail-expr / if-cond / if-else-nontail / assign-nonprop
+  / vardecl-call / cloop-guard / instanceof.
+
 ### What the bucket actually is (grounded by the Step-1 histogram)
 
 17 of 31 `body-shape-rejected` functions reject on host-global member access in
@@ -462,3 +550,278 @@ in-file for now. When splitting them out, get fresh ids via
 `claim-issue.mjs --allocate` and carry over the ⚠ contagion sequencing
 constraint above (an arm landed before extern-in-IR must prove
 `call-graph-closure` does not grow).
+
+## Step-2 root-cause analysis (2026-07-03, sr-bodyshape2) — the "dev-sized arms" framing is EMPIRICALLY DISPROVEN; no single mergeable PR can reduce this bucket
+
+Re-grounded from a clean `upstream/main` (@ 93ab47912). Confirmed the extern-in-IR
+Slice-1 (#2454's recorder + `2fcfbe06a`) **did** land and the baseline is now
+`body-shape-rejected: 25 / call-graph-closure: 10 / class-method: 5` (the 31→25
+reduction is banked — the "reduction never happened" premise some dispatch notes
+carried is stale). Fresh `JS2WASM_IR_SHAPE_DIAG=1 pnpm run check:ir-fallbacks -- --shape-diag`
+histogram of the current 25:
+
+| count | reject arm                                    | functions |
+| ----- | --------------------------------------------- | --------- |
+| 8 | `nontail-callstmt:CallExpression` | the 8 benchmark-harness `main`s (benchmarks.ts, benchmarks/{array,dom,fib,loop,string,style}.ts, js/builtins.ts) |
+| 4 | `unattributed-arm:helper-internal` | calendar `updFoot`, async `delay`, classes `Animal_new`/`Animal_speak` |
+| 3 | `body-unhandled-stmt:IfStatement` | algorithms `binarySearch`/`quicksort`/`joinNums` |
+| 2 | `vardecl-typenode:ArrayType` | benchmarks.ts + benchmarks/array.ts `bench_array` |
+| 1 each | `expr-unhandled:ArrowFunction` (helpers `addBenchCard`), `tail-unhandled:ExpressionStatement` (calendar `fdow`), `nontail-if-cond:BinaryExpression` (calendar `renderCal`), `nontail-unhandled-stmt:IfStatement` (calendar `onDay`), `nontail-assign-nonprop-lhs:BinaryExpression` (calendar `main`), `vardecl-init-expr:CallExpression` (algorithms `fibMemo`), `expr-arraylit-cloop-guard-1804:ArrayLiteralExpression` (algorithms `main`), `expr-binary-op-instanceof:BinaryExpression` (classes `main`) | — |
+
+### The two structural blockers that make every "dev-sized arm" a dead end
+
+**(1) Demotion is contagious (verified in source, `select.ts:492-518`).** Step-2's
+`call-graph-closure` fixpoint removes ANY shape-claimable function whose local
+caller OR callee is unclaimed. `buildLocalCallGraph` (`select.ts:2193-2198`) only
+creates edges for real `CallExpression`s with a local-decl callee — a function
+passed *by reference* (e.g. `addBenchCard(…, bench_fib)`) or called *inside a
+nested arrow* (`select.ts:2164` does not descend into nested function-likes) is
+**not** an edge. Consequence: fixing a leaf statement/expression arm inside a
+function whose call-component root (`main`) stays unclaimed does not reduce the
+gated total — it **moves** the count from `body-shape-rejected` into
+`call-graph-closure`, and the gate fails on that bucket's growth. So the unit of
+reduction is a **whole call-component**, never a single arm.
+
+**(2) The gate compiles each corpus file as a per-file program**
+(`scripts/check-ir-fallbacks.ts:217` — `ts.createProgram([filePath], …)`). Imports
+from sibling modules (`el`, `addBenchCard` from `benchmarks/helpers.ts`) are
+therefore genuinely **external**, landing in the `external-call` bucket.
+
+### Empirical proof that the highest-value arm is net-zero
+
+Temporarily accepting *any* out-of-scope identifier in `isPhase1Expr` (the
+"top-level function passed as a `() => number` value" arm the 8 benchmark `main`s
+need) moved the gate to:
+
+```
+body-shape-rejected   25 → 17   (-8)      ← the 8 benchmark mains leave body-shape
+external-call          0 →  7   (+7)      ← …but land here (imported el/addBenchCard)
+call-graph-closure    10 → 11   (+1)
+```
+
+Net unintended change: **0**. The gate FAILS on `external-call` + `call-graph-closure`
+growth. So the benchmark `main`s' `body-shape` rejection is **blocked BY #2858's
+domain (cross-module imported calls), not the reverse** — the dispatch claim that
+#2858 is "blocked on #2856" is backwards for this cluster: they are mutually
+entangled, and the benchmark mains need cross-module import lowering **and**
+first-class function-reference (closure-wrap ABI) lowering **together** before
+they can leave any unintended bucket.
+
+### Per-cluster capability requirements (each is a WHOLE-COMPONENT slice)
+
+- **Benchmark harness (8 `main`s + `helpers.ts`):** cross-module imported-call
+  lowering (#2858 / `external-call`) **+** top-level-function-reference as a
+  first-class `() => T` value (closure/`$__fn_wrap` ABI parity with legacy —
+  see `builtin-fn-meta.ts`, `closures.ts`) **+** the `addEventListener(…, () => …)`
+  arrow-closure value in `addBenchCard`. Contagion-safe leaves, but multi-capability.
+- **`bench_array` ×2 (contagion-safe leaves):** `ArrayType` annotation
+  (`isPhase1TypeNode`, trivial) **+** empty-array-literal + **growable-array
+  `.push`** (IR from-ast/lower have NO `.push` method arm — verified) **+** the
+  #1804 C-style-loop vec-SSA-threading correctness fix (the guard at
+  `select.ts:1967` protects a real lowering bug, not a shape check). Widening
+  `isPhase1TypeNode` alone is a no-op: `bench_array` immediately falls through to
+  `expr-arraylit-cloop-guard-1804` (verified).
+- **algorithms.ts (5 fns, one call-component rooted at `main`):**
+  `if`-in-non-tail-body-statement selector arm (`isPhase1BodyStatement` has no
+  `IfStatement` arm — `select.ts:1407`) **+** element-store `arr[i] = e`
+  (quicksort) **+** module-scope `Map` global with `.get`/`.set` sharing the
+  legacy backend's storage slot (fibMemo) **+** array-literal-under-C-style-loop
+  SSA (main's `const sorted = […]`). All pure computation (no host/closure), the
+  most self-contained cluster, but ≥3 real capabilities that MUST land together.
+- **classes.ts (3 fns):** `#private` field read/write (`ts.PrivateIdentifier`
+  is not an `Identifier`) **+** `instanceof` (`isPhase1BinaryOp` rejects it) **+**
+  `super`/inheritance interplay.
+- **calendar.ts (5 fns):** module-scope **mutable** bindings (`selStart`, `gridEl`,
+  …) **+** DOM member chains **+** if-in-body **+** `new Date()`.
+- **async.ts `delay`:** `new Promise((resolve) => …)` executor closure (borders
+  the `deferred`/async lane).
+
+### Why NO incremental capability PR is mergeable against this corpus
+
+Because the gate ratchets on this fixed corpus, any capability a
+contagion-locked corpus function needs (e.g. the `if`-in-body arm, which is
+genuinely useful and reusable) **cannot** be added incrementally: relaxing the
+selector for it flips `binarySearch`/`quicksort`/`joinNums` to shape-claimable,
+which the `call-graph-closure` fixpoint then demotes (their `main` is
+unclaimable) — the gate fails on `call-graph-closure` growth. Verified by
+inspection of the fixpoint. There is no corpus file whose whole call-component is
+one capability away from fully claiming.
+
+### Recommendation (routing)
+
+`body-shape-rejected → 0` is **not a dev-lane ticket and not decomposable into the
+"smaller dev-sized arms" listed in the earlier spec** — every one of those arms is
+either contagion-locked to an unclaimable `main` or has a deeper co-blocker in the
+same function. It is a **multi-capability program** that must be scheduled as
+whole-call-component slices, several of which (cross-module calls, first-class
+function values, growable arrays, module-scope mutable Map) are substantial IR
+features in their own right and overlap #2858 (cross-module/`external-call`),
+#2135 (capability predicate), #2138 (compile-once). Recommend PO/architect:
+
+1. Re-scope #2856 as a **tracking epic** under #2855, not an executable ticket.
+2. Cut capability sub-issues sized as whole-component slices, ordered by
+   self-containment: **algorithms.ts** (pure-compute; `if`-in-body + element-store
+   + Map-global + arraylit-SSA) is the cleanest first real reduction (−5, all
+   contagion-internal to one file). The benchmark-harness cluster (−8) should be
+   sequenced **after** #2858's cross-module-call lowering, since it is a hard
+   dependency, not a dependent.
+3. Do NOT dispatch the `ArrayType` / `if-in-body` / module-scope-binding arms as
+   standalone dev tasks — each is provably net-zero-or-worse against the gate in
+   isolation.
+
+No source change accompanies this analysis (the gate stays at 25/10/5); this PR is
+the corrected root-cause record so the team stops bouncing off the disproven
+"arms" decomposition. Marking `status: blocked` (on the capability program /
+#2858), `spec: needs-rescope`.
+
+## Implementation Plan — algorithms.ts whole-component slice (−5, first real reduction)
+
+**Author:** dev-team-c (2026-07-03), grounded against `origin/main` @ `17b09dd35`
+(includes the Step-2 correction). Verified with
+`JS2WASM_IR_SHAPE_DIAG=1 pnpm run check:ir-fallbacks -- --shape-diag`. This is
+the first executable slice of the re-scoped capability program — the cleanest
+because `website/playground/examples/js/algorithms.ts` has **zero imports**
+(`grep '^import' → none`; only `export function main`), so its whole call-graph
+is self-contained and its contagion is entirely **internal to one file** (unlike
+the benchmark-harness cluster, which needs #2858's cross-module-call lowering
+first).
+
+### The call-component (must claim atomically — one PR)
+
+`main` (the component root) calls `fibIter`, `fibMemo`, `joinNums`,
+`binarySearch`, `quicksort`. `fibIter` already claims. The **five** functions
+that currently reject (verified `--shape-diag`), and the capability each needs:
+
+| function | reject arm (current main) | capability required |
+| --- | --- | --- |
+| `fibMemo` | `vardecl-init-expr:CallExpression` | **C3** module-scope `Map` global + `.get`/`.set` |
+| `binarySearch` | `body-unhandled-stmt:IfStatement` | **C1** if-in-body (+ early-`return`-in-loop) |
+| `quicksort` | `body-unhandled-stmt:IfStatement` | **C1** if-in-body **+ C2** element-store `arr[i]=e` |
+| `joinNums` | `body-unhandled-stmt:IfStatement` | **C1** if-in-body |
+| `main` | `expr-arraylit-cloop-guard-1804:ArrayLiteralExpression` | **C4** array-literal-under-C-loop SSA |
+
+⚠ **Contagion (read `## ⚠ Sequencing constraint` above): all four capabilities
+must land in ONE PR.** The `call-graph-closure` fixpoint (`select.ts:492-518`)
+demotes any claimable function whose local caller/callee is unclaimed. `main`
+calls all five; fixing only some flips them to shape-claimable but `main` (still
+rejecting on C4) then demotes the whole component — the gate **fails on
+`call-graph-closure` growth**. The unit of reduction is the whole component. The
+merge gate to satisfy: `body-shape-rejected 25→20 (−5)` with `call-graph-closure`
+and `external-call` **unchanged** (net unintended −5); ratchet via
+`check:ir-fallbacks -- --update-on-decrease`.
+
+### C1 — `if`-in-non-tail-body-statement (+ early `return` inside a loop)
+
+`isPhase1BodyStatement` (`select.ts:1315`) has arms for Block, VariableStatement,
+ExpressionStatement, ForOf, While, For, Throw, Try — but **no `IfStatement`
+arm**, so it falls to `shapeNo("body-unhandled-stmt", stmt)` (`select.ts:1408`).
+A well-formed **tail** if already exists in `isPhase1Tail` (`select.ts:1430`:
+requires `else`, recurses both branches as tails). The body form differs: an
+`if` in statement position whose then/else are **statement lists** (not
+tail-expressions), and — critically for `binarySearch`/`fibMemo` — whose branch
+may contain an **early `return`** (`if (arr[mid] === t) return mid;` inside a
+`while`; `if (hit !== undefined) return hit;`). `isPhase1BodyStatement` has no
+`ReturnStatement` arm either.
+
+- **Selector:** add `if (ts.isIfStatement(stmt)) return isPhase1IfBodyStatement(stmt, scope, localClasses)` before the final `shapeNo`. New helper: cond via `isPhase1Expr`; then/else recurse via `isPhase1BodyStatement` (else optional, unlike the tail form). Add a `ReturnStatement` arm to `isPhase1BodyStatement` (guarded: allowed only when a lowerable early-exit target exists — i.e. the enclosing lower context can emit a `br` to the function epilogue).
+- **Lowerer (`from-ast.ts`):** the nested-buffer `if` lowering already exists for the tail path (`IrInstrIf` with nested then/else buffers, `forEachNestedBuffer`). The new work is **early-return from inside a nested buffer/loop**: lower `return e` in body position to eval `e` + `br` to the function's result/epilogue block. Verify the multi-exit path composes with the existing loop back-edge lowering (this is the `binarySearch` `return mid` inside `while` case). NB this borders #2952 (multi-exit control flow) — coordinate: if #2952's `IrInstrBrLabel` lands first, reuse it; else a scoped epilogue-br is sufficient here (single-level, no labeled target needed).
+
+### C2 — element-store `arr[i] = e`
+
+Element **read** `arr[i]` is accepted (`select.ts:1950`, `isPhase1Expr`) and
+lowered (`from-ast.ts:2276` `lowerElementAccess`). The **store** is not: in
+`isPhase1BodyStatement`'s ExpressionStatement→BinaryExpression→`EqualsToken` arm
+(`select.ts:1343-1352`) the LHS is checked for `Identifier` and
+`PropertyAccessExpression` only — an `ElementAccessExpression` LHS
+(`arr[i] = arr[j]`, quicksort:66-67,70-72) falls through and rejects. And there
+is **no `lowerElementStore`** in `from-ast.ts` (`grep lowerElementStore → none`).
+
+- **Selector:** add an `ElementAccessExpression` case to the `EqualsToken` LHS
+  check — accept when `expr.expression` and `expr.argumentExpression` are both
+  `isPhase1Expr` (mirror the read guard at `select.ts:1950`).
+- **Lowerer:** add `lowerElementStore(expr, valueId, cx)` — the write dual of
+  `lowerElementAccess`; emit `vec.set` (WasmGC array `array.set`; linear
+  backend the store dual) with the i32-coerced index, reusing the in-bounds
+  reasoning path (`isProvenInBoundsIr`, `from-ast.ts:2179`). No new host import.
+
+### C3 — module-scope `Map` global + `.get`/`.set`
+
+`fibMemo` rejects at `vardecl-init-expr:CallExpression` on
+`const hit = fibCache.get(n)` because (a) `fibCache` is a **module-scope**
+binding (`const fibCache = new Map<number,number>()`, algorithms.ts:25) not in
+the function's scope set — the selector's scope set holds params/locals only —
+and (b) `Map.get`/`Map.set` are method calls the IR does not yet lower. This is
+the substantial capability of the slice.
+
+- **Module-scope binding set:** thread a module-level binding set (the `const`/
+  `let` names declared at module scope) into the shape walk so member/reference
+  access to `fibCache` is in-scope. Must NOT admit arbitrary module globals as a
+  side effect — scope it to bindings with a proven IR-lowerable representation.
+- **Storage-slot parity (the hazard):** IR module-global read/write MUST share
+  the **same storage slot the legacy backend allocates** for `fibCache` — the two
+  front-ends coexist per function (a global written by an IR function and read by
+  a legacy one must be one location). Add a **mixed IR/legacy read-write
+  equivalence test** (`tests/ir-*.test.ts`): a module global written by an
+  IR-claimed function and read by a legacy-compiled one round-trips.
+- **`Map` lowering:** lower `new Map()`, `.get(k)` (returns value-or-`undefined`),
+  `.set(k,v)`. If a native `Map` substrate is absent in the IR, this pairs with
+  the object/Map runtime — confirm the legacy backend's `Map` representation and
+  emit the identical calls/slots (byte-parity per mode). **This is the item most
+  likely to need its own predecessor sub-issue** if the `Map` runtime is not yet
+  IR-reachable — measure first; if `Map` lowering is out of reach, the component
+  cannot claim and this whole slice defers behind a `Map`-in-IR capability.
+
+### C4 — array-literal under C-style loop (SSA threading)
+
+`main` rejects at `expr-arraylit-cloop-guard-1804` (`select.ts:1967`): the #1804
+guard **withholds** the claim whenever the function contains a C-style
+`while`/`for` loop, because a constructed vec read inside such a loop fails SSA
+hygiene (the vec value isn't threaded into the loop's cond/body blocks — distinct
+from the working `for-of` vec path). `main` has both `const sorted = [1,3,…]`
+(algorithms.ts:99) and C-style `for` loops.
+
+- The guard protects a **real lowering bug**, not a shape gap — the fix is to
+  **thread the constructed-vec SSA value into the loop cond/body blocks** so the
+  vec identity is stable across the back-edge (the same class as the #2784 S3
+  vec-identity fix). Once threaded, lift the guard for the threaded case.
+- If the SSA-threading fix is larger than this slice can absorb, an acceptable
+  fallback that still claims `main`: hoist/represent the literal so it is not
+  read *through* the C-loop region — but the guard exists precisely because that
+  is unsound in general, so **prefer the SSA-threading fix**; do not just delete
+  the guard.
+
+### Ordering, sizing, verification
+
+- **Order within the PR:** C2 (smallest, self-contained) → C1 (if-in-body +
+  early-return, reused by 3 fns) → C4 (SSA threading) → C3 (Map + module-global,
+  the gate). Land as ONE PR; the ratchet only moves when all five claim.
+- **Sizing / routing:** whole-component, **feasibility hard, ~L, senior-dev** —
+  C1's multi-exit and C3's Map-runtime + storage-slot parity are each real IR
+  capabilities. NOT a single-window dev slice; schedule at a **fresh budget
+  window** (big-rock). If C3's `Map`-in-IR proves out of reach on a measure-first
+  probe, split C3 into a predecessor `Map`-in-IR sub-issue; note that C3 is on
+  the critical path for the whole component (`main` calls `fibMemo`, so `fibMemo`
+  must claim for `main`'s component to claim), so the whole slice waits on it —
+  measure before committing.
+- **No-regression bar:** `body-shape-rejected 25→20`, `call-graph-closure` and
+  `external-call` unchanged (net unintended −5); `pnpm run check:ir-fallbacks`
+  green locally before push; `tests/ir-*.test.ts` green; per-mode lowered bytes
+  for every already-claimed function unchanged (byte-parity); test262 conformance
+  net-neutral-or-positive.
+- **Promotion:** this slice does NOT reach `body-shape-rejected: 0` on its own
+  (20 remain: benchmark-harness −8 behind #2858, calendar/classes clusters). It
+  is the first `−5`. `STRICT_IR_REASONS` promotion (acceptance #3 of the epic)
+  waits until the whole bucket is 0.
+
+### Files
+
+- `src/ir/select.ts` — `isPhase1BodyStatement` (:1315, add IfStatement + Return
+  arms), `EqualsToken` LHS ElementAccess case (:1343), module-scope binding set,
+  `expr-arraylit-cloop-guard-1804` guard (:1967).
+- `src/ir/from-ast.ts` — new `lowerElementStore`; early-`return`-in-body lowering;
+  Map `.get`/`.set`/`new Map` lowering; module-global read/write.
+- `src/ir/lower.ts` / `src/codegen-linear/` — backend duals for element-store,
+  module-global, Map (WasmGC vs linear differ only here).
+- `tests/ir-algorithms-cluster.test.ts` (new) — per-capability claim tests +
+  the mixed IR/legacy module-global round-trip equivalence test.
+- `scripts/ir-fallback-baseline.json` — ratchet `body-shape-rejected` 25→20.

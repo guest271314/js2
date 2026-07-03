@@ -1,10 +1,11 @@
 ---
 id: 1895
 title: "Minimal .wat repro: WasmGC i8 array.copy vs element-loop vs linear memory.copy throughput (wasmtime vs Node/V8)"
-status: ready
+status: done
+completed: 2026-07-03
 sprint: Backlog
 created: 2026-06-05
-updated: 2026-06-05
+updated: 2026-07-03
 priority: medium
 feasibility: easy
 reasoning_effort: low
@@ -86,3 +87,18 @@ reuse the `.tmp/wasmtime-gc-bug/` scratch notes.
 - #1863 records the original measurement and the host's element-loop workaround.
 - #1886 (linear-backed `Uint8Array`) is the compiler-side fix that routes I/O
   buffers to `memory.copy`/zero-copy and sidesteps GC `array.copy` entirely.
+
+## Reconciliation — DONE (2026-07-03)
+
+The investigation deliverable was landed by **PR #1220**
+(`docs(#1895): minimal .wat GC array.copy vs linear memory.copy benchmark`,
+merged 2026-06-05, branch `issue-1895-gc-copy-bench`). Verified on `main`:
+
+- The committed repro exists under `bench/`: `bench/gc-array-copy.wat`
+  (i8 GC array with `bench_arraycopy` / `bench_elemloop` / `bench_memcopy`),
+  `bench/run-node.mjs`, and `bench/run-wasmtime.mjs`.
+- The issue body itself carries the `## Results (measured 2026-06-05, N = 16 MiB)`
+  section — the throughput findings this investigation set out to capture.
+
+Both the artifact and the measured results are recorded, so the investigation
+is complete. Flipped during the 2026-07-03 stale-backlog reconciliation.

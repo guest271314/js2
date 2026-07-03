@@ -83,6 +83,16 @@ export interface CodegenOptions {
    *  `__unbox_string` JS-host string imports. Used so the compiled module is
    *  runnable under pure-Wasm engines (wasmtime, wasmer) without a JS host. */
   standalone?: boolean;
+  /**
+   * (#2141 S1) Honest generic `any` boxing — the Stage-B regime flag. When ON,
+   * `boxToAny`'s externref arm routes through `__any_box_extern` (runtime
+   * classification → true `JsTag`) instead of the historical tag-5
+   * "box-the-externref" lie (#1888). Default OFF: byte-identical to the legacy
+   * regime (the honest helper is not even registered). Flips to default-on for
+   * standalone/wasi in slice S4 after the consumer migration (S2/S3) lands —
+   * see plan/issues/2141-tag5-abi-untangle-honest-boxing.md.
+   */
+  honestAnyBoxing?: boolean;
   /** (#2796) Diff-test-harness fidelity: in JS-host mode, export the top-level
    *  `__module_init` and do NOT run it via the wasm `start` section, so the host
    *  invokes it AFTER `setExports` (symmetric with the standalone `_start`
@@ -856,8 +866,11 @@ export interface CodegenContext {
   exportSignatures: Map<string, import("../../ir/types.js").ExportSignature>;
   /** Map from className → parent className (for inheritance chain walk) */
   externClassParent: Map<string, string>;
-  /** Map from global name (e.g. "document") → import info */
-  declaredGlobals: Map<string, { type: ValType; funcIdx: number }>;
+  /** Map from global name (e.g. "document") → import info. `className` is
+   *  the extern class of the global's declared type ("Document") — recorded
+   *  at registration for the IR host-extern path (#2856), which types the
+   *  `call global_<name>` handle as `IrType.extern { className }`. */
+  declaredGlobals: Map<string, { type: ValType; funcIdx: number; className?: string }>;
   /** Counter for generated callback functions (__cb_0, __cb_1, ...) */
   callbackCounter: number;
   /** Map from captured variable name → global index in mod.globals */
@@ -1841,6 +1854,10 @@ export interface CodegenContext {
    *  `__unbox_string`, `__str_from_mem`, `__str_to_mem`,
    *  `__str_extern_len`). Implies `nativeStrings === true`. */
   standalone: boolean;
+  /** (#2141 S1) Honest generic `any` boxing regime flag — see the
+   *  `CodegenOptions.honestAnyBoxing` doc. Default false (legacy tag-5
+   *  box-the-externref ABI, byte-identical). */
+  honestAnyBoxing: boolean;
   /** (#2796) Diff-test-harness fidelity: in JS-host mode, export the top-level
    *  `__module_init` and do NOT wire the wasm `start` section to it, so the host
    *  runs it after `setExports` (symmetric with the standalone `_start` model).
@@ -1895,6 +1912,18 @@ export interface CodegenContext {
   /** (#2896) Cache: `(builtin, member)` key → the meta struct-type index above.
    *  Keeps `ensureBuiltinFnMetaType` idempotent per closure identity. */
   builtinFnMetaTypeByKey?: Map<string, number>;
+  /** (#2963) Reified-builtin-value IDENTITY substrate. A builtin static method
+   *  read AS A VALUE (`const r = Promise.resolve`, `[1,2].map(Number.isInteger)`)
+   *  must be a MODULE-LEVEL SINGLETON: every read of the same (builtin, member)
+   *  yields the SAME ref so `Promise.resolve === Promise.resolve` holds and a
+   *  `delete fn.name` mutates the one shared object (ES: builtin methods are a
+   *  single function object). Keyed by the meta/wrapper struct-type index (the
+   *  per-(builtin, member) unique type from `ensureBuiltinFnMetaType`), the value
+   *  is the index of a `(ref null <structType>)` mutable global that
+   *  `pushBuiltinFnSingletonValueInstrs` lazily materializes once (a null-guarded
+   *  `struct.new` in a shift-covered function body — NOT a const-init, whose
+   *  embedded `ref.func` the late-import funcidx shifter does not walk). */
+  builtinFnSingletonGlobalByTypeIdx?: Map<number, number>;
   /** (#2193 PR-B) Struct-type indices of `$NativeProto` member closures whose
    *  FIRST user param is the receiver (`this`) — e.g. `Array.prototype.slice`'s
    *  `(self, this, start, end)` closure. Unlike a plain user function (which
@@ -2146,13 +2175,6 @@ export interface CodegenContext {
    * declared externref.
    */
   jsxRuntime?: import("../../import-resolver.js").JsxRuntimeImport;
-  /**
-   * #1261 — module-wide worst-case eval tier (1=no eval … 5=direct sloppy).
-   * Computed read-only by `classifyEvalTier`; downstream optimization gating
-   * (#1262–#1265) consumes it. Optional because not every context constructs
-   * from a full source file.
-   */
-  evalTier?: import("../eval-tiering.js").EvalTier;
 }
 
 export type { SourcePos };
