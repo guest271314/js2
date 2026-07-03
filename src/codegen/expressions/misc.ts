@@ -242,6 +242,22 @@ function compileYieldExpression(ctx: CodegenContext, fctx: FunctionContext, expr
     if (pushIdx !== undefined) {
       fctx.body.push({ op: "call", funcIdx: pushIdx });
     }
+  } else if (yieldedType.kind === "i64") {
+    // #2993: a `yield <bigint>` (or native `i64`) lowers the yielded value to a
+    // raw i64, but the generic buffer slot is `__gen_push_ref(externref, externref)`.
+    // Without boxing, the i64 lands in the externref parameter slot and the module
+    // fails WasmGC validation ("expected type externref, found local.get of type i64"
+    // in the generator closure body, e.g. `__closure_0`). Box the i64 → externref via
+    // `coerceType`, which picks `__box_bigint` for a bigint-branded i64 (round-trips as
+    // a JS bigint) and `__box_number` for a native `type i64 = number` value. The value
+    // is already on the stack (with only the buffer operand beneath it), so the coercion
+    // ops apply to it in place before the push call. `coerceType` may add late union
+    // imports (index-shifting), so resolve the `__gen_push_ref` funcIdx AFTER it runs.
+    coerceType(ctx, fctx, yieldedType, { kind: "externref" } as ValType);
+    const pushIdx = ctx.funcMap.get("__gen_push_ref");
+    if (pushIdx !== undefined) {
+      fctx.body.push({ op: "call", funcIdx: pushIdx });
+    }
   } else {
     // externref, ref, ref_null — all pass as externref
     const pushIdx = ctx.funcMap.get("__gen_push_ref");

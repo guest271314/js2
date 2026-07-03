@@ -53,6 +53,7 @@ import {
   collectWrittenIdentifiers,
   compileArrowAsClosure,
   compileArrowFunction,
+  computeClosureWrapperSig,
   getFuncSignature,
   getOrCreateFuncRefWrapperTypes,
 } from "../closures.js";
@@ -130,6 +131,7 @@ import {
   ensureObjectNativeProtoGlue,
   ensureStringNativeProtoGlue,
   emitTypedArrayIntrinsicCtorObject,
+  emitArrayIteratorPrototypeSingleton,
   isWiredTypedArrayViewName,
 } from "../array-object-proto.js";
 import {
@@ -190,7 +192,7 @@ import {
   tryExternClassMethodOnAny,
 } from "./calls-closures.js";
 import { compileOptionalCallExpression } from "./calls-optional.js";
-import { tryStaticEvalInline, tryStaticFunctionCtorCall } from "./eval-inline.js";
+import { isFunctionCtorImmediateCall, tryStaticEvalInline, tryStaticFunctionCtorCall } from "./eval-inline.js";
 import { compileExternMethodCall, compileSpreadCallArgs, emitLazyProtoGet } from "./extern.js";
 import {
   compileStandaloneRegExpConstructor,
@@ -2844,6 +2846,68 @@ function ensureFuncValueWrappersRegistered(ctx: CodegenContext, sf: ts.SourceFil
     if (!sig) continue;
     getOrCreateFuncRefWrapperTypes(ctx, sig.params, sig.results);
   }
+
+  // (#2939) Nested-scope function-expression / arrow callbacks. A callback like
+  // `testWith*Constructors(function (TA) { … })` defined INSIDE another function
+  // (e.g. the test262 runner's `export function test()` wrapper) registers its
+  // funcref-wrapper type only LAZILY when its value site compiles — which is
+  // inside a body compiled AFTER the higher-order function whose `fn(...)`
+  // dispatch needs the candidate. So the dispatch (`tryEmitInlineDynamicCall`)
+  // saw ZERO candidates and silently dropped the call — the ~814 vacuous
+  // `testWith*Constructors` harness passes (round-4 leak analysis). Pre-register
+  // the SAME wrapper type (computeClosureWrapperSig ≡ the value-site logic;
+  // getOrCreateFuncRefWrapperTypes is signature-cached, so the value site reuses
+  // it — a capturing callback's custom subtype still shares this funcTypeIdx,
+  // which is what the dispatch discriminates on) for every func-expr / arrow used
+  // as a call argument or a variable initializer.
+  //
+  // Standalone-gated: on the gc/host lane a callback may instead take the
+  // `__make_callback` host path and never materialize a closure wrapper, so
+  // pre-registering one there would add a module type that lazy compilation
+  // would not — a byte change on the default lane. In standalone there is no
+  // host `__make_callback`, so every func-expr/arrow value compiles to a closure
+  // and the wrapper type is created regardless; pre-creating it only reorders
+  // when (all references stay internally consistent — same discipline the
+  // declaration loop above already relies on).
+  if (ctx.standalone) {
+    const seenFnNodes = new Set<ts.Node>();
+    const usedAsValueFn = (node: ts.FunctionExpression | ts.ArrowFunction): void => {
+      if (seenFnNodes.has(node)) return;
+      seenFnNodes.add(node);
+      const { params, returnType } = computeClosureWrapperSig(ctx, node);
+      // (#2939) Restrict pre-registration to the ALL-EXTERNREF callback shape
+      // (externref params + externref/void return). This is exactly the harness
+      // callback shape (`function(TA, makeCtorArg)` — `any` params) — the whole
+      // ~1421-test target population. A candidate with a NUMERIC (f64/i32) param
+      // in an OVER-ARITY position mints a malformed dispatch arm in the
+      // higher-order body (`call[0] expected externref, found f64…`) — the
+      // over-arity numeric-pad + box path in `tryEmitInlineDynamicCall` is not
+      // sound for a speculatively-registered candidate that never matches a real
+      // runtime value. Numeric-mixed nested callbacks stay lazily-registered
+      // (unchanged from base — they were never candidates), so this both fixes
+      // the invalid-Wasm CE and keeps the fix's blast radius to the harness
+      // class. (Inner numeric-param callbacks like `findLastIndex(fn)` dispatch
+      // via the array-method path, never this inline dispatcher.)
+      const allExternref = params.every((p) => p.kind === "externref");
+      const externrefOrVoidReturn = returnType === null || returnType.kind === "externref";
+      if (!allExternref || !externrefOrVoidReturn) return;
+      getOrCreateFuncRefWrapperTypes(ctx, params, returnType ? [returnType] : []);
+    };
+    const visitFns = (node: ts.Node): void => {
+      if (ts.isFunctionExpression(node) || ts.isArrowFunction(node)) {
+        const p = node.parent;
+        const isCallArg = p && ts.isCallExpression(p) && p.arguments.some((a) => a === node);
+        const isVarInit = p && ts.isVariableDeclaration(p) && p.initializer === node;
+        // A generator function-expression's value is a Generator object, not a
+        // plain closure the inline dispatcher marshals; skip (its wrapper type
+        // is externref-returning and harmless, but leave it to the value site).
+        const isGen = ts.isFunctionExpression(node) && node.asteriskToken !== undefined;
+        if ((isCallArg || isVarInit) && !isGen) usedAsValueFn(node);
+      }
+      ts.forEachChild(node, visitFns);
+    };
+    visitFns(sf);
+  }
 }
 
 /**
@@ -3982,6 +4046,18 @@ function compileCallExpression(
     if (r !== undefined) return r;
   }
 
+  // (#2960) DYNAMIC immediate-call `new Function(<non-const>)(args)` /
+  // `Function(<non-const>)(args)` in JS-host mode. The constant compile-away
+  // above declined (non-constant args), so the callee compiles to the
+  // meta-circular shim's real host-callable value. A wasm-side `f(args)` on a
+  // plain host-function externref returns undefined (the general any-callee
+  // host-function limitation), so route the call through the `__call_function`
+  // host helper (the same packer bound functions use).
+  if (!noJsHost(ctx) && !ctx.nativeStrings && isFunctionCtorImmediateCall(expr, ctx.checker)) {
+    const r = emitBoundFunctionCall(ctx, fctx, expr);
+    if (r !== null) return r;
+  }
+
   // (#2921) `__drain_microtasks()` — explicit microtask-queue drain intrinsic
   // (banked from the closed #2367/#2867 PR-B; the funcIdx-shift half already
   // landed via #2918). Lets a standalone/WASI embedder — and, once the carrier
@@ -4079,6 +4155,31 @@ function compileCallExpression(
       if (rewritten !== undefined) return rewritten;
       const inlined = tryStaticEvalInline(ctx, fctx, expr);
       if (inlined !== undefined) return inlined;
+      // (#2960) No-JS-host (standalone / wasi): the `__extern_eval` host import
+      // is unsatisfiable and previously leaked into the binary, trapping only at
+      // instantiation with zero compile-time signal. Instead emit a
+      // source-located WARNING and, for the dynamic case, a CATCHABLE throw at
+      // the eval call site (a program that never reaches this eval keeps
+      // working). The static-constant path (tryStaticEvalInline above) already
+      // splices inline and returned; only genuine dynamic eval reaches here.
+      if (noJsHost(ctx)) {
+        reportError(
+          ctx,
+          expr,
+          "Warning: dynamic eval is not supported in --target standalone/wasi — no " +
+            "runtime-eval host is available; this eval call throws at runtime " +
+            "(tracking: runtime-eval goal, bytecode interpreter #2928)",
+          "warning",
+        );
+        // Evaluate the argument expressions for their side effects first.
+        for (const a of expr.arguments) {
+          const t = compileExpression(ctx, fctx, a);
+          if (t !== null) fctx.body.push({ op: "drop" });
+        }
+        emitThrowTypeError(ctx, fctx, "dynamic eval is not supported in standalone mode (#2928)");
+        // The throw is stack-polymorphic; return the nominal eval result type.
+        return { kind: "externref" };
+      }
       let evalIdx = ctx.funcMap.get("__extern_eval");
       if (evalIdx === undefined) {
         const importsBefore = ctx.numImportFuncs;
@@ -4185,7 +4286,21 @@ function compileCallExpression(
   // but also (fn)(), ((fn))(), (obj.method)() etc. which would otherwise fail.
   if (ts.isParenthesizedExpression(expr.expression)) {
     let unwrapped: ts.Expression = expr.expression;
-    while (ts.isParenthesizedExpression(unwrapped)) {
+    // Strip parentheses AND type-only callee wrappers (`as T`, `satisfies T`,
+    // `<T>x`). A type cast is a compile-time no-op, so `(eval as any)()` must
+    // behave exactly like `eval()`. Critically, `AsExpression` /
+    // `SatisfiesExpression` / `TypeAssertion` are NOT `LeftHandSideExpression`s,
+    // so if we left them wrapped and fell through to the generic synthetic-call
+    // path below, `ts.factory.createCallExpression` would re-wrap the callee in
+    // a `ParenthesizedExpression` and the re-entry would rebuild an identical
+    // synthetic call → unbounded recursion (#3005). Stripping them here lets the
+    // inner expression reach its normal callee handling (e.g. eval special-casing).
+    while (
+      ts.isParenthesizedExpression(unwrapped) ||
+      ts.isAsExpression(unwrapped) ||
+      ts.isSatisfiesExpression(unwrapped) ||
+      ts.isTypeAssertionExpression(unwrapped)
+    ) {
       unwrapped = unwrapped.expression;
     }
     // Only unwrap if it's NOT a function expression or arrow (those are IIFEs, handled later)
@@ -6753,6 +6868,28 @@ function compileCallExpression(
       }
 
       const argTsType = ctx.checker.getTypeAtLocation(arg0);
+
+      // (#3013) `Object.getPrototypeOf(<array iterator>)` → the shared native
+      // `%ArrayIteratorPrototype%` singleton (standalone/WASI). Every array
+      // iterator (`[].values()` / `.keys()` / `.entries()` / `[][Symbol.iterator]()`
+      // and any value flowing through an `ArrayIterator<T>`-typed binding) reports
+      // the SAME prototype object by identity (§23.1.5.2). The TS checker names
+      // ALL four producers' result type `ArrayIterator` — distinct from
+      // `Generator`/`MapIterator`/`SetIterator`/`StringIterator` — so this routes
+      // genuinely and never mis-maps a different iterator kind. Without it the
+      // standalone fallback below returns `ref.null.extern`, which made the
+      // identity assertion pass only coincidentally (null === null). Host/gc mode
+      // keeps the `__getPrototypeOf` host import (byte-inert).
+      if ((ctx.standalone || ctx.wasi) && argTsType.getSymbol()?.name === "ArrayIterator") {
+        const argType = compileExpression(ctx, fctx, arg0);
+        if (argType) fctx.body.push({ op: "drop" });
+        const protoType = emitArrayIteratorPrototypeSingleton(ctx, fctx);
+        if (protoType) return protoType;
+        // Runtime unavailable: preserve the historical null return.
+        fctx.body.push({ op: "ref.null.extern" });
+        return { kind: "externref" };
+      }
+
       const className = resolveStructName(ctx, argTsType);
 
       // For known class instances, return the class prototype singleton
@@ -14584,6 +14721,21 @@ function compileCallExpression(
       //   - __call_@@iterator export for user-defined iterable classes
       //   - __vec_len/__vec_get fallback for vec structs (arrays)
       if (methodName === "@@iterator" || methodName === "@@asyncIterator") {
+        // (#3013) Standalone/WASI: `<array>[Symbol.iterator]()` is, per
+        // §23.1.3.40, the SAME operation as `Array.prototype.values` —
+        // `Array.prototype[Symbol.iterator] === Array.prototype.values`. Route an
+        // array receiver to the native `.values()` lowering so it produces the
+        // identical `$__IterRec` value host-free, instead of leaking the
+        // `env::__iterator` host import (the sole leak of the array-iterator
+        // conformance cluster). The `.values()`/`.keys()`/`.entries()` forms are
+        // already native; this closes the `[Symbol.iterator]()` gap. Host/gc mode
+        // keeps the existing `__iterator` bridge (byte-inert). Async iterator and
+        // non-array receivers fall through unchanged.
+        if (methodName === "@@iterator" && (ctx.standalone || ctx.wasi) && resolveArrayInfo(ctx, receiverType)) {
+          const nativeResult = compileArrayMethodCall(ctx, fctx, elemAccess, expr, receiverType, "values");
+          if (nativeResult !== undefined && nativeResult !== null) return nativeResult as ValType;
+          // Fall through to the host bridge if the native path declined.
+        }
         const importName = methodName === "@@iterator" ? "__iterator" : "__async_iterator";
         const recvType = compileExpression(ctx, fctx, elemAccess.expression);
         if (recvType) {

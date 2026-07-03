@@ -2,7 +2,7 @@
 id: 1916
 title: "Symbolic function references in WasmGC codegen — retire the late-import index-shift machinery"
 status: in-progress
-assignee: ttraenkler/dev-1916b
+assignee: ttraenkler/dev-1916o
 pipeline_unblocked: 1927
 sprint: current
 model: fable
@@ -293,33 +293,20 @@ is never a moment where one value means two functions.
     green. (The 3 `issue-1599` refusal failures are pre-existing on
     clean main — stale expectations after a recent JSON change; flagged
     to the lead, not this migration's doing.)
-  - **S3b medium batch A — LANDED (dev-1916b)**: `closures.ts` (8:
-    lifted-closure + `__cb_` continuations + method trampolines),
-    `any-helpers.ts` (8: `__any_from_extern`/`__any_to_extern` etc.,
-    separated mint/push — body built between reserve and push),
-    `class-bodies.ts` (6: ctor / `__onhost` / `_init` / method / getter /
-    setter). Corpus byte-IDENTICAL over playground + probe corpus ×
-    {gc,standalone,wasi}. **Surfaced two general infra fixes** (the
-    batch-8-style "drift reveals a latent assumption" — both are
-    order/shift bugs that bite ANY producer once its handle goes stable,
-    so they are load-bearing for every later batch AND S3-final):
-    1. **`collectDeclaredFuncRefs` sorted the declarative element segment
-       by RAW handle value** (`class-bodies.ts` `[...refs].sort((a,b)=>a-b)`).
-       A stable handle (`>= STABLE_FUNC_BASE`) is numerically huge, so it
-       was banished to the end → the emitted elem segment permuted vs the
-       all-live baseline (same bytes, reordered — caught only via
-       `async.ts::wasi`, two lifted closures). Fixed to sort by
-       `absoluteFuncIndex(mod, h)` (resolved index) → identical for live
-       handles, correct for stable. This is the elem-segment analogue of
-       the #1899 "identity must ride in the value" lesson.
-    2. **`closures.ts` manual `ntShift` bump used a bare
-       `methodFuncIdx >= importsBeforeNT`** (the "closure-creation import
-       machinery can't reach this captured callee, bump it ourselves"
-       path). A stable callee handle satisfies the bare `>=` and got
-       `+= ntShift` corrupted (only when `ntShift>0`, i.e. native-strings
-       under wasi/standalone). Fixed to `inLiveShiftRange(...)` per the
-       resolve-layout shifter contract (every shifter comparison must use
-       it). Byte-neutral for live handles.
+  - **S3b batch 4 — native-regex (dev-1916o, handoff from dev-1916f).**
+    `native-regex.ts`: all 10 helper producers (`__regex_class_match` +
+    the exec/match/replace/split/test family) flipped from the inline
+    `numImportFuncs + mod.functions.length` mint to `mintDefinedFunc` /
+    `pushDefinedFunc`. All 10 are the simple mint→push shape — no
+    `funcIdx + k` sibling derivation, and (verified by push-order) no
+    intervening push between any mint and its push, so the resolved
+    index equals the live-regime index by construction. Proof: corpus
+    byte-IDENTICAL incl. `regex.ts::standalone` (65908 B, native-regex
+    helpers emitted); #1916/#1677/#1809/#2191/#2193 + regex functional
+    suites (682/1539/2588) green. (The 1 `issue-1539` "refuses dynamic
+    `new RegExp(var)`" failure is pre-existing on clean origin/main —
+    stale refusal expectation after a recent RegExp change; verified via
+    file-revert control, not this flip's doing.)
   - Batch discipline (for the next executor): flip whole FILES (a
     producer family), never partial files; `nextFuncIdx`-style local
     helpers redefine in place; multi-mint sibling derivations

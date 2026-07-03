@@ -21,6 +21,7 @@ import type { ClosureInfo, CodegenContext, FunctionContext } from "./context/typ
 import { allocLocal } from "./context/locals.js";
 import { addFuncType, getOrRegisterArrayType } from "./registry/types.js";
 import { addUnionImportsViaRegistry } from "./shared.js";
+import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S3) stable-regime minting
 import { ensureExnTag } from "./registry/imports.js";
 import { inLiveShiftRange } from "../emit/resolve-layout.js"; // (#1916 S3) stable handles never shift
 
@@ -423,9 +424,8 @@ export function ensureMicrotaskQueue(ctx: CodegenContext): void {
   // 3. Helper function bodies. Index assignment matches push order — keep
   //    the order grow → enqueue → drain so each later body can reference
   //    the prior ones.
-  const baseFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-  state.growFuncIdx = baseFuncIdx;
-  ctx.mod.functions.push({
+  state.growFuncIdx = mintDefinedFunc(ctx);
+  pushDefinedFunc(ctx, state.growFuncIdx, {
     name: "__microtask_grow",
     typeIdx: addFuncType(ctx, [{ kind: "i32" }], [], "$__mt_grow_type"),
     locals: buildGrowLocals(funcArrIdx, argsArrIdx),
@@ -434,8 +434,8 @@ export function ensureMicrotaskQueue(ctx: CodegenContext): void {
   });
   ctx.funcMap.set("__microtask_grow", state.growFuncIdx);
 
-  state.enqueueFuncIdx = baseFuncIdx + 1;
-  ctx.mod.functions.push({
+  state.enqueueFuncIdx = mintDefinedFunc(ctx);
+  pushDefinedFunc(ctx, state.enqueueFuncIdx, {
     name: "__microtask_enqueue",
     typeIdx: addFuncType(
       ctx,
@@ -449,8 +449,8 @@ export function ensureMicrotaskQueue(ctx: CodegenContext): void {
   });
   ctx.funcMap.set("__microtask_enqueue", state.enqueueFuncIdx);
 
-  state.drainFuncIdx = baseFuncIdx + 2;
-  ctx.mod.functions.push({
+  state.drainFuncIdx = mintDefinedFunc(ctx);
+  pushDefinedFunc(ctx, state.drainFuncIdx, {
     name: "__drain_microtasks",
     typeIdx: addFuncType(ctx, [], [], "$__mt_drain_type"),
     locals: buildDrainLocals(),
@@ -762,17 +762,16 @@ function ensurePromiseSettleFunctions(ctx: CodegenContext): void {
     "$__promise_settle_type",
   );
 
-  const baseFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-  state.promiseFulfillFuncIdx = baseFuncIdx;
-  state.promiseRejectFuncIdx = baseFuncIdx + 1;
-  state.identityFulfillWrapperFuncIdx = baseFuncIdx + 2;
-  state.identityRejectWrapperFuncIdx = baseFuncIdx + 3;
+  state.promiseFulfillFuncIdx = mintDefinedFunc(ctx);
+  state.promiseRejectFuncIdx = mintDefinedFunc(ctx);
+  state.identityFulfillWrapperFuncIdx = mintDefinedFunc(ctx);
+  state.identityRejectWrapperFuncIdx = mintDefinedFunc(ctx);
   // (#2867 Gap 1) reserve the resolve-value slot up-front so the identity
   // fulfill wrapper below (and the `.then` handler wrappers) can reference it
   // before its body is pushed — late assignment would shift later funcIdxs.
-  state.promiseResolveValueFuncIdx = baseFuncIdx + 4;
+  state.promiseResolveValueFuncIdx = mintDefinedFunc(ctx);
 
-  ctx.mod.functions.push({
+  pushDefinedFunc(ctx, state.promiseFulfillFuncIdx, {
     name: "__promise_fulfill",
     typeIdx: settleTypeIdx,
     locals: buildPromiseSettleLocals(callbackTypeIdx),
@@ -781,7 +780,7 @@ function ensurePromiseSettleFunctions(ctx: CodegenContext): void {
   });
   ctx.funcMap.set("__promise_fulfill", state.promiseFulfillFuncIdx);
 
-  ctx.mod.functions.push({
+  pushDefinedFunc(ctx, state.promiseRejectFuncIdx, {
     name: "__promise_reject",
     typeIdx: settleTypeIdx,
     locals: buildPromiseSettleLocals(callbackTypeIdx),
@@ -796,7 +795,7 @@ function ensurePromiseSettleFunctions(ctx: CodegenContext): void {
   // helper registers on a pending inner promise recurse correctly (#2867 Gap 1).
   // The identity REJECT wrapper stays a direct reject — rejection reasons are
   // never assimilated.
-  ctx.mod.functions.push({
+  pushDefinedFunc(ctx, state.identityFulfillWrapperFuncIdx, {
     name: "__then_identity_fulfill",
     typeIdx: state.microtaskFuncTypeIdx,
     locals: buildIdentityWrapperLocals(capsTypeIdx),
@@ -805,7 +804,7 @@ function ensurePromiseSettleFunctions(ctx: CodegenContext): void {
   });
   ctx.funcMap.set("__then_identity_fulfill", state.identityFulfillWrapperFuncIdx);
 
-  ctx.mod.functions.push({
+  pushDefinedFunc(ctx, state.identityRejectWrapperFuncIdx, {
     name: "__then_identity_reject",
     typeIdx: state.microtaskFuncTypeIdx,
     locals: buildIdentityWrapperLocals(capsTypeIdx),
@@ -814,7 +813,7 @@ function ensurePromiseSettleFunctions(ctx: CodegenContext): void {
   });
   ctx.funcMap.set("__then_identity_reject", state.identityRejectWrapperFuncIdx);
 
-  ctx.mod.functions.push({
+  pushDefinedFunc(ctx, state.promiseResolveValueFuncIdx, {
     name: "__promise_resolve_value",
     typeIdx: settleTypeIdx,
     locals: buildPromiseResolveValueLocals(promiseTypeIdx),
@@ -1195,7 +1194,7 @@ function emitThenWrapperFunction(
   const capLocal = 2;
   const callbackLocal = 3;
   const resultLocal = 4;
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const funcIdx = mintDefinedFunc(ctx);
 
   const locals: LocalDef[] = [
     { name: "$caps", type: { kind: "ref", typeIdx: capsTypeIdx } },
@@ -1274,7 +1273,7 @@ function emitThenWrapperFunction(
   // Wrapper result (externref) — dropped by the drain; always null now.
   body.push({ op: "ref.null.extern" });
 
-  ctx.mod.functions.push({
+  pushDefinedFunc(ctx, funcIdx, {
     name: wrapperName,
     typeIdx: state.microtaskFuncTypeIdx,
     locals,
@@ -1611,10 +1610,8 @@ export function ensureTimerHeap(ctx: CodegenContext): void {
   // ── 3. Helper functions (push order = funcIdx order) ──────────────────
   // grow → add → cancel → peek → fire_due → now
   //   → (Phase 2: stdin_drain → poll_fd0_or_clock) → run_loop.
-  const baseFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-
-  const growIdx = baseFuncIdx;
-  ctx.mod.functions.push({
+  const growIdx = mintDefinedFunc(ctx);
+  pushDefinedFunc(ctx, growIdx, {
     name: "__timer_grow",
     typeIdx: addFuncType(ctx, [{ kind: "i32" }], [], "$__timer_grow_type"),
     locals: buildTimerGrowLocals(state),
@@ -1623,8 +1620,8 @@ export function ensureTimerHeap(ctx: CodegenContext): void {
   });
   ctx.funcMap.set("__timer_grow", growIdx);
 
-  state.timerAddFuncIdx = baseFuncIdx + 1;
-  ctx.mod.functions.push({
+  state.timerAddFuncIdx = mintDefinedFunc(ctx);
+  pushDefinedFunc(ctx, state.timerAddFuncIdx, {
     name: "__timer_add",
     typeIdx: addFuncType(
       ctx,
@@ -1638,8 +1635,8 @@ export function ensureTimerHeap(ctx: CodegenContext): void {
   });
   ctx.funcMap.set("__timer_add", state.timerAddFuncIdx);
 
-  state.timerCancelFuncIdx = baseFuncIdx + 2;
-  ctx.mod.functions.push({
+  state.timerCancelFuncIdx = mintDefinedFunc(ctx);
+  pushDefinedFunc(ctx, state.timerCancelFuncIdx, {
     name: "__timer_cancel",
     typeIdx: addFuncType(ctx, [{ kind: "i32" }], [], "$__timer_cancel_type"),
     locals: [],
@@ -1648,8 +1645,8 @@ export function ensureTimerHeap(ctx: CodegenContext): void {
   });
   ctx.funcMap.set("__timer_cancel", state.timerCancelFuncIdx);
 
-  state.timerPeekDeadlineFuncIdx = baseFuncIdx + 3;
-  ctx.mod.functions.push({
+  state.timerPeekDeadlineFuncIdx = mintDefinedFunc(ctx);
+  pushDefinedFunc(ctx, state.timerPeekDeadlineFuncIdx, {
     name: "__timer_peek_deadline",
     typeIdx: addFuncType(ctx, [], [{ kind: "i64" }], "$__timer_peek_type"),
     locals: buildTimerPeekLocals(),
@@ -1658,8 +1655,8 @@ export function ensureTimerHeap(ctx: CodegenContext): void {
   });
   ctx.funcMap.set("__timer_peek_deadline", state.timerPeekDeadlineFuncIdx);
 
-  state.timerFireDueFuncIdx = baseFuncIdx + 4;
-  ctx.mod.functions.push({
+  state.timerFireDueFuncIdx = mintDefinedFunc(ctx);
+  pushDefinedFunc(ctx, state.timerFireDueFuncIdx, {
     name: "__timer_fire_due",
     typeIdx: addFuncType(ctx, [{ kind: "i64" }], [], "$__timer_fire_type"),
     locals: buildTimerFireLocals(state, mtFuncTypeIdx),
@@ -1671,8 +1668,8 @@ export function ensureTimerHeap(ctx: CodegenContext): void {
   // Monotonic-now reader. clock_time_get(CLOCK_MONOTONIC=1, precision, out) →
   // i64 ns recombined from two i32 loads (the binary emitter has no i64.load).
   const clockIdx = ctx.wasiClockTimeGetIdx;
-  state.runLoopNowFuncIdx = baseFuncIdx + 5;
-  ctx.mod.functions.push({
+  state.runLoopNowFuncIdx = mintDefinedFunc(ctx);
+  pushDefinedFunc(ctx, state.runLoopNowFuncIdx, {
     name: "__rl_now_ns",
     typeIdx: addFuncType(ctx, [], [{ kind: "i64" }], "$__rl_now_type"),
     locals: [],
@@ -1685,13 +1682,12 @@ export function ensureTimerHeap(ctx: CodegenContext): void {
   // stdin reactor is active, BETWEEN __rl_now_ns and __run_event_loop (the run
   // loop calls them). When inactive, the run-loop func idx stays baseFuncIdx+6
   // exactly as Phase 1, preserving byte-neutrality for timer-only programs.
-  let nextFuncIdx = baseFuncIdx + 6;
   if (state.stdinReactor) {
     // __rl_stdin_drain() -> i32 : non-blocking fd_read available bytes from fd0
     // into the internal stdin buffer; returns bytes read (0 = EOF → drop the
     // fd subscription). Reuses the page-1 stdin buffer (WASI_STDIN_BUF_START).
-    state.stdinDrainFuncIdx = nextFuncIdx++;
-    ctx.mod.functions.push({
+    state.stdinDrainFuncIdx = mintDefinedFunc(ctx);
+    pushDefinedFunc(ctx, state.stdinDrainFuncIdx, {
       name: "__rl_stdin_drain",
       typeIdx: addFuncType(ctx, [], [{ kind: "i32" }], "$__rl_stdin_drain_type"),
       locals: buildStdinDrainLocals(),
@@ -1704,8 +1700,8 @@ export function ensureTimerHeap(ctx: CodegenContext): void {
     // poll_oneoff on (fd0 readable, nearest-timer clock). Returns 1 if fd0 is
     // readable, else 0 (clock fired / timeout). When no timer is pending
     // (deadline == I64_MAX) it polls fd0 alone (blocking until readable/EOF).
-    state.pollFd0OrClockFuncIdx = nextFuncIdx++;
-    ctx.mod.functions.push({
+    state.pollFd0OrClockFuncIdx = mintDefinedFunc(ctx);
+    pushDefinedFunc(ctx, state.pollFd0OrClockFuncIdx, {
       name: "__rl_poll_fd0_or_clock",
       typeIdx: addFuncType(ctx, [{ kind: "i64" }, { kind: "i64" }], [{ kind: "i32" }], "$__rl_poll_fd0_type"),
       locals: buildPollFd0Locals(),
@@ -1718,8 +1714,8 @@ export function ensureTimerHeap(ctx: CodegenContext): void {
   // The run loop references __wasi_sleep_ms by funcIdx; it was registered
   // earlier in the deferred-helper phase (needsPollOneoff). Resolve now.
   const sleepMsIdx = ctx.funcMap.get("__wasi_sleep_ms");
-  state.runLoopFuncIdx = nextFuncIdx++;
-  ctx.mod.functions.push({
+  state.runLoopFuncIdx = mintDefinedFunc(ctx);
+  pushDefinedFunc(ctx, state.runLoopFuncIdx, {
     name: "__run_event_loop",
     typeIdx: addFuncType(ctx, [], [], "$__run_event_loop_type"),
     locals: buildRunLoopLocals(state),
@@ -3042,7 +3038,7 @@ export function emitTimerCallbackWrapper(ctx: CodegenContext, info: ClosureInfo)
   const wrapperId = state.thenWrapperCounter++;
   const wrapperName = `__timer_cb_${wrapperId}`;
   const callbackLocal = 2; // decoded closure struct
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const funcIdx = mintDefinedFunc(ctx);
 
   const locals: LocalDef[] = [{ name: "$callback", type: { kind: "ref", typeIdx: info.structTypeIdx } }];
   const body: Instr[] = [
@@ -3070,7 +3066,7 @@ export function emitTimerCallbackWrapper(ctx: CodegenContext, info: ClosureInfo)
   // -> externref) is satisfied.
   coerceStackValueToExternref(ctx, body, info.returnType);
 
-  ctx.mod.functions.push({
+  pushDefinedFunc(ctx, funcIdx, {
     name: wrapperName,
     typeIdx: state.microtaskFuncTypeIdx,
     locals,

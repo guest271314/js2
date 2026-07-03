@@ -415,7 +415,19 @@ export function planIrCompilation(
         }
         continue;
       }
-      if (hasParent) {
+      // (#2857 static-method slice) A `static` method compiles to an ordinary
+      // function — no `self` injection, no dependency on the (parent-prefixed)
+      // instance layout. So even when the class `extends` a parent, a static
+      // method whose body does not reference `super` is exactly as IR-claimable
+      // as the same method in a flat class (cf. `Animal_kingdom`, already
+      // claimed). Let it fall through to the normal `whyNotIrClaimable` gate;
+      // only instance members and `super`-using statics need the inheritance
+      // substrate deferred to the Phase E slice, which stay `class-method`.
+      const isStaticMethod =
+        ts.isMethodDeclaration(memberNode) &&
+        (memberNode.modifiers?.some((m) => m.kind === ts.SyntaxKind.StaticKeyword) ?? false);
+      const claimableUnderParent = isStaticMethod && !referencesSuper(memberNode);
+      if (hasParent && !claimableUnderParent) {
         if (trackFallbacks) fallbackReasons.set(memberName, "class-method");
         continue;
       }
@@ -2080,6 +2092,29 @@ function phase1MemberName(name: ts.PropertyName): string | null {
   if (ts.isNumericLiteral(name)) return name.text;
   // ComputedPropertyName, PrivateIdentifier — Phase A skips both.
   return null;
+}
+
+/**
+ * (#2857 static-method slice) True if a `super` keyword appears anywhere in the
+ * subtree. A whole-subtree scan is deliberately conservative: a `super`
+ * reference inside a nested function still binds to the enclosing method's home
+ * object, so descending into nested boundaries never misses one. Used to keep a
+ * `super`-using static method on the legacy path (its inheritance substrate is
+ * the Phase E slice's job), while a plain static method is claimable even under
+ * `extends`.
+ */
+function referencesSuper(node: ts.Node): boolean {
+  let found = false;
+  const visit = (n: ts.Node): void => {
+    if (found) return;
+    if (n.kind === ts.SyntaxKind.SuperKeyword) {
+      found = true;
+      return;
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(node);
+  return found;
 }
 
 // #2135 — the operator predicates consume the shared capability table
