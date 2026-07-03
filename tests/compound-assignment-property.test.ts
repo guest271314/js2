@@ -7,7 +7,7 @@ import {
   compile,
   readFileSync,
   resolve,
-} from "./helpers.js";
+} from "./equivalence/helpers.js";
 
 describe("compound assignment on property access (#195)", () => {
   it("obj.prop += value", async () => {
