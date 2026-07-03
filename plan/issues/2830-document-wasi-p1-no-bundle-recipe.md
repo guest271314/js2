@@ -1,13 +1,14 @@
 ---
 id: 2830
 title: "Lower DataView/Uint8Array-over-WASI-memory to linear ops; rewrite wasi_p1 to standard DataView (drop the wasm:memory ghost intrinsic)"
-status: in-progress
+status: done
 sprint: current
 priority: medium
 area: codegen
 task_type: feature
 assignee: ttraenkler/senior-dev-2830
-related: [389, 2835, 1886, 1783, 2803, 2840]
+completed: 2026-07-03
+related: [389, 2835, 1886, 1783, 2803, 2840, 3012]
 ---
 
 # Replace the `wasm:memory` ghost intrinsic with a standard `DataView` surface the compiler lowers to linear ops
@@ -163,13 +164,15 @@ val, le)` call site knows to take the **linear path** (inline
    `node:fs` / `node:process` hosts already are. So the DataView rewrite alone cannot
    fully satisfy #2 for the raw-WASI host; the acceptance needs re-scoping.
 
-**Recommendation:** treat the Fallback (this PR) as the shipped, bounded outcome for
-#2830. If the team still wants the full DataView-linear lowering, cut a **fresh
-`feasibility: hard` issue** carrying the design above (whole-memory linear-view
+**Outcome (tech-lead adjudicated 2026-07-03):** #2830 **closes `done`** on the
+Fallback — the bundling recipe + design bank are real shipped value, not a punt.
+The full DataView-linear lowering is carried forward as **#3012** (`feasibility:
+hard`, `[ARCH]`): it carries the design above (whole-memory linear-view
 representation + per-view linear/GC discriminant propagation + `ArrayBuffer(N)`→
-initial-pages), route it through the architect, and re-scope acceptance #2 around
-the `wasi_snapshot_preview1` shim. Status decision (close #2830 on the fallback vs.
-keep it open for the feature) escalated to the tech lead.
+initial-pages) and **re-scopes acceptance #2** around a `wasi_snapshot_preview1`
+shim (the original "bundles cleanly from the DataView rewrite alone" framing was
+found unachievable regardless of the DataView work). #3012 must get an architect
+spec before any implementation attempt.
 
 ## Related
 
