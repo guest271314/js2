@@ -12019,6 +12019,16 @@ function compileCallExpression(
         if ((ctx.standalone || ctx.wasi) && dispatchArgs !== null && !recvIsBuiltinClass) {
           const arity = dispatchArgs.length;
           const dispatchIdx = reserveClosedMethodDispatch(ctx, methodName, arity);
+          // (#2927) For the in-place array mutation forms (`push` arity 1 / `pop`
+          // arity 0) the closed-method dispatcher grows a native `$__vec_base`
+          // brand arm (fillClosedMethodDispatch) that routes an `any`/externref
+          // vec receiver to these carrier-generic helpers. Reserve them here — the
+          // dispatcher's fill only READS funcMap, and reserving from this module
+          // (which already imports `reserveVecMethodHelper`) avoids the eval-time
+          // import cycle that reserving from `closed-method-dispatch.ts` would form.
+          if ((methodName === "push" && arity === 1) || (methodName === "pop" && arity === 0)) {
+            reserveVecMethodHelper(ctx, methodName === "push" ? "push" : "pop");
+          }
           flushLateImportShifts(ctx, fctx);
           // Receiver as externref.
           const recvType = compileExpression(ctx, fctx, propAccess.expression, { kind: "externref" });
