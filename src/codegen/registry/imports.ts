@@ -67,7 +67,7 @@ export function addImport(ctx: CodegenContext, module: string, name: string, des
       // legitimately drop-and-degrade unsupported host APIs under WASI (e.g.
       // examples/native-messaging/nm_js2wasm.ts: setTimeout/fetch/…).
       ctx.errors.push({ message, line: 0, column: 0, severity: "degrade" });
-      // (#3001) Record the dropped host import on the MODULE so finalize-time
+      // (#3009) Record the dropped host import on the MODULE so finalize-time
       // handle resolution can name it. When a producer bakes this dropped
       // import's (now `undefined`) function index into a helper body coupled to
       // a stable handle — e.g. console.log's native-string extern bridge

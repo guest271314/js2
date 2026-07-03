@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { compile } from "../src/index.ts";
 
 /**
- * #3001 — harden the strict `--no-host-imports` host-import degrade path.
+ * #3009 — harden the strict `--no-host-imports` host-import degrade path.
  *
  * Under `--target standalone` + `strictNoHostImports`, `console.log(<string>)`
  * lowers to `console_log_string(externref)` plus the `__str_to_extern` native
@@ -20,7 +20,7 @@ import { compile } from "../src/index.ts";
  * The fix records the dropped host imports on the module and turns that opaque
  * crash into a clean, actionable leak diagnostic that NAMES the coupled import(s).
  */
-describe("#3001 strict-mode dropped-import degrade hardening", () => {
+describe("#3009 strict-mode dropped-import degrade hardening", () => {
   it("console.log under strict standalone yields a clean, named leak diagnostic (no opaque ordinal-NaN crash)", async () => {
     const r: any = await compile(`console.log("hello");`, {
       fileName: "t.ts",

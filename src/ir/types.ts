@@ -103,7 +103,7 @@ export interface WasmModule {
    */
   codegenErrors?: { message: string; line: number; column: number; severity?: "error" | "warning" | "degrade" }[];
   /**
-   * (#3001) Host imports dropped by the strict `--no-host-imports` gate
+   * (#3009) Host imports dropped by the strict `--no-host-imports` gate
    * (`addImport` under `ctx.strictNoHostImports`). The gate drops the import
    * and pushes a `degrade` diagnostic, but a producer that baked the dropped
    * import's (now `undefined`) function index into a helper body — e.g.

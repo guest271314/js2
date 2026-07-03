@@ -123,7 +123,7 @@ export function absoluteFuncIndex(mod: WasmModule, h: FuncHandle): number {
  * passes keep in lockstep).
  */
 export function absoluteFuncIndexCached(mod: WasmModule, numImportFuncs: number, h: FuncHandle): number {
-  // (#3001) A baked funcIdx of `undefined` / NaN is NOT a stable-handle producer
+  // (#3009) A baked funcIdx of `undefined` / NaN is NOT a stable-handle producer
   // bug: it is the strict `--no-host-imports` degrade path leaking. `addImport`
   // dropped an `env` host import (pushing a `degrade` diagnostic) but a producer
   // baked the dropped import's now-`undefined` index into a helper body — e.g.
@@ -143,7 +143,7 @@ export function absoluteFuncIndexCached(mod: WasmModule, numImportFuncs: number,
             .map((d) => `${d.module}.${d.name}`)
             .join(
               ", ",
-            )}. This feature has no Wasm-native standalone path yet — provide one, or keep the feature off the strict path (see the preceding host-import degrade diagnostics; #2961/#3001).`
+            )}. This feature has no Wasm-native standalone path yet — provide one, or keep the feature off the strict path (see the preceding host-import degrade diagnostics; #2961/#3009).`
         : ` No dropped host imports were recorded, so this is a codegen producer bug: a call/ref instr was emitted with an undefined function target.`;
     throw new Error(
       `absoluteFuncIndex: unresolved call target (funcIdx=${String(h)}) baked into a compiled function body — the call has no resolvable function index.${coupling}`,

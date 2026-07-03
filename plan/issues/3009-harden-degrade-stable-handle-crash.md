@@ -1,5 +1,5 @@
 ---
-id: 3001
+id: 3009
 title: "Harden host-import degrade path: dropped stable-handle-coupled import must yield clean leak diagnostic, not absoluteFuncIndex crash"
 status: done
 sprint: current
@@ -18,7 +18,7 @@ related: [2961, 2094, 2879]
 origin: "2026-07-02 — traced while scoping #2961 (extend strictNoHostImports to --target standalone)"
 ---
 
-# #3001 — harden the strict-mode host-import degrade path against the `absoluteFuncIndex` crash
+# #3009 — harden the strict-mode host-import degrade path against the `absoluteFuncIndex` crash
 
 ## Problem
 
@@ -55,7 +55,7 @@ Turn the crash into a clean, actionable leak diagnostic that names the coupling:
    `funcIdx` of `undefined` / `null` / `NaN` (the dropped-import fingerprint,
    distinct from a genuine unrecorded stable handle) and throws a clean message
    that names the dropped-and-coupled import(s) from `mod.strictDroppedHostImports`,
-   explains the standalone-strict degrade coupling, and points at #2961/#3001.
+   explains the standalone-strict degrade coupling, and points at #2961/#3009.
    The `generate*` try/catch prefixes `Codegen error:` and flips
    `result.success` to false — the degraded binary is never handed to a consumer.
 
@@ -71,11 +71,11 @@ clean, named leak diagnostic.
   `stable handle undefined (ordinal NaN)` message is gone.
 - [x] Byte-inert: gc, non-strict standalone, and wasi compiles are
   sha256-identical to origin/main (verified via a 7-case hash battery).
-- [x] Regression test: `tests/issue-3001.test.ts`.
+- [x] Regression test: `tests/issue-3009.test.ts`.
 
 ## Test Results
 
-- `tests/issue-3001.test.ts` — 3/3 pass.
+- `tests/issue-3009.test.ts` — 3/3 pass.
 - Hash battery (gc-arith, gc-console, gc-class, standalone-arith, standalone-str,
   standalone-json, wasi-hello) — all 7 sha256-identical between origin/main and
   the patched tree.

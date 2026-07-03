@@ -2,7 +2,7 @@
 id: 2961
 title: "Extend the strictNoHostImports leak guarantee to `--target standalone` (today wasi-only)"
 status: blocked
-depends_on: [3001]
+depends_on: [3009]
 sprint: current
 created: 2026-07-02
 updated: 2026-07-02
@@ -14,7 +14,7 @@ task_type: feature
 area: codegen
 language_feature: compiler-internals
 goal: standalone-mode
-related: [2094, 2879, 2073, 2075, 2860, 3001]
+related: [2094, 2879, 2073, 2075, 2860, 3009]
 origin: "2026-07-02 July Fable audit §3 (protection asymmetry: standalone has only the statistical floor, no structural guarantee)"
 ---
 
@@ -48,7 +48,7 @@ pass-but-leaky tests — this asymmetry is why that class can exist.
    diagnostic), flip to error once the allowlist stabilizes — but the end
    state is the same hard guarantee wasi has.
 
-## Re-scope (2026-07-02, after #3001 tracing)
+## Re-scope (2026-07-02, after #3009 tracing)
 
 Scoping this surfaced that the flip is **not** a one-line gate change, and that
 the standalone leak surface is far narrower than the "7,498 pass-but-leaky"
@@ -70,11 +70,11 @@ headline suggested. Two findings:
 
 ### 3-step decomposition
 
-- **(a) Harden the degrade path — #3001 [LANDING].** Convert the
+- **(a) Harden the degrade path — #3009 [LANDING].** Convert the
   dropped-stable-handle-coupled crash into a clean, named leak diagnostic.
   This unblocks the enumeration lane (a real leak now reports cleanly instead
-  of crashing). This issue is `blocked` on #3001 landing.
-- **(b) Enumerate the full standalone leak set.** With #3001 in, run the
+  of crashing). This issue is `blocked` on #3009 landing.
+- **(b) Enumerate the full standalone leak set.** With #3009 in, run the
   standalone lane (or a scoped example/test262 sweep) with the strict flag on
   and collect every host import name that now hard-errors. Classify each as
   (i) allowlist-with-retiring-issue, or (ii) `refuseStandalone*` loud error
@@ -90,7 +90,7 @@ headline suggested. Two findings:
 - `--target standalone` compile of a program using an un-allowlisted host
   import fails loudly at compile time (or warns, phase 1) — never emits a
   silently-trapping binary, and never crashes with the `absoluteFuncIndex`
-  internal error (guaranteed by #3001).
+  internal error (guaranteed by #3009).
 - Allowlist growth for this issue is fully annotated (name → retiring
   issue).
 - Host-free floor (check-standalone-highwater) net-neutral or up;
