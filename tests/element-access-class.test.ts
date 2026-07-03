@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { assertEquivalent, compileToWasm, compile } from "./helpers.js";
+import { assertEquivalent, compileToWasm, compile } from "./equivalence/helpers.js";
 
 describe("element access on class instances", () => {
   it("bracket notation with string literal on class instance", async () => {

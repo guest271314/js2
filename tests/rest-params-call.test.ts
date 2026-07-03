@@ -1,5 +1,5 @@
 import { describe, it } from "vitest";
-import { assertEquivalent } from "./helpers.js";
+import { assertEquivalent } from "./equivalence/helpers.js";
 
 describe("Rest parameters with .call() and .apply()", () => {
   it("rest param function called via .call(null) with no extra args", async () => {

@@ -1,5 +1,5 @@
 import { describe, it } from "vitest";
-import { assertEquivalent } from "./helpers.js";
+import { assertEquivalent } from "./equivalence/helpers.js";
 
 describe("Object.create", () => {
   it("Object.create(Foo.prototype) creates instance and fields can be set", async () => {

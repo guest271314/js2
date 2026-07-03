@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { compileToWasm } from "./helpers.js";
+import { compileToWasm } from "./equivalence/helpers.js";
 
 describe("for-await-of (compiled as regular for-of)", () => {
   it("for await...of iterates an array of numbers", async () => {

@@ -1,5 +1,5 @@
 import { describe, it } from "vitest";
-import { assertEquivalent } from "./helpers.js";
+import { assertEquivalent } from "./equivalence/helpers.js";
 
 describe("var hoisting and scope issues (#146)", () => {
   it("var inside catch block is hoisted to function scope", async () => {

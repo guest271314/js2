@@ -1,5 +1,5 @@
 import { describe, it } from "vitest";
-import { assertEquivalent } from "./helpers.js";
+import { assertEquivalent } from "./equivalence/helpers.js";
 
 describe("Object.defineProperty getter/setter (#459)", () => {
   it("getter returning constant", async () => {

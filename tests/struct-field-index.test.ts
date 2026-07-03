@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { compileToWasm } from "./helpers.js";
+import { compileToWasm } from "./equivalence/helpers.js";
 
 describe("struct field index validation (#423)", () => {
   it("subclass with own field and instanceof", async () => {

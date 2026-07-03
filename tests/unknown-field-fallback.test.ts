@@ -1,5 +1,5 @@
 import { describe, it } from "vitest";
-import { assertEquivalent } from "./helpers.js";
+import { assertEquivalent } from "./equivalence/helpers.js";
 
 describe("unknown field access fallback (#392)", () => {
   it("reading unknown property returns undefined/NaN gracefully", async () => {

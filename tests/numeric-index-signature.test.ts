@@ -1,5 +1,5 @@
 import { describe, it } from "vitest";
-import { assertEquivalent } from "./helpers.js";
+import { assertEquivalent } from "./equivalence/helpers.js";
 
 describe("numeric index signature on object types (#391)", () => {
   it("numeric literal property access via struct.get", async () => {

@@ -1,5 +1,5 @@
 import { describe, it } from "vitest";
-import { assertEquivalent } from "./helpers.js";
+import { assertEquivalent } from "./equivalence/helpers.js";
 
 describe("Object.defineProperty (#346)", () => {
   it("simple value descriptor sets the property", async () => {

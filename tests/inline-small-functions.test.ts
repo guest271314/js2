@@ -1,5 +1,5 @@
 import { describe, it } from "vitest";
-import { assertEquivalent, compileToWasm } from "./helpers.js";
+import { assertEquivalent, compileToWasm } from "./equivalence/helpers.js";
 
 describe("Inline small functions (#465)", () => {
   it("identity function is inlined correctly", { timeout: 15000 }, async () => {

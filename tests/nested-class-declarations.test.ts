@@ -7,7 +7,7 @@ import {
   compile,
   readFileSync,
   resolve,
-} from "./helpers.js";
+} from "./equivalence/helpers.js";
 
 describe("Nested class declarations (#150)", () => {
   it("class inside if block", async () => {

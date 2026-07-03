@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { compileToWasm } from "./helpers.js";
+import { compileToWasm } from "./equivalence/helpers.js";
 
 describe("typeof on member expressions", () => {
   it("typeof obj.numberProp === 'number'", async () => {

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { compileToWasm } from "./helpers.js";
+import { compileToWasm } from "./equivalence/helpers.js";
 
 describe("computed property setter in class", () => {
   it("should call setter with computed property name", async () => {

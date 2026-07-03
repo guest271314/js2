@@ -1,5 +1,5 @@
 import { describe, it } from "vitest";
-import { assertEquivalent } from "./helpers.js";
+import { assertEquivalent } from "./equivalence/helpers.js";
 
 describe("Math.pow coercion to externref", () => {
   it("Math.pow result passed to function expecting any type", async () => {

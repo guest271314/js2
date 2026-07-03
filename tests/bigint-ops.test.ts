@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { compileToWasm } from "./helpers.js";
+import { compileToWasm } from "./equivalence/helpers.js";
 
 describe("BigInt arithmetic operations (#434)", () => {
   it("bigint division truncates toward zero", async () => {

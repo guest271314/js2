@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { assertEquivalent } from "./helpers.js";
+import { assertEquivalent } from "./equivalence/helpers.js";
 
 describe("delete operator (#474)", () => {
   it("delete on object property returns truthy", async () => {

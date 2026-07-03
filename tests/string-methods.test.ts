@@ -1,5 +1,5 @@
 import { describe, it } from "vitest";
-import { assertEquivalent } from "./helpers.js";
+import { assertEquivalent } from "./equivalence/helpers.js";
 
 describe("String.prototype.trim / trimStart / trimEnd", () => {
   it("trim removes whitespace from both ends", async () => {

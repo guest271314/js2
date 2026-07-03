@@ -1,5 +1,5 @@
 import { describe, it } from "vitest";
-import { assertEquivalent } from "./helpers.js";
+import { assertEquivalent } from "./equivalence/helpers.js";
 
 describe("destructuring assignment to member expression targets", () => {
   it("array destructuring to property access targets", async () => {

@@ -7,7 +7,7 @@ import {
   compile,
   readFileSync,
   resolve,
-} from "./helpers.js";
+} from "./equivalence/helpers.js";
 
 describe("coalesce operator type unification (#193)", () => {
   it("null string ?? default returns default", async () => {

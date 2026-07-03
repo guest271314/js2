@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { compileToWasm } from "./helpers.js";
+import { compileToWasm } from "./equivalence/helpers.js";
 
 describe("decorator syntax support (#376)", () => {
   it("class with decorator compiles (decorator ignored)", async () => {

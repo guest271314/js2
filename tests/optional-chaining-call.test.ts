@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { assertEquivalent } from "./helpers.js";
+import { assertEquivalent } from "./equivalence/helpers.js";
 
 describe("optional chaining calls (#409)", () => {
   it("obj?.method() on non-null local class instance", async () => {

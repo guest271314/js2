@@ -1,5 +1,5 @@
 import { describe, it } from "vitest";
-import { assertEquivalent } from "./helpers.js";
+import { assertEquivalent } from "./equivalence/helpers.js";
 
 describe("equality operators with mixed types (#433)", () => {
   it("true == object with valueOf returning 1", async () => {
