@@ -1,0 +1,463 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Compiling JavaScript, in the open, with a team that never sleeps · JS² Blog</title>
+    <meta
+      name="description"
+      content="How JS² turns TypeScript and JavaScript straight into WebAssembly — and how it's built with a human-plus-AI engineering team running the same test-driven, agile process a strong human team already uses."
+    />
+    <style>
+      :root {
+        --bg: #060a14;
+        --bg-soft: #0c1220;
+        --fg: #ffffff;
+        --fg-soft: rgba(255, 255, 255, 0.68);
+        --fg-faint: rgba(255, 255, 255, 0.46);
+        --line: rgba(255, 255, 255, 0.12);
+        --line-strong: rgba(255, 255, 255, 0.22);
+        --surface: rgba(255, 255, 255, 0.05);
+        --surface-hover: rgba(255, 255, 255, 0.08);
+        --nav: rgba(6, 10, 20, 0.45);
+        --accent: #6c8aff;
+        --mono: "JetBrains Mono", "SF Mono", SFMono-Regular, Consolas, monospace;
+        --font: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
+      }
+
+      html {
+        background: var(--bg);
+        color: var(--fg);
+        scroll-behavior: smooth;
+      }
+
+      body {
+        margin: 0;
+        font-family: var(--font);
+        line-height: 1.6;
+        overflow-x: hidden;
+        background: radial-gradient(circle at 18% 0%, rgba(58, 41, 110, 0.28), transparent 34%), var(--bg);
+        background-repeat: no-repeat;
+      }
+
+      a {
+        color: var(--accent);
+        text-decoration: none;
+      }
+
+      a:hover {
+        text-decoration: underline;
+      }
+
+      .layout {
+        max-width: 760px;
+        margin: 0 auto;
+        padding: 96px 32px 120px;
+      }
+
+      /* ── Post header ── */
+      .post-header {
+        margin-bottom: 40px;
+        padding-bottom: 28px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .eyebrow {
+        display: inline-block;
+        font-size: 12px;
+        font-weight: 600;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--accent);
+        margin-bottom: 18px;
+      }
+
+      h1 {
+        margin: 0 0 16px;
+        font-size: clamp(32px, 5vw, 48px);
+        line-height: 1.06;
+        letter-spacing: -0.03em;
+        font-weight: 700;
+      }
+
+      .dek {
+        margin: 0 0 20px;
+        max-width: 62ch;
+        font-size: 18px;
+        color: var(--fg-soft);
+      }
+
+      .post-meta {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 12px;
+        font-size: 13px;
+        color: var(--fg-faint);
+      }
+
+      .tag {
+        padding: 3px 10px;
+        border-radius: 999px;
+        background: var(--surface);
+        border: 1px solid var(--line);
+        font-size: 12px;
+        color: var(--fg-soft);
+      }
+
+      /* ── Prose ── */
+      .post h2 {
+        margin: 48px 0 16px;
+        font-size: 25px;
+        letter-spacing: -0.02em;
+        scroll-margin-top: 88px;
+      }
+
+      .post p {
+        margin: 0 0 16px;
+        color: var(--fg-soft);
+        font-size: 16px;
+      }
+
+      .post p.faint {
+        font-size: 14px;
+        color: var(--fg-faint);
+      }
+
+      .post ul {
+        margin: 0 0 16px;
+        padding-left: 22px;
+        color: var(--fg-soft);
+      }
+
+      .post li {
+        margin: 8px 0;
+      }
+
+      .post strong {
+        color: var(--fg);
+      }
+
+      code {
+        font-family: var(--mono);
+        font-size: 0.88em;
+        padding: 2px 6px;
+        border-radius: 5px;
+        background: var(--surface);
+        border: 1px solid var(--line);
+        color: var(--fg);
+        white-space: nowrap;
+      }
+
+      hr.divider {
+        border: none;
+        border-top: 1px solid var(--line);
+        margin: 44px 0;
+      }
+
+      /* ── CTA ── */
+      .cta {
+        margin-top: 40px;
+        padding: 24px 26px;
+        border-radius: 12px;
+        background: var(--surface);
+        border: 1px solid var(--line);
+      }
+
+      .cta p {
+        margin: 0 0 18px;
+      }
+
+      .cta-links {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+      }
+
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 40px;
+        padding: 0 18px;
+        border-radius: 8px;
+        font-size: 14px;
+        font-weight: 600;
+        border: 1px solid var(--line);
+        color: var(--fg);
+        transition:
+          background 0.15s ease,
+          border-color 0.15s ease,
+          opacity 0.15s ease;
+      }
+
+      .btn:hover {
+        text-decoration: none;
+      }
+
+      .btn-solid {
+        color: var(--bg);
+        background: var(--fg);
+        border-color: var(--fg);
+      }
+
+      .btn-solid:hover {
+        opacity: 0.9;
+      }
+
+      .btn-outline:hover {
+        background: var(--surface-hover);
+        border-color: var(--line-strong);
+      }
+
+      /* ── Footer ── */
+      .doc-footer {
+        max-width: 1100px;
+        margin: 0 auto;
+        padding: 32px;
+        border-top: 1px solid var(--line);
+        color: var(--fg-faint);
+        font-size: 13px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 14px;
+        justify-content: space-between;
+      }
+
+      @media (max-width: 900px) {
+        .layout {
+          padding: 88px 22px 96px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <site-nav
+      base="../"
+      links='[{"label":"Home","href":"../"},{"label":"Blog","href":"./"},{"label":"Compatibility","href":"../#goals"},{"label":"Benchmarks","href":"../#benchmarks"},{"label":"FAQ","href":"../#faq"},{"label":"Roadmap","href":"../#roadmap"}]'
+    ></site-nav>
+
+    <div class="layout">
+      <article class="post">
+        <header class="post-header">
+          <span class="eyebrow">JS² Blog</span>
+          <h1>Compiling JavaScript, in the open, with a team that never sleeps</h1>
+          <p class="dek">
+            How JS² turns TypeScript and JavaScript straight into WebAssembly — and how it's built with a human-plus-AI
+            engineering team running the same test-driven, agile process a strong human team already uses.
+          </p>
+          <div class="post-meta">
+            <span class="tag">Announcement</span>
+            <span class="tag">Compiler</span>
+            <span class="tag">Community</span>
+          </div>
+        </header>
+
+        <h2>The idea</h2>
+        <p>
+          JavaScript was never supposed to be "compiled ahead of time" — it's the dynamic, run-anywhere language of the
+          web, usually parsed and JIT-compiled by an engine that ships inside the browser.
+          <strong>JS²</strong>
+          starts from a different question: what if we compiled it
+          <em>directly</em>
+          to WebAssembly, with garbage collection, no bundled interpreter, and no JS engine hiding inside the output?
+        </p>
+        <p>
+          That's the bet.
+          <code>js2wasm</code>
+          is an ahead-of-time compiler that takes ordinary TypeScript or JavaScript and emits a
+          <code>.wasm</code>
+          binary using
+          <strong>WasmGC</strong>
+          — real structs, real arrays, real garbage collection, running on the host's own GC instead of a heap simulated
+          in linear memory. Code the compiler can fully resolve at compile time becomes native Wasm instructions. Only
+          the genuinely dynamic corners —
+          <code>eval</code>
+          ,
+          <code>new Function</code>
+          — fall back to a small embedded interpreter for code generated at runtime.
+        </p>
+        <p>
+          Why bother? Because if it works, WebAssembly stops being a niche target for Rust and C++ and becomes a
+          <strong>drop-in deployment target for the JavaScript and npm ecosystem that already exists</strong>
+          — no rewrite into a restricted subset, no engine bundled into every module. That unlocks smaller, faster
+          modules; JavaScript sandboxed from other JavaScript inside the same application; and dependency isolation that
+          makes a compromised npm package a much smaller problem than it is today.
+        </p>
+        <p>The project runs in two modes on purpose:</p>
+        <ul>
+          <li>
+            <strong>JS host mode</strong>
+            — uses host imports where they buy real performance or completeness today.
+          </li>
+          <li>
+            <strong>Standalone mode</strong>
+            — pure Wasm, zero JS runtime required, for WASI and edge targets.
+          </li>
+        </ul>
+        <p>
+          Standalone is the harder, more interesting target, and it's where most of the current work is aimed: shrinking
+          the JS-host dependency until it's optional everywhere, not just in the common case.
+        </p>
+        <p>
+          <strong>Where it stands today:</strong>
+          JS² is an early-stage research prototype, not a production compiler yet — and it's honest about that on its
+          own landing page. In JS host mode it currently passes
+          <strong>31,874 of 43,106</strong>
+          Test262 conformance tests (
+          <strong>73.9%</strong>
+          ), up from a few hundred passing tests when the project started. In standalone mode — no JS engine, no host
+          GC, the harder and strategically more important target — it's at
+          <strong>18,415 of 43,106 (42.7%)</strong>
+          and climbing steadily as host-import dependencies get replaced with native Wasm implementations. That's the
+          real, unglamorous measure of "does this actually behave like JavaScript," and it moves every week.
+        </p>
+
+        <h2>The other idea: an engineering team, not a script</h2>
+        <p>
+          Here's the part that's easy to undersell: JS² isn't being built by one person iterating in a loop. It's built
+          by a small
+          <strong>team of AI agents</strong>
+          , running the exact same engineering process a good human team would run — because that process turns out to
+          be exactly what makes agents effective too, not a workaround for using them.
+        </p>
+        <ul>
+          <li>
+            A
+            <strong>Product Owner</strong>
+            grooms the backlog, validates issues against the current codebase (closing ones that already got fixed
+            elsewhere), and prioritizes by value.
+          </li>
+          <li>
+            An
+            <strong>Architect</strong>
+            takes the hard issues — the ones that touch core codegen — and writes a real implementation spec into the
+            issue file: which functions, which Wasm patterns, which edge cases, before anyone writes code.
+          </li>
+          <li>
+            A
+            <strong>Tech Lead</strong>
+            runs the sprint: keeps a priority-ordered task queue full, dispatches work, and owns the merge queue.
+          </li>
+          <li>
+            <strong>Developers</strong>
+            pull tasks, branch, implement, and open pull requests — each in an isolated git worktree, so parallel agents
+            never collide.
+          </li>
+          <li>
+            A
+            <strong>PR-queue shepherd</strong>
+            watches CI end-to-end, handles conflicts, and makes sure green work actually lands instead of stranding in
+            review.
+          </li>
+        </ul>
+        <p>
+          Every change is
+          <strong>test-driven against Test262</strong>
+          , the official ECMAScript conformance suite — not "does it compile," but "does it behave like real JavaScript
+          across tens of thousands of spec-derived cases." Concretely: every pull request runs
+          <strong>48,088 Test262 cases</strong>
+          — the full standard + Annex&nbsp;B + TC39-proposal corpus —
+          <strong>twice</strong>
+          , once against JS host mode and once against standalone mode, sharded across 114 parallel CI jobs. That's
+          roughly
+          <strong>96,000 conformance checks</strong>
+          , on top of our own hand-written unit and differential-equivalence suite (~3,400 cases comparing native-JS
+          output against compiled-Wasm output, sharded 8-way) — call it close to
+          <strong>100,000 automated checks</strong>
+          before a single PR is allowed to merge.
+        </p>
+        <p class="faint">
+          (Headline conformance percentages above are reported against the narrower "official" 43,106-test scope —
+          standard + Annex&nbsp;B, the conventional way to state a conformance number — while CI itself casts a wider
+          net and also gates on proposal regressions.)
+        </p>
+        <p>
+          The merge queue then re-validates the
+          <em>merged</em>
+          result, not just the branch, so a clean-looking PR can't quietly break something else. Sprints are real
+          sprints — planned, executed, retro'd, and frozen into a record — not an unstructured chat log.
+        </p>
+        <p>
+          <strong>The point isn't "AI wrote a compiler."</strong>
+          It's that a rigorous, test-driven, spec-first, code-reviewed agile process — the same one a strong human team
+          already uses — works when the "engineers" are agents, and it works because the process was good discipline to
+          begin with, not because AI needed something special. Which also means the reverse is true: a human developer
+          can drop straight into this team using the exact same roles, the exact same issue files, the exact same PR and
+          CI gates. No separate track for "human contributions" and "AI contributions" — one workflow, one bar for
+          merging.
+        </p>
+
+        <h2>Where you come in</h2>
+        <p>
+          JS² is genuinely early — that's not a hedge, it's an invitation. Getting from "73.9% conformant research
+          prototype" to "production grade" is exactly the kind of work that scales with more hands, human or AI:
+        </p>
+        <ul>
+          <li>
+            <strong>Review.</strong>
+            Read a pull request, read an implementation spec, poke at an architecture decision. Fresh eyes on compiler
+            internals are always in short supply.
+          </li>
+          <li>
+            <strong>Test.</strong>
+            Run Test262 against a build, find a conformance gap, file it with a repro. The conformance dashboard shows
+            exactly what's failing and why.
+          </li>
+          <li>
+            <strong>Build.</strong>
+            Pick up a ready issue from
+            <code>plan/issues/</code>
+            — each one is a real spec, not a vague TODO — and send a PR. Every issue tracks its own status, from
+            <code>ready</code>
+            to
+            <code>done</code>
+            , in the open.
+          </li>
+          <li>
+            <strong>Bring your own agent.</strong>
+            If you use Claude Code or a similar tool, you can point it at the same issue files and the same contributor
+            workflow the project's own agents use — the instructions are public, in the repo, not internal tooling.
+          </li>
+          <li>
+            <strong>Just talk to us.</strong>
+            Join the Discord, ask questions, tell us where the docs are unclear or the playground breaks.
+          </li>
+        </ul>
+        <p>
+          The source is Apache 2.0 with the LLVM exception. Contributions go through a short CLA (so the project can
+          stay sustainably maintained long-term) and land through the same PR + CI process described above — the same
+          gate for everyone.
+        </p>
+
+        <div class="cta">
+          <p>
+            If the idea of JavaScript running as real, GC-backed WebAssembly — with no engine smuggled inside — is
+            interesting to you, there's a live conformance dashboard, a playground that compiles TypeScript to Wasm in
+            your browser right now, and an open issue queue waiting for the next contributor.
+            <strong>Come help make it production grade.</strong>
+          </p>
+          <div class="cta-links">
+            <a class="btn btn-solid" href="../getting-started/">Get started</a>
+            <a class="btn btn-outline" href="../playground/">Playground</a>
+            <a class="btn btn-outline" href="https://github.com/loopdive/js2">GitHub</a>
+            <a class="btn btn-outline" href="https://discord.gg/qNfAsf8He">Discord</a>
+          </div>
+        </div>
+      </article>
+    </div>
+
+    <footer class="doc-footer">
+      <span>JS² — JavaScript and TypeScript ahead-of-time compilation for WebAssembly GC.</span>
+      <span><a href="../">← Back to home</a></span>
+    </footer>
+
+    <script type="module" src="../components/site-nav.js"></script>
+  </body>
+</html>
