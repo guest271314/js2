@@ -1,7 +1,8 @@
 ---
 id: 3000
 title: "IR: class-member residual — private fields, accessors, inheritance/super (class-method → 0)"
-status: ready
+status: in-progress
+assignee: ttraenkler/sr-classmember
 sprint: current
 created: 2026-07-02
 updated: 2026-07-02
