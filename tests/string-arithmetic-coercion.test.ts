@@ -1,5 +1,5 @@
 import { describe, it } from "vitest";
-import { assertEquivalent } from "./equivalence/helpers.js";
+import { assertEquivalent } from "./helpers.js";
 
 describe("string-to-number coercion for arithmetic operators (#430)", () => {
   it("string - string", async () => {

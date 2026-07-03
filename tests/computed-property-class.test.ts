@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { compileToWasm } from "./equivalence/helpers.js";
+import { compileToWasm } from "./helpers.js";
 
 describe("computed property names in class declarations", () => {
   it("string literal computed method name", async () => {

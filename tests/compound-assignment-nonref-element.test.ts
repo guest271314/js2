@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { compileToWasm } from "./equivalence/helpers.js";
+import { compileToWasm } from "./helpers.js";
 
 describe("Compound assignment on element access for non-ref targets", () => {
   it("plus-equals on any-typed object with bracket notation compiles", async () => {

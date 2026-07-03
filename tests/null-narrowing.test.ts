@@ -1,5 +1,5 @@
 import { describe, it } from "vitest";
-import { assertEquivalent } from "./equivalence/helpers.js";
+import { assertEquivalent } from "./helpers.js";
 
 describe("null narrowing in if statements", () => {
   it("if (x !== null) narrows x to non-null for property access", async () => {

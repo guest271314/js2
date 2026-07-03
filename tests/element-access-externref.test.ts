@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { compileToWasm } from "./equivalence/helpers.js";
+import { compileToWasm } from "./helpers.js";
 
 describe("Element access on externref", () => {
   it("string key element access on any-typed parameter", async () => {

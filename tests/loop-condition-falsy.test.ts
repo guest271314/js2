@@ -1,5 +1,5 @@
 import { describe, it } from "vitest";
-import { assertEquivalent } from "./equivalence/helpers.js";
+import { assertEquivalent } from "./helpers.js";
 
 describe("loop condition falsy value handling", () => {
   it("while(NaN) should not enter loop body", async () => {

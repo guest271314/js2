@@ -1,5 +1,5 @@
 import { describe, it } from "vitest";
-import { assertEquivalent } from "./equivalence/helpers.js";
+import { assertEquivalent } from "./helpers.js";
 
 describe("for-of array destructuring", () => {
   it("tuple array: for (const [a, b] of pairs)", async () => {

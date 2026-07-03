@@ -1,5 +1,5 @@
 import { describe, it } from "vitest";
-import { assertEquivalent } from "./equivalence/helpers.js";
+import { assertEquivalent } from "./helpers.js";
 
 describe("test262-style destructuring assignment patterns", () => {
   it("array elem target identifier - chained assignment", async () => {

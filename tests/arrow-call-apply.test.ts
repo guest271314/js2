@@ -1,5 +1,5 @@
 import { describe, it } from "vitest";
-import { assertEquivalent } from "./equivalence/helpers.js";
+import { assertEquivalent } from "./helpers.js";
 
 describe("arrow function .call() and .apply()", () => {
   it("arrow.call() drops thisArg and passes arguments", async () => {

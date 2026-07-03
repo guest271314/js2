@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { compileToWasm } from "./equivalence/helpers.js";
+import { compileToWasm } from "./helpers.js";
 
 describe("Element assignment on non-array types", () => {
   it("string key assignment on any-typed parameter", async () => {

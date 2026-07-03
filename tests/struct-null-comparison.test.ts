@@ -1,5 +1,5 @@
 import { describe, it } from "vitest";
-import { assertEquivalent } from "./equivalence/helpers.js";
+import { assertEquivalent } from "./helpers.js";
 
 describe("struct ref null comparison", () => {
   it("obj !== null returns 1 when obj is non-null", async () => {

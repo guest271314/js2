@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { compileToWasm } from "./equivalence/helpers.js";
+import { compileToWasm } from "./helpers.js";
 
 describe("BigInt externref coercion (#237)", () => {
   it("bigint passed to function expecting any", async () => {

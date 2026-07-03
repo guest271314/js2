@@ -1,5 +1,5 @@
 import { describe, it } from "vitest";
-import { assertEquivalent } from "./equivalence/helpers.js";
+import { assertEquivalent } from "./helpers.js";
 
 describe("Try/catch/throw (#340)", () => {
   it("throw new Error is caught by catch", async () => {

@@ -1,5 +1,5 @@
 import { describe, it } from "vitest";
-import { assertEquivalent } from "./equivalence/helpers.js";
+import { assertEquivalent } from "./helpers.js";
 
 describe("toString() and valueOf() on various types", () => {
   it("boolean.toString() returns 'true' or 'false'", async () => {

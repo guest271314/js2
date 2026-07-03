@@ -1,5 +1,5 @@
 import { describe, it } from "vitest";
-import { assertEquivalent } from "./equivalence/helpers.js";
+import { assertEquivalent } from "./helpers.js";
 
 describe("null destructuring guards (#419)", () => {
   it("object destructuring from valid source after null guard", async () => {

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { compileToWasm } from "./equivalence/helpers.js";
+import { compileToWasm } from "./helpers.js";
 
 describe("Compound assignment on externref element access", () => {
   it("plus-equals on any-typed object element", async () => {

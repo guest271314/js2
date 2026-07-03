@@ -1,5 +1,5 @@
 import { describe, it } from "vitest";
-import { assertEquivalent } from "./equivalence/helpers.js";
+import { assertEquivalent } from "./helpers.js";
 
 describe("Array HOF callbacks with 3 params (#445)", () => {
   it("filter callback receives (val, idx, arr)", async () => {

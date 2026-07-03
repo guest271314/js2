@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { compileToWasm } from "./equivalence/helpers.js";
+import { compileToWasm } from "./helpers.js";
 
 describe("Private fields edge cases (getter accessor)", () => {
   it("private getter accessor on private field", async () => {

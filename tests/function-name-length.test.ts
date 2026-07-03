@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { assertEquivalent, compileToWasm } from "./equivalence/helpers.js";
+import { assertEquivalent, compileToWasm } from "./helpers.js";
 
 describe("Function .name property", () => {
   it("named function declaration", async () => {

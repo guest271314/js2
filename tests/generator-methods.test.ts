@@ -1,5 +1,5 @@
 import { describe, it } from "vitest";
-import { assertEquivalent } from "./equivalence/helpers.js";
+import { assertEquivalent } from "./helpers.js";
 
 describe("generator next/return/throw methods (#439)", () => {
   it("generator .next() returns values in sequence", async () => {

@@ -40,10 +40,35 @@ breakage never surfaced.
 ## Fix (this issue — the bounded, green slice)
 
 Mechanically repoint `from "./helpers.js"` → `from "./equivalence/helpers.js"`
-in the **94** files whose tests **pass** once they load — pure coverage
-restoration, all green. Test-file-only; byte-inert to the compiler
-(`src/**`). Verified: the 94 files load and pass (812 tests) on `origin/main`
-(measured on f1afd54b2, re-sanity-checked on df025c3e9).
+in the passing files — pure coverage restoration, all green. Test-file-only;
+byte-inert to the compiler (`src/**`). Verified: the files load and pass on
+`origin/main` (measured on f1afd54b2, re-sanity-checked on df025c3e9).
+
+### Scope narrowed to 28 files (overlap with PR #2588)
+
+Of the 94 files that pass once repointed, **66 are ALSO deleted outright by
+PR #2588** (dev-team-e), which verified those 66 as provably-dead duplicates —
+70 byte-identical modulo the import path, 6 superseded by a larger updated
+copy — of live files already under `tests/equivalence/`. Two PRs can't both
+delete and fix-and-keep the same files, and restoring a genuine duplicate just
+runs the same assertions twice (no new coverage). So this PR is narrowed to the
+**28 passing files that #2588 does NOT delete** (the unique, non-duplicate
+survivors); the other 66 are dropped from this diff and handled by #2588's
+deletion. The 28:
+
+```
+arguments-object, bigint, boolean-relational-comparison, coalesce-operator,
+compound-assignment-property, compound-assignment-unresolvable-prop,
+function-arity-mismatch, gradual-typing, in-operator-edge-cases,
+logical-assignment-property, logical-operators, loose-equality,
+modulus-special-values, negative-zero-modulus, nested-class-declarations,
+new-expression-spread, object-literal-getters-setters,
+prefix-postfix-increment-property, private-class-members,
+scope-and-error-handling, shape-inference, spread-in-new-expressions,
+string-relational-operators, switch-and-misc, template-literal-type-coercion,
+typeof-comparison, unary-plus-coercion-185, unary-plus-coercion-215
+```
+(all `tests/*.test.ts`)
 
 ## Deferred (real regressions surfaced — NOT in this PR)
 
@@ -75,7 +100,9 @@ pass by contributing zero assertions.
 
 ## Acceptance criteria
 
-- The 94 passing files import `./equivalence/helpers.js` and load + pass. [done]
+- The 28 non-duplicate passing files import `./equivalence/helpers.js` and load
+  + pass; the 66 duplicate-of-`tests/equivalence/` files are ceded to #2588's
+  deletion. [done]
 - The 12 failing files are enumerated with their surfaced-regression status for
-  follow-up. [done]
+  follow-up (real bugs, tracked here regardless of the #2588 overlap). [done]
 - No compiler-source change; required CI green. [done]

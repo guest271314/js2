@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { compileToWasm, assertEquivalent, compile } from "./equivalence/helpers.js";
+import { compileToWasm, assertEquivalent, compile } from "./helpers.js";
 
 describe("Empty object widening: var obj = {} with later property assignments", () => {
   it("basic numeric properties: var obj = {}; obj.x = 1; return obj.x", async () => {

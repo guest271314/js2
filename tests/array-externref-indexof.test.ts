@@ -1,5 +1,5 @@
 import { describe, it } from "vitest";
-import { assertEquivalent } from "./equivalence/helpers.js";
+import { assertEquivalent } from "./helpers.js";
 
 describe("array indexOf/includes with externref elements (#448)", () => {
   it("indexOf on empty array returns -1", async () => {
