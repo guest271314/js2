@@ -79,7 +79,7 @@ import {
   buildAccessorClosure,
   ensureStructAccessorGlobal,
 } from "./struct-accessor-closure.js";
-import { definedFuncAt } from "./func-space.js"; // (#1916 S2) positional-read chokepoint
+import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S2 read chokepoint / S3b stable-regime minting)
 
 /**
  * Check if a TS expression is "undefined-like" — OmittedExpression (array hole),
@@ -1991,8 +1991,8 @@ export function compileObjectLiteralForStruct(
       if (rt && !isVoidType(rt)) methodResult = [resolveWasmType(ctx, rt)];
     }
     const freshTypeIdx = addFuncType(ctx, newParams, methodResult, `${fullName}__lit_type`);
-    const freshFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-    ctx.mod.functions.push({
+    const freshFuncIdx = mintDefinedFunc(ctx);
+    pushDefinedFunc(ctx, freshFuncIdx, {
       name: `${fullName}__lit${freshFuncIdx}`,
       typeIdx: freshTypeIdx, // seeded from this literal's params; body-compile may refine
       locals: [],
@@ -2267,7 +2267,7 @@ export function compileObjectLiteralForStruct(
       }
 
       const getterTypeIdx = addFuncType(ctx, getterParams, getterResults, `${getterName}_type`);
-      const getterFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+      const getterFuncIdx = mintDefinedFunc(ctx);
       ctx.funcMap.set(getterName, getterFuncIdx);
 
       const getterFunc: WasmFunction = {
@@ -2277,7 +2277,7 @@ export function compileObjectLiteralForStruct(
         body: [],
         exported: false,
       };
-      ctx.mod.functions.push(getterFunc);
+      pushDefinedFunc(ctx, getterFuncIdx, getterFunc);
 
       // Promote captured locals to globals so the getter body can access them
       promoteAccessorCapturesToGlobals(ctx, fctx, prop.body);
@@ -2367,7 +2367,7 @@ export function compileObjectLiteralForStruct(
       }
 
       const setterTypeIdx = addFuncType(ctx, setterParams, [], `${setterName}_type`);
-      const setterFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+      const setterFuncIdx = mintDefinedFunc(ctx);
       ctx.funcMap.set(setterName, setterFuncIdx);
 
       const setterFunc: WasmFunction = {
@@ -2377,7 +2377,7 @@ export function compileObjectLiteralForStruct(
         body: [],
         exported: false,
       };
-      ctx.mod.functions.push(setterFunc);
+      pushDefinedFunc(ctx, setterFuncIdx, setterFunc);
 
       // Promote captured locals to globals so the setter body can access them
       promoteAccessorCapturesToGlobals(ctx, fctx, prop.body);
@@ -2582,7 +2582,7 @@ export function compileObjectLiteralForStruct(
         // Update type in case it was refined
         methodFunc.typeIdx = methodTypeIdx;
       } else {
-        const methodFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+        const methodFuncIdx = mintDefinedFunc(ctx);
         ctx.funcMap.set(fullName, methodFuncIdx);
         methodFunc = {
           name: fullName,
@@ -2591,7 +2591,7 @@ export function compileObjectLiteralForStruct(
           body: [],
           exported: false,
         };
-        ctx.mod.functions.push(methodFunc);
+        pushDefinedFunc(ctx, methodFuncIdx, methodFunc);
       }
 
       // Promote captured locals to globals so the method body can access them
