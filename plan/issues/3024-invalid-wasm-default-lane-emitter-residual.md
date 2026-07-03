@@ -74,3 +74,72 @@ async-generator destructuring, (b) compound assignment operators, (c) the
   materially below the 131 recorded here.
 - No regression in the standalone-lane invalid-Wasm counts (#2039/#2878/#2934)
   — this issue is scoped to the default target only.
+
+---
+
+## Banked root-cause: the `testCompoundAssignment` / numeric-operator sub-bucket (sr-interp, 2026-07-03)
+
+Measure-first reduction of the **11-fail `testCompoundAssignment`** cluster (and,
+by shared mechanism, the **`fN.ne`/`fN.trunc` expected fN found externref** rows,
+13). Verified on default `gc` lane (`compile(src, {})`, `WebAssembly.compile`).
+
+### Minimal repro (default gc lane → invalid Wasm)
+```ts
+export function test(): number { var x = 3; x = x * eval("var x = 2;"); return x; }
+// → f64.mul[0] expected type f64, found local.tee of type externref
+```
+`x *= eval("var x = 2;")` fails identically (compound-assign desugars to `x = x * …`).
+
+### Discriminators (why the bucket is narrow — all verified)
+| variant | result |
+|---|---|
+| `x * eval("var x = 2;")` (same-name var-declaring eval) | **INVALID** |
+| `x * eval("var y = 2;")` (different name) | VALID |
+| `x * eval("2")` (eval, no var-decl) | VALID |
+| `x += eval("var x = 2;")` (`+` / `+=`) | VALID |
+| `eval("var x = 2;"); x *= 4;` (eval as separate stmt) | VALID |
+| `x * e()` where `e():any` (any RHS, no eval) | VALID |
+
+So the trigger is precisely: a **non-strict direct `eval` that declares a `var` of
+the SAME name** as a numeric local used as an operand of a **numeric-only**
+operator (`*`,`-`,`/`,`%`; unary `fN.ne`/`fN.trunc`). `+`/`+=` is immune (its
+string-or-number lowering coerces the operand); a separate-statement eval is
+immune (only the operand of the SAME expression is mis-typed).
+
+### Root cause (representation vs static-type DESYNC)
+`eval("var x = …")` promotes the binding `x`'s **slot** to `externref` (the
+dynamic / eval-reachable representation, so the eval can read/redefine it), while
+the TS checker still types `x` as `number`. The numeric-operator codegen emits a
+raw `local.get`/`local.tee` of the externref slot but treats the operand as `f64`
+(its static type), so **no `externref → f64` coercion is inserted** and it bakes
+`f64.mul`/`f64.ne`/… directly on an externref → `expected fN, found externref`.
+
+### Fix LOCATION (verified by elimination — turnkey)
+- **NOT `compileBinaryNumeric`** (binary-ops.ts ~156): it `return null`s on the
+  `any` guard (L169) because the eval RHS is typed `any`, so the multiply is NOT
+  emitted there. I applied the slot-type-trust fix there and it did **not** change
+  the repro — confirming the emit is elsewhere. (Reverted; do not re-attempt there.)
+- **The emit is in the general `compileBinaryExpression`** (binary-ops.ts ~254,
+  the mixed `number × any` arithmetic path — note the pre-existing "the receiver
+  `id` is typed `number`/`any`, so the operand's *TS* type…" desync comment at
+  ~L1141). The fix mirrors the **`in`-operator precedent** (binary-ops.ts
+  ~L605-618, "Trust the ACTUAL slot type: if the receiver is an identifier whose
+  local slot is externref/anyref…"): before emitting the numeric op, if an
+  identifier operand's **actual** `fctx` slot type is `externref`/`anyref` (even
+  though its TS type is `number`), route it through the existing
+  `externref → f64` coercion (`coerceType(…, {kind:"f64"}, "number")`).
+
+### Blast radius (why this is banked, not landed, at 4% budget)
+This is a **shared desync class**, not one operator: the same "static type says
+`number`, slot is `externref` (eval-promoted / dynamically boxed)" mismatch is the
+likely root of the issue's other rows — `fN.ne`/`fN.trunc` externref (13),
+`local.set expected (ref null T)` (7), and possibly `call[N] expected (ref null T)`
+(14). A root fix (make identifier compilation report the true slot type, or coerce
+at every numeric consumer) would clear multiple buckets but is **broad-impact
+codegen** requiring full test262 CI validation — not safe to land + verify at 4%
+budget. Banked as a turnkey next step; the `in`-operator precedent makes the
+localized `compileBinaryExpression` fix low-risk for a fresh window.
+
+### Not started (roll forward)
+- The `__vec_from_extern_*` `array.set` bucket and async-gen `__closure_*` buckets
+  (issue's approach steps 2–3) are un-investigated here.
