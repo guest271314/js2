@@ -628,6 +628,53 @@ export class IrFunctionBuilder {
     return result;
   }
 
+  /**
+   * #3000-E: emit `class.super_init` for a derived ctor's `super(args)`. Runs
+   * the PARENT's `<parent>_init` on the already-allocated `self`. Statement-only
+   * (no SSA result) — the parent init's `(ref $struct)` return is dropped by the
+   * lowering. `self` is the subclass instance (a WasmGC subtype of the parent).
+   */
+  emitClassSuperInit(parentShape: IrClassShape, self: IrValueId, args: readonly IrValueId[]): void {
+    this.pushInstr({
+      kind: "class.super_init",
+      parentShape,
+      self,
+      args: [...args],
+      result: null,
+      resultType: null,
+    });
+  }
+
+  /**
+   * #3000-E: emit `class.super_call` for `super.method(args)`. Static-dispatches
+   * to the PARENT's `<parent>_<method>` slot with the subclass receiver.
+   * `resultType` is the parent method descriptor's `returnType` (`null` for void);
+   * returns `null` for void methods (callers in expression position reject null).
+   */
+  emitClassSuperCall(
+    parentShape: IrClassShape,
+    receiver: IrValueId,
+    methodName: string,
+    args: readonly IrValueId[],
+    resultType: IrType | null,
+  ): IrValueId | null {
+    let result: IrValueId | null = null;
+    if (resultType !== null) {
+      result = this.allocator.fresh();
+      this.valueTypes.set(result, resultType);
+    }
+    this.pushInstr({
+      kind: "class.super_call",
+      parentShape,
+      receiver,
+      methodName,
+      args: [...args],
+      result,
+      resultType,
+    });
+    return result;
+  }
+
   // --- extern class ops (#1169i — slice 10) -------------------------------
 
   /**

@@ -129,6 +129,17 @@ export function analyzeEscape(
         raise(instr.receiver, "opaque");
         for (const a of instr.args) raise(a, "opaque");
         break;
+      // #3000-E: super(...) / super.method() pass `self`/receiver + args into an
+      // opaque parent function (`<parent>_init` / `<parent>_<method>`), so every
+      // operand escapes — same as a plain class.call.
+      case "class.super_init":
+        raise(instr.self, "opaque");
+        for (const a of instr.args) raise(a, "opaque");
+        break;
+      case "class.super_call":
+        raise(instr.receiver, "opaque");
+        for (const a of instr.args) raise(a, "opaque");
+        break;
       case "closure.call":
         raise(instr.callee, "opaque");
         for (const a of instr.args) raise(a, "opaque");

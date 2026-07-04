@@ -299,16 +299,15 @@ export function compileIrPathFunctions(
     for (const stmt of sourceFile.statements) {
       if (!ts.isClassDeclaration(stmt) || !stmt.name) continue;
       const className = stmt.name.text;
-      // Phase A's selector already excluded classes with `extends`; defensive
-      // re-check here so a future selector loosening doesn't silently flow
-      // unsupported shapes into Phase B.
-      if (stmt.heritageClauses?.some((h) => h.token === ts.SyntaxKind.ExtendsKeyword)) continue;
 
+      // #3000-E: `buildIrClassShapes` now seeds single-level subclasses of a
+      // LOCAL user class (the shape carries `.parent`), so the wholesale
+      // `extends`-skip that used to sit here is gone — the shape presence IS the
+      // gate. A subclass of a builtin / externref-backed parent still gets NO
+      // shape there, so the `if (!classShape) continue;` below keeps it on legacy;
+      // the selector's `parentIsLocalClass` gate mirrors this exactly, so a
+      // claimed subclass member always finds its shape (no post-claim demotion).
       const classShape = classShapes?.get(className);
-      // The IR class shape registry only seeds non-extends classes today
-      // (see `buildIrClassShapes` in `src/codegen/index.ts`). Without a
-      // shape we can't form a valid `IrType.class` for the `__self` param,
-      // so the methods stay on legacy.
       if (!classShape) continue;
 
       for (const member of stmt.members) {
@@ -2374,6 +2373,10 @@ class ClassRegistry {
     // the legacy name for every non-colliding class.
     const ctx = this.ctx;
     const constructorFuncName = classMemberFuncKey(ctx, `${shape.className}_new`);
+    // #3000-E: the parent-init entry a derived `super(...)` chains to. Legacy
+    // registers `<className>_init` for every non-externref-backed class (the
+    // only kind that can be an IR subclass parent), keyed the same way.
+    const initFuncName = classMemberFuncKey(ctx, `${shape.className}_init`);
 
     // #3000-C: precompute the default-alloc instruction prefix so the
     // `class.alloc` IR instr (used by the IR constructor-body lowering to
@@ -2399,6 +2402,7 @@ class ClassRegistry {
         return idx;
       },
       constructorFuncName,
+      initFuncName,
       methodFuncName: (name: string): string => {
         // Returns a NAME — the resolver's `resolveFunc` maps it to the
         // funcIdx via `ctx.funcMap`, which the legacy collection pass

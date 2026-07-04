@@ -1,11 +1,12 @@
 ---
 id: 3000
 title: "IR: class-member residual — private fields, accessors, inheritance/super (class-method → 0)"
-status: in-progress
-assignee: opus-3000c-impl
+status: done
+assignee: opus-3000e-impl
+completed: 2026-07-05
 sprint: current
 created: 2026-07-02
-updated: 2026-07-04
+updated: 2026-07-05
 priority: medium
 horizon: xl
 feasibility: hard
@@ -516,3 +517,121 @@ statement position".
 
 **Unblocks #3000-E** (inheritance / `super`), which builds `super(...)` ctor
 chaining on top of this ctor-emission substrate.
+
+## Implementation Notes — #3000-E: inheritance / `super` emission LANDED (opus-3000e, 2026-07-05)
+
+**Acceptance MET — criterion #3 (classes.ts fully IR) is now TRUE.** On
+`classes.ts`, `irCompiledFuncs` now lists **every class member of both classes**
+in BOTH lanes (host externref + native `$AnyString`): `Animal_new`,
+`Animal_get_name`, `Animal_set_name`, `Animal_get_age`, `Animal_speak`,
+**`Dog_new`, `Dog_speak`, `Dog_get_breed`** — with `irPostClaimErrors: []` (zero
+post-claim demotions). The three `Dog_*` were the last IR-uncovered members.
+`check:ir-fallbacks` **`class-method` bucket: 3 → 0** (baseline ratcheted); the
+residual `body-shape-rejected=1` on classes.ts is `main` (accessor call sites +
+`console.log`/`instanceof`), NOT a class member. Runtime parity: legacy and IR
+both emit `Rex/4|Rex makes a sound woof|Lab|AD` — `super(...)` runs the parent
+init exactly once (inherited `#name`/`#age` correct), `super.speak()` dispatches
+to `Animal_speak` (Dog receiver), Dog's own `#breed` reads, and `instanceof`
+Animal+Dog both hold.
+
+**Non-vacuity — inject-throw proof.** Injecting `throw` into the `class.super_init`
+lowering demotes `Dog_new` with `{kind:"lower", func:"Dog_new",
+message:"INJECT-3000E-super-init"}` — proving `Dog_new`'s IR body genuinely emits
+the new instr (a byte-inert/legacy body would be unaffected). The pre-change
+baseline measured all three `Dog_*` ABSENT from `irCompiledFuncs`; post-change all
+three present. Byte-inert for non-subclass programs: `super_init`/`super_call` are
+emitted ONLY by subclass lowering, and `buildIrClassShapes` projects subclasses
+only — flat-class codegen is untouched (the #3000-C byte-inert sha256 test still
+passes on this branch).
+
+**The design — two dedicated IR instrs mirroring the legacy `_new`/`_init` split.**
+The legacy backend splits every WasmGC-struct class into `<Class>_new` (alloc +
+tail-call `<Class>_init`) and `<Class>_init` (`(...ctorParams, self) -> (ref
+$struct)`, self LAST — field inits + ctor body), lowering a derived `super(...)`
+to `call <Parent>_init(args..., self)`. #3000-E adds two instrs that mirror this
+EXACTLY, so the emitted calls are byte-compatible with the slots legacy builds:
+
+- **`class.super_init`** (`super(args)`): runs the PARENT's `<parent>_init` on the
+  already-`class.alloc`'d `self` (from #3000-C) — NOT the parent's `_new` (which
+  would allocate a second, wrong-typed instance). Statement-only; the parent
+  init's `(ref $struct)` return is dropped. `self` is a `(ref $SubStruct)` passed
+  where `_init` expects `(ref $ParentStruct)` — valid WasmGC subtyping. `_init`
+  writes the parent's fields onto the shared `self`, so a single alloc + parent
+  init + own field writes reconstructs the exact legacy object.
+- **`class.super_call`** (`super.method(args)`): static-dispatches to the PARENT's
+  `<parent>_<method>` slot with the subclass receiver, resolving against the
+  parent shape so a subclass override is bypassed. Result = the parent method's
+  return type. `Animal_speak` (whichever body — IR or legacy — is installed) runs
+  with a Dog receiver; `class.get __priv_name` reads the parent-prefixed slot
+  across the subtype boundary.
+
+Both resolve their func-key through `resolver.resolveClass(parentShape)` — a new
+`IrClassLowering.initFuncName` (`<parent>_init`) plus the existing
+`methodFuncName` — so the collision-safe `classMemberFuncKey` mangling is honored.
+
+**Subclass shape projection (`buildIrClassShapes`, `src/codegen/index.ts`).** The
+old wholesale `extends`-skip is replaced by a single-level gate: a subclass whose
+`extends` parent is a LOCAL user class already in `out` projects, carrying the
+parent as `IrClassShape.parent` (drives both super instrs). The KEY subtlety: a
+subclass's legacy `structFields` is `[...parentFields, ...ownFields]`, so it
+includes fields DECLARED on ancestors (Dog's `__priv_name` is Animal's *string*
+field). The AST field re-derivation (#3000-1b, which recovers string fields the
+lossy ValType can't) therefore walks the **whole ancestor chain** (self + every
+local parent's PropertyDeclarations + ctor-body `this.x =` writes) — else an
+inherited string field has no `astFieldIr` entry and the null-returning ValType
+path rejects the whole subclass. A subclass of a builtin/externref-backed parent
+gets no shape → stays on legacy (the selector's `parentIsLocalClass` gate mirrors
+this exactly, so a claim always finds a shape → no post-claim demotion; a dedicated
+test asserts `class MyErr extends Error` members are NOT claimed).
+
+**typeIdx-parity safety.** The Phase-3 slot patch's typeIdx-parity guard
+(`integration.ts`) still gates every overwrite: a mis-projected subclass signature
+can only keep the legacy body (worst case byte-inert), never miscompile — the
+#3000-C/1b precedent holds.
+
+**Criterion #5 (`class-method` → `STRICT_IR_REASONS`) DEFERRED — deliberate.**
+`STRICT_IR_REASONS` promotes a rejection reason to a HARD compile error for
+**every** compilation (test262 included), not just the playground corpus. The
+`class-method` reason still legitimately covers out-of-corpus deferred shapes —
+computed/generator/abstract method names, static `super`, subclass-of-builtin
+members — that B/C/E do not cover. A `class X extends Array { m(){} }` in test262
+would become a CE regression. The corpus bucket being 0 does NOT make the reason
+universally retired. `STRICT_IR_REASONS` is still empty for exactly this reason
+(no bucket has been flipped yet). Recommend flipping only after the deferred
+sub-shapes are separately handled or carved into distinct reasons.
+
+**Banked follow-ups (not this slice).**
+1. **Accessor CALL SITES** (`d.breed` read in an IR-claimed caller) still lower as
+   a field access → `class ... has no field` → the CALLER demotes cleanly (byte-
+   inert). This is why classes.ts's `main` stays legacy. Pre-existing from #3000-B;
+   a caller-side "member resolves to a get/set accessor → emit accessor CALL" slice.
+2. **Multi-level `super` to a grandparent-defined method** (`super.m()` where `m`
+   is on the grandparent, not the immediate parent): the immediate parent shape's
+   `methods` lacks it → from-ast throws → clean demotion. Single-level `extends`
+   and multi-level with own/immediate-parent members work; grandparent-method
+   super is banked. Field collection already walks the full chain.
+
+**Edits.**
+- `src/ir/nodes.ts` — `IrClassShape.parent`; `IrInstrClassSuperInit` /
+  `IrInstrClassSuperCall` interfaces + union + the three traversal switches
+  (no-op nested-buffer ×2, `directUses`).
+- `src/ir/builder.ts` — `emitClassSuperInit` / `emitClassSuperCall`.
+- `src/ir/backend/handles.ts` — `IrClassLowering.initFuncName`.
+- `src/ir/integration.ts` — populate `initFuncName`; drop the wholesale
+  `extends`-skip (shape presence is the gate).
+- `src/ir/lower.ts` — `class.super_init` (args, self, call `_init`, drop) +
+  `class.super_call` (receiver, args, call parent method); use-count switch.
+- `src/ir/from-ast.ts` — `super(...)` in `lowerCall`, `super.method()` in
+  `lowerMethodCall`; `requireThisValue` / `requireSuperParentShape` helpers.
+- `src/ir/select.ts` — `extendsParentName`; `parentIsLocalClass` loosens the
+  `hasParent` instance-member arm; `super(...)` / `super.method()` in `isPhase1Expr`.
+- `src/ir/effects.ts`, `verify.ts`, `passes/inline-small.ts`, `passes/monomorphize.ts`
+  — the two new instrs (call-like effects; use lists; operand renaming).
+- `src/codegen/index.ts` — `buildIrClassShapes` single-level subclass projection +
+  ancestor-chain field walk + `parent`; `extendsParentClassName` helper.
+- `scripts/ir-fallback-baseline.json` — `class-method` 3 → 0 (removed).
+- `plan/log/ir-adoption.md` — ctor/accessor/method rows → `mixed`; class-method note.
+- `tests/issue-3000-e.test.ts` — genuine emission (both lanes) + runtime parity +
+  builtin-parent clean-fallback guard.
+- `tests/issue-3000.test.ts`, `tests/issue-3000-b.test.ts` — updated the two
+  assertions that pinned subclass members to `class-method` "until Phase E".
