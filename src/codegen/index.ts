@@ -52,6 +52,7 @@ import { ensureMapRuntimeTypes } from "./map-runtime.js";
 import { scanForNewTarget } from "./new-target.js"; // (#2023)
 import { scanForArrayHoles, ensureHoleType } from "./array-holes.js"; // (#2001 S1)
 import { ensureDynReadHelpers } from "./dyn-read.js"; // (#2580 M0)
+import { collectClosureBaseWrapperTypeIdxs, buildClosureRefTestArms } from "./closure-classifier.js"; // (#2175 V2-S1)
 import { ensureNativeIteratorRuntime, fillNativeIteratorUserArms } from "./iterator-native.js";
 import { fillCombinatorToVec } from "./promise-combinators.js"; // (#2922) dynamic combinator-arg drain fill
 import { fillClosedMethodDispatch } from "./closed-method-dispatch.js";
@@ -4612,40 +4613,9 @@ function emitClosureMethodCallExportN(ctx: CodegenContext, arity: number): void 
  * choose between callable-wrapping (#1308) and `_wasmToPlain` marshaling
  * (#1504). No-op when the module has no closures.
  */
-/**
- * Collect the deduped set of closure base-wrapper struct type indices from
- * `ctx.closureInfoByTypeIdx`. Concrete closure subtypes (with captures) share
- * their funcref signature with the base wrapper post-V8 canonicalisation, so a
- * `ref.test` against the base catches all of them. Walks each registered
- * closure struct up to its root (superTypeIdx === -1). (#1896 — shared by
- * `emitIsClosureExport` and the standalone `__typeof_function`/`__typeof_object`
- * closure-recognition arms.)
- */
-function collectClosureBaseWrapperTypeIdxs(ctx: CodegenContext): number[] {
-  const mod = ctx.mod;
-  const baseTypeIdxs: number[] = [];
-  const seenBase = new Set<number>();
-  for (const [typeIdx, info] of ctx.closureInfoByTypeIdx) {
-    if (!info) continue;
-    const typeDef = mod.types[typeIdx];
-    if (!typeDef || typeDef.kind !== "struct") continue;
-    // Walk up to the root struct in the chain.
-    let root = typeIdx;
-    let cur = typeDef;
-    while (cur && cur.kind === "struct" && cur.superTypeIdx !== undefined && cur.superTypeIdx >= 0) {
-      const superIdx: number = cur.superTypeIdx;
-      const parent = mod.types[superIdx];
-      if (!parent || parent.kind !== "struct") break;
-      root = superIdx;
-      cur = parent;
-    }
-    if (!seenBase.has(root)) {
-      seenBase.add(root);
-      baseTypeIdxs.push(root);
-    }
-  }
-  return baseTypeIdxs;
-}
+/* (#2175 V2-S1) `collectClosureBaseWrapperTypeIdxs` moved to the leaf module
+ * `closure-classifier.ts` so `index.ts` and `dyn-read.ts` share ONE list (see
+ * that file). Imported at the top of this module. */
 
 function emitIsClosureExport(ctx: CodegenContext): void {
   const mod = ctx.mod;
@@ -4787,6 +4757,20 @@ function emitIsDataStructExport(ctx: CodegenContext): void {
  *   (a callable is `"function"`, never `"object"`) BEFORE the final non-null
  *   `i32.const 1`, so a wrapper read back from an open-object slot is not
  *   mis-classified as `"object"`.
+ * - (#2175 V2-S1) `__typeof`: the MATERIALIZED typeof-result native (the tag as
+ *   a NativeString VALUE, used by `const t = typeof x`). It classified
+ *   null/number/boolean/bigint/string and fell through to `"object"` — with NO
+ *   function arm, so a closure read back dynamically produced `"object"` while
+ *   the INLINE `typeof x === "function"` compare (via the `__typeof_function`
+ *   predicate above) produced `"function"`. That path-dependence is the #2984
+ *   `typeof` instability and contradicts `JsTag.Function` (#2949 V1 tag
+ *   fidelity). We splice a closure `ref.test` arm returning the `"function"`
+ *   NativeString before the terminal `"object"` sequence, using the SAME
+ *   closure base-wrapper list — one predicate, all three natives in lockstep.
+ *
+ * All three natives now share the single closure classifier
+ * (`buildClosureRefTestArms` / `collectClosureBaseWrapperTypeIdxs`,
+ * `closure-classifier.ts`) — never two divergent arm lists.
  *
  * No-op unless native-strings (the helpers only exist then) and at least one
  * closure base wrapper was registered.
@@ -4800,20 +4784,13 @@ function fillStandaloneTypeofClosureArms(ctx: CodegenContext): void {
     ctx.mod.functions.find((f) => (f as { name?: string }).name === name) as WasmFunction | undefined;
 
   // Chained `ref.test` arms over the anyref-converted param in local 0/1. Each
-  // arm returns `matchValue` on hit. Caller supplies the param→anyref local.
-  const closureTestArms = (anyLocalIdx: number, matchValue: number): Instr[] => {
-    const arms: Instr[] = [];
-    for (const t of baseTypeIdxs) {
-      arms.push({ op: "local.get", index: anyLocalIdx } as Instr);
-      arms.push({ op: "ref.test", typeIdx: t } as Instr);
-      arms.push({
-        op: "if",
-        blockType: { kind: "empty" },
-        then: [{ op: "i32.const", value: matchValue } as Instr, { op: "return" } as Instr],
-      } as Instr);
-    }
-    return arms;
-  };
+  // i32-predicate arm returns `matchValue` on hit. Builds from the ONE shared
+  // closure-base-wrapper list (`closure-classifier.ts`).
+  const closureI32Arms = (anyLocalIdx: number, matchValue: number): Instr[] =>
+    buildClosureRefTestArms(ctx, anyLocalIdx, [
+      { op: "i32.const", value: matchValue } as Instr,
+      { op: "return" } as Instr,
+    ]);
 
   // --- __typeof_function: param(0) externref → 1 if closure wrapper else 0.
   const tf = fnByName("__typeof_function");
@@ -4833,7 +4810,7 @@ function fillStandaloneTypeofClosureArms(ctx: CodegenContext): void {
       { op: "local.get", index: 0 } as Instr,
       { op: "any.convert_extern" } as Instr,
       { op: "local.set", index: 1 } as Instr,
-      ...closureTestArms(1, 1),
+      ...closureI32Arms(1, 1),
       { op: "i32.const", value: 0 } as Instr,
     ];
   }
@@ -4849,7 +4826,38 @@ function fillStandaloneTypeofClosureArms(ctx: CodegenContext): void {
     const lastIdx = b.length - 1;
     const last = b[lastIdx] as { op?: string; value?: number } | undefined;
     if (last && last.op === "i32.const" && last.value === 1) {
-      b.splice(lastIdx, 0, ...closureTestArms(1, 0));
+      b.splice(lastIdx, 0, ...closureI32Arms(1, 0));
+    }
+  }
+
+  // --- (#2175 V2-S1) __typeof (materialized result): splice a closure arm that
+  // returns the `"function"` NativeString before the terminal `"object"`
+  // sequence. The body converts param → anyref into local 1 (`$any_temp`)
+  // before its boxed-primitive guards, and local 1 still holds it at the
+  // terminal, so the arm reads local 1 exactly like the primitive guards.
+  //
+  // Robust splice point: the terminal is the last N instrs, where N is the
+  // length of `stringConstantExternrefInstrs(ctx, "object")` (deterministic —
+  // "object" was already registered when the body was built, so re-deriving it
+  // yields the same length). We verify the tail's op-shape matches before
+  // splicing; if `__typeof` is the `ref.null.extern` stub (no native-string
+  // type) the shape check fails and we skip — self-guarding.
+  const tt = fnByName("__typeof");
+  if (tt && ctx.nativeStrTypeIdx >= 0) {
+    const b = tt.body;
+    const objTerminal = stringConstantExternrefInstrs(ctx, "object");
+    const spliceAt = b.length - objTerminal.length;
+    const tailMatches =
+      spliceAt >= 0 &&
+      objTerminal.every(
+        (inst, i) => (b[spliceAt + i] as { op?: string } | undefined)?.op === (inst as { op?: string }).op,
+      );
+    if (tailMatches) {
+      const fnArm = buildClosureRefTestArms(ctx, 1, [
+        ...stringConstantExternrefInstrs(ctx, "function"),
+        { op: "return" } as Instr,
+      ]);
+      b.splice(spliceAt, 0, ...fnArm);
     }
   }
 }
@@ -12173,8 +12181,12 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
   //     EVERY tag and `t.length` trapped. Classify with the same dispatch the
   //     `__typeof_*` predicates above use (null → "undefined", box_number →
   //     "number", box_boolean → "boolean", $BigInt → "bigint", $AnyString →
-  //     "string", else → "object"; functions stay "object", matching the
-  //     conservative `__typeof_function` = 0 predicate) and return the tag as
+  //     "string", else → "object"). (#2175 V2-S1) A closure/function value read
+  //     back here would otherwise fall through to "object";
+  //     `fillStandaloneTypeofClosureArms` splices a closure `ref.test` →
+  //     "function" arm before the terminal at finalize (closures aren't all
+  //     registered yet at this registration point), so the materialized result
+  //     agrees with the `__typeof_function` predicate. The tag is returned as
   //     an inline NativeString (sentinel-safe, no funcidx baked — the #2515
   //     discipline; string literals here are type-index-only instructions, so
   //     the late-import finalize shift cannot desync this body). Falls back to

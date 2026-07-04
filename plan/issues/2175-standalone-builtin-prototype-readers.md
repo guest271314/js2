@@ -1051,3 +1051,100 @@ radius needs separate CI evidence.
   or generator/async-carrier residuals of #3027 — those stay with their
   owners; v2 is the representation + dispatch + visibility substrate they
   sit on.
+
+---
+
+## Implementation log — V2-S1 (sdev opus-2984s1, 2026-07-04)
+
+PR: **V2-S1 of 7** — `typeof` function arm + shared closure classifier.
+Branch `issue-2175-v2s1`. Status: implemented, host-free, standalone-gated.
+
+### Re-grounding correction to v2 fact 4 (IMPORTANT for later slices)
+
+The v2 spec (fact 4) states the standalone `__typeof` native has "**No
+function arm**". Verified against `origin/main @ 1b7632bda`, that is **half
+right and half stale** — the distinction is load-bearing:
+
+- The **PREDICATE** family `__typeof_function` / `__typeof_object` (used by
+  the INLINE `typeof x === "function"` compare) **already recognises closure
+  wrapper structs** — #1896 (`fillStandaloneTypeofClosureArms`,
+  `index.ts`) splices `ref.test`-over-closure-base-wrapper arms into both at
+  finalize. So `typeof x === "function"` was ALREADY correct standalone.
+- The **MATERIALIZED** `__typeof` native (the tag as a NativeString VALUE —
+  `const t = typeof x`, or `typeof` flowing through a param) had **no
+  function arm** and fell through to `"object"`. THIS is the actual #2984
+  path-dependence: inline said `"function"`, const-bound said `"object"`.
+
+Empirically confirmed on unmodified main (inject/contrast proof, not
+narrative): `const f = (x)=>x*2; const a:any=f;`
+- `typeof a === "function"` → **1** (predicate, #1896)
+- `const t:any = typeof a; t === "function"` → **0** (materialized, broken)
+- `RegExp.prototype.exec` const-bound typeof → **0** (broken) / inline → 1
+
+### What landed
+
+- **New leaf module `src/codegen/closure-classifier.ts`** — the SINGLE
+  home for the closure-base-wrapper list (`collectClosureBaseWrapperTypeIdxs`)
+  and a reusable arm-builder (`buildClosureRefTestArms(ctx, anyLocalIdx,
+  onMatch)`). It imports only types, so `index.ts` and `dyn-read.ts` (which
+  are in an import cycle) can both depend on it without re-introducing the
+  cycle. This retires the TWO divergent copies that existed:
+  `collectClosureBaseWrapperTypeIdxs` (index.ts) and the byte-identical
+  private `closureBaseWrapperTypeIdxs` (dyn-read.ts, added specifically to
+  dodge the cycle). **One predicate, all consumers** — the spec's "never two
+  closure-struct arm lists" invariant, now structurally enforced.
+- **`fillStandaloneTypeofClosureArms`** (`index.ts`) extended: after
+  patching `__typeof_function`/`__typeof_object` (unchanged, now via the
+  shared builder → **byte-identical**), it splices a closure `ref.test` →
+  `"function"` NativeString arm into the MATERIALIZED `__typeof` body,
+  before the terminal `"object"` sequence. Robust splice point: the terminal
+  is the last N instrs where N = `stringConstantExternrefInstrs(ctx,
+  "object").length` (deterministic); an op-shape tail check gates the splice
+  (skips the `ref.null.extern` stub when no native-string type). Finalize
+  timing is REQUIRED — closures aren't all registered at `__typeof`'s
+  registration point (same reason #1896 finalize-fills the predicates).
+
+### Why byte-neutral except the intended change
+
+- `buildClosureRefTestArms(ctx, i, [i32.const v, return])` emits IDENTICAL
+  instrs to the old local `closureTestArms(i, v)` (same list, same order) →
+  `__typeof_function`/`__typeof_object` bytes unchanged.
+- `dyn-read.ts` repoint is aliased to the prior local name; the shared
+  collector returns the same list (same algorithm, same Map iteration order)
+  → the `.length`-arity arm bytes unchanged. #2580 suite (57 tests) green.
+- Closure-FREE modules: empty list → `buildClosureRefTestArms` emits nothing
+  → `__typeof` unchanged. `prove-emit-identity` deterministic (exit 0).
+- Only NEW bytes: the `__typeof` function arm in closure-containing
+  standalone/wasi modules — the intended fix.
+
+### Gate — verified
+
+- `tests/issue-2175-typeof-function-arm.test.ts` (5/5): closure +
+  `RegExp.prototype.exec` report `"function"` inline AND const-bound;
+  swap-guard (materialized closure is NOT `"object"` — proves the arm fires,
+  not a coincidental pass); non-closure receivers keep their tag.
+- Regression: #1896 typeof-closure, typeof-expression/comparison,
+  #2104 value-tags, #2949 slices 1/2/3/3b (77), #2580 dyn-read (57) — all
+  green. `tsc --noEmit` clean. Host mode untouched (all arms
+  `ctx.nativeStrings`-gated).
+- **Pre-existing (NOT this slice):** 4 getter tests in
+  `issue-2175-regexp-proto-readers.test.ts` (`.flags`/`.source`/flag-bool
+  getter VALUE reads) fail on `origin/main` too (8/12 pass on both baseline
+  and this branch) — the S1 "getter engine body" boundary, unrelated to
+  typeof. Not regressed here; belongs to the V2-S5 RegExp instance-chain
+  slice.
+
+### Banked for V2-S2+ (consume the shared classifier)
+
+- **#2949 slice 3 / `$AnyValue` boxing classifier**: point `tag.test(Function)`
+  and the runtime-ref → `JsTag.Function` boxing at
+  `buildClosureRefTestArms` / `collectClosureBaseWrapperTypeIdxs`
+  (`closure-classifier.ts`) — do NOT mint a third arm list. The `__typeof`
+  arm and the boxing classifier are now guaranteed one predicate.
+- **V2-S2 (singleton unification)**: independent of S1; switch
+  `property-access.ts:~1130` method arm + `calls.ts` #2885 Site-2 to
+  `pushBuiltinFnSingletonValueInstrs` (identity). Note: once method values
+  are singletons, `typeof` of them is already correct via this S1 arm.
+- **V2-S3 (proto table)**: the reader arms will read closure structs back as
+  `$PropEntry.value` (raw anyref, D4) — their `typeof`/Function-ness now
+  resolves through this same classifier for free.
