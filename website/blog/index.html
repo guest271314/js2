@@ -133,19 +133,24 @@
         color: var(--fg);
       }
 
-      /* ── Conformance charts (landing donut + timeline components) ── */
+      /* ── Conformance charts (landing donut + timeline components) ──
+         No surrounding box. The chart block breaks out wider than the text
+         column so both donuts get their full ~380px orbit without clipping. */
       .figure {
-        margin: 26px 0;
-        padding: 24px 22px 20px;
-        background: var(--surface);
-        border: 1px solid var(--line);
-        border-radius: 12px;
+        margin: 34px 0;
+        padding: 0;
+        background: none;
+        border: none;
+        width: min(860px, calc(100vw - 32px));
+        margin-left: 50%;
+        transform: translateX(-50%);
       }
 
       .donut-pair {
         display: grid;
         grid-template-columns: 1fr 1fr;
-        gap: 16px;
+        gap: 20px;
+        align-items: center;
       }
 
       .donut-cell {
@@ -157,13 +162,14 @@
 
       .donut-cell t262-donut {
         width: 100%;
-        max-width: 240px;
+        max-width: 400px;
       }
 
       .trend-wrap {
-        margin-top: 24px;
-        padding-top: 22px;
+        margin: 20px auto 0;
+        padding-top: 26px;
         border-top: 1px solid var(--line);
+        max-width: 720px;
       }
 
       .trend-title {
@@ -179,13 +185,14 @@
       .figure .foot {
         font-size: 12px;
         color: var(--fg-faint);
-        margin: 20px 0 0;
+        margin: 18px auto 0;
+        max-width: 720px;
       }
 
-      @media (max-width: 560px) {
+      @media (max-width: 640px) {
         .donut-pair {
           grid-template-columns: 1fr;
-          gap: 24px;
+          gap: 8px;
         }
       }
 
