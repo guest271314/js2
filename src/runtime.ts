@@ -9299,17 +9299,32 @@ assert._isSameValue = isSameValue;
           }
           if (cappedOut) {
             const returnFn = resolveProp(iteratorObj, "return");
+            // §7.4.6 IteratorClose steps 6+9: call `return`, and if it returns
+            // a value whose Type is not Object, throw a TypeError. (The bounded
+            // stop is a NormalCompletion, so step 7's "outer throw wins" does not
+            // apply here — a non-object return result IS observable.) Absent
+            // return method → step 4 NormalCompletion, no call, no throw.
+            let innerResult: any;
+            let called = false;
             if (typeof returnFn === "function") {
-              returnFn.call(iteratorObj);
+              innerResult = returnFn.call(iteratorObj);
+              called = true;
             } else if (
               returnFn != null &&
               typeof returnFn === "object" &&
               _isWasmStruct(returnFn) &&
               typeof callFn0 === "function"
             ) {
-              callFn0(returnFn);
+              innerResult = callFn0(returnFn);
+              called = true;
             }
             // Else: no return method — spec §7.4.6 returns NormalCompletion.
+            if (
+              called &&
+              (innerResult === null || (typeof innerResult !== "object" && typeof innerResult !== "function"))
+            ) {
+              throw new TypeError("iterator close: return() did not return an Object");
+            }
           }
           return out;
         };
