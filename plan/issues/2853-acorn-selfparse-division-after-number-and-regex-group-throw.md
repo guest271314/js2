@@ -1,7 +1,8 @@
 ---
 id: 2853
 title: "compiled-acorn THROWS parsing its OWN source — two bisected constructs: division after a numeric literal (`1 / 2`) and ANY regex group `(…)`"
-status: in-progress
+status: done
+completed: 2026-07-04
 assignee: ttraenkler/fable-2853
 sprint: current
 priority: low
