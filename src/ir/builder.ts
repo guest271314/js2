@@ -8,6 +8,7 @@
 
 import {
   asBlockId,
+  asLabelId,
   asValueId,
   irVal,
   AllocKind,
@@ -22,6 +23,7 @@ import {
   IrFunction,
   IrGlobalRef,
   IrInstr,
+  IrLabelId,
   IrObjectShape,
   IrParam,
   IrSiteId,
@@ -68,6 +70,10 @@ export class IrFunctionBuilder {
   // index of the `__gen_buffer` Wasm-local. Set when the generator
   // prologue is emitted in from-ast.
   private generatorBufferSlot: number | undefined = undefined;
+  // #2952 slice 2 — per-function loop-label allocator (see IrLabelId in
+  // nodes.ts). Labels identify loop frames for `br.label`; unlabeled
+  // break/continue resolve to the innermost loop's synthesised label.
+  private nextLabelId = 0;
 
   constructor(
     private readonly name: string,
@@ -976,6 +982,8 @@ export class IrFunctionBuilder {
     dataSlot: number;
     elementSlot: number;
     body: readonly IrInstr[];
+    /** #2952 slice 2 — loop identity for `br.label` targeting. */
+    loopLabel?: IrLabelId;
   }): void {
     this.pushInstr({
       kind: "forof.vec",
@@ -987,6 +995,7 @@ export class IrFunctionBuilder {
       dataSlot: args.dataSlot,
       elementSlot: args.elementSlot,
       body: args.body,
+      ...(args.loopLabel !== undefined ? { loopLabel: args.loopLabel } : {}),
       result: null,
       resultType: null,
     });
@@ -1062,6 +1071,8 @@ export class IrFunctionBuilder {
     resultSlot: number;
     elementSlot: number;
     body: readonly IrInstr[];
+    /** #2952 slice 2 — loop identity for `br.label` targeting. */
+    loopLabel?: IrLabelId;
   }): void {
     this.pushInstr({
       kind: "forof.iter",
@@ -1070,6 +1081,7 @@ export class IrFunctionBuilder {
       resultSlot: args.resultSlot,
       elementSlot: args.elementSlot,
       body: args.body,
+      ...(args.loopLabel !== undefined ? { loopLabel: args.loopLabel } : {}),
       result: null,
       resultType: null,
     });
@@ -1091,6 +1103,8 @@ export class IrFunctionBuilder {
     strSlot: number;
     elementSlot: number;
     body: readonly IrInstr[];
+    /** #2952 slice 2 — loop identity for `br.label` targeting. */
+    loopLabel?: IrLabelId;
   }): void {
     this.pushInstr({
       kind: "forof.string",
@@ -1100,6 +1114,7 @@ export class IrFunctionBuilder {
       strSlot: args.strSlot,
       elementSlot: args.elementSlot,
       body: args.body,
+      ...(args.loopLabel !== undefined ? { loopLabel: args.loopLabel } : {}),
       result: null,
       resultType: null,
     });
@@ -1159,6 +1174,8 @@ export class IrFunctionBuilder {
     body: readonly IrInstr[];
     /** #2952 slice 1 — set for `do { body } while (cond)` (post-test loop). */
     postCond?: boolean;
+    /** #2952 slice 2 — loop identity for `br.label` targeting. */
+    loopLabel?: IrLabelId;
   }): void {
     this.pushInstr({
       kind: "while.loop",
@@ -1166,6 +1183,7 @@ export class IrFunctionBuilder {
       condValue: args.condValue,
       body: args.body,
       ...(args.postCond ? { postCond: true } : {}),
+      ...(args.loopLabel !== undefined ? { loopLabel: args.loopLabel } : {}),
       result: null,
       resultType: null,
     });
@@ -1182,6 +1200,8 @@ export class IrFunctionBuilder {
     condValue: IrValueId;
     body: readonly IrInstr[];
     update: readonly IrInstr[];
+    /** #2952 slice 2 — loop identity for `br.label` targeting. */
+    loopLabel?: IrLabelId;
   }): void {
     this.pushInstr({
       kind: "for.loop",
@@ -1189,6 +1209,43 @@ export class IrFunctionBuilder {
       condValue: args.condValue,
       body: args.body,
       update: args.update,
+      ...(args.loopLabel !== undefined ? { loopLabel: args.loopLabel } : {}),
+      result: null,
+      resultType: null,
+    });
+  }
+
+  // --- multi-exit control flow (#2952 slice 2) -----------------------------
+
+  /**
+   * #2952 slice 2 — allocate a fresh per-function loop label. The from-ast
+   * layer calls this once per lowered loop; unlabeled `break` / `continue`
+   * emit `br.label` against the innermost loop's label.
+   */
+  freshLoopLabel(): IrLabelId {
+    return asLabelId(this.nextLabelId++);
+  }
+
+  /**
+   * #2952 slice 2 — emit a `br.label` (unlabeled `break` / `continue`
+   * targeting the loop identified by `label`). Buffer-terminating; the
+   * caller must not emit further instructions into the same buffer.
+   */
+  emitBrLabel(label: IrLabelId, mode: "break" | "continue"): void {
+    this.pushInstr({ kind: "br.label", label, mode, result: null, resultType: null });
+  }
+
+  /**
+   * #2952 slice 2 — emit a statement-level `if (cond) then [else]` inside a
+   * nested buffer. Both arms are pre-collected via `collectBodyInstrs`;
+   * `else` may be an empty array (plain if). Result is void.
+   */
+  emitIfStmt(args: { cond: IrValueId; then: readonly IrInstr[]; else: readonly IrInstr[] }): void {
+    this.pushInstr({
+      kind: "if.stmt",
+      cond: args.cond,
+      then: args.then,
+      else: args.else,
       result: null,
       resultType: null,
     });

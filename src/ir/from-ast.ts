@@ -64,6 +64,7 @@ import {
   type IrClosureSignature,
   type IrFunction,
   type IrInstr,
+  type IrLabelId,
   type IrObjectShape,
   type IrType,
   type IrUnop,
@@ -972,6 +973,15 @@ interface LowerCtx {
    * unproven read falls to the SAFE bounds-checked read (no trap).
    */
   readonly safeIndexedArrays?: ReadonlySet<string>;
+  /**
+   * #2952 slice 2 — the innermost enclosing CLAIMED loop's label, threaded
+   * onto the body cx by every loop lowerer. `lowerBreakContinueStatement`
+   * emits `br.label` against it (unlabeled break/continue bind the
+   * innermost loop, ECMA-262 §14.8/§14.9). Absent outside loop bodies;
+   * lifted-closure contexts are constructed fresh, so it never leaks
+   * across function boundaries.
+   */
+  readonly loopLabel?: IrLabelId;
 }
 
 /**
@@ -3685,7 +3695,7 @@ function lowerForOfStatement(stmt: ts.ForOfStatement, cx: LowerCtx): void {
  * MUST be called inside the `collectBodyInstrs` closure that builds the cond
  * buffer so the coercion instructions re-run each iteration.
  */
-function coerceLoopCondToBool(condValue: IrValueId, cx: LowerCtx, loopKind: "while" | "for" | "do"): IrValueId {
+function coerceLoopCondToBool(condValue: IrValueId, cx: LowerCtx, loopKind: "while" | "for" | "do" | "if"): IrValueId {
   const kind = asVal(cx.builder.typeOf(condValue))?.kind;
   if (kind === "i32") return condValue;
   if (kind === "f64") {
@@ -3717,7 +3727,10 @@ function lowerWhileStatement(stmt: ts.WhileStatement, cx: LowerCtx): void {
   if (condResult === null || condResult === undefined) {
     throw new Error(`ir/from-ast: while cond produced no SSA value (${cx.funcName})`);
   }
-  const bodyCx: LowerCtx = { ...cx, scope: new Map(cx.scope) };
+  // #2952 slice 2 — synthesise the loop's label and thread it as the
+  // innermost loop for the body, so unlabeled break/continue resolve here.
+  const loopLabel = cx.builder.freshLoopLabel();
+  const bodyCx: LowerCtx = { ...cx, scope: new Map(cx.scope), loopLabel };
   const bodyInstrs = cx.builder.collectBodyInstrs(() => {
     lowerStmt(stmt.statement, bodyCx);
   });
@@ -3725,6 +3738,7 @@ function lowerWhileStatement(stmt: ts.WhileStatement, cx: LowerCtx): void {
     cond: condInstrs,
     condValue: condResult,
     body: bodyInstrs,
+    loopLabel,
   });
 }
 
@@ -3744,8 +3758,11 @@ function lowerWhileStatement(stmt: ts.WhileStatement, cx: LowerCtx): void {
  */
 function lowerDoStatement(stmt: ts.DoStatement, cx: LowerCtx): void {
   // Body first (buffer built exactly as `while`, just emitted before cond
-  // at lower time). Scope mirrors the while path.
-  const bodyCx: LowerCtx = { ...cx, scope: new Map(cx.scope) };
+  // at lower time). Scope mirrors the while path. (#2952 slice 2) The
+  // synthesised label makes this loop the innermost break/continue target;
+  // a continue falls through to the cond (post-test semantics).
+  const loopLabel = cx.builder.freshLoopLabel();
+  const bodyCx: LowerCtx = { ...cx, scope: new Map(cx.scope), loopLabel };
   const bodyInstrs = cx.builder.collectBodyInstrs(() => {
     lowerStmt(stmt.statement, bodyCx);
   });
@@ -3765,6 +3782,7 @@ function lowerDoStatement(stmt: ts.DoStatement, cx: LowerCtx): void {
     condValue: condResult,
     body: bodyInstrs,
     postCond: true,
+    loopLabel,
   });
 }
 
@@ -3899,9 +3917,12 @@ function lowerForStatement(stmt: ts.ForStatement, cx: LowerCtx): void {
   // keeps the fast unchecked `vec.get`. Thread the proven pair onto a body-scoped
   // cx (immutable copy → no leak to siblings; nested loops accumulate outward).
   const provenPair = detectCountedLoopSafeIndex(stmt);
+  // #2952 slice 2 — synthesise the loop's label; the body cx carries it as
+  // the innermost break/continue target (a continue jumps to the update).
+  const loopLabel = innerCx.builder.freshLoopLabel();
   const bodyCx: LowerCtx = provenPair
-    ? { ...innerCx, safeIndexedArrays: new Set([...(innerCx.safeIndexedArrays ?? []), provenPair]) }
-    : innerCx;
+    ? { ...innerCx, safeIndexedArrays: new Set([...(innerCx.safeIndexedArrays ?? []), provenPair]), loopLabel }
+    : { ...innerCx, loopLabel };
   const bodyInstrs = innerCx.builder.collectBodyInstrs(() => {
     lowerStmt(stmt.statement, bodyCx);
   });
@@ -3918,6 +3939,7 @@ function lowerForStatement(stmt: ts.ForStatement, cx: LowerCtx): void {
     condValue: condResult,
     body: bodyInstrs,
     update: updateInstrs,
+    loopLabel,
   });
 }
 
@@ -3982,7 +4004,9 @@ function lowerForOfIterFromExternrefValue(
   const elemIrT: IrType = irVal({ kind: "externref" });
   const bodyScope = new Map(cx.scope);
   bodyScope.set(loopVarName, { kind: "slot", slotIndex: elementSlot, type: elemIrT });
-  const bodyCx: LowerCtx = { ...cx, scope: bodyScope };
+  // #2952 slice 2 — this loop is the innermost break/continue target.
+  const loopLabel = cx.builder.freshLoopLabel();
+  const bodyCx: LowerCtx = { ...cx, scope: bodyScope, loopLabel };
 
   const body = cx.builder.collectBodyInstrs(() => {
     lowerStmt(stmt.statement, bodyCx);
@@ -3994,6 +4018,7 @@ function lowerForOfIterFromExternrefValue(
     resultSlot,
     elementSlot,
     body,
+    loopLabel,
   });
 }
 
@@ -4042,7 +4067,9 @@ function lowerForOfString(stmt: ts.ForOfStatement, cx: LowerCtx, strV: IrValueId
     type: elemIrT,
     asType: { kind: "string" },
   });
-  const bodyCx: LowerCtx = { ...cx, scope: bodyScope };
+  // #2952 slice 2 — this loop is the innermost break/continue target.
+  const loopLabel = cx.builder.freshLoopLabel();
+  const bodyCx: LowerCtx = { ...cx, scope: bodyScope, loopLabel };
 
   const body = cx.builder.collectBodyInstrs(() => {
     lowerStmt(stmt.statement, bodyCx);
@@ -4055,6 +4082,7 @@ function lowerForOfString(stmt: ts.ForOfStatement, cx: LowerCtx, strV: IrValueId
     strSlot,
     elementSlot,
     body,
+    loopLabel,
   });
 }
 
@@ -4104,7 +4132,9 @@ function lowerForOfVec(
 
   const bodyScope = new Map(cx.scope);
   bodyScope.set(loopVarName, { kind: "slot", slotIndex: elementSlot, type: elemIrT });
-  const bodyCx: LowerCtx = { ...cx, scope: bodyScope };
+  // #2952 slice 2 — this loop is the innermost break/continue target.
+  const loopLabel = cx.builder.freshLoopLabel();
+  const bodyCx: LowerCtx = { ...cx, scope: bodyScope, loopLabel };
 
   const body = cx.builder.collectBodyInstrs(() => {
     lowerStmt(stmt.statement, bodyCx);
@@ -4119,6 +4149,7 @@ function lowerForOfVec(
     dataSlot,
     elementSlot,
     body,
+    loopLabel,
   });
 }
 
@@ -4190,6 +4221,10 @@ function lowerStmt(stmt: ts.Statement, cx: LowerCtx): void {
     const childCx: LowerCtx = { ...cx, scope: new Map(cx.scope) };
     for (const s of stmt.statements) {
       lowerStmt(s, childCx);
+      // #2952 slice 2 — a break/continue terminates its buffer (the
+      // verifier requires br.label to be last); statements after it are
+      // dead code — skip them rather than emit unreachable instrs.
+      if (ts.isBreakStatement(s) || ts.isContinueStatement(s)) break;
     }
     return;
   }
@@ -4292,7 +4327,61 @@ function lowerStmt(stmt: ts.Statement, cx: LowerCtx): void {
     lowerTryStatement(stmt, cx);
     return;
   }
+  // #2952 slice 2 — statement-level if inside a body buffer.
+  if (ts.isIfStatement(stmt)) {
+    lowerIfBodyStatement(stmt, cx);
+    return;
+  }
+  // #2952 slice 2 — unlabeled break / continue against the innermost loop.
+  if (ts.isBreakStatement(stmt) || ts.isContinueStatement(stmt)) {
+    lowerBreakContinueStatement(stmt, cx);
+    return;
+  }
   throw new Error(`ir/from-ast: unsupported body statement ${ts.SyntaxKind[stmt.kind]} in ${cx.funcName}`);
+}
+
+/**
+ * #2952 slice 2 — lower a statement-position `if (cond) then [else]` inside
+ * a body buffer to the void `if.stmt` IR instr. Unlike the top-level
+ * statement-list `if` (which uses the block-CFG layer), nested buffers have
+ * no CFG access, so this stays fully structured: cond is lowered INLINE in
+ * the current buffer (evaluated once), each arm is collected into its own
+ * sub-buffer with a cloned scope (arm-local `let`s don't leak).
+ */
+function lowerIfBodyStatement(stmt: ts.IfStatement, cx: LowerCtx): void {
+  const raw = lowerExpr(stmt.expression, cx, irVal({ kind: "i32" }));
+  // Numeric-truthiness conds coerce via the shared NaN-safe ToBoolean
+  // (#2136); ref/string conds throw → legacy fallback, same discipline as
+  // the loop conds.
+  const cond = coerceLoopCondToBool(raw, cx, "if");
+  const thenCx: LowerCtx = { ...cx, scope: new Map(cx.scope) };
+  const thenInstrs = cx.builder.collectBodyInstrs(() => {
+    lowerStmt(stmt.thenStatement, thenCx);
+  });
+  const elseInstrs = stmt.elseStatement
+    ? cx.builder.collectBodyInstrs(() => {
+        lowerStmt(stmt.elseStatement!, { ...cx, scope: new Map(cx.scope) });
+      })
+    : [];
+  cx.builder.emitIfStmt({ cond, then: thenInstrs, else: elseInstrs });
+}
+
+/**
+ * #2952 slice 2 — lower an unlabeled `break;` / `continue;` to `br.label`
+ * against the innermost enclosing loop's synthesised label (threaded on
+ * `cx.loopLabel` by every loop lowerer). The selector's `inLoop` gate
+ * guarantees a label is in scope and the statement is unlabeled; the
+ * throws are internal-invariant assertions, not fallback paths.
+ */
+function lowerBreakContinueStatement(stmt: ts.BreakStatement | ts.ContinueStatement, cx: LowerCtx): void {
+  const kind = ts.isBreakStatement(stmt) ? "break" : "continue";
+  if (stmt.label) {
+    throw new Error(`ir/from-ast: labeled ${kind} not in #2952 slice 2 (${cx.funcName})`);
+  }
+  if (cx.loopLabel === undefined) {
+    throw new Error(`ir/from-ast: ${kind} outside a claimed loop — selector gate failed (${cx.funcName})`);
+  }
+  cx.builder.emitBrLabel(cx.loopLabel, kind);
 }
 
 /**
