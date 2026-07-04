@@ -237,3 +237,37 @@ describe("#3026 — duplicate binding names within a destructuring parameter", (
     expect(await isRejected("const [a] = [1]; const {a: b} = {a: 2}; void b;")).toBe(false);
   });
 });
+
+// Slice 7 — restricted production: `throw [no LineTerminator here] Expression`.
+// A LineTerminator right after `throw` triggers ASI, leaving `throw;` (no
+// operand) — a SyntaxError. TypeScript reparses the trailing expression as its
+// own statement and synthesizes a zero-width (missing) throw operand, emitting no
+// diagnostic, so nothing detected it. Covers test262 language/asi/S7.9_A4.js.
+describe("#3026 — no line terminator between `throw` and its expression", () => {
+  it("rejects a newline immediately after `throw` (`throw\\n 1`)", async () => {
+    expect(await isRejected("try { throw\n 1; } catch (e) {}")).toBe(true);
+  });
+
+  it("rejects a CRLF after `throw`", async () => {
+    expect(await isRejected("try { throw\r\n new Error('x'); } catch (e) {}")).toBe(true);
+  });
+
+  it("rejects a comment-then-newline after `throw`", async () => {
+    expect(await isRejected("try { throw /* c */\n 1; } catch (e) {}")).toBe(true);
+  });
+
+  // ── Valid controls: must NOT be rejected ──────────────────────────────────
+  it("accepts `throw` with its expression on the same line", async () => {
+    expect(await isRejected("function f(x: number) { if (x < 0) throw new Error('neg'); return x; } f(1);")).toBe(
+      false,
+    );
+  });
+
+  it("accepts `throw <string>` on the same line", async () => {
+    expect(await isRejected("function h(b: boolean) { if (b) throw 'bad'; return 1; } h(false);")).toBe(false);
+  });
+
+  it("accepts a `throw` whose expression wraps across lines (newline inside the operand)", async () => {
+    expect(await isRejected("function w() { throw new Error(\n  'multi'\n); } try { w(); } catch (e) {}")).toBe(false);
+  });
+});
