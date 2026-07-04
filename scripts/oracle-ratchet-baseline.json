@@ -121,8 +121,8 @@
       "ctxChecker": 5
     },
     "src/codegen/generators-native.ts": {
-      "getTypeAtLocation": 3,
-      "ctxChecker": 7
+      "getTypeAtLocation": 6,
+      "ctxChecker": 9
     },
     "src/codegen/index.ts": {
       "getTypeAtLocation": 53,
