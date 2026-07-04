@@ -1251,7 +1251,10 @@ export function lowerIrFunctionBody<S>(
           }
           const fromVal = lowerIrTypeToValType(operandIr, resolver, func.name);
           emitValue(instr.value, out);
-          for (const op of dyn.emitBox(fromVal)) emitter.pushRaw(out, op);
+          // The target's tag refinement (if the producer proved a partition)
+          // becomes the boxing hint — e.g. a Boolean-refined i32 boxes as a
+          // tag-4 boolean instead of the unbranded NUMBER default.
+          for (const op of dyn.emitBox(fromVal, instr.toType.tag)) emitter.pushRaw(out, op);
           return;
         }
         // `toType` must be a union (V1 only boxes into tagged unions). The

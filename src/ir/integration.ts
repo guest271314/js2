@@ -1661,6 +1661,37 @@ function isDynamicOp(instr: IrInstr): boolean {
 }
 
 /**
+ * #2949 slice 3 — map a box target's tag refinement onto `boxToAny`'s
+ * `jsType` hint. One partition table (js-tag.ts) → one hint vocabulary
+ * (value-tags.ts); "unknown" reproduces the historical kind-keyed dispatch
+ * exactly, so an unrefined box is behavior-identical to legacy's unbranded
+ * `any` coercion.
+ */
+function jsTagToStaticType(
+  hint: JsTag | undefined,
+): "null" | "undefined" | "boolean" | "number" | "string" | "object" | "function" | "unknown" {
+  switch (hint) {
+    case JsTag.Null:
+      return "null";
+    case JsTag.Undefined:
+      return "undefined";
+    case JsTag.Boolean:
+      return "boolean";
+    case JsTag.NumberI32:
+    case JsTag.NumberF64:
+      return "number";
+    case JsTag.String:
+      return "string";
+    case JsTag.Object:
+      return "object";
+    case JsTag.Function:
+      return "function";
+    default:
+      return "unknown";
+  }
+}
+
+/**
  * #2949 slice 3 — pre-register everything `makeDynamicLowering`'s emit
  * methods can resolve by name, BEFORE Phase-3 emission starts:
  *   - fast (gc strategy): `ensureAnyHelpers` — $AnyValue + the canonical
@@ -1759,14 +1790,16 @@ export function makeDynamicLowering(ctx: CodegenContext): IrDynamicLowering | nu
       anyValueTypeIdx: anyTypeIdx,
       tagFieldIdx: 0,
       payloadFieldIdx,
-      emitBox(from: ValType): readonly Instr[] {
+      emitBox(from: ValType, hint?: JsTag): readonly Instr[] {
         // Route through boxToAny — THE canonical boxing entry point. It only
         // touches `fctx.body`, so a body-only context shim is sound; using it
         // (instead of re-deriving the helper choice here) keeps ONE
         // kind→tag policy for legacy and IR (June-audit D4), including the
         // native-string re-tag arm and the honestAnyBoxing flag behavior.
+        // The refinement hint maps onto boxToAny's jsType hint verbatim —
+        // same "never override representation" contract.
         const shim = { body: [] as Instr[] } as unknown as FunctionContext;
-        if (!boxToAny(ctx, shim, from, "unknown")) {
+        if (!boxToAny(ctx, shim, from, jsTagToStaticType(hint))) {
           throw new Error(
             `ir/integration: no canonical boxing arm for operand kind "${from.kind}" — ` +
               `was preregisterDynamicSupport skipped? (#2949)`,
@@ -1833,14 +1866,18 @@ export function makeDynamicLowering(ctx: CodegenContext): IrDynamicLowering | nu
     payloadFieldIdx(tag: JsTag): number {
       throw new Error(`ir/integration: host dynamic carrier has no payload fields (asked for ${JsTag[tag]})`);
     },
-    emitBox(from: ValType): readonly Instr[] {
+    emitBox(from: ValType, hint?: JsTag): readonly Instr[] {
       switch (from.kind) {
         case "f64":
           return [callImport("__box_number")];
         case "i32":
-          // NUMBER semantics for bare i32 — identical to legacy's unbranded
-          // i32→externref coercion. Boolean-branded i32 needs the hinted
-          // arm (see the factory doc).
+          // Boolean-REFINED i32 boxes as a host boolean (mirrors legacy's
+          // type-aware coerceType, #2785). Unrefined i32 keeps NUMBER
+          // semantics — identical to legacy's unbranded i32→externref
+          // coercion.
+          if (hint === JsTag.Boolean) {
+            return [callImport("__box_boolean")];
+          }
           return [{ op: "f64.convert_i32_s" }, callImport("__box_number")];
         case "externref":
           // Host strings / already-host-boxed values ARE the carrier.

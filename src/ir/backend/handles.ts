@@ -208,9 +208,17 @@ export interface IrDynamicLowering {
    * canonical Wasm-kind-keyed policy — behavior-identical to legacy's
    * `any`-coercion for the same operand kind). host: `__box_number` family /
    * `extern.convert_any` / identity for externref.
-   * Throws when the operand kind has no sound unbranded box (e.g. i64 host).
+   *
+   * `hint` is the box target's OPTIONAL static tag refinement
+   * (`box{toType: {kind:"dynamic", tag}}`): a producer-proven partition.
+   * It maps onto `boxToAny`'s `jsType` hint and follows the same contract —
+   * honored only when consistent with the operand's Wasm kind, NEVER
+   * overriding representation. The one load-bearing case today: a
+   * Boolean-refined i32 boxes as a tag-4 boolean (`__any_box_bool` /
+   * `__box_boolean`) instead of the unbranded NUMBER default.
+   * Throws when the operand kind has no sound box at all (e.g. i64 host).
    */
-  emitBox(from: ValType): readonly Instr[];
+  emitBox(from: ValType, hint?: JsTag): readonly Instr[];
   /**
    * Carrier on the stack → the partition's payload. Caller must hold a
    * `tag.test` proof (verifier R2); a wasm-null carrier here is a producer
