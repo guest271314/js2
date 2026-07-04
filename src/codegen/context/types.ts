@@ -840,6 +840,15 @@ export interface CodegenContext {
    * function/message.
    */
   irPostClaimErrors: { kind: string; func: string; message: string }[];
+  /**
+   * #3000 — names of functions/class-members whose slots were actually patched
+   * with an IR-lowered body by `compileIrPathFunctions` (its `report.compiled`).
+   * A selector CLAIM alone does not imply emission: a claimed class member whose
+   * class has no `IrClassShape` is skipped in Phase B and stays byte-inert on
+   * legacy. This list is the durable non-vacuity signal — a member is GENUINELY
+   * IR-emitted iff it appears here. Surfaced on `CompileResult.irCompiledFuncs`.
+   */
+  irCompiledFuncs?: readonly string[];
   /** Last AST node with a valid source position — used as fallback for error reporting
    * when the immediate node lacks source file context (synthetic/detached nodes). */
   lastKnownNode: ts.Node | null;
