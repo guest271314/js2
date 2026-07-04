@@ -18,6 +18,14 @@ umbrella: 1712
 
 # #2850 — compiled-acorn throws validating regex character classes / named groups
 
+> **PARTLY SUPERSEDED by #2853 (see its repro B, verified 2026-07-03):** the
+> **char-class half is FIXED** on current main (`/[a-z]/`, `/[a]/`, `/\d/` all
+> parse — likely by #1690-family work); the surviving failure is **any regex
+> group `(…)`** (capturing, non-capturing, AND named). PO: re-scope this issue
+> to the group-throw or close it into #2853. In the interpreter sequencing
+> (`docs/architecture/runtime-eval-interpreter.md` §15–§16) the surviving half
+> is slice **P2**, a hard blocker for #2928's parser wiring.
+
 Surfaced by the wider acorn differential corpus
 (`tests/dogfood/acorn-corpus.mjs`, #1712 umbrella). Compiled-acorn throws a
 `WebAssembly.Exception` while **parsing/validating** certain regex-literal
