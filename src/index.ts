@@ -144,6 +144,15 @@ export interface CompileResult {
    */
   irPostClaimErrors?: { kind: string; func: string; message: string }[];
   /**
+   * (#3000) Names of functions/class-members whose slots were actually patched
+   * with an IR-lowered body (the integration pass's `report.compiled`). A mere
+   * selector claim does NOT imply emission — a claimed class member whose class
+   * has no `IrClassShape` is skipped in Phase B and stays byte-inert on legacy.
+   * This is the durable genuine-emission (non-vacuity) signal: a member is truly
+   * IR-emitted iff it appears here. Always collected on the WasmGC path.
+   */
+  irCompiledFuncs?: readonly string[];
+  /**
    * (#2138) IR-first compile-once inversion telemetry. Present ONLY when the
    * `JS2WASM_IR_FIRST=1` flag was active for this compile: lists the
    * top-level functions whose legacy body emission was skipped because the
