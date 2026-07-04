@@ -808,8 +808,20 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
   // eject at −162: the arms don't break dstr, they UNMASK latent failures of
   // the eager-buffer generator fixture (see #2141 S2 root cause + #3032).
   // Enable by default only after the #3032 waves land.
+  // GATE (pitfall from sd-3's attempt, memory
+  // reference_2040_tag5_field4_three_way_classifier: never gate the numeric
+  // arm on string availability): the classifier builds whenever the flag is
+  // on in standalone/wasi. The STRING arm needs the native content-eq
+  // (`canNativeStrEq`); in a module with NO string type at all
+  // (`anyStrTypeIdx < 0`, e.g. a pure-numeric program) tag-5 $AnyString
+  // payloads cannot exist, so the string arm is safely OMITTED and the
+  // numeric/object arms still work. If strings exist but content-eq is
+  // unavailable (host-import-only shapes), fall back to legacy entirely —
+  // classifying without a string arm would send equal-content distinct
+  // strings into the object `ref.eq` arm (wrong false).
   const tag5ValueEqThen = (): Instr[] => {
-    if (!ctx.tag5ValueEqClassifier || !canNativeStrEq) return tag5StringEqThen();
+    if (!ctx.tag5ValueEqClassifier || !(ctx.standalone === true || ctx.wasi === true)) return tag5StringEqThen();
+    if (!canNativeStrEq && ctx.anyStrTypeIdx >= 0) return tag5StringEqThen();
     const recoverAny = (operandIdx: number, scratchIdx: number): Instr[] => [
       { op: "local.get", index: operandIdx } as Instr,
       { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 4 } as Instr,
@@ -844,15 +856,19 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
         else: [{ op: "i32.const", value: 0 } as Instr],
       } as Instr,
     ];
-    const stringArm: Instr[] = [
-      ...bothTest(ctx.anyStrTypeIdx),
-      {
-        op: "if",
-        blockType: { kind: "val", type: { kind: "i32" } },
-        then: [...castFlatten(4), ...castFlatten(5), { op: "call", funcIdx: nativeStrEqualsIdx } as Instr],
-        else: objectArm,
-      } as Instr,
-    ];
+    // String arm only when the module HAS a string type (see gate note above);
+    // a string-free module cannot carry $AnyString payloads in tag-5 boxes.
+    const stringArm: Instr[] = canNativeStrEq
+      ? [
+          ...bothTest(ctx.anyStrTypeIdx),
+          {
+            op: "if",
+            blockType: { kind: "val", type: { kind: "i32" } },
+            then: [...castFlatten(4), ...castFlatten(5), { op: "call", funcIdx: nativeStrEqualsIdx } as Instr],
+            else: objectArm,
+          } as Instr,
+        ]
+      : objectArm;
     // Numeric arm requires the native $BoxedNumber type (always registered in
     // standalone/wasi before the eq helpers build — union imports first); the
     // S2 bisect (2026-07-04) confirmed the numeric AND object arms EACH
