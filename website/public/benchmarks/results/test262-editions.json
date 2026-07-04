@@ -10,9 +10,9 @@
   },
   {
     "edition": "ES5",
-    "pass": 10215,
-    "fail": 2731,
-    "ce": 129,
+    "pass": 10220,
+    "fail": 2717,
+    "ce": 138,
     "skip": 0,
     "total": 13075,
     "pct": 78,
@@ -58,8 +58,8 @@
   {
     "edition": "ES2015",
     "pass": 11102,
-    "fail": 4115,
-    "ce": 169,
+    "fail": 4100,
+    "ce": 184,
     "skip": 0,
     "total": 15386,
     "pct": 72,
@@ -67,8 +67,8 @@
       {
         "name": "destructuring-binding",
         "pass": 2059,
-        "fail": 439,
-        "ce": 35,
+        "fail": 423,
+        "ce": 51,
         "skip": 0,
         "total": 2533,
         "pct": 81
@@ -76,8 +76,8 @@
       {
         "name": "generators",
         "pass": 959,
-        "fail": 412,
-        "ce": 20,
+        "fail": 402,
+        "ce": 30,
         "skip": 0,
         "total": 1391,
         "pct": 69
@@ -94,8 +94,8 @@
       {
         "name": "default-parameters",
         "pass": 528,
-        "fail": 125,
-        "ce": 11,
+        "fail": 117,
+        "ce": 19,
         "skip": 0,
         "total": 664,
         "pct": 80
@@ -103,8 +103,8 @@
       {
         "name": "Symbol.iterator",
         "pass": 294,
-        "fail": 299,
-        "ce": 31,
+        "fail": 300,
+        "ce": 30,
         "skip": 0,
         "total": 624,
         "pct": 47
@@ -553,8 +553,8 @@
       {
         "name": "for-of",
         "pass": 1,
-        "fail": 0,
-        "ce": 3,
+        "fail": 1,
+        "ce": 2,
         "skip": 0,
         "total": 4,
         "pct": 25
@@ -1027,8 +1027,8 @@
   {
     "edition": "ES2018",
     "pass": 3807,
-    "fail": 416,
-    "ce": 28,
+    "fail": 405,
+    "ce": 39,
     "skip": 0,
     "total": 4251,
     "pct": 90,
@@ -1036,8 +1036,8 @@
       {
         "name": "async-iteration",
         "pass": 2956,
-        "fail": 301,
-        "ce": 27,
+        "fail": 290,
+        "ce": 38,
         "skip": 0,
         "total": 3284,
         "pct": 90
@@ -1081,8 +1081,8 @@
       {
         "name": "generators",
         "pass": 233,
-        "fail": 94,
-        "ce": 2,
+        "fail": 89,
+        "ce": 7,
         "skip": 0,
         "total": 329,
         "pct": 71
