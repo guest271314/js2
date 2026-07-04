@@ -2,8 +2,13 @@
 
 **Status:** architecture (this document) — decomposes the standing strategy
 proposal #1584 into a staged, landable roadmap and records the strategy
-decision with its trade-offs.
-**Author:** architect (arch-interp), 2026-07.
+decision with its trade-offs. **Part II (§12–§16, added 2026-07-04)** unifies
+the ladder post-Sprint-69 (Tiers 0/1/3 landed), records the interpreter
+representation ADR (bytecode over tree-walking), the unified name-resolution
+semantics (the #3017 bridge), the compiled-acorn feasibility verdict, and the
+revised Opus-executable slice sequencing. Where Part I and Part II disagree,
+**Part II wins**.
+**Author:** architect (arch-interp), 2026-07; Part II: architect, 2026-07-04.
 **Scope:** direct `eval`, indirect `eval` (`(0, eval)(s)`), and the `Function`
 constructor / `new Function`. **Out of scope of this doc:** `with` and `Proxy`
 mechanics themselves (tracked in #1355) — but this doc specifies the shared
@@ -74,19 +79,25 @@ needs no environment reification and is the largest, easiest slice.
 
 ## 2. Current state on `main` (what already exists)
 
+*(Table refreshed 2026-07-04 after the Sprint-69 landings: #2923, #2924,
+#2960, #2937.)*
+
 | Mechanism | File | What it does | Standalone? |
 |---|---|---|---|
-| Constant-string `eval` inliner (#1163) | `src/codegen/expressions/eval-inline.ts` | Parses a compile-time-constant `eval("…")` string as a Script and splices its statements inline at the call site. Bails on function/class/arrow/for-of/for-in/yield/await in the body. | **Yes** (pure AOT) |
-| Eval tiering classifier (#1261) | `src/codegen/eval-tiering.ts` | Read-only pass classifying a module's eval usage into 5 tiers (NoEval / StaticLiteral / Indirect / DirectStrict / DirectSloppy). Does not yet gate codegen. | n/a |
-| Call-site lowering | `src/codegen/expressions/calls.ts` (~3965) | Tries `tryEvalAsRegExpPeephole` → `tryStaticEvalInline` → falls through to `__extern_eval(src, isDirect)` host import. | Host import → traps standalone |
-| JS-host meta-circular shim (#1164) | `src/runtime-eval.ts` (`createEvalShim`), `src/runtime.ts` (~8048) | Recompiles the dynamic source through js2wasm at runtime → fresh WasmGC module via `WebAssembly.Module(bytes)` (sync). CSP-friendly (`wasm-unsafe-eval`), no `(0,eval)` capability leak. Legacy `(0,eval)` fallback for harness-rewritten strings. | **No** — host import absent standalone |
-| `new Function(...)` | `src/codegen/expressions/new-super.ts` (~3179) | **No-op stub**: evaluates args for side effects, returns `ref.null.extern` (a function that returns `undefined`). | trivially, but wrong |
+| Constant-string `eval` inliner (#1163, **broadened by #2923**) | `src/codegen/expressions/eval-inline.ts` | Parses a compile-time-constant `eval("…")` string as a Script and splices its statements inline. Now covers top-level sloppy function declarations (incl. recursion/mutual refs) and `for-of`/`for-in` over literals. Sound bails remain for: `"use strict"` prologues, AnnexB §B.3.3 conditional-hoist shapes (block-nested decls at script scope), classes, function/arrow *expressions*, yield/await/import/export, non-literal iterables. **91.7 % of test262 eval call-sites are constant-string** (2,394 of 2,611 — `scripts/eval-const-classifier.mjs`). | **Yes** (pure AOT) |
+| ~~Eval tiering classifier (#1261)~~ | ~~`src/codegen/eval-tiering.ts`~~ | **Deleted by #2960** (`classifyEvalTier` had zero production callers). The `isGlobalEvalIdentifier` / `isGlobalFunctionIdentifier` shadow-detection helpers survive. | n/a |
+| Call-site lowering, `eval` | `src/codegen/expressions/calls.ts` | Tries `tryEvalAsRegExpPeephole` → `tryStaticNewFunction`/`tryStaticFunctionCtorCall` → `tryStaticEvalInline` → host: `__extern_eval(src, isDirect)` import. **Standalone/wasi (#2960): NO import leak** — source-located compile warning + catchable call-time throw. | Tier-3 refuse-loudly |
+| JS-host meta-circular eval shim (#1164) | `src/runtime-eval.ts` (`createEvalShim`), `src/runtime.ts` | Recompiles the dynamic source through js2wasm at runtime → fresh WasmGC module (sync, LRU-cached). CSP-friendly, no `(0,eval)` capability leak. Known gaps: direct-eval scope capture (#2925), free-var resolution / `ReferenceError` shape in the child module (#3017 gap 2). | **No** — host tier |
+| `new Function("<const>")` (#2924) | `src/codegen/expressions/eval-inline.ts` (`synthesizeStaticNewFunction`, `tryStaticNewFunction`, `tryStaticFunctionCtorCall`) | Constant params+body → real AOT function over **global scope only** (`localMap`/`boxedCaptures` swapped empty = the §20.2.1.1 no-capture invariant). Value form + immediate-call form. Bails: `"use strict"` prologue, `this` in body (§10.4.3 `this === globalThis` unprovidable by splice), unsupported nodes. | **Yes** (pure AOT) |
+| `new Function(<dynamic>)`, host (#2960) | `src/runtime-eval.ts` (`createNewFunctionShim`, `env::__extern_new_function`) | Compiles the body as an exported function via `compileSourceSync` and returns a real JS-callable (unlike the eval shim's child-module closure). LRU-cached. | **No** — host tier |
+| `new Function(<dynamic>)`, standalone (#2960) | `src/codegen/expressions/new-super.ts` | Source-located compile **warning** + a call-time-**throwing** stub value (construction succeeds; invoking throws catchably). No silent `undefined`, no instantiation trap. | Tier-3 refuse-loudly |
 
 **Key correction to the #1584 framing:** #1584 was written as if eval were an
-unsolved greenfield problem. It is not — Tiers 0 and 1 are shipped. This doc
-re-bases the roadmap on that reality: the interpreter is the *third* leg, and
-several high-value slices (broaden Tier 0, `new Function` compile-away,
-direct-eval reification in Tier 1) land **before** any VM exists.
+unsolved greenfield problem. It is not — Tiers 0 and 1 are shipped (and, as of
+Sprint 69, broadened), and Tier 3 (refuse-loudly) is shipped. This doc re-bases
+the roadmap on that reality: the interpreter is the remaining leg, and the
+high-value non-interpreter slices (A/B, the #2960 diagnostics) have **already
+landed**.
 
 ---
 
@@ -387,14 +398,18 @@ Each slice is an issue (ids in §11). First two are `sprint: current` (S/M,
 independently landable, no interpreter). The rest are `sprint: Backlog`
 (the interpreter build-out), ordered by dependency.
 
-### A. Broaden constant-string compile-away — **S, current, independent** (#2923)
+*(Status 2026-07-04: A and B are **done** (sprint 69); the standalone
+refuse-loudly rung landed as #2960 — see §12. E's sequencing is superseded by
+the finer-grained slices in §16.)*
+
+### A. Broaden constant-string compile-away — **S, DONE** (#2923)
 Extend `tryStaticEvalInline` (#1163) to cover the currently-bailed node kinds
 (function/class declarations, `for-of`/`for-in`) in constant `eval` bodies,
 using the existing hoist + nested-declaration machinery. Pure AOT, standalone-
 safe. Ships a constant-vs-dynamic classifier count (§5.4) as an artifact.
 *Depends on:* nothing. *Backend:* both.
 
-### B. `new Function("<const>")` compile-away — **M, current, independent** (#2924)
+### B. `new Function("<const>")` compile-away — **M, DONE** (#2924)
 Replace the no-op `new Function` stub (`new-super.ts` ~3179) with an AST-splice
 that, when args are compile-time-constant, synthesizes a real AOT function
 (global scope, §4.4) via the #1163 machinery and returns a callable. Dynamic
@@ -521,3 +536,298 @@ substrate and self-host; F needs both plus the MOP surface shared with #1355.
 | F | #2929 | XL | Backlog | Interpreter direct eval + `with` + Proxy-MOP convergence |
 
 All six are children of umbrella #1584 and belong to goal `runtime-eval`.
+
+---
+
+---
+
+# Part II — Unification update (2026-07-04)
+
+Written after the Sprint-69 landings (#2923 A, #2924 B, #2960 diagnostics +
+host `new Function` shim, #2937 acorn-regression fix, the #2927 built-in-audit
+refinement). Part II is the authoritative statement of: the complete tier
+ladder and its routing rules (§12), the interpreter representation decision
+(§13), the unified name-resolution/environment-bridging semantics (§14), the
+compiled-acorn feasibility verdict (§15), and the revised slice sequencing
+(§16, mirrored as the `## Implementation Plan` in #2928).
+
+## 12. The tier ladder, complete (authoritative routing)
+
+The fallback ladder has **four** rungs, not three — the fourth (refuse-loudly)
+was implicit in Part I and **landed** as #2960. Naming it matters because it is
+the rung that guarantees the ladder's core invariant:
+
+> **Invariant L1 (no silent wrong values):** every dynamic-code call site
+> resolves, in every mode, to exactly one tier; the bottom tier is a
+> *source-located compile-time warning plus a catchable call-time throw* —
+> never a silent `undefined`, never an instantiation trap, never a missing
+> import discovered only at load time.
+
+| Tier | Mechanism | Fires when | Mode | Status |
+|---|---|---|---|---|
+| **0 — compile-away** | AOT splice (#1163/#2923/#2924) | source string compile-time constant **and** body inside splice coverage (sound bails listed in §2) | both | **landed** |
+| **1 — host meta-circular shim** | runtime recompile via js2wasm (#1164 `createEvalShim`, #2960 `createNewFunctionShim`) | dynamic source (or Tier-0 bail) **and** JS host present | host | **landed** (gaps: #2925 direct-eval scope, #3017 free-var `ReferenceError` shape) |
+| **2 — embedded interpreter** | self-compiled Acorn → bytecode → dispatch loop (#2927/#2928/#2929) | dynamic source (or Tier-0 bail) **and** no host (or host mode by choice, later) | standalone (primary), host (optional) | **not built** — this doc's subject |
+| **3 — refuse loudly** | compile warning + call-time catchable throw (#2960) | anything that reaches the bottom: today, all standalone dynamic code; permanently, constructs Tier 2 deliberately never supports | both | **landed** |
+
+Routing decision table (call-site shape × mode → tier, current vs. target):
+
+| Call-site shape | Host today | Host target | Standalone today | Standalone target |
+|---|---|---|---|---|
+| `eval("<const, in coverage>")` | 0 | 0 | 0 | 0 |
+| `eval("<const, bailed>")` (strict prologue, AnnexB shape, class, …) | 1 | 1 | 3 | **2** |
+| direct `eval(<dynamic>)` | 1 (no scope capture) | 1 + #2925 reified env | 3 | **2** (needs §14 env chain, #2929) |
+| indirect `(0,eval)(<dynamic>)` | 1 | 1 | 3 | **2** (global scope only, #2928) |
+| `new Function("<const>")` | 0 | 0 | 0 | 0 |
+| `new Function("<const>")` bails (`this` in body, strict prologue) | 1 (#2960 shim) | 1 | 3 | **2** |
+| `new Function(<dynamic>)` | 1 (#2960 shim) | 1 | 3 | **2** (first Tier-2 milestone — global scope, no capture) |
+| `with (obj) { … }` | unsupported | (unchanged AOT) | unsupported | **optional 2'** — build-time bytecode deopt, §12.1 |
+| Proxy traps (#1355) | partial | not an execution-tier question — shares §14 env-records + the F-slice MOP surface | partial | same |
+
+**Routing rules (normative):**
+
+1. **Tier selection for a call site is a compile-time decision between
+   “Tier 0” and “defer to the runtime tier”.** The runtime tier is then picked
+   by *mode*: host → Tier 1, standalone → Tier 2 (Tier 3 until Tier 2 exists,
+   and permanently for out-of-scope constructs).
+2. **Tier-0 bails must stay sound** — the #2923 merge-group park (AnnexB
+   conditional hoisting, strict early errors) is the standing lesson: a
+   broadened splice that changes observable semantics is worse than a bail.
+   Broadening Tier 0 is allowed only with a proof the spliced semantics match
+   PerformEval/CreateDynamicFunction for the lifted shape.
+3. **Tier transitions must be monotone in diagnostics**: replacing a Tier-3
+   throw with a Tier-2 execution is the only allowed direction; no change may
+   reintroduce a silent-wrong-value path (invariant L1).
+4. **Tier 2 in host mode is optional, not required.** Tier 1 stays the host
+   fast path (Part I §3.1/§3.3). Once Tier 2 exists, host mode MAY route to it
+   (e.g. under CSP without `wasm-unsafe-eval`, or to unify semantics), but
+   that is a flag, not a milestone gate.
+
+### 12.1 Generalization: the interpreter as the AOT **deopt target** (not only for strings)
+
+The assignment of this ladder is broader than `eval`: the interpreter is the
+project's answer to **any** code the compiler cannot statically compile. Two
+producers can feed the same bytecode format:
+
+- **(a) runtime producer** — compiled-Acorn ESTree → bytecode emitter, for
+  dynamic source strings (`eval`, `new Function`). This is #2928.
+- **(b) build-time producer** — the IR→bytecode backend (**#1715 proof
+  point**), for *functions the AOT backend refuses*: `with`-containing bodies,
+  future deferred-feature classes. Such a function compiles to a bytecode
+  blob in the constant pool plus a thin Wasm wrapper that enters the dispatch
+  loop; its callers see an ordinary function value.
+
+This is the resolution of the apparent conflict in #2928's original wording
+("bytecode emitter as a second IR backend" — that is producer (b); the
+runtime emitter (a) consumes ESTree, not IR, because there is no js2wasm IR
+inside the emitted module). **Phase 1 builds only producer (a).** Producer (b)
+is a design constraint on the opcode ADR — the opcode set must not assume
+"parsed at runtime" (e.g. it must carry enough static info that IR lowering
+can also target it) — and a Phase-3 option to be re-decided at #2929 time.
+This constraint is cheap now and expensive to retrofit.
+
+## 13. Representation ADR: **bytecode** (register + accumulator), tree-walking rejected
+
+The one open representation question the ladder left: should Tier 2 execute
+**bytecode** (as #2928 drafts) or **tree-walk the compiled-acorn ESTree
+directly** (skipping the emitter/encoder layer entirely)? Decision:
+**bytecode, confirmed.** The honest case:
+
+**What tree-walking would buy.** No opcode ADR, no encoder/jump-patching/
+exception tables, no disassembler; one component instead of two; each ESTree
+node kind maps to one `evaluate` case, so conformance breadth grows linearly
+with visitor cases. For run-once `eval` bodies (the common test262 shape) the
+walker's per-execution cost ≈ the emitter's one-time cost, so "bytecode is
+faster" is *not* by itself decisive for the fallback tier.
+
+**Why bytecode wins anyway:**
+
+1. **The hot loop lands on the strong substrate, not the weak one.** A
+   tree-walker's inner loop is *string-keyed dynamic property reads on open
+   `$Object`s* (`node.type`, `node.left`, …) — per node, per execution,
+   forever. That is exactly the boxed-any/dynamic-reader substrate that is
+   still being hardened (Part I §4.2 dependency note) and the slowest shape
+   js2wasm emits. A bytecode loop dispatches on an **i32 opcode via a dense
+   `br_table`** over typed struct/array reads — the one interpreter shape
+   js2wasm already provably compiles well (**#1715**). The fragile dynamic AST
+   reads still happen, but **only in the emitter, once per parse** — fragility
+   is isolated in a run-once component instead of the steady-state loop.
+2. **Retained callables re-execute.** `new Function` results are stored and
+   re-invoked (loops, callbacks, harness helpers). A walker re-pays the full
+   dynamic-read walk per call; bytecode amortizes it to one emit.
+3. **Suspension needs an explicit PC.** Generator/async bodies inside eval'd
+   code (#2929, aligned with #2864/#2865) require suspend/resume
+   mid-execution. With bytecode, suspension is "store PC + registers into the
+   heap `$Frame`, return; resume restores them" — the same `$Frame` carrier
+   #2864 builds. A tree-walker suspends only by CPS-transforming the entire
+   walker or authoring every visit function as a self-hosted generator —
+   structurally worse and a much harsher self-compile stress.
+4. **Two producers, one consumer (§12.1).** Bytecode can be produced at
+   runtime from ESTree *and* at build time from IR (#1715), making the
+   interpreter the general deopt target for `with`-class features. A
+   tree-walker serves only the runtime-string case.
+5. **The bytecode layer is testable off-substrate.** Emitter + loop are plain
+   TS operating on ESTree/arrays — they run and unit-test **in Node against
+   node-acorn** before any self-compilation (slice E1, §16). This removes most
+   of the "extra layer, debugged blind inside Wasm" cost that would otherwise
+   favor the walker; the residual cost is the ADR + a disassembler for debug.
+
+**Rejected, not staged.** A "tree-walker first, bytecode later" staging was
+considered and rejected: it builds two interpreters, doubles the conformance
+surface, and the walker's simplicity advantage mostly evaporates once E1's
+test-in-Node strategy is in place.
+
+**Design parameters (into the #2928 opcode ADR, `docs/adr/`):**
+register + accumulator machine (Ignition-style; fewer operands per op than
+pure stack); ~30 Phase-1 opcodes (#2928 list stands); bytecode as an i32
+WasmGC array + a boxed-any constant pool + a side exception table (try ranges
+→ handler PC); one heap `$Frame` per activation: `{ func-meta ref, pc, regs:
+mutable boxed-any array, envRec (§14), parent }`. Wasm locals cache the hot
+fields (pc, sp) inside the loop; the `$Frame` is written back only at
+suspension/call boundaries. Opcodes carry no runtime-type assumptions —
+operands are always boxed-any; typed fast paths are a non-goal (the AOT path
+owns performance).
+
+## 14. Unified name resolution — one semantics, three consumers (the #3017 bridge)
+
+#3017 (gap 2) documented the symptom: `Function("return f();")()` in the host
+shim produces `"null is not a function"` instead of the spec-correct
+`ReferenceError` — because the child module compiles free identifiers against
+*its own empty globals* and unresolved names decay to null callables. The fix
+is not shim-local; it is a **single name-resolution semantics** that Tier 1,
+Tier 2, and the build-time deopt path (§12.1) all implement:
+
+**The environment-record chain (normative model, after ECMA-262 §9.1):**
+
+```
+$EnvRec = struct {
+  kind:   declarative | object | global      ;; i32 tag
+  parent: (ref null $EnvRec)                 ;; lexical parent
+  ;; declarative: names → slot map + mutable boxed-any slots
+  ;; object/global: a backing $Object (globalThis for global)
+}
+```
+
+- The **global environment record** wraps the module's globalThis `$Object`
+  (#369) — the same object AOT code reads/writes. `var`/`function` hoisting
+  from indirect eval / `new Function` bodies creates properties there,
+  visible to AOT code and vice versa (Part I §4.3).
+- A **declarative record** is the #2864 `$Frame` extended with a
+  `name → slot` map — produced by direct-eval reification (#2925, Part I
+  §4.1). One carrier, shared with generators/async.
+- An **object record** over an arbitrary `$Object` is `with` (Part I §7) —
+  same struct, `kind = object`.
+
+**Resolution algorithm (all consumers):** walk `parent` links; declarative →
+map lookup into slots; object/global → property lookup on the backing
+`$Object` (through the prototype chain, per OrdinaryGet); miss at the root ⇒
+**throw `ReferenceError: <name> is not defined`** — typed, catchable, never a
+null-deref or null-call.
+
+**The three consumers:**
+
+1. **Tier 2 interpreter** — `LdName`/`StName` opcodes execute exactly this
+   walk (#2929 for the full chain; #2928 Phase 1 needs only the global record:
+   `LdGlobal`/`StGlobal` are the root-only special case).
+2. **Tier 1 host shim (#3017 gap 2, concrete direction).** The shim's child
+   module must compile eval/Function-code with **eval-code linkage**: free
+   identifiers that don't resolve inside the eval'd source lower to dynamic
+   get/set against a **global-environment handle passed in from the parent
+   module** (the parent's globalThis `$Object`, threaded through
+   `__extern_eval`/`__extern_new_function`), with the root-miss
+   `ReferenceError` above. This simultaneously fixes (a) the misleading error
+   shape (#3017's acceptance), and (b) the deeper sharing bug — today an
+   eval'd `var x = 1` lands in the *child's* globals and is invisible to the
+   parent. Direct-eval additionally passes the reified declarative record
+   (#2925) as the chain head. Tier 1 and Tier 2 thereby become observably
+   equivalent on name resolution — required if a program is ever migrated
+   between modes.
+3. **Build-time bytecode deopt (§12.1, later)** — the IR→bytecode producer
+   emits the same `LdName`/`StName` against records reified at function entry.
+
+**Strictness note:** `Function`-constructor bodies and indirect eval are
+*always* global-scope (§20.2.1.1/§19.2.1) — a caller-local name in the body
+resolving to the caller's binding is a bug, not a feature (#2924 already
+enforces this for Tier 0 by swapping `localMap` empty; the interpreter
+enforces it by rooting the chain at the global record). Direct eval in strict
+code gets a *fresh* declarative record layered over the caller chain
+(PerformEval steps 17–20) so its `var`s don't leak — a #2929 concern, stated
+here so the record model accounts for it.
+
+## 15. Compiled-acorn feasibility (dogfood status, 2026-07-04)
+
+Verdict: **feasibility is confirmed; two tokenizer/validator bugs are the
+hard blockers left before #2928 can wire the parser.**
+
+Evidence chain (post-#2937, which is **done** — the host `$Object`-hash
+poison that had zeroed the parser is fixed and re-landed):
+
+- Acorn **compiles** through js2wasm with no source edits (100 %), the 651 KB
+  binary **validates and instantiates** (100 %), and the #1710/#1712 corpus is
+  back to **13/22 inputs at structural parity** (equal ± cosmetic quirks) —
+  classes, generators, async, destructuring, for-await, import attributes,
+  optional chaining all parse correctly.
+- The remaining REAL divergences split into two classes with **very different
+  relevance** (the #2927 probe's key insight):
+  - **True parser bugs — block the interpreter:** **#2853-A** (division after
+    a *numeric literal* mis-tokenized as a regex start — `1 / 2` throws; fires
+    on virtually any real code) and **#2853-B** (regex literal containing any
+    group `(…)` throws in `validateRegExpPattern` — supersedes the surviving
+    half of #2850, whose char-class half is already fixed). Plus **#2846**
+    (BigInt literals → f64 corruption; low priority for eval bodies).
+  - **Suspected host-marshalling-only losses — likely irrelevant:** #2841
+    (params[] blank), #2851 (template quasis blank), #2852 (sequence children
+    blank), #2847 (cosmetics). The corpus harness reads the AST through
+    `wrapExports`, i.e. across the host boundary; under strategy 2(a) the
+    bytecode emitter consumes the AST **in-Wasm**, never through
+    `wrapExports`. *Suspected* — not proven — which is exactly what slice
+    **E0** (the in-Wasm AST consumer probe, §16) arbitrates. If E0 shows the
+    fields are intact in-Wasm, those four issues drop out of the interpreter's
+    critical path entirely.
+- **How the emitter reads the AST**: compiled-acorn `Node`s are open
+  `$Object`s with dynamically-assigned fields, so every node-field read in the
+  emitter goes through the dynamic `$Object` read path (name-keyed). This is
+  acceptable *because the emitter runs once per parse* (§13 point 1), but it
+  means the emitter inherits the dynamic-reader substrate's maturity — E0
+  doubles as the measurement of that inheritance.
+
+Consequences for sequencing: **#2853-A/B are promoted to named prerequisite
+slices (P1/P2)** of #2928 wiring; E0 is the first artifact; and — the key
+schedule insight — **the interpreter library itself (E1) does not depend on
+compiled-acorn at all** (it develops against node-acorn ESTree in Node), so
+E1 proceeds in parallel with P1/P2. #2850 should be re-scoped to its
+surviving group-throw half or closed into #2853 (flagged for PO).
+
+## 16. Revised slice sequencing (Opus-executable)
+
+Supersedes Part I §6-E's monolithic XL. Every slice is independently landable
+with its own acceptance test; the full detail (files, function names, edge
+cases) lives in #2928's `## Implementation Plan`.
+
+| Slice | Size | What | Depends on |
+|---|---|---|---|
+| **E0** — in-Wasm AST consumer probe | S | TS walker compiled alongside Acorn; calls `parse` and walks the AST **inside Wasm**, returns node-count/field scalars. Arbitrates true-parser-bug vs marshalling for #2841/#2851/#2852 (§15). | — (unblocked now) |
+| **P1** — #2853-A tokenizer fix | M | division-after-numeric-literal regex-context bug (a js2wasm miscompile of acorn's token-context update, most likely — root-cause in the compiler, not acorn). | — |
+| **P2** — #2853-B regex-group fix | M | `validateRegExpPattern` throw on any `(…)` group (suspected #1690-family global-array typing). Re-verify #2850's remaining half here. | — |
+| **E1** — interpreter library, tested in Node | L | Opcode ADR (`docs/adr/`) + ESTree→bytecode emitter + dispatch loop + `$Frame`/env-record types + disassembler, authored in the strictly-typed js2wasm-compilable TS subset but **developed and unit-tested in Node against node-acorn** (fixture corpus of eval bodies). Zero Wasm involvement. | — (parallel with P1/P2/E0) |
+| **E2** — self-compile + standalone dynamic `new Function` | L | Compile E1's emitter+loop via js2wasm into the module (behind the may-contain-dynamic gate); wire `new Function(<dynamic>)` standalone: Acorn parse → emit → callable that enters the loop. Global scope only. Replaces the Tier-3 throw at that call-site class. | E0, P1, P2, E1 |
+| **E3** — indirect eval + global hoisting | M | `(0,eval)(<dynamic>)` standalone; `var`/`function` hoist onto the globalThis `$Object`; AOT↔interpreted visibility both directions (§14). | E2 |
+| **E4** — exception bridging | M | `Throw`/`TryStart`/`TryEnd` opcodes + Wasm-EH tag propagation across the AOT↔interpreter boundary; root-miss `ReferenceError` (§14). | E2 |
+| **E5** — `CallBuiltin` over the #2927 generic surface | M–L | Wire the unified `CallBuiltin(name, recv, argsVec)` entry to the audited dispatch infra. Gap slices it depends on (from the #2927 audit, each landable alone): **G1** Map/Set `ref.test` brand arms in the closed-method dispatcher (turnkey, mirrors the landed push/pop arm); **G2** args-passing on the standalone generic path + `__apply_closure` arity>4 lift; **G3** array callback methods host-free (replace `env.__make_callback`); **G4** `string[]` carrier in `__vec_push`/`__vec_pop` (#2784). | E2; G1/G2 hard, G3/G4 soft |
+| **E6** — packaging & size floor | M | Interpreter+Acorn as a separately-compiled module linked on demand via #2527 canonical rec-groups; no-eval modules keep the size floor; one measured size figure for eval-enabled modules. | E2, #2527 |
+| then **F/#2929** | XL | full env-record chain (`LdName`/`StName`), standalone direct eval, `with` (object records), Proxy-MOP convergence, generator/async opcodes via PC-in-`$Frame` (#2864). | E3–E5, #2925, #2864 |
+
+Independent Tier-1 work, schedulable anytime (shares §14 semantics, no
+interpreter dependency): **#2925** (direct-eval reification, host) and
+**#3017 gap 2** (shim eval-code linkage + `ReferenceError` shape — §14
+consumer 2). #3017 gap 1 (poison-pill `.caller`/`.arguments`) is unrelated to
+the ladder and stays as filed.
+
+```
+        E0 ──┐
+        P1 ──┼──▶ E2 ──▶ E3 ──▶ ┐
+        P2 ──┤        ─▶ E4 ──▶ ├──▶ F (#2929)
+        E1 ──┘        ─▶ E5 ──▶ ┘
+  (E1 ∥ P1/P2/E0 — no shared dependency)      E6 rides after E2 (+#2527)
+  G1..G4 feed E5 · #2925/#3017-g2 (Tier 1) fully parallel
+```
