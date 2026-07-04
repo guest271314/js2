@@ -101,15 +101,15 @@ bucket work #2856–#2859.
 
 ## Declarations
 
-| Kind                                            | Status      | Notes                                                           | Tracking |
-| ----------------------------------------------- | ----------- | --------------------------------------------------------------- | -------- |
-| `FunctionDeclaration`                           | ir-owned    | The IR claim unit. Each rejection bucket reduces the claim set. | #1376    |
-| `MethodDeclaration`                             | mixed       | #1370 Phase B; #3000-E adds subclass methods + `super.method()`. | #1370    |
+| Kind                                            | Status      | Notes                                                              | Tracking |
+| ----------------------------------------------- | ----------- | ------------------------------------------------------------------ | -------- |
+| `FunctionDeclaration`                           | ir-owned    | The IR claim unit. Each rejection bucket reduces the claim set.    | #1376    |
+| `MethodDeclaration`                             | mixed       | #1370 Phase B; #3000-E adds subclass methods + `super.method()`.   | #1370    |
 | `ConstructorDeclaration`                        | mixed       | #3000-C ctor emission (`class.alloc`); #3000-E `super(...)` chain. | #3000    |
-| `GetAccessorDeclaration`                        | mixed       | #3000-B accessors; #3000-E subclass accessors (`Dog_get_breed`).  | #3000    |
-| `SetAccessorDeclaration`                        | mixed       | #3000-B accessors over the private slot.                          | #3000    |
-| `EnumDeclaration`                               | direct-only | Compile-time only; emitted as constants by direct codegen.      | (future) |
-| `InterfaceDeclaration` / `TypeAliasDeclaration` | deferred    | Type-erased; no Wasm output.                                    | —        |
+| `GetAccessorDeclaration`                        | mixed       | #3000-B accessors; #3000-E subclass accessors (`Dog_get_breed`).   | #3000    |
+| `SetAccessorDeclaration`                        | mixed       | #3000-B accessors over the private slot.                           | #3000    |
+| `EnumDeclaration`                               | direct-only | Compile-time only; emitted as constants by direct codegen.         | (future) |
+| `InterfaceDeclaration` / `TypeAliasDeclaration` | deferred    | Type-erased; no Wasm output.                                       | —        |
 
 ## Selector buckets (one row = one reason from `src/ir/select.ts`)
 
@@ -117,23 +117,23 @@ These are the reasons a `FunctionDeclaration` ends up in `mixed` rather
 than `ir-owned`. Driving each unintended bucket to zero promotes the
 relevant kind row above.
 
-| Bucket reason                 | Category   | What promotes a row                                          |
-| ----------------------------- | ---------- | ------------------------------------------------------------ |
-| `body-shape-rejected`         | unintended | from-ast.ts handles every statement in the body              |
-| `external-call`               | unintended | Math.\* / parseInt / Console wired through IR (#1371)        |
-| `call-graph-closure`          | unintended | Callees of claimed funcs all claimable themselves            |
-| `param-shape-rejected`        | unintended | Destructuring params supported (#1372)                       |
-| `param-type-not-resolvable`   | unintended | TypeMap propagation reaches the param                        |
-| `return-type-not-resolvable`  | unintended | TypeMap propagation reaches the return                       |
-| `type-resolution-failure`     | unintended | Same                                                         |
-| `class-method`                | unintended | #1370/#3000 B-C-E — corpus bucket is **0** (#3000-E); NOT yet in `STRICT_IR_REASONS` — the reason still covers out-of-corpus deferred shapes (computed/generator/abstract method names, static `super`, subclass-of-builtin members) |
-| `destructuring-param-complex` | unintended | Complex destructuring params lowered (subset of param-shape) |
-| `async-function`              | deferred   | Async bodies — CPS lowering tracked separately (#1373/#1796) |
-| `async-generator`             | deferred   | Out of scope long-term                                       |
-| `deferred-feature`            | deferred   | `eval` / `Proxy` / `with` — wont-fix                         |
-| `type-parameters`             | deferred   | Generics specialisation (future)                             |
-| `non-export-modifier`         | deferred   | `async` / declare-only — narrow                              |
-| `unnamed`                     | deferred   | Anonymous default exports                                    |
+| Bucket reason                 | Category   | What promotes a row                                                                                                                                   |
+| ----------------------------- | ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `body-shape-rejected`         | unintended | from-ast.ts handles every statement in the body                                                                                                       |
+| `external-call`               | unintended | Math.\* / parseInt / Console wired through IR (#1371)                                                                                                 |
+| `call-graph-closure`          | unintended | Callees of claimed funcs all claimable themselves                                                                                                     |
+| `param-shape-rejected`        | unintended | Destructuring params supported (#1372)                                                                                                                |
+| `param-type-not-resolvable`   | unintended | TypeMap propagation reaches the param                                                                                                                 |
+| `return-type-not-resolvable`  | unintended | TypeMap propagation reaches the return                                                                                                                |
+| `type-resolution-failure`     | unintended | Same                                                                                                                                                  |
+| `class-method`                | unintended | #1370/#3000 B-C-E — corpus bucket **0** (#3000-E); NOT yet strict (still covers computed/generator/abstract names, static super, subclass-of-builtin) |
+| `destructuring-param-complex` | unintended | Complex destructuring params lowered (subset of param-shape)                                                                                          |
+| `async-function`              | deferred   | Async bodies — CPS lowering tracked separately (#1373/#1796)                                                                                          |
+| `async-generator`             | deferred   | Out of scope long-term                                                                                                                                |
+| `deferred-feature`            | deferred   | `eval` / `Proxy` / `with` — wont-fix                                                                                                                  |
+| `type-parameters`             | deferred   | Generics specialisation (future)                                                                                                                      |
+| `non-export-modifier`         | deferred   | `async` / declare-only — narrow                                                                                                                       |
+| `unnamed`                     | deferred   | Anonymous default exports                                                                                                                             |
 
 ## How to update this table
 
