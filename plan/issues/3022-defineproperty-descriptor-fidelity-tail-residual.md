@@ -1,10 +1,10 @@
 ---
 id: 3022
 title: "spec gap: Object.defineProperty(ies) descriptor fidelity tail + non-object receiver arm (~728 default-lane fails)"
-status: ready
+status: blocked
 sprint: current
 created: 2026-07-03
-updated: 2026-07-03
+updated: 2026-07-04
 priority: high
 horizon: m
 feasibility: medium
@@ -73,3 +73,62 @@ clause for each built-in, not a blanket internal error).
   drops materially below the 600 recorded here.
 - Non-object receivers to `Object.defineProperty`/`defineProperties`
   produce spec-correct `TypeError`s instead of an internal/vague error.
+
+## Investigation (2026-07-04, dev-3022) — root-cause decomposition
+
+Regrounded against current `main` (595 `definePropert{y,ies}` fails +
+48 `Object.defineProperty called on non-object`). Re-ran the failing corpus
+in **process isolation** — the naive batch rerun was contaminated by
+cross-test `Object.prototype` pollution (a single test's
+`Object.prototype.get = fn` poisons the harness's own `Object.defineProperty`
+`__name` shim and every subsequent test in the same process), which manufactured
+a spurious 70-wide "Cannot both specify accessors and a value" bucket. With the
+harness prototype snapshot/restore fix, the tail is **genuinely fragmented across
+≥4 deep, high-blast-radius root causes** — this issue is **mis-sized as a single
+`medium` slice** and should be decomposed. Each cause below is validated with a
+minimal repro.
+
+1. **Struct-widening vs. sidecar read/write mismatch (~40+ tests, the biggest
+   clean cluster).** `Object.defineProperty(o, "foo", {value: undefined})` (or a
+   no-value descriptor) stores the value in the runtime sidecar
+   (`getOwnPropertyDescriptor` correctly reports `value: undefined`), but the
+   member read `o.foo` compiles to a **`struct.get` on a widened field**, not
+   `__extern_get` — so it returns the field default (`null`/`0`), which
+   `SameValue`-differs from `undefined`. Confirmed: compiled `o.foo === undefined`
+   is `false` after the define, while `o.missing === undefined` is `true`, and
+   `__extern_get` is never hit for `o.foo`. This is the `15.2.3.6-4-*` +
+   `verifyProperty({value: undefined})` cluster. Root: the read site resolves the
+   receiver to a struct and reads the typed field, bypassing the sidecar where the
+   dynamic define wrote — a codegen read/write path-consistency problem
+   (`receiverIsStaticStruct` / #1629 S3 territory) crossed with undefined
+   representation (#2106). Fix touches shared member-read + value-rep machinery.
+
+2. **Array exotic `[[DefineOwnProperty]]` (~83 tests).**
+   `Object.defineProperties(arr, {"0": {value: 12}})` / array `length`
+   RangeError + delete-non-configurable-suffix (`15.2.3.7-6-a-*`,
+   `15.2.3.7-5-*`). The singular `Object.defineProperty(arr, "length", …)` has an
+   inline handler (`maybeEmitVecLengthDefine`), but the **plural** path
+   (`__defineProperties` host import) and array-index element updates do not
+   implement §10.4.2 ArraySetLength / array-index [[DefineOwnProperty]].
+
+3. **Prototype-chain descriptor-field reading (~33 tests).** A descriptor that is
+   `new Ctor()` / a wrapper whose descriptor fields are **inherited** (e.g.
+   `Ctor.prototype = {value: X}`) drops the inherited field: `_fnctorProtoLookup`
+   returns nothing because `__register_fnctor_instance` is emitted **only for
+   module-global constructor closures** (`new-super.ts` gates on
+   `moduleGlobals/funcClosureGlobals`), so a **function-scope** `var Ctor =
+   function(){}` instance is never registered → `_fnctorInstanceCtor.get(inst)`
+   is null. `15.2.3.6-3-1xx/2xx`. Fix touches #1712 closure/global machinery.
+
+4. **Fragmented long tail (~370).** Attribute-transition rules
+   (non-configurable→configurable illegal transitions, redefine SameValue),
+   throw-expected TypeError/RangeError cases, `get:null`/`set:null` accessor
+   validation, and the 48 non-object-receiver cases (many are top-level `this`
+   as the global object under module wrapping). No shared root; each is a
+   separate small fix.
+
+**Recommendation:** decompose into cause-scoped sub-issues (1–3 are each a
+distinct senior-dev-sized fix in value-rep / array-exotic / #1712 machinery; 4 is
+a grab-bag). None is a low-regression-risk single `medium` PR. No code change is
+proposed here — shipping a partial fix to any one cause risks broad regressions
+across the host-mode object surface without a full-CI validation pass.
