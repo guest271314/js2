@@ -8711,7 +8711,7 @@ function ensureWasiStartExnPrinter(ctx: CodegenContext): number {
     { op: "local.get", index: 0 } as Instr,
     { op: "ref.is_null" } as Instr,
     { op: "if", blockType: { kind: "empty" }, then: [{ op: "return" } as Instr] } as Instr,
-    // payload (externref) → anyref → __any_to_string (ref AnyString) → stderr.
+    // payload (externref) → anyref → __any_to_string yields ref AnyString → stderr.
     { op: "local.get", index: 0 } as Instr,
     { op: "any.convert_extern" } as Instr,
     { op: "call", funcIdx: anyToStrIdx } as Instr,
