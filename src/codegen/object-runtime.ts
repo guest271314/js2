@@ -1034,7 +1034,10 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     // `ref.null.extern`. Legacy (flag off): miss = `ref.null.extern`,
     // byte-identical. This is the producer half of the lockstep flip whose
     // absence caused PR #2025's −1245 (consumer flipped, producer not).
-    const getMiss: Instr[] = undefinedExternInstrs(ctx) ?? [{ op: "ref.null.extern" } as Instr];
+    // A FACTORY, not a shared array — the miss appears in three branches and
+    // shared Instr objects get double-remapped by finalize walks (see
+    // `reference_shared_instr_object_dce_double_remap`).
+    const getMiss = (): Instr[] => undefinedExternInstrs(ctx) ?? [{ op: "ref.null.extern" } as Instr];
     const body: Instr[] = [
       // (#2896) Builtin-fn metadata arm: `fn[key]` for key "name"/"length" on a
       // builtin function value answers its spec metadata (host-free). Non-meta
@@ -1064,7 +1067,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       {
         op: "if",
         blockType: { kind: "empty" },
-        then: [...getMiss, { op: "return" } as Instr],
+        then: [...getMiss(), { op: "return" } as Instr],
       },
       // o = cast<$Object>(any)
       { op: "local.get", index: 4 },
@@ -1119,7 +1122,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
                       {
                         op: "if",
                         blockType: { kind: "empty" },
-                        then: [...getMiss, { op: "return" } as Instr],
+                        then: [...getMiss(), { op: "return" } as Instr],
                       },
                       // return __call_accessor_get(obj /*param 0*/, getter)
                       { op: "local.get", index: 0 },
@@ -1147,7 +1150,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
         ],
       },
       // not found anywhere → miss (undefined under the S1 regime; legacy null)
-      ...getMiss,
+      ...getMiss(),
     ];
     registerNative(
       "__extern_get",
