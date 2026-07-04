@@ -170,7 +170,21 @@ export function planAsyncClosureActivation(
   decl: ts.FunctionLikeDeclaration,
   isAsync: boolean,
 ): AsyncActivationPlan | null {
-  return decideAsyncActivation(ctx, decl, isAsync, /*allowNonDeclaration*/ true);
+  const decision = decideAsyncActivation(ctx, decl, isAsync, /*allowNonDeclaration*/ true);
+  // Phase-2 scope: closures activate ONLY the single-tail-await CPS lane. The
+  // host-drive ("host-drive") and native-drive ("drive") lanes activate
+  // multi-await / try-finally-across-await shapes whose continuation
+  // capture-struct + `__self` handling is NOT yet validated in the lifted-closure
+  // context — activating them from the arrow/fn-expr path null_deref'd the
+  // async-iteration builtins (Array.fromAsync / await-using /
+  // AsyncFromSyncIteratorPrototype / AsyncDisposableStack), whose test262
+  // `asyncTest(async function () { …multi-await… })` harness callbacks are
+  // multi-await function expressions (33 merge_group regressions on the first
+  // #2646 attempt). Those richer closure shapes stay on the legacy path; the
+  // drive lanes for closures are a follow-up that needs closure-context
+  // validation. The single-tail-await CPS shape (the phase-2 target, e.g.
+  // `async (x) => await g(x)`) is unaffected.
+  return decision !== null && decision.lane === "cps" ? decision : null;
 }
 
 /**
