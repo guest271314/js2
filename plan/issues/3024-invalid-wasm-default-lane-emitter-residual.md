@@ -1,10 +1,11 @@
 ---
 id: 3024
 title: "codegen: invalid Wasm binary emission residual — default (JS-host) lane (~131 fails, externref/f64 type-mismatch emitter bugs)"
-status: ready
+status: in-progress
+assignee: ttraenkler/dev-3024
 sprint: current
 created: 2026-07-03
-updated: 2026-07-03
+updated: 2026-07-04
 priority: high
 horizon: m
 feasibility: medium
