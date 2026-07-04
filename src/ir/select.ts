@@ -836,6 +836,37 @@ function whyNotIrClaimable(
   // covers `this.field = expr;`, `this.method(...)`, and bare calls. This
   // mirrors how try/catch/finally bodies are checked (see `isPhase1TryStatement`).
   if (ts.isConstructorDeclaration(fn)) {
+    // #3000-C: the IR constructor lowering (`lowerFunctionAstToIr` Phase C)
+    // runs ONLY the constructor body statements — it allocates the instance
+    // with each struct field at its default, then replays the body's
+    // `this.field = …` writes. It does NOT execute two other construction-time
+    // effects the legacy path handles:
+    //   (a) parameter properties (`constructor(private name: string)`) — the
+    //       param both declares AND assigns a field; the IR path treats it as
+    //       a plain param and drops the field write.
+    //   (b) PropertyDeclaration initialisers (`age = 5;`) — these run at
+    //       construction; the IR path leaves the field at its struct default.
+    // A class using either would silently mis-construct (the typeIdx-parity
+    // guard can't catch it — same signature). Reject to legacy so construction
+    // stays correct. Flat classes whose fields are declared without an
+    // initialiser and assigned in the body (the common shape, e.g. classes.ts's
+    // `Animal`) are unaffected.
+    for (const p of fn.parameters) {
+      const isParamProperty = p.modifiers?.some(
+        (m) =>
+          m.kind === ts.SyntaxKind.PublicKeyword ||
+          m.kind === ts.SyntaxKind.PrivateKeyword ||
+          m.kind === ts.SyntaxKind.ProtectedKeyword ||
+          m.kind === ts.SyntaxKind.ReadonlyKeyword,
+      );
+      if (isParamProperty) return "body-shape-rejected";
+    }
+    const parent = fn.parent;
+    if (parent && (ts.isClassDeclaration(parent) || ts.isClassExpression(parent))) {
+      for (const m of parent.members) {
+        if (ts.isPropertyDeclaration(m) && m.initializer) return "body-shape-rejected";
+      }
+    }
     const ctorScope = new Set(scope);
     // (#2856 C1) Constructor bodies never take the early-return arm — their
     // returns route through the implicit `return this` synthesis.

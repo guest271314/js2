@@ -543,6 +543,30 @@ export class IrFunctionBuilder {
   }
 
   /**
+   * #3000-C: emit `class.alloc` — allocate a fresh, default-initialised
+   * instance of `shape`'s class WITHOUT running its constructor. Used by the
+   * IR constructor-body lowering to synthesise `this` at body entry (the ctor
+   * body then writes fields via `class.set`, and the epilogue returns the
+   * instance). Result type is `{ kind: "class"; shape }` → `(ref $struct)`.
+   */
+  emitClassAlloc(shape: IrClassShape): IrValueId {
+    const result = this.allocator.fresh();
+    const resultType: IrType = { kind: "class", shape };
+    this.valueTypes.set(result, resultType);
+    // A fresh struct allocation — same alloc namespace as `class.new` /
+    // `object.new` ("object").
+    const alloc = this.allocId("object", resultType);
+    this.pushInstr({
+      kind: "class.alloc",
+      shape,
+      result,
+      resultType,
+      alloc,
+    });
+    return result;
+  }
+
+  /**
    * Emit `class.get` to read a named field on a class instance. Caller
    * passes the field's IrType (looked up against the receiver's shape) so
    * the SSA def's static type matches without a second resolver lookup.
