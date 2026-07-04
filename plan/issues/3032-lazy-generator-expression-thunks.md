@@ -78,6 +78,24 @@ Mechanism (no new imports, no funcidx shifts, no body-splitting):
   `setExports(instance.exports)` (already required for wasm-closure interop
   — `wrapForHost`; the runner does). Missing wiring → clear TypeError at
   first resume only.
+- **Eligibility gates (learned from PR #2625's first merge_group cycle —
+  41 regressions in three buckets, all fixed by gating):** lazy only when
+  `!isAsync && parameters.length === 0 && !closureBodyUsesArguments(body)
+  && !genBodyReferencesThis(body)`. `arguments` (zero-declared-param
+  generators still see call-site args — `gen-func-expr-args-trailing-comma-*`)
+  and `this`/`super` (`Array.prototype[Symbol.iterator] = function*(){
+  ...this[0]... }` — the `iter-val-array-prototype` cluster) are call-time
+  state the deferred `__call_fn_0` re-invocation cannot rebind; W2 spills
+  them. ALSO: the cached `ctx.genEagerFlagGlobalIdx` MUST be kept in step by
+  `fixupModuleGlobalIndices` (registry/imports.ts) — a string-constant
+  import between two generator emissions left the second `global.get`
+  pointing one slot low (externref) → wasm validation error (the
+  `fn-name-gen` + `Set receiver-not-set` compile_error cluster; the exact
+  #2023 `newTargetGlobalIdx` / #2001 `holeGlobalIdx` staleness hazard).
+- **Merge_group A/B for the gated slice** (js-host lane, vs 30-min-old
+  content-current baseline): +42 net (83 improvements — the whole
+  `ary-ptrn-empty` family — vs 41 bucket regressions pre-gates; the gates
+  eliminate all 41 while keeping the improvements, re-verified per bucket).
 
 Verified: probes v10/v12 (creation runs nothing, was `log=2`), v15
 (resume/drain/done exact), v16/v17 (return/throw-before-start never run the

@@ -1560,6 +1560,34 @@ function ensureGenEagerFlag(ctx: CodegenContext): number {
   return globalIdx;
 }
 
+/**
+ * (#3032) True when a generator-expression body references `this`/`super`
+ * from ITS OWN function scope (nested arrows inherit the generator's `this`
+ * and count; nested function expressions / methods / classes have their own
+ * `this` binding and do not). Such a generator is lazy-INELIGIBLE: the
+ * receiver is call-time state the deferred `__call_fn_0` re-invocation
+ * cannot rebind (#3032 W2 spills it).
+ */
+function genBodyReferencesThis(node: ts.Node): boolean {
+  if (node.kind === ts.SyntaxKind.ThisKeyword || node.kind === ts.SyntaxKind.SuperKeyword) return true;
+  if (
+    ts.isFunctionExpression(node) ||
+    ts.isFunctionDeclaration(node) ||
+    ts.isMethodDeclaration(node) ||
+    ts.isConstructorDeclaration(node) ||
+    ts.isGetAccessorDeclaration(node) ||
+    ts.isSetAccessorDeclaration(node) ||
+    ts.isClassLike(node)
+  ) {
+    return false; // own `this` binding — not the generator's receiver
+  }
+  let found = false;
+  forEachChild(node, (child) => {
+    if (!found && genBodyReferencesThis(child)) found = true;
+  });
+  return found;
+}
+
 export function compileArrowFunction(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -2476,7 +2504,21 @@ export function compileArrowAsClosure(
     // body emits targets the inner `block`/`try` (generator `return` uses
     // generatorReturnDepth relative to that block), never a label outside the
     // wrap, and the function-level `return` op is depth-independent.
-    const genLazyEligible = !isAsync && arrow.parameters.length === 0;
+    // Lazy-ineligible: async (separate host machinery), declared params (the
+    // thunk re-invocation via `__call_fn_0` cannot replay call-site args —
+    // #3032 W2), `arguments` usage (zero-declared-param generators can still
+    // observe call-site args through `arguments`; the deferred re-invocation
+    // would see arity 0 — the gen-func-expr-args-trailing-comma cluster in PR
+    // #2625's first merge_group cycle), and `this`/`super` usage (the
+    // receiver is call-time state the deferred `__call_fn_0` re-invocation
+    // cannot rebind — the `Array.prototype[Symbol.iterator] = function*() {
+    // ... this[0] ... }` iter-val-array-prototype cluster, same cycle).
+    // Receiver/args spilling is #3032 W2.
+    const genLazyEligible =
+      !isAsync &&
+      arrow.parameters.length === 0 &&
+      !(ts.isBlock(body) && closureBodyUsesArguments(body)) &&
+      !genBodyReferencesThis(body);
     const genOuterBody = liftedFctx.body;
     const eagerSeq: Instr[] = [];
     if (genLazyEligible) liftedFctx.body = eagerSeq;
