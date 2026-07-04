@@ -4296,6 +4296,18 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
       ctx.moduleInitStatements.push(stmt);
       continue;
     }
+    // (#2968) A top-level `throw` under `--target wasi`: collect it into
+    // `__module_init` so the statement actually executes at module load and its
+    // exception propagates out to `_start`, where the uncaught-exception printer
+    // (addWasiStartExport) renders it to stderr + `proc_exit(1)`. Without this
+    // there is no `ThrowStatement` case, so a bare top-level `throw` was silently
+    // dropped — it emitted no code at all and the program exited 0. Gated on
+    // `ctx.wasi` so JS-host / plain-standalone output stays byte-identical (their
+    // pre-existing top-level-throw drop is out of scope for this issue).
+    if (ts.isThrowStatement(stmt)) {
+      if (ctx.wasi) ctx.moduleInitStatements.push(stmt);
+      continue;
+    }
     // Module-level expression statements with side effects:
     // new expressions, call expressions, ++/--, assignments to module globals
     if (ts.isExpressionStatement(stmt)) {
