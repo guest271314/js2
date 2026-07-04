@@ -213,5 +213,18 @@
       "ctxChecker": 3
     }
   },
-  "preauthorized": []
+  "preauthorized": [
+    {
+      "file": "src/codegen/index.ts",
+      "field": "getTypeAtLocation",
+      "extra": 1,
+      "reason": "#3000 Phase-1b: buildIrClassShapes re-derives class-field IR types from the raw ts.Type of a field's declaration node (PropertyDeclaration / ctor this.x= LHS). The surrounding function already reads ctor/method param + return types the same way; the ctx.oracle abstraction exposes only TypeFact, not the raw ts.Type that tsTypeToClassPositionIr requires (t.flags & StringLike, t.getSymbol(), objectIrTypeFromTsType). Consistent with the existing direct-checker code in this function."
+    },
+    {
+      "file": "src/codegen/index.ts",
+      "field": "ctxChecker",
+      "extra": 1,
+      "reason": "#3000 Phase-1b: the single ctx.checker.getTypeAtLocation call above (buildIrClassShapes field-type derivation)."
+    }
+  ]
 }
