@@ -44,6 +44,7 @@ import {
   linearPlanToCfg,
   planLinearAwaits,
 } from "./async-cps.js";
+import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S3 / #2710) stable-regime minting
 import {
   type AsyncDriveRuntime,
   PROMISE_STATE_FULFILLED,
@@ -653,7 +654,13 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
   const stepFulfillName = info.host ? `__cb_${info.stepFulfillCbId}` : `${stepName}_fulfill`;
   const stepRejectName = info.host ? `__cb_${info.stepRejectCbId}` : `${stepName}_reject`;
 
-  const resumeFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  // (#1916 S3 / #2710) Stable-regime handles: the resume/step-adapter indices
+  // are baked into adapter bodies, `ref.func` reaction instrs, funcMap, exports
+  // and the cached `info.*FuncIdx` fields — every one of which previously had
+  // to be chased by the late-import shifters (and `info.*` was chased by NO
+  // shifter, a latent staleness hole). A stable handle never shifts, so all of
+  // those bakes are correct by construction.
+  const resumeFuncIdx = mintDefinedFunc(ctx);
   info.resumeFuncIdx = resumeFuncIdx;
   ctx.funcMap.set(resumeName, resumeFuncIdx);
   const resumePlaceholder: WasmFunction = {
@@ -663,12 +670,12 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
     body: [{ op: "unreachable" } as Instr],
     exported: false,
   };
-  ctx.mod.functions.push(resumePlaceholder);
+  pushDefinedFunc(ctx, resumeFuncIdx, resumePlaceholder);
 
-  const stepFulfillFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const stepFulfillFuncIdx = mintDefinedFunc(ctx);
   info.stepFulfillFuncIdx = stepFulfillFuncIdx;
   ctx.funcMap.set(stepFulfillName, stepFulfillFuncIdx);
-  ctx.mod.functions.push({
+  pushDefinedFunc(ctx, stepFulfillFuncIdx, {
     name: stepFulfillName,
     typeIdx: stepTypeIdx,
     locals: buildStepAdapterLocals(info),
@@ -687,10 +694,10 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
     });
   }
 
-  const stepRejectFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const stepRejectFuncIdx = mintDefinedFunc(ctx);
   info.stepRejectFuncIdx = stepRejectFuncIdx;
   ctx.funcMap.set(stepRejectName, stepRejectFuncIdx);
-  ctx.mod.functions.push({
+  pushDefinedFunc(ctx, stepRejectFuncIdx, {
     name: stepRejectName,
     typeIdx: stepTypeIdx,
     locals: buildStepAdapterLocals(info),
@@ -1143,13 +1150,34 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
     return out;
   };
 
+  // (#2710) COMPLETED-but-unassembled state-body arrays must stay reachable by
+  // the late-import shifters. `buildStateArm` builds states depth-first: while
+  // state i+1 compiles (and may register late imports via ensureLateImport /
+  // addStringImports / addUnionImports), state i's finished array is a plain
+  // local — not resumeFctx.body, not in ctx.liveBodies, not yet nested under any
+  // walked root (its wrapping `if` instr is only created after the recursion
+  // returns). Any LIVE-regime defined-func immediate already baked into it would
+  // then miss the shift — the exact mechanism behind the invalid-wasm
+  // playground async.ts::gc regression (a stale `call <user fn>` in state 0,
+  // off by the imports added while compiling later states; see the #2710
+  // progress log). Stable handles (#1916 S3) make user-fn callees immune, but
+  // calls to still-live-regime helpers (the remaining index.ts mints) ride the
+  // same arrays until S3-final — so track every detached array in
+  // ctx.liveBodies until the machine is assembled onto resumePlaceholder.body.
+  const detachedSegArrays: Instr[][] = [];
+  const trackDetached = (arr: Instr[]): Instr[] => {
+    detachedSegArrays.push(arr);
+    ctx.liveBodies.add(arr);
+    return arr;
+  };
+
   // Nested if-chain dispatch (`if(state==s){body}else{…}`), mirroring the
   // generator trampoline. Recursion depth == state id (dense, validated), so
   // each arm's `br`-to-loop depth is `id + 2` inside `buildStateBody`.
   const buildStateArm = (i: number): Instr[] => {
     if (i >= cfg.states.length) return [{ op: "unreachable" } as Instr];
     const st = cfg.states[i]!;
-    const then = buildStateBody(st);
+    const then = trackDetached(buildStateBody(st));
     return [
       { op: "local.get", index: frameLocal },
       { op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: STATE_FIELD },
@@ -1177,7 +1205,11 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
   // replay and are rejected by validateAsyncCfg until the 3c follow-up.
   const catchFinallyInstrs: Instr[] = [];
   try {
-    chain = buildStateArm(0);
+    // (#2710) The returned chain nests every state body, but stays detached
+    // from all shifter roots until the `dispatch` push below — track it too
+    // (the handler-finalizer compiles between here and there can register
+    // late imports).
+    chain = trackDetached(buildStateArm(0));
     for (const region of cfg.handlers) {
       const saved = resumeFctx.body;
       ctx.liveBodies.add(saved);
@@ -1244,6 +1276,11 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
 
   resumePlaceholder.locals = resumeFctx.locals;
   resumePlaceholder.body = resumeFctx.body;
+  // (#2710) Everything is now reachable from resumePlaceholder.body (walked via
+  // mod.functions) — release the detached-array tracking. The shifters' per-run
+  // `shifted` Set already dedupes arrays reachable from two roots, so the
+  // tracking was safe even across the assembly point.
+  for (const arr of detachedSegArrays) ctx.liveBodies.delete(arr);
   return resumeFuncIdx;
 }
 
