@@ -483,9 +483,13 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
     ts.isStringLiteral(node.expression.argumentExpression)
   ) {
     const elemMethodName = node.expression.argumentExpression.text;
-    const elemReceiverType = ctx.checker.getTypeAtLocation(node.expression.expression);
+    // Oracle-first (#1930): a primitive-number receiver reports `"number"`;
+    // a `new Number(x)` wrapper reports its declared symbol name "Number"
+    // (mirrors `isNumberWrapperType`'s Object+symbol check).
+    const elemRecvExpr = node.expression.expression;
     const isElemNumFmtRecv =
-      isNumberType(elemReceiverType) || (ctx.standalone && isNumberWrapperType(elemReceiverType));
+      ctx.oracle.staticJsTypeOf(elemRecvExpr) === "number" ||
+      (ctx.standalone && ctx.oracle.declaredNameOf(elemRecvExpr) === "Number");
     if (isElemNumFmtRecv) {
       if (elemMethodName === "toFixed") {
         state.primitiveNeeded.add("number_toFixed");
