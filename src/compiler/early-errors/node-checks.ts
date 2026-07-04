@@ -592,9 +592,21 @@ export function runNodeChecks(ctx: EarlyErrorContext, node: ts.Node): void {
     }
   }
 
-  // ES spec: Trailing comma after an object binding rest is a SyntaxError.
-  // e.g. const {...x,} = y;  BindingRestProperty must be last, no trailing comma.
+  // ES spec: an object binding rest (`{...x}`) must be last — no element may
+  // follow it (`const {...rest, b} = y`) and no trailing comma (`{...x,}`).
+  // BindingRestProperty must be the final BindingProperty. TS's parser accepts
+  // both forms silently under skipSemanticDiagnostics, so detect them here.
   if (ts.isObjectBindingPattern(node)) {
+    let foundRest = false;
+    for (const element of node.elements) {
+      if (foundRest) {
+        ctx.addError(element, "A rest element must be last in a destructuring pattern");
+        break;
+      }
+      if (ts.isBindingElement(element) && element.dotDotDotToken) {
+        foundRest = true;
+      }
+    }
     const lastEl = node.elements[node.elements.length - 1];
     if (node.elements.hasTrailingComma && lastEl && ts.isBindingElement(lastEl) && lastEl.dotDotDotToken) {
       ctx.addError(lastEl, "A rest element must be last in a destructuring pattern");
@@ -624,6 +636,15 @@ export function runNodeChecks(ctx: EarlyErrorContext, node: ts.Node): void {
       const textBetween = ctx.sourceFile.text.substring(paramEnd, parenClose);
       if (textBetween.includes(",")) {
         ctx.addError(lastParam, "A rest parameter or binding pattern may not have a trailing comma");
+      }
+    }
+    // ES spec: a rest parameter (`...b`) must be the LAST parameter — no
+    // parameter may follow it (`function f(a, ...b, c) {}`). TS drops this as a
+    // semantic diagnostic under skipSemanticDiagnostics, so re-detect it.
+    for (let i = 0; i < node.parameters.length - 1; i++) {
+      if (node.parameters[i]!.dotDotDotToken) {
+        ctx.addError(node.parameters[i]!, "A rest parameter must be last in a parameter list");
+        break;
       }
     }
   }

@@ -164,3 +164,29 @@ fields all remain valid.
 **Remaining:** the module-code / `import.meta` / top-level-await
 unenforced-`SyntaxError` samples are independent point-fixes (several need module
 linking/resolution) — issue stays open for follow-up slices.
+
+## Slice 4 landed — "rest must be last" completion (element after rest) (2026-07-05)
+
+**Delivered:** three additional early errors completing the "rest must be last"
+grammar rule — Slice 1 caught the trailing-comma-after-rest forms; this slice
+adds the **element-after-rest** forms that TS drops as semantic diagnostics under
+`skipSemanticDiagnostics`:
+
+- **Object binding pattern:** `const {...rest, b} = y` — a `BindingRestProperty`
+  must be the final element.
+- **Object assignment pattern:** `({...rest, b} = y)` — an `AssignmentRestProperty`
+  must be last.
+- **Rest parameter not last:** `function f(a, ...b, c) {}` / `(a, ...b, c) => …`
+  — a `BindingRestElement` in a `FormalParameterList` must be last.
+
+Covers `language/expressions/assignment/dstr/obj-rest-not-last-element-invalid`,
+`language/statements/for-of/dstr/obj-rest-not-last-element-invalid`, and
+`language/rest-parameters/position-invalid` (5/5 affected pass; 120/120 valid
+function/param/destructuring files regression-checked, 0 regressions).
+
+**Files:** `src/compiler/early-errors/node-checks.ts` (object-binding
+element-after-rest + rest-parameter-not-last), `src/compiler/early-errors/assignment.ts`
+(object-assignment spread-not-last). Tests: `tests/issue-3026.test.ts` (+4 reject,
++3 valid-control; 30 total pass). Byte-inert for valid programs — object rest as
+last element, rest param as last param, and object spread in a value position
+(`{...x, b: 1}`) all remain valid.

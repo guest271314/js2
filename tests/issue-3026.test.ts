@@ -158,3 +158,43 @@ describe("#3026 — private name in class heritage / destructuring pattern", () 
     ).toBe(false);
   });
 });
+
+// Slice 4 — "rest must be last" completion: an element following a rest is a
+// SyntaxError. Slice 1 caught the trailing-comma-after-rest cases; this slice
+// adds the element-after-rest cases that TS's parser drops as semantic
+// diagnostics under skipSemanticDiagnostics:
+//   - object binding pattern:   const {...rest, b} = y
+//   - object assignment pattern: ({...rest, b} = y)
+//   - rest parameter not last:   function f(a, ...b, c) {}  /  (a, ...b, c) => 0
+// Covers test262 language/expressions/assignment/dstr/obj-rest-not-last-element-invalid,
+// language/statements/for-of/dstr/obj-rest-not-last-element-invalid, language/rest-parameters/position-invalid.
+describe("#3026 — rest element / parameter must be last (element after rest)", () => {
+  it("rejects an object binding rest followed by an element (`const {...rest, b} = y`)", async () => {
+    expect(await isRejected("const {...rest, b} = {};")).toBe(true);
+  });
+
+  it("rejects an object assignment rest followed by an element (`({...rest, b} = y)`)", async () => {
+    expect(await isRejected("var rest, b; 0, ({...rest, b} = {});")).toBe(true);
+  });
+
+  it("rejects a rest parameter that is not last (`function f(a, ...b, c) {}`)", async () => {
+    expect(await isRejected("function f(a, ...b, c) {}")).toBe(true);
+  });
+
+  it("rejects a non-last rest parameter in an arrow function (`(a, ...b, c) => a`)", async () => {
+    expect(await isRejected("const g = (a: any, ...b: any[], c: any) => a;")).toBe(true);
+  });
+
+  // ── Valid controls: must NOT be rejected ──────────────────────────────────
+  it("accepts an object rest as the last element (`const {a, ...rest} = o`)", async () => {
+    expect(await isRejected("const {a, ...rest} = {a: 1};")).toBe(false);
+  });
+
+  it("accepts a rest parameter as the last parameter (`function f(a, ...b)`)", async () => {
+    expect(await isRejected("function f(a: any, ...b: any[]) { return b; }")).toBe(false);
+  });
+
+  it("accepts an object spread in a value position (`const o = {...x, b: 1}`)", async () => {
+    expect(await isRejected("const x = {}; const o = {...x, b: 1};")).toBe(false);
+  });
+});
