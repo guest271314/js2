@@ -43,6 +43,7 @@ import {
   noJsHost,
   resolveDeclaringClassForPrivateName,
 } from "./expressions/helpers.js";
+import { undefinedSingletonActive } from "./any-helpers.js";
 import { emitUndefined, patchStructNewForAddedField } from "./expressions/late-imports.js";
 import { emitSymbolDescLoad } from "./symbol-native.js";
 import {
@@ -2244,6 +2245,17 @@ export function compileOptionalPropertyAccess(
   const tmp = allocLocal(fctx, `__opt_${fctx.locals.length}`, objType);
   fctx.body.push({ op: "local.tee", index: tmp });
   fctx.body.push({ op: "ref.is_null" });
+  // (#2106 S1) Under the `undefinedSingleton` regime standalone `undefined` is
+  // a NON-null externref, so the short-circuit must also test the singleton.
+  if (undefinedSingletonActive(ctx) && objType.kind === "externref") {
+    const s1IsUndefIdx = ensureLateImport(ctx, "__extern_is_undefined", [{ kind: "externref" }], [{ kind: "i32" }]);
+    if (s1IsUndefIdx !== undefined) {
+      flushLateImportShifts(ctx, fctx);
+      fctx.body.push({ op: "local.get", index: tmp });
+      fctx.body.push({ op: "call", funcIdx: s1IsUndefIdx } as Instr);
+      fctx.body.push({ op: "i32.or" } as Instr);
+    }
+  }
 
   const savedBody = fctx.body;
   fctx.savedBodies.push(savedBody);

@@ -362,8 +362,21 @@ export function ensureAnyFromExternHelper(ctx: CodegenContext): number | undefin
   // `anyStrTypeIdx` — without the string test a genuine string would
   // mis-classify as tag-6 object, so fall back to the legacy arms instead.
   const honest = ctx.honestAnyBoxing === true && ctx.anyStrTypeIdx >= 0;
-  const nullAny: Instr[] =
-    honest && ctx.undefinedGlobalIdx !== undefined
+  // (#2106 S1) Under the `undefinedSingleton` regime a NULL externref means JS
+  // NULL (undefined is the non-null tag-1 singleton, recovered exactly by the
+  // `ref.test $AnyValue` arm below) — so the null arm boxes tag-0. This is
+  // what makes the tag-0 → tag-1 round-trip lie (see `__any_to_extern`'s tail
+  // comment) actually FIXED in the flag regime. Legacy/honest arms unchanged.
+  const nullAny: Instr[] = undefinedSingletonActive(ctx)
+    ? [
+        { op: "i32.const", value: 0 },
+        { op: "i32.const", value: 0 },
+        { op: "f64.const", value: 0 },
+        { op: "ref.null", typeIdx: EQ_HEAP_TYPE },
+        { op: "ref.null.extern" },
+        { op: "struct.new", typeIdx: anyTypeIdx },
+      ]
+    : honest && ctx.undefinedGlobalIdx !== undefined
       ? [{ op: "global.get", index: ctx.undefinedGlobalIdx } as Instr]
       : [
           { op: "i32.const", value: 1 },
@@ -730,11 +743,29 @@ export function ensureAnyToExternHelper(ctx: CodegenContext): number | undefined
         { op: "return" },
       ],
     },
+    // (#2106 S1) Under the `undefinedSingleton` regime tag 0 (null) unwraps to
+    // its canonical externref-plane representation `ref.null.extern` — and the
+    // round-trip is SAFE there because `__any_from_extern`'s null arm boxes
+    // tag-0 back (not the legacy tag-1). Tag 1 (undefined) stays wrapped: an
+    // extern-wrapped tag-1 `$AnyValue` IS the regime's undefined representation
+    // (all predicates are tag-keyed, not identity-keyed).
+    ...(undefinedSingletonActive(ctx)
+      ? ([
+          { op: "local.get", index: 1 },
+          { op: "i32.eqz" },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [{ op: "ref.null.extern" }, { op: "return" }],
+          },
+        ] as Instr[])
+      : []),
     // Tags 0 (null), 1 (undefined), 5 (string), 6 (GC ref): keep the WHOLE
     // $AnyValue box wrapped via extern.convert_any. Standalone/WASI has no host
     // that needs unwrapped values, and __any_from_extern recovers the wrapped
     // box exactly via its `ref.test $AnyValue` arm — preserving the tag and
-    // reference identity. Unwrapping these here was NOT round-trip-safe:
+    // reference identity. Unwrapping these here was NOT round-trip-safe (in the
+    // legacy regime; see the S1 arm above for the flagged tag-0 exception):
     //   - tag 0 came back as tag 1 (null → undefined across every boundary),
     //   - tag 6 (raw struct) was mis-tagged as tag 5 (string) by the
     //     __any_from_extern fallback.
