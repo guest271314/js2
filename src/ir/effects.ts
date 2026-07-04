@@ -184,6 +184,7 @@ export function effectsOf(instr: IrInstr, cache: Map<IrInstr, IrEffects> = new M
     case "gen.push":
     case "gen.epilogue":
     case "gen.yieldStar":
+    case "gen.setReturn":
       fx.readsHeap = true;
       fx.writesHeap = true;
       fx.allSlots = true;
@@ -473,6 +474,11 @@ export function isSideEffecting(i: IrInstr): boolean {
     // (`inner`) must stay live, but DCE's propagation only flows
     // through `result`-bearing instrs.
     i.kind === "gen.yieldStar" ||
+    // #2951: gen.setReturn stashes the generator's terminal return value on
+    // the buffer (observable through the terminal `{value, done:true}`).
+    // Pin for the same reason as gen.push: its `value` operand must stay
+    // live even though the instr is result-less.
+    i.kind === "gen.setReturn" ||
     // Slice 6 part 4 (#1183): forof.string is statement-level (result:
     // null) so the generic null-result rule already keeps it; explicit
     // listing for clarity.

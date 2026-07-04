@@ -24,6 +24,13 @@
 // identical sequences. A separate "selector" suite verifies the IR
 // actually CLAIMS the test function so a future regression that
 // silently routes back to legacy would be caught.
+//
+// #2035 / #2951 update: a generator's `return <value>` is the terminal
+// `{value, done:true}` result, NOT a `done:false` yielded element. Both the
+// legacy path (`__gen_set_return`) and the IR path (`gen.setReturn`, #2951)
+// now exclude it, and `yield*` excludes the INNER generator's return value
+// too. Since `drain()` stops at the first `done:true`, no `return` literal
+// appears in the collected sequences below.
 
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
@@ -110,7 +117,8 @@ const CASES: Case[] = [
     `,
     expectedClaimed: ["gen"],
     fn: "gen",
-    expectedYields: [1, 0, 1, 0],
+    // #2035/#2951 — `return false` excluded from the yield stream.
+    expectedYields: [1, 0, 1],
   },
 
   // ---- 2. string (ref) yields ------------------------------------------
@@ -131,7 +139,8 @@ const CASES: Case[] = [
     `,
     expectedClaimed: ["gen"],
     fn: "gen",
-    expectedYields: ["alpha", "beta", "gamma", "end"],
+    // #2035/#2951 — `return "end"` excluded from the yield stream.
+    expectedYields: ["alpha", "beta", "gamma"],
   },
 
   // ---- 3. bare yield (no value) ----------------------------------------
@@ -185,11 +194,10 @@ const CASES: Case[] = [
     `,
     expectedClaimed: ["inner", "outer"],
     fn: "outer",
-    // 0, then drained inner [1, 2, 3, 0 (inner's return)], then 99,
-    // then -1 (outer's return). Legacy pushes inner's return value
-    // because legacy's `return <expr>` semantics push to buffer; the
-    // host's `__gen_yield_star` then drains all of those onto outer.
-    expectedYields: [0, 1, 2, 3, 0, 99, -1],
+    // #2035/#2951 — 0, then drained inner yields [1, 2, 3] (inner's
+    // `return 0` is the inner's terminal value, NOT delegated), then 99.
+    // Outer's own `return -1` is likewise excluded (terminal done:true).
+    expectedYields: [0, 1, 2, 3, 99],
   },
 
   // ---- 5. mixed (numeric + bool) yields in the same generator ----------
@@ -206,7 +214,8 @@ const CASES: Case[] = [
     `,
     expectedClaimed: ["gen"],
     fn: "gen",
-    expectedYields: [42, 1, 7, 0, 0],
+    // #2035/#2951 — `return 0` excluded from the yield stream.
+    expectedYields: [42, 1, 7, 0],
   },
 ];
 

@@ -753,6 +753,9 @@ function collectUses(instr: IrInstr): readonly IrValueId[] {
     // Slice 7b (#1169f): yield* delegation.
     case "gen.yieldStar":
       return [instr.inner];
+    // #2951 — generator `return <value>` stash.
+    case "gen.setReturn":
+      return [instr.value];
     // Slice 9 (#1169h) — exception handling.
     case "throw":
       return [instr.value];

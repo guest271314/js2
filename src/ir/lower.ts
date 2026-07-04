@@ -1806,6 +1806,54 @@ export function lowerIrFunctionBody<S>(
         emitter.pushRaw(out, { op: "call", funcIdx: fnIdx });
         return;
       }
+      // #2951: generator `return <value>` — stash the value on the buffer
+      // via `__gen_set_return(buf, value)` (signature `(externref, externref)
+      // → void`, registered in `addGeneratorImports`). Mirrors legacy
+      // `compileReturnStatement` (`codegen/statements/control-flow.ts:144`).
+      // The value MUST be BOXED to externref before the call:
+      //   f64        → `__box_number`
+      //   i32        → `f64.convert_i32_s` then `__box_number`
+      //   ref/ref_null → `extern.convert_any`
+      //   externref  → pass through (from-ast already coerced ref-shaped
+      //                values to externref, so this is the common arm)
+      // If `__box_number` is unresolvable (e.g. a lane with no host boxing),
+      // `resolveFunc` THROWS — which demotes the whole function to legacy
+      // (integration.ts catch), never emitting a raw f64 arg that would fail
+      // Wasm validation against the `(externref, externref)` signature.
+      case "gen.setReturn": {
+        if (func.generatorBufferSlot === undefined) {
+          throw new Error(`ir/lower: gen.setReturn requires func.generatorBufferSlot (${func.name})`);
+        }
+        const setReturnIdx = resolver.resolveFunc({
+          kind: "func",
+          name: "__gen_set_return",
+        });
+        const valueT = asVal(typeOf(instr.value));
+        // buffer (arg 0)
+        emitter.pushRaw(out, {
+          op: "local.get",
+          index: slotWasmIdx(func.generatorBufferSlot),
+        });
+        // value (arg 1), boxed to externref
+        emitValue(instr.value, out);
+        if (valueT?.kind === "f64") {
+          emitter.pushRaw(out, {
+            op: "call",
+            funcIdx: resolver.resolveFunc({ kind: "func", name: "__box_number" }),
+          });
+        } else if (valueT?.kind === "i32") {
+          emitter.pushRaw(out, { op: "f64.convert_i32_s" });
+          emitter.pushRaw(out, {
+            op: "call",
+            funcIdx: resolver.resolveFunc({ kind: "func", name: "__box_number" }),
+          });
+        } else if (valueT?.kind === "ref" || valueT?.kind === "ref_null") {
+          emitter.pushRaw(out, { op: "extern.convert_any" });
+        }
+        // externref: already the right Wasm type — no coercion.
+        emitter.pushRaw(out, { op: "call", funcIdx: setReturnIdx });
+        return;
+      }
       case "forof.vec": {
         // The forof.vec instr is statement-level (result: null) but we
         // implement it inside emitInstrTree for code-organization parity
@@ -2940,6 +2988,9 @@ function collectIrUses(instr: IrInstr): readonly IrValueId[] {
     // Slice 7b (#1169f): yield* delegation.
     case "gen.yieldStar":
       return [instr.inner];
+    // #2951 — generator `return <value>` stash.
+    case "gen.setReturn":
+      return [instr.value];
     // Slice 6 part 4 (#1183) — string for-of.
     case "forof.string":
       return [instr.str];
