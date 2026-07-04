@@ -85,7 +85,7 @@ no-yield RELAX only.
 - **[DONE → #2941, PR #2458] class-static generator funcIdx desync.** Was the
   un-shifted `ctx.nativeGenerators[].resumeFuncIdx` side-channel. Fixed
   independently of this relax; proven to flip all ~16 class-static invalid
-  modules to valid (18/20 on the reg corpus). See `plan/issues/2941-*.md`.
+  modules to valid (18/20 on the reg corpus). See `plan/issues/2941-nativegen-funcidx-sidechannel.md`.
 - **[SPIRAL — deferred] no-yield `.value` semantic bug.** Root-caused
   (2026-07-02): the done-from-start native result struct's `.value` reads
   correctly in a **typed** context but returns a non-`undefined` value in an
