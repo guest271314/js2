@@ -251,7 +251,13 @@ export function stringIndexProvenBelow(argExpr: ts.Expression, len: number): boo
  * such functions are never claimed.
  */
 export function collectStringLiteralLens(
-  fn: ts.FunctionDeclaration | ts.MethodDeclaration | ts.ConstructorDeclaration,
+  fn:
+    | ts.FunctionDeclaration
+    | ts.MethodDeclaration
+    | ts.ConstructorDeclaration
+    // #3000-B: accessors reach this via `lowerFunctionAstToIr`; only `.body` is read.
+    | ts.GetAccessorDeclaration
+    | ts.SetAccessorDeclaration,
 ): ReadonlyMap<string, number> {
   const lens = new Map<string, number>();
   const declared = new Set<string>();

@@ -412,7 +412,12 @@ export function planIrCompilation(
     const hasParent = stmt.heritageClauses?.some((h) => h.token === ts.SyntaxKind.ExtendsKeyword) ?? false;
     for (const member of stmt.members) {
       let memberName: string;
-      let memberNode: ts.MethodDeclaration | ts.ConstructorDeclaration;
+      let memberNode:
+        | ts.MethodDeclaration
+        | ts.ConstructorDeclaration
+        // #3000-B: accessors join the claimable member kinds.
+        | ts.GetAccessorDeclaration
+        | ts.SetAccessorDeclaration;
       if (ts.isConstructorDeclaration(member)) {
         memberName = `${className}_new`;
         memberNode = member;
@@ -433,19 +438,37 @@ export function planIrCompilation(
         }
         memberName = `${className}_${methodNameRaw}`;
         memberNode = member;
-      } else {
-        // PropertyDeclaration (field), GetAccessorDeclaration,
-        // SetAccessorDeclaration, IndexSignatureDeclaration,
-        // SemicolonClassElement, ClassStaticBlockDeclaration — none are
-        // claimed by Phase A. Telemetry reasons:
-        //   - get/set → "class-method" (will be lowered with the rest of
-        //     the class member surface in a follow-up slice).
-        //   - PropertyDeclaration → not a function — out of IR's scope.
-        if (trackFallbacks && (ts.isGetAccessorDeclaration(member) || ts.isSetAccessorDeclaration(member))) {
-          const accessorName = member.name && phase1MemberName(member.name);
-          const key = `${className}_${accessorName ?? "<accessor>"}`;
-          fallbackReasons.set(key, "class-method");
+      } else if (ts.isGetAccessorDeclaration(member) || ts.isSetAccessorDeclaration(member)) {
+        // #3000-B: get/set accessors. The legacy path (`class-bodies.ts`)
+        // registers them under DISTINCT `${className}_get_${prop}` /
+        // `${className}_set_${prop}` funcMap keys — a getter and a setter of
+        // the same name are two separate slots, not a collapsed one. Claim
+        // each independently under the matching key so the Phase B walk and
+        // the funcMap slot patch agree.
+        const isGet = ts.isGetAccessorDeclaration(member);
+        const propName = member.name ? phase1MemberName(member.name) : null;
+        if (propName === null) {
+          // Computed / private accessor name — not claimed.
+          if (trackFallbacks) {
+            fallbackReasons.set(`${className}_${isGet ? "get" : "set"}_<computed>`, "class-method");
+          }
+          continue;
         }
+        const accessorKey = `${className}_${isGet ? "get" : "set"}_${propName}`;
+        // Static accessors use a different funcMap-entry shape (no `self`
+        // injection) — defer them alongside static-method internals, mirroring
+        // the instance-only restriction in the Phase B integration walk.
+        const isStaticAccessor = member.modifiers?.some((m) => m.kind === ts.SyntaxKind.StaticKeyword) ?? false;
+        if (isStaticAccessor) {
+          if (trackFallbacks) fallbackReasons.set(accessorKey, "class-method");
+          continue;
+        }
+        memberName = accessorKey;
+        memberNode = member;
+      } else {
+        // PropertyDeclaration (field), IndexSignatureDeclaration,
+        // SemicolonClassElement, ClassStaticBlockDeclaration — none are
+        // claimed (not functions — out of IR's scope).
         continue;
       }
       // (#2857 static-method slice) A `static` method compiles to an ordinary
@@ -585,7 +608,15 @@ export function planIrCompilation(
  * from MethodDeclaration / ConstructorDeclaration (class-owned, with
  * extra method-specific guards).
  */
-type IrClaimableSubject = ts.FunctionDeclaration | ts.MethodDeclaration | ts.ConstructorDeclaration;
+type IrClaimableSubject =
+  | ts.FunctionDeclaration
+  | ts.MethodDeclaration
+  | ts.ConstructorDeclaration
+  // #3000-B: get/set accessors are claimable as no-arg / one-arg instance
+  // members over a private (or public) slot. A getter's return type comes from
+  // `fn.type`; a setter is inherently void (handled explicitly below).
+  | ts.GetAccessorDeclaration
+  | ts.SetAccessorDeclaration;
 
 /**
  * Variant of `isIrClaimable` that returns the rejection reason instead of a
@@ -728,6 +759,11 @@ function whyNotIrClaimable(
       // we accept the shape and treat the return resolution as "object"
       // implicitly; Phase B/C will use the className from the parent node
       // to produce the correct class-typed return.
+    } else if (ts.isSetAccessorDeclaration(fn)) {
+      // #3000-B: a set accessor carries no source-level return type — it is
+      // inherently void. Its body is a void tail (the lone `this.#x = v;`
+      // property store, accepted by `isPhase1Tail`'s void-tail arm).
+      isVoidReturn = true;
     } else {
       const returnResolved = resolveReturnType(fn, entry?.returnType);
       if (returnResolved === null) return "return-type-not-resolvable";
@@ -984,7 +1020,9 @@ function resolveParamType(p: ts.ParameterDeclaration, mapped: LatticeType | unde
 // ts.ConstructorDeclaration is excluded — constructors don't carry a
 // source-level return type; the caller short-circuits before this.
 function resolveReturnType(
-  fn: ts.FunctionDeclaration | ts.MethodDeclaration,
+  // #3000-B: also accept a GET accessor — its return type is `fn.type` exactly
+  // like a method. (SET accessors are void and never reach here.)
+  fn: ts.FunctionDeclaration | ts.MethodDeclaration | ts.GetAccessorDeclaration,
   mapped: LatticeType | undefined,
 ): ResolvedKind {
   if (fn.type) {
@@ -1949,7 +1987,39 @@ function isPhase1Tail(
   // return. The lowerer's void branch synthesizes the empty-values
   // terminator after the expression's side effects.
   if (isVoidReturn && ts.isExpressionStatement(stmt)) {
-    return isPhase1Expr(stmt.expression, scope, localClasses);
+    const expr = stmt.expression;
+    // #3000-B: a property-store assignment as the void tail — the SET
+    // accessor body shape `set name(v) { this.#name = v; }`. Mirror the
+    // NON-tail property-store arm exactly (receiver Phase-1, prop an
+    // Identifier or PrivateIdentifier, RHS Phase-1); from-ast's void-tail
+    // arm routes it through the same `lowerPropertyAssignment` used mid-body,
+    // preserving select↔build parity.
+    if (
+      ts.isBinaryExpression(expr) &&
+      expr.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      ts.isPropertyAccessExpression(expr.left)
+    ) {
+      if (!ts.isIdentifier(expr.left.name) && !ts.isPrivateIdentifier(expr.left.name))
+        return shapeNo("tail-assign-computedprop", expr);
+      if (!isPhase1Expr(expr.left.expression, scope, localClasses))
+        return shapeNo("tail-assign-recv", expr.left.expression);
+      return isPhase1Expr(expr.right, scope, localClasses);
+    }
+    // #3000-B: element-store assignment as the void tail (`arr[i] = v;` last).
+    // Same receiver restriction as the non-tail element-store arm.
+    if (
+      ts.isBinaryExpression(expr) &&
+      expr.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      ts.isElementAccessExpression(expr.left)
+    ) {
+      const lhs = expr.left;
+      if (!ts.isIdentifier(lhs.expression) || !scope.has(lhs.expression.text))
+        return shapeNo("tail-elemstore-recv", lhs.expression);
+      if (!isPhase1Expr(lhs.argumentExpression, scope, localClasses))
+        return shapeNo("tail-elemstore-idx", lhs.argumentExpression);
+      return isPhase1Expr(expr.right, scope, localClasses);
+    }
+    return isPhase1Expr(expr, scope, localClasses);
   }
   return shapeNo("tail-unhandled", stmt);
 }
