@@ -2,7 +2,7 @@
 id: 3000
 title: "IR: class-member residual — private fields, accessors, inheritance/super (class-method → 0)"
 status: in-progress
-assignee: opus-3000c-impl
+assignee: opus-3000e-impl
 sprint: current
 created: 2026-07-02
 updated: 2026-07-04
