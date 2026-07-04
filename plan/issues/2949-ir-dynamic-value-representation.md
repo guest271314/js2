@@ -806,9 +806,10 @@ dynamic (union-cap-overflow params) — the "rare sliver" slice-3 named.
    test262 stride-40 sample): the intersection {functions rejecting on
    `param-/return-type-not-resolvable`} ∩ {functions with the widening shape}
    is an OVER-count of the true flip set (a member may reject for a body-use
-   reason, not the return arm). It read **0** in the sampled prefix (checkpoint
-   through 300+ files: claimed≈4, type-rejects≈11, widen-intersect=**0**),
-   consistent with the ~8-per-4452 ceiling density. Crucially, even the ~8
+   reason, not the return arm). It read **0** in the sampled prefix (stable
+   through 500 files before a probe-perf timeout: claimed=4, type-rejects=11,
+   widen-intersect=**0** throughout), consistent with the ~8-per-4452 ceiling
+   density. Crucially, even the ~8
    ceiling members corpus-wide (incl. `callbackfn`) are each blocked by a
    NON-return cause per probe 2 — so the *true* return-widening flip set (return
    arm is the SOLE blocker) is **empty** on this corpus, which is the decisive
