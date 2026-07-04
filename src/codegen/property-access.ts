@@ -7042,7 +7042,13 @@ export function compileElementAccess(
     ctx.nativeStrings &&
     ctx.anyStrTypeIdx >= 0 &&
     !isNumericIndexExpression(ctx, expr.argumentExpression) &&
-    isStringType(ctx.checker.getTypeAtLocation(expr.expression))
+    // (#1930) Query the receiver's static string-ness via the TypeOracle, not
+    // the raw checker. `isStringType` matched BOTH a primitive string and the
+    // `String` wrapper object; the oracle equivalents are
+    // `staticJsTypeOf === "string"` (primitive) OR `builtinReceiverOf ===
+    // "String"` (`new String(x)` wrapper), which together cover the same set.
+    (ctx.oracle.staticJsTypeOf(expr.expression) === "string" ||
+      ctx.oracle.builtinReceiverOf(expr.expression) === "String")
   ) {
     const key = resolveComputedKeyExpression(ctx, expr.argumentExpression);
     if (key !== undefined) {
