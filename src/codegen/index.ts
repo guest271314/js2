@@ -968,14 +968,14 @@ function buildIrClassShapes(
       if (ir) astFieldIr.set(mangled, ir);
     };
     // Property declarations (`#name: string;`, `x: number;`) — legacy reads the
-    // field type via `getTypeAtLocation(member)`; mirror that source exactly.
+    // field type off the member node itself; mirror that source exactly.
     for (const member of stmt.members) {
       if (ts.isPropertyDeclaration(member) && member.name && !hasStaticModifier(member)) {
         recordField(member.name, member);
       }
     }
     // Constructor-body `this.x = …` field introductions — legacy reads the
-    // field type via `getTypeAtLocation(left)` (the property-access LHS).
+    // field type off the property-access LHS node; mirror that source.
     if (ctor?.body) {
       for (const s of ctor.body.statements) {
         if (
