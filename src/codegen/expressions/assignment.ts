@@ -6165,8 +6165,8 @@ export function compileCompoundAssignment(
     return boxed.valType;
   }
 
-  const localType = getLocalType(fctx, localIdx) ?? { kind: "f64" as const };
-  const needsLocalCoerce = localType.kind !== "f64";
+  let localType = getLocalType(fctx, localIdx) ?? { kind: "f64" as const };
+  let needsLocalCoerce = localType.kind !== "f64";
 
   fctx.body.push({ op: "local.get", index: localIdx });
   if (needsLocalCoerce) coerceType(ctx, fctx, localType, { kind: "f64" });
@@ -6179,6 +6179,28 @@ export function compileCompoundAssignment(
     return null;
   }
   if (compoundRhsType3.kind !== "f64") coerceType(ctx, fctx, compoundRhsType3, { kind: "f64" });
+
+  // (#3024) Compiling the RHS can PROMOTE this local's slot from a concrete
+  // primitive to externref mid-expression — e.g. `x *= eval("var x = 2;")`,
+  // where the direct-eval body redeclares `x` (the re-declaration re-type in
+  // statements/variables.ts). The left value was already emitted above as a raw
+  // `local.get` of the then-f64 slot with no coercion, so it is now a stale
+  // externref buried under the (f64) RHS on the stack — and the writeback below
+  // would `local.tee` an f64 into what is now an externref slot. Both are invalid
+  // Wasm. Detect the flip (slot was primitive when read, is externref now) and
+  // repair: unbox the buried left operand to f64 (save RHS, coerce left, restore
+  // RHS), then switch the writeback to re-box via the externref path. Guarded on
+  // an actual primitive→externref flip, so ordinary compound assignments are
+  // byte-inert.
+  const localTypeAfter = getLocalType(fctx, localIdx);
+  if (!needsLocalCoerce && localType.kind === "f64" && localTypeAfter?.kind === "externref") {
+    const tmpRhs = allocLocal(fctx, `__cmp3024_${fctx.locals.length}`, { kind: "f64" });
+    fctx.body.push({ op: "local.set", index: tmpRhs });
+    coerceType(ctx, fctx, { kind: "externref" }, { kind: "f64" }, "number");
+    fctx.body.push({ op: "local.get", index: tmpRhs });
+    localType = { kind: "externref" };
+    needsLocalCoerce = true;
+  }
 
   emitCompoundOp(ctx, fctx, op);
 

@@ -143,3 +143,64 @@ localized `compileBinaryExpression` fix low-risk for a fresh window.
 ### Not started (roll forward)
 - The `__vec_from_extern_*` `array.set` bucket and async-gen `__closure_*` buckets
   (issue's approach steps 2–3) are un-investigated here.
+
+---
+
+## Landed: eval-var-promotion numeric-operand desync (dev-selfserve-1, 2026-07-04)
+
+**PR:** `issue-3024-numeric-slot-desync` — fixes the `testCompoundAssignment` /
+numeric-operator eval sub-cluster (the `x op eval("var x = …")` shape).
+
+### The banked "trust slot type at the numeric path" fix is UNSAFE — disproven
+The sr-interp banked plan (mirror the `in`-operator precedent: at the numeric
+emit, if an identifier operand's slot is externref, coerce) **cannot work as
+written**. Instrumentation on current `main` shows both the failing case
+(`x * eval("var x = 2;")`) and the passing control (`x * eval("var y = 2;")`)
+report `leftType = f64` at the numeric path, and in BOTH the slot is externref
+by the time the op emits. So slot-kind + reported-type at the emit point does
+**not** discriminate a stale-boxed operand from a genuinely-unboxed f64 — a naive
+"slot is externref ⇒ coerce" would double-unbox the already-correct unbox that
+`compileIdentifier` emits for a `number`-narrowed externref local.
+
+### True root cause (verified by WAT diff + `compileIdentifierCore` instrument)
+It is a **timing / mid-expression slot-promotion** bug, not a numeric-path bug:
+1. `x` starts as an `f64` local. In `x * eval("var x = 2;")`, the LEFT operand
+   `x` compiles first → emits a raw `local.get` of the f64 slot, no unbox.
+2. The RIGHT operand `eval("var x = 2;")` is a constant string, so
+   `tryStaticEvalInline` inlines the body. Compiling the inlined `var x = 2`
+   (a foreign `ts.createSourceFile` node the checker cannot type ⇒ `wasmType`
+   resolves to `externref`) hits the re-declaration re-type at
+   `statements/variables.ts` (~L1071–1072) and **flips `x`'s slot f64 → externref**.
+3. The already-emitted `local.get` now loads an externref, feeding `f64.mul`/
+   `f64.sub`/… → `expected fN, found externref`. Compound `x *= …` is worse: the
+   pre-RHS `local.get` (no coerce) AND the post-op `local.tee` (f64 into an
+   externref slot) are both invalidated.
+
+### The safe fix (byte-inert, proven)
+Detect the **primitive→externref slot flip across operand compilation** by
+snapshotting the identifier operand's slot kind before compiling and comparing
+after — a flip only ever happens on this eval-redeclaration path, so ordinary
+code is untouched.
+- `src/codegen/binary-ops.ts` (`compileBinaryExpression`): snapshot
+  `leftSlotBefore`/`rightSlotBefore`; if an operand flipped primitive→externref,
+  re-label its type `externref` so the existing numeric externref-unbox path
+  (~L2255) inserts the coercion.
+- `src/codegen/expressions/assignment.ts` (`compileCompoundAssignment`, local
+  path): re-read the slot after the RHS; on a flip, unbox the buried left
+  operand (save RHS / coerce left / restore RHS) and switch the writeback to the
+  externref re-box path.
+
+**Proofs:** repro + discriminators pass (`x*`, `x*=`, `x-`, `x/` eval-redeclare
+→ VALID; `var y` / `eval("2")` / plain arithmetic controls unchanged); runtime
+output matches Node (NaN/NaN, 21/21); inject-throw shows each guard fires ONLY on
+its promotion case and on NO control; a 10-program corpus (arithmetic, compound,
+loops, strings, objects, any, bitwise, for-of) is **byte-identical** (sha256) to
+`origin/main`; `issue-2923`, `compound-assignment-property/-unresolvable`,
+`issue-2045` suites (38 tests) pass.
+
+### Still open (roll forward — NOT this PR)
+- `{} << 0` / non-object numeric operands (`private-field-rhs-non-object.js`) —
+  a DISTINCT root cause (object left operand of a shift, no eval involved).
+- `__vec_from_extern_*` `array.set`, async-gen `__closure_*`, `struct.new` arg
+  count. The 131 bucket has multiple independent root causes; this PR clears the
+  eval-redeclaration numeric/compound sub-cluster only.
