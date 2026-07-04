@@ -208,6 +208,13 @@ fallback budget (`pnpm run check:ir-fallbacks`).
 
 ## See also
 
+- [`target-architecture.md`](target-architecture.md) — the **end-state
+  module architecture** (layer stack, the five-part backend contract a new
+  backend — MLIR or others — would implement, reviewability rules with CI
+  ratchets, migration map) and the serializable IR interchange contract for
+  external consumers. Umbrella issues #3029/#3030. This doc (codegen-axes)
+  stays authoritative for "which axis is my change on"; that one answers
+  "where does the code end up".
 - `plan/log/ir-adoption.md` — table of AST node kinds × IR status. The
   ratchet's source of truth. Updated when a kind moves between
   `direct-only`, `mixed`, and `ir-owned`.

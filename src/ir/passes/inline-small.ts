@@ -272,11 +272,15 @@ function canInline(callee: IrFunction, recursiveSet: ReadonlySet<string>): boole
       // ref→ref_null widening made single-block callees with bounds-checked
       // vec reads (emitSafeVecGet emits an `if`) actually inlinable.
       inst.kind === "if" ||
-      // (#2856) if.stmt is buffer-bearing (same nested SSA def-space concern
-      // as the kinds above). early.return lowers to a Wasm `return` — spliced
-      // into a caller it would return from the CALLER, not simulate the
-      // callee's return, so it is never inlinable.
+      // #2952 slice 2 — if.stmt carries nested body buffers (same deep-SSA
+      // concern as the loop kinds above); br.label references a loop label
+      // scoped to the callee (and is verifier-invalid at a block's top
+      // level anyway). Both skip conservatively.
       inst.kind === "if.stmt" ||
+      inst.kind === "br.label" ||
+      // (#2856) early.return lowers to a Wasm `return` — spliced into a
+      // caller it would return from the CALLER, not simulate the callee's
+      // return, so it is never inlinable.
       inst.kind === "early.return"
     ) {
       return false;
@@ -744,6 +748,31 @@ function renameInstrOperands(inst: IrInstr, rename: ReadonlyMap<IrValueId, IrVal
       if (cv === inst.condValue) return inst;
       return { ...inst, condValue: cv };
     }
+    // #2952 slice 2 — br.label carries no SSA operands (label is a control
+    // identity, untouched by value renames).
+    case "br.label":
+      return inst;
+    // #2952 slice 2 — if.stmt: rename the cond + recurse into both arm
+    // buffers (same pattern as `try` above), so a caller-scope rename
+    // reaches arm-interior uses of the redirected value.
+    case "if.stmt": {
+      const cv = mapId(rename, inst.cond);
+      let changed = cv !== inst.cond;
+      const newThen: IrInstr[] = [];
+      for (const sub of inst.then) {
+        const renamed = renameInstrOperands(sub, rename);
+        if (renamed !== sub) changed = true;
+        newThen.push(renamed);
+      }
+      const newElse: IrInstr[] = [];
+      for (const sub of inst.else) {
+        const renamed = renameInstrOperands(sub, rename);
+        if (renamed !== sub) changed = true;
+        newElse.push(renamed);
+      }
+      if (!changed) return inst;
+      return { ...inst, cond: cv, then: newThen, else: newElse };
+    }
     case "for.loop": {
       const cv = mapId(rename, inst.condValue);
       if (cv === inst.condValue) return inst;
@@ -767,31 +796,10 @@ function renameInstrOperands(inst: IrInstr, rename: ReadonlyMap<IrValueId, IrVal
       if (r === inst.reason) return inst;
       return { ...inst, reason: r };
     }
-    // (#2856) Statement-level if — rename the cond + recurse both arm
-    // buffers (mirrors the value-producing `if` arm above, minus the
-    // carrier values, which if.stmt doesn't have).
-    case "if.stmt": {
-      const c = mapId(rename, inst.cond);
-      const newThen: IrInstr[] = [];
-      const newElse: IrInstr[] = [];
-      let armChanged = false;
-      for (const sub of inst.then) {
-        const r = renameInstrOperands(sub, rename);
-        if (r !== sub) armChanged = true;
-        newThen.push(r);
-      }
-      for (const sub of inst.else) {
-        const r = renameInstrOperands(sub, rename);
-        if (r !== sub) armChanged = true;
-        newElse.push(r);
-      }
-      if (c === inst.cond && !armChanged) return inst;
-      return { ...inst, cond: c, then: newThen, else: newElse };
-    }
     // (#2856) Early return — rename the optional value. NB inlining a
     // function CONTAINING an early.return is unsound (the return would
-    // exit the CALLER); the inline pass's eligibility check excludes it
-    // (see `hasEarlyReturnDeep` guard in the candidate filter).
+    // exit the CALLER); the inline pass's eligibility check excludes the
+    // kind in `canInline`.
     case "early.return": {
       if (inst.value === null) return inst;
       const v = mapId(rename, inst.value);

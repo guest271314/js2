@@ -111,6 +111,12 @@ function linearInstrError(instr: IrInstr): string | null {
     case "slot.write":
     case "while.loop":
     case "for.loop":
+    // #2952 slice 2 — br.label lowers to a core-Wasm `br` (depth derived by
+    // the shared ctrlStack resolver) and if.stmt to a core `if`/`block`;
+    // both are backend-identical structured control flow like the loop
+    // kinds above (#1852/#1527 axis rule).
+    case "br.label":
+    case "if.stmt":
       return null;
     default:
       return `linear backend does not support IR instruction '${instr.kind}' at the function-lowering boundary`;
@@ -301,6 +307,9 @@ function nestedInstrBuffers(instr: IrInstr): readonly (readonly IrInstr[])[] {
       if (instr.finallyBody) out.push(instr.finallyBody);
       return out;
     }
+    // #2952 slice 2 — statement-level if arms.
+    case "if.stmt":
+      return [instr.then, instr.else];
     default:
       return [];
   }

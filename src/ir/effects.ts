@@ -166,7 +166,12 @@ export function effectsOf(instr: IrInstr, cache: Map<IrInstr, IrEffects> = new M
       break;
     // Control effects: throw is a control effect treated as a full heap
     // barrier; await / async completions suspend/complete observably.
+    // #2952 slice 2 — br.label is a pure control transfer (no heap access),
+    // but like throw it must never be re-ordered across OR dropped, and
+    // `effectsConflict` only consults the heap/slot facets, so it carries
+    // the same full-barrier classification.
     case "throw":
+    case "br.label":
     case "await":
     case "async.return":
     case "async.throw":
@@ -235,7 +240,8 @@ export function effectsOf(instr: IrInstr, cache: Map<IrInstr, IrEffects> = new M
       mergeBuffer(instr.then);
       mergeBuffer(instr.else);
       break;
-    // (#2856) Statement-level if — same buffer merge as the value form.
+    // #2952 slice 2 — statement-level if: effects are the union of both
+    // arm buffers (cond is a plain SSA use, surfaced via directUses).
     case "if.stmt":
       mergeBuffer(instr.then);
       mergeBuffer(instr.else);
@@ -483,6 +489,12 @@ export function isSideEffecting(i: IrInstr): boolean {
     // (#1922 — fixes the ordinary `while (i < limit)` IR demotion.)
     i.kind === "while.loop" ||
     i.kind === "for.loop" ||
+    // #2952 slice 2 — br.label is a control transfer (must always run);
+    // if.stmt is statement-level control flow whose arm buffers must be
+    // use-walked so values referenced only inside an arm stay live (same
+    // rationale as while.loop / for.loop above).
+    i.kind === "br.label" ||
+    i.kind === "if.stmt" ||
     // Slice 10 (#1169i): extern class ops invoke host imports with
     // arbitrary side effects. Conservatively keep all five live so DCE
     // never strips a `RegExp_new` or `Uint8Array_set` whose result is
@@ -505,12 +517,8 @@ export function isSideEffecting(i: IrInstr): boolean {
     i.kind === "await" ||
     i.kind === "async.return" ||
     i.kind === "async.throw" ||
-    // (#2856) Statement-level control flow: if.stmt runs its arm buffers for
-    // effect (result: null — the generic null-result rule also keeps it, but
-    // seeding here makes `collectUses(_, { deep: true })` walk its buffers,
-    // same rationale as while.loop/for.loop). early.return is a control
-    // transfer — never droppable.
-    i.kind === "if.stmt" ||
+    // (#2856) early.return is a control transfer — never droppable.
+    // (if.stmt is already seeded above with br.label, #2952 s2.)
     i.kind === "early.return"
   );
 }

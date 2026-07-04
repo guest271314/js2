@@ -791,15 +791,11 @@ function collectUses(instr: IrInstr): readonly IrValueId[] {
     case "while.loop":
     case "for.loop":
       return [instr.condValue];
-    // (#1373 Phase B) Async / await IR nodes — single operand.
-    case "await":
-      return [instr.operand];
-    case "async.return":
-      return [instr.value];
-    case "async.throw":
-      return [instr.reason];
-    // (#2856) Statement-level if — cond + uses inside both arm buffers
-    // (mirrors the value-producing `if` arm above, minus carrier values).
+    // #2952 slice 2 — br.label has no SSA operands; if.stmt surfaces its
+    // cond plus arm-buffer uses (same deep pattern as `if` above, so the
+    // monomorphize use-counting sees outer values referenced in arms).
+    case "br.label":
+      return [];
     case "if.stmt": {
       const out: IrValueId[] = [instr.cond];
       const walk = (instrs: readonly IrInstr[]): void => {
@@ -811,6 +807,14 @@ function collectUses(instr: IrInstr): readonly IrValueId[] {
       walk(instr.else);
       return out;
     }
+    // (#1373 Phase B) Async / await IR nodes — single operand.
+    case "await":
+      return [instr.operand];
+    case "async.return":
+      return [instr.value];
+    case "async.throw":
+      return [instr.reason];
+    // (#2856) early.return — the optional return value is a direct use.
     case "early.return":
       return instr.value !== null ? [instr.value] : [];
   }

@@ -40,7 +40,18 @@ jobs:
         run: |
           # Baseline JSONL and summary JSON now live in js2wasm-baselines,
           # not in LFS on the main repo, to avoid LFS bandwidth exhaustion.
-          git clone --depth=1 https://github.com/loopdive/js2wasm-baselines.git /tmp/js2wasm-baselines 2>/dev/null || true
+          # Sparse + blob-filtered clone (#3028): the baselines repo carries a
+          # large runs/ tree (~500 MB cap of per-SHA run JSONLs), so a plain
+          # --depth=1 clone downloaded every tip blob and took 3-14 MINUTES.
+          # Materializing only the files this step reads takes ~2-5s
+          # (same pattern as test262-sharded.yml's catastrophic-guard clone).
+          # NOTE: every file consumed by the copy blocks below MUST be listed
+          # here — a missing entry makes its `[ -f ]` guard silently skip
+          # (that's how the served standalone report stayed stale after #2619).
+          { git clone --depth=1 --filter=blob:none --no-checkout https://github.com/loopdive/js2wasm-baselines.git /tmp/js2wasm-baselines \
+            && git -C /tmp/js2wasm-baselines sparse-checkout set --no-cone \
+              /test262-current.json /test262-current.jsonl /test262-standalone-current.json /test262-standalone-current.jsonl /runs/index.json \
+            && git -C /tmp/js2wasm-baselines checkout main; } 2>/dev/null || true
           if [ -f /tmp/js2wasm-baselines/test262-current.json ]; then
             mkdir -p website/public/benchmarks/results benchmarks/results/runs
             cp /tmp/js2wasm-baselines/test262-current.json   website/public/benchmarks/results/test262-report.json
@@ -66,6 +77,15 @@ jobs:
             if [ -f /tmp/js2wasm-baselines/test262-standalone-current.jsonl ]; then
               mkdir -p .test262-cache
               cp /tmp/js2wasm-baselines/test262-standalone-current.jsonl .test262-cache/test262-standalone-current.jsonl
+            fi
+            # Refresh the SERVED standalone report JSON, mirroring the host
+            # copy above. build-pages.js prefers the website/public copy, so
+            # without this the report page's Host/Standalone switch reads the
+            # stale committed test262-standalone-report.json (old corpus, no
+            # host_free field) while the host donut shows fresh numbers.
+            if [ -f /tmp/js2wasm-baselines/test262-standalone-current.json ]; then
+              cp /tmp/js2wasm-baselines/test262-standalone-current.json website/public/benchmarks/results/test262-standalone-report.json
+              cp /tmp/js2wasm-baselines/test262-standalone-current.json benchmarks/results/test262-standalone-report.json
             fi
             [ -f /tmp/js2wasm-baselines/runs/index.json ] && \
               cp /tmp/js2wasm-baselines/runs/index.json benchmarks/results/runs/index.json

@@ -63,11 +63,13 @@ import {
   type IrFunction,
   type IrGlobalRef,
   type IrInstr,
+  type IrLabelId,
   type IrObjectShape,
   type IrType,
   type IrTypeRef,
   type IrValueId,
   asVal,
+  forEachInstrDeep,
   forEachNestedBuffer,
 } from "./nodes.js";
 // #2134 — the unified IR effect model (formerly the private `SchedFx` table
@@ -501,8 +503,8 @@ export function lowerIrFunctionBody<S>(
         recordUse(instr.thenValue, -1);
         recordUse(instr.elseValue, -1);
       }
-      // (#2856) Statement-level `if.stmt` arms — same `-1` convention as the
-      // value-producing form above (no carrier values to record).
+      // #2952 slice 2 — statement-level if arms: same -1 convention (an
+      // outer value used inside an arm pre-materialises into a Wasm local).
       if (instr.kind === "if.stmt") {
         for (const u of collectForOfBodyUses(instr.then)) recordUse(u, -1);
         for (const u of collectForOfBodyUses(instr.else)) recordUse(u, -1);
@@ -721,7 +723,7 @@ export function lowerIrFunctionBody<S>(
       for (const sub of instr.then) allocLocalForInstr(sub);
       for (const sub of instr.else) allocLocalForInstr(sub);
     }
-    // (#2856) Statement-level if — same arm recursion as the value form.
+    // #2952 slice 2 — statement-level if arms (same recursion as `if`).
     if (instr.kind === "if.stmt") {
       for (const sub of instr.then) allocLocalForInstr(sub);
       for (const sub of instr.else) allocLocalForInstr(sub);
@@ -812,6 +814,98 @@ export function lowerIrFunctionBody<S>(
   // --- emission -----------------------------------------------------------
 
   const materialized = new Set<IrValueId>();
+
+  // --- #2952 slice 2 — lowering-time label→depth resolver (Design A3) ------
+  //
+  // `br.label{label, mode}` stores NO depth: the Wasm `br` immediate is
+  // derived HERE by counting structured frames between the branch site and
+  // the frame that binds `label`. Every structured Wasm frame the emitter
+  // opens (block / loop / if / try — each exactly ONE Wasm label) pushes one
+  // `CtrlFrame` for the duration of its interior emission and pops on close,
+  // so the stack mirrors the physical nesting at every emission point. This
+  // is what makes the depth robust under buffer re-nesting: the IR carries
+  // only the semantic label, and each emission point re-derives its own
+  // relative depth.
+  //
+  // Frame kinds:
+  //   - "break"    — the frame a `br.label{mode:"break"}` for this label
+  //                  exits to (the loop's outer `block`).
+  //   - "continue" — the frame whose br re-runs the loop's advance/cond
+  //                  (the Wasm `loop` for pre-test while / forof.iter, or a
+  //                  dedicated body-wrapping `block` for for / do-while /
+  //                  counter-advancing for-of — emitted only when the body
+  //                  actually contains a continue for this label, keeping
+  //                  continue-free loops byte-identical).
+  //   - "plain"    — any other frame (if / try / labeled-block later).
+  //                  A try frame carries its ACTIVE `finallyBody` while its
+  //                  try-body buffer is being emitted: a br.label that
+  //                  crosses it inlines the finally immediately before the
+  //                  br (the same inlining IrInstrTry lowering already does
+  //                  for normal completion). The field is masked (undefined)
+  //                  while the finally itself / the catch path is emitted so
+  //                  a break inside a finally never re-runs its own finally.
+  type CtrlFrame =
+    | { kind: "break"; label: IrLabelId }
+    | { kind: "continue"; label: IrLabelId }
+    | { kind: "plain"; finallyBody?: readonly IrInstr[] | undefined };
+  const ctrlStack: CtrlFrame[] = [];
+
+  /**
+   * Emit a nested buffer as a statement sequence with the standard SSA
+   * materialisation rules (void instrs emit in place; cross-block results
+   * emit + local.set; intra-buffer multi-use values tee at their use site).
+   * S-generic twin of the per-arm `emitBodyBuffer` helpers; used by the new
+   * if.stmt arm and by the br.label finally-inlining path.
+   */
+  const emitBufferAsStatements = (bodyInstrs: readonly IrInstr[], target: S): void => {
+    for (const bodyInstr of bodyInstrs) {
+      if (bodyInstr.result === null) {
+        emitInstrTree(bodyInstr, target);
+      } else if (crossBlock.has(bodyInstr.result)) {
+        emitInstrTree(bodyInstr, target);
+        emitter.emitLocalSet(localIdx.get(bodyInstr.result)!, target);
+        materialized.add(bodyInstr.result);
+      } else if ((totalUses.get(bodyInstr.result) ?? 0) === 0 && isSideEffecting(bodyInstr)) {
+        // (#2856) Zero-use side-effecting instr inside a nested buffer —
+        // same eager emit + drop contract as `emitBlockBody`. Without this
+        // arm, a statement-position call whose unused NON-VOID result never
+        // gets consumed (e.g. `map.set(k, v);` in a loop body — Map_set
+        // returns the map) was silently SKIPPED, dropping its side effect.
+        emitInstrTree(bodyInstr, target);
+        emitter.emitDrop(target);
+      }
+      // Intra-buffer multi-use: handled at use site via the tee pattern.
+    }
+  };
+
+  /**
+   * Resolve a `br.label` at the current emission point: scan the ctrlStack
+   * from the innermost frame (depth 0), counting every frame; inline each
+   * crossed try-finally (innermost first — JS runs inner finallys before
+   * outer ones on an abrupt exit); emit `br <depth>` at the matching frame.
+   *
+   * A br.label inside an inlined finally resolves against the SAME stack
+   * (the code physically sits at the branch site), with the finally's own
+   * frame masked — so `try { break } finally { continue }` correctly lets
+   * the continue win (its br is emitted before the break's br, which
+   * becomes unreachable), matching ECMA-262 completion-value overriding.
+   */
+  const resolveBrLabel = (label: IrLabelId, mode: "break" | "continue", out: S): void => {
+    for (let i = ctrlStack.length - 1, depth = 0; i >= 0; i--, depth++) {
+      const frame = ctrlStack[i]!;
+      if (frame.kind === mode && frame.label === label) {
+        emitter.emitBr(depth, out);
+        return;
+      }
+      if (frame.kind === "plain" && frame.finallyBody) {
+        const saved = frame.finallyBody;
+        frame.finallyBody = undefined; // mask: a finally never re-runs itself
+        emitBufferAsStatements(saved, out);
+        frame.finallyBody = saved;
+      }
+    }
+    throw new Error(`ir/lower: br.label(${label as number}, ${mode}) has no enclosing frame in ${func.name}`);
+  };
 
   /**
    * #1303 — Defensive coercion for bitwise op operands.
@@ -1068,51 +1162,29 @@ export function lowerIrFunctionBody<S>(
         // 1. Emit cond.
         emitValue(instr.cond, out);
 
-        // 2. THEN arm.
+        // 2. THEN arm. (#2952 slice 2 — each arm is one structured Wasm
+        // frame; push a plain CtrlFrame so any br.label nested in the arm
+        // derives the correct depth. Byte-inert for arms without one.)
         const thenBody: S = emitter.newSink();
+        ctrlStack.push({ kind: "plain" });
         emitArmBody(instr.then, thenBody);
         emitValue(instr.thenValue, thenBody);
+        ctrlStack.pop();
 
         // 3. ELSE arm.
         const elseBody: S = emitter.newSink();
+        ctrlStack.push({ kind: "plain" });
         emitArmBody(instr.else, elseBody);
         emitValue(instr.elseValue, elseBody);
+        ctrlStack.pop();
 
         // 4. Wrap in `if (result T) ... else ... end`.
         emitter.emitIf(blockType, thenBody, elseBody, out);
         return;
       }
-      // (#2856) Statement-level if — void `if (empty) <then> else <else> end`.
-      // Arm buffers follow the same SSA-materialisation rules as the
-      // value-producing form above, minus the carrier values.
-      case "if.stmt": {
-        const emitArmBody = (bodyInstrs: readonly IrInstr[], target: S): void => {
-          for (const bodyInstr of bodyInstrs) {
-            if (bodyInstr.result === null) {
-              emitInstrTree(bodyInstr, target);
-            } else if (crossBlock.has(bodyInstr.result)) {
-              emitInstrTree(bodyInstr, target);
-              emitter.emitLocalSet(localIdx.get(bodyInstr.result)!, target);
-              materialized.add(bodyInstr.result);
-            } else if ((totalUses.get(bodyInstr.result) ?? 0) === 0 && isSideEffecting(bodyInstr)) {
-              // (#2856) Zero-use side-effecting instr inside a nested buffer —
-              // same eager emit + drop contract as `emitBlockBody` (a
-              // statement-position extern/host call whose unused result would
-              // otherwise be silently SKIPPED, dropping its side effect).
-              emitInstrTree(bodyInstr, target);
-              emitter.emitDrop(target);
-            }
-            // Intra-arm multi-use: handled at use site via tee pattern.
-          }
-        };
-        emitValue(instr.cond, out);
-        const thenBody: S = emitter.newSink();
-        emitArmBody(instr.then, thenBody);
-        const elseBody: S = emitter.newSink();
-        emitArmBody(instr.else, elseBody);
-        emitter.emitIf({ kind: "empty" }, thenBody, elseBody, out);
-        return;
-      }
+      // (NB: `case "if.stmt"` is handled below with the #2952 slice-2 arm —
+      // it pushes plain CtrlFrames so br.label depth-derivation counts the
+      // arm's structured frame.)
       // (#2856) Early return from inside a nested buffer — the Wasm `return`
       // op unwinds every enclosing block/loop and returns from the function.
       // The value (when present) was coerced to the function's result type by
@@ -1684,6 +1756,15 @@ export function lowerIrFunctionBody<S>(
           index: slotWasmIdx(instr.counterSlot),
         });
 
+        // #2952 slice 2 — frames: outer block = break target; loop frame is
+        // plain (the counter-advance runs AFTER the body, so a continue
+        // targets a dedicated body-wrapping block that falls into it —
+        // emitted only when the body contains a continue for this loop).
+        const label = instr.loopLabel;
+        const needsContinueBlock = label !== undefined && bufferHasBrLabel(instr.body, label, "continue");
+        ctrlStack.push(label !== undefined ? { kind: "break", label } : { kind: "plain" });
+        ctrlStack.push({ kind: "plain" });
+
         // Build loop body Wasm ops by recursively emitting body instrs.
         const loopBody: Instr[] = [];
         // if (counter >= length) br 1 (exit)
@@ -1713,24 +1794,15 @@ export function lowerIrFunctionBody<S>(
           index: slotWasmIdx(instr.elementSlot),
         });
 
-        // Body instrs
-        for (const bodyInstr of instr.body) {
-          if (bodyInstr.result === null) {
-            emitInstrTree(bodyInstr, loopBody as unknown as S);
-          } else if (crossBlock.has(bodyInstr.result)) {
-            emitInstrTree(bodyInstr, loopBody as unknown as S);
-            loopBody.push({
-              op: "local.set",
-              index: localIdx.get(bodyInstr.result)!,
-            });
-            materialized.add(bodyInstr.result);
-          } else if ((totalUses.get(bodyInstr.result) ?? 0) === 0 && isSideEffecting(bodyInstr)) {
-            // (#2856) Zero-use side-effecting instr — eager emit + drop,
-            // same contract as `emitBlockBody` (see the if-arm variant).
-            emitInstrTree(bodyInstr, loopBody as unknown as S);
-            emitter.emitDrop(loopBody as unknown as S);
-          }
-          // Intra-block multi-use: handled at use site via tee pattern.
+        // Body instrs (continue block falls through to the counter advance).
+        if (needsContinueBlock) {
+          const bodyOps: Instr[] = [];
+          ctrlStack.push({ kind: "continue", label: label! });
+          emitBufferAsStatements(instr.body, bodyOps as unknown as S);
+          ctrlStack.pop();
+          emitter.emitBlock({ kind: "empty" }, bodyOps as unknown as S, loopBody as unknown as S);
+        } else {
+          emitBufferAsStatements(instr.body, loopBody as unknown as S);
         }
 
         // counter = counter + 1
@@ -1747,6 +1819,8 @@ export function lowerIrFunctionBody<S>(
 
         // br 0 (continue)
         emitter.emitBr(0, loopBody as unknown as S);
+        ctrlStack.pop(); // loop frame
+        ctrlStack.pop(); // break frame
 
         // Wrap in block { loop { ... } } via the trait (#1584 a3).
         const loopWrap: Instr[] = [];
@@ -1838,6 +1912,16 @@ export function lowerIrFunctionBody<S>(
         wasmOut.push({ op: "call", funcIdx: iteratorIdx });
         wasmOut.push({ op: "local.set", index: slotWasmIdx(instr.iterSlot) });
 
+        // #2952 slice 2 — frames: outer block = break target (a break lands
+        // just past the block, i.e. AT the __iterator_return close call
+        // below — spec-correct IteratorClose on abrupt exit, §14.7.5); the
+        // loop frame is the continue target (br-to-loop re-runs
+        // __iterator_next — the advance happens at the loop top, so no
+        // body-wrapping block is needed).
+        const label = instr.loopLabel;
+        ctrlStack.push(label !== undefined ? { kind: "break", label } : { kind: "plain" });
+        ctrlStack.push(label !== undefined ? { kind: "continue", label } : { kind: "plain" });
+
         // Build loop body Wasm ops.
         const loopBody: Instr[] = [];
         // __iterator_next(iter) → (i32 done, externref value) [multi-value]
@@ -1855,35 +1939,21 @@ export function lowerIrFunctionBody<S>(
         emitter.emitBrIf(1, loopBody as unknown as S);
 
         // Body instrs (same materialisation pattern as forof.vec).
-        for (const bodyInstr of instr.body) {
-          if (bodyInstr.result === null) {
-            emitInstrTree(bodyInstr, loopBody as unknown as S);
-          } else if (crossBlock.has(bodyInstr.result)) {
-            emitInstrTree(bodyInstr, loopBody as unknown as S);
-            loopBody.push({
-              op: "local.set",
-              index: localIdx.get(bodyInstr.result)!,
-            });
-            materialized.add(bodyInstr.result);
-          } else if ((totalUses.get(bodyInstr.result) ?? 0) === 0 && isSideEffecting(bodyInstr)) {
-            // (#2856) Zero-use side-effecting instr — eager emit + drop,
-            // same contract as `emitBlockBody` (see the if-arm variant).
-            emitInstrTree(bodyInstr, loopBody as unknown as S);
-            emitter.emitDrop(loopBody as unknown as S);
-          }
-        }
+        emitBufferAsStatements(instr.body, loopBody as unknown as S);
 
         // br 0 (continue)
         emitter.emitBr(0, loopBody as unknown as S);
+        ctrlStack.pop(); // loop frame
+        ctrlStack.pop(); // break frame
 
         // block { loop { ... } } via the trait (#1584 a3).
         const loopWrap: Instr[] = [];
         emitter.emitLoop({ kind: "empty" }, loopBody as unknown as S, loopWrap as unknown as S);
         emitter.emitBlock({ kind: "empty" }, loopWrap as unknown as S, wasmOut as unknown as S);
 
-        // Normal-exit close: iter.return(iter). Note this runs only on
-        // normal loop exit (done=true). Abrupt exits (break/return)
-        // would need a try/finally — slice 6 step E (#1169h dependency).
+        // Loop-exit close: iter.return(iter). Runs on normal exit
+        // (done=true) AND on `break` (#2952 slice 2 — the break br targets
+        // the wrapping block, landing exactly here — IteratorClose §14.7.5).
         wasmOut.push({ op: "local.get", index: slotWasmIdx(instr.iterSlot) });
         wasmOut.push({ op: "call", funcIdx: iteratorReturnIdx });
         return;
@@ -1899,6 +1969,33 @@ export function lowerIrFunctionBody<S>(
         emitValue(instr.value, out);
         // #1584 (a4): throw routes through the trait.
         emitter.emitThrow(tagIdx, out);
+        return;
+      }
+      // #2952 slice 2 — unlabeled break/continue. Depth derived at emit time
+      // by the ctrlStack resolver; crossed try-finallys are inlined before
+      // the br. Verifier guarantees an enclosing loop binds the label.
+      case "br.label": {
+        resolveBrLabel(instr.label, instr.mode, out);
+        return;
+      }
+      // #2952 slice 2 — statement-level if (void arms, else may be empty).
+      // Each arm is one structured Wasm frame → one plain CtrlFrame so a
+      // br.label inside an arm counts it toward its depth.
+      case "if.stmt": {
+        emitValue(instr.cond, out);
+        const thenBody: S = emitter.newSink();
+        ctrlStack.push({ kind: "plain" });
+        emitBufferAsStatements(instr.then, thenBody);
+        ctrlStack.pop();
+        const elseBody: S = emitter.newSink();
+        if (instr.else.length > 0) {
+          ctrlStack.push({ kind: "plain" });
+          emitBufferAsStatements(instr.else, elseBody);
+          ctrlStack.pop();
+        }
+        // Empty-else encodes as a bare `if ... end` (binary.ts omits the
+        // else opcode for an empty arm under an empty blocktype).
+        emitter.emitIf({ kind: "empty" }, thenBody, elseBody, out);
         return;
       }
       case "try": {
@@ -1949,9 +2046,23 @@ export function lowerIrFunctionBody<S>(
           }
         };
 
+        // #2952 slice 2 — one CtrlFrame for the try op (it is exactly one
+        // Wasm label). The frame carries the ACTIVE finallyBody only while
+        // the try-body buffer is emitted: a br.label crossing out of the try
+        // body must inline the finally before its br. Everywhere else (the
+        // finally's own inline emissions, the catch path) it is masked —
+        // the catch path's finally obligations are owned by the dedicated
+        // inner-try frame below, and a finally must never re-run itself.
+        const tryFrame: { kind: "plain"; finallyBody?: readonly IrInstr[] | undefined } = {
+          kind: "plain",
+          finallyBody: instr.finallyBody,
+        };
+        ctrlStack.push(tryFrame);
+
         // Try body — emits user instrs + inlined finally on normal exit.
         const tryBody: Instr[] = [];
         emitBodyBuffer(instr.body, tryBody);
+        tryFrame.finallyBody = undefined; // mask for all remaining emissions
         if (instr.finallyBody) {
           emitBodyBuffer(instr.finallyBody, tryBody);
         }
@@ -1975,11 +2086,22 @@ export function lowerIrFunctionBody<S>(
             // Wrap user catch body in an inner try/catch_all so a throw
             // inside the catch body still runs finally before propagating.
             // #1584 (a4): the inner try + rethrow route through the trait.
+            // #2952 slice 2 — the inner try is one more Wasm label; its
+            // frame carries the finally while the catch body emits (a
+            // br.label out of the catch must run the finally), masked while
+            // the finally itself emits into the inner catch_all.
+            const innerFrame: { kind: "plain"; finallyBody?: readonly IrInstr[] | undefined } = {
+              kind: "plain",
+              finallyBody: instr.finallyBody,
+            };
+            ctrlStack.push(innerFrame);
             const innerBody: Instr[] = [];
             emitBodyBuffer(instr.catchClause.body, innerBody);
+            innerFrame.finallyBody = undefined;
             const innerCatchAll: Instr[] = [];
             emitBodyBuffer(instr.finallyBody, innerCatchAll);
             emitter.emitRethrow(0, innerCatchAll as unknown as S);
+            ctrlStack.pop();
             emitter.emitTry(
               { kind: "empty" },
               innerBody as unknown as S,
@@ -2010,6 +2132,8 @@ export function lowerIrFunctionBody<S>(
           emitter.emitRethrow(0, ca as unknown as S);
           catchAll = ca;
         }
+
+        ctrlStack.pop(); // tryFrame
 
         // #1584 (a4): the structured try routes through the trait.
         emitter.emitTry(
@@ -2052,6 +2176,15 @@ export function lowerIrFunctionBody<S>(
 
         // #1584 (a0-tail): out-of-subset (embeds an Instr[] loop body). S = Instr[].
         const wasmOut = requireInstrSink(out);
+
+        // #2952 slice 2 — frames: outer block = break target; loop frame is
+        // plain (the code-point cursor advance runs AFTER the body, so a
+        // continue targets a dedicated body-wrapping block — emitted only
+        // when the body contains a continue for this loop).
+        const label = instr.loopLabel;
+        const needsContinueBlock = label !== undefined && bufferHasBrLabel(instr.body, label, "continue");
+        ctrlStack.push(label !== undefined ? { kind: "break", label } : { kind: "plain" });
+        ctrlStack.push({ kind: "plain" });
 
         // <emit str>; local.set <strSlot>
         emitValue(instr.str, out);
@@ -2096,23 +2229,16 @@ export function lowerIrFunctionBody<S>(
           index: slotWasmIdx(instr.elementSlot),
         });
 
-        // Body instrs (same materialisation pattern as forof.vec/forof.iter).
-        for (const bodyInstr of instr.body) {
-          if (bodyInstr.result === null) {
-            emitInstrTree(bodyInstr, loopBody as unknown as S);
-          } else if (crossBlock.has(bodyInstr.result)) {
-            emitInstrTree(bodyInstr, loopBody as unknown as S);
-            loopBody.push({
-              op: "local.set",
-              index: localIdx.get(bodyInstr.result)!,
-            });
-            materialized.add(bodyInstr.result);
-          } else if ((totalUses.get(bodyInstr.result) ?? 0) === 0 && isSideEffecting(bodyInstr)) {
-            // (#2856) Zero-use side-effecting instr — eager emit + drop,
-            // same contract as `emitBlockBody` (see the if-arm variant).
-            emitInstrTree(bodyInstr, loopBody as unknown as S);
-            emitter.emitDrop(loopBody as unknown as S);
-          }
+        // Body instrs (same materialisation pattern as forof.vec/forof.iter;
+        // continue block falls through to the cursor advance below).
+        if (needsContinueBlock) {
+          const bodyOps: Instr[] = [];
+          ctrlStack.push({ kind: "continue", label: label! });
+          emitBufferAsStatements(instr.body, bodyOps as unknown as S);
+          ctrlStack.pop();
+          emitter.emitBlock({ kind: "empty" }, bodyOps as unknown as S, loopBody as unknown as S);
+        } else {
+          emitBufferAsStatements(instr.body, loopBody as unknown as S);
         }
 
         // counter = counter + element.len — the element is the whole code
@@ -2135,6 +2261,8 @@ export function lowerIrFunctionBody<S>(
 
         // br 0 (continue)
         emitter.emitBr(0, loopBody as unknown as S);
+        ctrlStack.pop(); // loop frame
+        ctrlStack.pop(); // break frame
 
         // block { loop { ... } } via the trait (#1584 a3).
         const loopWrap: Instr[] = [];
@@ -2251,10 +2379,37 @@ export function lowerIrFunctionBody<S>(
         // `block { loop { ... br 0 } }` and the `br_if 1` exit are identical.
         const postTest = instr.kind === "while.loop" && instr.postCond === true;
 
+        // #2952 slice 2 — CtrlFrames for the two frames this arm opens
+        // (outer `block` = break target; inner `loop`). For a pre-test
+        // `while`, br-to-loop re-evaluates the cond, so the loop frame IS
+        // the continue target. For post-test (do-while) and `for`, a
+        // continue must fall into the cond / update code that runs AFTER
+        // the body, so the body is wrapped in a dedicated `block` (the
+        // continue target) — emitted only when the body actually contains
+        // a continue for this loop, keeping continue-free loops
+        // byte-identical to the slice-1 emission.
+        const label = instr.loopLabel;
+        const preTestWhile = instr.kind === "while.loop" && !postTest;
+        const needsContinueBlock =
+          label !== undefined && !preTestWhile && bufferHasBrLabel(instr.body, label, "continue");
+        ctrlStack.push(label !== undefined ? { kind: "break", label } : { kind: "plain" });
+        ctrlStack.push(preTestWhile && label !== undefined ? { kind: "continue", label } : { kind: "plain" });
+        const emitLoopBodyStatements = (): void => {
+          if (needsContinueBlock) {
+            const bodyOps: Instr[] = [];
+            ctrlStack.push({ kind: "continue", label: label! });
+            emitBodyBuffer(instr.body, bodyOps);
+            ctrlStack.pop();
+            emitter.emitBlock({ kind: "empty" }, bodyOps as unknown as S, loopBody as unknown as S);
+          } else {
+            emitBodyBuffer(instr.body, loopBody);
+          }
+        };
+
         if (postTest) {
           // Post-test: body first, then evaluate cond and exit if falsy.
-          // 1. Body instructions.
-          emitBodyBuffer(instr.body, loopBody);
+          // 1. Body instructions (continue falls through to the cond).
+          emitLoopBodyStatements();
           // 2. Cond instructions (re-evaluated each iteration, after body).
           emitBodyBuffer(instr.cond, loopBody);
           // 3. Push the cond value, invert (i32.eqz), then br_if 1 to exit.
@@ -2272,8 +2427,8 @@ export function lowerIrFunctionBody<S>(
           loopBody.push({ op: "i32.eqz" });
           emitter.emitBrIf(1, loopBody as unknown as S);
 
-          // 3. Body instructions.
-          emitBodyBuffer(instr.body, loopBody);
+          // 3. Body instructions (for `for`, continue falls to the update).
+          emitLoopBodyStatements();
 
           // 4. Update instructions (for-loop only — empty array for while).
           if (instr.kind === "for.loop") {
@@ -2283,6 +2438,8 @@ export function lowerIrFunctionBody<S>(
 
         // 5. Continue back to the loop header.
         emitter.emitBr(0, loopBody as unknown as S);
+        ctrlStack.pop(); // loop frame
+        ctrlStack.pop(); // break frame
 
         // 6. Wrap in `block { loop { ... } }` via the trait (#1584 a3).
         const loopWrap: Instr[] = [];
@@ -2722,6 +2879,12 @@ function collectIrUses(instr: IrInstr): readonly IrValueId[] {
     case "while.loop":
     case "for.loop":
       return [];
+    // #2952 slice 2 — br.label has no SSA operands; if.stmt surfaces only
+    // its cond (arm-buffer uses via `collectForOfBodyUses`, like `if`).
+    case "br.label":
+      return [];
+    case "if.stmt":
+      return [instr.cond];
     // (#1373 Phase B) Async / await IR nodes — type-only in this slice.
     // The lowering Phase C (#1373b) will inflate these into CPS-form
     // microtask-queue calls; until then they're never emitted by
@@ -2732,14 +2895,28 @@ function collectIrUses(instr: IrInstr): readonly IrValueId[] {
       return [instr.value];
     case "async.throw":
       return [instr.reason];
-    // (#2856) Statement-level if — arm-buffer uses are surfaced separately
-    // via `collectForOfBodyUses` (forEachNestedBuffer recursion); only the
-    // cond is a direct use here.
-    case "if.stmt":
-      return [instr.cond];
+    // (#2856) Early return — the optional return value is a direct use.
     case "early.return":
       return instr.value !== null ? [instr.value] : [];
   }
+}
+
+/**
+ * #2952 slice 2 — does `body` (deeply) contain a `br.label` with the given
+ * label + mode? Used by the loop-lowering arms to decide whether to emit the
+ * dedicated continue-target block: labels are unique per function, so the
+ * deep scan is exact — a nested loop's own continues carry its own label and
+ * never match. Continue-free loops therefore stay byte-identical.
+ */
+export function bufferHasBrLabel(body: readonly IrInstr[], label: IrLabelId, mode: "break" | "continue"): boolean {
+  let found = false;
+  for (const instr of body) {
+    forEachInstrDeep(instr, (i) => {
+      if (i.kind === "br.label" && i.label === label && i.mode === mode) found = true;
+    });
+    if (found) return true;
+  }
+  return false;
 }
 
 /**
