@@ -19,7 +19,7 @@
   "codegen/fixups.ts": 1,
   "codegen/function-body.ts": 1,
   "codegen/host-import-allowlist.ts": 2,
-  "codegen/index.ts": 34,
+  "codegen/index.ts": 35,
   "codegen/iterator-native.ts": 2,
   "codegen/json-codec-native.ts": 7,
   "codegen/map-runtime.ts": 2,
