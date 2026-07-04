@@ -367,10 +367,107 @@ export function promoteAccessorCapturesToGlobals(
     }
   }
 
+  // (#2029 family A) Transitive captures of referenced NESTED FUNCTIONS.
+  // When the accessor body references a nested function declaration (e.g.
+  // `get() { return next; }` with `function next() { return count; }` in the
+  // enclosing scope), the name `next` itself is skipped below (it is a
+  // function reference, not a variable) — but materializing next's closure
+  // INSIDE the accessor still needs next's captured variables. Those captures
+  // are recorded against the ENCLOSING function's local slots
+  // (`cap.outerLocalIdx`), which the accessor's own function cannot read:
+  // previously `emitMemoizedNestedFnClosure` / the call-site cap-prepend baked
+  // the enclosing function's local index into the accessor body — an emit
+  // crash ("local index out of range") when the slot exceeded the accessor's
+  // local count, and a silent wrong-local read when it happened to be in
+  // range. Promote the transitive captures here, in the enclosing fctx where
+  // `cap.outerLocalIdx` is still valid:
+  //   - IMMUTABLE captures → plain value-global promotion (added to
+  //     `referencedNames`, handled by the main loop below). Value-copy
+  //     semantics are preserved: the variable is never written, so the
+  //     global always holds the one value the closure would have captured.
+  //   - MUTABLE captures → box EAGERLY (same ref-cell + localMap-rebind
+  //     pattern the closure builders use) and alias the BOX in a module
+  //     global (`ctx.capturedBoxGlobals`). The accessor's closure
+  //     materialization then shares the very same cell the enclosing
+  //     function writes through — live write-through semantics, not a copy.
+  {
+    // Names the accessor body references DIRECTLY (before the transitive
+    // union below). A mutable capture that is also directly referenced keeps
+    // the value-global promotion — the accessor's own read/write paths
+    // (identifiers.ts / assignment.ts) resolve via `ctx.capturedGlobals`
+    // only; the closure materialization then sources a boxed COPY of the
+    // value global (best-effort, no crash) instead of the shared cell.
+    const directlyReferenced = new Set(referencedNames);
+    const fnWorklist: string[] = [];
+    for (const name of referencedNames) {
+      if (ctx.funcMap.has(name) && ctx.nestedFuncCaptures.has(name)) fnWorklist.push(name);
+    }
+    const visitedFns = new Set<string>();
+    while (fnWorklist.length > 0) {
+      const fnName = fnWorklist.pop()!;
+      if (visitedFns.has(fnName)) continue;
+      visitedFns.add(fnName);
+      const caps = ctx.nestedFuncCaptures.get(fnName);
+      if (!caps) continue;
+      for (const cap of caps) {
+        // A capture can itself be a nested function name — follow it.
+        if (ctx.funcMap.has(cap.name) && ctx.nestedFuncCaptures.has(cap.name)) {
+          fnWorklist.push(cap.name);
+          continue;
+        }
+        if (!(cap.mutable && cap.valType) || directlyReferenced.has(cap.name)) {
+          // Immutable (value-copy semantics preserved: never written), or
+          // mutable-but-directly-referenced (accessor read path wins):
+          // value-global promotion via the main loop below.
+          referencedNames.add(cap.name);
+          continue;
+        }
+        // Mutable: box-promote (shared ref cell aliased in a global).
+        if (ctx.capturedBoxGlobals?.has(cap.name)) continue;
+        if (ctx.capturedGlobals.has(cap.name) || ctx.moduleGlobals.has(cap.name)) continue;
+        const capLocalIdx = fctx.localMap.get(cap.name);
+        if (capLocalIdx === undefined) continue;
+        const refCellTypeIdx = getOrRegisterRefCellType(ctx, cap.valType);
+        let boxedLocalIdx: number;
+        if (fctx.boxedCaptures?.has(cap.name)) {
+          // Already boxed by a prior closure construction — localMap points
+          // at the box; alias that same cell.
+          boxedLocalIdx = capLocalIdx;
+        } else {
+          fctx.body.push({ op: "local.get", index: capLocalIdx });
+          fctx.body.push({ op: "struct.new", typeIdx: refCellTypeIdx });
+          boxedLocalIdx = allocLocal(fctx, `__boxed_${cap.name}`, {
+            kind: "ref",
+            typeIdx: refCellTypeIdx,
+          });
+          fctx.body.push({ op: "local.set", index: boxedLocalIdx });
+          fctx.localMap.set(cap.name, boxedLocalIdx);
+          if (!fctx.boxedCaptures) fctx.boxedCaptures = new Map();
+          fctx.boxedCaptures.set(cap.name, { refCellTypeIdx, valType: cap.valType });
+        }
+        const boxGlobalIdx = nextModuleGlobalIdx(ctx);
+        ctx.mod.globals.push({
+          name: `__captured_box_${cap.name}`,
+          type: { kind: "ref_null", typeIdx: refCellTypeIdx },
+          mutable: true,
+          init: [{ op: "ref.null", typeIdx: refCellTypeIdx }],
+        });
+        fctx.body.push({ op: "local.get", index: boxedLocalIdx });
+        fctx.body.push({ op: "global.set", index: boxGlobalIdx });
+        (ctx.capturedBoxGlobals ??= new Map()).set(cap.name, { globalIdx: boxGlobalIdx, refCellTypeIdx });
+      }
+    }
+  }
+
   for (const name of referencedNames) {
     // Skip if already a captured global or module global
     if (ctx.capturedGlobals.has(name)) continue;
     if (ctx.moduleGlobals.has(name)) continue;
+    // (#2029 family A) Skip names box-promoted above — their localMap entry
+    // now points at the shared ref-cell box; value-promoting that box would
+    // orphan the rebind (and the accessor body sources it via
+    // `ctx.capturedBoxGlobals`, not `ctx.capturedGlobals`).
+    if (ctx.capturedBoxGlobals?.has(name)) continue;
 
     const localIdx = fctx.localMap.get(name);
     if (localIdx === undefined) continue;
@@ -3579,11 +3676,39 @@ function emitMemoizedNestedFnClosure(
       fctx.body.push({ op: "local.get", index: i });
       continue;
     }
+    // (#2029 family A) Cross-fctx capture sourcing. `cap.outerLocalIdx` is a
+    // slot in the function that DECLARED the nested fn; when this
+    // materialization runs inside a DIFFERENT function (an object-literal
+    // accessor body — the enclosing fn's locals are unreachable), baking it
+    // emit-crashes ("local index out of range") or silently reads the wrong
+    // local. `promoteAccessorCapturesToGlobals` promotes such captures to
+    // module globals (shared ref-cell box for mutable, value global for
+    // immutable); prefer those whenever the current fctx cannot resolve the
+    // name itself. Guarded on localMap-absence so owner-fctx behavior is
+    // unchanged (see the #1177 revert note in calls.ts for why a blanket
+    // localMap-first lookup is NOT safe).
+    const capUnresolvedHere = fctx.localMap.get(cap.name) === undefined;
     if (cap.mutable && cap.valType) {
       const refCellTypeIdx = getOrRegisterRefCellType(ctx, cap.valType);
+      const boxGlobal = capUnresolvedHere ? ctx.capturedBoxGlobals?.get(cap.name) : undefined;
       if (fctx.boxedCaptures?.has(cap.name)) {
         const currentLocalIdx = fctx.localMap.get(cap.name)!;
         fctx.body.push({ op: "local.get", index: currentLocalIdx });
+      } else if (boxGlobal !== undefined) {
+        // Shared ref-cell box promoted to a module global — live
+        // write-through semantics with the declaring function.
+        fctx.body.push({ op: "global.get", index: boxGlobal.globalIdx });
+        fctx.body.push({ op: "ref.as_non_null" });
+      } else if (capUnresolvedHere && ctx.capturedGlobals.has(cap.name)) {
+        // Value global (the capture is also directly referenced by the
+        // accessor body) — box a copy. Best-effort: writes through the
+        // closure do not propagate back, but the previous behavior was an
+        // out-of-scope local read (emit crash / wrong local).
+        fctx.body.push({ op: "global.get", index: ctx.capturedGlobals.get(cap.name)! });
+        if (ctx.capturedGlobalsWidened.has(cap.name)) {
+          fctx.body.push({ op: "ref.as_non_null" });
+        }
+        fctx.body.push({ op: "struct.new", typeIdx: refCellTypeIdx });
       } else {
         // Stage 1 localMap-first lookup reverted — see calls.ts comment.
         fctx.body.push({ op: "local.get", index: cap.outerLocalIdx });
@@ -3596,6 +3721,14 @@ function emitMemoizedNestedFnClosure(
         fctx.localMap.set(cap.name, boxedLocalIdx);
         if (!fctx.boxedCaptures) fctx.boxedCaptures = new Map();
         fctx.boxedCaptures.set(cap.name, { refCellTypeIdx, valType: cap.valType });
+      }
+    } else if (capUnresolvedHere && ctx.capturedGlobals.has(cap.name)) {
+      // (#2029 family A) Immutable capture promoted to a value global by
+      // the accessor-capture pass — read it instead of the out-of-scope
+      // declaring-function local slot.
+      fctx.body.push({ op: "global.get", index: ctx.capturedGlobals.get(cap.name)! });
+      if (ctx.capturedGlobalsWidened.has(cap.name)) {
+        fctx.body.push({ op: "ref.as_non_null" });
       }
     } else {
       fctx.body.push({ op: "local.get", index: cap.outerLocalIdx });

@@ -880,6 +880,21 @@ export interface CodegenContext {
   capturedGlobals: Map<string, number>;
   /** Captured globals whose type was widened from ref to ref_null for null init */
   capturedGlobalsWidened: Set<string>;
+  /**
+   * (#2029 family A) Mutable-capture ref-cell boxes promoted to module
+   * globals so an accessor body can materialize a nested function's closure.
+   * When an object-literal getter/setter references a nested function `f`
+   * whose captures include a MUTABLE outer local `v`, the closure-construction
+   * code inside the accessor needs the SAME ref-cell box the enclosing
+   * function writes through — an outer-fctx local slot (`cap.outerLocalIdx`)
+   * is unreachable from the accessor's own function (baking it emit-crashed
+   * with "local index out of range", or silently read the wrong local when
+   * the stale index happened to be in range). `promoteAccessorCapturesToGlobals`
+   * boxes `v` eagerly in the enclosing fctx and aliases the box in a module
+   * global of type `(ref null $cell)`; closure-materialization sites source
+   * the capture from here when the current fctx cannot resolve it.
+   */
+  capturedBoxGlobals?: Map<string, { globalIdx: number; refCellTypeIdx: number }>;
   /** Set of class names (local classes compiled to Wasm GC structs) */
   classSet: Set<string>;
   /**

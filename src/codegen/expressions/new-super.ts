@@ -307,6 +307,17 @@ function emitSuperExternMethodCall(
   }
   if (!externAncestor) return null;
 
+  // (#2029 family B) Standalone/WASI: this whole path is a JS-host bridge
+  // (`__extern_method_call` + `__js_array_*` — a dynamic `recv[name](args)`
+  // performed in JS land). With no host, the imports both leak (the module
+  // could never instantiate with an empty import object) AND the method-name
+  // string push below baked the `-1` string-global sentinel → the raw
+  // "global index out of range — -1" emit crash (e.g. `super[Symbol.replace]`
+  // in a `class RE extends RegExp`). Refuse here so the caller reports the
+  // clean, located "Cannot find method 'X' on parent class 'Y'" error —
+  // the #1888 dual-mode invariant (loud refusal, never a poisoned index).
+  if (ctx.standalone || ctx.wasi) return null;
+
   const selfIdx = fctx.localMap.get("this");
   if (selfIdx === undefined) return null;
 
@@ -353,13 +364,13 @@ function emitSuperExternMethodCall(
 
   // __extern_method_call(receiver, methodName, args)
   fctx.body.push({ op: "local.get", index: recvLocal });
+  // (#2029 family B) Route the name push through the dual-mode helper: a raw
+  // `global.get stringGlobalMap.get(name)` guarded only on `!== undefined`
+  // bakes the -1 sentinel under nativeStrings (gc + --nativeStrings; the
+  // standalone/wasi combination is refused above). Host mode is
+  // byte-identical (the helper emits the same `global.get`).
   addStringConstantGlobal(ctx, methodName);
-  const strIdx = ctx.stringGlobalMap.get(methodName);
-  if (strIdx !== undefined) {
-    fctx.body.push({ op: "global.get", index: strIdx } as Instr);
-  } else {
-    compileStringLiteral(ctx, fctx, methodName);
-  }
+  fctx.body.push(...stringConstantExternrefInstrs(ctx, methodName));
   fctx.body.push({ op: "local.get", index: argsLocal });
   const finalMcIdx = ctx.funcMap.get("__extern_method_call") ?? methodCallIdx;
   fctx.body.push({ op: "call", funcIdx: finalMcIdx });
