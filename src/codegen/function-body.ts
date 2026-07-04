@@ -53,6 +53,7 @@ import { collectI32SpecializedArrays } from "./array-element-typing.js";
 import { detectArrayReduceFusion, applyArrayReduceFusion } from "./array-reduce-fusion.js";
 import { compileNativeGeneratorFunction } from "./generators-native.js";
 import { maybeActivateAsync } from "./async-activation.js";
+import { emitAsyncGenerator, isAsyncGenDriveCandidate } from "./async-frame.js";
 import {
   functionHasLinearU8Params,
   getLinearU8ParamIndicesForDeclaration,
@@ -1009,7 +1010,15 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
     );
   }
 
-  if (isGenerator) {
+  if (isGenerator && hasAsyncModifier(decl) && isAsyncGenDriveCandidate(ctx, decl)) {
+    // (#2906 slice 3d-i) Async-generator PRODUCER core. `async function* g(){
+    // yield await P; yield E }` routes through the generator-buffer path and
+    // fails at the #680 native-generator gate in standalone/wasi. Intercept a
+    // bounded async-gen body HERE — before that gate — and drive it host-free on
+    // the async-frame CFG machine (frame carrier + `__async_gen_next_<name>`).
+    // The generator returnType is already externref (the frame carrier).
+    emitAsyncGenerator(ctx, fctx, decl);
+  } else if (isGenerator) {
     const nativeGenerator = ctx.nativeGenerators.get(func.name);
     if (nativeGenerator) {
       compileNativeGeneratorFunction(ctx, fctx, decl, nativeGenerator);

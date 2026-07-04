@@ -4,8 +4,8 @@ title: "negative_test_fail: residual early-error / static-semantics gaps (~79 de
 status: ready
 sprint: current
 created: 2026-07-03
-updated: 2026-07-03
-status_note: "First slice landed (PR): trailing-comma-after-rest early error in destructuring patterns (all four forms). Issue stays open — remaining unenforced-SyntaxError samples decompose into further independent point-fixes per the issue's own triage note."
+updated: 2026-07-04
+status_note: "Slices 1–3 landed. Slice 3 (PR): private-name grammar early errors — (a) private name referenced in a class heritage clause, (b) private name as a destructuring-pattern key (10 test262 files). Issue stays open — remaining unenforced-SyntaxError samples (module-code, import.meta, top-level-await) decompose into further independent point-fixes per the issue's own triage note."
 priority: medium
 horizon: s
 feasibility: medium
@@ -34,13 +34,13 @@ coverage grows (expected pattern for this project — not a regression).
 
 ## Breakdown
 
-| pattern | count |
-|---|--:|
-| expected `SyntaxError`, compiled with no diagnostic (early error not detected) | 64 |
-| expected runtime `ReferenceError` but succeeded | 9 |
-| expected runtime `SyntaxError` but succeeded | 3 |
-| expected resolution `SyntaxError`, no diagnostic | 2 |
-| expected runtime `TypeError` but succeeded | 1 |
+| pattern                                                                        | count |
+| ------------------------------------------------------------------------------ | ----: |
+| expected `SyntaxError`, compiled with no diagnostic (early error not detected) |    64 |
+| expected runtime `ReferenceError` but succeeded                                |     9 |
+| expected runtime `SyntaxError` but succeeded                                   |     3 |
+| expected resolution `SyntaxError`, no diagnostic                               |     2 |
+| expected runtime `TypeError` but succeeded                                     |     1 |
 
 ## Sample failing files
 
@@ -81,7 +81,7 @@ a rest element in every destructuring-pattern position — an
 - `const {...x,} = y` (object binding pattern).
 
 **Root cause:** the pre-existing "rest must be last" check only fired when an
-*element* followed the rest (`[...x, y]`); TypeScript's parser accepts the bare
+_element_ followed the rest (`[...x, y]`); TypeScript's parser accepts the bare
 trailing comma `[...x,]` silently and does NOT insert a trailing
 `OmittedExpression`, so nothing detected it. Fix keys off the NodeArray's
 `hasTrailingComma` flag when the last element is the rest.
@@ -90,7 +90,7 @@ trailing comma `[...x,]` silently and does NOT insert a trailing
 patterns), `src/compiler/early-errors/node-checks.ts` (array + object binding
 patterns). Tests: `tests/issue-3026.test.ts` (5 reject + 5 valid-control
 cases). Byte-inert for all valid programs — spread-with-trailing-comma in an
-array/object literal *value* (`const v = [...x,]`, `{...x,}`) and a trailing
+array/object literal _value_ (`const v = [...x,]`, `{...x,}`) and a trailing
 comma after a non-rest element (`[a,]`, `{a,}`) all remain valid.
 
 **Remaining:** the other unenforced-`SyntaxError` samples (private-name grammar,
@@ -125,3 +125,68 @@ to the existing shorthand-property checks). Tests: `tests/issue-3026.test.ts`
 **Remaining:** further unenforced-`SyntaxError` samples (private-name grammar on
 class heritage, `array-rest-elision-invalid` residuals, etc.) remain independent
 point-fixes — issue stays open for follow-up slices.
+
+## Slice 3 landed — private-name (`#x`) grammar early errors (2026-07-04)
+
+**Delivered:** two precise parse-time early errors for private-name grammar
+rules, clearing all **10** `elements/syntax/early-errors` unenforced-`SyntaxError`
+samples (verified: 10/10 now pass, 0/113 related passing files regressed):
+
+- **(a) Private name in a class heritage clause.** `class C extends class { x =
+this.#foo; } { #foo; }` — per §15.7.14 ClassDefinitionEvaluation the
+  `ClassHeritage` is evaluated with the OUTER PrivateEnvironment, so `C`'s own
+  `#foo` is not yet in scope in `C`'s `extends` clause → SyntaxError. Covers
+  `grammar-private-environment-on-class-heritage{,-function-expression,-recursive,-chained-usage}`
+  (both class-expression and class-statement forms).
+- **(b) Private name as a destructuring-pattern key.** `const { #x: v } = this`
+  / `({ #x: v } = this)` — `ObjectBindingPattern` / `ObjectAssignmentPattern`
+  property names are `PropertyName`, which excludes `PrivateIdentifier` →
+  SyntaxError even when `#x` is declared in the enclosing class. Covers
+  `grammar-private-field-on-object-destructuring`.
+
+**Root cause:** (a) `isInsideClassWithPrivateName` walked ALL enclosing classes
+and counted a class's own private members even when the reference lived in that
+class's heritage clause — it now skips a class's members when the reference is
+within that class's `heritageClauses`. (b) the existing PrivateIdentifier check
+only enforced "must be declared in an enclosing class"; a private name used as a
+`BindingElement.propertyName` or an object-pattern property key was silently
+accepted by TS's parser (no diagnostic under `skipSemanticDiagnostics`) — a new
+additive branch flags it before the enclosing-class rule.
+
+**Files:** `src/compiler/early-errors/predicates.ts` (heritage-scoped
+`isInsideClassWithPrivateName` + `isNodeWithin` helper),
+`src/compiler/early-errors/node-checks.ts` (destructuring-pattern private-key
+branch). Tests: `tests/issue-3026.test.ts` (+4 reject, +3 valid-control cases).
+Byte-inert for all valid programs — private field reads (`this.#x`), `#x in o`,
+normal object/array destructuring, and sibling classes with independent private
+fields all remain valid.
+
+**Remaining:** the module-code / `import.meta` / top-level-await
+unenforced-`SyntaxError` samples are independent point-fixes (several need module
+linking/resolution) — issue stays open for follow-up slices.
+
+## Slice 4 landed — "rest must be last" completion (element after rest) (2026-07-05)
+
+**Delivered:** three additional early errors completing the "rest must be last"
+grammar rule — Slice 1 caught the trailing-comma-after-rest forms; this slice
+adds the **element-after-rest** forms that TS drops as semantic diagnostics under
+`skipSemanticDiagnostics`:
+
+- **Object binding pattern:** `const {...rest, b} = y` — a `BindingRestProperty`
+  must be the final element.
+- **Object assignment pattern:** `({...rest, b} = y)` — an `AssignmentRestProperty`
+  must be last.
+- **Rest parameter not last:** `function f(a, ...b, c) {}` / `(a, ...b, c) => …`
+  — a `BindingRestElement` in a `FormalParameterList` must be last.
+
+Covers `language/expressions/assignment/dstr/obj-rest-not-last-element-invalid`,
+`language/statements/for-of/dstr/obj-rest-not-last-element-invalid`, and
+`language/rest-parameters/position-invalid` (5/5 affected pass; 120/120 valid
+function/param/destructuring files regression-checked, 0 regressions).
+
+**Files:** `src/compiler/early-errors/node-checks.ts` (object-binding
+element-after-rest + rest-parameter-not-last), `src/compiler/early-errors/assignment.ts`
+(object-assignment spread-not-last). Tests: `tests/issue-3026.test.ts` (+4 reject,
++3 valid-control; 30 total pass). Byte-inert for valid programs — object rest as
+last element, rest param as last param, and object spread in a value position
+(`{...x, b: 1}`) all remain valid.
