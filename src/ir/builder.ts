@@ -1123,6 +1123,35 @@ export class IrFunctionBuilder {
   }
 
   /**
+   * (#2856) Emit a statement-level `if (cond) { then } [else { else }]`
+   * inside a body buffer. Both arms are pre-collected instruction buffers
+   * (via `collectBodyInstrs`); `elseInstrs` is the empty array when the
+   * source has no else clause. Produces no SSA value.
+   */
+  emitIfStmt(args: { cond: IrValueId; then: readonly IrInstr[]; else: readonly IrInstr[] }): void {
+    this.pushInstr({
+      kind: "if.stmt",
+      cond: args.cond,
+      then: args.then,
+      else: args.else,
+      result: null,
+      resultType: null,
+    });
+  }
+
+  /**
+   * (#2856) Emit an early `return [value]` from inside a nested body buffer
+   * (loop bodies / if.stmt arms). Lowers to the Wasm `return` op. `value`
+   * is null for a bare `return;` in a void function; otherwise it must
+   * already be coerced to the function's declared result type. See
+   * `IrInstrEarlyReturn` for the soundness scope (no try/finally, no
+   * iterator-protocol for-of, no generators — selector/from-ast enforced).
+   */
+  emitEarlyReturn(value: IrValueId | null): void {
+    this.pushInstr({ kind: "early.return", value, result: null, resultType: null });
+  }
+
+  /**
    * Slice 9 (#1169h): emit a `try` instruction with a body, optional catch
    * handler, and optional finally body. Mirrors the for-of declarative
    * shape — the caller pre-collects each buffer via `collectBodyInstrs`.

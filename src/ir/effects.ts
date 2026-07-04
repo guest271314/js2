@@ -235,6 +235,18 @@ export function effectsOf(instr: IrInstr, cache: Map<IrInstr, IrEffects> = new M
       mergeBuffer(instr.then);
       mergeBuffer(instr.else);
       break;
+    // (#2856) Statement-level if — same buffer merge as the value form.
+    case "if.stmt":
+      mergeBuffer(instr.then);
+      mergeBuffer(instr.else);
+      break;
+    // (#2856) Early return is a control effect (like throw): never
+    // reordered, CSE'd, or dropped — treat as a full barrier.
+    case "early.return":
+      fx.readsHeap = true;
+      fx.writesHeap = true;
+      fx.control = true;
+      break;
     default: {
       // Future instruction kinds default to a full barrier so a new kind can
       // never silently become re-orderable.
@@ -492,6 +504,13 @@ export function isSideEffecting(i: IrInstr): boolean {
     // this — even unused-result awaits need to suspend.
     i.kind === "await" ||
     i.kind === "async.return" ||
-    i.kind === "async.throw"
+    i.kind === "async.throw" ||
+    // (#2856) Statement-level control flow: if.stmt runs its arm buffers for
+    // effect (result: null — the generic null-result rule also keeps it, but
+    // seeding here makes `collectUses(_, { deep: true })` walk its buffers,
+    // same rationale as while.loop/for.loop). early.return is a control
+    // transfer — never droppable.
+    i.kind === "if.stmt" ||
+    i.kind === "early.return"
   );
 }

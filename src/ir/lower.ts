@@ -501,6 +501,12 @@ export function lowerIrFunctionBody<S>(
         recordUse(instr.thenValue, -1);
         recordUse(instr.elseValue, -1);
       }
+      // (#2856) Statement-level `if.stmt` arms — same `-1` convention as the
+      // value-producing form above (no carrier values to record).
+      if (instr.kind === "if.stmt") {
+        for (const u of collectForOfBodyUses(instr.then)) recordUse(u, -1);
+        for (const u of collectForOfBodyUses(instr.else)) recordUse(u, -1);
+      }
     }
     for (const u of collectTerminatorUses(block)) recordUse(u, blockId);
   }
@@ -712,6 +718,11 @@ export function lowerIrFunctionBody<S>(
     // emission mis-targets an unrelated local. (Same recursion the for-of /
     // try / loop buffers already get.)
     if (instr.kind === "if") {
+      for (const sub of instr.then) allocLocalForInstr(sub);
+      for (const sub of instr.else) allocLocalForInstr(sub);
+    }
+    // (#2856) Statement-level if — same arm recursion as the value form.
+    if (instr.kind === "if.stmt") {
       for (const sub of instr.then) allocLocalForInstr(sub);
       for (const sub of instr.else) allocLocalForInstr(sub);
     }
@@ -1062,6 +1073,39 @@ export function lowerIrFunctionBody<S>(
 
         // 4. Wrap in `if (result T) ... else ... end`.
         emitter.emitIf(blockType, thenBody, elseBody, out);
+        return;
+      }
+      // (#2856) Statement-level if — void `if (empty) <then> else <else> end`.
+      // Arm buffers follow the same SSA-materialisation rules as the
+      // value-producing form above, minus the carrier values.
+      case "if.stmt": {
+        const emitArmBody = (bodyInstrs: readonly IrInstr[], target: S): void => {
+          for (const bodyInstr of bodyInstrs) {
+            if (bodyInstr.result === null) {
+              emitInstrTree(bodyInstr, target);
+            } else if (crossBlock.has(bodyInstr.result)) {
+              emitInstrTree(bodyInstr, target);
+              emitter.emitLocalSet(localIdx.get(bodyInstr.result)!, target);
+              materialized.add(bodyInstr.result);
+            }
+            // Intra-arm multi-use: handled at use site via tee pattern.
+          }
+        };
+        emitValue(instr.cond, out);
+        const thenBody: S = emitter.newSink();
+        emitArmBody(instr.then, thenBody);
+        const elseBody: S = emitter.newSink();
+        emitArmBody(instr.else, elseBody);
+        emitter.emitIf({ kind: "empty" }, thenBody, elseBody, out);
+        return;
+      }
+      // (#2856) Early return from inside a nested buffer — the Wasm `return`
+      // op unwinds every enclosing block/loop and returns from the function.
+      // The value (when present) was coerced to the function's result type by
+      // from-ast (same `coerceReturnValue` the tail path uses).
+      case "early.return": {
+        if (instr.value !== null) emitValue(instr.value, out);
+        emitter.emitReturn(out);
         return;
       }
       case "raw.wasm":
@@ -2649,6 +2693,13 @@ function collectIrUses(instr: IrInstr): readonly IrValueId[] {
       return [instr.value];
     case "async.throw":
       return [instr.reason];
+    // (#2856) Statement-level if — arm-buffer uses are surfaced separately
+    // via `collectForOfBodyUses` (forEachNestedBuffer recursion); only the
+    // cond is a direct use here.
+    case "if.stmt":
+      return [instr.cond];
+    case "early.return":
+      return instr.value !== null ? [instr.value] : [];
   }
 }
 

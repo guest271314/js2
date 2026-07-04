@@ -593,6 +593,27 @@ type IrClaimableSubject = ts.FunctionDeclaration | ts.MethodDeclaration | ts.Con
 let currentFnHasCStyleLoop = false;
 
 /**
+ * (#2856 C1) Early-return context for the CURRENT function's body walk.
+ * Module-level for the same isPhase1* threading reason as
+ * `currentFnHasCStyleLoop`. The `ReturnStatement` arm of
+ * `isPhase1BodyStatement` accepts an early return only when
+ *   - `earlyReturnLoopDepth > 0` — we are inside a C-style `while`/`for`/
+ *     `do` body (the Wasm `return` op is exactly JS's early exit there), AND
+ *   - `earlyReturnBarrierDepth === 0` — NO enclosing for-of body (iterator
+ *     `return()` cleanup would be skipped), try/catch/finally body (inlined
+ *     finally would be skipped), or constructor body (returns route through
+ *     the implicit `return this` synthesis), AND
+ *   - the function is not a generator (`currentFnIsGenerator` — generator
+ *     returns route through the buffer epilogue).
+ * Mirrored by from-ast's `cx.noEarlyReturn` / `funcKind` guards so accepted
+ * shapes always lower (select↔build parity, #2138).
+ */
+let earlyReturnLoopDepth = 0;
+let earlyReturnBarrierDepth = 0;
+let currentFnIsGenerator = false;
+let currentFnIsVoidReturn = false;
+
+/**
  * (#2856) Host-extern resolution for the CURRENT `planIrCompilation` run.
  * Set (and cleared) at the selector entry from `IrSelectionOptions` —
  * module-level for the same reason as `currentFnHasCStyleLoop`: the
@@ -779,6 +800,11 @@ function whyNotIrClaimable(
   // (see bodyHasCStyleLoop). Scoped per-function; the body walk below runs
   // synchronously so the flag is valid for the duration of this call.
   currentFnHasCStyleLoop = bodyHasCStyleLoop(body);
+  // (#2856 C1) Reset the early-return context for this function's walk.
+  earlyReturnLoopDepth = 0;
+  earlyReturnBarrierDepth = 0;
+  currentFnIsGenerator = isGenerator;
+  currentFnIsVoidReturn = isVoidReturn;
   // #1370 Phase A: constructor bodies don't have a return-statement tail —
   // the legacy lowerer (and Phase C) synthesise the implicit `return this;`.
   // Accept the body as a list of Phase-1 body statements instead, which
@@ -786,8 +812,15 @@ function whyNotIrClaimable(
   // mirrors how try/catch/finally bodies are checked (see `isPhase1TryStatement`).
   if (ts.isConstructorDeclaration(fn)) {
     const ctorScope = new Set(scope);
-    for (const s of body.statements) {
-      if (!isPhase1BodyStatement(s, ctorScope, localClasses)) return "body-shape-rejected";
+    // (#2856 C1) Constructor bodies never take the early-return arm — their
+    // returns route through the implicit `return this` synthesis.
+    earlyReturnBarrierDepth++;
+    try {
+      for (const s of body.statements) {
+        if (!isPhase1BodyStatement(s, ctorScope, localClasses)) return "body-shape-rejected";
+      }
+    } finally {
+      earlyReturnBarrierDepth--;
     }
     return null;
   }
@@ -1458,34 +1491,41 @@ function isPhase1TryStatement(
 ): boolean {
   if (!stmt.catchClause && !stmt.finallyBlock) return false;
 
-  // Try body: must be a Phase-1 body statement list.
-  const tryScope = new Set(scope);
-  for (const s of stmt.tryBlock.statements) {
-    if (!isPhase1BodyStatement(s, tryScope, localClasses)) return false;
-  }
-
-  if (stmt.catchClause) {
-    const catchScope = new Set(scope);
-    if (stmt.catchClause.variableDeclaration) {
-      const v = stmt.catchClause.variableDeclaration;
-      // Slice 9 only accepts identifier bindings. Destructuring catch
-      // (`catch ({message})`) defers to slice 9.5.
-      if (!ts.isIdentifier(v.name)) return false;
-      catchScope.add(v.name.text);
+  // (#2856 C1) try/catch/finally bodies are early-return BARRIERS: a Wasm
+  // `return` inside them would skip the inlined finally blocks.
+  earlyReturnBarrierDepth++;
+  try {
+    // Try body: must be a Phase-1 body statement list.
+    const tryScope = new Set(scope);
+    for (const s of stmt.tryBlock.statements) {
+      if (!isPhase1BodyStatement(s, tryScope, localClasses)) return false;
     }
-    for (const s of stmt.catchClause.block.statements) {
-      if (!isPhase1BodyStatement(s, catchScope, localClasses)) return false;
-    }
-  }
 
-  if (stmt.finallyBlock) {
-    const finallyScope = new Set(scope);
-    for (const s of stmt.finallyBlock.statements) {
-      if (!isPhase1BodyStatement(s, finallyScope, localClasses)) return false;
+    if (stmt.catchClause) {
+      const catchScope = new Set(scope);
+      if (stmt.catchClause.variableDeclaration) {
+        const v = stmt.catchClause.variableDeclaration;
+        // Slice 9 only accepts identifier bindings. Destructuring catch
+        // (`catch ({message})`) defers to slice 9.5.
+        if (!ts.isIdentifier(v.name)) return false;
+        catchScope.add(v.name.text);
+      }
+      for (const s of stmt.catchClause.block.statements) {
+        if (!isPhase1BodyStatement(s, catchScope, localClasses)) return false;
+      }
     }
-  }
 
-  return true;
+    if (stmt.finallyBlock) {
+      const finallyScope = new Set(scope);
+      for (const s of stmt.finallyBlock.statements) {
+        if (!isPhase1BodyStatement(s, finallyScope, localClasses)) return false;
+      }
+    }
+
+    return true;
+  } finally {
+    earlyReturnBarrierDepth--;
+  }
 }
 
 /**
@@ -1513,7 +1553,16 @@ function isPhase1ForOf(stmt: ts.ForOfStatement, scope: Set<string>, localClasses
   if (!isPhase1Expr(stmt.expression, scope, localClasses)) return false;
   const innerScope = new Set(scope);
   innerScope.add(decl.name.text);
-  return isPhase1BodyStatement(stmt.statement, innerScope, localClasses);
+  // (#2856 C1) A for-of body is an early-return BARRIER: the iterator-
+  // protocol drive would skip its `iter.return` cleanup on a Wasm return
+  // (whether the iterable resolves to the vec fast path is a lowering-time
+  // fact the shape walk can't see, so be conservative for all for-ofs).
+  earlyReturnBarrierDepth++;
+  try {
+    return isPhase1BodyStatement(stmt.statement, innerScope, localClasses);
+  } finally {
+    earlyReturnBarrierDepth--;
+  }
 }
 
 /**
@@ -1528,7 +1577,13 @@ function isPhase1WhileStatement(
   localClasses: ReadonlySet<string>,
 ): boolean {
   if (!isPhase1Expr(stmt.expression, scope, localClasses)) return false;
-  return isPhase1BodyStatement(stmt.statement, new Set(scope), localClasses);
+  // (#2856 C1) while bodies admit the early-return arm.
+  earlyReturnLoopDepth++;
+  try {
+    return isPhase1BodyStatement(stmt.statement, new Set(scope), localClasses);
+  } finally {
+    earlyReturnLoopDepth--;
+  }
 }
 
 /**
@@ -1546,7 +1601,13 @@ function isPhase1DoStatement(
   localClasses: ReadonlySet<string>,
 ): boolean {
   if (!isPhase1Expr(stmt.expression, scope, localClasses)) return false;
-  return isPhase1BodyStatement(stmt.statement, new Set(scope), localClasses);
+  // (#2856 C1) do-while bodies admit the early-return arm.
+  earlyReturnLoopDepth++;
+  try {
+    return isPhase1BodyStatement(stmt.statement, new Set(scope), localClasses);
+  } finally {
+    earlyReturnLoopDepth--;
+  }
 }
 
 /**
@@ -1610,7 +1671,13 @@ function isPhase1ForStatement(
   }
 
   // Body: single Phase-1 body statement.
-  return isPhase1BodyStatement(stmt.statement, innerScope, localClasses);
+  // (#2856 C1) for bodies admit the early-return arm.
+  earlyReturnLoopDepth++;
+  try {
+    return isPhase1BodyStatement(stmt.statement, innerScope, localClasses);
+  } finally {
+    earlyReturnLoopDepth--;
+  }
 }
 
 /**
@@ -1760,6 +1827,28 @@ function isPhase1BodyStatement(stmt: ts.Statement, scope: Set<string>, localClas
   }
   if (ts.isTryStatement(stmt)) {
     return isPhase1TryStatement(stmt, scope, localClasses);
+  }
+  // (#2856 C1) Statement-level `if` inside a body buffer — cond must be a
+  // Phase-1 expression; both arms recurse as body statements (else optional,
+  // unlike the tail form which requires it).
+  if (ts.isIfStatement(stmt)) {
+    if (!isPhase1Expr(stmt.expression, scope, localClasses)) return shapeNo("body-if-cond", stmt.expression);
+    if (!isPhase1BodyStatement(stmt.thenStatement, new Set(scope), localClasses)) return false;
+    if (stmt.elseStatement && !isPhase1BodyStatement(stmt.elseStatement, new Set(scope), localClasses)) return false;
+    return true;
+  }
+  // (#2856 C1) Early `return` inside a body buffer. Sound only inside a
+  // C-style loop with no enclosing barrier (for-of / try / ctor) and never
+  // in a generator — see the module-state doc on `earlyReturnLoopDepth`.
+  if (ts.isReturnStatement(stmt)) {
+    if (currentFnIsGenerator) return shapeNo("body-return-generator", stmt);
+    if (earlyReturnLoopDepth === 0 || earlyReturnBarrierDepth > 0) {
+      return shapeNo("body-return-context", stmt);
+    }
+    if (!stmt.expression) {
+      return currentFnIsVoidReturn ? true : shapeNo("body-return-bare-nonvoid", stmt);
+    }
+    return isPhase1Expr(stmt.expression, scope, localClasses);
   }
   return shapeNo("body-unhandled-stmt", stmt);
 }

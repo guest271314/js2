@@ -263,7 +263,13 @@ function canInline(callee: IrFunction, recursiveSet: ReadonlySet<string>): boole
       inst.kind === "forof.string" ||
       inst.kind === "try" ||
       inst.kind === "while.loop" ||
-      inst.kind === "for.loop"
+      inst.kind === "for.loop" ||
+      // (#2856) if.stmt is buffer-bearing (same nested SSA def-space concern
+      // as the kinds above). early.return lowers to a Wasm `return` — spliced
+      // into a caller it would return from the CALLER, not simulate the
+      // callee's return, so it is never inlinable.
+      inst.kind === "if.stmt" ||
+      inst.kind === "early.return"
     ) {
       return false;
     }
@@ -752,6 +758,37 @@ function renameInstrOperands(inst: IrInstr, rename: ReadonlyMap<IrValueId, IrVal
       const r = mapId(rename, inst.reason);
       if (r === inst.reason) return inst;
       return { ...inst, reason: r };
+    }
+    // (#2856) Statement-level if — rename the cond + recurse both arm
+    // buffers (mirrors the value-producing `if` arm above, minus the
+    // carrier values, which if.stmt doesn't have).
+    case "if.stmt": {
+      const c = mapId(rename, inst.cond);
+      const newThen: IrInstr[] = [];
+      const newElse: IrInstr[] = [];
+      let armChanged = false;
+      for (const sub of inst.then) {
+        const r = renameInstrOperands(sub, rename);
+        if (r !== sub) armChanged = true;
+        newThen.push(r);
+      }
+      for (const sub of inst.else) {
+        const r = renameInstrOperands(sub, rename);
+        if (r !== sub) armChanged = true;
+        newElse.push(r);
+      }
+      if (c === inst.cond && !armChanged) return inst;
+      return { ...inst, cond: c, then: newThen, else: newElse };
+    }
+    // (#2856) Early return — rename the optional value. NB inlining a
+    // function CONTAINING an early.return is unsound (the return would
+    // exit the CALLER); the inline pass's eligibility check excludes it
+    // (see `hasEarlyReturnDeep` guard in the candidate filter).
+    case "early.return": {
+      if (inst.value === null) return inst;
+      const v = mapId(rename, inst.value);
+      if (v === inst.value) return inst;
+      return { ...inst, value: v };
     }
   }
 }

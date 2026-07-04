@@ -798,5 +798,20 @@ function collectUses(instr: IrInstr): readonly IrValueId[] {
       return [instr.value];
     case "async.throw":
       return [instr.reason];
+    // (#2856) Statement-level if — cond + uses inside both arm buffers
+    // (mirrors the value-producing `if` arm above, minus carrier values).
+    case "if.stmt": {
+      const out: IrValueId[] = [instr.cond];
+      const walk = (instrs: readonly IrInstr[]): void => {
+        for (const sub of instrs) {
+          for (const u of collectUses(sub)) out.push(u);
+        }
+      };
+      walk(instr.then);
+      walk(instr.else);
+      return out;
+    }
+    case "early.return":
+      return instr.value !== null ? [instr.value] : [];
   }
 }
