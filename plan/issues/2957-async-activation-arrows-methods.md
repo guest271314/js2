@@ -1,10 +1,11 @@
 ---
 id: 2957
 title: "Async activation for arrows / methods / function expressions (both CPS + drive hooks are declaration-only)"
-status: ready
+status: in-progress
+assignee: ttraenkler/opus-2957p1
 sprint: current
 created: 2026-07-02
-updated: 2026-07-03
+updated: 2026-07-04
 priority: medium
 horizon: l
 feasibility: medium
@@ -58,12 +59,12 @@ subset; test262 async tests overwhelmingly use arrows and methods.
 Canonical single-tail-await body `await g(x)` in all four shapes, compiled
 host-mode, `f(1)` inspected in JS for `typeof result.then === 'function'`:
 
-| shape                    | `f(1)` returns        | activated? |
-| ------------------------ | --------------------- | ---------- |
-| `async function` decl    | real Promise (→ 2)    | YES        |
-| `const f = async () =>`  | sync number `2`       | **NO**     |
-| `const f = async fn(){}` | sync number `2`       | **NO**     |
-| class `async method`     | sync number `2`       | **NO**     |
+| shape                    | `f(1)` returns     | activated? |
+| ------------------------ | ------------------ | ---------- |
+| `async function` decl    | real Promise (→ 2) | YES        |
+| `const f = async () =>`  | sync number `2`    | **NO**     |
+| `const f = async fn(){}` | sync number `2`    | **NO**     |
+| class `async method`     | sync number `2`    | **NO**     |
 
 Confirms the bug for all three non-declaration shapes. (Note a naive probe
 that assigns the result into an `any`/externref slot and checks
@@ -101,7 +102,7 @@ Good news: the machinery is already shape-agnostic below the hook. All of
 `asyncFnNeedsHostDrive`, `emitAsyncStateMachine`, and
 `emitAsyncFrameStateMachine` already take `ts.FunctionLikeDeclaration` and
 build the frame from `fctx.params` + the body — no declaration assumption in
-the emitters themselves. The gap is purely that nobody *calls* them from the
+the emitters themselves. The gap is purely that nobody _calls_ them from the
 arrow/method paths.
 
 Recommended factoring: extract the activation block from `function-body.ts`
@@ -146,3 +147,44 @@ edit `closures.ts` / `class-bodies.ts` and lean on `buildAsyncFrameInfo` /
 `ensureAsyncResumeFunction` — high collision surface. Recommend landing this
 **after** the #2895 async-frame series settles, and re-scoping to `horizon: l`
 (done). Slice 1 (the refactor) is safe to land now and de-risks the rest.
+
+## Phase 1 landed (2026-07-04, opus-2957p1) — shared entry point extracted
+
+Slice 1 (the byte-inert refactor) is complete. The two async activation
+blocks in `compileFunctionBody` (`function-body.ts`, formerly ~1160–1210)
+plus the local `rewriteFuncResultType` helper were extracted verbatim into a
+new shared module `src/codegen/async-activation.ts`, exporting:
+
+```ts
+export function maybeActivateAsync(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  decl: ts.FunctionLikeDeclaration, // widened from FunctionDeclaration for phases 2–3
+  func: WasmFunction,
+): boolean; // true ⇒ caller skips its statement loop (body already emitted)
+```
+
+`compileFunctionBody` now calls it; the internal `ts.isFunctionDeclaration`
+guards are preserved unchanged, so **declaration** activation is untouched.
+
+**Byte-inert proof (acceptance gate):** compiling the full
+`website/playground/examples` + `examples` corpus (26 sources) × {gc, wasi,
+standalone} plus all four async shapes (`decl`/`arrow`/`fnexpr`/`method`) +
+multi-await, then sha256-ing every emitted binary, yields the identical
+`CORPUS_SHA256=161cd89fb5a298fb86c76af6fcdcd787f42f340ba6ce988fecaf08cc78a18d4b`
+before and after the change (62 compiles, 16 CE, all matching). `tsc --noEmit`
+clean.
+
+**Re-grounding note (#2906 hazard check):** the async-frame area was reshaped
+by #2906's multi-state CFG machine this week. Re-verified against current main
+(`1f77d0f70`): the two activation hooks are structurally intact (drive-lane +
+CPS/host-drive lane, both still `ts.isFunctionDeclaration`-gated), so phase 1
+remained a clean byte-identical extraction. No re-scope needed.
+
+**Phases 2–3 remain open** (the real behaviour change): wire
+`maybeActivateAsync` into `compileArrowFunction` (`closures.ts`) for
+fn-exprs+arrows, then class/object-literal methods (`class-bodies.ts` /
+`literals.ts`). These require the `envParam`/`selfParamCount` threading into
+`buildAsyncFrameInfo` described in the Implementation Plan above and interact
+with the still-active async-frame branches — higher risk, schedule after that
+series settles.
