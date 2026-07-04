@@ -1844,6 +1844,33 @@ export function compileBinaryExpression(
   // not bitwise, so it would re-derive f64). Without this the whole pure chain
   // collapses back to the f64 round-trip the predicate was meant to eliminate.
   const useI32PureEmit = arithI32WithToInt32Wrap || bitwiseI32;
+  // (#3024) An identifier operand's local slot type can be PROMOTED to externref
+  // *mid-expression* — e.g. `x * eval("var x = 2;")`, where the direct-eval body
+  // redeclares `x`, forcing its slot from f64 to the dynamic externref
+  // representation (the re-declaration re-type in statements/variables.ts, whose
+  // `wasmType` resolves to externref because the inlined eval body is a foreign
+  // `ts.createSourceFile` node the checker cannot type). That promotion happens
+  // when the OTHER operand (the eval call) compiles — AFTER this identifier was
+  // already emitted as a raw `local.get` of the then-f64 slot with no unbox. The
+  // stale read now loads an externref, so a following `f64.mul`/`f64.sub`/… fails
+  // Wasm validation ("expected fN, found externref"). Snapshot each identifier
+  // operand's slot kind BEFORE compiling so a genuine mid-expression
+  // primitive→externref flip can be recognised below. (A slot that was ALREADY
+  // externref and that `compileIdentifier` unboxed to f64 keeps the same slot
+  // before/after, so it is left untouched — no double-unbox.)
+  const identSlotKind = (e: ts.Expression): ValType["kind"] | undefined => {
+    if (!ts.isIdentifier(e)) return undefined;
+    const idx = fctx.localMap.get(e.text);
+    if (idx === undefined) return undefined;
+    const entry = idx < fctx.params.length ? fctx.params[idx] : fctx.locals[idx - fctx.params.length];
+    const t =
+      entry && typeof entry === "object" && "type" in entry
+        ? (entry as { type: ValType }).type
+        : (entry as ValType | undefined);
+    return t?.kind;
+  };
+  const leftSlotBefore = identSlotKind(expr.left);
+  const rightSlotBefore = identSlotKind(expr.right);
   let leftType: ValType | null;
   let rightType: ValType | null;
   if (useI32PureEmit) {
@@ -1854,6 +1881,29 @@ export function compileBinaryExpression(
   } else {
     leftType = compileExpression(ctx, fctx, expr.left, numericHint);
     rightType = compileExpression(ctx, fctx, expr.right, numericHint);
+    // (#3024) If an identifier operand's slot flipped from a concrete primitive
+    // to externref while (or after) it was compiled, its emitted value is a raw
+    // externref `local.get` with no unbox, yet the reported operand type stayed
+    // primitive. Re-label it externref so the numeric externref-unbox path
+    // (~line 2255 below) inserts the `externref → f64` coercion. Guarded on an
+    // actual primitive→externref flip, so ordinary operands are byte-inert.
+    const isPrimKind = (k: ValType["kind"] | undefined): boolean => k === "f64" || k === "i32" || k === "i64";
+    if (
+      leftType &&
+      isPrimKind(leftType.kind) &&
+      isPrimKind(leftSlotBefore) &&
+      identSlotKind(expr.left) === "externref"
+    ) {
+      leftType = { kind: "externref" };
+    }
+    if (
+      rightType &&
+      isPrimKind(rightType.kind) &&
+      isPrimKind(rightSlotBefore) &&
+      identSlotKind(expr.right) === "externref"
+    ) {
+      rightType = { kind: "externref" };
+    }
   }
 
   if (!leftType || !rightType) return null;
