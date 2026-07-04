@@ -257,6 +257,20 @@ export interface AstToIrOptions {
    */
   readonly selfParam?: { readonly type: IrType };
   /**
+   * #3000-C Phase C: set ONLY when lowering a `ConstructorDeclaration`. Names
+   * the class the constructor builds. Unlike `selfParam` (an instance method's
+   * caller-supplied `__self` FIRST param), a constructor is NOT passed `this` —
+   * it ALLOCATES the instance. So when this is set the lowerer:
+   *   - synthesises `this` = `class.alloc(shape)` (a fresh default-initialised
+   *     struct) at body entry and binds it in scope,
+   *   - forces the IR result type to `{ kind: "class"; shape }` (the ctor
+   *     returns the constructed instance — `(ref $struct)`),
+   *   - lowers the ctor body statements as plain (non-tail) statements, then
+   *     synthesises the implicit `return this` epilogue.
+   * Mutually exclusive with `selfParam`.
+   */
+  readonly constructorClassShape?: IrClassShape;
+  /**
    * If present, overrides the IR types for the function's own parameters.
    * Indexed by parameter position. Used when the AST lacks explicit TS
    * type annotations and the Phase-2 propagation pass has inferred types.
@@ -360,13 +374,16 @@ export function lowerFunctionAstToIr(
   // and a method/function may have one. Type-narrow before access.
   const isGenerator = (ts.isFunctionDeclaration(fn) || ts.isMethodDeclaration(fn)) && !!fn.asteriskToken;
 
-  // ConstructorDeclaration has no `.type` field (return type is implicit
-  // — the constructed instance). Phase B doesn't lower constructor bodies
-  // (Phase C handles `struct.new + __self`); the integration loop should
-  // skip ConstructorDeclaration. Defensive guard here in case it slips
-  // through.
-  if (ts.isConstructorDeclaration(fn)) {
-    throw new Error(`ir/from-ast: constructor body lowering is Phase C, not B (${name})`);
+  // #3000-C Phase C: constructor-body lowering. A ConstructorDeclaration has
+  // no `.type` (its return type is implicit — the constructed instance). The
+  // integration walk supplies `options.constructorClassShape`; the lowerer
+  // allocates `this`, runs the body, and returns the instance (see the
+  // `isCtor` branch below). Without the shape we can't form the class-typed
+  // return / `this`, so reject to legacy (defensive — the integration walk
+  // always supplies it).
+  const isCtor = ts.isConstructorDeclaration(fn);
+  if (isCtor && !options.constructorClassShape) {
+    throw new Error(`ir/from-ast: constructor lowering requires options.constructorClassShape (${name})`);
   }
 
   // Slice 7a (#1169f): `function*` produces a Generator-like externref
@@ -381,6 +398,7 @@ export function lowerFunctionAstToIr(
   // bare `return;` / fall-through tails.
   const isVoidReturn =
     !isGenerator &&
+    !isCtor &&
     // #3000-B: a set accessor is inherently void (no source-level return type);
     // treat it as void even if the caller forgot the explicit override.
     (ts.isSetAccessorDeclaration(fn) ||
@@ -388,9 +406,12 @@ export function lowerFunctionAstToIr(
       (options.returnTypeOverride === undefined && fn.type?.kind === ts.SyntaxKind.VoidKeyword));
   const returnType: IrType | null = isGenerator
     ? irVal({ kind: "externref" })
-    : isVoidReturn
-      ? null
-      : resolveIrType(fn.type, options.returnTypeOverride ?? undefined, `return type of ${name}`);
+    : // #3000-C: a constructor returns the constructed instance — `(ref $struct)`.
+      isCtor
+      ? ({ kind: "class", shape: options.constructorClassShape! } as IrType)
+      : isVoidReturn
+        ? null
+        : resolveIrType(fn.type, options.returnTypeOverride ?? undefined, `return type of ${name}`);
   // #1372 — binding-pattern params: synthesize a stable internal name
   // (`__pattern_param_<idx>`) so the IR `addParam` machinery has a regular
   // identifier to bind, then emit destructuring reads (object.get / vec.get
@@ -482,7 +503,10 @@ export function lowerFunctionAstToIr(
   }
 
   const stmts = fn.body.statements;
-  if (stmts.length < 1) {
+  // #3000-C: an empty constructor body (`constructor() {}`) is valid — it just
+  // allocates + returns `this`. Only non-ctor Phase-1 functions require ≥1
+  // statement (their body must produce a return/tail).
+  if (!isCtor && stmts.length < 1) {
     throw new Error(`ir/from-ast: Phase 1 expects at least 1 statement in ${name}`);
   }
 
@@ -517,6 +541,29 @@ export function lowerFunctionAstToIr(
   for (const { pattern, value } of pendingDestructures) {
     lowerBindingPattern(pattern, value, cx);
   }
+
+  if (isCtor) {
+    // #3000-C Phase C: synthesise `this` = a freshly-allocated, default-
+    // initialised instance (NO ctor call — that would recurse into the very
+    // `<className>_new` function we are compiling). Bind it so the body's
+    // `this.field = …` writes route through `class.set` / `class.get`.
+    const shape = options.constructorClassShape!;
+    const thisType: IrType = { kind: "class", shape };
+    const thisV = builder.emitClassAlloc(shape);
+    scope.set("this", { kind: "local", value: thisV, type: thisType });
+    // Constructor body statements are plain (non-tail) statements — the
+    // return is the implicit `return this`, not any body statement. Lower
+    // each via the body-statement dispatcher (the SAME shapes the selector's
+    // `isPhase1BodyStatement` admits), then synthesise the epilogue.
+    for (const s of stmts) {
+      lowerStmt(s, cx);
+      // A break/continue can't appear at ctor-body top level (no enclosing
+      // loop) — the selector rejects it — so no dead-code guard is needed.
+    }
+    builder.terminate({ kind: "return", values: [thisV] });
+    return { main: builder.finish(), lifted };
+  }
+
   lowerStatementList(stmts, cx);
 
   return { main: builder.finish(), lifted };
