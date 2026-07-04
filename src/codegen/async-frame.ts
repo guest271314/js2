@@ -43,6 +43,7 @@ import {
   analyzeAsyncBody,
   asyncFnNeedsCps,
   awaitedExprIsPromiseCombinator,
+  forAwaitAsyncNeedsDrive,
   forAwaitNeedsDrive,
   forAwaitSpillInfo,
   isBoundedAsyncGenBody,
@@ -448,7 +449,11 @@ export function asyncFnNeedsDrive(ctx: CodegenContext, fn: ts.FunctionLikeDeclar
     // `for await` genuinely suspends per element. Eligible when it is the
     // bounded for-await shape and every widened spill local is spill-safe.
     if (plan.forAwaitPoints.length === 0) return false;
-    if (!forAwaitNeedsDrive(ctx, fn, plan)) return false; // boxed-element sources only
+    // (#2906 slice 3b) boxed-array element sources OR (#2906 slice 3d-ii) a
+    // host-free async-generator source (`for await (const x of g())`). Both drive
+    // on the SAME for-await frame layout (own-locals + iterator spill), so the
+    // shared `computeForAwaitSpills` + spill-safe gate applies to either lane.
+    if (!forAwaitNeedsDrive(ctx, fn, plan) && !forAwaitAsyncNeedsDrive(ctx, fn, plan)) return false;
     const fa = computeForAwaitSpills(ctx, fn, plan);
     if (fa === null) return false;
     return fa.spillTypes.every(isSpillSafeType);
@@ -728,7 +733,9 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
   // (#2906 slice 3d-i) An async GENERATOR builds its CFG from the yield-aware
   // `planAsyncGenCfg` (settleYield/settleDone terminators); every other async fn
   // uses the linear/while/for-await `planAsyncCfg`.
-  const cfg = info.asyncGen ? planAsyncGenCfg(info.decl) : planAsyncCfg(info.decl, plan, { allowLoops: !info.host });
+  const cfg = info.asyncGen
+    ? planAsyncGenCfg(info.decl)
+    : planAsyncCfg(ctx, info.decl, plan, { allowLoops: !info.host });
   if (cfg === null) {
     reportError(ctx, info.decl, "internal: async-frame resume built on an unsupported body shape (#2906 slice 1/3a)");
     info.resumeFuncIdx = -1;

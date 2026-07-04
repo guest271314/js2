@@ -33,6 +33,8 @@ import {
 import { reportError } from "./context/errors.js";
 import { allocLocal } from "./context/locals.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
+import { RESULT_DONE_FIELD, RESULT_VALUE_FIELD, sanitizeTypeName } from "./frame-core.js";
+import { ensureNativeGeneratorResultType } from "./generators-native.js";
 import { resolveWasmType } from "./index.js";
 import { coerceType, compileExpression, compileStatement } from "./shared.js";
 import { ensureAsyncIterator } from "./statements/destructuring.js";
@@ -1267,6 +1269,7 @@ export interface AsyncCfgOptions {
  * outside the accepted shapes.
  */
 export function planAsyncCfg(
+  ctx: CodegenContext,
   fn: ts.FunctionLikeDeclaration,
   plan: AsyncCpsPlan,
   opts: AsyncCfgOptions,
@@ -1276,7 +1279,14 @@ export function planAsyncCfg(
   if (opts.allowLoops) {
     const whileCfg = planWhileLoopCfg(fn, plan);
     if (whileCfg !== null) return whileCfg;
-    // (#2906 slice 3b) `for await (… of …)` — the async-iterator carrier drive.
+    // (#2906 slice 3d-ii) `for await (const x of g())` where `g` is a host-free
+    // async GENERATOR — the async-iterator CONSUMER, tried before the 3b array
+    // carrier. Self-gates to async-gen sources (returns null otherwise), so an
+    // array source falls through to `planForAwaitCfg` byte-identically.
+    const genConsumer = planForAwaitAsyncCfg(ctx, fn, plan);
+    if (genConsumer !== null) return genConsumer;
+    // (#2906 slice 3b) `for await (… of …)` over a boxed array — the sync
+    // async-iterator carrier drive.
     return planForAwaitCfg(fn, plan);
   }
   return null;
@@ -1787,6 +1797,233 @@ export function planForAwaitCfg(fn: ts.FunctionLikeDeclaration, plan: AsyncCpsPl
     {
       id: resumeId,
       resumeFrom: { binding, handler: 0 },
+      lead: asLead(body),
+      terminator: { kind: "goto", target: headId },
+    },
+    {
+      id: exitId,
+      resumeFrom: null,
+      lead: asLead(post),
+      terminator: { kind: "settleUndefined" },
+    },
+  ];
+  return { states, handlers: [] };
+}
+
+// ---------------------------------------------------------------------------
+// for-await-of over an async GENERATOR — the async-iterator CONSUMER (#2906
+// slice 3d-ii).
+//
+// `for await (const x of g())` where `g` is a host-free async generator (3d-i)
+// is the DUAL of the sync-iterator 3b carrier: instead of a synchronous
+// `it.next()` returning `(done, value)` and an `await` on the ELEMENT, an
+// async-gen's `next()` returns a `Promise<IteratorResult>` — you `await` the
+// NEXT()-PROMISE first, then read `done`/`value` from the resolved
+// IteratorResult (§27.6.3.4 AsyncGenerator.prototype.next → §27.6.1.2). The
+// async gen IS its own async iterator (`[Symbol.asyncIterator]() { return this }`),
+// so `GetAsyncIterator(g()) === g()` — the frame carrier the 3d-i producer
+// returns. Lowered onto the SAME CFG machine (no new emitter/terminator):
+//
+//   entry: it = g()                          — the 3d-i frame carrier (spill it)
+//   head:  p = __async_gen_next_<g>(it)       — mint+kick, returns a $Promise
+//          suspend(await p, resume → chk)      — the next()-promise suspension
+//   chk:   {done,value} = SENT (IteratorResult) ; x = value
+//          if (done) goto exit else goto body   — the done test AFTER the await
+//   body:  <body> ; goto head                   — the back-edge
+//   exit:  <post> ; settleUndefined
+//
+// `p = next()`, the IteratorResult field reads and the `x` bind are RUNTIME ops
+// on wasm locals (not checker-typed AST — the #2367 wall), so they ride the same
+// `AsyncCfgStepEmit`/`AsyncCfgValueEmit` hooks 3b introduced. The next()-promise
+// is a native `$Promise`, so the stock `suspend` arm assimilates it verbatim: a
+// SYNCHRONOUSLY-settled yield (plain `yield E`) fulfils the promise inside the
+// `next()` call → fast-path advance; a genuinely-pending `yield await P` leaves
+// it pending → the consumer suspends and `__drain_microtasks` resumes it (a
+// two-level microtask chain producer↔consumer).
+// ---------------------------------------------------------------------------
+
+/** The reserved synthetic local holding the awaited IteratorResult (SENT) in the
+ *  async-gen for-await CONSUMER's `chk` state, before its fields are unpacked. */
+const FORAWAIT_ARESULT = "__forawait_aresult";
+
+/**
+ * (#2906 slice 3d-ii) If `source` is a direct call `g(...)` to a host-free async
+ * GENERATOR whose per-gen `next()` driver is ALREADY registered, return that
+ * driver's name (`__async_gen_next_<stem>`); else `null`.
+ *
+ * The `funcMap.has` check is the order-robust drive gate: function bodies compile
+ * in source order (declarations.ts), so the producer's `emitAsyncGenerator`
+ * registers `__async_gen_next_<stem>` iff `g` was declared BEFORE this consumer —
+ * the natural (and only lazily-correct) order. A forward-referenced async gen (or
+ * a non-async-gen callee) leaves the helper absent → we return `null` and the
+ * consumer stays on legacy/AG0 (correct-or-legacy, the #2367 graveyard rule).
+ * The name is derived identically to the producer (`sanitizeTypeName` of the
+ * callee identifier == the generator's declaration name), so a match is exact.
+ *
+ * Bounded to a direct named-function call `g(...)`; a gen held in a const/arrow
+ * (`asyncFnName` → `anon_<pos>`) or a member call is a 3d-iii edge.
+ */
+function resolveAsyncGenNextHelperName(ctx: CodegenContext, source: ts.Expression): string | null {
+  if (!ts.isCallExpression(source)) return null;
+  const callee = source.expression;
+  if (!ts.isIdentifier(callee)) return null;
+  const name = `__async_gen_next_${sanitizeTypeName(callee.text)}`;
+  return ctx.funcMap.has(name) ? name : null;
+}
+
+/**
+ * (#2906 slice 3d-ii) Should a bounded `for await (const x of g())` take the
+ * async-generator CONSUMER drive? True iff the body is the bounded for-await
+ * shape AND the source is a host-free async-gen call whose `next()` driver is
+ * registered. The shared spill-safe gate is applied by `asyncFnNeedsDrive` (it
+ * reuses `computeForAwaitSpills` — the consumer's frame layout is the SAME as a
+ * 3b for-await: loop own-locals + the persisted iterator spill).
+ */
+export function forAwaitAsyncNeedsDrive(
+  ctx: CodegenContext,
+  fn: ts.FunctionLikeDeclaration,
+  plan: AsyncCpsPlan,
+): boolean {
+  const shape = analyzeForAwait(fn, plan);
+  if (shape === null) return false;
+  return resolveAsyncGenNextHelperName(ctx, shape.source) !== null;
+}
+
+/**
+ * Build the CFG for a bounded `for await (const x of g())` over an async
+ * generator. Dense state ids in push order:
+ *   entry(0) : pre leads → emit `it = g()` (the 3d-i frame carrier) → goto(head)
+ *   head(1)  : emit `p = __async_gen_next_<g>(it)` → suspend(await p, resume→chk)
+ *   chk(2)   : (resumeFrom binds SENT = IteratorResult) emit unpack done/value +
+ *              bind x=value → condGoto(done, exit, body)
+ *   body(3)  : body leads → goto(head)                         ← the back-edge
+ *   exit(4)  : post leads → settleUndefined
+ * The `next()` call, IteratorResult field reads and `x` bind are injected via the
+ * emit hooks (runtime wasm-local ops, not AST); suspend + back-edge are the stock
+ * CFG machine. Returns `null` when the body is not the bounded async-gen shape.
+ */
+export function planForAwaitAsyncCfg(
+  ctx: CodegenContext,
+  fn: ts.FunctionLikeDeclaration,
+  plan: AsyncCpsPlan,
+): AsyncCfgPlan | null {
+  const shape = analyzeForAwait(fn, plan);
+  if (shape === null) return null;
+  const nextHelperName = resolveAsyncGenNextHelperName(ctx, shape.source);
+  if (nextHelperName === null) return null;
+  const { pre, source, binding, body, post } = shape;
+
+  // Wasm locals shared across the emit hooks, resolved at emit time. `iter` is
+  // the persisted spill slot (allocated by the resume-fn prologue from
+  // FORAWAIT_ITER_SPILL); `p`/`done` are transient (recomputed each head, never
+  // crossing a suspend, so not spilled).
+  const L = { iter: -1, p: -1, done: -1 };
+
+  const asLead = (stmts: readonly ts.Statement[]): AsyncCfgStmt[] => stmts.map((stmt) => ({ stmt, handler: 0 }));
+
+  const entryId = 0;
+  const headId = 1;
+  const chkId = 2;
+  const bodyId = 3;
+  const exitId = 4;
+
+  // entry emit: it = g() — the async gen call returns the 3d-i frame carrier
+  // (its own async iterator). Store into the persisted spill slot.
+  const initIterator: AsyncCfgStepEmit = (ctx, fctx) => {
+    const iterSlot = fctx.localMap.get(FORAWAIT_ITER_SPILL);
+    L.iter = iterSlot !== undefined ? iterSlot : allocLocal(fctx, FORAWAIT_ITER_SPILL, { kind: "externref" });
+    const srcType = compileExpression(ctx, fctx, source);
+    if (srcType !== null && srcType !== undefined) {
+      coerceType(ctx, fctx, srcType as ValType, { kind: "externref" });
+    } else {
+      fctx.body.push({ op: "ref.null.extern" } as Instr);
+    }
+    fctx.body.push({ op: "local.set", index: L.iter });
+  };
+
+  // head emit: p = __async_gen_next_<g>(it) — mint a fresh pending next()-promise,
+  // kick the producer to its next yield/await-suspend, return the promise. Resolve
+  // the funcIdx fresh (name-based: late imports may have shifted defined indices).
+  const stepNext: AsyncCfgStepEmit = (ctx, fctx) => {
+    if (L.p === -1) L.p = allocLocal(fctx, "__asyncgen_p", { kind: "externref" });
+    const nextIdx = ctx.funcMap.get(nextHelperName);
+    if (nextIdx === undefined) {
+      // Unreachable: the drive gate (`forAwaitAsyncNeedsDrive`) required the
+      // helper to be registered. Emit a null promise so the suspend delivers it
+      // plainly (SENT = null → done read below faults to 1 → the loop exits).
+      fctx.body.push({ op: "ref.null.extern" } as Instr);
+      fctx.body.push({ op: "local.set", index: L.p });
+      return;
+    }
+    fctx.body.push({ op: "local.get", index: L.iter });
+    fctx.body.push({ op: "call", funcIdx: nextIdx });
+    fctx.body.push({ op: "local.set", index: L.p });
+  };
+
+  const awaitNextPromise: AsyncCfgValueEmit = (_ctx, fctx) => {
+    fctx.body.push({ op: "local.get", index: L.p });
+    return { kind: "externref" };
+  };
+
+  // chk emit (runs AFTER the resume prelude delivers SENT into FORAWAIT_ARESULT):
+  // unpack the awaited IteratorResult — done → `L.done` (i32), value → `x`
+  // (coerced to its binding type; a boxed number stays externref, exactly like
+  // the 3b element delivery). Same result struct the producer's settleYield built
+  // (`ensureNativeGeneratorResultType` is memoised per element type).
+  const unpackResult: AsyncCfgStepEmit = (ctx, fctx) => {
+    const resultTypeIdx = ensureNativeGeneratorResultType(ctx, { kind: "externref" });
+    const aresSlot = fctx.localMap.get(FORAWAIT_ARESULT)!;
+    if (L.done === -1) L.done = allocLocal(fctx, "__asyncgen_done", { kind: "i32" });
+    // L.done = (SENT as IteratorResult).done
+    fctx.body.push({ op: "local.get", index: aresSlot });
+    fctx.body.push({ op: "any.convert_extern" } as Instr);
+    fctx.body.push({ op: "ref.cast", typeIdx: resultTypeIdx } as Instr);
+    fctx.body.push({ op: "struct.get", typeIdx: resultTypeIdx, fieldIdx: RESULT_DONE_FIELD } as Instr);
+    fctx.body.push({ op: "local.set", index: L.done });
+    // x = (SENT as IteratorResult).value  (bound BEFORE the body leads run)
+    const xType: ValType = binding.type
+      ? resolveWasmType(ctx, ctx.checker.getTypeAtLocation(binding.type))
+      : { kind: "externref" };
+    const xSlot = fctx.localMap.get(binding.name) ?? allocLocal(fctx, binding.name, xType);
+    fctx.body.push({ op: "local.get", index: aresSlot });
+    fctx.body.push({ op: "any.convert_extern" } as Instr);
+    fctx.body.push({ op: "ref.cast", typeIdx: resultTypeIdx } as Instr);
+    fctx.body.push({ op: "struct.get", typeIdx: resultTypeIdx, fieldIdx: RESULT_VALUE_FIELD } as Instr);
+    coerceType(ctx, fctx, { kind: "externref" }, xType);
+    fctx.body.push({ op: "local.set", index: xSlot });
+  };
+
+  const doneCond: AsyncCfgValueEmit = (_ctx, fctx) => {
+    fctx.body.push({ op: "local.get", index: L.done });
+    return { kind: "i32" };
+  };
+
+  const states: AsyncCfgState[] = [
+    {
+      id: entryId,
+      resumeFrom: null,
+      lead: asLead(pre),
+      emit: initIterator,
+      terminator: { kind: "goto", target: headId },
+    },
+    {
+      id: headId,
+      resumeFrom: null,
+      lead: [],
+      emit: stepNext,
+      terminator: { kind: "suspend", awaited: { emit: awaitNextPromise }, resumeState: chkId, handler: 0 },
+    },
+    {
+      id: chkId,
+      // SENT holds the awaited IteratorResult (externref); we unpack it in `emit`.
+      resumeFrom: { binding: { name: FORAWAIT_ARESULT, type: undefined }, handler: 0 },
+      lead: [],
+      emit: unpackResult,
+      terminator: { kind: "condGoto", cond: { emit: doneCond }, whenTrue: exitId, whenFalse: bodyId, handler: 0 },
+    },
+    {
+      id: bodyId,
+      resumeFrom: null,
       lead: asLead(body),
       terminator: { kind: "goto", target: headId },
     },
