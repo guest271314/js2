@@ -11,14 +11,7 @@
 import { describe, expect, it } from "vitest";
 
 import { compile } from "../src/index.js";
-
-const ENV = {
-  env: {
-    console_log_number: () => {},
-    console_log_string: () => {},
-    console_log_bool: () => {},
-  },
-};
+import { buildImports } from "../src/runtime.js";
 
 async function dualRun(
   source: string,
@@ -34,8 +27,8 @@ async function dualRun(
     throw new Error(`ir compile failed:\n${ir.errors.map((e) => e.message).join("\n")}`);
   }
   const [{ instance: lInst }, { instance: rInst }] = await Promise.all([
-    WebAssembly.instantiate(legacy.binary, ENV),
-    WebAssembly.instantiate(ir.binary, ENV),
+    WebAssembly.instantiate(legacy.binary, buildImports(legacy.imports, undefined, legacy.stringPool)),
+    WebAssembly.instantiate(ir.binary, buildImports(ir.imports, undefined, ir.stringPool)),
   ]);
   const lFn = lInst.exports[fnName] as (...a: unknown[]) => unknown;
   const rFn = rInst.exports[fnName] as (...a: unknown[]) => unknown;
