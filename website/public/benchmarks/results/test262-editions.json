@@ -10,8 +10,8 @@
   },
   {
     "edition": "ES5",
-    "pass": 10167,
-    "fail": 2779,
+    "pass": 10215,
+    "fail": 2731,
     "ce": 129,
     "skip": 0,
     "total": 13075,
@@ -57,8 +57,8 @@
   },
   {
     "edition": "ES2015",
-    "pass": 11085,
-    "fail": 4132,
+    "pass": 11102,
+    "fail": 4115,
     "ce": 169,
     "skip": 0,
     "total": 15386,
@@ -66,8 +66,8 @@
     "features": [
       {
         "name": "destructuring-binding",
-        "pass": 2042,
-        "fail": 456,
+        "pass": 2059,
+        "fail": 439,
         "ce": 35,
         "skip": 0,
         "total": 2533,
@@ -75,12 +75,12 @@
       },
       {
         "name": "generators",
-        "pass": 942,
-        "fail": 429,
+        "pass": 959,
+        "fail": 412,
         "ce": 20,
         "skip": 0,
         "total": 1391,
-        "pct": 68
+        "pct": 69
       },
       {
         "name": "TypedArray",
@@ -1026,17 +1026,17 @@
   },
   {
     "edition": "ES2018",
-    "pass": 3797,
-    "fail": 426,
+    "pass": 3807,
+    "fail": 416,
     "ce": 28,
     "skip": 0,
     "total": 4251,
-    "pct": 89,
+    "pct": 90,
     "features": [
       {
         "name": "async-iteration",
-        "pass": 2946,
-        "fail": 311,
+        "pass": 2956,
+        "fail": 301,
         "ce": 27,
         "skip": 0,
         "total": 3284,
@@ -1080,12 +1080,12 @@
       },
       {
         "name": "generators",
-        "pass": 223,
-        "fail": 104,
+        "pass": 233,
+        "fail": 94,
         "ce": 2,
         "skip": 0,
         "total": 329,
-        "pct": 68
+        "pct": 71
       },
       {
         "name": "object-rest",
@@ -2141,17 +2141,17 @@
   },
   {
     "edition": "ES2022",
-    "pass": 3110,
-    "fail": 1092,
+    "pass": 3118,
+    "fail": 1084,
     "ce": 32,
     "skip": 0,
     "total": 4234,
-    "pct": 73,
+    "pct": 74,
     "features": [
       {
         "name": "class",
-        "pass": 2179,
-        "fail": 596,
+        "pass": 2187,
+        "fail": 588,
         "ce": 15,
         "skip": 0,
         "total": 2790,
@@ -2177,17 +2177,17 @@
       },
       {
         "name": "class-methods-private",
-        "pass": 823,
-        "fail": 142,
+        "pass": 827,
+        "fail": 138,
         "ce": 1,
         "skip": 0,
         "total": 966,
-        "pct": 85
+        "pct": 86
       },
       {
         "name": "class-static-methods-private",
-        "pass": 663,
-        "fail": 107,
+        "pass": 667,
+        "fail": 103,
         "ce": 2,
         "skip": 0,
         "total": 772,
@@ -2195,21 +2195,21 @@
       },
       {
         "name": "async-iteration",
-        "pass": 681,
-        "fail": 37,
+        "pass": 689,
+        "fail": 29,
         "ce": 0,
         "skip": 0,
         "total": 718,
-        "pct": 95
+        "pct": 96
       },
       {
         "name": "generators",
-        "pass": 366,
-        "fail": 71,
+        "pass": 374,
+        "fail": 63,
         "ce": 0,
         "skip": 0,
         "total": 437,
-        "pct": 84
+        "pct": 86
       },
       {
         "name": "resizable-arraybuffer",
