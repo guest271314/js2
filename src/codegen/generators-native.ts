@@ -35,13 +35,12 @@ import type { CodegenContext, FunctionContext, NativeGeneratorInfo } from "./con
 import { reportError } from "./context/errors.js";
 import { nativeStringType } from "./native-strings.js";
 import { emitBrandCheckTypeError } from "./native-proto.js";
-import { addFuncType } from "./registry/types.js";
+import { addFuncType, getArrTypeIdxFromVec, getOrRegisterVecType } from "./registry/types.js";
 import { coerceType, compileExpression, compileStatement, valTypesMatch } from "./shared.js";
 import { UNDEF_F64_BITS } from "./value-tags.js";
 import { addUnionImports } from "./index.js";
 import { bodyUsesArguments } from "./helpers/body-uses-arguments.js";
 import { resolveSpillLocalValType } from "./statements/variables.js";
-import { resolveArrayInfo } from "./array-methods.js";
 import { destructureParamArray, destructureParamObject } from "./destructuring-params.js";
 import { resolveWasmType } from "./index.js";
 import { ensureExnTag } from "./registry/imports.js";
@@ -707,17 +706,19 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
     return callee.text;
   }
 
-  // (#2173 slice-2a) True when `subject`'s static type resolves to the NUMERIC
-  // canonical vec (an array literal of numbers, or an identifier typed
-  // `number[]`). This is the direct-vec case driven by the array for-of fast
-  // path — `vec.data[idx]` reads f64 with zero host imports. Generic `{next()}`
-  // iterables / `arr.values()` iterators do NOT resolve to a vec here and stay
-  // on the host path (slice-2b, the #1320 bridge). `resolveArrayInfo` already
-  // rejects native strings, so a string subject never qualifies.
+  // (#2173 slice-2a) True when `subject`'s static type is a NUMERIC array
+  // (`number[]` — an array literal of numbers, or an identifier/param typed
+  // `number[]`), which lowers to the canonical f64 vec. This is the direct-vec
+  // case driven by the array for-of fast path — `vec.data[idx]` reads f64 with
+  // zero host imports. Generic `{next()}` iterables / `arr.values()` iterators
+  // are NOT arrays and stay on the host path (slice-2b, the #1320 bridge); a
+  // string / string[] / object[] subject fails the numeric-element gate.
+  // (#1930) Uses the registry-free `ctx.oracle` type boundary, NOT the raw
+  // TS checker (the oracle-ratchet gate); the concrete vec ValType is resolved
+  // separately in `buildResumeInfo` via `getOrRegisterVecType`.
   function isNumericIterableDelegate(ctx: CodegenContext, subject: ts.Expression): boolean {
-    const t = ctx.checker.getTypeAtLocation(subject);
-    const arrInfo = resolveArrayInfo(ctx, t);
-    return arrInfo !== null && arrInfo.elemType.kind === "f64";
+    const fact = ctx.oracle.typeFactOf(subject);
+    return fact.kind === "array" && fact.element.kind === "number";
   }
 
   // Reserve the successor of a yield and set up its resume binding/abrupt
@@ -1543,13 +1544,18 @@ export function registerNativeGenerator(
   // is resolved once here from the subject's static type and stored on the info,
   // so the emit-time cursor drive and this field layout use the SAME typeIdx.
   const vecDelegationSlots: NonNullable<NativeGeneratorInfo["vecDelegationSlots"]> = [];
-  for (const site of plan.vecDelegationSites) {
-    const arrInfo = resolveArrayInfo(ctx, ctx.checker.getTypeAtLocation(site.subject));
-    const vecTypeIdx = arrInfo ? arrInfo.vecTypeIdx : null;
+  for (const _site of plan.vecDelegationSites) {
+    // The gate (`isNumericIterableDelegate`) has already established the subject
+    // is a `number[]`, which lowers to the canonical f64 vec. Resolve that vec
+    // type directly (registry call, no checker) so the field layout and the
+    // emit-time cursor drive use the SAME typeIdx as `compileExpression(subject)`
+    // produces (both go through `getOrRegisterVecType(ctx, "f64")`).
+    const vecTypeIdx = getOrRegisterVecType(ctx, "f64");
+    const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
     const vecFieldIdx = stateFields.length;
     stateFields.push({
       name: `vecdeleg_${vecDelegationSlots.length}`,
-      type: vecTypeIdx !== null ? { kind: "ref_null", typeIdx: vecTypeIdx } : { kind: "eqref" },
+      type: { kind: "ref_null", typeIdx: vecTypeIdx },
       mutable: true,
     });
     const cursorFieldIdx = stateFields.length;
@@ -1558,8 +1564,8 @@ export function registerNativeGenerator(
       vecFieldIdx,
       cursorFieldIdx,
       vecTypeIdx,
-      arrTypeIdx: arrInfo ? arrInfo.arrTypeIdx : -1,
-      elemType: arrInfo ? arrInfo.elemType : { kind: "f64" },
+      arrTypeIdx,
+      elemType: { kind: "f64" },
     });
   }
 
