@@ -79,6 +79,7 @@ import {
 import { emitInlineMathFunctions } from "./math-helpers.js";
 import { finalizeMethodTrampolines } from "./closures.js";
 import { peepholeOptimize } from "./peephole.js";
+import { brandCollidingShapeTypes } from "./shape-brand.js";
 import {
   addImport,
   addStringConstantGlobal,
@@ -2299,6 +2300,14 @@ export function generateModule(
     // index freeze. No-op unless a gc/host delete-aware read recorded the flag.
     finalizeInModuleInitFlag(ctx);
 
+    // (#2853) Nominal shape branding: structurally-colliding `__anon_*` /
+    // `__fnctor_*` shape types get a trailing brand-ref field so the engine's
+    // iso-recursive canonicalization cannot merge distinct key-sets into one
+    // runtime type (which made `ref.test`-keyed property dispatch read fields
+    // by OFFSET instead of by KEY). Runs after all instruction emission and
+    // BEFORE dead-type elimination so the brand-chain refs get remapped.
+    brandCollidingShapeTypes(mod, ctx.noBrandShapeTypes);
+
     markLeafStructsFinal(mod, ctx.wasi);
 
     // Dead import and type elimination pass
@@ -2938,32 +2947,69 @@ function _emitStructFieldSettersInner(ctx: CodegenContext): void {
 
   if (fieldMap.size === 0) return;
 
-  // Setter signatures: 3 variants by val type.
-  // Mixed-kind buckets are skipped — sidecar carries the write instead.
-  const setterExternTypeIdx = addFuncType(ctx, [{ kind: "externref" }, { kind: "externref" }], [], "$sset_extern_type");
-  const setterF64TypeIdx = addFuncType(ctx, [{ kind: "externref" }, { kind: "f64" }], [], "$sset_f64_type");
-  const setterI32TypeIdx = addFuncType(ctx, [{ kind: "externref" }, { kind: "i32" }], [], "$sset_i32_type");
-
   // Only kinds we can emit a correct `struct.set` for after the externref →
   // anyref convert. Abstract heap types other than `anyref` (eqref / structref /
   // funcref) would need a `ref.cast` to an abstract heap type, which the
-  // current Instr encoding does not express — skip those buckets so the
+  // current Instr encoding does not express — skip those ARMS so the
   // sidecar still carries the write.
   const isRefKind = (k: ValType["kind"]) =>
     k === "ref" || k === "ref_null" || k === "anyref" || k === "externref" || k === "ref_extern";
 
+  // (#2853 bug B) Mixed-kind buckets are NO LONGER skipped. A skipped bucket
+  // (e.g. `pos`, whose field kind differs across acorn's Parser /
+  // RegExpValidationState structs) meant every HOST write (`state.pos = 0` via
+  // a method-parameter access → `__extern_set` → `_safeSet`) landed in the
+  // JS sidecar only, while every in-wasm `this.pos` access used the live
+  // struct field — two stores for one key. Once the sidecar was seeded, host
+  // reads (`_safeGet` first) saw the frozen sidecar value (0) forever, so
+  // acorn's regexp validator compared a phantom `state.pos` and raised
+  // "Unmatched ')'" on every group. Mixed buckets now use the externref
+  // signature with per-arm coercion: numeric fields unbox via __unbox_number.
+  // Ensure the union helpers exist BEFORE any setter funcIdx is computed
+  // (mirrors the getter emitter's needsBox discipline / #1320).
+  let needsUnbox = false;
+  for (const entries of fieldMap.values()) {
+    const allF64 = entries.every((e) => e.fieldType.kind === "f64");
+    const allI32 = entries.every((e) => e.fieldType.kind === "i32");
+    if (allF64 || allI32) continue;
+    if (entries.some((e) => e.fieldType.kind === "f64" || e.fieldType.kind === "i32")) {
+      needsUnbox = true;
+      break;
+    }
+  }
+  if (needsUnbox) addUnionImports(ctx);
+  const unboxNumIdx = ctx.funcMap.get("__unbox_number");
+
+  // Setter signatures: 3 variants by val type. All return i32 (1 = an arm
+  // matched and wrote the live struct field, 0 = no arm matched) so the
+  // runtime `_safeSet` can decide whether the sidecar must carry the value
+  // (expando / unmatched shape) or must NOT shadow the live field (#2853 B).
+  const setterExternTypeIdx = addFuncType(
+    ctx,
+    [{ kind: "externref" }, { kind: "externref" }],
+    [{ kind: "i32" }],
+    "$sset_extern_type",
+  );
+  const setterF64TypeIdx = addFuncType(
+    ctx,
+    [{ kind: "externref" }, { kind: "f64" }],
+    [{ kind: "i32" }],
+    "$sset_f64_type",
+  );
+  const setterI32TypeIdx = addFuncType(
+    ctx,
+    [{ kind: "externref" }, { kind: "i32" }],
+    [{ kind: "i32" }],
+    "$sset_i32_type",
+  );
+
   for (const [fieldName, entries] of fieldMap) {
     const allF64 = entries.every((e) => e.fieldType.kind === "f64");
     const allI32 = entries.every((e) => e.fieldType.kind === "i32");
-    const allRef = entries.every((e) => isRefKind(e.fieldType.kind));
-
-    // Skip mixed-kind buckets or any bucket containing kinds we can't
-    // route through one of the three setter signatures (i64 / f32 / v128
-    // / packed i8/i16). The sidecar still carries those writes.
-    if (!allF64 && !allI32 && !allRef) continue;
 
     let setterTypeIdx: number;
     let valMode: "extern" | "f64" | "i32";
+    let useEntries = entries;
     if (allF64) {
       setterTypeIdx = setterF64TypeIdx;
       valMode = "f64";
@@ -2971,6 +3017,16 @@ function _emitStructFieldSettersInner(ctx: CodegenContext): void {
       setterTypeIdx = setterI32TypeIdx;
       valMode = "i32";
     } else {
+      // Ref-only AND mixed buckets: externref signature, per-arm coercion.
+      // Arms whose field kind we cannot coerce from externref (i64 / f32 /
+      // v128 / packed i8/i16, or numeric without __unbox_number) are dropped —
+      // they return 0 and the sidecar carries those writes, as before.
+      useEntries = entries.filter(
+        (e) =>
+          isRefKind(e.fieldType.kind) ||
+          ((e.fieldType.kind === "f64" || e.fieldType.kind === "i32") && unboxNumIdx !== undefined),
+      );
+      if (useEntries.length === 0) continue;
       setterTypeIdx = setterExternTypeIdx;
       valMode = "extern";
     }
@@ -2978,13 +3034,17 @@ function _emitStructFieldSettersInner(ctx: CodegenContext): void {
     const funcName = `__sset_${fieldName}`;
     const funcIdx = ctx.numImportFuncs + mod.functions.length;
     const anyLocal = 2; // locals after the two params (local 0 = obj, local 1 = val)
+    const wroteLocal = 3; // i32 "an arm matched and wrote" flag (defaults 0)
 
-    const funcBody = buildSetterNestedIfElse(ctx, entries, anyLocal, valMode);
+    const funcBody = buildSetterNestedIfElse(ctx, useEntries, anyLocal, valMode, wroteLocal, unboxNumIdx);
 
     mod.functions.push({
       name: funcName,
       typeIdx: setterTypeIdx,
-      locals: [{ name: "__any", type: { kind: "anyref" } }],
+      locals: [
+        { name: "__any", type: { kind: "anyref" } },
+        { name: "__wrote", type: { kind: "i32" } },
+      ],
       body: funcBody,
       exported: true,
     } as WasmFunction);
@@ -3002,6 +3062,8 @@ function buildSetterNestedIfElse(
   entries: { typeIdx: number; fieldIdx: number; fieldType: ValType; shapeId?: number; shapeFieldIdx?: number }[],
   anyLocal: number,
   valMode: "extern" | "f64" | "i32",
+  wroteLocal: number,
+  unboxNumIdx?: number,
 ): Instr[] {
   const body: Instr[] = [];
 
@@ -3011,11 +3073,11 @@ function buildSetterNestedIfElse(
   body.push({ op: "local.set", index: anyLocal } as Instr);
 
   // Chain: if (ref.test T1) { cast + struct.set T1 } else if (ref.test T2) { ... }
-  let current: Instr[] = []; // final else: no-op
+  let current: Instr[] = []; // final else: no-op (wrote flag stays 0)
 
   for (let i = entries.length - 1; i >= 0; i--) {
     const entry = entries[i]!;
-    let thenBranch = buildSetterStore(ctx, entry, anyLocal, valMode);
+    let thenBranch = buildSetterStore(ctx, entry, anyLocal, valMode, wroteLocal, unboxNumIdx);
 
     // (#2009) Colliding struct: `ref.test typeIdx` matched, but same-shape
     // canonicalization means the instance might be a DIFFERENT struct that
@@ -3048,25 +3110,31 @@ function buildSetterNestedIfElse(
   }
 
   body.push(...current);
+  // Result: 1 iff an arm matched this receiver's runtime type and wrote.
+  body.push({ op: "local.get", index: wroteLocal } as Instr);
   return body;
 }
 
-/** Build the "then" branch that stores `val` (local 1) into a struct field. */
+/** Build the "then" branch that stores `val` (local 1) into a struct field
+ *  and sets the `wroteLocal` success flag (#2853 B). */
 function buildSetterStore(
   ctx: CodegenContext,
   entry: { typeIdx: number; fieldIdx: number; fieldType: ValType },
   anyLocal: number,
   valMode: "extern" | "f64" | "i32",
+  wroteLocal: number,
+  unboxNumIdx?: number,
 ): Instr[] {
   const then: Instr[] = [];
   const ft = entry.fieldType;
+  const markWrote: Instr[] = [{ op: "i32.const", value: 1 } as Instr, { op: "local.set", index: wroteLocal } as Instr];
 
   // Push the cast struct ref onto the stack
   then.push({ op: "local.get", index: anyLocal } as Instr);
   then.push({ op: "ref.cast", typeIdx: entry.typeIdx } as Instr);
 
-  // Push the value (already typed per valMode) — since we only emit setters
-  // for homogeneous-kind buckets, valMode and ft.kind line up.
+  // Push the value (typed per valMode; for extern-mode buckets the arm
+  // coerces per its own field kind below — mixed buckets are allowed, #2853 B).
   then.push({ op: "local.get", index: 1 } as Instr);
 
   if (valMode === "extern") {
@@ -3085,15 +3153,27 @@ function buildSetterStore(
       then.push({ op: "call", funcIdx: vecMatIdx } as Instr);
       if (ft.kind === "ref") then.push({ op: "ref.as_non_null" } as Instr);
       then.push({ op: "struct.set", typeIdx: entry.typeIdx, fieldIdx: entry.fieldIdx } as Instr);
+      then.push(...markWrote);
       return then;
     }
-    // Field kinds are restricted by isRefKind above to: ref / ref_null /
-    // anyref / externref / ref_extern. externref & ref_extern need no
-    // conversion; everything else converts externref → anyref first, then
-    // typed-ref fields cast down to the field's specific heap type. Cast
-    // failures trap; the runtime _safeSet wraps the setter call in
-    // try/catch so a wrong-type assign degrades to sidecar-only (the
-    // prior behaviour) rather than crashing.
+    // (#2853 B) Numeric field in an extern-mode (mixed) bucket: unbox the
+    // externref value to f64 (Number coercion host-side), truncating for i32
+    // fields. Boolean-branded i32 fields coerce true/false → 1/0 the same way.
+    if (ft.kind === "f64" || ft.kind === "i32") {
+      // Caller guarantees unboxNumIdx is defined for these arms (bucket filter).
+      then.push({ op: "call", funcIdx: unboxNumIdx! } as Instr);
+      if (ft.kind === "i32") then.push({ op: "i32.trunc_sat_f64_s" } as Instr);
+      then.push({ op: "struct.set", typeIdx: entry.typeIdx, fieldIdx: entry.fieldIdx } as Instr);
+      then.push(...markWrote);
+      return then;
+    }
+    // Remaining field kinds here: ref / ref_null / anyref / externref /
+    // ref_extern (the bucket filter drops i64 / f32 / v128 / packed arms).
+    // externref & ref_extern need no conversion; everything else converts
+    // externref → anyref first, then typed-ref fields cast down to the
+    // field's specific heap type. Cast failures trap; the runtime _safeSet
+    // wraps the setter call in try/catch so a wrong-type assign degrades to
+    // sidecar-only (the prior behaviour) rather than crashing.
     if (ft.kind === "ref" || ft.kind === "ref_null" || ft.kind === "anyref") {
       then.push({ op: "any.convert_extern" } as Instr);
     }
@@ -3105,6 +3185,7 @@ function buildSetterStore(
   }
 
   then.push({ op: "struct.set", typeIdx: entry.typeIdx, fieldIdx: entry.fieldIdx } as Instr);
+  then.push(...markWrote);
   return then;
 }
 
@@ -6833,6 +6914,11 @@ export function generateMultiModule(
     // Runs before dead-elim (which never prunes/remaps live globals) and the
     // index freeze. No-op unless a gc/host delete-aware read recorded the flag.
     finalizeInModuleInitFlag(ctx);
+
+    // (#2853) Nominal shape branding — same pass + placement as the
+    // single-module pipeline (see generateModule): after all instruction
+    // emission, before dead-type elimination.
+    brandCollidingShapeTypes(mod, ctx.noBrandShapeTypes);
 
     markLeafStructsFinal(mod, ctx.wasi);
 
