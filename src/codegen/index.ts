@@ -119,6 +119,7 @@ import { STANDALONE_REGEXP_REFLECTION_PROPS } from "./regexp-standalone.js";
 
 // ── Extracted sub-modules ──────────────────────────────────────────────────
 import {
+  buildIsUndefinedExternBody,
   emitWrapperValueOfFunctions,
   ensureAnyFromExternHelper,
   ensureAnyHelpers,
@@ -126,7 +127,9 @@ import {
   ensureAnyValueType,
   ensureWrapperTypes,
   isAnyValue,
+  undefinedSingletonActive,
 } from "./any-helpers.js";
+import { UNDEF_F64_BITS } from "./value-tags.js";
 import {
   buildShapePropFlagsTable,
   collectClassDeclaration,
@@ -586,11 +589,17 @@ function resolvePositionType(
     if (node.kind === ts.SyntaxKind.NumberKeyword) return irVal({ kind: "f64" });
     if (node.kind === ts.SyntaxKind.BooleanKeyword) return irVal({ kind: "i32" });
     if (node.kind === ts.SyntaxKind.StringKeyword) return { kind: "string" };
-    // Slice 14 (#1228) — AnyKeyword lowers to externref. The IR's externref
-    // val type is the catch-all for host values; operations on `any`-typed
-    // SSA defs must be conservative (no field access, no arithmetic) but
-    // pass-through forwarding (return, parameter passing) is fine.
-    if (node.kind === ts.SyntaxKind.AnyKeyword) return irVal({ kind: "externref" });
+    // (#2949 slice 3b) AnyKeyword IS the dynamic type. The historical #1228
+    // mapping (externref in ALL modes) diverged from legacy's fast-mode
+    // `any` ABI — legacy `resolveWasmType` is mode-split (fast →
+    // `ref_null $AnyValue`, host → externref), so an IR-claimed
+    // `f(x: any)` had a DIFFERENT fast-mode signature than its legacy
+    // callers/callees (measured in the slice-2 session; class-method
+    // claims hit the typeIdx-parity guard for the same reason). `dynamic`
+    // lowers through `resolveDynamic()`, which mirrors that mode split
+    // exactly — one `any` ABI for both front-ends in both modes. Host-mode
+    // bytes are unchanged (dynamic lowers to externref there).
+    if (node.kind === ts.SyntaxKind.AnyKeyword) return irDynamic();
     // Slice 6 part 2 (#1181) — array type (T[] or Array<T>) resolves to a
     // vec ref. The legacy `getOrRegisterVecType` produces the same
     // (ref_null $vec_<elem>) struct ref the for-of vec fast path needs,
@@ -600,8 +609,17 @@ function resolvePositionType(
     // types throw and fall back to legacy.
     if (ts.isArrayTypeNode(node)) {
       const elemIr = resolvePositionType(node.elementType, undefined, ctx, classShapes);
+      // (#2949 slice 3b) `any[]` elements keep their historical externref
+      // vec representation — the AnyKeyword POSITION arm above now returns
+      // `dynamic`, but element storage is a vec-layout decision (the
+      // boxed-any element rep is #2379/#1852 territory, not this slice).
+      // Byte-preserving for every currently-claimed `any[]` shape.
       const elemVal =
-        elemIr.kind === "val" ? elemIr.val : elemIr.kind === "string" ? ({ kind: "externref" } as ValType) : null;
+        elemIr.kind === "val"
+          ? elemIr.val
+          : elemIr.kind === "string" || elemIr.kind === "dynamic"
+            ? ({ kind: "externref" } as ValType)
+            : null;
       if (!elemVal) {
         throw new Error(
           `array element TypeNode ${ts.SyntaxKind[node.elementType.kind]} could not be lowered to a primitive ValType`,
@@ -11426,6 +11444,16 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
   }
   const strToNumberIdx = ctx.funcMap.get("__str_to_number");
 
+  // (#2106 S1) `undefinedSingleton` regime support for the union natives:
+  // when active, `undefined` is a non-null extern-wrapped tag-1 `$AnyValue`
+  // (never `ref.null.extern`), so ToBoolean must classify it FALSY, the
+  // typeof cluster must answer "undefined" for the singleton and "object"
+  // for null, and `__typeof_undefined` flips off bare `ref.is_null`.
+  // Inactive (default): every body below is byte-identical to legacy.
+  const s1Active = undefinedSingletonActive(ctx);
+  if (s1Active) ensureAnyValueType(ctx);
+  const s1AnyValIdx = s1Active ? ctx.anyValueTypeIdx : -1;
+
   /**
    * Synthesize a native helper function. The funcIdx is allocated as
    * `numImportFuncs + mod.functions.length` to match how every other
@@ -11736,6 +11764,30 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
         blockType: { kind: "empty" },
         then: [{ op: "i32.const", value: 0 }, { op: "return" }],
       },
+      // (#2106 S1) `$AnyValue` box: tag 0 (null) / 1 (undefined) → FALSY
+      // (§7.1.2); other wrapped tags (5 string / 6 object) keep the non-null-
+      // ref default (truthy). Without this arm the non-null `$undefined`
+      // singleton would be truthy — `if (undefined)` taking the then-branch.
+      ...(s1AnyValIdx >= 0
+        ? ([
+            { op: "local.get", index: 0 },
+            { op: "any.convert_extern" },
+            { op: "local.tee", index: 1 },
+            { op: "ref.test", typeIdx: s1AnyValIdx },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                { op: "local.get", index: 1 },
+                { op: "ref.cast", typeIdx: s1AnyValIdx },
+                { op: "struct.get", typeIdx: s1AnyValIdx, fieldIdx: 0 },
+                { op: "i32.const", value: 1 },
+                { op: "i32.gt_u" },
+                { op: "return" },
+              ],
+            },
+          ] as Instr[])
+        : []),
       // any = any.convert_extern(param)
       { op: "local.get", index: 0 },
       { op: "any.convert_extern" },
@@ -11886,8 +11938,19 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
     registerNative("__typeof_string", externrefToI32, [{ op: "i32.const", value: 0 }]);
   }
 
-  // 12. __typeof_undefined(externref) -> i32 — `ref.is_null`.
-  registerNative("__typeof_undefined", externrefToI32, [{ op: "local.get", index: 0 }, { op: "ref.is_null" }]);
+  // 12. __typeof_undefined(externref) -> i32 — `ref.is_null` (legacy: null and
+  //     undefined share the null-extern bit pattern). (#2106 S1) Under the
+  //     `undefinedSingleton` regime: tag-1 `$AnyValue` ∨ UNDEF_F64 box; a null
+  //     externref answers 0 (typeof null is "object", not "undefined").
+  {
+    const s1Body = s1Active ? buildIsUndefinedExternBody(ctx, 1, UNDEF_F64_BITS) : undefined;
+    registerNative(
+      "__typeof_undefined",
+      externrefToI32,
+      s1Body ?? [{ op: "local.get", index: 0 }, { op: "ref.is_null" }],
+      s1Body !== undefined ? [{ name: "$any_temp", type: { kind: "anyref" } as ValType }] : [],
+    );
+  }
 
   // 13. __typeof_object(externref) -> i32 — non-null AND not number AND
   //     not boolean AND not bigint AND not function. We approximate as "non-null and
@@ -11903,8 +11966,36 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
       {
         op: "if",
         blockType: { kind: "empty" },
-        then: [{ op: "i32.const", value: 0 }, { op: "return" }],
+        // (#2106 S1) typeof null IS "object" (§13.5.3) — under the singleton
+        // regime a null externref means JS null, so answer 1. Legacy: null
+        // means null-or-undefined; keep the historical 0.
+        then: [{ op: "i32.const", value: s1Active ? 1 : 0 }, { op: "return" }],
       },
+      // (#2106 S1) the tag-1 `$undefined` singleton is NOT an object.
+      ...(s1AnyValIdx >= 0
+        ? ([
+            { op: "local.get", index: 0 },
+            { op: "any.convert_extern" },
+            { op: "local.tee", index: 1 },
+            { op: "ref.test", typeIdx: s1AnyValIdx },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                { op: "local.get", index: 1 },
+                { op: "ref.cast", typeIdx: s1AnyValIdx },
+                { op: "struct.get", typeIdx: s1AnyValIdx, fieldIdx: 0 },
+                { op: "i32.const", value: 1 },
+                { op: "i32.eq" },
+                {
+                  op: "if",
+                  blockType: { kind: "empty" },
+                  then: [{ op: "i32.const", value: 0 }, { op: "return" }],
+                } as Instr,
+              ],
+            },
+          ] as Instr[])
+        : []),
       { op: "local.get", index: 0 },
       { op: "any.convert_extern" },
       { op: "local.tee", index: 1 },
@@ -11985,8 +12076,16 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
       "__typeof",
       externrefToExternref,
       [
-        // null externref → undefined (matches __typeof_undefined = ref.is_null)
-        ...typeofTagArm([{ op: "local.get", index: 0 }, { op: "ref.is_null" }], "undefined"),
+        // null externref → undefined (matches __typeof_undefined = ref.is_null).
+        // (#2106 S1) Under the singleton regime null means JS null → "object"
+        // (§13.5.3), and the tag-1/UNDEF-box arm below answers "undefined".
+        ...typeofTagArm([{ op: "local.get", index: 0 }, { op: "ref.is_null" }], s1Active ? "object" : "undefined"),
+        ...(s1Active
+          ? (() => {
+              const test = buildIsUndefinedExternBody(ctx, 1, UNDEF_F64_BITS);
+              return test !== undefined ? typeofTagArm(test, "undefined") : [];
+            })()
+          : []),
         { op: "local.get", index: 0 },
         { op: "any.convert_extern" },
         { op: "local.set", index: 1 },

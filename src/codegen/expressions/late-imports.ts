@@ -12,6 +12,7 @@ import { reportErrorNoNode } from "../context/errors.js";
 import { addImport } from "../registry/imports.js";
 import { addFuncType } from "../registry/types.js";
 import { addUnionImportsViaRegistry } from "../shared.js";
+import { emitUndefinedExtern } from "../any-helpers.js";
 import { ensureObjectRuntime, OBJECT_RUNTIME_HELPER_NAMES } from "../object-runtime.js";
 import { ensureSymbolCarrier } from "../symbol-native.js";
 import { shiftAsyncSideChannelFuncIdxs } from "../async-scheduler.js";
@@ -680,13 +681,19 @@ export function ensureGetUndefined(ctx: CodegenContext): number | undefined {
 /**
  * Emit instructions that push the JS `undefined` value onto the stack.
  * Uses the __get_undefined host import when available; falls back to
- * ref.null.extern (indistinguishable from null) in standalone mode.
+ * ref.null.extern (indistinguishable from null) in standalone mode — unless
+ * the (#2106 S1) `undefinedSingleton` regime is active, in which case the
+ * distinct extern-wrapped tag-1 `$undefined` singleton is pushed instead
+ * (a GLOBAL read, not a func import, so the #329 late-import finalize shift
+ * is never driven — see the S1.0 reservation in `ensureAnyValueType`).
  */
 export function emitUndefined(ctx: CodegenContext, fctx: FunctionContext): void {
   const funcIdx = ensureGetUndefined(ctx);
   if (funcIdx !== undefined) {
     flushLateImportShifts(ctx, fctx);
     fctx.body.push({ op: "call", funcIdx });
+  } else if (emitUndefinedExtern(ctx, fctx)) {
+    // (#2106 S1) flag regime: `global.get $undefined; extern.convert_any`.
   } else {
     fctx.body.push({ op: "ref.null.extern" });
   }

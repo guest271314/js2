@@ -326,7 +326,12 @@ describe("#2949 lowering contract for dynamic", () => {
     expect(() => lowerIrFunctionToWasm(f, resolver)).toThrow(/resolver cannot lower dynamic IrType/);
   });
 
-  it("box-to-dynamic lowering throws the staged slice-3 error", () => {
+  it("box-to-dynamic without resolveDynamicLowering fails loudly (slice 3 landed the arms)", () => {
+    // Slice 1 staged a "lands in #2949 slice 3" error here; slice 3 replaced
+    // it with the real lowering, so the failure mode for a resolver without
+    // dynamic op support is now the missing-resolver contract error (same
+    // shape as the resolveDynamic one above). The positive lowering paths
+    // live in tests/issue-2949-slice3-dynamic-lowering.test.ts.
     const f = fn(
       "boxIt",
       [{ type: F64, name: "n" }],
@@ -336,6 +341,6 @@ describe("#2949 lowering contract for dynamic", () => {
       2,
     );
     const { resolver } = stubResolver();
-    expect(() => lowerIrFunctionToWasm(f, resolver)).toThrow(/#2949 slice 3/);
+    expect(() => lowerIrFunctionToWasm(f, resolver)).toThrow(/resolveDynamicLowering missing/);
   });
 });

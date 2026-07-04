@@ -14,7 +14,7 @@ import {
   isWrapperObjectType,
 } from "../checker/type-mapper.js";
 import type { Instr, ValType } from "../ir/types.js";
-import { isAnyValue } from "./any-helpers.js";
+import { isAnyValue, undefinedSingletonActive } from "./any-helpers.js";
 import { reportError } from "./context/errors.js";
 import { allocLocal, allocTempLocal, releaseTempLocal } from "./context/locals.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
@@ -2314,8 +2314,15 @@ export function compileBinaryExpression(
       // `isLoose` so the strict path is byte-identical to before.
       const isLoose =
         !isStrict && (op === ts.SyntaxKind.EqualsEqualsToken || op === ts.SyntaxKind.ExclamationEqualsToken);
-      if (isLoose) ensureObjectRuntime(ctx);
+      // (#2106 S1) The singleton-regime nullish guard below needs the
+      // `__extern_is_nullish` / `__extern_is_undefined` natives for BOTH
+      // strict and loose, so pull in the object runtime under the flag too
+      // (flag-off: the legacy `isLoose`-only pull, byte-identical).
+      const s1Regime = undefinedSingletonActive(ctx);
+      if (isLoose || s1Regime) ensureObjectRuntime(ctx);
       addUnionImports(ctx);
+      const s1IsNullishIdx = s1Regime ? ctx.funcMap.get("__extern_is_nullish") : undefined;
+      const s1IsUndefIdx = s1Regime ? ctx.funcMap.get("__extern_is_undefined") : undefined;
       const typeofNum = ctx.funcMap.get("__typeof_number")!;
       const typeofBool = ctx.funcMap.get("__typeof_boolean")!;
       const typeofBigint = ctx.funcMap.get("__typeof_bigint")!;
@@ -2675,29 +2682,76 @@ export function compileBinaryExpression(
       ];
       // For loose equality, wrap the core cascade in the nullish guard
       // (§7.2.15 steps 2-3): both nullish ⇒ true; nullish-vs-non-nullish ⇒ false.
-      const eqInstrs: Instr[] = looseNullish
+      //
+      // (#2106 S1) Under the `undefinedSingleton` regime the guard applies to
+      // BOTH strict and loose — and is keyed on the regime predicates, not bare
+      // `ref.is_null` (which no longer catches the non-null singleton):
+      //   loose:  both nullish (`__extern_is_nullish`) ⇒ true.
+      //   strict (§7.2.16 via SameType, null and undefined now DISTINCT):
+      //     (both null) ∨ (both undefined) ⇒ true; any other nullish pairing ⇒
+      //     false. This is the #1961 `bothNullishGuard` re-keyed on the
+      //     singleton, exactly as the S1 spec prescribed — it fixes dynamic
+      //     `undefined === undefined` / `null === null` (the legacy identity
+      //     arm answers 0 for null refs) while keeping `null === undefined`
+      //     false.
+      const s1NullishGuard = s1Regime && s1IsNullishIdx !== undefined && s1IsUndefIdx !== undefined;
+      const eqInstrs: Instr[] = s1NullishGuard
         ? [
             { op: "local.get", index: lTmp },
-            { op: "ref.is_null" } as Instr,
+            { op: "call", funcIdx: s1IsNullishIdx! } as Instr,
             { op: "local.get", index: rTmp },
-            { op: "ref.is_null" } as Instr,
-            // (lNull || rNull): if EITHER is nullish, the result is whether BOTH
-            // are nullish (true) or not (false) — never coerce against a nullish.
+            { op: "call", funcIdx: s1IsNullishIdx! } as Instr,
             { op: "i32.or" } as Instr,
             {
               op: "if",
               blockType: { kind: "val", type: { kind: "i32" } },
-              then: [
-                { op: "local.get", index: lTmp },
-                { op: "ref.is_null" } as Instr,
-                { op: "local.get", index: rTmp },
-                { op: "ref.is_null" } as Instr,
-                { op: "i32.and" } as Instr,
-              ],
+              then: isStrict
+                ? [
+                    { op: "local.get", index: lTmp },
+                    { op: "ref.is_null" } as Instr,
+                    { op: "local.get", index: rTmp },
+                    { op: "ref.is_null" } as Instr,
+                    { op: "i32.and" } as Instr,
+                    { op: "local.get", index: lTmp },
+                    { op: "call", funcIdx: s1IsUndefIdx! } as Instr,
+                    { op: "local.get", index: rTmp },
+                    { op: "call", funcIdx: s1IsUndefIdx! } as Instr,
+                    { op: "i32.and" } as Instr,
+                    { op: "i32.or" } as Instr,
+                  ]
+                : [
+                    { op: "local.get", index: lTmp },
+                    { op: "call", funcIdx: s1IsNullishIdx! } as Instr,
+                    { op: "local.get", index: rTmp },
+                    { op: "call", funcIdx: s1IsNullishIdx! } as Instr,
+                    { op: "i32.and" } as Instr,
+                  ],
               else: coreEqInstrs,
             } as Instr,
           ]
-        : coreEqInstrs;
+        : looseNullish
+          ? [
+              { op: "local.get", index: lTmp },
+              { op: "ref.is_null" } as Instr,
+              { op: "local.get", index: rTmp },
+              { op: "ref.is_null" } as Instr,
+              // (lNull || rNull): if EITHER is nullish, the result is whether BOTH
+              // are nullish (true) or not (false) — never coerce against a nullish.
+              { op: "i32.or" } as Instr,
+              {
+                op: "if",
+                blockType: { kind: "val", type: { kind: "i32" } },
+                then: [
+                  { op: "local.get", index: lTmp },
+                  { op: "ref.is_null" } as Instr,
+                  { op: "local.get", index: rTmp },
+                  { op: "ref.is_null" } as Instr,
+                  { op: "i32.and" } as Instr,
+                ],
+                else: coreEqInstrs,
+              } as Instr,
+            ]
+          : coreEqInstrs;
       for (const ins of eqInstrs) fctx.body.push(ins);
       if (isNeqOp) fctx.body.push({ op: "i32.eqz" });
       releaseTempLocal(fctx, rTmp);

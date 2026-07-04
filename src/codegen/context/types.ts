@@ -96,6 +96,10 @@ export interface CodegenOptions {
   /** (#2141 S2/S3, #2626) Tag-5 boxed-VALUE equality classifier — see the
    *  `CompileOptions.tag5ValueEqClassifier` doc. Default false (legacy). */
   tag5ValueEqClassifier?: boolean;
+  /** (#2106 S1) Standalone `$undefined` tag-1 singleton regime — see the
+   *  `CompileOptions.undefinedSingleton` doc. Default false (legacy:
+   *  undefined ≡ null ≡ ref.null.extern in standalone, byte-identical). */
+  undefinedSingleton?: boolean;
   /** (#2796) Diff-test-harness fidelity: in JS-host mode, export the top-level
    *  `__module_init` and do NOT run it via the wasm `start` section, so the host
    *  invokes it AFTER `setExports` (symmetric with the standalone `_start`
@@ -1892,6 +1896,11 @@ export interface CodegenContext {
    *  non-string tag-5 pairs). `JS2WASM_TAG5_CLASSIFIER=1` env defaults it on
    *  for runner-level A/B. */
   tag5ValueEqClassifier: boolean;
+  /** (#2106 S1) Standalone `$undefined` tag-1 singleton regime flag — see the
+   *  `CompileOptions.undefinedSingleton` doc. Default false (legacy:
+   *  undefined ≡ null ≡ ref.null.extern, byte-identical). Only meaningful
+   *  under standalone/nativeStrings; host mode ignores it. */
+  undefinedSingleton: boolean;
   /** (#2796) Diff-test-harness fidelity: in JS-host mode, export the top-level
    *  `__module_init` and do NOT wire the wasm `start` section to it, so the host
    *  runs it after `setExports` (symmetric with the standalone `_start` model).

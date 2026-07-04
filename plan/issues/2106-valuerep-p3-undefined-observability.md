@@ -2,7 +2,7 @@
 id: 2106
 title: "value-rep P3: undefined observability — UNDEF_F64 sentinel, union-collapse reversal (flagged), standalone $undefined singleton"
 status: in-progress
-assignee: ttraenkler/sdev-s1fix
+assignee: ttraenkler/fable-2106
 sprint: current
 created: 2026-06-11
 updated: 2026-06-26
@@ -588,6 +588,100 @@ complete, properly-sequenced sweep in a fresh PR with the full producer+consumer
 site set flipped together, validated via merge_group BEFORE enqueue (route to
 architect to enumerate the full producer/consumer site list first). The hold on
 #2025 must stay until this is resolved.
+
+## S1 re-land plan — FULL sweep behind `undefinedSingleton` flag (fable-2106, 2026-07-04)
+
+Resumed on branch `issue-2106-s1-undefined-singleton` (fast-forwarded to main
+@ 02cc6d108 — the old branch content had fully landed via PR #2025's
+floor-neutral revert; S1.0 inert reservation IS on main in `any-helpers.ts`).
+
+**Why flagged, not default-on:** the June partial flip measured −1245 net; the
+diagnosis proved producer+consumer must flip in lockstep across the WHOLE
+standalone runtime. A compile-flag regime (`undefinedSingleton`, default OFF →
+byte-identical, precedent: #2141 `honestAnyBoxing`) lets the complete sweep land
+green and floor-safe, with the default flip as a separate, measured, one-line PR.
+This is the issue's own S4 measure-first protocol applied to S1.
+
+**Key re-ground findings (2026-07-04, main @ 02cc6d108):**
+- Host mode ALREADY has non-null undefined (`__get_undefined`), so shared
+  expression-layer consumers are already dual-predicate: `??` emits
+  `ref.is_null || __extern_is_undefined` (logical-ops.ts:225-232); `=== undefined`
+  routes through `__extern_is_undefined` (binary-ops.ts:464-478). Flipping the
+  ONE native `__extern_is_undefined` body covers all of them at once.
+- The ripple is concentrated in STANDALONE-NATIVE bodies where null doubles as
+  absence/undefined: `__extern_get` 3 miss sites (object-runtime.ts:1012+),
+  `__extern_get_idx` miss, internal `call __extern_get; ref.is_null` absence
+  checks (to-primitive/method-dispatch/iterator/json — the 948 June CEs),
+  the standalone looseNullish guard (binary-ops.ts:2641 — bare `ref.is_null`),
+  externref ToBoolean (singleton must be falsy), ToNumber (null→0 vs
+  undefined→NaN — currently conflated), ToString ("null" vs "undefined").
+- `__extern_is_undefined` gained a #2979 UNDEF_F64-boxed-sentinel arm since the
+  June spec — the flag body must KEEP that arm (singleton-test ∨ UNDEF-box),
+  dropping only the `ref.is_null` arm.
+- #2949 coherence: `JsTag.Undefined = 1` is payload-less; identity via
+  `tag.test` — the tag-1 singleton IS the JsTag-lattice-conformant carrier.
+  `__any_to_extern` already round-trips tag-0/1 boxes wrapped (any-helpers.ts:632);
+  under the flag tag-1 canonicalizes to the singleton and tag-0 to
+  `ref.null.extern` (fixing the tag-0→tag-1 round-trip lie that comment documents,
+  in the flag regime).
+
+**Flag semantics (standalone/nativeStrings only; host byte-identical always):**
+undefined = the S1.0 `$undefined` tag-1 global (extern-wrapped at the externref
+plane); null = `ref.null.extern`. Producers emit the singleton; undefined-specific
+consumers test tag-1 (∨ UNDEF-box); null-specific stay `ref.is_null`; nullish =
+either (new native `__extern_is_nullish`).
+
+### S1 flagged sweep — DELIVERED (fable-2106, 2026-07-04, this branch)
+
+Implemented the complete lockstep sweep behind `undefinedSingleton` (default
+OFF; `JS2WASM_UNDEF_SINGLETON=1` env A/B, mirroring `JS2WASM_TAG5_CLASSIFIER`):
+
+- **Producers**: `emitUndefined` → singleton; `__extern_get` 3 miss sites;
+  `__extern_get_idx` misses (builder `missInstrs` factory — fresh instr objects
+  per branch, finalize-splice safe); `boxToAny` null/undefined jsType arms →
+  `__any_box_null`/`__any_box_undefined`; `__any_from_extern` null arm → tag-0.
+- **The boxing chokepoint that made dynamic eq work**: `__any_box_extern_s1` —
+  NULLISH-honest externref boxing (null→tag-0, singleton/UNDEF-box→tag-1,
+  everything else keeps the #1888 tag-5 wrap byte-equivalently). Deliberately
+  NOT #2141's full-honest classification (its solo flip measured −788/−794).
+  Routed from `boxToAny`'s externref arm under the flag. Without it,
+  `u === miss` boxed both nullish values tag-5 and `__any_strict_eq` said 0
+  (WAT-verified).
+- **Consumers**: `__extern_is_undefined` → tag-1 ∨ UNDEF-box (drops
+  `ref.is_null`); `__extern_is_nullish` + `__nullish_to_null` natives —
+  internal null-keyed lookups (to-primitive valueOf/toString: the June 948-CE
+  site; proxy traps; descriptor fields; `__extern_method_call`; groupBy)
+  NORMALIZE nullish→null at the read so their downstream logic stays
+  byte-identical; `__is_truthy` tag≤1 falsy; typeof cluster (predicate +
+  `__typeof_object` + materialized `__typeof`): null→"object",
+  singleton→"undefined"; strict/loose dynamic-eq nullish guard in the #1776
+  cascade (the #1961 bothNullishGuard re-keyed as spec'd); `?.` receiver
+  guards OR the singleton test; `__dyn_get` stops remapping stored-null→
+  undefined, `__dyn_has` tests nullish; join renders singleton as "";
+  `__extern_toString(null)` → "null"; destructure container guard tests tag-1
+  ONLY (preserves #3010's scalarized-`[undefined]` fix).
+- **Zero-change wins** (already tag-correct, verified): `__any_strict_eq`
+  (same-tag<2 equal), `__any_eq` (both-tags<2 arm), `__any_to_string`
+  (tag-0 "null"/tag-1 "undefined"), `__any_to_f64` (tag-1 NaN),
+  `__unbox_number` (null→0, opaque→NaN), dstr/param defaults
+  (`__extern_is_undefined`-exclusive per #1021 — spec-correct under the flag),
+  `holeToUndefinedInstrs` (routes via emitUndefined).
+- **Validation**: `tests/issue-2106-s1-undefined-singleton.test.ts` — 8 flag-on
+  standalone cases (strict/loose distinctness incl. cross-producer, typeof,
+  missing-vs-stored-null property reads, dstr defaults null-kept, ??/?./
+  truthiness, ToString/ToNumber split, container-guard TypeError) + a flag-off
+  legacy control. Byte-inertness: 10-program × {gc,wasi} corpus sha256 —
+  IDENTICAL to pre-change tree with flag off.
+- **Known flag-on residuals** (pre-existing, flag-NEUTRAL — confirmed both
+  regimes behave identically): `{ b: null }` shape-struct literals read via
+  bare `__extern_get` miss the field (dstr default fires either way);
+  `.join()` on an `any` receiver; `""+arr` to-primitive of any-array.
+
+**Next steps (follow-up PRs):** (1) A/B-measure the standalone test262 delta
+with `JS2WASM_UNDEF_SINGLETON=1` (runner-level env, no code change needed);
+(2) if net-positive, flip the default in a one-line PR validated via
+merge_group; (3) S2 (sNaN carve-out codify), S3 (number|undefined→externref,
+needs the box-protocol fix), S4 (union-collapse reversal) remain per plan.
 
 ## Residual (as of #2199, PO reconcile 2026-06-28)
 
