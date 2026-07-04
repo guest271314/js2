@@ -2,10 +2,10 @@
 id: 2175
 title: "architect spec: standalone builtin-prototype object representation + native-method-closure dispatch"
 status: in-progress
-assignee: ttraenkler/se-2175
+assignee: ttraenkler/fable-2175
 sprint: current
 created: 2026-06-16
-updated: 2026-06-24
+updated: 2026-07-04
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -13,7 +13,7 @@ task_type: analysis
 area: standalone
 language_feature: compiler-internals
 goal: standalone-mode
-related: [2161, 2158, 2159, 2101, 2100, 1907, 1888, 1914, 1539]
+related: [2161, 2158, 2159, 2101, 2100, 1907, 1888, 1914, 1539, 2861, 2885, 2949, 2963, 2984, 3025, 3027]
 depends_on: [2101]
 origin: "2026-06-16 — sdev5 #2161a refinement: RegExp.prototype-as-object refusal is the convergent gate across RegExp/class/TypedArray standalone reflection"
 ---
@@ -607,3 +607,447 @@ JS-host `RegExp.prototype` unchanged (4 host imports). Tests:
 - `$NativeProto.$ctor`/`$parent` are null-init in S1 (`.constructor` identity +
   `[[Prototype]]` chain walk land with S2's class composition, which owns the
   shared `$ctor`/`$parent` semantics).
+
+---
+
+## Implementation Plan v2 — unified substrate spec (2026-07-04, arch/fable)
+
+> Verified against `upstream/main` @ `6b2028dac`. This section supersedes the
+> open questions of the 2026-06-16 spec and re-grounds it on everything that
+> landed since: S0/S1 + the brand-table PREP (above), the #2861 glue wave
+> (~30 builtins wired), #2885 (gOPD call-site synthesis + accessor
+> descriptors + proto-identity arm), #2963 Phase 1
+> (`pushBuiltinFnSingletonValueInstrs` identity singletons) + #3006
+> (`emitBuiltinConstructorIdentity` ctor carriers), #2949 slices 1–2
+> (`IrType.dynamic`, `JsTag`, and the banked adoption slices A/B/C), and the
+> measured verdicts of #2984 (method-value placeholder), #3025 (struct
+> receivers invisible to the dynamic reader), and #3027 (the ~1,552
+> `$Object`-dynamic-reader residual — the largest standalone cluster).
+>
+> **The one-sentence thesis:** everything the syntactic layer can already do
+> (proto value reads, member closures, gOPD synthesis, `.length`/`.name`
+> folds) is invisible to the RUNTIME — `__extern_get`/`__extern_has`/
+> `__getOwnPropertyDescriptor`/`__getOwnPropertyNames` understand exactly one
+> receiver shape (`$Object`) and return null for every other GC struct. v2
+> makes the runtime reader a real MOP: builtin protos get a reader-visible
+> own-property table, method values become one identity-stable
+> Function-classified closure per (brand, member) across every surface, and
+> the reader gains receiver-class arms (proto / instance / closed-shape) with
+> a defined prototype-chain walk.
+
+### Measured ground truth driving v2 (all verified on current main)
+
+1. `__extern_get` (`object-runtime.ts:1012`) gates on `ref.test $Object`
+   (line 1051) and returns null externref otherwise. `__extern_has`
+   (`:2247`) and the descriptor/names natives do the same. `$NativeProto`,
+   `$NativeRegExp`, closed-shape nominal structs, vecs — **all invisible**.
+   This single gate is the shared root of #3027's null/undefined residual,
+   #3025's `with(structVar)` failure, and #2984 bucket (1)'s runtime forms.
+2. `object-runtime.ts` contains **zero references to `$NativeProto`** — the
+   entire #2175 S1/#2861/#2885 edifice is compile-time-syntactic. Any proto
+   object that *flows* (bound to a variable, passed as an argument, returned,
+   received as a closure param) drops off the reflective world.
+3. `tryCompileStandaloneBuiltinProtoMemberRead` (`property-access.ts:1080`,
+   method arm at `:1130`) still emits `pushBuiltinFnClosureValueInstrs` — a
+   **fresh struct per read**. #2963 Phase 1 fixed identity only for the 3
+   static-method closures (`property-access.ts:4165`). So
+   `RegExp.prototype.exec !== RegExp.prototype.exec` standalone, and
+   `gOPD(p,"exec").value !== p.exec` — exactly the #2984 "non-canonical
+   `.value`" finding.
+4. The standalone `__typeof` native (`index.ts:11854`) has arms for
+   null/number/boolean/bigint/string and falls through to `"object"`. **No
+   function arm** — a closure struct read back dynamically reports
+   `typeof === "object"`, while the inline path const-folds `"function"`
+   from the TS type. This is the #2984 "path-dependent `typeof`" defect, and
+   it contradicts `JsTag.Function` (#2949 V1 tag-fidelity invariant) at the
+   classifier level.
+5. `$Object` is **final** (`object-runtime.ts:276-291`, the #1100/#2009
+   canonicalization hazard) — "make the proto a `$Object` subtype with a
+   brand field" is not available. The codebase's established alternative is
+   the `$Proxy` pattern: a *separate* struct discriminated by its own
+   `ref.test` arm ahead of the `$Object` cast. v2 follows that pattern.
+6. `$PropEntry` already carries everything the proto table needs: anyref
+   key (native string OR `$Symbol` carrier, #2866), anyref value, flags with
+   `FLAG_ACCESSOR`, insertion seq, and anyref `$get`/`$set` accessor slots
+   whose getters `__extern_get` already invokes **with the original
+   receiver** (§6.2.5.5-correct, `:1088-1119`). No new entry representation
+   is needed — only population and dispatch.
+
+### The three contracts
+
+#### C1 — builtin-prototype object representation
+
+`$NativeProto` **stays** the identity anchor (one lazily-materialized struct
+per brand behind `__native_proto_<brand>`; `RegExp.prototype ===
+RegExp.prototype` continues to ride the global). It gains a **companion
+own-property table**: a new trailing field
+
+```
+6 $props (mut anyref)   ;; lazily-attached (ref $Object) own-property table, null until first runtime reflective access
+```
+
+- **Why a companion table and not a replacement:** replacing `$NativeProto`
+  with a bare `$Object` loses the brand (no field to put it in — `$Object`
+  is final, fact 5) and with it every compile-time surface keyed on brand
+  (member meta-folds, glue lookup, the #2885 identity arm). The table hangs
+  *off* the same identity-stable struct, so all landed surfaces keep working
+  unchanged while the runtime gains a real object to query.
+- **Why `anyref`, not `(ref null $Object)`:** typing the field would force
+  `registerNativeProtoType` to register the object runtime's types eagerly,
+  changing type sections (and bytes) for every module that touches a proto
+  value but never reflects. `anyref` + `ref.cast $Object` in the (rare)
+  reader arms keeps proto-only modules byte-stable. The single
+  `struct.new $NativeProto` site is `emitLazyNativeProtoGet`
+  (`native-proto.ts:296-340`) — the layout change is a one-site edit
+  (append `ref.null any` before `struct.new`) plus the S2-class site if
+  #2158's classmeta branch lands its own `struct.new`.
+- **Population** is a per-brand generated function
+  `__nativeproto_populate_<brand>(ref $NativeProto) -> ref $Object`,
+  emitted from the registered glue: for each CSV member, insert an entry
+  with the **singleton** closure value (C2) — methods as data props
+  `{writable:true, enumerable:false, configurable:true}`
+  (`FLAG_WRITABLE`), getters as accessor entries (`FLAG_ACCESSOR`, `$get` =
+  the getter singleton, `$set` null). **Reuse the standalone
+  `Object.defineProperty` insert path** (the `__obj_insert` +
+  grow-discipline wrappers) — do not hand-roll a second insert (D4 rule).
+  Symbol-keyed members insert **real `$Symbol` carrier keys** with the
+  well-known id — the `@@<id>` CSV sentinel stays only as the compile-time
+  member list encoding; at the table layer symbols are genuine keys (the
+  table already supports them, fact 6), so `getOwnPropertySymbols` /
+  `gOPD(proto, Symbol.match)` fall out of the ordinary reader.
+- **Trigger — lazy on first runtime reflective access** via a reserve/fill
+  native `__nativeproto_ensure_props(anyref) -> (ref $Object)`: registered
+  with the object runtime (default body unreachable), filled at FINALIZE
+  with `struct.get $brand` → brand-switch arms calling each registered
+  glue's populate fn — the same reserve/fill discipline as
+  `fillBuiltinFnMeta`/`fillExternIsArray`. Only brands whose glue was
+  registered during compilation get an arm, so binary cost stays
+  demand-driven (a program that never mentions RegExp carries no RegExp
+  populate).
+- **Chain linking:** `emitLazyNativeProtoGet`'s init body fills the fields
+  S1 left null: `$parent` = the parent proto's global (recursive
+  `emitLazyNativeProtoGet` — Object.prototype for most brands;
+  `%TypedArray%.prototype` for concrete views, per the v1 table), `$ctor` =
+  the builtin's ctor carrier (C1-ctor below). Object.prototype's own
+  `$parent` stays null (chain terminal). All emission is inside the
+  existing `if (ref.is_null)` init body in `fctx.body` — shift-covered, no
+  const-init `ref.func`/`call` hazard (the #2963 discipline).
+
+**C1-ctor (constructor objects).** The `__builtin_ctor_<Name>` carriers
+(`emitBuiltinConstructorIdentity`, `builtin-static-globals.ts:119`) are
+already **plain `$Object`s** — the reader sees them today; their tables are
+just empty. v2 populates them the same way: a per-name populate adding (a)
+`prototype` → the brand's `$NativeProto` (as anyref via
+`any.convert_extern`), (b) the wired static-method singletons, (c) nothing
+else (absent members correctly read `undefined`). Dually, proto tables get a
+`constructor` entry → the ctor carrier. This closes the loop
+`RegExp.prototype.constructor === RegExp` at the RUNTIME layer and retires
+#2984 bucket (2)'s `gOPD(Array,"isArray")` CE once `Array`/`Object` join the
+identity-carrier set (today they're namespace-object carriers with a
+different key — unify progressively, D7).
+
+#### C2 — native-method-closure dispatch contract
+
+**One value per (brand, member), everywhere.** The method/getter closure
+value for a builtin proto member is THE #2963 singleton
+(`pushBuiltinFnSingletonValueInstrs`, keyed by the meta typeIdx — already
+rec-group/DCE-stable and late-import-shift-safe). Three surfaces must
+converge on it:
+
+1. syntactic value read — `tryCompileStandaloneBuiltinProtoMemberRead`
+   method arm (`property-access.ts:1130`) switches from
+   `pushBuiltinFnClosureValueInstrs` to the singleton;
+2. the proto table — `__nativeproto_populate_<brand>` stores the same
+   singleton (emit the identical lazy-init guard against the same global
+   inside the populate body);
+3. #2885's gOPD synthesis (`calls.ts` Site 2) — the descriptor's
+   `value`/`get` args switch to the singleton.
+
+Then `RegExp.prototype.exec === RegExp.prototype.exec`,
+`gOPD(p,"exec").value === p.exec`, and the table read all yield one object —
+the ES "a builtin method is ONE function object" invariant, by construction.
+
+**Carrier & classification.** The table stores the **raw closure struct**
+(anyref), NOT an `$AnyValue` box — identity must survive round-trips, and
+`$PropEntry.value` is anyref already. Function-ness is the CLASSIFIER's job:
+
+- Add a **function arm to the standalone `__typeof` native**
+  (`index.ts:11854`): reserve the arm at registration, fill at FINALIZE
+  with `ref.test` over every closure **base wrapper** struct type
+  (`getOrCreateFuncRefWrapperTypes` registry — meta subtypes pass their
+  base's test, and user closures are correctly `"function"` too), placed
+  before the `"object"` fallthrough. Same fill pass exposes a shared
+  `isClosureStructArms()` helper.
+- The **same** arms feed the `$AnyValue` boxing classifier so a
+  dynamically-read method value boxes as `JsTag.Function`, keeping
+  `__typeof`, the #2040 tag classifier, and #2949's tag refinement in
+  lockstep (V1 tag fidelity; one predicate, two consumers — never two
+  tables).
+
+**Invocation.** Recovery of a dynamically-held method value is #2949's
+banked slice A contract: `tag.test(Function)` → unbox → `ref.test` against
+candidate closure struct types keyed on the **exact struct typeIdx** (not
+arity). The factory already registers every meta type in
+`ctx.closureInfoByTypeIdx` and records receiver-taking closures in
+`ctx.nativeProtoReceiverClosureStructTypes` (`native-proto.ts:503-507`), so
+`m.call(re, s)` / `d.get.call(re)` thread `thisArg` into param 1 (the #2193
+PR-B mechanism). v2 adds no new call machinery; it REQUIRES that the
+receiver-recovery arms in `expressions/calls.ts` (~the `__callable_param_*`
+region) and `__apply_closure` (`object-runtime.ts:6952`, the any-receiver
+method-call path) treat `nativeProtoReceiverClosureStructTypes` membership
+as "prepend receiver" uniformly — the implementer must probe both paths
+(`const m = RegExp.prototype.test; m.call(/a/,"a")` and
+`recv.test("a")` with recv externref) in the pilot slice.
+
+**Getter invocation on the chain** needs no new contract at all: once proto
+tables carry accessor entries, `__extern_get`'s existing accessor branch
+invokes `$get` with the ORIGINAL receiver (fact 6). An instance receiver
+gets the field value via the brand-recovery prologue; the proto object
+itself gets `undefined` via the #2885 proto-identity arm. Both spec arms
+compose for free.
+
+#### C3 — the dynamic-reader MOP + prototype-chain walk contract
+
+Restructure the reader natives around a **receiver-classification ladder**.
+Contract (applies to `__extern_get`, `__extern_has`, `__hasOwnProperty`,
+`__getOwnPropertyDescriptor`, `__getOwnPropertyNames`, `__extern_set`,
+`__delete_property` — one semantics, per-native arms):
+
+```
+lookup(recv, key):
+  1. builtin-fn meta arm (existing, #2896)                — fn values' name/length
+  2. ref.test $Object   → own-table find                  — existing path
+       hit  → resolve (data / accessor with recv as this)
+       miss → recv' = o.$proto; if null → step 5 (implicit terminal); loop
+  3. ref.test $NativeProto → t = __nativeproto_ensure_props(recv)
+       own find in t; hit → resolve (this = the PROTO object — identity arm
+       yields undefined for getters, correct); miss → recv' = $parent; loop
+  4. instance arm: brand = __instance_proto_brand(recv)   — finalize-filled
+       (ref.test $NativeRegExp → RegExp, vec types → Array, $AnyString →
+        String, closure wrappers → Function, boxed num/bool → Number/Boolean,
+        error structs → their NativeError brand, …)
+       own layer FIRST via __instance_own_get(recv, key)  — finalize-filled
+       (RegExp lastIndex/source own data props; vec "length" + indices;
+        string "length" + indices; closed-shape struct fields — see below)
+       then proto layer: the brand's $NativeProto table, walk $parent up
+  5. implicit terminal: Object.prototype's table (guarded by a future
+     FLAG_NULL_PROTO object flag for Object.create(null), D5)
+  6. miss → null / 0 / undefined-descriptor (per native)
+```
+
+- **Closed-shape nominal structs** (user object literals compiled to
+  nominal WasmGC structs — the #3025 root cause and a large #3027 subset)
+  are one arm of step 4: a finalize-filled `__closedshape_get(any, key)`
+  generated from `ctx.structFields`/`ctx.typeIdxToStructName` — per struct
+  type, `ref.test` → key compare via `__str_equals` → boxed field read
+  (box through the canonical `boxToAny`/`__box_*` family; native-string
+  fields pass as-is — this is the direct fix for the
+  `project_standalone_any_string_value_read_substrate` class where typed
+  reads work but dynamic reads drop values). Their proto brand is `Object`
+  (step 5 gives them `hasOwnProperty` et al.). Closed-shape **methods** stay
+  with the #2151 `__call_m_<name>` dispatcher family for CALLS; the method
+  VALUE read off a closed shape is out of v2 scope (flagged edge, below).
+- **`__extern_set` on a proto receiver:** methods are `writable:true`, so
+  assignment must genuinely write the table (after `ensure_props`).
+  `__extern_set` on a closed-shape struct field: emit the per-type arm for
+  fields (mutable fields only); non-writable / non-existent → current no-op
+  semantics. `__delete_property` on a proto member (`configurable:true`)
+  works for free once the table is real.
+- **`with` (#3025):** the standalone `with` dynamic path's `__extern_has` +
+  `emitDynGet` calls resolve struct receivers once step 4's closed-shape
+  arm lands — no `with`-specific work. The **host-lane** `with` failure
+  (#3025 is measured on the default lane, where `__extern_has` is a host
+  import that can't see GC structs) is NOT fixed by this; #3025's Tier-1
+  static-type extension remains the host-lane plan. Optionally the same
+  closed-shape native can run as a pre-check before the host import there —
+  note it in #3025, don't scope it here.
+- **Perf discipline:** the ladder adds arms only on the *miss* path of the
+  existing `$Object` test (step 2 is unchanged and first among struct
+  tests); typed fast paths (instance `re.flags`, `o.m()` at syntactic call
+  sites) never enter these natives. The byte-identity guard for untouched
+  programs is `scripts/prove-emit-identity.mjs` (39-hash corpus), which
+  every slice must keep IDENTICAL for modules that never pull the object
+  runtime.
+
+### Decision points (two-viable-designs, with recommendation)
+
+- **D1 — proto representation.** (a) keep protos virtual + widen call-site
+  synthesis case-by-case (#2885's original choice) vs **(b) companion
+  `$props` table on `$NativeProto` (RECOMMENDED)** vs (c) replace
+  `$NativeProto` with plain `$Object`s. (a) can never serve a *runtime*
+  receiver (the #2984/#3027 measured wall — synthesis needs syntax); (c) is
+  blocked by `$Object` finality (fact 5) and would orphan every brand-keyed
+  surface. (b) is additive, keeps identity anchoring, and converts #2885's
+  synthesis into a fast path rather than a dead end.
+- **D2 — `$props` field type.** `(ref null $Object)` vs **`anyref`
+  (RECOMMENDED)** — avoids eager object-runtime type registration from
+  `registerNativeProtoType`, keeping proto-only modules byte-stable; the
+  cast lives in reader arms that already paid for the object runtime.
+- **D3 — population trigger.** Eager at proto materialization vs **lazy via
+  `__nativeproto_ensure_props` on first runtime reflective access
+  (RECOMMENDED)**. Materialization is common (every `X.prototype` value
+  read); runtime reflection is rare. Lazy keeps the common path at one
+  null-check. Cost either way: the populate fn + member closures exist in
+  the binary for every glue-registered brand (~15 small delegating funcs
+  for RegExp). Accepted; it is demand-gated by glue registration, and most
+  closure bodies delegate to engine funcs the module already carries.
+  (Per-member lazy population was considered and REJECTED: closures exist
+  at compile time regardless, so it saves no binary size and adds a
+  per-entry guard.)
+- **D4 — table value carrier.** `$AnyValue`-boxed vs **raw closure struct
+  anyref + classifier arms (RECOMMENDED)**. Raw preserves `ref.eq` identity
+  with zero unwrap layers and matches how user-object closures are already
+  stored; Function-ness is established at the classifier (fact 4's fix),
+  which #2949 slice 3's boxing then consumes — one representation below,
+  tags at the boundary (the #1852 invariant).
+- **D5 — `$Object` chain terminal.** Widen `$Object.$proto` to anyref so
+  plain objects can LINK to `$NativeProto` protos, vs **implicit
+  Object.prototype terminal arm after the `$Object` walk exhausts
+  (RECOMMENDED)** + a `FLAG_NULL_PROTO` bit in `$Object.$flags` for
+  `Object.create(null)`/`setPrototypeOf(null)`. Widening the proto field
+  touches every proto-walk site and re-opens the #2009 canonicalization
+  minefield for marginal gain; the implicit arm is 10 lines per native and
+  spec-equivalent for default-proto objects. Revisit widening only if
+  user-defined `setPrototypeOf(obj, SomeBuiltin.prototype)` shows up as a
+  measured cluster.
+- **D6 — symbol members.** Keep `@@<id>` sentinels at the runtime layer vs
+  **real `$Symbol` carrier keys in the table (RECOMMENDED)** — the table
+  supports them (#2866); sentinels remain only as glue-CSV encoding.
+- **D7 — ctor-object unification.** Keep the three ctor carrier families
+  (identity set / namespace `$Object`s / null-extern defaults) vs
+  **progressively unify on populated `$Object` carriers (RECOMMENDED)**:
+  extend `BUILTIN_CONSTRUCTOR_IDENTITY_NAMES` per slice (Array + Object
+  first — they gate #2984 bucket 2), fold `emitBuiltinNamespaceObject`'s
+  populated-props mechanism into the same populate-table shape. Do NOT
+  flip all names in one PR — each name changes the bare-identifier read
+  path and needs its own regression sweep.
+
+### Slice decomposition (each independently mergeable; Opus-executable)
+
+- **V2-S1 (M) — `typeof` function arm + shared closure classifier.**
+  `index.ts` `__typeof` native: finalize-filled `ref.test` arms over closure
+  base wrapper types before the `"object"` fallthrough (reserve/fill like
+  `fillBuiltinFnMeta`); export the arm-builder for the `$AnyValue`
+  classifier + #2949 slice 3. Fixes the #2984 `typeof` instability and
+  `typeof f === "function"` standalone generally. *Gate:*
+  `typeof RegExp.prototype.exec`, `typeof (d.value)` inline AND
+  const-bound both `"function"`; `typeof {}` still `"object"`;
+  prove-emit-identity green on closure-free corpus files.
+- **V2-S2 (M) — singleton unification.** Switch surfaces (1) and (3) of C2
+  to `pushBuiltinFnSingletonValueInstrs`; getter closures get singletons
+  too. Files: `property-access.ts:1130` region, `calls.ts` #2885 Site-2
+  emission. *Gate:* `RegExp.prototype.exec === RegExp.prototype.exec`;
+  `gOPD(RegExp.prototype,"exec").value === RegExp.prototype.exec`;
+  swap-guard `… !== RegExp.prototype.test`; existing issue-2175/2885 suites
+  green.
+- **V2-S3 (L) — the proto table + `$NativeProto` reader arm.** C1 layout
+  change (+`$props`), `__nativeproto_populate_<brand>` generator in
+  `native-proto.ts` (glue-driven), `__nativeproto_ensure_props`
+  reserve/fill in `object-runtime.ts`, step-3 arms in
+  `__extern_get`/`__extern_has`/`__hasOwnProperty`/
+  `__getOwnPropertyDescriptor`/`__getOwnPropertyNames`/`__extern_set`/
+  `__delete_property`. Chain fields: `$parent`/`$ctor` filled at
+  materialization. RegExp + Object pilot brands (Object.prototype table:
+  `hasOwnProperty`, `toString`, `isPrototypeOf`, `valueOf`,
+  `propertyIsEnumerable` — bodies may degrade to the #2193 catchable
+  refusal where no engine exists yet). *Gate:* `const p: any =
+  RegExp.prototype; p.exec` resolves; `"exec" in p`;
+  `gOPD(p, "flags")` accessor descriptor with `.get.call(/gi/) === "gi"`
+  through the RUNTIME path (no syntactic synthesis);
+  `Object.getPrototypeOf(RegExp.prototype) === Object.prototype`;
+  `delete`-then-`hasOwnProperty` round-trip on a proto method.
+- **V2-S4 (L) — ctor objects populated + `__get_builtin` receiver refusal
+  retired.** C1-ctor: populate `__builtin_ctor_<Name>` tables
+  (`prototype`, static-method singletons, `constructor` back-link on
+  protos); add Array/Object to the identity set (D7); route the builtin-
+  ctor-as-dynamic-receiver path (the `__get_builtin` fallthrough,
+  `property-access.ts` ~L192-208/403 refusal context) to the carrier.
+  *Gate:* `gOPD(Array, "isArray")` compiles + returns a data descriptor
+  whose `.value === Array.isArray` (#2984 bucket 2);
+  `RegExp.prototype.constructor === RegExp`; #2963's identity tests stay
+  green.
+- **V2-S5 (L, decompose per class) — instance-chain arm.**
+  `__instance_proto_brand` + `__instance_own_get` finalize-filled hooks;
+  per-class sub-slices in order: RegExp (pilot — lastIndex own prop +
+  proto-chain method/getter resolution on an externref receiver), vec/Array
+  (own length + indices, then Array.prototype methods via the chain),
+  String (`$AnyString` receivers), Function (closure receivers → the
+  builtin-fn meta arm generalizes into this). *Gate per sub-slice:* e.g.
+  `function f(r: any) { return r.test("a") } f(/a/)` host-free;
+  `/a/[Symbol.match]("a")` non-null via the symbol-keyed table entry
+  (retiring the S1 "next refinement" boundary); the 57-test Symbol.* and
+  52-test `.call` RegExp sub-buckets.
+- **V2-S6 (M) — closed-shape struct arm.** `__closedshape_get/has`
+  generated from `ctx.structFields`; wire as step-4 arms + `__extern_set`
+  field writes. *Gate:* `const o = {p1: 7, p2: "hi"}; with(o){...}`
+  standalone; `const o: any = {v: "hi"}; o.v.length === 2` (the
+  substrate-memory repro); #3025's standalone repro; a
+  `Object.keys(structVar)` sanity (names arm optional here, flag if cut).
+- **V2-S7 (S) — measure + re-scope #3027.** Re-run the standalone harvest;
+  split the 1,552 into flipped-by-v2 vs residual (generator/async carriers
+  #2864/#2865, iterator protocol, other); update #3027 + umbrella #2860.
+
+Suggested order: S1 → S2 → S3 → S4 → S5(RegExp) → S6 → S5(rest) → S7.
+S1/S2 are independent and can run in parallel; S3 is the keystone; S4–S6
+depend on S3 only. Do not fold S3+S5 into one PR — the reader-arm blast
+radius needs separate CI evidence.
+
+### Coordination / conflict flags (in-flight work, read before dispatch)
+
+- **#2949 slice 3** (fable-2949, branch `issue-2949-jstag-dynamic` may still
+  be in flight): V2-S1's classifier arms are the SAME predicate its
+  `tag.test(Function)` lowering needs — land V2-S1 as/with the shared
+  helper and point #2949 slice 3 at it; never two closure-struct arm lists.
+- **#2984** (assignee sr-gopd): V2-S3/S4 ARE its buckets (1)+(2) substrate.
+  Re-point #2984 to consume these slices; do not dispatch a parallel
+  descriptor-layer attempt (its own file warns this re-breeds the
+  placeholder).
+- **#2963 Phase 2** (any-callable scalar-param dispatch, `calls.ts`
+  ~13230-13640): V2-S2 touches nearby singleton call sites; V2 does NOT fix
+  the scalar-param candidate-selection bug (that stays #2949 slice A /
+  #2963 P2 territory). Keep the PRs disjoint by function.
+- **#2158 S2 (class protos)**: unchanged by v2 — classes plug into the same
+  `$props`/populate contract with `$ClassMeta` as the population source
+  once #2101 P0-P1 compose; v2's reader arms are brand-agnostic, so S2
+  inherits them for free.
+- **File-conflict surface**: `object-runtime.ts` (S3/S5/S6),
+  `property-access.ts` (S2/S4), `native-proto.ts` (S3), `calls.ts` (S2/S4)
+  — serialize slices touching the same file through the queue; each is
+  `ctx.standalone`-gated so host/gc lanes stay byte-inert (validate on full
+  `merge_group` + `check-standalone-highwater.mjs`, never a scoped sweep).
+
+### Edge cases (beyond v1's list, which still applies)
+
+- **Reader re-entrancy:** `__nativeproto_ensure_props` runs inside
+  `__extern_get`; populate bodies must not call back into `__extern_get`
+  (they use `__obj_insert`-level primitives — assert this in review).
+- **`gOPD` non-own semantics:** step 3/4 proto-table hits are INHERITED for
+  an instance receiver — `__getOwnPropertyDescriptor(instance, "exec")`
+  must still return undefined (own-only). The ladder's own/proto layer
+  split carries a per-native "stop after own layer" flag.
+- **Frozen builtins:** `Object.freeze(RegExp.prototype)` → table flags
+  already model FLAG-level immutability on `$Object`; ensure the companion
+  table honors the same `$Object.$flags` bits.
+- **Closed-shape method VALUES** (`const m = structVar.m`) — OUT of v2
+  scope (needs per-struct method-closure reification; calls keep working
+  via #2151 dispatchers). File as a follow-up if a measured cluster
+  demands it.
+- **Escape-hatch identity:** the singleton globals are per-module; two
+  modules never share identity (fine — single-realm standalone).
+- **DCE / index stability:** populate fns + ensure_props follow
+  reserve-then-fill (#1719) and name-based funcIdx re-resolution after
+  `flushLateImportShifts` (#2043 class); type registrations for `$Symbol`
+  keys reuse `ensureSymbolCarrier` (never re-mint).
+
+### What v2 explicitly does NOT do
+
+- No host-mode changes (every arm `ctx.standalone`-gated); no new host
+  imports anywhere.
+- No `Proxy`/`Reflect.ownKeys`-completeness work; no `Symbol.hasInstance`.
+- No second boxing/tag/insert engine — every new path routes through
+  `$AnyValue`/`__box_*`, `__obj_insert`-family, and the one closure-struct
+  predicate (June-audit D4).
+- Does not fix #2963 P2's scalar-param value-call keying, host-lane `with`,
+  or generator/async-carrier residuals of #3027 — those stay with their
+  owners; v2 is the representation + dispatch + visibility substrate they
+  sit on.

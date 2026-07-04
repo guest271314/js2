@@ -111,11 +111,12 @@ describe("#2952 slice 1 — IR claims do-while (post-test loops)", () => {
     ).toBe(3 * 2);
   });
 
-  it("do-while whose body has `break` is NOT claimed (multi-exit subset boundary)", () => {
-    // break/continue remain the shared #2952 structural blocker — the
-    // selector must reject a do-while body containing them so the function
-    // demotes cleanly to legacy rather than mis-lowering.
-    const claimed = selectionFor(`
+  it("do-while whose body has `break` IS claimed (slice 2 lifted the boundary)", async () => {
+    // Slice 1 rejected break/continue bodies (the multi-exit-free subset);
+    // slice 2 adopts unlabeled break/continue via `br.label` + the
+    // lowering-time depth resolver, so the same shape now claims AND runs
+    // with post-test semantics (body executes once before the break).
+    const src = `
       export function test(): number {
         let x: number = 0;
         do {
@@ -123,6 +124,23 @@ describe("#2952 slice 1 — IR claims do-while (post-test loops)", () => {
           break;
         } while (x < 5);
         return x;
+      }
+    `;
+    expect(selectionFor(src).has("test")).toBe(true);
+    expect(await runIr(src)).toBe(1);
+  });
+
+  it("LABELED break is still NOT claimed (slice 3 boundary)", () => {
+    const claimed = selectionFor(`
+      export function test(): number {
+        let n: number = 0;
+        outer: do {
+          do {
+            n = n + 1;
+            break outer;
+          } while (n < 5);
+        } while (n < 5);
+        return n;
       }
     `);
     expect(claimed.has("test")).toBe(false);

@@ -446,6 +446,21 @@ export function asValueId(n: number): IrValueId {
 }
 
 /**
+ * #2952 slice 2 — per-function-unique identity of a loop (or, in slice 3, a
+ * labeled block) that `br.label` can target. Like {@link IrValueId} it is a
+ * branded number allocated by the builder; unlike an SSA value it names a
+ * CONTROL-FLOW frame, not a value. Labels are semantic: the Wasm `br` depth
+ * is NEVER stored in the IR — it is derived at lowering time by the
+ * `ctrlStack` frame counter in `lower.ts` (a stored depth would rot under
+ * any pass that re-nests buffers).
+ */
+export type IrLabelId = number & { readonly __brand: "IrLabelId" };
+
+export function asLabelId(n: number): IrLabelId {
+  return n as IrLabelId;
+}
+
+/**
  * Stable identity of an allocation site (#1586).
  *
  * Unlike {@link IrValueId} — which is a per-function SSA index that inlining
@@ -1284,6 +1299,8 @@ export interface IrInstrForOfVec extends IrInstrBase {
   readonly elementSlot: number;
   /** Body instrs emitted inside the loop. */
   readonly body: readonly IrInstr[];
+  /** #2952 slice 2 — loop identity for `br.label` (see IrInstrWhileLoop). */
+  readonly loopLabel?: IrLabelId;
 }
 
 // ---------------------------------------------------------------------------
@@ -1468,6 +1485,8 @@ export interface IrInstrForOfIter extends IrInstrBase {
   readonly elementSlot: number;
   /** Body instrs emitted inside the loop. */
   readonly body: readonly IrInstr[];
+  /** #2952 slice 2 — loop identity for `br.label` (see IrInstrWhileLoop). */
+  readonly loopLabel?: IrLabelId;
 }
 
 /**
@@ -1701,6 +1720,8 @@ export interface IrInstrForOfString extends IrInstrBase {
   readonly elementSlot: number;
   /** Body instrs emitted inside the loop. */
   readonly body: readonly IrInstr[];
+  /** #2952 slice 2 — loop identity for `br.label` (see IrInstrWhileLoop). */
+  readonly loopLabel?: IrLabelId;
 }
 
 // ---------------------------------------------------------------------------
@@ -1740,6 +1761,39 @@ export interface IrInstrForOfString extends IrInstrBase {
 export interface IrInstrThrow extends IrInstrBase {
   readonly kind: "throw";
   readonly value: IrValueId;
+}
+
+/**
+ * (#2856) Early `return` from inside a nested body buffer — the
+ * `if (v === target) return mid;` inside a `while` loop shape. The block
+ * TERMINATOR `return` can't express this (buffers aren't blocks), so this
+ * statement-level instr lowers to the Wasm `return` op, which unwinds all
+ * enclosing blocks/loops and returns from the function directly.
+ *
+ * `value` is null for a bare `return;` in a void function (the Wasm
+ * `return` then carries no operand). When non-null, the value is emitted
+ * onto the stack first and must match the function's single result type
+ * (from-ast routes it through the same `coerceReturnValue` the tail path
+ * uses).
+ *
+ * SOUNDNESS SCOPE (selector-enforced, mirrored in from-ast):
+ *   - NOT valid inside `try`/`catch`/`finally` buffers — a Wasm `return`
+ *     would skip the inlined finally blocks.
+ *   - NOT valid inside `forof.iter` bodies — the iterator protocol's
+ *     `iter.return` cleanup would be skipped (spec: `return` inside
+ *     for-of calls the iterator's return()).
+ *   - NOT valid in generators (their return routes through the buffer
+ *     epilogue, not a plain Wasm return).
+ *   Plain `while`/`for`/`do` bodies (and `if.stmt` arms nested in them)
+ *   are the supported contexts — a Wasm `return` there is exactly JS's
+ *   early-exit semantics.
+ *
+ * Like `throw`, it produces NO SSA value; instructions after it in the
+ * same buffer are dead but structurally valid.
+ */
+export interface IrInstrEarlyReturn extends IrInstrBase {
+  readonly kind: "early.return";
+  readonly value: IrValueId | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -1810,6 +1864,13 @@ export interface IrInstrWhileLoop extends IrInstrBase {
    * so the cond-first walk order is sound for both loop shapes.
    */
   readonly postCond?: boolean;
+  /**
+   * #2952 slice 2 — identity of this loop for `br.label` targeting. The
+   * from-ast layer always synthesises one (unlabeled break/continue resolve
+   * to the innermost loop's label); loops built directly by tests may omit
+   * it. Purely semantic — no pass reads it except the lowering resolver.
+   */
+  readonly loopLabel?: IrLabelId;
 }
 
 /**
@@ -1845,6 +1906,8 @@ export interface IrInstrForLoop extends IrInstrBase {
   readonly body: readonly IrInstr[];
   /** Update instructions executed after the body each iteration. */
   readonly update: readonly IrInstr[];
+  /** #2952 slice 2 — loop identity for `br.label` (see IrInstrWhileLoop). */
+  readonly loopLabel?: IrLabelId;
 }
 
 /**
@@ -1892,6 +1955,66 @@ export interface IrInstrTry extends IrInstrBase {
   };
   /** Optional finally body, inlined at every exit path. */
   readonly finallyBody?: readonly IrInstr[];
+}
+
+// ---------------------------------------------------------------------------
+// Multi-exit control flow (#2952 slice 2 — unlabeled break / continue)
+// ---------------------------------------------------------------------------
+
+/**
+ * #2952 slice 2 — branch to an enclosing loop frame identified by `label`.
+ *
+ * `mode` selects WHICH of the loop's Wasm frames the branch targets:
+ *   - `"break"`    → the loop's outer `block` (exit the loop);
+ *   - `"continue"` → the frame whose fall-through re-runs the loop's
+ *                    advance/cond (the Wasm `loop` frame for pre-test
+ *                    `while` / `forof.iter`, or a dedicated body-wrapping
+ *                    `block` for `for` / do-while / counter-advancing
+ *                    for-of shapes — the lowerer decides).
+ *
+ * NO depth is stored here (see the issue's Design-A spec): depth is a
+ * lowering-time artifact derived by scanning the emitter's `ctrlStack`.
+ * The verifier enforces (a) `label` is bound by an enclosing loop in the
+ * same buffer-nesting chain, and (b) the instr terminates its buffer
+ * (statements after it are dead code the from-ast layer never emits).
+ *
+ * A `br.label` that lexically crosses a `try` with a `finallyBody` makes
+ * the lowerer inline that finally buffer immediately before the `br` —
+ * the same inlining `IrInstrTry` already does for normal completion.
+ *
+ * Result is always void (`result: null`); control does not fall through.
+ */
+export interface IrInstrBrLabel extends IrInstrBase {
+  readonly kind: "br.label";
+  readonly label: IrLabelId;
+  readonly mode: "break" | "continue";
+}
+
+/**
+ * #2952 slice 2 — statement-level `if (cond) then [else]` inside a nested
+ * buffer (loop body / try body / another if-arm). UNLIKE the value-producing
+ * `IrInstrIf` (#1392) there are no carrier values and no result: both arms
+ * are void statement lists, and `else` may be empty (plain `if` without
+ * `else` — the lowerer emits a Wasm `if` with no else branch).
+ *
+ * This is the enabler for useful break/continue adoption: `if (c) break;`
+ * is the canonical multi-exit shape, and the loop-body statement grammar
+ * previously had no statement-`if` at all (top-level `if` uses the block
+ * CFG layer, which nested buffers cannot reach).
+ *
+ * Lowering:
+ *   <emit cond>            ;; i32
+ *   if                     ;; blocktype empty
+ *     <then instrs>
+ *   [else
+ *     <else instrs>]
+ *   end
+ */
+export interface IrInstrIfStmt extends IrInstrBase {
+  readonly kind: "if.stmt";
+  readonly cond: IrValueId;
+  readonly then: readonly IrInstr[];
+  readonly else: readonly IrInstr[];
 }
 
 export type IrInstr =
@@ -1945,6 +2068,8 @@ export type IrInstr =
   // Slice 9 (#1169h) — exception handling.
   | IrInstrThrow
   | IrInstrTry
+  // (#2856) Early return inside body buffers.
+  | IrInstrEarlyReturn
   // Slice 10 (#1169i) — extern class ops.
   | IrInstrExternNew
   | IrInstrExternCall
@@ -1954,6 +2079,9 @@ export type IrInstr =
   // Slice 12 (#1280) — generic structured loops.
   | IrInstrWhileLoop
   | IrInstrForLoop
+  // #2952 slice 2 — multi-exit control flow.
+  | IrInstrBrLabel
+  | IrInstrIfStmt
   // (#1373 Phase B) Async / await IR nodes. Currently type-only —
   // Phase C (CPS transform, follow-up #1373b) wires lowering.
   | IrInstrAwait
@@ -2189,6 +2317,13 @@ export function forEachNestedBuffer(instr: IrInstr, fn: (buffer: readonly IrInst
       if (instr.catchClause) fn(instr.catchClause.body);
       if (instr.finallyBody) fn(instr.finallyBody);
       return;
+    // #2952 slice 2 — statement-level if. Both arms are plain buffers
+    // (else may be empty — still visited, mirroring `if`'s unconditional
+    // arm visit so pass behavior is uniform).
+    case "if.stmt":
+      fn(instr.then);
+      fn(instr.else);
+      return;
     // All remaining kinds carry no nested IrInstr[] buffer. The `never`
     // binding turns a newly-added buffer-bearing kind into a compile error
     // here — the single point that must know about every buffer.
@@ -2235,6 +2370,7 @@ export function forEachNestedBuffer(instr: IrInstr, fn: (buffer: readonly IrInst
     case "gen.epilogue":
     case "gen.yieldStar":
     case "throw":
+    case "br.label": // #2952 slice 2 — leaf (buffer-terminating branch)
     case "extern.new":
     case "extern.call":
     case "extern.prop":
@@ -2243,6 +2379,7 @@ export function forEachNestedBuffer(instr: IrInstr, fn: (buffer: readonly IrInst
     case "await":
     case "async.return":
     case "async.throw":
+    case "early.return":
       return;
     default: {
       const _exhaustive: never = instr;
@@ -2321,6 +2458,13 @@ export function mapNestedBuffers(
         finallyBody: instr.finallyBody && finallyBody ? finallyBody : instr.finallyBody,
       };
     }
+    // #2952 slice 2 — statement-level if.
+    case "if.stmt": {
+      const then_ = mapBuffer(instr.then);
+      const else_ = mapBuffer(instr.else);
+      if (then_ === instr.then && else_ === instr.else) return instr;
+      return { ...instr, then: then_, else: else_ };
+    }
     // Leaf kinds carry no nested buffer — returned unchanged. (Same exhaustive
     // set as forEachNestedBuffer; the never-check enforces parity.)
     case "const":
@@ -2366,6 +2510,7 @@ export function mapNestedBuffers(
     case "gen.epilogue":
     case "gen.yieldStar":
     case "throw":
+    case "br.label": // #2952 slice 2 — leaf
     case "extern.new":
     case "extern.call":
     case "extern.prop":
@@ -2374,6 +2519,7 @@ export function mapNestedBuffers(
     case "await":
     case "async.return":
     case "async.throw":
+    case "early.return":
       return instr;
     default: {
       const _exhaustive: never = instr;
@@ -2485,6 +2631,13 @@ export function directUses(instr: IrInstr): readonly IrValueId[] {
       return [instr.value];
     case "try":
       return [];
+    // #2952 slice 2 — br.label carries no SSA operands (label is a control
+    // identity, not a value); if.stmt evaluates only its cond at its own
+    // level (arm-interior uses are reached via `collectUses(_, {deep:true})`).
+    case "br.label":
+      return [];
+    case "if.stmt":
+      return [instr.cond];
     case "extern.new":
       return instr.args;
     case "extern.call":
@@ -2502,6 +2655,9 @@ export function directUses(instr: IrInstr): readonly IrValueId[] {
       return [instr.value];
     case "async.throw":
       return [instr.reason];
+    // (#2856) early.return — the optional return value is a direct use.
+    case "early.return":
+      return instr.value !== null ? [instr.value] : [];
     default: {
       const _exhaustive: never = instr;
       void _exhaustive;

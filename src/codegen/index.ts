@@ -119,6 +119,7 @@ import { STANDALONE_REGEXP_REFLECTION_PROPS } from "./regexp-standalone.js";
 
 // ── Extracted sub-modules ──────────────────────────────────────────────────
 import {
+  buildIsUndefinedExternBody,
   emitWrapperValueOfFunctions,
   ensureAnyFromExternHelper,
   ensureAnyHelpers,
@@ -126,7 +127,9 @@ import {
   ensureAnyValueType,
   ensureWrapperTypes,
   isAnyValue,
+  undefinedSingletonActive,
 } from "./any-helpers.js";
+import { UNDEF_F64_BITS } from "./value-tags.js";
 import {
   buildShapePropFlagsTable,
   collectClassDeclaration,
@@ -153,6 +156,7 @@ import {
 import {
   emitExceptionRenderExports,
   emitTestRuntimeStringHelpers,
+  ensureAnyToStringHelper,
   ensureNativeStringExternBridge,
   ensureNativeStringHelpers,
   flatStringType,
@@ -2530,6 +2534,17 @@ function addWasiStartExport(ctx: CodegenContext): void {
     applyModuleInitGuard(ctx);
   }
 
+  // (#2968) Pre-emit the uncaught-exception printer helper BEFORE any funcidx is
+  // read below, so any late import it (transitively) registers shifts the index
+  // space first and every index we compute afterwards is already post-shift.
+  // Gated on a throwing (`exnTagIdx >= 0`), native-strings WASI module that has
+  // the fd_write + proc_exit imports the printer needs (registerWasiImports set
+  // both when the source contains a `throw`). A no-op otherwise, so the `_start`
+  // body stays byte-identical for every non-throwing module.
+  if (ctx.wasi && ctx.exnTagIdx >= 0 && ctx.nativeStrings && ctx.wasiFdWriteIdx >= 0 && ctx.wasiProcExitIdx >= 0) {
+    ensureWasiStartExnPrinter(ctx);
+  }
+
   // Choose the WASI program entry that `_start` wraps.
   //
   // #1411 regression: #1978 correctly stopped splicing the module-init body
@@ -2608,11 +2623,43 @@ function addWasiStartExport(ctx: CodegenContext): void {
       }
     }
 
+    // (#2968) If the uncaught-exception printer was emitted (throwing WASI
+    // module), wrap the entry call + reactor drain in `try` / `catch $exc`.
+    // A `return` inside the entry exits the `try` without entering the catch, so
+    // only a real uncaught throw reaches the handler; there it renders the
+    // payload to stderr via `__error_to_string`/fd_write and `proc_exit(1)`s so
+    // the exception surfaces (instead of the pre-fix silent exit 0). No wrap when
+    // the printer is absent → non-throwing modules stay byte-identical.
+    const exnPrinterIdx = ctx.funcMap.get("__wasi_start_print_exn");
+    const startBody: Instr[] =
+      exnPrinterIdx !== undefined && ctx.wasiProcExitIdx >= 0
+        ? [
+            {
+              op: "try",
+              blockType: { kind: "empty" },
+              body,
+              catches: [
+                {
+                  tagIdx: ctx.exnTagIdx,
+                  body: [
+                    // The catch pushes the thrown externref payload; render + write it.
+                    { op: "call", funcIdx: exnPrinterIdx } as Instr,
+                    // An uncaught exception is a failure — exit nonzero.
+                    { op: "i32.const", value: 1 } as Instr,
+                    { op: "call", funcIdx: ctx.wasiProcExitIdx } as Instr,
+                    { op: "unreachable" } as Instr,
+                  ],
+                },
+              ],
+            } as unknown as Instr,
+          ]
+        : body;
+
     ctx.mod.functions.push({
       name: "_start",
       typeIdx: startTypeIdx,
       locals: [],
-      body,
+      body: startBody,
       exported: true,
     });
 
@@ -7073,6 +7120,17 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
   const needsPathOpen = ctx.wasiNodeFsFuncs.has("writeFileSync");
 
   function visit(node: ts.Node) {
+    // (#2968) Any `throw` in the program can propagate uncaught to `_start`. The
+    // uncaught-exception printer wired in `addWasiStartExport` renders the payload
+    // to stderr via `fd_write` and calls `proc_exit(1)`, so a throwing WASI module
+    // needs BOTH imports even when it does no explicit console/process I/O — a bare
+    // `throw new TypeError("x")` otherwise exited 0 with no diagnostic. Registering
+    // them here (during the normal import pass) keeps them in the existing WASI set
+    // and avoids any late-import funcidx shift. Non-throwing modules are unaffected.
+    if (ts.isThrowStatement(node)) {
+      needsFdWrite = true;
+      needsProcExit = true;
+    }
     if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
       const propAccess = node.expression;
       if (
@@ -8600,6 +8658,81 @@ export function ensureWasiWriteAnyStringHelper(ctx: CodegenContext, useStderr: b
     name: helperName,
     typeIdx: funcTypeIdx,
     locals: wasiStrEncodeLocalDecls(strTypeIdx, strDataTypeIdx),
+    body,
+    exported: false,
+  });
+
+  return funcIdx;
+}
+
+/**
+ * (#2968) Ensure `__wasi_start_print_exn(payload: externref) -> void` exists and
+ * return its function index (lazy). Renders an uncaught exception payload to
+ * stderr for the WASI `_start` wrapper (addWasiStartExport):
+ *   - null payload (e.g. `throw null`) → no-op (no string form).
+ *   - else `any.convert_extern` → `__any_to_string` (whose #2962 error arm turns
+ *     an `$Error_struct` into a real "TypeError: x") → `__wasi_write_any_string_stderr`
+ *     (flatten + WTF-16→UTF-8 encode + fd 2 write) → a trailing newline byte.
+ * The caller invokes this from the `$exc` catch, then `proc_exit(1)`s.
+ *
+ * Valid only for a throwing, native-strings WASI module whose fd_write import is
+ * registered (registerWasiImports sets it when the source contains a `throw`);
+ * returns -1 otherwise so the caller keeps the plain `_start`.
+ *
+ * Index-shift safety: every dependency is ensured (each may append functions /
+ * a late import) BEFORE this helper's own funcidx is reserved, and the baked
+ * funcidx values are read from the authoritative `funcMap` after all ensures.
+ */
+function ensureWasiStartExnPrinter(ctx: CodegenContext): number {
+  const helperName = "__wasi_start_print_exn";
+  const existing = ctx.funcMap.get(helperName);
+  if (existing !== undefined) return existing;
+  if (!ctx.wasi || ctx.exnTagIdx < 0 || !ctx.nativeStrings) return -1;
+  if (!ctx.linkNodeShims && ctx.wasiFdWriteIdx < 0) return -1;
+
+  // Ensure dependencies first (append functions / possible late import) so this
+  // helper's reserved index lands AFTER any shift they cause.
+  ensureNativeStringHelpers(ctx);
+  ensureAnyToStringHelper(ctx);
+  const writeStderrIdx = ensureWasiWriteAnyStringHelper(ctx, /* useStderr */ true);
+  // The chunked-write helper backs the newline `emitWasiWriteTail` below; ensure
+  // it now (idempotent — ensureWasiWriteAnyStringHelper already did) so the tail
+  // lookup never pushes a function after this helper's funcidx is reserved.
+  ensureWasiFdWriteAllHelper(ctx);
+  // Read baked funcidx values from the authoritative funcMap AFTER all ensures.
+  const anyToStrIdx = ctx.funcMap.get("__any_to_string");
+  if (writeStderrIdx < 0 || anyToStrIdx === undefined) return -1;
+
+  // param 0 = payload externref; local 1 = the newline write length (=1).
+  const NL_LEN = 1;
+  const funcTypeIdx = addFuncType(ctx, [{ kind: "externref" }], []);
+  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  ctx.funcMap.set(helperName, funcIdx);
+
+  const body: Instr[] = [
+    // A null payload has no string form — skip rendering, still exit via caller.
+    { op: "local.get", index: 0 } as Instr,
+    { op: "ref.is_null" } as Instr,
+    { op: "if", blockType: { kind: "empty" }, then: [{ op: "return" } as Instr] } as Instr,
+    // payload (externref) → anyref → __any_to_string yields ref AnyString → stderr.
+    { op: "local.get", index: 0 } as Instr,
+    { op: "any.convert_extern" } as Instr,
+    { op: "call", funcIdx: anyToStrIdx } as Instr,
+    { op: "call", funcIdx: writeStderrIdx } as Instr,
+    // Trailing newline: store 0x0A at the shared write scratch and write 1 byte
+    // to fd 2 (emitWasiWriteTail handles both the direct-WASI and node-shim path).
+    { op: "i32.const", value: WASI_WRITE_SCRATCH_START } as Instr,
+    { op: "i32.const", value: 0x0a } as Instr,
+    { op: "i32.store8", align: 0, offset: 0 } as Instr,
+    { op: "i32.const", value: 1 } as Instr,
+    { op: "local.set", index: NL_LEN } as Instr,
+    ...emitWasiWriteTail(ctx, 2, WASI_WRITE_SCRATCH_START, NL_LEN),
+  ];
+
+  ctx.mod.functions.push({
+    name: helperName,
+    typeIdx: funcTypeIdx,
+    locals: [{ name: "nlLen", type: { kind: "i32" } }],
     body,
     exported: false,
   });
@@ -11296,6 +11429,16 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
   }
   const strToNumberIdx = ctx.funcMap.get("__str_to_number");
 
+  // (#2106 S1) `undefinedSingleton` regime support for the union natives:
+  // when active, `undefined` is a non-null extern-wrapped tag-1 `$AnyValue`
+  // (never `ref.null.extern`), so ToBoolean must classify it FALSY, the
+  // typeof cluster must answer "undefined" for the singleton and "object"
+  // for null, and `__typeof_undefined` flips off bare `ref.is_null`.
+  // Inactive (default): every body below is byte-identical to legacy.
+  const s1Active = undefinedSingletonActive(ctx);
+  if (s1Active) ensureAnyValueType(ctx);
+  const s1AnyValIdx = s1Active ? ctx.anyValueTypeIdx : -1;
+
   /**
    * Synthesize a native helper function. The funcIdx is allocated as
    * `numImportFuncs + mod.functions.length` to match how every other
@@ -11606,6 +11749,30 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
         blockType: { kind: "empty" },
         then: [{ op: "i32.const", value: 0 }, { op: "return" }],
       },
+      // (#2106 S1) `$AnyValue` box: tag 0 (null) / 1 (undefined) → FALSY
+      // (§7.1.2); other wrapped tags (5 string / 6 object) keep the non-null-
+      // ref default (truthy). Without this arm the non-null `$undefined`
+      // singleton would be truthy — `if (undefined)` taking the then-branch.
+      ...(s1AnyValIdx >= 0
+        ? ([
+            { op: "local.get", index: 0 },
+            { op: "any.convert_extern" },
+            { op: "local.tee", index: 1 },
+            { op: "ref.test", typeIdx: s1AnyValIdx },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                { op: "local.get", index: 1 },
+                { op: "ref.cast", typeIdx: s1AnyValIdx },
+                { op: "struct.get", typeIdx: s1AnyValIdx, fieldIdx: 0 },
+                { op: "i32.const", value: 1 },
+                { op: "i32.gt_u" },
+                { op: "return" },
+              ],
+            },
+          ] as Instr[])
+        : []),
       // any = any.convert_extern(param)
       { op: "local.get", index: 0 },
       { op: "any.convert_extern" },
@@ -11756,8 +11923,19 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
     registerNative("__typeof_string", externrefToI32, [{ op: "i32.const", value: 0 }]);
   }
 
-  // 12. __typeof_undefined(externref) -> i32 — `ref.is_null`.
-  registerNative("__typeof_undefined", externrefToI32, [{ op: "local.get", index: 0 }, { op: "ref.is_null" }]);
+  // 12. __typeof_undefined(externref) -> i32 — `ref.is_null` (legacy: null and
+  //     undefined share the null-extern bit pattern). (#2106 S1) Under the
+  //     `undefinedSingleton` regime: tag-1 `$AnyValue` ∨ UNDEF_F64 box; a null
+  //     externref answers 0 (typeof null is "object", not "undefined").
+  {
+    const s1Body = s1Active ? buildIsUndefinedExternBody(ctx, 1, UNDEF_F64_BITS) : undefined;
+    registerNative(
+      "__typeof_undefined",
+      externrefToI32,
+      s1Body ?? [{ op: "local.get", index: 0 }, { op: "ref.is_null" }],
+      s1Body !== undefined ? [{ name: "$any_temp", type: { kind: "anyref" } as ValType }] : [],
+    );
+  }
 
   // 13. __typeof_object(externref) -> i32 — non-null AND not number AND
   //     not boolean AND not bigint AND not function. We approximate as "non-null and
@@ -11773,8 +11951,36 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
       {
         op: "if",
         blockType: { kind: "empty" },
-        then: [{ op: "i32.const", value: 0 }, { op: "return" }],
+        // (#2106 S1) typeof null IS "object" (§13.5.3) — under the singleton
+        // regime a null externref means JS null, so answer 1. Legacy: null
+        // means null-or-undefined; keep the historical 0.
+        then: [{ op: "i32.const", value: s1Active ? 1 : 0 }, { op: "return" }],
       },
+      // (#2106 S1) the tag-1 `$undefined` singleton is NOT an object.
+      ...(s1AnyValIdx >= 0
+        ? ([
+            { op: "local.get", index: 0 },
+            { op: "any.convert_extern" },
+            { op: "local.tee", index: 1 },
+            { op: "ref.test", typeIdx: s1AnyValIdx },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                { op: "local.get", index: 1 },
+                { op: "ref.cast", typeIdx: s1AnyValIdx },
+                { op: "struct.get", typeIdx: s1AnyValIdx, fieldIdx: 0 },
+                { op: "i32.const", value: 1 },
+                { op: "i32.eq" },
+                {
+                  op: "if",
+                  blockType: { kind: "empty" },
+                  then: [{ op: "i32.const", value: 0 }, { op: "return" }],
+                } as Instr,
+              ],
+            },
+          ] as Instr[])
+        : []),
       { op: "local.get", index: 0 },
       { op: "any.convert_extern" },
       { op: "local.tee", index: 1 },
@@ -11855,8 +12061,16 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
       "__typeof",
       externrefToExternref,
       [
-        // null externref → undefined (matches __typeof_undefined = ref.is_null)
-        ...typeofTagArm([{ op: "local.get", index: 0 }, { op: "ref.is_null" }], "undefined"),
+        // null externref → undefined (matches __typeof_undefined = ref.is_null).
+        // (#2106 S1) Under the singleton regime null means JS null → "object"
+        // (§13.5.3), and the tag-1/UNDEF-box arm below answers "undefined".
+        ...typeofTagArm([{ op: "local.get", index: 0 }, { op: "ref.is_null" }], s1Active ? "object" : "undefined"),
+        ...(s1Active
+          ? (() => {
+              const test = buildIsUndefinedExternBody(ctx, 1, UNDEF_F64_BITS);
+              return test !== undefined ? typeofTagArm(test, "undefined") : [];
+            })()
+          : []),
         { op: "local.get", index: 0 },
         { op: "any.convert_extern" },
         { op: "local.set", index: 1 },

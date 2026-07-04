@@ -367,10 +367,107 @@ export function promoteAccessorCapturesToGlobals(
     }
   }
 
+  // (#2029 family A) Transitive captures of referenced NESTED FUNCTIONS.
+  // When the accessor body references a nested function declaration (e.g.
+  // `get() { return next; }` with `function next() { return count; }` in the
+  // enclosing scope), the name `next` itself is skipped below (it is a
+  // function reference, not a variable) — but materializing next's closure
+  // INSIDE the accessor still needs next's captured variables. Those captures
+  // are recorded against the ENCLOSING function's local slots
+  // (`cap.outerLocalIdx`), which the accessor's own function cannot read:
+  // previously `emitMemoizedNestedFnClosure` / the call-site cap-prepend baked
+  // the enclosing function's local index into the accessor body — an emit
+  // crash ("local index out of range") when the slot exceeded the accessor's
+  // local count, and a silent wrong-local read when it happened to be in
+  // range. Promote the transitive captures here, in the enclosing fctx where
+  // `cap.outerLocalIdx` is still valid:
+  //   - IMMUTABLE captures → plain value-global promotion (added to
+  //     `referencedNames`, handled by the main loop below). Value-copy
+  //     semantics are preserved: the variable is never written, so the
+  //     global always holds the one value the closure would have captured.
+  //   - MUTABLE captures → box EAGERLY (same ref-cell + localMap-rebind
+  //     pattern the closure builders use) and alias the BOX in a module
+  //     global (`ctx.capturedBoxGlobals`). The accessor's closure
+  //     materialization then shares the very same cell the enclosing
+  //     function writes through — live write-through semantics, not a copy.
+  {
+    // Names the accessor body references DIRECTLY (before the transitive
+    // union below). A mutable capture that is also directly referenced keeps
+    // the value-global promotion — the accessor's own read/write paths
+    // (identifiers.ts / assignment.ts) resolve via `ctx.capturedGlobals`
+    // only; the closure materialization then sources a boxed COPY of the
+    // value global (best-effort, no crash) instead of the shared cell.
+    const directlyReferenced = new Set(referencedNames);
+    const fnWorklist: string[] = [];
+    for (const name of referencedNames) {
+      if (ctx.funcMap.has(name) && ctx.nestedFuncCaptures.has(name)) fnWorklist.push(name);
+    }
+    const visitedFns = new Set<string>();
+    while (fnWorklist.length > 0) {
+      const fnName = fnWorklist.pop()!;
+      if (visitedFns.has(fnName)) continue;
+      visitedFns.add(fnName);
+      const caps = ctx.nestedFuncCaptures.get(fnName);
+      if (!caps) continue;
+      for (const cap of caps) {
+        // A capture can itself be a nested function name — follow it.
+        if (ctx.funcMap.has(cap.name) && ctx.nestedFuncCaptures.has(cap.name)) {
+          fnWorklist.push(cap.name);
+          continue;
+        }
+        if (!(cap.mutable && cap.valType) || directlyReferenced.has(cap.name)) {
+          // Immutable (value-copy semantics preserved: never written), or
+          // mutable-but-directly-referenced (accessor read path wins):
+          // value-global promotion via the main loop below.
+          referencedNames.add(cap.name);
+          continue;
+        }
+        // Mutable: box-promote (shared ref cell aliased in a global).
+        if (ctx.capturedBoxGlobals?.has(cap.name)) continue;
+        if (ctx.capturedGlobals.has(cap.name) || ctx.moduleGlobals.has(cap.name)) continue;
+        const capLocalIdx = fctx.localMap.get(cap.name);
+        if (capLocalIdx === undefined) continue;
+        const refCellTypeIdx = getOrRegisterRefCellType(ctx, cap.valType);
+        let boxedLocalIdx: number;
+        if (fctx.boxedCaptures?.has(cap.name)) {
+          // Already boxed by a prior closure construction — localMap points
+          // at the box; alias that same cell.
+          boxedLocalIdx = capLocalIdx;
+        } else {
+          fctx.body.push({ op: "local.get", index: capLocalIdx });
+          fctx.body.push({ op: "struct.new", typeIdx: refCellTypeIdx });
+          boxedLocalIdx = allocLocal(fctx, `__boxed_${cap.name}`, {
+            kind: "ref",
+            typeIdx: refCellTypeIdx,
+          });
+          fctx.body.push({ op: "local.set", index: boxedLocalIdx });
+          fctx.localMap.set(cap.name, boxedLocalIdx);
+          if (!fctx.boxedCaptures) fctx.boxedCaptures = new Map();
+          fctx.boxedCaptures.set(cap.name, { refCellTypeIdx, valType: cap.valType });
+        }
+        const boxGlobalIdx = nextModuleGlobalIdx(ctx);
+        ctx.mod.globals.push({
+          name: `__captured_box_${cap.name}`,
+          type: { kind: "ref_null", typeIdx: refCellTypeIdx },
+          mutable: true,
+          init: [{ op: "ref.null", typeIdx: refCellTypeIdx }],
+        });
+        fctx.body.push({ op: "local.get", index: boxedLocalIdx });
+        fctx.body.push({ op: "global.set", index: boxGlobalIdx });
+        (ctx.capturedBoxGlobals ??= new Map()).set(cap.name, { globalIdx: boxGlobalIdx, refCellTypeIdx });
+      }
+    }
+  }
+
   for (const name of referencedNames) {
     // Skip if already a captured global or module global
     if (ctx.capturedGlobals.has(name)) continue;
     if (ctx.moduleGlobals.has(name)) continue;
+    // (#2029 family A) Skip names box-promoted above — their localMap entry
+    // now points at the shared ref-cell box; value-promoting that box would
+    // orphan the rebind (and the accessor body sources it via
+    // `ctx.capturedBoxGlobals`, not `ctx.capturedGlobals`).
+    if (ctx.capturedBoxGlobals?.has(name)) continue;
 
     const localIdx = fctx.localMap.get(name);
     if (localIdx === undefined) continue;
@@ -1510,6 +1607,84 @@ export function computeClosureWrapperSig(
   return { params: arrowParams, returnType: closureReturnType };
 }
 
+/**
+ * (#3032 / #2141-S2) Lazy generator-expression support flag.
+ *
+ * A `mut i32` module global (0 = lazy, the default) plus an exported
+ * `__gen_set_eager(i32)` setter the HOST generator runtime flips around the
+ * deferred body run. Mechanism: a zero-param `function*(){...}` expression's
+ * closure no longer runs its body at creation; with the flag 0 it returns
+ * `__create_generator(<self closure as externref>, null)` — the host detects
+ * the non-Array first arg as a LAZY THUNK and defers. On the first `next()`
+ * the host sets the flag via `__gen_set_eager(1)`, re-invokes the SAME
+ * closure through the `__call_fn_0` export (the closure then takes the
+ * historical eager-buffer path, byte-for-byte), adopts the inner generator's
+ * state, and resets the flag. The eager arm clears the flag at its TOP so
+ * generator creations nested inside the eagerly-run body are themselves lazy
+ * again (one flag serves the whole module without leaking eagerness).
+ *
+ * Why: the eager-buffer lowering ran generator bodies AT CREATION — the
+ * test262 dstr fixture `var iter = function*() { iterations += 1; }();` had
+ * `iterations === 1` before any `next()`, a latent failure masked only by the
+ * tag-5 comparator vacuity (#2141-S2 root cause; see the issue file).
+ */
+function ensureGenEagerFlag(ctx: CodegenContext): number {
+  if (ctx.genEagerFlagGlobalIdx !== undefined) return ctx.genEagerFlagGlobalIdx;
+  const globalIdx = ctx.numImportGlobals + ctx.mod.globals.length;
+  ctx.mod.globals.push({
+    name: "__gen_eager_mode",
+    type: { kind: "i32" },
+    mutable: true,
+    init: [{ op: "i32.const", value: 0 }] as Instr[],
+  });
+  ctx.genEagerFlagGlobalIdx = globalIdx;
+  if (!ctx.funcMap.has("__gen_set_eager")) {
+    const typeIdx = addFuncType(ctx, [{ kind: "i32" }], [], "__gen_set_eager");
+    const funcIdx = mintDefinedFunc(ctx);
+    pushDefinedFunc(ctx, funcIdx, {
+      name: "__gen_set_eager",
+      typeIdx,
+      locals: [],
+      body: [{ op: "local.get", index: 0 }, { op: "global.set", index: globalIdx } as Instr],
+      exported: true,
+    });
+    ctx.funcMap.set("__gen_set_eager", funcIdx);
+    ctx.mod.exports.push({
+      name: "__gen_set_eager",
+      desc: { kind: "func", index: funcIdx },
+    });
+  }
+  return globalIdx;
+}
+
+/**
+ * (#3032) True when a generator-expression body references `this`/`super`
+ * from ITS OWN function scope (nested arrows inherit the generator's `this`
+ * and count; nested function expressions / methods / classes have their own
+ * `this` binding and do not). Such a generator is lazy-INELIGIBLE: the
+ * receiver is call-time state the deferred `__call_fn_0` re-invocation
+ * cannot rebind (#3032 W2 spills it).
+ */
+function genBodyReferencesThis(node: ts.Node): boolean {
+  if (node.kind === ts.SyntaxKind.ThisKeyword || node.kind === ts.SyntaxKind.SuperKeyword) return true;
+  if (
+    ts.isFunctionExpression(node) ||
+    ts.isFunctionDeclaration(node) ||
+    ts.isMethodDeclaration(node) ||
+    ts.isConstructorDeclaration(node) ||
+    ts.isGetAccessorDeclaration(node) ||
+    ts.isSetAccessorDeclaration(node) ||
+    ts.isClassLike(node)
+  ) {
+    return false; // own `this` binding — not the generator's receiver
+  }
+  let found = false;
+  forEachChild(node, (child) => {
+    if (!found && genBodyReferencesThis(child)) found = true;
+  });
+  return found;
+}
+
 export function compileArrowFunction(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -2415,6 +2590,35 @@ export function compileArrowAsClosure(
     // The body is wrapped in try/catch so that exceptions thrown before any yields
     // are captured as a "pending throw" and deferred to the first next() call,
     // matching lazy generator semantics (#928).
+    //
+    // (#3032 / #2141-S2) LAZY-FIRST-RESUME: for the zero-param non-async case
+    // the eager sequence below is wrapped in an `if (global $__gen_eager_mode)`
+    // — when the flag is 0 (default) the closure instead returns
+    // `__create_generator(<self as externref>, null)`, a lazy host generator
+    // holding this closure as a thunk; the host re-invokes it with the flag
+    // set on the FIRST `next()` (see ensureGenEagerFlag). Wrapping the whole
+    // sequence in one extra `if` level is branch-target-safe: every `br` the
+    // body emits targets the inner `block`/`try` (generator `return` uses
+    // generatorReturnDepth relative to that block), never a label outside the
+    // wrap, and the function-level `return` op is depth-independent.
+    // Lazy-ineligible: async (separate host machinery), declared params (the
+    // thunk re-invocation via `__call_fn_0` cannot replay call-site args —
+    // #3032 W2), `arguments` usage (zero-declared-param generators can still
+    // observe call-site args through `arguments`; the deferred re-invocation
+    // would see arity 0 — the gen-func-expr-args-trailing-comma cluster in PR
+    // #2625's first merge_group cycle), and `this`/`super` usage (the
+    // receiver is call-time state the deferred `__call_fn_0` re-invocation
+    // cannot rebind — the `Array.prototype[Symbol.iterator] = function*() {
+    // ... this[0] ... }` iter-val-array-prototype cluster, same cycle).
+    // Receiver/args spilling is #3032 W2.
+    const genLazyEligible =
+      !isAsync &&
+      arrow.parameters.length === 0 &&
+      !(ts.isBlock(body) && closureBodyUsesArguments(body)) &&
+      !genBodyReferencesThis(body);
+    const genOuterBody = liftedFctx.body;
+    const eagerSeq: Instr[] = [];
+    if (genLazyEligible) liftedFctx.body = eagerSeq;
     const bufferLocal = allocLocal(liftedFctx, "__gen_buffer", { kind: "externref" });
     const pendingThrowLocal = allocLocal(liftedFctx, "__gen_pending_throw", { kind: "externref" });
     const createBufIdx = ctx.funcMap.get("__gen_create_buffer")!;
@@ -2466,6 +2670,31 @@ export function compileArrowAsClosure(
     liftedFctx.body.push({ op: "local.get", index: bufferLocal });
     liftedFctx.body.push({ op: "local.get", index: pendingThrowLocal });
     liftedFctx.body.push({ op: "call", funcIdx: createGenIdx });
+
+    // (#3032) Wrap the eager sequence behind the eager-mode flag; default (0)
+    // returns the LAZY thunk generator instead. The eager arm clears the flag
+    // at its top so nested generator creations during the deferred body run
+    // are themselves lazy again.
+    if (genLazyEligible) {
+      liftedFctx.body = genOuterBody;
+      const flagGlobalIdx = ensureGenEagerFlag(ctx);
+      liftedFctx.body.push({ op: "global.get", index: flagGlobalIdx } as Instr);
+      liftedFctx.body.push({
+        op: "if",
+        blockType: { kind: "val", type: { kind: "externref" } },
+        then: [
+          { op: "i32.const", value: 0 } as Instr,
+          { op: "global.set", index: flagGlobalIdx } as Instr,
+          ...eagerSeq,
+        ],
+        else: [
+          { op: "local.get", index: 0 } as Instr,
+          { op: "extern.convert_any" } as Instr,
+          { op: "ref.null.extern" } as Instr,
+          { op: "call", funcIdx: createGenIdx } as Instr,
+        ],
+      } as Instr);
+    }
     conciseBodyHasValue = true; // generator return value is already on stack
   } else if (ts.isBlock(body)) {
     for (const stmt of body.statements) {
@@ -3447,11 +3676,39 @@ function emitMemoizedNestedFnClosure(
       fctx.body.push({ op: "local.get", index: i });
       continue;
     }
+    // (#2029 family A) Cross-fctx capture sourcing. `cap.outerLocalIdx` is a
+    // slot in the function that DECLARED the nested fn; when this
+    // materialization runs inside a DIFFERENT function (an object-literal
+    // accessor body — the enclosing fn's locals are unreachable), baking it
+    // emit-crashes ("local index out of range") or silently reads the wrong
+    // local. `promoteAccessorCapturesToGlobals` promotes such captures to
+    // module globals (shared ref-cell box for mutable, value global for
+    // immutable); prefer those whenever the current fctx cannot resolve the
+    // name itself. Guarded on localMap-absence so owner-fctx behavior is
+    // unchanged (see the #1177 revert note in calls.ts for why a blanket
+    // localMap-first lookup is NOT safe).
+    const capUnresolvedHere = fctx.localMap.get(cap.name) === undefined;
     if (cap.mutable && cap.valType) {
       const refCellTypeIdx = getOrRegisterRefCellType(ctx, cap.valType);
+      const boxGlobal = capUnresolvedHere ? ctx.capturedBoxGlobals?.get(cap.name) : undefined;
       if (fctx.boxedCaptures?.has(cap.name)) {
         const currentLocalIdx = fctx.localMap.get(cap.name)!;
         fctx.body.push({ op: "local.get", index: currentLocalIdx });
+      } else if (boxGlobal !== undefined) {
+        // Shared ref-cell box promoted to a module global — live
+        // write-through semantics with the declaring function.
+        fctx.body.push({ op: "global.get", index: boxGlobal.globalIdx });
+        fctx.body.push({ op: "ref.as_non_null" });
+      } else if (capUnresolvedHere && ctx.capturedGlobals.has(cap.name)) {
+        // Value global (the capture is also directly referenced by the
+        // accessor body) — box a copy. Best-effort: writes through the
+        // closure do not propagate back, but the previous behavior was an
+        // out-of-scope local read (emit crash / wrong local).
+        fctx.body.push({ op: "global.get", index: ctx.capturedGlobals.get(cap.name)! });
+        if (ctx.capturedGlobalsWidened.has(cap.name)) {
+          fctx.body.push({ op: "ref.as_non_null" });
+        }
+        fctx.body.push({ op: "struct.new", typeIdx: refCellTypeIdx });
       } else {
         // Stage 1 localMap-first lookup reverted — see calls.ts comment.
         fctx.body.push({ op: "local.get", index: cap.outerLocalIdx });
@@ -3464,6 +3721,14 @@ function emitMemoizedNestedFnClosure(
         fctx.localMap.set(cap.name, boxedLocalIdx);
         if (!fctx.boxedCaptures) fctx.boxedCaptures = new Map();
         fctx.boxedCaptures.set(cap.name, { refCellTypeIdx, valType: cap.valType });
+      }
+    } else if (capUnresolvedHere && ctx.capturedGlobals.has(cap.name)) {
+      // (#2029 family A) Immutable capture promoted to a value global by
+      // the accessor-capture pass — read it instead of the out-of-scope
+      // declaring-function local slot.
+      fctx.body.push({ op: "global.get", index: ctx.capturedGlobals.get(cap.name)! });
+      if (ctx.capturedGlobalsWidened.has(cap.name)) {
+        fctx.body.push({ op: "ref.as_non_null" });
       }
     } else {
       fctx.body.push({ op: "local.get", index: cap.outerLocalIdx });

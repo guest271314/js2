@@ -64,6 +64,7 @@ import {
   type IrClosureSignature,
   type IrFunction,
   type IrInstr,
+  type IrLabelId,
   type IrObjectShape,
   type IrType,
   type IrUnop,
@@ -195,6 +196,34 @@ export interface IrFromAstResolver {
         /** Extern class name of the RESULT when it is an externref-shaped host
          *  object (checker-derived at the use site); undefined otherwise. */
         resultClassName?: string;
+      }
+    | undefined;
+  /**
+   * (#2856 C2) True when `expr`'s checker type names a TypedArray-family
+   * view (Uint8Array, Int16Array, Uint8ClampedArray, …, or a subarray
+   * view). Element WRITES on those carry per-view conversion semantics
+   * (ToUint8 / ToUint8Clamp / packed-storage truncation — see the legacy
+   * `compileElementAssignment` view arms) that the plain vec store helper
+   * must not bypass, so `lowerElementStore` demotes them to legacy.
+   * Element READS are unaffected (value-identical to plain vec reads).
+   */
+  isTypedArrayViewExpr?(expr: ts.Expression): boolean;
+  /**
+   * (#2856 C3) Resolve a module-scope `const`/`let` binding to the Wasm
+   * global (and optional TDZ flag global) the legacy backend allocated for
+   * it, plus the extern-class brand of its value when the binding holds a
+   * host object (e.g. `const cache = new Map()` → className "Map").
+   * Returns `undefined` when the name isn't a registered module global or
+   * its value isn't an externref-shaped extern-class instance.
+   */
+  getModuleScopeExternBinding?(name: string):
+    | {
+        /** Name of the value global in `ctx.mod.globals` (`__mod_<name>`). */
+        globalName: string;
+        /** Name of the i32 TDZ flag global, or null when TDZ was elided. */
+        tdzGlobalName: string | null;
+        /** Registered extern class of the held value (e.g. "Map"). */
+        className: string;
       }
     | undefined;
 }
@@ -540,8 +569,9 @@ function lowerStatementList(stmts: readonly ts.Statement[], cx: LowerCtx): void 
         }
         // The result SSA value is unused; DCE strips it if pure.
         // closure.call and call are flagged side-effecting in dead-code
-        // so they stay live.
-        void lowerExpr(s.expression, cx, irVal({ kind: "f64" }));
+        // so they stay live. (#2856 C4) Statement position — a VOID direct
+        // call (`quicksort(arr, lo, p - 1);`) is legal here.
+        void lowerCall(s.expression, cx, /* statementPosition */ true);
         continue;
       }
       // Slice 7a (#1169f): `yield <expr>;` as a top-level statement.
@@ -558,6 +588,16 @@ function lowerStatementList(stmts: readonly ts.Statement[], cx: LowerCtx): void 
         ts.isPropertyAccessExpression(s.expression.left)
       ) {
         lowerPropertyAssignment(s.expression, cx);
+        continue;
+      }
+      // (#2856 C2) element store `arr[i] = v;` as a non-tail statement —
+      // quicksort's post-partition swap writes live here (outside any loop).
+      if (
+        ts.isBinaryExpression(s.expression) &&
+        s.expression.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+        ts.isElementAccessExpression(s.expression.left)
+      ) {
+        lowerElementStore(s.expression.left, s.expression.right, cx);
         continue;
       }
       throw new Error(`ir/from-ast: unsupported ExpressionStatement shape in ${cx.funcName}`);
@@ -761,6 +801,14 @@ function lowerTail(stmt: ts.Statement, cx: LowerCtx): void {
       !stmt.expression.questionDotToken
     ) {
       void lowerMethodCall(stmt.expression, cx, /* statementPosition */ true);
+      cx.builder.terminate({ kind: "return", values: [] });
+      return;
+    }
+    // (#2856 C4) Direct-call tail in a void function — `quicksort(arr, p +
+    // 1, hi);` as the last statement. Statement position, so a void callee
+    // is legal.
+    if (ts.isCallExpression(stmt.expression) && ts.isIdentifier(stmt.expression.expression)) {
+      void lowerCall(stmt.expression, cx, /* statementPosition */ true);
       cx.builder.terminate({ kind: "return", values: [] });
       return;
     }
@@ -972,6 +1020,26 @@ interface LowerCtx {
    * unproven read falls to the SAFE bounds-checked read (no trap).
    */
   readonly safeIndexedArrays?: ReadonlySet<string>;
+  /**
+   * #2952 slice 2 — the innermost enclosing CLAIMED loop's label, threaded
+   * onto the body cx by every loop lowerer. `lowerBreakContinueStatement`
+   * emits `br.label` against it (unlabeled break/continue bind the
+   * innermost loop, ECMA-262 §14.8/§14.9). Absent outside loop bodies;
+   * lifted-closure contexts are constructed fresh, so it never leaks
+   * across function boundaries.
+   */
+  readonly loopLabel?: IrLabelId;
+  /**
+   * (#2856) Early-return barrier. Set `true` for statement buffers where a
+   * Wasm-`return`-based early exit is UNSOUND: for-of bodies (an iterator-
+   * protocol drive would skip its `iter.return` cleanup) and try/catch/
+   * finally bodies (a Wasm return skips the inlined finally). `lowerStmt`'s
+   * ReturnStatement arm throws (→ clean legacy demote) when set. Plain
+   * while/for/do bodies inherit the surrounding value, so a loop nested
+   * inside a try correctly stays barred. Mirrored by the selector's
+   * `earlyReturnBarrierDepth` so accepted shapes always lower.
+   */
+  readonly noEarlyReturn?: boolean;
 }
 
 /**
@@ -1497,6 +1565,38 @@ function lowerExpr(expr: ts.Expression, cx: LowerCtx, hint: IrType): IrValueId {
         }
         return r;
       }
+      // (#2856 C3) Module-scope binding holding an extern-class instance
+      // (`const fibCache = new Map()` at module level). The legacy backend
+      // allocated a `__mod_<name>` externref global (module-level statements
+      // always compile via legacy — the IR only claims functions), so the IR
+      // read is a `global.get` against the SAME storage slot, branded with
+      // the binding's extern class so member calls dispatch through the
+      // extern arms. When legacy tracked a TDZ flag for the binding, emit
+      // the same read-site check legacy does: `if (__tdz_<name> == 0) throw`.
+      const mg = cx.resolver?.getModuleScopeExternBinding?.(expr.text);
+      if (mg) {
+        assertNotDeferred(
+          hostExternCapability(cx.resolver?.jsHostExterns?.() === true),
+          `module-scope extern binding "${expr.text}"`,
+          cx.funcName,
+        );
+        if (mg.tdzGlobalName) {
+          const tdz = cx.builder.emitGlobalGet({ kind: "global", name: mg.tdzGlobalName }, irVal({ kind: "i32" }));
+          const cond = cx.builder.emitUnary("i32.eqz", tdz, irVal({ kind: "i32" }));
+          const thenBody = cx.builder.collectBodyInstrs(() => {
+            const nullExt = cx.builder.emitConst(
+              { kind: "null", ty: irVal({ kind: "externref" }) },
+              irVal({ kind: "externref" }),
+            );
+            cx.builder.emitThrow(nullExt);
+          });
+          cx.builder.emitIfStmt({ cond, then: thenBody, else: [] });
+        }
+        return cx.builder.emitGlobalGet(
+          { kind: "global", name: mg.globalName },
+          { kind: "extern", className: mg.className },
+        );
+      }
     }
     if (!p) throw new Error(`ir/from-ast: identifier "${expr.text}" is not in scope in ${cx.funcName}`);
     // Slice 6 part 2 (#1181): slot-bound identifier (let mutated across
@@ -1540,7 +1640,13 @@ function lowerExpr(expr: ts.Expression, cx: LowerCtx, hint: IrType): IrValueId {
     return lowerConditional(expr, cx);
   }
   if (ts.isCallExpression(expr)) {
-    return lowerCall(expr, cx);
+    const callResult = lowerCall(expr, cx);
+    if (callResult === null) {
+      // Unreachable: expression position (statementPosition=false) throws
+      // before returning null.
+      throw new Error(`ir/from-ast: void call in expression position (${cx.funcName})`);
+    }
+    return callResult;
   }
   // Slice 4 (#1169d): class instantiation. Lookup must succeed against
   // the class registry seeded from `ctx.classShapes`; if not, the
@@ -2296,6 +2402,78 @@ function emitSafeVecGet(recv: IrValueId, idxI32: IrValueId, elemValType: ValType
  * out of slice 2's scope and throw, so the function falls back to
  * legacy.
  */
+/**
+ * (#2856 C2) Lower an element STORE `arr[i] = v;` in statement position —
+ * the write dual of `lowerElementAccess`'s vec arm. Dispatches to the
+ * per-vec-type `__vec_elem_set_<vecTypeIdx>` helper (materialized on demand
+ * by the resolver's `resolveFunc`, see src/codegen/vec-elem-set.ts), which
+ * carries the FULL legacy semantics: null-guard, grow-on-OOB (capacity
+ * doubling + data copy), the store, and the JS length update. A bare
+ * `array.set` would trap on the growing-write pattern (`a[i] = v` past the
+ * end), which is common in newly-claimed code — so the helper is the only
+ * sound lowering.
+ *
+ * Demotes (clean throw → legacy) for: TypedArray-view receivers (per-view
+ * conversion semantics — ToUint8/clamp/packing), non-vec receivers
+ * (externref objects, strings), packed/exotic element kinds, and value
+ * types that don't coerce to the element type.
+ */
+function lowerElementStore(lhs: ts.ElementAccessExpression, rhs: ts.Expression, cx: LowerCtx): void {
+  if (lhs.questionDotToken) {
+    throw new Error(`ir/from-ast: optional element store (a?.[i] = v) not in IR scope (${cx.funcName})`);
+  }
+  // TypedArray views need the legacy per-view value conversions.
+  if (cx.resolver?.isTypedArrayViewExpr?.(lhs.expression)) {
+    throw new Error(`ir/from-ast: element store on a TypedArray view not in IR scope (${cx.funcName})`);
+  }
+  const recv = lowerExpr(lhs.expression, cx, irVal({ kind: "f64" }));
+  const recvType = cx.builder.typeOf(recv);
+  const recvVal = asVal(recvType);
+  if (!recvVal || (recvVal.kind !== "ref" && recvVal.kind !== "ref_null")) {
+    throw new Error(`ir/from-ast: element store on ${describeIrType(recvType)} not in IR scope (${cx.funcName})`);
+  }
+  const vec = cx.resolver?.resolveVec?.(recvVal);
+  if (!vec) {
+    throw new Error(`ir/from-ast: element-store receiver is not a recognisable vec in ${cx.funcName}`);
+  }
+  const elem = vec.elementValType;
+  // Narrow slice: f64 vecs (number[]) and externref vecs (string[]/any[] in
+  // host mode). Native-string / packed / exotic element vecs demote.
+  if (elem.kind !== "f64" && elem.kind !== "externref") {
+    throw new Error(`ir/from-ast: element store into '${elem.kind}' vec not in IR scope (${cx.funcName})`);
+  }
+  // Index — the same f64-lower + trunc_sat discipline as the read path.
+  const idxRaw = lowerExpr(lhs.argumentExpression, cx, irVal({ kind: "f64" }));
+  const idxTy = asVal(cx.builder.typeOf(idxRaw));
+  let idxI32: IrValueId;
+  if (idxTy?.kind === "i32") {
+    idxI32 = idxRaw;
+  } else if (idxTy?.kind === "f64") {
+    idxI32 = cx.builder.emitUnary("i32.trunc_sat_f64_s", idxRaw, irVal({ kind: "i32" }));
+  } else {
+    throw new Error(`ir/from-ast: element-store index must be number or bool in ${cx.funcName}`);
+  }
+  // Value — lower with the element-type hint, then coerce.
+  const valRaw = lowerExpr(rhs, cx, irVal(elem));
+  let val: IrValueId;
+  if (elem.kind === "f64") {
+    const valTy = asVal(cx.builder.typeOf(valRaw));
+    if (valTy?.kind !== "f64") {
+      throw new Error(
+        `ir/from-ast: element-store value ${describeIrType(cx.builder.typeOf(valRaw))} into f64 vec ` +
+          `not in IR scope (${cx.funcName})`,
+      );
+    }
+    val = valRaw;
+  } else {
+    val = coerceToExpectedExtern(valRaw, elem, cx, `element-store value`);
+  }
+  // The helper name embeds the vec STRUCT typeIdx; the lower-time resolver
+  // intercepts the prefix and materializes the helper on demand (name-based
+  // resolution — funcIdx-shift safe by construction).
+  cx.builder.emitCall({ kind: "func", name: `__vec_elem_set_${vec.vecStructTypeIdx}` }, [recv, idxI32, val], null);
+}
+
 function lowerElementAccess(expr: ts.ElementAccessExpression, cx: LowerCtx): IrValueId {
   // #2713 — `a?.[i]` carries a `questionDotToken`: on a `null`/`undefined`
   // receiver the access must short-circuit to `undefined`, not index it.
@@ -2442,7 +2620,7 @@ function phase1PropertyName(name: ts.PropertyName): string | null {
  * or the propagation pass converged on a dynamic type that the selector
  * ignored — both are bugs.
  */
-function lowerCall(expr: ts.CallExpression, cx: LowerCtx): IrValueId {
+function lowerCall(expr: ts.CallExpression, cx: LowerCtx, statementPosition = false): IrValueId | null {
   // Optional call (`fn?.()` / `obj?.method()`, #1281). The IR has no
   // short-circuit primitive for nullable callees, and at this point we
   // haven't yet lowered the callee/receiver to inspect its IrType. The
@@ -2506,7 +2684,7 @@ function lowerCall(expr: ts.CallExpression, cx: LowerCtx): IrValueId {
     const expected = calleeSig.params[i]!;
     const argVal = lowerExpr(argExpr, cx, expected);
     const argType = cx.builder.typeOf(argVal);
-    if (!irTypeEquals(argType, expected)) {
+    if (!irTypeArgAssignable(argType, expected)) {
       throw new Error(
         `ir/from-ast: arg ${i} of call to ${calleeName} is ${describeIrType(argType)}, expected ${describeIrType(expected)} in ${cx.funcName}`,
       );
@@ -2515,9 +2693,38 @@ function lowerCall(expr: ts.CallExpression, cx: LowerCtx): IrValueId {
   }
   const result = cx.builder.emitCall({ kind: "func", name: calleeName }, args, calleeSig.returnType);
   if (result === null) {
+    // (#2856 C4) `quicksort(arr, lo, p - 1);` — a void direct call in
+    // STATEMENT position is legal (the recursion driver shape). Expression
+    // position keeps throwing.
+    if (statementPosition) return null;
     throw new Error(`ir/from-ast: call to ${calleeName} returned void used as expression in ${cx.funcName}`);
   }
   return result;
+}
+
+/**
+ * (#2856 C4) Wasm-level assignability for direct-call arguments. Exact
+ * IrType equality, plus the one sound widening the vec-literal-as-argument
+ * shape needs: a NON-NULL `(ref $T)` value passed where the callee's param
+ * is `(ref null $T)` — a Wasm subtype, so the call validates and the callee
+ * observes the identical value. (`const sorted = [1, 3, 5]` produces
+ * `(ref $vec_f64)` via `vec.new_fixed`; a `number[]` param resolves as
+ * `(ref null $vec_f64)`.) The reverse (ref_null → ref) stays rejected.
+ */
+function irTypeArgAssignable(actual: IrType, expected: IrType): boolean {
+  if (irTypeEquals(actual, expected)) return true;
+  const a = asVal(actual);
+  const e = asVal(expected);
+  if (
+    a !== null &&
+    e !== null &&
+    a.kind === "ref" &&
+    e.kind === "ref_null" &&
+    (a as { typeIdx: number }).typeIdx === (e as { typeIdx: number }).typeIdx
+  ) {
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -2818,6 +3025,18 @@ function coerceToExpectedExtern(value: IrValueId, expected: ValType, cx: LowerCt
   // extern → externref: extern values are externref-shaped.
   if (expected.kind === "externref" && t.kind === "extern") {
     return value;
+  }
+  // (#2856 C3) f64 → externref: box through the `__box_number` host import —
+  // the exact coercion legacy's `coerceType` emits for the same site (so the
+  // import is registered by legacy's own compile of the function in the
+  // dual-compile model). JS-host lane only: standalone has no `__box_number`
+  // (its boxing is the `$AnyValue` family), so demote there.
+  if (expected.kind === "externref" && got !== null && got.kind === "f64" && cx.resolver?.nativeStrings?.() === false) {
+    const boxed = cx.builder.emitCall({ kind: "func", name: "__box_number" }, [value], irVal({ kind: "externref" }));
+    if (boxed === null) {
+      throw new Error(`ir/from-ast: __box_number produced no result in ${cx.funcName}`);
+    }
+    return boxed;
   }
   throw new Error(`ir/from-ast: ${where} expects ${expected.kind} but got ${describeIrType(t)} (${cx.funcName})`);
 }
@@ -3529,6 +3748,25 @@ function coerceYieldValueToExternref(value: IrValueId, cx: LowerCtx): IrValueId 
  */
 function coerceReturnValue(value: IrValueId, cx: LowerCtx): IrValueId {
   const declared = cx.returnType;
+  // (#2856 C3) externref value into a NUMBER (f64) declared result —
+  // `return hit;` where `hit = cache.get(n)` is the externref Map_get
+  // result. Unbox through `__unbox_number`, exactly what legacy emits for
+  // the same site (import registered by legacy's own compile in the
+  // dual-compile model). Host lane only — standalone demotes. Before this
+  // arm such returns slipped to the verifier's #1798 gate and demoted;
+  // now they lower like legacy.
+  if (declared && declared.kind === "val" && declared.val.kind === "f64") {
+    const actualT = cx.builder.typeOf(value);
+    const actualV = asVal(actualT);
+    if (actualV && actualV.kind === "externref" && cx.resolver?.nativeStrings?.() === false) {
+      const unboxed = cx.builder.emitCall({ kind: "func", name: "__unbox_number" }, [value], irVal({ kind: "f64" }));
+      if (unboxed === null) {
+        throw new Error(`ir/from-ast: __unbox_number produced no result in ${cx.funcName}`);
+      }
+      return unboxed;
+    }
+    return value;
+  }
   // Only the externref (TS `any`) declared-result case can mismatch here;
   // native scalar / matching-ref returns already line up via the hint.
   if (!declared || declared.kind !== "val" || declared.val.kind !== "externref") {
@@ -3685,7 +3923,7 @@ function lowerForOfStatement(stmt: ts.ForOfStatement, cx: LowerCtx): void {
  * MUST be called inside the `collectBodyInstrs` closure that builds the cond
  * buffer so the coercion instructions re-run each iteration.
  */
-function coerceLoopCondToBool(condValue: IrValueId, cx: LowerCtx, loopKind: "while" | "for" | "do"): IrValueId {
+function coerceLoopCondToBool(condValue: IrValueId, cx: LowerCtx, loopKind: "while" | "for" | "do" | "if"): IrValueId {
   const kind = asVal(cx.builder.typeOf(condValue))?.kind;
   if (kind === "i32") return condValue;
   if (kind === "f64") {
@@ -3717,7 +3955,10 @@ function lowerWhileStatement(stmt: ts.WhileStatement, cx: LowerCtx): void {
   if (condResult === null || condResult === undefined) {
     throw new Error(`ir/from-ast: while cond produced no SSA value (${cx.funcName})`);
   }
-  const bodyCx: LowerCtx = { ...cx, scope: new Map(cx.scope) };
+  // #2952 slice 2 — synthesise the loop's label and thread it as the
+  // innermost loop for the body, so unlabeled break/continue resolve here.
+  const loopLabel = cx.builder.freshLoopLabel();
+  const bodyCx: LowerCtx = { ...cx, scope: new Map(cx.scope), loopLabel };
   const bodyInstrs = cx.builder.collectBodyInstrs(() => {
     lowerStmt(stmt.statement, bodyCx);
   });
@@ -3725,6 +3966,7 @@ function lowerWhileStatement(stmt: ts.WhileStatement, cx: LowerCtx): void {
     cond: condInstrs,
     condValue: condResult,
     body: bodyInstrs,
+    loopLabel,
   });
 }
 
@@ -3744,8 +3986,11 @@ function lowerWhileStatement(stmt: ts.WhileStatement, cx: LowerCtx): void {
  */
 function lowerDoStatement(stmt: ts.DoStatement, cx: LowerCtx): void {
   // Body first (buffer built exactly as `while`, just emitted before cond
-  // at lower time). Scope mirrors the while path.
-  const bodyCx: LowerCtx = { ...cx, scope: new Map(cx.scope) };
+  // at lower time). Scope mirrors the while path. (#2952 slice 2) The
+  // synthesised label makes this loop the innermost break/continue target;
+  // a continue falls through to the cond (post-test semantics).
+  const loopLabel = cx.builder.freshLoopLabel();
+  const bodyCx: LowerCtx = { ...cx, scope: new Map(cx.scope), loopLabel };
   const bodyInstrs = cx.builder.collectBodyInstrs(() => {
     lowerStmt(stmt.statement, bodyCx);
   });
@@ -3765,6 +4010,7 @@ function lowerDoStatement(stmt: ts.DoStatement, cx: LowerCtx): void {
     condValue: condResult,
     body: bodyInstrs,
     postCond: true,
+    loopLabel,
   });
 }
 
@@ -3899,9 +4145,12 @@ function lowerForStatement(stmt: ts.ForStatement, cx: LowerCtx): void {
   // keeps the fast unchecked `vec.get`. Thread the proven pair onto a body-scoped
   // cx (immutable copy → no leak to siblings; nested loops accumulate outward).
   const provenPair = detectCountedLoopSafeIndex(stmt);
+  // #2952 slice 2 — synthesise the loop's label; the body cx carries it as
+  // the innermost break/continue target (a continue jumps to the update).
+  const loopLabel = innerCx.builder.freshLoopLabel();
   const bodyCx: LowerCtx = provenPair
-    ? { ...innerCx, safeIndexedArrays: new Set([...(innerCx.safeIndexedArrays ?? []), provenPair]) }
-    : innerCx;
+    ? { ...innerCx, safeIndexedArrays: new Set([...(innerCx.safeIndexedArrays ?? []), provenPair]), loopLabel }
+    : { ...innerCx, loopLabel };
   const bodyInstrs = innerCx.builder.collectBodyInstrs(() => {
     lowerStmt(stmt.statement, bodyCx);
   });
@@ -3918,6 +4167,7 @@ function lowerForStatement(stmt: ts.ForStatement, cx: LowerCtx): void {
     condValue: condResult,
     body: bodyInstrs,
     update: updateInstrs,
+    loopLabel,
   });
 }
 
@@ -3982,7 +4232,10 @@ function lowerForOfIterFromExternrefValue(
   const elemIrT: IrType = irVal({ kind: "externref" });
   const bodyScope = new Map(cx.scope);
   bodyScope.set(loopVarName, { kind: "slot", slotIndex: elementSlot, type: elemIrT });
-  const bodyCx: LowerCtx = { ...cx, scope: bodyScope };
+  // #2952 slice 2 — this loop is the innermost break/continue target.
+  // (#2856) …and an early-return BARRIER (iter cleanup / conservative).
+  const loopLabel = cx.builder.freshLoopLabel();
+  const bodyCx: LowerCtx = { ...cx, scope: bodyScope, loopLabel, noEarlyReturn: true };
 
   const body = cx.builder.collectBodyInstrs(() => {
     lowerStmt(stmt.statement, bodyCx);
@@ -3994,6 +4247,7 @@ function lowerForOfIterFromExternrefValue(
     resultSlot,
     elementSlot,
     body,
+    loopLabel,
   });
 }
 
@@ -4042,7 +4296,10 @@ function lowerForOfString(stmt: ts.ForOfStatement, cx: LowerCtx, strV: IrValueId
     type: elemIrT,
     asType: { kind: "string" },
   });
-  const bodyCx: LowerCtx = { ...cx, scope: bodyScope };
+  // #2952 slice 2 — this loop is the innermost break/continue target.
+  // (#2856) …and an early-return BARRIER (iter cleanup / conservative).
+  const loopLabel = cx.builder.freshLoopLabel();
+  const bodyCx: LowerCtx = { ...cx, scope: bodyScope, loopLabel, noEarlyReturn: true };
 
   const body = cx.builder.collectBodyInstrs(() => {
     lowerStmt(stmt.statement, bodyCx);
@@ -4055,6 +4312,7 @@ function lowerForOfString(stmt: ts.ForOfStatement, cx: LowerCtx, strV: IrValueId
     strSlot,
     elementSlot,
     body,
+    loopLabel,
   });
 }
 
@@ -4104,7 +4362,10 @@ function lowerForOfVec(
 
   const bodyScope = new Map(cx.scope);
   bodyScope.set(loopVarName, { kind: "slot", slotIndex: elementSlot, type: elemIrT });
-  const bodyCx: LowerCtx = { ...cx, scope: bodyScope };
+  // #2952 slice 2 — this loop is the innermost break/continue target.
+  // (#2856) …and an early-return BARRIER (iter cleanup / conservative).
+  const loopLabel = cx.builder.freshLoopLabel();
+  const bodyCx: LowerCtx = { ...cx, scope: bodyScope, loopLabel, noEarlyReturn: true };
 
   const body = cx.builder.collectBodyInstrs(() => {
     lowerStmt(stmt.statement, bodyCx);
@@ -4119,6 +4380,7 @@ function lowerForOfVec(
     dataSlot,
     elementSlot,
     body,
+    loopLabel,
   });
 }
 
@@ -4190,6 +4452,10 @@ function lowerStmt(stmt: ts.Statement, cx: LowerCtx): void {
     const childCx: LowerCtx = { ...cx, scope: new Map(cx.scope) };
     for (const s of stmt.statements) {
       lowerStmt(s, childCx);
+      // #2952 slice 2 — a break/continue terminates its buffer (the
+      // verifier requires br.label to be last); statements after it are
+      // dead code — skip them rather than emit unreachable instrs.
+      if (ts.isBreakStatement(s) || ts.isContinueStatement(s)) break;
     }
     return;
   }
@@ -4205,7 +4471,8 @@ function lowerStmt(stmt: ts.Statement, cx: LowerCtx): void {
         void lowerMethodCall(stmt.expression, cx, /* statementPosition */ true);
         return;
       }
-      void lowerExpr(stmt.expression, cx, irVal({ kind: "f64" }));
+      // (#2856 C4) Statement position — a VOID direct call is legal.
+      void lowerCall(stmt.expression, cx, /* statementPosition */ true);
       return;
     }
     // Slice 7a (#1169f): `yield <expr>;` inside a for-of body. The
@@ -4228,6 +4495,11 @@ function lowerStmt(stmt: ts.Statement, cx: LowerCtx): void {
         }
         if (ts.isPropertyAccessExpression(stmt.expression.left)) {
           lowerPropertyAssignment(stmt.expression, cx);
+          return;
+        }
+        // (#2856 C2) element store `arr[i] = v;` in a body buffer.
+        if (ts.isElementAccessExpression(stmt.expression.left)) {
+          lowerElementStore(stmt.expression.left, stmt.expression.right, cx);
           return;
         }
       }
@@ -4292,7 +4564,104 @@ function lowerStmt(stmt: ts.Statement, cx: LowerCtx): void {
     lowerTryStatement(stmt, cx);
     return;
   }
+  // #2952 slice 2 — statement-level if inside a body buffer.
+  if (ts.isIfStatement(stmt)) {
+    lowerIfBodyStatement(stmt, cx);
+    return;
+  }
+  // #2952 slice 2 — unlabeled break / continue against the innermost loop.
+  if (ts.isBreakStatement(stmt) || ts.isContinueStatement(stmt)) {
+    lowerBreakContinueStatement(stmt, cx);
+    return;
+  }
+  // (#2856 C1) Early `return` inside a body buffer — `if (v === target)
+  // return mid;` inside a while loop. Lowers to the Wasm `return` op via
+  // the `early.return` instr. Guarded against contexts where that is
+  // unsound (generators, try/finally, iterator-protocol for-of) — the
+  // selector mirrors these guards so accepted shapes always lower.
+  if (ts.isReturnStatement(stmt)) {
+    lowerEarlyReturn(stmt, cx);
+    return;
+  }
   throw new Error(`ir/from-ast: unsupported body statement ${ts.SyntaxKind[stmt.kind]} in ${cx.funcName}`);
+}
+
+/**
+ * #2952 slice 2 — lower a statement-position `if (cond) then [else]` inside
+ * a body buffer to the void `if.stmt` IR instr. Unlike the top-level
+ * statement-list `if` (which uses the block-CFG layer), nested buffers have
+ * no CFG access, so this stays fully structured: cond is lowered INLINE in
+ * the current buffer (evaluated once), each arm is collected into its own
+ * sub-buffer with a cloned scope (arm-local `let`s don't leak).
+ */
+function lowerIfBodyStatement(stmt: ts.IfStatement, cx: LowerCtx): void {
+  const raw = lowerExpr(stmt.expression, cx, irVal({ kind: "i32" }));
+  // Numeric-truthiness conds coerce via the shared NaN-safe ToBoolean
+  // (#2136); ref/string conds throw → legacy fallback, same discipline as
+  // the loop conds.
+  const cond = coerceLoopCondToBool(raw, cx, "if");
+  const thenCx: LowerCtx = { ...cx, scope: new Map(cx.scope) };
+  const thenInstrs = cx.builder.collectBodyInstrs(() => {
+    lowerStmt(stmt.thenStatement, thenCx);
+  });
+  const elseInstrs = stmt.elseStatement
+    ? cx.builder.collectBodyInstrs(() => {
+        lowerStmt(stmt.elseStatement!, { ...cx, scope: new Map(cx.scope) });
+      })
+    : [];
+  cx.builder.emitIfStmt({ cond, then: thenInstrs, else: elseInstrs });
+}
+
+/**
+ * #2952 slice 2 — lower an unlabeled `break;` / `continue;` to `br.label`
+ * against the innermost enclosing loop's synthesised label (threaded on
+ * `cx.loopLabel` by every loop lowerer). The selector's `inLoop` gate
+ * guarantees a label is in scope and the statement is unlabeled; the
+ * throws are internal-invariant assertions, not fallback paths.
+ */
+function lowerBreakContinueStatement(stmt: ts.BreakStatement | ts.ContinueStatement, cx: LowerCtx): void {
+  const kind = ts.isBreakStatement(stmt) ? "break" : "continue";
+  if (stmt.label) {
+    throw new Error(`ir/from-ast: labeled ${kind} not in #2952 slice 2 (${cx.funcName})`);
+  }
+  if (cx.loopLabel === undefined) {
+    throw new Error(`ir/from-ast: ${kind} outside a claimed loop — selector gate failed (${cx.funcName})`);
+  }
+  cx.builder.emitBrLabel(cx.loopLabel, kind);
+}
+
+/**
+ * (#2856 C1) Lower an early `return [expr]` in body-statement position.
+ * Mirrors `lowerTail`'s return handling (void discard, value coercion via
+ * `coerceReturnValue`) but emits the `early.return` instr instead of a
+ * block terminator — the buffer isn't a block, and the Wasm `return` op
+ * unwinds the enclosing loop blocks natively.
+ */
+function lowerEarlyReturn(stmt: ts.ReturnStatement, cx: LowerCtx): void {
+  if (cx.funcKind === "generator") {
+    // A generator's `return` routes through __gen_set_return / the buffer
+    // epilogue — a plain Wasm return would skip the generator wrap. The
+    // selector rejects the shape; this is the defensive mirror.
+    throw new Error(`ir/from-ast: early return inside a generator not in IR scope (${cx.funcName})`);
+  }
+  if (cx.noEarlyReturn) {
+    // Inside try/catch/finally (would skip inlined finally) or an
+    // iterator-protocol for-of body (would skip iter.return cleanup).
+    throw new Error(`ir/from-ast: early return inside try/for-of-iter not in IR scope (${cx.funcName})`);
+  }
+  if (cx.returnType === null) {
+    if (stmt.expression) {
+      // Lower for side effects but discard the value (void function).
+      lowerExpr(stmt.expression, cx, irVal({ kind: "externref" }));
+    }
+    cx.builder.emitEarlyReturn(null);
+    return;
+  }
+  if (!stmt.expression) {
+    throw new Error(`ir/from-ast: early bare return in non-void function in ${cx.funcName}`);
+  }
+  const v = lowerExpr(stmt.expression, cx, cx.returnType);
+  cx.builder.emitEarlyReturn(coerceReturnValue(v, cx));
 }
 
 /**
@@ -4685,6 +5054,19 @@ function lowerBinary(expr: ts.BinaryExpression, cx: LowerCtx, hint: IrType): IrV
   // recurse into a bare NullKeyword and throw).
   const nullFold = tryFoldNullCompare(expr, op, cx);
   if (nullFold !== null) return nullFold;
+
+  // (#2856 C3) STRICT undefined-compare — `hit !== undefined`. Dispatch on
+  // the non-undefined operand's IrType (mirrors the selector's acceptance):
+  //   - externref-shaped (externref val / extern class / host string):
+  //     runtime `__extern_is_undefined(v)` (the legacy check for the same
+  //     shape), inverted for `!==`.
+  //   - representations that can never hold the JS `undefined` VALUE
+  //     (unboxed f64/i32 scalars, non-null WasmGC refs incl. vecs/classes/
+  //     native strings — strict equality: `null !== undefined` is true too):
+  //     constant fold, evaluating the operand for side effects.
+  //   - anything else (boxed / union / dynamic): clean demote.
+  const undefCompare = tryLowerUndefinedCompare(expr, op, cx);
+  if (undefCompare !== null) return undefCompare;
 
   // #2781 (hybrid Row 7) — `+` operand-type proof gate. Run BEFORE operand
   // lowering (mirrors #2780's pre-element widening gate), so no dead operand
@@ -5079,6 +5461,85 @@ function typeOfValue(v: IrValueId, cx: LowerCtx): IrType {
  * Returns `null` when this isn't a `null`-compare (so the caller
  * proceeds with the normal lowering).
  */
+/**
+ * (#2856 C3) Lower a STRICT undefined-compare — `<expr> !== undefined` /
+ * `<expr> === undefined` (`undefined` as a free identifier, not shadowed).
+ * Returns null when the expression isn't that shape (caller proceeds with
+ * the normal lowering).
+ *
+ * Dispatch by the non-undefined operand's IrType:
+ *   - externref-shaped (externref val / extern class / host-mode string) —
+ *     the runtime CAN hold the host `undefined`: emit the same
+ *     `__extern_is_undefined(v)` check legacy emits for this shape (import
+ *     registered by legacy's own lowering of the identical site in the
+ *     dual-compile model), `i32.eqz`-inverted for `!==`.
+ *   - representations that can never hold the JS `undefined` VALUE —
+ *     unboxed f64/i32 scalars and WasmGC refs (vecs, classes, objects,
+ *     closures, native strings; STRICT equality means even a null ref
+ *     compares false against undefined): constant-fold, keeping the
+ *     operand's side effects (DCE drops the value only when pure).
+ *   - anything else (boxed / union / dynamic) — clean demote to legacy.
+ *
+ * LOOSE `==`/`!=` never reach here (selector rejects them against
+ * `undefined`): `null == undefined` is true, so nullable-ref operands would
+ * need a runtime null check this slice doesn't emit.
+ */
+function tryLowerUndefinedCompare(expr: ts.BinaryExpression, op: ts.SyntaxKind, cx: LowerCtx): IrValueId | null {
+  const isStrictEq = op === ts.SyntaxKind.EqualsEqualsEqualsToken;
+  const isStrictNeq = op === ts.SyntaxKind.ExclamationEqualsEqualsToken;
+  if (!isStrictEq && !isStrictNeq) return null;
+  const isUndefIdent = (e: ts.Expression): boolean =>
+    ts.isIdentifier(e) && e.text === "undefined" && !cx.scope.has("undefined");
+  const leftU = isUndefIdent(expr.left);
+  const rightU = isUndefIdent(expr.right);
+  if (!leftU && !rightU) return null;
+  if (leftU && rightU) {
+    // `undefined === undefined` → true / `!==` → false.
+    return cx.builder.emitConst({ kind: "bool", value: isStrictEq }, irVal({ kind: "i32" }));
+  }
+  const other = leftU ? expr.right : expr.left;
+  const v = lowerExpr(other, cx, irVal({ kind: "externref" }));
+  const t = cx.builder.typeOf(v);
+  const tv = asVal(t);
+  const externrefShaped =
+    (tv !== null && tv.kind === "externref") ||
+    t.kind === "extern" ||
+    (t.kind === "string" && cx.resolver?.nativeStrings?.() === false);
+  if (externrefShaped) {
+    const flag = cx.builder.emitCall({ kind: "func", name: "__extern_is_undefined" }, [v], irVal({ kind: "i32" }));
+    if (flag === null) {
+      throw new Error(`ir/from-ast: __extern_is_undefined produced no result in ${cx.funcName}`);
+    }
+    return isStrictNeq ? cx.builder.emitUnary("i32.eqz", flag, irVal({ kind: "i32" })) : flag;
+  }
+  // Never-undefined representations: fold — but ONLY when the operand's TS
+  // static type proves the VALUE cannot be `undefined`. The Wasm-level rep
+  // alone is not enough: the IR erases `void x` (static type `undefined`)
+  // into an f64 NaN, so a rep-based fold would answer `void x === undefined`
+  // with false where JS says true (caught by
+  // tests/equivalence/logical-conditional-identity.test.ts). Types that
+  // include undefined/void/any/unknown demote to legacy, which tracks
+  // undefined-ness through its own lowering.
+  const staticTypeMayBeUndefined = (): boolean => {
+    if (!cx.checker) return true; // no checker — cannot prove; demote
+    const tsType = cx.checker.getTypeAtLocation(other);
+    const UNDEF_LIKE = ts.TypeFlags.Undefined | ts.TypeFlags.Void | ts.TypeFlags.Any | ts.TypeFlags.Unknown;
+    if (tsType.flags & UNDEF_LIKE) return true;
+    if (tsType.isUnion() && tsType.types.some((m) => (m.flags & UNDEF_LIKE) !== 0)) return true;
+    return false;
+  };
+  const neverUndefinedRep =
+    (tv !== null && (tv.kind === "f64" || tv.kind === "i32" || tv.kind === "ref" || tv.kind === "ref_null")) ||
+    t.kind === "class" ||
+    t.kind === "object" ||
+    t.kind === "closure" ||
+    t.kind === "string"; // native-strings mode only (host mode took the branch above)
+  if (neverUndefinedRep && !staticTypeMayBeUndefined()) {
+    return cx.builder.emitConst({ kind: "bool", value: isStrictNeq }, irVal({ kind: "i32" }));
+  }
+  throw new Error(`ir/from-ast: undefined-compare on ${describeIrType(t)} not in IR scope (${cx.funcName})`);
+}
+
 function tryFoldNullCompare(expr: ts.BinaryExpression, op: ts.SyntaxKind, cx: LowerCtx): IrValueId | null {
   const isEq = op === ts.SyntaxKind.EqualsEqualsEqualsToken || op === ts.SyntaxKind.EqualsEqualsToken;
   const isNeq = op === ts.SyntaxKind.ExclamationEqualsEqualsToken || op === ts.SyntaxKind.ExclamationEqualsToken;
@@ -5629,7 +6090,7 @@ function lowerThrowStatement(stmt: ts.ThrowStatement, cx: LowerCtx): void {
 function lowerTryStatement(stmt: ts.TryStatement, cx: LowerCtx): void {
   // ── Try body ────────────────────────────────────────────────────────
   const tryScope = new Map(cx.scope);
-  const tryCx: LowerCtx = { ...cx, scope: tryScope };
+  const tryCx: LowerCtx = { ...cx, scope: tryScope, noEarlyReturn: true };
   const tryBody = cx.builder.collectBodyInstrs(() => {
     for (const s of stmt.tryBlock.statements) {
       lowerStmt(s, tryCx);
@@ -5658,7 +6119,7 @@ function lowerTryStatement(stmt: ts.TryStatement, cx: LowerCtx): void {
       // Destructuring catch — selector should have rejected this.
       throw new Error(`ir/from-ast: destructuring catch param not in slice 9 (${cx.funcName})`);
     }
-    const catchCx: LowerCtx = { ...cx, scope: catchScope };
+    const catchCx: LowerCtx = { ...cx, scope: catchScope, noEarlyReturn: true };
     const catchBody = cx.builder.collectBodyInstrs(() => {
       for (const s of stmt.catchClause!.block.statements) {
         lowerStmt(s, catchCx);
@@ -5671,7 +6132,7 @@ function lowerTryStatement(stmt: ts.TryStatement, cx: LowerCtx): void {
   let finallyBody: readonly IrInstr[] | undefined;
   if (stmt.finallyBlock) {
     const finallyScope = new Map(cx.scope);
-    const finallyCx: LowerCtx = { ...cx, scope: finallyScope };
+    const finallyCx: LowerCtx = { ...cx, scope: finallyScope, noEarlyReturn: true };
     finallyBody = cx.builder.collectBodyInstrs(() => {
       for (const s of stmt.finallyBlock!.statements) {
         lowerStmt(s, finallyCx);

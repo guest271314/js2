@@ -227,6 +227,37 @@ export interface CompileOptions {
    * Do not enable in production until slice S4 of #2141 flips the default.
    */
   honestAnyBoxing?: boolean;
+  /**
+   * (#2141 S2/S3, #2626) Tag-5 boxed-VALUE equality classifier — the
+   * three-way true-class dispatch inside the both-tags-5 arm of
+   * `__any_eq`/`__any_strict_eq`: Number×Number → `f64.eq` (#2040),
+   * String×String → content eq (landed #1888), Object×Object → `ref.eq`
+   * identity (#2585), else legacy `0`. Default false (legacy: only the
+   * guarded string arm; non-string tag-5 pairs answer `0`, which also makes
+   * them fake-NaN self-unequal — the vacuity the test262 comparator
+   * accidentally relies on, see #2141 S2). The env var
+   * `JS2WASM_TAG5_CLASSIFIER=1` defaults this on for whole-runner A/B
+   * measurements. Do not enable by default until the #3032 lazy-generator
+   * waves land (the −162 dstr cluster unmasking).
+   */
+  tag5ValueEqClassifier?: boolean;
+  /**
+   * (#2106 S1) Standalone `$undefined` tag-1 singleton regime. When true (and
+   * targeting standalone/nativeStrings), `undefined` is represented by the
+   * S1.0 immutable tag-1 `$AnyValue` global (extern-wrapped at the externref
+   * plane), DISTINCT from `null` (`ref.null.extern`): `null !== undefined`,
+   * `typeof null === "object"`, ToNumber(null)=0 vs ToNumber(undefined)=NaN.
+   * All undefined producers (emitUndefined, `__extern_get`/`__extern_get_idx`
+   * miss, literal stores, boxToAny) and undefined-specific consumers
+   * (`__extern_is_undefined`, typeof cluster, strict-eq) flip in lockstep
+   * under this flag; nullish-intent consumers widen to `is_null ∨
+   * is-singleton`. Default false (legacy: undefined ≡ null ≡ ref.null.extern,
+   * byte-identical modules). Host (gc) mode is unaffected — it has a real
+   * host `undefined` via `__get_undefined`. `JS2WASM_UNDEF_SINGLETON=1`
+   * defaults it on for whole-runner A/B; the default flip is a separate
+   * measured PR (#2106).
+   */
+  undefinedSingleton?: boolean;
   /** #1588 PR-B: dual i8/i16 string storage. When true, string allocation
    *  sites the encoding analysis proves `ascii`/`utf8-guaranteed` are stored
    *  as i8-backed `Utf8String`; all others stay i16. Default false →

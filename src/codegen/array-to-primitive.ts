@@ -161,8 +161,13 @@ export function fillArrayToPrimitive(ctx: CodegenContext): void {
             { op: "f64.convert_i32_s" },
             { op: "call", funcIdx: externGetIdxIdx },
             { op: "local.tee", index: L_ELEM },
-            // §23.1.3.31: null/undefined element → "" (skip the concat)
-            { op: "ref.is_null" },
+            // §23.1.3.31: null/undefined element → "" (skip the concat).
+            // (#2106 S1) under the singleton regime an undefined element is a
+            // NON-null externref — test nullish, not bare null, or join would
+            // render it as "undefined".
+            ...(ctx.funcMap.has("__extern_is_nullish")
+              ? [{ op: "call", funcIdx: ctx.funcMap.get("__extern_is_nullish")! } as Instr]
+              : [{ op: "ref.is_null" } as Instr]),
             { op: "i32.eqz" },
             {
               op: "if",

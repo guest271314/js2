@@ -24,9 +24,18 @@
 
 import { ts } from "../ts-api.js";
 
-import { ensureAnyValueType } from "../codegen/any-helpers.js"; // (#2949) boxed-any carrier for IrType.dynamic
+import { ensureAnyHelpers, ensureAnyValueType } from "../codegen/any-helpers.js"; // (#2949) boxed-any carrier for IrType.dynamic
 import { getOrRegisterPromiseType } from "../codegen/async-scheduler.js";
-import { addGeneratorImports, addIteratorImports, addStringImports } from "../codegen/index.js";
+import {
+  addGeneratorImports,
+  addIteratorImports,
+  addStringImports,
+  addUnionImports, // (#2949 slice 3) host-mode dynamic op imports (__box_number/__typeof_* family)
+  TYPED_ARRAY_NAMES,
+} from "../codegen/index.js";
+import { boxToAny } from "../codegen/value-tags.js"; // (#2949 slice 3) THE canonical boxing entry point (D4)
+import { JsTag, jsTagUnboxKind } from "../codegen/js-tag.js";
+import { ensureVecElemSet, VEC_ELEM_SET_PREFIX } from "../codegen/vec-elem-set.js"; // (#2856 C2) on-demand element-store helper
 import { classMemberFuncKey } from "../codegen/class-member-keys.js"; // (#1983) collision-free class-member funcMap keys
 import {
   ensureNativeStringHelpers,
@@ -42,7 +51,7 @@ import {
   getOrRegisterRefCellType,
   getOrRegisterVecType,
 } from "../codegen/registry/types.js";
-import type { CodegenContext } from "../codegen/context/types.js";
+import type { CodegenContext, FunctionContext } from "../codegen/context/types.js";
 import { applyIrTailCalls } from "../codegen/ir-tail-call.js";
 import { ensureFmod, FMOD_FN } from "../codegen/fmod.js"; // #2945 — on-demand `%` helper materialization
 import { lowerFunctionAstToIr, type IrFromAstResolver } from "./from-ast.js";
@@ -51,22 +60,24 @@ import {
   lowerIrTypeToValType,
   type IrClassLowering,
   type IrClosureLowering,
+  type IrDynamicLowering,
   type IrLowerResolver,
   type IrObjectStructLowering,
   type IrRefCellLowering,
   type IrUnionLowering,
 } from "./lower.js";
-import type {
-  IrClassShape,
-  IrClosureSignature,
-  IrFuncRef,
-  IrFunction,
-  IrGlobalRef,
-  IrInstr,
-  IrModule,
-  IrObjectShape,
-  IrType,
-  IrTypeRef,
+import {
+  forEachInstrDeep, // (#2949 slice 3) deep instr walk for preregisterDynamicSupport
+  type IrClassShape,
+  type IrClosureSignature,
+  type IrFuncRef,
+  type IrFunction,
+  type IrGlobalRef,
+  type IrInstr,
+  type IrModule,
+  type IrObjectShape,
+  type IrType,
+  type IrTypeRef,
 } from "./nodes.js";
 import { analyzeEscape } from "./analysis/escape.js";
 import { analyzeOwnership } from "./analysis/ownership.js";
@@ -177,7 +188,7 @@ export function compileIrPathFunctions(
   // Phase 3 once the registries exist; both share the same underlying
   // logic for the methods both expose.
   // -------------------------------------------------------------------------
-  const fromAstResolver = makeFromAstResolver(ctx);
+  const fromAstResolver = makeFromAstResolver(ctx, sourceFile);
 
   // -------------------------------------------------------------------------
   // Phase 1 — Build: lower every selected AST function to an IrFunction.
@@ -621,6 +632,19 @@ export function compileIrPathFunctions(
   preregisterExceptionSupport(ctx, readyForLower);
 
   // -------------------------------------------------------------------------
+  // #2949 slice 3 — pre-register the dynamic box/unbox/tag.test backing
+  // (fast: `ensureAnyHelpers` → $AnyValue + the `__any_box_*`/`__any_unbox_*`
+  // defined-function family; host: `addUnionImports` → the `__box_number` /
+  // `__unbox_*` / `__typeof_*` import family) if any IR function carries a
+  // dynamic op. Same rationale as every preregister above: registration
+  // during Phase-3 emission would shift funcIdx values under an in-flight
+  // body buffer (the #329/#2078 bug class). Both entry points are
+  // idempotent, and `addUnionImports` performs the defined-function shift
+  // fix-up itself for anything already compiled.
+  // -------------------------------------------------------------------------
+  preregisterDynamicSupport(ctx, readyForLower);
+
+  // -------------------------------------------------------------------------
   // Phase 3 — Lower: translate each IrFunction to Wasm and install in ctx.
   // -------------------------------------------------------------------------
   //
@@ -936,7 +960,7 @@ function externResultClassName(
   }
 }
 
-function makeFromAstResolver(ctx: CodegenContext): IrFromAstResolver {
+function makeFromAstResolver(ctx: CodegenContext, sourceFile?: ts.SourceFile): IrFromAstResolver {
   return {
     nativeStrings(): boolean {
       return ctx.nativeStrings;
@@ -980,6 +1004,52 @@ function makeFromAstResolver(ctx: CodegenContext): IrFromAstResolver {
     // host-extern arms.
     jsHostExterns(): boolean {
       return !(ctx.standalone || ctx.wasi || ctx.strictNoHostImports);
+    },
+    // (#2856 C2) TypedArray-view receiver detection for element STORES —
+    // the same checker walk as the legacy `elementAccessTypedArrayName`
+    // (assignment.ts): symbol name of the receiver's TS type against the
+    // TYPED_ARRAY_NAMES registry. Writes into those views carry per-view
+    // conversion semantics (ToUint8/ToUint8Clamp/packing) that the plain
+    // vec store helper must not bypass, so the IR demotes them.
+    isTypedArrayViewExpr(expr: ts.Expression): boolean {
+      const t = ctx.checker.getTypeAtLocation(expr);
+      let name = t.getSymbol()?.name ?? t.aliasSymbol?.name;
+      if ((!name || !TYPED_ARRAY_NAMES.has(name)) && ts.isNewExpression(expr) && ts.isIdentifier(expr.expression)) {
+        name = expr.expression.text;
+      }
+      return !!name && TYPED_ARRAY_NAMES.has(name);
+    },
+    // (#2856 C3) Module-scope binding → the Wasm global the legacy backend
+    // allocated (`__mod_<name>` in ctx.mod.globals, TDZ flag `__tdz_<name>`
+    // when tracked) + the extern-class brand of the held value from the
+    // checker at the DECLARATION site. Only externref-shaped extern-class
+    // instances resolve (e.g. `const cache = new Map()` → "Map"); plain
+    // scalars / non-extern values return undefined so the identifier arm
+    // demotes cleanly.
+    getModuleScopeExternBinding(name: string) {
+      if (!ctx.moduleGlobals.has(name)) return undefined;
+      const globalName = `__mod_${name}`;
+      const g = ctx.mod.globals.find((gl) => gl.name === globalName);
+      if (!g || g.type.kind !== "externref") return undefined;
+      // Brand from the checker: the module-level declaration's type symbol
+      // must name a REGISTERED extern class (host mode only — in
+      // standalone/nativeStrings the class isn't registered, so this
+      // resolves nothing and the function demotes to legacy, which has the
+      // native runtime interception).
+      const sf = sourceFile;
+      if (!sf) return undefined;
+      let className: string | undefined;
+      for (const stmt of sf.statements) {
+        if (!ts.isVariableStatement(stmt)) continue;
+        for (const d of stmt.declarationList.declarations) {
+          if (!ts.isIdentifier(d.name) || d.name.text !== name) continue;
+          const t = ctx.checker.getTypeAtLocation(d.name);
+          className = t.getSymbol()?.name ?? t.aliasSymbol?.name;
+        }
+      }
+      if (!className || !ctx.externClasses.has(className)) return undefined;
+      const tdzGlobalName = ctx.mod.globals.some((gl) => gl.name === `__tdz_${name}`) ? `__tdz_${name}` : null;
+      return { globalName, tdzGlobalName, className };
     },
     // (#2856) Variant selection for `console.<m>(arg)` — the SAME checker
     // predicates as the legacy `collectConsoleImports` registration scan
@@ -1091,6 +1161,9 @@ function makeResolver(
   refCellResolver: DeferredRefCellResolver,
   classResolver: DeferredClassResolver,
 ): IrLowerResolver {
+  // (#2949 slice 3) One dynamic-lowering handle per resolver (undefined =
+  // not yet built; null = mode has no dynamic op lowering).
+  let dynamicLoweringMemo: IrDynamicLowering | null | undefined;
   return {
     resolveFunc(ref: IrFuncRef): number {
       // #2945 — `%` lowers to a call of the Wasm-native exact-fmod helper.
@@ -1100,6 +1173,18 @@ function makeResolver(
       // functions. On-demand keeps the helper out of modules that never use
       // `%` (parity with legacy, which also emits it lazily).
       if (ref.name === FMOD_FN) return ensureFmod(ctx);
+      // (#2856 C2) `__vec_elem_set_<vecTypeIdx>` — element-store helper with
+      // full legacy grow semantics. Materialized on demand, same append-only
+      // defined-function discipline as `ensureFmod` (never an import, no
+      // existing funcIdx shifts). Idempotent via funcMap.
+      if (ref.name.startsWith(VEC_ELEM_SET_PREFIX)) {
+        const vecTypeIdx = Number(ref.name.slice(VEC_ELEM_SET_PREFIX.length));
+        const helperIdx = Number.isInteger(vecTypeIdx) ? ensureVecElemSet(ctx, vecTypeIdx) : null;
+        if (helperIdx === null) {
+          throw new Error(`ir/integration: cannot materialize ${ref.name} (not a recognisable vec struct)`);
+        }
+        return helperIdx;
+      }
       const idx = ctx.funcMap.get(ref.name);
       if (idx !== undefined) return idx;
       // Slice 6 part 4 (#1183): native-string helpers (`__str_charAt`,
@@ -1221,6 +1306,17 @@ function makeResolver(
         return { kind: "ref_null", typeIdx: ctx.anyValueTypeIdx };
       }
       return { kind: "externref" };
+    },
+    // (#2949 slice 3) Op-emission handle for dynamic box/unbox/tag.test —
+    // memoized so all arms of one lowering run share a single handle. The
+    // factory's mode split mirrors resolveDynamic above by construction
+    // (both key on ctx.fast). Helpers/imports the handle resolves by name
+    // were registered up front by preregisterDynamicSupport.
+    resolveDynamicLowering(): IrDynamicLowering | null {
+      if (dynamicLoweringMemo === undefined) {
+        dynamicLoweringMemo = makeDynamicLowering(ctx);
+      }
+      return dynamicLoweringMemo;
     },
     // Slice 6 part 4 refactor (#1185): expose the nativeStrings mode
     // discriminator so the from-ast for-of arms can dispatch without
@@ -1547,6 +1643,311 @@ function preregisterExceptionSupport(ctx: CodegenContext, fns: readonly BuiltFnR
       }
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Dynamic (boxed-any) op lowering (#2949 slice 3)
+// ---------------------------------------------------------------------------
+
+/**
+ * #2949 slice 3 — does this instruction carry a dynamic box/unbox/tag.test?
+ * `jsTag` presence is the dynamic-operand discriminator for unbox/tag.test
+ * (verifier R2/R3 make it REQUIRED exactly there and reject it elsewhere).
+ */
+function isDynamicOp(instr: IrInstr): boolean {
+  if (instr.kind === "box") return instr.toType.kind === "dynamic";
+  if (instr.kind === "unbox" || instr.kind === "tag.test") return instr.jsTag !== undefined;
+  return false;
+}
+
+/**
+ * #2949 slice 3 — map a box target's tag refinement onto `boxToAny`'s
+ * `jsType` hint. One partition table (js-tag.ts) → one hint vocabulary
+ * (value-tags.ts); "unknown" reproduces the historical kind-keyed dispatch
+ * exactly, so an unrefined box is behavior-identical to legacy's unbranded
+ * `any` coercion.
+ */
+function jsTagToStaticType(
+  hint: JsTag | undefined,
+): "null" | "undefined" | "boolean" | "number" | "string" | "object" | "function" | "unknown" {
+  switch (hint) {
+    case JsTag.Null:
+      return "null";
+    case JsTag.Undefined:
+      return "undefined";
+    case JsTag.Boolean:
+      return "boolean";
+    case JsTag.NumberI32:
+    case JsTag.NumberF64:
+      return "number";
+    case JsTag.String:
+      return "string";
+    case JsTag.Object:
+      return "object";
+    case JsTag.Function:
+      return "function";
+    default:
+      return "unknown";
+  }
+}
+
+/**
+ * #2949 slice 3 — pre-register everything `makeDynamicLowering`'s emit
+ * methods can resolve by name, BEFORE Phase-3 emission starts:
+ *   - fast (gc strategy): `ensureAnyHelpers` — $AnyValue + the canonical
+ *     `__any_box_*` / `__any_unbox_*` family. These are DEFINED functions
+ *     (appended, no import shift), but ensureAnyHelpers also pulls string
+ *     imports on some paths, so it must not fire mid-emission.
+ *   - host: `addUnionImports` — `__box_number` / `__unbox_number` /
+ *     `__unbox_boolean` / `__typeof_*`. This is a late-IMPORT registration
+ *     that shifts every defined funcIdx; running it here (before any IR
+ *     body buffer exists) makes the shift a no-op hazard-wise, exactly
+ *     like `preregisterStringSupport`.
+ * Both are idempotent, so overlapping legacy registration is a no-op.
+ */
+function preregisterDynamicSupport(ctx: CodegenContext, fns: readonly BuiltFnRef[]): void {
+  let usesDynamicOps = false;
+  for (const entry of fns) {
+    for (const block of entry.fn.blocks) {
+      for (const instr of block.instrs) {
+        forEachInstrDeep(instr, (i) => {
+          if (isDynamicOp(i)) usesDynamicOps = true;
+        });
+        if (usesDynamicOps) break;
+      }
+      if (usesDynamicOps) break;
+    }
+    if (usesDynamicOps) break;
+  }
+  if (!usesDynamicOps) return;
+  if (ctx.fast) {
+    ensureAnyHelpers(ctx);
+  } else {
+    addUnionImports(ctx);
+  }
+}
+
+/**
+ * #2949 slice 3 — the PRODUCTION `IrDynamicLowering` factory (see
+ * `backend/handles.ts` for the full contract, incl. the V2 numeric-class
+ * tag.test rule and the payload-field table). Exported so tests exercise
+ * the exact implementation the compiler uses, not a mock.
+ *
+ * Mode split MUST mirror `resolveDynamic()` (same `ctx.fast` test — the
+ * carrier and its ops are one decision):
+ *   - fast → "gc": `ref_null $AnyValue`; box via `boxToAny` (THE canonical
+ *     tag-selection policy — same helper family, same tags, byte-parity
+ *     with legacy's `any` coercion for the same operand kind); unbox via
+ *     the canonical `__any_unbox_f64` / `__any_unbox_i32` readers (V2:
+ *     they accept BOTH numeric tags) or a direct payload `struct.get`;
+ *     tag.test via a tag-field read.
+ *   - non-fast → "host": externref; `__box_number` family + `__typeof_*`
+ *     classifier imports (registered by `preregisterDynamicSupport`).
+ *
+ * Every funcIdx is resolved BY NAME at emit time (never captured at handle
+ * creation) — the #2191/#2193 name-based-repoint discipline.
+ *
+ * Producer contracts the emit arms rely on (enforced upstream, asserted
+ * here defensively):
+ *   - unbox is only emitted under a tag.test proof (verifier R2 field
+ *     rules + producer discipline) — a wasm-null gc carrier traps.
+ *   - a BOOLEAN-branded i32 must not be boxed through `emitBox` (both
+ *     strategies box bare i32 as a NUMBER, matching legacy's unbranded
+ *     kind-keyed dispatch); a boolean-aware box needs the jsType hint
+ *     plumbed through — a later producer slice.
+ */
+export function makeDynamicLowering(ctx: CodegenContext): IrDynamicLowering | null {
+  if (ctx.fast) {
+    ensureAnyValueType(ctx);
+    const anyTypeIdx = ctx.anyValueTypeIdx;
+    const callHelper = (name: string): Instr => {
+      const idx = ctx.funcMap.get(name);
+      if (idx === undefined) {
+        throw new Error(
+          `ir/integration: ${name} not registered — preregisterDynamicSupport must run before Phase 3 (#2949)`,
+        );
+      }
+      return { op: "call", funcIdx: idx };
+    };
+    const payloadFieldIdx = (tag: JsTag): number => {
+      switch (jsTagUnboxKind(tag)) {
+        case "i32":
+          return 1; // i32val (NumberI32 / Boolean)
+        case "f64":
+          return 2; // f64val (NumberF64)
+        case "ref":
+          // String rides extern-shaped in `externval` under tag 5 in BOTH
+          // string modes (the #42 / tag-5-field-4 contract); Object and
+          // Function refs ride in `refval` (eqref).
+          return tag === JsTag.String ? 4 : 3;
+        default:
+          throw new Error(`ir/integration: JsTag ${JsTag[tag]} is a singleton partition — no payload field (#2949)`);
+      }
+    };
+    return {
+      carrier: { kind: "ref_null", typeIdx: anyTypeIdx },
+      strategy: "gc",
+      anyValueTypeIdx: anyTypeIdx,
+      tagFieldIdx: 0,
+      payloadFieldIdx,
+      emitBox(from: ValType, hint?: JsTag): readonly Instr[] {
+        // Route through boxToAny — THE canonical boxing entry point. It only
+        // touches `fctx.body`, so a body-only context shim is sound; using it
+        // (instead of re-deriving the helper choice here) keeps ONE
+        // kind→tag policy for legacy and IR (June-audit D4), including the
+        // native-string re-tag arm and the honestAnyBoxing flag behavior.
+        // The refinement hint maps onto boxToAny's jsType hint verbatim —
+        // same "never override representation" contract.
+        const shim = { body: [] as Instr[] } as unknown as FunctionContext;
+        if (!boxToAny(ctx, shim, from, jsTagToStaticType(hint))) {
+          throw new Error(
+            `ir/integration: no canonical boxing arm for operand kind "${from.kind}" — ` +
+              `was preregisterDynamicSupport skipped? (#2949)`,
+          );
+        }
+        return shim.body;
+      },
+      emitUnbox(tag: JsTag): readonly Instr[] {
+        switch (tag) {
+          case JsTag.NumberF64:
+            // V2 numeric class: the canonical reader converts a tag-2 i32
+            // payload, so a class-proven "number" always reads correctly.
+            return [callHelper("__any_unbox_f64")];
+          case JsTag.NumberI32:
+            // V2 numeric class: trunc-sats a tag-3 f64 payload.
+            return [callHelper("__any_unbox_i32")];
+          case JsTag.Boolean:
+          case JsTag.String:
+          case JsTag.Object:
+          case JsTag.Function:
+            // Exact-tag partitions: direct payload read after the proof.
+            return [{ op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: payloadFieldIdx(tag) }];
+          default:
+            throw new Error(`ir/integration: cannot unbox singleton partition ${JsTag[tag]} (#2949 R2)`);
+        }
+      },
+      emitTagTest(tag: JsTag): readonly Instr[] {
+        if (tag === JsTag.NumberI32 || tag === JsTag.NumberF64) {
+          // Numeric CLASS test (V2): tag ∈ {2,3} ⇔ (tag − 2) ≤u 1. Keeps
+          // gc and host tag.test semantics identical — host `typeof` has
+          // exactly one "number".
+          return [
+            { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 0 },
+            { op: "i32.const", value: JsTag.NumberI32 },
+            { op: "i32.sub" },
+            { op: "i32.const", value: 1 },
+            { op: "i32.le_u" },
+          ];
+        }
+        return [
+          { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 0 },
+          { op: "i32.const", value: tag },
+          { op: "i32.eq" },
+        ];
+      },
+    };
+  }
+
+  // Host (non-fast): externref carrier; ops via the union-import family.
+  const callImport = (name: string): Instr => {
+    const idx = ctx.funcMap.get(name);
+    if (idx === undefined) {
+      throw new Error(
+        `ir/integration: host import ${name} not registered — preregisterDynamicSupport must run before Phase 3 (#2949)`,
+      );
+    }
+    return { op: "call", funcIdx: idx };
+  };
+  return {
+    carrier: { kind: "externref" },
+    strategy: "host",
+    anyValueTypeIdx: -1,
+    tagFieldIdx: -1,
+    payloadFieldIdx(tag: JsTag): number {
+      throw new Error(`ir/integration: host dynamic carrier has no payload fields (asked for ${JsTag[tag]})`);
+    },
+    emitBox(from: ValType, hint?: JsTag): readonly Instr[] {
+      switch (from.kind) {
+        case "f64":
+          return [callImport("__box_number")];
+        case "i32":
+          // Boolean-REFINED i32 boxes as a host boolean (mirrors legacy's
+          // type-aware coerceType, #2785). Unrefined i32 keeps NUMBER
+          // semantics — identical to legacy's unbranded i32→externref
+          // coercion.
+          if (hint === JsTag.Boolean) {
+            return [callImport("__box_boolean")];
+          }
+          return [{ op: "f64.convert_i32_s" }, callImport("__box_number")];
+        case "externref":
+          // Host strings / already-host-boxed values ARE the carrier.
+          return [];
+        case "ref":
+        case "ref_null":
+        case "eqref":
+          // Struct/array/closure refs are anyref subtypes — re-tag.
+          return [{ op: "extern.convert_any" }];
+        default:
+          throw new Error(`ir/integration: no host boxing arm for operand kind "${from.kind}" (#2949)`);
+      }
+    },
+    emitUnbox(tag: JsTag): readonly Instr[] {
+      switch (tag) {
+        case JsTag.NumberF64:
+          return [callImport("__unbox_number")];
+        case JsTag.NumberI32:
+          // Same narrowing the gc reader applies to a tag-3 payload.
+          return [callImport("__unbox_number"), { op: "i32.trunc_sat_f64_s" }];
+        case JsTag.Boolean:
+          // ToBoolean on a PROVEN boolean is the identity payload read.
+          return [callImport("__unbox_boolean")];
+        case JsTag.String:
+        case JsTag.Object:
+        case JsTag.Function:
+          // The host carrier IS the host value — identity.
+          return [];
+        default:
+          throw new Error(`ir/integration: cannot unbox singleton partition ${JsTag[tag]} (#2949 R2)`);
+      }
+    },
+    emitTagTest(tag: JsTag, scratch: () => number): readonly Instr[] {
+      switch (tag) {
+        case JsTag.NumberI32:
+        case JsTag.NumberF64:
+          // Numeric CLASS test (V2) — host typeof has one "number".
+          return [callImport("__typeof_number")];
+        case JsTag.String:
+          return [callImport("__typeof_string")];
+        case JsTag.Boolean:
+          return [callImport("__typeof_boolean")];
+        case JsTag.Function:
+          return [callImport("__typeof_function")];
+        case JsTag.Undefined:
+          return [callImport("__typeof_undefined")];
+        case JsTag.Null:
+          // JS null crosses the boundary as THE null externref; undefined
+          // is a real (non-null) host value — so ref.is_null is exactly
+          // the Null partition test.
+          return [{ op: "ref.is_null" }];
+        case JsTag.Object: {
+          // `typeof v === "object"` is true for null (host semantics);
+          // the Object PARTITION excludes it. Read the operand twice via
+          // the lazily-allocated carrier scratch local.
+          const s = scratch();
+          return [
+            { op: "local.tee", index: s },
+            callImport("__typeof_object"),
+            { op: "local.get", index: s },
+            { op: "ref.is_null" },
+            { op: "i32.eqz" },
+            { op: "i32.and" },
+          ];
+        }
+        default:
+          throw new Error(`ir/integration: no host tag.test arm for ${JsTag[tag]} (#2949)`);
+      }
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------

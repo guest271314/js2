@@ -34,7 +34,8 @@ import { ensureSetHelpers } from "../set-runtime.js";
 import { ensureWeakCollectionHelpers } from "../weak-collections-runtime.js";
 import { classMemberFuncKey } from "../class-member-keys.js"; // (#1983) collision-free class-member funcMap keys
 import { compileObjectLiteralAsExternref, resolveComputedKeyExpression } from "../literals.js";
-import { stringConstantExternrefInstrs } from "../native-strings.js";
+import { stringConstantExternrefInstrs, ensureAnyToStringHelper } from "../native-strings.js";
+import { emitNativeNumberFormat } from "../number-format-native.js";
 import {
   compileStandaloneRegExpConstructor,
   isGlobalRegExpIdentifier,
@@ -306,6 +307,17 @@ function emitSuperExternMethodCall(
   }
   if (!externAncestor) return null;
 
+  // (#2029 family B) Standalone/WASI: this whole path is a JS-host bridge
+  // (`__extern_method_call` + `__js_array_*` — a dynamic `recv[name](args)`
+  // performed in JS land). With no host, the imports both leak (the module
+  // could never instantiate with an empty import object) AND the method-name
+  // string push below baked the `-1` string-global sentinel → the raw
+  // "global index out of range — -1" emit crash (e.g. `super[Symbol.replace]`
+  // in a `class RE extends RegExp`). Refuse here so the caller reports the
+  // clean, located "Cannot find method 'X' on parent class 'Y'" error —
+  // the #1888 dual-mode invariant (loud refusal, never a poisoned index).
+  if (ctx.standalone || ctx.wasi) return null;
+
   const selfIdx = fctx.localMap.get("this");
   if (selfIdx === undefined) return null;
 
@@ -352,13 +364,13 @@ function emitSuperExternMethodCall(
 
   // __extern_method_call(receiver, methodName, args)
   fctx.body.push({ op: "local.get", index: recvLocal });
+  // (#2029 family B) Route the name push through the dual-mode helper: a raw
+  // `global.get stringGlobalMap.get(name)` guarded only on `!== undefined`
+  // bakes the -1 sentinel under nativeStrings (gc + --nativeStrings; the
+  // standalone/wasi combination is refused above). Host mode is
+  // byte-identical (the helper emits the same `global.get`).
   addStringConstantGlobal(ctx, methodName);
-  const strIdx = ctx.stringGlobalMap.get(methodName);
-  if (strIdx !== undefined) {
-    fctx.body.push({ op: "global.get", index: strIdx } as Instr);
-  } else {
-    compileStringLiteral(ctx, fctx, methodName);
-  }
+  fctx.body.push(...stringConstantExternrefInstrs(ctx, methodName));
   fctx.body.push({ op: "local.get", index: argsLocal });
   const finalMcIdx = ctx.funcMap.get("__extern_method_call") ?? methodCallIdx;
   fctx.body.push({ op: "call", funcIdx: finalMcIdx });
@@ -2901,6 +2913,52 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       } else {
         // No message — push null externref (undefined message)
         fctx.body.push({ op: "ref.null.extern" });
+      }
+      // (#2969) §20.5.1.1 step 3 — `msg = ToString(message)` at CONSTRUCTION
+      // time. In standalone/WASI the native `__new_<Name>` ctor stores its arg
+      // verbatim (see error-types.ts), so `new Error(42).message` was the number
+      // `42` (spec: `"42"`) and `String(new Error(42))` degraded to `"Error"`.
+      // Do the ToString HERE at the user call site (null-guarded so argument-less
+      // / `new Error(undefined)` still render the name alone) rather than inside
+      // the SHARED ctor — the ctor is also lazily emitted for internal compiler
+      // error paths (destructuring/coercion `TypeError`s), and pulling the
+      // `__any_to_string` family into those emissions destabilised standalone
+      // `any`-equality dispatch (the tag-5 value-eq gap deferred to #2580 M2 /
+      // #3032). Host mode's `__new_<Name>` import does ToString in JS, so only
+      // the native path needs this. Applies to both the WASI-error and
+      // Test262Error branches below (both native, both standalone/WASI).
+      if ((ctx.wasi || ctx.standalone) && args.length >= 1) {
+        // Force `number_toString` before `__any_to_string` bakes so its number
+        // arm renders a raw numeric message ("42") instead of degrading to
+        // "[object Object]" (a module that only constructs `new Error(n)` never
+        // otherwise pulls the number formatter). Must precede the ensure below.
+        if (ctx.funcMap.get("number_toString") === undefined) {
+          emitNativeNumberFormat(ctx, new Set(["number_toString"]));
+        }
+        const anyToStrIdx = ensureAnyToStringHelper(ctx);
+        if (anyToStrIdx >= 0) {
+          const msgTmp = allocTempLocal(fctx, { kind: "externref" });
+          fctx.body.push(
+            { op: "local.set", index: msgTmp },
+            { op: "local.get", index: msgTmp },
+            { op: "ref.is_null" },
+            {
+              op: "if",
+              blockType: { kind: "val", type: { kind: "externref" } },
+              // undefined / null argument → keep null (renders name alone).
+              then: [{ op: "ref.null.extern" } as Instr],
+              // ToString(message): externref → anyref → __any_to_string
+              // (ref $AnyString) → externref for the ctor's $message field.
+              else: [
+                { op: "local.get", index: msgTmp } as Instr,
+                { op: "any.convert_extern" } as Instr,
+                { op: "call", funcIdx: anyToStrIdx } as Instr,
+                { op: "extern.convert_any" } as Instr,
+              ],
+            } as Instr,
+          );
+          releaseTempLocal(fctx, msgTmp);
+        }
       }
       // (#1104 Phase 1) In WASI/standalone mode, the JS host is unavailable —
       // use a Wasm-native `__new_<Name>` function that builds a `$Error_struct`

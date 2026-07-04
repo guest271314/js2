@@ -4,7 +4,7 @@ title: "standalone: getPrototypeOf(Object.create(p)) === p is false — object i
 status: blocked
 sprint: current
 created: 2026-06-21
-updated: 2026-06-24
+updated: 2026-07-04
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -205,3 +205,15 @@ Add `tests/issue-2585-proto-identity.test.ts` (standalone harness):
 Scoped local check before PR; CI validates conformance. Expect positive
 test262 delta in `built-ins/Object/{create,getPrototypeOf}/` and
 `language/expressions/equality/` object-identity tests.
+
+---
+
+## Architect spec pointer (2026-07-04)
+
+The dynamic-MOP umbrella spec **#3031**
+(`plan/issues/3031-dynamic-mop-extensions-spec.md`, Part 2 §2.1) ratifies
+that the mutable-[[Prototype]] chain REPRESENTATION is identity-correct
+(`$Object.$proto` holds the same GC ref); only the tag-5 `===` classifier
+loses identity. This issue stays folded into **#2626** behind the value-rep
+substrate — #3031 explicitly excludes it from its slice table (do not
+re-attempt in isolation).

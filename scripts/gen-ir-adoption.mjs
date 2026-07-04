@@ -37,7 +37,12 @@ const SECTIONS = [
     rows: [
       ["`VariableStatement`", "mixed", "Single-binding `let/const/var` works. Destructuring init throws.", "#1372"],
       ["`ExpressionStatement`", "mixed", "Calls / assignments / pre-post `++ --` work. Other shapes throw.", "#1131"],
-      ["`IfStatement`", "ir-owned", "Both arms must be present in tail position; body-position `if` works.", "—"],
+      [
+        "`IfStatement`",
+        "ir-owned",
+        "Tail / early-return via block CFG; statement-`if` inside loop/try body buffers via `if.stmt` (#2952 slice 2).",
+        "—",
+      ],
       [
         "`ReturnStatement`",
         "ir-owned",
@@ -58,15 +63,20 @@ const SECTIONS = [
       ],
       [
         "`BreakStatement`",
-        "direct-only",
-        "Labeled / unlabeled break — needs the `br_label` depth resolver (#2952).",
+        "mixed",
+        "Unlabeled `break` claimed in all IR loop kinds via `br.label` + lowering-time depth resolver (#2952 slice 2); labeled break is slice 3.",
         "#2952",
       ],
-      ["`ContinueStatement`", "direct-only", "Same.", "#2952"],
+      [
+        "`ContinueStatement`",
+        "mixed",
+        "Unlabeled `continue` claimed (dedicated continue-target frame per loop shape); labeled continue is slice 3.",
+        "#2952",
+      ],
       [
         "`DoStatement`",
         "mixed",
-        "Post-test loop claimed (reuses `while.loop` + `postCond`); break/continue bodies demote (shared #2952 blocker).",
+        "Post-test loop claimed (reuses `while.loop` + `postCond`); unlabeled break/continue bodies claimed since slice 2.",
         "#2952",
       ],
       ["`LabeledStatement`", "direct-only", "Needs labeled break/continue CFG support.", "#2952"],

@@ -1569,7 +1569,7 @@
         const controlsHost = el("div", { className: "filter-toggles", style: { marginTop: "1rem" } });
         // Strict mode toggle — checked by default, persisted in localStorage
         const strictToggle = el("label", { className: "filter-toggle" });
-        const strictDefault = localStorage.getItem("t262-strict-only") !== "false";
+        const strictDefault = localStorage.getItem("t262-strict-only") === "true";
         const strictCheckbox = el("input", { type: "checkbox" });
         if (strictDefault) strictCheckbox.setAttribute("checked", "checked");
         strictCheckbox.checked = strictDefault;
@@ -2589,6 +2589,25 @@
         }
       }
 
+      // Rewrite every summary-shaped node in a standalone report so `pass`
+      // counts only host-free passes (leaky passes → fail). Mutates in place;
+      // the standalone report object is not shared with the host report.
+      function applyStandaloneHostFree(node) {
+        if (Array.isArray(node)) {
+          node.forEach(applyStandaloneHostFree);
+          return;
+        }
+        if (!node || typeof node !== "object") return;
+        if (typeof node.host_free_pass === "number" && typeof node.total === "number") {
+          const hf = node.host_free_pass;
+          const ce = Number(node.ce) || Number(node.compile_error || 0) + Number(node.compile_timeout || 0);
+          const skip = Number(node.skip) || 0;
+          node.pass = hf;
+          node.fail = Math.max(0, node.total - hf - ce - skip);
+        }
+        for (const key of Object.keys(node)) applyStandaloneHostFree(node[key]);
+      }
+
       async function main() {
         const [conformance, standaloneReport, benchmarkHistory, snippets, conformanceRuns, categoryEditions] =
           await Promise.all([
@@ -2601,6 +2620,15 @@
           ]);
         const app = document.getElementById("app");
         app.textContent = "";
+
+        // Standalone honesty (host-free): a "leaky pass" passed only because the
+        // compiled Wasm still reached for a JS-host import, so it is NOT a true
+        // standalone pass. Count host_free_pass as pass across every
+        // summary-shaped node (overall / official / strict / full / per-scope /
+        // by_category), pushing leaky passes into fail. Keeps the standalone
+        // headline consistent with the honest host-free number (matches the
+        // per-edition slider, which is already generated with --host-free).
+        applyStandaloneHostFree(standaloneReport);
 
         if (conformance) {
           // (#2871 #1) Host (JS) vs Standalone (pure Wasm) views. Both share the
@@ -2625,13 +2653,13 @@
 
           // Mode switch (only shown when standalone data is available).
           const conformanceHost = el("div");
-          let activeMode = "host";
+          let activeMode = standaloneView && localStorage.getItem("t262-mode") === "standalone" ? "standalone" : "host";
           const renderActive = () => {
             conformanceHost.textContent = "";
             const view = activeMode === "standalone" && standaloneView ? standaloneView : hostView;
             renderConformance(view, conformanceHost, conformanceRuns);
           };
-          if (false) {
+          if (standaloneView) {
             const modeSwitch = el("div", { className: "mode-switch" });
             const mkBtn = (mode, main, sub) => {
               const b = el(

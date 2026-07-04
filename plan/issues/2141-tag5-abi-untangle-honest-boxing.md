@@ -2,10 +2,10 @@
 id: 2141
 title: "Retire the tag-5 box-the-externref ABI: make consumers tag-agnostic, then allow honest generic boxing"
 status: in-progress
-assignee: ttraenkler/dev-evalf
+assignee: ttraenkler/fable-tag5
 sprint: current
 created: 2026-06-12
-updated: 2026-07-02
+updated: 2026-07-04
 unblocked_note: "2026-07-02: blocked_by #2167 (Fable disabled) is done — Fable restored; flipped on claim per owner directive (task #32)."
 priority: high
 feasibility: hard
@@ -169,25 +169,62 @@ per-slice merge_group proof is the gate.
   `undefined === undefined` in fast → false (mixed-provenance cross-tag).
   `emitTag5TrueClass` (the shared consumer-side classifier) deferred to
   S3 where its first consumers land.
-- **S2 (verification slice):** root-cause the dstr reliance. Faithful
-  `runTest262File` standalone canary
-  (`language/statements/class/dstr/meth-dflt-ary-ptrn-empty` + siblings),
-  WAT trace of the `__any_strict_eq(arg, non-string-tag-5)` call, identify
-  the emitting lowering line. Fix the RELYING SITE (dedicated
-  is-undefined test or honest producer at that lowering), NOT by keeping
-  eq wrong. Deliverable: canary green with the numeric+object eq arms
-  force-enabled locally. PITFALL (memory): trust the faithful runner, not
-  hand-rolled repros; the floor only runs in merge_group.
-- **S3:** eq true-class arms — both-tags-5 arm of `__any_eq`/`__any_strict_eq`
-  dispatch on `emitTag5TrueClass` pairs: Number×Number → `__any_to_f64` +
+- **S2 (verification slice — LANDED 2026-07-04, fable-tag5): root cause
+  REWRITTEN by the evidence.** The presumed "dstr default-parameter
+  undefined-check relying on always-false tag-5 eq" DOES NOT EXIST. WAT
+  trace of the compiled canary: the ONLY `__any_strict_eq` callers in the
+  module are the three `isSameValue` sites of the test262 harness — nothing
+  in the dstr/generator lowering calls it. Actual mechanism (probe-verified):
+  1. The dstr fixture `var iter = function*() { iterations += 1; }();` is an
+     anonymous generator EXPRESSION — excluded from the native lazy lowering
+     (`isNativeGeneratorCandidate` requires `decl.name`; the test262 wrapper
+     additionally makes every generator nested+capturing, #2203) — so it
+     takes the EAGER-BUFFER path, which runs the whole body AT CREATION.
+     `iterations` is already 1 before any `next()` (probe: `return
+     iterations*100+7` right after the fixture → 107). The test is latently
+     failing.
+  2. The harness comparator masks it: `isSameValue(a: any, b: any)` params
+     ride the externref ABI and are boxed per-use via `__any_box_string`
+     (the tag-5 lie). Legacy tag-5 non-string eq = `0` ⇒ every lie-boxed
+     value is SELF-unequal (fake NaN) ⇒ `a === b || (a !== a && b !== b)`
+     is TRUE for EVERY pair of lie-boxed operands — a vacuous pass
+     regardless of values.
+  3. The classifier arms make self-compare honest (bisect re-confirmed:
+     numeric `f64.eq` AND object `ref.eq` EACH independently flip the
+     canary), closing the vacuity escape and UNMASKING the latent failure.
+     The −162 was never eq breaking dstr; it was honesty revealing an
+     eager-generator bug.
+  Relying-site fix = **#3032 lazy-first-resume generator thunks** (landed
+  with this slice, zero-param expression wave): the eager sequence is
+  flag-wrapped; creation returns a lazy thunk generator
+  (`__create_generator(<self closure>, null)`); the host materializes on
+  first `next()` via `__gen_set_eager`/`__call_fn_0`; `return`/`throw`
+  before first resume never run the body (§27.5.3.2). Deliverable MET:
+  canary + siblings green with the classifier force-enabled, and the
+  24-file class/dstr `dflt` sample behavior-identical under the default
+  legacy comparator (18 pass / 6 fail before and after the lazy fix).
+- **S3:** eq true-class arms — **classifier now IN-TREE behind
+  `tag5ValueEqClassifier` (CompileOptions, default OFF; env
+  `JS2WASM_TAG5_CLASSIFIER=1` defaults it on for whole-runner A/B), landed
+  with S2**: both-tags-5 arm dispatches Number×Number → `__any_to_f64` +
   `f64.eq` (NaN self-false preserved); String×String → content eq (existing
-  `tag5StringEqThen` core); Object×Object → `ref.eq` on
-  `any.convert_extern` (identity, #2585/#2734); Undefined×Undefined →
-  true; mixed → false (strict) / loose-eq coercion rules unchanged.
-  Also: `__any_typeof` tag-5 arm, `typeof-delete.ts` direct tag-list,
-  `__json_stringify` tag-5 arm, `dyn-read.ts` routing → same classifier.
-  Requires S2 landed. Full merge_group + standalone floor + the −162
-  canary cluster explicitly re-run.
+  `tag5StringEqThen` core); Object×Object → `ref.eq` (identity,
+  #2585/#2734); else legacy `0`. S3-remaining:
+  (a) flip the default ON — gated on enough #3032 waves that the standalone
+  floor A/B clears (the flip's "regressions" are unmaskings of still-eager
+  generator shapes; `gen-meth-*` method generators are the known residue,
+  #3032 W4 — the 24-sample flip delta is 4 fails / 2 fixes, all gen-meth);
+  (b) the OTHER tag-trusting consumers (`__any_typeof` tag-5 arm,
+  `typeof-delete.ts` direct tag-list, `__json_stringify` tag-5 arm,
+  `dyn-read.ts` routing) via a shared `emitTag5TrueClass`;
+  (c) NEW S2 finding — mixed-provenance equal numbers (tag-5 `$BoxedNumber`
+  × honest tag-2/3) compare UNEQUAL in strict eq: the classifier fixes the
+  both-tags-5 cell only; the cross-tag cell needs the Number true-class
+  admitted into `__any_strict_eq`'s numeric-class gate (the other half of
+  isSameValue honesty — measure as its own slice; the historical "14
+  regressions" verdict against cross-tag broadening predates the lazy fix).
+  Full merge_group + standalone floor + the −162 canary cluster explicitly
+  re-run on the flip.
 - **S4 (the flip):** `honestAnyBoxing` default ON for standalone/wasi +
   `__any_from_extern` fallback honesty (objects → tag 6; the
   `__extern_strict_eq` identity fast-path becomes redundant, kept one

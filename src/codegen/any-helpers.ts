@@ -104,6 +104,145 @@ export function emitIsUndefinedSingleton(ctx: CodegenContext, fctx: FunctionCont
 }
 
 /**
+ * (#2106 S1) Is the `undefinedSingleton` regime ACTIVE for this module?
+ * True only when the flag is set AND we are in standalone/native-strings mode
+ * (host mode has a real host `undefined` via `__get_undefined` and is never
+ * affected). Every producer/consumer flip of the S1 sweep gates on this, so
+ * flag-off (default) modules are byte-identical to legacy.
+ */
+export function undefinedSingletonActive(ctx: CodegenContext): boolean {
+  return ctx.undefinedSingleton === true && (ctx.standalone || ctx.nativeStrings);
+}
+
+/**
+ * (#2106 S1) Push the `$undefined` singleton as an EXTERNREF (the externref-
+ * plane representation of `undefined` under the `undefinedSingleton` regime).
+ * Returns false (emitting nothing) when the regime is inactive or the
+ * singleton cannot be reserved — callers keep their legacy `ref.null.extern`.
+ */
+export function emitUndefinedExtern(ctx: CodegenContext, fctx: FunctionContext): boolean {
+  if (!undefinedSingletonActive(ctx)) return false;
+  if (!emitUndefinedSingleton(ctx, fctx)) return false;
+  fctx.body.push({ op: "extern.convert_any" } as Instr);
+  return true;
+}
+
+/**
+ * (#2106 S1) The externref-plane "undefined singleton" INSTRUCTION SEQUENCE for
+ * baked native bodies: `global.get $undefined; extern.convert_any`. Returns
+ * undefined when the regime is inactive (callers keep `ref.null.extern`).
+ * Reserves the singleton (via ensureAnyValueType) on first use.
+ */
+export function undefinedExternInstrs(ctx: CodegenContext): Instr[] | undefined {
+  if (!undefinedSingletonActive(ctx)) return undefined;
+  if (ctx.undefinedGlobalIdx === undefined) {
+    ensureAnyValueType(ctx);
+    if (ctx.undefinedGlobalIdx === undefined) return undefined;
+  }
+  return [{ op: "global.get", index: ctx.undefinedGlobalIdx } as Instr, { op: "extern.convert_any" } as Instr];
+}
+
+/**
+ * (#2106 S1) Build the flagged "is this externref `undefined`?" body for a
+ * `(externref) -> i32` native (param 0 = the value, `scratchAnyLocal` = an
+ * anyref local). Under the singleton regime the predicate is:
+ *   tag-1 `$AnyValue` box (the singleton, or any tag-1 box)  ∨
+ *   `$BoxedNumber` carrying the UNDEF_F64 sentinel bits (#2979 arm)
+ * and — critically — NOT `ref.is_null` (null is DISTINCT from undefined here;
+ * a null externref answers 0 through the failing `ref.test`s).
+ * Returns undefined when the regime is inactive or `$AnyValue` is unavailable
+ * (callers keep their legacy `ref.is_null`-based body).
+ */
+export function buildIsUndefinedExternBody(
+  ctx: CodegenContext,
+  scratchAnyLocal: number,
+  undefF64Bits: bigint,
+): Instr[] | undefined {
+  if (!undefinedSingletonActive(ctx)) return undefined;
+  if (ctx.anyValueTypeIdx < 0) ensureAnyValueType(ctx);
+  if (ctx.anyValueTypeIdx < 0) return undefined;
+  const anyTypeIdx = ctx.anyValueTypeIdx;
+  const boxedNumArm: Instr[] =
+    ctx.nativeBoxNumberTypeIdx >= 0
+      ? [
+          { op: "local.get", index: scratchAnyLocal },
+          { op: "ref.test", typeIdx: ctx.nativeBoxNumberTypeIdx },
+          {
+            op: "if",
+            blockType: { kind: "val", type: { kind: "i32" } },
+            then: [
+              { op: "local.get", index: scratchAnyLocal },
+              { op: "ref.cast", typeIdx: ctx.nativeBoxNumberTypeIdx },
+              { op: "struct.get", typeIdx: ctx.nativeBoxNumberTypeIdx, fieldIdx: 0 },
+              { op: "i64.reinterpret_f64" },
+              { op: "i64.const", value: undefF64Bits },
+              { op: "i64.eq" },
+            ],
+            else: [{ op: "i32.const", value: 0 }],
+          } as Instr,
+        ]
+      : [{ op: "i32.const", value: 0 } as Instr];
+  return [
+    // any = any.convert_extern(v)  (null externref → null anyref: both
+    // ref.tests below answer 0, so null → NOT undefined, as required.)
+    { op: "local.get", index: 0 },
+    { op: "any.convert_extern" } as Instr,
+    { op: "local.tee", index: scratchAnyLocal },
+    { op: "ref.test", typeIdx: anyTypeIdx },
+    {
+      op: "if",
+      blockType: { kind: "val", type: { kind: "i32" } },
+      then: [
+        { op: "local.get", index: scratchAnyLocal },
+        { op: "ref.cast", typeIdx: anyTypeIdx },
+        { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 0 },
+        { op: "i32.const", value: 1 },
+        { op: "i32.eq" },
+      ],
+      else: boxedNumArm,
+    } as Instr,
+  ];
+}
+
+/**
+ * (#2106 S1) Emit a test that the externref in local `externLocalIdx` is a
+ * tag-1 `$AnyValue` box (the `$undefined` singleton shape) — leaving an i32.
+ * Deliberately does NOT include the #2979 UNDEF_F64 `$BoxedNumber` arm: this
+ * is for CONTAINER-position checks (destructure guard) where the boxed
+ * sentinel can be a scalarized `[undefined]` array, not undefined itself
+ * (the #3010 55-test regression). `scratchAnyIdx` must be an anyref local.
+ * Returns false (emitting nothing) when the regime is inactive.
+ */
+export function emitIsUndefinedSingletonExternAt(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  externLocalIdx: number,
+  scratchAnyIdx: number,
+): boolean {
+  if (!undefinedSingletonActive(ctx)) return false;
+  if (ctx.anyValueTypeIdx < 0) ensureAnyValueType(ctx);
+  if (ctx.anyValueTypeIdx < 0) return false;
+  const t = ctx.anyValueTypeIdx;
+  fctx.body.push({ op: "local.get", index: externLocalIdx } as Instr);
+  fctx.body.push({ op: "any.convert_extern" } as Instr);
+  fctx.body.push({ op: "local.tee", index: scratchAnyIdx } as Instr);
+  fctx.body.push({ op: "ref.test", typeIdx: t } as Instr);
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "val", type: { kind: "i32" } },
+    then: [
+      { op: "local.get", index: scratchAnyIdx },
+      { op: "ref.cast", typeIdx: t },
+      { op: "struct.get", typeIdx: t, fieldIdx: 0 },
+      { op: "i32.const", value: 1 },
+      { op: "i32.eq" },
+    ],
+    else: [{ op: "i32.const", value: 0 }],
+  } as Instr);
+  return true;
+}
+
+/**
  * Lazily register wrapper struct types for Number, String, Boolean.
  * Each wrapper is a struct with a single `value` field holding the primitive.
  * Also registers WrapperX_valueOf functions that extract the value.
@@ -261,8 +400,21 @@ export function ensureAnyFromExternHelper(ctx: CodegenContext): number | undefin
   // `anyStrTypeIdx` — without the string test a genuine string would
   // mis-classify as tag-6 object, so fall back to the legacy arms instead.
   const honest = ctx.honestAnyBoxing === true && ctx.anyStrTypeIdx >= 0;
-  const nullAny: Instr[] =
-    honest && ctx.undefinedGlobalIdx !== undefined
+  // (#2106 S1) Under the `undefinedSingleton` regime a NULL externref means JS
+  // NULL (undefined is the non-null tag-1 singleton, recovered exactly by the
+  // `ref.test $AnyValue` arm below) — so the null arm boxes tag-0. This is
+  // what makes the tag-0 → tag-1 round-trip lie (see `__any_to_extern`'s tail
+  // comment) actually FIXED in the flag regime. Legacy/honest arms unchanged.
+  const nullAny: Instr[] = undefinedSingletonActive(ctx)
+    ? [
+        { op: "i32.const", value: 0 },
+        { op: "i32.const", value: 0 },
+        { op: "f64.const", value: 0 },
+        { op: "ref.null", typeIdx: EQ_HEAP_TYPE },
+        { op: "ref.null.extern" },
+        { op: "struct.new", typeIdx: anyTypeIdx },
+      ]
+    : honest && ctx.undefinedGlobalIdx !== undefined
       ? [{ op: "global.get", index: ctx.undefinedGlobalIdx } as Instr]
       : [
           { op: "i32.const", value: 1 },
@@ -629,11 +781,29 @@ export function ensureAnyToExternHelper(ctx: CodegenContext): number | undefined
         { op: "return" },
       ],
     },
+    // (#2106 S1) Under the `undefinedSingleton` regime tag 0 (null) unwraps to
+    // its canonical externref-plane representation `ref.null.extern` — and the
+    // round-trip is SAFE there because `__any_from_extern`'s null arm boxes
+    // tag-0 back (not the legacy tag-1). Tag 1 (undefined) stays wrapped: an
+    // extern-wrapped tag-1 `$AnyValue` IS the regime's undefined representation
+    // (all predicates are tag-keyed, not identity-keyed).
+    ...(undefinedSingletonActive(ctx)
+      ? ([
+          { op: "local.get", index: 1 },
+          { op: "i32.eqz" },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [{ op: "ref.null.extern" }, { op: "return" }],
+          },
+        ] as Instr[])
+      : []),
     // Tags 0 (null), 1 (undefined), 5 (string), 6 (GC ref): keep the WHOLE
     // $AnyValue box wrapped via extern.convert_any. Standalone/WASI has no host
     // that needs unwrapped values, and __any_from_extern recovers the wrapped
     // box exactly via its `ref.test $AnyValue` arm — preserving the tag and
-    // reference identity. Unwrapping these here was NOT round-trip-safe:
+    // reference identity. Unwrapping these here was NOT round-trip-safe (in the
+    // legacy regime; see the S1 arm above for the flagged tag-0 exception):
     //   - tag 0 came back as tag 1 (null → undefined across every boundary),
     //   - tag 6 (raw struct) was mis-tagged as tag 5 (string) by the
     //     __any_from_extern fallback.
@@ -793,6 +963,110 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
     return [{ op: "i32.const", value: 0 } as Instr];
   };
 
+  // (#2141 S2/S3, #2626 — flag-gated, OFF by default) The three-way tag-5
+  // boxed-VALUE true-class classifier for the both-tags-5 arm of
+  // `__any_eq`/`__any_strict_eq`: Number×Number → `f64.eq` over
+  // `__any_to_f64` recovery (#2040; NaN self-false preserved), String×String
+  // → guarded content eq (the landed #1888 arm), Object×Object → `ref.eq`
+  // identity (#2585), else legacy `0`. Gated on `ctx.tag5ValueEqClassifier`
+  // (CompileOptions; `JS2WASM_TAG5_CLASSIFIER=1` env defaults it on for
+  // whole-runner A/B). OFF ⇒ byte-identical legacy: only the guarded string
+  // arm, so non-string tag-5 pairs answer `0` — which also makes a lie-boxed
+  // value SELF-unequal (fake NaN). The test262 comparator `isSameValue`
+  // (`a===b || (a!==a && b!==b)`) therefore answers TRUE for EVERY pair of
+  // lie-boxed operands — the vacuous-pass mask that made #1888's classifier
+  // eject at −162: the arms don't break dstr, they UNMASK latent failures of
+  // the eager-buffer generator fixture (see #2141 S2 root cause + #3032).
+  // Enable by default only after the #3032 waves land.
+  // GATE (pitfall from sd-3's attempt, memory
+  // reference_2040_tag5_field4_three_way_classifier: never gate the numeric
+  // arm on string availability): the classifier builds whenever the flag is
+  // on in standalone/wasi. The STRING arm needs the native content-eq
+  // (`canNativeStrEq`); in a module with NO string type at all
+  // (`anyStrTypeIdx < 0`, e.g. a pure-numeric program) tag-5 $AnyString
+  // payloads cannot exist, so the string arm is safely OMITTED and the
+  // numeric/object arms still work. If strings exist but content-eq is
+  // unavailable (host-import-only shapes), fall back to legacy entirely —
+  // classifying without a string arm would send equal-content distinct
+  // strings into the object `ref.eq` arm (wrong false).
+  const tag5ValueEqThen = (): Instr[] => {
+    if (!ctx.tag5ValueEqClassifier || !(ctx.standalone === true || ctx.wasi === true)) return tag5StringEqThen();
+    if (!canNativeStrEq && ctx.anyStrTypeIdx >= 0) return tag5StringEqThen();
+    const recoverAny = (operandIdx: number, scratchIdx: number): Instr[] => [
+      { op: "local.get", index: operandIdx } as Instr,
+      { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 4 } as Instr,
+      { op: "any.convert_extern" } as Instr,
+      { op: "local.set", index: scratchIdx } as Instr,
+    ];
+    const castFlatten = (scratchIdx: number): Instr[] => [
+      { op: "local.get", index: scratchIdx } as Instr,
+      { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr,
+      { op: "call", funcIdx: nativeStrFlattenIdx } as Instr,
+    ];
+    const bothTest = (typeIdx: number): Instr[] => [
+      { op: "local.get", index: 4 } as Instr,
+      { op: "ref.test", typeIdx } as Instr,
+      { op: "local.get", index: 5 } as Instr,
+      { op: "ref.test", typeIdx } as Instr,
+      { op: "i32.and" } as Instr,
+    ];
+    const EQ = -19;
+    const objectArm: Instr[] = [
+      ...bothTest(EQ),
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "i32" } },
+        then: [
+          { op: "local.get", index: 4 } as Instr,
+          { op: "ref.cast", typeIdx: EQ } as Instr,
+          { op: "local.get", index: 5 } as Instr,
+          { op: "ref.cast", typeIdx: EQ } as Instr,
+          { op: "ref.eq" } as Instr,
+        ],
+        else: [{ op: "i32.const", value: 0 } as Instr],
+      } as Instr,
+    ];
+    // String arm only when the module HAS a string type (see gate note above);
+    // a string-free module cannot carry $AnyString payloads in tag-5 boxes.
+    const stringArm: Instr[] = canNativeStrEq
+      ? [
+          ...bothTest(ctx.anyStrTypeIdx),
+          {
+            op: "if",
+            blockType: { kind: "val", type: { kind: "i32" } },
+            then: [...castFlatten(4), ...castFlatten(5), { op: "call", funcIdx: nativeStrEqualsIdx } as Instr],
+            else: objectArm,
+          } as Instr,
+        ]
+      : objectArm;
+    // Numeric arm requires the native $BoxedNumber type (always registered in
+    // standalone/wasi before the eq helpers build — union imports first); the
+    // S2 bisect (2026-07-04) confirmed the numeric AND object arms EACH
+    // independently unmask the dstr canary, so there is no safe arm subset.
+    const numericArm: Instr[] =
+      ctx.nativeBoxNumberTypeIdx >= 0
+        ? [
+            ...bothTest(ctx.nativeBoxNumberTypeIdx),
+            {
+              op: "if",
+              blockType: { kind: "val", type: { kind: "i32" } },
+              then: [
+                { op: "local.get", index: 0 } as Instr,
+                { op: "call", funcIdx: toF64IdxFwd() } as Instr,
+                { op: "local.get", index: 1 } as Instr,
+                { op: "call", funcIdx: toF64IdxFwd() } as Instr,
+                { op: "f64.eq" } as Instr,
+              ],
+              else: stringArm,
+            } as Instr,
+          ]
+        : stringArm;
+    return [...recoverAny(0, 4), ...recoverAny(1, 5), ...numericArm];
+  };
+  // __any_to_f64 is registered later in this function; resolve at build time
+  // of the eq helpers (they are added after it, so the map lookup is safe).
+  const toF64IdxFwd = (): number => ctx.funcMap.get("__any_to_f64")!;
+
   // Helper to register a helper function
   function addHelper(
     name: string,
@@ -913,6 +1187,100 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
       { op: "struct.new", typeIdx: anyTypeIdx },
     ],
   );
+
+  // (#2106 S1, flag-only) __any_box_extern_s1(val: externref) -> ref $AnyValue
+  //
+  // NULLISH-honest externref boxing for the `undefinedSingleton` regime:
+  //   null extern                    → tag-0 box (JS null)
+  //   tag-1 `$AnyValue` (singleton)  → recovered exactly (tag-1)
+  //   `$BoxedNumber` w/ UNDEF_F64    → tag-1 box (undefined through f64 lane)
+  //   everything else               → the legacy tag-5 box (#1888 lie KEPT)
+  // Rationale: full honest classification is #2141's flag (measured −788/−794
+  // when flipped alone — the comparator depends on the tag-5 lie for
+  // non-nullish values). S1 only needs the NULLISH partition honest so
+  // `__any_strict_eq`/`__any_eq`/`__any_to_string`/`__any_to_f64` (already
+  // tag-correct) observe null≠undefined; the non-nullish arms stay
+  // byte-equivalent to `__any_box_string`.
+  if (undefinedSingletonActive(ctx) && ctx.undefinedGlobalIdx !== undefined) {
+    const undefBoxInstrs: Instr[] = [{ op: "global.get", index: ctx.undefinedGlobalIdx } as Instr];
+    addHelper(
+      "__any_box_extern_s1",
+      [{ kind: "externref" }],
+      [anyRef],
+      [
+        { op: "local.get", index: 0 },
+        { op: "ref.is_null" },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            { op: "i32.const", value: 0 },
+            { op: "i32.const", value: 0 },
+            { op: "f64.const", value: 0 },
+            { op: "ref.null", typeIdx: EQ_HEAP_TYPE },
+            { op: "ref.null.extern" },
+            { op: "struct.new", typeIdx: anyTypeIdx },
+            { op: "return" },
+          ],
+        },
+        { op: "local.get", index: 0 },
+        { op: "any.convert_extern" },
+        { op: "local.tee", index: 1 },
+        { op: "ref.test", typeIdx: anyTypeIdx },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            // tag-1 box (the singleton or any undefined box) → recover exactly.
+            // Other wrapped tags fall through to the legacy tag-5 wrap below,
+            // preserving the legacy double-wrap behaviour for non-nullish.
+            { op: "local.get", index: 1 },
+            { op: "ref.cast", typeIdx: anyTypeIdx },
+            { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 0 },
+            { op: "i32.const", value: 1 },
+            { op: "i32.eq" },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [{ op: "local.get", index: 1 }, { op: "ref.cast", typeIdx: anyTypeIdx }, { op: "return" }],
+            } as Instr,
+          ],
+        },
+        ...(ctx.nativeBoxNumberTypeIdx >= 0
+          ? ([
+              // UNDEF_F64-sentinel $BoxedNumber → undefined (tag-1 singleton).
+              { op: "local.get", index: 1 },
+              { op: "ref.test", typeIdx: ctx.nativeBoxNumberTypeIdx },
+              {
+                op: "if",
+                blockType: { kind: "empty" },
+                then: [
+                  { op: "local.get", index: 1 },
+                  { op: "ref.cast", typeIdx: ctx.nativeBoxNumberTypeIdx },
+                  { op: "struct.get", typeIdx: ctx.nativeBoxNumberTypeIdx, fieldIdx: 0 },
+                  { op: "i64.reinterpret_f64" },
+                  { op: "i64.const", value: 0x7ff00000deadc0den },
+                  { op: "i64.eq" },
+                  {
+                    op: "if",
+                    blockType: { kind: "empty" },
+                    then: [...undefBoxInstrs.map((i) => ({ ...i }) as Instr), { op: "return" } as Instr],
+                  } as Instr,
+                ],
+              } as Instr,
+            ] as Instr[])
+          : []),
+        // legacy tag-5 wrap (byte-equivalent to __any_box_string)
+        { op: "i32.const", value: 5 },
+        { op: "i32.const", value: 0 },
+        { op: "f64.const", value: 0 },
+        { op: "ref.null", typeIdx: EQ_HEAP_TYPE },
+        { op: "local.get", index: 0 },
+        { op: "struct.new", typeIdx: anyTypeIdx },
+      ],
+      [{ name: "any", type: { kind: "anyref" } }],
+    );
+  }
 
   // __any_box_ref(val: eqref) -> ref $AnyValue
   // tag=6, i32val=0, f64val=0.0, refval=val, externval=null
@@ -1830,7 +2198,7 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
                                 // (ejected #1888 from the standalone floor). Those arms move
                                 // to the value-rep substrate (#2580 M2 / #35). The guarded
                                 // string path keeps #2579 boxed-string-eq + #2583 search.
-                                then: tag5StringEqThen(),
+                                then: tag5ValueEqThen(),
                                 else: [
                                   // null/undefined (tag < 2): both same tag → equal
                                   { op: "local.get", index: 2 },
@@ -2006,7 +2374,7 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
                                 // (ejected #1888 from the standalone floor). Those arms move
                                 // to the value-rep substrate (#2580 M2 / #35). The guarded
                                 // string path keeps #2579 boxed-string-eq + #2583 search.
-                                then: tag5StringEqThen(),
+                                then: tag5ValueEqThen(),
                                 else: [
                                   // null/undefined (tag < 2): both same tag → equal
                                   { op: "local.get", index: 2 },

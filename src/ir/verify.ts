@@ -19,7 +19,7 @@
 // On failure, returns a list of `IrVerifyError`s rather than throwing, so
 // callers can decide whether to bail or fall back to the legacy path.
 
-import type { IrBlock, IrFunction, IrInstr, IrType, IrValueId } from "./nodes.js";
+import type { IrBlock, IrFunction, IrInstr, IrLabelId, IrType, IrValueId } from "./nodes.js";
 import { asVal, forEachInstrDeep, forEachNestedBuffer } from "./nodes.js";
 import type { ValType } from "./types.js";
 // #2949 slice 1 — canonical JsTag policy for the dynamic-operand rules
@@ -253,6 +253,39 @@ export function verifyIrFunction(func: IrFunction): IrVerifyError[] {
     }
   }
 
+  // (#2856) Same #1798 gate for `early.return` instrs inside nested buffers —
+  // a Wasm `return` carries the function's result values, so a mis-typed
+  // early-return value would produce invalid Wasm at instantiate time. Flag
+  // it here so the function demotes to legacy instead.
+  for (const block of func.blocks) {
+    for (const instr of block.instrs) {
+      forEachInstrDeep(instr, (i) => {
+        if (i.kind !== "early.return") return;
+        const arity = i.value !== null ? 1 : 0;
+        if (arity !== func.resultTypes.length) {
+          errors.push({
+            message: `early.return arity ${arity} != declared result arity ${func.resultTypes.length}`,
+            func: func.name,
+            block: block.id as number,
+          });
+          return;
+        }
+        if (i.value === null) return;
+        const actual = operandIrType(func, block, i.value, new Set());
+        if (!actual) return; // not locally visible — SSA-scope check reports it
+        if (!returnTypeAssignable(actual, func.resultTypes[0]!)) {
+          errors.push({
+            message:
+              `early.return value type ${describeKind(actual)} not assignable to declared ` +
+              `result ${describeKind(func.resultTypes[0]!)}`,
+            func: func.name,
+            block: block.id as number,
+          });
+        }
+      });
+    }
+  }
+
   return errors;
 }
 
@@ -267,6 +300,24 @@ export function verifyIrFunction(func: IrFunction): IrVerifyError[] {
  * an unambiguous mismatch.
  */
 function returnTypeAssignable(actual: IrType, declared: IrType): boolean {
+  // #2949 slice 3 — R6 HARDENING: a `dynamic` declared result accepts ONLY a
+  // dynamic value (bare or tag-refined). Before slice 3 this fell through to
+  // the lenient both-reference-shaped arm below, which PASSED a bare
+  // `(ref $C)` / string / closure into a dynamic result — but the lowering
+  // of that flow is only valid through an explicit `box` (a raw struct ref
+  // is not an `$AnyValue` subtype in fast mode, and host mode needs the
+  // `extern.convert_any` re-tag the box arm emits). Slice 2's move-only
+  // producers never emit the flow (dyn return args are dyn-shaped by the
+  // scan), so this is zero-delta today; it exists so the FIRST producer
+  // that widens returns is forced through `box{toType: dynamic}` instead of
+  // silently emitting invalid Wasm (the latent trap the slice-2 handoff
+  // flagged). The dual direction (dynamic value into a non-dynamic declared
+  // result) keeps its existing arms: scalar results reject below via
+  // `asVal(dynamic) === null`; externref results legitimately accept the
+  // carrier (host: identity; fast: the return path's extern re-tag).
+  if (declared.kind === "dynamic") {
+    return actual.kind === "dynamic";
+  }
   const a = asVal(actual);
   const d = asVal(declared);
   const isScalar = (v: ValType | null): boolean =>
@@ -357,15 +408,30 @@ function verifyBlock(
       block: here,
     });
   };
-  const walkBuffer = (instrs: readonly IrInstr[]): void => {
-    for (const instr of instrs) {
+  // #2952 slice 2 — the label environment: the set of loop labels bound by
+  // enclosing loops IN THE SAME BUFFER-NESTING CHAIN. A `br.label` is valid
+  // iff its label is in scope here; this walk mirrors the lowering-time
+  // ctrlStack, so verifier acceptance implies the depth resolver finds a
+  // frame. Loop BODY buffers extend the environment with the loop's label;
+  // cond/update buffers do NOT (no statement can occur there), and try/if
+  // buffers inherit unchanged (break out of a try is legal — the lowerer
+  // inlines crossed finallys).
+  const walkBuffer = (instrs: readonly IrInstr[], labelsInScope: ReadonlySet<IrLabelId>): void => {
+    const withLabel = (l: IrLabelId | undefined): ReadonlySet<IrLabelId> => {
+      if (l === undefined) return labelsInScope;
+      const next = new Set(labelsInScope);
+      next.add(l);
+      return next;
+    };
+    for (let instrIdx = 0; instrIdx < instrs.length; instrIdx++) {
+      const instr = instrs[instrIdx]!;
       // `while.loop` / `for.loop` surface `condValue` in `collectUses`, but
       // that value is *produced by the cond buffer* (which `collectUses` for
       // these kinds does not contain). Walk the cond buffer first so its def
       // is registered before we validate the `condValue` use — otherwise it
       // would spuriously read as use-before-def. (#1844)
       if (instr.kind === "while.loop" || instr.kind === "for.loop") {
-        walkBuffer(instr.cond);
+        walkBuffer(instr.cond, labelsInScope);
         // The lowerer emits an unconditional `i32.eqz` on `condValue`, so a
         // non-i32 cond produces invalid Wasm that bricks the whole module.
         // Reject it here (the lowerer's #1980 fix throws a fallback before
@@ -375,6 +441,42 @@ function verifyBlock(
         if (condT && asVal(condT)?.kind !== "i32") {
           errors.push({
             message: `${instr.kind} condValue must be i32, got ${asVal(condT)?.kind ?? condT.kind}`,
+            func: func.name,
+            block: block.id as number,
+          });
+        }
+      }
+
+      // #2952 slice 2 — br.label rules: (a) the label must be bound by an
+      // enclosing loop in this buffer-nesting chain, (b) the instr must
+      // terminate its buffer (control cannot fall through; from-ast stops
+      // emitting after a break/continue, so trailing instrs are a producer
+      // bug, not dead code to tolerate).
+      if (instr.kind === "br.label") {
+        if (!labelsInScope.has(instr.label)) {
+          errors.push({
+            message: `br.label(${instr.label as number}, ${instr.mode}) targets no enclosing loop label`,
+            func: func.name,
+            block: block.id as number,
+          });
+        }
+        if (instrIdx !== instrs.length - 1) {
+          errors.push({
+            message: `br.label must be the last instruction in its buffer (found at ${instrIdx} of ${instrs.length})`,
+            func: func.name,
+            block: block.id as number,
+          });
+        }
+      }
+
+      // #2952 slice 2 — if.stmt cond must be i32: the lowerer emits a Wasm
+      // `if` directly on it (same backstop rationale as the loop condValue
+      // check above).
+      if (instr.kind === "if.stmt") {
+        const condT = operandIrType(func, block, instr.cond, localDefs);
+        if (condT && asVal(condT)?.kind !== "i32") {
+          errors.push({
+            message: `if.stmt cond must be i32, got ${asVal(condT)?.kind ?? condT.kind}`,
             func: func.name,
             block: block.id as number,
           });
@@ -513,19 +615,24 @@ function verifyBlock(
       // for-of bodies, try/catch/finally). The nesting instr's own result is
       // registered before we descend so an arm body may reference it. The
       // loop `cond` buffer was already walked above, so skip it here.
+      // (#2952 slice 2) Loop BODY buffers extend the label environment with
+      // the loop's label; every other buffer inherits it unchanged.
       if (instr.kind === "while.loop") {
-        walkBuffer(instr.body);
+        walkBuffer(instr.body, withLabel(instr.loopLabel));
       } else if (instr.kind === "for.loop") {
-        walkBuffer(instr.body);
-        walkBuffer(instr.update);
+        walkBuffer(instr.body, withLabel(instr.loopLabel));
+        walkBuffer(instr.update, labelsInScope);
+      } else if (instr.kind === "forof.vec" || instr.kind === "forof.iter" || instr.kind === "forof.string") {
+        walkBuffer(instr.body, withLabel(instr.loopLabel));
       } else {
-        // Non-loop buffer-bearing kinds (if / for-of / try). Loops are handled
-        // above so their cond buffer (already walked) isn't re-walked here.
-        forEachNestedBuffer(instr, walkBuffer);
+        // Non-loop buffer-bearing kinds (if / if.stmt / try). Loops are
+        // handled above so their cond buffer (already walked) isn't
+        // re-walked here.
+        forEachNestedBuffer(instr, (buffer) => walkBuffer(buffer, labelsInScope));
       }
     }
   };
-  walkBuffer(block.instrs);
+  walkBuffer(block.instrs, new Set());
 
   // Terminator uses must resolve to params/blockargs/local defs, or to a value
   // defined in a block that dominates this one (#1850).
@@ -683,6 +790,12 @@ function collectUses(instr: IrBlock["instrs"][number]): readonly IrValueId[] {
     case "while.loop":
     case "for.loop":
       return [instr.condValue];
+    // #2952 slice 2 — br.label has no SSA operands; if.stmt surfaces only
+    // its cond (arm-buffer uses are walked via the buffer recursion).
+    case "br.label":
+      return [];
+    case "if.stmt":
+      return [instr.cond];
     // (#1373 Phase B) Async / await IR nodes — type-only in this slice.
     // The verifier sees their operands as plain SSA uses; lowering
     // (Phase C, #1373b) will define the per-arm SSA scope.
@@ -692,6 +805,9 @@ function collectUses(instr: IrBlock["instrs"][number]): readonly IrValueId[] {
       return [instr.value];
     case "async.throw":
       return [instr.reason];
+    // (#2856) early.return — the optional return value is a direct use.
+    case "early.return":
+      return instr.value !== null ? [instr.value] : [];
   }
 }
 

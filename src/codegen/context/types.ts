@@ -93,6 +93,13 @@ export interface CodegenOptions {
    * see plan/issues/2141-tag5-abi-untangle-honest-boxing.md.
    */
   honestAnyBoxing?: boolean;
+  /** (#2141 S2/S3, #2626) Tag-5 boxed-VALUE equality classifier — see the
+   *  `CompileOptions.tag5ValueEqClassifier` doc. Default false (legacy). */
+  tag5ValueEqClassifier?: boolean;
+  /** (#2106 S1) Standalone `$undefined` tag-1 singleton regime — see the
+   *  `CompileOptions.undefinedSingleton` doc. Default false (legacy:
+   *  undefined ≡ null ≡ ref.null.extern in standalone, byte-identical). */
+  undefinedSingleton?: boolean;
   /** (#2796) Diff-test-harness fidelity: in JS-host mode, export the top-level
    *  `__module_init` and do NOT run it via the wasm `start` section, so the host
    *  invokes it AFTER `setExports` (symmetric with the standalone `_start`
@@ -877,6 +884,21 @@ export interface CodegenContext {
   capturedGlobals: Map<string, number>;
   /** Captured globals whose type was widened from ref to ref_null for null init */
   capturedGlobalsWidened: Set<string>;
+  /**
+   * (#2029 family A) Mutable-capture ref-cell boxes promoted to module
+   * globals so an accessor body can materialize a nested function's closure.
+   * When an object-literal getter/setter references a nested function `f`
+   * whose captures include a MUTABLE outer local `v`, the closure-construction
+   * code inside the accessor needs the SAME ref-cell box the enclosing
+   * function writes through — an outer-fctx local slot (`cap.outerLocalIdx`)
+   * is unreachable from the accessor's own function (baking it emit-crashed
+   * with "local index out of range", or silently read the wrong local when
+   * the stale index happened to be in range). `promoteAccessorCapturesToGlobals`
+   * boxes `v` eagerly in the enclosing fctx and aliases the box in a module
+   * global of type `(ref null $cell)`; closure-materialization sites source
+   * the capture from here when the current fctx cannot resolve it.
+   */
+  capturedBoxGlobals?: Map<string, { globalIdx: number; refCellTypeIdx: number }>;
   /** Set of class names (local classes compiled to Wasm GC structs) */
   classSet: Set<string>;
   /**
@@ -1523,6 +1545,16 @@ export interface CodegenContext {
    * the #329 native-string finalize-shift hazard. `undefined` until reserved.
    */
   undefinedGlobalIdx?: number;
+  /**
+   * (#3032 / #2141-S2) Global index of the `mut i32` `__gen_eager_mode` flag
+   * for LAZY generator-expression creation. 0 (default) = a zero-param
+   * `function*(){}` expression returns a lazy thunk generator
+   * (`__create_generator(<self closure>, null)`); the host sets the flag via
+   * the exported `__gen_set_eager` around the deferred first-`next()` body
+   * run. Reserved lazily by `ensureGenEagerFlag` (closures.ts); `undefined`
+   * until the first lazy-eligible generator expression is compiled.
+   */
+  genEagerFlagGlobalIdx?: number;
   /** Map from any-value helper name → function index */
   anyHelpers: Map<string, number>;
   /** Whether any-value helper functions have been emitted */
@@ -1858,6 +1890,17 @@ export interface CodegenContext {
    *  `CodegenOptions.honestAnyBoxing` doc. Default false (legacy tag-5
    *  box-the-externref ABI, byte-identical). */
   honestAnyBoxing: boolean;
+  /** (#2141 S2/S3, #2626) Tag-5 boxed-VALUE equality classifier — three-way
+   *  true-class dispatch in the both-tags-5 eq arm (numeric `f64.eq` /
+   *  string content / object `ref.eq`). Default false (legacy `0` for
+   *  non-string tag-5 pairs). `JS2WASM_TAG5_CLASSIFIER=1` env defaults it on
+   *  for runner-level A/B. */
+  tag5ValueEqClassifier: boolean;
+  /** (#2106 S1) Standalone `$undefined` tag-1 singleton regime flag — see the
+   *  `CompileOptions.undefinedSingleton` doc. Default false (legacy:
+   *  undefined ≡ null ≡ ref.null.extern, byte-identical). Only meaningful
+   *  under standalone/nativeStrings; host mode ignores it. */
+  undefinedSingleton: boolean;
   /** (#2796) Diff-test-harness fidelity: in JS-host mode, export the top-level
    *  `__module_init` and do NOT wire the wasm `start` section to it, so the host
    *  runs it after `setExports` (symmetric with the standalone `_start` model).

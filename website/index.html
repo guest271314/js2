@@ -1663,7 +1663,7 @@
                  baseline. Off by default so the headline number reflects
                  shipped ECMAScript only. -->
             <div class="feat-filter conformance-scope-toggle">
-              <label class="feat-toggle" style="display: none">
+              <label class="feat-toggle">
                 <input type="checkbox" id="host-support-toggle" checked />
                 <span>JS host</span>
               </label>
@@ -5177,15 +5177,38 @@ console.log(instance.exports.run()); // &rarr; 55</pre
           }
           return null;
         };
+        // Standalone honesty (host-free): a "leaky pass" passed only because the
+        // compiled Wasm still reached for a JS-host import, so it is NOT a true
+        // standalone pass. Rewrite every summary-shaped node so `pass` counts
+        // host_free_pass, pushing leaky passes into fail. Keeps the standalone
+        // donut/headline consistent with the honest host-free number (matches
+        // the per-edition slider, already generated with --host-free).
+        const applyStandaloneHostFree = (node) => {
+          if (Array.isArray(node)) {
+            node.forEach(applyStandaloneHostFree);
+            return;
+          }
+          if (!node || typeof node !== "object") return;
+          if (typeof node.host_free_pass === "number" && typeof node.total === "number") {
+            const hf = node.host_free_pass;
+            const ce = Number(node.ce) || Number(node.compile_error || 0) + Number(node.compile_timeout || 0);
+            const skip = Number(node.skip) || 0;
+            node.pass = hf;
+            node.fail = Math.max(0, node.total - hf - ce - skip);
+          }
+          for (const key of Object.keys(node)) applyStandaloneHostFree(node[key]);
+        };
         const loadStandaloneReport = async (hostReport) => {
           const embedded = standalonePayloadFromHostReport(hostReport);
           if (embedded && hasUsableSummary(embedded.summary ?? embedded.official_summary)) {
+            applyStandaloneHostFree(embedded);
             return { report: embedded, source: "test262-current.json" };
           }
           for (const url of STANDALONE_TEST262_REPORT_URLS) {
             try {
               const report = await fetchJson(url);
               if (hasUsableSummary(report?.summary ?? report?.official_summary)) {
+                applyStandaloneHostFree(report);
                 return { report, source: url };
               }
             } catch {

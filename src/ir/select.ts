@@ -303,6 +303,30 @@ export function planIrCompilation(
     options?.resolveHostGlobal && hostExternCapability(options?.jsHostExterns === true) !== "defer"
       ? options.resolveHostGlobal
       : null;
+  // (#2856 C3) Module-scope `const <m> = new Map(...)` bindings — the
+  // `<m>.get(k)` / `<m>.set(k, v)` method-call receiver arm of isPhase1Expr
+  // consults this set. JS-host lane only (same capability gate as the
+  // host-global resolver): in standalone/nativeStrings mode `Map` isn't a
+  // registered extern class, so from-ast couldn't lower the calls — the
+  // empty set keeps select↔build parity there.
+  currentModuleScopeMapConsts.clear();
+  if (hostExternCapability(options?.jsHostExterns === true) !== "defer") {
+    for (const stmt of sourceFile.statements) {
+      if (!ts.isVariableStatement(stmt)) continue;
+      if (!(stmt.declarationList.flags & ts.NodeFlags.Const)) continue;
+      for (const d of stmt.declarationList.declarations) {
+        if (
+          ts.isIdentifier(d.name) &&
+          d.initializer &&
+          ts.isNewExpression(d.initializer) &&
+          ts.isIdentifier(d.initializer.expression) &&
+          d.initializer.expression.text === "Map"
+        ) {
+          currentModuleScopeMapConsts.add(d.name.text);
+        }
+      }
+    }
+  }
   const fallbackReasons = new Map<string, IrFallbackReason>();
   // (#2856 Step-1) Parallel to `fallbackReasons`: the opt-in reject-arm detail
   // for `body-shape-rejected` entries (populated only when JS2WASM_IR_SHAPE_DIAG=1).
@@ -580,22 +604,30 @@ type IrClaimableSubject = ts.FunctionDeclaration | ts.MethodDeclaration | ts.Con
  * `deferred-feature`) cover them).
  */
 /**
- * #1804 regression guard: a `vec.new_fixed`-constructed vec read inside a
- * C-style `while`/`for` loop produces an invalid SSA program — the vec value
- * defined in the entry block is not threaded as a block-arg into the loop's
- * cond/body blocks (the `while.loop`/`for.loop` lowering, distinct from the
- * `forof.vec` path which handles it). So when the function body contains a
- * C-style loop, the array-literal selector arm withholds the claim and the
- * function reverts to the (correct) legacy path — exactly as it did before
- * #1804. `for...of` and non-loop array-literal uses are unaffected. The proper
- * fix (thread the constructed vec through the loop block-args) is a follow-up.
+ * (#2856 C1) Early-return context for the CURRENT function's body walk.
+ * Module-level for the same isPhase1* threading reason as
+ * `currentHostGlobalResolver`. The `ReturnStatement` arm of
+ * `isPhase1BodyStatement` accepts an early return only when
+ *   - `earlyReturnLoopDepth > 0` — we are inside a C-style `while`/`for`/
+ *     `do` body (the Wasm `return` op is exactly JS's early exit there), AND
+ *   - `earlyReturnBarrierDepth === 0` — NO enclosing for-of body (iterator
+ *     `return()` cleanup would be skipped), try/catch/finally body (inlined
+ *     finally would be skipped), or constructor body (returns route through
+ *     the implicit `return this` synthesis), AND
+ *   - the function is not a generator (`currentFnIsGenerator` — generator
+ *     returns route through the buffer epilogue).
+ * Mirrored by from-ast's `cx.noEarlyReturn` / `funcKind` guards so accepted
+ * shapes always lower (select↔build parity, #2138).
  */
-let currentFnHasCStyleLoop = false;
+let earlyReturnLoopDepth = 0;
+let earlyReturnBarrierDepth = 0;
+let currentFnIsGenerator = false;
+let currentFnIsVoidReturn = false;
 
 /**
  * (#2856) Host-extern resolution for the CURRENT `planIrCompilation` run.
  * Set (and cleared) at the selector entry from `IrSelectionOptions` —
- * module-level for the same reason as `currentFnHasCStyleLoop`: the
+ * module-level for the same reason as `currentHostGlobalResolver`: the
  * `isPhase1*` predicates are a deep recursion whose signatures are shared
  * with every in-flight selector slice, and threading a param through all of
  * them would conflict with each of those PRs for zero behavioural gain.
@@ -604,32 +636,15 @@ let currentFnHasCStyleLoop = false;
  */
 let currentHostGlobalResolver: ((node: ts.Identifier) => string | undefined) | null = null;
 
-/** True if `node` (a function body) contains a `while`/`for` (C-style) loop
- *  anywhere, NOT descending into nested function/class scopes. */
-function bodyHasCStyleLoop(node: ts.Node): boolean {
-  let found = false;
-  const visit = (n: ts.Node): void => {
-    if (found) return;
-    // Don't descend into nested functions — their loops have their own scope.
-    if (
-      ts.isFunctionDeclaration(n) ||
-      ts.isFunctionExpression(n) ||
-      ts.isArrowFunction(n) ||
-      ts.isMethodDeclaration(n) ||
-      ts.isClassDeclaration(n) ||
-      ts.isClassExpression(n)
-    ) {
-      if (n !== node) return;
-    }
-    if (ts.isWhileStatement(n) || ts.isForStatement(n) || ts.isDoStatement(n)) {
-      found = true;
-      return;
-    }
-    ts.forEachChild(n, visit);
-  };
-  ts.forEachChild(node, visit);
-  return found;
-}
+/**
+ * (#2856 C3) Module-scope `const <m> = new Map(...)` binding names for the
+ * CURRENT `planIrCompilation` run (JS-host lane only — cleared/refilled at
+ * the selector entry). Receiver acceptance for `<m>.get(k)` / `<m>.set(k, v)`
+ * method calls; the from-ast identifier arm resolves the same binding via
+ * `resolver.getModuleScopeExternBinding` (the legacy `__mod_<name>` global +
+ * extern-class brand), so accepted shapes always lower.
+ */
+const currentModuleScopeMapConsts = new Set<string>();
 
 function whyNotIrClaimable(
   fn: IrClaimableSubject,
@@ -774,11 +789,11 @@ function whyNotIrClaimable(
 
   const body = fn.body;
   if (!body) return "body-shape-rejected";
-  // #1804 regression guard — record whether this function has a C-style loop,
-  // so the array-literal arm of isPhase1Expr withholds the vec.new_fixed claim
-  // (see bodyHasCStyleLoop). Scoped per-function; the body walk below runs
-  // synchronously so the flag is valid for the duration of this call.
-  currentFnHasCStyleLoop = bodyHasCStyleLoop(body);
+  // (#2856 C1) Reset the early-return context for this function's walk.
+  earlyReturnLoopDepth = 0;
+  earlyReturnBarrierDepth = 0;
+  currentFnIsGenerator = isGenerator;
+  currentFnIsVoidReturn = isVoidReturn;
   // #1370 Phase A: constructor bodies don't have a return-statement tail —
   // the legacy lowerer (and Phase C) synthesise the implicit `return this;`.
   // Accept the body as a list of Phase-1 body statements instead, which
@@ -786,8 +801,15 @@ function whyNotIrClaimable(
   // mirrors how try/catch/finally bodies are checked (see `isPhase1TryStatement`).
   if (ts.isConstructorDeclaration(fn)) {
     const ctorScope = new Set(scope);
-    for (const s of body.statements) {
-      if (!isPhase1BodyStatement(s, ctorScope, localClasses)) return "body-shape-rejected";
+    // (#2856 C1) Constructor bodies never take the early-return arm — their
+    // returns route through the implicit `return this` synthesis.
+    earlyReturnBarrierDepth++;
+    try {
+      for (const s of body.statements) {
+        if (!isPhase1BodyStatement(s, ctorScope, localClasses)) return "body-shape-rejected";
+      }
+    } finally {
+      earlyReturnBarrierDepth--;
     }
     return null;
   }
@@ -991,7 +1013,7 @@ function resolveReturnType(
  * All top-level FunctionDeclarations of the CURRENT `planIrCompilation` run,
  * pre-collected before Step 1 so the move-only scan can resolve CALLEE
  * param/return dynamic-ness regardless of declaration order. Module-level for
- * the same reason as `currentFnHasCStyleLoop` (threading a param through the
+ * the same reason as `currentHostGlobalResolver` (threading a param through the
  * shared `isPhase1*` recursion would conflict with every in-flight selector
  * slice). `null` outside a selector run — the scan then treats every callee
  * as non-dynamic (conservative: dyn args to it reject the claim).
@@ -1330,6 +1352,25 @@ function isPhase1StatementList(
           return shapeNo("nontail-assign-rhs", s.expression.right);
         continue;
       }
+      // (#2856 C2) element store `<id>[<idx>] = <rhs>;` as a NON-TAIL
+      // statement — quicksort's post-partition swap (`arr[i + 1] = arr[hi];
+      // arr[hi] = tmp;`). Same receiver restriction as the body-buffer arm:
+      // a plain in-scope identifier; the lowerer dispatches on its IrType.
+      if (
+        ts.isBinaryExpression(s.expression) &&
+        s.expression.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+        ts.isElementAccessExpression(s.expression.left)
+      ) {
+        const lhs = s.expression.left;
+        if (!ts.isIdentifier(lhs.expression) || !scope.has(lhs.expression.text)) {
+          return shapeNo("nontail-elemstore-recv", lhs.expression);
+        }
+        if (!isPhase1Expr(lhs.argumentExpression, scope, localClasses))
+          return shapeNo("nontail-elemstore-idx", lhs.argumentExpression);
+        if (!isPhase1Expr(s.expression.right, scope, localClasses))
+          return shapeNo("nontail-elemstore-rhs", s.expression.right);
+        continue;
+      }
       // (#2856) Catch-all for ExpressionStatements outside the accepted set:
       // mutable local assignment `x = e` / element assignment `arr[i] = e`
       // (LHS not a PropertyAccess), postfix/prefix `++`/`--`, compound
@@ -1455,37 +1496,49 @@ function isPhase1TryStatement(
   stmt: ts.TryStatement,
   scope: ReadonlySet<string>,
   localClasses: ReadonlySet<string>,
+  // #2952 slice 2 — propagated so a break/continue inside a try nested in a
+  // loop is claimable (the lowerer inlines crossed finallys before the br).
+  inLoop: boolean = false,
 ): boolean {
   if (!stmt.catchClause && !stmt.finallyBlock) return false;
 
-  // Try body: must be a Phase-1 body statement list.
-  const tryScope = new Set(scope);
-  for (const s of stmt.tryBlock.statements) {
-    if (!isPhase1BodyStatement(s, tryScope, localClasses)) return false;
-  }
-
-  if (stmt.catchClause) {
-    const catchScope = new Set(scope);
-    if (stmt.catchClause.variableDeclaration) {
-      const v = stmt.catchClause.variableDeclaration;
-      // Slice 9 only accepts identifier bindings. Destructuring catch
-      // (`catch ({message})`) defers to slice 9.5.
-      if (!ts.isIdentifier(v.name)) return false;
-      catchScope.add(v.name.text);
+  // (#2856 C1) try/catch/finally bodies are early-return BARRIERS: a Wasm
+  // `return` inside them would skip the inlined finally blocks. (#2952 s2's
+  // break/continue is different — its `br.label` lowering inlines crossed
+  // finallys, so `inLoop` propagates while the early-return arm stays barred.)
+  earlyReturnBarrierDepth++;
+  try {
+    // Try body: must be a Phase-1 body statement list.
+    const tryScope = new Set(scope);
+    for (const s of stmt.tryBlock.statements) {
+      if (!isPhase1BodyStatement(s, tryScope, localClasses, inLoop)) return false;
     }
-    for (const s of stmt.catchClause.block.statements) {
-      if (!isPhase1BodyStatement(s, catchScope, localClasses)) return false;
-    }
-  }
 
-  if (stmt.finallyBlock) {
-    const finallyScope = new Set(scope);
-    for (const s of stmt.finallyBlock.statements) {
-      if (!isPhase1BodyStatement(s, finallyScope, localClasses)) return false;
+    if (stmt.catchClause) {
+      const catchScope = new Set(scope);
+      if (stmt.catchClause.variableDeclaration) {
+        const v = stmt.catchClause.variableDeclaration;
+        // Slice 9 only accepts identifier bindings. Destructuring catch
+        // (`catch ({message})`) defers to slice 9.5.
+        if (!ts.isIdentifier(v.name)) return false;
+        catchScope.add(v.name.text);
+      }
+      for (const s of stmt.catchClause.block.statements) {
+        if (!isPhase1BodyStatement(s, catchScope, localClasses, inLoop)) return false;
+      }
     }
-  }
 
-  return true;
+    if (stmt.finallyBlock) {
+      const finallyScope = new Set(scope);
+      for (const s of stmt.finallyBlock.statements) {
+        if (!isPhase1BodyStatement(s, finallyScope, localClasses, inLoop)) return false;
+      }
+    }
+
+    return true;
+  } finally {
+    earlyReturnBarrierDepth--;
+  }
 }
 
 /**
@@ -1513,7 +1566,18 @@ function isPhase1ForOf(stmt: ts.ForOfStatement, scope: Set<string>, localClasses
   if (!isPhase1Expr(stmt.expression, scope, localClasses)) return false;
   const innerScope = new Set(scope);
   innerScope.add(decl.name.text);
-  return isPhase1BodyStatement(stmt.statement, innerScope, localClasses);
+  // (#2856 C1) A for-of body is an early-return BARRIER: the iterator-
+  // protocol drive would skip its `iter.return` cleanup on a Wasm return
+  // (whether the iterable resolves to the vec fast path is a lowering-time
+  // fact the shape walk can't see, so be conservative for all for-ofs).
+  // #2952 s2's break/continue stays claimable (`inLoop` true — its br.label
+  // targets the loop label, not a function exit).
+  earlyReturnBarrierDepth++;
+  try {
+    return isPhase1BodyStatement(stmt.statement, innerScope, localClasses, /* inLoop (#2952 s2) */ true);
+  } finally {
+    earlyReturnBarrierDepth--;
+  }
 }
 
 /**
@@ -1528,17 +1592,24 @@ function isPhase1WhileStatement(
   localClasses: ReadonlySet<string>,
 ): boolean {
   if (!isPhase1Expr(stmt.expression, scope, localClasses)) return false;
-  return isPhase1BodyStatement(stmt.statement, new Set(scope), localClasses);
+  // (#2856 C1) while bodies admit the early-return arm.
+  earlyReturnLoopDepth++;
+  try {
+    return isPhase1BodyStatement(stmt.statement, new Set(scope), localClasses, /* inLoop (#2952 s2) */ true);
+  } finally {
+    earlyReturnLoopDepth--;
+  }
 }
 
 /**
  * #2952 slice 1 — shape-check `do { body } while (cond)`. Identical
  * constraints to `while`: a Phase-1 condition expression and a Phase-1
  * body statement. The only runtime difference (body-before-cond) is a
- * lowering concern, not a shape concern — `break` / `continue` are still
- * rejected by `isPhase1BodyStatement` (no arm accepts them), so the
- * multi-exit-free subset is what's claimed. The claim is backed by
- * `lowerDoStatement` (postCond `while.loop`) — selector↔builder parity.
+ * lowering concern, not a shape concern. Slice 2 lifted the slice-1
+ * break/continue restriction: unlabeled break/continue in the body is
+ * claimable via the `inLoop` gate + `br.label` lowering. The claim is
+ * backed by `lowerDoStatement` (postCond `while.loop`) —
+ * selector↔builder parity.
  */
 function isPhase1DoStatement(
   stmt: ts.DoStatement,
@@ -1546,7 +1617,13 @@ function isPhase1DoStatement(
   localClasses: ReadonlySet<string>,
 ): boolean {
   if (!isPhase1Expr(stmt.expression, scope, localClasses)) return false;
-  return isPhase1BodyStatement(stmt.statement, new Set(scope), localClasses);
+  // (#2856 C1) do-while bodies admit the early-return arm.
+  earlyReturnLoopDepth++;
+  try {
+    return isPhase1BodyStatement(stmt.statement, new Set(scope), localClasses, /* inLoop (#2952 s2) */ true);
+  } finally {
+    earlyReturnLoopDepth--;
+  }
 }
 
 /**
@@ -1610,7 +1687,13 @@ function isPhase1ForStatement(
   }
 
   // Body: single Phase-1 body statement.
-  return isPhase1BodyStatement(stmt.statement, innerScope, localClasses);
+  // (#2856 C1) for bodies admit the early-return arm.
+  earlyReturnLoopDepth++;
+  try {
+    return isPhase1BodyStatement(stmt.statement, innerScope, localClasses, /* inLoop (#2952 s2) */ true);
+  } finally {
+    earlyReturnLoopDepth--;
+  }
 }
 
 /**
@@ -1662,11 +1745,21 @@ function isPhase1ForUpdateExpr(
  *     `<id> = <id> <op> <expr>`).
  *   - Nested `ForOfStatement`.
  */
-function isPhase1BodyStatement(stmt: ts.Statement, scope: Set<string>, localClasses: ReadonlySet<string>): boolean {
+function isPhase1BodyStatement(
+  stmt: ts.Statement,
+  scope: Set<string>,
+  localClasses: ReadonlySet<string>,
+  // #2952 slice 2 — true when an enclosing CLAIMED loop is in scope at this
+  // statement position. Loop shape-checkers pass true for their body walks;
+  // block/if/try arms propagate it. Gates the break/continue arm: an
+  // unlabeled break/continue binds the innermost loop, so it is claimable
+  // exactly when that innermost loop is itself on the IR path.
+  inLoop: boolean = false,
+): boolean {
   if (ts.isBlock(stmt)) {
     const inner = new Set(scope);
     for (const s of stmt.statements) {
-      if (!isPhase1BodyStatement(s, inner, localClasses)) return false;
+      if (!isPhase1BodyStatement(s, inner, localClasses, inLoop)) return false;
     }
     return true;
   }
@@ -1701,6 +1794,19 @@ function isPhase1BodyStatement(stmt: ts.Statement, scope: Set<string>, localClas
           if (!ts.isIdentifier(stmt.expression.left.name) && !ts.isPrivateIdentifier(stmt.expression.left.name))
             return false;
           if (!isPhase1Expr(stmt.expression.left.expression, scope, localClasses)) return false;
+          return isPhase1Expr(stmt.expression.right, scope, localClasses);
+        }
+        // (#2856 C2) element store `<id>[<idx>] = <rhs>;` — receiver
+        // restricted to a plain in-scope identifier (quicksort's `arr[i] =
+        // arr[j]`); the lowerer dispatches on its IrType (vec → the
+        // __vec_elem_set helper with full legacy grow semantics; non-vec
+        // receivers demote cleanly).
+        if (ts.isElementAccessExpression(stmt.expression.left)) {
+          const lhs = stmt.expression.left;
+          if (!ts.isIdentifier(lhs.expression) || !scope.has(lhs.expression.text)) {
+            return shapeNo("body-elemstore-recv", lhs.expression);
+          }
+          if (!isPhase1Expr(lhs.argumentExpression, scope, localClasses)) return false;
           return isPhase1Expr(stmt.expression.right, scope, localClasses);
         }
       }
@@ -1759,7 +1865,41 @@ function isPhase1BodyStatement(stmt: ts.Statement, scope: Set<string>, localClas
     return isPhase1ThrowStatement(stmt, scope, localClasses);
   }
   if (ts.isTryStatement(stmt)) {
-    return isPhase1TryStatement(stmt, scope, localClasses);
+    return isPhase1TryStatement(stmt, scope, localClasses, inLoop);
+  }
+  // #2952 slice 2 — statement-level `if` inside a body buffer (lowered as
+  // the void `if.stmt` IR instr — NOT the top-level block-CFG rewrite).
+  // Both arms are body statements; `inLoop` propagates so `if (c) break;`
+  // — the canonical multi-exit shape — is claimable.
+  if (ts.isIfStatement(stmt)) {
+    if (!isPhase1Expr(stmt.expression, scope, localClasses)) return shapeNo("body-if-cond", stmt.expression);
+    if (!isPhase1BodyStatement(stmt.thenStatement, new Set(scope), localClasses, inLoop)) return false;
+    if (stmt.elseStatement && !isPhase1BodyStatement(stmt.elseStatement, new Set(scope), localClasses, inLoop)) {
+      return false;
+    }
+    return true;
+  }
+  // #2952 slice 2 — unlabeled break / continue: claimable exactly when an
+  // enclosing CLAIMED loop binds them (labeled forms are slice 3). Backed
+  // by `lowerBreakContinueStatement` in from-ast (br.label against the
+  // innermost loop's synthesised label) — selector↔builder parity.
+  if (ts.isBreakStatement(stmt) || ts.isContinueStatement(stmt)) {
+    if (stmt.label) return shapeNo("body-labeled-break-continue", stmt);
+    if (!inLoop) return shapeNo("body-break-continue-outside-loop", stmt);
+    return true;
+  }
+  // (#2856 C1) Early `return` inside a body buffer. Sound only inside a
+  // C-style loop with no enclosing barrier (for-of / try / ctor) and never
+  // in a generator — see the module-state doc on `earlyReturnLoopDepth`.
+  if (ts.isReturnStatement(stmt)) {
+    if (currentFnIsGenerator) return shapeNo("body-return-generator", stmt);
+    if (earlyReturnLoopDepth === 0 || earlyReturnBarrierDepth > 0) {
+      return shapeNo("body-return-context", stmt);
+    }
+    if (!stmt.expression) {
+      return currentFnIsVoidReturn ? true : shapeNo("body-return-bare-nonvoid", stmt);
+    }
+    return isPhase1Expr(stmt.expression, scope, localClasses);
   }
   return shapeNo("body-unhandled-stmt", stmt);
 }
@@ -2169,8 +2309,25 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
     return isPhase1Expr(expr.operand, scope, localClasses);
   }
   if (ts.isBinaryExpression(expr)) {
-    if (!isPhase1BinaryOp(expr.operatorToken.kind))
-      return shapeNo(`expr-binary-op-${ts.tokenToString(expr.operatorToken.kind) ?? expr.operatorToken.kind}`, expr);
+    const binOp = expr.operatorToken.kind;
+    // (#2856 C3) STRICT undefined-compare — `hit !== undefined` /
+    // `x === undefined`. The `undefined` identifier isn't in scope, so the
+    // generic operand recursion would reject it; accept it specially as one
+    // operand of a strict equality. The from-ast arm dispatches on the other
+    // operand's IrType (externref-shaped → runtime `__extern_is_undefined`;
+    // never-undefined representations → constant fold). LOOSE `==`/`!=` stay
+    // rejected: `null == undefined` is true, so a nullable-ref operand would
+    // need a runtime null check this slice doesn't emit.
+    if (binOp === ts.SyntaxKind.EqualsEqualsEqualsToken || binOp === ts.SyntaxKind.ExclamationEqualsEqualsToken) {
+      const isUndefIdent = (e: ts.Expression): boolean =>
+        ts.isIdentifier(e) && e.text === "undefined" && !scope.has("undefined");
+      const leftUndef = isUndefIdent(expr.left);
+      const rightUndef = isUndefIdent(expr.right);
+      if (leftUndef && rightUndef) return true;
+      if (rightUndef) return isPhase1Expr(expr.left, scope, localClasses);
+      if (leftUndef) return isPhase1Expr(expr.right, scope, localClasses);
+    }
+    if (!isPhase1BinaryOp(binOp)) return shapeNo(`expr-binary-op-${ts.tokenToString(binOp) ?? binOp}`, expr);
     return isPhase1Expr(expr.left, scope, localClasses) && isPhase1Expr(expr.right, scope, localClasses);
   }
   if (ts.isConditionalExpression(expr)) {
@@ -2200,6 +2357,28 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
         !ts.isSpreadElement(expr.arguments[0]!)
       ) {
         return isPhase1Expr(expr.arguments[0]!, scope, localClasses);
+      }
+      // (#2856 C3) `<moduleMapConst>.get(k)` / `.set(k, v)` — the receiver is
+      // a module-scope `const <m> = new Map(...)` binding (never in the local
+      // scope set, so the generic receiver check below would reject it). The
+      // from-ast identifier arm lowers the receiver as a TDZ-checked
+      // `global.get $__mod_<m>` branded `extern:Map`; `.get`/`.set` then ride
+      // the existing extern method-call machinery (Map_get / Map_set host
+      // imports, registered by the legacy source scan). JS-host lane only —
+      // the set is empty otherwise.
+      if (
+        ts.isIdentifier(expr.expression.expression) &&
+        !scope.has(expr.expression.expression.text) &&
+        currentModuleScopeMapConsts.has(expr.expression.expression.text) &&
+        (expr.expression.name.text === "get" || expr.expression.name.text === "set")
+      ) {
+        const wantArgs = expr.expression.name.text === "get" ? 1 : 2;
+        if (expr.arguments.length !== wantArgs) return shapeNo("expr-modmap-arity", expr);
+        for (const arg of expr.arguments) {
+          if (ts.isSpreadElement(arg)) return shapeNo("expr-modmap-spread", arg);
+          if (!isPhase1Expr(arg, scope, localClasses)) return false;
+        }
+        return true;
       }
       if (!isPhase1Expr(expr.expression.expression, scope, localClasses)) return false;
       for (const arg of expr.arguments) {
@@ -2320,12 +2499,17 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
   // (mixed-type / non-scalar literals clean-fall-back there). Spread/sparse
   // stay out of scope (legacy fallback).
   if (ts.isArrayLiteralExpression(expr)) {
-    // #1804 regression guard: a constructed vec read inside a C-style
-    // while/for loop fails SSA hygiene (the vec value isn't threaded into the
-    // loop's cond/body blocks — distinct from the working forof.vec path). When
-    // this function contains such a loop, withhold the claim so the whole
-    // function reverts to the (correct) legacy path, as it did pre-#1804.
-    if (currentFnHasCStyleLoop) return shapeNo("expr-arraylit-cloop-guard-1804", expr);
+    // (#2856 C4) The #1804 guard (withhold the claim whenever the function
+    // contains a C-style loop) is RETIRED. The unsound shape it protected —
+    // a constructed vec read inside a `while`/`for` body whose SSA value
+    // wasn't threaded into the loop buffers — was fixed by the slice-12
+    // buffer machinery: uses inside loop cond/body buffers are recorded
+    // against the synthetic -1 block id, so any outer-defined value
+    // (including a `vec.new_fixed` result) is cross-block-materialized into
+    // a Wasm local before the loop op runs (see lower.ts use counting).
+    // Verified empirically: read-in-loop-body, read-in-cond, construct-in-
+    // body, nested-loop, and after-loop shapes all lower correctly and agree
+    // with legacy (tests/ir-algorithms-cluster.test.ts).
     for (const el of expr.elements) {
       if (ts.isSpreadElement(el)) return shapeNo("expr-arraylit-spread", el); // out of scope
       if (ts.isOmittedExpression(el)) return shapeNo("expr-arraylit-sparse", expr); // sparse — out of scope

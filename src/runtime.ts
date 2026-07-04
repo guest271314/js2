@@ -227,7 +227,24 @@ function _getOrVivifyFnPrototype(
  */
 const _GeneratorState = new WeakMap<
   object,
-  { buf: any[]; index: number; pendingThrow: any; retVal?: any; retDone?: boolean }
+  {
+    buf: any[];
+    index: number;
+    pendingThrow: any;
+    retVal?: any;
+    retDone?: boolean;
+    /** (#3032) LAZY thunk mode: the generator-expression closure (an opaque
+     *  wasm externref) whose deferred invocation produces the buffer. Present
+     *  only until the first `next()` (or cleared without running by
+     *  `return`/`throw` on a not-yet-started generator — spec §27.5.3.2:
+     *  resuming a suspendedStart generator abruptly completes it WITHOUT
+     *  running the body). */
+    thunk?: any;
+    /** (#3032) Runs the thunk via the module's `__call_fn_0` export with the
+     *  `__gen_set_eager` flag held, then adopts the inner eager generator's
+     *  state. Captured at `__create_generator` time (needs `callbackState`). */
+    materialize?: () => void;
+  }
 >();
 const _AsyncGeneratorState = new WeakMap<
   object,
@@ -391,6 +408,8 @@ function _getGeneratorPrototype(): any {
     if (!state) {
       throw new TypeError("Generator.prototype.next called on incompatible receiver");
     }
+    // (#3032) Lazy generator: run the deferred body now (first resume).
+    if (state.materialize) state.materialize();
     if (state.index < state.buf.length) {
       return { value: state.buf[state.index++], done: false };
     }
@@ -417,6 +436,10 @@ function _getGeneratorPrototype(): any {
     // Early termination: skip the rest of the buffer AND suppress the
     // generator's own return value — the caller-supplied `value` becomes the
     // terminal result (§27.5.3.3). Mark retDone so a later next() is terminal.
+    // (#3032) A not-yet-started lazy generator completes WITHOUT running its
+    // body (§27.5.3.2 GeneratorResumeAbrupt on suspendedStart) — drop the thunk.
+    state.thunk = undefined;
+    state.materialize = undefined;
     state.index = state.buf.length;
     state.retDone = true;
     return { value, done: true };
@@ -427,6 +450,9 @@ function _getGeneratorPrototype(): any {
     if (!state) {
       throw new TypeError("Generator.prototype.throw called on incompatible receiver");
     }
+    // (#3032) See `return` — abrupt resume of suspendedStart never runs the body.
+    state.thunk = undefined;
+    state.materialize = undefined;
     state.index = state.buf.length;
     throw e;
   });
@@ -12186,6 +12212,57 @@ assert._isSameValue = isSameValue;
           // (`_GeneratorState.get(this)`) is unaffected.
           const proto = _getGeneratorInstancePrototype();
           const obj: any = Object.create(proto);
+          // (#3032) LAZY thunk mode: a non-Array first arg is the generator-
+          // expression CLOSURE itself (an opaque wasm ref), not an eager
+          // buffer. Defer the body: on the first `next()` re-invoke the
+          // closure through the module's `__call_fn_0` export with the
+          // `__gen_set_eager` flag held — the closure then takes its
+          // historical eager-buffer path and we adopt the inner generator's
+          // state. `return`/`throw` before the first `next()` complete the
+          // generator WITHOUT running the body (spec §27.5.3.2). This fixes
+          // the eager-at-creation side effects of the buffer lowering
+          // (test262 dstr fixture: `var iter = function*(){ iterations += 1 }()`
+          // must keep iterations === 0 until a resume).
+          if (buf !== null && buf !== undefined && !Array.isArray(buf)) {
+            const st: {
+              buf: any[];
+              index: number;
+              pendingThrow: any;
+              retVal?: any;
+              thunk?: any;
+              materialize?: () => void;
+            } = { buf: [], index: 0, pendingThrow: null, retVal: undefined, thunk: buf };
+            st.materialize = () => {
+              const DBG = process.env.GEN_DEBUG === "1";
+              const thunk = st.thunk;
+              st.thunk = undefined;
+              st.materialize = undefined;
+              const exports = callbackState?.getExports?.() as any;
+              const setEager = exports?.__gen_set_eager as ((v: number) => void) | undefined;
+              const callFn0 = exports?.__call_fn_0 as ((c: any) => any) | undefined;
+              if (!setEager || !callFn0) {
+                throw new TypeError(
+                  "lazy generator: __call_fn_0/__gen_set_eager exports unavailable (host must wire setExports)",
+                );
+              }
+              let inner: any;
+              try {
+                setEager(1);
+                inner = callFn0(thunk);
+              } finally {
+                setEager(0);
+              }
+              const innerSt = _GeneratorState.get(inner);
+              if (DBG) console.error("MATERIALIZE inner=", inner, "innerSt=", innerSt);
+              if (innerSt) {
+                st.buf = innerSt.buf;
+                st.pendingThrow = innerSt.pendingThrow;
+                st.retVal = innerSt.retVal;
+              }
+            };
+            _GeneratorState.set(obj, st);
+            return obj;
+          }
           // (#2035) Read the generator's return value off the buffer's side
           // property (set by `__gen_set_return`) into the instance state so the
           // terminal `{value, done:true}` result carries it — without it ever

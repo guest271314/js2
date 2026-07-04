@@ -228,6 +228,16 @@ function fixupModuleGlobalIndices(ctx: CodegenContext, threshold: number, delta:
   if (ctx.holeGlobalIdx !== undefined && ctx.holeGlobalIdx >= threshold) {
     ctx.holeGlobalIdx += delta;
   }
+  // (#3032) Same hazard for the cached `__gen_eager_mode` flag global: a
+  // string-constant import inserted between two generator-expression
+  // emissions left the SECOND emission's `global.get` pointing one slot low
+  // (an externref global → "if[0] expected type i32, found global.get of
+  // type externref" — the fn-name-gen compile_error cluster in PR #2625's
+  // first merge_group cycle). Keep the cached index in step exactly as
+  // `newTargetGlobalIdx`/`holeGlobalIdx` above.
+  if (ctx.genEagerFlagGlobalIdx !== undefined && ctx.genEagerFlagGlobalIdx >= threshold) {
+    ctx.genEagerFlagGlobalIdx += delta;
+  }
 
   const visitedInstrs = new WeakSet<object>();
   const visitedArrays = new WeakSet<Instr[]>();
