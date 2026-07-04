@@ -312,49 +312,67 @@ export function compileIrPathFunctions(
       if (!classShape) continue;
 
       for (const member of stmt.members) {
-        // Phase B v1 — instance methods + (#3000-B) instance get/set accessors.
-        // Static members skip `self` injection and use a different funcMap
-        // entry shape; defer. Abstract methods have no body — Phase A already
-        // rejected them as `class-method`.
+        // Phase B v1 — instance methods + (#3000-B) instance get/set accessors
+        // + (#3000-C) the constructor. Static members skip `self` injection and
+        // use a different funcMap entry shape; defer. Abstract methods have no
+        // body — Phase A already rejected them as `class-method`.
+        const isCtorMember = ts.isConstructorDeclaration(member);
         const isAccessor = ts.isGetAccessorDeclaration(member) || ts.isSetAccessorDeclaration(member);
-        if (!ts.isMethodDeclaration(member) && !isAccessor) continue;
-        if (!member.name) continue;
-        const isStatic = member.modifiers?.some((m) => m.kind === ts.SyntaxKind.StaticKeyword) ?? false;
-        if (isStatic) continue;
-        if (member.modifiers?.some((m) => m.kind === ts.SyntaxKind.AbstractKeyword)) continue;
+        if (!ts.isMethodDeclaration(member) && !isAccessor && !isCtorMember) continue;
+        // Non-ctor members: skip nameless / static / abstract. A constructor
+        // carries no `.name`, is never static, and never abstract — so these
+        // guards apply only to methods / accessors.
+        if (!isCtorMember) {
+          if (!member.name) continue;
+          const isStatic = member.modifiers?.some((m) => m.kind === ts.SyntaxKind.StaticKeyword) ?? false;
+          if (isStatic) continue;
+          if (member.modifiers?.some((m) => m.kind === ts.SyntaxKind.AbstractKeyword)) continue;
+        }
 
-        // Phase A's `phase1MemberName` admits identifier / string-literal /
-        // numeric-literal — replicate the dispatch here without re-importing
-        // the helper (it's selector-private). The synthetic name format
-        // mirrors `class-bodies.ts:275` exactly.
-        let memberBaseName: string;
-        if (ts.isIdentifier(member.name)) memberBaseName = member.name.text;
-        else if (ts.isStringLiteral(member.name) || ts.isNumericLiteral(member.name)) {
-          memberBaseName = member.name.text;
-        } else continue; // computed / private name — skipped by selector
-
-        // #3000-B: accessors register under `${className}_get_${prop}` /
-        // `${className}_set_${prop}` funcMap keys (see `class-bodies.ts`); a
-        // setter is VOID (`returnTypeOverride: null`), a getter returns
-        // `member.type` unchanged. Methods keep `${className}_${name}`.
+        // #3000-C: the constructor's synthetic funcMap key is `${className}_new`
+        // (mirrors `class-bodies.ts`). Methods/accessors compute their key from
+        // the member name below.
         let memberName: string;
         let returnTypeOverride: IrType | null | undefined;
-        if (ts.isGetAccessorDeclaration(member)) {
-          memberName = `${className}_get_${memberBaseName}`;
-        } else if (ts.isSetAccessorDeclaration(member)) {
-          memberName = `${className}_set_${memberBaseName}`;
-          returnTypeOverride = null; // set accessor bodies return void
+        if (isCtorMember) {
+          memberName = `${className}_new`;
         } else {
-          memberName = `${className}_${memberBaseName}`;
+          // Phase A's `phase1MemberName` admits identifier / string-literal /
+          // numeric-literal — replicate the dispatch here without re-importing
+          // the helper (it's selector-private). The synthetic name format
+          // mirrors `class-bodies.ts:275` exactly.
+          let memberBaseName: string;
+          if (ts.isIdentifier(member.name!)) memberBaseName = member.name!.text;
+          else if (ts.isStringLiteral(member.name!) || ts.isNumericLiteral(member.name!)) {
+            memberBaseName = member.name!.text;
+          } else continue; // computed / private name — skipped by selector
+
+          // #3000-B: accessors register under `${className}_get_${prop}` /
+          // `${className}_set_${prop}` funcMap keys (see `class-bodies.ts`); a
+          // setter is VOID (`returnTypeOverride: null`), a getter returns
+          // `member.type` unchanged. Methods keep `${className}_${name}`.
+          if (ts.isGetAccessorDeclaration(member)) {
+            memberName = `${className}_get_${memberBaseName}`;
+          } else if (ts.isSetAccessorDeclaration(member)) {
+            memberName = `${className}_set_${memberBaseName}`;
+            returnTypeOverride = null; // set accessor bodies return void
+          } else {
+            memberName = `${className}_${memberBaseName}`;
+          }
         }
         if (!selected.classMembers.has(memberName)) continue;
 
         try {
+          // #3000-C: a constructor is NOT passed `__self` — it allocates the
+          // instance itself (`constructorClassShape` drives the `class.alloc` +
+          // `return this` synthesis in from-ast). Methods/accessors get the
+          // caller-supplied `selfParam` FIRST param instead.
           const result = lowerFunctionAstToIr(member, {
-            exported: false, // class methods are not directly exported
+            exported: false, // class members are not directly exported
             funcName: memberName,
-            selfParam: { type: { kind: "class", shape: classShape } as IrType },
-            returnTypeOverride,
+            ...(isCtorMember
+              ? { constructorClassShape: classShape }
+              : { selfParam: { type: { kind: "class", shape: classShape } as IrType }, returnTypeOverride }),
             calleeTypes,
             classShapes,
             resolver: fromAstResolver,
@@ -2269,6 +2287,40 @@ class RefCellRegistry {
 }
 
 /**
+ * #3000-C: the default value pushed for one struct field when allocating a
+ * fresh class instance (the `class.alloc` IR instr). Mirrors the `newBody`
+ * default switch in `class-bodies.ts` (the legacy `<className>_new` alloc
+ * prefix) EXACTLY — the `__tag` slot gets the class discrimination constant,
+ * every other field gets its ValType zero/null. Keeping this identical to the
+ * legacy switch is what makes the IR-emitted allocation byte-compatible with
+ * the struct the legacy path builds.
+ */
+function defaultFieldAllocInstr(field: FieldDef, tagValue: number): Instr {
+  if (field.name === "__tag") return { op: "i32.const", value: tagValue };
+  switch (field.type.kind) {
+    case "f64":
+      return { op: "f64.const", value: 0 };
+    case "i32":
+      return { op: "i32.const", value: 0 };
+    case "externref":
+      return { op: "ref.null.extern" };
+    case "ref":
+    case "ref_null":
+      return { op: "ref.null", typeIdx: field.type.typeIdx };
+    case "i64":
+      return { op: "i64.const", value: 0n };
+    case "eqref":
+      return { op: "ref.null.eq" };
+    default:
+      // Legacy fallback for any unhandled type — push i32 0 (mirrors
+      // class-bodies.ts). A mis-typed default can only make `struct.new`
+      // fail validation (a clean legacy fallback via the caller's try),
+      // never miscompile.
+      return { op: "i32.const", value: 0 };
+  }
+}
+
+/**
  * Slice 4 (#1169d): per-class lookup over the legacy class registry.
  *
  * The legacy `collectClassDeclaration` pass (in `class-bodies.ts`)
@@ -2323,6 +2375,20 @@ class ClassRegistry {
     const ctx = this.ctx;
     const constructorFuncName = classMemberFuncKey(ctx, `${shape.className}_new`);
 
+    // #3000-C: precompute the default-alloc instruction prefix so the
+    // `class.alloc` IR instr (used by the IR constructor-body lowering to
+    // synthesise `this`) emits the SAME allocation the legacy
+    // `<className>_new` emits before its tail-call to `<className>_init`.
+    // The field defaults + `__tag` constant mirror `class-bodies.ts`
+    // (the `newBody` loop) exactly, keyed off the SAME `legacyFields` /
+    // `classTagMap`, so the emitted `struct.new` prefix is byte-identical.
+    const tagValue = ctx.classTagMap.get(shape.className) ?? 0;
+    const allocInstrs: Instr[] = [];
+    for (const field of legacyFields) {
+      allocInstrs.push(defaultFieldAllocInstr(field, tagValue));
+    }
+    allocInstrs.push({ op: "struct.new", typeIdx: structTypeIdx });
+
     const lowering: IrClassLowering = {
       structTypeIdx,
       fieldIdx: (name: string): number => {
@@ -2339,6 +2405,7 @@ class ClassRegistry {
         // populated with stable indices. (#1983) collision-free key.
         return classMemberFuncKey(ctx, `${shape.className}_${name}`);
       },
+      allocInstrs,
     };
     this.cache.set(shape.className, lowering);
     return lowering;

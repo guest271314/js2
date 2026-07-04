@@ -85,6 +85,7 @@ function allocKindOfInstr(kind: string): AllocKind | null {
     case "string.const":
       return "string";
     case "class.new":
+    case "class.alloc": // #3000-C — fresh struct allocation (object namespace)
       return "object";
     default:
       return null;
