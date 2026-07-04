@@ -5,7 +5,7 @@ status: blocked
 assignee: ttraenkler/sd-2618
 sprint: current
 created: 2026-06-22
-updated: 2026-06-24
+updated: 2026-07-04
 reconcile_status_note: "2026-06-24 (PO reconcile vs upstream/main): Slice 1 LANDED (PR #1984, commit 1cc09f72f — pure-runtime START-timing + callable-target wrap, +1 gc row). REMAINING work (externref-callee p.call(a,b) CALL dispatch + dynamic-new construct-result routing) is gated on the deep #56 dispatch substrate (blocked_on:[56] already set). NOT dev-claimable until #56 lands. → blocked (was in-progress)."
 blocked_on: [56]
 reconcile_note: "SLICE 1 MERGED #1984 (sd-2618): pure-runtime START-timing + callable-target [[ProxyTarget]] wrap; +1 gc row (apply/call-parameters), zero regr. DEFERRED slices SCOPED+HANDED OFF 2026-06-24 (sd-2618): both apply-dispatch AND construct bottom out in the SAME root cause — the inbound __call_fn_method_N dispatcher ref.cast-ing a host JS argArray to a wasm vec struct (illegal cast). == 2623-A inbound-marshalling KEYSTONE (codegen/index.ts buildArgConversion 3356/3659). Construct codegen routing (compileNewExpression Proxy guard + constructable-target wrapper) prototyped, correct, but INERT (0 rows) without the keystone. NOT shipped — broad surface for 0 rows = #1888 floor-eject hazard. See '## Deferred slices … SCOPE+HANDOFF' for WAT evidence + ordering. Architect/2623-A territory, not a standalone dev slice."
@@ -432,3 +432,15 @@ flip for free. Forcing either deferred slice now would ship broad dispatch
 surface for **0 rows** — the #1888-class floor-eject hazard. Branch
 `issue-2618-apply-dispatch` kept pristine (all prototyped changes reverted; no
 codegen shipped).
+
+---
+
+## Architect spec pointer (2026-07-04)
+
+The inbound-marshalling keystone (2623-A) and the construct routing are now
+specced as slices **K1 / K1b** of the dynamic-MOP umbrella spec **#3031**
+(`plan/issues/3031-dynamic-mop-extensions-spec.md`, Part 1 §1.2). K1 is
+tier-marked FABLE (guarded `ref.test` + `__marshal_extern_to_vec_T` fallback
+in `buildArgConversion`, full merge_group gate); K1b (the prototyped construct
+guard + constructable-forwarder above) is OPUS-executable on top. Coordinate
+with #56 state before starting K1.

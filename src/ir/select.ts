@@ -1455,13 +1455,16 @@ function isPhase1TryStatement(
   stmt: ts.TryStatement,
   scope: ReadonlySet<string>,
   localClasses: ReadonlySet<string>,
+  // #2952 slice 2 — propagated so a break/continue inside a try nested in a
+  // loop is claimable (the lowerer inlines crossed finallys before the br).
+  inLoop: boolean = false,
 ): boolean {
   if (!stmt.catchClause && !stmt.finallyBlock) return false;
 
   // Try body: must be a Phase-1 body statement list.
   const tryScope = new Set(scope);
   for (const s of stmt.tryBlock.statements) {
-    if (!isPhase1BodyStatement(s, tryScope, localClasses)) return false;
+    if (!isPhase1BodyStatement(s, tryScope, localClasses, inLoop)) return false;
   }
 
   if (stmt.catchClause) {
@@ -1474,14 +1477,14 @@ function isPhase1TryStatement(
       catchScope.add(v.name.text);
     }
     for (const s of stmt.catchClause.block.statements) {
-      if (!isPhase1BodyStatement(s, catchScope, localClasses)) return false;
+      if (!isPhase1BodyStatement(s, catchScope, localClasses, inLoop)) return false;
     }
   }
 
   if (stmt.finallyBlock) {
     const finallyScope = new Set(scope);
     for (const s of stmt.finallyBlock.statements) {
-      if (!isPhase1BodyStatement(s, finallyScope, localClasses)) return false;
+      if (!isPhase1BodyStatement(s, finallyScope, localClasses, inLoop)) return false;
     }
   }
 
@@ -1513,7 +1516,7 @@ function isPhase1ForOf(stmt: ts.ForOfStatement, scope: Set<string>, localClasses
   if (!isPhase1Expr(stmt.expression, scope, localClasses)) return false;
   const innerScope = new Set(scope);
   innerScope.add(decl.name.text);
-  return isPhase1BodyStatement(stmt.statement, innerScope, localClasses);
+  return isPhase1BodyStatement(stmt.statement, innerScope, localClasses, /* inLoop (#2952 s2) */ true);
 }
 
 /**
@@ -1528,17 +1531,18 @@ function isPhase1WhileStatement(
   localClasses: ReadonlySet<string>,
 ): boolean {
   if (!isPhase1Expr(stmt.expression, scope, localClasses)) return false;
-  return isPhase1BodyStatement(stmt.statement, new Set(scope), localClasses);
+  return isPhase1BodyStatement(stmt.statement, new Set(scope), localClasses, /* inLoop (#2952 s2) */ true);
 }
 
 /**
  * #2952 slice 1 — shape-check `do { body } while (cond)`. Identical
  * constraints to `while`: a Phase-1 condition expression and a Phase-1
  * body statement. The only runtime difference (body-before-cond) is a
- * lowering concern, not a shape concern — `break` / `continue` are still
- * rejected by `isPhase1BodyStatement` (no arm accepts them), so the
- * multi-exit-free subset is what's claimed. The claim is backed by
- * `lowerDoStatement` (postCond `while.loop`) — selector↔builder parity.
+ * lowering concern, not a shape concern. Slice 2 lifted the slice-1
+ * break/continue restriction: unlabeled break/continue in the body is
+ * claimable via the `inLoop` gate + `br.label` lowering. The claim is
+ * backed by `lowerDoStatement` (postCond `while.loop`) —
+ * selector↔builder parity.
  */
 function isPhase1DoStatement(
   stmt: ts.DoStatement,
@@ -1546,7 +1550,7 @@ function isPhase1DoStatement(
   localClasses: ReadonlySet<string>,
 ): boolean {
   if (!isPhase1Expr(stmt.expression, scope, localClasses)) return false;
-  return isPhase1BodyStatement(stmt.statement, new Set(scope), localClasses);
+  return isPhase1BodyStatement(stmt.statement, new Set(scope), localClasses, /* inLoop (#2952 s2) */ true);
 }
 
 /**
@@ -1610,7 +1614,7 @@ function isPhase1ForStatement(
   }
 
   // Body: single Phase-1 body statement.
-  return isPhase1BodyStatement(stmt.statement, innerScope, localClasses);
+  return isPhase1BodyStatement(stmt.statement, innerScope, localClasses, /* inLoop (#2952 s2) */ true);
 }
 
 /**
@@ -1662,11 +1666,21 @@ function isPhase1ForUpdateExpr(
  *     `<id> = <id> <op> <expr>`).
  *   - Nested `ForOfStatement`.
  */
-function isPhase1BodyStatement(stmt: ts.Statement, scope: Set<string>, localClasses: ReadonlySet<string>): boolean {
+function isPhase1BodyStatement(
+  stmt: ts.Statement,
+  scope: Set<string>,
+  localClasses: ReadonlySet<string>,
+  // #2952 slice 2 — true when an enclosing CLAIMED loop is in scope at this
+  // statement position. Loop shape-checkers pass true for their body walks;
+  // block/if/try arms propagate it. Gates the break/continue arm: an
+  // unlabeled break/continue binds the innermost loop, so it is claimable
+  // exactly when that innermost loop is itself on the IR path.
+  inLoop: boolean = false,
+): boolean {
   if (ts.isBlock(stmt)) {
     const inner = new Set(scope);
     for (const s of stmt.statements) {
-      if (!isPhase1BodyStatement(s, inner, localClasses)) return false;
+      if (!isPhase1BodyStatement(s, inner, localClasses, inLoop)) return false;
     }
     return true;
   }
@@ -1759,7 +1773,28 @@ function isPhase1BodyStatement(stmt: ts.Statement, scope: Set<string>, localClas
     return isPhase1ThrowStatement(stmt, scope, localClasses);
   }
   if (ts.isTryStatement(stmt)) {
-    return isPhase1TryStatement(stmt, scope, localClasses);
+    return isPhase1TryStatement(stmt, scope, localClasses, inLoop);
+  }
+  // #2952 slice 2 — statement-level `if` inside a body buffer (lowered as
+  // the void `if.stmt` IR instr — NOT the top-level block-CFG rewrite).
+  // Both arms are body statements; `inLoop` propagates so `if (c) break;`
+  // — the canonical multi-exit shape — is claimable.
+  if (ts.isIfStatement(stmt)) {
+    if (!isPhase1Expr(stmt.expression, scope, localClasses)) return shapeNo("body-if-cond", stmt.expression);
+    if (!isPhase1BodyStatement(stmt.thenStatement, new Set(scope), localClasses, inLoop)) return false;
+    if (stmt.elseStatement && !isPhase1BodyStatement(stmt.elseStatement, new Set(scope), localClasses, inLoop)) {
+      return false;
+    }
+    return true;
+  }
+  // #2952 slice 2 — unlabeled break / continue: claimable exactly when an
+  // enclosing CLAIMED loop binds them (labeled forms are slice 3). Backed
+  // by `lowerBreakContinueStatement` in from-ast (br.label against the
+  // innermost loop's synthesised label) — selector↔builder parity.
+  if (ts.isBreakStatement(stmt) || ts.isContinueStatement(stmt)) {
+    if (stmt.label) return shapeNo("body-labeled-break-continue", stmt);
+    if (!inLoop) return shapeNo("body-break-continue-outside-loop", stmt);
+    return true;
   }
   return shapeNo("body-unhandled-stmt", stmt);
 }

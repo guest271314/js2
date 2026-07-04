@@ -263,7 +263,13 @@ function canInline(callee: IrFunction, recursiveSet: ReadonlySet<string>): boole
       inst.kind === "forof.string" ||
       inst.kind === "try" ||
       inst.kind === "while.loop" ||
-      inst.kind === "for.loop"
+      inst.kind === "for.loop" ||
+      // #2952 slice 2 — if.stmt carries nested body buffers (same deep-SSA
+      // concern as the loop kinds above); br.label references a loop label
+      // scoped to the callee (and is verifier-invalid at a block's top
+      // level anyway). Both skip conservatively.
+      inst.kind === "if.stmt" ||
+      inst.kind === "br.label"
     ) {
       return false;
     }
@@ -729,6 +735,31 @@ function renameInstrOperands(inst: IrInstr, rename: ReadonlyMap<IrValueId, IrVal
       const cv = mapId(rename, inst.condValue);
       if (cv === inst.condValue) return inst;
       return { ...inst, condValue: cv };
+    }
+    // #2952 slice 2 — br.label carries no SSA operands (label is a control
+    // identity, untouched by value renames).
+    case "br.label":
+      return inst;
+    // #2952 slice 2 — if.stmt: rename the cond + recurse into both arm
+    // buffers (same pattern as `try` above), so a caller-scope rename
+    // reaches arm-interior uses of the redirected value.
+    case "if.stmt": {
+      const cv = mapId(rename, inst.cond);
+      let changed = cv !== inst.cond;
+      const newThen: IrInstr[] = [];
+      for (const sub of inst.then) {
+        const renamed = renameInstrOperands(sub, rename);
+        if (renamed !== sub) changed = true;
+        newThen.push(renamed);
+      }
+      const newElse: IrInstr[] = [];
+      for (const sub of inst.else) {
+        const renamed = renameInstrOperands(sub, rename);
+        if (renamed !== sub) changed = true;
+        newElse.push(renamed);
+      }
+      if (!changed) return inst;
+      return { ...inst, cond: cv, then: newThen, else: newElse };
     }
     case "for.loop": {
       const cv = mapId(rename, inst.condValue);
