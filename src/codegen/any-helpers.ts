@@ -1188,6 +1188,100 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
     ],
   );
 
+  // (#2106 S1, flag-only) __any_box_extern_s1(val: externref) -> ref $AnyValue
+  //
+  // NULLISH-honest externref boxing for the `undefinedSingleton` regime:
+  //   null extern                    → tag-0 box (JS null)
+  //   tag-1 `$AnyValue` (singleton)  → recovered exactly (tag-1)
+  //   `$BoxedNumber` w/ UNDEF_F64    → tag-1 box (undefined through f64 lane)
+  //   everything else               → the legacy tag-5 box (#1888 lie KEPT)
+  // Rationale: full honest classification is #2141's flag (measured −788/−794
+  // when flipped alone — the comparator depends on the tag-5 lie for
+  // non-nullish values). S1 only needs the NULLISH partition honest so
+  // `__any_strict_eq`/`__any_eq`/`__any_to_string`/`__any_to_f64` (already
+  // tag-correct) observe null≠undefined; the non-nullish arms stay
+  // byte-equivalent to `__any_box_string`.
+  if (undefinedSingletonActive(ctx) && ctx.undefinedGlobalIdx !== undefined) {
+    const undefBoxInstrs: Instr[] = [{ op: "global.get", index: ctx.undefinedGlobalIdx } as Instr];
+    addHelper(
+      "__any_box_extern_s1",
+      [{ kind: "externref" }],
+      [anyRef],
+      [
+        { op: "local.get", index: 0 },
+        { op: "ref.is_null" },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            { op: "i32.const", value: 0 },
+            { op: "i32.const", value: 0 },
+            { op: "f64.const", value: 0 },
+            { op: "ref.null", typeIdx: EQ_HEAP_TYPE },
+            { op: "ref.null.extern" },
+            { op: "struct.new", typeIdx: anyTypeIdx },
+            { op: "return" },
+          ],
+        },
+        { op: "local.get", index: 0 },
+        { op: "any.convert_extern" },
+        { op: "local.tee", index: 1 },
+        { op: "ref.test", typeIdx: anyTypeIdx },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            // tag-1 box (the singleton or any undefined box) → recover exactly.
+            // Other wrapped tags fall through to the legacy tag-5 wrap below,
+            // preserving the legacy double-wrap behaviour for non-nullish.
+            { op: "local.get", index: 1 },
+            { op: "ref.cast", typeIdx: anyTypeIdx },
+            { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 0 },
+            { op: "i32.const", value: 1 },
+            { op: "i32.eq" },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [{ op: "local.get", index: 1 }, { op: "ref.cast", typeIdx: anyTypeIdx }, { op: "return" }],
+            } as Instr,
+          ],
+        },
+        ...(ctx.nativeBoxNumberTypeIdx >= 0
+          ? ([
+              // UNDEF_F64-sentinel $BoxedNumber → undefined (tag-1 singleton).
+              { op: "local.get", index: 1 },
+              { op: "ref.test", typeIdx: ctx.nativeBoxNumberTypeIdx },
+              {
+                op: "if",
+                blockType: { kind: "empty" },
+                then: [
+                  { op: "local.get", index: 1 },
+                  { op: "ref.cast", typeIdx: ctx.nativeBoxNumberTypeIdx },
+                  { op: "struct.get", typeIdx: ctx.nativeBoxNumberTypeIdx, fieldIdx: 0 },
+                  { op: "i64.reinterpret_f64" },
+                  { op: "i64.const", value: 0x7ff00000deadc0den },
+                  { op: "i64.eq" },
+                  {
+                    op: "if",
+                    blockType: { kind: "empty" },
+                    then: [...undefBoxInstrs.map((i) => ({ ...i }) as Instr), { op: "return" } as Instr],
+                  } as Instr,
+                ],
+              } as Instr,
+            ] as Instr[])
+          : []),
+        // legacy tag-5 wrap (byte-equivalent to __any_box_string)
+        { op: "i32.const", value: 5 },
+        { op: "i32.const", value: 0 },
+        { op: "f64.const", value: 0 },
+        { op: "ref.null", typeIdx: EQ_HEAP_TYPE },
+        { op: "local.get", index: 0 },
+        { op: "struct.new", typeIdx: anyTypeIdx },
+      ],
+      [{ name: "any", type: { kind: "anyref" } }],
+    );
+  }
+
   // __any_box_ref(val: eqref) -> ref $AnyValue
   // tag=6, i32val=0, f64val=0.0, refval=val, externval=null
   addHelper(

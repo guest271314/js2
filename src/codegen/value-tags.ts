@@ -193,6 +193,16 @@ export function boxToAny(ctx: CodegenContext, fctx: FunctionContext, from: ValTy
     // under the flag; if absent (availability preconditions unmet) fall back
     // to the legacy lie so the flag can never produce a compile-time hole.
     if (ctx.honestAnyBoxing && emit("__any_from_extern")) return true;
+    // (#2106 S1) NULLISH-honest boxing under the `undefinedSingleton` regime:
+    // null → tag-0, the singleton / UNDEF-box → tag-1, everything else keeps
+    // the legacy tag-5 wrap byte-equivalently (see __any_box_extern_s1 —
+    // deliberately NOT the full-honest #2141 classification, whose solo flip
+    // measured −788/−794). Without this, `u === miss` over two `any` operands
+    // boxes both nullish values as tag-5 "strings" and __any_strict_eq's
+    // guarded string arm answers 0.
+    if (ctx.undefinedSingleton === true && (ctx.standalone || ctx.nativeStrings) && emit("__any_box_extern_s1")) {
+      return true;
+    }
     // #1888 (regression −788/−794): do NOT route generic externref boxing
     // through honest tag recovery. The test262 harness comparator (`isSameValue`
     // over the externref ABI with `any` params) depends on main's tag-5

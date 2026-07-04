@@ -631,6 +631,58 @@ plane); null = `ref.null.extern`. Producers emit the singleton; undefined-specif
 consumers test tag-1 (∨ UNDEF-box); null-specific stay `ref.is_null`; nullish =
 either (new native `__extern_is_nullish`).
 
+### S1 flagged sweep — DELIVERED (fable-2106, 2026-07-04, this branch)
+
+Implemented the complete lockstep sweep behind `undefinedSingleton` (default
+OFF; `JS2WASM_UNDEF_SINGLETON=1` env A/B, mirroring `JS2WASM_TAG5_CLASSIFIER`):
+
+- **Producers**: `emitUndefined` → singleton; `__extern_get` 3 miss sites;
+  `__extern_get_idx` misses (builder `missInstrs` factory — fresh instr objects
+  per branch, finalize-splice safe); `boxToAny` null/undefined jsType arms →
+  `__any_box_null`/`__any_box_undefined`; `__any_from_extern` null arm → tag-0.
+- **The boxing chokepoint that made dynamic eq work**: `__any_box_extern_s1` —
+  NULLISH-honest externref boxing (null→tag-0, singleton/UNDEF-box→tag-1,
+  everything else keeps the #1888 tag-5 wrap byte-equivalently). Deliberately
+  NOT #2141's full-honest classification (its solo flip measured −788/−794).
+  Routed from `boxToAny`'s externref arm under the flag. Without it,
+  `u === miss` boxed both nullish values tag-5 and `__any_strict_eq` said 0
+  (WAT-verified).
+- **Consumers**: `__extern_is_undefined` → tag-1 ∨ UNDEF-box (drops
+  `ref.is_null`); `__extern_is_nullish` + `__nullish_to_null` natives —
+  internal null-keyed lookups (to-primitive valueOf/toString: the June 948-CE
+  site; proxy traps; descriptor fields; `__extern_method_call`; groupBy)
+  NORMALIZE nullish→null at the read so their downstream logic stays
+  byte-identical; `__is_truthy` tag≤1 falsy; typeof cluster (predicate +
+  `__typeof_object` + materialized `__typeof`): null→"object",
+  singleton→"undefined"; strict/loose dynamic-eq nullish guard in the #1776
+  cascade (the #1961 bothNullishGuard re-keyed as spec'd); `?.` receiver
+  guards OR the singleton test; `__dyn_get` stops remapping stored-null→
+  undefined, `__dyn_has` tests nullish; join renders singleton as "";
+  `__extern_toString(null)` → "null"; destructure container guard tests tag-1
+  ONLY (preserves #3010's scalarized-`[undefined]` fix).
+- **Zero-change wins** (already tag-correct, verified): `__any_strict_eq`
+  (same-tag<2 equal), `__any_eq` (both-tags<2 arm), `__any_to_string`
+  (tag-0 "null"/tag-1 "undefined"), `__any_to_f64` (tag-1 NaN),
+  `__unbox_number` (null→0, opaque→NaN), dstr/param defaults
+  (`__extern_is_undefined`-exclusive per #1021 — spec-correct under the flag),
+  `holeToUndefinedInstrs` (routes via emitUndefined).
+- **Validation**: `tests/issue-2106-s1-undefined-singleton.test.ts` — 8 flag-on
+  standalone cases (strict/loose distinctness incl. cross-producer, typeof,
+  missing-vs-stored-null property reads, dstr defaults null-kept, ??/?./
+  truthiness, ToString/ToNumber split, container-guard TypeError) + a flag-off
+  legacy control. Byte-inertness: 10-program × {gc,wasi} corpus sha256 —
+  IDENTICAL to pre-change tree with flag off.
+- **Known flag-on residuals** (pre-existing, flag-NEUTRAL — confirmed both
+  regimes behave identically): `{ b: null }` shape-struct literals read via
+  bare `__extern_get` miss the field (dstr default fires either way);
+  `.join()` on an `any` receiver; `""+arr` to-primitive of any-array.
+
+**Next steps (follow-up PRs):** (1) A/B-measure the standalone test262 delta
+with `JS2WASM_UNDEF_SINGLETON=1` (runner-level env, no code change needed);
+(2) if net-positive, flip the default in a one-line PR validated via
+merge_group; (3) S2 (sNaN carve-out codify), S3 (number|undefined→externref,
+needs the box-protocol fix), S4 (union-collapse reversal) remain per plan.
+
 ## Residual (as of #2199, PO reconcile 2026-06-28)
 
 NOT done — the referencing merged PR was a REVERT (PR #2025 auto-parked: standalone floor breach, NET -1245 test262 rows), so it is floor-neutral undo, NOT progress. S1 (standalone tag-1 $undefined singleton) still requires the FULL ~40-site producer+consumer sweep (architect re-spec) — no narrow floor-saving subset exists. S2 (sNaN carve-out), S3 (number|undefined→externref), S4 (union-collapse reversal), typeof-null→object all remain. Stays in-progress; resume-only for a senior-dev at max effort.

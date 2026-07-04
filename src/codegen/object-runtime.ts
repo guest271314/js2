@@ -2686,7 +2686,10 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       {
         op: "if",
         blockType: { kind: "val", type: { kind: "externref" } },
-        then: [{ op: "ref.null.extern" }],
+        // (#2106 S1) under the singleton regime a null externref IS JS null →
+        // ToString = "null" (§7.1.17). Legacy keeps the null pass-through
+        // (downstream __any_to_string renders its residual arm).
+        then: undefinedSingletonActive(ctx) ? [...stringExtern("null")] : [{ op: "ref.null.extern" } as Instr],
         else: [
           { op: "local.get", index: 0 },
           { op: "any.convert_extern" },
