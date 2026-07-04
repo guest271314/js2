@@ -852,7 +852,7 @@ class Parser {
   /** Parse the code unit denoted by an escape, with the backslash already
    *  consumed. Shared by atom and class parsing for non-class-shorthand
    *  escapes. */
-  private parseEscapedCodeUnit(): number {
+  private parseEscapedCodeUnit(inClass = false): number {
     const e = this.next();
     switch (e) {
       case "n":
@@ -883,25 +883,53 @@ class Parser {
       case "9":
         return e.charCodeAt(0); // identity (Annex B)
       case "c": {
-        // ControlLetter escape: \cA-\cZ \ca-\cz → code % 32. Anything else is
-        // host-invalid or a deeper Annex B identity case — refuse.
+        // ControlLetter escape: \cA-\cZ \ca-\cz → code % 32. In a character
+        // class, Annex B §B.1.4 ClassControlLetter also admits DecimalDigit and
+        // `_` (`/[\c1]/` → 0x11, `/[\c_]/` → 0x1f) — non-u mode only.
         const l = this.peek();
-        if (l !== undefined && ((l >= "A" && l <= "Z") || (l >= "a" && l <= "z"))) {
+        const isCtrlLetter = l !== undefined && ((l >= "A" && l <= "Z") || (l >= "a" && l <= "z"));
+        const isClassCtrl = inClass && !this.unicode && l !== undefined && ((l >= "0" && l <= "9") || l === "_");
+        if (isCtrlLetter || isClassCtrl) {
           this.next();
-          return l.charCodeAt(0) % 32;
+          return l!.charCodeAt(0) % 32;
+        }
+        // Annex B §B.1.4 identity fallback (non-u): a `\c` that does not form a
+        // control escape is a literal reverse solidus, and the following char is
+        // re-parsed as an ordinary atom (`/\c1/` matches the 3 chars `\`, `c`,
+        // `1`). Un-consume the `c` and emit `\`. In u/v mode this is a real
+        // SyntaxError — refuse.
+        if (!this.unicode) {
+          this.pos--; // un-consume the `c`
+          return 0x5c;
         }
         throw new RegexUnsupportedError("\\c without a control letter");
       }
       case "x": {
-        const hex = this.next() + this.next();
-        if (!/^[0-9a-fA-F]{2}$/.test(hex)) throw new RegexUnsupportedError(`bad \\x escape`);
-        return parseInt(hex, 16);
+        // \xHH — exactly two hex digits. Annex B §B.1.4: an incomplete `\x`
+        // (fewer than two hex digits following) is an IdentityEscape — the
+        // literal `x` — with the trailing chars re-parsed (`/\x/` matches `x`).
+        // Read without consuming so the fallback leaves the cursor put; u/v mode
+        // stays strict (a bad `\x` there is a real SyntaxError).
+        const hex = this.src.slice(this.pos, this.pos + 2);
+        if (/^[0-9a-fA-F]{2}$/.test(hex)) {
+          this.pos += 2;
+          return parseInt(hex, 16);
+        }
+        if (!this.unicode) return 0x78; // literal 'x'
+        throw new RegexUnsupportedError(`bad \\x escape`);
       }
       case "u": {
         if (this.peek() === "{") throw new RegexUnsupportedError("\\u{…} code-point escape — #1539 Phase 2c/2d");
-        const hex = this.next() + this.next() + this.next() + this.next();
-        if (!/^[0-9a-fA-F]{4}$/.test(hex)) throw new RegexUnsupportedError(`bad \\u escape`);
-        return parseInt(hex, 16);
+        // \uHHHH — exactly four hex digits. Annex B: an incomplete `\u` is an
+        // IdentityEscape for the literal `u` (`/\u/` matches `u`). Same
+        // read-without-consume fallback; u/v mode stays strict.
+        const hex = this.src.slice(this.pos, this.pos + 4);
+        if (/^[0-9a-fA-F]{4}$/.test(hex)) {
+          this.pos += 4;
+          return parseInt(hex, 16);
+        }
+        if (!this.unicode) return 0x75; // literal 'u'
+        throw new RegexUnsupportedError(`bad \\u escape`);
       }
       default:
         // Escaped metacharacter or escaped literal — the char itself.
@@ -992,7 +1020,7 @@ class Parser {
       if (e === "p" || e === "P") {
         throw new RegexUnsupportedError(`Unicode property escape \\${e}{…} — #1539 Phase 2d`);
       }
-      return { kind: "char", code: this.parseEscapedCodeUnit() };
+      return { kind: "char", code: this.parseEscapedCodeUnit(true) };
     }
     return { kind: "char", code: this.next().charCodeAt(0) };
   }
