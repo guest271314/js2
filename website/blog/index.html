@@ -133,112 +133,60 @@
         color: var(--fg);
       }
 
-      /* ── KPI tiles ── */
-      .kpis {
-        display: grid;
-        grid-template-columns: repeat(4, 1fr);
-        gap: 10px;
-        margin: 26px 0;
-      }
-
-      .kpi {
-        background: var(--surface);
-        border: 1px solid var(--line);
-        border-radius: 12px;
-        padding: 16px 14px;
-      }
-
-      .kpi .n {
-        font-size: 26px;
-        font-weight: 700;
-        letter-spacing: -0.02em;
-        line-height: 1;
-        font-variant-numeric: tabular-nums;
-      }
-
-      .kpi .l {
-        font-size: 11.5px;
-        color: var(--fg-faint);
-        margin-top: 8px;
-        line-height: 1.35;
-      }
-
-      @media (max-width: 560px) {
-        .kpis {
-          grid-template-columns: repeat(2, 1fr);
-        }
-      }
-
-      /* ── Conformance bar chart (matches the landing module-size / benchmark
-         <perf-benchmark-chart>: white gradient fill on a subtle surface track,
-         4px corners, monospace labels). ── */
+      /* ── Conformance charts (landing donut + timeline components) ── */
       .figure {
         margin: 26px 0;
-        padding: 22px 22px 20px;
+        padding: 24px 22px 20px;
         background: var(--surface);
         border: 1px solid var(--line);
         border-radius: 12px;
       }
 
-      .figure .cap {
+      .donut-pair {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 16px;
+      }
+
+      .donut-cell {
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        min-width: 0;
+      }
+
+      .donut-cell t262-donut {
+        width: 100%;
+        max-width: 240px;
+      }
+
+      .trend-wrap {
+        margin-top: 24px;
+        padding-top: 22px;
+        border-top: 1px solid var(--line);
+      }
+
+      .trend-title {
         font-family: var(--mono);
         font-size: 11px;
         font-weight: 500;
         letter-spacing: 0.1em;
         text-transform: uppercase;
         color: var(--fg-faint);
-        margin-bottom: 24px;
-      }
-
-      .bar-row {
-        display: grid;
-        grid-template-columns: 132px 1fr 56px;
-        align-items: center;
-        gap: 16px;
-        margin: 16px 0;
-      }
-
-      .bar-row .name {
-        font-family: var(--mono);
-        font-size: 13px;
-        color: var(--fg-soft);
-        line-height: 1.35;
-      }
-
-      .bar-row .name b {
-        display: block;
-        color: var(--fg);
-        font-weight: 600;
-      }
-
-      .track {
-        position: relative;
-        height: 28px;
-        background: var(--surface);
-        border-radius: 4px;
-        overflow: hidden;
-      }
-
-      .fill {
-        height: 100%;
-        border-radius: 4px;
-        background: linear-gradient(to right, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.9));
-        transition: width 0.7s cubic-bezier(0.4, 0, 0.2, 1);
-      }
-
-      .bar-row .val {
-        font-family: var(--mono);
-        font-size: 13px;
-        font-weight: 500;
-        color: var(--fg);
-        font-variant-numeric: tabular-nums;
-        text-align: right;
+        margin-bottom: 14px;
       }
 
       .figure .foot {
         font-size: 12px;
         color: var(--fg-faint);
         margin: 20px 0 0;
+      }
+
+      @media (max-width: 560px) {
+        .donut-pair {
+          grid-template-columns: 1fr;
+          gap: 24px;
+        }
       }
 
       /* ── Comparison table ── */
@@ -425,25 +373,6 @@
           one module from the next is the starting point, not something I bolt on later.
         </p>
 
-        <div class="kpis">
-          <div class="kpi">
-            <div class="n">43,106</div>
-            <div class="l">Test262 cases, the full official suite</div>
-          </div>
-          <div class="kpi">
-            <div class="n" data-metric="host-pct">74.2%</div>
-            <div class="l">pass in host mode</div>
-          </div>
-          <div class="kpi">
-            <div class="n" data-metric="sa-pct">46.4%</div>
-            <div class="l">pass as pure standalone Wasm</div>
-          </div>
-          <div class="kpi">
-            <div class="n">~100k</div>
-            <div class="l">automated checks per pull request</div>
-          </div>
-        </div>
-
         <h2>Where it actually stands</h2>
         <p>
           I test against the full Test262 suite, the same conformance corpus the browser engines certify against, with
@@ -451,26 +380,39 @@
         </p>
 
         <div class="figure">
-          <div class="cap">Test262 pass rate — 43,106 cases</div>
-          <div class="bar-row">
-            <div class="name">
-              Host mode
-              <b>browser / Node</b>
+          <div class="donut-pair">
+            <div class="donut-cell">
+              <t262-donut
+                src="../benchmarks/results/test262-report.json"
+                caption-main="Host mode"
+                caption-sub="browser / Node"
+                style="--t262-bg: var(--bg)"
+              ></t262-donut>
             </div>
-            <div class="track"><div class="fill" id="bar-host" style="width: 74.2%"></div></div>
-            <div class="val" data-metric="host-pct">74.2%</div>
+            <div class="donut-cell">
+              <!-- Standalone donut is seeded with the host-free numbers (leaky
+                   passes excluded) and refreshed live below; a bare src= would
+                   read summary.pass, which counts host-import passes. -->
+              <t262-donut
+                id="donut-standalone"
+                pass="20001"
+                fail="21288"
+                ce="1799"
+                skip="18"
+                total="43106"
+                caption-main="Standalone"
+                caption-sub="pure Wasm"
+                style="--t262-bg: var(--bg)"
+              ></t262-donut>
+            </div>
           </div>
-          <div class="bar-row">
-            <div class="name">
-              Standalone
-              <b>pure Wasm</b>
-            </div>
-            <div class="track"><div class="fill" id="bar-sa" style="width: 46.4%"></div></div>
-            <div class="val" data-metric="sa-pct">46.4%</div>
+          <div class="trend-wrap">
+            <div class="trend-title">ECMAScript conformance over time</div>
+            <trend-chart id="conformance-history-chart" mode="step" height="240" x-key="time"></trend-chart>
           </div>
           <p class="foot">
             The project started at zero in early March and the numbers climb every week. Recomputed on every merge and
-            published live.
+            published live, so these charts read from the current data.
           </p>
         </div>
 
@@ -579,7 +521,7 @@
         </p>
         <ul>
           <li>
-            <strong>Read a PR or a spec.</strong>
+            <strong>Review the code.</strong>
             Fresh eyes on compiler internals are always scarce.
           </li>
           <li>
@@ -622,39 +564,132 @@
     </footer>
 
     <script type="module" src="../components/site-nav.js"></script>
+    <script src="../components/t262-charts.js"></script>
+    <script src="../components/trend-chart.js"></script>
     <script>
-      // Hydrate the conformance tiles + bars from live baselines so the post
-      // never drifts from the dashboard. Host = summary.pass; standalone =
-      // host_free_pass (the honest "no JS in the loop" number, matching the
-      // landing donut). Baked 74.2% / 46.4% stays as the fallback if offline.
+      // Standalone donut: refresh from the live baseline using the host-free
+      // count (leaky passes excluded), matching the landing donut's honest
+      // standalone number. The host donut auto-loads from its src. Seeded
+      // attributes in the markup are the offline fallback.
       (async () => {
-        const setPct = (metric, pct) => {
-          const txt = pct.toFixed(1) + "%";
-          document.querySelectorAll(`[data-metric="${metric}"]`).forEach((el) => {
-            el.textContent = txt;
-          });
-        };
+        const el = document.getElementById("donut-standalone");
+        if (!el) return;
         try {
-          const [host, standalone] = await Promise.all([
-            fetch("../benchmarks/results/test262-report.json").then((r) => r.json()),
-            fetch("../benchmarks/results/test262-standalone-report.json").then((r) => r.json()),
-          ]);
-          const hs = host.summary;
-          const ss = standalone.summary;
-          if (hs && hs.total) {
-            const pct = (100 * hs.pass) / hs.total;
-            setPct("host-pct", pct);
-            const bar = document.getElementById("bar-host");
-            if (bar) bar.style.width = pct + "%";
-          }
-          if (ss && ss.total && typeof ss.host_free_pass === "number") {
-            const pct = (100 * ss.host_free_pass) / ss.total;
-            setPct("sa-pct", pct);
-            const bar = document.getElementById("bar-sa");
-            if (bar) bar.style.width = pct + "%";
-          }
+          const resp = await fetch("../benchmarks/results/test262-standalone-report.json");
+          if (!resp.ok) return;
+          const d = await resp.json();
+          const s = d && d.summary;
+          if (!s || !s.total || typeof s.host_free_pass !== "number") return;
+          const total = Number(s.total);
+          const pass = Number(s.host_free_pass);
+          const ce = Number(s.compile_error || 0) + Number(s.compile_timeout || 0);
+          const skip = Number(s.skip || 0);
+          const fail = Math.max(0, total - pass - ce - skip);
+          el.setAttribute("pass", String(pass));
+          el.setAttribute("fail", String(fail));
+          el.setAttribute("ce", String(ce));
+          el.setAttribute("skip", String(skip));
+          el.setAttribute("total", String(total));
         } catch {
-          /* keep the baked fallback numbers */
+          /* keep the seeded fallback */
+        }
+      })();
+
+      // Conformance-over-time timeline — same run-history source and series as
+      // the landing page, so it live-updates from benchmarks/results/runs.
+      (async () => {
+        const chart = document.getElementById("conformance-history-chart");
+        if (!chart) return;
+        try {
+          const projectStart = new Date("2026-02-27T00:00:00Z");
+          const parseRunTimestamp = (value) => {
+            const raw = String(value || "");
+            if (!raw) return null;
+            const isoDate = new Date(raw);
+            if (Number.isFinite(isoDate.getTime())) return isoDate;
+            const compact = raw.match(/^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})$/);
+            if (compact) {
+              const [, y, m, dd, hh, mm, ss] = compact;
+              return new Date(`${y}-${m}-${dd}T${hh}:${mm}:${ss}Z`);
+            }
+            return null;
+          };
+          const formatLabel = (date) =>
+            `${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+          const resp = await fetch("../benchmarks/results/runs/index.json");
+          if (!resp.ok) return;
+          const runs = await resp.json();
+          if (!Array.isArray(runs)) return;
+
+          const rawPoints = runs
+            .filter((run) => Number(run?.total ?? 0) > 1 && Number(run?.pass ?? 0) >= 0)
+            .sort((a, b) => {
+              const ta = parseRunTimestamp(a.timestamp)?.getTime() ?? Number.POSITIVE_INFINITY;
+              const tb = parseRunTimestamp(b.timestamp)?.getTime() ?? Number.POSITIVE_INFINITY;
+              return ta - tb;
+            })
+            .map((run) => {
+              const total = Number(run.total || 0);
+              const pass = Number(run.pass || 0);
+              const ts = String(run.timestamp || "");
+              const date = parseRunTimestamp(ts);
+              return {
+                label: date ? formatLabel(date) : "",
+                timestamp: ts,
+                time: date?.getTime() ?? 0,
+                pass,
+                total,
+                rate: total > 0 ? (pass / total) * 100 : 0,
+              };
+            })
+            .filter((point) => point.total > 0 && point.rate >= 5);
+
+          const points = [];
+          for (const point of rawPoints) {
+            const prev = points.at(-1);
+            if (prev && point.total < prev.total * 0.75) continue;
+            points.push(point);
+          }
+
+          const firstPoint = points[0];
+          if (firstPoint?.timestamp) {
+            const firstDate = new Date(firstPoint.timestamp);
+            if (
+              Number.isFinite(firstDate.getTime()) &&
+              firstDate.getTime() - projectStart.getTime() > 12 * 60 * 60 * 1000
+            ) {
+              points.unshift({
+                label: formatLabel(projectStart),
+                timestamp: projectStart.toISOString(),
+                time: projectStart.getTime(),
+                pass: 0,
+                total: 0,
+                rate: 0,
+              });
+            }
+          }
+
+          if (points.length < 2) return;
+
+          chart.setAttribute("labels-key", "label");
+          chart.setAttribute(
+            "series",
+            JSON.stringify([
+              { key: "rate", color: "#ffffff", fill: true },
+              { key: "pass", color: "rgba(255,255,255,0.82)", axis: "right", lineWidth: 1, lineOpacity: 0.5 },
+              {
+                key: "total",
+                color: "rgba(141, 154, 184, 1)",
+                axis: "right",
+                lineWidth: 1,
+                lineOpacity: 1,
+                dasharray: "1 3",
+              },
+            ]),
+          );
+          chart.data = points;
+        } catch {
+          /* leave the timeline empty if the run index is unavailable */
         }
       })();
     </script>
