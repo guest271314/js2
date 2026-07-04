@@ -79,6 +79,7 @@ import {
 import { emitInlineMathFunctions } from "./math-helpers.js";
 import { finalizeMethodTrampolines } from "./closures.js";
 import { peepholeOptimize } from "./peephole.js";
+import { brandCollidingShapeTypes } from "./shape-brand.js";
 import {
   addImport,
   addStringConstantGlobal,
@@ -2280,6 +2281,14 @@ export function generateModule(
     // Runs before dead-elim (which never prunes/remaps live globals) and the
     // index freeze. No-op unless a gc/host delete-aware read recorded the flag.
     finalizeInModuleInitFlag(ctx);
+
+    // (#2853) Nominal shape branding: structurally-colliding `__anon_*` /
+    // `__fnctor_*` shape types get a trailing brand-ref field so the engine's
+    // iso-recursive canonicalization cannot merge distinct key-sets into one
+    // runtime type (which made `ref.test`-keyed property dispatch read fields
+    // by OFFSET instead of by KEY). Runs after all instruction emission and
+    // BEFORE dead-type elimination so the brand-chain refs get remapped.
+    brandCollidingShapeTypes(mod);
 
     markLeafStructsFinal(mod, ctx.wasi);
 
@@ -6815,6 +6824,11 @@ export function generateMultiModule(
     // Runs before dead-elim (which never prunes/remaps live globals) and the
     // index freeze. No-op unless a gc/host delete-aware read recorded the flag.
     finalizeInModuleInitFlag(ctx);
+
+    // (#2853) Nominal shape branding — same pass + placement as the
+    // single-module pipeline (see generateModule): after all instruction
+    // emission, before dead-type elimination.
+    brandCollidingShapeTypes(mod);
 
     markLeafStructsFinal(mod, ctx.wasi);
 
