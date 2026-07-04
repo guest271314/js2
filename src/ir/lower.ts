@@ -1669,6 +1669,45 @@ export function lowerIrFunctionBody<S>(
         });
         return;
       }
+      case "class.super_init": {
+        // #3000-E: `super(args)` — run the PARENT's `<parent>_init` on the
+        // already-allocated `self`. Legacy `_init` signature is
+        // `(...ctorParams, self) -> (ref $struct)` (self LAST), so emit the user
+        // args first, then `self`, then call. The returned instance is discarded
+        // (super() is a statement) → drop.
+        const cl = resolver.resolveClass?.(instr.parentShape);
+        if (!cl) {
+          throw new Error(`ir/lower: resolver cannot lower super class ${instr.parentShape.className} (${func.name})`);
+        }
+        for (const a of instr.args) emitValue(a, out);
+        emitValue(instr.self, out);
+        emitter.pushRaw(out, {
+          op: "call",
+          funcIdx: resolver.resolveFunc({ kind: "func", name: cl.initFuncName }),
+        });
+        emitter.pushRaw(out, { op: "drop" });
+        return;
+      }
+      case "class.super_call": {
+        // #3000-E: `super.method(args)` — static-dispatch to the PARENT's method
+        // slot (`<parent>_<method>`) with the subclass receiver first, then args.
+        // Resolving against `parentShape` (not the receiver's shape) bypasses any
+        // subclass override.
+        const cl = resolver.resolveClass?.(instr.parentShape);
+        if (!cl) {
+          throw new Error(`ir/lower: resolver cannot lower super class ${instr.parentShape.className} (${func.name})`);
+        }
+        emitValue(instr.receiver, out);
+        for (const a of instr.args) emitValue(a, out);
+        emitter.pushRaw(out, {
+          op: "call",
+          funcIdx: resolver.resolveFunc({
+            kind: "func",
+            name: cl.methodFuncName(instr.methodName),
+          }),
+        });
+        return;
+      }
       // Slice 6 (#1169e): slot / vec / for-of ops.
       case "slot.read": {
         emitter.pushRaw(out, {
@@ -2961,6 +3000,10 @@ function collectIrUses(instr: IrInstr): readonly IrValueId[] {
     case "class.set":
       return [instr.value, instr.newValue];
     case "class.call":
+      return [instr.receiver, ...instr.args];
+    case "class.super_init":
+      return [...instr.args, instr.self];
+    case "class.super_call":
       return [instr.receiver, ...instr.args];
     // Slice 6 (#1169e): slot / vec / for-of ops.
     case "slot.read":

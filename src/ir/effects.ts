@@ -151,6 +151,8 @@ export function effectsOf(instr: IrInstr, cache: Map<IrInstr, IrEffects> = new M
     // trigger a host getter; iterator ops advance host iterator state.
     case "call":
     case "class.call":
+    case "class.super_init": // #3000-E — runs parent `_init` (writes parent fields on self)
+    case "class.super_call": // #3000-E — static-dispatched parent method (arbitrary heap effect)
     case "closure.call":
     case "extern.call":
     case "class.new":

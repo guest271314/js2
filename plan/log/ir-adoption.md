@@ -104,10 +104,10 @@ bucket work #2856–#2859.
 | Kind                                            | Status      | Notes                                                           | Tracking |
 | ----------------------------------------------- | ----------- | --------------------------------------------------------------- | -------- |
 | `FunctionDeclaration`                           | ir-owned    | The IR claim unit. Each rejection bucket reduces the claim set. | #1376    |
-| `MethodDeclaration`                             | mixed       | Adopted incrementally via #1370 Phase B class-shape registry.   | #1370    |
-| `ConstructorDeclaration`                        | direct-only | Phase C work; defensively rejected by from-ast.ts today.        | #1370    |
-| `GetAccessorDeclaration`                        | direct-only | `class-method` fallback bucket; phase B excludes accessors.     | #1370    |
-| `SetAccessorDeclaration`                        | direct-only | Same.                                                           | #1370    |
+| `MethodDeclaration`                             | mixed       | #1370 Phase B; #3000-E adds subclass methods + `super.method()`. | #1370    |
+| `ConstructorDeclaration`                        | mixed       | #3000-C ctor emission (`class.alloc`); #3000-E `super(...)` chain. | #3000    |
+| `GetAccessorDeclaration`                        | mixed       | #3000-B accessors; #3000-E subclass accessors (`Dog_get_breed`).  | #3000    |
+| `SetAccessorDeclaration`                        | mixed       | #3000-B accessors over the private slot.                          | #3000    |
 | `EnumDeclaration`                               | direct-only | Compile-time only; emitted as constants by direct codegen.      | (future) |
 | `InterfaceDeclaration` / `TypeAliasDeclaration` | deferred    | Type-erased; no Wasm output.                                    | —        |
 
@@ -126,7 +126,7 @@ relevant kind row above.
 | `param-type-not-resolvable`   | unintended | TypeMap propagation reaches the param                        |
 | `return-type-not-resolvable`  | unintended | TypeMap propagation reaches the return                       |
 | `type-resolution-failure`     | unintended | Same                                                         |
-| `class-method`                | unintended | #1370 Phase B / C — class shape registry covers the member   |
+| `class-method`                | unintended | #1370/#3000 B-C-E — corpus bucket is **0** (#3000-E); NOT yet in `STRICT_IR_REASONS` — the reason still covers out-of-corpus deferred shapes (computed/generator/abstract method names, static `super`, subclass-of-builtin members) |
 | `destructuring-param-complex` | unintended | Complex destructuring params lowered (subset of param-shape) |
 | `async-function`              | deferred   | Async bodies — CPS lowering tracked separately (#1373/#1796) |
 | `async-generator`             | deferred   | Out of scope long-term                                       |

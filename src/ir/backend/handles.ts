@@ -145,6 +145,16 @@ export interface IrClassLowering {
   readonly constructorFuncName: string;
   methodFuncName(name: string): string;
   /**
+   * #3000-E: legacy-registered name of the constructor-init function
+   * (`<className>_init`) — signature `(...ctorParams, self) -> (ref $struct)`,
+   * carrying field inits + the ctor body, operating on a caller-allocated
+   * instance. A derived `super(...)` lowers to `call <parent>_init(args..., self)`.
+   * The resolver's `resolveFunc` maps it to the funcIdx. Present for every
+   * WasmGC-struct (non-externref-backed) class, which is exactly the set that
+   * can appear as an IR-claimable subclass parent.
+   */
+  readonly initFuncName: string;
+  /**
    * #3000-C: the raw Wasm instruction sequence that allocates a fresh,
    * default-initialised instance of this class — the default field values
    * (with the `__tag` slot set to the class's discrimination constant)

@@ -543,6 +543,30 @@ function renameInstrOperands(inst: IrInstr, rename: ReadonlyMap<IrValueId, IrVal
       if (!changed) return inst;
       return { ...inst, receiver: r, args: newArgs };
     }
+    case "class.super_init": {
+      const s = mapId(rename, inst.self);
+      let changed = s !== inst.self;
+      const newArgs: IrValueId[] = [];
+      for (const a of inst.args) {
+        const n = mapId(rename, a);
+        if (n !== a) changed = true;
+        newArgs.push(n);
+      }
+      if (!changed) return inst;
+      return { ...inst, self: s, args: newArgs };
+    }
+    case "class.super_call": {
+      const r = mapId(rename, inst.receiver);
+      let changed = r !== inst.receiver;
+      const newArgs: IrValueId[] = [];
+      for (const a of inst.args) {
+        const n = mapId(rename, a);
+        if (n !== a) changed = true;
+        newArgs.push(n);
+      }
+      if (!changed) return inst;
+      return { ...inst, receiver: r, args: newArgs };
+    }
     // Slice 6 (#1169e): slot / vec / for-of ops.
     case "slot.read":
       return inst;

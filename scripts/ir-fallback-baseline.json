@@ -2,8 +2,7 @@
   "generated": "2026-07-04",
   "unintended": {
     "body-shape-rejected": 18,
-    "call-graph-closure": 9,
-    "class-method": 3
+    "call-graph-closure": 9
   },
   "deferred": {
     "async-function": 4
