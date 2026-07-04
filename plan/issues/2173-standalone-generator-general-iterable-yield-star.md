@@ -1,7 +1,9 @@
 ---
 id: 2173
 title: "standalone: yield* over a general iterable (array / custom {next()}) in native generators (SF-3 slice-2 of #2157)"
-status: ready
+status: done
+completed: 2026-07-04
+assignee: ttraenkler/opus-2173
 blocked_by: []
 sprint: current
 created: 2026-06-16
@@ -198,3 +200,73 @@ the #2864 D2 abrupt-forwarding shape (write mode/error into the inner record,
 drive once, discard) — do not invent a second close path. Blocked-by-#2106
 only for undefined-observability of the final `value`; everything else is
 buildable.
+
+## Slice 2a LANDED (opus-2173, 2026-07-04)
+
+Implemented exactly per the banked vec-cursor contract — the contract held on
+contact against current main (no re-derivation needed beyond the fresh
+delegation-kind scaffolding, which the note said to re-derive). Standalone
+`yield* [1,2,3]` now lowers host-free via a direct vec cursor.
+
+### Design (as shipped)
+
+- The `yield-star` state terminator became a discriminated union
+  `delegationKind: "native-gen" | "vec"`. The native-gen arm (#2170 slice-1) is
+  **byte-identical** — the vec arm is a new branch keyed off the discriminant.
+- `emitYield`'s asterisk branch, when `nativeGeneratorDelegationName` returns
+  undefined, tries `isNumericIterableDelegate(subject)` — true iff the subject's
+  static type resolves (via `resolveArrayInfo`) to a numeric canonical vec
+  (`elemType.kind === "f64"`). Array literals of numbers and `number[]`-typed
+  identifiers/params qualify; `arr.values()` iterators and custom `{next()}`
+  objects do NOT (they stay slice-2b). Same `elemIsString`-outer bail as R1.
+- Per vec site: TWO state-struct fields appended AFTER the native-gen
+  delegation slots (so `spillFieldOffset` and native-gen slot indices are
+  unaffected — byte-inert for non-vec-delegating generators): `ref null $Vec` +
+  `i32` cursor, both resolved/typed once in `buildResumeInfo` and stored on
+  `NativeGeneratorInfo.vecDelegationSlots`.
+- Runtime arm: first entry materializes the vec (`compileExpression(subject)`,
+  evaluated ONCE — GetIterator semantics) into the slot and resets cursor to 0;
+  each entry reads `vec.data[cursor]` (already f64, **no box**), `cursor++`,
+  re-yields staying in this state; on `cursor >= vec.length` nulls the slot
+  (so a `yield*` inside a loop re-iterates), delivers the `bindResultTo`
+  completion value (undefined-as-NaN sentinel, #2106 residual — not asserted),
+  and transitions to the successor. **Zero host imports** — the #1320
+  `__iterator` bridge is deliberately unused (it would leak
+  `__box_number`/`__unbox_number`).
+
+### Files
+
+- `src/codegen/generators-native.ts` — union terminator, `vecDelegationSites`
+  in the plan, `isNumericIterableDelegate`, vec branch in `emitYield`, vec
+  slots in `buildResumeInfo`, vec `struct.new` inits, and the runtime vec-cursor
+  arm in `compileState`.
+- `src/codegen/context/types.ts` — `NativeGeneratorInfo.vecDelegationSlots`.
+- `tests/issue-2173-yieldstar-array.test.ts` — 12 standalone cases, all assert
+  zero host imports.
+
+## Test Results (opus-2173, 2026-07-04)
+
+**Measure-first (current main):** standalone `function* g(){ yield* [1,2,3]; yield 4 }`
+→ CE #680; wasmgc → host-buffer path (`__gen_*` imports). After: standalone → 0
+host imports, for-of sums to 10, `[...].next()`-sequence yields 1,2,3,4.
+
+- **New suite** `tests/issue-2173-yieldstar-array.test.ts` — **12/12 pass**
+  (for-of sum, delegation-only, next-sequence, vec-via-variable, vec-via-param,
+  two sequential sites, yield\* in a loop, own-yield-before, `const x = yield*`
+  binding, zero-length typed vec, element count, plain-numeric regression).
+- **Blast radius (no regression, 90 tests):** generators (32), #2170 slice-1 (6),
+  #2171 string yields (7), #2864 carrier F1/F1b/F2 (all), #1665 (3), #2079 (all),
+  #1017 (all), #2169 spread/destructure/arrayfrom (all), #2172 nested. Plus the
+  adjacent-machinery batch (#2157/#2571/#2892/#3032/method-destructuring).
+- **Byte-inertness:** js-host (wasmgc) generators are unchanged (the native path
+  is gated `noJsHostTarget`); the native-gen delegation arm and numeric/string
+  carriers are byte-identical (their regression tests pass).
+
+### Known narrow limitation
+
+An **untyped** empty array literal `yield* []` (TS type `never[]`, no numeric
+vec) cleanly bails to the host path (standalone: the #680 refusal — same as
+before, no regression). The runtime "straight to successor, no suspension" path
+IS exercised and passes for typed empties (`const a: number[] = []; yield* a`
+and `yield* ([] as number[])`). Non-numeric-elem iterables (strings, objects,
+`.values()` iterators, custom `{next()}`) are slice-2b.
