@@ -117,3 +117,12 @@ downstream null-call error.
   dynamic-`Function` story, so they are filed together. A dev may split them
   into two PRs if that keeps each change small; treat the acceptance criteria as
   independently landable.
+- **Gap 2's normative design is now specified** (architect, 2026-07-04) in
+  `docs/architecture/runtime-eval-interpreter.md` **§14** (unified name
+  resolution, consumer 2): the shim child module compiles free identifiers
+  with *eval-code linkage* against a global-environment handle passed from the
+  parent module (its globalThis `$Object`), with a root-miss →
+  `ReferenceError`. Implementing that section satisfies acceptance criterion 2
+  AND fixes the deeper sharing bug (eval'd `var x` landing in the child's
+  globals, invisible to the parent). Gap 2 is independent of the #2928
+  interpreter and schedulable anytime.
