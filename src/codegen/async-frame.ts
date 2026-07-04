@@ -39,8 +39,12 @@ import { forEachChild, ts } from "../ts-api.js";
 import type { AsyncCfgPlan, AsyncCfgState, AsyncCpsPlan, AsyncResumePoint } from "./async-cps.js";
 import {
   ASYNC_CPS_ENABLED,
+  FORAWAIT_ITER_SPILL,
   asyncFnNeedsCps,
   awaitedExprIsPromiseCombinator,
+  forAwaitNeedsDrive,
+  forAwaitSpillInfo,
+  isEmitOperand,
   loopAsyncSpillInfo,
   planAsyncCfg,
   planLinearAwaits,
@@ -423,7 +427,16 @@ function bindingLiveAcrossLaterAwait(name: string, k: number, plan: AsyncCpsPlan
  */
 export function asyncFnNeedsDrive(ctx: CodegenContext, fn: ts.FunctionLikeDeclaration, plan: AsyncCpsPlan): boolean {
   if (!ASYNC_CPS_ENABLED) return false;
-  if (plan.awaitPoints.length === 0) return false;
+  if (plan.awaitPoints.length === 0) {
+    // (#2906 slice 3b) `for await`-only body: no `ts.AwaitExpression`, but a
+    // `for await` genuinely suspends per element. Eligible when it is the
+    // bounded for-await shape and every widened spill local is spill-safe.
+    if (plan.forAwaitPoints.length === 0) return false;
+    if (!forAwaitNeedsDrive(ctx, fn, plan)) return false; // boxed-element sources only
+    const fa = computeForAwaitSpills(ctx, fn, plan);
+    if (fa === null) return false;
+    return fa.spillTypes.every(isSpillSafeType);
+  }
   const anyRealSuspension = plan.awaitPoints.some((a) => plan.awaitedStaticallyResolved.get(a) !== true);
   if (!anyRealSuspension) return false; // fully await-elidable → sync + resolved promise
   const linear = planLinearAwaits(fn, plan);
@@ -489,6 +502,36 @@ function computeLoopSpills(
 }
 
 /**
+ * (#2906 slice 3b) The spill layout for a `for await` drive: every loop own-local
+ * ({@link forAwaitSpillInfo}, resolved to its declared ValType, defaulting to
+ * externref) PLUS the synthetic async-iterator carrier local (externref), which
+ * is created once in the entry state and must survive every per-element suspend.
+ * Returns `null` when the body is not the bounded for-await shape.
+ */
+function computeForAwaitSpills(
+  ctx: CodegenContext,
+  decl: ts.FunctionLikeDeclaration,
+  plan: AsyncCpsPlan,
+): { spillNames: string[]; spillTypes: ValType[] } | null {
+  const info = forAwaitSpillInfo(decl, plan);
+  if (info === null) return null;
+  const declByName = collectVarDeclsByName(decl);
+  const spillNames: string[] = [];
+  const spillTypes: ValType[] = [];
+  for (const name of info.names) {
+    const declNode = declByName.get(name);
+    const resolved = declNode ? resolveSpillLocalValType(ctx, declNode) : null;
+    spillNames.push(name);
+    spillTypes.push(resolved ?? { kind: "externref" });
+  }
+  // The persisted async-iterator (`it`), reloaded on every resume, stored on
+  // every suspend. Must be LAST — the emitter looks it up by this reserved name.
+  spillNames.push(FORAWAIT_ITER_SPILL);
+  spillTypes.push({ kind: "externref" });
+  return { spillNames, spillTypes };
+}
+
+/**
  * The body locals that are live across ANY await and so must be spilled into the
  * frame (the multi-await generalization of the generator's `bodySpills`).
  *
@@ -514,8 +557,11 @@ function computeAsyncSpills(
   const linear = planLinearAwaits(decl, plan);
   if (linear === null) {
     // (#2906 slice 3a) `while`-with-await loop: widened spill set (all loop
-    // own-locals). Returns empty for any non-loop non-linear body.
-    return computeLoopSpills(ctx, decl, plan) ?? { spillNames: [], spillTypes: [] };
+    // own-locals). (#2906 slice 3b) for-await drive: loop own-locals + the
+    // synthetic async-iterator carrier local. Returns empty for any other body.
+    return (
+      computeLoopSpills(ctx, decl, plan) ?? computeForAwaitSpills(ctx, decl, plan) ?? { spillNames: [], spillTypes: [] }
+    );
   }
   const paramSet = new Set(paramNames);
 
@@ -956,6 +1002,12 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
         compileStatement(ctx, resumeFctx, stmt);
       }
 
+      // (#2906 slice 3b) State-level injected step — the for-await planner uses
+      // it for `it = GetAsyncIterator(source)` (entry) and `{done,value} =
+      // it.next()` (loop head). Emitted after the lead, before the terminator;
+      // leaves the stack balanced. `undefined` (no hook) for every other plan.
+      if (st.emit) st.emit(ctx, resumeFctx);
+
       const term = st.terminator;
       switch (term.kind) {
         case "suspend": {
@@ -963,7 +1015,12 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
             curHandler = term.handler;
             out.push(...setHandler(curHandler));
           }
-          const awaitedType = compileExpression(ctx, resumeFctx, term.awaited);
+          // (#2906 slice 3b) The awaited operand is a `ts.Expression`
+          // (linear/while) or an injected emit hook (for-await, whose element
+          // value lives in a wasm local, not AST).
+          const awaitedType = isEmitOperand(term.awaited)
+            ? term.awaited.emit(ctx, resumeFctx)
+            : compileExpression(ctx, resumeFctx, term.awaited);
           if (awaitedType !== null && awaitedType !== undefined) {
             coerceType(ctx, resumeFctx, awaitedType as ValType, {
               kind: "externref",
@@ -1160,7 +1217,11 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
             curHandler = term.handler;
             out.push(...setHandler(curHandler));
           }
-          const condType = compileExpression(ctx, resumeFctx, term.cond);
+          // (#2906 slice 3b) condition is a `ts.Expression` (while/if) or an
+          // emit hook pushing the i32 `done` flag (for-await loop head).
+          const condType = isEmitOperand(term.cond)
+            ? term.cond.emit(ctx, resumeFctx)
+            : compileExpression(ctx, resumeFctx, term.cond);
           ensureI32Condition(resumeFctx, condType, ctx);
           out.push({
             op: "if",

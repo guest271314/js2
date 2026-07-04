@@ -35,6 +35,7 @@ import { allocLocal } from "./context/locals.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { resolveWasmType } from "./index.js";
 import { coerceType, compileExpression, compileStatement } from "./shared.js";
+import { ensureAsyncIterator } from "./statements/destructuring.js";
 
 /**
  * Master gate for the AST-side async CPS lowering.
@@ -66,6 +67,18 @@ export const ASYNC_CPS_ENABLED = true;
 export interface AsyncCpsPlan {
   /** Pre-order list of await points found in the body (by `ts.Node` identity). */
   readonly awaitPoints: readonly ts.AwaitExpression[];
+  /**
+   * (#2906 slice 3b) Top-level `for await (… of …)` loops in the body (not
+   * descending into nested fn scopes). A `for await` carries NO
+   * `ts.AwaitExpression` — the per-element suspension is implicit in the
+   * `awaitModifier` — so it never lands in `awaitPoints`; without this the whole
+   * `awaitPoints`-keyed suspension machinery treats a for-await-only body as
+   * non-suspending (AG0 unwrap → the loop var holds the un-awaited Promise → NaN
+   * for `for await (x of [P.resolve(1), …])`). The native drive lane
+   * (`asyncFnNeedsDrive` → `planForAwaitCfg`) keys off THIS list to recognise the
+   * fn as suspending and lower the async-iterator drive onto the CFG machine.
+   */
+  readonly forAwaitPoints: readonly ts.ForOfStatement[];
   /**
    * For each await point: the set of live local names that must be captured
    * into the continuation that resumes after the await. "Live" = referenced in
@@ -103,6 +116,7 @@ export interface AsyncCpsPlan {
  */
 export function analyzeAsyncBody(_ctx: CodegenContext, fn: ts.FunctionLikeDeclaration): AsyncCpsPlan {
   const awaitPoints: ts.AwaitExpression[] = [];
+  const forAwaitPoints: ts.ForOfStatement[] = [];
   const body = fn.body;
 
   // Collect await points in pre-order, WITHOUT descending into nested function
@@ -110,6 +124,7 @@ export function analyzeAsyncBody(_ctx: CodegenContext, fn: ts.FunctionLikeDeclar
   // awaits do not suspend the enclosing function.
   if (body !== undefined) {
     collectAwaitPoints(body, awaitPoints);
+    collectForAwaitPoints(body, forAwaitPoints);
   }
 
   // Live-after-await: for each await, the names referenced in the textual
@@ -149,6 +164,7 @@ export function analyzeAsyncBody(_ctx: CodegenContext, fn: ts.FunctionLikeDeclar
 
   return {
     awaitPoints,
+    forAwaitPoints,
     liveAfterAwait,
     hasTryAcrossAwait: awaitPoints.length > 0 && bodyHasTryAcrossAwait(body),
     hasUncaughtThrow: body !== undefined && bodyHasUncaughtThrow(body),
@@ -1008,6 +1024,34 @@ function statementContainsNode(stmt: ts.Node, node: ts.Node): boolean {
 // are PLANNER-ONLY follow-ups that never touch the emitter again.
 // ---------------------------------------------------------------------------
 
+/**
+ * (#2906 slice 3b) An emit escape hatch. A `for await` loop's iterator-protocol
+ * steps — `GetAsyncIterator(expr)`, the per-iteration `it.next()`, the `done`
+ * flag test, the element value — are RUNTIME operations on wasm locals, not
+ * checker-typed `ts.Expression`s, and synthesising the AST for them is the #2367
+ * wall (a synthetic identifier the checker cannot type mis-lowers property /
+ * element access). So the for-await planner injects those steps as raw
+ * instructions via these hooks; the CFG machine's state/terminator/suspend/
+ * back-edge substrate is otherwise unchanged, which is what makes this carrier
+ * reusable by async-generators (3d). Pre-existing (linear / while) plans use NO
+ * hooks, so their emitted machine is byte-identical.
+ *
+ * A `AsyncCfgValueEmit` pushes exactly ONE value and returns its `ValType`
+ * (consumed like a `compileExpression` result); a `AsyncCfgStepEmit` runs a
+ * side-effecting step and leaves the stack balanced. Both are invoked with the
+ * resume function's `(ctx, fctx)` at emit time.
+ */
+export type AsyncCfgValueEmit = (ctx: CodegenContext, fctx: FunctionContext) => ValType;
+export type AsyncCfgStepEmit = (ctx: CodegenContext, fctx: FunctionContext) => void;
+
+/** A terminator operand that is either a checker-typed AST node or an emit hook. */
+export type AsyncCfgOperand = ts.Expression | { readonly emit: AsyncCfgValueEmit };
+
+/** True when an operand is an injected emit hook rather than a `ts.Expression`. */
+export function isEmitOperand(op: AsyncCfgOperand): op is { readonly emit: AsyncCfgValueEmit } {
+  return typeof (op as { emit?: unknown }).emit === "function";
+}
+
 /** One handler-annotated statement of a state's straight-line lead. */
 export interface AsyncCfgStmt {
   readonly stmt: ts.Statement;
@@ -1033,8 +1077,13 @@ export interface AsyncResumePoint {
 export type AsyncCfgTerminator =
   | {
       readonly kind: "suspend";
-      /** The await operand (assimilated to a `$Promise` / host promise). */
-      readonly awaited: ts.Expression;
+      /**
+       * The await operand (assimilated to a `$Promise` / host promise). A
+       * `ts.Expression` for linear/while awaits; an emit hook for for-await,
+       * whose awaited value is the iterator's `next()` element held in a wasm
+       * local (#2906 slice 3b).
+       */
+      readonly awaited: AsyncCfgOperand;
       /** State entered on resume AND on the synchronous fulfilled/rejected advance. */
       readonly resumeState: number;
       /** Handler region the await executes in (0 = none). */
@@ -1043,8 +1092,12 @@ export type AsyncCfgTerminator =
   | { readonly kind: "goto"; readonly target: number }
   | {
       readonly kind: "condGoto";
-      /** Condition, compiled with `ensureI32Condition` truthiness. */
-      readonly cond: ts.Expression;
+      /**
+       * Condition, compiled with `ensureI32Condition` truthiness. A
+       * `ts.Expression` for while/if heads; an emit hook (pushing the i32 `done`
+       * flag) for the for-await loop head (#2906 slice 3b).
+       */
+      readonly cond: AsyncCfgOperand;
       readonly whenTrue: number;
       readonly whenFalse: number;
       /** Handler region the condition evaluates in (0 = none). */
@@ -1059,6 +1112,13 @@ export interface AsyncCfgState {
   readonly resumeFrom: AsyncResumePoint | null;
   readonly lead: readonly AsyncCfgStmt[];
   readonly terminator: AsyncCfgTerminator;
+  /**
+   * (#2906 slice 3b) Extra instructions emitted AFTER the resume prelude + lead
+   * and BEFORE the terminator — the for-await planner uses it to inject
+   * `it = GetAsyncIterator(source)` (entry) and `it.next()` → done/value locals
+   * (loop head). Must leave the stack balanced. `undefined` for all other plans.
+   */
+  readonly emit?: AsyncCfgStepEmit;
 }
 
 /**
@@ -1175,7 +1235,12 @@ export function planAsyncCfg(
 ): AsyncCfgPlan | null {
   const linear = planLinearAwaits(fn, plan);
   if (linear !== null) return linearPlanToCfg(linear);
-  if (opts.allowLoops) return planWhileLoopCfg(fn, plan);
+  if (opts.allowLoops) {
+    const whileCfg = planWhileLoopCfg(fn, plan);
+    if (whileCfg !== null) return whileCfg;
+    // (#2906 slice 3b) `for await (… of …)` — the async-iterator carrier drive.
+    return planForAwaitCfg(fn, plan);
+  }
   return null;
 }
 
@@ -1390,6 +1455,314 @@ export function loopAsyncSpillInfo(
 }
 
 // ---------------------------------------------------------------------------
+// for-await-of drive (#2906 slice 3b — the async-iterator carrier).
+//
+// A `for await (const x of source)` over a SYNC-backed async iterable (the
+// dominant test262 shape — `for await (x of [P.resolve(1), …])` / a sync
+// iterable) is spec-equivalent to
+//
+//     it = GetAsyncIterator(source)          // §7.4.3: use @@asyncIterator if
+//                                            // present, else wrap the sync one
+//     loop:  { done, value } = it.next()     // sync IteratorStep
+//            if (done) break
+//            x = await value                  // §27.1.4.4 AsyncFromSyncIterator
+//            <body>                           // Await(value): a Promise element
+//     exit:  <post statements>               //   double-resolves to its value
+//
+// which is a loop with ONE suspend per iteration — exactly the 3a while-with-
+// await machine. So no NEW emitter machinery is needed for the DRIVE; the gap
+// (per the #2906 3b grounding) was below the machine: (1) a `for await` carries
+// no `ts.AwaitExpression`, so the fn read as non-suspending (→ AG0 → NaN), and
+// (2) the iterator-protocol steps (`GetAsyncIterator`, `it.next()`, the done
+// flag, the element) are runtime ops on wasm locals — not checker-typed AST, and
+// synthesising that AST is the #2367 wall. `planForAwaitCfg` closes both: it is
+// gated on `plan.forAwaitPoints` (fix 1) and injects the protocol steps via the
+// `AsyncCfgStepEmit`/`AsyncCfgValueEmit` hooks (fix 2), reusing the CFG machine's
+// suspend + back-edge substrate verbatim. This is the same carrier async
+// generators (3d) consume.
+// ---------------------------------------------------------------------------
+
+/** Reserved spill-slot name for the persisted async-iterator (survives every
+ *  per-element suspend). Shared with `computeForAwaitSpills` in async-frame.ts. */
+export const FORAWAIT_ITER_SPILL = "__forawait_iter";
+
+/** The bounded `for await` shape `planForAwaitCfg`/`forAwaitSpillInfo` accept. */
+interface ForAwaitShape {
+  pre: ts.Statement[];
+  source: ts.Expression;
+  binding: { name: string; type: ts.TypeNode | undefined };
+  body: ts.Statement[];
+  post: ts.Statement[];
+  forStmt: ts.ForOfStatement;
+}
+
+/**
+ * Recognise an async body whose ONLY suspension is a single top-level
+ * `for await (const x of source) { … }`. Returns the pre-loop leads, the source
+ * expression, the (identifier) binding, the loop body, and the post-loop leads —
+ * or `null` when the body is outside the bounded slice.
+ *
+ * Bounded slice (everything else → legacy/AG0 fallback):
+ *   - NO bare `await` anywhere in the body (`awaitPoints` empty) and EXACTLY one
+ *     `for await` (multi/mixed suspension is a follow-up);
+ *   - the `for await` is a flat top-level statement of the fn body;
+ *   - a simple `const`/`let x` identifier binding (destructuring / expression
+ *     head is a follow-up — #2906 3b′);
+ *   - the loop body is linear-canonical with NO `break`/`continue`/`return`/
+ *     nested loop/`try`/labeled/`switch` (abrupt loop exit must call
+ *     `it.return()` — an async close, itself a suspend — banked as 3b′).
+ */
+function analyzeForAwait(fn: ts.FunctionLikeDeclaration, plan: AsyncCpsPlan): ForAwaitShape | null {
+  if (plan.awaitPoints.length !== 0) return null; // mixed bare-await + for-await — follow-up
+  if (plan.forAwaitPoints.length !== 1) return null;
+  const body = fn.body;
+  if (body === undefined || !ts.isBlock(body)) return null;
+  const forStmt = plan.forAwaitPoints[0]!;
+
+  // Must be a top-level statement of the fn body (not nested in if/loop/try).
+  let forIdx = -1;
+  for (let i = 0; i < body.statements.length; i++) {
+    if (body.statements[i] === forStmt) {
+      forIdx = i;
+      break;
+    }
+  }
+  if (forIdx === -1) return null;
+
+  // Simple identifier binding: `for await (const x of …)`.
+  const init = forStmt.initializer;
+  if (!ts.isVariableDeclarationList(init) || init.declarations.length !== 1) return null;
+  const decl = init.declarations[0]!;
+  if (!ts.isIdentifier(decl.name)) return null;
+  if (decl.name.text === FORAWAIT_ITER_SPILL) return null; // reserved synthetic name collision
+  const binding = { name: decl.name.text, type: decl.type };
+
+  // Loop body: reuse the while-slice's abrupt-control rejection (also rejects a
+  // nested `for await`, since it is a `ForOfStatement`).
+  if (loopBodyHasUnsupportedControl(forStmt.statement)) return null;
+  const bodyStmts = ts.isBlock(forStmt.statement) ? [...forStmt.statement.statements] : [forStmt.statement];
+
+  return {
+    pre: [...body.statements.slice(0, forIdx)],
+    source: forStmt.expression,
+    binding,
+    body: bodyStmts,
+    post: [...body.statements.slice(forIdx + 1)],
+    forStmt,
+  };
+}
+
+/**
+ * (#2906 slice 3b) The own-locals a `for await` body must spill into the frame
+ * (they survive the per-element suspend), plus the loop binding for exclusion.
+ * Every own-local referenced anywhere in the `for await` statement is live across
+ * the loop-carried suspend (read before the await, read again after resume on the
+ * next iteration — the 3a loop-liveness rule), MINUS params and MINUS the loop
+ * binding itself (delivered fresh from `SENT_FIELD` on resume, never snapshotted).
+ * The synthetic async-iterator carrier local is appended by
+ * `computeForAwaitSpills`. Returns `null` when the body is not the bounded shape.
+ */
+export function forAwaitSpillInfo(
+  fn: ts.FunctionLikeDeclaration,
+  plan: AsyncCpsPlan,
+): { names: string[]; binding: { name: string; type: ts.TypeNode | undefined } } | null {
+  const shape = analyzeForAwait(fn, plan);
+  if (shape === null) return null;
+  const ownLocals = new Set<string>();
+  collectAllDeclaredNames(fn, ownLocals);
+  const paramNames = new Set<string>();
+  for (const p of fn.parameters) {
+    if (ts.isIdentifier(p.name)) paramNames.add(p.name.text);
+    else collectBindingPatternNames(p.name, paramNames);
+  }
+  const names: string[] = [];
+  const seen = new Set<string>();
+  const walk = (node: ts.Node): void => {
+    if (isNestedFunctionScope(node)) return;
+    if (
+      ts.isIdentifier(node) &&
+      ownLocals.has(node.text) &&
+      !paramNames.has(node.text) &&
+      node.text !== shape.binding.name && // resume binding — delivered via SENT, not spilled
+      !seen.has(node.text)
+    ) {
+      seen.add(node.text);
+      names.push(node.text);
+    }
+    forEachChild(node, walk);
+  };
+  walk(shape.forStmt);
+  return { names, binding: shape.binding };
+}
+
+/**
+ * (#2906 slice 3b) Should a bounded `for await` take the native async-iterator
+ * DRIVE, or stay on the legacy path? This is the drive gate — `asyncFnNeedsDrive`
+ * calls it, so the routing and `planForAwaitCfg` stay consistent.
+ *
+ * Drive ONLY when the source's element type is BOXED (externref / GC-ref) — a
+ * Promise/thenable/object element whose `Await` can genuinely suspend, and whose
+ * runtime representation the native `__iterator` vec carrier consumes. Rationale:
+ *   - a source of UNBOXED primitives (`number[]`, `boolean[]`) settles
+ *     immediately (`Await(v) = v`), so the legacy sync-unwrap path is ALREADY
+ *     correct; and those arrays use a typed WasmGC representation the vec iterator
+ *     cannot `ref.cast` — driving them would trap (a regression);
+ *   - a non-array / user-iterable source (`getNumberIndexType() === undefined`)
+ *     may be a user ASYNC iterable whose `next()` the sync native iterator can't
+ *     drive — keep it on legacy for now (a 3b′ follow-up: general
+ *     `AsyncFromSyncIterator` / user-`@@asyncIterator`).
+ * So the driven set is exactly the proven case: an array whose elements are
+ * boxed (Promise arrays — the −32 for-await cluster — and object/string arrays).
+ * Returns `false` for a non-for-await / non-bounded body.
+ *
+ * Element-type query goes through `ctx.oracle.elementFactOf` (the #1930 type
+ * boundary — NOT the raw checker, per the oracle-ratchet gate).
+ */
+export function forAwaitNeedsDrive(ctx: CodegenContext, fn: ts.FunctionLikeDeclaration, plan: AsyncCpsPlan): boolean {
+  const shape = analyzeForAwait(fn, plan);
+  if (shape === null) return false;
+  const elem = ctx.oracle.elementFactOf(shape.source);
+  switch (elem.kind) {
+    // Unboxed scalars settle immediately (`Await(v) = v`, legacy already
+    // correct) and their typed WasmGC arrays would trap the vec iterator.
+    case "number":
+    case "boolean":
+    case "bigint":
+    case "undefined":
+    case "null":
+    case "void":
+    // No element fact: a non-array / user-iterable source — keep on legacy (3b′).
+    case "unresolvable":
+      return false;
+    // Boxed element (Promise/object/class/builtin/string/array/tuple/function/
+    // any/unknown/union): the vec `__iterator` consumes it and `Await` can
+    // genuinely suspend.
+    default:
+      return true;
+  }
+}
+
+/**
+ * Build the CFG for a bounded `for await (const x of source) { body }` async
+ * body. Dense state ids in push order:
+ *   entry(0) : pre leads → emit `it = GetAsyncIterator(source)` → goto(head)
+ *   head(1)  : emit `{done,value} = it.next()` → condGoto(done, exit, body)
+ *   body(2)  : (empty) → suspend(await value, resume→resume)   ← the Await
+ *   resume(3): deliver x = SENT; body leads → goto(head)        ← the back-edge
+ *   exit(4)  : post leads → settleUndefined
+ * The iterator-protocol steps are injected via emit hooks (the element value and
+ * done flag live in wasm locals, not AST); the suspend + back-edge are the stock
+ * CFG machine. Returns `null` when the body is not the bounded shape.
+ */
+export function planForAwaitCfg(fn: ts.FunctionLikeDeclaration, plan: AsyncCpsPlan): AsyncCfgPlan | null {
+  const shape = analyzeForAwait(fn, plan);
+  if (shape === null) return null;
+  const { pre, source, binding, body, post } = shape;
+
+  // Wasm locals shared across the emit hooks, resolved at emit time. `iter` is
+  // the persisted spill slot (allocated by the resume-fn prologue from
+  // FORAWAIT_ITER_SPILL); `value`/`done` are transient (recomputed each
+  // iteration head, never crossing a suspend, so not spilled).
+  const L = { iter: -1, value: -1, done: -1 };
+
+  const asLead = (stmts: readonly ts.Statement[]): AsyncCfgStmt[] => stmts.map((stmt) => ({ stmt, handler: 0 }));
+
+  const entryId = 0;
+  const headId = 1;
+  const bodyId = 2;
+  const resumeId = 3;
+  const exitId = 4;
+
+  // entry emit: it = GetAsyncIterator(source), into the persisted spill slot.
+  const initIterator: AsyncCfgStepEmit = (ctx, fctx) => {
+    const iterSlot = fctx.localMap.get(FORAWAIT_ITER_SPILL);
+    L.iter = iterSlot !== undefined ? iterSlot : allocLocal(fctx, FORAWAIT_ITER_SPILL, { kind: "externref" });
+    const srcType = compileExpression(ctx, fctx, source);
+    if (srcType !== null && srcType !== undefined) {
+      coerceType(ctx, fctx, srcType as ValType, { kind: "externref" });
+    } else {
+      fctx.body.push({ op: "ref.null.extern" } as Instr);
+    }
+    const iterIdx = ensureAsyncIterator(ctx, fctx);
+    if (iterIdx === undefined) {
+      // Only reachable if the native iterator runtime is unavailable (not the
+      // standalone/wasi drive lane this planner runs on); leave iter null.
+      fctx.body.push({ op: "drop" });
+      fctx.body.push({ op: "ref.null.extern" } as Instr);
+      fctx.body.push({ op: "local.set", index: L.iter });
+      return;
+    }
+    fctx.body.push({ op: "call", funcIdx: iterIdx });
+    fctx.body.push({ op: "local.set", index: L.iter });
+  };
+
+  // head emit: {done, value} = it.next() (multi-value: value on top, done below).
+  const stepNext: AsyncCfgStepEmit = (ctx, fctx) => {
+    if (L.value === -1) L.value = allocLocal(fctx, "__forawait_value", { kind: "externref" });
+    if (L.done === -1) L.done = allocLocal(fctx, "__forawait_done", { kind: "i32" });
+    const nextIdx = ctx.funcMap.get("__iterator_next");
+    if (nextIdx === undefined) {
+      // Native iterator runtime absent — deliver done=1 so the loop exits.
+      fctx.body.push({ op: "ref.null.extern" } as Instr);
+      fctx.body.push({ op: "local.set", index: L.value });
+      fctx.body.push({ op: "i32.const", value: 1 });
+      fctx.body.push({ op: "local.set", index: L.done });
+      return;
+    }
+    fctx.body.push({ op: "local.get", index: L.iter });
+    fctx.body.push({ op: "call", funcIdx: nextIdx });
+    fctx.body.push({ op: "local.set", index: L.value });
+    fctx.body.push({ op: "local.set", index: L.done });
+  };
+
+  const doneCond: AsyncCfgValueEmit = (_ctx, fctx) => {
+    fctx.body.push({ op: "local.get", index: L.done });
+    return { kind: "i32" };
+  };
+
+  const awaitValue: AsyncCfgValueEmit = (_ctx, fctx) => {
+    fctx.body.push({ op: "local.get", index: L.value });
+    return { kind: "externref" };
+  };
+
+  const states: AsyncCfgState[] = [
+    {
+      id: entryId,
+      resumeFrom: null,
+      lead: asLead(pre),
+      emit: initIterator,
+      terminator: { kind: "goto", target: headId },
+    },
+    {
+      id: headId,
+      resumeFrom: null,
+      lead: [],
+      emit: stepNext,
+      terminator: { kind: "condGoto", cond: { emit: doneCond }, whenTrue: exitId, whenFalse: bodyId, handler: 0 },
+    },
+    {
+      id: bodyId,
+      resumeFrom: null,
+      lead: [],
+      terminator: { kind: "suspend", awaited: { emit: awaitValue }, resumeState: resumeId, handler: 0 },
+    },
+    {
+      id: resumeId,
+      resumeFrom: { binding, handler: 0 },
+      lead: asLead(body),
+      terminator: { kind: "goto", target: headId },
+    },
+    {
+      id: exitId,
+      resumeFrom: null,
+      lead: asLead(post),
+      terminator: { kind: "settleUndefined" },
+    },
+  ];
+  return { states, handlers: [] };
+}
+
+// ---------------------------------------------------------------------------
 // Internal helpers (private to async-cps.ts)
 // ---------------------------------------------------------------------------
 
@@ -1445,6 +1818,19 @@ function collectAwaitPoints(node: ts.Node, out: ts.AwaitExpression[]): void {
     // Continue into the operand — `await (await x)` has two await points.
   }
   forEachChild(node, (child) => collectAwaitPoints(child, out));
+}
+
+/**
+ * Collect `for await (… of …)` loops (`ForOfStatement` with an `awaitModifier`)
+ * in pre-order, not descending into nested fn scopes — a nested async fn's
+ * for-await belongs to its own machine. (#2906 slice 3b)
+ */
+function collectForAwaitPoints(node: ts.Node, out: ts.ForOfStatement[]): void {
+  if (isNestedFunctionScope(node)) return;
+  if (ts.isForOfStatement(node) && node.awaitModifier !== undefined) {
+    out.push(node);
+  }
+  forEachChild(node, (child) => collectForAwaitPoints(child, out));
 }
 
 /**

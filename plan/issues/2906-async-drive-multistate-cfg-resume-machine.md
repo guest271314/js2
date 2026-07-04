@@ -2,7 +2,7 @@
 id: 2906
 title: "Standalone: generalize the async drive layer → multi-state, CFG-aware CPS resume machine (unlocks try/finally-across-await, for-await, multi-await)"
 status: in-progress
-assignee: ttraenkler/opus-2906-3b
+assignee: ttraenkler/opus-asynciter
 created: 2026-07-01
 priority: high
 feasibility: hard
@@ -200,12 +200,12 @@ field default, so those fall back to legacy (a later slice can widen this).
 programs (single-await, 2×multi-await, plain) under gc(default) / standalone /
 wasi and sha256'd the binaries before vs after:
 
-| program     | gc | standalone | wasi |
-| ----------- | -- | ---------- | ---- |
-| singleAwait | identical | identical | CHANGED (general machine) |
-| multiAwait  | identical | identical | CHANGED (new drive) |
-| pendingMulti| identical | identical | CHANGED (new drive) |
-| plain       | identical | identical | identical |
+| program      | gc        | standalone | wasi                      |
+| ------------ | --------- | ---------- | ------------------------- |
+| singleAwait  | identical | identical  | CHANGED (general machine) |
+| multiAwait   | identical | identical  | CHANGED (new drive)       |
+| pendingMulti | identical | identical  | CHANGED (new drive)       |
+| plain        | identical | identical  | identical                 |
 
 gc/host + standalone are **byte-identical** — the drive branch is gated on
 `isStandalonePromiseActive` (wasi-only), so neither lane reaches the changed
@@ -275,10 +275,13 @@ change (the intended unlock). All Gap-3 machine instrs are guarded on
 slice-1 branch; enqueue after #2413 lands. Gap 5 (for-await / async-gen) builds on
 this same abrupt-completion machinery; the slice-1d widen stays LAST.
 
-
 ## Reconciliation note (shepherd, 2026-07-01)
 
 Landed slices: **slice 1** general N-state async resume machine (PR #2413), **slice 2 / Gap 3** try/finally-across-await on the N-state machine (PR #2416). Issue stays `in-progress` for the remaining slices.
+
+## Reconciliation note (2026-07-04)
+
+Landed since: **slice 3** CFG-aware machine core (PR #2413-follow), **slice 3a** while-with-await loop producer, **slice 3b** for-await-of async-iterator carrier (this PR — `planForAwaitCfg` + `forAwaitPoints` coupling + emit-hook operands). `for await (x of [P.resolve(1),…])` now works host-free (→ 6, imports `[]`). Issue stays `in-progress` for 3b′ (user async iterables / destructuring binding / break-continue via `it.return()`), **3c** (try/catch + return-through-finally + nested regions), and **3d** (async generators — now unblocked, reuses this carrier).
 
 ## Slice 3 — CFG-aware machine core (this PR, 2026-07-03)
 
@@ -326,6 +329,74 @@ they cannot be #2906-slice-3 regressions).
 byte-identical everywhere, so it neither constrains nor is constrained by the
 slice-1d carrier-widen decision — the widen simply flips which lanes reach this
 (unchanged-shape) machine.
+
+## Slice 3b — for-await-of: the native async-iterator carrier (LANDED, host-free wasi lane)
+
+**What shipped.** `for await (const x of source)` over a BOXED-element array (the
+dominant test262 shape — `for await (x of [P.resolve(1), …])` / object arrays) is
+now driven host-free on the 3a CFG machine. `for await (x of [P.resolve(1),
+P.resolve(2), P.resolve(3)]) sum += x` → **6, imports `[]`** (was NaN). Both
+blockers the 3b grounding (PR #2653) identified — which sat BELOW the drive
+machine — are closed:
+
+- **(1) implicit-await coupling.** A `for await` carries no `ts.AwaitExpression`,
+  so `analyzeAsyncBody` reported 0 await points and every `awaitPoints`-keyed gate
+  treated the fn as non-suspending (→ AG0 unwrap → the loop var held the
+  un-awaited Promise → NaN). `AsyncCpsPlan` now also carries **`forAwaitPoints`**
+  (`ForOfStatement`s with an `awaitModifier`), and `asyncFnNeedsDrive` recognises
+  a bounded for-await-only body as suspending.
+- **(2) the async-iterator carrier.** `planForAwaitCfg` (async-cps.ts) lowers the
+  loop onto the existing CFG machine as the spec-equivalent
+  `it = GetAsyncIterator(source); loop { {done,value} = it.next(); if (done)
+break; x = await value; <body> }` (§7.4.3 GetIterator(async) + §27.1.4.4
+  AsyncFromSyncIterator: `Await(value)` — a Promise element double-resolves to its
+  value). No NEW emitter machinery: the sync `it.next()` step, the `done` test and
+  the element are RUNTIME ops on wasm locals — not checker-typed AST — so they are
+  injected via two new **emit hooks** (`AsyncCfgStepEmit` / `AsyncCfgValueEmit`)
+  threaded through the stock `condGoto` (done → exit) + `suspend` (await value) +
+  back-edge `goto(head)` substrate. This deliberately avoids the #2367
+  synthetic-AST wall (a synthetic identifier the checker can't type mis-lowers
+  element access). The persisted iterator is a synthetic frame spill
+  (`FORAWAIT_ITER_SPILL`, reloaded on every resume); the element/done locals are
+  transient (recomputed each head, never crossing a suspend).
+
+**This is the reusable substrate async generators (3d) consume** — the same
+emit-hook carrier drives an async-gen's `next()` protocol.
+
+**Bounded slice (everything else → legacy/AG0, correct-or-legacy).** Exactly one
+top-level `for await`, no bare `await` in the body, simple `const`/`let x`
+identifier binding, linear-canonical body with NO `break`/`continue`/`return`/
+`try`/nested loop/labeled/`switch`. **Drive gate**: only BOXED-element sources
+(the source's `getNumberIndexType()` resolves to externref/GC-ref — Promise/object
+arrays). Unboxed-primitive arrays (`number[]`) settle immediately (`Await(v)=v`) so
+the legacy sync path is already correct — and their typed WasmGC representation
+would trap the vec-based `__iterator`, so driving them is (correctly) rejected.
+Non-array / user-iterable sources (unknown index type) stay on legacy — general
+`AsyncFromSyncIterator` / user-`@@asyncIterator` is the 3b′ follow-up (abrupt loop
+exit via `it.return()` — an async close — is also 3b′).
+
+**Byte-inertness proof (the −16/−29 discipline).** sha256 of 6 programs ×
+{gc, standalone, wasi} before (origin/main) vs after: **gc + standalone identical
+for ALL programs** (the drive is gated on `isStandalonePromiseActive`, wasi-only,
+so neither lane reaches the changed code); **wasi identical for every program
+except a for-await** (plainAsync / multiAwait / whileAwait / syncForOf / plain all
+byte-identical; only the for-await wasi bytes change — the intended unlock). A
+`number[]` for-await is byte-identical to main in BOTH gc and wasi (it stays on
+legacy — no regression).
+
+**Verification.** `tests/issue-2906-3b-forawait.test.ts` (7 host-free wasi tests:
+the settled-Promise proof → 6; the genuinely-pending drain proof → suspends at 0,
+resumes to 23; pre/post statements; zero-element source; bare-body count; a
+rejected element rejecting the result promise without trapping; and the
+`number[]` legacy-path parity). The full async suite (2895/2906-3a/multiawait/
+gap3) shows the SAME pass/fail set as origin/main — the 3 gap3-tryfinally
+throw-path failures are pre-existing (a `{}`-instantiation harness gap), verified
+identical on a `main` worktree.
+
+**Unblocks 3d (async generators):** the emit-hook async-iterator carrier + the
+`forAwaitPoints` suspension coupling are the substrate 3d reuses for the
+`next()`-queue protocol; 3d is now a planner-only follow-up (`settleYield`
+terminator + result-promise queue) on this same machine.
 
 ## Design (banked): how the remaining shapes map onto the CFG machine
 
@@ -385,7 +456,7 @@ Implementation notes (the hazards a cheaper model must not skip):
    inside iteration k>1 routes to the result promise. Plus the byte-hash probe
    for non-loop programs (must stay identical).
 
-### 3b — for-await-of (async-iterator drive on 3a machinery)
+### 3b — for-await-of (async-iterator drive on 3a machinery) — LANDED (see "Slice 3b" above)
 
 > **UPDATE (2026-07-04):** grounding for 3b found this design's `it.next()`→
 > `$Promise` step needs the native async-iterator **carrier**, which
@@ -421,14 +492,14 @@ The full ES completion semantics on the frame's EXISTING `MODE`/`ABRUPT`/
    to `block { loop { try { chain } catch $exn { route } } }` so an abrupt
    completion becomes a STATE TRANSITION: the catch routes by the region-id
    local — region has a `catchState` → `ERROR=reason; MODE=THROW;
-   STATE=catchState; br <loop>` (the catch body is ordinary states and MAY
+STATE=catchState; br <loop>` (the catch body is ordinary states and MAY
    await); no region → settle-reject + return (today's behaviour). NOTE: this
    moves every arm's `br`-to-loop depth by +1 (the try block wraps the chain)
    — change `loopDepth` in ONE place (`buildStateBody`) and re-prove the
-   byte-hash on a `main` control before/after is *expectedly different* here,
+   byte-hash on a `main` control before/after is _expectedly different_ here,
    so instead prove semantics via the full async test files + new tests.
 2. **Handler regions generalize**: `{ id, parent, catchState?, finallyState?,
-   finalizer? }`. A finally that must support replay becomes states
+finalizer? }`. A finally that must support replay becomes states
    (`finallyState` entry); its terminator is a new `replay` terminator: read
    MODE — NEXT → goto(normal successor); THROW → set region local to `parent`,
    re-throw ERROR (routes to the next outer region); RETURN → settle the
@@ -478,6 +549,7 @@ branch base: a while-await wasi fn was host-free-compilable but never completed
 across genuine suspensions with the accumulator surviving each spill/restore.
 
 **How** (planner + spill only — the emitter already had goto/condGoto):
+
 - `async-cps.ts` — `planAsyncCfg(fn, plan, {allowLoops})` is now the single CFG
   producer for the drive lane. Linear bodies **delegate** to the byte-identical
   `linearPlanToCfg(planLinearAwaits(...))` path (proven: the 69-test async drive
@@ -530,10 +602,16 @@ lands; this section banks the follow-up with a concrete contract.
 1. **The drive machine already handles the for-await loop-drive shape.** The
    spec-equivalent index lowering of `for await (const x of arr)`, written as
    real source —
+
    ```ts
-   const __src = arr; let __i = 0;
-   while (__i < __src.length) { const x = await __src[__i]; __i = __i + 1; /*body*/ }
+   const __src = arr;
+   let __i = 0;
+   while (__i < __src.length) {
+     const x = await __src[__i];
+     __i = __i + 1; /*body*/
+   }
    ```
+
    — compiles host-free (imports `[]`, valid Wasm) and runs correctly on the 3a
    while-with-await machine (`[P.resolve(1),P.resolve(2),P.resolve(3)]` → sum 6,
    both the fast-path advance and the `__drain_microtasks` resume). So the CFG
@@ -541,7 +619,7 @@ lands; this section banks the follow-up with a concrete contract.
    shipped are sufficient.
 
 2. **The user-facing gap is real and severe.** `for await (const x of
-   [Promise.resolve(1), …]) { sum += x }` compiles host-free today but yields
+[Promise.resolve(1), …]) { sum += x }` compiles host-free today but yields
    **NaN** — for-await produces **no `ts.AwaitExpression`** (the per-element
    suspension is implicit in `awaitModifier`), so `analyzeAsyncBody` reports
    **zero await points**, every gate (`asyncFnNeedsDrive` / `asyncFnNeedsCps` /
