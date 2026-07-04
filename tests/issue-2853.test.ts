@@ -88,4 +88,34 @@ describe("#2853 bug A — absent-key reads must not alias same-offset sibling fi
     // after `num` → 0 (division), after `,` → 1 (regex allowed)
     expect(ex.exprAllowedAfterNum()).toBe(1);
   });
+
+  // Park-regression guard (#2853 merge_group re-park): the shape-brand finalize
+  // pass separates previously-canonically-equal same-layout shapes. A `var`
+  // reassigned across DIFFERENT-KEY same-layout object literals is typed to the
+  // FIRST shape by the front-end, which then emits a guarded downcast
+  // (`ref.test T … else ref.null T ; ref.as_non_null`) for each later
+  // assignment. Pre-brand those passed by canonical-merge coincidence; post-brand
+  // they must trap (`dereferencing a null pointer`) UNLESS the coercion registers
+  // both sibling shapes as no-brand. This reproduces the exact test262 regression
+  // cluster (S11.1.5_A4.3, S11.4.9, S13.2.2, Temporal *singular-properties*).
+  it("a var reassigned across same-layout different-key object literals does not trap", async () => {
+    // NB: 'o' is deliberately UNANNOTATED so the object-widening pre-pass types
+    // the local as a bare '__anon' struct (the trap needs a concrete struct
+    // local + guarded downcast; an ': any' local stays externref and dispatches
+    // dynamically, sidestepping the bug). Multiple same-layout literals in the
+    // module give the collision (keyCount >= 2) that drives branding.
+    const ex = await run(`
+      export function t(): number {
+        var o = { undefined: true }; // shape A  {k:i32,$shape}
+        if (o.undefined !== true) return 1;
+        o = { true: true } as any;   // shape B — same layout, different key
+        if ((o as any).true !== true) return 2;
+        o = { null: true } as any;   // shape C
+        if ((o as any).null !== true) return 3;
+        return 0;
+      }
+    `);
+    // Must complete without a null-deref trap and read each own key correctly.
+    expect(ex.t()).toBe(0);
+  });
 });

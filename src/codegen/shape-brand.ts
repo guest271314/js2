@@ -112,7 +112,44 @@ function shallowStructKey(t: StructTypeDef): string {
  * Must run AFTER all instruction emission and BEFORE dead-type elimination
  * (`eliminateDeadImports`) so the chain refs get remapped/kept-alive by DCE.
  */
-export function brandCollidingShapeTypes(mod: WasmModule): void {
+/**
+ * (#2853 park fix) Record that two struct types are same-layout sibling shapes
+ * for which a *trapping* guarded downcast was emitted (e.g. a `var` reassigned
+ * across different-key object literals lowered `ref.test T … ref.null T ;
+ * ref.as_non_null` between them). Both are added to `noBrand` so
+ * `brandCollidingShapeTypes` skips them: branding would separate two
+ * previously-canonically-equal runtime types, and the already-baked narrowing
+ * cast would then fail the `ref.test` and trap on `ref.as_non_null`.
+ *
+ * SOUNDNESS: excluding a shape from branding reverts it to EXACT pre-brand
+ * (baseline) behaviour, so this can never introduce a NEW test262 regression —
+ * it only forgoes the nominal-distinctness fix for the specific sibling pair
+ * that a downcast already treats as interchangeable (which the downcast proves
+ * the source never relies on distinguishing). Acorn's colliding shapes are read
+ * through keyed `__sget_*`/inline dispatch, NOT through sibling downcasts, so
+ * they are NOT registered here and stay branded (Bug A fix preserved).
+ */
+export function markNoBrandSiblingShapes(
+  types: readonly StructTypeDef[] | ReadonlyArray<{ kind: string; name?: string }>,
+  noBrand: Set<number>,
+  fromIdx: number,
+  toIdx: number,
+): void {
+  if (fromIdx === toIdx) return;
+  const a = types[fromIdx] as StructTypeDef | undefined;
+  const b = types[toIdx] as StructTypeDef | undefined;
+  if (!a || !b || a.kind !== "struct" || b.kind !== "struct") return;
+  if (!isBrandableShapeName(a.name) || !isBrandableShapeName(b.name)) return;
+  if (a.superTypeIdx !== undefined || b.superTypeIdx !== undefined) return;
+  // Only same shallow layout collides under canonicalization; a genuinely
+  // different-layout downcast (narrowing) is handled soundly elsewhere and its
+  // types may still be branded.
+  if (shallowStructKey(a) !== shallowStructKey(b)) return;
+  noBrand.add(fromIdx);
+  noBrand.add(toIdx);
+}
+
+export function brandCollidingShapeTypes(mod: WasmModule, noBrand?: ReadonlySet<number>): void {
   const types = mod.types;
 
   // ── 1. Collision universe: shallow keys of every struct type ──
@@ -156,6 +193,7 @@ export function brandCollidingShapeTypes(mod: WasmModule): void {
     if (t.superTypeIdx !== undefined) continue; // only bare structs
     if (isSuper.has(i)) continue; // never widen a supertype's field prefix
     if (i <= anchorIdx) continue; // chain refs must point backward
+    if (noBrand?.has(i)) continue; // (#2853 park fix) a trapping sibling downcast targets this shape
     const key = structKeys[i]!;
     if ((keyCount.get(key) ?? 0) < 2) continue; // collides with nothing → byte-inert
     // Clone the fields array: ctx.structFields shares the original array and

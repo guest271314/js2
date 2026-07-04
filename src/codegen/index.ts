@@ -2306,7 +2306,7 @@ export function generateModule(
     // runtime type (which made `ref.test`-keyed property dispatch read fields
     // by OFFSET instead of by KEY). Runs after all instruction emission and
     // BEFORE dead-type elimination so the brand-chain refs get remapped.
-    brandCollidingShapeTypes(mod);
+    brandCollidingShapeTypes(mod, ctx.noBrandShapeTypes);
 
     markLeafStructsFinal(mod, ctx.wasi);
 
@@ -6918,7 +6918,7 @@ export function generateMultiModule(
     // (#2853) Nominal shape branding — same pass + placement as the
     // single-module pipeline (see generateModule): after all instruction
     // emission, before dead-type elimination.
-    brandCollidingShapeTypes(mod);
+    brandCollidingShapeTypes(mod, ctx.noBrandShapeTypes);
 
     markLeafStructsFinal(mod, ctx.wasi);
 
