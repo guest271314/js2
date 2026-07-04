@@ -7105,6 +7105,125 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   return types;
 }
 
+/**
+ * (#2161 B1) `__wrapper_string_value(externref) -> ref null $AnyString` —
+ * boxed-`new String(...)` receiver/argument primitive-string recovery.
+ *
+ * A `new String(x)` produces a `$Object` wrapper (`__new_String`) carrying its
+ * [[StringData]] under the reserved FLAG_INTERNAL `WRAPPER_PRIMITIVE_KEY` slot.
+ * When such a wrapper reaches an externref→native-`$AnyString` coercion (a string
+ * method's receiver-as-subject, e.g. `new String("hello").split(/l/)`, or a
+ * string-typed argument) the generic `ref.test $AnyString` misses it (a wrapper
+ * is an object, not a string) and the value was previously dropped to null →
+ * downstream `__str_flatten` trapped ("dereferencing a null pointer").
+ *
+ * This helper extracts JUST the wrapper's primitive-string slot — the same
+ * internal-slot read `__to_primitive` performs inline (§7.1.1.1: the wrapper's
+ * intrinsic valueOf/toString return the internal primitive) — WITHOUT pulling in
+ * OrdinaryToPrimitive (the valueOf/toString method dispatch), so it stays a pure
+ * bounded slot probe with no user-observable side effects. It returns the native
+ * string when the input is a boxed-String wrapper, else null (a plain object,
+ * another wrapper kind, or a non-string slot value), so the caller keeps its
+ * prior null fallthrough for every non-boxed-String value.
+ *
+ * Registered lazily and idempotently — only when a qualifying coercion actually
+ * needs it, so modules that never box a String stay byte-identical. Returns the
+ * func index, or -1 when the object runtime is absent (no `__obj_find`) or native
+ * strings are off (gc/host mode) — in which case the caller falls through to its
+ * prior null. `ensureObjectRuntime` has already run (a boxed String cannot exist
+ * otherwise), so `ctx.objectRuntimeTypes` and `__obj_find` are settled and no
+ * late-import shift is pending.
+ */
+export function ensureWrapperStringValueHelper(ctx: CodegenContext): number {
+  const existing = ctx.funcMap.get("__wrapper_string_value");
+  if (existing !== undefined) return existing;
+
+  const anyStrTypeIdx = ctx.anyStrTypeIdx;
+  const objTypes = ctx.objectRuntimeTypes;
+  const objFindIdx = ctx.funcMap.get("__obj_find");
+  if (anyStrTypeIdx < 0 || objTypes === undefined || objFindIdx === undefined) {
+    return -1;
+  }
+  const { objectTypeIdx, propEntryTypeIdx } = objTypes;
+  const anyStrRefNull: ValType = { kind: "ref_null", typeIdx: anyStrTypeIdx };
+
+  const body: Instr[] = [
+    // a = any.convert_extern(x)
+    { op: "local.get", index: 0 },
+    { op: "any.convert_extern" },
+    { op: "local.tee", index: 1 },
+    { op: "ref.test", typeIdx: objectTypeIdx },
+    {
+      op: "if",
+      blockType: { kind: "val", type: anyStrRefNull },
+      then: [
+        // e = __obj_find(cast<$Object>(a), WRAPPER_PRIMITIVE_KEY)
+        { op: "local.get", index: 1 },
+        { op: "ref.cast", typeIdx: objectTypeIdx },
+        ...((): Instr[] => {
+          addStringConstantGlobal(ctx, WRAPPER_PRIMITIVE_KEY);
+          return stringConstantExternrefInstrs(ctx, WRAPPER_PRIMITIVE_KEY);
+        })(),
+        { op: "call", funcIdx: objFindIdx },
+        { op: "local.tee", index: 2 },
+        { op: "ref.is_null" },
+        {
+          op: "if",
+          blockType: { kind: "val", type: anyStrRefNull },
+          then: [{ op: "ref.null", typeIdx: anyStrTypeIdx } as Instr],
+          else: [
+            // confirm the entry is the internal slot (FLAG_INTERNAL)
+            { op: "local.get", index: 2 },
+            { op: "ref.as_non_null" },
+            { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 2 }, // flags
+            { op: "i32.const", value: FLAG_INTERNAL },
+            { op: "i32.and" },
+            {
+              op: "if",
+              blockType: { kind: "val", type: anyStrRefNull },
+              then: [
+                // v = entry.value (anyref); if it is a native string, return it
+                { op: "local.get", index: 2 },
+                { op: "ref.as_non_null" },
+                { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 1 }, // value
+                { op: "local.tee", index: 3 },
+                { op: "ref.test", typeIdx: anyStrTypeIdx },
+                {
+                  op: "if",
+                  blockType: { kind: "val", type: anyStrRefNull },
+                  then: [
+                    { op: "local.get", index: 3 },
+                    { op: "ref.cast", typeIdx: anyStrTypeIdx },
+                  ],
+                  else: [{ op: "ref.null", typeIdx: anyStrTypeIdx } as Instr],
+                } as Instr,
+              ],
+              else: [{ op: "ref.null", typeIdx: anyStrTypeIdx } as Instr],
+            } as Instr,
+          ],
+        } as Instr,
+      ],
+      else: [{ op: "ref.null", typeIdx: anyStrTypeIdx } as Instr],
+    } as Instr,
+  ];
+
+  const typeIdx = addFuncType(ctx, [{ kind: "externref" }], [anyStrRefNull]);
+  const funcIdx = mintDefinedFunc(ctx);
+  ctx.funcMap.set("__wrapper_string_value", funcIdx);
+  pushDefinedFunc(ctx, funcIdx, {
+    name: "__wrapper_string_value",
+    typeIdx,
+    locals: [
+      { name: "a", type: { kind: "anyref" } },
+      { name: "e", type: { kind: "ref_null", typeIdx: propEntryTypeIdx } },
+      { name: "v", type: { kind: "anyref" } },
+    ],
+    body,
+    exported: false,
+  });
+  return funcIdx;
+}
+
 /** (#1100/#1355) Reserved trap-invoke driver names — filled by `fillProxyDispatch`. */
 const PROXY_CALL_GET = "__proxy_call_get";
 const PROXY_CALL_SET = "__proxy_call_set";
