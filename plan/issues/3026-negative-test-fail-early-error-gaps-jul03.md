@@ -240,3 +240,26 @@ with a single default, no default, a default-before-cases, a nested switch, and
 fallthrough all compile to byte-identical Wasm (sha256-compared against the
 pre-change compiler); only a switch with two-or-more default clauses newly raises
 the early SyntaxError.
+
+## Slice 7 landed — no line terminator between `throw` and its expression (2026-07-05)
+
+**Delivered:** an early error for the restricted production `ThrowStatement :
+throw [no LineTerminator here] Expression ;`. A LineTerminator right after
+`throw` triggers ASI, which would leave `throw;` (no operand) — a SyntaxError.
+Covers test262 `language/asi/S7.9_A4.js`.
+
+**Root cause:** unlike `return` / `break` / `continue` (where ASI produces a
+valid statement), TypeScript's parser silently reparses the expression after the
+newline as its own statement and synthesizes a **zero-width (missing)** throw
+operand, emitting no diagnostic — so nothing in the early-error pass detected it.
+The fix flags any `ThrowStatement` whose `expression` has `getFullWidth() === 0`
+(a missing operand). This also covers a bare `throw;` with no operand at all.
+
+**Files:** `src/compiler/early-errors/node-checks.ts` (one additive check in the
+per-node walk). Tests: `tests/issue-3026.test.ts` (+3 reject, +3 valid-control).
+Byte-inert for valid programs — verified via sha256: `throw <expr>` on the same
+line (including a `throw` whose operand itself wraps across lines, e.g.
+`throw new Error(\n …)`, and a `throw` inside a switch case) all compile to
+byte-identical Wasm against the pre-change compiler; only a `throw` with a
+missing operand (newline immediately after `throw`, or bare `throw;`) newly
+raises the early SyntaxError.
