@@ -2,7 +2,7 @@
 id: 3000
 title: "IR: class-member residual — private fields, accessors, inheritance/super (class-method → 0)"
 status: in-progress
-assignee: opus-3000b
+assignee: opus-3000-1b
 sprint: current
 created: 2026-07-02
 updated: 2026-07-04
@@ -216,6 +216,89 @@ Animal`. Needs: parent-prefixed `IrClassShape` (today `buildIrClassShapes`
 
 `"class-method"` joins `STRICT_IR_REASONS` (`src/codegen/index.ts`) only once
 B + C + E all land and the bucket is 0.
+
+## Implementation Notes — Phase 1b: string-field-shape projection (2026-07-04, PR TBD)
+
+**The blocker this closes.** #3000-B (accessors) and Phase-1a (private field
+read/write) both landed the selector claim + AST→IR lowering for string-field
+class members, but `buildIrClassShapes` (`src/codegen/index.ts`) still rejected
+the whole class: it projected each field's IR type from the *legacy struct
+ValType* via `valTypeToIrField`, which returned `null` for a `string` field.
+One string field ⇒ no `IrClassShape` ⇒ Phase-B integration skipped **every**
+member (`integration.ts:312` `if (!classShape) continue;`) ⇒ accessors +
+methods stayed **byte-inert on legacy**. classes.ts's `Animal` (`#name: string`)
+was blocked exactly this way. This is the "string-field-shape" gap the #3000-B
+author documented (and its test header called out).
+
+**Root cause of the null (verified).** The legacy struct ValType is *lossy*: a
+string field lowers to `externref` in host mode — indistinguishable from `any`
+/ object — so string recovery cannot be done from the ValType alone. Fix:
+re-derive each field's IR type from the **AST/checker** (mirroring the exact
+`getTypeAtLocation` sources the legacy `collectClassDeclaration` uses:
+`PropertyDeclaration` members + ctor-body `this.x = …` introductions), keyed by
+the SAME mangled name legacy stores in `structFields` (`#x` → `__priv_x`). A
+`string` field projects to `IrType.string`, which `lowerIrTypeToValType` →
+`resolveString()` lowers to the exact per-lane carrier the struct already holds
+(host → `externref`; native → `(ref $AnyString)`). Parity is enforced, not
+assumed: `irFieldTypeMatchesLegacyValType` adopts the AST-derived type **only**
+when it is byte-compatible with the legacy struct slot (a *field-level* parity
+guard, mirroring the string arm of `resolveWasmType` + the `ref`→`ref_null`
+field widening). Anything the AST can't resolve, or that disagrees with the
+slot, falls back to the ValType path → worst case a clean legacy fallback.
+
+**Genuine emission proven (non-vacuity).** Added `CompileResult.irCompiledFuncs`
+(the integration pass's `report.compiled` — the members whose slots were
+*actually patched* with an IR body; a selector claim alone does NOT imply
+this). Differential proof: with the string arm disabled, `Animal_get_name`,
+`Animal_set_name`, `Animal_get_age`, `Animal_speak` are **byte-inert/missing**
+from `irCompiledFuncs`; with it, all four are **IR-emitted in BOTH lanes**
+(host externref + native `$AnyString`), zero post-claim demotions, correct
+string round-trips through the production runtime. Corpus `check:ir-fallbacks`:
+**zero** post-claim demotions across all playground examples.
+
+**Metric.** The `class-method` bucket on classes.ts was already `5 → 3` from
+#3000-B's *selector* relaxation (the count is selector-level). Phase-1b does not
+move the count — it makes the already-claimed `Animal` accessors + method
+**genuinely non-byte-inert**. The remaining `class-method: 3` are all `Dog_*`
+(`Dog_new`, `Dog_speak`, `Dog_breed`) — the `extends` subclass, deferred to
+Phase E. **Criterion #3 (classes.ts fully IR) is NOT yet reachable**: it still
+needs Phase C (ctor emission) + Phase E (inheritance/`super`).
+
+**Edits.**
+- `src/codegen/index.ts` — `buildIrClassShapes` field loop re-derives field IR
+  types from AST/checker; new `irFieldTypeMatchesLegacyValType` parity guard;
+  `valTypeToIrField` comment updated (strings now handled by the AST path);
+  `ctx.irCompiledFuncs = report.compiled` + threaded onto both codegen return
+  sites.
+- `src/codegen/context/types.ts`, `src/index.ts`, `src/compiler.ts` —
+  `irCompiledFuncs` telemetry field (the durable genuine-emission signal).
+- `tests/issue-3000-1b.test.ts` — genuine-emission proof (both lanes) + runtime
+  round-trip + numeric/string co-emission.
+- `tests/issue-3000.test.ts` — `runString` now instantiates via the PRODUCTION
+  runtime (`compileAndInstantiate` → native `wasm:js-string` builtins). The old
+  raw `WebAssembly.instantiate(binary, importObject)` harness could not resolve
+  `wasm:js-string`: IR expresses string ops as native js-string *builtin*
+  imports (not tracked host imports), so `importObject` (keyed off
+  `result.imports`) is empty for an all-builtin module. This is a general IR
+  property, not class-specific.
+
+**DISCOVERED PRE-EXISTING GAP — banked for a follow-up (not this slice).**
+An IR-emitted class method invoked as a *method-value* with a foreign receiver
+(`(c.method as any).call({})`) null-dereferences instead of throwing a catchable
+`TypeError` — the brand-check `ref.test` guard legacy emits in the method-value
+`.call` dispatch is not applied for IR-claimed methods. **This is pre-existing
+and independent of Phase-1b**: a *numeric*-field class (which IR-emits via
+#3000-B, with Phase-1b fully disabled) reproduces the identical null-deref on
+`main`. `tests/issue-private-access-brand.test.ts` is already 2/4 red on `main`
+from it (the getter + private-method cases); Phase-1b makes the string-field
+case (Test 1) join them (2→3 red). That file is **not run by any blocking CI
+gate** (`quality` runs a fixed file list; the equivalence shards only run
+`tests/equivalence/`). The gated class-equivalence suites are **45/45 green**
+with Phase-1b. Fixing the brand check belongs to the method-value dispatch
+machinery (`__call_fn_method_*` / #2175 area) — shared across ALL IR class
+methods (numeric + string), architect-scale, and orthogonal to string-field
+shape. **Recommend a dedicated follow-up issue: "IR class-method-value `.call`
+brand-check guard".**
 
 ## Implementation Notes — #3000-B: accessors (get/set) (2026-07-04, opus-3000b)
 
