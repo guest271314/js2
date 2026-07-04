@@ -37,6 +37,7 @@ import {
 } from "./predicates.js";
 import { validateArrayAssignmentPattern, validateObjectAssignmentPattern } from "./assignment.js";
 import {
+  checkDuplicateDefaultClause,
   checkDuplicateLexicalDeclarations,
   checkDuplicateParams,
   checkDuplicatePrivateNames,
@@ -915,6 +916,7 @@ export function runNodeChecks(ctx: EarlyErrorContext, node: ts.Node): void {
   // contains any duplicate entries.
   if (ts.isCaseBlock(node)) {
     checkSwitchCaseLexicalDuplicates(ctx, node);
+    checkDuplicateDefaultClause(ctx, node);
   }
 
   // ── Class body: static prototype method/field ─────────────────────
