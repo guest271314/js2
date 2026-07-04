@@ -564,7 +564,10 @@
     </footer>
 
     <script type="module" src="../components/site-nav.js"></script>
-    <script src="../components/t262-charts.js"></script>
+    <!-- t262-charts.js is an ES module (it `export {}`s at top level); loading
+         it as a classic script throws a SyntaxError and t262-donut never
+         registers. trend-chart.js is a classic script and loads as-is. -->
+    <script type="module" src="../components/t262-charts.js"></script>
     <script src="../components/trend-chart.js"></script>
     <script>
       // Standalone donut: refresh from the live baseline using the host-free
