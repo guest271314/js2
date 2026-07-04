@@ -278,3 +278,73 @@ export function test(): number {
     ).toBe(8);
   });
 });
+
+describe("#2864 R1 yield* completion-value binding (standalone)", () => {
+  it("verify-first: const x = yield* inner() binds the inner's return value", async () => {
+    expect(
+      await runStandalone(`function* inner() { yield 1; return 42; }
+function* g() { const x = yield* inner(); yield x; }
+export function test(): number {
+  let s = 0;
+  for (const v of g()) s += v;
+  return s; // 1 (delegated) + 42 (bound return value)
+}`),
+    ).toBe(43);
+  });
+
+  it("binding survives a later suspension (spill round-trip)", async () => {
+    expect(
+      await runStandalone(`function* inner() { yield 1; return 42; }
+function* g() { const x = yield* inner(); yield 7; yield x; }
+export function test(): number {
+  const it = g();
+  let s = 0;
+  let r = it.next();
+  while (!r.done) { s = s * 100 + (r.value as number); r = it.next(); }
+  return s; // 1, 7, 42 → 10742
+}`),
+    ).toBe(10742);
+  });
+
+  it("binding works in a boxed-any (mixed-yield) outer", async () => {
+    expect(
+      await runStandalone(`function* inner() { yield 1; return 5; }
+function* g() { const x = yield* inner(); yield {a: x}; }
+export function test(): number {
+  let s = 0;
+  for (const v of g()) { s += (typeof v === "number") ? (v as number) : (v as any).a; }
+  return s; // 1 + 5
+}`),
+    ).toBe(6);
+  });
+
+  it("two delegation sites, first one bound", async () => {
+    expect(
+      await runStandalone(`function* a() { yield 1; return 10; }
+function* b() { yield 2; }
+function* g() { const x = yield* a(); yield* b(); yield x; }
+export function test(): number {
+  let s = 0;
+  for (const v of g()) s = s * 100 + v;
+  return s; // 1, 2, 10 → 10210
+}`),
+    ).toBe(10210);
+  });
+
+  it("string-outer delegation refuses cleanly (#680) instead of emitting invalid wasm", async () => {
+    // Latent since #2170/#2171: a string-carrier outer delegating to an f64
+    // inner passed the plan gate (which only checked the INNER's elem type) and
+    // the emitted module FAILED WASM VALIDATION at instantiation (f64 value
+    // into the outer's concrete-ref result field — no fixups.ts repair exists
+    // for that pair). The R1 gate bails the shape to the host path, which under
+    // standalone is the scoped #680 compile refusal — correct-not-wrong.
+    const r = await compile(
+      `function* inner() { yield 1; }
+function* g() { yield* inner(); yield "s"; }
+export function test(): number { let n = 0; for (const x of g()) n++; return n; }`,
+      { fileName: "test.ts", target: "standalone" },
+    );
+    expect(r.success).toBe(false);
+    expect(r.errors?.[0]?.message ?? "").toContain("#680");
+  });
+});

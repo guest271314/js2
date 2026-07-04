@@ -2,9 +2,9 @@
 id: 2864
 title: "Standalone: no Wasm-native generator carrier — sync generators leak __create_generator/__gen_* host imports"
 status: in-progress
-assignee: ttraenkler/sr-frame
+assignee: ttraenkler/fable-gencarrier
 created: 2026-06-30
-updated: 2026-06-30
+updated: 2026-07-04
 priority: high
 feasibility: hard
 task_type: feature
@@ -306,7 +306,146 @@ propagate the error; `return()` through try/finally is unchanged.
 - `tests/issue-2864-standalone-generator-carrier.test.ts` — 5 F2 standalone cases
   (zero-host-import asserted).
 
-
 ## Reconciliation note (shepherd, 2026-07-01)
 
 Landed slices: **F1** heterogeneous boxed-any carrier (PR #2366), **F1b** typed live-across-yield local spills (PR #2372), **F2** `gen.throw()` abrupt completion (PR #2375). Issue stays `in-progress` for the remaining carrier phases.
+
+## Carrier-completion design (fable-gencarrier, 2026-07-04) — measured status + remaining protocol
+
+### Measured `return <value>` status (corrects the task framing)
+
+Probed on main (standalone, host-free asserted): `return <value>` routing in
+the NATIVE carrier is **already complete** — terminal `{value, done:true}`
+exactly once then `{undefined, done:true}` (11111 canary), for-of/spread
+exclude it (203 canary), mid-loop `return`, boxed-any `return {…}`,
+string-carrier `return "z"`, and `gen.return(v)` value round-trip (numeric +
+open dispatch) all pass. What was actually missing on the sync-carrier side:
+
+1. **`const x = yield* inner()`** — the delegation COMPLETION value
+   (§27.5.3.7: the yield\* expression's value is `innerRes.value` once
+   `innerRes.done`) had no binding path (plan bailed → #680 CE). → **R1, this
+   PR.**
+2. **`yield*` over a general iterable** — #2173 (design refreshed there;
+   slice-2a is NOT #2106-blocked).
+3. **IR front-end (js-host lane)**: IR generators still throw-defer any
+   `return <expr>` to legacy (#2035 note in `from-ast.ts lowerTail`) — blocks
+   the #2951 skip-set retirement. Exact Opus-executable contract banked in
+   #2951 ("gen.setReturn" section).
+
+### R1 (this PR) — yield\* completion-value binding + carrier-mismatch gate
+
+- **`const x = yield* inner()`**: the `yield-star` terminator gains
+  `bindResultTo`. The done-arm delivers `innerRes.value` (f64 — inners are
+  f64-gated) into the binding's pre-allocated local AND its spill field
+  BEFORE transitioning to the successor, inside the same resume call that
+  observed completion. Deliberately NOT a resume binding: resume bindings
+  re-read the `sent` field on every entry, which would clobber the completion
+  value with the next `.next(v)` argument. Spill typed f64 via a dedicated
+  `delegationBindingNames` set (the decl-shape cascade in
+  `resolveSpillLocalValType` doesn't model yield\* initializers; the
+  `sent`-carrier rule types `.next(v)` bindings — both wrong here).
+- **Latent invalid-wasm fix**: the #2170 delegation gate checked only the
+  INNER's elem type. A **string-carrier outer** delegating to an f64 inner
+  emitted a module that FAILED WASM VALIDATION at instantiation (f64 →
+  concrete-ref result field; `repairStructTypeMismatches` has no repair for
+  that pair — the boxed-any outer only works because fixups.ts repairs
+  f64→externref to `__box_number`). R1 bails `elemIsString` outers to the
+  host path → clean #680 refusal. Do NOT "fix" this by leaning further on the
+  repair pass; if string-outer delegation is wanted later, emit an explicit
+  elem conversion in the yield-arm.
+- **Byte-inertness**: 8-program × 3-lane sha256 matrix (numeric/any/string
+  gens, slice-1 delegation, any-outer delegation, spill gen, plain, host gen ×
+  gc/standalone/wasi) — all identical before/after; only programs using the
+  NEW shapes change.
+- **Known residual (pre-existing, NOT R1)**: an inner that completes without
+  an explicit `return` delivers the f64 carrier's undefined-as-NaN sentinel,
+  so `x === x` diverges from Node (`false` vs `true`). This is the #2106
+  value-rep undefined-observability class, same as `.next()`-with-no-arg
+  resume bindings today. Do not pin it in tests.
+
+### Remaining protocol gaps (banked slices, exact contracts)
+
+- **D2 — delegation abrupt forwarding (iterator close through yield\*)**:
+  `.return(v)` / `.throw(e)` on the OUTER while suspended in a `yield-star`
+  state must forward to the INNER (`inner.return`/`inner.throw`, §27.5.3.7
+  steps 7.b/7.c) so the inner's `finally` blocks run, then continue the
+  outer's abrupt path. Today the outer's per-state abrupt block completes the
+  outer WITHOUT closing the inner (inner finalizers silently skipped).
+  Contract: in the yield-star state's abrupt block (mode != 0), when the
+  delegation slot is non-null, drive the inner's resume once with the SAME
+  mode + abrupt/error payload (write inner's `MODE`/`ABRUPT`/`ERROR` fields,
+  call its resume fn), discard the inner's result, null the slot, then run the
+  outer's own finalizers as today. Wasm-level: mirrors F2's mode-2 wiring, one
+  extra call in the abrupt block, gated on `delegationSlots` non-empty —
+  byte-inert for non-delegating generators. Test: M3 probe shape
+  (`inner try/finally`, outer `.return()` mid-delegation → inner `log`
+  written + outer completes with the return value).
+- **D3 — general-iterable `yield*`**: lives in #2173 (vec-cursor for numeric
+  arrays — slice-2a there, NOT blocked by #2106; generic `{next()}` +
+  `.return()` close as slice-2b, which SHOULD reuse D2's forwarding shape).
+- **D4 — try/CATCH across yield** (F2 deferral): do NOT extend the ad-hoc
+  region modeling in `generators-native.ts` for this — see the alignment
+  decision below; catch-region routing is exactly what #2906 slice 3c builds
+  for async. Trigger point for the planner convergence.
+
+### Alignment decision: sync generators vs the #2906 AsyncCfgPlan machine
+
+**Question** (from the dispatch): should sync generators ride the #2906
+multi-state CFG machine rather than a parallel mechanism?
+
+**Answer: converge at the PLANNER, not the emitter, and only at the D4/W6
+trigger — do not port the sync carrier now.** Rationale:
+
+1. **The ABI layer is ALREADY converged.** `frame-core.ts` owns the shared
+   frame ABI (`STATE`/`SENT`/`MODE`/`ABRUPT`/`ERROR`, `storeSpills`,
+   `setStateInstrs`) consumed by BOTH `generators-native.ts` and
+   `async-frame.ts`. The #2618 interpreter's PC-in-`$Frame` bytecode
+   suspension is the same model (saved integer position + spilled locals in a
+   heap frame) — all three stories are coherent today.
+2. **The two machines differ ONLY in suspend/settle backends.** Generator
+   `yield` returns `{value, done}` synchronously to the caller; async
+   `suspend` registers a promise reaction and returns. `jump`≈`goto`,
+   `branch`≈`condGoto`, `return/done`≈`settle*` are already isomorphic.
+   What is DUPLICATED is the **statement-tree → state-graph planner**
+   (loops/ifs/try-region lowering exists in both files, independently).
+3. **Why not port now**: the sync planner+emitter is load-bearing for ~250
+   native-gen tests with byte-stability discipline; a port is pure churn with
+   zero functional win until a shape needs what only the CFG machine has.
+   #2906's planner is also still growing its region model (3c: catch-states,
+   completion replay, nested regions) — porting onto a moving substrate
+   re-derives the #2367 graveyard.
+4. **The convergence trigger is D4 (try/catch-across-yield) / #3032 W6
+   (buffer retirement).** Both need catch-region routing + replay — exactly
+   #2906 3c. When 3c has landed and proven in the async lane, add a **sync
+   settle backend** to the CFG emitter (`yield` terminator → build result
+   struct + return, instead of fulfil+microtask) and route NEW generator
+   shapes through `planAsyncCfg`; retire `generators-native`'s ad-hoc
+   structural lowering only when the CFG path's corpus is net-zero on the
+   native-gen suites. **#2865 (async generators) must NOT wait for that
+   retirement**: it stacks directly on #2906 3d (`settleYield` terminator +
+   result-promise queue), which is the designed convergence point of the two
+   frames — building async gens on `generators-native.ts` instead would be a
+   third machine. Rule of thumb going forward: **new control-flow capability →
+   CFG planner; carrier/value-rep capability → generators-native.**
+
+### Composition with #3032 lazy-first-resume thunks
+
+Disjoint lanes, one destination. The thunk model is the JS-HOST answer for
+expression/nested/method generators (eager buffer made lazy at creation); the
+native carrier is standalone-only (`noJsHostTarget`) and already truly lazy —
+nothing runs until the first resume, `return()`/`throw()` before start never
+run the body (F2), matching the thunk model's §27.5.3.2 behavior. No gating
+interaction exists today (verified: R1 touches only the native path; js-host
+bytes identical). The composition rules:
+
+- **#3032 W3 route (b) (#2203 capture slots in the state struct) is the
+  preferred endgame** over widening route (a) thunk-wraps: every generator
+  family that becomes a native candidate exits the buffer model entirely
+  (and with it the thunk hack) in standalone; W6 then widens the native
+  carrier to js-host, retiring both.
+- **Do not add new eager-buffer capabilities** beyond the #2951 IR
+  `gen.setReturn` unblock (needed for the IR-first flip in the js-host lane
+  regardless of W6 timing).
+- Any future js-host widening of the native carrier must preserve #3032's
+  observable contract: creation runs nothing; `next(v)` two-way communication
+  (impossible under the buffer) comes free with the carrier.

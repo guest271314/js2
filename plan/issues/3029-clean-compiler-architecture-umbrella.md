@@ -1,7 +1,8 @@
 ---
 id: 3029
 title: "Clean compiler architecture umbrella: layered module map, five-part backend contract, reviewability ratchets"
-status: ready
+status: in-progress
+assignee: ttraenkler/fable-arch-slices
 sprint: current
 created: 2026-07-04
 updated: 2026-07-04
@@ -128,3 +129,118 @@ continuous; S9 after #3030's serializer exists.
 - **Duplication with in-flight issues**: #2953 (S2), #2956 (S3 overlap),
   #742 (S8) keep their own issue files and owners; this umbrella sequences
   them and must not double-dispatch. Check assignees before claiming.
+
+## S4 — ModuleAssembler design (RATIFIED, Fable 2026-07-04)
+
+The interface body lives in `src/ir/backend/contract.ts` (part 5) with the
+invariants A1–A7 inline. This section records the design rationale and the
+convergence map — the WHY, so the S5 implementer and the #2710 waves don't
+re-litigate it.
+
+### The design in one sentence
+
+**A consumer of the assembler never sees a module index**: identity is a
+stable handle minted at declaration; indices come into existence exactly
+once, inside `finalize()` (= `resolveLayout`), and are consumed only by the
+serializer.
+
+### Why this shape (root cause of the regression class)
+
+The bug class is definitionally "a concrete index baked into instruction X
+went stale when the index space changed" (#2710). Every prior mitigation —
+shifters, fixups, `?? funcIdx` repoints, cached-field chases — is REACTIVE:
+it repairs concrete indices after churn, so every new emit site / cached
+field is a fresh opportunity to forget the repair (the 2026-07 tag-5 PR's
+stale cached `__gen_eager_mode` global index is the newest instance; #2078
+`currentThisGlobalIdx` the canonical one). The assembler contract is the
+STRUCTURAL fix: with no index in circulation before finalize, there is
+nothing a late import can invalidate. This is the same dual lesson #1899
+proved — identity must ride in the reference; the only sound resolution
+point is after all churn.
+
+### Key decisions
+
+1. **Two-phase declare/define (mint/push), not define-returns-handle.**
+   Producers routinely need the handle BEFORE the body exists (self-calls,
+   mutual recursion, helper bodies that reference each other, bake-into-
+   immediate-then-build). func-space.ts's `mintDefinedFunc`/`pushDefinedFunc`
+   proved the protocol under nested emission; the contract generalizes it to
+   globals. Declared-but-never-defined fails loudly at finalize (mirrors
+   `absoluteFuncIndex`'s NaN-ordinal throw).
+2. **Imports mint handles too, at any pre-finalize time.** This is the
+   member that makes late imports FREE and retires the shift regime. The
+   import/defined distinction becomes a finalize-time ordering concern
+   (imports first, registration order), not a producer-visible index-space
+   split — `isImportFuncIdx` arithmetic disappears with it.
+3. **`finalize()` returns `ModuleLayout` and is the ONLY index authority
+   (single-shot).** It corresponds to today's `indexSpaceFrozen = true`
+   point in `generateModule`. Post-finalize mutation throws — the fail-loud
+   twin of today's freeze flag.
+4. **Type interning is the assembler's; layout-handle memoization is the
+   LayoutResolver's.** Two different dedup concerns that today blur through
+   `ctx`: "one canonical TypeDef entry per structural definition" (index
+   identity — assembler) vs "one struct registration per IR shape"
+   (lowering memoization — resolver). Splitting them keeps part 4
+   backend-neutral.
+5. **DCE marks dead, finalize skips.** Dead-elimination stops renumbering
+   instructions (its remap is where the type-index remove-and-renumber
+   factory lives, `project_type_index_shift_and_deadelim`); it only marks.
+   The layout skips dead handles. One mechanism for funcs/globals/types.
+6. **Definition payloads are generic.** `ModuleAssembler<FuncDefT,
+GlobalDefT, TypeDefT>` defaults to the `src/ir/types.ts` Wasm records;
+   an MLIR assembler's payloads are dialect ops and its finalize produces an
+   `mlir::ModuleOp`-shaped layout. The handle protocol is representation-
+   independent — that is what makes part 5 a _contract_ rather than a
+   WasmGC refactor.
+
+### Convergence map (today's mechanism → contract member)
+
+| Today (live)                                                                                                 | Contract member                   | Migration vehicle             |
+| ------------------------------------------------------------------------------------------------------------ | --------------------------------- | ----------------------------- |
+| `mintDefinedFunc` / `pushDefinedFunc` (func-space.ts, #1916 S3 stable regime)                                | `declareFunc` / `defineFunc`      | already aligned               |
+| `ctx.numImportFuncs + mod.functions.length` eager minting (legacy live regime)                               | `declareFunc` / `defineFunc`      | #1916 S3 / #2710 s4b          |
+| `addUnionImports` / `addStringImports` / `ensureLateImport` + 4 shifters + `reconcileNativeStrFinalizeShift` | `importFunc` (shift-free by A3)   | #2710 slice 4b/4c             |
+| `addStringConstantGlobal` + `fixupModuleGlobalIndices` + ~25 cached global-idx chases                        | `importGlobal` / `declareGlobal`  | #2710 slice 4a (globals wave) |
+| `ctx.funcMap` / `moduleGlobals` / `ctx.typeNames`                                                            | `lookupFunc/Global/Type` (A6)     | S5 adapter                    |
+| `addFuncType` / struct registration index minting                                                            | `internType`                      | #2710 slice 4d (types wave)   |
+| `eliminateDeadImports` remove-and-renumber                                                                   | dead-marking + finalize skip (A7) | #2710 slice 4d                |
+| `resolveLayout` (src/emit/resolve-layout.ts) at `indexSpaceFrozen`                                           | `finalize()`                      | already the seam              |
+| `WasmExport` / `startFuncIdx` records                                                                        | `exportFunc/Global`, `setStart`   | S5 adapter                    |
+
+Remaining positional-read surface at freeze time (#2710 slice 3 residue):
+`index.ts` ×39 + `integration.ts` ×1, plus the globals/types waves — those
+are exactly the reads the S5 adapter converts. **S5 is adapter-first over
+the existing `ctx.mod` (byte-identity gated via
+`scripts/prove-emit-identity.mjs`), never a rewrite** — the WasmGC
+`ModuleAssembler` wraps the live registries; the linear twin wraps
+`generateLinearModule`'s module state.
+
+### Executable spec
+
+`tests/backend-contract.test.ts` encodes A2/A3/A4/A5/A6 against the stub
+assembler (`src/ir/backend/contract-conformance.ts`) — including the
+headline property: a handle minted before a late import resolves correctly
+after it, with zero fixup.
+
+## Progress log
+
+### S1 + S4 landed (fable-arch-slices, 2026-07-04)
+
+- **S1 — contract freeze**: `src/ir/backend/contract.ts` declares/re-exports
+  all five parts (`TypeConverter<Slot>`, `BackendLegality` + `legalityFor`,
+  `BackendEmitter<Sink>` re-export — the sink was already generic since
+  #1584, so S1 banks it as contract surface — `LayoutResolver` as the
+  canonical name of `IrLowerResolver`, `ModuleAssembler`, and the
+  `BackendContract` bundle). Contract README at `src/ir/backend/README.md`
+  (ownership table, operand-order rules, memoization ownership, R-ESCAPE,
+  R-DEP declaration). Conformance skeleton
+  `src/ir/backend/contract-conformance.ts`: tsc-enforced proof that the
+  three emitters satisfy `BackendEmitter<Sink>` with their own sinks + a
+  from-scratch stub backend implementing all five parts over a foreign
+  `string[]` sink. Byte-inert: new files + type-only re-exports + one
+  unused-by-callers factory; no call site changed.
+- **S4 — ModuleAssembler design**: ratified above; interface body in
+  contract.ts; invariants executable in tests/backend-contract.test.ts.
+- Open slices: S2 (#2953, owned), S3, S5–S9 (Opus lanes per the tier
+  ruling). Umbrella stays in-progress; claim released on merge so the next
+  slice can dispatch.
