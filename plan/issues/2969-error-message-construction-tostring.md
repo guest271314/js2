@@ -103,3 +103,28 @@ Both residuals fixed.
   pre-existing limitation (it fails for string messages too, e.g.
   `(new Error("hi").message as any) === "hi"` on `main`). The naturally-typed
   read (`e.message` is `string` per the TS lib) compares correctly.
+
+## PR #2534 CI-fix (2026-07-04): call-site ToString, not shared-ctor ToString
+
+The first implementation routed the message ToString through the SHARED
+`emitErrorStructConstructor` (`error-types.ts`). That ctor is also lazily
+emitted for internal compiler error paths (destructuring / coercion
+`TypeError`s), so pulling the `__any_to_string` family into those emissions
+registered the `$AnyValue` type + any-equality helpers EARLY — which flips
+standalone `any == any` / `any === any` from the correct native inline lowering
+to the `__any_eq` / `__any_strict_eq` helper path. That helper's tag-5 field-4
+arm deliberately does NOT value-compare boxed numbers (the numeric `f64.eq`
+classifier was tried in #1888, ejected on the standalone floor at −162, and is
+deferred to #2580 M2 / #3032 behind `tag5ValueEqClassifier`). Net: 6 broad
+equivalence regressions (`any 5 === any 5` → false, etc.), and a pre-existing
+latent class (`String(x)` + `any===any` already mis-compares on main).
+
+**Fix:** revert `error-types.ts` to the lightweight raw-store ctor (main
+behaviour — internal error emissions no longer pull any-helpers) and do the
+null-guarded `ToString(message)` at the **user** `new Error(x)` call site
+(`new-super.ts`, standalone/WASI branches only; host mode's import does JS
+ToString). `number_toString` is forced there first so `__any_to_string`'s number
+arm renders "42" not "[object Object]". The `native-strings.ts` numeric-exn hunk
+is unrelated to the equality flip and stays. Verified: the 6 regressing snippets
+return correct results, and `new Error(42).message === "42"` /
+`new TypeError(99).message` work standalone.
