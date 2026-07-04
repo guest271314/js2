@@ -13955,6 +13955,25 @@ function compileCallExpression(
                 valType: cap.valType,
               });
             }
+          } else if (fctx.localMap.get(cap.name) === undefined && ctx.capturedBoxGlobals?.has(cap.name)) {
+            // (#2029 family A) Cross-fctx capture: calling a nested fn from an
+            // object-literal accessor body. The declaring function's local
+            // slot (`cap.outerLocalIdx`) is unreachable here; the accessor-
+            // capture pass promoted the shared ref-cell box to a module
+            // global — source it from there (live write-through semantics).
+            // Guarded on localMap-absence so owner-fctx behavior is unchanged
+            // (see the #1177 revert note below).
+            fctx.body.push({ op: "global.get", index: ctx.capturedBoxGlobals.get(cap.name)!.globalIdx });
+            fctx.body.push({ op: "ref.as_non_null" });
+          } else if (fctx.localMap.get(cap.name) === undefined && ctx.capturedGlobals.has(cap.name)) {
+            // (#2029 family A) Value-global-promoted capture — box a copy.
+            // Best-effort (writes through the closure don't propagate back);
+            // the previous behavior was an out-of-scope local read.
+            fctx.body.push({ op: "global.get", index: ctx.capturedGlobals.get(cap.name)! });
+            if (ctx.capturedGlobalsWidened.has(cap.name)) {
+              fctx.body.push({ op: "ref.as_non_null" });
+            }
+            fctx.body.push({ op: "struct.new", typeIdx: refCellTypeIdx });
           } else {
             // Create a ref cell, store the current value, keep ref on stack.
             // (Note: #1177 originally proposed `localMap.get(cap.name) ?? cap.outerLocalIdx`
@@ -13987,6 +14006,17 @@ function compileCallExpression(
             if (!valTypesMatch(refCellType, expectedMutCapType)) {
               coerceType(ctx, fctx, refCellType, expectedMutCapType);
             }
+          }
+        } else if (fctx.localMap.get(cap.name) === undefined && ctx.capturedGlobals.has(cap.name)) {
+          // (#2029 family A) Immutable capture promoted to a value global by
+          // the accessor-capture pass (cross-fctx call of a nested fn from an
+          // accessor body, or owner-fctx call after promotion) — read the
+          // global instead of the out-of-scope / stale local slot. The
+          // global's type matches the lifted param by construction (both
+          // derive from the same declaring-function local), so no coercion.
+          fctx.body.push({ op: "global.get", index: ctx.capturedGlobals.get(cap.name)! });
+          if (ctx.capturedGlobalsWidened.has(cap.name)) {
+            fctx.body.push({ op: "ref.as_non_null" });
           }
         } else {
           // (#1177: TDZ check moved above the mutable/non-mutable branch.
@@ -15183,11 +15213,15 @@ function compileCallExpression(
           methodName === "toExponential")
       ) {
         // RangeError validation for toString(radix) — radix must be integer 2-36
+        // (#2029 family C) Hoisted so the call below can PASS the radix — the
+        // old code validated it, then called the 1-arg `number_toString`
+        // (radix silently dropped → `5["toString"](2)` returned "5").
+        let radixLocal: number | undefined;
         if (methodName === "toString" && expr.arguments.length > 0) {
           compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "f64" });
           // Floor the radix (ToInteger semantics)
           fctx.body.push({ op: "f64.floor" });
-          const radixLocal = allocLocal(fctx, `__radix_${fctx.locals.length}`, { kind: "f64" });
+          radixLocal = allocLocal(fctx, `__radix_${fctx.locals.length}`, { kind: "f64" });
           fctx.body.push({ op: "local.tee", index: radixLocal });
           fctx.body.push({ op: "f64.const", value: 2 });
           fctx.body.push({ op: "f64.lt" });
@@ -15202,13 +15236,17 @@ function compileCallExpression(
           fctx.body.push({ op: "i32.or" });
           {
             const rangeErrMsg = "RangeError: toString() radix must be between 2 and 36";
+            // (#2029 family C) Dual-mode message push — the raw
+            // `global.get stringGlobalMap.get(msg)!` baked the -1 sentinel
+            // under standalone/nativeStrings (`5["toString"](2)` emit-crashed
+            // with "global index out of range — -1"); the dot-access twin of
+            // this site already uses the helper. Host mode is byte-identical.
             addStringConstantGlobal(ctx, rangeErrMsg);
-            const strIdx = ctx.stringGlobalMap.get(rangeErrMsg)!;
             const tagIdx = ensureExnTag(ctx);
             fctx.body.push({
               op: "if",
               blockType: { kind: "empty" },
-              then: [{ op: "global.get", index: strIdx } as Instr, { op: "throw", tagIdx } as Instr],
+              then: [...stringConstantExternrefInstrs(ctx, rangeErrMsg), { op: "throw", tagIdx } as Instr],
               else: [],
             });
           }
@@ -15233,13 +15271,15 @@ function compileCallExpression(
           fctx.body.push({ op: "i32.or" });
           {
             const rangeErrMsg = "RangeError: toFixed() digits argument must be between 0 and 100";
+            // (#2029 family C) Dual-mode message push — see the toString()
+            // radix twin above (`1["toFixed"](5)` was the standalone
+            // emit-crash repro for property-accessors/S11.2.1_A3_T2).
             addStringConstantGlobal(ctx, rangeErrMsg);
-            const strIdx = ctx.stringGlobalMap.get(rangeErrMsg)!;
             const tagIdx = ensureExnTag(ctx);
             fctx.body.push({
               op: "if",
               blockType: { kind: "empty" },
-              then: [{ op: "global.get", index: strIdx } as Instr, { op: "throw", tagIdx } as Instr],
+              then: [...stringConstantExternrefInstrs(ctx, rangeErrMsg), { op: "throw", tagIdx } as Instr],
               else: [],
             });
           }
@@ -15283,9 +15323,17 @@ function compileCallExpression(
               ? "number_toPrecision"
               : methodName === "toExponential"
                 ? "number_toExponential"
-                : "number_toString";
+                : radixLocal !== undefined
+                  ? "number_toString_radix"
+                  : "number_toString";
         const funcIdx = ctx.funcMap.get(funcName);
         if (funcIdx !== undefined) {
+          // (#2029 family C) The 2-arg radix helper takes (x, radix) — mirror
+          // the dot-access site: receiver is already on the stack, append the
+          // validated radix.
+          if (funcName === "number_toString_radix" && radixLocal !== undefined) {
+            fctx.body.push({ op: "local.get", index: radixLocal });
+          }
           fctx.body.push({ op: "call", funcIdx });
           return { kind: "externref" };
         }

@@ -468,6 +468,46 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
       }
     }
   }
+  // (#2029 family C) Element-access spelling of the number-format methods —
+  // `1["toFixed"](5)`, `5["toString"](2)` (test262
+  // property-accessors/S11.2.1_A3_T2). The dot-form scan above never sees
+  // these, so the native helpers were not registered; the codegen
+  // element-access arm (calls.ts) then found `funcMap.get("number_toFixed")`
+  // undefined and fell through past its already-pushed receiver+argument into
+  // the generic dynamic fallback — a dirty stack whose ref.null receiver threw
+  // "Cannot access property on null or undefined" at runtime standalone.
+  // Register the same helpers for a statically-resolvable string key.
+  if (
+    ts.isCallExpression(node) &&
+    ts.isElementAccessExpression(node.expression) &&
+    ts.isStringLiteral(node.expression.argumentExpression)
+  ) {
+    const elemMethodName = node.expression.argumentExpression.text;
+    // Oracle-first (#1930): a primitive-number receiver reports `"number"`;
+    // a `new Number(x)` wrapper reports its declared symbol name "Number"
+    // (mirrors `isNumberWrapperType`'s Object+symbol check).
+    const elemRecvExpr = node.expression.expression;
+    const isElemNumFmtRecv =
+      ctx.oracle.staticJsTypeOf(elemRecvExpr) === "number" ||
+      (ctx.standalone && ctx.oracle.declaredNameOf(elemRecvExpr) === "Number");
+    if (isElemNumFmtRecv) {
+      if (elemMethodName === "toFixed") {
+        state.primitiveNeeded.add("number_toFixed");
+      } else if (elemMethodName === "toPrecision") {
+        state.primitiveNeeded.add("number_toPrecision");
+        // 0-arg toPrecision routes to plain toString (see the codegen arm).
+        state.primitiveNeeded.add("number_toString");
+      } else if (elemMethodName === "toExponential") {
+        state.primitiveNeeded.add("number_toExponential");
+      } else if (elemMethodName === "toString") {
+        if (node.arguments.length > 0) {
+          state.primitiveNeeded.add("number_toString_radix");
+        } else {
+          state.primitiveNeeded.add("number_toString");
+        }
+      }
+    }
+  }
   // Template expressions with number/boolean/bigint substitutions need number_toString
   if (ts.isTemplateExpression(node)) {
     for (const span of node.templateSpans) {

@@ -1,12 +1,13 @@
 ---
 id: 2029
 title: "standalone: `Binary emit error: u32 out of range: -1` on builtin subclassing, disposal protocol, Object.create, Iterator.prototype (497 tests)"
-status: in-progress
+status: done
+completed: 2026-07-04
 sprint: current
 created: 2026-06-10
-updated: 2026-06-25
+updated: 2026-07-04
 priority: critical
-assignee: ttraenkler/sd-2029fn
+assignee: ttraenkler/fable-2029
 feasibility: medium
 reasoning_effort: high
 model: opus
@@ -646,3 +647,62 @@ local-index (1) residuals already noted above.
 ## Residual (as of #2199, PO reconcile 2026-06-28)
 
 NOT done — umbrella; the headline `u32 out of range: -1` emit-crash class IS resolved (497 → a handful; multiple landed slices: emitSetSubclassProto -1 sentinel, __get_undefined leak, primitive-wrapper refusal, tagged-template localMap rollback, SuppressedError global-sentinel, failed-nested-hoist funcIdx). Remaining separate producers: regexp-replacer global-index (2), property-accessor (1), native-generator funcMap-undefined in annexB RegExp (2), one for-of/iterator-next local-index (1). Deferred: primitive-wrapper native-box subclass; DisposableStack/AsyncDisposableStack ERM substrate (Symbol.dispose value-read + dispose-dispatch, senior-dev). Stays in-progress as the umbrella.
+
+## FINAL family map + fixes (2026-07-04, fable-2029) — emit-crash class now ZERO
+
+**Measured first (live standalone baseline `test262-standalone-current.jsonl`,
+2026-07-03 refresh, confirmed per-process on main `f01867968` via
+`runTest262File`):** the bucket was down to **4 tests, 3 producer families**.
+The annexB native-generator `funcMap`-undefined pair (2) had already flipped to
+ordinary semantic `fail`s (fixed by intervening work — no longer emit-crashes).
+Notably, none of the 4 was host-PASS anymore, and family A crashed in **BOTH
+modes** — the original "host-pass gap" framing was stale.
+
+| Family | Tests | Producer (verified per-process, minimized) | Fix |
+|---|---|---|---|
+| **A** `local index out of range — 2 (valid:[0,2)) at '__anon_0_get_next'` (BOTH modes) | for-of/iterator-next-reference.js | The **Object.defineProperty descriptor accessor path** (`object-ops.ts` ~1927) compiled `get(){...}` bodies in a fresh fctx **without ever calling `promoteAccessorCapturesToGlobals`** (the object-literal accessor path in literals.ts has always called it). A getter returning a nested fn (`get(){ return next; }`, `function next()` capturing an enclosing local) materialized next's closure via `cap.outerLocalIdx` — a slot of the ENCLOSING function — baked into the accessor body: emit crash when out of range, **silent wrong-local read when in range**. Minimal repro needs a preceding computed-member fn-expr assignment only to shift the slot out of range. | (1) `object-ops.ts`: call `promoteAccessorCapturesToGlobals` for descriptor get/set bodies (after the S5c closure arm). (2) `closures.ts promoteAccessorCapturesToGlobals`: NEW phase — promote **transitive captures of referenced nested functions** (value global for immutable — value-copy semantics preserved since never written; eager ref-cell box aliased in a `(ref null $cell)` module global — `ctx.capturedBoxGlobals` — for mutable, giving LIVE write-through sharing). (3) `closures.ts emitMemoizedNestedFnClosure` + the calls.ts direct-call cap-prepend: new sourcing arms — prefer `capturedBoxGlobals` / `capturedGlobals` when the current fctx cannot resolve the capture (guarded on localMap-absence; owner-fctx behavior unchanged, respecting the #1177 revert). Mutable-but-directly-referenced keeps value promotion + a boxed copy at materialization (best-effort, documented). |
+| **B** `global index -1 at 'RE_@@replace'` (standalone) | replaceAll/searchValue-replacer-RegExp-call{,-fn}.js | `emitSuperExternMethodCall` (`new-super.ts:356`) — the #1614 JS-host super-dispatch bridge (`__extern_method_call`) — ran under standalone and pushed the method name via raw `global.get stringGlobalMap.get(name)` guarded only on `!== undefined` — the documented **-1 string-global sentinel class** (`reference_string_global_sentinel_guard`), missed by PR-1's audit because it's the *super* path, not a direct `stringGlobalMap` consumer of that sweep. Minimal repro: ANY `super.method(...)` in a subclass of a host-constructible builtin, standalone. | Gate the bridge off under `ctx.standalone || ctx.wasi` (host bridge can never be satisfied there; also stops the `__extern_method_call`/`__js_array_*` import leak) + route the name push through `stringConstantExternrefInstrs` for the gc+nativeStrings combination (host byte-identical). |
+| **C** `global index -1 at 'test'` (standalone) | property-accessors/S11.2.1_A3_T2.js | **Three layers** in the ELEMENT-ACCESS number-method arm (calls.ts ~15207), minimized to `1["toFixed"](5)`: (i) the RangeError message pushes used the raw -1-sentinel `global.get` (the dot-access twins already used the dual-mode helper); (ii) the declarations.ts pre-scan (`collectPrimitiveMethodImports`) only recognizes the DOT form, so `number_toFixed` etc. were never registered for the computed spelling → the arm fell through past `funcMap.get(...)` **with receiver+arg already pushed** into the generic dynamic fallback (runtime throw); (iii) the arm validated `toString(radix)` then called the 1-arg helper — radix silently dropped (`5["toString"](2)` → "5"). | (i) `stringConstantExternrefInstrs` at both message sites; (ii) new elem-access string-key branch in the declarations.ts scan registering the same helpers; (iii) hoist `radixLocal` and route to the 2-arg `number_toString_radix` mirroring the dot site. All computed forms (`toFixed`/`toPrecision`/`toExponential`/`toString(radix)`) now compute CORRECT values standalone (verified runtime, empty import object). |
+
+**Classification verdicts (the assignment's a/b/c ruling):** none of the three
+families was dying on its own via #2710's late-binding migration (the
+`ref.func` in family A's body was already a healthy `STABLE_FUNC_BASE`
+late-bound id — the poison was the *local* index); all three were bounded
+fixes and all three are FIXED in this PR. The annexB generator pair (the one
+family sd-2029fn left) had already died via intervening work.
+
+**Row-delta (per-process, branch vs pristine `f01867968`):** all 4 tests ×
+both modes: emit-crash → compiles + ordinary runtime `fail` (dynamic-object
+iterator protocol / RegExp-subclass ctor flags / number-member spelling gaps —
+separate, pre-existing families, host-mode parity). **The `index out of
+range` emit-crash count in the standalone baseline is now 0.**
+
+**Validation:** new `tests/issue-2029-emit-index-families.test.ts` (8/8; A
+gc+standalone compile, B no-crash + no `__extern_method_call` leak +
+gc control, C standalone runtime-correct + gc control). All 7 existing
+issue-2029 suites green (37/37). Closure/accessor batch
+(illegal-cast-585, 1712, getters-setters, accessor-side-effects, 2580, 2609,
+2692, 1528): 13 failures **identical on pristine** (verified in a clean
+control worktree) — pre-existing, not regressions. Number-format suites
+(49, 2163, 2934): 23/23. tsc clean; stack-balance / any-box / speculative-
+rollback gates OK; coercion-sites baseline refreshed (+2 in declarations.ts =
+pre-registration of EXISTING native helpers for the elem-access spelling,
+same pattern as the counted dot-form block — not new coercion vocabulary).
+Broad emit-path change → merge_group test262 floor validates full conformance
+(`project_broad_impact_validate_full_ci`).
+
+**Why status: done.** The issue's defining class — invalid-binary emission
+from a poisoned index — is extinct on the measured baseline: every producer
+family is fixed or refuses loudly, and #2043's always-on validation turns any
+future regression into a named, located error. The remaining non-emit
+residuals live on their own trackers per the 2026-06-23 disposition:
+Set/Map/WeakMap/WeakSet subclass → #2620/#2622; primitive-wrapper native-box →
+value-rep follow-up (pairs #1629b); Object.create ToPrimitive/descriptor
+reflection → #2358/#2158; iterator-helper semantics → iterator-helpers lane;
+DisposableStack/AsyncDisposableStack ERM substrate (Symbol.dispose value-read
++ dispose-dispatch) → senior-dev substrate slice (dev-carla triage above).
+Known small residual noted for a follow-up, NOT emit-crash: the elem-access
+number-method arm still falls through with a dirty stack if a helper is
+somehow unregistered (unreachable for the scanned shapes), and a
+directly-referenced + mutably-closure-captured accessor variable gets copy
+(not shared) semantics — both documented inline at the sites.
