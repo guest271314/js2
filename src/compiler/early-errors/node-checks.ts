@@ -347,7 +347,23 @@ export function runNodeChecks(ctx: EarlyErrorContext, node: ts.Node): void {
 
   // Check private name (#x) used outside its declaring class
   if (ts.isPrivateIdentifier(node)) {
-    if (!isInsideClassWithPrivateName(node, node.escapedText as string)) {
+    // A PrivateIdentifier is only valid as a MemberExpression private reference
+    // (`this.#x`, `#x in obj`) or a class-member name. It cannot appear as a
+    // property key in a destructuring pattern — `const { #x: v } = o` /
+    // `({ #x: v } = o)` — because `ObjectBindingPattern` / `ObjectAssignmentPattern`
+    // property names are `PropertyName`, which does not include PrivateIdentifier.
+    // This is an early SyntaxError regardless of whether `#x` is declared in an
+    // enclosing class (so it must be checked before the enclosing-class rule).
+    if (ts.isBindingElement(node.parent) && node.parent.propertyName === node) {
+      ctx.addError(node, `Private field '${node.text}' is not allowed in a destructuring pattern`);
+    } else if (
+      (ts.isPropertyAssignment(node.parent) || ts.isShorthandPropertyAssignment(node.parent)) &&
+      node.parent.name === node &&
+      ts.isObjectLiteralExpression(node.parent.parent) &&
+      isAssignmentPatternContext(node.parent.parent)
+    ) {
+      ctx.addError(node, `Private field '${node.text}' is not allowed in a destructuring pattern`);
+    } else if (!isInsideClassWithPrivateName(node, node.escapedText as string)) {
       ctx.addError(node, `Private field '${node.text}' must be declared in an enclosing class`);
     }
   }
