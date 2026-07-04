@@ -2,7 +2,7 @@
 id: 2957
 title: "Async activation for arrows / methods / function expressions (both CPS + drive hooks are declaration-only)"
 status: in-progress
-assignee: ttraenkler/opus-2957p1
+assignee: ttraenkler/opus-2957p2
 sprint: current
 created: 2026-07-02
 updated: 2026-07-04
@@ -188,3 +188,57 @@ fn-exprs+arrows, then class/object-literal methods (`class-bodies.ts` /
 `buildAsyncFrameInfo` described in the Implementation Plan above and interact
 with the still-active async-frame branches — higher risk, schedule after that
 series settles.
+
+## Phase 2 landed — arrows + function expressions (2026-07-04, opus-2957p2)
+
+**Done.** Async arrows and function expressions now activate the host CPS async
+state machine. Measure-first confirmed on `origin/main`: the lifted closure for
+`const f = async (x) => await g(x)` compiled with `(result f64)` (legacy sync
+pass-through), no `Promise_then2`/`__cb_N` markers — a non-activated sync value.
+After phase 2 all of `{concise-arrow, block-arrow, named/anon fn-expr}` emit the
+CPS machine and return a real Promise that resolves to the awaited value
+(`tests/issue-2957.test.ts`, 7 cases, host lane).
+
+**How** (four edits, no `__self` special-casing needed for the canonical shape):
+
+- `async-activation.ts` — refactored the two inline activation blocks into a
+  pure decision (`decideAsyncActivation`, gated on `ts.isFunctionDeclaration`
+  only for the decl entry) + an `emitAsyncLane` dispatcher. `maybeActivateAsync`
+  (decl entry) is unchanged in behaviour (byte-identity preserved — the 52
+  async decl/CPS/host-drive equivalence tests still pass). Added
+  `planAsyncClosureActivation` (pure, no decl guard) + `emitAsyncClosureBody`
+  (emit, no type rewrite) for the closure path.
+- `closures.ts::compileArrowAsClosure` — decide activation EARLY (before the
+  lifted func type + closure struct are built) and, on a match, bake the
+  `externref` (Promise) result into `closureReturnType`. `computeClosureWrapperSig`
+  had been setting the *unwrapped* awaited type (the root of the sync fallback).
+  At the body-compile point, emit the async machine instead of the statement
+  loop. Generators excluded (`!isGenerator`).
+- `async-cps.ts::splitBodyAtAwait` — added a concise-expression-body branch so
+  `async (x) => await P` (the acceptance-criteria canonical, an expression body
+  not a block) splits as a `return await` tail. Additive: fn-decls always have
+  block bodies and never reach it.
+- `declarations.ts` collectAsyncCpsImports prepass — widened the node gate from
+  `ts.isFunctionDeclaration` to also match arrows/fn-exprs, so the host CPS
+  imports (`Promise_resolve`/`__make_callback`/`Promise_then2`) are
+  pre-registered for arrow-only modules (else `emitAsyncStateMachine` bails and
+  silently falls back).
+
+**`__self` risk (banked as the real hazard) — did not bite the canonical shape.**
+The CPS emitter only captures live-after-await locals by name; the canonical
+single-tail-await (`return await P`) has an empty live-after set, so the lifted
+`__self` env param (param 0) is never spilled. Richer closure shapes with locals
+live across the await route through the same predicate gate; they remain on the
+legacy path unless/until the `envParam` threading (phase-3 scope) lands.
+
+**Blast radius verified** (all green): `async-await`, `issue-1042`,
+`issue-1042-host-drive`, `async-census` (52), generators + async-gen
+(`generators`, `issue-1672`, `issue-2611`, `generator-iife`, 30). Pre-existing
+failures on clean `origin/main` (NOT introduced here): `issue-2865` (2 WASI decl
+cases), `issue-1712`/`illegal-cast-closures-585` (6 non-async closure cases).
+`tsc --noEmit` clean.
+
+**Phase 3 (methods) still open** — class methods (`class-bodies.ts`) and
+object-literal methods (`literals.ts`), where `this` is param 0 with the
+instance struct type and the #1370 class-registry / typeIdx parity guard apply.
+Issue stays `in-progress` for that follow-up.
