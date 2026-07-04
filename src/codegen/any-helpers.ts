@@ -793,6 +793,110 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
     return [{ op: "i32.const", value: 0 } as Instr];
   };
 
+  // (#2141 S2/S3, #2626 — flag-gated, OFF by default) The three-way tag-5
+  // boxed-VALUE true-class classifier for the both-tags-5 arm of
+  // `__any_eq`/`__any_strict_eq`: Number×Number → `f64.eq` over
+  // `__any_to_f64` recovery (#2040; NaN self-false preserved), String×String
+  // → guarded content eq (the landed #1888 arm), Object×Object → `ref.eq`
+  // identity (#2585), else legacy `0`. Gated on `ctx.tag5ValueEqClassifier`
+  // (CompileOptions; `JS2WASM_TAG5_CLASSIFIER=1` env defaults it on for
+  // whole-runner A/B). OFF ⇒ byte-identical legacy: only the guarded string
+  // arm, so non-string tag-5 pairs answer `0` — which also makes a lie-boxed
+  // value SELF-unequal (fake NaN). The test262 comparator `isSameValue`
+  // (`a===b || (a!==a && b!==b)`) therefore answers TRUE for EVERY pair of
+  // lie-boxed operands — the vacuous-pass mask that made #1888's classifier
+  // eject at −162: the arms don't break dstr, they UNMASK latent failures of
+  // the eager-buffer generator fixture (see #2141 S2 root cause + #3032).
+  // Enable by default only after the #3032 waves land.
+  // GATE (pitfall from sd-3's attempt, memory
+  // reference_2040_tag5_field4_three_way_classifier: never gate the numeric
+  // arm on string availability): the classifier builds whenever the flag is
+  // on in standalone/wasi. The STRING arm needs the native content-eq
+  // (`canNativeStrEq`); in a module with NO string type at all
+  // (`anyStrTypeIdx < 0`, e.g. a pure-numeric program) tag-5 $AnyString
+  // payloads cannot exist, so the string arm is safely OMITTED and the
+  // numeric/object arms still work. If strings exist but content-eq is
+  // unavailable (host-import-only shapes), fall back to legacy entirely —
+  // classifying without a string arm would send equal-content distinct
+  // strings into the object `ref.eq` arm (wrong false).
+  const tag5ValueEqThen = (): Instr[] => {
+    if (!ctx.tag5ValueEqClassifier || !(ctx.standalone === true || ctx.wasi === true)) return tag5StringEqThen();
+    if (!canNativeStrEq && ctx.anyStrTypeIdx >= 0) return tag5StringEqThen();
+    const recoverAny = (operandIdx: number, scratchIdx: number): Instr[] => [
+      { op: "local.get", index: operandIdx } as Instr,
+      { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 4 } as Instr,
+      { op: "any.convert_extern" } as Instr,
+      { op: "local.set", index: scratchIdx } as Instr,
+    ];
+    const castFlatten = (scratchIdx: number): Instr[] => [
+      { op: "local.get", index: scratchIdx } as Instr,
+      { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr,
+      { op: "call", funcIdx: nativeStrFlattenIdx } as Instr,
+    ];
+    const bothTest = (typeIdx: number): Instr[] => [
+      { op: "local.get", index: 4 } as Instr,
+      { op: "ref.test", typeIdx } as Instr,
+      { op: "local.get", index: 5 } as Instr,
+      { op: "ref.test", typeIdx } as Instr,
+      { op: "i32.and" } as Instr,
+    ];
+    const EQ = -19;
+    const objectArm: Instr[] = [
+      ...bothTest(EQ),
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "i32" } },
+        then: [
+          { op: "local.get", index: 4 } as Instr,
+          { op: "ref.cast", typeIdx: EQ } as Instr,
+          { op: "local.get", index: 5 } as Instr,
+          { op: "ref.cast", typeIdx: EQ } as Instr,
+          { op: "ref.eq" } as Instr,
+        ],
+        else: [{ op: "i32.const", value: 0 } as Instr],
+      } as Instr,
+    ];
+    // String arm only when the module HAS a string type (see gate note above);
+    // a string-free module cannot carry $AnyString payloads in tag-5 boxes.
+    const stringArm: Instr[] = canNativeStrEq
+      ? [
+          ...bothTest(ctx.anyStrTypeIdx),
+          {
+            op: "if",
+            blockType: { kind: "val", type: { kind: "i32" } },
+            then: [...castFlatten(4), ...castFlatten(5), { op: "call", funcIdx: nativeStrEqualsIdx } as Instr],
+            else: objectArm,
+          } as Instr,
+        ]
+      : objectArm;
+    // Numeric arm requires the native $BoxedNumber type (always registered in
+    // standalone/wasi before the eq helpers build — union imports first); the
+    // S2 bisect (2026-07-04) confirmed the numeric AND object arms EACH
+    // independently unmask the dstr canary, so there is no safe arm subset.
+    const numericArm: Instr[] =
+      ctx.nativeBoxNumberTypeIdx >= 0
+        ? [
+            ...bothTest(ctx.nativeBoxNumberTypeIdx),
+            {
+              op: "if",
+              blockType: { kind: "val", type: { kind: "i32" } },
+              then: [
+                { op: "local.get", index: 0 } as Instr,
+                { op: "call", funcIdx: toF64IdxFwd() } as Instr,
+                { op: "local.get", index: 1 } as Instr,
+                { op: "call", funcIdx: toF64IdxFwd() } as Instr,
+                { op: "f64.eq" } as Instr,
+              ],
+              else: stringArm,
+            } as Instr,
+          ]
+        : stringArm;
+    return [...recoverAny(0, 4), ...recoverAny(1, 5), ...numericArm];
+  };
+  // __any_to_f64 is registered later in this function; resolve at build time
+  // of the eq helpers (they are added after it, so the map lookup is safe).
+  const toF64IdxFwd = (): number => ctx.funcMap.get("__any_to_f64")!;
+
   // Helper to register a helper function
   function addHelper(
     name: string,
@@ -1830,7 +1934,7 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
                                 // (ejected #1888 from the standalone floor). Those arms move
                                 // to the value-rep substrate (#2580 M2 / #35). The guarded
                                 // string path keeps #2579 boxed-string-eq + #2583 search.
-                                then: tag5StringEqThen(),
+                                then: tag5ValueEqThen(),
                                 else: [
                                   // null/undefined (tag < 2): both same tag → equal
                                   { op: "local.get", index: 2 },
@@ -2006,7 +2110,7 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
                                 // (ejected #1888 from the standalone floor). Those arms move
                                 // to the value-rep substrate (#2580 M2 / #35). The guarded
                                 // string path keeps #2579 boxed-string-eq + #2583 search.
-                                then: tag5StringEqThen(),
+                                then: tag5ValueEqThen(),
                                 else: [
                                   // null/undefined (tag < 2): both same tag → equal
                                   { op: "local.get", index: 2 },

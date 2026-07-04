@@ -12,8 +12,37 @@ task_type: bugfix
 area: codegen, runtime, value-rep
 language_feature: equality, ===, boxed numbers, object identity, destructuring defaults
 goal: test262-conformance
-related: [2040, 2585, 2580, 2579, 2583]
+related: [2040, 2585, 2580, 2579, 2583, 2141, 3032]
 ---
+
+## ROOT CAUSE CORRECTED + ARMS LANDED FLAG-GATED (2026-07-04, #2141 S2 — fable-tag5)
+
+**The premise below ("the dstr/generator lowering implicitly relied on the
+legacy always-false tag-5 eq") is DISPROVEN.** WAT trace of the canary
+module: the only `__any_strict_eq` callers are the test262 harness's three
+`isSameValue` sites — no dstr/iterator lowering touches the eq helpers. The
+real chain: (1) the dstr fixture `var iter = function*(){ iterations+=1 }()`
+is an anonymous generator EXPRESSION → eager-buffer path → **body runs at
+creation**, `iterations` is already 1 (probe-verified); (2) the legacy tag-5
+non-string eq (`0`) makes lie-boxed values SELF-unequal (fake NaN), so
+`isSameValue(a,b) = a===b || (a!==a && b!==b)` is vacuously TRUE for every
+lie-boxed pair, masking the latent failure; (3) each classifier arm closes
+the vacuity escape → the −162 is UNMASKING, not breakage. See #2141 S2 and
+#3032 for the full evidence + the lazy-first-resume fix (zero-param wave
+landed; canary green with the arms force-enabled).
+
+**Status now:** BOTH arms (numeric `f64.eq` + object `ref.eq`) are IN-TREE
+inside the both-tags-5 arm of `__any_eq`/`__any_strict_eq`, gated on
+`tag5ValueEqClassifier` (CompileOptions, default OFF;
+`JS2WASM_TAG5_CLASSIFIER=1` env defaults it on for runner A/B). The 4
+formerly-skipped cases in `tests/issue-2040-tag5-field4-eq.test.ts` run
+with the flag. Remaining scope of THIS issue = flip the default ON, gated
+on the #3032 waves (method generators W4 is the known residue — the
+24-sample flip delta is 4 unmaskings / 2 fixes, all `gen-meth-*` shapes)
+and the merge_group standalone floor A/B. Also note the S2 discovery: the
+cross-tag cell (tag-5 `$BoxedNumber` × honest tag-2/3 equal numbers →
+wrongly unequal) is NOT covered by the both-tags-5 classifier and needs its
+own slice.
 
 # #2626 — tag-5 boxed-VALUE equality classifier (numeric + object arms) — substrate-blocked
 

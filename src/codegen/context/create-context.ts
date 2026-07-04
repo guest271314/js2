@@ -251,6 +251,9 @@ export function createCodegenContext(
     // (#2141 S1) Honest generic any-boxing regime — default OFF (legacy tag-5
     // box-the-externref ABI, byte-identical modules). Flips in S4.
     honestAnyBoxing: options?.honestAnyBoxing ?? false,
+    // (#2141 S2/S3, #2626) tag-5 boxed-VALUE eq classifier — default OFF
+    // (legacy); JS2WASM_TAG5_CLASSIFIER=1 env defaults it on for runner A/B.
+    tag5ValueEqClassifier: options?.tag5ValueEqClassifier ?? process.env.JS2WASM_TAG5_CLASSIFIER === "1",
     // (#2796) Diff-test-harness fidelity — export __module_init + skip the wasm
     // start section so the host runs top-level code after setExports.
     deferTopLevelInit: options?.deferTopLevelInit ?? false,

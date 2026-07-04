@@ -19,6 +19,9 @@ async function run(src: string): Promise<number | undefined> {
   if (!r.success) throw new Error(r.errors[0]?.message ?? "compile error");
   const imports = buildImports(r.imports, undefined, r.stringPool);
   const { instance } = await WebAssembly.instantiate(r.binary, imports);
+  // (#3032) Lazy generator-expression thunks resume through the module's
+  // __call_fn_0/__gen_set_eager exports — wire them like the test262 runner.
+  (imports as { setExports?: (e: unknown) => void }).setExports?.(instance.exports);
   const fn = instance.exports.test as () => number;
   try {
     return fn();

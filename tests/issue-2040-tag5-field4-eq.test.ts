@@ -23,12 +23,26 @@ import { compile } from "../src/index.ts";
 // String⇄Number coercion (`tag5ToNumber`) is a separate, dstr-safe #2040 fix and
 // stays — `23===23.0`, NaN, ±0 below still pass via that path.
 
-async function runStandalone(src: string): Promise<unknown> {
-  const r = await compile(src, { target: "standalone" } as never);
+async function runStandalone(src: string, opts?: { tag5ValueEqClassifier?: boolean }): Promise<unknown> {
+  const r = await compile(src, { target: "standalone", ...(opts ?? {}) } as never);
   if (!r.success) throw new Error("compile error: " + (r.errors?.[0]?.message ?? "unknown"));
   const { instance } = await WebAssembly.instantiate(r.binary, {});
   return (instance.exports as { main(): unknown }).main();
 }
+
+// (#2141 S2 / #2626) The classifier arms are now IN-TREE behind the
+// `tag5ValueEqClassifier` CompileOption (default OFF = legacy). The S2
+// root-cause work (2026-07-04) disproved the "dstr lowering relies on
+// always-false tag-5 eq" theory: the −162 eject was the classifier UNMASKING
+// latent failures — the eager-buffer generator-expression fixture ran its
+// body at creation (`iterations` already 1), and the legacy comparator's
+// fake-NaN self-inequality made `isSameValue` vacuously TRUE over lie-boxed
+// operands. With the #3032 lazy-first-resume fix the dstr canary stays green
+// with the classifier force-enabled. The previously `it.skip`ped cases below
+// now run WITH the flag; the default stays off until the remaining #3032
+// waves (method generators, paramful expressions) land and the floor A/B
+// clears (#2141 S3).
+const CLASSIFIER_ON = { tag5ValueEqClassifier: true };
 
 describe("#2040/#2585 unified tag-5 field-4 equality classifier (standalone)", () => {
   // ── #2040 numeric branch ──────────────────────────────────────────────
@@ -38,22 +52,23 @@ describe("#2040/#2585 unified tag-5 field-4 equality classifier (standalone)", (
     ).toBe(1);
   });
 
-  // DEFERRED to #2580 M2 / #35: the both-tags-5 numeric `f64.eq` classifier arm
-  // regresses the class/dstr cluster (−162, ejected #1888). Re-enable when the
-  // value-rep substrate owns the dstr-iterator interaction.
-  it.skip("a !== a after a numeric op is false (a is a number, ===itself) — DEFERRED #2580 M2", async () => {
+  // (#2141 S2) Flag-gated: the both-tags-5 numeric `f64.eq` classifier arm,
+  // now in-tree behind `tag5ValueEqClassifier` (see header note).
+  it("a !== a after a numeric op is false (a is a number, ===itself) — classifier ON", async () => {
     // 1/a forces `a` through the boxed-number tag-5 path; a!==a must be false.
     expect(
       await runStandalone(
         `function f(a:any){const _=1/a;return a!==a;} export function main(): number { return f(5)?1:0; }`,
+        CLASSIFIER_ON,
       ),
     ).toBe(0);
   });
 
-  it.skip("boxed-number === boxed-number (post-op) is true — DEFERRED #2580 M2", async () => {
+  it("boxed-number === boxed-number (post-op) is true — classifier ON", async () => {
     expect(
       await runStandalone(
         `function f(a:any,b:any){const x=a+0;const y=b+0;return x===y;} export function main(): number { return f(7,7)?1:0; }`,
+        CLASSIFIER_ON,
       ),
     ).toBe(1);
   });
@@ -89,23 +104,22 @@ describe("#2040/#2585 unified tag-5 field-4 equality classifier (standalone)", (
     ).toBe(0);
   });
 
-  // ── #2585 object proto-identity (ref.eq branch) — DEFERRED to #2580 M2 / #35 ──
-  // The both-tags-5 object `ref.eq` arm makes tag-5 boxed-object `===` reference-
-  // correct, but that flips a comparison the dstr/generator-iterator lowering
-  // relied on (it counted on the legacy always-false tag-5 object eq), regressing
-  // the class/dstr cluster (part of the −162 #1888 eject). Re-enable with the
-  // value-rep substrate.
-  it.skip("getPrototypeOf(Object.create(p)) === p is true — DEFERRED #2580 M2", async () => {
+  // ── #2585 object proto-identity (ref.eq branch) — flag-gated (#2141 S2) ──
+  it("getPrototypeOf(Object.create(p)) === p is true — classifier ON", async () => {
     expect(
       await runStandalone(
         `export function main(): number { const p:any={x:1}; const o=Object.create(p); return (Object.getPrototypeOf(o)===p)?1:0; }`,
+        CLASSIFIER_ON,
       ),
     ).toBe(1);
   });
 
-  it.skip("same object via two reads === is true — DEFERRED #2580 M2", async () => {
+  it("same object via two reads === is true — classifier ON", async () => {
     expect(
-      await runStandalone(`export function main(): number { const o:any={x:1}; const p:any=o; return (o===p)?1:0; }`),
+      await runStandalone(
+        `export function main(): number { const o:any={x:1}; const p:any=o; return (o===p)?1:0; }`,
+        CLASSIFIER_ON,
+      ),
     ).toBe(1);
   });
 
