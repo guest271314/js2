@@ -1,9 +1,9 @@
 ---
 id: 2173
 title: "standalone: yield* over a general iterable (array / custom {next()}) in native generators (SF-3 slice-2 of #2157)"
-status: done
+status: in-progress
 completed: 2026-07-04
-assignee: ttraenkler/opus-2173
+assignee: ttraenkler/dev-selfserve-1
 blocked_by: []
 sprint: current
 created: 2026-06-16
