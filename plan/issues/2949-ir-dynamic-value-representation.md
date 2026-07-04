@@ -2,7 +2,7 @@
 id: 2949
 title: "IR dynamic value representation: JsTag-carrying `dynamic` kind in IrType (make untyped JS claimable)"
 status: in-progress
-assignee: ttraenkler/fable-2949
+assignee: ttraenkler/fable-2949s3
 sprint: current
 created: 2026-07-02
 updated: 2026-07-04
@@ -497,6 +497,130 @@ so producers can widen past move-only. This replaces the staged
 IDENTICAL for any slice that adds only lowering arms (no producer change);
 each producer widening re-runs the claim sweep (below) + full CI.
 
+## Implementation Notes — Slice 3 (fable-2949s3, 2026-07-04, branch `issue-2949-slice3-lowering`)
+
+Slice 3 ships the **lowering substrate**: the three staged `"lands in #2949
+slice 3"` errors in `lower.ts` are replaced with real arms, driven by a new
+`IrDynamicLowering` handle. **Producer-free and byte-inert by construction**
+(prove-emit-identity: all 39 (file,target) hashes IDENTICAL vs main
+`cf2fb1c40`); the move-only scan, gate 6, and the zero-demotion invariant are
+untouched. Decisions and the WHY:
+
+1. **Handle shape** (`backend/handles.ts` `IrDynamicLowering`): the ratified
+   §4 record (`carrier`/`anyValueTypeIdx`/`tagFieldIdx`/`payloadFieldIdx`)
+   PLUS emit-time op-sequence methods (`emitBox`/`emitUnbox`/`emitTagTest`)
+   in the proven `emitStringConcat` resolver-emit style. The emitter-trait
+   trio (`emitBox?` on `BackendEmitter`) was NOT promoted — the union arms it
+   was declared for still go through `pushRaw`, and rerouting both families
+   is #2953's surface; the handle exposes the gc layout so that migration
+   can consume it later. FuncIdx values are resolved BY NAME at emit time
+   (never captured at handle creation) — the #2191/#2193 repoint discipline.
+2. **gc strategy boxes via `boxToAny` itself** (a body-only FunctionContext
+   shim), not a re-derived helper choice — ONE kind→tag policy for legacy
+   and IR (D4), including the #42 native-string re-tag arm and the
+   `honestAnyBoxing` flag, for free. Unbox routes through the CANONICAL
+   readers `__any_unbox_f64` / `__any_unbox_i32` (not raw `struct.get`) for
+   the number partitions.
+3. **V2 numeric-class deviation from the plan sketch (deliberate)**: plan
+   step 4 said `tag.test` = `struct.get tag + i32.eq` (exact). But the host
+   carrier CANNOT split NumberI32/NumberF64 (`typeof` has one "number") —
+   exact gc tests would make producer decision trees mode-divergent (host
+   `tag.test(NumberI32)` true for 0.5, gc false). So `tag.test` on EITHER
+   number partition is the CLASS test in both strategies (gc:
+   `(tag−2) ≤u 1`, host: `__typeof_number`), per js-tag.ts's V2 invariant
+   ("consumers must treat {2,3} as a single class"); the payload choice
+   lives in the UNBOX tag (F64 → V2-safe f64 read; I32 → trunc-sat).
+4. **Box refinement hint**: `box{toType: {kind:"dynamic", tag}}` maps the
+   refinement onto `boxToAny`'s `jsType` hint (same "never override
+   representation" contract). Load-bearing case: Boolean-refined i32 boxes
+   tag-4 (`__any_box_bool` / `__box_boolean`) — without it i32 always boxes
+   as a NUMBER (legacy unbranded parity), and `true` would round-trip as
+   `1`. Producers that know the partition MUST refine the box target.
+5. **R6 hardening = verifier rejection**, not auto-box: `returnTypeAssignable`
+   now accepts ONLY dynamic (bare or refined) into a dynamic declared
+   result. Auto-boxing in `coerceReturnValue` was rejected because box is a
+   PRODUCER decision (the scan must mirror it 1:1 — see note 7) and a silent
+   coercion would let scan/builder drift compile. Zero-delta today: the
+   move-only scan never produces the flow. Dual direction (dynamic value →
+   externref-val declared result) unchanged.
+6. **Host `Object` tag.test needs two reads** (`typeof === "object" &&
+   !ref.is_null` — host `typeof null === "object"` but Null is its own
+   partition), so `emitTagTest` takes a lazy scratch-local allocator;
+   `lower.ts` allocates one carrier-typed local per function (`$dyn_tag_
+   scratch`, same pattern as the bitwise/vec scratches). gc arms never use
+   it. Host `Null` test is `ref.is_null` (JS null IS the null externref;
+   undefined is a non-null host value).
+7. **Producer widening DESCOPED from this PR — with a load-bearing lattice
+   finding**: the planned "mixed return boxes the concrete arm" producer is
+   mostly VACUOUS as specced, because `join(unknown, number) = number` in
+   propagate.ts — `f(x){ if(c) return x; return 0; }` types its return
+   CONCRETE f64 (the optimistic no-evidence join), NOT dynamic. The scan
+   correctly rejects that shape today (dyn value into concrete result), and
+   the type-honest fix is a **soundness-driven return-WIDENING slice**
+   (selector + `resolvePositionType` symmetry: any dyn-shaped return arg ⇒
+   return verdict dynamic ⇒ box the concrete arms), not a bolt-on box in
+   `coerceReturnValue`. Only the rare lattice-TOP population (union-cap
+   overflow params) hits "literal return under dynamic verdict" as written.
+   Widening the scan for that sliver risks the zero-claim-then-demote
+   invariant (load-bearing under JS2WASM_IR_FIRST) for ~no claim delta, so
+   slice 3 lands the substrate only; the widening family (truthiness via
+   tag.test+unbox, return-widening + box, concrete-arg→dyn-param box) is
+   the follow-up producer slice with its own claim-sweep evidence.
+8. **Registration discipline**: `preregisterDynamicSupport` walks the IR
+   (deep, `forEachInstrDeep`) BEFORE Phase 3 and registers the full backing
+   (fast: `ensureAnyHelpers`; host: `addUnionImports`) so no emit can
+   trigger a mid-emission funcIdx shift (#329/#2078 class). Both entry
+   points are idempotent.
+9. **Known hazards banked for the producer slice** (documented in the
+   handle docs too): (a) a wasm-null gc carrier TRAPS in `tag.test`/`unbox`
+   `struct.get` — producers must null-guard or normalize at entry
+   (coherent with #2106 S1's $undefined singleton, tag 1 — same table,
+   suspended, no live interlock: verified `issue-2106` is backlog/resume-
+   only, `$undefined` reservation in `ensureAnyValueType` matches
+   `JsTag.Undefined = 1`); (b) `unbox(String)` yields the extern-shaped
+   payload (externref) in BOTH modes — native-string consumers need a
+   convert+cast op that lands with the first string-consuming producer;
+   (c) `tag.test(Function)` is mechanical (tag 7) but closures BOX AS
+   tag-6 Object today — no producer may emit Function tests until #2963
+   Phase 1 reifies function values (host/gc would diverge on them).
+
+## Test Results — Slice 3 (2026-07-04, fable-2949s3)
+
+- `tests/issue-2949-slice3-dynamic-lowering.test.ts` — **16/16 pass**,
+  including REAL RUNTIME execution of both strategies (a first for the
+  box/unbox/tag.test arms; the union V1 arms were only ever instr-level):
+  hand-built IrFunctions lowered against the PRODUCTION `makeDynamicLowering`
+  over a real `CodegenContext` (real `ensureAnyHelpers` / `addUnionImports`
+  registration), production `emitBinary`, instantiated and executed.
+  - gc (fast + js-string config): box→unbox f64 identity (incl. −0, NaN),
+    V2 cross-tag reads (i32 box → f64 unbox; f64 box → trunc-sat i32),
+    Boolean-refined box → tag-4 proof, numeric-CLASS tag.test from BOTH
+    partition tags, negative tags (String/Null on numbers, Number on bools).
+  - host: real JS values through dynamic params — String/Object(excl.
+    null!)/Null-vs-Undefined/Number/Function classifiers, `__box_number`/
+    `__unbox_number` round-trip, Boolean unbox.
+  - handle-contract: payload-field table (1/2/3/4 + singleton throws),
+    canonical-family routing (D4), V2 class-test equality across partition
+    tags, carrier↔resolveDynamic lockstep, host scratch protocol.
+  - failure modes: missing/null `resolveDynamicLowering`, jsTag backstops.
+  - R6: string→dynamic return REJECTED, box→return clean, dyn/refined-dyn
+    moves clean, scalar→dynamic still rejected.
+- `tests/issue-2949-ir-dynamic-type.test.ts` 19/19 (one staged-error
+  expectation updated to the new missing-resolver contract error),
+  `issue-2949-slice2-dynamic-producers` 22/22, `issue-2104-value-tags`,
+  `backend-contract` — 62/62 across the four suites.
+- **Byte-inertness PROVEN**: `prove-emit-identity.mjs` baseline on clean
+  main (`cf2fb1c40`), check on branch → **IDENTICAL, all 39 (file,target)
+  hashes** across gc/standalone/wasi.
+- `pnpm run check:ir-fallbacks` — OK, zero delta, no post-claim entries
+  (no selector/producer change, as designed).
+- Adjacent IR suites (`tests/ir/`, `ir-frontend-widening`,
+  `ir-backend-emitter`, `ir-scaffold`): 164/173; the 9 failures
+  (`ir-scaffold` 2, `ir/passes` 4, `ir/inline-small` 3) reproduce with the
+  IDENTICAL counts on clean main `cf2fb1c40` run side-by-side — pre-existing,
+  unrelated (ir-scaffold's 2 were already recorded in the slice-1/2 notes).
+- `npx tsc --noEmit` clean.
+
 ## Implementation Plan — Slice 3b: unify explicit `any` onto `dynamic`
 
 `resolvePositionType`'s AnyKeyword arm (`codegen/index.ts:592`) and the
@@ -511,6 +635,58 @@ radius**: currently-claimed any-functions change fast-mode signatures
 externref there). Needs: the #1228 tests updated, a fast-mode cross-call
 probe (legacy caller → IR callee), and full CI. Do NOT fold into slice 3's
 lowering PR — separate, revertible.
+
+## Implementation Notes — Slice 3b (fable-2949s3, 2026-07-04, branch `issue-2949-slice3b-any-unification`, stacked on slice 3)
+
+Ships as planned: `resolvePositionType`'s AnyKeyword arm → `irDynamic()`
+(codegen/index.ts), the selector's AnyKeyword arms → `"dynamic"`, and the
+`"any"` ResolvedKind is DELETED. Findings beyond the plan:
+
+1. **`any[]` element preservation**: the AnyKeyword flip would have made
+   `resolvePositionType(any[])`'s element resolution return `dynamic` →
+   `null` elemVal → previously-claimed `any[]` functions silently drop to
+   legacy. Added an explicit `dynamic → externref` element arm in the
+   ArrayTypeNode case (element rep is #2379/#1852 territory, not 3b) —
+   byte-preserving, probe-verified. (Separately: the fast-mode any[]
+   IR-vs-legacy header divergence — legacy narrows to a different vec
+   type + i32 result — is PRE-EXISTING on main, probe-verified
+   side-by-side, untouched here.)
+2. **The plan's "fast-mode cross-call probe (legacy caller → IR callee)"
+   is unconstructible for top-level calls** — pinned in the tests: the
+   selector's call-graph-closure rule EVICTS a claimable any-callee when
+   a non-claimable function calls it, so mixed legacy→IR top-level edges
+   cannot exist. The ABI unification's cross-front-end exposure is the
+   export boundary, class-method claims (the typeIdx-parity guard now
+   MATCHES legacy in fast mode instead of demoting), and future producer
+   widenings. A future call-graph relaxation must revisit the ABI story —
+   the pinning test will fire.
+3. **Claim-then-demote channel closed**: the old `"any"` kind claimed
+   every any-param function unconditionally (from-ast threw on non-move
+   uses → post-claim demotion, NOT covered by gate 6 pre-3b since the
+   signature carried externref, not dynamic). Now any-annotated functions
+   run through `dynamicUsesAreMoveOnly` pre-claim (e.g. `a === b` on any
+   params: was claim→demote, now a clean `param-type-not-resolvable`
+   rejection) AND gate 6 covers the claims (dynamic signature ⇒
+   compile-twice under IR_FIRST).
+4. Byte-inert on the 39-hash corpus (no claimed any-functions there);
+   the behavior change is confined to any-annotated IR claims — fast-mode
+   signatures now equal legacy's (the FIX), host-mode bytes unchanged.
+
+## Test Results — Slice 3b (2026-07-04, fable-2949s3)
+
+- `tests/issue-2949-slice3b-any-dynamic.test.ts` — **8/8**: #1228 surface
+  stays claimed; `===`-on-any rejects PRE-claim with the scan's bucket;
+  mixed any/unannotated chains claim; host header parity (unchanged) and
+  **fast header parity — the FIX** (`func $f` == legacy's, NOT externref);
+  call-graph-closure eviction pinned; host-mode runtime identity across
+  number/string/null/undefined/bool/object; any[] claim + host header
+  parity + fast zero-demotion compile.
+- `tests/issue-1228.test.ts` 9/9 UNCHANGED (the `===` fallback test passes
+  via the new pre-claim rejection instead of post-claim demotion).
+- Slice 1/2/3 suites: 74/74 combined. `check:ir-fallbacks` OK, zero delta.
+- `prove-emit-identity` vs main baseline: IDENTICAL (39/39) — corpus has
+  no claimed any-functions; drift is confined to the intended population.
+- `npx tsc --noEmit` clean.
 
 ## Banked adoption slices (unlocked by this substrate; Opus-tier)
 

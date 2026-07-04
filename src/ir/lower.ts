@@ -49,6 +49,7 @@ import type {
   IrBoxedLowering,
   IrClassLowering,
   IrClosureLowering,
+  IrDynamicLowering,
   IrObjectStructLowering,
   IrRefCellLowering,
   IrUnionLowering,
@@ -88,6 +89,7 @@ export type {
   IrBoxedLowering,
   IrClassLowering,
   IrClosureLowering,
+  IrDynamicLowering,
   IrObjectStructLowering,
   IrRefCellLowering,
   IrUnionLowering,
@@ -204,6 +206,22 @@ export interface IrLowerResolver {
    * time when it's missing.
    */
   resolveDynamic?(): ValType;
+  /**
+   * #2949 slice 3 — resolve the op-emission handle for dynamic
+   * box/unbox/tag.test lowering (see `IrDynamicLowering` in
+   * `backend/handles.ts` for the full contract, incl. the V2 numeric-class
+   * tag.test rule). MUST agree with `resolveDynamic()` on the carrier — one
+   * mode split, two views of it. Optional like `resolveDynamic`; a function
+   * that actually emits a dynamic box/unbox/tag.test fails at lowering time
+   * when it's missing. Returns `null` when the active backend/mode has no
+   * dynamic op lowering (linear — #1852-G4/#2956).
+   *
+   * Registration discipline: the integration layer pre-registers every
+   * helper/import the handle can emit (`preregisterDynamicSupport`) BEFORE
+   * Phase-3 lowering starts, so no `emit*` call can trigger a mid-emission
+   * late-import funcIdx shift (the #329/#2078 bug class).
+   */
+  resolveDynamicLowering?(): IrDynamicLowering | null;
   /**
    * Slice 6 part 4 (#1183) refactored in #1185: returns whether the
    * compiler is in native-strings mode. Drives the for-of strategy
@@ -797,6 +815,19 @@ export function lowerIrFunctionBody<S>(
     }
     return { rhs: jsBitwiseRhsIdxF64, tmp: jsBitwiseTmpIdx };
   };
+  // #2949 slice 3 — scratch local for dynamic `tag.test` arms that must read
+  // the carrier twice (host-mode Object test: `typeof === "object" && !null`).
+  // Carrier-typed, allocated lazily on first use, one per function, reused
+  // across every dynamic tag.test in the body (same pattern as the bitwise /
+  // vec scratch slots above). The gc arms never invoke the allocator.
+  let dynTagScratchIdx: number | null = null;
+  const ensureDynTagScratch = (carrier: ValType): number => {
+    if (dynTagScratchIdx === null) {
+      dynTagScratchIdx = func.params.length + locals.length;
+      locals.push({ name: "$dyn_tag_scratch", type: carrier });
+    }
+    return dynTagScratchIdx;
+  };
 
   // #1126 Stage 3 — best-effort `typeOf` that returns null instead of
   // throwing. Used by the fast-path operand inspection in `case "binary"`
@@ -1198,13 +1229,33 @@ export function lowerIrFunctionBody<S>(
         for (const op of instr.ops) emitter.pushRaw(out, op);
         return;
       case "box": {
-        // #2949 slice 1 — box-to-dynamic is DEFINED at the IR level (see
-        // nodes.ts IrInstrBox) but its lowering (through the canonical
-        // `__any_box_*` family via the emitter contract, #2953) lands in
-        // slice 3. Staged error so a premature producer fails loudly with
-        // the right pointer instead of the misleading union message below.
+        // #2949 slice 3 — box-to-dynamic: erase a concrete value into the
+        // module's canonical boxed-any carrier. The op sequence comes from
+        // the `IrDynamicLowering` handle (integration.ts), which routes
+        // through the CANONICAL boxing entry points — `boxToAny` /
+        // `__any_box_*` on the gc strategy, the `__box_number` import family
+        // on host — never a second boxing engine (June-audit D4). The
+        // operand's mode-resolved ValType picks the arm, exactly as legacy's
+        // `coerceType(from, <any-carrier>)` dispatches on the same kind.
         if (instr.toType.kind === "dynamic") {
-          throw new Error(`ir/lower: box-to-dynamic lowering lands in #2949 slice 3 (${func.name})`);
+          const dyn = resolver.resolveDynamicLowering?.();
+          if (!dyn) {
+            throw new Error(
+              `ir/lower: resolver cannot lower box-to-dynamic (resolveDynamicLowering missing/null) (${func.name})`,
+            );
+          }
+          const operandIr = typeOf(instr.value);
+          if (operandIr.kind === "dynamic") {
+            // Verifier R1 backstop — a re-box is provably redundant.
+            throw new Error(`ir/lower: box operand is already dynamic (${func.name})`);
+          }
+          const fromVal = lowerIrTypeToValType(operandIr, resolver, func.name);
+          emitValue(instr.value, out);
+          // The target's tag refinement (if the producer proved a partition)
+          // becomes the boxing hint — e.g. a Boolean-refined i32 boxes as a
+          // tag-4 boolean instead of the unbranded NUMBER default.
+          for (const op of dyn.emitBox(fromVal, instr.toType.tag)) emitter.pushRaw(out, op);
+          return;
         }
         // `toType` must be a union (V1 only boxes into tagged unions). The
         // tag + value are pushed onto the stack in declaration order, then
@@ -1238,9 +1289,25 @@ export function lowerIrFunctionBody<S>(
         // Caller must have proved the tag already; lowering is a plain
         // `struct.get $val`. A future debug mode may prepend a tag check.
         const valueIrType = typeOf(instr.value);
-        // #2949 slice 1 — unbox-from-dynamic lowering lands in slice 3.
+        // #2949 slice 3 — unbox-from-dynamic: read the proven partition's
+        // payload off the carrier. `jsTag` is verifier-REQUIRED here (R2,
+        // payload-bearing partitions only); the handle picks the payload
+        // read (gc: canonical `__any_unbox_f64`/`__any_unbox_i32` readers /
+        // struct.get; host: `__unbox_number` family / identity).
         if (valueIrType.kind === "dynamic") {
-          throw new Error(`ir/lower: unbox-from-dynamic lowering lands in #2949 slice 3 (${func.name})`);
+          const dyn = resolver.resolveDynamicLowering?.();
+          if (!dyn) {
+            throw new Error(
+              `ir/lower: resolver cannot lower unbox-from-dynamic (resolveDynamicLowering missing/null) (${func.name})`,
+            );
+          }
+          if (instr.jsTag === undefined) {
+            // Verifier R2 backstop.
+            throw new Error(`ir/lower: unbox on a dynamic operand requires jsTag (${func.name})`);
+          }
+          emitValue(instr.value, out);
+          for (const op of dyn.emitUnbox(instr.jsTag)) emitter.pushRaw(out, op);
+          return;
         }
         if (valueIrType.kind !== "union") {
           throw new Error(`ir/lower: unbox value must be a union IrType, got ${valueIrType.kind} (${func.name})`);
@@ -1264,9 +1331,29 @@ export function lowerIrFunctionBody<S>(
       case "tag.test": {
         // Emit struct.get $tag; i32.const <tagFor(tag)>; i32.eq.
         const valueIrType = typeOf(instr.value);
-        // #2949 slice 1 — tag.test-on-dynamic lowering lands in slice 3.
+        // #2949 slice 3 — tag.test-on-dynamic: does the carrier's runtime
+        // tag match the partition? `jsTag` is verifier-REQUIRED here (R3,
+        // ANY partition incl. Null/Undefined). Number partitions test the
+        // numeric CLASS in both strategies (the V2 contract — see
+        // `IrDynamicLowering` in backend/handles.ts for the WHY). The
+        // scratch callback lazily allocates a carrier-typed local for arms
+        // that read the operand twice (host Object test).
         if (valueIrType.kind === "dynamic") {
-          throw new Error(`ir/lower: tag.test-on-dynamic lowering lands in #2949 slice 3 (${func.name})`);
+          const dyn = resolver.resolveDynamicLowering?.();
+          if (!dyn) {
+            throw new Error(
+              `ir/lower: resolver cannot lower tag.test-on-dynamic (resolveDynamicLowering missing/null) (${func.name})`,
+            );
+          }
+          if (instr.jsTag === undefined) {
+            // Verifier R3 backstop.
+            throw new Error(`ir/lower: tag.test on a dynamic operand requires jsTag (${func.name})`);
+          }
+          emitValue(instr.value, out);
+          for (const op of dyn.emitTagTest(instr.jsTag, () => ensureDynTagScratch(dyn.carrier))) {
+            emitter.pushRaw(out, op);
+          }
+          return;
         }
         if (valueIrType.kind !== "union") {
           throw new Error(`ir/lower: tag.test value must be a union IrType, got ${valueIrType.kind} (${func.name})`);

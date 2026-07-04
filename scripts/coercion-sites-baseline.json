@@ -6,7 +6,7 @@
   "codegen/binary-ops.ts": 33,
   "codegen/class-to-primitive.ts": 1,
   "codegen/closed-method-dispatch.ts": 1,
-  "codegen/declarations.ts": 20,
+  "codegen/declarations.ts": 22,
   "codegen/expressions/assignment.ts": 12,
   "codegen/expressions/calls-closures.ts": 2,
   "codegen/expressions/calls.ts": 30,

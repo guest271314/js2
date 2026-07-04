@@ -14,7 +14,9 @@ import type { InnerResult } from "../shared.js";
 import { compileExpression, VOID_RESULT } from "../shared.js";
 import { compileNativeStringMethodCall } from "../string-ops.js";
 import { defaultValueInstrs, pushDefaultValue } from "../type-coercion.js";
+import { undefinedSingletonActive } from "../any-helpers.js";
 import { compileCallablePropertyCall } from "./calls-closures.js";
+import { ensureExternIsUndefinedImport, flushLateImportShifts } from "./late-imports.js";
 import { getFuncParamTypes } from "./helpers.js";
 import { resolveStructName } from "./misc.js";
 
@@ -52,6 +54,17 @@ export function compileOptionalCallExpression(
   const tmp = allocLocal(fctx, `__optcall_${fctx.locals.length}`, objType);
   fctx.body.push({ op: "local.tee", index: tmp });
   fctx.body.push({ op: "ref.is_null" });
+  // (#2106 S1) Under the `undefinedSingleton` regime standalone `undefined` is
+  // a NON-null externref, so the short-circuit must also test the singleton.
+  if (undefinedSingletonActive(ctx) && objType.kind === "externref") {
+    const isUndefIdx = ensureExternIsUndefinedImport(ctx);
+    if (isUndefIdx !== undefined) {
+      flushLateImportShifts(ctx, fctx);
+      fctx.body.push({ op: "local.get", index: tmp });
+      fctx.body.push({ op: "call", funcIdx: isUndefIdx });
+      fctx.body.push({ op: "i32.or" } as Instr);
+    }
+  }
 
   const savedBody = pushBody(fctx);
   // The receiver of an optional chain is nullable by construction (`K | null`),

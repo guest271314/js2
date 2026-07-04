@@ -17,6 +17,7 @@ language_feature: compiler-internals
 goal: maintainability
 related: [2710, 1899, 1985]
 ---
+
 # #1916 — Symbolic function references in WasmGC codegen
 
 ## Problem
@@ -34,7 +35,7 @@ instruction array in flight:
 - A **second** shift regime (`reconcileNativeStrFinalizeShift`,
   `late-imports.ts:355+`, #1677) exists because raw `addImport` deliberately
   doesn't shift (the #618 revert).
-- Context fields exist *only* to make bodies reachable for the shifter
+- Context fields exist _only_ to make bodies reachable for the shifter
   (`liveBodies`, `context/types.ts:940-946`, citing #1384) — the context
   schema is shaped by repair-pass reachability.
 - `generateModule`'s prologue (`index.ts:954-1103`) is a 150-line ordering
@@ -212,15 +213,15 @@ collision-free id requiring no registry map. The two regimes are then
 distinguishable by magnitude, like a tagged union:
 
 - `definedFuncAt`: `h >= STABLE_BASE ? mod.functions[h - STABLE_BASE] :
-  mod.functions[h - numImportFuncs]` — S2 made this THE read chokepoint,
+mod.functions[h - numImportFuncs]` — S2 made this THE read chokepoint,
   so dual-mode lands in one function (+ its 3 siblings).
 - `binary.ts` `fIdx` (the S1 seam): `h >= STABLE_BASE ? finalNumImports
-  + (h - STABLE_BASE) : h`.
+  - (h - STABLE_BASE) : h`.
 - **Each of the 4 shifters + dead-elim's fR remap get a one-line guard:
   skip any `funcIdx >= STABLE_BASE`** (a stable handle never shifts).
   Transitional; deleted with the shifters.
 - Import handles stay in the live regime initially — they are already
-  *prefix-stable* (an import's index never changes once minted; imports
+  _prefix-stable_ (an import's index never changes once minted; imports
   only append among themselves). The only breaker is dead-elim REMOVING
   a func import; that is resolveLayout's import-ordinal remap table in
   the endgame slice.
@@ -231,6 +232,7 @@ the identity by construction (disjoint ranges, stable ordinal); there
 is never a moment where one value means two functions.
 
 **S3 slices (each byte-identity-provable):**
+
 - S3a — LANDED (PR 3): the full two-regime infrastructure + the FIRST
   flipped producer, proven byte-identical. As-built notes:
   - `src/emit/resolve-layout.ts`: `STABLE_FUNC_BASE` (1<<21),
@@ -262,9 +264,9 @@ is never a moment where one value means two functions.
     the `__num_fmt_finalize` sibling-call fan-in). Proof: corpus
     byte-IDENTICAL (1215 records — the flip resolves to exactly the
     bytes the shifter regime produced), issue-1537 (33) + issue-49 (7)
-    + late-shift suites green, and a new acceptance test: stable
-    producer + forced late-import churn compiles/validates/runs on all
-    3 targets.
+    - late-shift suites green, and a new acceptance test: stable
+      producer + forced late-import churn compiles/validates/runs on all
+      3 targets.
 - S3b..N: flip remaining producers batchwise (~203 canonical
   `numImportFuncs + mod.functions.length` sites + 10 variants across 49
   files → `mintDefinedFunc`/`pushDefinedFunc`). Byte-identity after
@@ -327,28 +329,33 @@ is never a moment where one value means two functions.
     mutating the pushed object reference). Corpus byte-IDENTICAL (stacked
     on batch A so it inherits the declaredFuncRefs sort fix — literals'
     object-method funcrefs are ref.func'd).
-  - **`declarations.ts` (5 sites) — DEFERRED to its own batch (dev-1916b,
-    needs deeper analysis)**. Flipping it drifts `async.ts::gc` (−6 bytes,
-    code section): the async state-machine helper `__sset_state`'s body is
-    emitted calling a DIFFERENT function (`__js_array_new`→`setTimeout`)
-    with a different compile-time result arity (drop×3 → drop×1). Both the
-    call target AND the baked drop-count differ, so this is NOT a late
-    shift — it is a `funcIdx`-interpreting consumer between freeze and emit
-    reading a stable handle positionally (prime suspect: `stackBalance`,
-    already flagged in the S3-final consumer list as "reads callee
-    signatures — takes `mod` only, import-count context must be derivable
-    from `mod`; audit"). Like closures, this file needs an infra fix before
-    it can flip byte-identically; tracked here for the next executor.
+  - **`declarations.ts` (5 sites) — LANDED (fable-2710, 2026-07-04), and the
+    deferral diagnosis is CORRECTED**. The observed `async.ts::gc` −6-byte
+    drift was NOT a consumer reading a stable handle positionally — it was
+    the flip **fixing a latent invalid-Wasm bug on main** (baseline
+    `async.ts::gc` fails `WebAssembly.validate` since PR #2483/#1042; the
+    "different call target" was a STALE live-regime immediate that missed
+    its late-import shift inside a shifter-unreachable detached array, then
+    got renumbered onto an unrelated function by dead-import elimination;
+    stackBalance behaved correctly on the wrong input). `stackBalance` needs
+    no audit fix — it has been dual-regime since S3a. Full trace + bisect +
+    proof in #2710's progress log ("S3b deferred-producer flip landed").
   - **S3b medium batch C — LANDED (dev-1916b)**: `accessor-driver.ts` (5:
     reserve-then-fill placeholder accessors, uniform `funcIdx`/`placeholder`)
-    + `iterator-native.ts` (3: `__array_from_iter_n` + inline iterator
-    helpers). Corpus byte-IDENTICAL (stacked on A+B → inherits both infra
-    fixes). Non-async producers flipped cleanly with no new drift.
-  - **async-frame.ts (3) + promise-combinators.ts (2) — DEFERRED**
-    alongside `declarations.ts`: they build the same async/promise state
-    machines whose `__sset_*` helpers exposed the `stackBalance`-class
-    consumer bug; flipping them risks the same drift. They flip once the
-    consumer audit fix lands.
+    - `iterator-native.ts` (3: `__array_from_iter_n` + inline iterator
+      helpers). Corpus byte-IDENTICAL (stacked on A+B → inherits both infra
+      fixes). Non-async producers flipped cleanly with no new drift.
+  - **async-frame.ts (3) + promise-combinators.ts (5) — LANDED
+    (fable-2710, 2026-07-04)** together with `declarations.ts` (the
+    "consumer audit" gate was a misdiagnosis, see above). async-frame also
+    gained the transitional `buildStateArm` detached-segment
+    `ctx.liveBodies` tracking: completed-but-unassembled state-segment
+    arrays were unreachable by ALL FOUR shifters while later segments
+    compiled (the second half of the invalid-Wasm mechanism); the tracking
+    covers calls to the ~39 still-live-regime `index.ts` mints and is
+    deleted with the shifters at S3-final. promise-combinators' `base + k`
+    four-sibling derivation became four explicit mints (the batch-3 JSON
+    trio pattern).
   - **S3b medium batch D — LANDED (dev-1916b)**: the 15 single-/double-mint
     producer files — `array-to-primitive`, `builtin-static-globals` (2),
     `class-to-primitive`, `closed-method-dispatch` (2), `fmod`,
@@ -360,13 +367,25 @@ is never a moment where one value means two functions.
     its helper is not on the `stackBalance` drift path the async
     `__sset_*` helpers hit, so generators are safe to flip while
     async-frame/promise-combinators wait for the consumer-audit fix.
-  - **Remaining after batch D**: `index.ts` (~38 non-uniform sites,
-    shifter-adjacent — its own careful PR), plus the deferred
-    `declarations.ts` / `async-frame.ts` / `promise-combinators.ts` (all
-    gated on the `stackBalance` consumer-audit fix). Out of scope for the
+  - **Remaining after the deferred-producer flip (2026-07-04): ONLY
+    `index.ts` (39 non-uniform sites, shifter-adjacent — its own careful
+    PR) + `ir/integration.ts` (1)**, then S3-final. Out of scope for the
     WasmGC front-end flip: `codegen-linear/*` (converts with the linear
-    backend's own registry), `emit/binary.ts` + `ir/integration.ts` (the
-    resolver/patch surfaces, not producers).
+    backend's own registry), `emit/binary.ts` (the resolver surface, not a
+    producer). Execution notes for the index.ts wave (bank for the
+    executor): (a) the two inline shifters (`addStringImports` /
+    `addUnionImports`) live in this file — flipping the natives they mint
+    while their own shift blocks still run is safe ONLY because every
+    shifter comparison uses `inLiveShiftRange` (stable range skipped), but
+    verify each flipped mint is not also read back positionally inside the
+    same function; (b) `addUnionImportsAsNativeFuncs` and the native-string
+    helper finalize interact with `reconcileNativeStrFinalizeShift` +
+    `nativeStrHelperImportBase` — flip those clusters LAST, immediately
+    before deleting the reconcile machinery (S3-final 4c), or the re-base
+    bookkeeping double-counts; (c) prove with the byte-identity harness
+    per batch AND classify any drift before deferring (validate both
+    binaries first — see the #2710 method lesson: a drift can be the flip
+    FIXING a latent stale-shift bug, as it was for async.ts::gc).
   - **S3b batch 4 — native-regex (dev-1916o, handoff from dev-1916f).**
     `native-regex.ts`: all 10 helper producers (`__regex_class_match` +
     the exec/match/replace/split/test family) flipped from the inline

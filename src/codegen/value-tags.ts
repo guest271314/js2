@@ -148,8 +148,33 @@ export function boxToAny(ctx: CodegenContext, fctx: FunctionContext, from: ValTy
     case "null":
       // Only honor when the value is a discardable reference carrier; otherwise
       // fall through (a non-ref "null" hint shouldn't drop a live scalar).
+      // (#2106 S1) Under the `undefinedSingleton` regime (inline mirror of
+      // any-helpers' `undefinedSingletonActive` — kept import-free here), a
+      // statically-null reference carrier boxes tag-0 directly instead of
+      // falling into the Wasm-kind dispatch (whose externref arm tags it 5,
+      // the #1888 lie, or — honest — routes through __any_from_extern).
+      if (
+        ctx.undefinedSingleton === true &&
+        (ctx.standalone || ctx.nativeStrings) &&
+        (from.kind === "externref" || from.kind === "ref" || from.kind === "ref_null") &&
+        emit("__any_box_null", [{ op: "drop" } as Instr])
+      ) {
+        return true;
+      }
       break;
     case "undefined":
+      // (#2106 S1) Statically-undefined value: drop the carrier (null extern /
+      // singleton extern / UNDEF_F64-sentinel f64 — the only values an
+      // `undefined`-typed slot can hold) and box tag-1. Regime-gated; the
+      // legacy path keeps the historical kind-keyed dispatch below.
+      if (
+        ctx.undefinedSingleton === true &&
+        (ctx.standalone || ctx.nativeStrings) &&
+        (from.kind === "externref" || from.kind === "ref" || from.kind === "ref_null" || from.kind === "f64") &&
+        emit("__any_box_undefined", [{ op: "drop" } as Instr])
+      ) {
+        return true;
+      }
       break;
     default:
       break;
@@ -168,6 +193,16 @@ export function boxToAny(ctx: CodegenContext, fctx: FunctionContext, from: ValTy
     // under the flag; if absent (availability preconditions unmet) fall back
     // to the legacy lie so the flag can never produce a compile-time hole.
     if (ctx.honestAnyBoxing && emit("__any_from_extern")) return true;
+    // (#2106 S1) NULLISH-honest boxing under the `undefinedSingleton` regime:
+    // null → tag-0, the singleton / UNDEF-box → tag-1, everything else keeps
+    // the legacy tag-5 wrap byte-equivalently (see __any_box_extern_s1 —
+    // deliberately NOT the full-honest #2141 classification, whose solo flip
+    // measured −788/−794). Without this, `u === miss` over two `any` operands
+    // boxes both nullish values as tag-5 "strings" and __any_strict_eq's
+    // guarded string arm answers 0.
+    if (ctx.undefinedSingleton === true && (ctx.standalone || ctx.nativeStrings) && emit("__any_box_extern_s1")) {
+      return true;
+    }
     // #1888 (regression −788/−794): do NOT route generic externref boxing
     // through honest tag recovery. The test262 harness comparator (`isSameValue`
     // over the externref ABI with `any` params) depends on main's tag-5

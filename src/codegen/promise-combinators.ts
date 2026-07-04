@@ -36,7 +36,7 @@ import type { CodegenContext, FunctionContext } from "./context/types.js";
 import type { Instr, LocalDef, ValType } from "../ir/types.js";
 import { addFuncType, getArrTypeIdxFromVec, getOrRegisterVecType } from "./registry/types.js";
 import { allocLocal } from "./context/locals.js";
-import { definedFuncAt } from "./func-space.js"; // (#1916 S2) positional-read chokepoint
+import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S2/S3) positional-read chokepoint + stable mint/push
 import {
   ensureAsyncDriveRuntime,
   getOrRegisterPromiseType,
@@ -135,11 +135,17 @@ export function ensureCombinatorFunctions(ctx: CodegenContext): CombinatorRuntim
     [],
   );
 
-  const base = ctx.numImportFuncs + ctx.mod.functions.length;
-  const subscribeFuncIdx = base;
-  const allFulfillFuncIdx = base + 1;
-  const raceFulfillFuncIdx = base + 2;
-  const rejectFuncIdx = base + 3;
+  // (#1916 S3 / #2710) Four explicit stable mints replace the implicit
+  // consecutive-position `base + k` sibling derivation (same conversion as the
+  // JSON parse trio in S3b batch 3). The handles are baked into each other's
+  // bodies below and into `ref.func`/`call` sites at use time — stable handles
+  // never shift, so no ordering constraint against ensureAsyncDriveRuntime's
+  // appends (the "claim the slot last" comment above is now historical for
+  // the index reservation; rt must still be built first for its own values).
+  const subscribeFuncIdx = mintDefinedFunc(ctx);
+  const allFulfillFuncIdx = mintDefinedFunc(ctx);
+  const raceFulfillFuncIdx = mintDefinedFunc(ctx);
+  const rejectFuncIdx = mintDefinedFunc(ctx);
 
   const ids: CombinatorRuntime = {
     stateTypeIdx,
@@ -153,7 +159,7 @@ export function ensureCombinatorFunctions(ctx: CodegenContext): CombinatorRuntim
     rejectFuncIdx,
   };
 
-  ctx.mod.functions.push({
+  pushDefinedFunc(ctx, subscribeFuncIdx, {
     name: "__combinator_subscribe",
     typeIdx: subscribeTypeIdx,
     locals: buildSubscribeLocals(promiseTypeIdx),
@@ -162,7 +168,7 @@ export function ensureCombinatorFunctions(ctx: CodegenContext): CombinatorRuntim
   });
   ctx.funcMap.set("__combinator_subscribe", subscribeFuncIdx);
 
-  ctx.mod.functions.push({
+  pushDefinedFunc(ctx, allFulfillFuncIdx, {
     name: "__combinator_all_fulfill",
     typeIdx: wrapperTypeIdx,
     locals: buildAllFulfillLocals(ids),
@@ -171,7 +177,7 @@ export function ensureCombinatorFunctions(ctx: CodegenContext): CombinatorRuntim
   });
   ctx.funcMap.set("__combinator_all_fulfill", allFulfillFuncIdx);
 
-  ctx.mod.functions.push({
+  pushDefinedFunc(ctx, raceFulfillFuncIdx, {
     name: "__combinator_race_fulfill",
     typeIdx: wrapperTypeIdx,
     locals: buildSettleWrapperLocals(ids),
@@ -180,7 +186,7 @@ export function ensureCombinatorFunctions(ctx: CodegenContext): CombinatorRuntim
   });
   ctx.funcMap.set("__combinator_race_fulfill", raceFulfillFuncIdx);
 
-  ctx.mod.functions.push({
+  pushDefinedFunc(ctx, rejectFuncIdx, {
     name: "__combinator_reject",
     typeIdx: wrapperTypeIdx,
     locals: buildSettleWrapperLocals(ids),
@@ -729,8 +735,8 @@ export function ensureCombinatorToVec(ctx: CodegenContext): void {
   const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
   const arrRefNull: ValType = { kind: "ref_null", typeIdx: arrTypeIdx };
   const typeIdx = addFuncType(ctx, [EXTERNREF], [EXTERNREF]);
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-  ctx.mod.functions.push({
+  const funcIdx = mintDefinedFunc(ctx); // (#1916 S3) stable handle
+  pushDefinedFunc(ctx, funcIdx, {
     name: "__combinator_to_vec",
     typeIdx,
     locals: [
