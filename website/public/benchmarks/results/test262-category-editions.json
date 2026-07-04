@@ -103,8 +103,8 @@
       "skip": 0
     },
     "ES2015": {
-      "pass": 2124,
-      "fail": 684,
+      "pass": 2125,
+      "fail": 683,
       "ce": 67,
       "skip": 0
     },
@@ -139,8 +139,8 @@
       "skip": 0
     },
     "ES2022": {
-      "pass": 1262,
-      "fail": 389,
+      "pass": 1327,
+      "fail": 324,
       "ce": 7,
       "skip": 0
     },
@@ -549,8 +549,8 @@
       "skip": 0
     },
     "ES2015": {
-      "pass": 2135,
-      "fail": 540,
+      "pass": 2136,
+      "fail": 539,
       "ce": 52,
       "skip": 0
     },
@@ -591,8 +591,8 @@
       "skip": 0
     },
     "ES2022": {
-      "pass": 1323,
-      "fail": 375,
+      "pass": 1394,
+      "fail": 304,
       "ce": 6,
       "skip": 0
     },
@@ -1131,14 +1131,6 @@
       "skip": 0
     }
   },
-  "built-ins/decodeURIComponent": {
-    "ES2015": {
-      "pass": 53,
-      "fail": 3,
-      "ce": 0,
-      "skip": 0
-    }
-  },
   "built-ins/Symbol": {
     "ES2015": {
       "pass": 46,
@@ -1167,6 +1159,14 @@
     "ES2025": {
       "pass": 4,
       "fail": 2,
+      "ce": 0,
+      "skip": 0
+    }
+  },
+  "built-ins/decodeURIComponent": {
+    "ES2015": {
+      "pass": 53,
+      "fail": 3,
       "ce": 0,
       "skip": 0
     }
@@ -1531,6 +1531,14 @@
       "skip": 0
     }
   },
+  "language/line-terminators": {
+    "ES5": {
+      "pass": 33,
+      "fail": 0,
+      "ce": 8,
+      "skip": 0
+    }
+  },
   "language/comments": {
     "ES5": {
       "pass": 16,
@@ -1568,14 +1576,6 @@
       "pass": 14,
       "fail": 0,
       "ce": 0,
-      "skip": 0
-    }
-  },
-  "language/line-terminators": {
-    "ES5": {
-      "pass": 33,
-      "fail": 0,
-      "ce": 8,
       "skip": 0
     }
   },
@@ -1731,14 +1731,6 @@
       "skip": 0
     }
   },
-  "built-ins/ThrowTypeError": {
-    "ES2015": {
-      "pass": 6,
-      "fail": 8,
-      "ce": 0,
-      "skip": 0
-    }
-  },
   "built-ins/MapIteratorPrototype": {
     "ES2015": {
       "pass": 11,
@@ -1757,6 +1749,14 @@
     "ES2022": {
       "pass": 0,
       "fail": 1,
+      "ce": 0,
+      "skip": 0
+    }
+  },
+  "built-ins/ThrowTypeError": {
+    "ES2015": {
+      "pass": 6,
+      "fail": 8,
       "ce": 0,
       "skip": 0
     }

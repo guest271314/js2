@@ -57,8 +57,8 @@
   },
   {
     "edition": "ES2015",
-    "pass": 11108,
-    "fail": 4094,
+    "pass": 11110,
+    "fail": 4092,
     "ce": 184,
     "skip": 0,
     "total": 15386,
@@ -147,8 +147,8 @@
       },
       {
         "name": "class",
-        "pass": 304,
-        "fail": 74,
+        "pass": 306,
+        "fail": 72,
         "ce": 8,
         "skip": 0,
         "total": 386,
@@ -399,12 +399,12 @@
       },
       {
         "name": "decorators",
-        "pass": 22,
-        "fail": 2,
+        "pass": 24,
+        "fail": 0,
         "ce": 0,
         "skip": 0,
         "total": 24,
-        "pct": 92
+        "pct": 100
       },
       {
         "name": "symbols-as-weakmap-keys",
@@ -2141,57 +2141,57 @@
   },
   {
     "edition": "ES2022",
-    "pass": 3118,
-    "fail": 1084,
+    "pass": 3254,
+    "fail": 948,
     "ce": 32,
     "skip": 0,
     "total": 4234,
-    "pct": 74,
+    "pct": 77,
     "features": [
       {
         "name": "class",
-        "pass": 2187,
-        "fail": 588,
+        "pass": 2323,
+        "fail": 452,
         "ce": 15,
         "skip": 0,
         "total": 2790,
-        "pct": 78
+        "pct": 83
       },
       {
         "name": "class-fields-public",
-        "pass": 1508,
-        "fail": 546,
+        "pass": 1644,
+        "fail": 410,
         "ce": 0,
         "skip": 0,
         "total": 2054,
-        "pct": 73
+        "pct": 80
       },
       {
         "name": "class-fields-private",
-        "pass": 980,
-        "fail": 129,
+        "pass": 1032,
+        "fail": 77,
         "ce": 17,
         "skip": 0,
         "total": 1126,
-        "pct": 87
+        "pct": 92
       },
       {
         "name": "class-methods-private",
-        "pass": 827,
-        "fail": 138,
+        "pass": 859,
+        "fail": 106,
         "ce": 1,
         "skip": 0,
         "total": 966,
-        "pct": 86
+        "pct": 89
       },
       {
         "name": "class-static-methods-private",
-        "pass": 667,
-        "fail": 103,
+        "pass": 707,
+        "fail": 63,
         "ce": 2,
         "skip": 0,
         "total": 772,
-        "pct": 86
+        "pct": 92
       },
       {
         "name": "async-iteration",
@@ -2222,12 +2222,12 @@
       },
       {
         "name": "class-static-fields-private",
-        "pass": 252,
-        "fail": 81,
+        "pass": 282,
+        "fail": 51,
         "ce": 0,
         "skip": 0,
         "total": 333,
-        "pct": 76
+        "pct": 85
       },
       {
         "name": "async-functions",
@@ -2240,12 +2240,12 @@
       },
       {
         "name": "computed-property-names",
-        "pass": 63,
-        "fail": 168,
+        "pass": 65,
+        "fail": 166,
         "ce": 0,
         "skip": 0,
         "total": 231,
-        "pct": 27
+        "pct": 28
       },
       {
         "name": "Symbol.iterator",
