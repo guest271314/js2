@@ -81,8 +81,14 @@ export function validateObjectAssignmentPattern(
   obj: ts.ObjectLiteralExpression,
   strict: boolean,
 ): void {
+  const lastProperty = obj.properties[obj.properties.length - 1];
   for (const prop of obj.properties) {
     if (ts.isSpreadAssignment(prop)) {
+      // AssignmentRestProperty (`...rest`) must be LAST — no property may follow
+      // it (`({...rest, b} = y)`). TS accepts spread-not-last silently, so flag it.
+      if (prop !== lastProperty) {
+        ctx.addError(prop, "Rest element must be last in a destructuring pattern");
+      }
       // Rest in object: { ...rest } = x — valid, but rest may not have computed
       validateAssignmentTarget(ctx, prop.expression, strict);
       continue;

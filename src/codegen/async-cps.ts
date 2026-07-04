@@ -1125,7 +1125,24 @@ export type AsyncCfgTerminator =
       readonly handler: number;
     }
   | { readonly kind: "settleSent" } // `return await P` — fulfil with SENT directly
-  | { readonly kind: "settleUndefined" }; // fall off the body — fulfil with undefined
+  | { readonly kind: "settleUndefined" } // fall off the body — fulfil with undefined
+  | {
+      // (#2906 slice 3d-i) Async-generator `yield E`: fulfil the CURRENT
+      // `next()`-promise (`frame.result_promise`, re-minted per `next()` call)
+      // with an IteratorResult `{value: E, done: false}`, set STATE=resumeState,
+      // and `return` — the machine SUSPENDS until the next `next()` kick, which
+      // re-mints the result promise and re-dispatches at `resumeState`. Unlike
+      // `suspend` it registers NO promise reaction (a yield does not await): the
+      // consumer's next `next()` is the sole resumption driver.
+      readonly kind: "settleYield";
+      /** The yielded value. `null` ⇒ `fromSent` (yield the delivered await value). */
+      readonly value: AsyncCfgOperand | null;
+      /** Yield `SENT_FIELD` directly (`yield await P` — the awaited value). */
+      readonly fromSent: boolean;
+      /** State entered on the next `next()` kick after this yield. */
+      readonly resumeState: number;
+    }
+  | { readonly kind: "settleDone" }; // async-gen body end — fulfil `{value: undefined, done: true}`
 
 /** One basic block of the async CFG. */
 export interface AsyncCfgState {
@@ -1780,6 +1797,163 @@ export function planForAwaitCfg(fn: ts.FunctionLikeDeclaration, plan: AsyncCpsPl
       terminator: { kind: "settleUndefined" },
     },
   ];
+  return { states, handlers: [] };
+}
+
+// ---------------------------------------------------------------------------
+// async-generator PRODUCER core (#2906 slice 3d-i).
+//
+// `async function* g() { yield await P; yield E; … }` currently routes through
+// the generator-buffer path and fails at the #680 native-generator gate in
+// standalone/wasi — it never reaches the async drive machine. The PRODUCER core
+// intercepts a BOUNDED async-gen body BEFORE that gate and lowers it onto the
+// SAME CFG resume machine (`ensureAsyncResumeFunction`) the linear/while/
+// for-await drives already use, with two new terminators:
+//
+//   - `settleYield` — `yield E`: fulfil the current `next()`-promise with
+//     `{value: E, done: false}` and suspend (no reaction; the next `next()` kick
+//     resumes). `yield await P` splits into a `suspend` on `P` (the existing
+//     await terminator — genuine microtask suspension) followed by a
+//     `settleYield` that yields the delivered `SENT_FIELD` value (`fromSent`).
+//   - `settleDone` — body end: fulfil `{value: undefined, done: true}`.
+//
+// Bounded slice (everything else → the legacy gen path / #680 error, never a
+// wrong machine — the #2367 graveyard rule):
+//   - the body is a FLAT block whose every statement is `yield <E>` (an
+//     expression statement wrapping a non-delegating `YieldExpression`);
+//   - `E` is a plain expression, `await <P>`, or absent (`yield;`);
+//   - a plain `E` contains no nested `await`/`yield` (those need expression-level
+//     suspend-point numbering — a follow-up);
+//   - NO own-local declarations (var/let/const) in the body: a local that
+//     crosses a yield/await needs the frame-spill widening the linear/loop
+//     drives already have; the core keeps spills empty (params are captured in
+//     frame fields, so param-only bodies are fine). Own-locals are the immediate
+//     3d-i′ follow-up (reuse `computeAsyncSpills`).
+// Consumer-side `next(v)`/`.throw()`/`.return()` and prototype-method dispatch
+// are 3d-ii (the for-await consumer); the core proves the producer host-free via
+// direct `next()`-helper drive.
+// ---------------------------------------------------------------------------
+
+/** True when `node` contains an `await`/`yield` not inside a nested fn scope. */
+function containsAwaitOrYield(node: ts.Node): boolean {
+  let found = false;
+  const walk = (n: ts.Node): void => {
+    if (found || isNestedFunctionScope(n)) return;
+    if (ts.isAwaitExpression(n) || ts.isYieldExpression(n)) {
+      found = true;
+      return;
+    }
+    forEachChild(n, walk);
+  };
+  walk(node);
+  return found;
+}
+
+/** Does the async-gen body declare any own local (var/let/const)? (Conservative
+ *  — the 3d-i core rejects these; spill widening is the follow-up.) */
+function asyncGenBodyHasOwnLocals(fn: ts.FunctionLikeDeclaration): boolean {
+  const body = fn.body;
+  if (body === undefined) return false;
+  let found = false;
+  const walk = (n: ts.Node): void => {
+    if (found || isNestedFunctionScope(n)) return;
+    if (ts.isVariableDeclaration(n)) {
+      found = true;
+      return;
+    }
+    forEachChild(n, walk);
+  };
+  forEachChild(body, walk);
+  return found;
+}
+
+/** One bounded async-gen yield statement: `yield await <awaited>` OR `yield <plain>`
+ *  OR `yield;` (both null). */
+interface AsyncGenYield {
+  readonly awaited: ts.Expression | null;
+  readonly plain: ts.Expression | null;
+}
+
+/** Recognise the bounded 3d-i async-gen body; return its ordered yield list, or
+ *  `null` for anything outside the slice. */
+function analyzeAsyncGen(fn: ts.FunctionLikeDeclaration): AsyncGenYield[] | null {
+  const body = fn.body;
+  if (body === undefined || !ts.isBlock(body)) return null;
+  if (asyncGenBodyHasOwnLocals(fn)) return null;
+  const yields: AsyncGenYield[] = [];
+  for (const st of body.statements) {
+    if (!ts.isExpressionStatement(st)) return null;
+    const e = st.expression;
+    if (!ts.isYieldExpression(e)) return null;
+    if (e.asteriskToken !== undefined) return null; // `yield*` delegation — follow-up
+    const operand = e.expression;
+    if (operand === undefined) {
+      yields.push({ awaited: null, plain: null }); // `yield;`
+    } else if (ts.isAwaitExpression(operand)) {
+      // `yield await P` — reject a doubly-nested await/yield in the awaited operand.
+      if (containsAwaitOrYield(operand.expression)) return null;
+      yields.push({ awaited: operand.expression, plain: null });
+    } else {
+      if (containsAwaitOrYield(operand)) return null; // nested await/yield — follow-up
+      yields.push({ awaited: null, plain: operand });
+    }
+  }
+  if (yields.length === 0) return null; // an empty async-gen has no producer to prove
+  return yields;
+}
+
+/** True when `fn` is a bounded 3d-i async-generator body drivable host-free. */
+export function isBoundedAsyncGenBody(fn: ts.FunctionLikeDeclaration): boolean {
+  return analyzeAsyncGen(fn) !== null;
+}
+
+/**
+ * Build the CFG for a bounded async-generator body. Dense ids in push order; a
+ * `yield await P` contributes TWO states (await-suspend + yield-from-sent), a
+ * plain `yield E` ONE, and a trailing `settleDone`:
+ *
+ *   yield await P:  Sk  suspend(P, resume→Sk+1)                (the await)
+ *                   Sk+1 (resumeFrom binding:null) settleYield(fromSent, →Sk+2)
+ *   yield E:        Sk  settleYield(value:E, →Sk+1)
+ *   <end>:          Sn  settleDone
+ *
+ * Only the yield-from-sent state carries a resume prelude (to re-throw a rejected
+ * await via the MODE_THROW arm — a rejected awaited yield rejects the current
+ * `next()` promise). Every other state is entered by a `next()` kick with
+ * MODE_NEXT, so needs no prelude. Returns `null` for a non-bounded body.
+ */
+export function planAsyncGenCfg(fn: ts.FunctionLikeDeclaration): AsyncCfgPlan | null {
+  const yields = analyzeAsyncGen(fn);
+  if (yields === null) return null;
+  const states: AsyncCfgState[] = [];
+  let id = 0;
+  for (const y of yields) {
+    if (y.awaited !== null) {
+      // await-suspend state → yield-from-sent state.
+      states.push({
+        id,
+        resumeFrom: null,
+        lead: [],
+        terminator: { kind: "suspend", awaited: y.awaited, resumeState: id + 1, handler: 0 },
+      });
+      states.push({
+        id: id + 1,
+        resumeFrom: { binding: null, handler: 0 }, // re-throw a rejected await
+        lead: [],
+        terminator: { kind: "settleYield", value: null, fromSent: true, resumeState: id + 2 },
+      });
+      id += 2;
+    } else {
+      states.push({
+        id,
+        resumeFrom: null,
+        lead: [],
+        terminator: { kind: "settleYield", value: y.plain, fromSent: false, resumeState: id + 1 },
+      });
+      id += 1;
+    }
+  }
+  states.push({ id, resumeFrom: null, lead: [], terminator: { kind: "settleDone" } });
   return { states, handlers: [] };
 }
 
