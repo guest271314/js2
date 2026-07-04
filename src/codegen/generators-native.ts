@@ -94,7 +94,20 @@ type StateTerminator =
   // the state struct (see `delegationSites`). This is a SELF-suspending state:
   // each `.next()` re-enters it, driving the inner's resume until the inner is
   // done, then control transfers to `next`.
-  | { kind: "yield-star"; subject: ts.Expression; innerName: string; siteIndex: number; next: number };
+  // (#2864 R1) `bindResultTo` — for `const x = yield* inner()`: the name that
+  // receives the DELEGATION COMPLETION value (the inner's `return` value,
+  // §27.5.3.7 — `innerRes.value` once `innerRes.done`). It is delivered by the
+  // done-arm inside the SAME resume call that observed the inner's completion,
+  // NOT from the `sent` field — so it is deliberately NOT a resume binding (a
+  // resume binding would clobber it with the `.next(v)` argument on re-entry).
+  | {
+      kind: "yield-star";
+      subject: ts.Expression;
+      innerName: string;
+      siteIndex: number;
+      next: number;
+      bindResultTo?: string;
+    };
 
 interface NativeGeneratorState {
   /** Straight-line, yield-free statements to run on entering this state. */
@@ -311,6 +324,13 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
   // (#2170) `yield*` delegation sites, allocated in source order; index into
   // this array is the terminator's `siteIndex`.
   const delegationSites: { innerName: string }[] = [];
+  // (#2864 R1) Names bound to a delegation COMPLETION value
+  // (`const x = yield* inner()`). Spilled at f64 — the delegation gate admits
+  // only f64-elem inners, and the inner's `return` value rides its result
+  // struct's f64 `value` field. Typed here (not via `resolveSpillLocalValType`,
+  // whose declaration-shape cascade doesn't model a yield* initializer, nor via
+  // the `sent`-carrier rule, which types `.next(v)` bindings).
+  const delegationBindingNames = new Set<string>();
   const spillSet = new Set<string>();
   // (#2864 F1b) The variable declaration that introduced each spilled name, so
   // the spill's wasm type can be resolved at its actual ValType.
@@ -496,11 +516,23 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
       const subject = yieldExpr.expression;
       const innerName = subject ? nativeGeneratorDelegationName(subject) : undefined;
       if (!subject || innerName === undefined) return fail();
-      // The successor after delegation finishes. Like a yield successor it may
-      // carry a resume binding (`x = yield* inner()` binds the inner's return
-      // value); slice-1 supports only the unbound expression-statement form, so
-      // require `bindSentTo === undefined`.
-      if (bindSentTo !== undefined) return fail();
+      // (#2864 R1) Carrier-mismatch gate: the delegation yield-arm re-yields the
+      // inner's f64 `value` through the OUTER result struct. For an f64 outer
+      // that is exact; for the boxed-any outer the f64→externref mismatch is
+      // repaired to a `__box_number` by `repairStructTypeMismatches`
+      // (fixups.ts). A STRING outer's result `value` is a concrete ref no
+      // repair can bridge — main emitted an INVALID module for that shape
+      // (wasm validation failure at instantiation, latent since #2170/#2171).
+      // Bail it to the host path (standalone: the clean #680 refusal) instead.
+      if (elemIsString) return fail();
+      // (#2864 R1) `const x = yield* inner()` — bind the delegation COMPLETION
+      // value (the inner's `return` value). The done-arm writes it inside the
+      // same resume call, so it is NOT a resume binding (see the terminator
+      // comment); it only needs a typed spill slot.
+      if (bindSentTo !== undefined) {
+        delegationBindingNames.add(bindSentTo);
+        addSpill(bindSentTo);
+      }
       const siteIndex = delegationSites.length;
       delegationSites.push({ innerName });
       const nextId = startStateAfterYield(undefined, activeFinalizers);
@@ -510,6 +542,7 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
         innerName,
         siteIndex,
         next: nextId,
+        bindResultTo: bindSentTo,
       });
       // Create the successor and make it current (mirrors finishCurrentAsYield).
       curId = reserveState();
@@ -828,6 +861,13 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
   const carrierType = genCarrierFieldType(elemValType);
   const spillTypes = new Map<string, ValType>();
   for (const name of spills) {
+    // (#2864 R1) A delegation-completion binding (`const x = yield* inner()`)
+    // holds the inner's f64 `return` value — always f64 (only f64-elem inners
+    // are delegated), independent of the OUTER's carrier.
+    if (delegationBindingNames.has(name)) {
+      spillTypes.set(name, { kind: "f64" });
+      continue;
+    }
     if (resumeBindingNames.has(name)) {
       // A `let x = yield …` binding reads `.next(v)`'s value from the `sent`
       // carrier field. For numeric / native-string carriers (sent = f64 / string)
@@ -1771,12 +1811,39 @@ function compileState(
       body.push({ op: "call", funcIdx: innerResumeIdx });
       body.push({ op: "local.set", index: innerResLocal });
 
+      // (#2864 R1) `const x = yield* inner()` — on completion, deliver the
+      // inner's `return` value (§27.5.3.7: the yield* expression's value is
+      // `innerRes.value` once `innerRes.done`) into the binding's local AND its
+      // spill field, so it both flows into the successor state within this
+      // resume call and survives later suspensions. The inner is f64-gated, so
+      // the value and the binding's spill slot are both f64.
+      const bindInstrs: Instr[] = [];
+      if (term.bindResultTo !== undefined) {
+        const bindLocal = fctx.localMap.get(term.bindResultTo);
+        const bindSpillIdx = info.spillNames.indexOf(term.bindResultTo);
+        if (bindLocal !== undefined && bindSpillIdx >= 0) {
+          bindInstrs.push(
+            { op: "local.get", index: innerResLocal },
+            { op: "struct.get", typeIdx: innerInfo.resultTypeIdx, fieldIdx: RESULT_VALUE_FIELD },
+            { op: "local.set", index: bindLocal },
+            { op: "local.get", index: selfLocal },
+            { op: "local.get", index: bindLocal },
+            {
+              op: "struct.set",
+              typeIdx: info.stateTypeIdx,
+              fieldIdx: info.spillFieldOffset + bindSpillIdx,
+            } as Instr,
+          );
+        }
+      }
+
       // if (innerRes.done == 0) re-yield innerRes.value (stay in THIS state)
       const doneArm: Instr[] = [
         // inner done — clear the slot, advance to the successor state, re-enter.
         { op: "local.get", index: selfLocal },
         { op: "ref.null", typeIdx: innerInfo.stateTypeIdx },
         { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: slot.fieldIdx } as Instr,
+        ...bindInstrs,
         ...setStateInstrs(info, selfLocal, term.next),
         { op: "br", depth: loopDepth + 1 }, // +1 for the inner `if`
       ];
