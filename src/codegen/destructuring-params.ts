@@ -24,6 +24,7 @@ import { stringConstantExternrefInstrs } from "./native-strings.js";
 import { emitLocalTdzInit } from "./statements/tdz.js";
 import { addFuncType, getArrTypeIdxFromVec, getOrRegisterVecType } from "./registry/types.js";
 import { holeToUndefinedInstrs } from "./array-holes.js"; // (#2001 S1)
+import { emitIsUndefinedSingletonExternAt, undefinedSingletonActive } from "./any-helpers.js"; // (#2106 S1)
 import {
   coerceType,
   compileExpression,
@@ -785,6 +786,22 @@ export function emitExternrefDestructureGuard(ctx: CodegenContext, fctx: Functio
       fctx.body.push({ op: "local.get", index: paramIdx });
       fctx.body.push({ op: "call", funcIdx: undefIdx });
       fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: buildDestructureNullThrow(ctx, fctx), else: [] });
+    } else if (undefinedSingletonActive(ctx)) {
+      // (#2106 S1) Under the singleton regime a standalone `undefined`
+      // container is a NON-null externref, so the `ref.is_null` guard above
+      // misses it. Test the tag-1 `$AnyValue` shape ONLY — deliberately NOT
+      // the sentinel-aware `__extern_is_undefined`, whose UNDEF_F64
+      // `$BoxedNumber` arm false-positives on a scalarized `[undefined]`
+      // array container (the #3010 55-test regression).
+      const scratchAny = allocLocal(fctx, `__s1_dguard_any_${fctx.locals.length}`, { kind: "anyref" });
+      if (emitIsUndefinedSingletonExternAt(ctx, fctx, paramIdx, scratchAny)) {
+        fctx.body.push({
+          op: "if",
+          blockType: { kind: "empty" },
+          then: buildDestructureNullThrow(ctx, fctx),
+          else: [],
+        });
+      }
     }
   }
 }

@@ -39,6 +39,7 @@ import type { Instr, ValType } from "../ir/types.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { addFuncType } from "./registry/types.js";
 import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S3) stable-regime minting
+import { undefinedSingletonActive } from "./any-helpers.js"; // (#2106 S1)
 import { ensureGetUndefined } from "./expressions/late-imports.js";
 import { ensureObjectRuntime } from "./object-runtime.js";
 import { stringConstantExternrefInstrs } from "./native-strings.js";
@@ -97,6 +98,15 @@ export function ensureDynReadHelpers(ctx: CodegenContext): void {
   const getUndefIdx = ensureGetUndefined(ctx);
   const undefInstrs: Instr[] =
     getUndefIdx !== undefined ? [{ op: "call", funcIdx: getUndefIdx } as Instr] : [{ op: "ref.null.extern" } as Instr];
+  // (#2106 S1) Under the `undefinedSingleton` regime `__extern_get` ALREADY
+  // returns the singleton for an absent property, and a null result means a
+  // STORED JS null — so `__dyn_get` must NOT remap null → undefined (that
+  // would read `obj.x = null` back as undefined), and `__dyn_has`'s
+  // "present ⇔ non-null" flips to "present ⇔ non-nullish". This runs at
+  // FINALIZE: only consult ALREADY-reserved indices (no ensureAnyValueType —
+  // registering struct types this late is the #2043 late-shift class).
+  const s1DynRegime = undefinedSingletonActive(ctx) && ctx.undefinedGlobalIdx !== undefined;
+  const s1IsNullishIdx = s1DynRegime ? ctx.funcMap.get("__extern_is_nullish") : undefined;
 
   const externref: ValType = { kind: "externref" };
   const i32: ValType = { kind: "i32" };
@@ -134,21 +144,29 @@ export function ensureDynReadHelpers(ctx: CodegenContext): void {
     "__dyn_get",
     [externref, externref],
     [externref],
-    [
-      // val = __extern_get(recv, key)
-      { op: "local.get", index: 0 } as Instr,
-      { op: "local.get", index: 1 } as Instr,
-      { op: "call", funcIdx: externGetIdx } as Instr,
-      { op: "local.tee", index: 2 } as Instr,
-      // if (val is null) return undefined  — §Get of an absent property is undefined
-      { op: "ref.is_null" } as Instr,
-      {
-        op: "if",
-        blockType: { kind: "val", type: externref },
-        then: undefInstrs,
-        else: [{ op: "local.get", index: 2 } as Instr],
-      } as Instr,
-    ],
+    s1DynRegime
+      ? [
+          // (#2106 S1) plain pass-through: __extern_get already answers the
+          // singleton for absent, and null means a stored JS null.
+          { op: "local.get", index: 0 } as Instr,
+          { op: "local.get", index: 1 } as Instr,
+          { op: "call", funcIdx: externGetIdx } as Instr,
+        ]
+      : [
+          // val = __extern_get(recv, key)
+          { op: "local.get", index: 0 } as Instr,
+          { op: "local.get", index: 1 } as Instr,
+          { op: "call", funcIdx: externGetIdx } as Instr,
+          { op: "local.tee", index: 2 } as Instr,
+          // if (val is null) return undefined  — §Get of an absent property is undefined
+          { op: "ref.is_null" } as Instr,
+          {
+            op: "if",
+            blockType: { kind: "val", type: externref },
+            then: undefInstrs,
+            else: [{ op: "local.get", index: 2 } as Instr],
+          } as Instr,
+        ],
     [{ name: "__dg_val", type: externref }],
   );
 
@@ -165,13 +183,22 @@ export function ensureDynReadHelpers(ctx: CodegenContext): void {
     "__dyn_has",
     [externref, externref],
     [i32],
-    [
-      { op: "local.get", index: 0 } as Instr,
-      { op: "local.get", index: 1 } as Instr,
-      { op: "call", funcIdx: externGetIdx } as Instr,
-      { op: "ref.is_null" } as Instr,
-      { op: "i32.eqz" } as Instr, // present ⇔ NOT null
-    ],
+    s1IsNullishIdx !== undefined
+      ? [
+          // (#2106 S1) present ⇔ NOT nullish (absent = the undefined singleton).
+          { op: "local.get", index: 0 } as Instr,
+          { op: "local.get", index: 1 } as Instr,
+          { op: "call", funcIdx: externGetIdx } as Instr,
+          { op: "call", funcIdx: s1IsNullishIdx } as Instr,
+          { op: "i32.eqz" } as Instr,
+        ]
+      : [
+          { op: "local.get", index: 0 } as Instr,
+          { op: "local.get", index: 1 } as Instr,
+          { op: "call", funcIdx: externGetIdx } as Instr,
+          { op: "ref.is_null" } as Instr,
+          { op: "i32.eqz" } as Instr, // present ⇔ NOT null
+        ],
   );
 
   // Reference the tag constant so a future refined tag-dispatch (M2/M3) keeps it;

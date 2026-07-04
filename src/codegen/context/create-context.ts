@@ -254,6 +254,10 @@ export function createCodegenContext(
     // (#2141 S2/S3, #2626) tag-5 boxed-VALUE eq classifier — default OFF
     // (legacy); JS2WASM_TAG5_CLASSIFIER=1 env defaults it on for runner A/B.
     tag5ValueEqClassifier: options?.tag5ValueEqClassifier ?? process.env.JS2WASM_TAG5_CLASSIFIER === "1",
+    // (#2106 S1) standalone $undefined tag-1 singleton regime — default OFF
+    // (legacy: undefined ≡ null ≡ ref.null.extern, byte-identical);
+    // JS2WASM_UNDEF_SINGLETON=1 env defaults it on for runner A/B.
+    undefinedSingleton: options?.undefinedSingleton ?? process.env.JS2WASM_UNDEF_SINGLETON === "1",
     // (#2796) Diff-test-harness fidelity — export __module_init + skip the wasm
     // start section so the host runs top-level code after setExports.
     deferTopLevelInit: options?.deferTopLevelInit ?? false,
