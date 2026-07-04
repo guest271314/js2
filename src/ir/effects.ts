@@ -246,6 +246,13 @@ export function effectsOf(instr: IrInstr, cache: Map<IrInstr, IrEffects> = new M
       mergeBuffer(instr.then);
       mergeBuffer(instr.else);
       break;
+    // (#2856) Early return is a control effect (like throw): never
+    // reordered, CSE'd, or dropped — treat as a full barrier.
+    case "early.return":
+      fx.readsHeap = true;
+      fx.writesHeap = true;
+      fx.control = true;
+      break;
     default: {
       // Future instruction kinds default to a full barrier so a new kind can
       // never silently become re-orderable.
@@ -509,6 +516,9 @@ export function isSideEffecting(i: IrInstr): boolean {
     // this — even unused-result awaits need to suspend.
     i.kind === "await" ||
     i.kind === "async.return" ||
-    i.kind === "async.throw"
+    i.kind === "async.throw" ||
+    // (#2856) early.return is a control transfer — never droppable.
+    // (if.stmt is already seeded above with br.label, #2952 s2.)
+    i.kind === "early.return"
   );
 }

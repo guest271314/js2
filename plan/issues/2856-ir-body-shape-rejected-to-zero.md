@@ -2,8 +2,8 @@
 id: 2856
 title: "IR: drive body-shape-rejected fallback bucket to zero (dominant unintended bucket)"
 status: blocked
-assignee: ttraenkler/sr-bodyshape2
-spec: needs-rescope
+assignee:
+spec: banked
 sprint: current
 created: 2026-06-30
 updated: 2026-07-03
@@ -825,3 +825,138 @@ from the working `for-of` vec path). `main` has both `const sorted = [1,3,…]`
 - `tests/ir-algorithms-cluster.test.ts` (new) — per-capability claim tests +
   the mixed IR/legacy module-global round-trip equivalence test.
 - `scripts/ir-fallback-baseline.json` — ratchet `body-shape-rejected` 25→20.
+
+## Slice RESULTS — algorithms.ts whole-component (2026-07-04, fable-2856exec)
+
+**Gate: `body-shape-rejected` → 18, `call-graph-closure` → 9, `class-method`
+unchanged, post-claim demotions ZERO.** Relative to the pre-slice base
+(23/10/5) that is −5/−1; relative to post-#2952-slice-2 main (22/11/5, which
+this branch merged mid-flight) it is −4/−2. Net unintended 38 → 32 either
+way, banked in `scripts/ir-fallback-baseline.json`. (The plan's "25→20"
+numbers were grounded pre-#3000; the private-field pair had already cleared.)
+Whole-file verification: `js/algorithms.ts` IR-vs-legacy **console output
+identical (20/20 lines)**, zero demotions; standalone + wasi compiles stay
+clean (host-gated arms defer → legacy, as designed).
+
+### What landed, per capability (and WHY it's shaped that way)
+
+- **C1 — `if.stmt` + `early.return` IR instrs** (`nodes.ts`): statement-level
+  `if` (else optional, no carrier values — the #1392 value-`if` requires
+  both) and early-return (lowers to the Wasm `return` op, which natively
+  unwinds the `block{loop{…}}` nesting). Soundness scope is selector-enforced
+  and mirrored in from-ast (`cx.noEarlyReturn` / module-level
+  `earlyReturnLoopDepth`/`BarrierDepth` counters): early return is accepted
+  ONLY inside C-style `while`/`for`/`do` bodies with NO enclosing for-of
+  (iterator `return()` cleanup would be skipped), try/catch/finally (inlined
+  finally skipped), constructor (implicit `return this` synthesis), or
+  generator (buffer epilogue). A regression test pins the try/finally case to
+  legacy. Both kinds are excluded from `inline-small` (buffer-bearing /
+  caller-exit).
+- **C2 — element store** via an on-demand `__vec_elem_set_<vecTypeIdx>`
+  helper (`src/codegen/vec-elem-set.ts`, materialized through the
+  `resolveFunc` intercept like `ensureFmod`, #2945). NOT a new IR instr and
+  NOT a bare `array.set`: the helper carries the FULL legacy semantics
+  (null-guard → throw, grow-on-OOB with capacity doubling + copy, length
+  update) because the growing write (`a[i] = v` past the end) is common in
+  newly-claimable code — a bare store would trap. Pure WasmGC, no host
+  import (dual-mode clean). TypedArray-view receivers demote
+  (per-view ToUint8/clamp conversions stay legacy); selector restricts the
+  receiver to a plain in-scope identifier.
+- **C3 — module-scope Map** WITHOUT a Map-in-IR predecessor: module-level
+  statements always compile via legacy, so `const m = new Map()` already has
+  a legacy `__mod_<m>` externref global + `Map_new/Map_get/Map_set` extern
+  imports (JS-host lane). The IR side only needed: (a) a TDZ-checked
+  `global.get $__mod_<m>` branded `extern:Map` in the identifier arm
+  (storage-slot parity BY CONSTRUCTION — same global, name-resolved), after
+  which `.get`/`.set` ride the existing extern method-call machinery; (b)
+  `f64→externref` arg boxing via `__box_number` and `externref→f64` return
+  unboxing via `__unbox_number` in the coercion arms (exactly legacy's
+  emission for the same sites, so the imports are registered by legacy's own
+  compile of the function — dual-compile model); (c) strict undefined-compare
+  (`hit !== undefined`) → `__extern_is_undefined` on externref-shaped
+  operands, constant-fold on never-undefined representations. LOOSE `==
+  undefined` stays legacy (null == undefined needs a null check). Host lane
+  only — standalone's native Map runtime is NOT wired; fibMemo correctly
+  demotes there (the selector's Map-const set is empty outside the host
+  lane, so no claim-then-fail).
+- **C4 — #1804 guard retired**: the unsound shape it protected was fixed by
+  the slice-12 buffer machinery (synthetic −1 block-id use recording
+  materializes the constructed vec into a local before the loop op).
+  Verified with a 7-shape battery (read-in-body/cond, construct-in-body,
+  after-loop, nested, do-while, store-in-loop), each proven CLAIMED via
+  byte-diff (not vacuously green). Plus: call-arg `ref → ref_null` widening
+  (`irTypeArgAssignable` — a vec literal is `(ref $vec)`, params are
+  `(ref null $vec)`), and statement-position VOID direct calls
+  (`quicksort(arr, lo, p-1);` — `lowerCall(…, statementPosition)`).
+
+### Two latent lower.ts/passes bugs found & fixed en route
+
+1. **`inline-small` corrupted value-`if` arm buffers** — `renameAllInInstr`
+   doesn't deep-rename arm-buffer DEFS, so inlining a single-block callee
+   containing an `if` (any bounds-checked `a[i]` read emits one) produced
+   duplicate SSA defs → silent post-inline demote. Latent on main (the
+   ref/ref_null arg mismatch demoted such callers at build first); exposed by
+   C4's widening. Fix: `if` joins the buffer-bearing exclusion list in
+   `canInline`.
+2. **Nested-buffer emission silently DROPPED zero-use side-effecting
+   instrs** — all seven buffer-emission loops in `lower.ts` (loop bodies,
+   for-of bodies, try bodies, if arms) lacked `emitBlockBody`'s
+   "zero uses + side-effecting → eager emit + drop" arm, so a statement call
+   with an unused non-void result inside a loop body (e.g.
+   `shared.set(k, v)` — Map_set returns the map) emitted NOTHING. Caught by
+   the mixed-front-end storage-parity test (IR writer's write never
+   happened). Fix applied uniformly to all seven sites.
+
+### Verification record
+
+- `tests/ir-algorithms-cluster.test.ts` (new, 18 tests): per-capability
+  legacy/IR parity, each claim-proven via byte-diff (anti-vacuity); growing
+  store; mixed IR-writer/legacy-reader Map storage parity; try/finally
+  early-return negative; whole-component e2e console equality; standalone/
+  wasi cleanliness.
+- IR suite (`tests/ir-*`, issue-*-ir tests): per-file failure counts
+  IDENTICAL to pristine main (the ~81 container-env failures are
+  pre-existing; verified side-by-side) except `ir-scaffold`'s expected-claims
+  list, updated for `withWhile` (legitimate capability growth).
+- Byte-inertness for non-claimed programs: by construction — no legacy
+  codegen path was modified (the only `src/codegen/` change is the NEW
+  helper file, reachable only from the IR resolver).
+
+### Epic status after this slice
+
+`status: blocked` stands for the EPIC (bucket 18, not 0): the remaining
+clusters are the benchmark-harness 8 (hard-blocked BY #2858 cross-module
+calls + first-class function values), bench_array ×2 (ArrayType annotation +
+`.push` growable-array IR), calendar 5 (mutable module-scope bindings + DOM
+chains), classes.ts main (`instanceof`), async delay (Promise executor).
+This slice (−5 algorithms.ts component + −1 call-graph bonus) is merged
+work; the next executable slice per the Step-2 ordering is the
+benchmark-harness cluster AFTER #2858.
+
+### Post-merge reconciliation with #2952 slice 2 (same-day upstream landing)
+
+#2952 slice 2 landed mid-flight with a CONVERGENT `if.stmt` design (identical
+node shape) plus `br.label` break/continue and a ctrlStack depth resolver.
+Reconciliation on this branch: upstream's `if.stmt` + `emitBufferAsStatements`
++ ctrlStack machinery adopted wholesale (their arm pushes the plain CtrlFrames
+br.label depth-derivation needs; their `lowerIfBodyStatement` also upgrades
+the cond to truthiness via `coerceLoopCondToBool`); my duplicate `if.stmt`
+implementation deleted at every layer; `early.return` (mine alone) kept and
+now rides their emission helper. The #2856 zero-use side-effect fix collapsed
+from seven emission-loop sites into upstream's single `emitBufferAsStatements`
+(+ the remaining per-arm loops). Early-return barriers and #2952's `inLoop`
+threading coexist: break/continue may cross a try (br.label inlines crossed
+finallys) while early-return stays barred there. Verified post-merge:
+gate 18/9/5, cluster suite 18/18, #2952 suite 27/27, and a combined probe
+(`continue` + early `return` + `break` in one loop) claims with legacy parity.
+
+### Post-slice regression caught by the equivalence sweep (fixed in-branch)
+
+`void x === undefined` — the undefined-compare constant-fold was initially
+REP-based (f64 can't hold undefined), but the IR erases `void x` (static type
+`undefined`) into f64 NaN, folding the comparison to false where JS says
+true. Fix: the fold now ALSO requires the checker's static type to exclude
+undefined/void/any/unknown; undefined-able static types demote to legacy
+(which tracks undefined-ness). Full `tests/equivalence/` sweep on the final
+tree matches the pristine-main baseline (all remaining failures pre-existing
+container-env issues, verified side-by-side).

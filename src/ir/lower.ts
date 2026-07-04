@@ -865,6 +865,14 @@ export function lowerIrFunctionBody<S>(
         emitInstrTree(bodyInstr, target);
         emitter.emitLocalSet(localIdx.get(bodyInstr.result)!, target);
         materialized.add(bodyInstr.result);
+      } else if ((totalUses.get(bodyInstr.result) ?? 0) === 0 && isSideEffecting(bodyInstr)) {
+        // (#2856) Zero-use side-effecting instr inside a nested buffer —
+        // same eager emit + drop contract as `emitBlockBody`. Without this
+        // arm, a statement-position call whose unused NON-VOID result never
+        // gets consumed (e.g. `map.set(k, v);` in a loop body — Map_set
+        // returns the map) was silently SKIPPED, dropping its side effect.
+        emitInstrTree(bodyInstr, target);
+        emitter.emitDrop(target);
       }
       // Intra-buffer multi-use: handled at use site via the tee pattern.
     }
@@ -1139,6 +1147,13 @@ export function lowerIrFunctionBody<S>(
               emitInstrTree(bodyInstr, target);
               emitter.emitLocalSet(localIdx.get(bodyInstr.result)!, target);
               materialized.add(bodyInstr.result);
+            } else if ((totalUses.get(bodyInstr.result) ?? 0) === 0 && isSideEffecting(bodyInstr)) {
+              // (#2856) Zero-use side-effecting instr inside a nested buffer —
+              // same eager emit + drop contract as `emitBlockBody` (a
+              // statement-position extern/host call whose unused result would
+              // otherwise be silently SKIPPED, dropping its side effect).
+              emitInstrTree(bodyInstr, target);
+              emitter.emitDrop(target);
             }
             // Intra-arm multi-use: handled at use site via tee pattern.
           }
@@ -1165,6 +1180,18 @@ export function lowerIrFunctionBody<S>(
 
         // 4. Wrap in `if (result T) ... else ... end`.
         emitter.emitIf(blockType, thenBody, elseBody, out);
+        return;
+      }
+      // (NB: `case "if.stmt"` is handled below with the #2952 slice-2 arm —
+      // it pushes plain CtrlFrames so br.label depth-derivation counts the
+      // arm's structured frame.)
+      // (#2856) Early return from inside a nested buffer — the Wasm `return`
+      // op unwinds every enclosing block/loop and returns from the function.
+      // The value (when present) was coerced to the function's result type by
+      // from-ast (same `coerceReturnValue` the tail path uses).
+      case "early.return": {
+        if (instr.value !== null) emitValue(instr.value, out);
+        emitter.emitReturn(out);
         return;
       }
       case "raw.wasm":
@@ -2009,6 +2036,11 @@ export function lowerIrFunctionBody<S>(
                 index: localIdx.get(bodyInstr.result)!,
               });
               materialized.add(bodyInstr.result);
+            } else if ((totalUses.get(bodyInstr.result) ?? 0) === 0 && isSideEffecting(bodyInstr)) {
+              // (#2856) Zero-use side-effecting instr — eager emit + drop,
+              // same contract as `emitBlockBody` (see the if-arm variant).
+              emitInstrTree(bodyInstr, target as unknown as S);
+              emitter.emitDrop(target as unknown as S);
             }
             // Intra-block multi-use: handled via tee at use site.
           }
@@ -2330,6 +2362,11 @@ export function lowerIrFunctionBody<S>(
                 index: localIdx.get(bodyInstr.result)!,
               });
               materialized.add(bodyInstr.result);
+            } else if ((totalUses.get(bodyInstr.result) ?? 0) === 0 && isSideEffecting(bodyInstr)) {
+              // (#2856) Zero-use side-effecting instr — eager emit + drop,
+              // same contract as `emitBlockBody` (see the if-arm variant).
+              emitInstrTree(bodyInstr, target as unknown as S);
+              emitter.emitDrop(target as unknown as S);
             }
             // Intra-block multi-use: handled at use site via tee pattern.
           }
@@ -2858,6 +2895,9 @@ function collectIrUses(instr: IrInstr): readonly IrValueId[] {
       return [instr.value];
     case "async.throw":
       return [instr.reason];
+    // (#2856) Early return — the optional return value is a direct use.
+    case "early.return":
+      return instr.value !== null ? [instr.value] : [];
   }
 }
 

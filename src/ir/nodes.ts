@@ -1763,6 +1763,39 @@ export interface IrInstrThrow extends IrInstrBase {
   readonly value: IrValueId;
 }
 
+/**
+ * (#2856) Early `return` from inside a nested body buffer — the
+ * `if (v === target) return mid;` inside a `while` loop shape. The block
+ * TERMINATOR `return` can't express this (buffers aren't blocks), so this
+ * statement-level instr lowers to the Wasm `return` op, which unwinds all
+ * enclosing blocks/loops and returns from the function directly.
+ *
+ * `value` is null for a bare `return;` in a void function (the Wasm
+ * `return` then carries no operand). When non-null, the value is emitted
+ * onto the stack first and must match the function's single result type
+ * (from-ast routes it through the same `coerceReturnValue` the tail path
+ * uses).
+ *
+ * SOUNDNESS SCOPE (selector-enforced, mirrored in from-ast):
+ *   - NOT valid inside `try`/`catch`/`finally` buffers — a Wasm `return`
+ *     would skip the inlined finally blocks.
+ *   - NOT valid inside `forof.iter` bodies — the iterator protocol's
+ *     `iter.return` cleanup would be skipped (spec: `return` inside
+ *     for-of calls the iterator's return()).
+ *   - NOT valid in generators (their return routes through the buffer
+ *     epilogue, not a plain Wasm return).
+ *   Plain `while`/`for`/`do` bodies (and `if.stmt` arms nested in them)
+ *   are the supported contexts — a Wasm `return` there is exactly JS's
+ *   early-exit semantics.
+ *
+ * Like `throw`, it produces NO SSA value; instructions after it in the
+ * same buffer are dead but structurally valid.
+ */
+export interface IrInstrEarlyReturn extends IrInstrBase {
+  readonly kind: "early.return";
+  readonly value: IrValueId | null;
+}
+
 // ---------------------------------------------------------------------------
 // Generic structured loops (#1280 — IR Phase 4 Slice 12)
 // ---------------------------------------------------------------------------
@@ -2035,6 +2068,8 @@ export type IrInstr =
   // Slice 9 (#1169h) — exception handling.
   | IrInstrThrow
   | IrInstrTry
+  // (#2856) Early return inside body buffers.
+  | IrInstrEarlyReturn
   // Slice 10 (#1169i) — extern class ops.
   | IrInstrExternNew
   | IrInstrExternCall
@@ -2344,6 +2379,7 @@ export function forEachNestedBuffer(instr: IrInstr, fn: (buffer: readonly IrInst
     case "await":
     case "async.return":
     case "async.throw":
+    case "early.return":
       return;
     default: {
       const _exhaustive: never = instr;
@@ -2483,6 +2519,7 @@ export function mapNestedBuffers(
     case "await":
     case "async.return":
     case "async.throw":
+    case "early.return":
       return instr;
     default: {
       const _exhaustive: never = instr;
@@ -2618,6 +2655,9 @@ export function directUses(instr: IrInstr): readonly IrValueId[] {
       return [instr.value];
     case "async.throw":
       return [instr.reason];
+    // (#2856) early.return — the optional return value is a direct use.
+    case "early.return":
+      return instr.value !== null ? [instr.value] : [];
     default: {
       const _exhaustive: never = instr;
       void _exhaustive;

@@ -253,6 +253,39 @@ export function verifyIrFunction(func: IrFunction): IrVerifyError[] {
     }
   }
 
+  // (#2856) Same #1798 gate for `early.return` instrs inside nested buffers —
+  // a Wasm `return` carries the function's result values, so a mis-typed
+  // early-return value would produce invalid Wasm at instantiate time. Flag
+  // it here so the function demotes to legacy instead.
+  for (const block of func.blocks) {
+    for (const instr of block.instrs) {
+      forEachInstrDeep(instr, (i) => {
+        if (i.kind !== "early.return") return;
+        const arity = i.value !== null ? 1 : 0;
+        if (arity !== func.resultTypes.length) {
+          errors.push({
+            message: `early.return arity ${arity} != declared result arity ${func.resultTypes.length}`,
+            func: func.name,
+            block: block.id as number,
+          });
+          return;
+        }
+        if (i.value === null) return;
+        const actual = operandIrType(func, block, i.value, new Set());
+        if (!actual) return; // not locally visible — SSA-scope check reports it
+        if (!returnTypeAssignable(actual, func.resultTypes[0]!)) {
+          errors.push({
+            message:
+              `early.return value type ${describeKind(actual)} not assignable to declared ` +
+              `result ${describeKind(func.resultTypes[0]!)}`,
+            func: func.name,
+            block: block.id as number,
+          });
+        }
+      });
+    }
+  }
+
   return errors;
 }
 
@@ -754,6 +787,9 @@ function collectUses(instr: IrBlock["instrs"][number]): readonly IrValueId[] {
       return [instr.value];
     case "async.throw":
       return [instr.reason];
+    // (#2856) early.return — the optional return value is a direct use.
+    case "early.return":
+      return instr.value !== null ? [instr.value] : [];
   }
 }
 

@@ -814,5 +814,8 @@ function collectUses(instr: IrInstr): readonly IrValueId[] {
       return [instr.value];
     case "async.throw":
       return [instr.reason];
+    // (#2856) early.return — the optional return value is a direct use.
+    case "early.return":
+      return instr.value !== null ? [instr.value] : [];
   }
 }
