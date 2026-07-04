@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-07-04T16:40:11.716Z",
-  "baseline_generated_at": "2026-07-04T16:40:11.716Z",
-  "baseline_sha": "a2065394b847814c5c72cdcf29c74bb105699b0d",
+  "timestamp": "2026-07-04T17:41:05.764Z",
+  "baseline_generated_at": "2026-07-04T17:41:05.765Z",
+  "baseline_sha": "265a26fc3adef6ebed04b3d6d148ca6b1ad94cc8",
   "oracle_version": 1,
   "mode": {
     "target": "standalone",
@@ -10,38 +10,38 @@
   },
   "summary": {
     "total": 43106,
-    "pass": 27361,
-    "fail": 13904,
+    "pass": 27371,
+    "fail": 13894,
     "compile_error": 1818,
     "compile_timeout": 5,
     "skip": 18,
     "compilable": 41265,
-    "host_free_pass": 20573,
+    "host_free_pass": 20583,
     "leaky_pass": 6788,
     "stale": 0,
     "by_category": {
       "standard": {
         "total": 42020,
-        "pass": 27107,
-        "fail": 13113,
+        "pass": 27115,
+        "fail": 13105,
         "compile_error": 1777,
         "compile_timeout": 5,
         "skip": 18,
         "compilable": 40220,
-        "host_free_pass": 20321,
+        "host_free_pass": 20329,
         "leaky_pass": 6786,
         "stale": 0,
         "label": "ECMAScript current standard"
       },
       "annex_b": {
         "total": 1086,
-        "pass": 254,
-        "fail": 791,
+        "pass": 256,
+        "fail": 789,
         "compile_error": 41,
         "compile_timeout": 0,
         "skip": 0,
         "compilable": 1045,
-        "host_free_pass": 252,
+        "host_free_pass": 254,
         "leaky_pass": 2,
         "stale": 0,
         "label": "Annex B (legacy web compat)"
@@ -61,26 +61,26 @@
       },
       "official": {
         "total": 43106,
-        "pass": 27361,
-        "fail": 13904,
+        "pass": 27371,
+        "fail": 13894,
         "compile_error": 1818,
         "compile_timeout": 5,
         "skip": 18,
         "compilable": 41265,
-        "host_free_pass": 20573,
+        "host_free_pass": 20583,
         "leaky_pass": 6788,
         "stale": 0,
         "label": "standard + annex_b (default)"
       },
       "full": {
         "total": 48088,
-        "pass": 28521,
-        "fail": 17394,
+        "pass": 28531,
+        "fail": 17384,
         "compile_error": 2044,
         "compile_timeout": 6,
         "skip": 123,
         "compilable": 45915,
-        "host_free_pass": 20942,
+        "host_free_pass": 20952,
         "leaky_pass": 7579,
         "stale": 0,
         "label": "standard + annex_b + proposals"
@@ -89,50 +89,50 @@
   },
   "official_summary": {
     "total": 43106,
-    "pass": 27361,
-    "fail": 13904,
+    "pass": 27371,
+    "fail": 13894,
     "compile_error": 1818,
     "compile_timeout": 5,
     "skip": 18,
     "compilable": 41265,
-    "host_free_pass": 20573,
+    "host_free_pass": 20583,
     "leaky_pass": 6788,
     "stale": 0
   },
   "full_summary": {
     "total": 48088,
-    "pass": 28521,
-    "fail": 17394,
+    "pass": 28531,
+    "fail": 17384,
     "compile_error": 2044,
     "compile_timeout": 6,
     "skip": 123,
     "compilable": 45915,
-    "host_free_pass": 20942,
+    "host_free_pass": 20952,
     "leaky_pass": 7579,
     "stale": 0
   },
   "strict_summary": {
     "total": 40597,
-    "pass": 26260,
-    "fail": 12602,
+    "pass": 26270,
+    "fail": 12592,
     "compile_error": 1712,
     "compile_timeout": 5,
     "skip": 18,
     "compilable": 38862,
-    "host_free_pass": 19728,
+    "host_free_pass": 19738,
     "leaky_pass": 6532,
     "stale": 0
   },
   "scope_summaries": {
     "annex_b": {
       "total": 1086,
-      "pass": 254,
-      "fail": 791,
+      "pass": 256,
+      "fail": 789,
       "compile_error": 41,
       "compile_timeout": 0,
       "skip": 0,
       "compilable": 1045,
-      "host_free_pass": 252,
+      "host_free_pass": 254,
       "leaky_pass": 2,
       "stale": 0
     },
@@ -150,13 +150,13 @@
     },
     "standard": {
       "total": 42020,
-      "pass": 27107,
-      "fail": 13113,
+      "pass": 27115,
+      "fail": 13105,
       "compile_error": 1777,
       "compile_timeout": 5,
       "skip": 18,
       "compilable": 40220,
-      "host_free_pass": 20321,
+      "host_free_pass": 20329,
       "leaky_pass": 6786,
       "stale": 0
     }
@@ -165,24 +165,24 @@
     {
       "name": "annexB/built-ins",
       "path": "annexB/built-ins",
-      "pass": 90,
-      "fail": 129,
+      "pass": 91,
+      "fail": 128,
       "compile_error": 22,
       "compile_timeout": 0,
       "skip": 0,
       "total": 241,
-      "host_free_pass": 88
+      "host_free_pass": 89
     },
     {
       "name": "annexB/language",
       "path": "annexB/language",
-      "pass": 164,
-      "fail": 662,
+      "pass": 165,
+      "fail": 661,
       "compile_error": 19,
       "compile_timeout": 0,
       "skip": 0,
       "total": 845,
-      "host_free_pass": 164
+      "host_free_pass": 165
     },
     {
       "name": "built-ins/AbstractModuleSource",
@@ -682,13 +682,13 @@
     {
       "name": "built-ins/RegExp",
       "path": "built-ins/RegExp",
-      "pass": 1511,
-      "fail": 349,
+      "pass": 1514,
+      "fail": 346,
       "compile_error": 19,
       "compile_timeout": 0,
       "skip": 0,
       "total": 1879,
-      "host_free_pass": 1506
+      "host_free_pass": 1509
     },
     {
       "name": "built-ins/RegExpStringIteratorPrototype",
@@ -748,13 +748,13 @@
     {
       "name": "built-ins/String",
       "path": "built-ins/String",
-      "pass": 633,
-      "fail": 501,
+      "pass": 638,
+      "fail": 496,
       "compile_error": 89,
       "compile_timeout": 0,
       "skip": 0,
       "total": 1223,
-      "host_free_pass": 632
+      "host_free_pass": 637
     },
     {
       "name": "built-ins/StringIteratorPrototype",
@@ -1198,12 +1198,12 @@
     }
   ],
   "error_categories": {
-    "assertion_fail": 8895,
-    "illegal_cast": 767,
+    "assertion_fail": 8887,
+    "illegal_cast": 765,
     "negative_test_fail": 74,
-    "null_deref": 307,
+    "null_deref": 306,
     "oob": 42,
-    "other": 4982,
+    "other": 4983,
     "promise_error": 184,
     "range_error": 44,
     "runtime_error": 511,
@@ -1220,8 +1220,8 @@
   },
   "root_cause_map": {
     "target": "standalone",
-    "total_non_pass_non_skip": 19444,
-    "classified": 19444,
+    "total_non_pass_non_skip": 19434,
+    "classified": 19434,
     "unclassified_threshold": null,
     "buckets": [
       {
@@ -1480,21 +1480,20 @@
         "id": "standalone-regexp-string-protocol",
         "issues": ["#1913", "#1909", "#1539"],
         "label": "Standalone RegExp string protocol, global/sticky lastIndex, split, replace, and matchAll",
-        "count": 195,
+        "count": 194,
         "statuses": {
           "pass": 0,
-          "fail": 179,
+          "fail": 178,
           "compile_error": 16,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 195,
+          "total": 194,
           "host_free_pass": 0
         },
         "error_categories": {
           "other": 27,
           "assertion_fail": 138,
           "type_error": 23,
-          "null_deref": 1,
           "runtime_error": 3,
           "illegal_cast": 3
         },
@@ -1517,20 +1516,20 @@
         "id": "standalone-regexp-native-engine",
         "issues": ["#1914", "#1909", "#682"],
         "label": "Standalone RegExp native-engine/runtime gaps: source, constructors, prototype access, result shape",
-        "count": 242,
+        "count": 237,
         "statuses": {
           "pass": 0,
-          "fail": 220,
+          "fail": 215,
           "compile_error": 22,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 242,
+          "total": 237,
           "host_free_pass": 0
         },
         "error_categories": {
-          "assertion_fail": 154,
+          "assertion_fail": 151,
           "other": 16,
-          "illegal_cast": 35,
+          "illegal_cast": 33,
           "type_error": 6,
           "null_deref": 22,
           "wasm_compile": 4,
@@ -1723,8 +1722,8 @@
           "null_deref": 3
         },
         "sample_files": [
-          "test/built-ins/AsyncGeneratorFunction/instance-name.js",
           "test/built-ins/AsyncGeneratorFunction/prototype/extensibility.js",
+          "test/built-ins/AsyncGeneratorFunction/instance-name.js",
           "test/built-ins/GeneratorFunction/prototype/extensibility.js",
           "test/built-ins/GeneratorPrototype/throw/from-state-completed.js",
           "test/language/expressions/generators/eval-body-proto-realm.js"
@@ -1741,20 +1740,20 @@
         "id": "class-prototype-private-descriptor",
         "issues": ["#1591", "#1365", "#1364"],
         "label": "Class element, prototype, private-name, and descriptor reconciliation gaps",
-        "count": 5721,
+        "count": 5717,
         "statuses": {
           "pass": 0,
-          "fail": 5497,
+          "fail": 5493,
           "compile_error": 224,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 5721,
+          "total": 5717,
           "host_free_pass": 0
         },
         "error_categories": {
           "runtime_error": 60,
-          "assertion_fail": 3419,
-          "other": 638,
+          "assertion_fail": 3414,
+          "other": 639,
           "type_error": 1089,
           "illegal_cast": 201,
           "wasm_compile": 147,
@@ -1844,9 +1843,9 @@
         "sample_files": [
           "test/built-ins/TypedArray/out-of-bounds-has.js",
           "test/built-ins/TypedArray/resizable-buffer-length-tracking-1.js",
-          "test/built-ins/TypedArrayConstructors/internals/Set/detached-buffer.js",
           "test/built-ins/TypedArrayConstructors/ctors/buffer-arg/defined-length-sab.js",
-          "test/built-ins/TypedArrayConstructors/ctors/typedarray-arg/same-ctor-returns-new-cloned-typedarray.js"
+          "test/built-ins/TypedArrayConstructors/internals/Set/detached-buffer.js",
+          "test/built-ins/TypedArrayConstructors/internals/HasProperty/indexed-value.js"
         ],
         "sample_signatures": [
           "other:ReferenceError: ctors is not defined",
@@ -1921,14 +1920,14 @@
           "test/language/expressions/object/literal-property-name-bigint.js",
           "test/language/statements/variable/12.2.1-21-s.js",
           "test/built-ins/String/fromCharCode/S15.5.3.2_A3_T2.js",
-          "test/built-ins/Object/create/properties-arg-to-object-bigint.js"
+          "test/built-ins/Object/defineProperties/15.2.3.7-5-b-247.js"
         ],
         "sample_signatures": [
           "type_error:TypeError: Cannot destructure 'null' or 'undefined'",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(o[\"#\"], true, \"the property name must be the string representation of the numeric value.\");",
           "type_error:TypeError: Cannot access property on null or undefined",
           "other:L#:## Codegen error: String.fromCharCode built-in static property value read is not supported in --target standalone (## / ## S6-b). Add a native built-in method closure for this pair.",
-          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: extern.convert_any[#] expected type shared anyref, found i64.const of type i64 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $proto ex"
+          "type_error:TypeError: Object.defineProperties unsupported descriptor shape in standalone mode (##)"
         ]
       },
       {
@@ -1989,15 +1988,15 @@
         },
         "sample_files": [
           "test/annexB/language/global-code/if-decl-no-else-global-skip-early-err-try.js",
+          "test/annexB/language/global-code/switch-case-global-no-skip-try.js",
           "test/annexB/language/eval-code/direct/func-if-decl-else-stmt-eval-func-skip-early-err-for-in.js",
           "test/annexB/language/eval-code/direct/global-if-decl-no-else-eval-global-block-scoping.js",
-          "test/annexB/language/global-code/switch-case-global-no-skip-try.js",
           "test/annexB/language/eval-code/indirect/global-if-decl-else-decl-b-eval-global-update.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert.throws(ReferenceError, function() { f; }, 'An initialized binding is not created following evaluation');",
-          "type_error:TypeError: dynamic eval is not supported in standalone mode (##)",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue( f, undefined, 'Initialized binding created prior to evaluation' );",
+          "type_error:TypeError: dynamic eval is not supported in standalone mode (##)",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(typeof f, 'function');",
           "runtime_error:L#:## Invalid left-hand side in for-in/for-of"
         ]
@@ -2457,8 +2456,8 @@
         "sample_files": [
           "test/language/module-code/instn-star-iee-cycle.js",
           "test/language/module-code/top-level-await/syntax/early-does-not-propagate-to-fn-declaration-params.js",
-          "test/language/module-code/top-level-await/new-await-parens.js",
           "test/language/module-code/parse-err-hoist-lex-fun.js",
+          "test/language/module-code/top-level-await/new-await-parens.js",
           "test/language/module-code/top-level-await/syntax/export-var-await-expr-obj-literal.js"
         ],
         "sample_signatures": [
