@@ -5,8 +5,13 @@ status: ready
 # measure phase delivered by ttraenkler/fable-5 (2026-07-02) — the four residual classes are the remaining work.
 # NB the 07-02 claim release had NOT landed on the issue-assignments ref; force-released
 # 2026-07-03 by the architect (`claim-issue.mjs --release 2980 ... --force`). Claimable now.
+# 2026-07-05 (dev-2980): re-measured + landed class 1 as its own issue, #3035
+# (self-contained PR). #2980 itself is STILL an umbrella over classes 2-4 +
+# the full decision measure — released back to `ready` for the next dev to
+# claim class 3 (independent, next-largest, −12) or pick up once #2906
+# slices 3/4 land (classes 2+4). See "## Class 1 landed" below.
 created: 2026-07-02
-updated: 2026-07-03
+updated: 2026-07-05
 priority: high
 horizon: l
 feasibility: hard
@@ -24,6 +29,7 @@ origin: "#2922 residual re-scope (task #17) — arms 1-3 landed (PRs #2428/#2482
 ---
 
 # #2980 — Async widen final layers + the carrier-widen decision measure
+
 > **Provenance**: formerly #2971; re-id'd because id 2971 was taken on main by
 > the TLA sibling-module evaluation-order issue (parallel session, #2531
 > allocator race). The code-comment ref in src/codegen/async-scheduler.ts was
@@ -196,3 +202,40 @@ re-measure of rule 5 EARLIER (see below). Standing rules until the flip:
 Housekeeping: the stale in-progress claim from the dead 07-02 agent
 (`ttraenkler/agent-ab81b787ac6992334`) was force-released 2026-07-03; the
 issue is claimable.
+
+## Class 1 landed — 2026-07-05 (dev-2980, main@13350e8f9)
+
+Per rule 5: rebuilt the A/B harness (`.tmp/measure-carrier-ab.mts` — the dead
+agent's copy did not survive `.tmp/` being gitignored) and re-ran the
+**promise-then-all bucket only** (60-file deterministic spread-sample) BEFORE
+writing class-1 code:
+
+| arm                        | pass/60 | regressed vs off |
+| -------------------------- | ------- | ---------------- |
+| off (baseline)             | 37      | —                |
+| on (widen), before class 1 | 21      | 16               |
+| on (widen), after class 1  | 33      | **4**            |
+
+**#2959 + #2671 slice 2 had NOT meaningfully shrunk class 1** in this fresh
+measurement (16 regressed — matching the original −18 order of magnitude,
+not the "plausibly shrink" the 07-03 architect note hoped for). Class 1
+itself — `emitStandalonePromiseThen`'s unconditional `ref.cast` on a
+non-native-`$Promise` `.then`/`.catch` receiver (deferred combinators
+`allSettled`/`any`, constructor-executor / capability-object shapes) — is now
+fixed: a runtime `ref.test` routes non-native receivers to the pre-existing
+host `.then` path instead of trapping. Landed as **#3035** (self-contained,
+independent per this file's rule 3, banked inert — `main`'s unwidened /
+un-WASI behaviour is unchanged; the WASI lane, where native chaining is
+unconditional, gets the same hardening as a real observable fix).
+
+Full detail + the 4 residual (out-of-scope, different-root-cause)
+regressions: see #3035.
+
+**#2980 itself stays open** — classes 2 (−15, #2906 slice 3), 3 (−12,
+`planLinearAwaits` Gap-3 + default-param abrupt routing — unclaimed,
+independent, next-largest), and 4 (−6, #2906 slice 4) are unlanded, so the
+full decision-measure re-run and the flip PR both remain blocked per rule 1.
+The interim full A/B (rule 5, after class 1) is deferred to whoever lands
+class 3 or the #2906 slices next — re-running all 5 buckets now would only
+re-confirm the unchanged classes-2/3/4 residual at extra cost without new
+information.

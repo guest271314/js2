@@ -43,6 +43,7 @@ import {
   emitTimerCancel,
   ensureTimerHeap,
   getDrainFuncIdxForWasiStart,
+  getOrRegisterPromiseType,
   getRunLoopNowFuncIdx,
   isStandalonePromiseActive,
   isStandaloneThenChainNativeActive,
@@ -3462,8 +3463,10 @@ function compileStandalonePromiseThenCallback(
   const instrs: Instr[] = [];
   liveBuffers.push(instrs);
   ctx.liveBodies.add(instrs);
-  // (#2918) Keep the outer body reachable to the late-import shifter — see the
-  // matching note in compilePromiseThenReceiverBuffer.
+  // (#2918) Keep the outer body reachable to the late-import shifter — a late
+  // import registered while compiling this buffer (e.g. an object-runtime
+  // helper, or `__box_*` for a numeric arg) must still be able to walk the
+  // outer body and bump the `call`/`ref.func` indices already emitted there.
   const savedBody = fctx.body;
   fctx.savedBodies.push(savedBody);
   fctx.body = instrs;
@@ -3490,6 +3493,158 @@ function compileStandalonePromiseThenCallback(
   } finally {
     fctx.savedBodies.pop();
     fctx.body = savedBody;
+  }
+}
+
+/**
+ * (#2980 class 1) The pre-widen host `.then`/`.catch` path (`Promise_then` /
+ * `Promise_then2` / `Promise_catch` late imports) — unchanged behaviour,
+ * extracted into its own function so {@link emitStandaloneThenWithNativeFallback}
+ * can bake it into the runtime `else` arm against the ALREADY-EVALUATED
+ * receiver local, instead of a second (possibly side-effecting) compile of
+ * the receiver expression.
+ */
+function emitHostPromiseThenFallback(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  recvLocal: number,
+  method: "then" | "catch",
+  onFulfilledArg: ts.Expression | undefined,
+  onRejectedArg: ts.Expression | undefined,
+): void {
+  const useThen2 = method === "then" && onRejectedArg !== undefined;
+  const importName = useThen2 ? "Promise_then2" : `Promise_${method}`;
+  const paramTypes: ValType[] = useThen2
+    ? [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }]
+    : [{ kind: "externref" }, { kind: "externref" }];
+  let funcIdx = ctx.funcMap.get(importName) ?? ensureLateImport(ctx, importName, paramTypes, [{ kind: "externref" }]);
+  flushLateImportShifts(ctx, fctx);
+  funcIdx = ctx.funcMap.get(importName) ?? funcIdx;
+
+  if (funcIdx === undefined) {
+    // Keep the stack balanced even if the import couldn't be registered.
+    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    return;
+  }
+
+  fctx.body.push({ op: "local.get", index: recvLocal } as Instr);
+
+  const firstArg = method === "catch" ? onRejectedArg : onFulfilledArg;
+  if (firstArg) {
+    const cbType = compileExpression(ctx, fctx, firstArg, { kind: "externref" });
+    if (cbType && cbType.kind !== "externref") coerceType(ctx, fctx, cbType, { kind: "externref" });
+  } else {
+    fctx.body.push({ op: "ref.null.extern" } as Instr);
+  }
+
+  if (useThen2) {
+    const cb2Type = compileExpression(ctx, fctx, onRejectedArg!, { kind: "externref" });
+    if (cb2Type && cb2Type.kind !== "externref") coerceType(ctx, fctx, cb2Type, { kind: "externref" });
+  }
+
+  const finalIdx = ctx.funcMap.get(importName) ?? funcIdx;
+  fctx.body.push({ op: "call", funcIdx: finalIdx } as Instr);
+}
+
+/**
+ * (#2980 class 1) `.then`/`.catch` runtime dispatch on standalone/WASI native
+ * chaining. `isStandaloneThenChainNativeActive` only decides whether native
+ * `$Promise` chaining is enabled AT ALL for this compile — it cannot know the
+ * runtime SHAPE of the receiver, which for several real constructs is NOT a
+ * native `$Promise` struct even when native chaining is on: the deferred
+ * combinators (`Promise.allSettled` / `Promise.any` — `promise-combinators.ts`
+ * only lowers `all`/`race` natively), constructor-executor promises, and
+ * `Promise.prototype.then.call` / capability-object shapes all route through
+ * host machinery. `emitStandalonePromiseThen`'s unconditional `ref.cast` to
+ * `$Promise` TRAPS on any of these — the dominant #2980 decision-measure
+ * residual (class 1, −18/60 in the original 262-file corpus measure;
+ * re-measured 2026-07-05 against current main at 16/60 regressed in the
+ * promise-then-all bucket alone, every one an "illegal cast in test()").
+ *
+ * Fix: evaluate the receiver ONCE into a local, `ref.test` it against the
+ * native `$Promise` struct at RUNTIME, and route to the fast native chain
+ * only on a genuine hit. A miss falls back to
+ * {@link emitHostPromiseThenFallback} — exactly the pre-widen standalone
+ * behaviour for that shape (fails to instantiate cleanly if the host import
+ * is unsatisfied, no invalid Wasm — see {@link isStandaloneThenChainNativeActive}).
+ *
+ * Both arms are pre-compiled Instr buffers spliced into a runtime `if`/`else`
+ * (`blockType: {kind:"val", type:{kind:"externref"}}` — both arms leave
+ * exactly one externref). The native arm is built FIRST and then held
+ * off `fctx.body`/`fctx.savedBodies` while the host arm is built (which can
+ * register a NEW late host import and shift already-baked defined-function
+ * indices) — so it MUST be registered in `ctx.liveBodies` for that window,
+ * exactly the `liveBuffers` pattern this file already uses for the
+ * `onFulfilled`/`onRejected` closure buffers (#2918).
+ *
+ * CALLER CONTRACT: only call this for the NON-wasi case (`ctx.wasi !==
+ * true`). WASI's `.then`/`.catch` MUST NEVER gain a `Promise_then` import —
+ * that contract is enforced by `tests/issue-1326.test.ts` (asserts the WAT
+ * never contains "Promise_then" and instantiates with an EMPTY imports
+ * object). The call sites in `compileCallExpression` branch on `ctx.wasi`
+ * BEFORE reaching here and keep the original unconditional-cast lowering
+ * for wasi untouched.
+ */
+function emitStandaloneThenWithNativeFallback(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  receiverExpr: ts.Expression,
+  method: "then" | "catch",
+  onFulfilledArg: ts.Expression | undefined,
+  onRejectedArg: ts.Expression | undefined,
+): void {
+  const liveBuffers: Instr[][] = [];
+  try {
+    const recvLocal = allocLocal(fctx, `__then_recv_${fctx.locals.length}`, { kind: "externref" });
+    const recvType = compileExpression(ctx, fctx, receiverExpr, { kind: "externref" });
+    if (recvType && recvType.kind !== "externref") {
+      coerceType(ctx, fctx, recvType, { kind: "externref" });
+    }
+    fctx.body.push({ op: "local.set", index: recvLocal } as Instr);
+
+    const onFulfilled =
+      method === "then" ? compileStandalonePromiseThenCallback(ctx, fctx, onFulfilledArg, liveBuffers) : null;
+    const onRejected = compileStandalonePromiseThenCallback(ctx, fctx, onRejectedArg, liveBuffers);
+    const promiseInstrs: Instr[] = [{ op: "local.get", index: recvLocal } as Instr];
+
+    const outerBody = fctx.body;
+
+    const nativeArm: Instr[] = [];
+    ctx.liveBodies.add(nativeArm);
+    liveBuffers.push(nativeArm);
+    fctx.savedBodies.push(outerBody);
+    fctx.body = nativeArm;
+    try {
+      emitStandalonePromiseThen(ctx, fctx, promiseInstrs, onFulfilled, onRejected);
+    } finally {
+      fctx.savedBodies.pop();
+      fctx.body = outerBody;
+    }
+
+    const hostArm: Instr[] = [];
+    ctx.liveBodies.add(hostArm);
+    liveBuffers.push(hostArm);
+    fctx.savedBodies.push(outerBody);
+    fctx.body = hostArm;
+    try {
+      emitHostPromiseThenFallback(ctx, fctx, recvLocal, method, onFulfilledArg, onRejectedArg);
+    } finally {
+      fctx.savedBodies.pop();
+      fctx.body = outerBody;
+    }
+
+    const promiseTypeIdx = getOrRegisterPromiseType(ctx);
+    fctx.body.push({ op: "local.get", index: recvLocal } as Instr);
+    fctx.body.push({ op: "any.convert_extern" } as Instr);
+    fctx.body.push({ op: "ref.test", typeIdx: promiseTypeIdx } as Instr);
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "val", type: { kind: "externref" } },
+      then: nativeArm,
+      else: hostArm,
+    } as Instr);
+  } finally {
+    for (const b of liveBuffers) ctx.liveBodies.delete(b);
   }
 }
 
@@ -10130,15 +10285,43 @@ function compileCallExpression(
         const isPromiseReceiver = recvSym === "Promise" || apparentSym === "Promise";
 
         if (isPromiseReceiver) {
+          // (#2980 class 1) `.then` on native chaining. WASI's ZERO-host-
+          // import contract for `.then`/`.catch` is load-bearing (#1326/
+          // #2895 — `tests/issue-1326.test.ts` asserts the WAT never
+          // contains "Promise_then" for `--target wasi`, and instantiates
+          // with an EMPTY imports object). So the `ref.test` + host-fallback
+          // hardening below is scoped to the NON-wasi case (`ctx.standalone`
+          // under the carrier-widen measurement) — the only configuration
+          // the #2980 decision measure actually exercises, and one where a
+          // host `Promise_then`/`Promise_then2`/`Promise_catch` import is
+          // ALREADY the pre-widen fallback for every standalone `.then`
+          // receiver (see `isStandaloneThenChainNativeActive`), so making it
+          // conditional here introduces no NEW import dependency. WASI keeps
+          // the exact original unconditional-cast lowering: no test262
+          // corpus item currently reaches a non-native receiver under wasi
+          // (the deferred-combinator paths that would produce one already
+          // fail to instantiate for their own unrelated missing import), so
+          // this preserves WASI's behaviour byte-for-byte.
           if (isStandaloneThenChainNativeActive(ctx) && method === "then") {
-            const liveBuffers: Instr[][] = [];
-            try {
-              const promiseInstrs = compilePromiseThenReceiverBuffer(ctx, fctx, propAccess.expression, liveBuffers);
-              const onFulfilled = compileStandalonePromiseThenCallback(ctx, fctx, expr.arguments[0], liveBuffers);
-              const onRejected = compileStandalonePromiseThenCallback(ctx, fctx, expr.arguments[1], liveBuffers);
-              emitStandalonePromiseThen(ctx, fctx, promiseInstrs, onFulfilled, onRejected);
-            } finally {
-              for (const b of liveBuffers) ctx.liveBodies.delete(b);
+            if (ctx.wasi === true) {
+              const liveBuffers: Instr[][] = [];
+              try {
+                const promiseInstrs = compilePromiseThenReceiverBuffer(ctx, fctx, propAccess.expression, liveBuffers);
+                const onFulfilled = compileStandalonePromiseThenCallback(ctx, fctx, expr.arguments[0], liveBuffers);
+                const onRejected = compileStandalonePromiseThenCallback(ctx, fctx, expr.arguments[1], liveBuffers);
+                emitStandalonePromiseThen(ctx, fctx, promiseInstrs, onFulfilled, onRejected);
+              } finally {
+                for (const b of liveBuffers) ctx.liveBodies.delete(b);
+              }
+            } else {
+              emitStandaloneThenWithNativeFallback(
+                ctx,
+                fctx,
+                propAccess.expression,
+                "then",
+                expr.arguments[0],
+                expr.arguments[1],
+              );
             }
             return { kind: "externref" };
           }
@@ -10148,15 +10331,27 @@ function compileCallExpression(
           // mode doesn't leak the `Promise_catch` / `__make_callback` host
           // imports. The chained promise still propagates a fulfilled receiver
           // unchanged (onFulfilled = null) and routes a rejection through the
-          // user's onRejected continuation.
+          // user's onRejected continuation. (#2980 class 1: same wasi/standalone
+          // split as `.then` above.)
           if (isStandaloneThenChainNativeActive(ctx) && method === "catch") {
-            const liveBuffers: Instr[][] = [];
-            try {
-              const promiseInstrs = compilePromiseThenReceiverBuffer(ctx, fctx, propAccess.expression, liveBuffers);
-              const onRejected = compileStandalonePromiseThenCallback(ctx, fctx, expr.arguments[0], liveBuffers);
-              emitStandalonePromiseThen(ctx, fctx, promiseInstrs, null, onRejected);
-            } finally {
-              for (const b of liveBuffers) ctx.liveBodies.delete(b);
+            if (ctx.wasi === true) {
+              const liveBuffers: Instr[][] = [];
+              try {
+                const promiseInstrs = compilePromiseThenReceiverBuffer(ctx, fctx, propAccess.expression, liveBuffers);
+                const onRejected = compileStandalonePromiseThenCallback(ctx, fctx, expr.arguments[0], liveBuffers);
+                emitStandalonePromiseThen(ctx, fctx, promiseInstrs, null, onRejected);
+              } finally {
+                for (const b of liveBuffers) ctx.liveBodies.delete(b);
+              }
+            } else {
+              emitStandaloneThenWithNativeFallback(
+                ctx,
+                fctx,
+                propAccess.expression,
+                "catch",
+                undefined,
+                expr.arguments[0],
+              );
             }
             return { kind: "externref" };
           }
