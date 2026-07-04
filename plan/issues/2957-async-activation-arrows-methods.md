@@ -242,3 +242,57 @@ cases), `issue-1712`/`illegal-cast-closures-585` (6 non-async closure cases).
 object-literal methods (`literals.ts`), where `this` is param 0 with the
 instance struct type and the #1370 class-registry / typeIdx parity guard apply.
 Issue stays `in-progress` for that follow-up.
+
+## Phase-2 SECOND re-park diagnosis + fix (2026-07-04, sdev)
+
+PR #2646 re-parked in the merge_group after the first park's fix (346e281,
+`lane === "cps"` restriction). The `lane === "cps"` gate cut the regressions
+33 → 23 but was **necessary, not sufficient**.
+
+**Exact flipped-test delta** (merge_group run 28715357838, baseline 1cda5e1):
+net **+13 pass** but **23 pass→fail regressions** (22 `null_deref` + 1
+`assertion_fail`), all in the async-iteration-builtin family that routes
+through the test262 `asyncTest(async function () { … })` harness:
+`Array/fromAsync/*` (×15), `await-using/*` (×7),
+`AsyncFromSyncIteratorPrototype/throw/throw-null` (×1). Gate failed on the
+**ratio** (23 / 36 improvements = 63.9% ≥ 10%), not on net. Verified real:
+`returns-promise.js` PASSES on clean `origin/main`, `null_deref`s on the branch.
+
+**Root cause.** `asyncFnNeedsCps` accepts three single-tail-await shapes
+(`splitBodyAtAwait`): (1) `return await P` / concise, (2) `const x = await P; …`,
+(3) bare `await P; …`. Shapes 1, 2, and 3-with-a-void suffix emit a lifted
+closure that correctly returns its result Promise. But two shape-3 sub-shapes
+mis-emit **in the lifted-closure context only** (the decl path is fine — decls
+aren't lifted into a closure struct):
+
+- **(a) bare `await P;` with EMPTY suffix** (discarded tail await, implicit
+  `undefined` return): the lifted closure returns `null` instead of a Promise,
+  so the harness `testFunc().then(…)` dereferences null. → the 22 `null_deref`s.
+- **(b) bare `await P; … return Q;`** where the continuation returns an
+  async-adopted value (`await it.next(); return it.throw(e)` — the throw-null
+  nested arrow): the continuation does not adopt `Q`, so the settled value is
+  wrong. → the 1 `assertion_fail`.
+
+The 36 IMPROVEMENTS are the SAME test family but the SAFE shapes:
+`const out = await Array.fromAsync(input); assert(…)` (shape 2, often rich-prefix)
+and `await Array.fromAsync(input); assert.sameValue(…)` (shape 3, **void** suffix).
+So an "empty-prefix" or "reject-all-shape-3" guard would have wrongly reverted
+those improvements — the discriminator is the DISCARD / value-return, not the
+prefix.
+
+**Fix** (`async-activation.ts::planAsyncClosureActivation`, closure-path only):
+after the `lane === "cps"` gate, reject bare-`await` shape 3 when
+`suffix.length === 0` (a) or the suffix returns a value (b, via
+`suffixReturnsValue`, which does not descend into nested function-likes).
+Keeps shapes 1, 2, and 3-with-void-suffix.
+
+**Validated** (host lane, this branch, `runTest262File`): **23/23** re-park
+regressions now pass, **36/36** improvements still pass → **zero regressions,
++36 net**. `tests/issue-2957.test.ts` (7), `async-await` (8), `issue-1042` (20),
+`issue-1042-host-drive` all green. The one issue-2957 `await P; return N` case
+now takes the legacy path but still resolves to the correct value (suite green).
+
+**Deferred to phase 3** (needs lifted-closure CPS-emit fix, not just a gate):
+(a) why the discarded-tail continuation drops the result Promise, and (b) making
+the continuation adopt a returned thenable. Until then those two closure
+sub-shapes stay on the legacy path.
