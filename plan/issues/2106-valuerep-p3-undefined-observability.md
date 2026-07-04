@@ -2,7 +2,7 @@
 id: 2106
 title: "value-rep P3: undefined observability — UNDEF_F64 sentinel, union-collapse reversal (flagged), standalone $undefined singleton"
 status: in-progress
-assignee: ttraenkler/sdev-s1fix
+assignee: ttraenkler/fable-2106
 sprint: current
 created: 2026-06-11
 updated: 2026-06-26
@@ -588,6 +588,48 @@ complete, properly-sequenced sweep in a fresh PR with the full producer+consumer
 site set flipped together, validated via merge_group BEFORE enqueue (route to
 architect to enumerate the full producer/consumer site list first). The hold on
 #2025 must stay until this is resolved.
+
+## S1 re-land plan — FULL sweep behind `undefinedSingleton` flag (fable-2106, 2026-07-04)
+
+Resumed on branch `issue-2106-s1-undefined-singleton` (fast-forwarded to main
+@ 02cc6d108 — the old branch content had fully landed via PR #2025's
+floor-neutral revert; S1.0 inert reservation IS on main in `any-helpers.ts`).
+
+**Why flagged, not default-on:** the June partial flip measured −1245 net; the
+diagnosis proved producer+consumer must flip in lockstep across the WHOLE
+standalone runtime. A compile-flag regime (`undefinedSingleton`, default OFF →
+byte-identical, precedent: #2141 `honestAnyBoxing`) lets the complete sweep land
+green and floor-safe, with the default flip as a separate, measured, one-line PR.
+This is the issue's own S4 measure-first protocol applied to S1.
+
+**Key re-ground findings (2026-07-04, main @ 02cc6d108):**
+- Host mode ALREADY has non-null undefined (`__get_undefined`), so shared
+  expression-layer consumers are already dual-predicate: `??` emits
+  `ref.is_null || __extern_is_undefined` (logical-ops.ts:225-232); `=== undefined`
+  routes through `__extern_is_undefined` (binary-ops.ts:464-478). Flipping the
+  ONE native `__extern_is_undefined` body covers all of them at once.
+- The ripple is concentrated in STANDALONE-NATIVE bodies where null doubles as
+  absence/undefined: `__extern_get` 3 miss sites (object-runtime.ts:1012+),
+  `__extern_get_idx` miss, internal `call __extern_get; ref.is_null` absence
+  checks (to-primitive/method-dispatch/iterator/json — the 948 June CEs),
+  the standalone looseNullish guard (binary-ops.ts:2641 — bare `ref.is_null`),
+  externref ToBoolean (singleton must be falsy), ToNumber (null→0 vs
+  undefined→NaN — currently conflated), ToString ("null" vs "undefined").
+- `__extern_is_undefined` gained a #2979 UNDEF_F64-boxed-sentinel arm since the
+  June spec — the flag body must KEEP that arm (singleton-test ∨ UNDEF-box),
+  dropping only the `ref.is_null` arm.
+- #2949 coherence: `JsTag.Undefined = 1` is payload-less; identity via
+  `tag.test` — the tag-1 singleton IS the JsTag-lattice-conformant carrier.
+  `__any_to_extern` already round-trips tag-0/1 boxes wrapped (any-helpers.ts:632);
+  under the flag tag-1 canonicalizes to the singleton and tag-0 to
+  `ref.null.extern` (fixing the tag-0→tag-1 round-trip lie that comment documents,
+  in the flag regime).
+
+**Flag semantics (standalone/nativeStrings only; host byte-identical always):**
+undefined = the S1.0 `$undefined` tag-1 global (extern-wrapped at the externref
+plane); null = `ref.null.extern`. Producers emit the singleton; undefined-specific
+consumers test tag-1 (∨ UNDEF-box); null-specific stay `ref.is_null`; nullish =
+either (new native `__extern_is_nullish`).
 
 ## Residual (as of #2199, PO reconcile 2026-06-28)
 
