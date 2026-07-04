@@ -190,3 +190,29 @@ element-after-rest + rest-parameter-not-last), `src/compiler/early-errors/assign
 +3 valid-control; 30 total pass). Byte-inert for valid programs — object rest as
 last element, rest param as last param, and object spread in a value position
 (`{...x, b: 1}`) all remain valid.
+
+## Slice 6 landed — at most one `default` clause in a switch (2026-07-05)
+
+**Delivered:** an early error for a switch statement whose `CaseBlock` contains
+more than one `DefaultClause`. ES `CaseBlock : { CaseClauses_opt DefaultClause
+CaseClauses_opt }` Static Semantics: Early Errors — it is a Syntax Error if a
+CaseBlock contains more than one `DefaultClause`. Covers test262
+`language/statements/switch/S12.11_A2_T1.js`.
+
+**Root cause:** TypeScript's parser accepts a second `default:` clause with no
+diagnostic (it parses two `DefaultClause` nodes into the same `CaseBlock`), so
+nothing in the early-error pass detected it. The fix adds
+`checkDuplicateDefaultClause` — a linear scan of `caseBlock.clauses` that flags
+the second and any later `DefaultClause` — wired into the existing
+`ts.isCaseBlock(node)` branch of the per-node walk (so it fires for nested
+switches too).
+
+**Files:** `src/compiler/early-errors/duplicates.ts` (new
+`checkDuplicateDefaultClause`), `src/compiler/early-errors/node-checks.ts` (import
+
+- one call in the `CaseBlock` branch). Tests: `tests/issue-3026.test.ts` (+3
+  reject, +4 valid-control). Byte-inert for valid programs — verified: a switch
+  with a single default, no default, a default-before-cases, a nested switch, and
+  fallthrough all compile to byte-identical Wasm (sha256-compared against the
+  pre-change compiler); only a switch with two-or-more default clauses newly
+  raises the early SyntaxError.

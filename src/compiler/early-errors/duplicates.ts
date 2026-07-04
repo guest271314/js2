@@ -86,6 +86,27 @@ export function checkDuplicateLexicalDeclarations(ctx: EarlyErrorContext, block:
   }
 }
 
+/**
+ * A switch CaseBlock may contain at most one DefaultClause. ES2015+
+ * (`SwitchStatement` → `CaseBlock`) Static Semantics: Early Errors —
+ * `CaseBlock : { CaseClauses_opt DefaultClause CaseClauses_opt }` — it is a
+ * Syntax Error if a CaseBlock contains more than one DefaultClause. TypeScript's
+ * parser accepts a second `default:` clause with no diagnostic, so nothing else
+ * detects it. Covers test262 `language/statements/switch/S12.11_A2_T1.js`.
+ */
+export function checkDuplicateDefaultClause(ctx: EarlyErrorContext, caseBlock: ts.CaseBlock): void {
+  let seenDefault = false;
+  for (const clause of caseBlock.clauses) {
+    if (ts.isDefaultClause(clause)) {
+      if (seenDefault) {
+        ctx.addError(clause, "More than one default clause in switch statement");
+      } else {
+        seenDefault = true;
+      }
+    }
+  }
+}
+
 /** Check duplicate lexical declarations across switch case clauses. */
 export function checkSwitchCaseLexicalDuplicates(ctx: EarlyErrorContext, caseBlock: ts.CaseBlock): void {
   const lexNames = new Map<string, ts.Node>(); // name -> first declaration

@@ -198,3 +198,50 @@ describe("#3026 — rest element / parameter must be last (element after rest)",
     expect(await isRejected("const x = {}; const o = {...x, b: 1};")).toBe(false);
   });
 });
+
+describe("#3026 — at most one default clause in a switch", () => {
+  // ES CaseBlock : { CaseClauses_opt DefaultClause CaseClauses_opt } — a
+  // SyntaxError if a CaseBlock contains more than one DefaultClause. TypeScript's
+  // parser accepts a second `default:` silently. Covers test262
+  // language/statements/switch/S12.11_A2_T1.js.
+  it("rejects two default clauses in one switch", async () => {
+    expect(await isRejected("switch (0) { case 1: break; default: break; default: break; }")).toBe(true);
+  });
+
+  it("rejects two default clauses inside a function body", async () => {
+    expect(
+      await isRejected("function f(v: number) { switch (v) { default: return 1; default: return 2; } } f(0);"),
+    ).toBe(true);
+  });
+
+  it("rejects adjacent duplicate default clauses", async () => {
+    expect(await isRejected("switch (0) { default: default: }")).toBe(true);
+  });
+
+  // ── Valid controls: must NOT be rejected ──────────────────────────────────
+  it("accepts a switch with a single default clause", async () => {
+    expect(
+      await isRejected("function f(v: number) { switch (v) { case 0: return 1; default: return 2; } } f(0);"),
+    ).toBe(false);
+  });
+
+  it("accepts a switch with no default clause", async () => {
+    expect(
+      await isRejected("function f(v: number) { switch (v) { case 0: return 1; case 1: return 2; } return 0; } f(0);"),
+    ).toBe(false);
+  });
+
+  it("accepts a default clause before case clauses (single default)", async () => {
+    expect(
+      await isRejected("function f(v: number) { switch (v) { default: return 9; case 0: return 1; } } f(0);"),
+    ).toBe(false);
+  });
+
+  it("accepts separate switches that each have their own default", async () => {
+    expect(
+      await isRejected(
+        "function f(v: number) { switch (v) { default: break; } switch (v) { default: break; } return 1; } f(0);",
+      ),
+    ).toBe(false);
+  });
+});
