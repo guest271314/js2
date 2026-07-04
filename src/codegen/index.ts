@@ -936,17 +936,67 @@ function buildIrClassShapes(
     }
     if (!ctorOk) continue;
 
-    // Fields — read from the legacy `structFields` (already includes
-    // type info that the IR cares about). Strip the `__tag` prefix and
-    // map each remaining field's ValType back to an IrType. If any
-    // field type can't be projected (e.g. tagged-union ref), skip the
-    // whole class.
+    // Fields — read from the legacy `structFields` (which fixes the
+    // authoritative field set: names, count, and the backend ValType each
+    // struct slot commits to). Strip the `__tag` prefix and map each remaining
+    // field to an IrType.
+    //
+    // #3000 Phase-1b (string-field-shape) — re-derive each field's IR type
+    // from the AST/checker instead of the *lossy* legacy ValType. A `string`
+    // field lowers to externref (host) / (ref $AnyString) (native); the ValType
+    // alone can't tell a string from an `any`/object in host mode (both are
+    // externref), so the old `valTypeToIrField(ValType)` returned null for
+    // strings and the WHOLE class (e.g. classes.ts's `Animal`, whose `#name`
+    // is a string) got no IrClassShape — leaving every accessor / method / ctor
+    // byte-inert on legacy. We build a checker-derived field→IrType map keyed
+    // by the SAME mangled name legacy stores in `structFields`, then adopt the
+    // richer type ONLY when it is byte-compatible with the legacy struct slot
+    // (`irFieldTypeMatchesLegacyValType` — a field-level parity guard). Fields
+    // the AST can't resolve, or whose projection disagrees with the struct
+    // slot, fall back to the original ValType path. Net effect: string (and
+    // boolean/number) fields now project; unresolvable shapes still reject the
+    // class, so the worst case remains a clean legacy fallback.
+    const astFieldIr = new Map<string, IrType>();
+    const recordField = (nameNode: ts.PropertyName, tsNode: ts.Node): void => {
+      let mangled: string;
+      if (ts.isPrivateIdentifier(nameNode)) mangled = "__priv_" + nameNode.text.slice(1);
+      else if (ts.isIdentifier(nameNode)) mangled = nameNode.text;
+      else return; // computed / string-literal / numeric names → leave to ValType path
+      if (astFieldIr.has(mangled)) return;
+      const tsType = ctx.checker.getTypeAtLocation(tsNode);
+      const ir = tsTypeToClassPositionIr(ctx, tsType, out);
+      if (ir) astFieldIr.set(mangled, ir);
+    };
+    // Property declarations (`#name: string;`, `x: number;`) — legacy reads the
+    // field type off the member node itself; mirror that source exactly.
+    for (const member of stmt.members) {
+      if (ts.isPropertyDeclaration(member) && member.name && !hasStaticModifier(member)) {
+        recordField(member.name, member);
+      }
+    }
+    // Constructor-body `this.x = …` field introductions — legacy reads the
+    // field type off the property-access LHS node; mirror that source.
+    if (ctor?.body) {
+      for (const s of ctor.body.statements) {
+        if (
+          ts.isExpressionStatement(s) &&
+          ts.isBinaryExpression(s.expression) &&
+          s.expression.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+          ts.isPropertyAccessExpression(s.expression.left) &&
+          s.expression.left.expression.kind === ts.SyntaxKind.ThisKeyword
+        ) {
+          recordField(s.expression.left.name, s.expression.left);
+        }
+      }
+    }
+
     const legacyFields = ctx.structFields.get(className)!;
     const fields: { name: string; type: IrType }[] = [];
     let fieldsOk = true;
     for (const f of legacyFields) {
       if (f.name === "__tag") continue;
-      const ir = valTypeToIrField(ctx, f.type);
+      const astIr = astFieldIr.get(f.name);
+      const ir = astIr && irFieldTypeMatchesLegacyValType(ctx, astIr, f.type) ? astIr : valTypeToIrField(ctx, f.type);
       if (!ir) {
         fieldsOk = false;
         break;
@@ -1059,12 +1109,52 @@ function tsTypeToClassPositionIr(
  */
 function valTypeToIrField(_ctx: CodegenContext, vt: import("../ir/types.js").ValType): IrType | null {
   if (vt.kind === "f64" || vt.kind === "i32") return irVal(vt);
-  // Slice 4 defers `string`-typed class fields exposed as externref or
-  // (ref $AnyString) — the IR's `IrType.string` is backend-agnostic
-  // but the legacy `structFields` already commits to a backend ValType
-  // (externref/ref). Returning null here lets the class fall back to
-  // legacy if it has string fields.
+  // `string`-typed class fields are handled by the AST/checker projection in
+  // `buildIrClassShapes` (#3000 Phase-1b) — the legacy ValType (externref /
+  // (ref $AnyString)) is ambiguous in host mode, so string recovery can't be
+  // done from the ValType alone. This ValType path stays the fallback for
+  // non-string fields; returning null here still rejects any field the AST
+  // couldn't resolve (e.g. tagged-union / `any` refs), so the class falls back
+  // to legacy cleanly.
   return null;
+}
+
+/**
+ * #3000 Phase-1b — field-level parity guard. Does an AST/checker-derived class
+ * field `IrType` lower to the SAME backend `ValType` the legacy struct slot
+ * already committed to? We only adopt the richer AST-derived type when it is
+ * byte-compatible with the struct, so `class.get`/`class.set` against the shape
+ * produce exactly the ValType the struct holds — no invalid Wasm, no ABI drift
+ * versus legacy-compiled callers, and the #1370 method-signature parity guard
+ * (`integration.ts`) sees identical typeIdx on both sides.
+ *
+ * Scope is intentionally narrow: primitives (`f64`/`i32`) and `string`. The
+ * `string` arm mirrors `resolveWasmType`'s string arm + the `ref`→`ref_null`
+ * field widening in `collectClassDeclaration` (native → `(ref/ref_null
+ * $AnyString)`; host → `externref`), which is exactly what `resolveString()`
+ * resolves an `IrType.string` to at lower time. Any other IR kind returns
+ * false → the caller falls back to the ValType path.
+ */
+function irFieldTypeMatchesLegacyValType(
+  ctx: CodegenContext,
+  ir: IrType,
+  vt: import("../ir/types.js").ValType,
+): boolean {
+  if (ir.kind === "val") {
+    const a = ir.val;
+    if (a.kind !== vt.kind) return false;
+    if (a.kind === "ref" || a.kind === "ref_null") {
+      return a.typeIdx === (vt as { typeIdx: number }).typeIdx;
+    }
+    return true;
+  }
+  if (ir.kind === "string") {
+    if (ctx.nativeStrings && ctx.anyStrTypeIdx >= 0) {
+      return (vt.kind === "ref" || vt.kind === "ref_null") && vt.typeIdx === ctx.anyStrTypeIdx;
+    }
+    return vt.kind === "externref";
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -1469,6 +1559,8 @@ export function generateModule(
   fallbackCounts?: FallbackCounts;
   // #1923 — IR post-claim demotions (only when trackIrPostClaim is set).
   irPostClaimErrors?: { kind: string; func: string; message: string }[];
+  // #3000 — functions/class-members actually IR-emitted (genuine-emission signal).
+  irCompiledFuncs?: readonly string[];
   // #2138 — legacy bodies skipped under JS2WASM_IR_FIRST=1 (undefined when off).
   irFirstSkipped?: readonly string[];
 } {
@@ -1870,6 +1962,10 @@ export function generateModule(
       const plan = irPlan ?? planIrOverlay(ctx, ast);
       const { selection, classShapes, overrideMap, safeSelection, trackFallbacks } = plan;
       const report = compileIrPathFunctions(ctx, ast.sourceFile, safeSelection, overrideMap, classShapes);
+      // #3000 — record the set of functions/class-members whose slots were
+      // actually patched with an IR body (genuine-emission signal; a mere
+      // selector claim does not imply this — see `irCompiledFuncs` doc).
+      ctx.irCompiledFuncs = report.compiled;
       // Slice 12 (#1169o) — most IR-path failures are NOT compile errors. The
       // legacy path has already produced a working `body` for every function
       // before `compileIrPathFunctions` runs; an ordinary IR throw here is a
@@ -2381,6 +2477,7 @@ export function generateModule(
     errors: ctx.errors,
     fallbackCounts: ctx.fallbackCounts,
     irPostClaimErrors: ctx.irPostClaimErrors,
+    irCompiledFuncs: ctx.irCompiledFuncs,
     irFirstSkipped,
   };
 }
@@ -6649,6 +6746,8 @@ export function generateMultiModule(
   fallbackCounts?: FallbackCounts;
   // #1923 — IR post-claim demotions (only when trackIrPostClaim is set).
   irPostClaimErrors?: { kind: string; func: string; message: string }[];
+  // #3000 — functions/class-members actually IR-emitted (genuine-emission signal).
+  irCompiledFuncs?: readonly string[];
 } {
   const mod = createEmptyModule();
   const ctx = createCodegenContext(mod, multiAst.checker, options);
@@ -7002,6 +7101,7 @@ export function generateMultiModule(
     errors: ctx.errors,
     fallbackCounts: ctx.fallbackCounts,
     irPostClaimErrors: ctx.irPostClaimErrors,
+    irCompiledFuncs: ctx.irCompiledFuncs,
   };
 }
 

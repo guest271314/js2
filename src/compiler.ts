@@ -874,6 +874,8 @@ function runPipeline(input: PipelineInput): CompileResult {
   let mod;
   let capturedFallbackCounts: import("./index.js").CompileResult["fallbackCounts"];
   let capturedIrPostClaimErrors: import("./index.js").CompileResult["irPostClaimErrors"];
+  // (#3000) genuine-emission signal — functions/class-members actually IR-emitted.
+  let capturedIrCompiledFuncs: import("./index.js").CompileResult["irCompiledFuncs"];
   // (#2138) IR-first skip telemetry — populated only under JS2WASM_IR_FIRST=1.
   let capturedIrFirstSkipped: import("./index.js").CompileResult["irFirstSkipped"];
   try {
@@ -893,6 +895,7 @@ function runPipeline(input: PipelineInput): CompileResult {
       mod = result.module;
       capturedFallbackCounts = result.fallbackCounts;
       capturedIrPostClaimErrors = result.irPostClaimErrors;
+      capturedIrCompiledFuncs = result.irCompiledFuncs;
       capturedIrFirstSkipped = multiAst
         ? undefined // generateMultiModule has no IR overlay yet — the #2138 multi seam is a follow-on slice
         : (result as ReturnType<typeof generateModule>).irFirstSkipped;
@@ -1016,6 +1019,7 @@ function runPipeline(input: PipelineInput): CompileResult {
     exportSignatures: mod.exportSignatures,
     fallbackCounts: capturedFallbackCounts,
     irPostClaimErrors: capturedIrPostClaimErrors,
+    irCompiledFuncs: capturedIrCompiledFuncs,
     irFirstSkipped: capturedIrFirstSkipped,
   };
 }
