@@ -2,7 +2,7 @@
 id: 2949
 title: "IR dynamic value representation: JsTag-carrying `dynamic` kind in IrType (make untyped JS claimable)"
 status: in-progress
-assignee: ttraenkler/fable-2949s3
+assignee: ttraenkler/opus-2949s4
 sprint: current
 created: 2026-07-02
 updated: 2026-07-04
@@ -749,3 +749,107 @@ either order (both consume A's recovery helper). Producer widenings (step
 6) can proceed in parallel with A–C once slice 3 lands. Each slice: own
 PR, own claim-rate/CE-delta measurement, prove-emit-identity for
 untouched lanes.
+
+## Implementation Notes — Slice 4: return-widening measured VACUOUS-ADJACENT; do NOT ship in isolation (opus-2949s4, 2026-07-04, branch `issue-2949-s4-return-widening`)
+
+**Verdict: the isolated return-widening producer has a measured claim delta
+of ~0 at test262 scale and must NOT be shipped alone.** It is a necessary
+CO-REQUISITE of the dynamic-use-in-body producer family (step 6), not an
+independent slice. Landing it in isolation would be dead codegen carrying a
+load-bearing scan↔builder 1:1-lockstep obligation (drift = a
+`JS2WASM_IR_FIRST` skipped-slot hard error) for zero payoff. Evidence,
+mechanism, and the corrected next step below.
+
+### What "return-widening" was specced to do (and why it can't fire alone)
+
+Slice-3 note 7 flagged the specced "mixed-return box producer" as vacuous
+because `join(unknown, number) = number`. The honest correction was a
+return-WIDENING slice: *any dyn-shaped return arg ⇒ widen the return verdict
+to `dynamic` ⇒ box the concrete return arms*. The target population is a
+function like `f(x){ if(c) return x; return 0; }` (x an unannotated → dynamic
+param): one arm moves a dynamic value, another returns a concrete literal, and
+the join **collapses** the return to concrete `f64` so the slice-2 move-only
+scan rejects `return x` (dyn into concrete result).
+
+**Source-confirmed collapse** (`src/ir/propagate.ts:840-842`): `join` is
+`dynamic ∨ x = dynamic` (840), but `unknown ∨ concrete = concrete` (841-842,
+the optimistic no-evidence arm). A dyn (=`unknown`) param arm joined with a
+concrete co-arm yields the concrete type — the return is NEVER lattice-dynamic
+from this mix. And two *distinct concrete* arms join to `union`
+(propagate.ts:872), which is #2135's tagged-union rows, not the dynamic
+carrier. So a return is lattice-`dynamic` **only** when an arm is already
+dynamic (union-cap-overflow params) — the "rare sliver" slice-3 named.
+
+### Measurement (three independent probes, banked in `.tmp/`)
+
+1. **AST shape ceiling** (`widening-ceiling2.mts`, over-approximation — ignores
+   body-shape / call-graph gating): across **4452 files** (playground + test262
+   stride-12), **5295** functions, **928** with an unannotated param, only
+   **8** match the widening shape (≥1 dyn-move return + ≥1 concrete return) —
+   0.18% of unannotated-param functions, ~1 per 556 files.
+
+2. **Real-selector on those candidates** (`real-selector-probe.mts`, production
+   `planIrCompilation`): EVERY reachable candidate rejects for a reason
+   return-widening cannot convert:
+   - `nextUp`/`nextDown` (Temporal precision test) → `body-shape-rejected`
+     (`nontail-if-cond:PrefixUnaryExpression`; also `new Float64Array`, BigInt,
+     element stores) — never reaches the type gate.
+   - `handleGet` (Locale getter-order) → `body-shape-rejected`.
+   - `callbackfn` (`Array.prototype.reduce` test) → `param-type-not-resolvable`,
+     but NOT because of its mixed `return curVal;`/`return false;` — because the
+     body USES the dyn params non-trivially (`idx > 0`, `obj[idx] === curVal`,
+     `obj[idx-1] === prevVal`): comparison + property access on dynamic values,
+     which need the slice-3 unbox producers (`tag.test`+`unbox`), NOT
+     return-widening.
+
+3. **Corpus aggregate** (`widening-aggregate.mts`, production selector over a
+   test262 stride-40 sample): the intersection {functions rejecting on
+   `param-/return-type-not-resolvable`} ∩ {functions with the widening shape}
+   is an OVER-count of the true flip set (a member may reject for a body-use
+   reason, not the return arm). It read **0** in the sampled prefix (stable
+   through 500 files before a probe-perf timeout: claimed=4, type-rejects=11,
+   widen-intersect=**0** throughout), consistent with the ~8-per-4452 ceiling
+   density. Crucially, even the ~8
+   ceiling members corpus-wide (incl. `callbackfn`) are each blocked by a
+   NON-return cause per probe 2 — so the *true* return-widening flip set (return
+   arm is the SOLE blocker) is **empty** on this corpus, which is the decisive
+   number, not the aggregate's sampled 0.
+
+**Honest reading:** this is not the fully-vacuous case (the box producer, which
+never fired) — the shape does exist (~8 ceiling). It is *vacuous-adjacent*: the
+surviving population after body-shape + move-only gating is empty, because any
+function with a dyn param that also mixes returns invariably USES that param in
+the body (comparison/arith/property access), and that use is the binding
+blocker — exactly the slice-2 finding ("the body-shape/use gate is the binding
+constraint, not the type gate") applied to producers.
+
+### Why NOT ship an isolated byte-inert substrate
+
+- To be byte-inert it must claim ZERO functions (else the widened function's
+  Wasm signature flips `f64`→dynamic carrier at the export/caller boundary).
+  Claiming zero ⇒ the new scan-arm + from-ast box-producer are dead code.
+- That dead code still carries the **load-bearing** obligation that the
+  selector's widening decision and the from-ast box producer agree 1:1 (a
+  claimed-then-demote under `JS2WASM_IR_FIRST` is a skipped-slot hard error;
+  the box is a PRODUCER decision per slice-3 note 5 — no silent
+  `coerceReturnValue` auto-box). Maintaining that lockstep for no claim is
+  pure liability.
+- Slice-3 note 7 already prescribed this: the widening family lands WITH its
+  use-producer siblings, measured together — not as an isolated sliver.
+
+### Corrected next step (the real lever)
+
+Return-widening is a **co-requisite** of, and must be bundled into, the
+**dynamic-use-in-body producer slice** (this issue's step 6): truthiness
+`if (x)` and `x ? a : b` via `tag.test`+`unbox`; comparison `x === lit` /
+`x > lit` via `tag.test`(+unbox); property access `x.p` / `x[i]` via dynamic
+read. Those producers are what the reachable population (`callbackfn` and the
+bulk of real untyped-JS bodies) actually needs; a function unblocked by them
+that ALSO returns a concrete arm alongside a dyn arm then needs the return box —
+so return-widening rides along, measured against the SAME claim sweep, with the
+signature-flip exposure validated in one full-CI pass rather than for a
+zero-delta sliver. Recommend re-scoping step 6 as one XL producer slice
+(architect pass first — it overlaps the `select.ts` move-only scan +
+`from-ast` lowering region that #3000-1b's `buildIrClassShapes` work also
+touches; coordinate). The isolated "return-widening only" task is closed as
+**wont-fix-in-isolation** with this evidence.
