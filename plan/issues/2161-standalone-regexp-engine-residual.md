@@ -72,6 +72,7 @@ helper `__regex_match_all` (regexp-standalone.ts:1106+) returns a vec of the
 `.index`, `.input`, named groups — i.e. a vec of capture-ARRAYS, not substrings.
 
 **Building blocks already on main (verified):**
+
 - `ensureRegexCaptureArray` / `__regex_capture_array` (regexp-standalone.ts:934)
   — builds the [0]+captures array for ONE exec result (used by `exec`/`match`).
 - `emitRegexExecArrayCall` (the exec driver) — runs one match from lastIndex.
@@ -79,6 +80,7 @@ helper `__regex_match_all` (regexp-standalone.ts:1106+) returns a vec of the
   template to copy, but collecting capture-arrays instead of substrings.
 
 **Implementation plan (focused, ~half-day):**
+
 1. New native helper `ensureRegexMatchAllArrays` — clone `__regex_match_all`'s
    eager loop (SetLastIndex 0; loop RegExpExec with AdvanceStringIndex on empty
    match), but per iteration call the capture-array builder and push the
@@ -149,22 +151,22 @@ Pulled the standalone-shard baseline (`loopdive/js2wasm-baselines`
 every RegExp-bucket failure. **1,120 RegExp failures: 843 compile_error + 277
 fail.** The 651 RegExp compile_errors by `error_signature`:
 
-| count | bucket | nature |
-|---:|---|---|
-| 126 | `RegExp.prototype.<prop>` built-in value read (#1907/#1888 S6-b) | **reflection** — `RegExp.prototype.test`/`.flags`/getter *descriptor* reads. Verified: **instance** `re.flags`/`re.source`/`re.global`/`re.ignoreCase`/`re.multiline` ALREADY compile + run in standalone — only the `RegExp.prototype`-as-receiver reflection form refuses (`property-access.ts:1975`, `ensureStandaloneBuiltinStaticMethodClosure` has no RegExp.prototype pairs). |
-| ~128 | `@@match`/`@@replace`/`@@split`/`@@matchAll` symbol-protocol calls (literal-substring backend refuses; `string-ops.ts`) | **native built-in prototype-method closures** — `re[Symbol.match](s)` etc. The String.prototype.matchAll *call* form is DONE (#1504); this is the explicit `re[Symbol.X]()` protocol form. |
-| ~64 | dynamic constructor patterns/flags (RegExp Phase 2a) | regex-engine feature work |
-| 33 | `\q{…}` string disjunction (Phase 2a) | unsupported regex feature (v-flag) |
-| 30 | `__get_builtin` dynamic-shape (Phase B) | not RegExp-specific; dynamic-object reflection |
-| 33 | `\\`-class / literal-substring backend gaps | regex-engine feature work |
-| 10 | `Cannot convert object to primitive value` (runtime) | a `_toPrimitiveSync`/key-coercion gap on a RegExp receiver |
+| count | bucket                                                                                                                  | nature                                                                                                                                                                                                                                                                                                                                                                               |
+| ----: | ----------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+|   126 | `RegExp.prototype.<prop>` built-in value read (#1907/#1888 S6-b)                                                        | **reflection** — `RegExp.prototype.test`/`.flags`/getter _descriptor_ reads. Verified: **instance** `re.flags`/`re.source`/`re.global`/`re.ignoreCase`/`re.multiline` ALREADY compile + run in standalone — only the `RegExp.prototype`-as-receiver reflection form refuses (`property-access.ts:1975`, `ensureStandaloneBuiltinStaticMethodClosure` has no RegExp.prototype pairs). |
+|  ~128 | `@@match`/`@@replace`/`@@split`/`@@matchAll` symbol-protocol calls (literal-substring backend refuses; `string-ops.ts`) | **native built-in prototype-method closures** — `re[Symbol.match](s)` etc. The String.prototype.matchAll _call_ form is DONE (#1504); this is the explicit `re[Symbol.X]()` protocol form.                                                                                                                                                                                           |
+|   ~64 | dynamic constructor patterns/flags (RegExp Phase 2a)                                                                    | regex-engine feature work                                                                                                                                                                                                                                                                                                                                                            |
+|    33 | `\q{…}` string disjunction (Phase 2a)                                                                                   | unsupported regex feature (v-flag)                                                                                                                                                                                                                                                                                                                                                   |
+|    30 | `__get_builtin` dynamic-shape (Phase B)                                                                                 | not RegExp-specific; dynamic-object reflection                                                                                                                                                                                                                                                                                                                                       |
+|    33 | `\\`-class / literal-substring backend gaps                                                                             | regex-engine feature work                                                                                                                                                                                                                                                                                                                                                            |
+|    10 | `Cannot convert object to primitive value` (runtime)                                                                    | a `_toPrimitiveSync`/key-coercion gap on a RegExp receiver                                                                                                                                                                                                                                                                                                                           |
 
 **Conclusion (honest scope call):** there is **no clean bounded point-fix** left
 in #2161. The matchAll concrete leak (the one named in the original triage) is
 already shipped via #1504. Each remaining bucket is a sub-project:
 
-1. **RegExp.prototype reflection (126)** — add native built-in *method/getter
-   closures* for the RegExp.prototype pairs to
+1. **RegExp.prototype reflection (126)** — add native built-in _method/getter
+   closures_ for the RegExp.prototype pairs to
    `ensureStandaloneBuiltinStaticMethodClosure`, backed by the native engine's
    flag fields (`RE_FIELD_*`) + the existing exec/test helpers. ~14 pairs
    (test/exec/compile/toString + 10 flag getters). Self-contained but meaty
@@ -183,7 +185,8 @@ closures` (~126 tests, self-contained, architect-spec'd), (b) `fix: standalone
 RegExp @@symbol protocol calls` (~128, reuses #1504), (c) `feat: standalone
 RegExp engine v-flag / dynamic-ctor features` (~97, regex backend). Each is a
 dispatchable issue with a concrete test gate; none is a tail-end slice. Sub (a)
-+ (b) together recover ~250 standalone tests.
+
+- (b) together recover ~250 standalone tests.
 
 ### Refinement on sub-bucket (a) — REVISED scope (2026-06-16, sdev5, #2161a)
 
@@ -198,7 +201,7 @@ is **no isolated slice** (not even `.length`/`.name`) that avoids it: every form
 chains off `RegExp.prototype`.
 
 Sub-categories of the 126 (by test form): 52 legacy `.call` (`RegExp.prototype.
-test.call(re, s)`), 57 Symbol.* protocol members, 31 this-val brand-check, 26
+test.call(re, s)`), 57 Symbol.\* protocol members, 31 this-val brand-check, 26
 `.length`/`.name`, 7 prop-desc reflection.
 
 **This means (a) is NOT self-contained** — it requires `RegExp.prototype` to be a
@@ -350,11 +353,11 @@ as noted above. **#2161 stays open.**
 route through the native RegExp.prototype.toString rendering, matching the
 already-working `re.toString()` method form. Confirmed against `2af57ffc0`:
 
-| form | before | after |
-|---|---|---|
-| `String(/abc/gi)` | runtime null-deref (null string) | `/abc/gi` |
-| `` `x${/abc/gi}y` `` | `x[object Object]y` | `x/abc/giy` |
-| `re.toString()` | `/abc/gi` (slice 7) | unchanged |
+| form                 | before                           | after       |
+| -------------------- | -------------------------------- | ----------- |
+| `String(/abc/gi)`    | runtime null-deref (null string) | `/abc/gi`   |
+| `` `x${/abc/gi}y` `` | `x[object Object]y`              | `x/abc/giy` |
+| `re.toString()`      | `/abc/gi` (slice 7)              | unchanged   |
 
 **Fix** — extracted a shared operand-explicit core from the slice-7 method
 helper, then wired it into the two coercion sites:
@@ -362,7 +365,7 @@ helper, then wired it into the two coercion sites:
 - `src/codegen/regexp-standalone.ts`: factored
   `emitStandaloneRegExpToStringFromExpr(ctx, fctx, regexpExpr)` out of
   `tryCompileStandaloneRegExpToString` (§22.2.6.14 → `"/" + source + "/" +
-  flags` via `__regex_flags_str` + `__str_concat`). The method helper now
+flags` via `__regex_flags_str` + `__str_concat`). The method helper now
   delegates to it; behaviour byte-identical for the `re.toString()` path. Gated
   on `ctx.standalone` + a static / backend-created RegExp receiver (dynamic
   externref receivers fall through unchanged).
@@ -412,12 +415,12 @@ standalone baseline `2026-06-19`, both from `loopdive/js2wasm-baselines`):
 (`--target standalone`, empty importObject) to find the **concrete, bounded,
 substrate-independent** wins. Sliced into 4 dispatch-ready dev issues:
 
-| # | slice | root cause (verified on main) | est. rows | feasibility |
-|---|---|---|---:|---|
-| **#2588** | named-groups result object `m.groups` + `$<name>` substitution | match-vec struct has no `groups` field; reader maps any non-`index` prop to `input`; `$<` is a literal stub. Numbered captures + `\k<name>` already work; only the result-object exposure + `$<name>` are missing. | ~40-50 | medium |
-| **#2589** | `d`-flag match `.indices` array | match-vec struct has no `indices` field; `m.indices` read leaks `env::__extern_get`. The `caps` i32 array already holds every start/end pair — just unmaterialised. | ~15-22 | medium |
-| **#2590** | `RegExp.escape(str)` static method (ES2025) | entirely unimplemented; leaks `env::__get_builtin` and fails to instantiate. Pure native string transform, no engine. | ~20-29 | medium |
-| **#2591** | `v`-flag `\q{…}` string disjunction | set ops `&&`/`--` already work; `\q{}` **traps at runtime** ("illegal cast") — the unicode.ts refusal guard is bypassed for some forms, lowering a malformed multi-char-in-class node. Implement (desugar to alternation) or complete the refusal. | ~25-39 | medium |
+| #         | slice                                                          | root cause (verified on main)                                                                                                                                                                                                                      | est. rows | feasibility |
+| --------- | -------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------: | ----------- |
+| **#2588** | named-groups result object `m.groups` + `$<name>` substitution | match-vec struct has no `groups` field; reader maps any non-`index` prop to `input`; `$<` is a literal stub. Numbered captures + `\k<name>` already work; only the result-object exposure + `$<name>` are missing.                                 |    ~40-50 | medium      |
+| **#2589** | `d`-flag match `.indices` array                                | match-vec struct has no `indices` field; `m.indices` read leaks `env::__extern_get`. The `caps` i32 array already holds every start/end pair — just unmaterialised.                                                                                |    ~15-22 | medium      |
+| **#2590** | `RegExp.escape(str)` static method (ES2025)                    | entirely unimplemented; leaks `env::__get_builtin` and fails to instantiate. Pure native string transform, no engine.                                                                                                                              |    ~20-29 | medium      |
+| **#2591** | `v`-flag `\q{…}` string disjunction                            | set ops `&&`/`--` already work; `\q{}` **traps at runtime** ("illegal cast") — the unicode.ts refusal guard is bypassed for some forms, lowering a malformed multi-char-in-class node. Implement (desugar to alternation) or complete the refusal. |    ~25-39 | medium      |
 
 **Sub-total ≈ 100-140 standalone rows** across the 4 slices. Each has ONE
 concrete root cause, is independently implementable (~1-2 days), and is pure
@@ -453,17 +456,18 @@ dynamic-receiver residuals once #2588-#2591 land.
 (empty importObject). The 4 architect slices are done; the dominant remaining
 buckets are #2175-gated reflection and the dynamic/`any`-typed receiver
 architecture — neither bounded. The **one genuinely bounded, substrate-independent
-win left** was the dynamic-constructor-pattern bucket, *narrowed to its
-compile-time-constant subset*.
+win left** was the dynamic-constructor-pattern bucket, _narrowed to its
+compile-time-constant subset_.
 
 **Root cause (pinned):** `compileStandaloneRegExpConstructor`
 (`regexp-standalone.ts`) recovered the pattern via the narrow `staticStringValue`,
 which only accepts a bare string literal. Patterns that ARE compile-time-constant
 and CAN be compiled to native bytecode were rejected → lowered to a placeholder
 that **runtime-traps** (the documented "dynamic ctor patterns illegal-cast"):
-  - `new RegExp("a" + "b")` — string-literal concatenation,
-  - `const p = "ab"; new RegExp(p)` — `const`-bound literal,
-  - `new RegExp(/ab/g)` / `new RegExp(/ab/, "i")` — §22.2.3.1 copy-constructor.
+
+- `new RegExp("a" + "b")` — string-literal concatenation,
+- `const p = "ab"; new RegExp(p)` — `const`-bound literal,
+- `new RegExp(/ab/g)` / `new RegExp(/ab/, "i")` — §22.2.3.1 copy-constructor.
 
 **Fix** (`regexp-standalone.ts`, +112 LoC, zero new host imports, zero substrate
 dep): new `staticConstStringValue` (recursively folds string literals, `const`-
@@ -487,6 +491,7 @@ slice — earlier slices (#1912) turned those static-invalid refusals into a
 runtime `throw`; not in this slice's scope and not in the CI equivalence gate).
 
 **Future architect-spec items (NOT this window — bounded budget call):**
+
 - **Dynamic / `any`-typed regex receivers** (`function f(re: RegExp){re.test(s)}`
   returns wrong / `re.exec` → "Cannot convert object to primitive value"; truly-
   runtime `new RegExp(runtimeString)` runtime-traps): needs a **runtime regex
@@ -507,17 +512,17 @@ families on current main; three had bounded fixes which THIS slice lands.
 
 ### Family map (510 rows, by root cause)
 
-| family | rows | root cause | verdict |
-|---|---:|---|---|
-| **B0 — null native-string ≠ undefined sentinel** | ~76 in-bucket ("deref null in test()" 73 + compareArray 3; **109 across ALL standalone categories**) | THREE sinks mishandled the null-string = `undefined` sentinel (non-strict checker ERASES `undefined` from `["a",undefined]` unions; unmatched capture groups are null slots): (a) `coerceType` `ref_null→ref` emitted a trapping `ref.as_non_null` for native-string targets (type-coercion.ts ~1468); (b) the mixed `any === string` #1914 eq-arm and the tag-cascade eqref identity arm returned 0 for null/null (`ref.test` is false for null); (c) `$__regexp_match_vec` → `any[]` param fell into struct-NARROWING (`getVecInfo` only matches `__vec_*` names), ref-casting the `__arr_ref_<anyStr>` data array to `$__arr_externref` → null → trap; (d) `s === undefined` on a `string`-typed local constant-folded to false (#1105 gate was `ref_null`-only). | **FIXED this slice** |
-| **B2 — split undefined separator/limit** | ~15-25 of the split 72 | §22.1.3.23: `s.split()` / `s.split(undefined)` fell past the string-like-separator gate to the host marshal path (no standalone `string_split`) → null deref; a statically-`undefined` LIMIT compiled to f64 NaN → ToUint32(NaN)=0 → `[]`. | **FIXED this slice** |
-| **B4 — never-reassigned `var` pattern fold** | ~15-20 of the 37 "illegal cast" | Slice 9's fold was `const`-only; sputnik binds patterns/flags with `var` (`var __re="d+"; RegExp(__re,"i")`), uses `void 0` / hoisted-uninitialised flags, `new RegExp(ctorCopy, "g")`, and diamond concat chains (the `seen` cycle-guard blocked same-binding re-references). | **FIXED this slice** |
-| B1 — boxed `new String(x)` receiver OR argument | ~40 (`__str_flatten` deref: every `instance-is-string-hello` split/search/match/replace test + `re.exec(new String(...))` — verified the ARG position hits the same site) | `new String()` builds a `$Object` wrapper (`__new_String`, object-runtime.ts:~1390, primitive under `WRAPPER_PRIMITIVE_KEY`); any externref→AnyString coercion (`coerceType`'s externref→ref arm, type-coercion.ts ~1743: `ref.test $AnyString` → else `ref.null`) drops the wrapper to null → flatten trap. **Exact contract:** for a NATIVE-STRING target, extend that else-arm with the wrapper-slot probe `__to_primitive` already implements INLINE (object-runtime.ts ~2544: `ref.cast $Object` → `__obj_find(WRAPPER_PRIMITIVE_KEY)` → FLAG_INTERNAL check → value): `ref.test $Object` → read the internal slot → `ref.test $AnyString` → cast, else null. Do NOT call full `__to_primitive` (it would pull OrdinaryToPrimitive semantics — valueOf/toString dispatch — into every string coercion); extract just the slot read, gated on the object runtime already being in the module (`ctx.funcMap.has("__obj_find")` — `new String` registration guarantees it). Watch late-registration ordering (funcIdx shifts — flushLateImportShifts discipline). | Opus point-fix (bounded, shared-coercion blast radius — needs the full string-suite battery this slice's `.tmp/battery-final` set established) |
-| B5 — annexB identity-escape fallbacks | ~6-10 | `/\x/`, `/\u/` (incomplete hex/unicode), `/\c1/`-class escapes: the pattern compiler refuses → placeholder trap. AnnexB says incomplete escapes fall through to IdentityEscape. **Exact contract:** in the bytecode pattern parser's escape handling, on failed `\x`/`\u` hex parse emit the literal char (annexB §B.1.4 ExtendedAtom); `\c` + non-letter → literal `\c`. Blocks `separator-regexp.js` (needs split-at-end-anchor fix too: our `__regex_split` matches at q==size — `"x".split(/$/)` → 2 elems, JS spec loops q<size → 1). | Opus point-fix (engine parser) |
-| F6 — reflection (`.name`/`.length`/prop-desc/`hasOwnProperty` on builtin methods, `RegExpStringIteratorPrototype`, legacy accessors `RegExp.$1`, cross-realm) | ~80+ (48 "Cannot access property" + hasOwnProperty clusters + 15 CE legacy-accessors) | Builtin-prototype-object representation. | dying via **#2175** (in-flight) — do NOT slice |
-| F7 — dynamic receivers / RegExpExec protocol observables (lastIndex-err tests, custom `exec`, `split.call(numberReceiver)`, ToPrimitive ctor args, `new RegExp(arr[i])`, 200-paren loop-built patterns) | ~120+ (38+8+5+4… clusters) | Needs the runtime regex compiler + runtime-externref receiver generalisation (documented Slice 9 "future architect-spec"). | architect-spec (NOT bounded) |
-| F8 — eval-based literal tests | 11 | `eval` unsupported by design. | wont-fix scope |
-| misc engine tail | ~30 | duplicate named groups (ES2025), regexp-modifiers, `\q{}` residue, step-limit (2), quantifier-integer-limit | separate small engine issues |
+| family                                                                                                                                                                                                  |                                                                                                                                                                      rows | root cause                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | verdict                                                                                                                                        |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------: | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| **B0 — null native-string ≠ undefined sentinel**                                                                                                                                                        |                                                                      ~76 in-bucket ("deref null in test()" 73 + compareArray 3; **109 across ALL standalone categories**) | THREE sinks mishandled the null-string = `undefined` sentinel (non-strict checker ERASES `undefined` from `["a",undefined]` unions; unmatched capture groups are null slots): (a) `coerceType` `ref_null→ref` emitted a trapping `ref.as_non_null` for native-string targets (type-coercion.ts ~1468); (b) the mixed `any === string` #1914 eq-arm and the tag-cascade eqref identity arm returned 0 for null/null (`ref.test` is false for null); (c) `$__regexp_match_vec` → `any[]` param fell into struct-NARROWING (`getVecInfo` only matches `__vec_*` names), ref-casting the `__arr_ref_<anyStr>` data array to `$__arr_externref` → null → trap; (d) `s === undefined` on a `string`-typed local constant-folded to false (#1105 gate was `ref_null`-only).                                                                                                                                                                                                                                                                                                | **FIXED this slice**                                                                                                                           |
+| **B2 — split undefined separator/limit**                                                                                                                                                                |                                                                                                                                                    ~15-25 of the split 72 | §22.1.3.23: `s.split()` / `s.split(undefined)` fell past the string-like-separator gate to the host marshal path (no standalone `string_split`) → null deref; a statically-`undefined` LIMIT compiled to f64 NaN → ToUint32(NaN)=0 → `[]`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | **FIXED this slice**                                                                                                                           |
+| **B4 — never-reassigned `var` pattern fold**                                                                                                                                                            |                                                                                                                                           ~15-20 of the 37 "illegal cast" | Slice 9's fold was `const`-only; sputnik binds patterns/flags with `var` (`var __re="d+"; RegExp(__re,"i")`), uses `void 0` / hoisted-uninitialised flags, `new RegExp(ctorCopy, "g")`, and diamond concat chains (the `seen` cycle-guard blocked same-binding re-references).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | **FIXED this slice**                                                                                                                           |
+| B1 — boxed `new String(x)` receiver OR argument                                                                                                                                                         | ~40 (`__str_flatten` deref: every `instance-is-string-hello` split/search/match/replace test + `re.exec(new String(...))` — verified the ARG position hits the same site) | `new String()` builds a `$Object` wrapper (`__new_String`, object-runtime.ts:~1390, primitive under `WRAPPER_PRIMITIVE_KEY`); any externref→AnyString coercion (`coerceType`'s externref→ref arm, type-coercion.ts ~1743: `ref.test $AnyString` → else `ref.null`) drops the wrapper to null → flatten trap. **Exact contract:** for a NATIVE-STRING target, extend that else-arm with the wrapper-slot probe `__to_primitive` already implements INLINE (object-runtime.ts ~2544: `ref.cast $Object` → `__obj_find(WRAPPER_PRIMITIVE_KEY)` → FLAG_INTERNAL check → value): `ref.test $Object` → read the internal slot → `ref.test $AnyString` → cast, else null. Do NOT call full `__to_primitive` (it would pull OrdinaryToPrimitive semantics — valueOf/toString dispatch — into every string coercion); extract just the slot read, gated on the object runtime already being in the module (`ctx.funcMap.has("__obj_find")` — `new String` registration guarantees it). Watch late-registration ordering (funcIdx shifts — flushLateImportShifts discipline). | Opus point-fix (bounded, shared-coercion blast radius — needs the full string-suite battery this slice's `.tmp/battery-final` set established) |
+| B5 — annexB identity-escape fallbacks                                                                                                                                                                   |                                                                                                                                                                     ~6-10 | `/\x/`, `/\u/` (incomplete hex/unicode), `/\c1/`-class escapes: the pattern compiler refuses → placeholder trap. AnnexB says incomplete escapes fall through to IdentityEscape. **Exact contract:** in the bytecode pattern parser's escape handling, on failed `\x`/`\u` hex parse emit the literal char (annexB §B.1.4 ExtendedAtom); `\c` + non-letter → literal `\c`. Blocks `separator-regexp.js` (needs split-at-end-anchor fix too: our `__regex_split` matches at q==size — `"x".split(/$/)` → 2 elems, JS spec loops q<size → 1).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | Opus point-fix (engine parser)                                                                                                                 |
+| F6 — reflection (`.name`/`.length`/prop-desc/`hasOwnProperty` on builtin methods, `RegExpStringIteratorPrototype`, legacy accessors `RegExp.$1`, cross-realm)                                           |                                                                                     ~80+ (48 "Cannot access property" + hasOwnProperty clusters + 15 CE legacy-accessors) | Builtin-prototype-object representation.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            | dying via **#2175** (in-flight) — do NOT slice                                                                                                 |
+| F7 — dynamic receivers / RegExpExec protocol observables (lastIndex-err tests, custom `exec`, `split.call(numberReceiver)`, ToPrimitive ctor args, `new RegExp(arr[i])`, 200-paren loop-built patterns) |                                                                                                                                                ~120+ (38+8+5+4… clusters) | Needs the runtime regex compiler + runtime-externref receiver generalisation (documented Slice 9 "future architect-spec").                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | architect-spec (NOT bounded)                                                                                                                   |
+| F8 — eval-based literal tests                                                                                                                                                                           |                                                                                                                                                                        11 | `eval` unsupported by design.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | wont-fix scope                                                                                                                                 |
+| misc engine tail                                                                                                                                                                                        |                                                                                                                                                                       ~30 | duplicate named groups (ES2025), regexp-modifiers, `\q{}` residue, step-limit (2), quantifier-integer-limit                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | separate small engine issues                                                                                                                   |
 
 ### Shipped (this slice, all standalone, zero new host imports)
 
@@ -564,3 +569,46 @@ coercion-sites, any-box-sites, prettier all clean.
 
 **#2161 stays open (blocked on #2175)** for F6 reflection; F7 dynamic-receiver
 architecture and B1/B5 point-fix contracts above are the next pickups.
+
+## Slice 12 (2026-07-04, opus-2161b1) — family B5: Annex B identity escapes + split-at-end-anchor — LANDED
+
+**Landed** the banked B5 contract (slice-10 family map, row B5). Two bounded
+regex-engine root causes, both runtime traps on current main:
+
+1. **Annex B §B.1.4 identity escapes** — `/\x/`, `/\u/` (incomplete hex) and
+   `/\c1/` trapped "illegal cast": the bytecode pattern parser
+   (`src/codegen/regex/parse.ts` `parseEscapedCodeUnit`) refused them
+   (`RegexUnsupportedError` → placeholder trap) instead of falling through to
+   IdentityEscape. In **non-unicode** mode an incomplete `\x`/`\u` is now the
+   literal `x`/`u` (read-without-consume so trailing chars re-parse: `/\xGG/`
+   matches `xGG`), and a `\c` not forming a control escape is a literal reverse
+   solidus with the following char re-parsed (`/\c1/` matches `\`,`c`,`1`).
+   Inside a character class, Annex B ClassControlLetter additionally admits
+   DecimalDigit and `_` (`/[\c1]/` → U+0011, `/[\c_]/` → U+001F) via a new
+   `inClass` parameter. u/v mode stays strict (a bad escape there is a real
+   SyntaxError — still refused).
+
+2. **`split` at an end-of-string anchor** — `"x".split(/$/)` returned `["x",""]`
+   instead of `["x"]`. §22.2.5.2's SplitMatch loop only tests positions
+   `q < size`, so a zero-width separator match STARTING at the end is never seen;
+   the native `__regex_split` (`src/codegen/native-regex.ts`) used a forward
+   `search` that could land such a match at `mstart == slen`. Added a
+   `mstart >= slen → break` guard right after the match bounds are read. A
+   non-end match starts at `mstart < slen`, so ordinary/multiline/empty-pattern
+   splits are unaffected (`"a\nb".split(/$/m)` still → `["a","\nb"]`).
+
+**Validation.** New `tests/issue-2161-b5-annexb-escapes.test.ts` (12 cases, all
+standalone + empty importObject, zero host-import leak): incomplete `\x`/`\u`
+identity + valid-hex controls, `\xGG` trailing re-parse, `\c1` atom vs
+`[\c1]`/`[\c_]` class ControlLetter, `\cA` control escape, `[\x]` in-class; the
+real test262 `built-ins/String/prototype/split/separator-regexp.js` shapes
+(`/$/`, `/^/`, plus ordinary/empty-pattern/lookahead no-regression splits). All
+13 assertions of `separator-regexp.js` verified byte-for-content against host JS.
+Blast-radius battery (11 regex suites: #1539/#1911/#1912/#1913/#1914/#1474/#2671/
+#2588/#2591/#2091 — 465 pass) shows every failure PRE-EXISTING on clean main
+(the same 6 #1474/#1539 "expects-refusal" reds); **zero** new failures.
+Byte-inert for non-regex programs (numeric/array/string/object sha256-identical
+vs clean main). tsc clean.
+
+**#2161 stays open (blocked on #2175)** for F6 reflection; F7 dynamic-receiver
+architecture remains the next (unbounded) pickup.
