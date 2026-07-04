@@ -4,7 +4,7 @@ title: "with statement: closed object-literal shape residual (~167 default-lane 
 status: ready
 sprint: current
 created: 2026-07-03
-updated: 2026-07-03
+updated: 2026-07-04
 priority: medium
 horizon: s
 feasibility: medium
@@ -129,3 +129,26 @@ struct literals bound to a variable.
 Status left `ready` (unclaimed) — this window banked measurement + root cause
 only; no code change, so no risk of regression. The next dev can go straight to
 the Tier-1 struct-target extension above.
+
+---
+
+## Architect ruling (2026-07-04, #3031)
+
+The dynamic-MOP umbrella spec **#3031**
+(`plan/issues/3031-dynamic-mop-extensions-spec.md`, Part 3) rules on the two
+banked fix directions: **both, ordered, different owners** —
+
+1. **Tier-1 extension to closed-struct-typed targets** (slice **W1**,
+   OPUS-executable, bounded, ~55 files) is the primary near-term fix, with
+   conservative fall-through-to-Tier-2 soundness gates (inherited
+   `Object.prototype` key referenced in body; widened supertype; `any`/
+   Proxy-shaped target).
+2. **Teaching the dynamic reader struct fields** is owned by **#3027** (the
+   `$Object` dynamic-reader substrate) — `with` Tier-2 inherits it for free
+   via `__extern_has`/the dynamic getter. No with-local struct-reflection
+   hack.
+
+@@unscopables + abrupt-propagation tail = slice **W2**. Interpreter split:
+the compile path owns `with` in compiled source; the interpreter (#2929 §2)
+owns `with` inside eval/Function-ctor text only — one shared MOP surface
+(#3031 §3.4).
