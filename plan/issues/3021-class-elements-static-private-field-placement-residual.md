@@ -1,10 +1,11 @@
 ---
 id: 3021
 title: "spec gap: class elements — static/private field & method placement residual (~1,522 default-lane fails)"
-status: ready
+status: in-progress
+assignee: ttraenkler/opus-3021s1
 sprint: current
 created: 2026-07-03
-updated: 2026-07-04
+updated: 2026-07-05
 priority: high
 horizon: l
 feasibility: hard
@@ -35,7 +36,7 @@ total **1,522** official fails.
 A long line of class-element issues has landed (#1047 instance-fields-leak,
 #1144 static-class-elements-this-priv, #1226 static-async-private, #1348/#1643
 static-init-and-private-fields, #1364 method/field descriptor fidelity, #1591
-same-line multi-definition) but a residual of the same *symptom family*
+same-line multi-definition) but a residual of the same _symptom family_
 persists at a much larger scale than any single one of those fixes covered.
 Dominant assertion signatures:
 
@@ -77,7 +78,7 @@ Dominant assertion signatures:
 3. `class/dstr` (416) likely shares root cause with the #2669 destructuring
    residual umbrella (which already tracks `for-of/dstr` 247, function-param
    dstr 63, object-method dstr 55) — cross-check before duplicating work;
-   this issue owns the class-element-*specific* dstr shapes if #2669's
+   this issue owns the class-element-_specific_ dstr shapes if #2669's
    scope doesn't already cover class method/constructor params.
 
 ## Acceptance criteria
@@ -124,14 +125,14 @@ one line, fails on three lines" noise:
    src/codegen/statements/nested-declarations.ts:83 — same collect/compile
    machinery as top-level, so this alone is benign).
 2. `Object.prototype.hasOwnProperty.call(X, k)` is rewritten to
-   **`(X).hasOwnProperty(k)`** — a *parenthesized* receiver. → RC1.
+   **`(X).hasOwnProperty(k)`** — a _parenthesized_ receiver. → RC1.
 3. `var c = ...` is hoisted to module-level **`let c: any;`** whenever the
-   var name matches `\b<name>\b` anywhere in a *multi-line* class body
+   var name matches `\b<name>\b` anywhere in a _multi-line_ class body
    (tests/test262-runner.ts:2435-2470; the one-line class regex at :2440
    doesn't match single-line bodies). A field literally named `c` (`'c' =
-   39`) triggers the hoist of `var c` → the receiver becomes **`any`** and
+39`) triggers the hoist of `var c` → the receiver becomes **`any`** and
    every subsequent read goes through the dynamic host path. → RC2/RC4/RC5.
-   This is *more* spec-faithful (real test262 is untyped JS), so do NOT
+   This is _more_ spec-faithful (real test262 is untyped JS), so do NOT
    "fix" the harness to dodge; the compiler's `any` lane must be correct.
 
 ### RC1 — paren-blind `isPrototypeReceiver` in compilePropertyIntrospection [S]
@@ -152,7 +153,7 @@ C.prototype.hasOwnProperty("b")  → false ✓   (C.prototype).hasOwnProperty("b
 C.prototype.hasOwnProperty("m")  → true  ✓   (C.prototype).hasOwnProperty("m") → false ✗
 ```
 
-Since the harness *always* produces the paren form from
+Since the harness _always_ produces the paren form from
 `Object.prototype.hasOwnProperty.call(...)`, every template-battery station
 `assert(!hasOwnProperty.call(C.prototype, field))` fails. Direct first-fail
 attribution: **E1 (137) + E2 (73 — the "c.foo" signature is an
@@ -208,7 +209,7 @@ one source of truth for identity; no new host-import, standalone-clean):
    (the trampoline mint at closures.ts:4247-4310 + cache-global alloc +
    `global.get / ref.is_null / if(init) / global.get` sequence at
    :4444-4480) into a reusable `emitCachedMethodClosureInit(ctx, targetBody,
-   fullName, methodFuncIdx, structTypeIdx)` so the same cache global +
+fullName, methodFuncIdx, structTypeIdx)` so the same cache global +
    canonical trampoline (`__obj_meth_tramp_${fullName}_cached`) back both
    the typed access sites and the new export. Preserve the
    `pendingMethodTrampolines` re-resolution mechanics (#1669/#2015) —
@@ -217,7 +218,7 @@ one source of truth for identity; no new host-import, standalone-clean):
 2. **Emit `__class_member_value(externref, externref) -> externref`** at
    finalize time, modeled line-for-line on `emitStructFieldNamesExport`
    (src/codegen/index.ts:3233 — same host-only gate: `if (ctx.nativeStrings)
-   return;`, same placement AFTER all class bodies are compiled so no
+return;`, same placement AFTER all class bodies are compiled so no
    funcidx shifts can invalidate it — see memories
    `reference_1461/2191/2193` for why late-emitted bodies must not capture
    pre-shift indices). Body shape:
@@ -243,8 +244,8 @@ one source of truth for identity; no new host-import, standalone-clean):
 3. **Host wiring** (src/runtime.ts): in the `__extern_get` closure
    (runtime.ts:8282), after the `__sget_${key}` miss and before the final
    `return undefined`, add: if `_isWasmStruct(obj) && typeof key ===
-   "string"` → `const mv = exports?.__class_member_value?.(obj, key); if
-   (mv != null) return mv;`. Add the SAME arm to `_resolveHostField`
+"string"` → `const mv = exports?.__class_member_value?.(obj, key); if
+(mv != null) return mv;`. Add the SAME arm to `_resolveHostField`
    (runtime.ts:5234) so proxy `get`/descriptor reads agree, and to
    `_wasmStructHasOwn` (runtime.ts:3435) ONLY as a presence probe for
    receivers with **no** `_prototypeMethodNames` registration (an instance
@@ -277,6 +278,7 @@ references the class name (`static x() { return C.#x(…); }` → `\bC\b`
 matches → `var C` hoists to any).
 
 **Fix** (after RC2's dispatcher exists):
+
 - Add a **class-object arm** to `__class_member_value`: `ref.test` the
   class-object singleton's struct type (built by `emitLazyClassObjectGet`,
   src/codegen/expressions/extern.ts:247 — confirm its struct typeIdx;
@@ -289,7 +291,7 @@ matches → `var C` hoists to any).
   `ctx.staticProps` global, coerced to externref.
 - Host side: covered by the RC2 wiring (same `__class_member_value` call).
 - hasOwn for statics: `_staticMethodNames` (#1395) already answers method
-  presence; static *fields* need their names added to the
+  presence; static _fields_ need their names added to the
   `__register_class_object` CSV (index.ts:1642-1654 registration; extern.ts
   emits the call) so `(C).hasOwnProperty("b")` (dynamic) and
   `Object.getOwnPropertyNames(C)` include initialized static fields.
@@ -313,16 +315,16 @@ at these. Add a cross-link in #2106; do not attempt a local workaround
 
 ### Routing of the remainder (no work in this issue)
 
-| Sub-bucket | Count | Route |
-| --- | --- | --- |
-| `elements` eval-based `assert.throws(SyntaxError)` (`*-eval-err-*`) | 37 | deferred — eval is a skip-tier feature; 37/37 sampled files are `(0, eval)` probes |
-| `elements` async-gen `yield-star-*` log-protocol | ~24-40 | async-generator protocol family (#1226 lineage) — separate issue |
-| `elements` negative_test_fail (early-error grammar) | 10 | small separate slice (early-error detection) |
-| `class/dstr` init-skipped / "Cannot destructure null" | large share of 392 | #2106 (null-vs-undefined default trigger) + #2669 umbrella |
-| `class/dstr` "it.next is not a function" | ~60 | re-measure after RC2; open sub-issue only for the residual |
-| flat `cpn-*` (computed keys from await/async-arrow exprs) | ~50 | separate issue — computed-name evaluation contexts, unrelated root |
-| `subclass/derived-class-return-override-*` (null deref) | ~10 | separate issue — [[Construct]] return-override protocol |
-| private-* `*-multiple-evaluations-of-class-{realm,eval}` | ~15 | realm/eval infra — deferred tier |
+| Sub-bucket                                                          | Count              | Route                                                                              |
+| ------------------------------------------------------------------- | ------------------ | ---------------------------------------------------------------------------------- |
+| `elements` eval-based `assert.throws(SyntaxError)` (`*-eval-err-*`) | 37                 | deferred — eval is a skip-tier feature; 37/37 sampled files are `(0, eval)` probes |
+| `elements` async-gen `yield-star-*` log-protocol                    | ~24-40             | async-generator protocol family (#1226 lineage) — separate issue                   |
+| `elements` negative_test_fail (early-error grammar)                 | 10                 | small separate slice (early-error detection)                                       |
+| `class/dstr` init-skipped / "Cannot destructure null"               | large share of 392 | #2106 (null-vs-undefined default trigger) + #2669 umbrella                         |
+| `class/dstr` "it.next is not a function"                            | ~60                | re-measure after RC2; open sub-issue only for the residual                         |
+| flat `cpn-*` (computed keys from await/async-arrow exprs)           | ~50                | separate issue — computed-name evaluation contexts, unrelated root                 |
+| `subclass/derived-class-return-override-*` (null deref)             | ~10                | separate issue — [[Construct]] return-override protocol                            |
+| private-_ `_-multiple-evaluations-of-class-{realm,eval}`            | ~15                | realm/eval infra — deferred tier                                                   |
 
 ### Sequenced slices (all Opus-executable; Fable NOT required)
 
@@ -357,6 +359,36 @@ at these. Add a cross-link in #2106; do not attempt a local workaround
 
 Slices are independent enough for separate PRs; S2 before S3 (S3 extends
 S2's export). S1 can land first and alone.
+
+### S1 landed — 2026-07-05 (ttraenkler/opus-3021s1)
+
+**RC1 fix shipped.** `compilePropertyIntrospection`
+(`src/codegen/object-ops.ts`) now computes
+`const recvExpr = ts.skipParentheses(propAccess.expression)` once and uses it
+for both the `isPrototypeReceiver` AST check and the #1334/#2726
+`recvVarName` needsRuntime gate. `isConstructorReceiver` was already
+paren-safe (checker-based) and is unchanged.
+
+Measured (real runner path, gc + standalone):
+
+- Reproduction probe `(C.prototype).hasOwnProperty("b"/"m")`: `1001` (inverted)
+  → `101` (correct) after fix.
+- Named spec files: `multiple-definitions-private-method-usage.js` and
+  `multiple-stacked-definitions-rs-privatename-identifier-initializer.js`
+  flip FAIL→PASS on **both** lanes; `wrapped-in-sc-literal-names.js` flips
+  standalone FAIL→PASS (gc residual is a later RC2/RC4 station, out of S1
+  scope).
+- Blast-radius: `built-ins/Object/prototype/{hasOwnProperty,propertyIsEnumerable}`
+  = 66/79 pass, **identical** fail set pre/post-fix (13 unrelated symbol-key
+  fails) — zero regression on the introspection hot path.
+- Byte-inert: sha256 of compiled binaries for programs with no
+  parenthesized-receiver introspection is **identical** pre/post-fix
+  (`skipParentheses` is identity on non-paren nodes).
+- New regression test: `tests/issue-3021.test.ts` (5 cases, equivalence vs
+  Node).
+
+**Remaining:** S2 (RC2 `__class_member_value` dispatcher), S3 (RC5 statics),
+S4 (wrap-up). Issue stays `in-progress` until those land.
 
 ### Success measure
 
