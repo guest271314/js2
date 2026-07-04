@@ -83,7 +83,7 @@ import {
 import { ensureI32Condition, resolveWasmType } from "./index.js";
 import { ensureExnTag } from "./registry/imports.js";
 import { addFuncType } from "./registry/types.js";
-import { coerceType, compileExpression, compileStatement, ensureLateImport } from "./shared.js";
+import { coerceType, compileExpression, compileStatement } from "./shared.js";
 import { resolveSpillLocalValType } from "./statements/variables.js";
 
 /**
@@ -1676,10 +1676,6 @@ export function emitAsyncGenerator(ctx: CodegenContext, fctx: FunctionContext, d
   const rt = ensureAsyncDriveRuntime(ctx);
   const promiseTypeIdx = getOrRegisterPromiseType(ctx);
   const resultTypeIdx = ensureNativeGeneratorResultType(ctx, { kind: "externref" });
-  // Ensure the number (un)boxers used by the yield-value box + reader probe are
-  // registered up-front — under wasi these resolve to DEFINED (host-free) funcs.
-  ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
-  ensureLateImport(ctx, "__unbox_number", [{ kind: "externref" }], [{ kind: "f64" }]);
 
   const plan = analyzeAsyncBody(ctx, decl);
   const paramNames = fctx.params.map((p) => p.name);
@@ -1795,13 +1791,17 @@ function emitAsyncGenNextHelper(ctx: CodegenContext, info: AsyncFrameInfo, promi
  */
 function ensureAsyncGenReaderProbes(ctx: CodegenContext, promiseTypeIdx: number, resultTypeIdx: number): void {
   if (ctx.funcMap.has("__async_gen_p_state")) return;
-  const unboxIdx = ctx.funcMap.get("__unbox_number");
 
-  const register = (name: string, result: ValType, body: Instr[]): void => {
+  const register = (
+    name: string,
+    result: ValType,
+    body: Instr[],
+    locals: { name: string; type: ValType }[] = [],
+  ): void => {
     const typeIdx = addFuncType(ctx, [{ kind: "externref" }], [result], `${name}_type`);
     const funcIdx = mintDefinedFunc(ctx);
     ctx.funcMap.set(name, funcIdx);
-    pushDefinedFunc(ctx, funcIdx, { name, typeIdx, locals: [], body, exported: false });
+    pushDefinedFunc(ctx, funcIdx, { name, typeIdx, locals, body, exported: false });
     ctx.mod.exports.push({ name, desc: { kind: "func", index: funcIdx } });
   };
 
@@ -1824,20 +1824,37 @@ function ensureAsyncGenReaderProbes(ctx: CodegenContext, promiseTypeIdx: number,
     { op: "struct.get", typeIdx: resultTypeIdx, fieldIdx: RESULT_DONE_FIELD } as Instr,
   ]);
 
-  // promise → unbox((promise.value as IteratorResult).value) (f64).
-  const valueBody: Instr[] = [
-    { op: "local.get", index: 0 },
-    { op: "any.convert_extern" } as Instr,
-    { op: "ref.cast", typeIdx: promiseTypeIdx } as Instr,
-    { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 1 } as Instr, // value (IteratorResult)
-    { op: "any.convert_extern" } as Instr,
-    { op: "ref.cast", typeIdx: resultTypeIdx } as Instr,
-    { op: "struct.get", typeIdx: resultTypeIdx, fieldIdx: RESULT_VALUE_FIELD } as Instr, // element (boxed number)
-  ];
-  if (unboxIdx !== undefined) {
-    valueBody.push({ op: "call", funcIdx: unboxIdx });
-  } else {
-    valueBody.push({ op: "drop" }, { op: "f64.const", value: NaN });
+  // promise → ToNumber((promise.value as IteratorResult).value) (f64). The
+  // externref→f64 unbox is routed through the single coercion engine
+  // (`coerceType`, #2108) rather than naming `__unbox_number` directly, so this
+  // probe adds no hand-rolled coercion vocabulary outside the engine.
+  const vfctx: FunctionContext = {
+    name: "__async_gen_result_value",
+    params: [{ name: "p", type: { kind: "externref" } }],
+    locals: [],
+    localMap: new Map([["p", 0]]),
+    returnType: { kind: "f64" },
+    body: [
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" } as Instr,
+      { op: "ref.cast", typeIdx: promiseTypeIdx } as Instr,
+      { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 1 } as Instr, // value (IteratorResult)
+      { op: "any.convert_extern" } as Instr,
+      { op: "ref.cast", typeIdx: resultTypeIdx } as Instr,
+      { op: "struct.get", typeIdx: resultTypeIdx, fieldIdx: RESULT_VALUE_FIELD } as Instr, // element (boxed number)
+    ],
+    blockDepth: 0,
+    breakStack: [],
+    continueStack: [],
+    labelMap: new Map(),
+    savedBodies: [],
+  };
+  const savedFunc = ctx.currentFunc;
+  ctx.currentFunc = vfctx;
+  try {
+    coerceType(ctx, vfctx, { kind: "externref" }, { kind: "f64" });
+  } finally {
+    ctx.currentFunc = savedFunc;
   }
-  register("__async_gen_result_value", { kind: "f64" }, valueBody);
+  register("__async_gen_result_value", { kind: "f64" }, vfctx.body, vfctx.locals);
 }
