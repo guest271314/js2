@@ -7,6 +7,7 @@
  */
 import { ts } from "../../ts-api.js";
 import type { WasmModule } from "../../ir/types.js";
+import { TsCheckerOracle } from "../../checker/oracle.js";
 import { getOrRegisterVecType, registerNativeStringTypes } from "../registry/types.js";
 import { nativeLiteralRegExpEngineConfig } from "../regexp-standalone.js";
 import { createFallbackCounts } from "../fallback-telemetry.js";
@@ -41,6 +42,12 @@ export function createCodegenContext(
   const ctx: CodegenContext = {
     mod,
     checker,
+    // (#1930) THE type-query boundary. New codegen code MUST prefer
+    // `ctx.oracle` over raw `ctx.checker` access — the oracle-ratchet CI gate
+    // (`pnpm run check:oracle-ratchet`) fails on any growth of direct checker
+    // usage under src/codegen/. Contract: registry-free, side-effect-free,
+    // memoized (see src/checker/oracle.ts and issue #1930's Design section).
+    oracle: new TsCheckerOracle(checker),
     funcMap: new Map(),
     structMap: new Map(),
     typeIdxToStructName: new Map(),
@@ -129,6 +136,7 @@ export function createCodegenContext(
     nativeGeneratorResultTypeIdx: -1,
     nativeGenerators: new Map(),
     moduleGlobals: new Map(),
+    liveFuncBindingGlobals: new Set(),
     moduleInitStatements: [],
     nestedFuncCaptures: new Map(),
     classParentMap: new Map(),
@@ -190,6 +198,7 @@ export function createCodegenContext(
     widenedDefinePropertyKeys: new Set(),
     dynamicDescriptorWidenVars: new Set(),
     objectHashConsumerVars: new Set(),
+    objectHashConsumerTypes: new Set(),
     growableObjectLiteralVars: new Set(),
     externrefAccessorVars: new Set(),
     pendingMathMethods: new Set(),
@@ -239,6 +248,16 @@ export function createCodegenContext(
     nodeFsReadSyncIdx: -1,
     nodeFsWriteSyncIdx: -1,
     standalone: options?.standalone ?? false,
+    // (#2141 S1) Honest generic any-boxing regime — default OFF (legacy tag-5
+    // box-the-externref ABI, byte-identical modules). Flips in S4.
+    honestAnyBoxing: options?.honestAnyBoxing ?? false,
+    // (#2141 S2/S3, #2626) tag-5 boxed-VALUE eq classifier — default OFF
+    // (legacy); JS2WASM_TAG5_CLASSIFIER=1 env defaults it on for runner A/B.
+    tag5ValueEqClassifier: options?.tag5ValueEqClassifier ?? process.env.JS2WASM_TAG5_CLASSIFIER === "1",
+    // (#2106 S1) standalone $undefined tag-1 singleton regime — default OFF
+    // (legacy: undefined ≡ null ≡ ref.null.extern, byte-identical);
+    // JS2WASM_UNDEF_SINGLETON=1 env defaults it on for runner A/B.
+    undefinedSingleton: options?.undefinedSingleton ?? process.env.JS2WASM_UNDEF_SINGLETON === "1",
     // (#2796) Diff-test-harness fidelity — export __module_init + skip the wasm
     // start section so the host runs top-level code after setExports.
     deferTopLevelInit: options?.deferTopLevelInit ?? false,

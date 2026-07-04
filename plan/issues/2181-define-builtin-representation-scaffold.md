@@ -2,9 +2,9 @@
 id: 2181
 title: "defineBuiltin(name, {elementKinds, lower}) scaffold — unify per-representation element-load/ToString/null handling"
 status: done
-sprint: current
+sprint: 69
 created: 2026-06-16
-updated: 2026-06-28
+updated: 2026-07-03
 completed: 2026-06-28
 assignee: ttraenkler/agent-a20aa13da21b8d592
 priority: medium

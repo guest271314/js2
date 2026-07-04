@@ -11,11 +11,10 @@ import {
   isBooleanType,
   isNumberType,
   isStringType,
-  isSymbolType,
   isWrapperObjectType,
 } from "../checker/type-mapper.js";
 import type { Instr, ValType } from "../ir/types.js";
-import { isAnyValue } from "./any-helpers.js";
+import { isAnyValue, undefinedSingletonActive } from "./any-helpers.js";
 import { reportError } from "./context/errors.js";
 import { allocLocal, allocTempLocal, releaseTempLocal } from "./context/locals.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
@@ -298,8 +297,11 @@ export function compileBinaryExpression(
   // compare Symbols by identity and never coerce. Symbols are lowered to i32 ids,
   // so without this guard the operator would silently treat the id as a number.
   if (SYMBOL_TONUMERIC_OPS.has(op)) {
-    const leftSym = isSymbolType(ctx.checker.getTypeAtLocation(expr.left));
-    const rightSym = isSymbolType(ctx.checker.getTypeAtLocation(expr.right));
+    // (#1930 Slice 2) oracle fold: was a direct isSymbolType check on the
+    // checker type — flag-identical (ESSymbol|UniqueESSymbol → "symbol")
+    // through the boundary.
+    const leftSym = ctx.oracle.staticJsTypeOf(expr.left) === "symbol";
+    const rightSym = ctx.oracle.staticJsTypeOf(expr.right) === "symbol";
     if (leftSym || rightSym) {
       // Evaluate operands left-to-right for side effects, then throw.
       const lt = compileExpression(ctx, fctx, expr.left);
@@ -1274,9 +1276,10 @@ export function compileBinaryExpression(
 
       // Loose equality and comparisons: convert both operands to f64, then compare
       // For BigInt vs Number: i64 → f64 via f64.convert_i64_s
-      // For BigInt vs String: string → f64 via parseFloat, i64 → f64 (#295)
-      //   Incomparable strings (parseFloat returns NaN) make all comparisons false,
-      //   which matches the JS spec for BigInt vs non-numeric-string.
+      // For BigInt vs String: string → f64 via ToNumber (§7.1.4), i64 → f64
+      //   (#295, #2109). Incomparable strings (ToNumber returns NaN) make all
+      //   comparisons false, matching the JS spec for BigInt vs a
+      //   non-numeric-string.
       const isLooseEq = op === ts.SyntaxKind.EqualsEqualsToken;
       const isLooseNeq = op === ts.SyntaxKind.ExclamationEqualsToken;
       const isComparison =
@@ -1367,13 +1370,14 @@ export function compileBinaryExpression(
         if (leftType.kind === "i64") {
           fctx.body.push({ op: "f64.convert_i64_s" });
         } else if (leftType.kind === "externref") {
-          // String/externref → f64 via parseFloat (NaN for incomparable strings)
-          const pfIdx = ctx.funcMap.get("parseFloat");
-          if (pfIdx !== undefined) {
-            fctx.body.push({ op: "call", funcIdx: pfIdx });
-          } else {
-            coerceType(ctx, fctx, leftType, { kind: "f64" }, "number");
-          }
+          // (#2109) String/externref → f64 via ToNumber (§7.1.4), NOT parseFloat.
+          // parseFloat accepts trailing garbage and rejects the 0x/0o/0b and
+          // empty-string forms, so `"10abc" == 10n` wrongly became true and
+          // `"0x10" == 16n` wrongly became false — but ONLY when the module also
+          // used parseFloat (which registered it in funcMap and took this
+          // branch). ToNumber (`__unbox_number` = JS `Number()`) is spec
+          // StringToNumber: Number("10abc")=NaN, Number("0x10")=16, Number("")=0.
+          coerceType(ctx, fctx, leftType, { kind: "f64" }, "number");
         } else if (leftType.kind === "i32") {
           fctx.body.push({ op: "f64.convert_i32_s" });
         } else if (leftType.kind === "ref" || leftType.kind === "ref_null") {
@@ -1388,13 +1392,14 @@ export function compileBinaryExpression(
         if (rightType.kind === "i64") {
           fctx.body.push({ op: "f64.convert_i64_s" });
         } else if (rightType.kind === "externref") {
-          // String/externref → f64 via parseFloat (NaN for incomparable strings)
-          const pfIdx = ctx.funcMap.get("parseFloat");
-          if (pfIdx !== undefined) {
-            fctx.body.push({ op: "call", funcIdx: pfIdx });
-          } else {
-            coerceType(ctx, fctx, rightType, { kind: "f64" }, "number");
-          }
+          // (#2109) String/externref → f64 via ToNumber (§7.1.4), NOT parseFloat.
+          // parseFloat accepts trailing garbage and rejects the 0x/0o/0b and
+          // empty-string forms, so `10n == "10abc"` wrongly became true and
+          // `16n == "0x10"` wrongly became false — but ONLY when the module also
+          // used parseFloat (which registered it in funcMap and took this
+          // branch). ToNumber (`__unbox_number` = JS `Number()`) is spec
+          // StringToNumber: Number("10abc")=NaN, Number("0x10")=16, Number("")=0.
+          coerceType(ctx, fctx, rightType, { kind: "f64" }, "number");
         } else if (rightType.kind === "i32") {
           fctx.body.push({ op: "f64.convert_i32_s" });
         } else if (rightType.kind === "ref" || rightType.kind === "ref_null") {
@@ -2286,8 +2291,15 @@ export function compileBinaryExpression(
       // `isLoose` so the strict path is byte-identical to before.
       const isLoose =
         !isStrict && (op === ts.SyntaxKind.EqualsEqualsToken || op === ts.SyntaxKind.ExclamationEqualsToken);
-      if (isLoose) ensureObjectRuntime(ctx);
+      // (#2106 S1) The singleton-regime nullish guard below needs the
+      // `__extern_is_nullish` / `__extern_is_undefined` natives for BOTH
+      // strict and loose, so pull in the object runtime under the flag too
+      // (flag-off: the legacy `isLoose`-only pull, byte-identical).
+      const s1Regime = undefinedSingletonActive(ctx);
+      if (isLoose || s1Regime) ensureObjectRuntime(ctx);
       addUnionImports(ctx);
+      const s1IsNullishIdx = s1Regime ? ctx.funcMap.get("__extern_is_nullish") : undefined;
+      const s1IsUndefIdx = s1Regime ? ctx.funcMap.get("__extern_is_undefined") : undefined;
       const typeofNum = ctx.funcMap.get("__typeof_number")!;
       const typeofBool = ctx.funcMap.get("__typeof_boolean")!;
       const typeofBigint = ctx.funcMap.get("__typeof_bigint")!;
@@ -2634,29 +2646,76 @@ export function compileBinaryExpression(
       ];
       // For loose equality, wrap the core cascade in the nullish guard
       // (§7.2.15 steps 2-3): both nullish ⇒ true; nullish-vs-non-nullish ⇒ false.
-      const eqInstrs: Instr[] = looseNullish
+      //
+      // (#2106 S1) Under the `undefinedSingleton` regime the guard applies to
+      // BOTH strict and loose — and is keyed on the regime predicates, not bare
+      // `ref.is_null` (which no longer catches the non-null singleton):
+      //   loose:  both nullish (`__extern_is_nullish`) ⇒ true.
+      //   strict (§7.2.16 via SameType, null and undefined now DISTINCT):
+      //     (both null) ∨ (both undefined) ⇒ true; any other nullish pairing ⇒
+      //     false. This is the #1961 `bothNullishGuard` re-keyed on the
+      //     singleton, exactly as the S1 spec prescribed — it fixes dynamic
+      //     `undefined === undefined` / `null === null` (the legacy identity
+      //     arm answers 0 for null refs) while keeping `null === undefined`
+      //     false.
+      const s1NullishGuard = s1Regime && s1IsNullishIdx !== undefined && s1IsUndefIdx !== undefined;
+      const eqInstrs: Instr[] = s1NullishGuard
         ? [
             { op: "local.get", index: lTmp },
-            { op: "ref.is_null" } as Instr,
+            { op: "call", funcIdx: s1IsNullishIdx! } as Instr,
             { op: "local.get", index: rTmp },
-            { op: "ref.is_null" } as Instr,
-            // (lNull || rNull): if EITHER is nullish, the result is whether BOTH
-            // are nullish (true) or not (false) — never coerce against a nullish.
+            { op: "call", funcIdx: s1IsNullishIdx! } as Instr,
             { op: "i32.or" } as Instr,
             {
               op: "if",
               blockType: { kind: "val", type: { kind: "i32" } },
-              then: [
-                { op: "local.get", index: lTmp },
-                { op: "ref.is_null" } as Instr,
-                { op: "local.get", index: rTmp },
-                { op: "ref.is_null" } as Instr,
-                { op: "i32.and" } as Instr,
-              ],
+              then: isStrict
+                ? [
+                    { op: "local.get", index: lTmp },
+                    { op: "ref.is_null" } as Instr,
+                    { op: "local.get", index: rTmp },
+                    { op: "ref.is_null" } as Instr,
+                    { op: "i32.and" } as Instr,
+                    { op: "local.get", index: lTmp },
+                    { op: "call", funcIdx: s1IsUndefIdx! } as Instr,
+                    { op: "local.get", index: rTmp },
+                    { op: "call", funcIdx: s1IsUndefIdx! } as Instr,
+                    { op: "i32.and" } as Instr,
+                    { op: "i32.or" } as Instr,
+                  ]
+                : [
+                    { op: "local.get", index: lTmp },
+                    { op: "call", funcIdx: s1IsNullishIdx! } as Instr,
+                    { op: "local.get", index: rTmp },
+                    { op: "call", funcIdx: s1IsNullishIdx! } as Instr,
+                    { op: "i32.and" } as Instr,
+                  ],
               else: coreEqInstrs,
             } as Instr,
           ]
-        : coreEqInstrs;
+        : looseNullish
+          ? [
+              { op: "local.get", index: lTmp },
+              { op: "ref.is_null" } as Instr,
+              { op: "local.get", index: rTmp },
+              { op: "ref.is_null" } as Instr,
+              // (lNull || rNull): if EITHER is nullish, the result is whether BOTH
+              // are nullish (true) or not (false) — never coerce against a nullish.
+              { op: "i32.or" } as Instr,
+              {
+                op: "if",
+                blockType: { kind: "val", type: { kind: "i32" } },
+                then: [
+                  { op: "local.get", index: lTmp },
+                  { op: "ref.is_null" } as Instr,
+                  { op: "local.get", index: rTmp },
+                  { op: "ref.is_null" } as Instr,
+                  { op: "i32.and" } as Instr,
+                ],
+                else: coreEqInstrs,
+              } as Instr,
+            ]
+          : coreEqInstrs;
       for (const ins of eqInstrs) fctx.body.push(ins);
       if (isNeqOp) fctx.body.push({ op: "i32.eqz" });
       releaseTempLocal(fctx, rTmp);

@@ -12,6 +12,7 @@
  * IEEE 754 for the common range.
  */
 import type { Instr, ValType } from "../ir/types.js";
+import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S3b) stable-regime minting
 import type { CodegenContext } from "./context/types.js";
 import { addFuncType } from "./registry/types.js";
 
@@ -106,8 +107,8 @@ export function emitInlineMathFunctions(ctx: CodegenContext, needed: Set<string>
 
   function addMathFunc(def: MathFuncDef): number {
     const typeIdx = addFuncType(ctx, def.params, def.results, def.name + "_type");
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-    ctx.mod.functions.push({
+    const funcIdx = mintDefinedFunc(ctx);
+    pushDefinedFunc(ctx, funcIdx, {
       name: def.name,
       typeIdx,
       locals: def.locals,

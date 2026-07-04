@@ -4,7 +4,7 @@ title: "[SENIOR-DEV ONLY] member-WRITE dispatcher `__set_member_<name>` traps `i
 status: done
 completed: 2026-06-29
 assignee: ttraenkler/sendev-2831
-sprint: current
+sprint: 69
 priority: high
 horizon: l
 feasibility: hard

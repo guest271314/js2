@@ -15,6 +15,7 @@ import {
 } from "../../checker/type-mapper.js";
 import type { Instr, ValType } from "../../ir/types.js";
 import { emitCachedFuncClosureAccess, emitFuncRefAsClosure } from "../closures.js";
+import { emitNativeGlobalThisObject } from "../array-object-proto.js";
 import { emitLazyClassObjectGet } from "./extern.js";
 import type { CodegenContext, FunctionContext } from "../context/types.js";
 import {
@@ -39,7 +40,12 @@ import { popBody, pushBody } from "../context/bodies.js";
 import { reportSilentFallback } from "../fallback-telemetry.js";
 import { emitThrowReferenceError, emitThrowTypeError, noJsHost } from "./helpers.js";
 import { emitDynamicWithGet, emitWithBindingGet, resolveWithBinding } from "../with-scope.js";
-import { emitBuiltinNamespaceObject, isSupportedBuiltinNamespace } from "../builtin-static-globals.js";
+import {
+  emitBuiltinConstructorIdentity,
+  emitBuiltinNamespaceObject,
+  isBuiltinConstructorIdentityName,
+  isSupportedBuiltinNamespace,
+} from "../builtin-static-globals.js";
 import { tryEmitPromiseSubclassValue } from "./promise-subclass.js";
 
 /**
@@ -785,6 +791,24 @@ function compileIdentifierCore(ctx: CodegenContext, fctx: FunctionContext, id: t
     }
   }
 
+  // (#3006) Standalone bare builtin-CONSTRUCTOR identifier read as a VALUE
+  // (`… === Set`, `assert.sameValue(…, Set)`, `[Set, Map]`) → the GENUINE,
+  // identity-stable reified constructor object, NOT the null-externref carrier it
+  // otherwise falls through to. This is the RHS partner of the
+  // `<Builtin>.prototype.constructor` fold in property-access.ts: both resolve to
+  // the SAME per-name `__builtin_ctor_<Name>` singleton, so
+  // `Set.prototype.constructor === Set` is genuinely true and
+  // `Set.prototype.constructor === Map` genuinely false (distinct singletons).
+  // Scoped to the narrow constructor subset with no existing bare-value identity
+  // (Set/Map/Weak*/RegExp/FinalizationRegistry/Disposable*/SuppressedError) and to
+  // standalone; gc/host and the namespace-object / native-error-tag builtins are
+  // untouched. Order: AFTER local/module/declared-global shadowing and the
+  // class-object / promise-subclass singleton blocks (so a user binding or a real
+  // class always wins), BEFORE the null-externref fallback.
+  if (ctx.standalone && isBuiltinConstructorIdentityName(name)) {
+    return emitBuiltinConstructorIdentity(ctx, fctx, name);
+  }
+
   // #1502 — Browser Storage globals (localStorage / sessionStorage). Emit
   // a host import that resolves to the real browser Storage when running
   // inside a browser / jsdom, and to an in-memory polyfill in standalone
@@ -822,8 +846,20 @@ function compileIdentifierCore(ctx: CodegenContext, fctx: FunctionContext, id: t
     return { kind: "externref" };
   }
 
-  // globalThis — return the JS global object via host import
+  // globalThis — return the JS global object.
   if (name === "globalThis") {
+    // (#2996) Standalone / WASI (no-JS-host): resolve to a native, cached
+    // `$Object` singleton instead of the `env::__get_globalThis` host import,
+    // which a host-free binary can't satisfy (it merely leaks into the import
+    // section). This eliminates the biggest genuine sole-import leak lever
+    // (47 tests) — READ-value substrate only; `globalThis.prop` reflective reads
+    // are the deferred #2988 MOP work and keep their existing path. Host/gc mode
+    // is byte-identical (falls through to the host import below).
+    if (ctx.standalone || ctx.wasi) {
+      const nativeVt = emitNativeGlobalThisObject(ctx, fctx);
+      if (nativeVt) return nativeVt;
+      // Native runtime unavailable — fall through to the host-import path.
+    }
     let funcIdx = ctx.funcMap.get("__get_globalThis");
     if (funcIdx === undefined) {
       const importsBefore = ctx.numImportFuncs;
@@ -895,6 +931,21 @@ function compileIdentifierCore(ctx: CodegenContext, fctx: FunctionContext, id: t
   if (name === "Infinity") {
     fctx.body.push({ op: "f64.const", value: Infinity });
     return { kind: "f64" };
+  }
+
+  // (#2931) Reassigned function-declaration live binding: the name (or an import
+  // alias of it) is backed by a mutable `externref` module global that both the
+  // reassignment (`global.set`) and every read go through, so a later read
+  // observes `fn = …`. Read through the global. Checked before the funcref-value
+  // path (which would otherwise re-wrap the func index into a fresh closure,
+  // ignoring the live value). Gated on the normally-empty set — byte-identical
+  // for programs that never reassign a function declaration.
+  if (fctx.localMap.get(name) === undefined && ctx.liveFuncBindingGlobals?.has(name)) {
+    const liveGlobalIdx = ctx.moduleGlobals.get(name);
+    if (liveGlobalIdx !== undefined) {
+      fctx.body.push({ op: "global.get", index: liveGlobalIdx });
+      return { kind: "externref" };
+    }
   }
 
   // Function reference as value: when a known function name is used as an
@@ -1244,7 +1295,66 @@ function emitInstanceofThrowGuard(ctx: CodegenContext, fctx: FunctionContext): v
   // stack out: [i32 0|1]
 }
 
+/**
+ * (#2998) True when `t` is EXCLUSIVELY a primitive value type — every union
+ * constituent is a number / string / boolean / bigint / symbol / null /
+ * undefined / void, and NONE is `Object` / `any` / `unknown` / a non-primitive
+ * brand / a type-parameter. `never` also qualifies: a `never`-typed operand can
+ * never produce a value, so any downstream constant is unreachable.
+ *
+ * Used to short-circuit the fully-dynamic `instanceof` path: §7.3.20
+ * OrdinaryHasInstance step 3 ("If Type(O) is not Object, return false") makes a
+ * primitive left-hand value answer `false` WITHOUT reading `target.prototype` or
+ * walking any prototype chain — so no host predicate is needed.
+ */
+function isExclusivelyPrimitiveType(t: ts.Type): boolean {
+  const PRIM =
+    ts.TypeFlags.NumberLike |
+    ts.TypeFlags.StringLike |
+    ts.TypeFlags.BooleanLike |
+    ts.TypeFlags.BigIntLike |
+    ts.TypeFlags.ESSymbolLike |
+    ts.TypeFlags.Null |
+    ts.TypeFlags.Undefined |
+    ts.TypeFlags.Void |
+    ts.TypeFlags.Never;
+  const NON_PRIM =
+    ts.TypeFlags.Object |
+    ts.TypeFlags.Any |
+    ts.TypeFlags.Unknown |
+    ts.TypeFlags.NonPrimitive |
+    ts.TypeFlags.TypeParameter;
+  if (t.isUnion()) return t.types.length > 0 && t.types.every(isExclusivelyPrimitiveType);
+  return (t.flags & PRIM) !== 0 && (t.flags & NON_PRIM) === 0;
+}
+
 function emitDynamicInstanceOf(ctx: CodegenContext, fctx: FunctionContext, expr: ts.BinaryExpression): ValType {
+  // (#2998) Standalone / WASI: when the left-hand operand is STATICALLY and
+  // EXCLUSIVELY a primitive, §13.10.2 → §7.3.20 OrdinaryHasInstance step 3
+  // ("If Type(O) is not Object, return false") resolves the operator to `false`
+  // WITHOUT the `__instanceof_check` host predicate, no prototype read, no
+  // proto-chain walk. We still compile BOTH operands (spec evaluates the LHS,
+  // then the RHS, before any check — preserving side effects and a RHS
+  // ReferenceError / accessor throw), discard them, and push the constant. This
+  // retires the `env::__instanceof_check` sole-import leak on the legacy
+  // `language/expressions/instanceof/S15.3.5.3_A1_*` (`<primitive> instanceof
+  // Function(...)`) and `primitive-prototype-with-primitive` /
+  // `prototype-getter-with-primitive` (`0 instanceof Function.prototype`) shapes.
+  //
+  // Gated on `noJsHost`: in the gc/host lane the import is satisfiable and the
+  // runtime predicate still throws a spec TypeError for a genuine-primitive RHS
+  // (`1 instanceof <runtime-non-object>`), so that lane is left byte-identical.
+  // The object-LHS dynamic path (a real proto-chain-walk membership test) is
+  // deferred to the #2916 Slice B substrate.
+  if (noJsHost(ctx) && isExclusivelyPrimitiveType(ctx.checker.getTypeAtLocation(expr.left))) {
+    const lt = compileExpression(ctx, fctx, expr.left);
+    if (lt) fctx.body.push({ op: "drop" });
+    const rt = compileExpression(ctx, fctx, expr.right);
+    if (rt) fctx.body.push({ op: "drop" });
+    fctx.body.push({ op: "i32.const", value: 0 });
+    return { kind: "i32" };
+  }
+
   // (#2702) `__instanceof_check` implements §13.10.2 InstanceofOperator +
   // §7.3.20 OrdinaryHasInstance and returns a tri-state (0/1/2) so the
   // non-object / non-callable / custom-@@hasInstance cases are handled

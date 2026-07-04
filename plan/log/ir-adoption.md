@@ -5,6 +5,15 @@ Source of truth for which AST node kinds are owned by the typed IR
 codegen (`src/codegen/`). Companion document to
 [`docs/architecture/codegen-axes.md`](../../docs/architecture/codegen-axes.md).
 
+**North star (goal `ir-full-coverage`, elevated 2026-07-02):** ALL AST node
+kinds route through the IR front-end; WasmGC vs linear is purely a backend
+fork below the IR (`BackendEmitter`); the direct AST→Wasm path is
+**deprecation-tracked by this file**, not a peer front-end. Every
+`direct-only` / `mixed` row here is a migration TODO (except `deferred`
+rows, which die with the direct path). See the "North star" section of the
+codegen-axes doc and `plan/goals/ir-full-coverage.md`; ratchet #2855,
+bucket work #2856–#2859.
+
 > **Generated file — do not edit by hand.** Regenerate with
 > `pnpm run gen:ir-adoption` after editing the curated data in
 > `scripts/gen-ir-adoption.mjs`. The quality CI job runs `--check` and fails
@@ -31,28 +40,28 @@ codegen (`src/codegen/`). Companion document to
 
 ## Statements
 
-| Kind                  | Status      | Notes                                                                      | Tracking |
-| --------------------- | ----------- | -------------------------------------------------------------------------- | -------- |
-| `VariableStatement`   | mixed       | Single-binding `let/const/var` works. Destructuring init throws.           | #1372    |
-| `ExpressionStatement` | mixed       | Calls / assignments / pre-post `++ --` work. Other shapes throw.           | #1131    |
-| `IfStatement`         | ir-owned    | Both arms must be present in tail position; body-position `if` works.      | —        |
-| `ReturnStatement`     | ir-owned    | Must have an expression in Phase 1; `return;` (void) added in slice 14.    | #1228    |
-| `ForStatement`        | mixed       | Requires a condition; rejects bare `for(;;)`.                              | #1131    |
-| `ForOfStatement`      | mixed       | Destructuring init throws (slice 6 sentinel).                              | #1131    |
-| `WhileStatement`      | ir-owned    | —                                                                          | —        |
-| `TryStatement`        | mixed       | Basic try/catch lowered; finally + rethrow paths partial.                  | #1131    |
-| `ThrowStatement`      | ir-owned    | —                                                                          | —        |
-| `Block`               | ir-owned    | Plain statement lists; scope handling via LowerCtx.                        | —        |
-| `SwitchStatement`     | direct-only | No IR handler. Lowered in `src/codegen/statements/control-flow.ts`.        | (future) |
-| `BreakStatement`      | direct-only | Labeled / unlabeled break — needs CFG IR enhancements.                     | (future) |
-| `ContinueStatement`   | direct-only | Same.                                                                      | (future) |
-| `DoStatement`         | direct-only | Lower priority; rewrites cleanly to `while`.                               | (future) |
-| `LabeledStatement`    | direct-only | Needs labeled break/continue CFG support.                                  | (future) |
-| `ForInStatement`      | direct-only | Object iteration host-import based today.                                  | (future) |
-| `ClassDeclaration`    | mixed       | Methods adopted incrementally via #1370 (Phase B). Constructor in Phase C. | #1370    |
-| `ImportDeclaration`   | deferred    | Module-level concern, not function-body.                                   | —        |
-| `ExportDeclaration`   | deferred    | Module-level concern.                                                      | —        |
-| `ExportAssignment`    | deferred    | Module-level concern.                                                      | —        |
+| Kind                  | Status      | Notes                                                                                                                                   | Tracking |
+| --------------------- | ----------- | --------------------------------------------------------------------------------------------------------------------------------------- | -------- |
+| `VariableStatement`   | mixed       | Single-binding `let/const/var` works. Destructuring init throws.                                                                        | #1372    |
+| `ExpressionStatement` | mixed       | Calls / assignments / pre-post `++ --` work. Other shapes throw.                                                                        | #1131    |
+| `IfStatement`         | ir-owned    | Tail / early-return via block CFG; statement-`if` inside loop/try body buffers via `if.stmt` (#2952 slice 2).                           | —        |
+| `ReturnStatement`     | ir-owned    | Must have an expression in Phase 1; `return;` (void) added in slice 14.                                                                 | #1228    |
+| `ForStatement`        | mixed       | Requires a condition; rejects bare `for(;;)`.                                                                                           | #1131    |
+| `ForOfStatement`      | mixed       | Destructuring init throws (slice 6 sentinel).                                                                                           | #1131    |
+| `WhileStatement`      | ir-owned    | —                                                                                                                                       | —        |
+| `TryStatement`        | mixed       | Basic try/catch lowered; finally + rethrow paths partial.                                                                               | #1131    |
+| `ThrowStatement`      | ir-owned    | —                                                                                                                                       | —        |
+| `Block`               | ir-owned    | Plain statement lists; scope handling via LowerCtx.                                                                                     | —        |
+| `SwitchStatement`     | direct-only | No IR handler. Needs `br_table` + block-per-case (Design A, #2952 spec).                                                                | #2952    |
+| `BreakStatement`      | mixed       | Unlabeled `break` claimed in all IR loop kinds via `br.label` + lowering-time depth resolver (#2952 slice 2); labeled break is slice 3. | #2952    |
+| `ContinueStatement`   | mixed       | Unlabeled `continue` claimed (dedicated continue-target frame per loop shape); labeled continue is slice 3.                             | #2952    |
+| `DoStatement`         | mixed       | Post-test loop claimed (reuses `while.loop` + `postCond`); unlabeled break/continue bodies claimed since slice 2.                       | #2952    |
+| `LabeledStatement`    | direct-only | Needs labeled break/continue CFG support.                                                                                               | #2952    |
+| `ForInStatement`      | direct-only | Object iteration host-import based today.                                                                                               | #2952    |
+| `ClassDeclaration`    | mixed       | Methods adopted incrementally via #1370 (Phase B). Constructor in Phase C.                                                              | #1370    |
+| `ImportDeclaration`   | deferred    | Module-level concern, not function-body.                                                                                                | —        |
+| `ExportDeclaration`   | deferred    | Module-level concern.                                                                                                                   | —        |
+| `ExportAssignment`    | deferred    | Module-level concern.                                                                                                                   | —        |
 
 ## Expressions
 
@@ -140,5 +149,5 @@ This file is generated. To move a row:
    union in `src/ir/select.ts` **and** to `BUCKETS` here — the generator
    cross-checks the two and fails otherwise.
 
-The aim of #1530 is that every "unintended" bucket reaches zero. The
+The aim of #2855 is that every "unintended" bucket reaches zero. The
 "deferred" buckets are stable — they're a documented decision, not a TODO.

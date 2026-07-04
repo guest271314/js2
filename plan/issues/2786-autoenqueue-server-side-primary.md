@@ -2,7 +2,7 @@
 id: 2786
 title: "Auto-enqueue: make the server-side workflow_run path the single primary; drop the per-agent enqueue and the grace window"
 status: done
-sprint: current
+sprint: 69
 created: 2026-06-28
 completed: 2026-06-28
 priority: high

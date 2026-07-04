@@ -5,7 +5,7 @@ status: done
 assignee: ttraenkler/member2869
 completed: 2026-06-30
 created: 2026-06-30
-updated: 2026-06-30
+updated: 2026-07-03
 parent: 2669
 priority: high
 feasibility: hard
@@ -16,7 +16,7 @@ es_edition: 2015
 language_feature: destructuring
 goal: spec-completeness
 architect_spec: done
-sprint: current
+sprint: 69
 related: [2669, 2664, 2659, 2567, 1109, 1461, 2191, 2193]
 ---
 

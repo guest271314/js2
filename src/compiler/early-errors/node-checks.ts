@@ -567,6 +567,22 @@ export function runNodeChecks(ctx: EarlyErrorContext, node: ts.Node): void {
         foundRest = true;
       }
     }
+    // Trailing comma after a binding rest element: `const [...x,] = y` — a
+    // SyntaxError. TS accepts it without a trailing OmittedExpression, so
+    // detect it via the NodeArray's hasTrailingComma flag.
+    const lastEl = node.elements[node.elements.length - 1];
+    if (node.elements.hasTrailingComma && lastEl && ts.isBindingElement(lastEl) && lastEl.dotDotDotToken) {
+      ctx.addError(lastEl, "A rest element must be last in a destructuring pattern");
+    }
+  }
+
+  // ES spec: Trailing comma after an object binding rest is a SyntaxError.
+  // e.g. const {...x,} = y;  BindingRestProperty must be last, no trailing comma.
+  if (ts.isObjectBindingPattern(node)) {
+    const lastEl = node.elements[node.elements.length - 1];
+    if (node.elements.hasTrailingComma && lastEl && ts.isBindingElement(lastEl) && lastEl.dotDotDotToken) {
+      ctx.addError(lastEl, "A rest element must be last in a destructuring pattern");
+    }
   }
 
   // ES spec: Trailing comma after rest parameter is a SyntaxError.
@@ -1078,6 +1094,24 @@ export function runNodeChecks(ctx: EarlyErrorContext, node: ts.Node): void {
         ctx.addError(node, "Invalid shorthand property initializer");
       }
     }
+  }
+
+  // ── 'async' prefix on a shorthand property ─────────────────────
+  // ES spec: PropertyDefinition : IdentifierReference (shorthand) is a bare
+  // IdentifierReference and admits no modifier. `async` is only valid as the
+  // prefix of an AsyncMethod (which requires a `(` parameter list). TypeScript's
+  // parser silently accepts `({async async})` / `({async x = 1})` as a
+  // ShorthandPropertyAssignment carrying an AsyncKeyword modifier with NO parse
+  // diagnostic (unlike `get`/`set`/`*`, which it already flags), so nothing
+  // detects it. Covers test262
+  // language/expressions/object/prop-def-invalid-async-prefix.
+  if (
+    ts.isShorthandPropertyAssignment(node) &&
+    (node as unknown as { modifiers?: ts.NodeArray<ts.ModifierLike> }).modifiers?.some(
+      (m) => m.kind === ts.SyntaxKind.AsyncKeyword,
+    )
+  ) {
+    ctx.addError(node, "'async' is not a valid prefix of a shorthand property");
   }
 
   // ── 'let' as shorthand property in strict mode ─────────────────

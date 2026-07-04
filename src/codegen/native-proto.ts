@@ -31,8 +31,10 @@
  */
 
 import type { Instr, ValType } from "../ir/types.js";
+import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S3b) stable-regime minting
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { getOrCreateFuncRefWrapperTypes } from "./closures.js";
+import { ensureBuiltinFnMetaType } from "./builtin-fn-meta.js";
 import { addStringConstantGlobal, ensureExnTag } from "./registry/imports.js";
 import { stringConstantExternrefInstrs } from "./native-strings.js";
 import { emitWasiErrorConstructor } from "./registry/error-types.js";
@@ -131,8 +133,12 @@ const BUILTIN_BRAND_TABLE: Readonly<Record<string, number>> = {
   // object is pure (member CSV only).
   DisposableStack: BUILTIN_BRAND_BASE + 41,
   AsyncDisposableStack: BUILTIN_BRAND_BASE + 42,
+  // (#2861) SuppressedError (ES2026 error aggregation) — an Error subclass, so
+  // its `.prototype` value read reuses the shared NativeError glue shape
+  // (`toString` member; constructor/name/message data props via the meta-fold).
+  SuppressedError: BUILTIN_BRAND_BASE + 43,
 
-  // Next free slot: BUILTIN_BRAND_BASE + 43 (append only).
+  // Next free slot: BUILTIN_BRAND_BASE + 44 (append only).
 };
 
 /**
@@ -228,6 +234,18 @@ export interface NativeProtoBuiltinGlue {
   memberKind: (member: string) => "getter" | "method";
   /** Static arity advertised by a member's closure value (`fn.length`). */
   memberLength: (member: string) => number;
+  /**
+   * (#2875 slice 3) ABI param-slot count for members whose trailing OPTIONAL
+   * args are not counted by `fn.length` — e.g. `String.prototype.indexOf(
+   * searchString, position)` is spec length 1 but needs TWO arg slots. The
+   * closure's lifted func type declares `max(memberLength, memberParamSlots)`
+   * user-arg params; every call surface pads missing args with
+   * `ref.null.extern` (undefined), and `.length` reads stay honest via
+   * `nativeClosureMeta`, which records the SPEC arity. Absent / not larger
+   * than `memberLength` → no effect (slot count falls back to the spec
+   * arity), so families that don't define it emit byte-identical modules.
+   */
+  memberParamSlots?: (member: string) => number;
   /**
    * Emit a method/getter closure BODY into `fctx`, given the externref `this`
    * already bound to closure-param index 1 and any further args at indices
@@ -404,9 +422,15 @@ export function ensureStandaloneNativeMethodClosure(
   // S1 RegExp closures take at most one string arg; over-declaring args is
   // harmless (the call path pads/truncates), but we size to the advertised
   // arity to keep the signature honest for `.length`.
+  // (#2875 slice 3) …except for members with UNCOUNTED optional trailing args
+  // (`indexOf(searchString, position)` — length 1, two slots): those size to
+  // `memberParamSlots` so the optional arg has a real param index. `.length`
+  // stays honest regardless — it reads `nativeClosureMeta` (set below from the
+  // spec arity), never the func type.
   const arity = kind === "getter" ? 0 : glue.memberLength(member);
+  const paramSlots = kind === "getter" ? 0 : Math.max(arity, glue.memberParamSlots?.(member) ?? 0);
   const userParams: ValType[] = [{ kind: "externref" }];
-  for (let i = 0; i < arity; i++) userParams.push({ kind: "externref" });
+  for (let i = 0; i < paramSlots; i++) userParams.push({ kind: "externref" });
 
   // Probe the member body to learn its result type by emitting into a throwaway
   // fctx, then keep that body (it's the real body — no double emission).
@@ -432,8 +456,8 @@ export function ensureStandaloneNativeMethodClosure(
     const committedResult = glue.emitMemberBody(ctx, closureFctx, member, kind);
     if (committedResult === null) return null;
 
-    funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-    ctx.mod.functions.push({
+    funcIdx = mintDefinedFunc(ctx);
+    pushDefinedFunc(ctx, funcIdx, {
       name: funcName,
       typeIdx: wrapperTypes.liftedFuncTypeIdx,
       locals: closureFctx.locals,
@@ -451,16 +475,38 @@ export function ensureStandaloneNativeMethodClosure(
     ctx.nativeClosureMeta.set(funcIdx, { name: accessorName, length: arity });
   }
 
+  // (#2896) The value struct is the UNIQUE per-(brand, member) metadata subtype
+  // of the signature wrapper, so the reflective runtime natives
+  // (`__getOwnPropertyDescriptor` / `__extern_get` / `__hasOwnProperty` /
+  // `__getOwnPropertyNames`) can `ref.test` the value and answer its spec
+  // `name`/`length` own properties at RUNTIME (test262 propertyHelper reads
+  // them through runtime params — a compile-time fold cannot satisfy it). All
+  // call paths are unaffected: the meta type subtypes the wrapper the lifted
+  // func expects. Getters carry the §10.2.9 accessor spelling ("get <key>").
+  const metaName = kind === "getter" ? `get ${member}` : member;
+  const metaTypeIdx = ensureBuiltinFnMetaType(
+    ctx,
+    wrapperTypes.structTypeIdx,
+    wrapperTypes.closureInfo,
+    `proto:${brand}:${kind}:${member}`,
+    metaName,
+    arity,
+  );
+
   // (#2193 PR-B) A `"method"` closure's first user param is the receiver
   // (`this`); record its struct type so a reflective `m.call(thisArg, …args)`
   // threads `thisArg` into param 1 instead of dropping it (the plain-function
   // `.call` default). Getters carry no user-visible receiver-arg semantics here.
+  // Both the base wrapper AND the meta subtype are recorded — call sites key
+  // this set by the ClosureInfo's structTypeIdx, which is the meta type for
+  // values produced by this factory.
   if (kind === "method") {
     if (!ctx.nativeProtoReceiverClosureStructTypes) ctx.nativeProtoReceiverClosureStructTypes = new Set();
     ctx.nativeProtoReceiverClosureStructTypes.add(wrapperTypes.structTypeIdx);
+    ctx.nativeProtoReceiverClosureStructTypes.add(metaTypeIdx);
   }
 
-  return { type: { kind: "ref", typeIdx: wrapperTypes.structTypeIdx }, funcIdx };
+  return { type: { kind: "ref", typeIdx: metaTypeIdx }, funcIdx };
 }
 
 /**

@@ -26,6 +26,7 @@ import { allocLocal } from "../context/locals.js";
 import { nextModuleGlobalIdx } from "../registry/imports.js";
 import { addFuncType } from "../registry/types.js";
 import { compileArrowAsClosure, resolveComputedKeyExpression } from "../shared.js";
+import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "../func-space.js"; // (#1916 S2 read chokepoint / S3b stable-regime minting)
 
 /** Canonical proto-owner token for `Array.prototype`. */
 const ARRAY_PROTO_TOKEN = "Array";
@@ -194,7 +195,7 @@ function reserveProtoIteratorDriver(ctx: CodegenContext): number {
     [{ kind: "externref" }],
     "$drive_proto_iterator_type",
   );
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const funcIdx = mintDefinedFunc(ctx);
   const placeholder: WasmFunction = {
     name: DRIVE_PROTO_ITERATOR,
     typeIdx: sigIdx,
@@ -205,7 +206,7 @@ function reserveProtoIteratorDriver(ctx: CodegenContext): number {
     body: [{ op: "unreachable" } as Instr],
     exported: false,
   };
-  ctx.mod.functions.push(placeholder);
+  pushDefinedFunc(ctx, funcIdx, placeholder);
   ctx.funcMap.set(DRIVE_PROTO_ITERATOR, funcIdx);
   ctx.protoIteratorDriverReserved = true;
   return funcIdx;
@@ -229,8 +230,7 @@ export function fillProtoIteratorDriver(ctx: CodegenContext): void {
   if (!ctx.protoIteratorDriverReserved) return;
   const driverIdx = ctx.funcMap.get(DRIVE_PROTO_ITERATOR);
   if (driverIdx === undefined) return;
-  const fnArrayIdx = driverIdx - ctx.numImportFuncs;
-  const driverFn = ctx.mod.functions[fnArrayIdx];
+  const driverFn = definedFuncAt(ctx, driverIdx);
   if (!driverFn) return;
 
   const callMethod0 = ctx.funcMap.get("__call_fn_method_0");

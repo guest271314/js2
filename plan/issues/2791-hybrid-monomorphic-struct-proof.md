@@ -2,9 +2,9 @@
 id: 2791
 title: "Hybrid audit Row 4 — monomorphic struct.get/set soundness (read discharged; real miscompile is structural-narrowing copy, not Row 4)"
 status: done
-sprint: current
+sprint: 69
 created: 2026-06-28
-updated: 2026-06-28
+updated: 2026-07-03
 completed: 2026-06-28
 priority: medium
 horizon: m

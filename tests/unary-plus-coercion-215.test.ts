@@ -7,7 +7,7 @@ import {
   compile,
   readFileSync,
   resolve,
-} from "./helpers.js";
+} from "./equivalence/helpers.js";
 
 describe("Unary plus coercion (#215)", () => {
   it('+\"\" should be 0', async () => {

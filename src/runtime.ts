@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 import { compileSource } from "./compiler.js";
 import type { ImportDescriptor, ImportIntent, ImportPolicy } from "./index.js";
-import { createEvalShim } from "./runtime-eval.js";
+import { createEvalShim, createNewFunctionShim } from "./runtime-eval.js";
 import { hasLoneSurrogate, hexCodeUnits, STRING_CONSTANTS16_NS } from "./string-surrogate.js";
 
 /**
@@ -227,7 +227,24 @@ function _getOrVivifyFnPrototype(
  */
 const _GeneratorState = new WeakMap<
   object,
-  { buf: any[]; index: number; pendingThrow: any; retVal?: any; retDone?: boolean }
+  {
+    buf: any[];
+    index: number;
+    pendingThrow: any;
+    retVal?: any;
+    retDone?: boolean;
+    /** (#3032) LAZY thunk mode: the generator-expression closure (an opaque
+     *  wasm externref) whose deferred invocation produces the buffer. Present
+     *  only until the first `next()` (or cleared without running by
+     *  `return`/`throw` on a not-yet-started generator — spec §27.5.3.2:
+     *  resuming a suspendedStart generator abruptly completes it WITHOUT
+     *  running the body). */
+    thunk?: any;
+    /** (#3032) Runs the thunk via the module's `__call_fn_0` export with the
+     *  `__gen_set_eager` flag held, then adopts the inner eager generator's
+     *  state. Captured at `__create_generator` time (needs `callbackState`). */
+    materialize?: () => void;
+  }
 >();
 const _AsyncGeneratorState = new WeakMap<
   object,
@@ -391,6 +408,8 @@ function _getGeneratorPrototype(): any {
     if (!state) {
       throw new TypeError("Generator.prototype.next called on incompatible receiver");
     }
+    // (#3032) Lazy generator: run the deferred body now (first resume).
+    if (state.materialize) state.materialize();
     if (state.index < state.buf.length) {
       return { value: state.buf[state.index++], done: false };
     }
@@ -417,6 +436,10 @@ function _getGeneratorPrototype(): any {
     // Early termination: skip the rest of the buffer AND suppress the
     // generator's own return value — the caller-supplied `value` becomes the
     // terminal result (§27.5.3.3). Mark retDone so a later next() is terminal.
+    // (#3032) A not-yet-started lazy generator completes WITHOUT running its
+    // body (§27.5.3.2 GeneratorResumeAbrupt on suspendedStart) — drop the thunk.
+    state.thunk = undefined;
+    state.materialize = undefined;
     state.index = state.buf.length;
     state.retDone = true;
     return { value, done: true };
@@ -427,6 +450,9 @@ function _getGeneratorPrototype(): any {
     if (!state) {
       throw new TypeError("Generator.prototype.throw called on incompatible receiver");
     }
+    // (#3032) See `return` — abrupt resume of suspendedStart never runs the body.
+    state.thunk = undefined;
+    state.materialize = undefined;
     state.index = state.buf.length;
     throw e;
   });
@@ -8236,6 +8262,23 @@ assert._isSameValue = isSameValue;
           return (0, eval)(wrapped);
         }
       }
+      if (name === "__extern_new_function") {
+        // (#2960) Dynamic `new Function(params, body)` — meta-circular
+        // construction via js2wasm's own compiler (see createNewFunctionShim).
+        // Returns a real JS-callable function the parent module can invoke.
+        // Falls back to native `Function(params, body)` when the js2wasm
+        // pipeline can't compile the body (mirrors __extern_eval's host
+        // fallback — keeps harness-shaped dynamic functions working).
+        const wasmNewFnShim = createNewFunctionShim({});
+        return (params: any, body: any) => {
+          try {
+            return wasmNewFnShim(params, body);
+          } catch {
+            // biome-ignore lint/security/noGlobalEval: intentional test262 runtime new Function
+            return new Function(String(params ?? ""), String(body ?? ""));
+          }
+        };
+      }
       if (name === "__extern_get")
         return (obj: any, key: any) => {
           // (#2743 a) A registered arguments object is an ordinary Object whose
@@ -11773,6 +11816,47 @@ assert._isSameValue = isSameValue;
       //     to a real JS array so native can iterate it.
       //   - Other primitives (number, boolean, symbol) → pass through; native
       //     rejects with TypeError per spec.
+      // (#2671) A USER THENABLE element — a wasm object-literal `{ then:
+      // function (onFulfilled, onRejected) {…} }` — must cross into the native
+      // combinator with a host-visible callable `then`: V8's PerformPromiseAll
+      // does `Invoke(C.resolve(elem), "then", «resolveElement, reject»)`, and a
+      // RAW WasmGC struct exposes no properties, so the Invoke threw TypeError
+      // and the aggregate rejected (the `call-resolve-element` / `new-resolve-
+      // function` / `resolve-before-loop-exit` test262 family — the combinator
+      // resolve-element protocol was unreachable). Wrap ONLY structs whose own
+      // `then` resolves to a callable (host fn or wasm closure) in the
+      // `_wrapForHost` live-mirror proxy — its `get` bridges the closure field
+      // to a host-callable, and the #2015 receiver-unwrap in the method bridge
+      // restores the raw struct as wasm-side `this`. Everything else passes
+      // through RAW, exactly as before, preserving fulfilled-value identity
+      // for non-thenable elements (`Promise.all([obj]) → values[0] === obj`).
+      // A thenable's pre-fix behavior was an unconditional reject, so there is
+      // no working identity to preserve for the wrapped class.
+      const _wrapThenableElement = (v: any): any => {
+        if (v == null || typeof v !== "object" || !_isWasmStruct(v)) return v;
+        const exports = callbackState?.getExports();
+        if (!exports) return v;
+        try {
+          // A struct-SHAPE `then` field is read via the compiled `__sget_then`
+          // getter — `_safeGet` reads only the sidecar/accessor/proto layers by
+          // design, so it alone misses the literal `{ then: function … }` shape.
+          // A sidecar-assigned `obj.then = fn` falls back to `_safeGet`.
+          let t: any;
+          try {
+            const sget = (exports as Record<string, Function>).__sget_then;
+            if (typeof sget === "function") t = sget(v);
+          } catch {
+            t = undefined;
+          }
+          if (t == null) t = _safeGet(v, "then", callbackState);
+          if (t != null && (typeof t === "function" || _isWasmClosureValue(t, callbackState))) {
+            return _wrapForHost(v, exports);
+          }
+        } catch {
+          /* not a thenable — pass through raw */
+        }
+        return v;
+      };
       const _toIterable = (iter: any): any => {
         // null/undefined: per spec, GetIterator throws TypeError. Native does
         // this when given undefined — pass through and let it reject.
@@ -11782,8 +11866,19 @@ assert._isSameValue = isSameValue;
         // Already JS-iterable: array, generator, custom Symbol.iterator,
         // arguments object, Set, Map, TypedArray, etc.
         if (typeof iter === "object") {
-          // Real JS Array — fast path.
-          if (Array.isArray(iter)) return iter;
+          // Real JS Array — fast path. (#2671) Re-materialize only when some
+          // element is a wasm-struct thenable (see _wrapThenableElement); the
+          // overwhelmingly common all-plain case returns the array unchanged.
+          if (Array.isArray(iter)) {
+            let needsWrap = false;
+            for (const v of iter) {
+              if (v !== _wrapThenableElement(v)) {
+                needsWrap = true;
+                break;
+              }
+            }
+            return needsWrap ? iter.map(_wrapThenableElement) : iter;
+          }
           // Detect WasmGC vec first via accessors (they return 0/null for
           // non-vec externrefs, so we materialize only when the round-trip
           // looks sane). We MUST attempt this before Symbol.iterator because
@@ -11809,7 +11904,9 @@ assert._isSameValue = isSameValue;
                 if (typeof len === "number" && len > 0) {
                   const result: any[] = new Array(len);
                   for (let i = 0; i < len; i++) {
-                    result[i] = vecGet(iter, i);
+                    // (#2671) Thenable struct elements get the live-mirror
+                    // proxy so V8's resolve-element Invoke sees `.then`.
+                    result[i] = _wrapThenableElement(vecGet(iter, i));
                   }
                   return result;
                 }
@@ -12115,6 +12212,57 @@ assert._isSameValue = isSameValue;
           // (`_GeneratorState.get(this)`) is unaffected.
           const proto = _getGeneratorInstancePrototype();
           const obj: any = Object.create(proto);
+          // (#3032) LAZY thunk mode: a non-Array first arg is the generator-
+          // expression CLOSURE itself (an opaque wasm ref), not an eager
+          // buffer. Defer the body: on the first `next()` re-invoke the
+          // closure through the module's `__call_fn_0` export with the
+          // `__gen_set_eager` flag held — the closure then takes its
+          // historical eager-buffer path and we adopt the inner generator's
+          // state. `return`/`throw` before the first `next()` complete the
+          // generator WITHOUT running the body (spec §27.5.3.2). This fixes
+          // the eager-at-creation side effects of the buffer lowering
+          // (test262 dstr fixture: `var iter = function*(){ iterations += 1 }()`
+          // must keep iterations === 0 until a resume).
+          if (buf !== null && buf !== undefined && !Array.isArray(buf)) {
+            const st: {
+              buf: any[];
+              index: number;
+              pendingThrow: any;
+              retVal?: any;
+              thunk?: any;
+              materialize?: () => void;
+            } = { buf: [], index: 0, pendingThrow: null, retVal: undefined, thunk: buf };
+            st.materialize = () => {
+              const DBG = process.env.GEN_DEBUG === "1";
+              const thunk = st.thunk;
+              st.thunk = undefined;
+              st.materialize = undefined;
+              const exports = callbackState?.getExports?.() as any;
+              const setEager = exports?.__gen_set_eager as ((v: number) => void) | undefined;
+              const callFn0 = exports?.__call_fn_0 as ((c: any) => any) | undefined;
+              if (!setEager || !callFn0) {
+                throw new TypeError(
+                  "lazy generator: __call_fn_0/__gen_set_eager exports unavailable (host must wire setExports)",
+                );
+              }
+              let inner: any;
+              try {
+                setEager(1);
+                inner = callFn0(thunk);
+              } finally {
+                setEager(0);
+              }
+              const innerSt = _GeneratorState.get(inner);
+              if (DBG) console.error("MATERIALIZE inner=", inner, "innerSt=", innerSt);
+              if (innerSt) {
+                st.buf = innerSt.buf;
+                st.pendingThrow = innerSt.pendingThrow;
+                st.retVal = innerSt.retVal;
+              }
+            };
+            _GeneratorState.set(obj, st);
+            return obj;
+          }
           // (#2035) Read the generator's return value off the buffer's side
           // property (set by `__gen_set_return`) into the instance state so the
           // terminal `{value, done:true}` result carries it — without it ever

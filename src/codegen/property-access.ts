@@ -16,6 +16,7 @@ import {
   isStringWrapperType,
 } from "../checker/type-mapper.js";
 import type { FieldDef, Instr, ValType } from "../ir/types.js";
+import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js";
 import { emitBoundsCheckedArrayGet } from "./array-methods.js";
 import { emitHoleToUndefined } from "./array-holes.js"; // (#2001 S1)
 import { classMemberFuncKey } from "./class-member-keys.js"; // (#1983) collision-free class-member funcMap keys
@@ -26,6 +27,14 @@ import { snapshotSpeculative, rollbackSpeculative } from "./context/speculative.
 import { emitDynGet } from "./dyn-read.js"; // (#2580 M2 slice 1)
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { emitCachedMethodClosureAccess, emitFuncRefAsClosure, getOrCreateFuncRefWrapperTypes } from "./closures.js";
+import {
+  BUILTIN_STATIC_METHOD_ARITY,
+  ensureBuiltinFnMetaType,
+  pushBuiltinFnClosureValueInstrs,
+  pushBuiltinFnSingletonValueInstrs,
+  STANDALONE_STATIC_METHOD_META,
+} from "./builtin-fn-meta.js";
+import { emitBuiltinConstructorIdentity, isBuiltinConstructorIdentityName } from "./builtin-static-globals.js";
 import { emitLazyClassObjectGet, emitLazyProtoGet, findExternInfoForMember } from "./expressions/extern.js";
 import {
   classifyPrivateMember,
@@ -34,6 +43,7 @@ import {
   noJsHost,
   resolveDeclaringClassForPrivateName,
 } from "./expressions/helpers.js";
+import { undefinedSingletonActive } from "./any-helpers.js";
 import { emitUndefined, patchStructNewForAddedField } from "./expressions/late-imports.js";
 import { emitSymbolDescLoad } from "./symbol-native.js";
 import {
@@ -92,6 +102,7 @@ import {
   ensureTypedArrayIntrinsicNativeProtoGlue,
   emitTypedArrayIntrinsicCtorObject,
   isWiredTypedArrayViewName,
+  emitNativeGlobalThisObject,
 } from "./array-object-proto.js";
 import { isBuiltinSubtype, isBuiltinTypeName } from "./builtin-tags.js";
 import { getOrRegisterErrorStructType, isWasiErrorName } from "./registry/error-types.js";
@@ -410,6 +421,59 @@ const NUMBER_CONSTANT_PROPS = new Set([
   "NEGATIVE_INFINITY",
   "NaN",
 ]);
+
+/**
+ * (#2933) Numeric VALUES of the `Math` / `Number` namespace static constants —
+ * the single source of truth shared by the dot-access `f64.const` emitter (in
+ * `compilePropertyAccess`) and the reflective element-access fold
+ * (`tryEmitBuiltinNamespaceConstantValue`, used by `compileElementAccess` for
+ * `Math["PI"]` / `const k = "PI"; Math[k]`). Keeping these here means the
+ * reflective read and the direct read never drift.
+ */
+const MATH_CONSTANT_VALUES: Record<string, number> = {
+  PI: Math.PI,
+  E: Math.E,
+  LN2: Math.LN2,
+  LN10: Math.LN10,
+  SQRT2: Math.SQRT2,
+  SQRT1_2: Math.SQRT1_2,
+  LOG2E: Math.LOG2E,
+  LOG10E: Math.LOG10E,
+};
+const NUMBER_CONSTANT_VALUES: Record<string, number> = {
+  EPSILON: Number.EPSILON,
+  MAX_SAFE_INTEGER: Number.MAX_SAFE_INTEGER,
+  MIN_SAFE_INTEGER: Number.MIN_SAFE_INTEGER,
+  MAX_VALUE: Number.MAX_VALUE,
+  MIN_VALUE: Number.MIN_VALUE,
+  POSITIVE_INFINITY: Infinity,
+  NEGATIVE_INFINITY: -Infinity,
+  NaN: NaN,
+};
+
+/**
+ * (#2933) Fold a `<namespace>.<constant>` VALUE read to its `f64.const` when
+ * `builtinName` is `Math`/`Number` and `propName` is one of their numeric
+ * static data constants. Returns the emitted `ValType` (`f64`) or `undefined`
+ * when the pair is not a foldable namespace constant (caller falls through).
+ *
+ * Used by the reflective element-access path (`Math["PI"]`) so a computed read
+ * of a namespace constant emits the SAME constant the syntactic dot read does.
+ * Observationally identical in host mode (which would otherwise read the same
+ * value via `__get_builtin`/`__extern_get`) and the only host-free lowering in
+ * standalone (the generic computed read returns 0 there — #2933).
+ */
+function tryEmitBuiltinNamespaceConstantValue(
+  fctx: FunctionContext,
+  builtinName: string,
+  propName: string,
+): ValType | undefined {
+  const table =
+    builtinName === "Math" ? MATH_CONSTANT_VALUES : builtinName === "Number" ? NUMBER_CONSTANT_VALUES : undefined;
+  if (!table || !(propName in table)) return undefined;
+  fctx.body.push({ op: "f64.const", value: table[propName]! });
+  return { kind: "f64" };
+}
 
 /**
  * (#2595) Per-constructor element byte width for `TypedArray.BYTES_PER_ELEMENT`
@@ -904,6 +968,13 @@ export function tryEnsureNativeProtoBrand(ctx: CodegenContext, builtinName: stri
   if (builtinName === "AsyncDisposableStack") {
     return ensureAsyncDisposableStackNativeProtoGlue(ctx);
   }
+  // (#2861) SuppressedError (ES2026 error aggregation) is an Error subclass —
+  // its prototype's own method set mirrors Error's (`toString`), with
+  // `constructor`/`name`/`message` data props handled by the shared meta-fold.
+  // Reuse the NativeError glue (its own-brand slot 43).
+  if (builtinName === "SuppressedError") {
+    return ensureNativeErrorNativeProtoGlue(ctx, builtinName);
+  }
   // (#2651 M1 / D2) Concrete TypedArray view protos — `Int8Array.prototype`,
   // `Uint8Array.prototype`, … This is the measured Slice-0 lever: the
   // `<View>.prototype` value read (the #1907 / #1888 S6-b `Int8Array.prototype`
@@ -960,6 +1031,26 @@ function tryCompileStandaloneBuiltinProtoMemberMeta(
   const memberAccess = skipTransparentExpressions(expr.expression);
   if (!ts.isPropertyAccessExpression(memberAccess)) return undefined;
   const inner = skipTransparentExpressions(memberAccess.expression);
+  // (#2896) `<Builtin>.<staticMethod>.length` / `.name` — fold the spec
+  // metadata for direct reads of ANY standard builtin static method (the
+  // BUILTIN_STATIC_METHOD_ARITY table; `.name` === the property key per
+  // §10.2.9). No closure is materialized, so this also answers methods whose
+  // VALUE-read is not yet wired host-free (`Number.isNaN.length` etc.).
+  // Sibling of the `<Builtin>.prototype.<member>` fold below; the runtime
+  // reflective reads for wired closures resolve through the #2896 meta
+  // subtypes instead (same values — STANDALONE_STATIC_METHOD_META agrees with
+  // this table).
+  if (ts.isIdentifier(inner)) {
+    const staticShadowed = fctx.localMap.has(inner.text) || (fctx.boxedCaptures?.has(inner.text) ?? false);
+    const staticArity = BUILTIN_STATIC_METHOD_ARITY[inner.text]?.[memberAccess.name.text];
+    if (!staticShadowed && staticArity !== undefined) {
+      if (metaProp === "length") {
+        fctx.body.push({ op: "f64.const", value: staticArity } as Instr);
+        return { kind: "f64" };
+      }
+      return compileStringLiteral(ctx, fctx, memberAccess.name.text) ?? undefined;
+    }
+  }
   if (!ts.isPropertyAccessExpression(inner)) return undefined;
   if (inner.name.text !== "prototype" || !ts.isIdentifier(inner.expression)) return undefined;
   const builtinName = inner.expression.text;
@@ -1025,8 +1116,7 @@ function tryCompileStandaloneBuiltinProtoMemberRead(
     if (!closureInfo) return undefined;
 
     // self struct (param 0) — unused by the body (no captures) but type-required.
-    fctx.body.push({ op: "ref.func", funcIdx: closure.funcIdx } as Instr);
-    fctx.body.push({ op: "struct.new", typeIdx: closure.type.typeIdx } as Instr);
+    fctx.body.push(...pushBuiltinFnClosureValueInstrs(ctx, closure));
     // `this` arg (param 1): the builtin proto object externref.
     if (!emitLazyNativeProtoGet(ctx, fctx, brand)) return undefined;
     // call_ref operand: the typed funcref. `ref.func` yields `(ref liftedType)`
@@ -1037,8 +1127,7 @@ function tryCompileStandaloneBuiltinProtoMemberRead(
     return closureInfo.returnType ?? { kind: "externref" };
   }
 
-  fctx.body.push({ op: "ref.func", funcIdx: closure.funcIdx } as Instr);
-  fctx.body.push({ op: "struct.new", typeIdx: closure.type.typeIdx } as Instr);
+  fctx.body.push(...pushBuiltinFnClosureValueInstrs(ctx, closure));
   return closure.type;
 }
 
@@ -1106,8 +1195,8 @@ function ensureStandaloneBuiltinStaticMethodClosure(
       closureFctx.body.push({ op: "call", funcIdx: gopdIdx });
     }
 
-    funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-    ctx.mod.functions.push({
+    funcIdx = mintDefinedFunc(ctx);
+    pushDefinedFunc(ctx, funcIdx, {
       name: funcName,
       typeIdx: wrapperTypes.liftedFuncTypeIdx,
       locals: closureFctx.locals,
@@ -1115,6 +1204,23 @@ function ensureStandaloneBuiltinStaticMethodClosure(
       exported: false,
     });
     ctx.funcMap.set(funcName, funcIdx);
+  }
+
+  // (#2896) The value struct is the UNIQUE per-(builtin, method) metadata
+  // subtype of the signature wrapper, so the reflective runtime natives can
+  // `ref.test` it and answer its spec `name`/`length` own properties. All call
+  // paths are unaffected (subtype of the wrapper the lifted func expects).
+  const meta = STANDALONE_STATIC_METHOD_META[key];
+  if (meta) {
+    const metaTypeIdx = ensureBuiltinFnMetaType(
+      ctx,
+      wrapperTypes.structTypeIdx,
+      wrapperTypes.closureInfo,
+      `static:${key}`,
+      meta.name,
+      meta.length,
+    );
+    return { type: { kind: "ref", typeIdx: metaTypeIdx }, funcIdx };
   }
 
   return { type: { kind: "ref", typeIdx: wrapperTypes.structTypeIdx }, funcIdx };
@@ -1169,6 +1275,10 @@ function isBindResultExpr(ctx: CodegenContext, expr: ts.Expression): boolean {
  * classExprNameMap, and anonTypeMap.
  */
 export function resolveStructName(ctx: CodegenContext, tsType: ts.Type): string | undefined {
+  // (#2937) The evolved checker type of a poisoned `$Object`-hash-consumer
+  // `{}` var never resolves to a struct — receivers of that type route through
+  // the externref host-MOP path (see resolveWasmType's matching guard).
+  if (ctx.objectHashConsumerTypes.has(tsType)) return undefined;
   const name = tsType.symbol?.name;
   if (name && name !== "__type" && name !== "__object" && ctx.structMap.has(name)) {
     return name;
@@ -1452,8 +1562,7 @@ function emitGetterCallWithDummy(
   if (!emitDummyStruct(ctx, fctx, className)) return null;
   fctx.body.push({ op: "call", funcIdx });
   // Determine return type from the getter's function type
-  const localIdx = funcIdx - ctx.numImportFuncs;
-  const funcDef = localIdx >= 0 ? ctx.mod.functions[localIdx] : undefined;
+  const funcDef = definedFuncAt(ctx, funcIdx);
   if (funcDef) {
     const funcType = ctx.mod.types[funcDef.typeIdx];
     if (funcType?.kind === "func" && funcType.results.length > 0) {
@@ -2136,6 +2245,17 @@ export function compileOptionalPropertyAccess(
   const tmp = allocLocal(fctx, `__opt_${fctx.locals.length}`, objType);
   fctx.body.push({ op: "local.tee", index: tmp });
   fctx.body.push({ op: "ref.is_null" });
+  // (#2106 S1) Under the `undefinedSingleton` regime standalone `undefined` is
+  // a NON-null externref, so the short-circuit must also test the singleton.
+  if (undefinedSingletonActive(ctx) && objType.kind === "externref") {
+    const s1IsUndefIdx = ensureLateImport(ctx, "__extern_is_undefined", [{ kind: "externref" }], [{ kind: "i32" }]);
+    if (s1IsUndefIdx !== undefined) {
+      flushLateImportShifts(ctx, fctx);
+      fctx.body.push({ op: "local.get", index: tmp });
+      fctx.body.push({ op: "call", funcIdx: s1IsUndefIdx } as Instr);
+      fctx.body.push({ op: "i32.or" } as Instr);
+    }
+  }
 
   const savedBody = fctx.body;
   fctx.savedBodies.push(savedBody);
@@ -2211,7 +2331,7 @@ export function compileOptionalPropertyAccess(
         } else if (ctx.classAccessorSet.has(accessorKey) && getterIdx !== undefined) {
           fctx.body.push({ op: "call", funcIdx: getterIdx });
           // Determine getter return type
-          const funcDef = ctx.mod.functions[getterIdx - ctx.numImportFuncs];
+          const funcDef = definedFuncAt(ctx, getterIdx);
           if (funcDef) {
             const typeDef = ctx.mod.types[funcDef.typeIdx];
             if (typeDef && typeDef.kind === "func" && typeDef.results.length > 0) {
@@ -2747,8 +2867,9 @@ export function tryEmitDeleteAwareDynamicSet(
   const valLocal = allocLocal(fctx, `__daset_val_${fctx.locals.length}`, { kind: "externref" });
   fctx.body.push({ op: "local.set", index: valLocal });
 
-  // __extern_set_strict(obj, "prop", val) → _safeSet (clears tombstone, writes
-  // sidecar, mirrors __sset_<key>). Bare call — NOT the struct.set dispatcher.
+  // RUNTIME arm — __extern_set_strict(obj, "prop", val) → _safeSet (clears
+  // tombstone, writes sidecar, mirrors __sset_<key>). Bare call — NOT the
+  // struct.set dispatcher.
   //
   // (#2681/#2686) An EARLIER pinned-write path (`tryEmitPinnedStructMemberSet`,
   // assignment.ts) already routes writes to a RECONSTRUCTED-fnctor receiver
@@ -2757,17 +2878,80 @@ export function tryEmitDeleteAwareDynamicSet(
   // READ. This delete-aware path is the GENERAL `any`-receiver write in a
   // delete-using module, where the receiver is typically a PLAIN object literal
   // lowered to an anonymous `$__anon_N` struct. Routing THAT through the
-  // dispatcher's `struct.set` arm overwrites the field SLOT in place, which
-  // bypasses the delete+re-add ORDERING the JS-host sidecar tracks
+  // dispatcher's `struct.set` arm at RUNTIME overwrites the field SLOT in place,
+  // which bypasses the delete+re-add ORDERING the JS-host sidecar tracks
   // (`delete o.p; o.p = v` must re-insert `p` at the END — `for-in` order, #2179/
-  // #2731). So the general delete-aware write MUST stay on the bare sidecar
-  // `_safeSet`; only the narrowly-pinned reconstructed-fnctor write uses the slot
-  // dispatcher. (The broad reroute here regressed `for-in/order-simple-object`.)
-  fctx.body.push({ op: "local.get", index: objLocal });
+  // #2731). So the general delete-aware runtime write MUST stay on the bare
+  // sidecar `_safeSet`; only the narrowly-pinned reconstructed-fnctor write uses
+  // the slot dispatcher. (The broad runtime reroute here regressed
+  // `for-in/order-simple-object`.)
+  //
+  // (#2805) MODULE-INIT correctness — the symmetric WRITE side of #2800. gc/host
+  // runs `__module_init` via the Wasm `start` section, INSIDE
+  // `WebAssembly.instantiate`, BEFORE the host wires the struct setters via
+  // `__setExports`. The runtime host write above threads `__extern_set_strict` →
+  // `_safeSet` → `getExports()?.__sset_<key>`, so at init `getExports()` is
+  // undefined and the field write is SILENTLY DROPPED — a top-level
+  // `new X({...})` whose ctor does `this.<f> = conf.<f>` on an `any`-typed `this`
+  // stores nothing (the struct keeps its 0/null default), while the IDENTICAL
+  // construction at RUNTIME works. Mirror #2800's read-side gate: branch on the
+  // `__in_module_init` flag and, DURING INIT, write the slot host-free via the
+  // `__set_member_<name>` dispatcher (a `ref.test`+`struct.set` over the complete
+  // finalize-time candidate set; #2664) — no exports needed, and nothing has been
+  // `delete`d yet on a freshly-built object so the for-in re-add ordering the
+  // runtime arm preserves is moot. At runtime keep the sidecar `__extern_set_strict`.
+  //
+  // gc/host only: WASI/standalone have no host `__extern_set_strict` (this
+  // function already returns early for `ctx.standalone`), and WASI's
+  // `__module_init` lazy-init wrap must stay untouched — so WASI keeps the legacy
+  // bare sidecar write.
+  //
+  // The dispatcher is reserved HERE — AFTER both operands are evaluated into
+  // locals — deliberately. The `value` expression (e.g. `conf.zz || 0`) can
+  // itself reserve a `__get_member_<name>` dispatcher and pull late imports that
+  // shift the DEFINED-function index space; reserving `__set_member_<name>` after
+  // all that, with NOTHING emitted between its reserve+flush and the bake below,
+  // guarantees `setMemberIdx` is post-shift and each property's write bakes its
+  // OWN distinct funcIdx. Reserving it BEFORE the value eval (the #2800 write-side
+  // prototype) left the local stale-low so `this.label` and `this.zz` baked the
+  // SAME `call funcIdx` (a funcIdx desync). `setIdx` is an IMPORT (its index is
+  // stable once added — new imports insert at the import-section end and shift
+  // only defined funcs), so baking it late is safe.
+  const setMemberIdx = ctx.wasi ? undefined : reserveMemberSetDispatch(ctx, propName, /*strict*/ true, fctx);
   addStringConstantGlobal(ctx, propName);
-  fctx.body.push(...stringConstantExternrefInstrs(ctx, propName));
-  fctx.body.push({ op: "local.get", index: valLocal });
-  fctx.body.push({ op: "call", funcIdx: setIdx } as Instr);
+  flushLateImportShifts(ctx, fctx);
+
+  if (setMemberIdx === undefined) {
+    // WASI / no dispatcher — legacy bare tombstone-aware host write (byte-identical).
+    fctx.body.push({ op: "local.get", index: objLocal });
+    fctx.body.push(...stringConstantExternrefInstrs(ctx, propName));
+    fctx.body.push({ op: "local.get", index: valLocal });
+    fctx.body.push({ op: "call", funcIdx: setIdx } as Instr);
+    fctx.body.push({ op: "local.get", index: valLocal });
+    return { kind: "externref" };
+  }
+
+  // `__in_module_init ? __set_member_<name>(recv, val) : __extern_set_strict(recv, "prop", val)`.
+  // The flag-read `global.get` index is a PLACEHOLDER patched at finalize by
+  // `finalizeInModuleInitFlag` (after all import globals settle) — shared with the
+  // read-side gate via the same `ctx.inModuleInitFlagReads` list.
+  const flagGet = recordInModuleInitFlagRead(ctx);
+  fctx.body.push(flagGet);
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: [
+      { op: "local.get", index: objLocal } as Instr,
+      { op: "local.get", index: valLocal } as Instr,
+      { op: "call", funcIdx: setMemberIdx } as Instr,
+    ],
+    else: [
+      { op: "local.get", index: objLocal } as Instr,
+      ...stringConstantExternrefInstrs(ctx, propName),
+      { op: "local.get", index: valLocal } as Instr,
+      { op: "call", funcIdx: setIdx } as Instr,
+    ],
+  } as Instr);
 
   // `=` evaluates to the assigned value.
   fctx.body.push({ op: "local.get", index: valLocal });
@@ -3046,6 +3230,47 @@ export function compilePropertyAccess(
     if (isAnyOrUnknown) {
       const ctorIdn = tryEmitConstructorViaTag(ctx, fctx, expr, objType);
       if (ctorIdn !== undefined) return ctorIdn;
+    }
+  }
+
+  // (#3006) Standalone `<Builtin>.prototype.constructor` / `<instance>.constructor`
+  // → the GENUINE, identity-stable reified builtin-constructor object (supersedes
+  // the #2537 null-fold). Reading `.constructor` on a builtin extern-class receiver
+  // otherwise walks the inheritance chain (`compileExternPropertyGet`) to the
+  // `Object` base extern class — the only declarer of `constructor`,
+  // `importPrefix: "Object"` — and emits an `env::Object_get_constructor` host
+  // import (the leak the #2999 round-5 analysis flagged: 9 standalone passes for
+  // Set/WeakMap/WeakRef/WeakSet/RegExp/FinalizationRegistry/DisposableStack/
+  // SuppressedError plus instance forms). Route it to the SAME per-name
+  // `__builtin_ctor_<Name>` singleton the bare identifier now resolves to
+  // (identifiers.ts), so `<Builtin>.prototype.constructor === <Builtin>` is
+  // GENUINELY true (same object) and the swap-wrong-builtin cross-check
+  // `Set.prototype.constructor === Map` is GENUINELY false — NOT the null≡null
+  // tautology #2537 relied on.
+  //
+  // Placed HERE (before the builtin-specific `.prototype`/regexp/native-proto
+  // member paths further down) so it fires UNIFORMLY for every target builtin:
+  // routing `RegExp.prototype.constructor` through `compileExternPropertyGet` would
+  // never reach it (a RegExp-specific member path returns first). Gated on the
+  // receiver being a genuine ambient-declared builtin (`isExternalDeclaredClass` +
+  // the narrow `BUILTIN_CONSTRUCTOR_IDENTITY_NAMES` set) so a user `class Set {}`
+  // (not extern-declared) keeps its own `.constructor`. Standalone-only: gc/host
+  // keeps the real `Object_get_constructor` read (a genuine value there).
+  if (ctx.standalone && propName === "constructor") {
+    const builtinName = objType.getSymbol()?.name;
+    if (
+      builtinName !== undefined &&
+      isBuiltinConstructorIdentityName(builtinName) &&
+      isExternalDeclaredClass(objType, ctx.checker)
+    ) {
+      // Evaluate the receiver for its side effects (spec: the object expression is
+      // evaluated), then discard it — the constructor identity does not depend on
+      // the receiver instance.
+      const objResult = compileExpression(ctx, fctx, expr.expression);
+      if (objResult) {
+        fctx.body.push({ op: "drop" });
+      }
+      return emitBuiltinConstructorIdentity(ctx, fctx, builtinName);
     }
   }
 
@@ -3747,7 +3972,7 @@ export function compilePropertyAccess(
           // Resolve the getter funcIdx AFTER the throw branch settled imports.
           const getterIdx = ctx.funcMap.get(classMemberFuncKey(ctx, getterName))!;
           successInstrs.push({ op: "call", funcIdx: getterIdx });
-          const funcDef = ctx.mod.functions[getterIdx - ctx.numImportFuncs];
+          const funcDef = definedFuncAt(ctx, getterIdx);
           const typeDef = funcDef ? ctx.mod.types[funcDef.typeIdx] : undefined;
           resultKind =
             typeDef && typeDef.kind === "func" && typeDef.results.length > 0
@@ -3801,13 +4026,32 @@ export function compilePropertyAccess(
     return { kind: "externref" };
   }
 
-  // Handle globalThis.prop — compile as __extern_get(__get_globalThis(), key)
+  // Handle globalThis.prop — compile as __extern_get(<globalThis>, key)
   // globalThis is a genuine JS object (externref), not a WasmGC struct.
   // Without this handler, the TS type `typeof globalThis` resolves to a struct
   // type and struct.get on a real JS object traps with null deref.
+  //
+  // (#2988) Receiver resolution is dual-mode:
+  //   - host/gc: the `env::__get_globalThis` host import (unchanged).
+  //   - standalone/WASI (no-JS-host): the native `globalThis` `$Object`
+  //     singleton (#2996, `emitNativeGlobalThisObject`) — the SAME singleton that
+  //     `Object.defineProperty(globalThis, k, desc)` and `globalThis.x = v`
+  //     already write onto (both proven host-free), so reflective reads
+  //     round-trip host-free. This retires the last `env::__get_globalThis`
+  //     sole-import leak on the `globalThis.prop` member-read path. `__extern_get`
+  //     itself is already a DEFINED native helper in these modes (routed via
+  //     `ensureLateImport` → `ensureObjectRuntime`), so the read is fully
+  //     host-free. If the native object runtime is unavailable, falls through to
+  //     the host-import path.
   if (ts.isIdentifier(expr.expression) && expr.expression.text === "globalThis") {
-    const gtFuncIdx = ensureLateImport(ctx, "__get_globalThis", [], [{ kind: "externref" }]);
-    // Ensure __extern_get import exists
+    const nativeGlobal = ctx.standalone || ctx.wasi;
+    // Import registration order is preserved for the host/gc path
+    // (`__get_globalThis` then `__extern_get`, as it was before #2988) so that
+    // path stays byte-identical. In standalone/WASI both names resolve to DEFINED
+    // native helpers (no host import added, so ordering is immaterial), and the
+    // `__extern_get` lookup also brings up the object runtime (incl.
+    // `__new_plain_object`) that `emitNativeGlobalThisObject` needs.
+    const gtFuncIdx = nativeGlobal ? undefined : ensureLateImport(ctx, "__get_globalThis", [], [{ kind: "externref" }]);
     const getIdx = ensureLateImport(
       ctx,
       "__extern_get",
@@ -3816,19 +4060,31 @@ export function compilePropertyAccess(
     );
     flushLateImportShifts(ctx, fctx);
 
-    if (gtFuncIdx === undefined || getIdx === undefined) {
+    if (getIdx === undefined || (!nativeGlobal && gtFuncIdx === undefined)) {
       // Fallback: return null externref if imports couldn't be registered
       fctx.body.push({ op: "ref.null.extern" });
       return { kind: "externref" };
     }
 
-    // Emit: __extern_get(__get_globalThis(), key) -> externref
-    fctx.body.push({ op: "call", funcIdx: gtFuncIdx });
+    // Emit: __extern_get(<globalThis receiver>, key) -> externref
+    if (nativeGlobal) {
+      const nativeVt = emitNativeGlobalThisObject(ctx, fctx);
+      if (!nativeVt) {
+        // Native runtime unavailable — fall back to the host import.
+        const gt2 = ensureLateImport(ctx, "__get_globalThis", [], [{ kind: "externref" }]);
+        flushLateImportShifts(ctx, fctx);
+        if (gt2 === undefined) {
+          fctx.body.push({ op: "ref.null.extern" });
+          return { kind: "externref" };
+        }
+        fctx.body.push({ op: "call", funcIdx: gt2 });
+      }
+    } else {
+      fctx.body.push({ op: "call", funcIdx: gtFuncIdx! });
+    }
     addStringConstantGlobal(ctx, propName);
     fctx.body.push(...stringConstantExternrefInstrs(ctx, propName));
-    if (getIdx !== undefined) {
-      fctx.body.push({ op: "call", funcIdx: getIdx });
-    }
+    fctx.body.push({ op: "call", funcIdx: getIdx });
 
     // Coerce externref to expected type
     const accessType = ctx.checker.getTypeAtLocation(expr);
@@ -3913,8 +4169,12 @@ export function compilePropertyAccess(
       }
       const closure = ensureStandaloneBuiltinStaticMethodClosure(ctx, builtinName, propName, expr);
       if (closure) {
-        fctx.body.push({ op: "ref.func", funcIdx: closure.funcIdx });
-        fctx.body.push({ op: "struct.new", typeIdx: closure.type.typeIdx });
+        // (#2963) IDENTITY-STABLE reified builtin value: read via a module-level
+        // singleton so `Array.isArray === Array.isArray`, `Number.isInteger ===
+        // Number.isInteger`, etc. hold (a fresh `struct.new` per read gave two
+        // distinct instances → `!==`). Distinct builtins keep distinct singleton
+        // globals, so `Array.isArray !== Number.isInteger` still holds.
+        fctx.body.push(...pushBuiltinFnSingletonValueInstrs(ctx, closure));
         return closure.type;
       }
       reportUnsupportedStandaloneBuiltinValueRead(ctx, builtinName, propName);
@@ -5122,8 +5382,7 @@ export function compilePropertyAccess(
         // Use actual Wasm return type of the getter function — TS checker
         // may report 'any' (externref) for Object.defineProperty accessors
         // while the getter actually returns f64/i32/ref.
-        const getterLocalIdx = funcIdx - ctx.numImportFuncs;
-        const getterDef = getterLocalIdx >= 0 ? ctx.mod.functions[getterLocalIdx] : undefined;
+        const getterDef = definedFuncAt(ctx, funcIdx);
         if (getterDef) {
           const getterType = ctx.mod.types[getterDef.typeIdx];
           if (getterType?.kind === "func" && getterType.results.length > 0) {
@@ -6508,6 +6767,32 @@ export function compileElementAccess(
     return compileSuperElementAccess(ctx, fctx, expr);
   }
 
+  // (#2933) Reflective read of a `Math`/`Number` namespace static CONSTANT via a
+  // statically-resolvable computed key: `Math["PI"]`, `Number["MAX_SAFE_INTEGER"]`,
+  // `const k = "PI"; Math[k]`. Fold to the SAME `f64.const` the syntactic dot read
+  // (`Math.PI`) emits. Without this, standalone returns `0` for the computed form
+  // (the generic dynamic computed read cannot resolve a namespace member — the
+  // namespace has no `$Object` sidecar), and even host mode round-trips through
+  // `__extern_get`. Gated on a resolvable key + a real namespace-constant name, so
+  // non-constant keys (`Math[i]`) and non-constant members (`Math["max"]`) fall
+  // through unchanged. Observationally identical in host mode.
+  {
+    const nsRecv = skipTransparentExpressions(expr.expression);
+    if (ts.isIdentifier(nsRecv)) {
+      const nsName = nsRecv.text;
+      if (nsName === "Math" || nsName === "Number") {
+        const isShadowed = fctx.localMap.has(nsName) || (fctx.boxedCaptures?.has(nsName) ?? false);
+        if (!isShadowed) {
+          const key = resolveComputedKeyExpression(ctx, expr.argumentExpression);
+          if (key !== undefined) {
+            const folded = tryEmitBuiltinNamespaceConstantValue(fctx, nsName, key);
+            if (folded !== undefined) return folded;
+          }
+        }
+      }
+    }
+  }
+
   // #1482 — `process.env[<expr>]` under `--target wasi`. Mirrors the
   // PropertyAccess short-circuit but the key is a runtime expression, so we
   // compile it inline rather than using compileStringLiteral. The key must be
@@ -6785,7 +7070,24 @@ export function compileElementAccessBody(
     // already ref.tests `$ObjVec`); numeric index only (a string key is a genuine
     // property, never a vec index).
     if (!ctx.standalone && ctx.vecTypeMap.size > 0 && isNumericIndexExpression(ctx, expr.argumentExpression)) {
-      const vecGetIdx = ctx.funcMap.get("__vec_get");
+      // recv externref is on the stack → recvLocal (allocated FIRST so the local
+      // numbering of recv / idx / anyTmp is unchanged from before #3007).
+      const recvLocal = allocLocal(fctx, `__nve_recv_${fctx.locals.length}`, { kind: "externref" });
+      fctx.body.push({ op: "local.set", index: recvLocal } as Instr);
+      // (#3007) index → f64 → idxLocal, compiled BEFORE the fast-path funcIdxs are
+      // captured. A computed index (`a[a.length - 1]`) lowers its own dynamic
+      // reads, which can register late imports and shift every DEFINED-function
+      // index — including `__vec_get`. The pre-#3007 order captured `__vec_get`
+      // BEFORE this compile, so the index's imports left it stale; the desynced
+      // `then` arm emitted an invalid instruction stream (`f64.convert_i32_s` on
+      // the externref receiver → "expected i32, found externref", invalid Wasm).
+      // Resolving the imports and `__vec_get` AFTER the index compile (single
+      // flush) keeps every funcIdx live through emission. For a non-import-adding
+      // index (e.g. a literal) the import order is identical, so valid output is
+      // byte-for-byte unchanged.
+      compileExpression(ctx, fctx, expr.argumentExpression, { kind: "f64" });
+      const idxLocal = allocLocal(fctx, `__nve_idx_${fctx.locals.length}`, { kind: "f64" });
+      fctx.body.push({ op: "local.set", index: idxLocal } as Instr);
       const extGetIdx = ensureLateImport(
         ctx,
         "__extern_get",
@@ -6794,15 +7096,8 @@ export function compileElementAccessBody(
       );
       const boxNumIdx = ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
       flushLateImportShifts(ctx, fctx);
-      const vgIdx = vecGetIdx ?? reserveVecMethodHelper(ctx, "get");
+      const vgIdx = ctx.funcMap.get("__vec_get") ?? reserveVecMethodHelper(ctx, "get");
       if (vgIdx !== undefined && extGetIdx !== undefined && boxNumIdx !== undefined) {
-        // recv externref is on the stack → recvLocal.
-        const recvLocal = allocLocal(fctx, `__nve_recv_${fctx.locals.length}`, { kind: "externref" });
-        fctx.body.push({ op: "local.set", index: recvLocal } as Instr);
-        // index → f64 → idxLocal (numeric index; reused as i32 for vec, boxed for host).
-        compileExpression(ctx, fctx, expr.argumentExpression, { kind: "f64" });
-        const idxLocal = allocLocal(fctx, `__nve_idx_${fctx.locals.length}`, { kind: "f64" });
-        fctx.body.push({ op: "local.set", index: idxLocal } as Instr);
         // isVec = OR of ref.test over the registered vec carriers.
         const anyTmp = allocLocal(fctx, `__nve_any_${fctx.locals.length}`, { kind: "anyref" } as ValType);
         fctx.body.push({ op: "local.get", index: recvLocal } as Instr);
@@ -6837,6 +7132,21 @@ export function compileElementAccessBody(
         } as Instr);
         return { kind: "externref" };
       }
+      // (#3007) Defensive fallback — recv/idx were consumed into locals above, so
+      // if the fast-path imports are somehow unavailable we must not fall through
+      // to the generic path (which expects recv on the stack). Emit the generic
+      // host read from the stored locals. Unreachable in host mode (the box/extern
+      // imports are always registerable), so this changes no valid output.
+      fctx.body.push({ op: "local.get", index: recvLocal } as Instr);
+      if (boxNumIdx !== undefined && extGetIdx !== undefined) {
+        fctx.body.push({ op: "local.get", index: idxLocal } as Instr);
+        fctx.body.push({ op: "call", funcIdx: boxNumIdx } as Instr);
+        fctx.body.push({ op: "call", funcIdx: extGetIdx } as Instr);
+        return { kind: "externref" };
+      }
+      fctx.body.push({ op: "drop" } as Instr);
+      fctx.body.push({ op: "ref.null.extern" } as Instr);
+      return { kind: "externref" };
     }
     // (#2166 PR-C2) A NUMERIC index on a standalone externref must go through
     // `__extern_get_idx(v, f64)`, not the string-keyed `__extern_get`. The
@@ -7027,8 +7337,7 @@ export function compileElementAccessBody(
             if (funcIdx !== undefined) {
               fctx.body.push({ op: "call", funcIdx });
               // Use actual Wasm return type of the getter
-              const elGetterLocalIdx = funcIdx - ctx.numImportFuncs;
-              const elGetterDef = elGetterLocalIdx >= 0 ? ctx.mod.functions[elGetterLocalIdx] : undefined;
+              const elGetterDef = definedFuncAt(ctx, funcIdx);
               if (elGetterDef) {
                 const elGetterType = ctx.mod.types[elGetterDef.typeIdx];
                 if (elGetterType?.kind === "func" && elGetterType.results.length > 0) {

@@ -27,6 +27,21 @@
  */
 import { coercionPlan } from "./coercion-plan.js";
 import type { BlockType, FuncTypeDef, Instr, TypeDef, ValType, WasmFunction, WasmModule } from "../ir/types.js";
+import { STABLE_FUNC_BASE, absoluteFuncIndexCached } from "../emit/resolve-layout.js"; // (#1916 S3)
+
+/**
+ * (#2934) Widen a packed i8/i16 STORAGE type to the i32 that actually lives on
+ * the Wasm value stack. `array.get_u`/`array.get_s` (and `struct.get_s/_u`)
+ * zero/sign-extend packed elements to i32 — the packed kind itself never exists
+ * as a stack value. The type-stack simulation must model the widened type:
+ * propagating the raw packed kind poisons downstream repairs (the struct.new
+ * arg-coercion fixup materializes stack types into `$sn_tmp` temp locals, and a
+ * local declared `i8` is invalid Wasm — "packed storage type is not valid in a
+ * value position").
+ */
+function widenPackedToI32(t: ValType): ValType {
+  return t.kind === "i8" || t.kind === "i16" ? { kind: "i32" } : t;
+}
 
 /** Sentinel: the instruction sequence is unreachable (after return/br/throw/unreachable). */
 const UNREACHABLE = -999;
@@ -69,7 +84,14 @@ export type FixupKind =
   | "branch-type-cast" // branch result externref→ref/ref_null via any.convert_extern + ref.cast_null
   | "call-arg-coerce" // call argument coerced to the callee's declared param type
   | "struct-field-coerce" // struct.new field value coerced to the field's declared type
-  | "local-set-coerce"; // local.set/local.tee value coerced to the local's declared type
+  | "local-set-coerce" // local.set/local.tee value coerced to the local's declared type
+  // (#2140) NOT a repair — a detected-but-unbridgeable branch type mismatch.
+  // The pass inserts nothing; the module WILL fail WebAssembly.validate. The
+  // event makes the failure loud and located instead of an opaque validator
+  // offset; hard compile error under JS2WASM_STRICT_BALANCE=error; corpus
+  // baseline pins it at 0. Unconditional-throw promotion is the staged
+  // follow-up (see plan/issues/2140-fixbranchtype-coerce-or-throw.md).
+  | "branch-type-unfixable";
 
 /** A single located fixup the pass applied while repairing emitter output. */
 export interface FixupEvent {
@@ -108,6 +130,7 @@ export function summarizeFixups(events: readonly FixupEvent[]): Record<FixupKind
     "call-arg-coerce": 0,
     "struct-field-coerce": 0,
     "local-set-coerce": 0,
+    "branch-type-unfixable": 0,
   };
   for (const e of events) counts[e.kind]++;
   return counts;
@@ -880,7 +903,15 @@ function fixBranchType(
     const plan = coercionPlan(fromVT, expectedType, { boxNumberIdx, unboxNumberIdx });
     if (plan) {
       body.push(...plan.instrs);
-      recordFixup("branch-type-coerce", `coerced branch result ${produced} → ${expectedType.kind}`); // #1918
+      // (#2140) Propagate the plan's lossiness — the lossy rows (funcref→
+      // externref; any-hierarchy→numeric without an unbox helper) were being
+      // mis-recorded as clean coercions, hiding them from the strict-mode
+      // LOSSY marker and the audit trail.
+      recordFixup(
+        "branch-type-coerce",
+        `coerced branch result ${produced} → ${expectedType.kind}`,
+        plan.lossy === true,
+      ); // #1918
       return 1;
     }
   }
@@ -897,6 +928,33 @@ function fixBranchType(
     return 1;
   }
 
+  // (#2140 note) There is deliberately NO ref/eqref → concrete-ref cast arm
+  // here: `typesCompatible` assumes ref/eqref are compatible with any expected
+  // ref/ref_null (the kind-string inference carries no typeIdx to know
+  // better), so such pairs never reach this function, and `inferLastType`
+  // never yields "anyref" (any.convert_extern is classified "ref"). The
+  // richer per-instruction contexts (call args / local.set), whose
+  // `inferInstrType` DOES read local/global types, get the eqref/anyref
+  // rows from the shared coercionPlan instead.
+
+  // (#2140) Unfixable: the produced kind is KNOWN-incompatible with the block
+  // type and no coercion row / cast arm bridges it (e.g. funcref→f64,
+  // numeric→funcref). Leaving it silently meant the module failed
+  // `WebAssembly.validate` later with an opaque offset-only error. Record the
+  // located event (lossy — the module is about to be invalid): it surfaces in
+  // the per-compile fixup summary, becomes a hard error under
+  // `JS2WASM_STRICT_BALANCE=error`, and is ratcheted at 0 by the corpus gate.
+  // Promotion to an unconditional compile error is the staged follow-up once
+  // the corpus row + a CI test262 delta prove 0 occurrences (`inferLastType`
+  // is heuristic; a mis-inference here is a no-op today but would be a
+  // spurious compile failure under an unconditional throw).
+  recordFixup(
+    "branch-type-unfixable",
+    `branch result ${produced} is incompatible with block type ${expectedType.kind}` +
+      (expectedType.kind === "ref" || expectedType.kind === "ref_null" ? ` #${expectedType.typeIdx}` : "") +
+      ` and no coercion bridges it (module will fail validation)`,
+    true,
+  );
   return 0;
 }
 
@@ -1150,6 +1208,7 @@ function buildFuncSigs(mod: WasmModule): FuncSigInfo {
   }
 
   // Then defined functions
+  const numImports = idx;
   for (const func of mod.functions) {
     const ft = resolveFuncType(mod.types, func.typeIdx);
     if (ft) {
@@ -1157,6 +1216,17 @@ function buildFuncSigs(mod: WasmModule): FuncSigInfo {
       map.set(idx, { params: ft.params.length, results: ft.results.length, resultType });
     }
     idx++;
+  }
+
+  // (#1916 S3) Register stable-regime ALIASES: a `call` immediate may carry a
+  // stable handle (STABLE_FUNC_BASE + ordinal) instead of an absolute index.
+  // Aliasing the same sig record under the handle key makes every
+  // `sigs.get(funcIdx)` read site dual-regime with no per-site changes.
+  for (let ordinal = 0; ordinal < mod.funcOrdinalToPosition.length; ordinal++) {
+    const pos = mod.funcOrdinalToPosition[ordinal]!;
+    if (Number.isNaN(pos)) continue; // minted, never pushed — resolution throws elsewhere
+    const sig = map.get(numImports + pos);
+    if (sig) map.set(STABLE_FUNC_BASE + ordinal, sig);
   }
 
   return map;
@@ -1170,6 +1240,8 @@ function buildFuncSigs(mod: WasmModule): FuncSigInfo {
  * Resolve full param types for a function by index.
  */
 function getFullParamTypes(mod: WasmModule, funcIdx: number, numImports: number): ValType[] | null {
+  // (#1916 S3) normalize a possibly-stable handle to the absolute index first.
+  funcIdx = absoluteFuncIndexCached(mod, numImports, funcIdx);
   if (funcIdx < numImports) {
     let importFuncCount = 0;
     for (const imp of mod.imports) {
@@ -1286,14 +1358,16 @@ function inferInstrType(
     const fieldIdx = (instr as any).fieldIdx as number;
     const td = types[typeIdx];
     if (td?.kind === "struct" && td.fields[fieldIdx]) {
-      return td.fields[fieldIdx]!.type;
+      // Packed i8/i16 fields arrive on the stack widened to i32 (#2934).
+      return widenPackedToI32(td.fields[fieldIdx]!.type);
     }
     return null;
   }
   if (op === "array.get" || op === "array.get_s" || op === "array.get_u") {
     const typeIdx = (instr as any).typeIdx as number;
     const td = types[typeIdx];
-    if (td?.kind === "array") return td.element;
+    // Packed i8/i16 elements arrive on the stack widened to i32 (#2934).
+    if (td?.kind === "array") return widenPackedToI32(td.element);
     return null;
   }
   if (op === "ref.null") {
@@ -1324,7 +1398,7 @@ function inferInstrType(
   }
 
   if (op === "call") {
-    const funcIdx = (instr as any).funcIdx as number;
+    const funcIdx = absoluteFuncIndexCached(mod, numImports, (instr as any).funcIdx as number); // (#1916 S3)
     const pt = getFullParamTypes(mod, funcIdx, numImports);
     // Need result types, not params
     if (funcIdx < numImports) {
@@ -1909,7 +1983,9 @@ function fixStructNewFieldCoercion(
               const tempLocals: number[] = [];
               const paramCount = resolveFuncType(types, func.typeIdx)?.params.length ?? 0;
               for (let fi = 0; fi < numFields; fi++) {
-                const actualType = fieldTypes[fi] ?? fields[fi]!.type;
+                // Widen defensively: the declared-field-type fallback can be a
+                // packed i8/i16, which is invalid as a local type (#2934).
+                const actualType = widenPackedToI32(fieldTypes[fi] ?? fields[fi]!.type);
                 const localIdx = paramCount + func.locals.length;
                 func.locals.push({ name: `$sn_tmp_${localIdx}`, type: actualType });
                 // Update localTypes for future inference
@@ -2225,7 +2301,8 @@ function updateTypeStack(
     const fieldIdx = (instr as any).fieldIdx as number;
     const td = types[typeIdx];
     if (td?.kind === "struct" && (td as any).fields[fieldIdx]) {
-      stack.push((td as any).fields[fieldIdx].type);
+      // Packed i8/i16 fields arrive on the stack widened to i32 (#2934).
+      stack.push(widenPackedToI32((td as any).fields[fieldIdx].type));
     } else {
       stack.push(null);
     }
@@ -2246,7 +2323,8 @@ function updateTypeStack(
     const typeIdx = (instr as any).typeIdx as number;
     const td = types[typeIdx];
     if (td?.kind === "array") {
-      stack.push(td.element);
+      // Packed i8/i16 elements arrive on the stack widened to i32 (#2934).
+      stack.push(widenPackedToI32(td.element));
     } else {
       stack.push(null);
     }
@@ -2299,7 +2377,7 @@ function updateTypeStack(
 
   // call: pop params, push results
   if (op === "call") {
-    const funcIdx = (instr as any).funcIdx as number;
+    const funcIdx = absoluteFuncIndexCached(mod, numImports, (instr as any).funcIdx as number); // (#1916 S3)
     const sig = sigs.get(funcIdx);
     if (sig) {
       for (let i = 0; i < sig.params; i++) stack.pop();
@@ -2405,17 +2483,35 @@ export function stackBalance(mod: WasmModule): number {
   // #1918 — reset the fixup-telemetry collector for this run.
   fixupEvents = [];
 
-  // Count import functions and find __box_number/__unbox_number indices
+  // Count import functions.
   let numImports = 0;
-  let boxNumberIdx: number | null = null;
-  let unboxNumberIdx: number | null = null;
   for (const imp of mod.imports) {
-    if (imp.desc.kind === "func") {
-      if (imp.name === "__box_number") boxNumberIdx = numImports;
-      if (imp.name === "__unbox_number") unboxNumberIdx = numImports;
-      numImports++;
-    }
+    if (imp.desc.kind === "func") numImports++;
   }
+  // (#2140) Resolve the box/unbox helper indices. The helpers may be env
+  // imports (JS-host lane) OR DEFINED functions (standalone/WASI — the
+  // Wasm-native UNION helpers, see late-imports.ts). The previous import-only
+  // scan left them null in the host-less lane, so every coercionPlan
+  // box/unbox row silently degraded to its fall-through (no coerce) or lossy
+  // arm exactly where no host could absorb the damage. Imports win on the
+  // impossible-in-practice duplicate; defined idx = numImports + position.
+  // (Single name-literal per helper — the #2108 drift gate counts quoted
+  // coercion-vocabulary occurrences per file.)
+  const findFuncByName = (helperName: string): number | null => {
+    let importIdx = 0;
+    for (const imp of mod.imports) {
+      if (imp.desc.kind === "func") {
+        if (imp.name === helperName) return importIdx;
+        importIdx++;
+      }
+    }
+    for (let i = 0; i < mod.functions.length; i++) {
+      if (mod.functions[i]!.name === helperName) return numImports + i;
+    }
+    return null;
+  };
+  const boxNumberIdx: number | null = findFuncByName("__box_number");
+  const unboxNumberIdx: number | null = findFuncByName("__unbox_number");
 
   // Build global types array
   const globalTypes: ValType[] = [];

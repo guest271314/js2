@@ -11,12 +11,22 @@ import { coercionPlan } from "./coercion-plan.js";
 import { boxToAny } from "./value-tags.js";
 import { allocLocal, allocTempLocal, releaseTempLocal } from "./context/locals.js";
 import type { ClosureInfo, CodegenContext, FunctionContext, OptionalParamInfo } from "./context/types.js";
+import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js";
 import { addUnionImports, ensureAnyHelpers, ensureAnyToExternHelper, isAnyValue } from "./index.js";
 import { ensureAnyToStringHelper, stringConstantExternrefInstrs } from "./native-strings.js";
+import { emitThrowTypeError } from "./expressions/helpers.js";
+import { ensureNativeArrayFromIterN } from "./iterator-native.js";
 import { emitNativeNumberFormat } from "./number-format-native.js";
 import { addStringConstantGlobal } from "./registry/imports.js";
 import { addFuncType, getArrTypeIdxFromVec } from "./registry/types.js";
-import { ensureLateImport, flushLateImportShifts, materializeStructAsObject, registerCoerceType } from "./shared.js";
+import {
+  elemGetOp,
+  ensureLateImport,
+  flushLateImportShifts,
+  materializeStructAsObject,
+  registerCoerceType,
+  unpackedElemType,
+} from "./shared.js";
 
 /**
  * Emit a guarded ref.cast: use ref.test to check if the cast will succeed.
@@ -555,8 +565,8 @@ export function buildVecFromExternMaterializer(ctx: CodegenContext, vecTypeIdx: 
   ];
 
   const typeIdx = addFuncType(ctx, [{ kind: "externref" }], [resultType], "$vec_from_extern_type");
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-  ctx.mod.functions.push({
+  const funcIdx = mintDefinedFunc(ctx);
+  pushDefinedFunc(ctx, funcIdx, {
     name,
     typeIdx,
     locals: fctx.locals,
@@ -589,16 +599,29 @@ function buildTupleFromIterableFallback(
   if (externLocal === undefined) {
     return [{ op: "ref.null", typeIdx: tupleTypeIdx } as Instr];
   }
+  // (#2995) In host-free targets (standalone / WASI) the host `__array_from_iter`
+  // import is unavailable — emitting it leaks `env::__array_from_iter` and breaks
+  // zero-import instantiation. Materialize through the NATIVE `__array_from_iter_n`
+  // instead (registered by `ensureNativeArrayFromIterN`, #2904), passing `-1` for
+  // an unbounded drain that is byte-semantics-equivalent to the host
+  // `__array_from_iter` (fully drain the iterable, then index each tuple slot via
+  // `__extern_get_idx`). Host mode keeps the JS-host `__array_from_iter` path
+  // unchanged (byte-inert). Mirrors the native ObjVec steering in
+  // `buildVecFromExternref`.
+  const useNativeFromIter = ctx.standalone || ctx.wasi;
+  if (useNativeFromIter) ensureNativeArrayFromIterN(ctx);
   // Register all helpers first so every ensureLateImport shift completes
   // before we freeze funcIdx values — otherwise a later ensureLateImport
   // could shift a previously-captured funcIdx and produce the wrong call.
-  ensureLateImport(ctx, "__array_from_iter", [{ kind: "externref" }], [{ kind: "externref" }]);
+  if (!useNativeFromIter) {
+    ensureLateImport(ctx, "__array_from_iter", [{ kind: "externref" }], [{ kind: "externref" }]);
+  }
   ensureLateImport(ctx, "__extern_get_idx", [{ kind: "externref" }, { kind: "f64" }], [{ kind: "externref" }]);
   ensureLateImport(ctx, "__extern_is_undefined", [{ kind: "externref" }], [{ kind: "i32" }]);
   ensureLateImport(ctx, "__unbox_number", [{ kind: "externref" }], [{ kind: "f64" }]);
   ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
   flushLateImportShifts(ctx, fctx);
-  const iterIdx = ctx.funcMap.get("__array_from_iter");
+  const iterIdx = useNativeFromIter ? ctx.funcMap.get("__array_from_iter_n") : ctx.funcMap.get("__array_from_iter");
   const getIdxFn = ctx.funcMap.get("__extern_get_idx");
   const isUndefFn = ctx.funcMap.get("__extern_is_undefined");
   const unboxIdx = ctx.funcMap.get("__unbox_number");
@@ -640,9 +663,12 @@ function buildTupleFromIterableFallback(
     }
   }
 
-  // Result shape: if (isNull || isUndefined) then ref.null else build tuple
+  // Result shape: if (isNull || isUndefined) then ref.null else build tuple.
+  // Native `__array_from_iter_n(externref, f64)` takes a count arg — pass `-1`
+  // (unbounded drain, byte-semantics-equivalent to the host `__array_from_iter`).
   const buildTupleInstrs: Instr[] = [
     { op: "local.get", index: externLocal } as Instr,
+    ...(useNativeFromIter ? [{ op: "f64.const", value: -1 } as Instr] : []),
     { op: "call", funcIdx: iterIdx } as Instr,
     { op: "local.set", index: matLocal } as Instr,
     ...fieldExtracts,
@@ -736,6 +762,15 @@ function buildTupleFromExternref(
       { op: "local.set", index: lenLocal } as Instr,
     ];
 
+    // (#2934) Packed i8/i16 vec elements (byte/short typed arrays) read with
+    // `array.get_u`/`get_s` and live on the stack widened to i32 — a plain
+    // `array.get` on a packed array and a packed `if` result type are both
+    // invalid Wasm. This chain tests every vec type at runtime (the shared
+    // i8_byte vec serves Int8Array AND Uint8Array), so no view name exists
+    // here — use the storage-kind heuristic for the read op.
+    const readType = unpackedElemType(elemType);
+    const readOp = elemGetOp(elemType, undefined);
+
     // For each tuple field, bounds-checked read from the vec
     for (let i = 0; i < tupleFields.length; i++) {
       const fieldType = tupleFields[i]!;
@@ -744,10 +779,10 @@ function buildTupleFromExternref(
       const readInstrs: Instr[] = [
         { op: "local.get", index: dataLocal } as Instr,
         { op: "i32.const", value: i } as Instr,
-        { op: "array.get", typeIdx: arrTypeIdx } as Instr,
+        { op: readOp, typeIdx: arrTypeIdx } as Instr,
       ];
 
-      const defaultInstrs: Instr[] = defaultValueInstrs(elemType);
+      const defaultInstrs: Instr[] = defaultValueInstrs(readType);
 
       thenInstrs.push(
         { op: "i32.const", value: i } as Instr,
@@ -755,44 +790,54 @@ function buildTupleFromExternref(
         { op: "i32.lt_u" } as Instr,
         {
           op: "if",
-          blockType: { kind: "val" as const, type: elemType },
+          blockType: { kind: "val" as const, type: readType },
           then: readInstrs,
           else: defaultInstrs,
         } as Instr,
       );
 
+      // (#2934) A packed element arrives as the widened i32; lift it to f64 (a
+      // JS number) so the generic coercion arms below (which only know
+      // f64/externref/ref) apply. `convert_i32_s` is correct for both
+      // signednesses — get_u/get_s already produced the small-range i32.
+      let effElemType = elemType;
+      if (readType.kind === "i32" && elemType.kind !== "i32") {
+        thenInstrs.push({ op: "f64.convert_i32_s" } as Instr);
+        effElemType = { kind: "f64" };
+      }
+
       // Coerce element type to tuple field type if needed
       if (
-        elemType.kind !== fieldType.kind ||
-        ((elemType.kind === "ref" || elemType.kind === "ref_null") &&
+        effElemType.kind !== fieldType.kind ||
+        ((effElemType.kind === "ref" || effElemType.kind === "ref_null") &&
           (fieldType.kind === "ref" || fieldType.kind === "ref_null") &&
-          (elemType as { typeIdx: number }).typeIdx !== (fieldType as { typeIdx: number }).typeIdx)
+          (effElemType as { typeIdx: number }).typeIdx !== (fieldType as { typeIdx: number }).typeIdx)
       ) {
         // Ensure __box_number / __unbox_number are imported before use (#822)
         if (
-          (elemType.kind === "f64" && fieldType.kind === "externref") ||
-          (elemType.kind === "externref" && fieldType.kind === "f64")
+          (effElemType.kind === "f64" && fieldType.kind === "externref") ||
+          (effElemType.kind === "externref" && fieldType.kind === "f64")
         ) {
           addUnionImports(ctx);
         }
         // Inline coercion: most common case is f64 → externref (box) or externref → f64 (unbox)
-        if (elemType.kind === "f64" && fieldType.kind === "externref") {
+        if (effElemType.kind === "f64" && fieldType.kind === "externref") {
           const boxIdx = ctx.funcMap.get("__box_number");
           if (boxIdx !== undefined) {
             thenInstrs.push({ op: "call", funcIdx: boxIdx } as Instr);
           }
-        } else if (elemType.kind === "externref" && fieldType.kind === "f64") {
+        } else if (effElemType.kind === "externref" && fieldType.kind === "f64") {
           const unboxIdx = ctx.funcMap.get("__unbox_number");
           if (unboxIdx !== undefined) {
             thenInstrs.push({ op: "call", funcIdx: unboxIdx } as Instr);
           }
-        } else if (elemType.kind === "f64" && fieldType.kind === "f64") {
+        } else if (effElemType.kind === "f64" && fieldType.kind === "f64") {
           // same type, no coercion needed
-        } else if (elemType.kind === "externref" && fieldType.kind === "externref") {
+        } else if (effElemType.kind === "externref" && fieldType.kind === "externref") {
           // same type, no coercion needed
-        } else if ((elemType.kind === "ref" || elemType.kind === "ref_null") && fieldType.kind === "externref") {
+        } else if ((effElemType.kind === "ref" || effElemType.kind === "ref_null") && fieldType.kind === "externref") {
           thenInstrs.push({ op: "extern.convert_any" } as Instr);
-        } else if (elemType.kind === "externref" && (fieldType.kind === "ref" || fieldType.kind === "ref_null")) {
+        } else if (effElemType.kind === "externref" && (fieldType.kind === "ref" || fieldType.kind === "ref_null")) {
           const toRefIdx = (fieldType as { typeIdx: number }).typeIdx;
           thenInstrs.push({ op: "any.convert_extern" } as Instr, { op: "ref.cast_null", typeIdx: toRefIdx } as Instr);
         }
@@ -975,6 +1020,13 @@ function emitVecToTupleBody(
   fctx.body.push({ op: "struct.get", typeIdx: fromTypeIdx, fieldIdx: 0 });
   fctx.body.push({ op: "local.set", index: lenLocal });
 
+  // (#2934) Packed i8/i16 vec elements read with `array.get_u`/`get_s` and
+  // arrive on the stack widened to i32 — a plain `array.get` on a packed array
+  // and a packed `if` result type are both invalid Wasm. No view name is
+  // available on this generic coercion path, so use the storage-kind heuristic.
+  const readType = unpackedElemType(elemType);
+  const readOp = elemGetOp(elemType, undefined);
+
   // For each tuple field, read from the vec's data array with bounds check and coerce
   for (let i = 0; i < tupleFields.length; i++) {
     const fieldType = tupleFields[i]!;
@@ -987,22 +1039,23 @@ function emitVecToTupleBody(
     const thenInstrs: Instr[] = [
       { op: "local.get", index: dataLocal } as Instr,
       { op: "i32.const", value: i } as Instr,
-      { op: "array.get", typeIdx: arrTypeIdx } as Instr,
+      { op: readOp, typeIdx: arrTypeIdx } as Instr,
     ];
-    const elseInstrs: Instr[] = defaultValueInstrs(elemType);
+    const elseInstrs: Instr[] = defaultValueInstrs(readType);
 
     fctx.body.push({
       op: "if",
-      blockType: { kind: "val" as const, type: elemType },
+      blockType: { kind: "val" as const, type: readType },
       then: thenInstrs,
       else: elseInstrs,
     } as Instr);
 
-    // Coerce the vec element type to the tuple field type if needed
-    if (elemType.kind !== fieldType.kind) {
-      coerceType(ctx, fctx, elemType, fieldType);
+    // Coerce the READ value's type (widened i32 for packed elements, #2934) to
+    // the tuple field type if needed
+    if (readType.kind !== fieldType.kind) {
+      coerceType(ctx, fctx, readType, fieldType);
     } else if (
-      (elemType.kind === "ref" || elemType.kind === "ref_null") &&
+      (readType.kind === "ref" || readType.kind === "ref_null") &&
       (fieldType.kind === "ref" || fieldType.kind === "ref_null")
     ) {
       const fromRefIdx = (elemType as { typeIdx: number }).typeIdx;
@@ -1072,11 +1125,17 @@ function emitVecToVecBody(
   // dstArr[i] = coerce(srcArr[i])
   fctx.body.push({ op: "local.get", index: dstArrLocal });
   fctx.body.push({ op: "local.get", index: iLocal });
-  // Read source element
+  // Read source element. (#2934 1c) A packed i8/i16 source (byte/short typed
+  // array backing) must read with `array.get_u`/`get_s` — a plain `array.get`
+  // on a packed array is invalid Wasm. No view name exists on this generic
+  // coercion path (the i8_byte array type is shared by Int8Array AND
+  // Uint8Array), so use the storage-kind heuristic; the read value is the
+  // widened i32.
   fctx.body.push({ op: "local.get", index: srcLocal });
   fctx.body.push({ op: "struct.get", typeIdx: fromTypeIdx, fieldIdx: 1 });
   fctx.body.push({ op: "local.get", index: iLocal });
-  fctx.body.push({ op: "array.get", typeIdx: srcVec.arrTypeIdx });
+  fctx.body.push({ op: elemGetOp(srcVec.elemType, undefined), typeIdx: srcVec.arrTypeIdx } as Instr);
+  const readElemType = unpackedElemType(srcVec.elemType);
   // Coerce element type. Important: comparing only `.kind` is insufficient
   // when both sides are `ref` / `ref_null` to DIFFERENT struct types — e.g.
   // a vec of `IncompatibleKeyError` being copied into a vec of `__anon_24`
@@ -1084,15 +1143,15 @@ function emitVecToVecBody(
   // `kind: "ref"`, so the old check skipped the coercion and the
   // `array.set` below saw a value of the wrong element type, failing Wasm
   // validation. Force a coercion when the typeIdx differs too.
-  const srcKind = srcVec.elemType.kind;
+  const srcKind = readElemType.kind;
   const dstKind = dstVec.elemType.kind;
   const srcRefIdx =
-    srcKind === "ref" || srcKind === "ref_null" ? (srcVec.elemType as { typeIdx: number }).typeIdx : undefined;
+    srcKind === "ref" || srcKind === "ref_null" ? (readElemType as { typeIdx: number }).typeIdx : undefined;
   const dstRefIdx =
     dstKind === "ref" || dstKind === "ref_null" ? (dstVec.elemType as { typeIdx: number }).typeIdx : undefined;
   const needsCoerce = srcKind !== dstKind || srcRefIdx !== dstRefIdx;
   if (needsCoerce) {
-    coerceType(ctx, fctx, srcVec.elemType, dstVec.elemType);
+    coerceType(ctx, fctx, readElemType, dstVec.elemType);
   }
   // Write to destination
   fctx.body.push({ op: "array.set", typeIdx: dstVec.arrTypeIdx });
@@ -1798,8 +1857,7 @@ export function coerceType(
         pushStringHint(ctx, fctx, hint);
         fctx.body.push({ op: "call", funcIdx: toPrimFuncIdx });
         // Coerce result to externref if needed
-        const funcDefIdx = toPrimFuncIdx - ctx.numImportFuncs;
-        const funcDef = funcDefIdx >= 0 ? ctx.mod.functions[funcDefIdx] : undefined;
+        const funcDef = definedFuncAt(ctx, toPrimFuncIdx);
         const funcType = funcDef ? ctx.mod.types[funcDef.typeIdx] : undefined;
         // Default to "externref" for imports (funcDefIdx < 0) which typically return externref
         const retKind = (funcType?.kind === "func" && funcType.results?.[0]?.kind) || "externref";
@@ -2061,7 +2119,7 @@ export function coerceType(
         pushStringHint(ctx, fctx, hint);
         fctx.body.push({ op: "call", funcIdx: toPrimFuncIdx });
         // Coerce result to f64 if needed
-        const funcDef = ctx.mod.functions[toPrimFuncIdx - ctx.numImportFuncs];
+        const funcDef = definedFuncAt(ctx, toPrimFuncIdx);
         const funcType = funcDef ? ctx.mod.types[funcDef.typeIdx] : undefined;
         const retKind = (funcType?.kind === "func" && funcType.results?.[0]?.kind) || "f64";
         if (retKind === "i32") {
@@ -2090,8 +2148,7 @@ export function coerceType(
             // Call ClassName_valueOf(self) — self is already on stack
             fctx.body.push({ op: "call", funcIdx: valueOfFuncIdx });
             // Check return type — if not f64, convert to f64
-            const voFuncDefIdx = valueOfFuncIdx - ctx.numImportFuncs;
-            const voFuncDef = voFuncDefIdx >= 0 ? ctx.mod.functions[voFuncDefIdx] : undefined;
+            const voFuncDef = definedFuncAt(ctx, valueOfFuncIdx);
             const funcType = voFuncDef ? ctx.mod.types[voFuncDef.typeIdx] : undefined;
             if (funcType?.kind === "func" && funcType.results?.[0]?.kind === "i32") {
               fctx.body.push({ op: "f64.convert_i32_s" });
@@ -2398,7 +2455,7 @@ export function coerceType(
           // function rather than a closure stored in the struct field.
           const standaloneValueOf = ctx.funcMap.get(`${name}_valueOf`);
           if (standaloneValueOf !== undefined) {
-            const funcType = ctx.mod.types[ctx.mod.functions[standaloneValueOf - ctx.numImportFuncs]?.typeIdx ?? -1];
+            const funcType = ctx.mod.types[definedFuncAt(ctx, standaloneValueOf)?.typeIdx ?? -1];
             const retKind = funcType?.kind === "func" ? funcType.results?.[0]?.kind : undefined;
             // (#1525b §7.1.1.1 step 6) For object-ref return, we must re-route
             // through the host helper using the ORIGINAL struct. Save it before
@@ -2595,7 +2652,7 @@ function tryToStringFallback(
   const toStrFuncIdx = ctx.funcMap.get(`${structName}_toString`);
   if (toStrFuncIdx !== undefined) {
     fctx.body.push({ op: "call", funcIdx: toStrFuncIdx });
-    const funcType = ctx.mod.types[ctx.mod.functions[toStrFuncIdx - ctx.numImportFuncs]?.typeIdx ?? -1];
+    const funcType = ctx.mod.types[definedFuncAt(ctx, toStrFuncIdx)?.typeIdx ?? -1];
     const retKind = funcType?.kind === "func" ? funcType.results?.[0]?.kind : undefined;
     emitToStringResultToF64ByKind(ctx, fctx, retKind);
     return true;
@@ -2652,6 +2709,19 @@ export function tryStructToString(ctx: CodegenContext, fctx: FunctionContext, fr
   // (which handles AnyValue boxes + AnyString passthrough). A bare ref_null
   // string is cast to the concrete $AnyString so the value type is exact.
   const normaliseToString = (retKind: string | undefined): void => {
+    // (#2934 slice 3) A dispatched method whose Wasm func type has NO result —
+    // it either always throws (never; e.g. `toString(){ throw "x"; }`,
+    // S15.5.4.6_A4_T2) or returns undefined (void). Nothing is on the stack, so
+    // the arms below would under-feed their consumer (`call $__any_to_string`
+    // with 0 operands — "not enough arguments on the stack"). Per §7.1.1
+    // OrdinaryToPrimitive, a toString that yields no primitive ends in
+    // TypeError; emit that throw — for the always-throwing case it is dead
+    // code after the call, and `throw` leaves the stack polymorphic so the
+    // enclosing arm's declared `ref $AnyString` result validates.
+    if (retKind === undefined || retKind === "void") {
+      emitThrowTypeError(ctx, fctx, "Cannot convert object to primitive value");
+      return;
+    }
     if (retKind === "externref" || retKind === "ref_extern") {
       // externref holding a native string → any.convert_extern + cast.
       fctx.body.push({ op: "any.convert_extern" } as Instr);
@@ -2681,8 +2751,7 @@ export function tryStructToString(ctx: CodegenContext, fctx: FunctionContext, fr
   };
 
   const funcResultKind = (funcIdx: number): string | undefined => {
-    const defIdx = funcIdx - ctx.numImportFuncs;
-    const def = defIdx >= 0 ? ctx.mod.functions[defIdx] : undefined;
+    const def = definedFuncAt(ctx, funcIdx);
     const ft = def ? ctx.mod.types[def.typeIdx] : undefined;
     return ft?.kind === "func" ? ft.results?.[0]?.kind : undefined;
   };

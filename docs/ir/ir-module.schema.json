@@ -1,0 +1,494 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://loopdive.github.io/js2wasm/ir/ir-module.schema.json",
+  "title": "js2wasm IR interchange module (v1.0)",
+  "description": "One serialized IR module (#3030 D1). Normative companion: docs/ir/ir-contract.md — the schema is the syntax gate; per-instruction operand/result typing is enforced by the IR verifier (the semantic conformance checker). Enum tables are append-only with frozen order (D2); any shape change requires an IR_FORMAT_VERSION bump.",
+  "type": "object",
+  "properties": {
+    "irVersion": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+$" },
+    "source": { "type": "string" },
+    "coverage": { "type": "array", "items": { "$ref": "#/$defs/coverageEntry" } },
+    "functions": { "type": "array", "items": { "$ref": "#/$defs/function" } }
+  },
+  "required": ["irVersion", "coverage", "functions"],
+  "additionalProperties": false,
+  "$defs": {
+    "valueId": { "type": "integer", "minimum": 0 },
+    "blockId": { "type": "integer", "minimum": 0 },
+    "labelId": { "type": "integer", "minimum": 0 },
+    "allocSiteId": { "type": "integer", "minimum": 0 },
+    "site": {
+      "type": "object",
+      "properties": { "line": { "type": "integer", "minimum": 1 }, "column": { "type": "integer", "minimum": 0 } },
+      "required": ["line", "column"],
+      "additionalProperties": false
+    },
+    "scalarValKind": {
+      "description": "D5 closed scalar set — append-only, frozen order.",
+      "enum": ["i32", "i64", "f32", "f64", "v128", "i8", "i16", "funcref", "externref", "ref_extern", "eqref", "anyref"]
+    },
+    "valType": {
+      "description": "A serialized backend-level value type: either a D5 scalar leaf (with optional brands) or a SYMBOLIC ref leaf (no module-relative typeIdx — D5/T2).",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "$ref": "#/$defs/scalarValKind" },
+            "boolean": { "const": true },
+            "symbol": { "const": true },
+            "bigint": { "type": "boolean" }
+          },
+          "required": ["kind"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "enum": ["ref", "ref_null"] },
+            "name": { "type": "string", "description": "Symbolic type-namespace name (IrTypeRef)." }
+          },
+          "required": ["kind", "name"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "irType": {
+      "description": "Serialized IrType (D5). Kind table is append-only, frozen order: val, string, object, closure, class, extern, union, boxed, dynamic.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "const": "val" },
+            "val": { "$ref": "#/$defs/valType" },
+            "signed": { "type": "boolean" }
+          },
+          "required": ["kind", "val"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": { "kind": { "const": "string" } },
+          "required": ["kind"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": { "kind": { "const": "object" }, "shape": { "$ref": "#/$defs/objectShape" } },
+          "required": ["kind", "shape"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": { "kind": { "const": "closure" }, "signature": { "$ref": "#/$defs/closureSignature" } },
+          "required": ["kind", "signature"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": { "kind": { "const": "class" }, "shape": { "$ref": "#/$defs/classShape" } },
+          "required": ["kind", "shape"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": { "kind": { "const": "extern" }, "className": { "type": "string" } },
+          "required": ["kind", "className"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "const": "union" },
+            "members": { "type": "array", "items": { "$ref": "#/$defs/irType" }, "minItems": 2 }
+          },
+          "required": ["kind", "members"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": { "kind": { "const": "boxed" }, "inner": { "$ref": "#/$defs/irType" } },
+          "required": ["kind", "inner"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": { "kind": { "const": "dynamic" }, "tag": { "$ref": "#/$defs/jsTag" } },
+          "required": ["kind"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "jsTag": {
+      "description": "JsTag partition ids (frozen, append-only): Null=0, Undefined=1, NumberI32=2, NumberF64=3, Boolean=4, String=5, Object=6, Function=7.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 7
+    },
+    "objectShape": {
+      "type": "object",
+      "properties": {
+        "fields": {
+          "type": "array",
+          "description": "Name-sorted (canonical order — D1 determinism).",
+          "items": {
+            "type": "object",
+            "properties": { "name": { "type": "string" }, "type": { "$ref": "#/$defs/irType" } },
+            "required": ["name", "type"],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": ["fields"],
+      "additionalProperties": false
+    },
+    "closureSignature": {
+      "type": "object",
+      "properties": {
+        "params": { "type": "array", "items": { "$ref": "#/$defs/irType" } },
+        "returnType": { "$ref": "#/$defs/irType" }
+      },
+      "required": ["params", "returnType"],
+      "additionalProperties": false
+    },
+    "classShape": {
+      "type": "object",
+      "properties": {
+        "className": { "type": "string" },
+        "fields": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": { "name": { "type": "string" }, "type": { "$ref": "#/$defs/irType" } },
+            "required": ["name", "type"],
+            "additionalProperties": false
+          }
+        },
+        "methods": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": { "type": "string" },
+              "params": { "type": "array", "items": { "$ref": "#/$defs/irType" } },
+              "returnType": { "oneOf": [{ "$ref": "#/$defs/irType" }, { "type": "null" }] }
+            },
+            "required": ["name", "params", "returnType"],
+            "additionalProperties": false
+          }
+        },
+        "constructorParams": { "type": "array", "items": { "$ref": "#/$defs/irType" } }
+      },
+      "required": ["className", "fields", "methods", "constructorParams"],
+      "additionalProperties": false
+    },
+    "funcRef": {
+      "type": "object",
+      "properties": { "kind": { "const": "func" }, "name": { "type": "string" } },
+      "required": ["kind", "name"],
+      "additionalProperties": false
+    },
+    "globalRef": {
+      "type": "object",
+      "properties": { "kind": { "const": "global" }, "name": { "type": "string" } },
+      "required": ["kind", "name"],
+      "additionalProperties": false
+    },
+    "const": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "enum": ["i32", "f32"] },
+            "value": { "type": "number" }
+          },
+          "required": ["kind", "value"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "const": "f64" },
+            "value": {
+              "description": "Number, or the D1 strings for non-finite / negative-zero values.",
+              "oneOf": [{ "type": "number" }, { "enum": ["NaN", "Infinity", "-Infinity", "-0"] }]
+            }
+          },
+          "required": ["kind", "value"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "const": "i64" },
+            "value": {
+              "type": "string",
+              "pattern": "^-?[0-9]+$",
+              "description": "Decimal string (D1 — JSON numbers cannot carry i64)."
+            }
+          },
+          "required": ["kind", "value"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": { "kind": { "const": "bool" }, "value": { "type": "boolean" } },
+          "required": ["kind", "value"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": { "kind": { "const": "null" }, "ty": { "$ref": "#/$defs/irType" } },
+          "required": ["kind", "ty"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": { "kind": { "const": "undefined" } },
+          "required": ["kind"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "instrKind": {
+      "description": "Frozen instruction-kind table (append-only, frozen order). `raw.wasm` is deliberately ABSENT — a body containing it is not serializable (D4).",
+      "enum": [
+        "const",
+        "call",
+        "global.get",
+        "global.set",
+        "binary",
+        "unary",
+        "select",
+        "if",
+        "box",
+        "unbox",
+        "tag.test",
+        "string.const",
+        "string.concat",
+        "string.eq",
+        "string.len",
+        "object.new",
+        "object.get",
+        "object.set",
+        "closure.new",
+        "closure.cap",
+        "closure.call",
+        "refcell.new",
+        "refcell.get",
+        "refcell.set",
+        "class.new",
+        "class.get",
+        "class.set",
+        "class.call",
+        "slot.read",
+        "slot.write",
+        "vec.len",
+        "vec.get",
+        "vec.new_fixed",
+        "forof.vec",
+        "coerce.to_externref",
+        "iter.new",
+        "iter.next",
+        "iter.done",
+        "iter.value",
+        "iter.return",
+        "forof.iter",
+        "gen.push",
+        "gen.epilogue",
+        "gen.yieldStar",
+        "forof.string",
+        "throw",
+        "try",
+        "early.return",
+        "extern.new",
+        "extern.call",
+        "extern.prop",
+        "extern.propSet",
+        "extern.regex",
+        "while.loop",
+        "for.loop",
+        "br.label",
+        "if.stmt",
+        "await",
+        "async.return",
+        "async.throw"
+      ]
+    },
+    "instr": {
+      "description": "Base instruction shape. Per-kind operand fields ride as additional properties; their arity/typing rules are normative in ir-contract.md §'Node inventory' and enforced by the verifier (T4). Key discriminating payloads are pinned below via conditionals.",
+      "type": "object",
+      "properties": {
+        "kind": { "$ref": "#/$defs/instrKind" },
+        "result": { "oneOf": [{ "$ref": "#/$defs/valueId" }, { "type": "null" }] },
+        "resultType": { "oneOf": [{ "$ref": "#/$defs/irType" }, { "type": "null" }] },
+        "site": { "$ref": "#/$defs/site" },
+        "alloc": { "$ref": "#/$defs/allocSiteId" }
+      },
+      "required": ["kind", "result", "resultType"],
+      "allOf": [
+        {
+          "if": { "properties": { "kind": { "const": "const" } } },
+          "then": { "properties": { "value": { "$ref": "#/$defs/const" } }, "required": ["value"] }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "call" } } },
+          "then": {
+            "properties": {
+              "target": { "$ref": "#/$defs/funcRef" },
+              "args": { "type": "array", "items": { "$ref": "#/$defs/valueId" } }
+            },
+            "required": ["target", "args"]
+          }
+        },
+        {
+          "if": { "properties": { "kind": { "enum": ["global.get", "global.set"] } } },
+          "then": { "properties": { "target": { "$ref": "#/$defs/globalRef" } }, "required": ["target"] }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "box" } } },
+          "then": {
+            "properties": { "value": { "$ref": "#/$defs/valueId" }, "toType": { "$ref": "#/$defs/irType" } },
+            "required": ["value", "toType"]
+          }
+        },
+        {
+          "if": { "properties": { "kind": { "enum": ["unbox", "tag.test"] } } },
+          "then": {
+            "properties": {
+              "value": { "$ref": "#/$defs/valueId" },
+              "tag": { "$ref": "#/$defs/valType" },
+              "jsTag": { "$ref": "#/$defs/jsTag" }
+            },
+            "required": ["value"]
+          }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "closure.new" } } },
+          "then": { "properties": { "liftedFunc": { "$ref": "#/$defs/funcRef" } }, "required": ["liftedFunc"] }
+        }
+      ]
+    },
+    "branch": {
+      "type": "object",
+      "properties": {
+        "target": { "$ref": "#/$defs/blockId" },
+        "args": { "type": "array", "items": { "$ref": "#/$defs/valueId" } }
+      },
+      "required": ["target", "args"],
+      "additionalProperties": false
+    },
+    "terminator": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "const": "return" },
+            "values": { "type": "array", "items": { "$ref": "#/$defs/valueId" } },
+            "site": { "$ref": "#/$defs/site" }
+          },
+          "required": ["kind", "values"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "const": "br" },
+            "branch": { "$ref": "#/$defs/branch" },
+            "site": { "$ref": "#/$defs/site" }
+          },
+          "required": ["kind", "branch"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "const": "br_if" },
+            "condition": { "$ref": "#/$defs/valueId" },
+            "ifTrue": { "$ref": "#/$defs/branch" },
+            "ifFalse": { "$ref": "#/$defs/branch" },
+            "site": { "$ref": "#/$defs/site" }
+          },
+          "required": ["kind", "condition", "ifTrue", "ifFalse"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": { "kind": { "const": "unreachable" }, "site": { "$ref": "#/$defs/site" } },
+          "required": ["kind"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "block": {
+      "type": "object",
+      "properties": {
+        "id": { "$ref": "#/$defs/blockId" },
+        "blockArgs": { "type": "array", "items": { "$ref": "#/$defs/valueId" } },
+        "blockArgTypes": { "type": "array", "items": { "$ref": "#/$defs/irType" } },
+        "instrs": { "type": "array", "items": { "$ref": "#/$defs/instr" } },
+        "terminator": { "$ref": "#/$defs/terminator" }
+      },
+      "required": ["id", "blockArgs", "blockArgTypes", "instrs", "terminator"],
+      "additionalProperties": false
+    },
+    "slotDef": {
+      "type": "object",
+      "properties": {
+        "index": { "type": "integer", "minimum": 0 },
+        "name": { "type": "string" },
+        "type": {
+          "description": "D4 slot-type rule: scalar leaves only in serialized documents.",
+          "type": "object",
+          "properties": {
+            "kind": { "$ref": "#/$defs/scalarValKind" },
+            "boolean": { "const": true },
+            "symbol": { "const": true },
+            "bigint": { "type": "boolean" }
+          },
+          "required": ["kind"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["index", "name", "type"],
+      "additionalProperties": false
+    },
+    "function": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "exported": { "type": "boolean" },
+        "funcKind": { "enum": ["regular", "generator", "async"] },
+        "params": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "value": { "$ref": "#/$defs/valueId" },
+              "name": { "type": "string" },
+              "type": { "$ref": "#/$defs/irType" }
+            },
+            "required": ["value", "name", "type"],
+            "additionalProperties": false
+          }
+        },
+        "resultTypes": { "type": "array", "items": { "$ref": "#/$defs/irType" } },
+        "slots": { "type": "array", "items": { "$ref": "#/$defs/slotDef" } },
+        "valueCount": { "type": "integer", "minimum": 0 },
+        "blocks": { "type": "array", "items": { "$ref": "#/$defs/block" }, "minItems": 1 }
+      },
+      "required": ["name", "exported", "params", "resultTypes", "valueCount", "blocks"],
+      "additionalProperties": false
+    },
+    "coverageEntry": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "carrier": { "enum": ["ir", "legacy"] },
+        "exported": { "type": "boolean" },
+        "reason": { "type": "string" }
+      },
+      "required": ["name", "carrier", "exported"],
+      "additionalProperties": false
+    }
+  }
+}

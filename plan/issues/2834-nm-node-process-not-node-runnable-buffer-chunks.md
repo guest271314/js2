@@ -4,7 +4,7 @@ title: nm_js2wasm_node_process example is not node-runnable (Buffer stdin chunks
 status: done
 completed: 2026-06-29
 assignee: ttraenkler/agent-aca3caf083aabc01b
-sprint: current
+sprint: 69
 priority: low
 area: examples
 task_type: bug

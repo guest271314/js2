@@ -3,7 +3,7 @@ id: 2852
 title: "compiled-acorn marshals SequenceExpression `expressions[]` child nodes BLANK (all fields dropped across host boundary)"
 status: done
 completed: 2026-06-30
-sprint: current
+sprint: 69
 priority: high
 horizon: m
 feasibility: medium

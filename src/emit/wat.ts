@@ -10,6 +10,19 @@ import type {
   WasmFunction,
   WasmModule,
 } from "../ir/types.js";
+import { resolveLayout, type ModuleLayout } from "./resolve-layout.js";
+
+// (#1916 S3) Debug-WAT func-handle resolution. Instruction immediates may hold
+// stable func handles (STABLE_FUNC_BASE + ordinal) whose raw magnitude is not
+// the final function index. `emitWat` arms this from `resolveLayout(mod)` (the
+// same seam `binary.ts` uses) so `call`/`return_call`/`ref.func` and the
+// element/declared-ref lists print RESOLVED indices — keeping the debug WAT
+// consistent with the emitted binary. Module-level (mirrors binary.ts `layout`);
+// `emitWat` is not reentrant.
+let watLayout: ModuleLayout | null = null;
+function resolveFuncIdx(h: number): number {
+  return watLayout ? watLayout.func(h) : h;
+}
 
 /**
  * Compute the set of type indices that can be inlined into their sole
@@ -108,6 +121,7 @@ export function emitWat(mod: WasmModule): string {
   const lines: string[] = [];
   const indent = (depth: number) => "  ".repeat(depth);
   const inlineableTypes = computeInlineableTypes(mod);
+  watLayout = resolveLayout(mod); // (#1916 S3) resolve stable func handles for debug WAT
 
   lines.push("(module");
 
@@ -159,13 +173,16 @@ export function emitWat(mod: WasmModule): string {
   // Elements
   for (const elem of mod.elements) {
     const offsetStr = elem.offset.map((i) => formatInstr(i, 0)).join(" ");
-    const funcStr = elem.funcIndices.join(" ");
+    const funcStr = elem.funcIndices.map(resolveFuncIdx).join(" ");
     lines.push(`${indent(1)}(elem (offset ${offsetStr}) func ${funcStr})`);
   }
 
   // Declarative element segment for ref.func targets
   if (mod.declaredFuncRefs.length > 0) {
-    const funcStr = mod.declaredFuncRefs.join(" ");
+    const funcStr = mod.declaredFuncRefs
+      .map(resolveFuncIdx)
+      .sort((a, b) => a - b)
+      .join(" ");
     lines.push(`${indent(1)}(elem declare func ${funcStr})`);
   }
 
@@ -398,9 +415,9 @@ function formatInstr(instr: Instr, _depth: number): string {
     case "br_if":
       return `br_if ${instr.depth}`;
     case "call":
-      return `call ${instr.funcIdx}`;
+      return `call ${resolveFuncIdx(instr.funcIdx)}`;
     case "return_call":
-      return `return_call ${instr.funcIdx}`;
+      return `return_call ${resolveFuncIdx(instr.funcIdx)}`;
     case "call_indirect":
       return `call_indirect (type ${instr.typeIdx})`;
     case "struct.new":
@@ -446,7 +463,7 @@ function formatInstr(instr: Instr, _depth: number): string {
     case "ref.test":
       return `ref.test (ref ${instr.typeIdx})`;
     case "ref.func":
-      return `ref.func ${instr.funcIdx}`;
+      return `ref.func ${resolveFuncIdx(instr.funcIdx)}`;
     case "call_ref":
       return `call_ref ${instr.typeIdx}`;
     case "return_call_ref":

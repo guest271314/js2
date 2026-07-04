@@ -4,13 +4,13 @@ title: "Doc: running js2wasm --target wasi output across runtimes (wasmtime / bu
 status: done
 completed: 2026-06-30
 created: 2026-06-29
-updated: 2026-06-30
+updated: 2026-07-03
 priority: low
 feasibility: easy
 task_type: docs
 area: docs
 goal: platform
-sprint: current
+sprint: 69
 horizon: s
 related: [389, 2812]
 ---

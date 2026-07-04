@@ -3,7 +3,6 @@ import type { FieldDef, Instr, ValType } from "../../ir/types.js";
 /**
  * new/super/class expression compilation.
  */
-import { isSymbolType } from "../../checker/type-mapper.js";
 import { forEachChild, ts } from "../../ts-api.js";
 import {
   collectReferencedIdentifiers,
@@ -25,6 +24,7 @@ import {
   resolveWasmType,
   typedArrayVecStorage,
 } from "../index.js";
+import { coercionPlan } from "../coercion-plan.js"; // (#2934 1c) single coercion table for the copy-ctor element bridge
 import { getOrRegisterDvWindowType } from "../dataview-native.js"; // (#2159/#38) DataView windowing wrapper
 import { emitBoundsCheckedArrayGet } from "../array-methods.js";
 import { ensureMapHelpers, coerceMapKeyToAnyref } from "../map-runtime.js";
@@ -34,7 +34,8 @@ import { ensureSetHelpers } from "../set-runtime.js";
 import { ensureWeakCollectionHelpers } from "../weak-collections-runtime.js";
 import { classMemberFuncKey } from "../class-member-keys.js"; // (#1983) collision-free class-member funcMap keys
 import { compileObjectLiteralAsExternref, resolveComputedKeyExpression } from "../literals.js";
-import { stringConstantExternrefInstrs } from "../native-strings.js";
+import { stringConstantExternrefInstrs, ensureAnyToStringHelper } from "../native-strings.js";
+import { emitNativeNumberFormat } from "../number-format-native.js";
 import {
   compileStandaloneRegExpConstructor,
   isGlobalRegExpIdentifier,
@@ -42,6 +43,12 @@ import {
 } from "../regexp-standalone.js";
 import { emitStandaloneTest262Error, emitWasiErrorConstructor, isWasiErrorName } from "../registry/error-types.js";
 import type { InnerResult } from "../shared.js";
+import {
+  emitDynamicNewFunctionHostEval,
+  emitStandaloneDynamicFunctionStub,
+  isGlobalFunctionIdentifier,
+  tryStaticNewFunction,
+} from "./eval-inline.js";
 import {
   coerceType,
   compileExpression,
@@ -70,7 +77,9 @@ import {
 import { localGlobalIdx } from "../registry/imports.js";
 import { ensureLateImport, flushLateImportShifts } from "./late-imports.js";
 import { emitFnctorProtoGet } from "./fnctor-prototype.js"; // (#2660 S3a) reconstruct `new F()` as $Object
+import { emitStandalonePromiseFromExecutor } from "../promise-executor.js"; // (#2959) native new Promise(executor)
 import { deriveFnctorFields, resolveFnctorSymbol, resolveEnclosingFnctorOwner } from "../fnctor-escape-gate.js"; // (#2660 S3a) canonical fnctor-name key; (#2773 S1) shared field derivation; (#2681/#2686 A1) `new this()` owner
+import { funcSignatureOf, mintDefinedFunc, pushDefinedFunc } from "../func-space.js"; // (#1916 S2 read chokepoint / S3b stable-regime minting)
 
 // #2146: resolveEnclosingClassName now lives in shared.ts (imported above).
 
@@ -298,6 +307,17 @@ function emitSuperExternMethodCall(
   }
   if (!externAncestor) return null;
 
+  // (#2029 family B) Standalone/WASI: this whole path is a JS-host bridge
+  // (`__extern_method_call` + `__js_array_*` — a dynamic `recv[name](args)`
+  // performed in JS land). With no host, the imports both leak (the module
+  // could never instantiate with an empty import object) AND the method-name
+  // string push below baked the `-1` string-global sentinel → the raw
+  // "global index out of range — -1" emit crash (e.g. `super[Symbol.replace]`
+  // in a `class RE extends RegExp`). Refuse here so the caller reports the
+  // clean, located "Cannot find method 'X' on parent class 'Y'" error —
+  // the #1888 dual-mode invariant (loud refusal, never a poisoned index).
+  if (ctx.standalone || ctx.wasi) return null;
+
   const selfIdx = fctx.localMap.get("this");
   if (selfIdx === undefined) return null;
 
@@ -344,13 +364,13 @@ function emitSuperExternMethodCall(
 
   // __extern_method_call(receiver, methodName, args)
   fctx.body.push({ op: "local.get", index: recvLocal });
+  // (#2029 family B) Route the name push through the dual-mode helper: a raw
+  // `global.get stringGlobalMap.get(name)` guarded only on `!== undefined`
+  // bakes the -1 sentinel under nativeStrings (gc + --nativeStrings; the
+  // standalone/wasi combination is refused above). Host mode is
+  // byte-identical (the helper emits the same `global.get`).
   addStringConstantGlobal(ctx, methodName);
-  const strIdx = ctx.stringGlobalMap.get(methodName);
-  if (strIdx !== undefined) {
-    fctx.body.push({ op: "global.get", index: strIdx } as Instr);
-  } else {
-    compileStringLiteral(ctx, fctx, methodName);
-  }
+  fctx.body.push(...stringConstantExternrefInstrs(ctx, methodName));
   fctx.body.push({ op: "local.get", index: argsLocal });
   const finalMcIdx = ctx.funcMap.get("__extern_method_call") ?? methodCallIdx;
   fctx.body.push({ op: "call", funcIdx: finalMcIdx });
@@ -1147,7 +1167,7 @@ function compileNewFunctionDeclaration(
   const ctorName = `${structName}_new`;
   const ctorResults: ValType[] = [{ kind: "ref", typeIdx: structTypeIdx }];
   const ctorTypeIdx = addFuncType(ctx, ctorParams, ctorResults, `${ctorName}_type`);
-  const ctorFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const ctorFuncIdx = mintDefinedFunc(ctx);
   ctx.funcMap.set(classMemberFuncKey(ctx, ctorName), ctorFuncIdx); // (#1983) collision-free key
 
   const ctorFunc = {
@@ -1157,7 +1177,7 @@ function compileNewFunctionDeclaration(
     body: [] as Instr[],
     exported: false,
   };
-  ctx.mod.functions.push(ctorFunc);
+  pushDefinedFunc(ctx, ctorFuncIdx, ctorFunc);
 
   // Cache the mapping
   ctx.funcConstructorMap.set(funcName, {
@@ -1635,8 +1655,8 @@ function compileNewFunctionExpression(
   ctx.currentFunc = savedFunc;
 
   // 7. Register the lifted function
-  const liftedFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-  ctx.mod.functions.push({
+  const liftedFuncIdx = mintDefinedFunc(ctx);
+  pushDefinedFunc(ctx, liftedFuncIdx, {
     name: closureName,
     typeIdx: liftedFuncTypeIdx,
     locals: liftedFctx.locals,
@@ -1812,26 +1832,9 @@ function compileClassExpression(ctx: CodegenContext, fctx: FunctionContext, expr
  * expected anyref, found externref`). Returns `undefined` for void / unknown.
  */
 function getFuncResultType(ctx: CodegenContext, funcIdx: number): ValType | undefined {
-  if (funcIdx < ctx.numImportFuncs) {
-    let importFuncCount = 0;
-    for (const imp of ctx.mod.imports) {
-      if (imp.desc.kind === "func") {
-        if (importFuncCount === funcIdx) {
-          const typeDef = ctx.mod.types[imp.desc.typeIdx];
-          if (typeDef?.kind === "func" && typeDef.results.length > 0) return typeDef.results[0];
-          return undefined;
-        }
-        importFuncCount++;
-      }
-    }
-    return undefined;
-  }
-  const func = ctx.mod.functions[funcIdx - ctx.numImportFuncs];
-  if (func) {
-    const typeDef = ctx.mod.types[func.typeIdx];
-    if (typeDef?.kind === "func" && typeDef.results.length > 0) return typeDef.results[0];
-  }
-  return undefined;
+  // #1916 S2 — funcSignatureOf is the positional-read chokepoint (func-space.ts).
+  const sig = funcSignatureOf(ctx, funcIdx);
+  return sig && sig.results.length > 0 ? sig.results[0] : undefined;
 }
 
 /**
@@ -2770,8 +2773,24 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     }
   }
 
-  // Handle `new Promise(executor)` — delegate to host import
+  // Handle `new Promise(executor)`.
   if (ts.isIdentifier(expr.expression) && expr.expression.text === "Promise") {
+    // (#2959) Native standalone/WASI path — construct the `$Promise` and run the
+    // executor with synthesised native resolve/reject closures, retiring the
+    // `Promise_new` host import. Gated inside the helper on
+    // `isStandalonePromiseActive` + a resolvable executor closure; when it can't
+    // apply it emits NOTHING and returns false, falling through to the host path
+    // below (byte-unchanged in host/gc mode). Guard the ambient-global binding so
+    // a user `class Promise {}` / local shadow keeps the normal ctor path.
+    const promiseArgs = expr.arguments ?? [];
+    if (
+      promiseArgs.length >= 1 &&
+      !ctx.classSet.has("Promise") &&
+      resolvesToAmbientGlobal(ctx, expr.expression) &&
+      emitStandalonePromiseFromExecutor(ctx, fctx, promiseArgs[0]!)
+    ) {
+      return { kind: "externref" };
+    }
     let funcIdx =
       ctx.funcMap.get("Promise_new") ??
       ensureLateImport(ctx, "Promise_new", [{ kind: "externref" }], [{ kind: "externref" }]);
@@ -2806,7 +2825,7 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
           // ToNumber(Symbol) throws TypeError (§7.1.4) — the wrapper ctor runs
           // ToNumber on its argument before boxing. Mirror the `Number(sym)`
           // call-path guard so `new Number(Symbol())` throws too (#1564).
-          if (isSymbolType(ctx.checker.getTypeAtLocation(args[0]!))) {
+          if (ctx.oracle.staticJsTypeOf(args[0]!) === "symbol") {
             const t = compileExpression(ctx, fctx, args[0]!);
             if (t !== null) fctx.body.push({ op: "drop" });
             emitThrowTypeError(ctx, fctx, "Cannot convert a Symbol value to a number");
@@ -2848,7 +2867,7 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
           // ToBoolean never throws on Symbol (a Symbol is truthy), but this path
           // coerces the arg to f64 first, which would silently lose the Symbol.
           // A Symbol arg should produce a truthy wrapper: box 1.0.
-          if (isSymbolType(ctx.checker.getTypeAtLocation(args[0]!))) {
+          if (ctx.oracle.staticJsTypeOf(args[0]!) === "symbol") {
             const t = compileExpression(ctx, fctx, args[0]!);
             if (t !== null) fctx.body.push({ op: "drop" });
             fctx.body.push({ op: "f64.const", value: 1 });
@@ -2894,6 +2913,52 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       } else {
         // No message — push null externref (undefined message)
         fctx.body.push({ op: "ref.null.extern" });
+      }
+      // (#2969) §20.5.1.1 step 3 — `msg = ToString(message)` at CONSTRUCTION
+      // time. In standalone/WASI the native `__new_<Name>` ctor stores its arg
+      // verbatim (see error-types.ts), so `new Error(42).message` was the number
+      // `42` (spec: `"42"`) and `String(new Error(42))` degraded to `"Error"`.
+      // Do the ToString HERE at the user call site (null-guarded so argument-less
+      // / `new Error(undefined)` still render the name alone) rather than inside
+      // the SHARED ctor — the ctor is also lazily emitted for internal compiler
+      // error paths (destructuring/coercion `TypeError`s), and pulling the
+      // `__any_to_string` family into those emissions destabilised standalone
+      // `any`-equality dispatch (the tag-5 value-eq gap deferred to #2580 M2 /
+      // #3032). Host mode's `__new_<Name>` import does ToString in JS, so only
+      // the native path needs this. Applies to both the WASI-error and
+      // Test262Error branches below (both native, both standalone/WASI).
+      if ((ctx.wasi || ctx.standalone) && args.length >= 1) {
+        // Force `number_toString` before `__any_to_string` bakes so its number
+        // arm renders a raw numeric message ("42") instead of degrading to
+        // "[object Object]" (a module that only constructs `new Error(n)` never
+        // otherwise pulls the number formatter). Must precede the ensure below.
+        if (ctx.funcMap.get("number_toString") === undefined) {
+          emitNativeNumberFormat(ctx, new Set(["number_toString"]));
+        }
+        const anyToStrIdx = ensureAnyToStringHelper(ctx);
+        if (anyToStrIdx >= 0) {
+          const msgTmp = allocTempLocal(fctx, { kind: "externref" });
+          fctx.body.push(
+            { op: "local.set", index: msgTmp },
+            { op: "local.get", index: msgTmp },
+            { op: "ref.is_null" },
+            {
+              op: "if",
+              blockType: { kind: "val", type: { kind: "externref" } },
+              // undefined / null argument → keep null (renders name alone).
+              then: [{ op: "ref.null.extern" } as Instr],
+              // ToString(message): externref → anyref → __any_to_string
+              // (ref $AnyString) → externref for the ctor's $message field.
+              else: [
+                { op: "local.get", index: msgTmp } as Instr,
+                { op: "any.convert_extern" } as Instr,
+                { op: "call", funcIdx: anyToStrIdx } as Instr,
+                { op: "extern.convert_any" } as Instr,
+              ],
+            } as Instr,
+          );
+          releaseTempLocal(fctx, msgTmp);
+        }
       }
       // (#1104 Phase 1) In WASI/standalone mode, the JS host is unavailable —
       // use a Wasm-native `__new_<Name>` function that builds a `$Error_struct`
@@ -3172,20 +3237,40 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     return { kind: "externref" };
   }
 
-  // Handle `new Function(...)` — dynamic code generation is not possible in Wasm.
-  // Emit a no-op function that returns undefined (ref.null extern) to prevent
-  // compile errors. Tests that rely on dynamic behavior will fail at runtime
-  // instead of at compile time, which is more informative.
+  // Handle `new Function(...)`.
   if (ts.isIdentifier(expr.expression) && expr.expression.text === "Function") {
-    // Compile and discard all arguments (they may have side effects)
     const args = expr.arguments ?? [];
+    // (#2924) Constant param list + body → compile-away to a real AOT callable
+    // (global scope, no capture). Dynamic bodies fall through to the no-op stub
+    // below (the Tier-2 interpreter, #2928, handles them). Guarded on the
+    // GLOBAL `Function` intrinsic (a local shadow keeps the legacy stub path).
+    const staticFn = isGlobalFunctionIdentifier(expr.expression, ctx.checker)
+      ? tryStaticNewFunction(ctx, fctx, args)
+      : undefined;
+    if (staticFn !== undefined) return staticFn;
+    // (#2960) Dynamic body (non-constant args). No longer a silent no-op stub:
+    //  - JS-host mode → route to the meta-circular runtime-eval shim
+    //    (`__extern_eval`, global scope) so the constructed function actually
+    //    works — fixes the ~119 host Function-ctor test262 cluster.
+    //  - standalone/wasi (no host) → emit a source-located warning + a callable
+    //    value that throws catchably at CALL time (construction still succeeds,
+    //    so a program that never invokes it keeps working).
+    if (isGlobalFunctionIdentifier(expr.expression, ctx.checker)) {
+      const hostEval = emitDynamicNewFunctionHostEval(ctx, fctx, args);
+      if (hostEval !== undefined) return hostEval;
+      if (noJsHost(ctx)) {
+        return emitStandaloneDynamicFunctionStub(ctx, fctx, expr, args) as ValType;
+      }
+    }
+    // Legacy fallback (e.g. a local `Function` shadow, or JS-host with
+    // nativeStrings where the shim path is unavailable): evaluate args for side
+    // effects and return the historical null-value stub.
     for (const arg of args) {
       const argResult = compileExpression(ctx, fctx, arg);
       if (argResult) {
         fctx.body.push({ op: "drop" });
       }
     }
-    // Return ref.null extern — represents a function that returns undefined
     fctx.body.push({ op: "ref.null.extern" });
     return { kind: "externref" };
   }
@@ -3612,12 +3697,42 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
                     : srcArrDef.element.kind === "i16"
                       ? "array.get_s"
                       : "array.get";
-                const convertInstrs: Instr[] =
-                  srcArrDef.element.kind === "f64" && dstArrDef.element.kind !== "f64"
-                    ? [{ op: "i32.trunc_sat_f64_s" } as Instr]
-                    : srcArrDef.element.kind !== "f64" && dstArrDef.element.kind === "f64"
-                      ? [{ op: "f64.convert_i32_u" } as Instr]
-                      : [];
+                // (#2934 1c) The element-conversion matrix keys on the READ
+                // value's stack kind (packed i8/i16 widen to i32 via get_u/_s).
+                // The old matrix only knew f64↔int, so an EXTERNREF source
+                // element (`new Uint8Array([102])` where the literal compiled
+                // to an any[] externref vec) flowed uncoerced into the packed
+                // `array.set` — "array.set[2] expected i32, found array.get of
+                // externref" (the toBase64/`__cb_0` invalid-Wasm cluster). An
+                // externref element now unboxes (ToNumber) and truncates to
+                // integer storage; packed stores truncate width for free.
+                const srcReadKind =
+                  srcArrDef.element.kind === "i8" || srcArrDef.element.kind === "i16" ? "i32" : srcArrDef.element.kind;
+                const dstStoreKind =
+                  dstArrDef.element.kind === "i8" || dstArrDef.element.kind === "i16" ? "i32" : dstArrDef.element.kind;
+                let convertInstrs: Instr[];
+                if (srcReadKind === "externref" && dstStoreKind !== "externref") {
+                  // ToNumber the boxed element via the single coercion table
+                  // (#2108 — coercionPlan's externref→i32 row is exactly
+                  // unbox + trunc_sat; externref→f64 is the bare unbox).
+                  // Integer storage then truncates width on the packed store.
+                  addUnionImports(ctx);
+                  const plan = coercionPlan(
+                    { kind: "externref" },
+                    { kind: dstStoreKind === "f64" ? "f64" : "i32" },
+                    {
+                      boxNumberIdx: ctx.funcMap.get("__box_number") ?? null,
+                      unboxNumberIdx: ctx.funcMap.get("__unbox_number") ?? null,
+                    },
+                  );
+                  convertInstrs = plan?.instrs ?? [];
+                } else if (srcReadKind === "f64" && dstStoreKind !== "f64" && dstStoreKind !== "externref") {
+                  convertInstrs = [{ op: "i32.trunc_sat_f64_s" } as Instr];
+                } else if (srcReadKind !== "f64" && srcReadKind !== "externref" && dstStoreKind === "f64") {
+                  convertInstrs = [{ op: "f64.convert_i32_u" } as Instr];
+                } else {
+                  convertInstrs = [];
+                }
 
                 fctx.body.push({
                   op: "block",

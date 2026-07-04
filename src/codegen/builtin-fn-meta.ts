@@ -1,0 +1,303 @@
+// Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
+/**
+ * (#2896) Standalone native function-object metadata.
+ *
+ * A builtin function value under `--target standalone` is a closure wrapper
+ * struct (`getOrCreateFuncRefWrapperTypes`); it carries no `name`/`length`, so
+ * every REFLECTIVE read (`Object.getOwnPropertyDescriptor(fn, "name")`,
+ * `fn[key]` with a runtime key, `hasOwnProperty`, `getOwnPropertyNames`) sees
+ * nothing — which fails test262's `propertyHelper.js verifyProperty` for every
+ * builtin `name.js` / `length.js` / `prop-desc.js` even where a compile-time
+ * direct-access meta fold exists (the helper's receiver/key are runtime params).
+ *
+ * ## Mechanism — per-(builtin, member) meta SUBTYPE, constant metadata per type
+ *
+ * For each distinct builtin function we materialize, register a UNIQUE struct
+ * subtype of its signature wrapper:
+ *
+ *   `$__builtinfn_<n> { funcref func; (mut i32) bfnstate }  <: $__fn_wrap_<sig>`
+ *
+ * - Being a SUBTYPE of the signature wrapper keeps every existing call path
+ *   working untouched (static closure calls, reflective `.call`, any-typed
+ *   callback dispatch — they cast to the sig wrapper / root, and a subtype
+ *   passes).
+ * - The metadata itself ({name, length}) is statically known per (builtin,
+ *   member), so it is NOT stored in fields — it lives in
+ *   `ctx.builtinFnMetaByTypeIdx` keyed by the meta type index. The reflective
+ *   runtime natives discriminate the receiver with `ref.test <metaType>` arms
+ *   (type indices are rec-group/dead-elim stable — no funcidx hazard) that are
+ *   SPLICED IN AT FINALIZE by `fillBuiltinFnMeta` (object-runtime.ts), after
+ *   every meta type is known — same reserve/fill discipline as
+ *   `fillExternIsArray` / `fillExternGetIdxVecArms`.
+ * - `bfnstate` is the one piece of per-INSTANCE state: a deleted-bits mask
+ *   (bit 0 = `name` deleted, bit 1 = `length` deleted). `verifyProperty`'s
+ *   `isConfigurable` arm `delete`s the property and then requires
+ *   `hasOwnProperty` to report false, so delete must genuinely work.
+ *   `struct.new` sites therefore push an extra `i32.const 0`
+ *   (`pushBuiltinFnClosureValueInstrs` below).
+ */
+import type { Instr } from "../ir/types.js";
+import type { ClosureInfo, CodegenContext } from "./context/types.js";
+
+/**
+ * Spec `{name, length}` for the builtin STATIC method closures wired in
+ * `ensureStandaloneBuiltinStaticMethodClosure` (property-access.ts). Keep in
+ * sync with its `switch (key)`. Also consumed by the direct-access
+ * `.name`/`.length` meta fold so the constant fold and the runtime descriptor
+ * agree.
+ */
+export const STANDALONE_STATIC_METHOD_META: Record<string, { name: string; length: number }> = {
+  "Array.isArray": { name: "isArray", length: 1 },
+  "Object.keys": { name: "keys", length: 1 },
+  "Object.getOwnPropertyDescriptor": { name: "getOwnPropertyDescriptor", length: 2 },
+};
+
+/**
+ * (#2896) Spec arity of every standard builtin STATIC method (own
+ * function-valued data properties of the global constructors/namespaces), for
+ * the direct-access `<Builtin>.<method>.length` / `.name` meta fold. `.name`
+ * equals the property key for all of these (§10.2.9); `.length` values are the
+ * ECMA-262 declared arities (generated from a conforming host — V8/Node — and
+ * spot-checked against the spec). This is a compile-time COMPANION of the
+ * runtime metadata substrate above: the fold answers direct syntactic reads
+ * (no closure materialization, so it also covers methods whose value-read is
+ * not yet wired host-free); the meta subtypes answer reflective/runtime reads
+ * for the wired closures.
+ */
+export const BUILTIN_STATIC_METHOD_ARITY: Record<string, Record<string, number>> = {
+  Array: { isArray: 1, from: 1, fromAsync: 1, of: 0 },
+  ArrayBuffer: { isView: 1 },
+  BigInt: { asUintN: 2, asIntN: 2 },
+  Date: { now: 0, parse: 1, UTC: 7 },
+  Error: { isError: 1 },
+  Map: { groupBy: 2 },
+  Number: { isFinite: 1, isInteger: 1, isNaN: 1, isSafeInteger: 1, parseFloat: 1, parseInt: 2 },
+  Object: {
+    assign: 2,
+    getOwnPropertyDescriptor: 2,
+    getOwnPropertyDescriptors: 1,
+    getOwnPropertyNames: 1,
+    getOwnPropertySymbols: 1,
+    hasOwn: 2,
+    is: 2,
+    preventExtensions: 1,
+    seal: 1,
+    create: 2,
+    defineProperties: 2,
+    defineProperty: 3,
+    freeze: 1,
+    getPrototypeOf: 1,
+    setPrototypeOf: 2,
+    isExtensible: 1,
+    isFrozen: 1,
+    isSealed: 1,
+    keys: 1,
+    entries: 1,
+    fromEntries: 1,
+    values: 1,
+    groupBy: 2,
+  },
+  Promise: { all: 1, allSettled: 1, any: 1, race: 1, resolve: 1, reject: 1, withResolvers: 0, try: 1 },
+  Proxy: { revocable: 2 },
+  Reflect: {
+    defineProperty: 3,
+    deleteProperty: 2,
+    apply: 3,
+    construct: 2,
+    get: 2,
+    getOwnPropertyDescriptor: 2,
+    getPrototypeOf: 1,
+    has: 2,
+    isExtensible: 1,
+    ownKeys: 1,
+    preventExtensions: 1,
+    set: 3,
+    setPrototypeOf: 2,
+  },
+  RegExp: { escape: 1 },
+  String: { fromCharCode: 1, fromCodePoint: 1, raw: 1 },
+  Symbol: { for: 1, keyFor: 1 },
+  Math: {
+    abs: 1,
+    acos: 1,
+    acosh: 1,
+    asin: 1,
+    asinh: 1,
+    atan: 1,
+    atanh: 1,
+    atan2: 2,
+    ceil: 1,
+    cbrt: 1,
+    expm1: 1,
+    clz32: 1,
+    cos: 1,
+    cosh: 1,
+    exp: 1,
+    floor: 1,
+    fround: 1,
+    hypot: 2,
+    imul: 2,
+    log: 1,
+    log1p: 1,
+    log2: 1,
+    log10: 1,
+    max: 2,
+    min: 2,
+    pow: 2,
+    random: 0,
+    round: 1,
+    sign: 1,
+    sin: 1,
+    sinh: 1,
+    sqrt: 1,
+    tan: 1,
+    tanh: 1,
+    trunc: 1,
+    f16round: 1,
+  },
+  JSON: { parse: 2, stringify: 3, rawJSON: 1, isRawJSON: 1 },
+  Atomics: {
+    load: 2,
+    store: 3,
+    add: 3,
+    sub: 3,
+    and: 3,
+    or: 3,
+    xor: 3,
+    exchange: 3,
+    compareExchange: 4,
+    isLockFree: 1,
+    wait: 4,
+    waitAsync: 4,
+    notify: 3,
+    pause: 0,
+  },
+  Iterator: { from: 1 },
+  Uint8Array: { fromBase64: 1, fromHex: 1 },
+};
+
+/**
+ * Register (idempotently, keyed by `cacheKey`) the unique metadata-carrying
+ * struct subtype for one builtin function closure and return its type index.
+ *
+ * - `baseStructTypeIdx` — the signature wrapper struct (the supertype).
+ * - `baseClosureInfo` — the signature wrapper's ClosureInfo; a copy with
+ *   `structTypeIdx` re-pointed at the meta type is registered in
+ *   `ctx.closureInfoByTypeIdx` so the static closure-call path and the
+ *   reflective `.call` recovery resolve the meta-typed value exactly like the
+ *   base wrapper (the lifted func type takes `(ref $sigWrapper)` self — a meta
+ *   instance passes as a subtype).
+ */
+export function ensureBuiltinFnMetaType(
+  ctx: CodegenContext,
+  baseStructTypeIdx: number,
+  baseClosureInfo: ClosureInfo,
+  cacheKey: string,
+  name: string,
+  length: number,
+): number {
+  if (!ctx.builtinFnMetaTypeByKey) ctx.builtinFnMetaTypeByKey = new Map();
+  const existing = ctx.builtinFnMetaTypeByKey.get(cacheKey);
+  if (existing !== undefined) return existing;
+
+  const typeIdx = ctx.mod.types.length;
+  ctx.mod.types.push({
+    kind: "struct",
+    name: `__builtinfn_meta_${typeIdx}_struct`,
+    fields: [
+      // Field 0 must mirror the supertype exactly (same type + mutability).
+      { name: "func", type: { kind: "funcref" as const }, mutable: false },
+      // Deleted-bits mask: bit 0 = "name" deleted, bit 1 = "length" deleted.
+      { name: "bfnstate", type: { kind: "i32" as const }, mutable: true },
+    ],
+    superTypeIdx: baseStructTypeIdx,
+  });
+
+  ctx.closureInfoByTypeIdx.set(typeIdx, { ...baseClosureInfo, structTypeIdx: typeIdx });
+  if (!ctx.builtinFnMetaByTypeIdx) ctx.builtinFnMetaByTypeIdx = new Map();
+  ctx.builtinFnMetaByTypeIdx.set(typeIdx, { name, length });
+  ctx.builtinFnMetaTypeByKey.set(cacheKey, typeIdx);
+  return typeIdx;
+}
+
+/** Bit set in `bfnstate` when the `name` own property was deleted. */
+export const BFN_STATE_NAME_DELETED = 1;
+/** Bit set in `bfnstate` when the `length` own property was deleted. */
+export const BFN_STATE_LENGTH_DELETED = 2;
+
+/**
+ * The instruction sequence that materializes a builtin closure VALUE from a
+ * factory result. A meta-typed closure struct has the extra `(mut i32)
+ * bfnstate` field, so its `struct.new` needs one more operand than the plain
+ * 2-op `ref.func` + `struct.new` sequence; non-meta types keep the old shape.
+ */
+export function pushBuiltinFnClosureValueInstrs(
+  ctx: CodegenContext,
+  closure: { type: { kind: "ref"; typeIdx: number }; funcIdx: number },
+): Instr[] {
+  const isMeta = ctx.builtinFnMetaByTypeIdx?.has(closure.type.typeIdx) ?? false;
+  const instrs: Instr[] = [{ op: "ref.func", funcIdx: closure.funcIdx } as Instr];
+  if (isMeta) instrs.push({ op: "i32.const", value: 0 } as Instr);
+  instrs.push({ op: "struct.new", typeIdx: closure.type.typeIdx } as Instr);
+  return instrs;
+}
+
+/**
+ * (#2963) IDENTITY-STABLE reified builtin-function value. Instead of a fresh
+ * `struct.new` per read (which gives `Promise.resolve !== Promise.resolve` —
+ * two distinct closure instances), materialize the closure struct into a
+ * MODULE-LEVEL SINGLETON: one `(ref null <structType>)` mutable global per
+ * (builtin, member), lazily initialized on first read, so every read of the
+ * same builtin value yields the SAME ref.
+ *
+ * Why a lazy null-guard in the FUNCTION BODY rather than a global const-init:
+ * the singleton's `struct.new` takes a `ref.func <closureFuncIdx>` operand, and
+ * `closureFuncIdx` is a DEFINED-function index that shifts whenever a late
+ * import is added (`addUnionImports` / `shiftLateImportIndices` / the
+ * string-import shifter). Those shifters walk function bodies + nested
+ * `.then`/`.body`/`.else` arrays (verified) but do NOT walk
+ * `ctx.mod.globals[].init`, so a `ref.func` embedded in a const-init would go
+ * stale and reference the wrong function. Emitting the materialization inside
+ * an `if (ref.is_null) { … }` guard in `fctx.body` keeps the `ref.func` in a
+ * shift-covered array — the same discipline as every other funcidx bake site.
+ *
+ * The mutable `bfnstate` (delete-bits) field being shared across all reads is
+ * spec-correct: a builtin method is ONE function object, so `delete fn.name`
+ * seen through any reference mutates the same object (test262 `verifyProperty`
+ * `isConfigurable` arm).
+ *
+ * Stack: `[] → [(ref <structType>)]` (non-null, exactly what
+ * `pushBuiltinFnClosureValueInstrs` produced, so callers' result type is
+ * unchanged).
+ */
+export function pushBuiltinFnSingletonValueInstrs(
+  ctx: CodegenContext,
+  closure: { type: { kind: "ref"; typeIdx: number }; funcIdx: number },
+): Instr[] {
+  const typeIdx = closure.type.typeIdx;
+  if (!ctx.builtinFnSingletonGlobalByTypeIdx) ctx.builtinFnSingletonGlobalByTypeIdx = new Map();
+  let globalIdx = ctx.builtinFnSingletonGlobalByTypeIdx.get(typeIdx);
+  if (globalIdx === undefined) {
+    globalIdx = ctx.numImportGlobals + ctx.mod.globals.length;
+    ctx.mod.globals.push({
+      name: `__builtinfn_singleton_${typeIdx}`,
+      // (ref null <structType>) — starts null, set once on first read.
+      type: { kind: "ref_null", typeIdx },
+      mutable: true,
+      init: [{ op: "ref.null", typeIdx } as Instr],
+    });
+    ctx.builtinFnSingletonGlobalByTypeIdx.set(typeIdx, globalIdx);
+  }
+
+  return [
+    { op: "global.get", index: globalIdx } as Instr,
+    { op: "ref.is_null" } as Instr,
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [...pushBuiltinFnClosureValueInstrs(ctx, closure), { op: "global.set", index: globalIdx } as Instr],
+    } as Instr,
+    { op: "global.get", index: globalIdx } as Instr,
+    { op: "ref.as_non_null" } as Instr,
+  ];
+}

@@ -1,7 +1,7 @@
 ---
 name: developer
 description: Developer for implementing features, fixing bugs, and creating PRs. Use when code changes are needed for an issue — works in an isolated git worktree with a new branch.
-model: opus
+model: fable
 tools: Read, Edit, Write, Bash, Grep, Glob, Agent, TaskCreate, TaskUpdate, TaskList, SendMessage
 isolation: worktree
 ---

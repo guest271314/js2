@@ -2,7 +2,7 @@
 id: 2906
 title: "Standalone: generalize the async drive layer → multi-state, CFG-aware CPS resume machine (unlocks try/finally-across-await, for-await, multi-await)"
 status: in-progress
-assignee: ttraenkler/sendev-async-multistate
+assignee: ttraenkler/fable-2906
 created: 2026-07-01
 priority: high
 feasibility: hard
@@ -279,3 +279,185 @@ this same abrupt-completion machinery; the slice-1d widen stays LAST.
 ## Reconciliation note (shepherd, 2026-07-01)
 
 Landed slices: **slice 1** general N-state async resume machine (PR #2413), **slice 2 / Gap 3** try/finally-across-await on the N-state machine (PR #2416). Issue stays `in-progress` for the remaining slices.
+
+## Slice 3 — CFG-aware machine core (this PR, 2026-07-03)
+
+**What ships.** The drive-layer emitter is generalized from the implicit linear
+chain (state `s` always continues at `s+1`; try/finally = one boolean flag) to a
+**general CFG plan** — the durable substrate every remaining slice extends
+without touching the emitter again:
+
+- **`async-cps.ts`** — `AsyncCfgPlan`: `states` (basic blocks: optional
+  `resumeFrom` prelude + handler-annotated `lead` statements + exactly one
+  `terminator`) and `handlers` (try-region table). Terminators:
+  `suspend {awaited, resumeState, handler}` · `goto {target}` ·
+  `condGoto {cond, whenTrue, whenFalse, handler}` · `settleSent` ·
+  `settleUndefined`. The **emitter contract** (dense ids; goto/condGoto targets
+  have no resume prelude; handler ids 1-based dense, `parent === 0` until 3c) is
+  documented in the file's contract block. `linearPlanToCfg(linear)` converts a
+  `LinearAwaitPlan` into the trivial chain and is the ONLY producer this slice.
+- **`async-frame.ts`** — `ensureAsyncResumeFunction` now drives `AsyncCfgPlan`:
+  one generic `buildStateBody(state)` replaces
+  `buildAwaitSegment`/`buildFinalSegment`; the slice-2 `inSrcTry` boolean is now
+  the **handler-region-id local** (i32, 0 = none — single-region plans emit
+  byte-identical 0/1 toggles); the outer catch routes by region id (truthiness
+  guard for one region ≡ slice 2, id-equality guards for sibling regions).
+  `validateAsyncCfg` hard-fails (compile error, not a miscompile) any future
+  planner that violates the contract. **`br`-depth model**: from a state arm's
+  top level the re-dispatch loop is at depth `id + 2` (dispatch if-chain nesting
+  == id); `goto`/`condGoto` emit `STATE=<target>; br <loop>`, so a **back-edge
+  is just a target ≤ the current id** — loops need NO new emitter machinery.
+  `condGoto` compiles its condition with `ensureI32Condition` truthiness and
+  br's at `loopDepth + 1` (inside its own `if` arm).
+
+**Byte-inertness proof** (`.tmp/hash-async-lanes.mts`, 27 program×lane sha256
+hashes): plain / singleAwait / multiAwait / bareAwaits / returnAwait /
+tryFinally / syncFulfilledLocal / promiseAllHost / awaitArith, each under
+gc(default) + standalone + wasi — **all identical before vs after**, including
+the wasi drive lane and the #1042 host-drive lane (`linearPlanToCfg` reproduces
+the exact pre-CFG instruction stream; goto/condGoto are producer-unreachable
+this slice). Test control: the 10 async test files (89 tests) — 85 pass, the
+same 4 pre-existing failures as on `origin/main` (2× issue-2865 AG0 wasi, 2×
+promise-combinators host — their compiled binaries hash-identical to main's, so
+they cannot be #2906-slice-3 regressions).
+
+**#2980 coordination**: this slice does not touch either carrier gate
+(`isStandalonePromiseActive` / `isStandaloneThenChainNativeActive`) and is
+byte-identical everywhere, so it neither constrains nor is constrained by the
+slice-1d carrier-widen decision — the widen simply flips which lanes reach this
+(unchanged-shape) machine.
+
+## Design (banked): how the remaining shapes map onto the CFG machine
+
+The remaining slices are **planner-only** — each produces `AsyncCfgState[]` and
+the emitter (validated, byte-stable) does the rest. Written for execution by a
+non-Fable dev; read the emitter-contract block in `async-cps.ts` first.
+
+### 3a — while/do-while-with-await (the back-edge validation slice)
+
+Lowering for `while (cond) { body… (≥1 canonical await) }`:
+
+```
+state h   (loop head, resumeFrom: null): lead=[], terminator condGoto(cond, b, e)
+state b…  (body states, as linear lowering): last body state's terminator
+          suspends with resumeState → a continuation state whose terminator is
+          goto(h)   ← the back-edge
+state e   (exit): the statements after the loop (continues the outer chain)
+```
+
+Implementation notes (the hazards a cheaper model must not skip):
+
+1. **New producer, not a `LinearAwaitPlan` retrofit.** Introduce
+   `planAsyncCfg(fn, plan, opts): AsyncCfgPlan | null` in `async-cps.ts` that
+   subsumes `lowerLinearStatements` but builds states directly (keep
+   `planLinearAwaits` delegating to it or converting via `linearPlanToCfg` —
+   whichever keeps the linear byte-hash identical; PROVE with the probe).
+   Placeholder-patch forward targets (exit-state id unknown until the loop body
+   is lowered): build with `target: -1` + a patch list, resolve before
+   `validateAsyncCfg`.
+2. **Eligibility gates**: `asyncFnNeedsDrive`/`asyncFnNeedsHostDrive` +
+   `computeAsyncSpills` all call `planLinearAwaits` today — route them through
+   the new planner ONCE, not three divergent copies. Gate loop acceptance to
+   the **native drive lane first** (`opts.allowLoops` true only from
+   `asyncFnNeedsDrive`) so the gc/host lanes stay byte-identical; widen the
+   host lane in a follow-up with its own corpus check (the host lane suspends
+   on EVERY await — N iterations = N microtask rounds; correct but must be
+   tested with real drains).
+3. **Liveness across back-edges (the silent-miscompile trap).** The
+   `liveAfterAwait` sets are TEXTUAL-remainder based. For an await inside a
+   loop, a local read textually BEFORE the await is read again on the next
+   iteration AFTER the resume — so the live set for any await inside a loop
+   must be widened to include **every own-local referenced anywhere in the
+   loop statement** (∪ the textual remainder). Same rule for the spill set.
+4. **Resume bindings in a loop are self-live**: `bindingLiveAcrossLaterAwait`
+   must treat the binding's OWN await as "later" through the back-edge (spill
+   it; it round-trips the frame each iteration). Simplest correct rule: inside
+   a loop, every resume binding is spilled (still subject to the
+   spill-safe-type gate).
+5. **Reject and fall back (legacy/AG0) on**: `break`/`continue` targeting the
+   loop (until 3a′ adds them as `goto exit` / `goto head` — they are trivially
+   expressible, but each needs a test), `try` interacting with the loop,
+   awaits in the loop CONDITION (needs a condition-eval state — expressible,
+   separate follow-up), labeled statements.
+6. **Tests**: pending-then-fulfilled across ≥2 iterations via
+   `__drain_microtasks`; a binding carried across the back-edge; zero-iteration
+   loop (cond false first — straight to exit, no resume ever fires); rejection
+   inside iteration k>1 routes to the result promise. Plus the byte-hash probe
+   for non-loop programs (must stay identical).
+
+### 3b — for-await-of (async-iterator drive on 3a machinery)
+
+`for await (const x of expr) body` lowers to (all on existing terminators):
+
+```
+init:  it = GetAsyncIterator(expr)        — [Symbol.asyncIterator] ?? wrap the
+       sync iterator (each sync next() result is PromiseResolve'd); spill `it`.
+head:  r = it.next()                       — suspend(r, resume → chk)
+chk:   resumeFrom binds step (IteratorResult); condGoto(step.done, exit, bodyStart)
+body…: bind x = step.value; body states; last terminator goto(head)
+exit:  continue the outer chain
+```
+
+`step.done`/`step.value` reads go through the existing IteratorResult shape
+(`{value,done}` — `RESULT_VALUE_FIELD`/`RESULT_DONE_FIELD` for native frames,
+dynamic reads for host results). First slice: no `break`/`continue`/`throw`
+inside the body (abrupt loop exit must call `it.return()` — an async close,
+itself a suspend — bank as 3b′), no destructuring binding. Converges with the
+#2865/#2867 Gap-5 corpus (the −32 for-await/async-gen cluster in #2980).
+
+### 3c — try/catch + return-through-finally + nested regions (completion replay)
+
+The full ES completion semantics on the frame's EXISTING `MODE`/`ABRUPT`/
+`ERROR` fields (frame-core reserved them from the start):
+
+1. **Restructure the dispatcher** from `try { block { loop { chain } } } catch`
+   to `block { loop { try { chain } catch $exn { route } } }` so an abrupt
+   completion becomes a STATE TRANSITION: the catch routes by the region-id
+   local — region has a `catchState` → `ERROR=reason; MODE=THROW;
+   STATE=catchState; br <loop>` (the catch body is ordinary states and MAY
+   await); no region → settle-reject + return (today's behaviour). NOTE: this
+   moves every arm's `br`-to-loop depth by +1 (the try block wraps the chain)
+   — change `loopDepth` in ONE place (`buildStateBody`) and re-prove the
+   byte-hash on a `main` control before/after is *expectedly different* here,
+   so instead prove semantics via the full async test files + new tests.
+2. **Handler regions generalize**: `{ id, parent, catchState?, finallyState?,
+   finalizer? }`. A finally that must support replay becomes states
+   (`finallyState` entry); its terminator is a new `replay` terminator: read
+   MODE — NEXT → goto(normal successor); THROW → set region local to `parent`,
+   re-throw ERROR (routes to the next outer region); RETURN → settle the
+   result promise with ABRUPT (or route through the next enclosing finally).
+   `return` inside a try records `MODE=RETURN; ABRUPT=value; goto(finallyState)`
+   instead of settling directly (the `asyncDriveReturn` hook grows a
+   per-region indirection).
+3. **Nested regions**: `validateAsyncCfg` currently rejects `parent !== 0` —
+   lift that ONLY when the catch routing walks the parent chain. Sibling
+   regions (two sequential try/finallys, both parent 0) already route
+   correctly with the id-equality guards and may ship before full nesting.
+
+### 3d — async generators (AG2 `$Frame`/`$AsyncFrame` convergence)
+
+Sketch (own design pass before execution): an async-gen frame is an
+`$AsyncFrame` + a result-promise QUEUE. `yield` is a new `settleYield`
+terminator: fulfil the CURRENT `next()`-promise with `{value, done:false}` and
+`return`; `next(v)` allocates a fresh pending result promise, stores SENT=v,
+kicks resume. `await` inside the gen uses the existing suspend terminator
+against the awaited promise (resume writes SENT, NOT the result queue). The
+generator trampoline's yield-dispatch and this machine's await-dispatch share
+STATE — they compose because both are `br_table`-over-STATE with disjoint
+suspend kinds. Reuse `generators-native.ts` result-struct helpers; do NOT fork
+the frame ABI (both layouts already share frame-core).
+
+### Integration points (for the owning issues)
+
+- **#2957 phases 2-3 (async arrows/methods/fn-exprs)**: the drive branches in
+  `function-body.ts` (~L1163 and ~L1186) gate on `ts.isFunctionDeclaration` —
+  activation for other function kinds is a call-site/naming problem
+  (`asyncFnName` already synthesizes `anon_<pos>` names), NOT a machine
+  problem; the machine is shape-agnostic.
+- **#2967 (engine convergence)**: `asyncFnNeedsCps`'s single-tail-await JS-host
+  CPS lane can retire onto `asyncFnNeedsHostDrive` once the host lane accepts
+  every CPS shape — measure with the #1042 census, then delete
+  `emitAsyncStateMachine` (one machine, two settle backends).
+- **#2980 slice-1d (carrier widen)**: stays LAST, after 3a/3b land, gated on
+  the full merge_group standalone corpus measuring net-positive. This slice
+  changed nothing it depends on.

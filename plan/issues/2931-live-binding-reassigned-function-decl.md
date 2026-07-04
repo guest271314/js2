@@ -1,11 +1,12 @@
 ---
 id: 2931
 title: "codegen: reassigned function declaration is not a live binding (fn = 2 is lost)"
-status: ready
+status: done
 priority: high
-sprint: current
+sprint: 69
 created: 2026-07-02
-assignee: ttraenkler/dev-2900
+completed: 2026-07-02
+assignee: ttraenkler/dev-2900b
 feasibility: medium
 task_type: bug
 area: codegen
@@ -70,3 +71,18 @@ other module globals (reserve up-front, avoid late-global index desync).
 
 - Single-module: `function fn(){fn=2;return 1} fn(); fn===2` observes `2`.
 - No regression in `module-code/` or existing tests (CI).
+
+## Implemented (dev-2900, 2026-07-02)
+
+`registerReassignedFunctionGlobals` in `src/codegen/index.ts`, wired into BOTH the
+single-source (`generateModule`) and multi-source (`generateMultiModule`) phases
+after `collectDeclarations`. Read arm in `identifiers.ts`; `__module_init` closure
+seed in `declarations.ts` (`compileModuleInitBody`, gated so it runs even with no
+other init statements); `ctx.liveFuncBindingGlobals` field on the context.
+`registerImportBindingAliases` (#2930) propagates set membership to import aliases.
+Tests: `tests/issue-2931.test.ts` (4/4). All behaviour gated on the normally-empty
+set — byte-identical for programs that never reassign a function declaration.
+
+**End-to-end proof:** with #2930 + #2931 + `allowJs` + a **top-level** import, the
+real test262 fixture `eval-gtbndng-indirect-update-dflt.js` returns `1` (PASS). The
+two remaining gaps are runner-side and belong to #2932/RC1 — see that issue.

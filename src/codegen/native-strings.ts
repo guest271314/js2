@@ -10,10 +10,17 @@ import { ensureAnyValueType } from "./any-helpers.js";
 import { emitNativeCaseConversion } from "./case-convert-native.js";
 import { allocLocal } from "./context/locals.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
+import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S3) stable-regime minting
 import { ensureLateImport, flushLateImportShifts } from "./expressions/late-imports.js";
 import { emitNativeNumberFormat } from "./number-format-native.js";
 import { addImport } from "./registry/imports.js";
-import { addFuncType, getArrTypeIdxFromVec, getOrRegisterArrayType, getOrRegisterVecType } from "./registry/types.js";
+import {
+  addFuncType,
+  getArrTypeIdxFromVec,
+  getOrRegisterArrayType,
+  getOrRegisterErrorStructType,
+  getOrRegisterVecType,
+} from "./registry/types.js";
 
 export function nativeStringType(ctx: CodegenContext): ValType {
   return { kind: "ref", typeIdx: ctx.anyStrTypeIdx };
@@ -305,7 +312,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
     const wlArrRefNull: ValType = { kind: "ref_null", typeIdx: wlArrTypeIdx };
 
     const typeIdx = addFuncType(ctx, [strRef, strDataRef, { kind: "i32" }], [{ kind: "i32" }]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_copy_tree", funcIdx);
 
     // params: node(0), buf(1), pos(2)
@@ -575,7 +582,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       { op: "local.get", index: 2 },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_copy_tree",
       typeIdx,
       locals: [
@@ -601,7 +608,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
   if (ctx.utf8Storage && ctx.utf8StrTypeIdx >= 0) {
     const u8StrRef: ValType = { kind: "ref", typeIdx: ctx.utf8StrTypeIdx };
     const typeIdx = addFuncType(ctx, [u8StrRef], [flatStrRef]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_utf8_to_flat", funcIdx);
     // params: u(0)
     // locals: len(1) code-unit count, byteLen(2), data(3) i8 array, out(4) i16 array,
@@ -848,7 +855,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       { op: "local.get", index: 4 },
       { op: "struct.new", typeIdx: strTypeIdx },
     ];
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_utf8_to_flat",
       typeIdx,
       locals: [
@@ -873,7 +880,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
   // If s is already a FlatString, returns it. Otherwise flattens the rope tree.
   {
     const typeIdx = addFuncType(ctx, [strRef], [flatStrRef]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_flatten", funcIdx);
     // Also register in funcMap so the deferred late-import shift
     // (flushLateImportShifts walks ctx.funcMap) keeps __str_flatten's index
@@ -924,7 +931,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_flatten",
       typeIdx,
       locals: [
@@ -963,7 +970,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
     const flattenIdx = ctx.nativeStrHelpers.get("__str_flatten")!;
     const u8DataRef: ValType = { kind: "ref", typeIdx: ctx.utf8StrDataTypeIdx };
     const typeIdx = addFuncType(ctx, [strRef], [u8DataRef]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_to_utf8", funcIdx);
 
     // params: s(0)
@@ -1339,7 +1346,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       { op: "local.get", index: OUT },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_to_utf8",
       typeIdx,
       locals: [
@@ -1366,7 +1373,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
   {
     const flattenIdx = ctx.nativeStrHelpers.get("__str_flatten")!;
     const typeIdx = addFuncType(ctx, [strRef, strRef], [strRef]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_concat", funcIdx);
 
     // params: a(0), b(1)
@@ -1463,7 +1470,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_concat",
       typeIdx,
       locals: [
@@ -1487,7 +1494,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
   // directly (caller traps on out-of-memory at the array.new_default site).
   {
     const typeIdx = addFuncType(ctx, [{ kind: "i32" }, { kind: "i32" }], [{ kind: "i32" }]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_buf_next_cap", funcIdx);
 
     // params: curCap(0), needed(1)
@@ -1535,7 +1542,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       { op: "local.get", index: 0 },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_buf_next_cap",
       typeIdx,
       locals: [],
@@ -1547,7 +1554,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
   // --- $__str_equals(a: ref $NativeString, b: ref $NativeString) -> i32 ---
   {
     const typeIdx = addFuncType(ctx, [strRef, strRef], [{ kind: "i32" }]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_equals", funcIdx);
 
     // locals: len(2), i(3), aData(4), bData(5), aOff(6), bOff(7)
@@ -1640,7 +1647,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       { op: "i32.const", value: 1 },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_equals",
       typeIdx,
       locals: [
@@ -1660,7 +1667,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
   // Lexicographic comparison: returns -1 (a < b), 0 (a == b), or 1 (a > b)
   {
     const typeIdx = addFuncType(ctx, [strRef, strRef], [{ kind: "i32" }]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_compare", funcIdx);
 
     // locals: lenA(2), lenB(3), minLen(4), i(5), aData(6), bData(7), aOff(8), bOff(9), ca(10), cb(11)
@@ -1795,7 +1802,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       { op: "i32.const", value: 0 },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_compare",
       typeIdx,
       locals: [
@@ -1818,7 +1825,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
   // --- $__str_substring(s: ref $NativeString, start: i32, end: i32) -> ref $NativeString ---
   {
     const typeIdx = addFuncType(ctx, [strRef, { kind: "i32" }, { kind: "i32" }], [strRef]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_substring", funcIdx);
 
     // O(1) substring: creates a view sharing the backing array.
@@ -1891,7 +1898,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       { op: "struct.new", typeIdx: strTypeIdx },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_substring",
       typeIdx,
       locals: [
@@ -1906,7 +1913,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
   // --- $__str_charAt(s: ref $NativeString, idx: i32) -> ref $NativeString ---
   {
     const typeIdx = addFuncType(ctx, [strRef, { kind: "i32" }], [strRef]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_charAt", funcIdx);
 
     const body: Instr[] = [
@@ -1948,7 +1955,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_charAt",
       typeIdx,
       locals: [],
@@ -1966,7 +1973,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
   // their cursor by the returned string's `len`.
   {
     const typeIdx = addFuncType(ctx, [strRef, { kind: "i32" }], [strRef]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_charAt_cp", funcIdx);
     const substringIdx = ctx.nativeStrHelpers.get("__str_substring")!;
 
@@ -2046,7 +2053,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_charAt_cp",
       typeIdx,
       locals: [],
@@ -2059,7 +2066,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
   // Like substring but handles negative indices
   {
     const typeIdx = addFuncType(ctx, [strRef, { kind: "i32" }, { kind: "i32" }], [strRef]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_slice", funcIdx);
 
     const substringIdx = ctx.nativeStrHelpers.get("__str_substring")!;
@@ -2153,7 +2160,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       } as Instr,
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_slice",
       typeIdx,
       locals: [{ name: "len", type: { kind: "i32" } }],
@@ -2173,7 +2180,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
   // absent length so the min() clamps it to `len - start` (to the end).
   {
     const typeIdx = addFuncType(ctx, [strRef, { kind: "i32" }, { kind: "i32" }], [strRef]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_substr", funcIdx);
 
     const substringIdx = ctx.nativeStrHelpers.get("__str_substring")!;
@@ -2255,7 +2262,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       { op: "call", funcIdx: substringIdx },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_substr",
       typeIdx,
       locals: [
@@ -2270,7 +2277,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
   // --- $__str_indexOf(haystack: ref $NativeString, needle: ref $NativeString, fromIndex: i32) -> i32 ---
   {
     const typeIdx = addFuncType(ctx, [strRef, strRef, { kind: "i32" }], [{ kind: "i32" }]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_indexOf", funcIdx);
 
     // params: haystack(0), needle(1), fromIndex(2)
@@ -2405,7 +2412,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       { op: "i32.const", value: -1 },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_indexOf",
       typeIdx,
       locals: [
@@ -2426,7 +2433,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
   // --- $__str_lastIndexOf(haystack: ref $NativeString, needle: ref $NativeString, fromIndex: i32) -> i32 ---
   {
     const typeIdx = addFuncType(ctx, [strRef, strRef, { kind: "i32" }], [{ kind: "i32" }]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_lastIndexOf", funcIdx);
 
     // params: haystack(0), needle(1), fromIndex(2)
@@ -2438,6 +2445,20 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       { op: "local.get", index: 1 },
       { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 },
       { op: "local.set", index: 4 },
+      // (#2875) §22.1.3.9 step 8: start candidates are bounded by
+      // min(max(pos, 0), …) — clamp fromIndex to ≥ 0 ONCE here so both the
+      // empty-needle arm (min(fromIndex, hLen)) and the scan init
+      // (min(fromIndex, hLen - nLen)) see the spec's max(pos, 0). Without it,
+      // lastIndexOf('a', -1) started the reverse scan at -1 and returned -1
+      // instead of checking position 0.
+      // fromIndex = max(fromIndex, 0)
+      { op: "local.get", index: 2 },
+      { op: "i32.const", value: 0 },
+      { op: "local.get", index: 2 },
+      { op: "i32.const", value: 0 },
+      { op: "i32.gt_s" },
+      { op: "select" },
+      { op: "local.set", index: 2 },
       // if nLen == 0, return min(fromIndex, hLen)
       { op: "local.get", index: 4 },
       { op: "i32.eqz" },
@@ -2548,7 +2569,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       { op: "i32.const", value: -1 },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_lastIndexOf",
       typeIdx,
       locals: [
@@ -2569,7 +2590,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
   // --- $__str_includes(haystack: ref $NativeString, needle: ref $NativeString, fromIndex: i32) -> i32 ---
   {
     const typeIdx = addFuncType(ctx, [strRef, strRef, { kind: "i32" }], [{ kind: "i32" }]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_includes", funcIdx);
 
     const indexOfIdx = ctx.nativeStrHelpers.get("__str_indexOf")!;
@@ -2583,7 +2604,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       { op: "i32.ne" },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_includes",
       typeIdx,
       locals: [],
@@ -2595,7 +2616,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
   // --- $__str_startsWith(s: ref $NativeString, prefix: ref $NativeString, position: i32) -> i32 ---
   {
     const typeIdx = addFuncType(ctx, [strRef, strRef, { kind: "i32" }], [{ kind: "i32" }]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_startsWith", funcIdx);
 
     // params: s(0), prefix(1), position(2)
@@ -2607,6 +2628,27 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       { op: "local.get", index: 1 },
       { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 },
       { op: "local.set", index: 4 },
+      // (#2875) §22.1.3.23 step 12: start = min(max(pos, 0), len). Without the
+      // clamp, position=INT_MAX (the trunc-sat of Infinity) overflows the
+      // `position + pLen` check below into a negative and the scan reads OOB
+      // (trap), and a negative position reads sData[sOff-…] (trap) instead of
+      // searching from 0 — startsWith('!', Infinity) / ('The', -1).
+      // position = max(position, 0)
+      { op: "local.get", index: 2 },
+      { op: "i32.const", value: 0 },
+      { op: "local.get", index: 2 },
+      { op: "i32.const", value: 0 },
+      { op: "i32.gt_s" },
+      { op: "select" },
+      { op: "local.set", index: 2 },
+      // position = min(position, sLen)
+      { op: "local.get", index: 2 },
+      { op: "local.get", index: 3 },
+      { op: "local.get", index: 2 },
+      { op: "local.get", index: 3 },
+      { op: "i32.lt_s" },
+      { op: "select" },
+      { op: "local.set", index: 2 },
       // if position + pLen > sLen, return 0
       { op: "local.get", index: 2 },
       { op: "local.get", index: 4 },
@@ -2680,7 +2722,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       { op: "i32.const", value: 0 },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_startsWith",
       typeIdx,
       locals: [
@@ -2700,7 +2742,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
   // --- $__str_endsWith(s: ref $NativeString, suffix: ref $NativeString, endPos: i32) -> i32 ---
   {
     const typeIdx = addFuncType(ctx, [strRef, strRef, { kind: "i32" }], [{ kind: "i32" }]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_endsWith", funcIdx);
 
     // params: s(0), suffix(1), endPos(2)
@@ -2713,6 +2755,17 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       { op: "local.get", index: 0 },
       { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 },
       { op: "local.set", index: 8 },
+      // (#2875) §22.1.3.6 step 7: end = min(max(pos, 0), len). The max(0) arm
+      // was missing — endsWith('', -1) computed startPos = -1 - 0 < 0 → false,
+      // but the spec clamps a negative endPosition to 0 (empty suffix → true).
+      // endPos = max(endPos, 0)
+      { op: "local.get", index: 2 },
+      { op: "i32.const", value: 0 },
+      { op: "local.get", index: 2 },
+      { op: "i32.const", value: 0 },
+      { op: "i32.gt_s" },
+      { op: "select" },
+      { op: "local.set", index: 2 },
       // endPos = min(endPos, sLen)
       { op: "local.get", index: 2 },
       { op: "local.get", index: 8 },
@@ -2795,7 +2848,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       { op: "i32.const", value: 0 },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_endsWith",
       typeIdx,
       locals: [
@@ -2820,7 +2873,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
   //   0x205F, 0x3000, 0xFEFF (BOM/ZWNBSP).
   {
     const typeIdx = addFuncType(ctx, [{ kind: "i32" }], [{ kind: "i32" }]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_isWhitespace", funcIdx);
 
     // Membership test as an OR-chain. `eq(v)` / `range(lo,hi)` each push one i32
@@ -2861,7 +2914,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       { op: "i32.or" },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_isWhitespace",
       typeIdx,
       locals: [],
@@ -2873,7 +2926,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
   // --- $__str_trimStart(s: ref $NativeString) -> ref $NativeString ---
   {
     const typeIdx = addFuncType(ctx, [strRef], [strRef]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_trimStart", funcIdx);
 
     const isWsIdx = ctx.nativeStrHelpers.get("__str_isWhitespace")!;
@@ -2931,7 +2984,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       { op: "call", funcIdx: substringIdx },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_trimStart",
       typeIdx,
       locals: [
@@ -2948,7 +3001,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
   // --- $__str_trimEnd(s: ref $NativeString) -> ref $NativeString ---
   {
     const typeIdx = addFuncType(ctx, [strRef], [strRef]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_trimEnd", funcIdx);
 
     const isWsIdx = ctx.nativeStrHelpers.get("__str_isWhitespace")!;
@@ -3006,7 +3059,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       { op: "call", funcIdx: substringIdx },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_trimEnd",
       typeIdx,
       locals: [
@@ -3022,7 +3075,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
   // --- $__str_trim(s: ref $NativeString) -> ref $NativeString ---
   {
     const typeIdx = addFuncType(ctx, [strRef], [strRef]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_trim", funcIdx);
 
     const trimStartIdx = ctx.nativeStrHelpers.get("__str_trimStart")!;
@@ -3034,7 +3087,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       { op: "call", funcIdx: trimEndIdx },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_trim",
       typeIdx,
       locals: [],
@@ -3046,7 +3099,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
   // --- $__str_repeat(s: ref $NativeString, count: i32) -> ref $NativeString ---
   {
     const typeIdx = addFuncType(ctx, [strRef, { kind: "i32" }], [strRef]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_repeat", funcIdx);
 
     // params: s(0), count(1)
@@ -3157,7 +3210,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_repeat",
       typeIdx,
       locals: [
@@ -3181,7 +3234,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
     const substringIdx = ctx.nativeStrHelpers.get("__str_substring")!;
 
     const typeIdx = addFuncType(ctx, [strRef, { kind: "i32" }, strRef], [strRef]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_padStart", funcIdx);
 
     // params: s(0), targetLen(1), padStr(2)
@@ -3245,7 +3298,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_padStart",
       typeIdx,
       locals: [
@@ -3267,7 +3320,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
     const substringIdx = ctx.nativeStrHelpers.get("__str_substring")!;
 
     const typeIdx = addFuncType(ctx, [strRef, { kind: "i32" }, strRef], [strRef]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_padEnd", funcIdx);
 
     // params: s(0), targetLen(1), padStr(2)
@@ -3335,7 +3388,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_padEnd",
       typeIdx,
       locals: [
@@ -3353,7 +3406,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
   // ASCII-only: maps A-Z (65-90) to a-z (97-122), copies everything else as-is
   {
     const typeIdx = addFuncType(ctx, [strRef], [strRef]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_toLowerCase", funcIdx);
 
     // params: s(0)
@@ -3441,7 +3494,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       { op: "struct.new", typeIdx: strTypeIdx },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_toLowerCase",
       typeIdx,
       locals: [
@@ -3461,7 +3514,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
   // ASCII-only: maps a-z (97-122) to A-Z (65-90), copies everything else as-is
   {
     const typeIdx = addFuncType(ctx, [strRef], [strRef]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_toUpperCase", funcIdx);
 
     // params: s(0)
@@ -3549,7 +3602,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       { op: "struct.new", typeIdx: strTypeIdx },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_toUpperCase",
       typeIdx,
       locals: [
@@ -3585,7 +3638,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
     const concatIdx = ctx.nativeStrHelpers.get("__str_concat")!;
 
     const typeIdx = addFuncType(ctx, [strRef, strRef, strRef, strRef], [strRef]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_getSubstitution", funcIdx);
 
     // params: replacement(0), matched(1), prefix(2), suffix(3)
@@ -3781,7 +3834,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       { op: "call", funcIdx: concatIdx },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_getSubstitution",
       typeIdx,
       locals: [
@@ -3808,7 +3861,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
     const getSubstitutionIdx = ctx.nativeStrHelpers.get("__str_getSubstitution")!;
 
     const typeIdx = addFuncType(ctx, [strRef, strRef, strRef], [strRef]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_replace", funcIdx);
 
     // params: s(0), search(1), replacement(2)
@@ -3871,7 +3924,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_replace",
       typeIdx,
       locals: [
@@ -3894,7 +3947,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
     const getSubstitutionIdx = ctx.nativeStrHelpers.get("__str_getSubstitution")!;
 
     const typeIdx = addFuncType(ctx, [strRef, strRef, strRef], [strRef]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_replaceAll", funcIdx);
 
     // params: s(0), search(1), replacement(2)
@@ -4076,7 +4129,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_replaceAll",
       typeIdx,
       locals: [
@@ -4106,7 +4159,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
     const nstrVecRef: ValType = { kind: "ref", typeIdx: nstrVecTypeIdx };
 
     const typeIdx = addFuncType(ctx, [strRef, strRef, { kind: "i32" }], [nstrVecRef]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_split", funcIdx);
 
     const indexOfIdx = ctx.nativeStrHelpers.get("__str_indexOf")!;
@@ -4392,7 +4445,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       { op: "struct.new", typeIdx: nstrVecTypeIdx },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_split",
       typeIdx,
       locals: [
@@ -4420,7 +4473,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
   // Supplementary (cp > 0xFFFF): 2-element surrogate pair.
   {
     const typeIdx = addFuncType(ctx, [{ kind: "i32" }], [strRef]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_fromCodePoint", funcIdx);
 
     // params: cp(0)
@@ -4465,7 +4518,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       } as Instr,
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_fromCodePoint",
       typeIdx,
       locals: [],
@@ -4480,7 +4533,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
   // are taken (no surrogate-pair handling — that is fromCodePoint's job).
   {
     const typeIdx = addFuncType(ctx, [{ kind: "i32" }], [strRef]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_fromCharCode", funcIdx);
 
     // params: code(0). Build: struct.new $NativeString(len=1, off=0, [code & 0xFFFF])
@@ -4494,7 +4547,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       { op: "struct.new", typeIdx: strTypeIdx },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_fromCharCode",
       typeIdx,
       locals: [],
@@ -4523,7 +4576,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
     const concatIdx = ctx.nativeStrHelpers.get("__str_concat")!;
     const flattenIdx = ctx.nativeStrHelpers.get("__str_flatten")!;
     const typeIdx = addFuncType(ctx, [strRef], [strRef]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__regex_escape", funcIdx);
 
     // params: s(0)
@@ -4968,7 +5021,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       { op: "local.get", index: OUT },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__regex_escape",
       typeIdx,
       locals: [
@@ -5058,7 +5111,7 @@ export function ensureTextEncodingHelpers(ctx: CodegenContext): {
 
   if (existingEncode === undefined) {
     const typeIdx = addFuncType(ctx, [strRef], [vecRef]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__textencoder_encode", funcIdx);
     ctx.funcMap.set("__textencoder_encode", funcIdx);
 
@@ -5333,7 +5386,7 @@ export function ensureTextEncodingHelpers(ctx: CodegenContext): {
       { op: "struct.new", typeIdx: vecTypeIdx },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__textencoder_encode",
       typeIdx,
       locals: [
@@ -5356,7 +5409,7 @@ export function ensureTextEncodingHelpers(ctx: CodegenContext): {
 
   if (existingDecode === undefined) {
     const typeIdx = addFuncType(ctx, [vecRef], [strRef]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__textdecoder_decode_u8", funcIdx);
     ctx.funcMap.set("__textdecoder_decode_u8", funcIdx);
 
@@ -5610,7 +5663,7 @@ export function ensureTextEncodingHelpers(ctx: CodegenContext): {
       { op: "struct.new", typeIdx: strTypeIdx },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__textdecoder_decode_u8",
       typeIdx,
       locals: [
@@ -5690,7 +5743,7 @@ export function ensureEncodeIntoHelper(
     // regularly-compiled function), which avoids materializing a fresh WasmGC
     // struct from inside this late-registered runtime helper.
     const typeIdx = addFuncType(ctx, [strRef, destVecRef], [{ kind: "i32" }, { kind: "i32" }]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set(helperName, funcIdx);
     ctx.funcMap.set(helperName, funcIdx);
 
@@ -6055,7 +6108,7 @@ export function ensureEncodeIntoHelper(
       ...buildResult,
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: helperName,
       typeIdx,
       locals: [
@@ -6107,6 +6160,125 @@ export function ensureEncodeIntoHelper(
  *
  * Idempotent — caches the function index under `nativeStrHelpers["__any_to_string"]`.
  */
+/**
+ * (#2962) §20.5.3.4 `Error.prototype.toString` for the native `$Error_struct` —
+ * `__error_to_string(v: anyref) -> ref $AnyString`, where `v` MUST already be
+ * a `$Error_struct` (callers guard with `ref.test`; the entry `ref.cast` is
+ * defensive).
+ *
+ *   1. name = $name field when it is a native string, else the literal
+ *      "Error" (our constructors always materialize a non-empty name, so the
+ *      spec's empty-name arm is unreachable — see emitErrorStructConstructor).
+ *   2. msg  = $message field; `null` (constructed argument-less), a NON-string
+ *      (documented residual: §20.5.1.1 stores ToString(message) at
+ *      construction, our ctor stores the raw arg), or the empty string all
+ *      yield `name` alone per §20.5.3.4 steps 4–6.
+ *   3. else `name + ": " + msg`.
+ *
+ * Standalone/WASI only: in JS-host mode the `__new_<Kind>` imports resolve to
+ * the real JS constructors, so thrown errors are host objects and never
+ * `$Error_struct`s — the helper would be dead weight. Registering the error
+ * struct type here (idempotent) makes the arm order-independent: a module
+ * whose first string coercion happens BEFORE its first error construction
+ * still gets the arm.
+ *
+ * Index-shift safety (#1448 pattern): the only baked dependency is
+ * `__str_concat` (already emitted by ensureNativeStringHelpers); the body is
+ * built and pushed with no intervening helper emission. Registered in
+ * `funcMap` so deferred late-import flushes keep the index authoritative.
+ *
+ * Idempotent — cached under `nativeStrHelpers["__error_to_string"]`.
+ */
+function ensureErrorToStringHelper(ctx: CodegenContext): number | undefined {
+  const cached = ctx.nativeStrHelpers.get("__error_to_string");
+  if (cached !== undefined) return cached;
+  if (!(ctx.standalone || ctx.wasi)) return undefined; // noJsHost only (see doc above)
+  ensureNativeStringHelpers(ctx);
+  const strConcatIdx = ctx.nativeStrHelpers.get("__str_concat");
+  if (strConcatIdx === undefined) return undefined;
+
+  const errStructIdx = getOrRegisterErrorStructType(ctx);
+  const anyStrTypeIdx = ctx.anyStrTypeIdx;
+  const strRef: ValType = { kind: "ref", typeIdx: anyStrTypeIdx };
+  const litStr = (value: string): Instr[] => nativeStringLiteralInstrs(ctx, value);
+
+  // params: v(0) anyref · locals: e(1) ref null $Error_struct, tmp(2) anyref,
+  // name(3) ref null $AnyString, msg(4) ref null $AnyString
+  const L_V = 0;
+  const L_E = 1;
+  const L_TMP = 2;
+  const L_NAME = 3;
+  const L_MSG = 4;
+
+  const returnName: Instr[] = [
+    { op: "local.get", index: L_NAME },
+    { op: "ref.as_non_null" } as Instr,
+    { op: "return" } as Instr,
+  ];
+
+  const body: Instr[] = [
+    { op: "local.get", index: L_V },
+    { op: "ref.cast", typeIdx: errStructIdx } as Instr,
+    { op: "local.set", index: L_E },
+    // name = ($name is a native string) ? it : "Error"
+    { op: "local.get", index: L_E },
+    { op: "struct.get", typeIdx: errStructIdx, fieldIdx: 2 }, // $name (externref)
+    { op: "any.convert_extern" } as Instr,
+    { op: "local.tee", index: L_TMP },
+    { op: "ref.test", typeIdx: anyStrTypeIdx } as Instr,
+    {
+      op: "if",
+      blockType: { kind: "val", type: strRef },
+      then: [{ op: "local.get", index: L_TMP }, { op: "ref.cast", typeIdx: anyStrTypeIdx } as Instr],
+      else: litStr("Error"),
+    } as Instr,
+    { op: "local.set", index: L_NAME },
+    // msg — null / non-string → name alone (steps 4–6; non-string is the
+    // documented construction-time-ToString residual).
+    { op: "local.get", index: L_E },
+    { op: "struct.get", typeIdx: errStructIdx, fieldIdx: 1 }, // $message (externref)
+    { op: "any.convert_extern" } as Instr,
+    { op: "local.tee", index: L_TMP },
+    { op: "ref.test", typeIdx: anyStrTypeIdx } as Instr,
+    { op: "i32.eqz" },
+    { op: "if", blockType: { kind: "empty" }, then: returnName.map((i) => ({ ...i })) } as Instr,
+    { op: "local.get", index: L_TMP },
+    { op: "ref.cast", typeIdx: anyStrTypeIdx } as Instr,
+    { op: "local.set", index: L_MSG },
+    // empty message → name alone (§20.5.3.4 step 6)
+    { op: "local.get", index: L_MSG },
+    { op: "struct.get", typeIdx: anyStrTypeIdx, fieldIdx: 0 }, // len
+    { op: "i32.eqz" },
+    { op: "if", blockType: { kind: "empty" }, then: returnName.map((i) => ({ ...i })) } as Instr,
+    // name + ": " + msg
+    { op: "local.get", index: L_NAME },
+    { op: "ref.as_non_null" } as Instr,
+    ...litStr(": "),
+    { op: "call", funcIdx: strConcatIdx },
+    { op: "local.get", index: L_MSG },
+    { op: "ref.as_non_null" } as Instr,
+    { op: "call", funcIdx: strConcatIdx },
+  ];
+
+  const typeIdx = addFuncType(ctx, [{ kind: "anyref" }], [strRef]);
+  const funcIdx = mintDefinedFunc(ctx);
+  ctx.nativeStrHelpers.set("__error_to_string", funcIdx);
+  ctx.funcMap.set("__error_to_string", funcIdx);
+  pushDefinedFunc(ctx, funcIdx, {
+    name: "__error_to_string",
+    typeIdx,
+    locals: [
+      { name: "e", type: { kind: "ref_null", typeIdx: errStructIdx } },
+      { name: "tmp", type: { kind: "anyref" } },
+      { name: "name", type: { kind: "ref_null", typeIdx: anyStrTypeIdx } },
+      { name: "msg", type: { kind: "ref_null", typeIdx: anyStrTypeIdx } },
+    ],
+    body,
+    exported: false,
+  });
+  return funcIdx;
+}
+
 export function ensureAnyToStringHelper(ctx: CodegenContext): number {
   ensureNativeStringHelpers(ctx);
   const existing = ctx.nativeStrHelpers.get("__any_to_string");
@@ -6121,11 +6293,39 @@ export function ensureAnyToStringHelper(ctx: CodegenContext): number {
   ensureAnyValueType(ctx);
   const anyValueTypeIdx = ctx.anyValueTypeIdx;
 
+  // (#2962) Emit the §20.5.3.4 `__error_to_string` helper BEFORE this
+  // function's own index is baked (it appends a function — no import, so no
+  // index shift for anything already emitted). `undefined` in JS-host mode
+  // (errors are host objects there) — every arm below then degrades to the
+  // prior "[object Object]" literal, keeping host lanes byte-identical.
+  const errToStrIdx = ensureErrorToStringHelper(ctx);
+  const errStructTypeIdx = errToStrIdx !== undefined ? ctx.errorStructTypeIdx : -1;
+
   // number_toString returns an externref that is really a `ref $AnyString` in
   // native-strings mode; convert it back with any.convert_extern + ref.cast.
   const numToStrIdx = ctx.funcMap.get("number_toString");
 
   const litStr = (value: string): Instr[] => nativeStringLiteralInstrs(ctx, value);
+
+  // (#2962) Shared terminal for an unrecognized object ref: `$Error_struct` →
+  // `__error_to_string` (a real "TypeError: boom"), anything else → the
+  // canonical "[object Object]". `loadRef` is a FACTORY (fresh instruction
+  // objects per use) because the ref is loaded twice (test + call) — aliasing
+  // one instr array into two tree positions double-shifts funcIdx fields when
+  // post-codegen passes walk the tree (the #1448 corruption class).
+  const objectOrErrorTag = (loadRef: () => Instr[]): Instr[] =>
+    errToStrIdx !== undefined && errStructTypeIdx >= 0
+      ? [
+          ...loadRef(),
+          { op: "ref.test", typeIdx: errStructTypeIdx } as Instr,
+          {
+            op: "if",
+            blockType: { kind: "val", type: strRef },
+            then: [...loadRef(), { op: "call", funcIdx: errToStrIdx } as Instr],
+            else: litStr("[object Object]"),
+          } as Instr,
+        ]
+      : litStr("[object Object]");
 
   // `box` (the $AnyValue ref) lives in local 1; the original anyref param in 0.
   const L_V = 0;
@@ -6204,7 +6404,10 @@ export function ensureAnyToStringHelper(ctx: CodegenContext): number {
                         else: litStr("false"),
                       } as Instr,
                     ],
-                    else: litStr("[object Object]"),
+                    // (#2962) a `$Error_struct` reaching the tag-5 boxed-extern
+                    // recovery (a caught error re-boxed as `any`) renders
+                    // "Name: message" instead of "[object Object]".
+                    else: objectOrErrorTag(() => [{ op: "local.get", index: L_RECOVER }]),
                   } as Instr,
                 ],
               } as Instr,
@@ -6329,8 +6532,12 @@ export function ensureAnyToStringHelper(ctx: CodegenContext): number {
                               ]),
                             } as Instr,
                           ],
-                          // tag 6 / unknown → "[object Object]"
-                          else: litStr("[object Object]"),
+                          // tag 6 / unknown → $Error_struct renders
+                          // "Name: message" (#2962), else "[object Object]"
+                          else: objectOrErrorTag(() => [
+                            { op: "local.get", index: L_BOX },
+                            { op: "struct.get", typeIdx: anyValueTypeIdx, fieldIdx: 3 },
+                          ]),
                         } as Instr,
                       ],
                     } as Instr,
@@ -6397,13 +6604,16 @@ export function ensureAnyToStringHelper(ctx: CodegenContext): number {
                     else: litStr("false"),
                   } as Instr,
                 ],
-                // tag 6 / unknown ref → "[object Object]"
-                else: litStr("[object Object]"),
+                // unknown ref → $Error_struct renders "Name: message"
+                // (#2962), else "[object Object]"
+                else: objectOrErrorTag(() => [{ op: "local.get", index: L_V }]),
               } as Instr,
             ],
           } as Instr,
         ]
-      : litStr("[object Object]");
+      : // No box types registered — still recognize a raw `$Error_struct`
+        // (#2962) before the "[object Object]" terminal.
+        objectOrErrorTag(() => [{ op: "local.get", index: L_V }]);
 
   const body: Instr[] = [
     // if (v is a $AnyString) return it directly
@@ -6435,10 +6645,10 @@ export function ensureAnyToStringHelper(ctx: CodegenContext): number {
   ];
 
   const typeIdx = addFuncType(ctx, [anyref], [strRef]);
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const funcIdx = mintDefinedFunc(ctx);
   ctx.nativeStrHelpers.set("__any_to_string", funcIdx);
   ctx.funcMap.set("__any_to_string", funcIdx);
-  ctx.mod.functions.push({
+  pushDefinedFunc(ctx, funcIdx, {
     name: "__any_to_string",
     typeIdx,
     locals: [
@@ -6643,10 +6853,10 @@ function ensureNativeVecJoinHelper(
   ];
 
   const typeIdx = addFuncType(ctx, [{ kind: "ref_null", typeIdx: vecTypeIdx }], [strRef]);
-  const joinFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const joinFuncIdx = mintDefinedFunc(ctx);
   ctx.nativeStrHelpers.set(cacheKey, joinFuncIdx);
   ctx.funcMap.set(cacheKey, joinFuncIdx);
-  ctx.mod.functions.push({
+  pushDefinedFunc(ctx, joinFuncIdx, {
     name: cacheKey,
     typeIdx,
     locals: [
@@ -7026,10 +7236,10 @@ export function ensureStrToCharVecHelper(ctx: CodegenContext): { funcIdx: number
   ];
 
   const typeIdx = addFuncType(ctx, [strRef], [{ kind: "ref", typeIdx: nstrVecTypeIdx }]);
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const funcIdx = mintDefinedFunc(ctx);
   ctx.nativeStrHelpers.set("__str_to_char_vec", funcIdx);
   ctx.funcMap.set("__str_to_char_vec", funcIdx);
-  ctx.mod.functions.push({
+  pushDefinedFunc(ctx, funcIdx, {
     name: "__str_to_char_vec",
     typeIdx,
     locals: [
@@ -7068,6 +7278,7 @@ export function ensureNativeStringExternBridge(ctx: CodegenContext): void {
     });
   }
 
+  const importsBeforeBridge = ctx.numImportFuncs;
   const fromMemIdx = ensureLateImport(
     ctx,
     "__str_from_mem",
@@ -7076,10 +7287,27 @@ export function ensureNativeStringExternBridge(ctx: CodegenContext): void {
   )!;
   const toMemIdx = ensureLateImport(ctx, "__str_to_mem", [{ kind: "externref" }, { kind: "i32" }], [])!;
   const externLenIdx = ensureLateImport(ctx, "__str_extern_len", [{ kind: "externref" }], [{ kind: "i32" }])!;
+  // (#2934 slice 3) Close the deferred late-import batch BEFORE baking
+  // `fromMemIdx`/`toMemIdx`/`externLenIdx` into the helper bodies below. The
+  // deferred flush repairs STALE refs by bumping every `funcIdx >=
+  // importsBefore` — it cannot distinguish a freshly-baked, already-final
+  // import index (these three) from a stale defined-function ref, so leaving
+  // the batch open until some later flush bumps the baked import refs onto
+  // whatever defined function lands at that offset (`__str_to_extern`'s
+  // `call __str_from_mem` resolved to `__str_copy_tree`, arity 3 — "not
+  // enough arguments on the stack" for every object-with-own-toString string
+  // coercion, S15.5.4.6_A4_T2). Flushing here settles all pre-batch stale
+  // refs and makes the subsequent flush a no-op for this batch. Gated on
+  // actually having REGISTERED imports (a funcMap-hit lookup is pure and must
+  // not force-flush an outer batch), so already-registered paths are
+  // byte-identical.
+  if (ctx.numImportFuncs > importsBeforeBridge) {
+    flushLateImportShifts(ctx, null);
+  }
 
   {
     const typeIdx = addFuncType(ctx, [strRef], [{ kind: "externref" }]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_to_extern", funcIdx);
     ctx.funcMap.set("__str_to_extern", funcIdx);
 
@@ -7152,7 +7380,7 @@ export function ensureNativeStringExternBridge(ctx: CodegenContext): void {
       { op: "call", funcIdx: fromMemIdx },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_to_extern",
       typeIdx,
       locals: [
@@ -7169,7 +7397,7 @@ export function ensureNativeStringExternBridge(ctx: CodegenContext): void {
 
   {
     const typeIdx = addFuncType(ctx, [{ kind: "externref" }], [strRef]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_from_extern", funcIdx);
     ctx.funcMap.set("__str_from_extern", funcIdx);
 
@@ -7219,7 +7447,7 @@ export function ensureNativeStringExternBridge(ctx: CodegenContext): void {
       { op: "struct.new", typeIdx: strTypeIdx },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_from_extern",
       typeIdx,
       locals: [
@@ -7300,7 +7528,7 @@ export function emitTestRuntimeStringHelpers(ctx: CodegenContext): void {
   // locals: len(1), data(2), i(3)
   {
     const typeIdx = addFuncType(ctx, [externref], [anyStrRef]);
-    const funcIdx = ctx.numImportFuncs + mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
 
     const body: Instr[] = [
       // len = wasm:js-string.length(s)
@@ -7360,7 +7588,7 @@ export function emitTestRuntimeStringHelpers(ctx: CodegenContext): void {
       { op: "struct.new", typeIdx: strTypeIdx },
     ];
 
-    mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__test_str_from_externref",
       typeIdx,
       locals: [
@@ -7390,7 +7618,7 @@ export function emitTestRuntimeStringHelpers(ctx: CodegenContext): void {
   // locals: flat(1), len(2), off(3), result(4), i(5)
   {
     const typeIdx = addFuncType(ctx, [anyStrRef], [externref]);
-    const funcIdx = ctx.numImportFuncs + mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
 
     const body: Instr[] = [
       // flat = __str_flatten(s)
@@ -7465,7 +7693,7 @@ export function emitTestRuntimeStringHelpers(ctx: CodegenContext): void {
       { op: "local.get", index: 4 },
     ];
 
-    mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__test_str_to_externref",
       typeIdx,
       locals: [
@@ -7482,5 +7710,155 @@ export function emitTestRuntimeStringHelpers(ctx: CodegenContext): void {
       name: "__test_str_to_externref",
       desc: { kind: "func", index: funcIdx },
     });
+  }
+}
+
+/**
+ * (#2962) Harness-readable exception rendering for standalone/WASI binaries —
+ * the export pair that de-opaques the "uncaught Wasm-GC exception
+ * (non-stringifiable payload)" bucket (~5.9k standalone baseline entries).
+ *
+ * A natively-thrown payload (an `$Error_struct`, a native string, a boxed
+ * number, …) is a WasmGC value the HOST cannot stringify — `String(payload)`
+ * throws `Cannot convert object to primitive value`, so the test262 harness
+ * (`extractWasmExceptionMessage`) could only record the #2870 opaque label.
+ * These exports let the harness render the payload with ZERO host imports,
+ * following the same harness-support-export pattern as `__sget_*` / `__vec_*`:
+ *
+ *   - `__exn_render_prepare(payload: externref) -> i32` — runs the payload
+ *     through the same `__any_to_string` chain the in-module `String(x)`
+ *     coercion uses (so an `$Error_struct` renders `"TypeError: boom"` via
+ *     `__error_to_string`, §20.5.3.4), flattens the result, stashes it in a
+ *     module global, and returns its code-unit length (`-1` for a null
+ *     payload — the harness keeps its legacy label).
+ *   - `__exn_render_char(i: i32) -> i32` — code-unit readback from the
+ *     prepared buffer (`0` when unprepared / out of range).
+ *
+ * Emitted at finalize (see the `emitExceptionRenderExports` call in
+ * codegen/index.ts) and gated on `(standalone || wasi) && nativeStrings &&
+ * exnTagIdx >= 0` — a module that cannot throw through the `$exc` tag gets
+ * neither export nor the string-runtime pull-in, keeping non-throwing modules
+ * byte-identical. JS-host binaries are untouched (payloads there are real JS
+ * values the host formats directly).
+ *
+ * Index-shift safety: both dependencies (`__any_to_string`, `__str_flatten`)
+ * are ensured/read from the authoritative `funcMap`/`nativeStrHelpers` BEFORE
+ * either body is built, and both functions are pushed with no intervening
+ * helper emission or import registration.
+ */
+export function emitExceptionRenderExports(ctx: CodegenContext): void {
+  if (!(ctx.standalone || ctx.wasi)) return;
+  if (!ctx.nativeStrings) return;
+  if (ctx.exnTagIdx < 0) return;
+  if (ctx.funcMap.has("__exn_render_prepare")) return;
+
+  // (#2969) Force `number_toString` before `__any_to_string` bakes so its number
+  // arm renders a raw thrown number ("42") instead of degrading to
+  // "[object Object]" — a throwing module that never itself stringifies a number
+  // otherwise leaves the arm unresolved. `emitExceptionRenderExports` is the
+  // first (and here, only) consumer of `__any_to_string` for such a module, so
+  // ensuring the format helper ahead of the `ensureAnyToStringHelper` call below
+  // makes the number arm real. Size cost falls only on throwing standalone/WASI
+  // modules. Must precede the ensure call (which snapshots the number_toString
+  // funcIdx into the baked arm).
+  if (ctx.funcMap.get("number_toString") === undefined) {
+    emitNativeNumberFormat(ctx, new Set(["number_toString"]));
+  }
+
+  const anyToStrIdx = ensureAnyToStringHelper(ctx);
+  const flattenIdx = ctx.funcMap.get("__str_flatten") ?? ctx.nativeStrHelpers.get("__str_flatten");
+  const flatTypeIdx = ctx.nativeStrTypeIdx;
+  const dataTypeIdx = ctx.nativeStrDataTypeIdx;
+  if (anyToStrIdx === undefined || flattenIdx === undefined || flatTypeIdx < 0 || dataTypeIdx < 0) return;
+
+  const mod = ctx.mod;
+
+  // (mut ref null $NativeString) — the prepared render buffer.
+  const bufGlobalIdx = ctx.numImportGlobals + mod.globals.length;
+  mod.globals.push({
+    name: "__exn_render_buf",
+    type: { kind: "ref_null", typeIdx: flatTypeIdx },
+    mutable: true,
+    init: [{ op: "ref.null", typeIdx: flatTypeIdx } as Instr],
+  });
+
+  // __exn_render_prepare(payload: externref) -> i32
+  {
+    const typeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i32" }], "$exn_render_prepare_type");
+    const funcIdx = mintDefinedFunc(ctx);
+    const body: Instr[] = [
+      { op: "local.get", index: 0 },
+      { op: "ref.is_null" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "i32.const", value: -1 }, { op: "return" } as Instr],
+      },
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" } as Instr,
+      { op: "call", funcIdx: anyToStrIdx },
+      { op: "call", funcIdx: flattenIdx },
+      { op: "global.set", index: bufGlobalIdx } as Instr,
+      { op: "global.get", index: bufGlobalIdx } as Instr,
+      { op: "struct.get", typeIdx: flatTypeIdx, fieldIdx: 0 }, // len
+    ];
+    ctx.funcMap.set("__exn_render_prepare", funcIdx);
+    pushDefinedFunc(ctx, funcIdx, {
+      name: "__exn_render_prepare",
+      typeIdx,
+      locals: [],
+      body,
+      exported: true,
+    } as WasmFunction);
+    mod.exports.push({ name: "__exn_render_prepare", desc: { kind: "func", index: funcIdx } });
+  }
+
+  // __exn_render_char(i: i32) -> i32
+  {
+    const typeIdx = addFuncType(ctx, [{ kind: "i32" }], [{ kind: "i32" }], "$exn_render_char_type");
+    const funcIdx = mintDefinedFunc(ctx);
+    const L_I = 0;
+    const L_BUF = 1;
+    const body: Instr[] = [
+      { op: "global.get", index: bufGlobalIdx } as Instr,
+      { op: "local.tee", index: L_BUF },
+      { op: "ref.is_null" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "i32.const", value: 0 }, { op: "return" } as Instr],
+      },
+      // i < 0 || i >= len → 0
+      { op: "local.get", index: L_I },
+      { op: "i32.const", value: 0 },
+      { op: "i32.lt_s" },
+      { op: "local.get", index: L_I },
+      { op: "local.get", index: L_BUF },
+      { op: "struct.get", typeIdx: flatTypeIdx, fieldIdx: 0 }, // len
+      { op: "i32.ge_s" },
+      { op: "i32.or" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "i32.const", value: 0 }, { op: "return" } as Instr],
+      },
+      // data[off + i]
+      { op: "local.get", index: L_BUF },
+      { op: "struct.get", typeIdx: flatTypeIdx, fieldIdx: 2 }, // data
+      { op: "local.get", index: L_BUF },
+      { op: "struct.get", typeIdx: flatTypeIdx, fieldIdx: 1 }, // off
+      { op: "local.get", index: L_I },
+      { op: "i32.add" },
+      { op: "array.get_u", typeIdx: dataTypeIdx },
+    ];
+    ctx.funcMap.set("__exn_render_char", funcIdx);
+    pushDefinedFunc(ctx, funcIdx, {
+      name: "__exn_render_char",
+      typeIdx,
+      locals: [{ name: "buf", type: { kind: "ref_null", typeIdx: flatTypeIdx } }],
+      body,
+      exported: true,
+    } as WasmFunction);
+    mod.exports.push({ name: "__exn_render_char", desc: { kind: "func", index: funcIdx } });
   }
 }

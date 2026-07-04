@@ -9,7 +9,7 @@ priority: high
 task_type: bug
 area: tooling
 goal: standalone
-sprint: current
+sprint: 69
 horizon: s
 related: [2862, 2860]
 ---

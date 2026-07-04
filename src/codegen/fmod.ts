@@ -41,6 +41,7 @@
  * drivers (`accessor-driver.ts`).
  */
 import type { Instr, WasmFunction } from "../ir/types.js";
+import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S3b) stable-regime minting
 import type { CodegenContext } from "./context/types.js";
 import { addFuncType } from "./registry/types.js";
 
@@ -58,7 +59,7 @@ export function ensureFmod(ctx: CodegenContext): number {
   if (existing !== undefined) return existing;
 
   const sigIdx = addFuncType(ctx, [{ kind: "f64" }, { kind: "f64" }], [{ kind: "f64" }], "$fmod_type");
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const funcIdx = mintDefinedFunc(ctx);
 
   // Locals (after the two f64 params at indices 0=a, 1=b):
   //   2 = x (|a|, running remainder), 3 = y (|b|), 4 = t (aligned divisor)
@@ -228,7 +229,7 @@ export function ensureFmod(ctx: CodegenContext): number {
     body,
     exported: false,
   };
-  ctx.mod.functions.push(fn);
+  pushDefinedFunc(ctx, funcIdx, fn);
   ctx.funcMap.set(FMOD_FN, funcIdx);
   return funcIdx;
 }

@@ -7,7 +7,7 @@ import {
   compile,
   readFileSync,
   resolve,
-} from "./helpers.js";
+} from "./equivalence/helpers.js";
 
 describe("in operator edge cases", () => {
   it("known property is 'in' the object", async () => {

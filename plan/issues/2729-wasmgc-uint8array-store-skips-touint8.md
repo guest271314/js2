@@ -3,7 +3,7 @@ id: 2729
 title: "WasmGC backend: new Uint8Array(n) element store skips ToUint8 (u[0]=257 reads 257, u[0]=NaN reads NaN)"
 status: done
 assignee: ttraenkler/agent-aa6c288d8cd3cb14b
-sprint: current
+sprint: 69
 created: 2026-06-26
 completed: 2026-06-28
 priority: medium

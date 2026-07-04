@@ -2,7 +2,7 @@
 id: 2783
 title: "General --link <namespace> dynamic-linking flag (generalize --link-node-shims)"
 status: done
-sprint: current
+sprint: 69
 created: 2026-06-28
 completed: 2026-06-28
 assignee: ttraenkler/agent-a957b1b8ea8d85c4a

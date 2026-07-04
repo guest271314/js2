@@ -53,6 +53,10 @@ describe("async/await support", () => {
   });
 
   it("async function with multiple sequential awaits", async () => {
+    // #1042 host drive: a genuinely-suspending multi-await body returns a REAL
+    // Promise (previously the legacy synchronous fakery returned the raw sum —
+    // and wrong values the moment an operand was genuinely pending). Same
+    // consumption migration #1796 applied to the single-await tests.
     const exports = await instantiate(`
       async function getA(): Promise<number> { return 10; }
       async function getB(): Promise<number> { return 20; }
@@ -62,7 +66,7 @@ describe("async/await support", () => {
         return a + b;
       }
     `);
-    expect(exports.sumTwo()).toBe(30);
+    await expect(exports.sumTwo()).resolves.toBe(30);
   });
 
   it("async void function compiles and runs", async () => {
@@ -86,6 +90,7 @@ describe("async/await support", () => {
   });
 
   it("async function with arithmetic on awaited values", async () => {
+    // #1042 host drive — real Promise result; see the sequential-awaits note.
     const exports = await instantiate(`
       async function getX(): Promise<number> { return 7; }
       async function getY(): Promise<number> { return 3; }
@@ -95,7 +100,7 @@ describe("async/await support", () => {
         return x * y + 1;
       }
     `);
-    expect(exports.calculate()).toBe(22); // 7 * 3 + 1
+    await expect(exports.calculate()).resolves.toBe(22); // 7 * 3 + 1
   });
 
   it("async function with boolean return", async () => {

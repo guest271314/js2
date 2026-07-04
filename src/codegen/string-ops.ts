@@ -2222,8 +2222,41 @@ export function compileNativeStringMethodCall(
 
   // (#2576) Single indirection for emitting the receiver. Default re-compiles
   // `propAccess.expression`; the guarded `any`-receiver path overrides it.
-  const emitReceiver = (): ValType | null =>
-    receiverOverride ? receiverOverride() : compileExpression(ctx, fctx, propAccess.expression);
+  // (#2934 2b) A statically-string-typed receiver can still COMPILE to
+  // externref — e.g. `String(42).concat(x)`: `number_toString` returns the
+  // native string EXTERNALIZED via `extern.convert_any`. Every method arm
+  // below feeds the receiver to a native helper expecting `(ref null
+  // $AnyString)`, so an uncoerced externref receiver is invalid Wasm
+  // (`call[0] expected (ref null $AnyString), found call of externref`).
+  // Cast it back with the established inverse
+  // (`emitNativeStringRefFromExternref`): in the native-strings world every
+  // string-typed externref wraps a native string struct (there are no host
+  // strings), so `any.convert_extern` + `ref.cast $AnyString` is exact.
+  const emitReceiver = (): ValType | null => {
+    const t = receiverOverride ? receiverOverride() : compileExpression(ctx, fctx, propAccess.expression);
+    if (t && (t.kind === "externref" || t.kind === "ref_extern") && ctx.anyStrTypeIdx >= 0) {
+      emitNativeStringRefFromExternref(ctx, fctx);
+      return nativeStringType(ctx);
+    }
+    // (#2934 slice 3) A reflective `String.prototype.X.call(obj, …)` receiver
+    // can compile to a concrete OBJECT struct ref — §22.1.3.x requires
+    // ToString(this) first (dispatching the object's own toString, which may
+    // throw — S15.5.4.6_A4_T2 expects exactly that). Feeding the raw struct
+    // ref to a native string helper is invalid Wasm (`call[0] expected (ref
+    // null $AnyString), found global.get of (ref null N)`). `tryStructToString`
+    // performs that dispatch and normalises to `ref $AnyString`; string-typed
+    // refs are untouched (excluded here, and not in the struct-name map).
+    if (
+      t &&
+      (t.kind === "ref" || t.kind === "ref_null") &&
+      (t as { typeIdx: number }).typeIdx !== ctx.anyStrTypeIdx &&
+      (t as { typeIdx: number }).typeIdx !== ctx.nativeStrTypeIdx &&
+      tryStructToString(ctx, fctx, t)
+    ) {
+      return nativeStringType(ctx);
+    }
+    return t;
+  };
 
   // Helper: emit a flatten call to convert ref $AnyString → ref $NativeString
   const emitFlatten = () => fctx.body.push({ op: "call", funcIdx: flattenIdx });

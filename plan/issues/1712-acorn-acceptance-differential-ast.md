@@ -3,7 +3,7 @@ id: 1712
 title: "acceptance: compiled acorn parses a representative .js with AST structurally equal to node-acorn"
 status: in-progress
 created: 2026-05-29
-updated: 2026-06-24
+updated: 2026-07-02
 priority: high
 feasibility: hard
 reasoning_effort: high
@@ -527,3 +527,20 @@ specific (likely the module-global-object + assignment-expression + nested
 This is a fresh investigation — a separate slice from the identity loop this
 branch closes. The #1712 acceptance test (`tests/issue-1712.test.ts`) stays
 `it.skip` until the module-init chain clears.
+
+## Status reconcile (2026-07-02)
+
+Stays **in-progress** — the acceptance gate is NOT met: `tests/issue-1712.test.ts`
+is still `it.skip` on main, and the committed differential corpus shows open gaps.
+Landed since the last note above:
+
+- **PR #1874** (2026-06-21) — the two tokenizer identity-loop root causes
+  documented in the section above (the `_safeSet` struct-writeback + the
+  `any`-receiver `replace` mis-dispatch).
+- **PR #2330** (2026-06-29) — wider acorn differential corpus + committed gap map
+  (`tests/dogfood/CORPUS-GAP-MAP.md`, `pnpm run dogfood:acorn-corpus`); measured
+  `inputs=22 equal±quirks=6 REAL=6 compiled-threw=10` and filed the distinct gap
+  issues #2844–#2848/#2850 (return wall = #2838, arrow params = #2841).
+
+This remains an integration gate satisfied by fixing its dependency gap issues,
+not by direct dispatch.

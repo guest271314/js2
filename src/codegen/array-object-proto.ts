@@ -493,6 +493,25 @@ const PROTO_METHOD_LENGTH: Readonly<Record<string, number>> = {
   unregister: 1,
 };
 
+/**
+ * (#2875 slice 3) ABI param-slot counts for `String.prototype` members whose
+ * trailing OPTIONAL arg is NOT counted by `fn.length` — `indexOf(searchString,
+ * position)` etc. are spec length 1 but take a second arg. The reflective
+ * closure's lifted func type sizes to this slot count (so the optional arg has
+ * a real param index — reading a nonexistent param index lands on the first
+ * DECLARED LOCAL and emits invalid Wasm), while `.length` keeps reporting the
+ * spec arity via `nativeClosureMeta`. Call surfaces pad missing args with
+ * `ref.null.extern` (undefined). Scoped to String so every other family's
+ * closure types stay byte-identical.
+ */
+const STRING_PROTO_METHOD_PARAM_SLOTS: Readonly<Record<string, number>> = {
+  indexOf: 2, // (searchString, position) §22.1.3.8
+  lastIndexOf: 2, // (searchString, position) §22.1.3.9
+  includes: 2, // (searchString, position) §22.1.3.7
+  startsWith: 2, // (searchString, position) §22.1.3.23
+  endsWith: 2, // (searchString, endPosition) §22.1.3.6
+};
+
 // ── ArrayBuffer.prototype (ES2024 §25.1.5) ────────────────────────────────────
 // Method names + accessor getters. Getters (`byteLength`/`maxByteLength`/
 // `detached`/`resizable`) are marked below so their `.length` meta folds to 0.
@@ -719,13 +738,33 @@ function emitArrayProtoMemberBody(ctx: CodegenContext, fctx: FunctionContext, me
  * `$__any_to_string` are functions (append-only, no index shift).
  */
 function emitStringProtoMemberBody(ctx: CodegenContext, fctx: FunctionContext, member: string): ValType | null {
-  const SLICE1 = new Set(["charAt", "at"]);
-  if (!SLICE1.has(member)) return emitProtoMemberBodyRefusal(ctx, fctx, "String", member);
+  const IN_SCOPE = new Set(["charAt", "at", "charCodeAt", "codePointAt"]);
+  // (#2875 slice 3a) The number-returning search family — `indexOf` /
+  // `lastIndexOf` — has a DIFFERENT closure ABI from the index accessors
+  // (param 2 is the search STRING, not an integer position; the optional
+  // position is param 3), so it gets a dedicated body rather than the
+  // integer-position path below. Routed FIRST so it bypasses the index-accessor
+  // code entirely — keeping that path byte-identical to slices 1–2.
+  const SEARCH_NUMERIC = new Set(["indexOf", "lastIndexOf"]);
+  if (SEARCH_NUMERIC.has(member)) return emitStringSearchNumericMemberBody(ctx, fctx, member);
+  // (#2875 slice 3b) The BOOLEAN-returning search family shares the two-string
+  // ABI of 3a but boxes an i32 boolean result via __box_boolean.
+  const SEARCH_BOOLEAN = new Set(["includes", "startsWith", "endsWith"]);
+  if (SEARCH_BOOLEAN.has(member)) return emitStringSearchBooleanMemberBody(ctx, fctx, member);
+  if (!IN_SCOPE.has(member)) return emitProtoMemberBodyRefusal(ctx, fctx, "String", member);
 
   ensureNativeStringHelpers(ctx);
-  // Unbox the integer position arg FIRST (the sole late-import site → flushes).
-  const posLocal = unboxArgToI32(ctx, fctx, 2);
-  // Fetch helper funcIdxs AFTER the import shift, by name.
+  const needsNumBox = member === "charCodeAt" || member === "codePointAt";
+  // Do ALL late-import-adding ops FIRST (mirrors emitArrayProtoMemberBody), so
+  // every helper funcIdx fetched by NAME afterwards is post-shift-correct.
+  const posLocal = unboxArgToI32(ctx, fctx, 2); // → __unbox_number import + flush
+  let boxIdx: number | undefined;
+  if (needsNumBox) {
+    boxIdx = ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
+    flushLateImportShifts(ctx, fctx);
+    if (boxIdx === undefined) return emitProtoMemberBodyRefusal(ctx, fctx, "String", member);
+  }
+  // Fetch helper funcIdxs AFTER the import shifts, by name.
   const anyToStrIdx = ensureAnyToStringHelper(ctx);
   const flattenIdx = ctx.nativeStrHelpers.get("__str_flatten");
   const charAtIdx = ctx.nativeStrHelpers.get("__str_charAt");
@@ -757,6 +796,135 @@ function emitStringProtoMemberBody(ctx: CodegenContext, fctx: FunctionContext, m
     fctx.body.push({ op: "local.get", index: posLocal } as Instr);
     fctx.body.push({ op: "call", funcIdx: charAtIdx } as Instr);
     fctx.body.push({ op: "extern.convert_any" } as Instr); // native string → externref
+    return { kind: "externref" };
+  }
+
+  const strTy = ctx.nativeStrTypeIdx; // flat string struct: 0=len, 1=off, 2=data
+  const dataTy = ctx.nativeStrDataTypeIdx;
+
+  if (member === "charCodeAt") {
+    // §22.1.3.3: out-of-range → NaN; else the UTF-16 code unit as a number.
+    fctx.body.push({ op: "local.get", index: posLocal } as Instr);
+    fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+    fctx.body.push({ op: "i32.lt_s" } as Instr);
+    fctx.body.push({ op: "local.get", index: posLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: flatLocal } as Instr);
+    fctx.body.push({ op: "struct.get", typeIdx: strTy, fieldIdx: 0 } as Instr); // len
+    fctx.body.push({ op: "i32.ge_s" } as Instr);
+    fctx.body.push({ op: "i32.or" } as Instr);
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "val", type: { kind: "f64" } },
+      then: [{ op: "f64.const", value: NaN } as Instr],
+      else: [
+        { op: "local.get", index: flatLocal } as Instr,
+        { op: "struct.get", typeIdx: strTy, fieldIdx: 2 } as Instr, // data
+        { op: "local.get", index: flatLocal } as Instr,
+        { op: "struct.get", typeIdx: strTy, fieldIdx: 1 } as Instr, // off
+        { op: "local.get", index: posLocal } as Instr,
+        { op: "i32.add" } as Instr,
+        { op: "array.get_u", typeIdx: dataTy } as Instr,
+        { op: "f64.convert_i32_u" } as Instr,
+      ],
+    } as Instr);
+    fctx.body.push({ op: "call", funcIdx: boxIdx! } as Instr); // f64 → externref
+    return { kind: "externref" };
+  }
+
+  if (member === "codePointAt") {
+    // §22.1.3.4: position out of range → undefined; else the code point at
+    // `pos`, combining a leading+trailing surrogate pair when present.
+    const lenL = allocLocal(fctx, `__str_pm_len_${fctx.locals.length}`, { kind: "i32" });
+    const firstL = allocLocal(fctx, `__str_pm_first_${fctx.locals.length}`, { kind: "i32" });
+    const secondL = allocLocal(fctx, `__str_pm_second_${fctx.locals.length}`, { kind: "i32" });
+    fctx.body.push({ op: "local.get", index: flatLocal } as Instr);
+    fctx.body.push({ op: "struct.get", typeIdx: strTy, fieldIdx: 0 } as Instr);
+    fctx.body.push({ op: "local.set", index: lenL } as Instr);
+    // out of range (pos<0 || pos>=len) → undefined
+    fctx.body.push({ op: "local.get", index: posLocal } as Instr);
+    fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+    fctx.body.push({ op: "i32.lt_s" } as Instr);
+    fctx.body.push({ op: "local.get", index: posLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: lenL } as Instr);
+    fctx.body.push({ op: "i32.ge_s" } as Instr);
+    fctx.body.push({ op: "i32.or" } as Instr);
+    // read unit at pos → firstL (guarded read builder)
+    const readUnit = (posInstrs: Instr[]): Instr[] => [
+      { op: "local.get", index: flatLocal } as Instr,
+      { op: "struct.get", typeIdx: strTy, fieldIdx: 2 } as Instr, // data
+      { op: "local.get", index: flatLocal } as Instr,
+      { op: "struct.get", typeIdx: strTy, fieldIdx: 1 } as Instr, // off
+      ...posInstrs,
+      { op: "i32.add" } as Instr,
+      { op: "array.get_u", typeIdx: dataTy } as Instr,
+    ];
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "val", type: { kind: "externref" } as ValType },
+      then: [{ op: "ref.null.extern" } as Instr],
+      else: [
+        // first = data[off+pos]
+        ...readUnit([{ op: "local.get", index: posLocal } as Instr]),
+        { op: "local.set", index: firstL } as Instr,
+        // isLead = first in [0xD800,0xDBFF] && pos+1 < len
+        { op: "local.get", index: firstL } as Instr,
+        { op: "i32.const", value: 0xd800 } as Instr,
+        { op: "i32.ge_u" } as Instr,
+        { op: "local.get", index: firstL } as Instr,
+        { op: "i32.const", value: 0xdbff } as Instr,
+        { op: "i32.le_u" } as Instr,
+        { op: "i32.and" } as Instr,
+        { op: "local.get", index: posLocal } as Instr,
+        { op: "i32.const", value: 1 } as Instr,
+        { op: "i32.add" } as Instr,
+        { op: "local.get", index: lenL } as Instr,
+        { op: "i32.lt_s" } as Instr,
+        { op: "i32.and" } as Instr,
+        {
+          op: "if",
+          blockType: { kind: "val", type: { kind: "f64" } },
+          then: [
+            // second = data[off+pos+1]
+            ...readUnit([
+              { op: "local.get", index: posLocal } as Instr,
+              { op: "i32.const", value: 1 } as Instr,
+              { op: "i32.add" } as Instr,
+            ]),
+            { op: "local.set", index: secondL } as Instr,
+            // isTrail = second in [0xDC00,0xDFFF]
+            { op: "local.get", index: secondL } as Instr,
+            { op: "i32.const", value: 0xdc00 } as Instr,
+            { op: "i32.ge_u" } as Instr,
+            { op: "local.get", index: secondL } as Instr,
+            { op: "i32.const", value: 0xdfff } as Instr,
+            { op: "i32.le_u" } as Instr,
+            { op: "i32.and" } as Instr,
+            {
+              op: "if",
+              blockType: { kind: "val", type: { kind: "f64" } },
+              then: [
+                // cp = (first-0xD800)*0x400 + (second-0xDC00) + 0x10000
+                { op: "local.get", index: firstL } as Instr,
+                { op: "i32.const", value: 0xd800 } as Instr,
+                { op: "i32.sub" } as Instr,
+                { op: "i32.const", value: 0x400 } as Instr,
+                { op: "i32.mul" } as Instr,
+                { op: "local.get", index: secondL } as Instr,
+                { op: "i32.const", value: 0xdc00 } as Instr,
+                { op: "i32.sub" } as Instr,
+                { op: "i32.add" } as Instr,
+                { op: "i32.const", value: 0x10000 } as Instr,
+                { op: "i32.add" } as Instr,
+                { op: "f64.convert_i32_u" } as Instr,
+              ],
+              else: [{ op: "local.get", index: firstL } as Instr, { op: "f64.convert_i32_u" } as Instr],
+            } as Instr,
+          ],
+          else: [{ op: "local.get", index: firstL } as Instr, { op: "f64.convert_i32_u" } as Instr],
+        } as Instr,
+        { op: "call", funcIdx: boxIdx! } as Instr, // f64 → externref
+      ],
+    } as Instr);
     return { kind: "externref" };
   }
 
@@ -803,6 +971,184 @@ function emitStringProtoMemberBody(ctx: CodegenContext, fctx: FunctionContext, m
       { op: "extern.convert_any" } as Instr,
     ],
   } as Instr);
+  return { kind: "externref" };
+}
+
+/**
+ * (#2875 slice 3a) Native body for a reflective `String.prototype.<member>`
+ * closure of the NUMBER-returning search family — `indexOf` / `lastIndexOf`.
+ * Closure ABI: `this` = param 1 (externref), searchString = param 2 (externref-
+ * boxed), fromIndex/position = param 3 (externref-boxed). Param 3 exists ONLY
+ * because `STRING_PROTO_METHOD_PARAM_SLOTS` sizes these closures to 2 arg
+ * slots (spec `fn.length` is 1 — the optional `position` is uncounted, and
+ * sizing by arity alone made `local.get 3` read the first DECLARED LOCAL,
+ * emitting invalid Wasm — the original slice-3 blocker). Implements
+ * §22.1.3.{8,9}: `? RequireObjectCoercible(this)` → `? ToString(this)` →
+ * `? ToString(searchString)` → the native index scan → box the i32 index as a
+ * Number (externref). This is the search-family counterpart of `charCodeAt`'s
+ * number-box arm; it differs from the index-accessor path only in that param 2
+ * is a STRING (flattened) rather than an integer position.
+ *
+ * Funcidx/type-index discipline: the ONLY late-import adders here (`unboxArgToI32`'s
+ * `__unbox_number` and `__box_number`) run FIRST and flush, so every helper funcIdx
+ * fetched by NAME afterwards is post-shift-correct. Receiver + needle are flattened
+ * to `flatStringType` (`ref $FlatString`, a subtype of the helpers' `ref $AnyString`
+ * param — a valid implicit up-cast), mirroring `charAt`.
+ */
+function emitStringSearchNumericMemberBody(ctx: CodegenContext, fctx: FunctionContext, member: string): ValType | null {
+  ensureNativeStringHelpers(ctx);
+  const isLast = member === "lastIndexOf";
+  const helperName = isLast ? "__str_lastIndexOf" : "__str_indexOf";
+
+  // (1) Do ALL late-import-adding ops FIRST (mirrors charCodeAt), so every helper
+  // funcIdx fetched by NAME afterwards is post-shift-correct.
+  //   fromIndex: unbox param 3 → i32 (null/undefined → 0 via NaN→trunc_sat).
+  const fromLocal = unboxArgToI32(ctx, fctx, 3);
+  const boxIdx = ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
+  flushLateImportShifts(ctx, fctx);
+  if (boxIdx === undefined) return emitProtoMemberBodyRefusal(ctx, fctx, "String", member);
+
+  // (2) Fetch helper funcIdxs AFTER the import shifts, by name.
+  const anyToStrIdx = ensureAnyToStringHelper(ctx);
+  const flattenIdx = ctx.nativeStrHelpers.get("__str_flatten");
+  const searchIdx = ctx.nativeStrHelpers.get(helperName);
+  if (flattenIdx === undefined || searchIdx === undefined) {
+    return emitProtoMemberBodyRefusal(ctx, fctx, "String", member);
+  }
+
+  // (3) RequireObjectCoercible(this) [param 1]: undefined≡null≡ref.null.extern in
+  // standalone, so a bare ref.is_null throw covers both → catchable TypeError.
+  const rocThrow: Instr[] = [];
+  emitBrandCheckTypeError(ctx, rocThrow, `String.prototype.${member} called on null or undefined`);
+  fctx.body.push({ op: "local.get", index: 1 } as Instr);
+  fctx.body.push({ op: "ref.is_null" } as Instr);
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: rocThrow } as Instr);
+
+  // (4) lastIndexOf default position: §22.1.3.9 — an absent / `undefined` position
+  // is ToIntegerOrInfinity → +∞ ⇒ search from the end. In standalone both map to a
+  // null externref, so ref.is_null selects the from-end sentinel (0x7fffffff). An
+  // explicit numeric position (incl. saturating large values) keeps its unboxed i32.
+  // `indexOf`'s default of 0 is exactly what unboxArgToI32 already yields for null.
+  if (isLast) {
+    fctx.body.push({ op: "local.get", index: 3 } as Instr);
+    fctx.body.push({ op: "ref.is_null" } as Instr);
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "val", type: { kind: "i32" } },
+      then: [{ op: "i32.const", value: 0x7fffffff } as Instr],
+      else: [{ op: "local.get", index: fromLocal } as Instr],
+    } as Instr);
+    fctx.body.push({ op: "local.set", index: fromLocal } as Instr);
+  }
+
+  // (5) recv = flatten(ToString(this)); needle = flatten(ToString(searchString)).
+  const flattenExtern = (paramIdx: number, label: string): number => {
+    fctx.body.push({ op: "local.get", index: paramIdx } as Instr);
+    fctx.body.push({ op: "any.convert_extern" } as Instr);
+    fctx.body.push({ op: "call", funcIdx: anyToStrIdx } as Instr);
+    fctx.body.push({ op: "call", funcIdx: flattenIdx } as Instr);
+    const local = allocLocal(fctx, `${label}_${fctx.locals.length}`, flatStringType(ctx));
+    fctx.body.push({ op: "local.set", index: local } as Instr);
+    return local;
+  };
+  const recvLocal = flattenExtern(1, "__str_srch_recv");
+  const needleLocal = flattenExtern(2, "__str_srch_needle");
+
+  // (6) call __str_indexOf/__str_lastIndexOf(recv, needle, fromIndex) → i32 index.
+  fctx.body.push({ op: "local.get", index: recvLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: needleLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: fromLocal } as Instr);
+  fctx.body.push({ op: "call", funcIdx: searchIdx } as Instr);
+  // (7) box the i32 index as a Number (externref).
+  fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+  fctx.body.push({ op: "call", funcIdx: boxIdx } as Instr);
+  return { kind: "externref" };
+}
+
+/**
+ * (#2875 slice 3b) Native body for a reflective `String.prototype.<member>`
+ * closure of the BOOLEAN-returning search family — `includes` / `startsWith` /
+ * `endsWith`. Same two-string ABI as the 3a numeric family (`this` = param 1,
+ * searchString = param 2, position/endPosition = param 3 — the second slot
+ * exists via STRING_PROTO_METHOD_PARAM_SLOTS), but the i32 core result is
+ * boxed via the standalone-native `__box_boolean` so the externref carries a
+ * real JS boolean (NOT `__box_number` — `1 === true` is false; see the
+ * array-methods.ts SameValueZero note). Implements §22.1.3.{7,23,6} steps:
+ * `? RequireObjectCoercible(this)` → `? ToString(this)` →
+ * `? ToString(searchString)` → clamp position → the native core.
+ *
+ * Known spec gap (documented, matches the DIRECT path's static-only fold):
+ * step 3's IsRegExp(searchString) throw is folded STATICALLY at direct call
+ * sites (`argIsStaticRegExp`, string-ops.ts); this reflective body does not
+ * re-check at runtime, so a RegExp arg reaching a reflective call falls
+ * through to ToString instead of throwing. No test262 case exercises that
+ * combination today; a runtime `ref.test $RegExp` arm can be added when one
+ * does.
+ */
+function emitStringSearchBooleanMemberBody(ctx: CodegenContext, fctx: FunctionContext, member: string): ValType | null {
+  ensureNativeStringHelpers(ctx);
+  const helperName =
+    member === "includes" ? "__str_includes" : member === "startsWith" ? "__str_startsWith" : "__str_endsWith";
+
+  // (1) Do ALL late-import-adding ops FIRST (mirrors the 3a body), so every
+  // helper funcIdx fetched by NAME afterwards is post-shift-correct.
+  //   position/endPosition: unbox param 3 → i32 (null/undefined → 0).
+  const posLocal = unboxArgToI32(ctx, fctx, 3);
+  const boxBoolIdx = ensureLateImport(ctx, "__box_boolean", [{ kind: "i32" }], [{ kind: "externref" }]);
+  flushLateImportShifts(ctx, fctx);
+  if (boxBoolIdx === undefined) return emitProtoMemberBodyRefusal(ctx, fctx, "String", member);
+
+  // (2) Fetch helper funcIdxs AFTER the import shifts, by name.
+  const anyToStrIdx = ensureAnyToStringHelper(ctx);
+  const flattenIdx = ctx.nativeStrHelpers.get("__str_flatten");
+  const coreIdx = ctx.nativeStrHelpers.get(helperName);
+  if (flattenIdx === undefined || coreIdx === undefined) {
+    return emitProtoMemberBodyRefusal(ctx, fctx, "String", member);
+  }
+
+  // (3) RequireObjectCoercible(this) [param 1]: undefined≡null≡ref.null.extern in
+  // standalone, so a bare ref.is_null throw covers both → catchable TypeError.
+  const rocThrow: Instr[] = [];
+  emitBrandCheckTypeError(ctx, rocThrow, `String.prototype.${member} called on null or undefined`);
+  fctx.body.push({ op: "local.get", index: 1 } as Instr);
+  fctx.body.push({ op: "ref.is_null" } as Instr);
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: rocThrow } as Instr);
+
+  // (4) endsWith default endPosition: §22.1.3.6 step 6 — absent/`undefined`
+  // endPosition ⇒ end = len. Mirror the DIRECT path's 0x7fffffff sentinel
+  // (string-ops.ts), which the core clamps to sLen. `includes`/`startsWith`
+  // default position 0 is exactly what unboxArgToI32 already yields for null.
+  if (member === "endsWith") {
+    fctx.body.push({ op: "local.get", index: 3 } as Instr);
+    fctx.body.push({ op: "ref.is_null" } as Instr);
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "val", type: { kind: "i32" } },
+      then: [{ op: "i32.const", value: 0x7fffffff } as Instr],
+      else: [{ op: "local.get", index: posLocal } as Instr],
+    } as Instr);
+    fctx.body.push({ op: "local.set", index: posLocal } as Instr);
+  }
+
+  // (5) recv = flatten(ToString(this)); needle = flatten(ToString(searchString)).
+  const flattenExtern = (paramIdx: number, label: string): number => {
+    fctx.body.push({ op: "local.get", index: paramIdx } as Instr);
+    fctx.body.push({ op: "any.convert_extern" } as Instr);
+    fctx.body.push({ op: "call", funcIdx: anyToStrIdx } as Instr);
+    fctx.body.push({ op: "call", funcIdx: flattenIdx } as Instr);
+    const local = allocLocal(fctx, `${label}_${fctx.locals.length}`, flatStringType(ctx));
+    fctx.body.push({ op: "local.set", index: local } as Instr);
+    return local;
+  };
+  const recvLocal = flattenExtern(1, "__str_srchb_recv");
+  const needleLocal = flattenExtern(2, "__str_srchb_needle");
+
+  // (6) call the core (recv, needle, pos) → i32 boolean → box as JS boolean.
+  fctx.body.push({ op: "local.get", index: recvLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: needleLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: posLocal } as Instr);
+  fctx.body.push({ op: "call", funcIdx: coreIdx } as Instr);
+  fctx.body.push({ op: "call", funcIdx: boxBoolIdx } as Instr);
   return { kind: "externref" };
 }
 
@@ -1012,6 +1358,11 @@ function makeGlue(
     // not the proto).
     memberKind: () => "method",
     memberLength: (member) => PROTO_METHOD_LENGTH[member] ?? 1,
+    // (#2875 slice 3) String search-family members carry an uncounted optional
+    // `position` arg — give their closures a real param slot for it. Non-String
+    // families return 0 (= "no override": the slot count falls back to the spec
+    // arity), keeping their closure types byte-identical.
+    memberParamSlots: (member) => (name === "String" ? (STRING_PROTO_METHOD_PARAM_SLOTS[member] ?? 0) : 0),
     // (#2193 PR-B) Array.prototype.slice is now a real native closure body;
     // (#2875 slice 1) String.prototype.{charAt,at} likewise. Other Array/String
     // members + all Object members still degrade to a catchable TypeError.
@@ -1558,6 +1909,117 @@ export function emitTypedArrayIntrinsicCtorObject(ctx: CodegenContext, fctx: Fun
   }
   if (!ok) return null;
 
+  fctx.body.push({ op: "global.get", index: globalIdx } as Instr);
+  fctx.body.push({ op: "ref.is_null" } as Instr);
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: initBody, else: [] } as Instr);
+  fctx.body.push({ op: "global.get", index: globalIdx } as Instr);
+  return { kind: "externref" };
+}
+
+/**
+ * (#2996) Native standalone `globalThis` value. In host/gc mode a bare
+ * `globalThis` identifier read leaks the `env::__get_globalThis` host import
+ * (see `compileIdentifier`), which a no-JS-host binary can't satisfy — yet the
+ * value still leaks into the standalone import section. The 47 sole-import
+ * `__get_globalThis` leaky-passes (annexB `emulates-undefined`, `global-code`,
+ * Array/Proxy cross-realm) never actually *read* a property off the resulting
+ * object; they only need `globalThis` to be a valid object value (it lands in
+ * the test262 `$262 = { global: globalThis, … }` harness stub, or an unread
+ * slot). This resolves bare `globalThis` to a native, lazily-created, cached
+ * `$Object` singleton (stable identity: `globalThis === globalThis`) built with
+ * the same `__new_plain_object` runtime an empty `{}` uses — zero host imports.
+ *
+ * Scope note: this reifies the READ-value substrate. As of #2988,
+ * `compilePropertyAccess`'s dedicated `globalThis.prop` reflective-read path also
+ * routes to THIS singleton in standalone/WASI (host/gc still uses
+ * `__extern_get(__get_globalThis(), key)`), so reflective reads round-trip with
+ * `Object.defineProperty(globalThis, …)` / `globalThis.x = v` writes host-free
+ * (all three resolve to the one native singleton). Standalone/WASI only; returns
+ * the externref ValType, or `null` if the `$Object` runtime is unavailable
+ * (caller falls through to the host-import path).
+ */
+export function emitNativeGlobalThisObject(ctx: CodegenContext, fctx: FunctionContext): ValType | null {
+  ensureObjectRuntime(ctx);
+  const newObjectIdx = ctx.funcMap.get("__new_plain_object");
+  if (newObjectIdx === undefined) return null;
+
+  const globalName = "__native_globalThis";
+  let globalIdx = ctx.builtinObjectGlobals.get(globalName);
+  if (globalIdx === undefined) {
+    globalIdx = ctx.numImportGlobals + ctx.mod.globals.length;
+    ctx.mod.globals.push({
+      name: globalName,
+      type: { kind: "externref" },
+      mutable: true,
+      init: [{ op: "ref.null.extern" }],
+    });
+    ctx.builtinObjectGlobals.set(globalName, globalIdx);
+  }
+
+  // Lazy init: `if (global == null) global = __new_plain_object();` then read it.
+  // The init body is nested directly inside the `if` (part of `fctx.body`), so
+  // any later late-import funcIdx shift walks it naturally — no detached-body
+  // (`liveBodies`) registration needed.
+  const initBody: Instr[] = [
+    { op: "call", funcIdx: newObjectIdx } as Instr,
+    { op: "global.set", index: globalIdx } as Instr,
+  ];
+  fctx.body.push({ op: "global.get", index: globalIdx } as Instr);
+  fctx.body.push({ op: "ref.is_null" } as Instr);
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: initBody, else: [] } as Instr);
+  fctx.body.push({ op: "global.get", index: globalIdx } as Instr);
+  return { kind: "externref" };
+}
+
+/**
+ * (#3013) Native standalone `%ArrayIteratorPrototype%` value — the ONE shared
+ * prototype object every array iterator (`[].values()` / `.keys()` / `.entries()`
+ * / `[][Symbol.iterator]()`) reports from `Object.getPrototypeOf`. ECMA-262
+ * §23.1.5.2: all array iterators are `ObjectCreate(%ArrayIteratorPrototype%, …)`,
+ * so `Object.getPrototypeOf([].values()) === Object.getPrototypeOf(
+ * [][Symbol.iterator]())` MUST hold by object identity.
+ *
+ * Standalone array iterators are native `$__IterRec` structs (array-methods.ts /
+ * iterator-native.ts); their [[Prototype]] is not modeled, so the pre-#3013
+ * `Object.getPrototypeOf(<iterator>)` standalone fallback returned
+ * `ref.null.extern` — which made the identity assertion pass only COINCIDENTALLY
+ * (null === null) and, worse, made `getPrototypeOf([].values()) ===
+ * getPrototypeOf([1, 2])` ALSO pass (both null). This reifies a genuine,
+ * identity-stable `$Object` singleton (same `__new_plain_object` runtime as
+ * `{}`), lazily materialized once, cached in a module-level mutable global. Every
+ * array-iterator `getPrototypeOf` routes to the SAME global, so identity is
+ * genuine: same singleton across all array iterators (true), distinct from array
+ * / plain-object / other-kind-iterator prototypes (false under the swap-guard).
+ *
+ * The routing is keyed on the STATIC type being `ArrayIterator<T>` (the TS
+ * checker's precise symbol name for all four array-iterator producers, distinct
+ * from `Generator`/`MapIterator`/`SetIterator`/`StringIterator`), so no
+ * cross-kind iterator is mis-routed to this prototype. Standalone/WASI only;
+ * returns the externref ValType, or `null` if the `$Object` runtime is
+ * unavailable (caller falls through to the host-import path).
+ */
+export function emitArrayIteratorPrototypeSingleton(ctx: CodegenContext, fctx: FunctionContext): ValType | null {
+  ensureObjectRuntime(ctx);
+  const newObjectIdx = ctx.funcMap.get("__new_plain_object");
+  if (newObjectIdx === undefined) return null;
+
+  const globalName = "__native_array_iterator_prototype";
+  let globalIdx = ctx.builtinObjectGlobals.get(globalName);
+  if (globalIdx === undefined) {
+    globalIdx = ctx.numImportGlobals + ctx.mod.globals.length;
+    ctx.mod.globals.push({
+      name: globalName,
+      type: { kind: "externref" },
+      mutable: true,
+      init: [{ op: "ref.null.extern" }],
+    });
+    ctx.builtinObjectGlobals.set(globalName, globalIdx);
+  }
+
+  const initBody: Instr[] = [
+    { op: "call", funcIdx: newObjectIdx } as Instr,
+    { op: "global.set", index: globalIdx } as Instr,
+  ];
   fctx.body.push({ op: "global.get", index: globalIdx } as Instr);
   fctx.body.push({ op: "ref.is_null" } as Instr);
   fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: initBody, else: [] } as Instr);

@@ -38,6 +38,8 @@
 import type { Instr, ValType } from "../ir/types.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { addFuncType } from "./registry/types.js";
+import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S3) stable-regime minting
+import { undefinedSingletonActive } from "./any-helpers.js"; // (#2106 S1)
 import { ensureGetUndefined } from "./expressions/late-imports.js";
 import { ensureObjectRuntime } from "./object-runtime.js";
 import { stringConstantExternrefInstrs } from "./native-strings.js";
@@ -96,6 +98,15 @@ export function ensureDynReadHelpers(ctx: CodegenContext): void {
   const getUndefIdx = ensureGetUndefined(ctx);
   const undefInstrs: Instr[] =
     getUndefIdx !== undefined ? [{ op: "call", funcIdx: getUndefIdx } as Instr] : [{ op: "ref.null.extern" } as Instr];
+  // (#2106 S1) Under the `undefinedSingleton` regime `__extern_get` ALREADY
+  // returns the singleton for an absent property, and a null result means a
+  // STORED JS null — so `__dyn_get` must NOT remap null → undefined (that
+  // would read `obj.x = null` back as undefined), and `__dyn_has`'s
+  // "present ⇔ non-null" flips to "present ⇔ non-nullish". This runs at
+  // FINALIZE: only consult ALREADY-reserved indices (no ensureAnyValueType —
+  // registering struct types this late is the #2043 late-shift class).
+  const s1DynRegime = undefinedSingletonActive(ctx) && ctx.undefinedGlobalIdx !== undefined;
+  const s1IsNullishIdx = s1DynRegime ? ctx.funcMap.get("__extern_is_nullish") : undefined;
 
   const externref: ValType = { kind: "externref" };
   const i32: ValType = { kind: "i32" };
@@ -109,8 +120,8 @@ export function ensureDynReadHelpers(ctx: CodegenContext): void {
   ): void {
     if (ctx.funcMap.has(name)) return;
     const typeIdx = addFuncType(ctx, params, results, name);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-    ctx.mod.functions.push({ name, typeIdx, locals, body, exported: false } as never);
+    const funcIdx = mintDefinedFunc(ctx);
+    pushDefinedFunc(ctx, funcIdx, { name, typeIdx, locals, body, exported: false } as never);
     ctx.funcMap.set(name, funcIdx);
   }
 
@@ -133,21 +144,29 @@ export function ensureDynReadHelpers(ctx: CodegenContext): void {
     "__dyn_get",
     [externref, externref],
     [externref],
-    [
-      // val = __extern_get(recv, key)
-      { op: "local.get", index: 0 } as Instr,
-      { op: "local.get", index: 1 } as Instr,
-      { op: "call", funcIdx: externGetIdx } as Instr,
-      { op: "local.tee", index: 2 } as Instr,
-      // if (val is null) return undefined  — §Get of an absent property is undefined
-      { op: "ref.is_null" } as Instr,
-      {
-        op: "if",
-        blockType: { kind: "val", type: externref },
-        then: undefInstrs,
-        else: [{ op: "local.get", index: 2 } as Instr],
-      } as Instr,
-    ],
+    s1DynRegime
+      ? [
+          // (#2106 S1) plain pass-through: __extern_get already answers the
+          // singleton for absent, and null means a stored JS null.
+          { op: "local.get", index: 0 } as Instr,
+          { op: "local.get", index: 1 } as Instr,
+          { op: "call", funcIdx: externGetIdx } as Instr,
+        ]
+      : [
+          // val = __extern_get(recv, key)
+          { op: "local.get", index: 0 } as Instr,
+          { op: "local.get", index: 1 } as Instr,
+          { op: "call", funcIdx: externGetIdx } as Instr,
+          { op: "local.tee", index: 2 } as Instr,
+          // if (val is null) return undefined  — §Get of an absent property is undefined
+          { op: "ref.is_null" } as Instr,
+          {
+            op: "if",
+            blockType: { kind: "val", type: externref },
+            then: undefInstrs,
+            else: [{ op: "local.get", index: 2 } as Instr],
+          } as Instr,
+        ],
     [{ name: "__dg_val", type: externref }],
   );
 
@@ -164,13 +183,22 @@ export function ensureDynReadHelpers(ctx: CodegenContext): void {
     "__dyn_has",
     [externref, externref],
     [i32],
-    [
-      { op: "local.get", index: 0 } as Instr,
-      { op: "local.get", index: 1 } as Instr,
-      { op: "call", funcIdx: externGetIdx } as Instr,
-      { op: "ref.is_null" } as Instr,
-      { op: "i32.eqz" } as Instr, // present ⇔ NOT null
-    ],
+    s1IsNullishIdx !== undefined
+      ? [
+          // (#2106 S1) present ⇔ NOT nullish (absent = the undefined singleton).
+          { op: "local.get", index: 0 } as Instr,
+          { op: "local.get", index: 1 } as Instr,
+          { op: "call", funcIdx: externGetIdx } as Instr,
+          { op: "call", funcIdx: s1IsNullishIdx } as Instr,
+          { op: "i32.eqz" } as Instr,
+        ]
+      : [
+          { op: "local.get", index: 0 } as Instr,
+          { op: "local.get", index: 1 } as Instr,
+          { op: "call", funcIdx: externGetIdx } as Instr,
+          { op: "ref.is_null" } as Instr,
+          { op: "i32.eqz" } as Instr, // present ⇔ NOT null
+        ],
   );
 
   // Reference the tag constant so a future refined tag-dispatch (M2/M3) keeps it;
@@ -252,6 +280,17 @@ export function emitDynGet(ctx: CodegenContext, fctx: FunctionContext, keyName: 
   if (keyName === "length") {
     ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
     ensureLateImport(ctx, "__extern_is_undefined", [{ kind: "externref" }], [{ kind: "i32" }]);
+    // (#2896) Builtin-fn metadata read for the closure arm (standalone only):
+    // a builtin function value's `.length` is its spec arity, answered by the
+    // finalize-filled `__builtinfn_get_meta` native instead of the flat 0.
+    if (ctx.standalone) {
+      ensureLateImport(
+        ctx,
+        "__builtinfn_get_meta",
+        [{ kind: "externref" }, { kind: "externref" }],
+        [{ kind: "externref" }],
+      );
+    }
   }
   addStringConstantGlobal(ctx, keyName);
   flushLateImportShifts(ctx, fctx);
@@ -288,6 +327,31 @@ export function emitDynGet(ctx: CodegenContext, fctx: FunctionContext, keyName: 
     // no funcidx hazard). Closure base types are derived inline from
     // `ctx.closureInfoByTypeIdx` (walking each to its root struct) to avoid a
     // circular import on index.ts's private `collectClosureBaseWrapperTypeIdxs`.
+    // (#2896) Standalone: a builtin function value carries its spec arity in
+    // the finalize-filled `__builtinfn_get_meta` native — ask it first; a null
+    // result (plain user closure, or a builtin fn whose `length` was deleted →
+    // inherited Function.prototype.length === 0) keeps the prior flat 0.
+    const bfnGetMetaIdx = ctx.standalone ? ctx.funcMap.get("__builtinfn_get_meta") : undefined;
+    const closureArmThen = (): Instr[] => {
+      if (bfnGetMetaIdx === undefined) {
+        // arity fallback: box_number(0.0) — matches the prior numeric path.
+        return [{ op: "f64.const", value: 0 } as Instr, { op: "call", funcIdx: boxNumIdx } as Instr];
+      }
+      const metaTmp = allocLocal(fctx, `__dg_bfnmeta_${fctx.locals.length}`, { kind: "externref" });
+      return [
+        { op: "local.get", index: recvTmp } as Instr,
+        ...stringConstantExternrefInstrs(ctx, keyName),
+        { op: "call", funcIdx: bfnGetMetaIdx } as Instr,
+        { op: "local.tee", index: metaTmp } as Instr,
+        { op: "ref.is_null" } as Instr,
+        {
+          op: "if",
+          blockType: { kind: "val", type: { kind: "externref" } as ValType },
+          then: [{ op: "f64.const", value: 0 } as Instr, { op: "call", funcIdx: boxNumIdx } as Instr],
+          else: [{ op: "local.get", index: metaTmp } as Instr],
+        } as Instr,
+      ];
+    };
     for (const closureBaseTypeIdx of closureBaseWrapperTypeIdxs(ctx)) {
       chain = [
         { op: "local.get", index: anyTmp } as Instr,
@@ -295,11 +359,7 @@ export function emitDynGet(ctx: CodegenContext, fctx: FunctionContext, keyName: 
         {
           op: "if",
           blockType: { kind: "val", type: { kind: "externref" } as ValType },
-          then: [
-            // arity fallback: box_number(0.0) — matches the prior numeric path.
-            { op: "f64.const", value: 0 } as Instr,
-            { op: "call", funcIdx: boxNumIdx } as Instr,
-          ],
+          then: closureArmThen(),
           else: chain,
         } as Instr,
       ];

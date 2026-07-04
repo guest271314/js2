@@ -143,6 +143,15 @@ export interface CompileResult {
    * class.
    */
   irPostClaimErrors?: { kind: string; func: string; message: string }[];
+  /**
+   * (#2138) IR-first compile-once inversion telemetry. Present ONLY when the
+   * `JS2WASM_IR_FIRST=1` flag was active for this compile: lists the
+   * top-level functions whose legacy body emission was skipped because the
+   * IR path owned the slot (compiled once instead of twice). `undefined`
+   * whenever the flag is off — the flag-off pipeline is byte-identical to
+   * the pre-#2138 behavior and pays zero cost for this field.
+   */
+  irFirstSkipped?: readonly string[];
 }
 
 export interface CompileError {
@@ -208,6 +217,47 @@ export interface CompileOptions {
    *  Enabled automatically when fast: true or target: "wasi".
    *  Required for non-browser runtimes (wasmtime, wasmer, etc.) */
   nativeStrings?: boolean;
+  /**
+   * (#2141 S1) Honest generic `any` boxing — Stage-B regime flag of the tag-5
+   * ABI retirement. When true, boxing an externref-carried dynamic value into
+   * `$AnyValue` runtime-classifies it to its true `JsTag` (undefined/number/
+   * boolean/string/object) instead of the historical blanket tag-5 "string"
+   * (#1888 box-the-externref ABI). Default false (legacy, byte-identical).
+   * Standalone/wasi only — host (gc) mode dynamic values stay host-owned.
+   * Do not enable in production until slice S4 of #2141 flips the default.
+   */
+  honestAnyBoxing?: boolean;
+  /**
+   * (#2141 S2/S3, #2626) Tag-5 boxed-VALUE equality classifier — the
+   * three-way true-class dispatch inside the both-tags-5 arm of
+   * `__any_eq`/`__any_strict_eq`: Number×Number → `f64.eq` (#2040),
+   * String×String → content eq (landed #1888), Object×Object → `ref.eq`
+   * identity (#2585), else legacy `0`. Default false (legacy: only the
+   * guarded string arm; non-string tag-5 pairs answer `0`, which also makes
+   * them fake-NaN self-unequal — the vacuity the test262 comparator
+   * accidentally relies on, see #2141 S2). The env var
+   * `JS2WASM_TAG5_CLASSIFIER=1` defaults this on for whole-runner A/B
+   * measurements. Do not enable by default until the #3032 lazy-generator
+   * waves land (the −162 dstr cluster unmasking).
+   */
+  tag5ValueEqClassifier?: boolean;
+  /**
+   * (#2106 S1) Standalone `$undefined` tag-1 singleton regime. When true (and
+   * targeting standalone/nativeStrings), `undefined` is represented by the
+   * S1.0 immutable tag-1 `$AnyValue` global (extern-wrapped at the externref
+   * plane), DISTINCT from `null` (`ref.null.extern`): `null !== undefined`,
+   * `typeof null === "object"`, ToNumber(null)=0 vs ToNumber(undefined)=NaN.
+   * All undefined producers (emitUndefined, `__extern_get`/`__extern_get_idx`
+   * miss, literal stores, boxToAny) and undefined-specific consumers
+   * (`__extern_is_undefined`, typeof cluster, strict-eq) flip in lockstep
+   * under this flag; nullish-intent consumers widen to `is_null ∨
+   * is-singleton`. Default false (legacy: undefined ≡ null ≡ ref.null.extern,
+   * byte-identical modules). Host (gc) mode is unaffected — it has a real
+   * host `undefined` via `__get_undefined`. `JS2WASM_UNDEF_SINGLETON=1`
+   * defaults it on for whole-runner A/B; the default flip is a separate
+   * measured PR (#2106).
+   */
+  undefinedSingleton?: boolean;
   /** #1588 PR-B: dual i8/i16 string storage. When true, string allocation
    *  sites the encoding analysis proves `ascii`/`utf8-guaranteed` are stored
    *  as i8-backed `Utf8String`; all others stay i16. Default false →
@@ -266,6 +316,18 @@ export interface CompileOptions {
    * direct-emission path (bit-by-bit divergence tests or emergency revert).
    */
   experimentalIR?: boolean;
+  /**
+   * (#2973) Opt this compile out of the `JS2WASM_IR_FIRST` compile-once
+   * inversion, regardless of the ambient env flag. Semantics-critical
+   * in-process sub-compiles — the `eval` / `new Function` host shims — MUST
+   * set this: they are a proven fast path, not an IR-first *measurement*
+   * target, and an IR-first post-claim hard error there is swallowed by the
+   * shim's fallback `catch` arms and silently degraded to `undefined` (a wrong
+   * answer, not a fail-loud error). Only the fail-loud skip-body inversion is
+   * disabled; the ordinary IR overlay (`experimentalIR`) is untouched.
+   * Default: false.
+   */
+  disableIrFirst?: boolean;
   /** Compile-time constant definitions. Substitutes identifiers/dotted paths with literal values
    *  before TypeScript parsing. Example: `{ "process.env.NODE_ENV": '"production"' }`.
    *  Values must be valid JS expression literals (strings need inner quotes).

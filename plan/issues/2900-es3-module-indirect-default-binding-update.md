@@ -1,10 +1,11 @@
 ---
 id: 2900
 title: "≤ES3 (edition bucket): module indirect default-export binding update returns wrong value"
-status: blocked
+status: done
 priority: high
-sprint: current
+sprint: 69
 created: 2026-06-30
+completed: 2026-07-02
 feasibility: hard
 task_type: bug
 area: codegen
@@ -13,8 +14,13 @@ language_feature: module-code
 goal: spec-completeness
 related: [2898]
 assignee: ttraenkler/dev-2900
-blocked_reason: "Umbrella — split into #2930 (RC2 alias, done), #2931 (RC3 live bindings), #2932 (RC1 .js module-dep compile, broad-impact/needs full test262 diff). Closes when all three land."
 ---
+
+> Closed 2026-07-02 with the #2932 PR — umbrella split into #2930 (RC2 alias,
+> PR #2437), #2931 (RC3 live bindings, PR #2446), #2932 (RC1 .js module-dep
+> compile + wrapTest import hoist). With all three in,
+> `eval-gtbndng-indirect-update-dflt.js` returns 1 (PASS) through the runner
+> path (verified locally by dev-2900f; confirmed by the #2932 PR's sharded CI).
 
 # #2900 — module indirect global-binding update of a default export reads stale
 
@@ -163,9 +169,10 @@ discipline (memory `project_type_index_shift_and_deadelim`,
 Split into three issues (each independently valuable and testable):
 
 - **#2930** — RC2 import-alias resolution (renamed/default/anonymous imports).
-  Clean, additive, unit-testable with `.ts` fixtures. **DONE** (this PR).
+  Clean, additive, unit-testable with `.ts` fixtures. **DONE** (PR #2437, merged
+  2026-07-02).
 - **#2931** — RC3 live bindings for reassigned function declarations. Narrow,
-  additive, unit-testable single-module. Ready (dev-2900 next).
+  additive, unit-testable single-module. **DONE** (PR #2446, merged 2026-07-02).
 - **#2932** — RC1 compile `.js` module dependencies. **Broad-impact; gate on a full
   test262 diff.** Blocked pending tech-lead sign-off on option + run slot. This is
   the piece that actually lets `#2900`'s runner path exercise #2930 & #2931.

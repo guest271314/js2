@@ -19,11 +19,13 @@ import { isVoidType, unwrapPromiseType, isPromiseType } from "../checker/type-ma
 import type { FieldDef, Instr, LocalDef, StructTypeDef, ValType } from "../ir/types.js";
 import { isStandalonePromiseActive } from "./async-scheduler.js"; // (#2867 Gap 1) native-$Promise carrier gate
 import { classMemberFuncKey } from "./class-member-keys.js"; // (#1983) collision-free class-member funcMap keys
+import { definedFuncAt, funcSignatureOf, mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S2 read chokepoint / S3b stable-regime minting)
+import { inLiveShiftRange } from "../emit/resolve-layout.js"; // (#1916 S3b) manual import-shift must skip stable handles
 import { addStringConstantGlobal } from "./registry/imports.js"; // (#2025)
 import { stringConstantExternrefInstrs } from "./native-strings.js"; // (#2025)
 import { noJsHost } from "./expressions/helpers.js"; // (#2025)
 import { emitWasiErrorConstructor } from "./registry/error-types.js"; // (#2025)
-import { pushBody } from "./context/bodies.js";
+import { popBody, pushBody } from "./context/bodies.js";
 import { reportError } from "./context/errors.js";
 import { reportSilentFallback } from "./fallback-telemetry.js";
 import { resolveLiftedMethodThisStruct } from "./fnctor-escape-gate.js"; // (#2681/#2686 A3) lifted-method `this`→struct
@@ -365,10 +367,107 @@ export function promoteAccessorCapturesToGlobals(
     }
   }
 
+  // (#2029 family A) Transitive captures of referenced NESTED FUNCTIONS.
+  // When the accessor body references a nested function declaration (e.g.
+  // `get() { return next; }` with `function next() { return count; }` in the
+  // enclosing scope), the name `next` itself is skipped below (it is a
+  // function reference, not a variable) — but materializing next's closure
+  // INSIDE the accessor still needs next's captured variables. Those captures
+  // are recorded against the ENCLOSING function's local slots
+  // (`cap.outerLocalIdx`), which the accessor's own function cannot read:
+  // previously `emitMemoizedNestedFnClosure` / the call-site cap-prepend baked
+  // the enclosing function's local index into the accessor body — an emit
+  // crash ("local index out of range") when the slot exceeded the accessor's
+  // local count, and a silent wrong-local read when it happened to be in
+  // range. Promote the transitive captures here, in the enclosing fctx where
+  // `cap.outerLocalIdx` is still valid:
+  //   - IMMUTABLE captures → plain value-global promotion (added to
+  //     `referencedNames`, handled by the main loop below). Value-copy
+  //     semantics are preserved: the variable is never written, so the
+  //     global always holds the one value the closure would have captured.
+  //   - MUTABLE captures → box EAGERLY (same ref-cell + localMap-rebind
+  //     pattern the closure builders use) and alias the BOX in a module
+  //     global (`ctx.capturedBoxGlobals`). The accessor's closure
+  //     materialization then shares the very same cell the enclosing
+  //     function writes through — live write-through semantics, not a copy.
+  {
+    // Names the accessor body references DIRECTLY (before the transitive
+    // union below). A mutable capture that is also directly referenced keeps
+    // the value-global promotion — the accessor's own read/write paths
+    // (identifiers.ts / assignment.ts) resolve via `ctx.capturedGlobals`
+    // only; the closure materialization then sources a boxed COPY of the
+    // value global (best-effort, no crash) instead of the shared cell.
+    const directlyReferenced = new Set(referencedNames);
+    const fnWorklist: string[] = [];
+    for (const name of referencedNames) {
+      if (ctx.funcMap.has(name) && ctx.nestedFuncCaptures.has(name)) fnWorklist.push(name);
+    }
+    const visitedFns = new Set<string>();
+    while (fnWorklist.length > 0) {
+      const fnName = fnWorklist.pop()!;
+      if (visitedFns.has(fnName)) continue;
+      visitedFns.add(fnName);
+      const caps = ctx.nestedFuncCaptures.get(fnName);
+      if (!caps) continue;
+      for (const cap of caps) {
+        // A capture can itself be a nested function name — follow it.
+        if (ctx.funcMap.has(cap.name) && ctx.nestedFuncCaptures.has(cap.name)) {
+          fnWorklist.push(cap.name);
+          continue;
+        }
+        if (!(cap.mutable && cap.valType) || directlyReferenced.has(cap.name)) {
+          // Immutable (value-copy semantics preserved: never written), or
+          // mutable-but-directly-referenced (accessor read path wins):
+          // value-global promotion via the main loop below.
+          referencedNames.add(cap.name);
+          continue;
+        }
+        // Mutable: box-promote (shared ref cell aliased in a global).
+        if (ctx.capturedBoxGlobals?.has(cap.name)) continue;
+        if (ctx.capturedGlobals.has(cap.name) || ctx.moduleGlobals.has(cap.name)) continue;
+        const capLocalIdx = fctx.localMap.get(cap.name);
+        if (capLocalIdx === undefined) continue;
+        const refCellTypeIdx = getOrRegisterRefCellType(ctx, cap.valType);
+        let boxedLocalIdx: number;
+        if (fctx.boxedCaptures?.has(cap.name)) {
+          // Already boxed by a prior closure construction — localMap points
+          // at the box; alias that same cell.
+          boxedLocalIdx = capLocalIdx;
+        } else {
+          fctx.body.push({ op: "local.get", index: capLocalIdx });
+          fctx.body.push({ op: "struct.new", typeIdx: refCellTypeIdx });
+          boxedLocalIdx = allocLocal(fctx, `__boxed_${cap.name}`, {
+            kind: "ref",
+            typeIdx: refCellTypeIdx,
+          });
+          fctx.body.push({ op: "local.set", index: boxedLocalIdx });
+          fctx.localMap.set(cap.name, boxedLocalIdx);
+          if (!fctx.boxedCaptures) fctx.boxedCaptures = new Map();
+          fctx.boxedCaptures.set(cap.name, { refCellTypeIdx, valType: cap.valType });
+        }
+        const boxGlobalIdx = nextModuleGlobalIdx(ctx);
+        ctx.mod.globals.push({
+          name: `__captured_box_${cap.name}`,
+          type: { kind: "ref_null", typeIdx: refCellTypeIdx },
+          mutable: true,
+          init: [{ op: "ref.null", typeIdx: refCellTypeIdx }],
+        });
+        fctx.body.push({ op: "local.get", index: boxedLocalIdx });
+        fctx.body.push({ op: "global.set", index: boxGlobalIdx });
+        (ctx.capturedBoxGlobals ??= new Map()).set(cap.name, { globalIdx: boxGlobalIdx, refCellTypeIdx });
+      }
+    }
+  }
+
   for (const name of referencedNames) {
     // Skip if already a captured global or module global
     if (ctx.capturedGlobals.has(name)) continue;
     if (ctx.moduleGlobals.has(name)) continue;
+    // (#2029 family A) Skip names box-promoted above — their localMap entry
+    // now points at the shared ref-cell box; value-promoting that box would
+    // orphan the rebind (and the accessor body sources it via
+    // `ctx.capturedBoxGlobals`, not `ctx.capturedGlobals`).
+    if (ctx.capturedBoxGlobals?.has(name)) continue;
 
     const localIdx = fctx.localMap.get(name);
     if (localIdx === undefined) continue;
@@ -1190,6 +1289,21 @@ export function isHostCallbackArgument(node: ts.Node, ctx: CodegenContext): bool
     if (ts.isPropertyAccessExpression(parent.expression)) {
       const propAccess = parent.expression;
       const methodName = propAccess.name.text;
+      // (#3016) `Function.prototype.call`/`apply` NEVER invoke their arguments
+      // as callbacks — they invoke the *receiver* with those args as `thisArg`
+      // + forwarded params. So a function-expression/arrow passed to `.call`/
+      // `.apply` (e.g. `get.call(() => {})` using a function object as an
+      // invalid `this`, or `Array.prototype.find.call(undefined, fn)`) is a
+      // plain function-object VALUE, not a synchronously-invoked host callback.
+      // Routing it through `__make_callback` leaks an `env::` import in
+      // standalone mode for no reason; the GC closure-struct path produces a
+      // valid function-object value host-free (and any HOF that the *receiver*
+      // then invokes — `Array.prototype.forEach.call(arr, cb)` — dispatches the
+      // struct via `__call_fn_N`, verified host-free). Standalone-gated so the
+      // js-host lane stays byte-identical.
+      if (ctx.standalone && (methodName === "call" || methodName === "apply")) {
+        return false;
+      }
       try {
         const receiverType = ctx.checker.getTypeAtLocation(propAccess.expression);
         // Search the receiver type's symbol chain for a class name that
@@ -1413,6 +1527,164 @@ function closureProvablyAfterLetDecl(
   return true;
 }
 
+/**
+ * (#2939) Compute the funcref-wrapper signature (user param ValTypes + return
+ * ValType) of an arrow / function-expression closure, WITHOUT emitting anything.
+ *
+ * This is the exact param+return-type logic `compileArrowAsClosure` uses to
+ * build its `getOrCreateFuncRefWrapperTypes(params, results)` wrapper type,
+ * factored out so the dynamic-dispatch candidate pre-scan
+ * (`ensureFuncValueWrappersRegistered`) can pre-register the SAME wrapper type
+ * for a callback function-expression defined in an inner scope — otherwise its
+ * wrapper is registered only LAZILY at the (later-compiled) value site, so an
+ * earlier-compiled higher-order body that dispatches the callback
+ * (`tryEmitInlineDynamicCall`) sees ZERO candidates and silently drops the call
+ * (the #2939 nested-scope gap: the test262 `testWith*Constructors(function(TA){…})`
+ * harness wrapper, ~814 vacuous passes). Capture analysis is intentionally NOT
+ * replicated here — the dispatch keys on the funcref signature (funcTypeIdx),
+ * which a capturing closure's custom subtype shares with this base wrapper.
+ *
+ * Pure: reads only `ctx` + the checker; no side effects, no `fctx`.
+ */
+export function computeClosureWrapperSig(
+  ctx: CodegenContext,
+  arrow: ts.ArrowFunction | ts.FunctionExpression,
+): { params: ValType[]; returnType: ValType | null } {
+  const isGenerator = ts.isFunctionExpression(arrow) && arrow.asteriskToken !== undefined;
+
+  // 1. Parameter types.
+  const arrowParams: ValType[] = [];
+  for (const p of arrow.parameters) {
+    const paramType = ctx.checker.getTypeAtLocation(p);
+    let wasmType = resolveWasmType(ctx, paramType);
+    if (p.initializer && wasmType.kind === "ref") {
+      wasmType = { kind: "ref_null", typeIdx: (wasmType as { kind: "ref"; typeIdx: number }).typeIdx };
+    }
+    const hasBindingPattern = ts.isArrayBindingPattern(p.name) || ts.isObjectBindingPattern(p.name);
+    if (hasBindingPattern && wasmType.kind !== "externref") {
+      wasmType = { kind: "externref" };
+    }
+    if (ctx.forceExternrefCallbackParams && isVecOrArrayRefType(ctx, wasmType)) {
+      wasmType = { kind: "externref" };
+    }
+    arrowParams.push(wasmType);
+  }
+
+  // 2. Return type (mirrors compileArrowAsClosure).
+  const isAsync = arrow.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) ?? false;
+  const sig = ctx.checker.getSignatureFromDeclaration(arrow);
+  let closureReturnType: ValType | null = null;
+  if (isGenerator) {
+    closureReturnType = { kind: "externref" };
+  } else if (sig) {
+    let retType = ctx.checker.getReturnTypeOfSignature(sig);
+    if (isAsync) {
+      retType = unwrapPromiseType(retType, ctx.checker);
+    }
+    if (!isAsync && isStandalonePromiseActive(ctx) && isPromiseType(retType)) {
+      closureReturnType = { kind: "externref" };
+    }
+    if (closureReturnType === null && !isVoidType(retType) && !(retType.flags & ts.TypeFlags.Never)) {
+      closureReturnType = resolveWasmType(ctx, retType);
+    }
+  }
+  if (closureReturnType === null && isAssignedToSymbolIterator(arrow)) {
+    closureReturnType = inferExplicitClosureReturnType(ctx, arrow);
+  }
+  if (closureReturnType !== null) {
+    const ctxType = ctx.checker.getContextualType(arrow);
+    if (ctxType) {
+      const ctxCallSigs = ctxType.getCallSignatures?.();
+      if (ctxCallSigs && ctxCallSigs.length > 0) {
+        const ctxRetType = ctx.checker.getReturnTypeOfSignature(ctxCallSigs[0]!);
+        if (isVoidType(ctxRetType) && !isAssignedToSymbolIterator(arrow)) {
+          closureReturnType = null;
+        }
+      }
+    }
+  }
+
+  return { params: arrowParams, returnType: closureReturnType };
+}
+
+/**
+ * (#3032 / #2141-S2) Lazy generator-expression support flag.
+ *
+ * A `mut i32` module global (0 = lazy, the default) plus an exported
+ * `__gen_set_eager(i32)` setter the HOST generator runtime flips around the
+ * deferred body run. Mechanism: a zero-param `function*(){...}` expression's
+ * closure no longer runs its body at creation; with the flag 0 it returns
+ * `__create_generator(<self closure as externref>, null)` — the host detects
+ * the non-Array first arg as a LAZY THUNK and defers. On the first `next()`
+ * the host sets the flag via `__gen_set_eager(1)`, re-invokes the SAME
+ * closure through the `__call_fn_0` export (the closure then takes the
+ * historical eager-buffer path, byte-for-byte), adopts the inner generator's
+ * state, and resets the flag. The eager arm clears the flag at its TOP so
+ * generator creations nested inside the eagerly-run body are themselves lazy
+ * again (one flag serves the whole module without leaking eagerness).
+ *
+ * Why: the eager-buffer lowering ran generator bodies AT CREATION — the
+ * test262 dstr fixture `var iter = function*() { iterations += 1; }();` had
+ * `iterations === 1` before any `next()`, a latent failure masked only by the
+ * tag-5 comparator vacuity (#2141-S2 root cause; see the issue file).
+ */
+function ensureGenEagerFlag(ctx: CodegenContext): number {
+  if (ctx.genEagerFlagGlobalIdx !== undefined) return ctx.genEagerFlagGlobalIdx;
+  const globalIdx = ctx.numImportGlobals + ctx.mod.globals.length;
+  ctx.mod.globals.push({
+    name: "__gen_eager_mode",
+    type: { kind: "i32" },
+    mutable: true,
+    init: [{ op: "i32.const", value: 0 }] as Instr[],
+  });
+  ctx.genEagerFlagGlobalIdx = globalIdx;
+  if (!ctx.funcMap.has("__gen_set_eager")) {
+    const typeIdx = addFuncType(ctx, [{ kind: "i32" }], [], "__gen_set_eager");
+    const funcIdx = mintDefinedFunc(ctx);
+    pushDefinedFunc(ctx, funcIdx, {
+      name: "__gen_set_eager",
+      typeIdx,
+      locals: [],
+      body: [{ op: "local.get", index: 0 }, { op: "global.set", index: globalIdx } as Instr],
+      exported: true,
+    });
+    ctx.funcMap.set("__gen_set_eager", funcIdx);
+    ctx.mod.exports.push({
+      name: "__gen_set_eager",
+      desc: { kind: "func", index: funcIdx },
+    });
+  }
+  return globalIdx;
+}
+
+/**
+ * (#3032) True when a generator-expression body references `this`/`super`
+ * from ITS OWN function scope (nested arrows inherit the generator's `this`
+ * and count; nested function expressions / methods / classes have their own
+ * `this` binding and do not). Such a generator is lazy-INELIGIBLE: the
+ * receiver is call-time state the deferred `__call_fn_0` re-invocation
+ * cannot rebind (#3032 W2 spills it).
+ */
+function genBodyReferencesThis(node: ts.Node): boolean {
+  if (node.kind === ts.SyntaxKind.ThisKeyword || node.kind === ts.SyntaxKind.SuperKeyword) return true;
+  if (
+    ts.isFunctionExpression(node) ||
+    ts.isFunctionDeclaration(node) ||
+    ts.isMethodDeclaration(node) ||
+    ts.isConstructorDeclaration(node) ||
+    ts.isGetAccessorDeclaration(node) ||
+    ts.isSetAccessorDeclaration(node) ||
+    ts.isClassLike(node)
+  ) {
+    return false; // own `this` binding — not the generator's receiver
+  }
+  let found = false;
+  forEachChild(node, (child) => {
+    if (!found && genBodyReferencesThis(child)) found = true;
+  });
+  return found;
+}
+
 export function compileArrowFunction(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -1442,107 +1714,17 @@ export function compileArrowAsClosure(
   if (isGenerator) {
     ctx.generatorFunctions.add(closureName);
   }
-
-  // 1. Determine arrow parameter types and return type
-  const arrowParams: ValType[] = [];
-  for (const p of arrow.parameters) {
-    const paramType = ctx.checker.getTypeAtLocation(p);
-    let wasmType = resolveWasmType(ctx, paramType);
-    // If the parameter has a default value and is a non-null ref type,
-    // widen to ref_null so callers can pass ref.null as a sentinel for "use default"
-    if (p.initializer && wasmType.kind === "ref") {
-      wasmType = { kind: "ref_null", typeIdx: (wasmType as { kind: "ref"; typeIdx: number }).typeIdx };
-    }
-    // Binding-pattern params MUST route through the externref destructure path
-    // so that (a) null/undefined trigger a spec-mandated synchronous TypeError and
-    // (b) nested patterns (e.g. `[[x]]`) recurse via the generic destructure logic.
-    // See #1151. Without this override:
-    //   * Pattern params inferred as f64/i32 fall through to allocBindingLocals
-    //     and emit no destructure code at all.
-    //   * Pattern params inferred as a tuple-struct ref bypass the nested-pattern
-    //     loop (which only handles identifier children) and skip the null guard,
-    //     so `f([null])` silently returns an empty result on an unannotated
-    //     pattern parameter.
-    const hasBindingPattern = ts.isArrayBindingPattern(p.name) || ts.isObjectBindingPattern(p.name);
-    if (hasBindingPattern && wasmType.kind !== "externref") {
-      wasmType = { kind: "externref" };
-    }
-    // (#2640) Array-like generic-method dispatch widens a callback parameter
-    // that TS inferred as a typed vec/array (`T[]` → `__vec_*`/`__arr_*`/
-    // `$__vec_base`) to `externref`. The receiver passed to such a callback by
-    // `compileArrayLikePrototypeCall` is a DYNAMIC (non-vec) array-like
-    // externref, not a typed vec; if the param stays a vec ref the dispatch
-    // loop must pass `ref.null` (the receiver fails the vec `ref.test`) and the
-    // callback's `obj.length`/`obj[i]` lowers to `struct.get` on null → a null
-    // deref. Widening to externref routes those reads through the tag-aware
-    // dynamic reader. Gated on the flag, set ONLY for the non-vec array-like
-    // path (typed `arr.forEach(cb)` never enters that path).
-    if (ctx.forceExternrefCallbackParams && isVecOrArrayRefType(ctx, wasmType)) {
-      wasmType = { kind: "externref" };
-    }
-    arrowParams.push(wasmType);
-  }
-
-  // Detect async functions/arrows — their TS return type is Promise<T> but the
-  // Wasm return should be T (matching the unwrap that top-level async functions use).
+  // `isAsync` is still consumed below (generator-create name selection); the
+  // return-type derivation moved into computeClosureWrapperSig.
   const isAsync = arrow.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) ?? false;
 
-  const sig = ctx.checker.getSignatureFromDeclaration(arrow);
-  let closureReturnType: ValType | null = null;
-  if (isGenerator) {
-    // Generator function expressions always return externref (JS Generator object)
-    closureReturnType = { kind: "externref" };
-  } else if (sig) {
-    let retType = ctx.checker.getReturnTypeOfSignature(sig);
-    // For async functions, unwrap Promise<T> to get T — matching the top-level
-    // async function handling in index.ts. Without this, async Promise<void>
-    // closures get externref return type and push ref.null.extern, breaking
-    // .then()/.catch() chains that expect a real Promise.
-    if (isAsync) {
-      retType = unwrapPromiseType(retType, ctx.checker);
-    }
-    // (#2867 Gap 1) A NON-async closure that returns a `Promise<T>` — e.g. a
-    // `.then`/`.catch` handler `v => Promise.resolve(...)` — produces a real
-    // Promise OBJECT at runtime, not a `T`. Under the host-free native-`$Promise`
-    // carrier, `resolveWasmType(Promise<T>)` would unwrap to `T` (e.g. f64),
-    // coercing the promise externref to NaN inside the body and breaking recursive
-    // thenable assimilation (the chained promise must ADOPT the returned inner
-    // promise's state). Keep the result `externref` so `__promise_resolve_value`
-    // at the settle site sees a real `$Promise`. Gated on the carrier predicate
-    // (wasi today; widens to standalone in lockstep at #2895 slice 1d) so the
-    // default gc/host `.then` path — and the standalone lane while its carrier is
-    // still host-backed — stay byte-unchanged.
-    if (!isAsync && isStandalonePromiseActive(ctx) && isPromiseType(retType)) {
-      closureReturnType = { kind: "externref" };
-    }
-    // Treat `never` the same as `void` — a function returning `never` (e.g.
-    // always throws) never produces a value, so it should have no Wasm result.
-    // Without this, `never` resolves to externref and creates a mismatched
-    // closure wrapper type vs. the `() => void` signature expected by callers.
-    if (closureReturnType === null && !isVoidType(retType) && !(retType.flags & ts.TypeFlags.Never)) {
-      closureReturnType = resolveWasmType(ctx, retType);
-    }
-  }
-  if (closureReturnType === null && isAssignedToSymbolIterator(arrow)) {
-    closureReturnType = inferExplicitClosureReturnType(ctx, arrow);
-  }
-
-  // (#585) Check the contextual type (e.g., a parameter type like `() => void`).
-  // If the contextual type expects a void-returning callable but the closure's
-  // actual return type is non-void, override to void so the closure uses the
-  // same wrapper struct type that callers will ref.cast against.
-  if (closureReturnType !== null) {
-    const ctxType = ctx.checker.getContextualType(arrow);
-    if (ctxType) {
-      const ctxCallSigs = ctxType.getCallSignatures?.();
-      if (ctxCallSigs && ctxCallSigs.length > 0) {
-        const ctxRetType = ctx.checker.getReturnTypeOfSignature(ctxCallSigs[0]!);
-        if (isVoidType(ctxRetType) && !isAssignedToSymbolIterator(arrow)) {
-          closureReturnType = null;
-        }
-      }
-    }
-  }
+  // 1. Determine arrow parameter types and return type. (#2939) Factored into
+  //    `computeClosureWrapperSig` so the dynamic-dispatch candidate pre-scan
+  //    registers the IDENTICAL wrapper type for inner-scope callbacks. The
+  //    (#585 contextual-void / #2867 Gap-1 / async-unwrap / #1151 binding-pattern
+  //    / #2640 array-callback-widen) logic all lives there now.
+  const { params: arrowParams, returnType: closureReturnTypeInit } = computeClosureWrapperSig(ctx, arrow);
+  let closureReturnType: ValType | null = closureReturnTypeInit;
 
   // 2. Analyze captured variables. Use scope-aware collection so that nested
   //    `var` declarations and parameter bindings inside the closure body shadow
@@ -2408,6 +2590,35 @@ export function compileArrowAsClosure(
     // The body is wrapped in try/catch so that exceptions thrown before any yields
     // are captured as a "pending throw" and deferred to the first next() call,
     // matching lazy generator semantics (#928).
+    //
+    // (#3032 / #2141-S2) LAZY-FIRST-RESUME: for the zero-param non-async case
+    // the eager sequence below is wrapped in an `if (global $__gen_eager_mode)`
+    // — when the flag is 0 (default) the closure instead returns
+    // `__create_generator(<self as externref>, null)`, a lazy host generator
+    // holding this closure as a thunk; the host re-invokes it with the flag
+    // set on the FIRST `next()` (see ensureGenEagerFlag). Wrapping the whole
+    // sequence in one extra `if` level is branch-target-safe: every `br` the
+    // body emits targets the inner `block`/`try` (generator `return` uses
+    // generatorReturnDepth relative to that block), never a label outside the
+    // wrap, and the function-level `return` op is depth-independent.
+    // Lazy-ineligible: async (separate host machinery), declared params (the
+    // thunk re-invocation via `__call_fn_0` cannot replay call-site args —
+    // #3032 W2), `arguments` usage (zero-declared-param generators can still
+    // observe call-site args through `arguments`; the deferred re-invocation
+    // would see arity 0 — the gen-func-expr-args-trailing-comma cluster in PR
+    // #2625's first merge_group cycle), and `this`/`super` usage (the
+    // receiver is call-time state the deferred `__call_fn_0` re-invocation
+    // cannot rebind — the `Array.prototype[Symbol.iterator] = function*() {
+    // ... this[0] ... }` iter-val-array-prototype cluster, same cycle).
+    // Receiver/args spilling is #3032 W2.
+    const genLazyEligible =
+      !isAsync &&
+      arrow.parameters.length === 0 &&
+      !(ts.isBlock(body) && closureBodyUsesArguments(body)) &&
+      !genBodyReferencesThis(body);
+    const genOuterBody = liftedFctx.body;
+    const eagerSeq: Instr[] = [];
+    if (genLazyEligible) liftedFctx.body = eagerSeq;
     const bufferLocal = allocLocal(liftedFctx, "__gen_buffer", { kind: "externref" });
     const pendingThrowLocal = allocLocal(liftedFctx, "__gen_pending_throw", { kind: "externref" });
     const createBufIdx = ctx.funcMap.get("__gen_create_buffer")!;
@@ -2459,6 +2670,31 @@ export function compileArrowAsClosure(
     liftedFctx.body.push({ op: "local.get", index: bufferLocal });
     liftedFctx.body.push({ op: "local.get", index: pendingThrowLocal });
     liftedFctx.body.push({ op: "call", funcIdx: createGenIdx });
+
+    // (#3032) Wrap the eager sequence behind the eager-mode flag; default (0)
+    // returns the LAZY thunk generator instead. The eager arm clears the flag
+    // at its top so nested generator creations during the deferred body run
+    // are themselves lazy again.
+    if (genLazyEligible) {
+      liftedFctx.body = genOuterBody;
+      const flagGlobalIdx = ensureGenEagerFlag(ctx);
+      liftedFctx.body.push({ op: "global.get", index: flagGlobalIdx } as Instr);
+      liftedFctx.body.push({
+        op: "if",
+        blockType: { kind: "val", type: { kind: "externref" } },
+        then: [
+          { op: "i32.const", value: 0 } as Instr,
+          { op: "global.set", index: flagGlobalIdx } as Instr,
+          ...eagerSeq,
+        ],
+        else: [
+          { op: "local.get", index: 0 } as Instr,
+          { op: "extern.convert_any" } as Instr,
+          { op: "ref.null.extern" } as Instr,
+          { op: "call", funcIdx: createGenIdx } as Instr,
+        ],
+      } as Instr);
+    }
     conciseBodyHasValue = true; // generator return value is already on stack
   } else if (ts.isBlock(body)) {
     for (const stmt of body.statements) {
@@ -2527,8 +2763,8 @@ export function compileArrowAsClosure(
   ctx.currentFunc = savedFunc;
 
   // 6. Register the lifted function
-  const liftedFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-  ctx.mod.functions.push({
+  const liftedFuncIdx = mintDefinedFunc(ctx);
+  pushDefinedFunc(ctx, liftedFuncIdx, {
     name: closureName,
     typeIdx: liftedFuncTypeIdx,
     locals: liftedFctx.locals,
@@ -3031,8 +3267,8 @@ export function compileArrowAsCallback(
   ctx.currentFunc = savedFunc;
 
   // 6. Register and export the callback function
-  const cbFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-  ctx.mod.functions.push({
+  const cbFuncIdx = mintDefinedFunc(ctx);
+  pushDefinedFunc(ctx, cbFuncIdx, {
     name: cbName,
     typeIdx: cbTypeIdx,
     locals: cbFctx.locals,
@@ -3285,8 +3521,8 @@ export function compileSyntheticAsyncContinuation(
 
   // 7. Register + export the continuation (the __make_callback host bridge
   //    dispatches by the exported `__cb_${cbId}` name).
-  const cbFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-  ctx.mod.functions.push({
+  const cbFuncIdx = mintDefinedFunc(ctx);
+  pushDefinedFunc(ctx, cbFuncIdx, {
     name: cbName,
     typeIdx: cbTypeIdx,
     locals: cbFctx.locals,
@@ -3307,27 +3543,9 @@ export function getFuncSignature(
   ctx: CodegenContext,
   funcIdx: number,
 ): { params: ValType[]; results: ValType[] } | null {
-  if (funcIdx < ctx.numImportFuncs) {
-    let importFuncCount = 0;
-    for (const imp of ctx.mod.imports) {
-      if (imp.desc.kind === "func") {
-        if (importFuncCount === funcIdx) {
-          const typeDef = ctx.mod.types[imp.desc.typeIdx];
-          if (typeDef?.kind === "func") return { params: typeDef.params, results: typeDef.results };
-          return null;
-        }
-        importFuncCount++;
-      }
-    }
-  } else {
-    const localIdx = funcIdx - ctx.numImportFuncs;
-    const func = ctx.mod.functions[localIdx];
-    if (func) {
-      const typeDef = ctx.mod.types[func.typeIdx];
-      if (typeDef?.kind === "func") return { params: typeDef.params, results: typeDef.results };
-    }
-  }
-  return null;
+  // #1916 S2 — funcSignatureOf is the positional-read chokepoint (func-space.ts).
+  const sig = funcSignatureOf(ctx, funcIdx);
+  return sig ? { params: sig.params, results: sig.results } : null;
 }
 
 /**
@@ -3383,6 +3601,200 @@ export function getOrCreateFuncRefWrapperTypes(
 }
 
 /**
+ * (#2976) Emit the memoized, `ref.is_null`-guarded VALUE instance of a
+ * capture-carrying nested function declaration:
+ *
+ *   local.get $memo
+ *   ref.is_null
+ *   if (empty)                       ;; first DYNAMIC reference only
+ *     ref.func $tramp
+ *     <capture pushes>               ;; unchanged from the per-site build
+ *     struct.new $__fn_cap_<name>
+ *     local.set $memo
+ *   end
+ *   local.get $memo
+ *   ref.as_non_null
+ *
+ * The memo local is allocated once per enclosing activation
+ * (`fctx.nestedFnClosureMemos`), so every reference yields the SAME struct
+ * instance — `f === f` holds and sidecar/static writes (`f.resolve = fn`)
+ * are visible through later references. The runtime guard (not a prologue
+ * hoist, not compile-order memoization) is load-bearing twice over:
+ *   - it preserves value-capture semantics — immutable captures copy their
+ *     value at the first DYNAMIC reference, exactly where the old per-site
+ *     build copied them (a prologue hoist would run before hoisted-over
+ *     initializers);
+ *   - it is control-flow-safe — with compile-order memoization, a reference
+ *     in a runtime-skipped branch would leave a later branch reading an
+ *     uninitialized local.
+ * The capture-push block keeps its compile-time side effects (mutable-capture
+ * boxing + localMap rebind, TDZ flag boxing) — they now occur while compiling
+ * the guard arm, same net effect as before.
+ */
+function emitMemoizedNestedFnClosure(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  funcName: string,
+  structTypeIdx: number,
+  trampolineFuncIdx: number,
+  nestedCaptures: NonNullable<ReturnType<CodegenContext["nestedFuncCaptures"]["get"]>>,
+  tdzFlaggedNested: NonNullable<ReturnType<CodegenContext["nestedFuncCaptures"]["get"]>>,
+): void {
+  const numCaptures = nestedCaptures.length;
+  const numTdzFlags = tdzFlaggedNested.length;
+
+  let memoLocal = fctx.nestedFnClosureMemos?.get(funcName);
+  if (memoLocal === undefined) {
+    memoLocal = allocLocal(fctx, `__fnmemo_${funcName}_${fctx.locals.length}`, {
+      kind: "ref_null",
+      typeIdx: structTypeIdx,
+    });
+    (fctx.nestedFnClosureMemos ??= new Map()).set(funcName, memoLocal);
+  }
+
+  fctx.body.push({ op: "local.get", index: memoLocal });
+  fctx.body.push({ op: "ref.is_null" });
+
+  // Build the construction sequence into the guard's then-arm.
+  const savedBody = pushBody(fctx);
+
+  // struct.new fields: func, cap0, cap1, ..., __tdz_*...
+  fctx.body.push({ op: "ref.func", funcIdx: trampolineFuncIdx });
+  // (#1312) Self-reference inside the lifted body of `funcName` itself —
+  // e.g. `function next() { return call(next); }`. The captures are
+  // already in scope as the leading params [0..numCaptures-1] of the
+  // lifted fn (mutable captures arrive as boxed ref cells, immutable as
+  // raw values). We re-push them by param index instead of trying to
+  // dereference `cap.outerLocalIdx`, which points into a different
+  // (outer) scope and yields garbage / null when reused inside the
+  // current lifted body.
+  const isSelfRef = fctx.name === funcName;
+  for (let i = 0; i < nestedCaptures.length; i++) {
+    const cap = nestedCaptures[i]!;
+    if (isSelfRef) {
+      // Captures arrive at param index `i` in the lifted fn (#1312).
+      fctx.body.push({ op: "local.get", index: i });
+      continue;
+    }
+    // (#2029 family A) Cross-fctx capture sourcing. `cap.outerLocalIdx` is a
+    // slot in the function that DECLARED the nested fn; when this
+    // materialization runs inside a DIFFERENT function (an object-literal
+    // accessor body — the enclosing fn's locals are unreachable), baking it
+    // emit-crashes ("local index out of range") or silently reads the wrong
+    // local. `promoteAccessorCapturesToGlobals` promotes such captures to
+    // module globals (shared ref-cell box for mutable, value global for
+    // immutable); prefer those whenever the current fctx cannot resolve the
+    // name itself. Guarded on localMap-absence so owner-fctx behavior is
+    // unchanged (see the #1177 revert note in calls.ts for why a blanket
+    // localMap-first lookup is NOT safe).
+    const capUnresolvedHere = fctx.localMap.get(cap.name) === undefined;
+    if (cap.mutable && cap.valType) {
+      const refCellTypeIdx = getOrRegisterRefCellType(ctx, cap.valType);
+      const boxGlobal = capUnresolvedHere ? ctx.capturedBoxGlobals?.get(cap.name) : undefined;
+      if (fctx.boxedCaptures?.has(cap.name)) {
+        const currentLocalIdx = fctx.localMap.get(cap.name)!;
+        fctx.body.push({ op: "local.get", index: currentLocalIdx });
+      } else if (boxGlobal !== undefined) {
+        // Shared ref-cell box promoted to a module global — live
+        // write-through semantics with the declaring function.
+        fctx.body.push({ op: "global.get", index: boxGlobal.globalIdx });
+        fctx.body.push({ op: "ref.as_non_null" });
+      } else if (capUnresolvedHere && ctx.capturedGlobals.has(cap.name)) {
+        // Value global (the capture is also directly referenced by the
+        // accessor body) — box a copy. Best-effort: writes through the
+        // closure do not propagate back, but the previous behavior was an
+        // out-of-scope local read (emit crash / wrong local).
+        fctx.body.push({ op: "global.get", index: ctx.capturedGlobals.get(cap.name)! });
+        if (ctx.capturedGlobalsWidened.has(cap.name)) {
+          fctx.body.push({ op: "ref.as_non_null" });
+        }
+        fctx.body.push({ op: "struct.new", typeIdx: refCellTypeIdx });
+      } else {
+        // Stage 1 localMap-first lookup reverted — see calls.ts comment.
+        fctx.body.push({ op: "local.get", index: cap.outerLocalIdx });
+        fctx.body.push({ op: "struct.new", typeIdx: refCellTypeIdx });
+        const boxedLocalIdx = allocLocal(fctx, `__boxed_${cap.name}`, {
+          kind: "ref",
+          typeIdx: refCellTypeIdx,
+        });
+        fctx.body.push({ op: "local.tee", index: boxedLocalIdx });
+        fctx.localMap.set(cap.name, boxedLocalIdx);
+        if (!fctx.boxedCaptures) fctx.boxedCaptures = new Map();
+        fctx.boxedCaptures.set(cap.name, { refCellTypeIdx, valType: cap.valType });
+      }
+    } else if (capUnresolvedHere && ctx.capturedGlobals.has(cap.name)) {
+      // (#2029 family A) Immutable capture promoted to a value global by
+      // the accessor-capture pass — read it instead of the out-of-scope
+      // declaring-function local slot.
+      fctx.body.push({ op: "global.get", index: ctx.capturedGlobals.get(cap.name)! });
+      if (ctx.capturedGlobalsWidened.has(cap.name)) {
+        fctx.body.push({ op: "ref.as_non_null" });
+      }
+    } else {
+      fctx.body.push({ op: "local.get", index: cap.outerLocalIdx });
+    }
+  }
+  // #1205 Stage 3: after all value captures, push the boxed TDZ flag refs
+  // (one per TDZ-flagged capture). Sourcing rules mirror calls.ts — see
+  // the FNDECL-A4 cap-prepend block there for the full rationale. The
+  // short version: only trust the LIVE `fctx.tdzFlagLocals[name]` lookup
+  // when it points to an i32 in the current fctx. Otherwise (block-shadow
+  // or cross-fctx transitive) push `i32.const 1` (treat as initialized) —
+  // matches pre-#1205 behavior where the lifted body had no flag check.
+  if (numTdzFlags > 0) {
+    const i32RefCellTypeIdxForFlags = getOrRegisterRefCellType(ctx, { kind: "i32" });
+    for (let ti = 0; ti < tdzFlaggedNested.length; ti++) {
+      const cap = tdzFlaggedNested[ti]!;
+      if (isSelfRef) {
+        // (#1312) Self-reference inside the lifted body — the TDZ-flag
+        // boxed refs arrive as params at index `numCaptures + ti` (after
+        // all value captures). Re-push from there.
+        fctx.body.push({ op: "local.get", index: numCaptures + ti });
+        continue;
+      }
+      const existingBox = fctx.boxedTdzFlags?.get(cap.name);
+      if (existingBox) {
+        fctx.body.push({ op: "local.get", index: existingBox.localIdx });
+      } else {
+        const liveFlagIdx = fctx.tdzFlagLocals?.get(cap.name);
+        const liveType = liveFlagIdx !== undefined ? getLocalType(fctx, liveFlagIdx) : undefined;
+        const liveOk = liveType?.kind === "i32";
+        if (liveOk && liveFlagIdx !== undefined) {
+          fctx.body.push({ op: "local.get", index: liveFlagIdx });
+          fctx.body.push({ op: "struct.new", typeIdx: i32RefCellTypeIdxForFlags });
+        } else {
+          fctx.body.push({ op: "i32.const", value: 1 });
+          fctx.body.push({ op: "struct.new", typeIdx: i32RefCellTypeIdxForFlags });
+        }
+        const flagBoxLocal = allocLocal(fctx, `__tdz_box_${cap.name}`, {
+          kind: "ref",
+          typeIdx: i32RefCellTypeIdxForFlags,
+        });
+        fctx.body.push({ op: "local.tee", index: flagBoxLocal });
+        if (liveOk) {
+          if (!fctx.boxedTdzFlags) fctx.boxedTdzFlags = new Map();
+          fctx.boxedTdzFlags.set(cap.name, {
+            refCellTypeIdx: i32RefCellTypeIdxForFlags,
+            localIdx: flagBoxLocal,
+          });
+          if (!fctx.tdzFlagLocals) fctx.tdzFlagLocals = new Map();
+          fctx.tdzFlagLocals.set(cap.name, flagBoxLocal);
+        }
+      }
+    }
+  }
+  fctx.body.push({ op: "struct.new", typeIdx: structTypeIdx });
+  fctx.body.push({ op: "local.set", index: memoLocal });
+
+  const thenArm = fctx.body;
+  popBody(fctx, savedBody);
+
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: thenArm, else: [] });
+  fctx.body.push({ op: "local.get", index: memoLocal });
+  fctx.body.push({ op: "ref.as_non_null" });
+}
+
+/**
  * Emit a closure struct wrapping a plain function. Creates a per-function
  * trampoline that delegates to the original function.  Struct types are shared
  * across functions with the same signature so they can be reassigned.
@@ -3401,6 +3813,19 @@ export function emitFuncRefAsClosure(
   if (nestedCaptures && nestedCaptures.length > 0) {
     // Functions with captures: create a closure struct that stores the capture values.
     // The trampoline extracts captures from the struct and passes them to the original function. (#857)
+    //
+    // (#2976) IDENTITY: the struct type + trampoline are minted ONCE per
+    // funcName (module-level `nestedFnClosureArtifacts` dedupe below), and the
+    // INSTANCE is memoized per enclosing activation in a `ref.is_null`-guarded
+    // local (`fctx.nestedFnClosureMemos`). Previously every reference site
+    // built a fresh struct type + trampoline + instance, so
+    // `Constructor === Constructor` was false and a static/sidecar write
+    // (`Constructor.resolve = fn`) landed on a dead instance the next
+    // reference never saw (the #2671 Promise capability sub-bucket). The
+    // lazy guard — rather than a prologue hoist — preserves the existing
+    // value-capture semantics exactly: immutable captures copy their value at
+    // the FIRST DYNAMIC reference, the same point the old per-site build
+    // copied them; mutable captures were already live through ref cells.
     const numCaptures = nestedCaptures.length;
     // #1205 Stage 3: TDZ-flag captures get extra ref-cell fields after the
     // value captures, mirroring the leading-param layout of the lifted fn.
@@ -3412,6 +3837,23 @@ export function emitFuncRefAsClosure(
 
     const wrapperTypes = getOrCreateFuncRefWrapperTypes(ctx, userParams, results);
     if (!wrapperTypes) return null;
+
+    const cachedArtifacts = ctx.nestedFnClosureArtifacts?.get(funcName);
+    if (cachedArtifacts) {
+      const trampIdx = ctx.funcMap.get(cachedArtifacts.trampolineName);
+      if (trampIdx !== undefined) {
+        emitMemoizedNestedFnClosure(
+          ctx,
+          fctx,
+          funcName,
+          cachedArtifacts.structTypeIdx,
+          trampIdx,
+          nestedCaptures,
+          tdzFlaggedNested,
+        );
+        return { kind: "ref", typeIdx: cachedArtifacts.structTypeIdx };
+      }
+    }
 
     // Create a custom struct with func + capture fields + TDZ-flag fields
     // (subtype of the base wrapper).
@@ -3478,8 +3920,8 @@ export function emitFuncRefAsClosure(
     }
     trampolineBody.push({ op: "call", funcIdx } as Instr);
 
-    const trampolineFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-    ctx.mod.functions.push({
+    const trampolineFuncIdx = mintDefinedFunc(ctx);
+    pushDefinedFunc(ctx, trampolineFuncIdx, {
       name: trampolineName,
       typeIdx: liftedFuncTypeIdx,
       locals: trampolineLocals,
@@ -3497,96 +3939,22 @@ export function emitFuncRefAsClosure(
     };
     ctx.closureInfoByTypeIdx.set(structTypeIdx, closureInfo);
 
-    // Emit: struct.new with fields: func, cap0, cap1, ..., __tdz_*..., ...
-    fctx.body.push({ op: "ref.func", funcIdx: trampolineFuncIdx });
-    // (#1312) Self-reference inside the lifted body of `funcName` itself —
-    // e.g. `function next() { return call(next); }`. The captures are
-    // already in scope as the leading params [0..numCaptures-1] of the
-    // lifted fn (mutable captures arrive as boxed ref cells, immutable as
-    // raw values). We re-push them by param index instead of trying to
-    // dereference `cap.outerLocalIdx`, which points into a different
-    // (outer) scope and yields garbage / null when reused inside the
-    // current lifted body.
-    const isSelfRef = fctx.name === funcName;
-    for (let i = 0; i < nestedCaptures.length; i++) {
-      const cap = nestedCaptures[i]!;
-      if (isSelfRef) {
-        // Captures arrive at param index `i` in the lifted fn (#1312).
-        fctx.body.push({ op: "local.get", index: i });
-        continue;
-      }
-      if (cap.mutable && cap.valType) {
-        const refCellTypeIdx = getOrRegisterRefCellType(ctx, cap.valType);
-        if (fctx.boxedCaptures?.has(cap.name)) {
-          const currentLocalIdx = fctx.localMap.get(cap.name)!;
-          fctx.body.push({ op: "local.get", index: currentLocalIdx });
-        } else {
-          // Stage 1 localMap-first lookup reverted — see calls.ts comment.
-          fctx.body.push({ op: "local.get", index: cap.outerLocalIdx });
-          fctx.body.push({ op: "struct.new", typeIdx: refCellTypeIdx });
-          const boxedLocalIdx = allocLocal(fctx, `__boxed_${cap.name}`, {
-            kind: "ref",
-            typeIdx: refCellTypeIdx,
-          });
-          fctx.body.push({ op: "local.tee", index: boxedLocalIdx });
-          fctx.localMap.set(cap.name, boxedLocalIdx);
-          if (!fctx.boxedCaptures) fctx.boxedCaptures = new Map();
-          fctx.boxedCaptures.set(cap.name, { refCellTypeIdx, valType: cap.valType });
-        }
-      } else {
-        fctx.body.push({ op: "local.get", index: cap.outerLocalIdx });
-      }
-    }
-    // #1205 Stage 3: after all value captures, push the boxed TDZ flag refs
-    // (one per TDZ-flagged capture). Sourcing rules mirror calls.ts — see
-    // the FNDECL-A4 cap-prepend block there for the full rationale. The
-    // short version: only trust the LIVE `fctx.tdzFlagLocals[name]` lookup
-    // when it points to an i32 in the current fctx. Otherwise (block-shadow
-    // or cross-fctx transitive) push `i32.const 1` (treat as initialized) —
-    // matches pre-#1205 behavior where the lifted body had no flag check.
-    if (numTdzFlags > 0) {
-      for (let ti = 0; ti < tdzFlaggedNested.length; ti++) {
-        const cap = tdzFlaggedNested[ti]!;
-        if (isSelfRef) {
-          // (#1312) Self-reference inside the lifted body — the TDZ-flag
-          // boxed refs arrive as params at index `numCaptures + ti` (after
-          // all value captures). Re-push from there.
-          fctx.body.push({ op: "local.get", index: numCaptures + ti });
-          continue;
-        }
-        const existingBox = fctx.boxedTdzFlags?.get(cap.name);
-        if (existingBox) {
-          fctx.body.push({ op: "local.get", index: existingBox.localIdx });
-        } else {
-          const liveFlagIdx = fctx.tdzFlagLocals?.get(cap.name);
-          const liveType = liveFlagIdx !== undefined ? getLocalType(fctx, liveFlagIdx) : undefined;
-          const liveOk = liveType?.kind === "i32";
-          if (liveOk && liveFlagIdx !== undefined) {
-            fctx.body.push({ op: "local.get", index: liveFlagIdx });
-            fctx.body.push({ op: "struct.new", typeIdx: i32RefCellTypeIdxForFlags });
-          } else {
-            fctx.body.push({ op: "i32.const", value: 1 });
-            fctx.body.push({ op: "struct.new", typeIdx: i32RefCellTypeIdxForFlags });
-          }
-          const flagBoxLocal = allocLocal(fctx, `__tdz_box_${cap.name}`, {
-            kind: "ref",
-            typeIdx: i32RefCellTypeIdxForFlags,
-          });
-          fctx.body.push({ op: "local.tee", index: flagBoxLocal });
-          if (liveOk) {
-            if (!fctx.boxedTdzFlags) fctx.boxedTdzFlags = new Map();
-            fctx.boxedTdzFlags.set(cap.name, {
-              refCellTypeIdx: i32RefCellTypeIdxForFlags,
-              localIdx: flagBoxLocal,
-            });
-            if (!fctx.tdzFlagLocals) fctx.tdzFlagLocals = new Map();
-            fctx.tdzFlagLocals.set(cap.name, flagBoxLocal);
-          }
-        }
-      }
-    }
-    fctx.body.push({ op: "struct.new", typeIdx: structTypeIdx });
+    // (#2976) Register the module-level artifacts so every later reference —
+    // in this or any other fctx — reuses this ONE struct type + trampoline
+    // instead of minting fresh ones per site. Stored by trampoline NAME
+    // (re-resolved via funcMap at emission) so late-import shifts can't
+    // desync a cached raw index.
+    (ctx.nestedFnClosureArtifacts ??= new Map()).set(funcName, { structTypeIdx, trampolineName });
 
+    emitMemoizedNestedFnClosure(
+      ctx,
+      fctx,
+      funcName,
+      structTypeIdx,
+      trampolineFuncIdx,
+      nestedCaptures,
+      tdzFlaggedNested,
+    );
     return { kind: "ref", typeIdx: structTypeIdx };
   }
 
@@ -3608,8 +3976,8 @@ export function emitFuncRefAsClosure(
   }
   trampolineBody.push({ op: "call", funcIdx } as Instr);
 
-  const trampolineFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-  ctx.mod.functions.push({
+  const trampolineFuncIdx = mintDefinedFunc(ctx);
+  pushDefinedFunc(ctx, trampolineFuncIdx, {
     name: trampolineName,
     typeIdx: liftedFuncTypeIdx,
     locals: [],
@@ -3703,8 +4071,7 @@ function buildNullThisTypeErrorThrow(ctx: CodegenContext): Instr[] | null {
  * so we don't silently regress the trap→TypeError fix.
  */
 function methodBodyReadsThis(ctx: CodegenContext, methodFuncIdx: number): boolean {
-  const localIdx = methodFuncIdx - ctx.numImportFuncs;
-  const fn = localIdx >= 0 ? ctx.mod.functions[localIdx] : undefined;
+  const fn = definedFuncAt(ctx, methodFuncIdx);
   if (!fn || !Array.isArray(fn.body)) return true;
   const walk = (instrs: Instr[]): boolean => {
     for (const instr of instrs) {
@@ -3842,7 +4209,7 @@ export function emitObjectMethodAsClosure(
   const importsBeforeNT = ctx.numImportFuncs;
   ensureNullThisTypeError(ctx, fctx);
   const ntShift = ctx.numImportFuncs - importsBeforeNT;
-  if (ntShift > 0 && methodFuncIdx >= importsBeforeNT) methodFuncIdx += ntShift;
+  if (ntShift > 0 && inLiveShiftRange(methodFuncIdx, importsBeforeNT)) methodFuncIdx += ntShift;
   const trampolineBody: Instr[] = buildTrampolineThisSlot(ctx, objStructTypeIdx, anyTempLocalIdx, methodUsesThis);
   for (let i = 0; i < userParams.length; i++) {
     // Skip closure_self at param 0; user params start at index 1
@@ -3850,8 +4217,8 @@ export function emitObjectMethodAsClosure(
   }
   trampolineBody.push({ op: "call", funcIdx: methodFuncIdx } as Instr);
 
-  const trampolineFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-  ctx.mod.functions.push({
+  const trampolineFuncIdx = mintDefinedFunc(ctx);
+  pushDefinedFunc(ctx, trampolineFuncIdx, {
     name: trampolineName,
     typeIdx: liftedFuncTypeIdx,
     locals: [{ name: "__this_any", type: { kind: "anyref" } }],
@@ -4160,7 +4527,7 @@ export function emitCachedMethodClosureAccess(
     const importsBeforeNT = ctx.numImportFuncs;
     ensureNullThisTypeError(ctx, fctx);
     const ntShift = ctx.numImportFuncs - importsBeforeNT;
-    if (ntShift > 0 && methodFuncIdx >= importsBeforeNT) methodFuncIdx += ntShift;
+    if (ntShift > 0 && inLiveShiftRange(methodFuncIdx, importsBeforeNT)) methodFuncIdx += ntShift;
     const trampolineBody: Instr[] = buildTrampolineThisSlot(
       ctx,
       objStructTypeIdx,
@@ -4171,8 +4538,8 @@ export function emitCachedMethodClosureAccess(
       trampolineBody.push({ op: "local.get", index: i + 1 } as Instr);
     }
     trampolineBody.push({ op: "call", funcIdx: methodFuncIdx } as Instr);
-    trampolineFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-    ctx.mod.functions.push({
+    trampolineFuncIdx = mintDefinedFunc(ctx);
+    pushDefinedFunc(ctx, trampolineFuncIdx, {
       name: trampolineName,
       typeIdx: liftedFuncTypeIdx,
       locals: [{ name: "__this_any", type: { kind: "anyref" } }],
@@ -4297,8 +4664,8 @@ export function emitCachedFuncClosureAccess(
       trampolineBody.push({ op: "local.get", index: i + 1 } as Instr);
     }
     trampolineBody.push({ op: "call", funcIdx } as Instr);
-    trampolineFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-    ctx.mod.functions.push({
+    trampolineFuncIdx = mintDefinedFunc(ctx);
+    pushDefinedFunc(ctx, trampolineFuncIdx, {
       name: trampolineName,
       typeIdx: liftedFuncTypeIdx,
       locals: [],

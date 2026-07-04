@@ -3,9 +3,9 @@ id: 2796
 title: "diff-test host path: dynamic-object own-key enumerate/copy — for-in empty, spread loses values, Object.assign loses keys"
 status: done
 completed: 2026-06-28
-sprint: current
+sprint: 69
 created: 2026-06-28
-updated: 2026-06-28
+updated: 2026-07-03
 priority: high
 feasibility: medium
 reasoning_effort: medium

@@ -7,7 +7,7 @@ import {
   compile,
   readFileSync,
   resolve,
-} from "./helpers.js";
+} from "./equivalence/helpers.js";
 
 describe("Scope and error handling (#180, #196, #197)", () => {
   it("var re-declaration with different types (#180)", async () => {

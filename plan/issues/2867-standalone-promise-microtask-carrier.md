@@ -4,7 +4,7 @@ title: "Standalone: Promise / async microtask leaks Promise_resolve/reject/then 
 status: in-progress
 assignee: ttraenkler/sendev-carriergap4
 created: 2026-06-30
-updated: 2026-07-01
+updated: 2026-07-02
 priority: high
 feasibility: hard
 task_type: feature
@@ -255,3 +255,23 @@ the runner `__drain_microtasks` hook (sr-pathb's 1d-scaffolding, in branch
 NET-POSITIVE on the full `merge_group` standalone corpus AFTER #2402 (the stored
 `Promise<T>` consumption contract, now LANDED on main). Gap 4 is
 independently-mergeable and inert.
+
+## Landed slices (reconcile 2026-07-02)
+
+Stays **in-progress**. Merged so far:
+
+- **Gap 1** — recursive thenable assimilation (PR #2400).
+- **Gap 2** — async throw→reject routing + drive-result `.then` observability
+  (PR #2401).
+- **Gap 3** — try/finally-across-await: LANDED under **#2906 slice 2**
+  (PR #2416, on the N-state resume machine) — the "Remaining for the unlock"
+  list above predates it.
+- **Gap 4** — native `Promise.all` / `Promise.race` combinators (PR #2403).
+- Related hardening: native `Promise.then`/`.all` funcIdx-shift desync fix
+  (PR #2419, filed as #2918); `__drain_microtasks` runner hook landed via #2895
+  (PR #2404).
+
+**Still open:** Gap 5 (for-await-of / async-generator drive — #2906 slices 3/4)
+and the measured slice-1d gate-widen (`isStandalonePromiseActive` +
+`isStandaloneThenChainNativeActive` → standalone), plus the deferred
+`allSettled`/`any`/generic-iterable follow-ups above.

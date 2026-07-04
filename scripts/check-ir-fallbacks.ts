@@ -57,6 +57,7 @@ import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import { buildTypeMap } from "../src/ir/propagate.js";
 import { planIrCompilation, type IrFallbackReason } from "../src/ir/select.js";
+import { makeIrHostGlobalResolver } from "../src/ir/host-extern.js";
 import { compile } from "../src/index.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -161,6 +162,9 @@ async function aggregate(): Promise<{
   deferred: Partial<Record<IrFallbackReason, number>>;
   postClaim: PostClaimBuckets;
   perFile: Array<{ file: string; reasons: Partial<Record<IrFallbackReason, number>> }>;
+  // (#2856 Step-1) Per-rejection reject-arm detail for `body-shape-rejected`,
+  // populated only when JS2WASM_IR_SHAPE_DIAG=1 (select.ts records it).
+  shapeDetails: Array<{ file: string; name: string; detail: string }>;
 }> {
   const corpus = CORPUS_ROOTS.flatMap(listTsFiles);
 
@@ -173,6 +177,7 @@ async function aggregate(): Promise<{
   // — they happen during build/verify/lower AFTER the selector claims).
   const postClaim = emptyPostClaim();
   const perFile: Array<{ file: string; reasons: Partial<Record<IrFallbackReason, number>> }> = [];
+  const shapeDetails: Array<{ file: string; name: string; detail: string }> = [];
 
   const compilerOptions: ts.CompilerOptions = {
     target: ts.ScriptTarget.ES2022,
@@ -181,31 +186,33 @@ async function aggregate(): Promise<{
     moduleResolution: ts.ModuleResolutionKind.NodeNext,
     skipLibCheck: true,
     noEmit: true,
+    // (#2856) The host-extern selector arm resolves ambient globals
+    // (`document`, `console`) through the checker — the program needs the
+    // REAL default libs (es + dom) for those `declare var`s to exist. The
+    // previous hand-rolled host declared `lib.d.ts` but had no lib dir on
+    // its search path, so the program ran lib-less and every ambient global
+    // was unresolvable — fine before #2856 (the selector was lib-blind),
+    // WRONG after (the gate would never see host-extern claims the real
+    // compiler makes).
+    lib: ["lib.es2022.d.ts", "lib.dom.d.ts"],
   };
 
   for (const filePath of corpus) {
     const source = readFileSync(filePath, "utf-8");
     const sf = ts.createSourceFile(filePath, source, ts.ScriptTarget.ES2022, true);
 
-    // Build a tiny program over just this file so we can derive a checker
-    // for the type-propagation pass. Use an in-memory host that returns the
-    // file source for `filePath` and falls back to the disk for libs.
+    // Build a program over just this file so we can derive a checker for the
+    // type-propagation pass AND (#2856) ambient-global resolution. The
+    // disk-backed default host resolves the bundled typescript lib files;
+    // only `filePath` is served from the pre-parsed in-memory source.
+    const baseHost = ts.createCompilerHost(compilerOptions, /* setParentNodes */ true);
     const host: ts.CompilerHost = {
-      getSourceFile: (name) => {
+      ...baseHost,
+      getSourceFile: (name, languageVersion, ...rest) => {
         if (name === filePath) return sf;
-        if (existsSync(name)) {
-          return ts.createSourceFile(name, readFileSync(name, "utf-8"), ts.ScriptTarget.ES2022, true);
-        }
-        return undefined;
+        return baseHost.getSourceFile(name, languageVersion, ...rest);
       },
       writeFile: () => {},
-      getDefaultLibFileName: () => "lib.d.ts",
-      getCurrentDirectory: () => REPO_ROOT,
-      getCanonicalFileName: (n) => n,
-      useCaseSensitiveFileNames: () => true,
-      getNewLine: () => "\n",
-      fileExists: (n) => existsSync(n),
-      readFile: (n) => (existsSync(n) ? readFileSync(n, "utf-8") : undefined),
     };
     const program = ts.createProgram([filePath], compilerOptions, host);
     const checker = program.getTypeChecker();
@@ -221,12 +228,29 @@ async function aggregate(): Promise<{
       continue;
     }
 
-    const selection = planIrCompilation(sourceFile, { experimentalIR: true, trackFallbacks: true }, typeMap);
+    // (#2856) Thread the SAME host-extern options the real compiler passes
+    // (`planIrOverlay` in src/codegen/index.ts) so the gate's selector
+    // verdicts match production exactly: JS-host mode (the corpus is
+    // playground/browser code) + the shared checker-backed ambient-global
+    // resolver.
+    const selection = planIrCompilation(
+      sourceFile,
+      {
+        experimentalIR: true,
+        trackFallbacks: true,
+        jsHostExterns: true,
+        resolveHostGlobal: makeIrHostGlobalResolver(checker),
+      },
+      typeMap,
+    );
     const fileReasons: Partial<Record<IrFallbackReason, number>> = {};
     for (const fb of selection.fallbacks ?? []) {
       const bucket = UNINTENDED.has(fb.reason) ? unintended : deferred;
       bucket[fb.reason] = (bucket[fb.reason] ?? 0) + 1;
       fileReasons[fb.reason] = (fileReasons[fb.reason] ?? 0) + 1;
+      if (fb.reason === "body-shape-rejected" && fb.detail) {
+        shapeDetails.push({ file: relative(REPO_ROOT, filePath), name: fb.name, detail: fb.detail });
+      }
     }
     perFile.push({ file: relative(REPO_ROOT, filePath), reasons: fileReasons });
 
@@ -244,7 +268,7 @@ async function aggregate(): Promise<{
       // ignore — example-file compile failures are not the gate's concern
     }
   }
-  return { unintended, deferred, postClaim, perFile };
+  return { unintended, deferred, postClaim, perFile, shapeDetails };
 }
 
 function loadBaseline(): Baseline | undefined {
@@ -335,8 +359,38 @@ async function main(): Promise<void> {
         ? "json"
         : "gate";
   const verbose = args.has("--verbose");
+  const shapeDiag = args.has("--shape-diag");
 
-  const { unintended, deferred, postClaim, perFile } = await aggregate();
+  const { unintended, deferred, postClaim, perFile, shapeDetails } = await aggregate();
+
+  // (#2856 Step-1) `--shape-diag`: print the `body-shape-rejected` reject-arm
+  // histogram. Requires `JS2WASM_IR_SHAPE_DIAG=1` in the env (select.ts reads it
+  // at module load to enable the opt-in recorder). This attributes each of the
+  // rejected functions to its proximate `isPhase1*` reject arm + node kind.
+  if (shapeDiag) {
+    if (process.env.JS2WASM_IR_SHAPE_DIAG !== "1") {
+      process.stderr.write(
+        "--shape-diag requires JS2WASM_IR_SHAPE_DIAG=1 in the environment (the recorder is gated at module load).\n" +
+          "Re-run: JS2WASM_IR_SHAPE_DIAG=1 pnpm run check:ir-fallbacks -- --shape-diag\n",
+      );
+      process.exitCode = 2;
+      return;
+    }
+    const hist = new Map<string, number>();
+    for (const d of shapeDetails) hist.set(d.detail, (hist.get(d.detail) ?? 0) + 1);
+    const total = shapeDetails.length;
+    process.stdout.write(`\n=== body-shape-rejected reject-arm histogram (#2856 Step-1) ===\n`);
+    process.stdout.write(`  attributed: ${total} rejections\n\n`);
+    for (const [arm, n] of [...hist.entries()].sort((a, b) => b[1] - a[1])) {
+      process.stdout.write(`  ${String(n).padStart(4)}  ${arm}\n`);
+    }
+    process.stdout.write(`\n=== per-function ===\n`);
+    for (const d of shapeDetails.sort((a, b) => a.file.localeCompare(b.file))) {
+      process.stdout.write(`  ${d.file}  ${d.name}  →  ${d.detail}\n`);
+    }
+    process.stdout.write("\n");
+    return;
+  }
 
   if (mode === "json") {
     process.stdout.write(JSON.stringify({ unintended, deferred, postClaim, perFile }, null, 2) + "\n");

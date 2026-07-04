@@ -30,31 +30,15 @@ import type { CodegenContext, FunctionContext } from "./context/types.js";
 /**
  * Canonical JS-type tag for the `$AnyValue` boxed representation.
  *
- * Invariant V1 (tag fidelity): the tag always equals the value's ECMAScript
- * type partition (the `typeof` partition with `null` split out). No consumer may
- * infer a JS type from a Wasm kind.
- *
- * Invariant V2 (numeric class): tags 2 and 3 are ONE JS type (`number`) — one
- * uses the i32 payload, one the f64 payload. Equality / relational / typeof /
- * ToString helpers must treat `{2,3}` as a single class.
- *
- * These values MUST match the runtime tags written by the `__any_box_*` helpers
- * in `any-helpers.ts` (asserted by tests). `Function` (7) is reserved for a
- * later phase (today closures box as `Object`).
- *
- * (Plain `enum`, not `const enum` — Biome's `noConstEnum` forbids the latter;
- * the numeric values are still inlined at our use sites.)
+ * #2949 slice 1 — the enum itself moved to the dependency-free leaf module
+ * `js-tag.ts` so the IR type lattice (`src/ir/nodes.ts`, which carries
+ * `{ kind: "dynamic", tag?: JsTag }`) can import it without pulling this
+ * module's `ts-api` / codegen-context dependency chain into the IR leaf.
+ * Re-exported here so every existing import site is unchanged; this file
+ * remains the tag POLICY home (classifier, boxing entry point, sentinel).
+ * See `js-tag.ts` for the invariants (V1 tag fidelity, V2 numeric class).
  */
-export enum JsTag {
-  Null = 0,
-  Undefined = 1,
-  NumberI32 = 2,
-  NumberF64 = 3,
-  Boolean = 4,
-  String = 5,
-  Object = 6,
-  Function = 7,
-}
+export { JsTag, jsTagUnboxKind } from "./js-tag.js";
 
 /** Static JS-type classification of an expression, resolved from its TS type. */
 export type JsStaticType =
@@ -164,8 +148,33 @@ export function boxToAny(ctx: CodegenContext, fctx: FunctionContext, from: ValTy
     case "null":
       // Only honor when the value is a discardable reference carrier; otherwise
       // fall through (a non-ref "null" hint shouldn't drop a live scalar).
+      // (#2106 S1) Under the `undefinedSingleton` regime (inline mirror of
+      // any-helpers' `undefinedSingletonActive` — kept import-free here), a
+      // statically-null reference carrier boxes tag-0 directly instead of
+      // falling into the Wasm-kind dispatch (whose externref arm tags it 5,
+      // the #1888 lie, or — honest — routes through __any_from_extern).
+      if (
+        ctx.undefinedSingleton === true &&
+        (ctx.standalone || ctx.nativeStrings) &&
+        (from.kind === "externref" || from.kind === "ref" || from.kind === "ref_null") &&
+        emit("__any_box_null", [{ op: "drop" } as Instr])
+      ) {
+        return true;
+      }
       break;
     case "undefined":
+      // (#2106 S1) Statically-undefined value: drop the carrier (null extern /
+      // singleton extern / UNDEF_F64-sentinel f64 — the only values an
+      // `undefined`-typed slot can hold) and box tag-1. Regime-gated; the
+      // legacy path keeps the historical kind-keyed dispatch below.
+      if (
+        ctx.undefinedSingleton === true &&
+        (ctx.standalone || ctx.nativeStrings) &&
+        (from.kind === "externref" || from.kind === "ref" || from.kind === "ref_null" || from.kind === "f64") &&
+        emit("__any_box_undefined", [{ op: "drop" } as Instr])
+      ) {
+        return true;
+      }
       break;
     default:
       break;
@@ -176,12 +185,31 @@ export function boxToAny(ctx: CodegenContext, fctx: FunctionContext, from: ValTy
   if (from.kind === "f64") return emit("__any_box_f64");
   if (from.kind === "i64") return emit("__any_box_f64", [{ op: "f64.convert_i64_s" }]);
   if (from.kind === "externref") {
+    // (#2141 S1) Stage-B regime: honest runtime classification behind the
+    // `honestAnyBoxing` flag (default OFF until slice S4), via
+    // `__any_from_extern` — whose null + fallback arms are honest under the
+    // same flag (see ensureAnyFromExternHelper), covering BOTH generic-boxing
+    // chokepoints with one helper. It is pre-registered by `ensureAnyHelpers`
+    // under the flag; if absent (availability preconditions unmet) fall back
+    // to the legacy lie so the flag can never produce a compile-time hole.
+    if (ctx.honestAnyBoxing && emit("__any_from_extern")) return true;
+    // (#2106 S1) NULLISH-honest boxing under the `undefinedSingleton` regime:
+    // null → tag-0, the singleton / UNDEF-box → tag-1, everything else keeps
+    // the legacy tag-5 wrap byte-equivalently (see __any_box_extern_s1 —
+    // deliberately NOT the full-honest #2141 classification, whose solo flip
+    // measured −788/−794). Without this, `u === miss` over two `any` operands
+    // boxes both nullish values as tag-5 "strings" and __any_strict_eq's
+    // guarded string arm answers 0.
+    if (ctx.undefinedSingleton === true && (ctx.standalone || ctx.nativeStrings) && emit("__any_box_extern_s1")) {
+      return true;
+    }
     // #1888 (regression −788/−794): do NOT route generic externref boxing
     // through honest tag recovery. The test262 harness comparator (`isSameValue`
     // over the externref ABI with `any` params) depends on main's tag-5
     // box-the-externref behaviour; honest recovery here flipped ~794 baseline
     // standalone passes. Numeric honesty for open-any dispatch is provided
     // downstream by the $BoxedNumber recovery arm in `__any_to_f64`. Keep tag-5.
+    // Consumers are being made tag-agnostic (#2141 S2/S3); the flip is S4.
     return emit("__any_box_string");
   }
   // (#42) A native WasmGC string is a `ref $AnyString` (nativeStrings/standalone),

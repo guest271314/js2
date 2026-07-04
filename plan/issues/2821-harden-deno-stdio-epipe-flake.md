@@ -2,7 +2,7 @@
 id: 2821
 title: "Harden the flaky EPIPE in tests/issue-2684-deno-stdio.test.ts"
 status: done
-sprint: current
+sprint: 69
 priority: medium
 area: tests
 task_type: test

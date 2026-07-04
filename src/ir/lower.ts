@@ -49,6 +49,7 @@ import type {
   IrBoxedLowering,
   IrClassLowering,
   IrClosureLowering,
+  IrDynamicLowering,
   IrObjectStructLowering,
   IrRefCellLowering,
   IrUnionLowering,
@@ -63,19 +64,32 @@ import {
   type IrFunction,
   type IrGlobalRef,
   type IrInstr,
+  type IrLabelId,
   type IrObjectShape,
   type IrType,
   type IrTypeRef,
   type IrValueId,
   asVal,
+  forEachInstrDeep,
   forEachNestedBuffer,
 } from "./nodes.js";
-import { isSideEffecting } from "./passes/dead-code.js";
+// #2134 — the unified IR effect model (formerly the private `SchedFx` table
+// here plus `isSideEffecting` in passes/dead-code.ts; moved verbatim), plus
+// the slice-2 independent schedule verifier.
+import {
+  effectsOf,
+  effectsArePure,
+  effectsConflict,
+  isSideEffecting,
+  verifyEmissionSchedule,
+  type IrEffects,
+} from "./effects.js";
 import type { BlockType, FuncTypeDef, Instr, LocalDef, ValType, WasmFunction } from "./types.js";
 export type {
   IrBoxedLowering,
   IrClassLowering,
   IrClosureLowering,
+  IrDynamicLowering,
   IrObjectStructLowering,
   IrRefCellLowering,
   IrUnionLowering,
@@ -176,6 +190,38 @@ export interface IrLowerResolver {
    * time when it's missing.
    */
   resolveString?(): ValType;
+  /**
+   * #2949 slice 1 — resolve the Wasm value type used for `IrType.dynamic`
+   * (the boxed-any carrier) in the active backend/mode. The contract is the
+   * ratified #1852 representation table, and the returned ValType MUST match
+   * legacy `resolveWasmType`'s any/unknown arm exactly so IR-claimed and
+   * legacy-compiled functions agree on the `any` ABI:
+   *   - WasmGC fast/standalone mode → `ref_null $AnyValue` (registered via
+   *     `ensureAnyValueType`; the `__any_box_*` helper family's carrier).
+   *   - WasmGC host (non-fast) mode → `externref` (host-boxed values).
+   *   - Linear backend → DEFERRED (#1852-G4 / #2956): omit the method;
+   *     lowering a dynamic-typed function there fails loudly.
+   * Optional so Phase-1 resolvers without dynamic support can omit it; a
+   * function that actually carries a dynamic-typed value fails at lowering
+   * time when it's missing.
+   */
+  resolveDynamic?(): ValType;
+  /**
+   * #2949 slice 3 — resolve the op-emission handle for dynamic
+   * box/unbox/tag.test lowering (see `IrDynamicLowering` in
+   * `backend/handles.ts` for the full contract, incl. the V2 numeric-class
+   * tag.test rule). MUST agree with `resolveDynamic()` on the carrier — one
+   * mode split, two views of it. Optional like `resolveDynamic`; a function
+   * that actually emits a dynamic box/unbox/tag.test fails at lowering time
+   * when it's missing. Returns `null` when the active backend/mode has no
+   * dynamic op lowering (linear — #1852-G4/#2956).
+   *
+   * Registration discipline: the integration layer pre-registers every
+   * helper/import the handle can emit (`preregisterDynamicSupport`) BEFORE
+   * Phase-3 lowering starts, so no `emit*` call can trigger a mid-emission
+   * late-import funcIdx shift (the #329/#2078 bug class).
+   */
+  resolveDynamicLowering?(): IrDynamicLowering | null;
   /**
    * Slice 6 part 4 (#1183) refactored in #1185: returns whether the
    * compiler is in native-strings mode. Drives the for-of strategy
@@ -475,6 +521,12 @@ export function lowerIrFunctionBody<S>(
         recordUse(instr.thenValue, -1);
         recordUse(instr.elseValue, -1);
       }
+      // #2952 slice 2 — statement-level if arms: same -1 convention (an
+      // outer value used inside an arm pre-materialises into a Wasm local).
+      if (instr.kind === "if.stmt") {
+        for (const u of collectForOfBodyUses(instr.then)) recordUse(u, -1);
+        for (const u of collectForOfBodyUses(instr.else)) recordUse(u, -1);
+      }
     }
     for (const u of collectTerminatorUses(block)) recordUse(u, blockId);
   }
@@ -528,7 +580,7 @@ export function lowerIrFunctionBody<S>(
   // program order — this is purely an emission-scheduling fix.
   const anchorEager = new Set<IrValueId>();
   {
-    const fxCache = new Map<IrInstr, SchedFx>();
+    const fxCache = new Map<IrInstr, IrEffects>();
     const NEVER = Number.POSITIVE_INFINITY;
     for (const block of func.blocks) {
       const instrs = block.instrs;
@@ -591,14 +643,14 @@ export function lowerIrFunctionBody<S>(
         let e = NEVER;
         for (const c of consumers) e = Math.min(e, c === n ? n : emissionIdx[c]);
         if (e === NEVER) continue; // consumed only by dead chains — never emitted
-        const fx = schedFxOf(instr, fxCache);
+        const fx = effectsOf(instr, fxCache);
         let anchored = false;
-        if (!schedFxIsPure(fx)) {
+        if (!effectsArePure(fx)) {
           for (let k = i + 1; k < e && k < n; k++) {
             const ek = emissionIdx[k];
             if (ek === NEVER || ek > e) continue; // executes after our tree (or never) — def order preserved
             if (ek === e && treeConsumes(k, r)) continue; // same tree, operands emit before consumers
-            if (schedFxConflicts(fx, schedFxOf(instrs[k], fxCache))) {
+            if (effectsConflict(fx, effectsOf(instrs[k], fxCache))) {
               anchored = true;
               break;
             }
@@ -612,6 +664,23 @@ export function lowerIrFunctionBody<S>(
           emissionIdx[i] = e;
           isLazyAt[i] = true;
         }
+      }
+
+      // #2134 slice 2 — independent post-hoc verification of the computed
+      // schedule: pairwise over emitted effectful instrs, program order must
+      // be preserved for conflicting effects (an algorithmically separate
+      // re-derivation, so an anchor-pass bug cannot hide itself). The throw
+      // is caught by the integration loop; the "emission-schedule verify"
+      // marker classifies it kind "verify" → HARD failure under CI/test
+      // (`irVerifierHardFailureEnabled`), demote-to-legacy warning in
+      // production — a tripwire that can never miscompile silently.
+      const scheduleViolations = verifyEmissionSchedule(instrs, emissionIdx, isLazyAt, collectIrUses, fxCache);
+      if (scheduleViolations.length > 0) {
+        throw new Error(
+          `emission-schedule verify: ${scheduleViolations[0]!.reason}` +
+            (scheduleViolations.length > 1 ? ` (+${scheduleViolations.length - 1} more)` : "") +
+            ` in ${func.name} [#2134]`,
+        );
       }
     }
   }
@@ -669,6 +738,11 @@ export function lowerIrFunctionBody<S>(
     // emission mis-targets an unrelated local. (Same recursion the for-of /
     // try / loop buffers already get.)
     if (instr.kind === "if") {
+      for (const sub of instr.then) allocLocalForInstr(sub);
+      for (const sub of instr.else) allocLocalForInstr(sub);
+    }
+    // #2952 slice 2 — statement-level if arms (same recursion as `if`).
+    if (instr.kind === "if.stmt") {
       for (const sub of instr.then) allocLocalForInstr(sub);
       for (const sub of instr.else) allocLocalForInstr(sub);
     }
@@ -741,6 +815,19 @@ export function lowerIrFunctionBody<S>(
     }
     return { rhs: jsBitwiseRhsIdxF64, tmp: jsBitwiseTmpIdx };
   };
+  // #2949 slice 3 — scratch local for dynamic `tag.test` arms that must read
+  // the carrier twice (host-mode Object test: `typeof === "object" && !null`).
+  // Carrier-typed, allocated lazily on first use, one per function, reused
+  // across every dynamic tag.test in the body (same pattern as the bitwise /
+  // vec scratch slots above). The gc arms never invoke the allocator.
+  let dynTagScratchIdx: number | null = null;
+  const ensureDynTagScratch = (carrier: ValType): number => {
+    if (dynTagScratchIdx === null) {
+      dynTagScratchIdx = func.params.length + locals.length;
+      locals.push({ name: "$dyn_tag_scratch", type: carrier });
+    }
+    return dynTagScratchIdx;
+  };
 
   // #1126 Stage 3 — best-effort `typeOf` that returns null instead of
   // throwing. Used by the fast-path operand inspection in `case "binary"`
@@ -758,6 +845,98 @@ export function lowerIrFunctionBody<S>(
   // --- emission -----------------------------------------------------------
 
   const materialized = new Set<IrValueId>();
+
+  // --- #2952 slice 2 — lowering-time label→depth resolver (Design A3) ------
+  //
+  // `br.label{label, mode}` stores NO depth: the Wasm `br` immediate is
+  // derived HERE by counting structured frames between the branch site and
+  // the frame that binds `label`. Every structured Wasm frame the emitter
+  // opens (block / loop / if / try — each exactly ONE Wasm label) pushes one
+  // `CtrlFrame` for the duration of its interior emission and pops on close,
+  // so the stack mirrors the physical nesting at every emission point. This
+  // is what makes the depth robust under buffer re-nesting: the IR carries
+  // only the semantic label, and each emission point re-derives its own
+  // relative depth.
+  //
+  // Frame kinds:
+  //   - "break"    — the frame a `br.label{mode:"break"}` for this label
+  //                  exits to (the loop's outer `block`).
+  //   - "continue" — the frame whose br re-runs the loop's advance/cond
+  //                  (the Wasm `loop` for pre-test while / forof.iter, or a
+  //                  dedicated body-wrapping `block` for for / do-while /
+  //                  counter-advancing for-of — emitted only when the body
+  //                  actually contains a continue for this label, keeping
+  //                  continue-free loops byte-identical).
+  //   - "plain"    — any other frame (if / try / labeled-block later).
+  //                  A try frame carries its ACTIVE `finallyBody` while its
+  //                  try-body buffer is being emitted: a br.label that
+  //                  crosses it inlines the finally immediately before the
+  //                  br (the same inlining IrInstrTry lowering already does
+  //                  for normal completion). The field is masked (undefined)
+  //                  while the finally itself / the catch path is emitted so
+  //                  a break inside a finally never re-runs its own finally.
+  type CtrlFrame =
+    | { kind: "break"; label: IrLabelId }
+    | { kind: "continue"; label: IrLabelId }
+    | { kind: "plain"; finallyBody?: readonly IrInstr[] | undefined };
+  const ctrlStack: CtrlFrame[] = [];
+
+  /**
+   * Emit a nested buffer as a statement sequence with the standard SSA
+   * materialisation rules (void instrs emit in place; cross-block results
+   * emit + local.set; intra-buffer multi-use values tee at their use site).
+   * S-generic twin of the per-arm `emitBodyBuffer` helpers; used by the new
+   * if.stmt arm and by the br.label finally-inlining path.
+   */
+  const emitBufferAsStatements = (bodyInstrs: readonly IrInstr[], target: S): void => {
+    for (const bodyInstr of bodyInstrs) {
+      if (bodyInstr.result === null) {
+        emitInstrTree(bodyInstr, target);
+      } else if (crossBlock.has(bodyInstr.result)) {
+        emitInstrTree(bodyInstr, target);
+        emitter.emitLocalSet(localIdx.get(bodyInstr.result)!, target);
+        materialized.add(bodyInstr.result);
+      } else if ((totalUses.get(bodyInstr.result) ?? 0) === 0 && isSideEffecting(bodyInstr)) {
+        // (#2856) Zero-use side-effecting instr inside a nested buffer —
+        // same eager emit + drop contract as `emitBlockBody`. Without this
+        // arm, a statement-position call whose unused NON-VOID result never
+        // gets consumed (e.g. `map.set(k, v);` in a loop body — Map_set
+        // returns the map) was silently SKIPPED, dropping its side effect.
+        emitInstrTree(bodyInstr, target);
+        emitter.emitDrop(target);
+      }
+      // Intra-buffer multi-use: handled at use site via the tee pattern.
+    }
+  };
+
+  /**
+   * Resolve a `br.label` at the current emission point: scan the ctrlStack
+   * from the innermost frame (depth 0), counting every frame; inline each
+   * crossed try-finally (innermost first — JS runs inner finallys before
+   * outer ones on an abrupt exit); emit `br <depth>` at the matching frame.
+   *
+   * A br.label inside an inlined finally resolves against the SAME stack
+   * (the code physically sits at the branch site), with the finally's own
+   * frame masked — so `try { break } finally { continue }` correctly lets
+   * the continue win (its br is emitted before the break's br, which
+   * becomes unreachable), matching ECMA-262 completion-value overriding.
+   */
+  const resolveBrLabel = (label: IrLabelId, mode: "break" | "continue", out: S): void => {
+    for (let i = ctrlStack.length - 1, depth = 0; i >= 0; i--, depth++) {
+      const frame = ctrlStack[i]!;
+      if (frame.kind === mode && frame.label === label) {
+        emitter.emitBr(depth, out);
+        return;
+      }
+      if (frame.kind === "plain" && frame.finallyBody) {
+        const saved = frame.finallyBody;
+        frame.finallyBody = undefined; // mask: a finally never re-runs itself
+        emitBufferAsStatements(saved, out);
+        frame.finallyBody = saved;
+      }
+    }
+    throw new Error(`ir/lower: br.label(${label as number}, ${mode}) has no enclosing frame in ${func.name}`);
+  };
 
   /**
    * #1303 — Defensive coercion for bitwise op operands.
@@ -999,6 +1178,13 @@ export function lowerIrFunctionBody<S>(
               emitInstrTree(bodyInstr, target);
               emitter.emitLocalSet(localIdx.get(bodyInstr.result)!, target);
               materialized.add(bodyInstr.result);
+            } else if ((totalUses.get(bodyInstr.result) ?? 0) === 0 && isSideEffecting(bodyInstr)) {
+              // (#2856) Zero-use side-effecting instr inside a nested buffer —
+              // same eager emit + drop contract as `emitBlockBody` (a
+              // statement-position extern/host call whose unused result would
+              // otherwise be silently SKIPPED, dropping its side effect).
+              emitInstrTree(bodyInstr, target);
+              emitter.emitDrop(target);
             }
             // Intra-arm multi-use: handled at use site via tee pattern.
           }
@@ -1007,24 +1193,70 @@ export function lowerIrFunctionBody<S>(
         // 1. Emit cond.
         emitValue(instr.cond, out);
 
-        // 2. THEN arm.
+        // 2. THEN arm. (#2952 slice 2 — each arm is one structured Wasm
+        // frame; push a plain CtrlFrame so any br.label nested in the arm
+        // derives the correct depth. Byte-inert for arms without one.)
         const thenBody: S = emitter.newSink();
+        ctrlStack.push({ kind: "plain" });
         emitArmBody(instr.then, thenBody);
         emitValue(instr.thenValue, thenBody);
+        ctrlStack.pop();
 
         // 3. ELSE arm.
         const elseBody: S = emitter.newSink();
+        ctrlStack.push({ kind: "plain" });
         emitArmBody(instr.else, elseBody);
         emitValue(instr.elseValue, elseBody);
+        ctrlStack.pop();
 
         // 4. Wrap in `if (result T) ... else ... end`.
         emitter.emitIf(blockType, thenBody, elseBody, out);
+        return;
+      }
+      // (NB: `case "if.stmt"` is handled below with the #2952 slice-2 arm —
+      // it pushes plain CtrlFrames so br.label depth-derivation counts the
+      // arm's structured frame.)
+      // (#2856) Early return from inside a nested buffer — the Wasm `return`
+      // op unwinds every enclosing block/loop and returns from the function.
+      // The value (when present) was coerced to the function's result type by
+      // from-ast (same `coerceReturnValue` the tail path uses).
+      case "early.return": {
+        if (instr.value !== null) emitValue(instr.value, out);
+        emitter.emitReturn(out);
         return;
       }
       case "raw.wasm":
         for (const op of instr.ops) emitter.pushRaw(out, op);
         return;
       case "box": {
+        // #2949 slice 3 — box-to-dynamic: erase a concrete value into the
+        // module's canonical boxed-any carrier. The op sequence comes from
+        // the `IrDynamicLowering` handle (integration.ts), which routes
+        // through the CANONICAL boxing entry points — `boxToAny` /
+        // `__any_box_*` on the gc strategy, the `__box_number` import family
+        // on host — never a second boxing engine (June-audit D4). The
+        // operand's mode-resolved ValType picks the arm, exactly as legacy's
+        // `coerceType(from, <any-carrier>)` dispatches on the same kind.
+        if (instr.toType.kind === "dynamic") {
+          const dyn = resolver.resolveDynamicLowering?.();
+          if (!dyn) {
+            throw new Error(
+              `ir/lower: resolver cannot lower box-to-dynamic (resolveDynamicLowering missing/null) (${func.name})`,
+            );
+          }
+          const operandIr = typeOf(instr.value);
+          if (operandIr.kind === "dynamic") {
+            // Verifier R1 backstop — a re-box is provably redundant.
+            throw new Error(`ir/lower: box operand is already dynamic (${func.name})`);
+          }
+          const fromVal = lowerIrTypeToValType(operandIr, resolver, func.name);
+          emitValue(instr.value, out);
+          // The target's tag refinement (if the producer proved a partition)
+          // becomes the boxing hint — e.g. a Boolean-refined i32 boxes as a
+          // tag-4 boolean instead of the unbranded NUMBER default.
+          for (const op of dyn.emitBox(fromVal, instr.toType.tag)) emitter.pushRaw(out, op);
+          return;
+        }
         // `toType` must be a union (V1 only boxes into tagged unions). The
         // tag + value are pushed onto the stack in declaration order, then
         // struct.new builds the union instance.
@@ -1057,6 +1289,26 @@ export function lowerIrFunctionBody<S>(
         // Caller must have proved the tag already; lowering is a plain
         // `struct.get $val`. A future debug mode may prepend a tag check.
         const valueIrType = typeOf(instr.value);
+        // #2949 slice 3 — unbox-from-dynamic: read the proven partition's
+        // payload off the carrier. `jsTag` is verifier-REQUIRED here (R2,
+        // payload-bearing partitions only); the handle picks the payload
+        // read (gc: canonical `__any_unbox_f64`/`__any_unbox_i32` readers /
+        // struct.get; host: `__unbox_number` family / identity).
+        if (valueIrType.kind === "dynamic") {
+          const dyn = resolver.resolveDynamicLowering?.();
+          if (!dyn) {
+            throw new Error(
+              `ir/lower: resolver cannot lower unbox-from-dynamic (resolveDynamicLowering missing/null) (${func.name})`,
+            );
+          }
+          if (instr.jsTag === undefined) {
+            // Verifier R2 backstop.
+            throw new Error(`ir/lower: unbox on a dynamic operand requires jsTag (${func.name})`);
+          }
+          emitValue(instr.value, out);
+          for (const op of dyn.emitUnbox(instr.jsTag)) emitter.pushRaw(out, op);
+          return;
+        }
         if (valueIrType.kind !== "union") {
           throw new Error(`ir/lower: unbox value must be a union IrType, got ${valueIrType.kind} (${func.name})`);
         }
@@ -1079,8 +1331,38 @@ export function lowerIrFunctionBody<S>(
       case "tag.test": {
         // Emit struct.get $tag; i32.const <tagFor(tag)>; i32.eq.
         const valueIrType = typeOf(instr.value);
+        // #2949 slice 3 — tag.test-on-dynamic: does the carrier's runtime
+        // tag match the partition? `jsTag` is verifier-REQUIRED here (R3,
+        // ANY partition incl. Null/Undefined). Number partitions test the
+        // numeric CLASS in both strategies (the V2 contract — see
+        // `IrDynamicLowering` in backend/handles.ts for the WHY). The
+        // scratch callback lazily allocates a carrier-typed local for arms
+        // that read the operand twice (host Object test).
+        if (valueIrType.kind === "dynamic") {
+          const dyn = resolver.resolveDynamicLowering?.();
+          if (!dyn) {
+            throw new Error(
+              `ir/lower: resolver cannot lower tag.test-on-dynamic (resolveDynamicLowering missing/null) (${func.name})`,
+            );
+          }
+          if (instr.jsTag === undefined) {
+            // Verifier R3 backstop.
+            throw new Error(`ir/lower: tag.test on a dynamic operand requires jsTag (${func.name})`);
+          }
+          emitValue(instr.value, out);
+          for (const op of dyn.emitTagTest(instr.jsTag, () => ensureDynTagScratch(dyn.carrier))) {
+            emitter.pushRaw(out, op);
+          }
+          return;
+        }
         if (valueIrType.kind !== "union") {
           throw new Error(`ir/lower: tag.test value must be a union IrType, got ${valueIrType.kind} (${func.name})`);
+        }
+        // #2949 — `tag` became optional (dynamic operands use `jsTag`); the
+        // union path still REQUIRES it (verifier enforces; this is the
+        // structural backstop).
+        if (!instr.tag) {
+          throw new Error(`ir/lower: tag.test on a union operand requires a ValType tag (${func.name})`);
         }
         // #1926 — unwrap each member IrType to its backend ValType.
         const tagTestMembers = valueIrType.members.map((m) => memberValType(m, func.name));
@@ -1263,7 +1545,9 @@ export function lowerIrFunctionBody<S>(
           throw new Error(`ir/lower: resolver cannot lower refcell<${inner.kind}> (${func.name})`);
         }
         emitValue(instr.value, out);
-        emitter.pushRaw(out, { op: "struct.new", typeIdx: cell.typeIdx });
+        // (a5) ref-cell family (#2953): route through emitRefCellNew —
+        // byte-identical {op:"struct.new"} on WasmGC.
+        emitter.emitRefCellNew(cell, out);
         return;
       }
       case "refcell.get": {
@@ -1278,11 +1562,9 @@ export function lowerIrFunctionBody<S>(
           throw new Error(`ir/lower: resolver cannot lower refcell<${getInner.kind}> (${func.name})`);
         }
         emitValue(instr.cell, out);
-        emitter.pushRaw(out, {
-          op: "struct.get",
-          typeIdx: cell.typeIdx,
-          fieldIdx: cell.fieldIdx,
-        });
+        // (a5) ref-cell family (#2953): route through emitRefCellGet —
+        // byte-identical {op:"struct.get"} on WasmGC.
+        emitter.emitRefCellGet(cell, out);
         return;
       }
       case "refcell.set": {
@@ -1298,11 +1580,9 @@ export function lowerIrFunctionBody<S>(
         }
         emitValue(instr.cell, out);
         emitValue(instr.value, out);
-        emitter.pushRaw(out, {
-          op: "struct.set",
-          typeIdx: cell.typeIdx,
-          fieldIdx: cell.fieldIdx,
-        });
+        // (a5) ref-cell family (#2953): route through emitRefCellSet —
+        // byte-identical {op:"struct.set"} on WasmGC.
+        emitter.emitRefCellSet(cell, out);
         return;
       }
       // Slice 4 (#1169d): class ops.
@@ -1563,6 +1843,15 @@ export function lowerIrFunctionBody<S>(
           index: slotWasmIdx(instr.counterSlot),
         });
 
+        // #2952 slice 2 — frames: outer block = break target; loop frame is
+        // plain (the counter-advance runs AFTER the body, so a continue
+        // targets a dedicated body-wrapping block that falls into it —
+        // emitted only when the body contains a continue for this loop).
+        const label = instr.loopLabel;
+        const needsContinueBlock = label !== undefined && bufferHasBrLabel(instr.body, label, "continue");
+        ctrlStack.push(label !== undefined ? { kind: "break", label } : { kind: "plain" });
+        ctrlStack.push({ kind: "plain" });
+
         // Build loop body Wasm ops by recursively emitting body instrs.
         const loopBody: Instr[] = [];
         // if (counter >= length) br 1 (exit)
@@ -1592,19 +1881,15 @@ export function lowerIrFunctionBody<S>(
           index: slotWasmIdx(instr.elementSlot),
         });
 
-        // Body instrs
-        for (const bodyInstr of instr.body) {
-          if (bodyInstr.result === null) {
-            emitInstrTree(bodyInstr, loopBody as unknown as S);
-          } else if (crossBlock.has(bodyInstr.result)) {
-            emitInstrTree(bodyInstr, loopBody as unknown as S);
-            loopBody.push({
-              op: "local.set",
-              index: localIdx.get(bodyInstr.result)!,
-            });
-            materialized.add(bodyInstr.result);
-          }
-          // Intra-block multi-use: handled at use site via tee pattern.
+        // Body instrs (continue block falls through to the counter advance).
+        if (needsContinueBlock) {
+          const bodyOps: Instr[] = [];
+          ctrlStack.push({ kind: "continue", label: label! });
+          emitBufferAsStatements(instr.body, bodyOps as unknown as S);
+          ctrlStack.pop();
+          emitter.emitBlock({ kind: "empty" }, bodyOps as unknown as S, loopBody as unknown as S);
+        } else {
+          emitBufferAsStatements(instr.body, loopBody as unknown as S);
         }
 
         // counter = counter + 1
@@ -1621,6 +1906,8 @@ export function lowerIrFunctionBody<S>(
 
         // br 0 (continue)
         emitter.emitBr(0, loopBody as unknown as S);
+        ctrlStack.pop(); // loop frame
+        ctrlStack.pop(); // break frame
 
         // Wrap in block { loop { ... } } via the trait (#1584 a3).
         const loopWrap: Instr[] = [];
@@ -1630,13 +1917,30 @@ export function lowerIrFunctionBody<S>(
       }
       // Slice 6 part 3 (#1182) — coercion + iterator protocol ops.
       case "coerce.to_externref": {
-        // Push the value, then convert any (ref) → externref. If the
-        // input is already externref, the convert is a wasm validation
-        // no-op (it's permitted on already-externref values). For all
-        // ref-typed inputs the wasm engine simply re-tags the reference
-        // so it can flow into externref-typed positions.
+        // Push the value, then re-tag an anyref subtype → externref.
+        //
+        // #2955 — whether the operand is ALREADY externref is a string-mode
+        // decision that belongs HERE, at lower time, not in the from-ast
+        // front-end. `extern.convert_any` maps an anyref subtype into
+        // externref, but it is INVALID over an operand whose Wasm valtype is
+        // already externref (externref is not itself an anyref subtype). In
+        // host-strings mode `IrType.string` lowers to externref, so the
+        // convert must be ELIDED; in native-strings mode it lowers to
+        // `(ref $AnyString)` (an anyref subtype) and the convert is REQUIRED.
+        // An operand already typed `(val) externref` is likewise a no-op.
+        // Emitting the convert over an already-externref operand is dead
+        // today (from-ast guards every site), so this elision is byte-inert
+        // for existing callers while letting from-ast drop those guards and
+        // emit `coerce.to_externref` mode-agnostically (identical IR in both
+        // string modes; per-mode lowered bytes unchanged).
         emitValue(instr.value, out);
-        emitter.pushRaw(out, { op: "extern.convert_any" });
+        const opTy = typeOf(instr.value);
+        const alreadyExternref =
+          (opTy.kind === "val" && opTy.val.kind === "externref") ||
+          (opTy.kind === "string" && resolver.resolveString?.()?.kind === "externref");
+        if (!alreadyExternref) {
+          emitter.pushRaw(out, { op: "extern.convert_any" });
+        }
         return;
       }
       case "iter.new": {
@@ -1695,6 +1999,16 @@ export function lowerIrFunctionBody<S>(
         wasmOut.push({ op: "call", funcIdx: iteratorIdx });
         wasmOut.push({ op: "local.set", index: slotWasmIdx(instr.iterSlot) });
 
+        // #2952 slice 2 — frames: outer block = break target (a break lands
+        // just past the block, i.e. AT the __iterator_return close call
+        // below — spec-correct IteratorClose on abrupt exit, §14.7.5); the
+        // loop frame is the continue target (br-to-loop re-runs
+        // __iterator_next — the advance happens at the loop top, so no
+        // body-wrapping block is needed).
+        const label = instr.loopLabel;
+        ctrlStack.push(label !== undefined ? { kind: "break", label } : { kind: "plain" });
+        ctrlStack.push(label !== undefined ? { kind: "continue", label } : { kind: "plain" });
+
         // Build loop body Wasm ops.
         const loopBody: Instr[] = [];
         // __iterator_next(iter) → (i32 done, externref value) [multi-value]
@@ -1712,30 +2026,21 @@ export function lowerIrFunctionBody<S>(
         emitter.emitBrIf(1, loopBody as unknown as S);
 
         // Body instrs (same materialisation pattern as forof.vec).
-        for (const bodyInstr of instr.body) {
-          if (bodyInstr.result === null) {
-            emitInstrTree(bodyInstr, loopBody as unknown as S);
-          } else if (crossBlock.has(bodyInstr.result)) {
-            emitInstrTree(bodyInstr, loopBody as unknown as S);
-            loopBody.push({
-              op: "local.set",
-              index: localIdx.get(bodyInstr.result)!,
-            });
-            materialized.add(bodyInstr.result);
-          }
-        }
+        emitBufferAsStatements(instr.body, loopBody as unknown as S);
 
         // br 0 (continue)
         emitter.emitBr(0, loopBody as unknown as S);
+        ctrlStack.pop(); // loop frame
+        ctrlStack.pop(); // break frame
 
         // block { loop { ... } } via the trait (#1584 a3).
         const loopWrap: Instr[] = [];
         emitter.emitLoop({ kind: "empty" }, loopBody as unknown as S, loopWrap as unknown as S);
         emitter.emitBlock({ kind: "empty" }, loopWrap as unknown as S, wasmOut as unknown as S);
 
-        // Normal-exit close: iter.return(iter). Note this runs only on
-        // normal loop exit (done=true). Abrupt exits (break/return)
-        // would need a try/finally — slice 6 step E (#1169h dependency).
+        // Loop-exit close: iter.return(iter). Runs on normal exit
+        // (done=true) AND on `break` (#2952 slice 2 — the break br targets
+        // the wrapping block, landing exactly here — IteratorClose §14.7.5).
         wasmOut.push({ op: "local.get", index: slotWasmIdx(instr.iterSlot) });
         wasmOut.push({ op: "call", funcIdx: iteratorReturnIdx });
         return;
@@ -1751,6 +2056,33 @@ export function lowerIrFunctionBody<S>(
         emitValue(instr.value, out);
         // #1584 (a4): throw routes through the trait.
         emitter.emitThrow(tagIdx, out);
+        return;
+      }
+      // #2952 slice 2 — unlabeled break/continue. Depth derived at emit time
+      // by the ctrlStack resolver; crossed try-finallys are inlined before
+      // the br. Verifier guarantees an enclosing loop binds the label.
+      case "br.label": {
+        resolveBrLabel(instr.label, instr.mode, out);
+        return;
+      }
+      // #2952 slice 2 — statement-level if (void arms, else may be empty).
+      // Each arm is one structured Wasm frame → one plain CtrlFrame so a
+      // br.label inside an arm counts it toward its depth.
+      case "if.stmt": {
+        emitValue(instr.cond, out);
+        const thenBody: S = emitter.newSink();
+        ctrlStack.push({ kind: "plain" });
+        emitBufferAsStatements(instr.then, thenBody);
+        ctrlStack.pop();
+        const elseBody: S = emitter.newSink();
+        if (instr.else.length > 0) {
+          ctrlStack.push({ kind: "plain" });
+          emitBufferAsStatements(instr.else, elseBody);
+          ctrlStack.pop();
+        }
+        // Empty-else encodes as a bare `if ... end` (binary.ts omits the
+        // else opcode for an empty arm under an empty blocktype).
+        emitter.emitIf({ kind: "empty" }, thenBody, elseBody, out);
         return;
       }
       case "try": {
@@ -1791,14 +2123,33 @@ export function lowerIrFunctionBody<S>(
                 index: localIdx.get(bodyInstr.result)!,
               });
               materialized.add(bodyInstr.result);
+            } else if ((totalUses.get(bodyInstr.result) ?? 0) === 0 && isSideEffecting(bodyInstr)) {
+              // (#2856) Zero-use side-effecting instr — eager emit + drop,
+              // same contract as `emitBlockBody` (see the if-arm variant).
+              emitInstrTree(bodyInstr, target as unknown as S);
+              emitter.emitDrop(target as unknown as S);
             }
             // Intra-block multi-use: handled via tee at use site.
           }
         };
 
+        // #2952 slice 2 — one CtrlFrame for the try op (it is exactly one
+        // Wasm label). The frame carries the ACTIVE finallyBody only while
+        // the try-body buffer is emitted: a br.label crossing out of the try
+        // body must inline the finally before its br. Everywhere else (the
+        // finally's own inline emissions, the catch path) it is masked —
+        // the catch path's finally obligations are owned by the dedicated
+        // inner-try frame below, and a finally must never re-run itself.
+        const tryFrame: { kind: "plain"; finallyBody?: readonly IrInstr[] | undefined } = {
+          kind: "plain",
+          finallyBody: instr.finallyBody,
+        };
+        ctrlStack.push(tryFrame);
+
         // Try body — emits user instrs + inlined finally on normal exit.
         const tryBody: Instr[] = [];
         emitBodyBuffer(instr.body, tryBody);
+        tryFrame.finallyBody = undefined; // mask for all remaining emissions
         if (instr.finallyBody) {
           emitBodyBuffer(instr.finallyBody, tryBody);
         }
@@ -1822,11 +2173,22 @@ export function lowerIrFunctionBody<S>(
             // Wrap user catch body in an inner try/catch_all so a throw
             // inside the catch body still runs finally before propagating.
             // #1584 (a4): the inner try + rethrow route through the trait.
+            // #2952 slice 2 — the inner try is one more Wasm label; its
+            // frame carries the finally while the catch body emits (a
+            // br.label out of the catch must run the finally), masked while
+            // the finally itself emits into the inner catch_all.
+            const innerFrame: { kind: "plain"; finallyBody?: readonly IrInstr[] | undefined } = {
+              kind: "plain",
+              finallyBody: instr.finallyBody,
+            };
+            ctrlStack.push(innerFrame);
             const innerBody: Instr[] = [];
             emitBodyBuffer(instr.catchClause.body, innerBody);
+            innerFrame.finallyBody = undefined;
             const innerCatchAll: Instr[] = [];
             emitBodyBuffer(instr.finallyBody, innerCatchAll);
             emitter.emitRethrow(0, innerCatchAll as unknown as S);
+            ctrlStack.pop();
             emitter.emitTry(
               { kind: "empty" },
               innerBody as unknown as S,
@@ -1857,6 +2219,8 @@ export function lowerIrFunctionBody<S>(
           emitter.emitRethrow(0, ca as unknown as S);
           catchAll = ca;
         }
+
+        ctrlStack.pop(); // tryFrame
 
         // #1584 (a4): the structured try routes through the trait.
         emitter.emitTry(
@@ -1899,6 +2263,15 @@ export function lowerIrFunctionBody<S>(
 
         // #1584 (a0-tail): out-of-subset (embeds an Instr[] loop body). S = Instr[].
         const wasmOut = requireInstrSink(out);
+
+        // #2952 slice 2 — frames: outer block = break target; loop frame is
+        // plain (the code-point cursor advance runs AFTER the body, so a
+        // continue targets a dedicated body-wrapping block — emitted only
+        // when the body contains a continue for this loop).
+        const label = instr.loopLabel;
+        const needsContinueBlock = label !== undefined && bufferHasBrLabel(instr.body, label, "continue");
+        ctrlStack.push(label !== undefined ? { kind: "break", label } : { kind: "plain" });
+        ctrlStack.push({ kind: "plain" });
 
         // <emit str>; local.set <strSlot>
         emitValue(instr.str, out);
@@ -1943,18 +2316,16 @@ export function lowerIrFunctionBody<S>(
           index: slotWasmIdx(instr.elementSlot),
         });
 
-        // Body instrs (same materialisation pattern as forof.vec/forof.iter).
-        for (const bodyInstr of instr.body) {
-          if (bodyInstr.result === null) {
-            emitInstrTree(bodyInstr, loopBody as unknown as S);
-          } else if (crossBlock.has(bodyInstr.result)) {
-            emitInstrTree(bodyInstr, loopBody as unknown as S);
-            loopBody.push({
-              op: "local.set",
-              index: localIdx.get(bodyInstr.result)!,
-            });
-            materialized.add(bodyInstr.result);
-          }
+        // Body instrs (same materialisation pattern as forof.vec/forof.iter;
+        // continue block falls through to the cursor advance below).
+        if (needsContinueBlock) {
+          const bodyOps: Instr[] = [];
+          ctrlStack.push({ kind: "continue", label: label! });
+          emitBufferAsStatements(instr.body, bodyOps as unknown as S);
+          ctrlStack.pop();
+          emitter.emitBlock({ kind: "empty" }, bodyOps as unknown as S, loopBody as unknown as S);
+        } else {
+          emitBufferAsStatements(instr.body, loopBody as unknown as S);
         }
 
         // counter = counter + element.len — the element is the whole code
@@ -1977,6 +2348,8 @@ export function lowerIrFunctionBody<S>(
 
         // br 0 (continue)
         emitter.emitBr(0, loopBody as unknown as S);
+        ctrlStack.pop(); // loop frame
+        ctrlStack.pop(); // break frame
 
         // block { loop { ... } } via the trait (#1584 a3).
         const loopWrap: Instr[] = [];
@@ -2076,30 +2449,84 @@ export function lowerIrFunctionBody<S>(
                 index: localIdx.get(bodyInstr.result)!,
               });
               materialized.add(bodyInstr.result);
+            } else if ((totalUses.get(bodyInstr.result) ?? 0) === 0 && isSideEffecting(bodyInstr)) {
+              // (#2856) Zero-use side-effecting instr — eager emit + drop,
+              // same contract as `emitBlockBody` (see the if-arm variant).
+              emitInstrTree(bodyInstr, target as unknown as S);
+              emitter.emitDrop(target as unknown as S);
             }
             // Intra-block multi-use: handled at use site via tee pattern.
           }
         };
 
-        // 1. Cond instructions (re-evaluated each iteration).
-        emitBodyBuffer(instr.cond, loopBody);
+        // #2952 slice 1 — `do { body } while (cond)` is a post-test loop:
+        // the body runs BEFORE the first cond check (runs at least once). It
+        // reuses the `while.loop` kind with `postCond: true`; only the
+        // emission order flips (body → cond-check), so the wrapping
+        // `block { loop { ... br 0 } }` and the `br_if 1` exit are identical.
+        const postTest = instr.kind === "while.loop" && instr.postCond === true;
 
-        // 2. Push the cond value, invert (i32.eqz), then br_if 1 to exit.
-        //    #1584 (a3): the control-flow ops route through the trait.
-        emitValue(instr.condValue, loopBody as unknown as S);
-        loopBody.push({ op: "i32.eqz" });
-        emitter.emitBrIf(1, loopBody as unknown as S);
+        // #2952 slice 2 — CtrlFrames for the two frames this arm opens
+        // (outer `block` = break target; inner `loop`). For a pre-test
+        // `while`, br-to-loop re-evaluates the cond, so the loop frame IS
+        // the continue target. For post-test (do-while) and `for`, a
+        // continue must fall into the cond / update code that runs AFTER
+        // the body, so the body is wrapped in a dedicated `block` (the
+        // continue target) — emitted only when the body actually contains
+        // a continue for this loop, keeping continue-free loops
+        // byte-identical to the slice-1 emission.
+        const label = instr.loopLabel;
+        const preTestWhile = instr.kind === "while.loop" && !postTest;
+        const needsContinueBlock =
+          label !== undefined && !preTestWhile && bufferHasBrLabel(instr.body, label, "continue");
+        ctrlStack.push(label !== undefined ? { kind: "break", label } : { kind: "plain" });
+        ctrlStack.push(preTestWhile && label !== undefined ? { kind: "continue", label } : { kind: "plain" });
+        const emitLoopBodyStatements = (): void => {
+          if (needsContinueBlock) {
+            const bodyOps: Instr[] = [];
+            ctrlStack.push({ kind: "continue", label: label! });
+            emitBodyBuffer(instr.body, bodyOps);
+            ctrlStack.pop();
+            emitter.emitBlock({ kind: "empty" }, bodyOps as unknown as S, loopBody as unknown as S);
+          } else {
+            emitBodyBuffer(instr.body, loopBody);
+          }
+        };
 
-        // 3. Body instructions.
-        emitBodyBuffer(instr.body, loopBody);
+        if (postTest) {
+          // Post-test: body first, then evaluate cond and exit if falsy.
+          // 1. Body instructions (continue falls through to the cond).
+          emitLoopBodyStatements();
+          // 2. Cond instructions (re-evaluated each iteration, after body).
+          emitBodyBuffer(instr.cond, loopBody);
+          // 3. Push the cond value, invert (i32.eqz), then br_if 1 to exit.
+          emitValue(instr.condValue, loopBody as unknown as S);
+          loopBody.push({ op: "i32.eqz" });
+          emitter.emitBrIf(1, loopBody as unknown as S);
+        } else {
+          // Pre-test (`while` / `for`): cond first, exit before running body.
+          // 1. Cond instructions (re-evaluated each iteration).
+          emitBodyBuffer(instr.cond, loopBody);
 
-        // 4. Update instructions (for-loop only — empty array for while).
-        if (instr.kind === "for.loop") {
-          emitBodyBuffer(instr.update, loopBody);
+          // 2. Push the cond value, invert (i32.eqz), then br_if 1 to exit.
+          //    #1584 (a3): the control-flow ops route through the trait.
+          emitValue(instr.condValue, loopBody as unknown as S);
+          loopBody.push({ op: "i32.eqz" });
+          emitter.emitBrIf(1, loopBody as unknown as S);
+
+          // 3. Body instructions (for `for`, continue falls to the update).
+          emitLoopBodyStatements();
+
+          // 4. Update instructions (for-loop only — empty array for while).
+          if (instr.kind === "for.loop") {
+            emitBodyBuffer(instr.update, loopBody);
+          }
         }
 
         // 5. Continue back to the loop header.
         emitter.emitBr(0, loopBody as unknown as S);
+        ctrlStack.pop(); // loop frame
+        ctrlStack.pop(); // break frame
 
         // 6. Wrap in `block { loop { ... } }` via the trait (#1584 a3).
         const loopWrap: Instr[] = [];
@@ -2402,211 +2829,6 @@ export function lowerIrFunctionBody<S>(
   };
 }
 
-// --- #1982: emission-scheduling effect summaries ----------------------------
-//
-// `emitBlockBody`'s lazy use-site emission re-orders instruction trees
-// relative to program order. That is sound only for values that commute with
-// everything in between. These summaries classify what each instruction reads
-// and writes so the scheduler can anchor order-sensitive values at their def
-// position instead.
-//
-// Slots are Wasm locals of the current function: nothing but `slot.write`
-// (and the loop headers that own dedicated slot indices) can modify them —
-// calls cannot reach another function's locals, and mutable closure captures
-// go through refcells. That keeps slot conflicts precise per index, which
-// matters because `slot.read` is by far the most common deferred read.
-
-interface SchedFx {
-  /** Reads mutable heap state (struct fields, globals, vec elements, host objects). */
-  readsHeap: boolean;
-  /** Writes heap state or has arbitrary effects (calls, iterator advance, throw). */
-  writesHeap: boolean;
-  /** Touches statically-unknown slots (raw.wasm may local.set; gen.* use func-level slots). */
-  allSlots: boolean;
-  readSlots: Set<number>;
-  writeSlots: Set<number>;
-}
-
-function schedFxOf(instr: IrInstr, cache: Map<IrInstr, SchedFx>): SchedFx {
-  const hit = cache.get(instr);
-  if (hit) return hit;
-  const fx: SchedFx = {
-    readsHeap: false,
-    writesHeap: false,
-    allSlots: false,
-    readSlots: new Set(),
-    writeSlots: new Set(),
-  };
-  // Memoize BEFORE recursing — buffers cannot be cyclic, but this keeps the
-  // walk linear in total instr count.
-  cache.set(instr, fx);
-  const mergeBuffer = (body: readonly IrInstr[]): void => {
-    for (const sub of body) {
-      const s = schedFxOf(sub, cache);
-      fx.readsHeap ||= s.readsHeap;
-      fx.writesHeap ||= s.writesHeap;
-      fx.allSlots ||= s.allSlots;
-      for (const x of s.readSlots) fx.readSlots.add(x);
-      for (const x of s.writeSlots) fx.writeSlots.add(x);
-    }
-  };
-  switch (instr.kind) {
-    // Pure: constants, arithmetic, allocation of fresh objects, immutable
-    // string content ops. Re-ordering these is unobservable.
-    case "const":
-    case "string.const":
-    case "binary":
-    case "unary":
-    case "select":
-    case "box":
-    case "unbox":
-    case "tag.test":
-    case "coerce.to_externref":
-    case "string.concat":
-    case "string.eq":
-    case "string.len":
-    case "object.new":
-    case "vec.new_fixed": // #1804 — fresh vec allocation, pure (like object.new)
-    case "refcell.new":
-    case "closure.new":
-    case "extern.regex":
-      break;
-    // Reads of mutable heap state.
-    case "global.get":
-    case "object.get":
-    case "class.get":
-    case "vec.get":
-    case "vec.len":
-    case "refcell.get":
-    case "closure.cap":
-      fx.readsHeap = true;
-      break;
-    // Writes of heap state (void-result, so only ever hazards).
-    case "global.set":
-    case "object.set":
-    case "class.set":
-    case "refcell.set":
-      fx.writesHeap = true;
-      break;
-    // Call-like: may read AND write arbitrary heap state. `extern.prop` can
-    // trigger a host getter; iterator ops advance host iterator state; throw
-    // is a control effect treated as a full heap barrier.
-    case "call":
-    case "class.call":
-    case "closure.call":
-    case "extern.call":
-    case "class.new":
-    case "extern.new":
-    case "extern.prop":
-    case "extern.propSet":
-    case "iter.new":
-    case "iter.next":
-    case "iter.done":
-    case "iter.value":
-    case "iter.return":
-    case "throw":
-    case "await":
-    case "async.return":
-    case "async.throw":
-      fx.readsHeap = true;
-      fx.writesHeap = true;
-      break;
-    // Generator ops read/write the function-level buffer/pendingThrow slots
-    // (slot indices live on IrFunction, not on the instr) plus the heap.
-    case "gen.push":
-    case "gen.epilogue":
-    case "gen.yieldStar":
-      fx.readsHeap = true;
-      fx.writesHeap = true;
-      fx.allSlots = true;
-      break;
-    // Raw embedded Wasm may contain arbitrary ops including local.set.
-    case "raw.wasm":
-      fx.readsHeap = true;
-      fx.writesHeap = true;
-      fx.allSlots = true;
-      break;
-    case "slot.read":
-      fx.readSlots.add(instr.slotIndex);
-      break;
-    case "slot.write":
-      fx.writeSlots.add(instr.slotIndex);
-      break;
-    // Loop headers write their pre-allocated state slots every iteration;
-    // body/cond/update effects merge in recursively.
-    case "forof.vec":
-      fx.readsHeap = true;
-      for (const s of [instr.counterSlot, instr.lengthSlot, instr.vecSlot, instr.dataSlot, instr.elementSlot]) {
-        fx.writeSlots.add(s);
-      }
-      mergeBuffer(instr.body);
-      break;
-    case "forof.iter":
-      fx.readsHeap = true;
-      fx.writesHeap = true; // iterator protocol host calls
-      for (const s of [instr.iterSlot, instr.resultSlot, instr.elementSlot]) fx.writeSlots.add(s);
-      mergeBuffer(instr.body);
-      break;
-    case "forof.string":
-      fx.readsHeap = true;
-      for (const s of [instr.counterSlot, instr.lengthSlot, instr.strSlot, instr.elementSlot]) {
-        fx.writeSlots.add(s);
-      }
-      mergeBuffer(instr.body);
-      break;
-    case "while.loop":
-      mergeBuffer(instr.cond);
-      mergeBuffer(instr.body);
-      break;
-    case "for.loop":
-      mergeBuffer(instr.cond);
-      mergeBuffer(instr.body);
-      mergeBuffer(instr.update);
-      break;
-    case "try":
-      mergeBuffer(instr.body);
-      if (instr.catchClause) mergeBuffer(instr.catchClause.body);
-      if (instr.finallyBody) mergeBuffer(instr.finallyBody);
-      break;
-    case "if":
-      mergeBuffer(instr.then);
-      mergeBuffer(instr.else);
-      break;
-    default: {
-      // Future instruction kinds default to a full barrier so a new kind can
-      // never silently become re-orderable.
-      const _exhaustive: never = instr;
-      void _exhaustive;
-      fx.readsHeap = true;
-      fx.writesHeap = true;
-      fx.allSlots = true;
-      break;
-    }
-  }
-  return fx;
-}
-
-function schedFxIsPure(fx: SchedFx): boolean {
-  return !fx.readsHeap && !fx.writesHeap && !fx.allSlots && fx.readSlots.size === 0 && fx.writeSlots.size === 0;
-}
-
-/** May re-ordering `a` across `b` change observable behavior? */
-function schedFxConflicts(a: SchedFx, b: SchedFx): boolean {
-  if (a.writesHeap && (b.readsHeap || b.writesHeap)) return true;
-  if (b.writesHeap && a.readsHeap) return true;
-  const aTouchesSlots = a.allSlots || a.readSlots.size > 0 || a.writeSlots.size > 0;
-  const bTouchesSlots = b.allSlots || b.readSlots.size > 0 || b.writeSlots.size > 0;
-  if (a.allSlots && bTouchesSlots) return true;
-  if (b.allSlots && aTouchesSlots) return true;
-  for (const s of a.writeSlots) {
-    if (b.readSlots.has(s) || b.writeSlots.has(s)) return true;
-  }
-  for (const s of b.writeSlots) {
-    if (a.readSlots.has(s)) return true;
-  }
-  return false;
-}
-
 function collectIrUses(instr: IrInstr): readonly IrValueId[] {
   switch (instr.kind) {
     case "const":
@@ -2744,6 +2966,12 @@ function collectIrUses(instr: IrInstr): readonly IrValueId[] {
     case "while.loop":
     case "for.loop":
       return [];
+    // #2952 slice 2 — br.label has no SSA operands; if.stmt surfaces only
+    // its cond (arm-buffer uses via `collectForOfBodyUses`, like `if`).
+    case "br.label":
+      return [];
+    case "if.stmt":
+      return [instr.cond];
     // (#1373 Phase B) Async / await IR nodes — type-only in this slice.
     // The lowering Phase C (#1373b) will inflate these into CPS-form
     // microtask-queue calls; until then they're never emitted by
@@ -2754,7 +2982,28 @@ function collectIrUses(instr: IrInstr): readonly IrValueId[] {
       return [instr.value];
     case "async.throw":
       return [instr.reason];
+    // (#2856) Early return — the optional return value is a direct use.
+    case "early.return":
+      return instr.value !== null ? [instr.value] : [];
   }
+}
+
+/**
+ * #2952 slice 2 — does `body` (deeply) contain a `br.label` with the given
+ * label + mode? Used by the loop-lowering arms to decide whether to emit the
+ * dedicated continue-target block: labels are unique per function, so the
+ * deep scan is exact — a nested loop's own continues carry its own label and
+ * never match. Continue-free loops therefore stay byte-identical.
+ */
+export function bufferHasBrLabel(body: readonly IrInstr[], label: IrLabelId, mode: "break" | "continue"): boolean {
+  let found = false;
+  for (const instr of body) {
+    forEachInstrDeep(instr, (i) => {
+      if (i.kind === "br.label" && i.label === label && i.mode === mode) found = true;
+    });
+    if (found) return true;
+  }
+  return false;
 }
 
 /**
@@ -2895,6 +3144,17 @@ export function lowerIrTypeToValType(t: IrType, resolver: IrLowerResolver, funcN
     }
     return { kind: "ref", typeIdx: union.typeIdx };
   }
+  if (t.kind === "dynamic") {
+    // #2949 slice 1 — the dynamic leaf lowers to the module's canonical
+    // boxed-any carrier (see `IrLowerResolver.resolveDynamic` for the #1852
+    // contract). The optional JsTag refinement is compile-time knowledge
+    // only and never changes the carrier ValType.
+    const dyn = resolver.resolveDynamic?.();
+    if (!dyn) {
+      throw new Error(`ir/lower: resolver cannot lower dynamic IrType (resolveDynamic missing) (${funcName})`);
+    }
+    return dyn;
+  }
   // boxed (refcell)
   // Slice 3 (#1169c): the resolver delegates to the legacy ref-cell
   // registry so legacy and IR ref cells share one WasmGC struct.
@@ -2935,6 +3195,8 @@ function describeIrTypeShallow(t: IrType): string {
   if (t.kind === "extern") return `extern<${t.className}>`;
   // #1926 — union members / boxed inner are IrTypes; recurse.
   if (t.kind === "union") return `union<${t.members.map(describeIrTypeShallow).join(",")}>`;
+  // #2949 — dynamic leaf; render the optional JsTag refinement when present.
+  if (t.kind === "dynamic") return t.tag === undefined ? "dynamic" : `dynamic<tag:${t.tag}>`;
   return `boxed<${describeIrTypeShallow(t.inner)}>`;
 }
 

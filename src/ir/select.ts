@@ -55,7 +55,9 @@
 //     `localClasses` set drives that exemption.
 
 import { ts, forEachChild } from "../ts-api.js";
+import type { IrClosureSignature, IrType } from "./nodes.js";
 
+import { binaryOpCapability, hostExternCapability, prefixOpCapability } from "./capability.js";
 import type { LatticeType, TypeMap } from "./propagate.js";
 
 /**
@@ -101,6 +103,44 @@ export type IrFallbackReason =
 export interface IrFallback {
   readonly name: string;
   readonly reason: IrFallbackReason;
+  /**
+   * (#2856 Step-1) Opt-in diagnostic detail for `body-shape-rejected` — the
+   * proximate reject arm + offending node kind (e.g. `stmt-assign-nonprop:
+   * BinaryExpression`). Populated only when `JS2WASM_IR_SHAPE_DIAG=1`; `undefined`
+   * on the normal path so the fallback record and the CI gate are byte-unchanged.
+   */
+  readonly detail?: string;
+}
+
+/**
+ * (#2856 Step-1) Opt-in reject-arm recorder for the `body-shape-rejected`
+ * bucket. The bucket's reason string ("body-shape-rejected") is uniform, so the
+ * 31 rejections cannot be attributed to a specific `isPhase1*` reject arm from
+ * the reason alone. When `JS2WASM_IR_SHAPE_DIAG=1`, every instrumented
+ * `return false` in the Phase-1 shape gate first calls {@link shapeNo}, which
+ * records a `"<arm>:<NodeKind>"` label. `whyNotIrClaimable` resets the recorder
+ * per function and, when it ultimately returns `body-shape-rejected`, exposes
+ * the FIRST recorded label (the proximate cause) via {@link takeShapeRejectDetail}.
+ *
+ * Behaviour is byte-identical when the env var is unset: `shapeNo` becomes a
+ * bare `return false`, the recorder stays null, and no `detail` is attached.
+ */
+const SHAPE_DIAG_ON = process.env.JS2WASM_IR_SHAPE_DIAG === "1";
+let shapeRejectDetail: string | null = null;
+
+/** Record the proximate reject arm (first-wins) and return false. */
+function shapeNo(arm: string, node: ts.Node): false {
+  if (SHAPE_DIAG_ON && shapeRejectDetail === null) {
+    shapeRejectDetail = `${arm}:${ts.SyntaxKind[node.kind]}`;
+  }
+  return false;
+}
+
+/** Read and clear the recorded reject detail (used by `planIrCompilation`). */
+function takeShapeRejectDetail(): string | undefined {
+  const d = shapeRejectDetail ?? undefined;
+  shapeRejectDetail = null;
+  return d;
 }
 
 /**
@@ -154,6 +194,16 @@ export interface IrSelection {
    *  paired with the rejection reason. Only populated when
    *  `IrSelectionOptions.trackFallbacks` is true. */
   readonly fallbacks?: ReadonlyArray<IrFallback>;
+  /** (#2138) Local call-graph edges (top-level FunctionDeclaration name →
+   *  set of top-level FunctionDeclaration callee names in the same source
+   *  file), exactly as computed by `buildLocalCallGraph` for the Step-2
+   *  closure. Exposed so the IR-first compile-once inversion
+   *  (`JS2WASM_IR_FIRST=1`) can decide which claimed functions are safe to
+   *  skip on the legacy body pass WITHOUT re-deriving the call graph.
+   *  Present only when Step 2 ran (i.e. at least one function was
+   *  individually claimed); callers must treat a missing map as "no edge
+   *  information" and behave conservatively. */
+  readonly localCallees?: ReadonlyMap<string, ReadonlySet<string>>;
 }
 
 export interface IrSelectionOptions {
@@ -176,6 +226,25 @@ export interface IrSelectionOptions {
    * Threaded from `CodegenContext.supportsAsyncIr` via `integration.ts`.
    */
   readonly supportsAsyncIr?: boolean;
+  /**
+   * (#2856) Host-extern support — resolves a bare identifier that is NOT a
+   * local/param binding to an ambient host global (`document`, `console`, …).
+   * Returns the extern class name (`"Document"`, `"Console"`) when the
+   * identifier's real binding (checker-resolved, so user shadowing wins) is a
+   * lib `declare var` of extern-class shape that the legacy backend would
+   * register (`isExternalDeclaredClass` parity); `undefined` otherwise.
+   *
+   * Provided by the `planIrCompilation` call sites (codegen index /
+   * check-ir-fallbacks), which own a TypeChecker; select.ts stays
+   * checker-free. Only consulted when `jsHostExterns` is true — the
+   * capability is mode-gated via `hostExternCapability` (capability.ts):
+   * standalone/wasi/strictNoHostImports defer to legacy, which routes
+   * `document.*` to the existing #1472/#2907 refusal.
+   */
+  readonly resolveHostGlobal?: (node: ts.Identifier) => string | undefined;
+  /** (#2856) True iff the compile targets a JS host (NOT standalone / wasi /
+   *  strictNoHostImports). Gates the host-extern capability. */
+  readonly jsHostExterns?: boolean;
 }
 
 /**
@@ -227,10 +296,62 @@ export function planIrCompilation(
   // #1169q telemetry — collect rejection reasons so the dispatcher can
   // log/throw on legacy fallback. Only populated when trackFallbacks is on.
   const trackFallbacks = options?.trackFallbacks === true;
+  // (#2856) Arm the host-extern identifier resolution for this run. Mode-gated
+  // via the capability table: only a JS-host compile may claim host-global
+  // shapes; standalone/wasi defer so legacy keeps its #1472/#2907 refusal.
+  currentHostGlobalResolver =
+    options?.resolveHostGlobal && hostExternCapability(options?.jsHostExterns === true) !== "defer"
+      ? options.resolveHostGlobal
+      : null;
+  // (#2856 C3) Module-scope `const <m> = new Map(...)` bindings — the
+  // `<m>.get(k)` / `<m>.set(k, v)` method-call receiver arm of isPhase1Expr
+  // consults this set. JS-host lane only (same capability gate as the
+  // host-global resolver): in standalone/nativeStrings mode `Map` isn't a
+  // registered extern class, so from-ast couldn't lower the calls — the
+  // empty set keeps select↔build parity there.
+  currentModuleScopeMapConsts.clear();
+  if (hostExternCapability(options?.jsHostExterns === true) !== "defer") {
+    for (const stmt of sourceFile.statements) {
+      if (!ts.isVariableStatement(stmt)) continue;
+      if (!(stmt.declarationList.flags & ts.NodeFlags.Const)) continue;
+      for (const d of stmt.declarationList.declarations) {
+        if (
+          ts.isIdentifier(d.name) &&
+          d.initializer &&
+          ts.isNewExpression(d.initializer) &&
+          ts.isIdentifier(d.initializer.expression) &&
+          d.initializer.expression.text === "Map"
+        ) {
+          currentModuleScopeMapConsts.add(d.name.text);
+        }
+      }
+    }
+  }
   const fallbackReasons = new Map<string, IrFallbackReason>();
+  // (#2856 Step-1) Parallel to `fallbackReasons`: the opt-in reject-arm detail
+  // for `body-shape-rejected` entries (populated only when JS2WASM_IR_SHAPE_DIAG=1).
+  const fallbackDetails = new Map<string, string>();
+  const captureShapeDetail = (name: string, reason: IrFallbackReason): void => {
+    if (!SHAPE_DIAG_ON) return;
+    if (reason !== "body-shape-rejected") return;
+    // A `body-shape-rejected` that reached an as-yet-uninstrumented helper arm
+    // (e.g. inside `isPhase1ObjectLiteral` / `isPhase1TryStatement` /
+    // `isPhase1ClosureLiteral`) records nothing; label it `unattributed-arm`
+    // so the histogram still accounts for all rejections (completeness).
+    fallbackDetails.set(name, takeShapeRejectDetail() ?? "unattributed-arm:helper-internal");
+  };
   // Track unnamed FunctionDeclarations too (rare but possible — `default`
   // export of an anonymous function, etc.) so callers can see them.
   let unnamedCount = 0;
+  // #2949 slice 2 — pre-collect ALL top-level FunctionDeclarations before the
+  // per-function claim loop so `dynamicUsesAreMoveOnly` can resolve CALLEE
+  // param/return dynamic-ness independent of declaration order (the loop
+  // below fills `declByName` incrementally, which would miss later-declared
+  // callees). Module-level for the usual isPhase1* threading reason.
+  for (const stmt of sourceFile.statements) {
+    if (ts.isFunctionDeclaration(stmt) && stmt.name) declByName.set(stmt.name.text, stmt);
+  }
+  currentDynScanDecls = declByName;
   for (const stmt of sourceFile.statements) {
     if (!ts.isFunctionDeclaration(stmt)) continue;
     if (!stmt.name) {
@@ -247,6 +368,7 @@ export function planIrCompilation(
       individuallyClaimed.add(stmt.name.text);
     } else if (trackFallbacks) {
       fallbackReasons.set(stmt.name.text, reason);
+      captureShapeDetail(stmt.name.text, reason);
     }
   }
 
@@ -326,7 +448,19 @@ export function planIrCompilation(
         }
         continue;
       }
-      if (hasParent) {
+      // (#2857 static-method slice) A `static` method compiles to an ordinary
+      // function — no `self` injection, no dependency on the (parent-prefixed)
+      // instance layout. So even when the class `extends` a parent, a static
+      // method whose body does not reference `super` is exactly as IR-claimable
+      // as the same method in a flat class (cf. `Animal_kingdom`, already
+      // claimed). Let it fall through to the normal `whyNotIrClaimable` gate;
+      // only instance members and `super`-using statics need the inheritance
+      // substrate deferred to the Phase E slice, which stay `class-method`.
+      const isStaticMethod =
+        ts.isMethodDeclaration(memberNode) &&
+        (memberNode.modifiers?.some((m) => m.kind === ts.SyntaxKind.StaticKeyword) ?? false);
+      const claimableUnderParent = isStaticMethod && !referencesSuper(memberNode);
+      if (hasParent && !claimableUnderParent) {
         if (trackFallbacks) fallbackReasons.set(memberName, "class-method");
         continue;
       }
@@ -339,6 +473,7 @@ export function planIrCompilation(
         individuallyClaimedClassMembers.add(memberName);
       } else if (trackFallbacks) {
         fallbackReasons.set(memberName, reason);
+        captureShapeDetail(memberName, reason);
       }
     }
   }
@@ -352,7 +487,7 @@ export function planIrCompilation(
       return { funcs: new Set<string>(), classMembers: individuallyClaimedClassMembers };
     }
     const fallbacks: IrFallback[] = [];
-    for (const [name, reason] of fallbackReasons) fallbacks.push({ name, reason });
+    for (const [name, reason] of fallbackReasons) fallbacks.push({ name, reason, detail: fallbackDetails.get(name) });
     for (let i = 0; i < unnamedCount; i++) fallbacks.push({ name: `<unnamed:${i}>`, reason: "unnamed" });
     if (individuallyClaimedClassMembers.size === 0) {
       return { funcs: new Set<string>(), fallbacks };
@@ -423,13 +558,17 @@ export function planIrCompilation(
   const classMembers = individuallyClaimedClassMembers.size > 0 ? individuallyClaimedClassMembers : undefined;
 
   if (!trackFallbacks) {
-    return classMembers ? { funcs: claimed, classMembers } : { funcs: claimed };
+    return classMembers
+      ? { funcs: claimed, classMembers, localCallees: callees }
+      : { funcs: claimed, localCallees: callees };
   }
 
   const fallbacks: IrFallback[] = [];
-  for (const [name, reason] of fallbackReasons) fallbacks.push({ name, reason });
+  for (const [name, reason] of fallbackReasons) fallbacks.push({ name, reason, detail: fallbackDetails.get(name) });
   for (let i = 0; i < unnamedCount; i++) fallbacks.push({ name: `<unnamed:${i}>`, reason: "unnamed" });
-  return classMembers ? { funcs: claimed, classMembers, fallbacks } : { funcs: claimed, fallbacks };
+  return classMembers
+    ? { funcs: claimed, classMembers, fallbacks, localCallees: callees }
+    : { funcs: claimed, fallbacks, localCallees: callees };
 }
 
 // ---------------------------------------------------------------------------
@@ -465,44 +604,47 @@ type IrClaimableSubject = ts.FunctionDeclaration | ts.MethodDeclaration | ts.Con
  * `deferred-feature`) cover them).
  */
 /**
- * #1804 regression guard: a `vec.new_fixed`-constructed vec read inside a
- * C-style `while`/`for` loop produces an invalid SSA program — the vec value
- * defined in the entry block is not threaded as a block-arg into the loop's
- * cond/body blocks (the `while.loop`/`for.loop` lowering, distinct from the
- * `forof.vec` path which handles it). So when the function body contains a
- * C-style loop, the array-literal selector arm withholds the claim and the
- * function reverts to the (correct) legacy path — exactly as it did before
- * #1804. `for...of` and non-loop array-literal uses are unaffected. The proper
- * fix (thread the constructed vec through the loop block-args) is a follow-up.
+ * (#2856 C1) Early-return context for the CURRENT function's body walk.
+ * Module-level for the same isPhase1* threading reason as
+ * `currentHostGlobalResolver`. The `ReturnStatement` arm of
+ * `isPhase1BodyStatement` accepts an early return only when
+ *   - `earlyReturnLoopDepth > 0` — we are inside a C-style `while`/`for`/
+ *     `do` body (the Wasm `return` op is exactly JS's early exit there), AND
+ *   - `earlyReturnBarrierDepth === 0` — NO enclosing for-of body (iterator
+ *     `return()` cleanup would be skipped), try/catch/finally body (inlined
+ *     finally would be skipped), or constructor body (returns route through
+ *     the implicit `return this` synthesis), AND
+ *   - the function is not a generator (`currentFnIsGenerator` — generator
+ *     returns route through the buffer epilogue).
+ * Mirrored by from-ast's `cx.noEarlyReturn` / `funcKind` guards so accepted
+ * shapes always lower (select↔build parity, #2138).
  */
-let currentFnHasCStyleLoop = false;
+let earlyReturnLoopDepth = 0;
+let earlyReturnBarrierDepth = 0;
+let currentFnIsGenerator = false;
+let currentFnIsVoidReturn = false;
 
-/** True if `node` (a function body) contains a `while`/`for` (C-style) loop
- *  anywhere, NOT descending into nested function/class scopes. */
-function bodyHasCStyleLoop(node: ts.Node): boolean {
-  let found = false;
-  const visit = (n: ts.Node): void => {
-    if (found) return;
-    // Don't descend into nested functions — their loops have their own scope.
-    if (
-      ts.isFunctionDeclaration(n) ||
-      ts.isFunctionExpression(n) ||
-      ts.isArrowFunction(n) ||
-      ts.isMethodDeclaration(n) ||
-      ts.isClassDeclaration(n) ||
-      ts.isClassExpression(n)
-    ) {
-      if (n !== node) return;
-    }
-    if (ts.isWhileStatement(n) || ts.isForStatement(n) || ts.isDoStatement(n)) {
-      found = true;
-      return;
-    }
-    ts.forEachChild(n, visit);
-  };
-  ts.forEachChild(node, visit);
-  return found;
-}
+/**
+ * (#2856) Host-extern resolution for the CURRENT `planIrCompilation` run.
+ * Set (and cleared) at the selector entry from `IrSelectionOptions` —
+ * module-level for the same reason as `currentHostGlobalResolver`: the
+ * `isPhase1*` predicates are a deep recursion whose signatures are shared
+ * with every in-flight selector slice, and threading a param through all of
+ * them would conflict with each of those PRs for zero behavioural gain.
+ * `null` = host-extern claiming disabled (no callback, or a host-free mode —
+ * see `hostExternCapability` in capability.ts).
+ */
+let currentHostGlobalResolver: ((node: ts.Identifier) => string | undefined) | null = null;
+
+/**
+ * (#2856 C3) Module-scope `const <m> = new Map(...)` binding names for the
+ * CURRENT `planIrCompilation` run (JS-host lane only — cleared/refilled at
+ * the selector entry). Receiver acceptance for `<m>.get(k)` / `<m>.set(k, v)`
+ * method calls; the from-ast identifier arm resolves the same binding via
+ * `resolver.getModuleScopeExternBinding` (the legacy `__mod_<name>` global +
+ * extern-class brand), so accepted shapes always lower.
+ */
+const currentModuleScopeMapConsts = new Set<string>();
 
 function whyNotIrClaimable(
   fn: IrClaimableSubject,
@@ -510,6 +652,9 @@ function whyNotIrClaimable(
   localClasses: ReadonlySet<string>,
   isMethod: boolean = false,
 ): IrFallbackReason | null {
+  // (#2856 Step-1) Clear any stale reject detail from a prior subject; the body
+  // walk below repopulates it via `shapeNo` when SHAPE_DIAG_ON.
+  if (SHAPE_DIAG_ON) shapeRejectDetail = null;
   // Top-level FunctionDeclaration must be named; constructor declarations
   // never carry a `name`; a MethodDeclaration with an undefined / computed
   // name is rejected as a Phase-A method-shape failure.
@@ -572,6 +717,9 @@ function whyNotIrClaimable(
   const entry = !isMethod && ts.isFunctionDeclaration(fn) && fn.name ? typeMap?.get(fn.name.text) : undefined;
 
   let isVoidReturn = false;
+  // #2949 slice 2 — true when the return position resolved `dynamic`
+  // (unannotated + lattice unknown/dynamic). Feeds the move-only scan below.
+  let isDynamicReturn = false;
   if (!isGenerator) {
     if (ts.isConstructorDeclaration(fn)) {
       // Constructors have no source-level return type — they always return
@@ -584,10 +732,16 @@ function whyNotIrClaimable(
       const returnResolved = resolveReturnType(fn, entry?.returnType);
       if (returnResolved === null) return "return-type-not-resolvable";
       isVoidReturn = returnResolved === "void";
+      isDynamicReturn = returnResolved === "dynamic";
     }
   }
 
   const scope = new Set<string>();
+  // #2949 slice 2 — names bound to DYNAMIC-typed values (unannotated params
+  // whose lattice type is unknown/dynamic; extended with const/let aliases by
+  // the move-only scan). Non-empty ⇒ the claim is additionally gated on
+  // `dynamicUsesAreMoveOnly` below.
+  const dynNames = new Set<string>();
   // Method bodies and constructor bodies see `this` as an implicit local;
   // mark it so a `return this;` / `this.field` reference passes the
   // identifier-in-scope check at Phase-1 expression position.
@@ -609,6 +763,10 @@ function whyNotIrClaimable(
       const mapped = entry?.params[i];
       const paramResolved = resolveParamType(p, mapped);
       if (paramResolved === null) return "param-type-not-resolvable";
+      // #2949 slice 2 — a DYNAMIC binding pattern (`function f({x}) …` with no
+      // annotation/evidence) would need dynamic property access to destructure;
+      // that's box/unbox territory (slice 3). Keep the honest rejection.
+      if (paramResolved === "dynamic") return "param-type-not-resolvable";
 
       collectPatternNames(p.name, scope);
       continue;
@@ -623,17 +781,19 @@ function whyNotIrClaimable(
     const mapped = entry?.params[i];
     const paramResolved = resolveParamType(p, mapped);
     if (paramResolved === null) return "param-type-not-resolvable";
+    // #2949 slice 2 — collect dynamic-typed param names for the move-only scan.
+    if (paramResolved === "dynamic") dynNames.add(p.name.text);
 
     scope.add(p.name.text);
   }
 
   const body = fn.body;
   if (!body) return "body-shape-rejected";
-  // #1804 regression guard — record whether this function has a C-style loop,
-  // so the array-literal arm of isPhase1Expr withholds the vec.new_fixed claim
-  // (see bodyHasCStyleLoop). Scoped per-function; the body walk below runs
-  // synchronously so the flag is valid for the duration of this call.
-  currentFnHasCStyleLoop = bodyHasCStyleLoop(body);
+  // (#2856 C1) Reset the early-return context for this function's walk.
+  earlyReturnLoopDepth = 0;
+  earlyReturnBarrierDepth = 0;
+  currentFnIsGenerator = isGenerator;
+  currentFnIsVoidReturn = isVoidReturn;
   // #1370 Phase A: constructor bodies don't have a return-statement tail —
   // the legacy lowerer (and Phase C) synthesise the implicit `return this;`.
   // Accept the body as a list of Phase-1 body statements instead, which
@@ -641,13 +801,45 @@ function whyNotIrClaimable(
   // mirrors how try/catch/finally bodies are checked (see `isPhase1TryStatement`).
   if (ts.isConstructorDeclaration(fn)) {
     const ctorScope = new Set(scope);
-    for (const s of body.statements) {
-      if (!isPhase1BodyStatement(s, ctorScope, localClasses)) return "body-shape-rejected";
+    // (#2856 C1) Constructor bodies never take the early-return arm — their
+    // returns route through the implicit `return this` synthesis.
+    earlyReturnBarrierDepth++;
+    try {
+      for (const s of body.statements) {
+        if (!isPhase1BodyStatement(s, ctorScope, localClasses)) return "body-shape-rejected";
+      }
+    } finally {
+      earlyReturnBarrierDepth--;
     }
     return null;
   }
   if (!isPhase1StatementList(body.statements, scope, localClasses, isGenerator, isVoidReturn))
     return "body-shape-rejected";
+
+  // -------------------------------------------------------------------------
+  // #2949 slice 2 — dynamic move-only gate.
+  //
+  // A function whose params/return resolved `dynamic` is claimable ONLY when
+  // every dynamic value strictly MOVES (return position, dyn-arg → dyn-param
+  // of a local direct call, const/let alias). Slice 2 deliberately has no
+  // box/unbox/tag.test lowering, so any other use (arithmetic, truthiness,
+  // property access, mixed concrete/dynamic returns, …) cannot be built; the
+  // scan keeps such functions in their existing rejection buckets instead of
+  // claim-then-demote. Precision here is LOAD-BEARING for `JS2WASM_IR_FIRST`:
+  // a claimed+skipped function that later build-demotes is a hard compile
+  // error there (see `computeIrFirstSkipSet`; gate 6 additionally keeps
+  // dynamic-signature functions compile-twice as insurance while slice 3
+  // lowering is absent).
+  //
+  // Generators with dynamic params stay rejected — the generator prologue /
+  // yield machinery has no dynamic arm yet.
+  // -------------------------------------------------------------------------
+  if (dynNames.size > 0 && isGenerator) return "param-type-not-resolvable";
+  if (dynNames.size > 0 || isDynamicReturn) {
+    if (!dynamicUsesAreMoveOnly(fn, dynNames, isDynamicReturn, typeMap)) {
+      return dynNames.size > 0 ? "param-type-not-resolvable" : "return-type-not-resolvable";
+    }
+  }
 
   return null;
 }
@@ -682,18 +874,82 @@ function isIrClaimable(
 //     `return;` / fall-through tails. `void` in param position is rejected
 //     (no JS source emits a `void`-typed param value, so there's nothing to
 //     accept).
-type ResolvedKind = "f64" | "bool" | "string" | "object" | "any" | "void" | null;
+// #2859 — `closure` (param only): a FunctionTypeNode annotation whose params
+//   and return are all primitive-annotated (the same surface slice-3 closure
+//   literals support). Lowers to `IrType.closure`; calls through the param
+//   dispatch via `lowerClosureCall` exactly like a closure-typed local.
+// #2949 slice 2 — `dynamic`: an UNANNOTATED position whose propagated lattice
+//   type converged to `unknown` (no evidence) or `dynamic` (top). Lowers to
+//   `IrType.dynamic` → the module's boxed-any carrier via
+//   `IrLowerResolver.resolveDynamic()` (fast/standalone: `ref_null $AnyValue`;
+//   JS-host: externref) — the SAME carrier legacy `resolveWasmType`'s
+//   any/unknown arm gives these positions, so IR-claimed and legacy functions
+//   agree on the ABI by construction. The claim is additionally gated by
+//   `dynamicUsesAreMoveOnly`: producers are still move-only (box/unbox
+//   producer widening is the #2949 follow-up slice), so dynamic values may
+//   only MOVE. (#2949 slice 3b) The explicit `any` ANNOTATION now resolves
+//   "dynamic" too — the historical "any" kind (externref in all modes, no
+//   use gating) is deleted: it diverged from legacy's fast-mode `any` ABI
+//   and was the last claim-then-demote channel for non-move any-uses.
+type ResolvedKind = "f64" | "bool" | "string" | "object" | "void" | "closure" | "dynamic" | null;
+
+/**
+ * #2859 — build an `IrClosureSignature` from an explicit function-type
+ * annotation (`(a: number, b: string) => number`), or return `null` when the
+ * annotation is outside the expressible surface. The primitive mapping MUST
+ * stay identical to `typeNodeToIr` in `from-ast.ts` (number→f64, boolean→i32,
+ * string→string): a closure-literal argument's signature is built there, and
+ * `lowerClosureCall` / `irTypeEquals` compare the two structurally — any
+ * divergence would reject valid calls at lowering time (post-claim demotion).
+ *
+ * Out-of-surface shapes (→ null, so the selector keeps the honest
+ * `param-type-not-resolvable` rejection): non-primitive param/return types,
+ * void returns (`emitClosureCall` is value-producing), rest/optional/default
+ * params, type parameters.
+ */
+export function irClosureSignatureFromFunctionTypeNode(node: ts.FunctionTypeNode): IrClosureSignature | null {
+  if (node.typeParameters && node.typeParameters.length > 0) return null;
+  const prim = (t: ts.TypeNode | undefined): IrType | null => {
+    if (!t) return null;
+    if (t.kind === ts.SyntaxKind.NumberKeyword) return { kind: "val", val: { kind: "f64" } };
+    if (t.kind === ts.SyntaxKind.BooleanKeyword) return { kind: "val", val: { kind: "i32" } };
+    if (t.kind === ts.SyntaxKind.StringKeyword) return { kind: "string" };
+    return null;
+  };
+  const params: IrType[] = [];
+  for (const p of node.parameters) {
+    if (p.questionToken || p.dotDotDotToken || p.initializer) return null;
+    const ir = prim(p.type);
+    if (!ir) return null;
+    params.push(ir);
+  }
+  const returnType = prim(node.type);
+  if (!returnType) return null;
+  return { params, returnType };
+}
 
 function resolveParamType(p: ts.ParameterDeclaration, mapped: LatticeType | undefined): ResolvedKind {
   if (p.type) {
     if (p.type.kind === ts.SyntaxKind.NumberKeyword) return "f64";
     if (p.type.kind === ts.SyntaxKind.BooleanKeyword) return "bool";
     if (p.type.kind === ts.SyntaxKind.StringKeyword) return "string";
-    // Slice 14 (#1228) — `any` param lowers to externref. The IR's
-    // `resolvePositionType` returns `irVal({ kind: "externref" })` for
-    // AnyKeyword. JS spec leaves operations on `any` to runtime semantics,
-    // and externref is the catch-all that already accepts any host value.
-    if (p.type.kind === ts.SyntaxKind.AnyKeyword) return "any";
+    // (#2949 slice 3b) `any` IS the dynamic type. The historical #1228
+    // mapping ("any" kind → externref override) claimed EVERY any-param
+    // function unconditionally and relied on from-ast throwing for
+    // non-move uses — a claim-then-demote channel; it also pinned the
+    // fast-mode carrier to externref, diverging from legacy's mode-split
+    // `any` ABI (fast → ref_null $AnyValue). Resolving `dynamic` here
+    // routes any-params through the SAME move-only scan + carrier as
+    // unannotated dynamics: non-move uses now reject PRE-claim (no
+    // demotion), and the claimed ones share legacy's ABI in both modes.
+    if (p.type.kind === ts.SyntaxKind.AnyKeyword) return "dynamic";
+    // #2859 — function-typed param (`fn: () => number`). Accepted when the
+    // signature is expressible with the slice-3 closure surface; the param
+    // lowers to the closure supertype struct and `fn()` dispatches through
+    // `lowerClosureCall`. Inexpressible function types stay rejected.
+    if (ts.isFunctionTypeNode(p.type)) {
+      return irClosureSignatureFromFunctionTypeNode(p.type) ? "closure" : null;
+    }
     // Slice 2 (#1169b) — accept TypeLiteral / TypeReference at the
     // selector level. The actual shape resolution happens in
     // codegen/index.ts:resolvePositionType, which materializes an
@@ -712,6 +968,13 @@ function resolveParamType(p: ts.ParameterDeclaration, mapped: LatticeType | unde
   if (mapped?.kind === "bool") return "bool";
   if (mapped?.kind === "string") return "string";
   if (mapped?.kind === "object") return "object";
+  // #2949 slice 2 — unannotated + lattice unknown (no evidence) or dynamic
+  // (top): the position is honestly DYNAMIC. `mapped` must be present (a
+  // TypeMap entry exists for every top-level FunctionDeclaration): class
+  // members don't participate in propagation (`entry` is undefined there) and
+  // must keep the null rejection, not silently become dynamic-claimable.
+  // Lattice `union` stays null: #2135's union rows own that shape.
+  if (mapped && (mapped.kind === "unknown" || mapped.kind === "dynamic")) return "dynamic";
   return null;
 }
 
@@ -730,8 +993,9 @@ function resolveReturnType(
     if (fn.type.kind === ts.SyntaxKind.StringKeyword) return "string";
     // Slice 14 (#1228) — `void` return: function has zero result types.
     if (fn.type.kind === ts.SyntaxKind.VoidKeyword) return "void";
-    // Slice 14 (#1228) — `any` return lowers to externref (same as for params).
-    if (fn.type.kind === ts.SyntaxKind.AnyKeyword) return "any";
+    // (#2949 slice 3b) `any` return IS the dynamic type (same rationale as
+    // the param arm — one `any` ABI, move-only-scanned).
+    if (fn.type.kind === ts.SyntaxKind.AnyKeyword) return "dynamic";
     if (ts.isTypeLiteralNode(fn.type) || ts.isTypeReferenceNode(fn.type) || ts.isArrayTypeNode(fn.type))
       return "object";
     return null;
@@ -740,7 +1004,262 @@ function resolveReturnType(
   if (mapped?.kind === "bool") return "bool";
   if (mapped?.kind === "string") return "string";
   if (mapped?.kind === "object") return "object";
+  // #2949 slice 2 — same dynamic arm as `resolveParamType` (see the rationale
+  // there). A dynamic return is claimable only when every return statement
+  // returns a dynamic-typed MOVE (enforced by `dynamicUsesAreMoveOnly`).
+  if (mapped && (mapped.kind === "unknown" || mapped.kind === "dynamic")) return "dynamic";
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// #2949 slice 2 — dynamic move-only scan
+// ---------------------------------------------------------------------------
+
+/**
+ * All top-level FunctionDeclarations of the CURRENT `planIrCompilation` run,
+ * pre-collected before Step 1 so the move-only scan can resolve CALLEE
+ * param/return dynamic-ness regardless of declaration order. Module-level for
+ * the same reason as `currentHostGlobalResolver` (threading a param through the
+ * shared `isPhase1*` recursion would conflict with every in-flight selector
+ * slice). `null` outside a selector run — the scan then treats every callee
+ * as non-dynamic (conservative: dyn args to it reject the claim).
+ */
+let currentDynScanDecls: ReadonlyMap<string, ts.FunctionDeclaration> | null = null;
+
+/** Resolve whether param `argIdx` of local function `calleeName` is dynamic
+ *  (same `resolveParamType` verdict the callee's own claim check uses, so the
+ *  caller-side scan and the callee's signature can never drift). */
+function calleeParamIsDynamic(calleeName: string, argIdx: number, typeMap: TypeMap | undefined): boolean {
+  const decl = currentDynScanDecls?.get(calleeName);
+  if (!decl) return false;
+  const p = decl.parameters[argIdx];
+  if (!p || !ts.isIdentifier(p.name)) return false;
+  return resolveParamType(p, typeMap?.get(calleeName)?.params[argIdx]) === "dynamic";
+}
+
+function calleeHasAnyDynamicParam(calleeName: string, typeMap: TypeMap | undefined): boolean {
+  const decl = currentDynScanDecls?.get(calleeName);
+  if (!decl) return false;
+  for (let i = 0; i < decl.parameters.length; i++) {
+    if (calleeParamIsDynamic(calleeName, i, typeMap)) return true;
+  }
+  return false;
+}
+
+/** Resolve whether local function `calleeName`'s return is dynamic. */
+function calleeReturnIsDynamic(calleeName: string, typeMap: TypeMap | undefined): boolean {
+  const decl = currentDynScanDecls?.get(calleeName);
+  if (!decl || decl.asteriskToken) return false;
+  return resolveReturnType(decl, typeMap?.get(calleeName)?.returnType) === "dynamic";
+}
+
+/**
+ * True when the subtree contains NO value-use of a dynamic name. Property
+ * NAMES (`obj.<name>`, non-computed object-literal keys) are not value uses
+ * and are excluded; everything else that mentions a dyn name counts as a
+ * touch. Used as the conservative fallback for constructs the move-only scan
+ * doesn't model: untouched-by-dynamic subtrees are exactly as claimable as
+ * they were before slice 2.
+ */
+function subtreeTouchesDynamic(root: ts.Node, dynNames: ReadonlySet<string>): boolean {
+  let found = false;
+  const visit = (n: ts.Node): void => {
+    if (found) return;
+    if (ts.isIdentifier(n) && dynNames.has(n.text)) {
+      found = true;
+      return;
+    }
+    if (ts.isPropertyAccessExpression(n)) {
+      visit(n.expression); // skip `.name` — not a value use
+      return;
+    }
+    if (ts.isPropertyAssignment(n)) {
+      if (ts.isComputedPropertyName(n.name)) visit(n.name);
+      visit(n.initializer); // skip the literal key
+      return;
+    }
+    forEachChild(n, visit);
+  };
+  visit(root);
+  return found;
+}
+
+/**
+ * #2949 slice 2 — verify every use of a dynamic value in `fn`'s body is a
+ * MOVE the from-ast builder can lower withOUT box/unbox/tag.test (which land
+ * in slice 3). Allowed sinks for a dynamic value:
+ *
+ *   - `return <dyn>` when the function's return resolved dynamic;
+ *   - argument position of a DIRECT call to a local function whose
+ *     corresponding param also resolved dynamic (`irTypeEquals` at the
+ *     from-ast call site then holds by construction);
+ *   - `const`/`let` initializer that is exactly a dyn identifier or a
+ *     dyn-returning local call — the declared name joins `dynNames`;
+ *   - re-assignment `<dynLocal> = <dyn move>`;
+ *   - statement-position calls (a dropped dynamic result is fine).
+ *
+ * Dually, a position that REQUIRES a dynamic value (dyn-param argument, dyn
+ * return) must receive one — a concrete value there would need a box.
+ * Everything else is rejected so the function keeps its existing rejection
+ * bucket (never claim-then-demote; see the IR-first hard-error contract).
+ *
+ * The walker mutates `dynNames` (alias tracking). Shadowing is already
+ * rejected by the Phase-1 scope rules, so a flat set is sound.
+ */
+function dynamicUsesAreMoveOnly(
+  fn: IrClaimableSubject,
+  dynNames: Set<string>,
+  returnIsDynamic: boolean,
+  typeMap: TypeMap | undefined,
+): boolean {
+  const body = fn.body;
+  if (!body) return false;
+
+  const unwrap = (e: ts.Expression): ts.Expression => {
+    while (ts.isParenthesizedExpression(e)) e = e.expression;
+    return e;
+  };
+
+  /** Is `e` shaped like a dynamic-typed value? (dyn name | dyn-returning local call) */
+  const isDynShaped = (e: ts.Expression): boolean => {
+    e = unwrap(e);
+    if (ts.isIdentifier(e)) return dynNames.has(e.text);
+    if (ts.isCallExpression(e) && ts.isIdentifier(e.expression) && !dynNames.has(e.expression.text)) {
+      return calleeReturnIsDynamic(e.expression.text, typeMap);
+    }
+    return false;
+  };
+
+  /** Scan a direct-call's arguments against the callee's per-param verdicts. */
+  const scanDirectCallArgs = (e: ts.CallExpression, calleeName: string): boolean => {
+    for (let i = 0; i < e.arguments.length; i++) {
+      const a = e.arguments[i]!;
+      if (ts.isSpreadElement(a)) {
+        // Spread shifts arg→param index mapping (`expandStaticSpreadArgs`);
+        // don't try to track it — safe only when the callee has no dynamic
+        // params and the spread source doesn't touch dynamic values.
+        if (calleeHasAnyDynamicParam(calleeName, typeMap)) return false;
+        if (subtreeTouchesDynamic(a, dynNames)) return false;
+        continue;
+      }
+      if (!scanExpr(a, calleeParamIsDynamic(calleeName, i, typeMap))) return false;
+    }
+    return true;
+  };
+
+  /**
+   * `expectDyn` is the type the POSITION requires: true ⇒ a dynamic value
+   * must flow here (box needed otherwise → reject); false ⇒ a concrete value
+   * must flow here (unbox needed otherwise → reject).
+   */
+  const scanExpr = (expr: ts.Expression, expectDyn: boolean): boolean => {
+    const e = unwrap(expr);
+    if (ts.isIdentifier(e)) {
+      return dynNames.has(e.text) === expectDyn;
+    }
+    if (ts.isCallExpression(e)) {
+      // Direct call to a (possibly) top-level function. A dyn-NAMED callee
+      // (`x()` where x is dynamic) is calling a dynamic value — slice 3.
+      if (ts.isIdentifier(e.expression)) {
+        if (dynNames.has(e.expression.text)) return false;
+        const calleeName = e.expression.text;
+        if (calleeReturnIsDynamic(calleeName, typeMap) !== expectDyn) return false;
+        return scanDirectCallArgs(e, calleeName);
+      }
+      // Method-shaped / other callees: no dynamic involvement allowed.
+      if (expectDyn) return false;
+      if (!scanExpr(e.expression, false)) return false;
+      for (const a of e.arguments) {
+        if (ts.isSpreadElement(a)) {
+          if (subtreeTouchesDynamic(a, dynNames)) return false;
+          continue;
+        }
+        if (!scanExpr(a, false)) return false;
+      }
+      return true;
+    }
+    if (ts.isBinaryExpression(e)) {
+      // Plain assignment re-binds; scan the RHS against the LHS's dyn-ness.
+      if (e.operatorToken.kind === ts.SyntaxKind.EqualsToken && ts.isIdentifier(e.left)) {
+        if (expectDyn) return false; // assignment-as-value in a dyn position — slice 3
+        return scanExpr(e.right, dynNames.has(e.left.text));
+      }
+      if (expectDyn) return false; // operator results are concrete-shaped
+      return scanExpr(e.left, false) && scanExpr(e.right, false);
+    }
+    if (ts.isPrefixUnaryExpression(e) || ts.isPostfixUnaryExpression(e)) {
+      if (expectDyn) return false;
+      const op = e.operand;
+      return scanExpr(op, false);
+    }
+    if (ts.isConditionalExpression(e)) {
+      // Dyn joins in cond-expr arms need refinement widening at the join —
+      // slice 3. Concrete conditional expressions pass through.
+      if (expectDyn) return false;
+      return scanExpr(e.condition, false) && scanExpr(e.whenTrue, false) && scanExpr(e.whenFalse, false);
+    }
+    if (ts.isPropertyAccessExpression(e)) {
+      if (expectDyn) return false;
+      return scanExpr(e.expression, false);
+    }
+    if (ts.isElementAccessExpression(e)) {
+      if (expectDyn) return false;
+      return scanExpr(e.expression, false) && scanExpr(e.argumentExpression, false);
+    }
+    // Everything else (literals, templates, object/array literals, closures,
+    // new-expressions, typeof, …): fine exactly when no dynamic value is
+    // involved AND the position doesn't require one.
+    return !expectDyn && !subtreeTouchesDynamic(e, dynNames);
+  };
+
+  const scanStmt = (s: ts.Statement): boolean => {
+    if (ts.isVariableStatement(s)) {
+      for (const d of s.declarationList.declarations) {
+        if (!ts.isIdentifier(d.name) || !d.initializer) {
+          if (subtreeTouchesDynamic(d, dynNames)) return false;
+          continue;
+        }
+        const initIsDyn = isDynShaped(d.initializer);
+        if (!scanExpr(d.initializer, initIsDyn)) return false;
+        if (initIsDyn) dynNames.add(d.name.text);
+      }
+      return true;
+    }
+    if (ts.isReturnStatement(s)) {
+      if (!s.expression) return true;
+      return scanExpr(s.expression, returnIsDynamic);
+    }
+    if (ts.isExpressionStatement(s)) {
+      const e = unwrap(s.expression);
+      // Statement-position direct call: the result is DROPPED, so a dynamic
+      // return is fine here regardless of the callee's return verdict.
+      if (ts.isCallExpression(e) && ts.isIdentifier(e.expression) && !dynNames.has(e.expression.text)) {
+        return scanDirectCallArgs(e, e.expression.text);
+      }
+      return scanExpr(s.expression, false);
+    }
+    if (ts.isIfStatement(s)) {
+      return (
+        scanExpr(s.expression, false) && scanStmt(s.thenStatement) && (!s.elseStatement || scanStmt(s.elseStatement))
+      );
+    }
+    if (ts.isBlock(s)) {
+      for (const inner of s.statements) if (!scanStmt(inner)) return false;
+      return true;
+    }
+    if (ts.isWhileStatement(s)) {
+      return scanExpr(s.expression, false) && scanStmt(s.statement);
+    }
+    // For / for-of / for-in / switch / try / throw / nested functions /
+    // anything else: conservative — claimable exactly when the statement
+    // doesn't touch a dynamic value at all.
+    return !subtreeTouchesDynamic(s, dynNames);
+  };
+
+  for (const s of body.statements) {
+    if (!scanStmt(s)) return false;
+  }
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -763,12 +1282,13 @@ function isPhase1StatementList(
   // (the lowerer synthesizes the implicit empty-values return).
   isVoidReturn: boolean = false,
 ): boolean {
-  if (stmts.length < 1) return false;
+  if (stmts.length < 1)
+    return shapeNo("stmt-list-empty", stmts.length ? stmts[0]! : ({ kind: ts.SyntaxKind.Block } as ts.Node));
   for (let i = 0; i < stmts.length - 1; i++) {
     const s = stmts[i]!;
     // Phase 1: VariableStatements before the tail.
     if (ts.isVariableStatement(s)) {
-      if (!isPhase1VarDecl(s, scope, localClasses)) return false;
+      if (!isPhase1VarDecl(s, scope, localClasses)) return shapeNo("nontail-vardecl", s);
       continue;
     }
     // Slice 3 (#1169c): nested function declaration. Treated like a
@@ -789,7 +1309,7 @@ function isPhase1StatementList(
     // shape; if not, the function falls back to legacy.
     if (ts.isExpressionStatement(s)) {
       if (ts.isCallExpression(s.expression)) {
-        if (!isPhase1Expr(s.expression, scope, localClasses)) return false;
+        if (!isPhase1Expr(s.expression, scope, localClasses)) return shapeNo("nontail-callstmt", s.expression);
         continue;
       }
       // Slice 7a/7b (#1169f): `yield`/`yield <expr>`/`yield* <expr>` as a
@@ -813,11 +1333,12 @@ function isPhase1StatementList(
       //                             gen.yieldStar(coerced_iterable).
       if (ts.isYieldExpression(s.expression)) {
         if (s.expression.expression) {
-          if (!isPhase1Expr(s.expression.expression, scope, localClasses)) return false;
+          if (!isPhase1Expr(s.expression.expression, scope, localClasses))
+            return shapeNo("nontail-yield-expr", s.expression);
         } else if (s.expression.asteriskToken) {
           // `yield*` MUST have an expression — TS parser enforces this,
           // but be defensive.
-          return false;
+          return shapeNo("nontail-yieldstar-noexpr", s.expression);
         }
         continue;
       }
@@ -826,22 +1347,61 @@ function isPhase1StatementList(
         s.expression.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
         ts.isPropertyAccessExpression(s.expression.left)
       ) {
-        // LHS: <expr>.<id> — receiver expr must be Phase-1, prop must be Identifier.
-        if (!ts.isIdentifier(s.expression.left.name)) return false;
-        if (!isPhase1Expr(s.expression.left.expression, scope, localClasses)) return false;
+        // LHS: <expr>.<id> — receiver expr must be Phase-1, prop must be an
+        // Identifier or (#3000) a PrivateIdentifier (`this.#x = v`).
+        if (!ts.isIdentifier(s.expression.left.name) && !ts.isPrivateIdentifier(s.expression.left.name))
+          return shapeNo("nontail-assign-computedprop", s.expression);
+        if (!isPhase1Expr(s.expression.left.expression, scope, localClasses))
+          return shapeNo("nontail-assign-recv", s.expression.left.expression);
         // RHS: any Phase-1 expression.
-        if (!isPhase1Expr(s.expression.right, scope, localClasses)) return false;
+        if (!isPhase1Expr(s.expression.right, scope, localClasses))
+          return shapeNo("nontail-assign-rhs", s.expression.right);
         continue;
       }
-      return false;
+      // (#2856 C2) element store `<id>[<idx>] = <rhs>;` as a NON-TAIL
+      // statement — quicksort's post-partition swap (`arr[i + 1] = arr[hi];
+      // arr[hi] = tmp;`). Same receiver restriction as the body-buffer arm:
+      // a plain in-scope identifier; the lowerer dispatches on its IrType.
+      if (
+        ts.isBinaryExpression(s.expression) &&
+        s.expression.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+        ts.isElementAccessExpression(s.expression.left)
+      ) {
+        const lhs = s.expression.left;
+        if (!ts.isIdentifier(lhs.expression) || !scope.has(lhs.expression.text)) {
+          return shapeNo("nontail-elemstore-recv", lhs.expression);
+        }
+        if (!isPhase1Expr(lhs.argumentExpression, scope, localClasses))
+          return shapeNo("nontail-elemstore-idx", lhs.argumentExpression);
+        if (!isPhase1Expr(s.expression.right, scope, localClasses))
+          return shapeNo("nontail-elemstore-rhs", s.expression.right);
+        continue;
+      }
+      // (#2856) Catch-all for ExpressionStatements outside the accepted set:
+      // mutable local assignment `x = e` / element assignment `arr[i] = e`
+      // (LHS not a PropertyAccess), postfix/prefix `++`/`--`, compound
+      // assignment `+=`, etc. Label by the offending expression kind + operator
+      // so the histogram distinguishes assignment from inc-dec.
+      const es = s.expression;
+      let arm = "nontail-exprstmt-other";
+      if (ts.isBinaryExpression(es)) {
+        arm =
+          es.operatorToken.kind === ts.SyntaxKind.EqualsToken
+            ? "nontail-assign-nonprop-lhs"
+            : "nontail-compound-or-binary-stmt";
+      } else if (ts.isPrefixUnaryExpression(es) || ts.isPostfixUnaryExpression(es)) {
+        arm = "nontail-incdec-stmt";
+      }
+      return shapeNo(arm, es);
     }
     // Phase 2 extension: an `if (cond) <tail>` with NO else and the rest
     // of the statements forming a tail. This is the classic early-return
     // pattern: `if (base) return x; <recursive body>`. We structurally
     // reinterpret as `if (cond) <tail> else { <rest> }`.
     if (ts.isIfStatement(s) && !s.elseStatement) {
-      if (!isPhase1Expr(s.expression, scope, localClasses)) return false;
-      if (!isPhase1Tail(s.thenStatement, new Set(scope), localClasses, isGenerator, isVoidReturn)) return false;
+      if (!isPhase1Expr(s.expression, scope, localClasses)) return shapeNo("nontail-if-cond", s.expression);
+      if (!isPhase1Tail(s.thenStatement, new Set(scope), localClasses, isGenerator, isVoidReturn))
+        return shapeNo("nontail-if-then", s.thenStatement);
       const rest = stmts.slice(i + 1);
       return isPhase1StatementList(rest, new Set(scope), localClasses, isGenerator, isVoidReturn);
     }
@@ -851,18 +1411,18 @@ function isPhase1StatementList(
     // the iterable's IR type resolves to a vec ref; non-vec iterables
     // throw and the function falls back to legacy.
     if (ts.isForOfStatement(s)) {
-      if (!isPhase1ForOf(s, scope, localClasses)) return false;
+      if (!isPhase1ForOf(s, scope, localClasses)) return shapeNo("nontail-forof", s);
       continue;
     }
     // Slice 12 (#1280) — `while` / `for` (C-style) as non-tail
     // statements. The body is shape-checked via `isPhase1BodyStatement`
     // (same restrictions as for-of).
     if (ts.isWhileStatement(s)) {
-      if (!isPhase1WhileStatement(s, scope, localClasses)) return false;
+      if (!isPhase1WhileStatement(s, scope, localClasses)) return shapeNo("nontail-while", s);
       continue;
     }
     if (ts.isForStatement(s)) {
-      if (!isPhase1ForStatement(s, scope, localClasses)) return false;
+      if (!isPhase1ForStatement(s, scope, localClasses)) return shapeNo("nontail-for", s);
       // Add init's let-declared names into outer scope so subsequent
       // statements can reference the loop counter (TypeScript would
       // narrow scope to the for-statement, but our scope tracker is
@@ -874,20 +1434,29 @@ function isPhase1StatementList(
       }
       continue;
     }
+    // #2952 slice 1 — `do { body } while (cond)` as a non-tail statement.
+    // Post-test loop; same body-shape restrictions as `while` / `for`.
+    if (ts.isDoStatement(s)) {
+      if (!isPhase1DoStatement(s, scope, localClasses)) return shapeNo("nontail-do", s);
+      continue;
+    }
     // Slice 9 (#1169h) — throw / try as a non-tail statement. A throw
     // doesn't fall through, but the selector accepts it in non-tail
     // position and the lowerer emits a `throw` instr followed by an
     // implicit unreachable. (Code AFTER a throw in the same block is
     // dead but structurally valid.)
     if (ts.isThrowStatement(s)) {
-      if (!isPhase1ThrowStatement(s, scope, localClasses)) return false;
+      if (!isPhase1ThrowStatement(s, scope, localClasses)) return shapeNo("nontail-throw", s);
       continue;
     }
     if (ts.isTryStatement(s)) {
-      if (!isPhase1TryStatement(s, scope, localClasses)) return false;
+      if (!isPhase1TryStatement(s, scope, localClasses)) return shapeNo("nontail-try", s);
       continue;
     }
-    return false;
+    // (#2856) Unhandled statement KIND at non-tail position — `if`-with-`else`,
+    // `switch`, `do`, labeled, `break`/`continue`, `for-in`, empty, etc. The
+    // node kind is the discriminator.
+    return shapeNo("nontail-unhandled-stmt", s);
   }
   return isPhase1Tail(stmts[stmts.length - 1]!, scope, localClasses, isGenerator, isVoidReturn);
 }
@@ -933,37 +1502,49 @@ function isPhase1TryStatement(
   stmt: ts.TryStatement,
   scope: ReadonlySet<string>,
   localClasses: ReadonlySet<string>,
+  // #2952 slice 2 — propagated so a break/continue inside a try nested in a
+  // loop is claimable (the lowerer inlines crossed finallys before the br).
+  inLoop: boolean = false,
 ): boolean {
   if (!stmt.catchClause && !stmt.finallyBlock) return false;
 
-  // Try body: must be a Phase-1 body statement list.
-  const tryScope = new Set(scope);
-  for (const s of stmt.tryBlock.statements) {
-    if (!isPhase1BodyStatement(s, tryScope, localClasses)) return false;
-  }
-
-  if (stmt.catchClause) {
-    const catchScope = new Set(scope);
-    if (stmt.catchClause.variableDeclaration) {
-      const v = stmt.catchClause.variableDeclaration;
-      // Slice 9 only accepts identifier bindings. Destructuring catch
-      // (`catch ({message})`) defers to slice 9.5.
-      if (!ts.isIdentifier(v.name)) return false;
-      catchScope.add(v.name.text);
+  // (#2856 C1) try/catch/finally bodies are early-return BARRIERS: a Wasm
+  // `return` inside them would skip the inlined finally blocks. (#2952 s2's
+  // break/continue is different — its `br.label` lowering inlines crossed
+  // finallys, so `inLoop` propagates while the early-return arm stays barred.)
+  earlyReturnBarrierDepth++;
+  try {
+    // Try body: must be a Phase-1 body statement list.
+    const tryScope = new Set(scope);
+    for (const s of stmt.tryBlock.statements) {
+      if (!isPhase1BodyStatement(s, tryScope, localClasses, inLoop)) return false;
     }
-    for (const s of stmt.catchClause.block.statements) {
-      if (!isPhase1BodyStatement(s, catchScope, localClasses)) return false;
-    }
-  }
 
-  if (stmt.finallyBlock) {
-    const finallyScope = new Set(scope);
-    for (const s of stmt.finallyBlock.statements) {
-      if (!isPhase1BodyStatement(s, finallyScope, localClasses)) return false;
+    if (stmt.catchClause) {
+      const catchScope = new Set(scope);
+      if (stmt.catchClause.variableDeclaration) {
+        const v = stmt.catchClause.variableDeclaration;
+        // Slice 9 only accepts identifier bindings. Destructuring catch
+        // (`catch ({message})`) defers to slice 9.5.
+        if (!ts.isIdentifier(v.name)) return false;
+        catchScope.add(v.name.text);
+      }
+      for (const s of stmt.catchClause.block.statements) {
+        if (!isPhase1BodyStatement(s, catchScope, localClasses, inLoop)) return false;
+      }
     }
-  }
 
-  return true;
+    if (stmt.finallyBlock) {
+      const finallyScope = new Set(scope);
+      for (const s of stmt.finallyBlock.statements) {
+        if (!isPhase1BodyStatement(s, finallyScope, localClasses, inLoop)) return false;
+      }
+    }
+
+    return true;
+  } finally {
+    earlyReturnBarrierDepth--;
+  }
 }
 
 /**
@@ -991,7 +1572,18 @@ function isPhase1ForOf(stmt: ts.ForOfStatement, scope: Set<string>, localClasses
   if (!isPhase1Expr(stmt.expression, scope, localClasses)) return false;
   const innerScope = new Set(scope);
   innerScope.add(decl.name.text);
-  return isPhase1BodyStatement(stmt.statement, innerScope, localClasses);
+  // (#2856 C1) A for-of body is an early-return BARRIER: the iterator-
+  // protocol drive would skip its `iter.return` cleanup on a Wasm return
+  // (whether the iterable resolves to the vec fast path is a lowering-time
+  // fact the shape walk can't see, so be conservative for all for-ofs).
+  // #2952 s2's break/continue stays claimable (`inLoop` true — its br.label
+  // targets the loop label, not a function exit).
+  earlyReturnBarrierDepth++;
+  try {
+    return isPhase1BodyStatement(stmt.statement, innerScope, localClasses, /* inLoop (#2952 s2) */ true);
+  } finally {
+    earlyReturnBarrierDepth--;
+  }
 }
 
 /**
@@ -1006,7 +1598,38 @@ function isPhase1WhileStatement(
   localClasses: ReadonlySet<string>,
 ): boolean {
   if (!isPhase1Expr(stmt.expression, scope, localClasses)) return false;
-  return isPhase1BodyStatement(stmt.statement, new Set(scope), localClasses);
+  // (#2856 C1) while bodies admit the early-return arm.
+  earlyReturnLoopDepth++;
+  try {
+    return isPhase1BodyStatement(stmt.statement, new Set(scope), localClasses, /* inLoop (#2952 s2) */ true);
+  } finally {
+    earlyReturnLoopDepth--;
+  }
+}
+
+/**
+ * #2952 slice 1 — shape-check `do { body } while (cond)`. Identical
+ * constraints to `while`: a Phase-1 condition expression and a Phase-1
+ * body statement. The only runtime difference (body-before-cond) is a
+ * lowering concern, not a shape concern. Slice 2 lifted the slice-1
+ * break/continue restriction: unlabeled break/continue in the body is
+ * claimable via the `inLoop` gate + `br.label` lowering. The claim is
+ * backed by `lowerDoStatement` (postCond `while.loop`) —
+ * selector↔builder parity.
+ */
+function isPhase1DoStatement(
+  stmt: ts.DoStatement,
+  scope: ReadonlySet<string>,
+  localClasses: ReadonlySet<string>,
+): boolean {
+  if (!isPhase1Expr(stmt.expression, scope, localClasses)) return false;
+  // (#2856 C1) do-while bodies admit the early-return arm.
+  earlyReturnLoopDepth++;
+  try {
+    return isPhase1BodyStatement(stmt.statement, new Set(scope), localClasses, /* inLoop (#2952 s2) */ true);
+  } finally {
+    earlyReturnLoopDepth--;
+  }
 }
 
 /**
@@ -1070,7 +1693,13 @@ function isPhase1ForStatement(
   }
 
   // Body: single Phase-1 body statement.
-  return isPhase1BodyStatement(stmt.statement, innerScope, localClasses);
+  // (#2856 C1) for bodies admit the early-return arm.
+  earlyReturnLoopDepth++;
+  try {
+    return isPhase1BodyStatement(stmt.statement, innerScope, localClasses, /* inLoop (#2952 s2) */ true);
+  } finally {
+    earlyReturnLoopDepth--;
+  }
 }
 
 /**
@@ -1122,11 +1751,21 @@ function isPhase1ForUpdateExpr(
  *     `<id> = <id> <op> <expr>`).
  *   - Nested `ForOfStatement`.
  */
-function isPhase1BodyStatement(stmt: ts.Statement, scope: Set<string>, localClasses: ReadonlySet<string>): boolean {
+function isPhase1BodyStatement(
+  stmt: ts.Statement,
+  scope: Set<string>,
+  localClasses: ReadonlySet<string>,
+  // #2952 slice 2 — true when an enclosing CLAIMED loop is in scope at this
+  // statement position. Loop shape-checkers pass true for their body walks;
+  // block/if/try arms propagate it. Gates the break/continue arm: an
+  // unlabeled break/continue binds the innermost loop, so it is claimable
+  // exactly when that innermost loop is itself on the IR path.
+  inLoop: boolean = false,
+): boolean {
   if (ts.isBlock(stmt)) {
     const inner = new Set(scope);
     for (const s of stmt.statements) {
-      if (!isPhase1BodyStatement(s, inner, localClasses)) return false;
+      if (!isPhase1BodyStatement(s, inner, localClasses, inLoop)) return false;
     }
     return true;
   }
@@ -1156,8 +1795,24 @@ function isPhase1BodyStatement(stmt: ts.Statement, scope: Set<string>, localClas
           return isPhase1Expr(stmt.expression.right, scope, localClasses);
         }
         if (ts.isPropertyAccessExpression(stmt.expression.left)) {
-          if (!ts.isIdentifier(stmt.expression.left.name)) return false;
+          // #3000 — allow `this.#x = v` (PrivateIdentifier) in method / ctor
+          // bodies, in addition to plain-Identifier field writes.
+          if (!ts.isIdentifier(stmt.expression.left.name) && !ts.isPrivateIdentifier(stmt.expression.left.name))
+            return false;
           if (!isPhase1Expr(stmt.expression.left.expression, scope, localClasses)) return false;
+          return isPhase1Expr(stmt.expression.right, scope, localClasses);
+        }
+        // (#2856 C2) element store `<id>[<idx>] = <rhs>;` — receiver
+        // restricted to a plain in-scope identifier (quicksort's `arr[i] =
+        // arr[j]`); the lowerer dispatches on its IrType (vec → the
+        // __vec_elem_set helper with full legacy grow semantics; non-vec
+        // receivers demote cleanly).
+        if (ts.isElementAccessExpression(stmt.expression.left)) {
+          const lhs = stmt.expression.left;
+          if (!ts.isIdentifier(lhs.expression) || !scope.has(lhs.expression.text)) {
+            return shapeNo("body-elemstore-recv", lhs.expression);
+          }
+          if (!isPhase1Expr(lhs.argumentExpression, scope, localClasses)) return false;
           return isPhase1Expr(stmt.expression.right, scope, localClasses);
         }
       }
@@ -1185,7 +1840,7 @@ function isPhase1BodyStatement(stmt: ts.Statement, scope: Set<string>, localClas
         return ts.isIdentifier(stmt.expression.operand) && scope.has(stmt.expression.operand.text);
       }
     }
-    return false;
+    return shapeNo("body-exprstmt-other", stmt.expression);
   }
   if (ts.isForOfStatement(stmt)) {
     return isPhase1ForOf(stmt, scope, localClasses);
@@ -1203,6 +1858,10 @@ function isPhase1BodyStatement(stmt: ts.Statement, scope: Set<string>, localClas
     }
     return true;
   }
+  // #2952 slice 1 — nested `do { body } while (cond)` inside a body buffer.
+  if (ts.isDoStatement(stmt)) {
+    return isPhase1DoStatement(stmt, scope, localClasses);
+  }
   // Slice 9 (#1169h) — throw / try inside a body statement list.
   // Accepting these here lets a try body / catch body / finally body
   // contain nested throws and nested try-statements (composes with the
@@ -1212,9 +1871,43 @@ function isPhase1BodyStatement(stmt: ts.Statement, scope: Set<string>, localClas
     return isPhase1ThrowStatement(stmt, scope, localClasses);
   }
   if (ts.isTryStatement(stmt)) {
-    return isPhase1TryStatement(stmt, scope, localClasses);
+    return isPhase1TryStatement(stmt, scope, localClasses, inLoop);
   }
-  return false;
+  // #2952 slice 2 — statement-level `if` inside a body buffer (lowered as
+  // the void `if.stmt` IR instr — NOT the top-level block-CFG rewrite).
+  // Both arms are body statements; `inLoop` propagates so `if (c) break;`
+  // — the canonical multi-exit shape — is claimable.
+  if (ts.isIfStatement(stmt)) {
+    if (!isPhase1Expr(stmt.expression, scope, localClasses)) return shapeNo("body-if-cond", stmt.expression);
+    if (!isPhase1BodyStatement(stmt.thenStatement, new Set(scope), localClasses, inLoop)) return false;
+    if (stmt.elseStatement && !isPhase1BodyStatement(stmt.elseStatement, new Set(scope), localClasses, inLoop)) {
+      return false;
+    }
+    return true;
+  }
+  // #2952 slice 2 — unlabeled break / continue: claimable exactly when an
+  // enclosing CLAIMED loop binds them (labeled forms are slice 3). Backed
+  // by `lowerBreakContinueStatement` in from-ast (br.label against the
+  // innermost loop's synthesised label) — selector↔builder parity.
+  if (ts.isBreakStatement(stmt) || ts.isContinueStatement(stmt)) {
+    if (stmt.label) return shapeNo("body-labeled-break-continue", stmt);
+    if (!inLoop) return shapeNo("body-break-continue-outside-loop", stmt);
+    return true;
+  }
+  // (#2856 C1) Early `return` inside a body buffer. Sound only inside a
+  // C-style loop with no enclosing barrier (for-of / try / ctor) and never
+  // in a generator — see the module-state doc on `earlyReturnLoopDepth`.
+  if (ts.isReturnStatement(stmt)) {
+    if (currentFnIsGenerator) return shapeNo("body-return-generator", stmt);
+    if (earlyReturnLoopDepth === 0 || earlyReturnBarrierDepth > 0) {
+      return shapeNo("body-return-context", stmt);
+    }
+    if (!stmt.expression) {
+      return currentFnIsVoidReturn ? true : shapeNo("body-return-bare-nonvoid", stmt);
+    }
+    return isPhase1Expr(stmt.expression, scope, localClasses);
+  }
+  return shapeNo("body-unhandled-stmt", stmt);
 }
 
 function isPhase1Tail(
@@ -1232,14 +1925,14 @@ function isPhase1Tail(
     //
     // Slice 14 (#1228): bare `return;` is also allowed in void-returning
     // functions. The lowerer's void branch terminates with empty values.
-    if (!stmt.expression) return isGenerator || isVoidReturn;
+    if (!stmt.expression) return isGenerator || isVoidReturn ? true : shapeNo("tail-bare-return-nonvoid", stmt);
     return isPhase1Expr(stmt.expression, scope, localClasses);
   }
   if (ts.isBlock(stmt)) {
     return isPhase1StatementList(stmt.statements, new Set(scope), localClasses, isGenerator, isVoidReturn);
   }
   if (ts.isIfStatement(stmt)) {
-    if (!stmt.elseStatement) return false;
+    if (!stmt.elseStatement) return shapeNo("tail-if-noelse", stmt);
     if (!isPhase1Expr(stmt.expression, scope, localClasses)) return false;
     if (!isPhase1Tail(stmt.thenStatement, new Set(scope), localClasses, isGenerator, isVoidReturn)) return false;
     if (!isPhase1Tail(stmt.elseStatement, new Set(scope), localClasses, isGenerator, isVoidReturn)) return false;
@@ -1258,13 +1951,13 @@ function isPhase1Tail(
   if (isVoidReturn && ts.isExpressionStatement(stmt)) {
     return isPhase1Expr(stmt.expression, scope, localClasses);
   }
-  return false;
+  return shapeNo("tail-unhandled", stmt);
 }
 
 function isPhase1VarDecl(stmt: ts.VariableStatement, scope: Set<string>, localClasses: ReadonlySet<string>): boolean {
   const flags = stmt.declarationList.flags;
-  if (!(flags & ts.NodeFlags.Let) && !(flags & ts.NodeFlags.Const)) return false;
-  if (stmt.modifiers && stmt.modifiers.length > 0) return false;
+  if (!(flags & ts.NodeFlags.Let) && !(flags & ts.NodeFlags.Const)) return shapeNo("vardecl-var-kind", stmt);
+  if (stmt.modifiers && stmt.modifiers.length > 0) return shapeNo("vardecl-modifier", stmt);
   const isConst = !!(flags & ts.NodeFlags.Const);
   for (const d of stmt.declarationList.declarations) {
     // Slice 8a (#1169g): destructuring binding patterns for `const`-bound
@@ -1274,39 +1967,40 @@ function isPhase1VarDecl(stmt: ts.VariableStatement, scope: Set<string>, localCl
     // rest. Anything wider (rest, defaults, nested patterns) defers to
     // slice 8.5+ — the legacy `destructuring.ts` path remains for those.
     if (ts.isObjectBindingPattern(d.name) || ts.isArrayBindingPattern(d.name)) {
-      if (!isConst) return false;
-      if (!d.initializer) return false;
-      if (!isPhase1BindingPattern(d.name, scope)) return false;
+      if (!isConst) return shapeNo("vardecl-dstr-let", d.name);
+      if (!d.initializer) return shapeNo("vardecl-dstr-noinit", d.name);
+      if (!isPhase1BindingPattern(d.name, scope)) return shapeNo("vardecl-dstr-pattern", d.name);
       // Initializer must be Phase-1 expressible. The lowerer inspects
       // its IrType to decide between object.get (object pattern) and
       // vec.get (array pattern); if the resolved IrType isn't compatible
       // with the pattern shape, lowering throws and the function falls
       // back to legacy.
-      if (!isPhase1Expr(d.initializer, scope, localClasses)) return false;
+      if (!isPhase1Expr(d.initializer, scope, localClasses)) return shapeNo("vardecl-dstr-init", d.initializer);
       // Pre-add every leaf identifier to scope so subsequent statements
       // see the new names.
       collectPatternNames(d.name, scope);
       continue;
     }
-    if (!ts.isIdentifier(d.name)) return false;
-    if (scope.has(d.name.text)) return false;
-    if (!d.initializer) return false;
+    if (!ts.isIdentifier(d.name)) return shapeNo("vardecl-nonident-name", d.name);
+    if (scope.has(d.name.text)) return shapeNo("vardecl-shadow", d.name);
+    if (!d.initializer) return shapeNo("vardecl-noinit", d);
     // Slice 3 (#1169c): closure-literal initializer. Only accepted for
     // `const` (no `let` arrow rebinding in slice 3). The closure
     // shape-check enforces the slice-3 surface (every param + return
     // annotated, body is a Phase-1 tail, no generator/async/named).
     if (ts.isArrowFunction(d.initializer) || ts.isFunctionExpression(d.initializer)) {
-      if (!isConst) return false;
+      if (!isConst) return shapeNo("vardecl-let-closure", d.initializer);
       // Permit an explicit closure type annotation (like `: (n: number) => number`)
       // — it's a shape-only signal, not a primitive type. Since the IR doesn't
       // syntactically check the annotation against the body, just accept any
       // annotation (the lowerer enforces semantic match).
-      if (!isPhase1ClosureLiteral(d.initializer, scope, localClasses)) return false;
+      if (!isPhase1ClosureLiteral(d.initializer, scope, localClasses))
+        return shapeNo("vardecl-closure-init", d.initializer);
       scope.add(d.name.text);
       continue;
     }
-    if (d.type && !isPhase1TypeNode(d.type)) return false;
-    if (!isPhase1Expr(d.initializer, scope, localClasses)) return false;
+    if (d.type && !isPhase1TypeNode(d.type)) return shapeNo("vardecl-typenode", d.type);
+    if (!isPhase1Expr(d.initializer, scope, localClasses)) return shapeNo("vardecl-init-expr", d.initializer);
     scope.add(d.name.text);
   }
   return true;
@@ -1590,8 +2284,21 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
   if (ts.isIdentifier(expr)) {
     // Identifier may name either a param/local (scope) or a function
     // (only valid as the callee of a CallExpression, handled below).
-    // A bare identifier that isn't in scope is not a valid Phase-1 expr.
-    return scope.has(expr.text);
+    // A bare identifier that isn't in scope is not a valid Phase-1 expr —
+    // UNLESS it resolves to an ambient host global (#2856, JS-host lane
+    // only; see `hostExternCapability`): the receiver in
+    // `document.getElementById(...)`, `console.log(...)`, `document.body`.
+    // The checker-backed resolver settles shadowing: a user binding named
+    // `document` resolves to the USER declaration, not the lib global, so
+    // this arm never hijacks a module-scope/local shadow. `localClasses` is
+    // excluded for symmetry with the legacy user-class-shadows-extern rule
+    // (#1284).
+    if (scope.has(expr.text)) return true;
+    return (
+      currentHostGlobalResolver !== null &&
+      !localClasses.has(expr.text) &&
+      currentHostGlobalResolver(expr) !== undefined
+    );
   }
   // #1370 Phase A — `this` reference inside a method or constructor body.
   // The selector marks `this` as an in-scope binding for class members
@@ -1603,11 +2310,30 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
     return scope.has("this");
   }
   if (ts.isPrefixUnaryExpression(expr)) {
-    if (!isPhase1PrefixOp(expr.operator)) return false;
+    if (!isPhase1PrefixOp(expr.operator))
+      return shapeNo(`expr-prefix-op-${ts.tokenToString(expr.operator) ?? expr.operator}`, expr);
     return isPhase1Expr(expr.operand, scope, localClasses);
   }
   if (ts.isBinaryExpression(expr)) {
-    if (!isPhase1BinaryOp(expr.operatorToken.kind)) return false;
+    const binOp = expr.operatorToken.kind;
+    // (#2856 C3) STRICT undefined-compare — `hit !== undefined` /
+    // `x === undefined`. The `undefined` identifier isn't in scope, so the
+    // generic operand recursion would reject it; accept it specially as one
+    // operand of a strict equality. The from-ast arm dispatches on the other
+    // operand's IrType (externref-shaped → runtime `__extern_is_undefined`;
+    // never-undefined representations → constant fold). LOOSE `==`/`!=` stay
+    // rejected: `null == undefined` is true, so a nullable-ref operand would
+    // need a runtime null check this slice doesn't emit.
+    if (binOp === ts.SyntaxKind.EqualsEqualsEqualsToken || binOp === ts.SyntaxKind.ExclamationEqualsEqualsToken) {
+      const isUndefIdent = (e: ts.Expression): boolean =>
+        ts.isIdentifier(e) && e.text === "undefined" && !scope.has("undefined");
+      const leftUndef = isUndefIdent(expr.left);
+      const rightUndef = isUndefIdent(expr.right);
+      if (leftUndef && rightUndef) return true;
+      if (rightUndef) return isPhase1Expr(expr.left, scope, localClasses);
+      if (leftUndef) return isPhase1Expr(expr.right, scope, localClasses);
+    }
+    if (!isPhase1BinaryOp(binOp)) return shapeNo(`expr-binary-op-${ts.tokenToString(binOp) ?? binOp}`, expr);
     return isPhase1Expr(expr.left, scope, localClasses) && isPhase1Expr(expr.right, scope, localClasses);
   }
   if (ts.isConditionalExpression(expr)) {
@@ -1637,6 +2363,28 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
         !ts.isSpreadElement(expr.arguments[0]!)
       ) {
         return isPhase1Expr(expr.arguments[0]!, scope, localClasses);
+      }
+      // (#2856 C3) `<moduleMapConst>.get(k)` / `.set(k, v)` — the receiver is
+      // a module-scope `const <m> = new Map(...)` binding (never in the local
+      // scope set, so the generic receiver check below would reject it). The
+      // from-ast identifier arm lowers the receiver as a TDZ-checked
+      // `global.get $__mod_<m>` branded `extern:Map`; `.get`/`.set` then ride
+      // the existing extern method-call machinery (Map_get / Map_set host
+      // imports, registered by the legacy source scan). JS-host lane only —
+      // the set is empty otherwise.
+      if (
+        ts.isIdentifier(expr.expression.expression) &&
+        !scope.has(expr.expression.expression.text) &&
+        currentModuleScopeMapConsts.has(expr.expression.expression.text) &&
+        (expr.expression.name.text === "get" || expr.expression.name.text === "set")
+      ) {
+        const wantArgs = expr.expression.name.text === "get" ? 1 : 2;
+        if (expr.arguments.length !== wantArgs) return shapeNo("expr-modmap-arity", expr);
+        for (const arg of expr.arguments) {
+          if (ts.isSpreadElement(arg)) return shapeNo("expr-modmap-spread", arg);
+          if (!isPhase1Expr(arg, scope, localClasses)) return false;
+        }
+        return true;
       }
       if (!isPhase1Expr(expr.expression.expression, scope, localClasses)) return false;
       for (const arg of expr.arguments) {
@@ -1722,7 +2470,11 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
   // class instance (recv is Phase-1; lowerer dispatches by the recv's
   // resolved IrType).
   if (ts.isPropertyAccessExpression(expr)) {
-    if (!ts.isIdentifier(expr.name)) return false;
+    // #3000 — accept private-field reads (`this.#x`). A PrivateIdentifier is a
+    // valid class-instance field access; from-ast lowers it to `class.get` on
+    // the mangled `__priv_x` slot. Non-class receivers with a private name are
+    // a TS error and never reach here.
+    if (!ts.isIdentifier(expr.name) && !ts.isPrivateIdentifier(expr.name)) return false;
     // Slice 11 (#1169n) — optional chaining (`obj?.prop`). The lowerer
     // doesn't yet emit the null-guard branch, so accept the shape
     // structurally but the lowerer will throw clean fallback when it
@@ -1753,15 +2505,20 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
   // (mixed-type / non-scalar literals clean-fall-back there). Spread/sparse
   // stay out of scope (legacy fallback).
   if (ts.isArrayLiteralExpression(expr)) {
-    // #1804 regression guard: a constructed vec read inside a C-style
-    // while/for loop fails SSA hygiene (the vec value isn't threaded into the
-    // loop's cond/body blocks — distinct from the working forof.vec path). When
-    // this function contains such a loop, withhold the claim so the whole
-    // function reverts to the (correct) legacy path, as it did pre-#1804.
-    if (currentFnHasCStyleLoop) return false;
+    // (#2856 C4) The #1804 guard (withhold the claim whenever the function
+    // contains a C-style loop) is RETIRED. The unsound shape it protected —
+    // a constructed vec read inside a `while`/`for` body whose SSA value
+    // wasn't threaded into the loop buffers — was fixed by the slice-12
+    // buffer machinery: uses inside loop cond/body buffers are recorded
+    // against the synthetic -1 block id, so any outer-defined value
+    // (including a `vec.new_fixed` result) is cross-block-materialized into
+    // a Wasm local before the loop op runs (see lower.ts use counting).
+    // Verified empirically: read-in-loop-body, read-in-cond, construct-in-
+    // body, nested-loop, and after-loop shapes all lower correctly and agree
+    // with legacy (tests/ir-algorithms-cluster.test.ts).
     for (const el of expr.elements) {
-      if (ts.isSpreadElement(el)) return false; // out of scope
-      if (ts.isOmittedExpression(el)) return false; // sparse — out of scope
+      if (ts.isSpreadElement(el)) return shapeNo("expr-arraylit-spread", el); // out of scope
+      if (ts.isOmittedExpression(el)) return shapeNo("expr-arraylit-sparse", expr); // sparse — out of scope
       if (!isPhase1Expr(el, scope, localClasses)) return false;
     }
     return true;
@@ -1781,7 +2538,9 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
   if (ts.isVoidExpression(expr)) {
     return isPhase1Expr(expr.expression, scope, localClasses);
   }
-  return false;
+  // (#2856) Unhandled expression KIND — closures (Arrow/FunctionExpression),
+  // await, spread outside the accepted sites, etc. The node kind discriminates.
+  return shapeNo("expr-unhandled", expr);
 }
 
 /**
@@ -1886,50 +2645,42 @@ function phase1MemberName(name: ts.PropertyName): string | null {
   return null;
 }
 
+/**
+ * (#2857 static-method slice) True if a `super` keyword appears anywhere in the
+ * subtree. A whole-subtree scan is deliberately conservative: a `super`
+ * reference inside a nested function still binds to the enclosing method's home
+ * object, so descending into nested boundaries never misses one. Used to keep a
+ * `super`-using static method on the legacy path (its inheritance substrate is
+ * the Phase E slice's job), while a plain static method is claimable even under
+ * `extends`.
+ */
+function referencesSuper(node: ts.Node): boolean {
+  let found = false;
+  const visit = (n: ts.Node): void => {
+    if (found) return;
+    if (n.kind === ts.SyntaxKind.SuperKeyword) {
+      found = true;
+      return;
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(node);
+  return found;
+}
+
+// #2135 — the operator predicates consume the shared capability table
+// (`src/ir/capability.ts`), the SAME source `from-ast.ts`'s lowering dispatch
+// asserts against. "claim-partial" is selector-accepted (the builder owns the
+// documented residual fallback); "defer" is selector-rejected up-front. The
+// former slice-11 "shape-only acceptance" block (`%` / `**` / `in` /
+// `instanceof` accepted here while the lowerer threw) is retired: those ops
+// are table-deferred, so the claim can no longer disagree with the builder.
 function isPhase1PrefixOp(op: ts.PrefixUnaryOperator): boolean {
-  return op === ts.SyntaxKind.MinusToken || op === ts.SyntaxKind.PlusToken || op === ts.SyntaxKind.ExclamationToken;
+  return prefixOpCapability(op) !== "defer";
 }
 
 function isPhase1BinaryOp(op: ts.SyntaxKind): boolean {
-  switch (op) {
-    case ts.SyntaxKind.PlusToken:
-    case ts.SyntaxKind.MinusToken:
-    case ts.SyntaxKind.AsteriskToken:
-    case ts.SyntaxKind.SlashToken:
-    case ts.SyntaxKind.LessThanToken:
-    case ts.SyntaxKind.LessThanEqualsToken:
-    case ts.SyntaxKind.GreaterThanToken:
-    case ts.SyntaxKind.GreaterThanEqualsToken:
-    case ts.SyntaxKind.EqualsEqualsEqualsToken:
-    case ts.SyntaxKind.EqualsEqualsToken:
-    case ts.SyntaxKind.ExclamationEqualsEqualsToken:
-    case ts.SyntaxKind.ExclamationEqualsToken:
-    case ts.SyntaxKind.AmpersandAmpersandToken:
-    case ts.SyntaxKind.BarBarToken:
-      return true;
-    // Slice 11 (#1169n) — bitwise ops on f64 operands. JS ToInt32
-    // each operand, apply the i32 op, convert back to f64. Lowering
-    // emits this sequence inline using a per-function scratch local.
-    case ts.SyntaxKind.AmpersandToken:
-    case ts.SyntaxKind.BarToken:
-    case ts.SyntaxKind.CaretToken:
-    case ts.SyntaxKind.LessThanLessThanToken:
-    case ts.SyntaxKind.GreaterThanGreaterThanToken:
-    case ts.SyntaxKind.GreaterThanGreaterThanGreaterThanToken:
-      return true;
-    // Slice 11 (#1169n) — shape-only acceptance for ops the lowerer
-    // doesn't yet implement. Lowering throws cleanly so the function
-    // falls back to legacy via `safeSelection`. Listed individually
-    // so future slices can flip them on without touching the selector.
-    case ts.SyntaxKind.PercentToken: // % — needs JS-conformant fmod-style remainder
-    case ts.SyntaxKind.AsteriskAsteriskToken: // ** — needs Math.pow host call
-    case ts.SyntaxKind.QuestionQuestionToken: // ?? — needs nullable-LHS handling
-    case ts.SyntaxKind.InKeyword: // in — needs prototype-chain probe
-    case ts.SyntaxKind.InstanceOfKeyword: // instanceof — needs class-shape check
-      return true;
-    default:
-      return false;
-  }
+  return binaryOpCapability(op) !== "defer";
 }
 
 // ---------------------------------------------------------------------------
@@ -2083,6 +2834,22 @@ function collectLocalClasses(sourceFile: ts.SourceFile): Set<string> {
 function collectLocalClosureBindings(fn: ts.FunctionDeclaration): Set<string> {
   const names = new Set<string>();
   if (!fn.body) return names;
+  // #2859 — function-typed params (`fn: () => number`). A call through such a
+  // param dispatches via the IR's closure machinery (`lowerClosureCall`),
+  // exactly like a slice-3 closure local — it is NOT an external call. Only
+  // expressible signatures count; an inexpressible function type keeps the
+  // function on `param-type-not-resolvable` anyway, so its call sites never
+  // reach the IR.
+  for (const p of fn.parameters) {
+    if (
+      ts.isIdentifier(p.name) &&
+      p.type &&
+      ts.isFunctionTypeNode(p.type) &&
+      irClosureSignatureFromFunctionTypeNode(p.type)
+    ) {
+      names.add(p.name.text);
+    }
+  }
   // Top-level walk: only direct children of the outer body. Nested
   // bindings inside an `if` arm or another function-like don't escape
   // their lexical scope, so they don't shadow the call-graph path.

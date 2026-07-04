@@ -890,6 +890,32 @@ function safeStringifyThrown(v) {
   }
 }
 
+/**
+ * (#2962) Render a natively-thrown Wasm-GC payload through the module's own
+ * `__exn_render_prepare` / `__exn_render_char` exports (standalone/wasi
+ * binaries emit them at finalize) — the module runs the payload through the
+ * same `__any_to_string` chain its in-module `String(x)` uses, so an
+ * `$Error_struct` renders "TypeError: boom" per §20.5.3.4 and a Test262Error
+ * yields its real assertion message. Returns `null` when the exports are
+ * absent (JS-host binaries), the payload renders empty, or anything throws —
+ * the caller then falls back to the #2870 opaque label. Kept in sync with
+ * `tryNativeExnRender` in tests/test262-runner.ts.
+ */
+function tryNativeExnRender(instance, payload) {
+  try {
+    const prep = instance?.exports?.__exn_render_prepare;
+    const chr = instance?.exports?.__exn_render_char;
+    if (typeof prep !== "function" || typeof chr !== "function") return null;
+    const len = prep(payload);
+    if (typeof len !== "number" || len <= 0 || len > 65536) return null;
+    let out = "";
+    for (let i = 0; i < len; i++) out += String.fromCharCode(chr(i));
+    return out;
+  } catch {
+    return null;
+  }
+}
+
 function extractWasmExceptionMessage(err, instance) {
   if (err instanceof WebAssembly.Exception) {
     let payload = null;
@@ -902,7 +928,17 @@ function extractWasmExceptionMessage(err, instance) {
     if (payload instanceof Error) {
       return payload.message ?? safeStringifyThrown(payload);
     }
-    if (payload != null) return safeStringifyThrown(payload);
+    if (payload != null) {
+      // (#2962) A host-opaque GC payload renders through the module's own
+      // exports before falling back to the #2870 label; host-readable
+      // primitives keep the direct String() path.
+      const t = typeof payload;
+      if (t === "object" || t === "function") {
+        const native = tryNativeExnRender(instance, payload);
+        if (native != null) return native;
+      }
+      return safeStringifyThrown(payload);
+    }
     return instance ? "TypeError (null/undefined access)" : "wasm exception during module init";
   }
   if (err instanceof Error) {
@@ -934,7 +970,9 @@ function extractWasmExceptionMessage(err, instance) {
 }
 
 function extractWasmFuncName(err) {
-  const stack = err?.stack ?? err?.message ?? String(err);
+  // (#2962) guarded stringify — same #2870 hazard: `String(err)` on an exotic
+  // thrown value (poisoned/prototype-less) throws a host TypeError mid-record.
+  const stack = err?.stack ?? err?.message ?? safeStringifyThrown(err);
   const atMatch = stack.match(/at\s+(\w[\w$]*)\s+\(wasm:\/\//);
   if (atMatch) return atMatch[1];
   const fnMatch = stack.match(/function\s+#\d+:"([^"]+)"/);
@@ -1326,6 +1364,21 @@ process.on("message", async (msg) => {
           compileMs,
           execMs,
           runtimeNegativeNoThrow: true,
+          ...buildResultMetadata(result, true),
+        });
+      } else if (ret === -262) {
+        // (#2939/#2940) Vacuity correction — the harness-wrapper callback never
+        // executed (invoked wrapper + zero counted asserts). Scored `fail` with
+        // a `vacuous` marker so host_free_pass / the standalone floor exclude it
+        // and the report can tally the integrity correction separately.
+        sendResult({
+          id,
+          status: "fail",
+          vacuous: true,
+          error: "vacuous: harness-wrapper callback never executed (#2940) — no assertion ran",
+          ret,
+          compileMs,
+          execMs,
           ...buildResultMetadata(result, true),
         });
       } else {

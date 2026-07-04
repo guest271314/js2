@@ -1,16 +1,17 @@
 ---
 id: 2861
 title: "Standalone: built-in static/prototype property value read not supported — extend native-proto glue (ArrayBuffer, DataView, Promise, Iterator, Error subclasses, …)"
-status: in-progress
+status: done
 assignee: ttraenkler/dev-2863
 created: 2026-06-30
-updated: 2026-07-02
+updated: 2026-07-03
+completed: 2026-07-02
 priority: high
 feasibility: medium
 task_type: feature
 area: codegen
 goal: standalone
-sprint: current
+sprint: 69
 horizon: l
 related: [2860, 1907, 1888, 2175, 2651, 2193]
 umbrella: 2860
@@ -197,3 +198,26 @@ remainder (NOT this slice, and NOT ctor/proto glue):
   ctor's own arity, `test/built-ins/Boolean/S15.6.3_A3.js`) still refuse. This is
   a distinct mechanism from proto glue (a function's own `length`/`name`, not a
   `.prototype` member) — a candidate next slice.
+
+## Slice 4 + close-out (reconcile 2026-07-02) — status → done
+
+**Slice 4 LANDED (PR #2438)**: `<Ctor>.length` / `<Ctor>.name` value reads fold
+to constants in standalone via a `BUILTIN_CTOR_ARITY` table + the native-constant
+defer path in `property-access.ts` (`hasNativeBuiltinConstantHandler`, checked
+first so per-builtin branches can't pre-empt it). Host mode unchanged
+(`__get_builtin`); shadowing locals win; namespaces (`Math`/`JSON`/`Reflect`/
+`Atomics`) deliberately excluded. Tests:
+`tests/issue-2861-ctor-length-name-value-read.test.ts` (15 cases).
+
+**Close-out.** All landed slices: ArrayBuffer/DataView proto glue (PR #2340),
+Promise/Iterator/NativeError subclasses (PR #2341),
+SharedArrayBuffer/WeakRef/FinalizationRegistry (PR #2344),
+DisposableStack/AsyncDisposableStack (slice 3, PR #2433), ctor `.length`/`.name`
+folds (slice 4, PR #2438). Per the Implementation Plan's explicit scope
+statement ("Scope THIS issue to the ctor/prototype value reads"), that completes
+this issue. The remaining **namespace static reads** (`Math.PI` as a value,
+`JSON.stringify` as a value, reflective `Math[computedKey]`) were split out
+up-front and stay tracked in umbrella **#2860** ("Not-yet-issued follow-ons —
+Namespace static reads"); #2863's 2026-07-02 remeasure pointed its
+static-method-value-read residual here — that residual now also lives under the
+#2860 follow-on.

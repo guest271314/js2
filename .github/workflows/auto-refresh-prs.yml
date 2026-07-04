@@ -1,20 +1,39 @@
-name: Auto-refresh open PR branches with main
+name: Auto-refresh BEHIND PR branches with main
 
-# DISABLED: GITHUB_TOKEN-authored commits do NOT trigger downstream
-# workflows (documented GitHub Actions limitation). So auto-refresh-prs's
-# update-branch calls create bot commits on PR branches but the resulting
-# synchronize events don't fire any CI workflows — PRs stay BLOCKED with
-# empty check sets after refresh. Net effect was harmful churn.
+# WHY (#35 — re-enabled 2026-07-02): a PR whose branch has fallen BEHIND main
+# sits BLOCKED until its branch is updated. This workflow was DISABLED in
+# 6596d55fa (2026-05-23) because it used GITHUB_TOKEN, and GITHUB_TOKEN-authored
+# update-branch commits do NOT trigger downstream workflows (a documented GitHub
+# Actions limitation to prevent recursive runs). So refreshed PRs got a merge
+# commit but no CI ran — they stayed BLOCKED with an EMPTY check set → harmful
+# churn. The same failure mode struck auto-enqueue.yml's opt-in BEHIND-update
+# path on 2026-06-11 (17 PRs stranded via github-actions[bot]).
 #
-# Replaced by: drift watcher polling script (scripts/poll-pr-mentions.sh)
-# running in the tech lead's session. On detected drift, tech lead
-# manually dispatches an agent that pulls main, reviews the merge
-# semantically, and pushes. Authored by user, so synchronize events
-# trigger CI normally.
+# FIX (#35): mint a GitHub App installation token (actions/create-github-app-token,
+# the SAME mechanism auto-enqueue.yml uses to enqueue). A GitHub App is a DISTINCT
+# actor from github-actions[bot]/GITHUB_TOKEN, so its update-branch merge commit
+# DOES fire the PR's `synchronize` event → downstream CI runs → the PR re-validates
+# and can go CLEAN → enqueueable. This App-token mechanism did not exist when the
+# push trigger was removed in May, so re-enabling with it is safe.
 #
-# Kept as workflow_dispatch for occasional manual emergency refreshes.
+# SCOPE (surgical, mirrors auto-enqueue.yml skip logic):
+#   - only mergeStateStatus == BEHIND PRs (the ones that actually need a refresh);
+#   - skip drafts and hold/do-not-merge/wip/blocked-labelled PRs (WIP is intentional);
+#   - skip PRs already in the merge queue — updating a queued branch changes the
+#     forming merge group's membership, which rebuilds it and CANCELS the head's
+#     in-flight merge_group run (project_merge_queue_requeue_cancels_run, #1758);
+#   - skip DIRTY (conflicting) PRs — update-branch 409s on a real conflict; those
+#     need manual resolution.
+#
+# TRIGGER: cron only (every 20 min) + manual dispatch — NOT push:main. A per-merge
+# push trigger races the SERIAL merge queue's merge_group formation (the churn
+# concern that got the push trigger removed). update-branch self-gates (HTTP 422
+# "already up to date") when a branch isn't actually behind, so a cron sweep over a
+# quiet set of BEHIND PRs does no spurious work.
 
 on:
+  schedule:
+    - cron: "*/20 * * * *"
   workflow_dispatch:
     inputs:
       reason:
@@ -26,32 +45,84 @@ permissions:
   contents: write
   pull-requests: write
 
+concurrency:
+  # Single-flight: never let two refresh sweeps overlap and double-update a branch.
+  group: auto-refresh-prs
+  cancel-in-progress: true
+
 jobs:
   refresh:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
     steps:
-      - name: Checkout main
-        uses: actions/checkout@v5
+      # Mint a GitHub App installation token (#35). Updating a PR branch with
+      # GITHUB_TOKEN does NOT trigger the downstream `synchronize` CI run — the
+      # exact reason this workflow was disabled. A GitHub App is a distinct actor,
+      # so its update-branch commit DOES fire CI. No `|| secrets.GITHUB_TOKEN`
+      # fallback on purpose: a missing/invalid app secret must fail LOUDLY rather
+      # than silently re-introduce the stranding-with-empty-check-set churn.
+      - name: Mint GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
         with:
-          ref: main
-          fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          app-id: ${{ secrets.ENQUEUE_APP_ID }}
+          private-key: ${{ secrets.ENQUEUE_APP_PRIVATE_KEY }}
 
-      - name: Refresh each open PR branch via GitHub update-branch API
+      - name: Update BEHIND PR branches with main (App token → downstream CI fires)
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
-          set +e
-          mapfile -t PRS < <(gh pr list --state open --limit 200 --json number --jq '.[].number')
-          ok=0; fail=0
-          for pr in "${PRS[@]}"; do
-            out=$(gh api "repos/${{ github.repository }}/pulls/$pr/update-branch" -X PUT 2>&1)
-            if echo "$out" | grep -qE 'Updating|no new commits|head branch is up'; then
+          set -uo pipefail
+          owner="${GH_REPO%/*}"
+          name="${GH_REPO#*/}"
+
+          # Merge-queue snapshot: PRs already queued must NOT be touched — updating
+          # a queued branch rebuilds the forming merge group and cancels the head's
+          # in-flight merge_group run (#1758). One GraphQL call lists every queued PR
+          # (gh 2.23's `pr view --json mergeQueueEntry` field does not exist).
+          mapfile -t QUEUED < <(gh api graphql -f query='
+            { repository(owner:"'"$owner"'", name:"'"$name"'") {
+                mergeQueue(branch:"main") { entries(first:100) { nodes { pullRequest { number } } } } } }' \
+            --jq '.data.repository.mergeQueue.entries.nodes[].pullRequest.number' 2>/dev/null || true)
+          is_queued() {
+            local n="$1" q
+            for q in "${QUEUED[@]:-}"; do [ "$q" = "$n" ] && return 0; done
+            return 1
+          }
+
+          # BEHIND, non-draft, non-hold open PRs. The label filter mirrors
+          # auto-enqueue.yml's HOLD_LABELS set.
+          mapfile -t BEHIND < <(gh pr list --state open --limit 200 \
+            --json number,mergeStateStatus,isDraft,labels \
+            --jq '.[]
+                    | select(.mergeStateStatus == "BEHIND")
+                    | select(.isDraft == false)
+                    | select([.labels[].name]
+                        | any(. == "hold" or . == "do-not-merge" or . == "do not merge" or . == "wip" or . == "blocked")
+                        | not)
+                    | .number')
+
+          echo "queued=[${QUEUED[*]:-}] behind=[${BEHIND[*]:-}]"
+          ok=0; skip=0; fail=0
+          for pr in "${BEHIND[@]:-}"; do
+            [ -n "$pr" ] || continue
+            if is_queued "$pr"; then
+              echo "skip #$pr (already in merge queue)"
+              skip=$((skip+1)); continue
+            fi
+            if out=$(gh api --method PUT "/repos/$GH_REPO/pulls/$pr/update-branch" 2>&1); then
+              echo "updated #$pr (App-token merge commit → CI will fire)"
               ok=$((ok+1))
+            elif echo "$out" | grep -qiE 'merge conflict|not mergeable|conflict|409'; then
+              echo "skip #$pr (DIRTY/conflict — needs manual resolution)"
+              skip=$((skip+1))
+            elif echo "$out" | grep -qiE 'already up|no new commits|up to date|422'; then
+              echo "skip #$pr (already up to date)"
+              skip=$((skip+1))
             else
+              echo "fail #$pr: $(printf '%s' "$out" | head -c 200)"
               fail=$((fail+1))
-              echo "fail #$pr: $out" | head -c 200
             fi
           done
-          echo "ok=$ok / fail=$fail (of ${#PRS[@]})"
+          echo "auto-refresh done: updated=$ok skipped=$skip failed=$fail"

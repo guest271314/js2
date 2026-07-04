@@ -1,22 +1,47 @@
 ---
 id: 1042
 title: "async/await state-machine lowering (AwaitExpression is currently a no-op)"
-status: backlog
+status: done
+assignee: ttraenkler/fable-5
+completed: 2026-07-02
 created: 2026-04-11
-updated: 2026-06-30
-priority: low
+updated: 2026-07-03
+priority: high
+horizon: l
 feasibility: hard
 reasoning_effort: max
 goal: async-model
-sprint: current
+sprint: 69
 parent: 1032
-depends_on: [680]
+depends_on: [2906]
+related: [2957, 1373b, 2895]
 required_by: [1058, 1766, 1774]
+follow_up: [2967]
 note: "Verified 2026-05-21: AwaitExpression no-op at expressions.ts:973 (drifted from cited L790). Multiple other line refs in this issue may need re-verification before dispatch."
 reconcile_note: "2026-06-24 (PO reconcile vs upstream/main): DEFERRED EPIC, not dev-claimable this sprint. The async CPS state machine (async-cps.ts) is built+correct but gated OFF behind the synchronous-consumption-contract architecture wall (commit 3897722bf async re-measure: cluster 76.6% via legacy sync-async path). #1042 remains the CPS *acceptance owner*, not a sprint driver. Bounded slices harvested into #2612/#2613/#2614. → backlog."
 reconcile_note_2: "2026-06-25 (sdev-async-sm reground vs origin/main @d28fdb2c5): KEYSTONE LANDED — the note above is now stale. The synchronous-consumption-contract WALL that blocked every prior #1042 pass was RESOLVED by #1796 + #1936 (both status: done). ASYNC_CPS_ENABLED=true on main; the global kill-switch is replaced by the per-function predicate asyncFnNeedsCps (async-cps.ts:292), which routes a fn through real CPS state-machine lowering only when it GENUINELY suspends (a non-statically-resolved await) in a splitBodyAtAwait-supported shape. Genuinely-suspending async/await now resolves through a REAL Promise + microtask tick — #1042's core deliverable. VERIFIED: tests/equivalence/{async-function,promise-chains}.test.ts (15 tests incl. the '#1796 CPS' real-suspension cases — `await getValue()`, nested async, sequential awaits, conditional, loop, arrow) all GREEN on main. Acceptance #2 (await Promise.resolve(42)→43) + sequential-awaits + return-await collapse all pass. REMAINING (NOT dev-sliceable as new core codegen now): multi-await-in-one-segment + nested/buried await + try-across-await are gated to the legacy path via the cps-unsupported-shape census bucket (analysis surface in analyzeAsyncBody is ready; no architect decision pending — these are incremental follow-up slices); standalone/WASI CPS → #1373b (backlog, blocked on no-host microtask drain, NOT this issue); Promise-combinator operands intentionally take the legacy real-Promise path (awaitedExprIsPromiseCombinator guard — correct). No tractable new independently-validatable phase remained for the sprint-66 session — a fresh PR would re-implement landed work. #1042 stays the acceptance OWNER; its eventual close is verifying the 5 acceptance criteria (incl. try/catch-across-await + axios Tier-4 #1032), which depend on #1373b + #1032, not on new core codegen here. Claim RELEASED, no PR opened. Prior conformance slices: #2612 done; #2613/#2614 blocked."
 ---
+
 # #1042 — Real `async`/`await` state-machine lowering
+
+## RE-SCOPE (2026-07-02, July Fable audit — plan/log/analysis-2026-07/00)
+
+The remaining #1042 shapes (multi-await in one segment, nested/buried
+await, try-across-await on the JS-host lane) should NOT be built by
+extending `splitBodyAtAwait`/`emitAsyncStateMachine` (the single-tail-await
+CPS special case). #2906 has since landed a general **N-state, CFG-aware
+`$AsyncFrame` resume machine** on the WASI lane (multi-await, linear
+try/finally-across-await, shared frame ABI with generators). The audited
+convergence path: **re-target the JS-host lane onto that same machine with
+host-Promise settle adapters** — reactions registered via
+`Promise_resolve`/`__make_callback`/`Promise_then2` instead of the native
+`$Promise` callback list — then retire `emitAsyncStateMachine` +
+`splitBodyAtAwait` entirely. One lowering engine, two settle primitives.
+This is the single highest-leverage step toward one async model and the
+prerequisite that makes #1373b (IR async) tractable (IR then targets ONE
+engine, not three). Depends on #2906 (its CFG layer is the engine).
+Activation-shape widening (arrows/methods/function-expressions) is split
+out as #2957 and can proceed independently.
 
 ## Joint architect spec (S53)
 
@@ -56,7 +81,6 @@ Recommended: pursue (1). Design doc before implementation because this interacts
 - [§27.7.5.1 AsyncFunctionStart](https://tc39.es/ecma262/#sec-async-functions-abstract-operations-async-function-start) — creates async execution context and promise capability
 - [§15.8.4 Runtime Semantics: EvaluateAsyncFunctionBody](https://tc39.es/ecma262/#sec-runtime-semantics-evaluateasyncfunctionbody) — evaluates body, resolves/rejects completion promise
 - [§6.2.4.1 Await](https://tc39.es/ecma262/#await) — suspends execution, resumes on promise settlement
-
 
 ## Acceptance criteria
 
@@ -122,24 +146,24 @@ unavoidable during the rollout.
 
 ### Slice mapping
 
-| #1042 Acceptance Criterion | Slice that delivers it | Validation |
-|----------------------------|------------------------|------------|
-| Design doc filed | This file + #1373b spec | ✅ This commit |
-| `async f() { return await Promise.resolve(42); }` returns 42 | #1373b Slice 3 | `tests/ir/issue-1373b.test.ts` PENDING-path case + WASI smoke |
-| try/catch around await propagates rejections | #1373c (new — splits out as Slice 4 in #1373b §2.5 explicitly defers it) | Add issue when Slice 3 lands |
-| `Promise.all([p1, p2])` serialises through two microtask boundaries | #1373b Slice 3 | Synthetic test counting `__drain_microtasks` iterations |
-| axios Tier 4 smoke (real GET from httpbin.org) | #1032 fixture | Existing #1032 acceptance test |
+| #1042 Acceptance Criterion                                          | Slice that delivers it                                                   | Validation                                                    |
+| ------------------------------------------------------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------- |
+| Design doc filed                                                    | This file + #1373b spec                                                  | ✅ This commit                                                |
+| `async f() { return await Promise.resolve(42); }` returns 42        | #1373b Slice 3                                                           | `tests/ir/issue-1373b.test.ts` PENDING-path case + WASI smoke |
+| try/catch around await propagates rejections                        | #1373c (new — splits out as Slice 4 in #1373b §2.5 explicitly defers it) | Add issue when Slice 3 lands                                  |
+| `Promise.all([p1, p2])` serialises through two microtask boundaries | #1373b Slice 3                                                           | Synthetic test counting `__drain_microtasks` iterations       |
+| axios Tier 4 smoke (real GET from httpbin.org)                      | #1032 fixture                                                            | Existing #1032 acceptance test                                |
 
 ### Estimated total LoC across the cluster
 
-| Slice | LoC | Status |
-|-------|-----|--------|
-| Slice 1 (gate scaffolding) | ~350 | ✅ Done in PR #441 (commit `3ea48c20c`) |
-| #1326c Phase 1C-B (microtask queue + Promise.then) | ~900 | 🔄 in-progress |
-| Slice 1b (from-ast wiring) | ~150 code + ~80 tests | ⏳ Spec ready |
-| Slice 2 (PENDING-path CPS) | ~600 code + ~200 tests | ⏳ Spec ready, blocked on #1326c |
-| Slice 3 (gate flip) | ~10 code + ~40 tests | ⏳ Spec ready, blocked on Slice 1b + Slice 2 |
-| Slice 4 (try/catch around await — #1373c) | ~200 code + ~100 tests | ⏳ Out of #1373b scope; file when Slice 3 lands |
+| Slice                                              | LoC                    | Status                                          |
+| -------------------------------------------------- | ---------------------- | ----------------------------------------------- |
+| Slice 1 (gate scaffolding)                         | ~350                   | ✅ Done in PR #441 (commit `3ea48c20c`)         |
+| #1326c Phase 1C-B (microtask queue + Promise.then) | ~900                   | 🔄 in-progress                                  |
+| Slice 1b (from-ast wiring)                         | ~150 code + ~80 tests  | ⏳ Spec ready                                   |
+| Slice 2 (PENDING-path CPS)                         | ~600 code + ~200 tests | ⏳ Spec ready, blocked on #1326c                |
+| Slice 3 (gate flip)                                | ~10 code + ~40 tests   | ⏳ Spec ready, blocked on Slice 1b + Slice 2    |
+| Slice 4 (try/catch around await — #1373c)          | ~200 code + ~100 tests | ⏳ Out of #1373b scope; file when Slice 3 lands |
 
 Total to close #1042 (excluding #1326c which is its own work): **~1300 LoC**.
 
@@ -172,7 +196,7 @@ the `src/codegen/expressions/` subdirectory. Verified current locations:
 
 ### Conflict notes — #820c overlap (CRITICAL)
 
-#820c (async-gen object-method yield* iterator-protocol, ~39 fails) is **in-progress
+#820c (async-gen object-method yield\* iterator-protocol, ~39 fails) is **in-progress
 in parallel** and edits two of the same files:
 
 - `src/codegen/expressions/calls.ts` — #820c adds `IteratorStep` non-object guard
@@ -195,6 +219,7 @@ guard.
 ### FAIL estimate
 
 Per the issue header (`test262_fail`: not set explicitly) and joint spec §5:
+
 - **~210 tests** fixed by Phase 2A when the AST-level CPS lands (issue body
   estimate). Bucket: `language/expressions/await/*`, `language/statements/await/*`,
   `built-ins/Promise/*` overlap with #1116, async-iter cases that need observable
@@ -215,13 +240,13 @@ Per the issue header (`test262_fail`: not set explicitly) and joint spec §5:
 
 ### Sequencing summary
 
-| Phase | Owner | Status |
-|-------|-------|--------|
-| 1A — #1151 binding-pattern guard | dev (one-line in `closures.ts:1169-1170`) | ready |
-| 1B — #1116 WI1-WI8 (partially landed: WI1/WI4/WI5/WI8 done) | dev | ready, partial |
-| 2A — #1042 introduces `async-cps.ts`, routes `AwaitExpression` | dev (this issue) | blocked on 1A+1B PRs landing |
-| 2B — #1373b CPS lowering | senior-dev | blocked on #1326c Phase 1C-B + 2A |
-| 3A/B — async.throw, try/catch across await | senior-dev | sub-slices of #1373b |
+| Phase                                                          | Owner                                     | Status                            |
+| -------------------------------------------------------------- | ----------------------------------------- | --------------------------------- |
+| 1A — #1151 binding-pattern guard                               | dev (one-line in `closures.ts:1169-1170`) | ready                             |
+| 1B — #1116 WI1-WI8 (partially landed: WI1/WI4/WI5/WI8 done)    | dev                                       | ready, partial                    |
+| 2A — #1042 introduces `async-cps.ts`, routes `AwaitExpression` | dev (this issue)                          | blocked on 1A+1B PRs landing      |
+| 2B — #1373b CPS lowering                                       | senior-dev                                | blocked on #1326c Phase 1C-B + 2A |
+| 3A/B — async.throw, try/catch across await                     | senior-dev                                | sub-slices of #1373b              |
 
 ---
 
@@ -229,8 +254,8 @@ Per the issue header (`test262_fail`: not set explicitly) and joint spec §5:
 
 This section is the **step-by-step coding spec** for Phase 2A (#1042). The
 joint architect spec at `plan/issues/sprints/53/async-cluster-architect-spec.md`
-defines the *what* (state-machine model, IR contract, mode dispatch); this
-section defines the *how* (functions to write, signatures, Wasm patterns, the
+defines the _what_ (state-machine model, IR contract, mode dispatch); this
+section defines the _how_ (functions to write, signatures, Wasm patterns, the
 order to land them).
 
 **Pre-condition** (verify before starting):
@@ -313,7 +338,7 @@ export function emitAsyncStateMachineFromIr(/* ... */): boolean;
 - `splitBodyAtAwait(stmts: ts.Statement[]): Segment[]` — walks the statement
   list and the expression tree; whenever it hits an `AwaitExpression`, ends
   the current segment and starts a new one. A `Segment` is `{ stmts:
-  ts.Statement[]; tailAwait: ts.AwaitExpression | null }`.
+ts.Statement[]; tailAwait: ts.AwaitExpression | null }`.
 - `computeLiveLocals(segment: Segment, allParams: string[]): Set<string>` —
   union of (a) params, (b) locals declared in this segment or any prior
   segment, that are referenced in any later segment. Use the existing
@@ -324,7 +349,7 @@ export function emitAsyncStateMachineFromIr(/* ... */): boolean;
   **Re-use `compileArrowAsClosure`'s closure-pipeline pattern** at
   `closures.ts:1554-1576` rather than rolling new struct/func synthesis.
   Param signature uniformly `(externref capturedState, externref awaitValue)
-  → externref` per joint spec §2.2.
+→ externref` per joint spec §2.2.
 
 ### Step 2 — Wire the await dispatcher in `expressions.ts:973`
 
@@ -407,7 +432,7 @@ if (isAsync) {
     emitAsyncStateMachine(ctx, fctx, decl, plan);
     fctx.asyncCpsActive = false;
     // emitAsyncStateMachine drove the entire body; skip the normal stmt loop.
-    finalizeFunctionBody(ctx, fctx, func);  // existing cleanup
+    finalizeFunctionBody(ctx, fctx, func); // existing cleanup
     return;
   }
 }
@@ -467,13 +492,11 @@ async function f(a, b) {
    - Restores locals from capture struct (`struct.get`).
    - Binds `y = awaitValue`.
    - Compiles `const z = y + x;`.
-   - Compiles `return z;` as: settle `captures.outerPromise` to FULFILLED with `z`.
-     - JS-host mode: `Promise_resolve_with_promise(outerPromise, z)` (new
-       import — see step 5).
-     - Standalone mode: `struct.set $Promise.state := FULFILLED;
-       struct.set $Promise.value := z;` plus draining any registered
-       callbacks (delegate to `emitStandalonePromiseSettle` — add as a new
-       helper in `async-scheduler.ts`).
+   - Compiles `return z;` as: settle `captures.outerPromise` to FULFILLED with `z`. - JS-host mode: `Promise_resolve_with_promise(outerPromise, z)` (new
+     import — see step 5). - Standalone mode: `struct.set $Promise.state := FULFILLED;
+struct.set $Promise.value := z;` plus draining any registered
+     callbacks (delegate to `emitStandalonePromiseSettle` — add as a new
+     helper in `async-scheduler.ts`).
 
 3. **`__cont_1_reject` (rejection of the first await)** — receives `(captures: externref, reason: externref)`:
    - Settles `captures.outerPromise` to REJECTED with `reason`.
@@ -495,7 +518,7 @@ function synthesizeContinuation(
   parentFctx: FunctionContext,
   segmentStmts: ts.Statement[],
   captures: Set<string>,
-  resumeBinding: { name: string; type: ValType } | null,  // the awaited-value binding (e.g. `y` in `let y = await foo()`)
+  resumeBinding: { name: string; type: ValType } | null, // the awaited-value binding (e.g. `y` in `let y = await foo()`)
 ): { funcIdx: number; structTypeIdx: number } {
   // Build a synthetic ts.FunctionExpression node? NO — too invasive.
   // Instead, call into a new helper in closures.ts:
@@ -521,11 +544,11 @@ shift list — see `index.ts` `collectPromiseImports` near line 4614, and
 the "addUnionImports shifts function indices" guidance in the architect
 prompt):
 
-| Import | Signature | Purpose |
-|--------|-----------|---------|
-| `Promise_new_pending` | `() → externref` | Allocate a new pending Promise + return it. JS side: `let r,j; const p = new Promise((res,rej)=>{r=res;j=rej;}); p.__r=r; p.__j=j; return p;` |
-| `Promise_settle_resolve` | `(externref promise, externref value) → ()` | Calls `promise.__r(value)` to settle. |
-| `Promise_settle_reject` | `(externref promise, externref reason) → ()` | Calls `promise.__j(reason)`. |
+| Import                   | Signature                                    | Purpose                                                                                                                                       |
+| ------------------------ | -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Promise_new_pending`    | `() → externref`                             | Allocate a new pending Promise + return it. JS side: `let r,j; const p = new Promise((res,rej)=>{r=res;j=rej;}); p.__r=r; p.__j=j; return p;` |
+| `Promise_settle_resolve` | `(externref promise, externref value) → ()`  | Calls `promise.__r(value)` to settle.                                                                                                         |
+| `Promise_settle_reject`  | `(externref promise, externref reason) → ()` | Calls `promise.__j(reason)`.                                                                                                                  |
 
 Declare these via the existing `ensureLateImport` mechanism
 (`expressions.ts:221` shows the pattern with `Promise_resolve`).
@@ -789,18 +812,18 @@ after any await).
 
 ### Step 11 — File map (what each file needs)
 
-| File | Action | Why |
-|------|--------|-----|
-| `src/codegen/async-cps.ts` | **NEW** | Holds `analyzeAsyncBody`, `emitAsyncStateMachine`, `splitBodyAtAwait`, `computeLiveAfterEach`. ~600 LoC. |
-| `src/codegen/expressions.ts` | EDIT line 973 — gate the no-op behind `!fctx.asyncCpsActive`; otherwise call `compileNestedAwait` (initial PR: report unsupported and fall back) | Make await-dispatch CPS-aware |
-| `src/codegen/function-body.ts` | EDIT around line 647 (after fctx setup) — call `analyzeAsyncBody`; if awaits present, call `emitAsyncStateMachine` and skip the normal stmt loop | Single async entry point |
-| `src/codegen/closures.ts` | ADD `compileSyntheticAsyncContinuation` (new function) — mirror of `compileArrowAsClosure` accepting explicit param list + statement list | Reuse closure pipeline for continuations |
-| `src/codegen/async-scheduler.ts` | ADD `emitStandalonePromiseNew` + `emitStandalonePromiseSettle` (settle a pending Promise in place). Standalone CPS is gated on #1326c; helpers stay no-throw stubs that error on call until 1C-B | Standalone mode parity scaffolding |
-| `src/codegen/context/types.ts` | ADD `asyncCpsActive?: boolean` field to `FunctionContext` | Signal CPS to the await dispatcher |
-| `src/codegen/registry/types.ts` | ADD `rewriteFuncResultType(ctx, typeIdx, ret)` helper if absent | Flip async function return type to externref |
-| `src/codegen/expressions/late-imports.ts` | ADD late-import declarations for `Promise_new_pending`, `Promise_settle_resolve`, `Promise_settle_reject`, `Promise_then_2` (or extend existing `.then` dispatch) | JS-host scheduling primitives |
-| `src/runtime.ts` | ADD JS implementations of the four new host imports | Provide the resolution loop on the JS side |
-| `tests/issue-1042.test.ts` | **NEW** | The five canonical cases from §"Test cases (5 representative)" above |
+| File                                      | Action                                                                                                                                                                                           | Why                                                                                                      |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------- |
+| `src/codegen/async-cps.ts`                | **NEW**                                                                                                                                                                                          | Holds `analyzeAsyncBody`, `emitAsyncStateMachine`, `splitBodyAtAwait`, `computeLiveAfterEach`. ~600 LoC. |
+| `src/codegen/expressions.ts`              | EDIT line 973 — gate the no-op behind `!fctx.asyncCpsActive`; otherwise call `compileNestedAwait` (initial PR: report unsupported and fall back)                                                 | Make await-dispatch CPS-aware                                                                            |
+| `src/codegen/function-body.ts`            | EDIT around line 647 (after fctx setup) — call `analyzeAsyncBody`; if awaits present, call `emitAsyncStateMachine` and skip the normal stmt loop                                                 | Single async entry point                                                                                 |
+| `src/codegen/closures.ts`                 | ADD `compileSyntheticAsyncContinuation` (new function) — mirror of `compileArrowAsClosure` accepting explicit param list + statement list                                                        | Reuse closure pipeline for continuations                                                                 |
+| `src/codegen/async-scheduler.ts`          | ADD `emitStandalonePromiseNew` + `emitStandalonePromiseSettle` (settle a pending Promise in place). Standalone CPS is gated on #1326c; helpers stay no-throw stubs that error on call until 1C-B | Standalone mode parity scaffolding                                                                       |
+| `src/codegen/context/types.ts`            | ADD `asyncCpsActive?: boolean` field to `FunctionContext`                                                                                                                                        | Signal CPS to the await dispatcher                                                                       |
+| `src/codegen/registry/types.ts`           | ADD `rewriteFuncResultType(ctx, typeIdx, ret)` helper if absent                                                                                                                                  | Flip async function return type to externref                                                             |
+| `src/codegen/expressions/late-imports.ts` | ADD late-import declarations for `Promise_new_pending`, `Promise_settle_resolve`, `Promise_settle_reject`, `Promise_then_2` (or extend existing `.then` dispatch)                                | JS-host scheduling primitives                                                                            |
+| `src/runtime.ts`                          | ADD JS implementations of the four new host imports                                                                                                                                              | Provide the resolution loop on the JS side                                                               |
+| `tests/issue-1042.test.ts`                | **NEW**                                                                                                                                                                                          | The five canonical cases from §"Test cases (5 representative)" above                                     |
 
 ### Step 12 — Land order and acceptance checks
 
@@ -842,7 +865,7 @@ after any await).
   retires") is encouraged.
 
 - **#820c overlap** — the in-progress #820c PR edits
-  `src/codegen/expressions/calls.ts` near line 4293 (yield* / iterator
+  `src/codegen/expressions/calls.ts` near line 4293 (yield\* / iterator
   protocol). #1042 does not touch that file directly in the AST path,
   but Step 5's `Promise_then_2` extension MAY touch the `.then` instance
   dispatch at `calls.ts:3807-3809`. Land #820c first (smaller, surgical),
@@ -851,10 +874,10 @@ after any await).
 
 - **#1373b (Phase 2B) integration** — once this PR lands and exposes
   the `emitAsyncStateMachine` entry, #1373b's `from-ast.ts` IR emission
-  + `lower.ts:1773` arms call into the same module via
-  `emitAsyncStateMachineFromIr` (Step 1's stub). The IR path is **not**
-  blocked on #1326c Phase 1C-B as long as it stays in JS-host mode for
-  initial rollout — only standalone CPS is blocked.
+  - `lower.ts:1773` arms call into the same module via
+    `emitAsyncStateMachineFromIr` (Step 1's stub). The IR path is **not**
+    blocked on #1326c Phase 1C-B as long as it stays in JS-host mode for
+    initial rollout — only standalone CPS is blocked.
 
 - **Test262 watch-list**: `language/expressions/await/*`,
   `language/statements/for-await-of/*` (mostly Phase 1A territory but
@@ -890,26 +913,38 @@ section wins (the older one drifted).
 
 ### Scope for sprint 58 (tech-lead authorized)
 
-**Slice 2A only:** single-await, *linear* async-function bodies — no loop, no
+**Slice 2A only:** single-await, _linear_ async-function bodies — no loop, no
 branch (`if`/`switch`/`?:` outside the awaited expression), no nested function,
 JS-host mode only. Plus the `return await x` collapse. Everything else
 (multi-await sequencing, try/catch-across-await, async arrows/methods,
 standalone/WASI CPS, nested await) stays gated/legacy and is filed forward.
 
-The *body shapes that must work* in this slice:
+The _body shapes that must work_ in this slice:
 
 ```ts
 // S1 — return-await collapse (the canonical acceptance test)
-async function f() { return await Promise.resolve(42); }     // f() resolves to 42
+async function f() {
+  return await Promise.resolve(42);
+} // f() resolves to 42
 
 // S2 — await-then-return-constant
-async function g() { await Promise.resolve(); return 7; }     // g() resolves to 7
+async function g() {
+  await Promise.resolve();
+  return 7;
+} // g() resolves to 7
 
 // S3 — await-bound, used in the tail
-async function h(p) { const y = await p; return y + 1; }      // h(Promise.resolve(1)) → 2
+async function h(p) {
+  const y = await p;
+  return y + 1;
+} // h(Promise.resolve(1)) → 2
 
 // S4 — prefix-sync then single await tail
-async function k(a) { const x = a * 2; const y = await foo(); return x + y; }
+async function k(a) {
+  const x = a * 2;
+  const y = await foo();
+  return x + y;
+}
 ```
 
 Anything with a second await, a branch, or a loop **must fall through to the
@@ -918,35 +953,35 @@ follow-up rather than emit a half-formed machine.
 
 ### Verified current line numbers (corrects the drifted refs above)
 
-| Symbol / site | Spec said | **Verified now** |
-|---|---|---|
-| `AwaitExpression` no-op | `expressions.ts:973` | **`src/codegen/expressions.ts:1165`** |
-| `FunctionContext.asyncCpsActive` | "ADD to context/types.ts" | **already present — `src/codegen/context/types.ts:204`** (Slice 1 added it) |
-| async path in `compileFunctionBody` | `function-body.ts:558-647` | **`src/codegen/function-body.ts:560` (fn start), `:569` `isAsync`, `:571` `effectiveRetType`, `:614` ret-type resolve** |
-| `ctx.currentFunc = fctx` | `:647` | **`function-body.ts:649`** |
-| main body statement loop | `compileStatement` loop | **`function-body.ts:965-966`** (and a separate decl-body loop at `:893-894`) |
-| `ctx.currentFunc = null` (body end) | — | **`function-body.ts:994`** |
-| `compileArrowAsClosure` | `closures.ts:1151` / `1247` | **`src/codegen/closures.ts:1247`** |
-| `collectReferencedIdentifiers` | `closures.ts:78` | **`closures.ts:185`** (re-exported) |
-| `collectFunctionOwnLocals` | `closures.ts` (~1242) | **`closures.ts:92`** |
-| `analyzeAsyncBody` etc. | "create async-cps.ts" | **`src/codegen/async-cps.ts` EXISTS** (Slice 1, PR #441) — `analyzeAsyncBody` is real; `emitAsyncStateMachine`/`compileNestedAwait` are inert `reportError` stubs; `ASYNC_CPS_ENABLED = false` at `async-cps.ts:38` |
-| `rewriteFuncResultType` | "add to registry/types.ts" | **DOES NOT EXIST yet** — must add |
-| `emitStandalonePromiseResolve/Reject/Then` | async-scheduler `:171-195` | **`src/codegen/async-scheduler.ts:1089 / :1103 / :1132`** (Then is real now, not a stub) |
-| host Promise imports in `runtime.ts` | — | **`Promise_resolve`/`reject`/`new`/`then`/`then2`/`catch`/`finally` all present, `runtime.ts:7835-7846`** |
+| Symbol / site                              | Spec said                   | **Verified now**                                                                                                                                                                                                    |
+| ------------------------------------------ | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `AwaitExpression` no-op                    | `expressions.ts:973`        | **`src/codegen/expressions.ts:1165`**                                                                                                                                                                               |
+| `FunctionContext.asyncCpsActive`           | "ADD to context/types.ts"   | **already present — `src/codegen/context/types.ts:204`** (Slice 1 added it)                                                                                                                                         |
+| async path in `compileFunctionBody`        | `function-body.ts:558-647`  | **`src/codegen/function-body.ts:560` (fn start), `:569` `isAsync`, `:571` `effectiveRetType`, `:614` ret-type resolve**                                                                                             |
+| `ctx.currentFunc = fctx`                   | `:647`                      | **`function-body.ts:649`**                                                                                                                                                                                          |
+| main body statement loop                   | `compileStatement` loop     | **`function-body.ts:965-966`** (and a separate decl-body loop at `:893-894`)                                                                                                                                        |
+| `ctx.currentFunc = null` (body end)        | —                           | **`function-body.ts:994`**                                                                                                                                                                                          |
+| `compileArrowAsClosure`                    | `closures.ts:1151` / `1247` | **`src/codegen/closures.ts:1247`**                                                                                                                                                                                  |
+| `collectReferencedIdentifiers`             | `closures.ts:78`            | **`closures.ts:185`** (re-exported)                                                                                                                                                                                 |
+| `collectFunctionOwnLocals`                 | `closures.ts` (~1242)       | **`closures.ts:92`**                                                                                                                                                                                                |
+| `analyzeAsyncBody` etc.                    | "create async-cps.ts"       | **`src/codegen/async-cps.ts` EXISTS** (Slice 1, PR #441) — `analyzeAsyncBody` is real; `emitAsyncStateMachine`/`compileNestedAwait` are inert `reportError` stubs; `ASYNC_CPS_ENABLED = false` at `async-cps.ts:38` |
+| `rewriteFuncResultType`                    | "add to registry/types.ts"  | **DOES NOT EXIST yet** — must add                                                                                                                                                                                   |
+| `emitStandalonePromiseResolve/Reject/Then` | async-scheduler `:171-195`  | **`src/codegen/async-scheduler.ts:1089 / :1103 / :1132`** (Then is real now, not a stub)                                                                                                                            |
+| host Promise imports in `runtime.ts`       | —                           | **`Promise_resolve`/`reject`/`new`/`then`/`then2`/`catch`/`finally` all present, `runtime.ts:7835-7846`**                                                                                                           |
 
 ### Finding 1 — the analysis surface is DONE and correct; only emission is missing
 
 `analyzeAsyncBody` (async-cps.ts:66) already returns a real `AsyncCpsPlan`
 with `awaitPoints`, a conservative whole-remainder `liveAfterAwait`, plus
 `hasTryAcrossAwait`/`hasUncaughtThrow`. It correctly stops at nested function
-scopes. Slice 2A does **not** need to touch analysis except to *consume* it.
+scopes. Slice 2A does **not** need to touch analysis except to _consume_ it.
 For the linear single-await scope, the conservative whole-remainder liveness is
 exactly right (one segment after the await ⇒ capture = all locals referenced in
 the tail). **Do not rewrite the liveness pass.**
 
 ### Finding 2 — the JS-host "deferred Promise" primitives DO NOT EXIST (foundation gap)
 
-The Step-5 design settles the *outer* promise from inside a continuation via
+The Step-5 design settles the _outer_ promise from inside a continuation via
 three host imports — `Promise_new_pending`, `Promise_settle_resolve`,
 `Promise_settle_reject`. **None of these exist in `runtime.ts`.** What exists is
 `Promise_new` (takes an executor), `Promise_then`/`Promise_then2`,
@@ -958,7 +993,7 @@ Two ways to close this, pick **(A)** for Slice 2A:
 - **(A) `.then`-returns-the-chain model (no new host imports).** Do NOT
   pre-allocate an outer pending promise. Instead the async function returns
   `awaited.then(onFulfilled, onRejected)` directly — the chained promise that
-  `.then` returns *is* the function's result promise. The continuation closure
+  `.then` returns _is_ the function's result promise. The continuation closure
   is `onFulfilled(value) → result`; its return value becomes the resolution of
   the chained promise automatically (JS Promise semantics). This is exactly
   what the `return await x` collapse and the four S1–S4 shapes need, and it uses
@@ -1044,7 +1079,7 @@ general `awaited.then(__cont)` path for S2–S4.
 
 Estimated: `rewriteFuncResultType` ~6, gate+predicate ~40, `emitAsyncStateMachine`
 ~120, tests ~120 → **~290 LoC**, matching the tech-lead's 200–300 envelope
-*because* model (A) drops the host-import/runtime foundation.
+_because_ model (A) drops the host-import/runtime foundation.
 
 ### Risk register (Slice 2A specific)
 
@@ -1089,6 +1124,7 @@ try/catch-across-await + nested await + async arrows/methods → explicit
 `reportError` + legacy fallback.
 
 ### Done so far (COMMITTED on branch, all inert behind `ASYNC_CPS_ENABLED=false`, tsc clean)
+
 - **e42882074** — `src/runtime.ts` (~line 7836): the 3 JS-host scheduling
   primitives — `Promise_new_pending` (allocate pending Promise, stash
   `__r`/`__j` resolve/reject capabilities), `Promise_settle_resolve`
@@ -1146,6 +1182,7 @@ if the chosen settle model needs them, but the current driver uses the simpler
 `.then`-chaining path and does not require them.
 
 ### `__make_callback` contract (confirmed for the driver)
+
 `__make_callback: (i32 cbId, externref captures) -> externref` (index.ts:7060).
 The continuation creation site pushes `i32.const cbId` + the captures struct
 (`extern.convert_any` to externref) + `call __make_callback` → yields a JS
@@ -1155,6 +1192,7 @@ host dispatches `exports["__cb_${cbId}"](captures, settledValue)` as a microtask
 separate funcref table.
 
 ### Verified wiring points (current line numbers, post-merge of origin/main)
+
 - `AwaitExpression` no-op: `src/codegen/expressions.ts:1165` (pass-through).
 - async dispatch: `src/codegen/function-body.ts:569` (`isAsync` →
   `effectiveRetType = unwrapPromiseType`); statement loop at `:894`/`:966`.
@@ -1165,19 +1203,20 @@ separate funcref table.
   (closures.ts:384) — reused by `analyzeAsyncBody`.
 - `fctx.asyncCpsActive` field already present (context/types.ts:204).
 - Promise host imports present in runtime.ts: `Promise_resolve/reject/new/then/
-  then2/catch/finally` + `_maybeWrapCallable` callback bridge.
+then2/catch/finally` + `_maybeWrapCallable` callback bridge.
 - `analyzeAsyncBody` (async-cps.ts:66) is real: await collection (no nested-fn
   descent) + conservative whole-remainder live-vars + try-across-await /
   uncaught-throw detection. `emitAsyncStateMachine`/`compileNestedAwait` are
   `reportError` stubs (gated off by `ASYNC_CPS_ENABLED = false`).
 
 ### Remaining (resume here — `emitAsyncStateMachine` driver is the next + heaviest piece)
+
 1. ✅ DONE (e42882074) — `compileSyntheticAsyncContinuation` (closures.ts:2809).
 2. ✅ DONE (c991edc92) — `splitBodyAtAwait` + `AwaitSplit` (async-cps.ts).
 3. `emitAsyncStateMachine`: alloc outer pending Promise (`Promise_new_pending`);
    compile prefix segment; build capture struct; compile awaited expr; wrap
    continuations via `__make_callback`; `Promise_then2(awaited, contCb,
-   rejectCb)`; return outer Promise. Continuation settles outer Promise via
+rejectCb)`; return outer Promise. Continuation settles outer Promise via
    `Promise_settle_resolve`. `return await X` collapse per spec §6.2.
    Wrap each continuation in `try/catch_all` → `Promise_settle_reject` on escape.
 4. function-body.ts hook (~after fctx built, before stmt loop): `analyzeAsyncBody`;
@@ -1195,6 +1234,7 @@ separate funcref table.
 9. Flip `ASYNC_CPS_ENABLED`/the function-body gate on for JS-host async-with-await.
 
 ### Continuation-synthesis primitive (key finding, 2026-06-03)
+
 Reuse the existing **`__make_callback` host bridge** (closures.ts:2351
 `compileArrowAsHostCallback`, creation site ~:2701 — pushes `cbId` + captures
 externref, calls `__make_callback` → JS-callable externref) rather than
@@ -1215,7 +1255,7 @@ instead of an arrow AST node. Branch merged with latest origin/main (incl.
 ## Slice 2A — runtime-validated blockers (senior-dev, 2026-06-03)
 
 **Status update that supersedes the "flip a dead no-op" framing.** The entire
-Slice 2A machinery is *already implemented and wired*, gated only by
+Slice 2A machinery is _already implemented and wired_, gated only by
 `ASYNC_CPS_ENABLED = false` (`src/codegen/async-cps.ts`):
 
 - `analyzeAsyncBody`, `splitBodyAtAwait`, `emitAsyncStateMachine`,
@@ -1256,13 +1296,13 @@ available. CPS is what fixes this; it is not introducing the failure.
 
 Runtime trace (Node, real host `Promise_then2`/`__make_callback`): with the
 gate on, `__make_callback` fires but **`Promise_then2` never does**, and the
-async fn returns the *callback function itself* instead of the chained
+async fn returns the _callback function itself_ instead of the chained
 promise. The WAT prints `call 2` = `Promise_then2` (symbolic resolution is
 correct), but the **binary's raw funcIdx is stale**. Root cause: the outer
 `$f` body emits `call __make_callback` / `call Promise_then2` with funcIdx
 values captured at emit time, but those two are added via `ensureLateImport`
 during `emitAsyncStateMachine`, and `__box_number` (added while coercing the
-awaited value) lands at a *different* relative position run-to-run
+awaited value) lands at a _different_ relative position run-to-run
 (observed import orders: `g, __make_callback, Promise_then2, __box_number`
 for return-await vs `g, __box_number, __make_callback, Promise_then2` for
 `await; return 7`). The outer `fctx.body` is **not** in `ctx.liveBodies`
@@ -1270,6 +1310,7 @@ during emission, so the shift walker never patches its `call` opcodes — the
 classic late-import index-shift hazard the spec flagged as risk #1.
 
 What I tried (reverted — kept the tree byte-identical / gate-off):
+
 - Adding `ctx.liveBodies.add(fctx.body)` for the whole `emitAsyncStateMachine`
   span (mirroring `compileSyntheticAsyncContinuation`'s own
   `liveBodies.add(cbFctx.body)` at closures.ts:2854). **Necessary but not
@@ -1292,7 +1333,7 @@ CPS-eligible async fn is present, pre-registers both imports; then have
 `ctx.funcMap.get("Promise_then2")` (stable) instead of `ensureLateImport`.
 That removes the shift hazard at its source and matches every other
 host-callback path. `__box_number` is itself a late import but it is consumed
-*inside* the same body before the `Promise_then2` call is emitted, so once the
+_inside_ the same body before the `Promise_then2` call is emitted, so once the
 two callback imports are stable the boxing shift is harmless.
 
 ### BLOCKER 2 — `return await` collapse discards the resolved value
@@ -1322,7 +1363,7 @@ it is a clean ~6-line change. (Reverted with the rest.)
    legacy path; equivalence-test pass for await-less async fns (gate predicate
    must exclude them — confirmed locally it does).
 6. **Watch the existing `tests/async-await.test.ts`**: those tests currently
-   expect the *synchronous* legacy result (`getNum()` toBe `42`, not a
+   expect the _synchronous_ legacy result (`getNum()` toBe `42`, not a
    Promise). Flipping the gate makes single-await JS-host async fns return a
    Promise — those assertions must be updated to `await exports.f()`, OR the
    gate predicate must be confirmed to exclude their exact shapes. This is the
@@ -1345,11 +1386,11 @@ landed on the branch (all behind `ASYNC_CPS_ENABLED`, gate left **false**):
 1. **Blocker 1 (late-import shift) — fixed.** New `collectAsyncCpsImports`
    detection + finalize in the unified collector (`declarations.ts`): when the
    gate is on and a CPS-eligible async fn exists, pre-register `__make_callback`
-   + `Promise_then2` + `Promise_resolve` upfront so the driver resolves them via
-   `ctx.funcMap.get(...)` (stable) instead of `ensureLateImport` (which would
-   not shift the outer body's `call` opcodes — the outer `$f` body is not in
-   `ctx.liveBodies`). `emitAsyncStateMachine` now reads the three stable indices
-   and `reportError`s if the prepass didn't run.
+   - `Promise_then2` + `Promise_resolve` upfront so the driver resolves them via
+     `ctx.funcMap.get(...)` (stable) instead of `ensureLateImport` (which would
+     not shift the outer body's `call` opcodes — the outer `$f` body is not in
+     `ctx.liveBodies`). `emitAsyncStateMachine` now reads the three stable indices
+     and `reportError`s if the prepass didn't run.
 2. **`await V` PromiseResolve (§27.7.5.3) — added.** The driver wraps the awaited
    value with `Promise_resolve` before `Promise_then2`, so `await <non-thenable>`
    (e.g. `await 41`) resolves to the value instead of throwing on `(41).then`.
@@ -1358,7 +1399,7 @@ landed on the branch (all behind `ASYNC_CPS_ENABLED`, gate left **false**):
    `local.get 1` (the `__awaitValue` param) as the identity tail instead of
    `ref.null.extern`, so the chained promise resolves to the awaited value.
 4. **Capture/resume-binding aliasing — fixed.** The resume binding (`const x =
-   await P`) is computed *before* the capture set and excluded from it:
+await P`) is computed _before_ the capture set and excluded from it:
    `hoistLetConstWithTdz` allocates a same-named outer local, so `liveAfterAwait`
    listed it, and capturing it snapshotted its uninitialized (0) value and
    shadowed the resumed value in the continuation. (Found via gate-on probe:
@@ -1370,7 +1411,7 @@ Flipping `ASYNC_CPS_ENABLED` globally regresses **3 equivalence tests**
 (`tests/equivalence/async-function.test.ts` "await expression is identity
 (pass-through)"; `tests/equivalence/promise-chains.test.ts` "await expression
 passes through value" + "nested async calls"). All three consume a single-await
-async fn as a *raw value* — `asyncFn() as any as number` — relying on the legacy
+async fn as a _raw value_ — `asyncFn() as any as number` — relying on the legacy
 synchronous fakery (#1313/#1727 "compile away"): the legacy path returns the
 unwrapped value synchronously, so the cast yields a number. With CPS on, that
 async fn returns a real `Promise`, and `Promise as any as number` → **NaN**.
@@ -1379,13 +1420,13 @@ The gate is **per-definition** but the contract is **per-call-site**: a function
 cannot know whether a given caller `await`s it (wants a Promise) or consumes it
 as a raw value (wants the unwrapped T). A global flip cannot satisfy both. The
 existing `asyncResultConsumedAsValue` (expressions.ts:1118) detects the raw-value
-case at the *call site*, but the CPS rewrite changes the *callee's* return type,
+case at the _call site_, but the CPS rewrite changes the _callee's_ return type,
 which all call sites then observe. These three patterns are pervasive in test262
 (`async fn` results consumed synchronously), so the global flip would regress
 far more than the 3 local cases.
 
 **What turning CPS on for real needs (architect-level — spec risk #1/#6):** the
-synchronous-consumption call sites must be taught to *drive* the returned
+synchronous-consumption call sites must be taught to _drive_ the returned
 Promise to its settled value (a synchronous resolve for already-settled
 promises), OR the async-fn return-type rewrite must be gated on whole-program
 consumption analysis (only rewrite fns that are exclusively `await`ed / consumed
@@ -1411,7 +1452,7 @@ slices that do **not** require flipping `ASYNC_CPS_ENABLED`:
 
 - **#2612** — async fn via var/expr binding consumed as thenable not Promise-
   wrapped (~18 fails, dev). Fixes the `Cannot read properties of null (reading
-  'then')` cluster in `async-function` expression tests.
+'then')` cluster in `async-function` expression tests.
 - **#2613** — `await <thenable>`/`<non-Promise>` assimilation in JS-host mode
   via host `PromiseResolve` (~15 fails, dev). The only suspension-shaped
   bucket; standalone thenable-await stays deferred to the CPS epic.
@@ -1422,3 +1463,89 @@ slices that do **not** require flipping `ASYNC_CPS_ENABLED`:
 criteria still gate the eventual gate-flip), but is not the sprint-65 driver.
 The consumption-contract architecture decision is the true predecessor to any
 further #1042/#1373b progress.
+
+---
+
+## Implementation — host lane onto the #2906 N-state resume machine (fable-5, 2026-07-02)
+
+**What landed (PR: `issue-1042-host-async-await`).** Per the July Fable audit
+re-scope (plan/log/analysis-2026-07 §Gap 5 convergence): instead of extending
+`splitBodyAtAwait`/`emitAsyncStateMachine` (the single-tail-await CPS special
+case), the JS-host lane now routes genuinely-suspending **linear multi-await
+and try/finally-across-await bodies** through the SAME `$AsyncFrame` N-state
+resume engine the wasi lane uses (`async-frame.ts`, #2906), parameterized with
+a **host settle backend**. One lowering engine, two settle primitives.
+
+### WHY this shape
+
+- **Measured premise (2026-07-02, current main):** the JS-host lane CPS-lowers
+  ONLY `asyncFnNeedsCps` shapes (single tail await, no try). Every other
+  genuinely-suspending body fell to the legacy synchronous fakery and returned
+  WRONG values: 2 sequential pending awaits → `null`; prefix local crossing a
+  later await → `null`; try/finally-across-await → `null`; a rejected 2nd
+  await → uncaught wasm exception. The wasi lane's #2906 engine already
+  handled all of these (control: tests/issue-2906-\*.test.ts green).
+- **Host backend mechanics** (all in `src/codegen/async-frame.ts`):
+  - result promise: `Promise_new_pending()` (externref frame field), settled
+    via `Promise_settle_resolve`/`Promise_settle_reject` (runtime.ts already
+    had all three from the June slice — verified, not re-added);
+  - suspension: a host Promise is an opaque externref (no synchronous state
+    inspection), so EVERY await suspends — `Promise_resolve(awaited)`
+    (§27.7.5.3 assimilation) then `Promise_then2(p, __make_callback(fulfillId,
+frame), __make_callback(rejectId, frame))`. No fast-path advance arm; this
+    also makes await timing spec-correct (≥1 microtask per await);
+  - step adapters: the engine's `(caps, value) -> externref` adapters are
+    named + exported `__cb_<id>` so the host `callback_maker` dispatch (BY
+    EXPORT NAME) reaches them. Export entries must be pushed into
+    `ctx.mod.exports` explicitly — the `exported` flag alone only opts into
+    the module-init guard (found via runtime trace: reactions fired
+    `__make_callback` but the `__cb_` export was missing).
+- **Predicate is disjoint by construction** (`asyncFnNeedsHostDrive`):
+  excludes everything `asyncFnNeedsCps` accepts (that lane stays
+  byte-identical), requires genuine suspension + `planLinearAwaits` acceptance
+  - the spill-safe-type gate, keeps the lone-combinator parity guard. So the
+    change is ADDITIVE: only shapes that were previously wrong change behavior.
+- **funcIdx discipline (#2936/#2941):** the six host imports are
+  pre-registered upfront by the `collectAsyncCpsImports` finalize in
+  `declarations.ts` (import indices are stable under late-import appends);
+  the reaction callbacks use compile-time `cbId` CONSTANTS (shift-immune,
+  name-dispatched) instead of `ref.func`; the entry shim re-reads the resume
+  funcIdx from `ctx.funcMap` BY NAME after body emission (a late import
+  during segment compilation shifts defined-function indices; the walker
+  patches bodies+funcMap but not stale JS-side captures).
+
+### Byte-inertness proof (sha256, main affc55523 vs branch)
+
+8/8 untouched-lane corpus hashes IDENTICAL: wasi multi-await, wasi
+try/finally, standalone async, host single-await CPS, host no-await async,
+host elidable-await, host sync-plain, host await-in-loop (unclaimed shape).
+
+### Test-contract migration (same precedent as #1796)
+
+Two equivalence tests (`async-function.test.ts` "multiple awaits in
+sequence", `promise-chains.test.ts` "multiple sequential awaits") consumed a
+genuinely-suspending multi-await fn as a raw number (`sum() as any as
+number`). They now await the real Promise — exactly the migration #1796
+applied to their single-await siblings when `asyncFnNeedsCps` landed.
+
+### Verified behavior (tests/issue-1042-host-drive.test.ts, 11 green)
+
+multi-await value threading, frame spill across a later await, bare-await
+ordering, `return await` final segment, multi-await over legacy async
+callees, try/finally normal + rejected paths (finally runs, then rejects),
+rejected-2nd-await rejection routing (reason parity with the CPS lane —
+both surface the wasm-exception-wrapped reason today), and the unclaimed
+shapes (await-in-loop, await-elidable) still compile via the legacy path.
+
+### Filed forward
+
+- **#2967** — retire `emitAsyncStateMachine`/`splitBodyAtAwait` by routing
+  the single-tail-await shapes through this engine too (measured A/B; the
+  audit's full convergence), then widen the remaining `planLinearAwaits`
+  gaps (try/catch-across-await, return-in-try, nested/buried await) ONCE for
+  both lanes.
+- Pre-existing, NOT introduced here (probe-verified broken on main in both
+  source orders): `const p = f(); return await p` (awaiting a promise held in
+  a local) resolves to `null` — worth its own issue when triaged.
+- Activation-shape widening (arrows/methods/function-expressions) stays
+  #2957's lane — this PR routes `FunctionDeclaration`s only, same as CPS.

@@ -4,7 +4,7 @@ title: "Strict compile-SUCCEEDED arm of the negative-test verdict (the #2912 fol
 status: done
 assignee: ttraenkler/dev-2912
 priority: medium
-sprint: current
+sprint: 69
 created: 2026-07-02
 completed: 2026-07-02
 feasibility: medium
@@ -137,3 +137,30 @@ the value self-heals to exact.
 - Behaviour identical across `gc` and `standalone`, and across all three
   runners (single shared helper).
 - Lands with a coordinated baseline refresh so the merge queue is not wedged.
+
+## Revert record (2026-07-02, the revert PR)
+
+Re-seed verified before reverting (required ordering — the revert's own gates
+at 200/budget-0 must diff against the honest baseline):
+
+- #2424 merged at `9d37728` (2026-07-02T01:05Z). Its own push:main run passed
+  `merge shard reports` but its `promote-baseline` job **failed** — a
+  persistent push race against `js2wasm-baselines` (another run's promote
+  landed first; the wholesale-regenerated JSONLs never rebase cleanly, so all
+  5 retries conflicted identically).
+- The **next** push:main run (`dacd7fd`, run 28558439826 — a descendant of
+  #2424) promoted successfully at 01:28Z: baselines-repo HEAD `71d3569`
+  ("33283/43135 host, 25825/43137 standalone (dacd7fd)"). The gate baseline is
+  honest/post-#2424.
+- Standalone high-water: the same promote raised the host-free mark
+  17802 → 18353 in-job; the direct-to-main commit of the refreshed mark was
+  deferred ("merge queue has 3 entries", #1951 fail-open) and lands via the
+  scheduled refresh. The committed 17802 floor is strictly permissive — the
+  revert leaves `test262-standalone-highwater.json` untouched.
+
+Levers restored by the revert PR: `CATASTROPHIC_REGRESSION_THRESHOLD`
+500 → 200 (#1668 guard), `INTENTIONAL_REGRESSION_BUDGET` removed from the
+regression-diff step AND the temporary waiver block removed from
+`scripts/diff-test262.ts` (its default was already 0; the block self-documented
+as revert-together). Permanent fix for this class of landing: #2926 (emit
+`wasm_sha` in the shard JSONL — filed with the revert PR).

@@ -1,0 +1,562 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Lightweight sandboxing of untrusted JavaScript: ahead-of-time compilation to WebAssembly · JS² Blog</title>
+    <meta
+      name="description"
+      content="JS² compiles TypeScript and JavaScript ahead of time to WebAssembly with no engine in the binary — compiled modules run in sandboxes with no ambient authority. Built in the open by a team of AI agents directed by humans on a test-driven agile engineering playbook."
+    />
+    <style>
+      :root {
+        --bg: #060a14;
+        --bg-soft: #0c1220;
+        --fg: #ffffff;
+        --fg-soft: rgba(255, 255, 255, 0.68);
+        --fg-faint: rgba(255, 255, 255, 0.46);
+        --line: rgba(255, 255, 255, 0.12);
+        --line-strong: rgba(255, 255, 255, 0.22);
+        --surface: rgba(255, 255, 255, 0.05);
+        --surface-hover: rgba(255, 255, 255, 0.08);
+        --nav: rgba(6, 10, 20, 0.45);
+        --accent: #6c8aff;
+        --mono: "JetBrains Mono", "SF Mono", SFMono-Regular, Consolas, monospace;
+        --font: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
+      }
+
+      html {
+        background: var(--bg);
+        color: var(--fg);
+        scroll-behavior: smooth;
+      }
+
+      body {
+        margin: 0;
+        font-family: var(--font);
+        line-height: 1.6;
+        overflow-x: hidden;
+        background: radial-gradient(circle at 18% 0%, rgba(58, 41, 110, 0.28), transparent 34%), var(--bg);
+        background-repeat: no-repeat;
+      }
+
+      a {
+        color: var(--accent);
+        text-decoration: none;
+      }
+
+      a:hover {
+        text-decoration: underline;
+      }
+
+      .layout {
+        max-width: 760px;
+        margin: 0 auto;
+        padding: 96px 32px 120px;
+      }
+
+      /* ── Post header ── */
+      .post-header {
+        margin-bottom: 40px;
+        padding-bottom: 28px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .eyebrow {
+        display: inline-block;
+        font-size: 12px;
+        font-weight: 600;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--accent);
+        margin-bottom: 18px;
+      }
+
+      h1 {
+        margin: 0 0 16px;
+        font-size: clamp(30px, 5vw, 44px);
+        line-height: 1.08;
+        letter-spacing: -0.03em;
+        font-weight: 700;
+      }
+
+      .dek {
+        margin: 0 0 20px;
+        font-size: 17px;
+        color: var(--fg-soft);
+      }
+
+      .post-meta {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 12px;
+        font-size: 13px;
+        color: var(--fg-faint);
+      }
+
+      .tag {
+        padding: 3px 10px;
+        border-radius: 999px;
+        background: var(--surface);
+        border: 1px solid var(--line);
+        font-size: 12px;
+        color: var(--fg-soft);
+      }
+
+      /* ── Prose ── */
+      .post h2 {
+        margin: 48px 0 16px;
+        font-size: 25px;
+        letter-spacing: -0.02em;
+        scroll-margin-top: 88px;
+      }
+
+      .post p {
+        margin: 0 0 16px;
+        color: var(--fg-soft);
+        font-size: 16px;
+      }
+
+      .post ul {
+        margin: 0 0 16px;
+        padding-left: 22px;
+        color: var(--fg-soft);
+      }
+
+      .post li {
+        margin: 8px 0;
+      }
+
+      .post strong {
+        color: var(--fg);
+      }
+
+      .post em {
+        color: var(--fg);
+      }
+
+      code {
+        font-family: var(--mono);
+        font-size: 0.88em;
+        padding: 2px 6px;
+        border-radius: 5px;
+        background: var(--surface);
+        border: 1px solid var(--line);
+        color: var(--fg);
+        white-space: nowrap;
+      }
+
+      /* ── Scoreboard ── */
+      .scoreboard {
+        margin: 0 0 18px;
+        padding: 18px 22px;
+        border-radius: 12px;
+        background: var(--surface);
+        border: 1px solid var(--line);
+      }
+
+      .scoreboard ul {
+        margin: 0;
+      }
+
+      /* ── FAQ ── */
+      .faq {
+        margin: 0 0 16px;
+      }
+
+      .faq dt {
+        font-weight: 600;
+        color: var(--fg);
+        margin-top: 22px;
+      }
+
+      .faq dd {
+        margin: 6px 0 0 0;
+        color: var(--fg-soft);
+      }
+
+      /* ── CTA ── */
+      .cta {
+        margin-top: 40px;
+        padding: 24px 26px;
+        border-radius: 12px;
+        background: var(--surface);
+        border: 1px solid var(--line);
+      }
+
+      .cta p {
+        margin: 0 0 18px;
+      }
+
+      .cta-links {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+      }
+
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 40px;
+        padding: 0 18px;
+        border-radius: 8px;
+        font-size: 14px;
+        font-weight: 600;
+        border: 1px solid var(--line);
+        color: var(--fg);
+        transition:
+          background 0.15s ease,
+          border-color 0.15s ease,
+          opacity 0.15s ease;
+      }
+
+      .btn:hover {
+        text-decoration: none;
+      }
+
+      .btn-solid {
+        color: var(--bg);
+        background: var(--fg);
+        border-color: var(--fg);
+      }
+
+      .btn-solid:hover {
+        opacity: 0.9;
+      }
+
+      .btn-outline:hover {
+        background: var(--surface-hover);
+        border-color: var(--line-strong);
+      }
+
+      /* ── Footer ── */
+      .doc-footer {
+        max-width: 1100px;
+        margin: 0 auto;
+        padding: 32px;
+        border-top: 1px solid var(--line);
+        color: var(--fg-faint);
+        font-size: 13px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 14px;
+        justify-content: space-between;
+      }
+
+      @media (max-width: 900px) {
+        .layout {
+          padding: 88px 22px 96px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <site-nav
+      base="../"
+      links='[{"label":"Home","href":"../"},{"label":"Blog","href":"./"},{"label":"Compatibility","href":"../#goals"},{"label":"Benchmarks","href":"../#benchmarks"},{"label":"FAQ","href":"../#faq"},{"label":"Roadmap","href":"../#roadmap"}]'
+    ></site-nav>
+
+    <div class="layout">
+      <article class="post">
+        <header class="post-header">
+          <span class="eyebrow">JS² Blog</span>
+          <h1>Lightweight sandboxing of untrusted JavaScript: ahead-of-time compilation to WebAssembly</h1>
+          <p class="dek">
+            JS² is an open-source research compiler that turns TypeScript and JavaScript into WebAssembly with no engine
+            in the binary. Compiled modules run in sandboxes with no ambient authority — no container, no VM, no
+            embedded engine — which is a structural answer to unread dependencies and AI-generated code, not another
+            review process. Conformance today: 74% of the official ECMAScript suite with a JS host present (the
+            sandboxing case in browsers and Node), 42.7% as pure standalone Wasm (the engine-free case), both recomputed
+            on every merge. Built in the open by a team of AI agents directed by humans on a test-driven agile team
+            engineering playbook.
+          </p>
+          <div class="post-meta">
+            <span class="tag">Announcement</span>
+            <span class="tag">Compiler</span>
+            <span class="tag">Community</span>
+          </div>
+        </header>
+
+        <h2>The problem JavaScript developers learned to live with</h2>
+        <p>
+          Every
+          <code>npm install</code>
+          is an act of trust. A modern app pulls in hundreds of transitive dependencies, and each one runs with the full
+          authority of your process — your filesystem, your network, your environment variables, every other module's
+          objects. Supply-chain attacks exploit exactly this: one compromised package anywhere in the tree owns
+          everything, and the ecosystem re-learns that lesson every few months.
+        </p>
+        <p>
+          Generative AI raises the stakes. Code now enters the ecosystem faster than any human can read it — generated
+          by models, assembled by agents, published at machine speed. "Someone has surely audited this" was always
+          optimistic; at machine speed it stops being plausible at all. When more and more of what you run is code
+          nobody has read, review alone can't carry the trust model. Untrusted code has to be
+          <em>contained by construction</em>
+          , not just inspected.
+        </p>
+        <p>
+          There's a second, quieter cost. Outside the browser, running JavaScript means shipping an engine — V8,
+          JavaScriptCore, SpiderMonkey, QuickJS — an engine in a box: megabytes of runtime, slow cold starts, one shared
+          heap.
+        </p>
+        <p>
+          Both problems share a root cause. JavaScript doesn't run — an engine runs it, and everything in the process
+          shares that engine.
+        </p>
+
+        <h2>The experiment: compile the engine away</h2>
+        <p>
+          JS² starts from the root cause. Its compiler,
+          <code>js2wasm</code>
+          , takes ordinary TypeScript or JavaScript and compiles it
+          <strong>ahead of time</strong>
+          to WebAssembly — in essence, machine code for a portable virtual processor, implemented by every major browser
+          and by standalone runtimes on servers and edge. Whatever the compiler can resolve at compile time becomes
+          plain Wasm instructions. For genuine runtime code generation —
+          <code>eval</code>
+          ,
+          <code>new Function</code>
+          — the design reserves a small embedded interpreter, scoped to just the code it creates; that fallback is on
+          the roadmap, not shipped yet.
+        </p>
+        <p>
+          Remove the engine and the benefits fall out of the architecture rather than being bolted on. A compiled Wasm
+          module has
+          <em>no ambient authority</em>
+          : filesystem, network, DOM, and globals exist only if the host hands them in as explicit imports. Today that
+          isolation holds between compilation units — compile a dependency separately, and it cannot reach anything you
+          didn't hand it. The goal is to push the boundary down to the individual JavaScript module, finer-grained than
+          an npm package, so that fencing off a dependency, a plugin, or a block of AI-generated code becomes the same
+          routine operation: don't hand it imports it shouldn't have. And with no engine to ship, modules are small and
+          start fast enough for edge and serverless targets where a bundled runtime never fit.
+        </p>
+
+        <h2>Why this is possible now</h2>
+        <p>
+          Hasn't compiling JavaScript to Wasm been tried? Yes — and the history is why timing matters. For years the
+          practical options were to restrict the language to a statically-compilable subset, or to pack an entire engine
+          into the module — QuickJS or SpiderMonkey compiled to Wasm, as today's Wasm-native JavaScript toolchains do.
+          What kept the direct route — compiling the actual, unrestricted language — off the table was never one missing
+          feature. It was scope: full ECMAScript compatibility has consumed engine teams for years, sometimes decades —
+          thousands of built-ins, edge cases, and spec pages to grind through.
+        </p>
+        <p>
+          That arithmetic is what changed. Recent advances in frontier language models make it possible to field a team
+          of AI agents, directed by humans and held to a hard test gate, that works the long tail of the spec around the
+          clock and at machine pace. Not because agents replace compiler engineers — but because the years-long grind is
+          exactly the part machines are now good at.
+        </p>
+        <p>
+          <strong>WasmGC</strong>
+          adds to it. The garbage-collection extension WebAssembly shipped in major browsers and runtimes over the past
+          two years lets a compiler emit real structs and arrays managed by the runtime's collector instead of
+          simulating a JavaScript heap inside linear memory. That makes the approach quick to validate inside a JS host
+          — compiled modules run right alongside the host's own objects in browsers and Node — and it makes the modules
+          lighter: no allocator or GC ships in the binary. A new generation of ahead-of-time JavaScript compilers is
+          forming around this bet; JS² is the WasmGC-native entry, with a linear-memory backend in development for hosts
+          without GC support as a second target behind the same compiler.
+        </p>
+        <p>
+          And if it holds, WebAssembly stops being a Rust-and-C++ club and opens to the largest code ecosystem ever
+          built — with the sandboxing and the engine-free footprint above coming along for free.
+        </p>
+
+        <h2>The honest scoreboard</h2>
+        <p>
+          JS² measures itself against the
+          <em>full</em>
+          official Test262 suite — all 43,106 tests, the same corpus browser engines certify against, with no curated
+          subset and no cherry-picked scope. Today:
+        </p>
+        <div class="scoreboard">
+          <ul>
+            <li>
+              <strong>JS-host mode: 31,874 / 43,106 — 73.9%.</strong>
+              Compiled Wasm may call host builtins. This is the number that matters for
+              <em>sandboxing</em>
+              : isolating modules inside a browser or Node app, where a JS host is present anyway.
+            </li>
+            <li>
+              <strong>Standalone mode: 18,415 / 43,106 — 42.7%.</strong>
+              Pure Wasm, no JavaScript anywhere in the loop. This is the number that matters for
+              <em>engine-free deployment</em>
+              : WASI, edge, and embedded targets with no JS runtime at all.
+            </li>
+            <li>Both up from a few hundred passes at project start; recomputed on every merge, published live.</li>
+          </ul>
+        </div>
+        <p>
+          The claim is deliberately
+          <em>not</em>
+          "production ready." The claim is: the number is real, it's public, and it moves every week. We publish the
+          number because the number is the argument.
+        </p>
+
+        <h2>The other story: an AI team on a human playbook</h2>
+        <p>
+          The compiler is built day-to-day by a team of AI agents: a
+          <strong>Product Owner</strong>
+          grooming the backlog and verifying each issue still reproduces; an
+          <strong>Architect</strong>
+          writing implementation specs before anyone writes code; a
+          <strong>Tech Lead</strong>
+          running the sprint and the merge queue;
+          <strong>Developers</strong>
+          claiming issues and opening PRs from isolated git worktrees; a
+          <strong>PR-queue shepherd</strong>
+          walking green work through CI so it lands instead of stranding.
+        </p>
+        <p>
+          If that org chart looks familiar, that's the point. Nothing here was invented for AI: spec-first issues,
+          test-driven changes, review, a merge queue. In this project's experience so far, the same discipline that
+          makes a strong human team work is what makes agents productive too — and it means a human contributor drops
+          into the identical workflow. Same issue files, same gates, same bar for merging. No AI track, no human track.
+        </p>
+        <p>
+          The gate is not casual. Every pull request runs
+          <strong>48,088 Test262 cases twice</strong>
+          — once per mode — across 114 parallel CI jobs, plus ~3,400 hand-written unit and differential tests comparing
+          compiled Wasm against native JavaScript behavior. Roughly
+          <strong>100,000 automated checks</strong>
+          stand between any change and
+          <code>main</code>
+          , and the merge queue re-validates the
+          <em>merged</em>
+          result, so a clean-looking PR can't quietly break the tree. It's the compiler's own thesis applied to its own
+          construction: don't trust the author — verify the output, and contain what you can't verify.
+        </p>
+
+        <h2>Fair questions</h2>
+        <dl class="faq">
+          <dt>"AOT-compiling JavaScript is impossible."</dt>
+          <dd>
+            Fully general AOT of every dynamic corner is — which is why the design reserves a tiny embedded interpreter
+            for
+            <code>eval</code>
+            , scoped to the code it creates (planned, not yet shipped). The bet is that the overwhelming majority of
+            real-world JavaScript
+            <em>is</em>
+            compilable ahead of time, and Test262 is the referee. 73.9% says the bet is alive; the remaining 26.1% says
+            it isn't won.
+          </dd>
+          <dt>"Aren't others working on AOT JavaScript too?"</dt>
+          <dd>
+            Yes — and that's a good sign: independent teams converging on the same bet suggests it's worth making. Where
+            JS² differs: it is
+            <strong>WasmGC-native</strong>
+            (the platform collects garbage; no allocator or GC ships in the binary), with a linear-memory backend in
+            development as a second target behind the same compiler. It targets the
+            <strong>full language</strong>
+            , including
+            <code>eval</code>
+            , rather than a subset. It compiles plain JavaScript, and when the input is
+            <strong>TypeScript</strong>
+            it takes it directly and uses the types to emit faster code. It reports host and standalone numbers
+            <strong>separately</strong>
+            , against the full 43,106-test official corpus, recomputed on every merge — no single blended figure. And
+            <strong>containment comes first</strong>
+            : module isolation is the design center, not a side effect. Different projects will make different
+            trade-offs; ours are all in the open.
+          </dd>
+          <dt>"Isn't AI-written code slop?"</dt>
+          <dd>
+            Assume fallibility — that's what the process is for. Specs precede code; ~100,000 checks precede every
+            merge; the queue re-validates the merged state; the entire history is public. Judge the diffs, not the
+            author. Human review is welcome — it's one of the most valuable ways to contribute.
+          </dd>
+          <dt>"73.9% isn't production."</dt>
+          <dd>
+            Correct, and the site says so in bold: JS² is a research prototype. The interesting question is the slope,
+            not today's intercept — and the slope is public, recomputed on every merge.
+          </dd>
+          <dt>"Why not just embed a JS engine, like Javy or StarlingMonkey?"</dt>
+          <dd>
+            You can — Javy ships QuickJS inside the module, StarlingMonkey does the same with SpiderMonkey, and both are
+            solid tools that work today. It's also what JS²'s planned
+            <code>eval</code>
+            fallback will do in miniature. But an engine-in-a-box keeps the engine: the binary size, the startup cost,
+            and one shared heap. And because WebAssembly permits no JIT inside a module, the embedded engine runs your
+            code as an interpreter — for compute-heavy work that typically costs an order of magnitude or more, 90%+ of
+            the performance a JIT would deliver. It also gives up the per-module sandboxing and dependency isolation
+            that motivated this project in the first place. JS² bets on the other trade: compile once, run as native
+            Wasm instructions, keep the binary small, and let the dynamic remainder shrink release by release.
+          </dd>
+          <dt>"Why not sandbox with containers or V8 isolates?"</dt>
+          <dd>
+            Those work at a different weight class. A container or microVM isolates at the process or kernel level —
+            right for whole tenants, far too heavy to give each of the hundreds of dependencies inside one application
+            its own. V8 isolates are much lighter, but the isolation boundary is the engine itself: every isolate lives
+            inside one V8 process and inherits the engine's attack surface, and ad-hoc in-language sandboxes have a long
+            history of escapes. A compiled Wasm module sits at a different point on the curve: a sandbox with a formally
+            specified boundary, measured in kilobytes rather than megabytes, cheap enough to instantiate that every
+            dependency can have one.
+          </dd>
+        </dl>
+
+        <h2>Come build it</h2>
+        <p>
+          Getting from research prototype to production compiler is exactly the kind of work that scales with more hands
+          — human or AI:
+        </p>
+        <ul>
+          <li>
+            <strong>Review</strong>
+            — read a PR or an implementation spec; fresh eyes on compiler internals are permanently scarce.
+          </li>
+          <li>
+            <strong>Test</strong>
+            — run Test262 against a build, find a gap, file it with a repro. The dashboard shows what fails and why.
+          </li>
+          <li>
+            <strong>Build</strong>
+            — claim a
+            <code>ready</code>
+            issue from
+            <code>plan/issues/</code>
+            ; each one is a real spec, not a TODO.
+          </li>
+          <li>
+            <strong>Bring your agent</strong>
+            — point Claude Code (or similar) at the same public issue files and workflow the project's own agents use.
+          </li>
+          <li>
+            <strong>Talk to us</strong>
+            — the Discord is open; tell us what's unclear, what breaks, and what you'd want first.
+          </li>
+        </ul>
+        <p>
+          Everything is Apache 2.0 with the LLVM exception; contributions go through a short CLA and the same PR + CI
+          gauntlet as everyone else's.
+        </p>
+
+        <div class="cta">
+          <p>
+            If "JavaScript, compiled" still sounds like a contradiction — come help resolve it. The playground compiles
+            JavaScript and TypeScript to Wasm in your browser right now, and the issue queue is open.
+          </p>
+          <div class="cta-links">
+            <a class="btn btn-solid" href="../getting-started/">Get started</a>
+            <a class="btn btn-outline" href="../playground/">Playground</a>
+            <a class="btn btn-outline" href="https://github.com/loopdive/js2">GitHub</a>
+            <a class="btn btn-outline" href="https://discord.gg/qNfAsf8He">Discord</a>
+          </div>
+        </div>
+      </article>
+    </div>
+
+    <footer class="doc-footer">
+      <span>JS² — JavaScript and TypeScript ahead-of-time compilation for WebAssembly GC.</span>
+      <span><a href="../">← Back to home</a></span>
+    </footer>
+
+    <script type="module" src="../components/site-nav.js"></script>
+  </body>
+</html>

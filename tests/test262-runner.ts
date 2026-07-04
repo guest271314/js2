@@ -1511,6 +1511,7 @@ function buildPreamble(
   needsBoolAssert: boolean,
   needsCompareArray: boolean,
   needsAssertCompareArray: boolean,
+  needsAssertDeepEqual: boolean,
   needsPropertyHelper: boolean,
   needsFnGlobalObject: boolean,
   needsIsConstructor: boolean,
@@ -1523,6 +1524,7 @@ function buildPreamble(
   needsAsyncTest: boolean,
   needsDoneForAsyncTest: boolean,
   needsTestTypedArray: boolean,
+  needsTestBigIntTypedArray: boolean,
   needsAssertThrowsAsync: boolean,
   needsTypedArrayBinding: boolean,
   needsIteratorBinding: boolean,
@@ -1532,11 +1534,34 @@ function buildPreamble(
 ): string {
   let p = `let __fail: number = 0;
 let __assert_count: number = 1;
+// (#2939/#2940) Vacuity sentinel. Harness wrappers that call a user callback in
+// a loop (testWith*Constructors and siblings) increment this per callback
+// invocation they ATTEMPT. If, post-run, a test "passed" (__fail === 0) but a
+// harness wrapper was invoked (__harness_cb_expected > 0) yet NO assertion ever
+// executed (__assert_count still at its initial 1 — every assert helper bumps
+// it), the callback body was DEAD (the dispatch-drop / dead-callback class):
+// the assertions live inside the callback, so zero counted asserts + an invoked
+// wrapper ⇒ vacuous. Such a pass is scored VACUOUS (a distinct status, NOT
+// pass) so host_free_pass structurally excludes it. Under-detection (asserts
+// outside the callback keep __assert_count > 1) is safe — the test just stays a
+// pass; over-detection is near-impossible for the harness class (its callbacks
+// always contain counted asserts).
+let __harness_cb_expected: number = 0;
 
 class Test262Error {
   message: string;
   constructor(msg: string = "") {
     this.message = msg;
+  }
+  // (#2671) Real sta.js defines \`Test262Error.thrower\` — the Promise
+  // capability tests pass it as the executor's reject callback
+  // (\`executor(resolve, Test262Error.thrower)\`). The synthesized prelude
+  // lacked it, so those tests read undefined and V8's NewPromiseCapability
+  // threw "Promise resolve or reject function is not callable" regardless of
+  // compiler correctness. A static METHOD (not the sta.js assignment form)
+  // marshals host-callable when passed as a value.
+  static thrower(msg: string = ""): void {
+    throw new Test262Error(msg);
   }
 }
 
@@ -1659,6 +1684,46 @@ function assert_compareArray(actual: any[], expected: any[]): void {
 }`;
   }
 
+  if (needsAssertDeepEqual) {
+    // (#2671) Real harness deepEqual.js analog for the shapes the suite
+    // exercises (nested arrays incl. holes/undefined, plain objects like
+    // match-indices \`groups\`, primitives with SameValue NaN handling). The
+    // RegExp match-indices family includes deepEqual.js and previously died
+    // with "assert is not defined" because no shim existed.
+    p += `
+
+function __deepEq(a: any, b: any): number {
+  if (a === b) { return 1; }
+  if (a !== a && b !== b) { return 1; }
+  if (a == null && b == null) { return 1; }
+  if (a == null || b == null) { return 0; }
+  if (typeof a !== "object" || typeof b !== "object") { return 0; }
+  var aArr = Array.isArray(a);
+  var bArr = Array.isArray(b);
+  if (aArr || bArr) {
+    if (!aArr || !bArr) { return 0; }
+    if (a.length !== b.length) { return 0; }
+    for (let i: number = 0; i < a.length; i++) {
+      if (!__deepEq(a[i], b[i])) { return 0; }
+    }
+    return 1;
+  }
+  var ka = Object.keys(a);
+  var kb = Object.keys(b);
+  if (ka.length !== kb.length) { return 0; }
+  for (let i: number = 0; i < ka.length; i++) {
+    var k = ka[i];
+    if (!__deepEq(a[k], b[k])) { return 0; }
+  }
+  return 1;
+}
+
+function assert_deepEqual(actual: any, expected: any): void {
+  __assert_count = __assert_count + 1;
+  if (!__deepEq(actual, expected)) { if (!__fail) __fail = __assert_count; }
+}`;
+  }
+
   if (needsPropertyHelper) {
     // verifyProperty calls are transformed into assert_sameValue at the source
     // level (see transformVerifyPropertyCalls), so no stub is needed for it.
@@ -1687,9 +1752,19 @@ function fnGlobalObject(): number { return 0; }`;
   }
 
   if (needsIsConstructor) {
+    // (#2875 slice 4) Harness stub pending a real standalone Reflect.construct
+    // (#1472 Phase C): everything reports non-constructor. The stub MUST return
+    // a real `false`, not the number 0 — `assert.sameValue(isConstructor(x),
+    // false)` compiles to a strict `===` where `0 === false` is (correctly)
+    // false in the standalone lane, so the typed-number stub failed every
+    // `*/not-a-constructor.js` at assert #1 even though the test's second
+    // assert (`new X()` throws TypeError) exercises real compiled semantics
+    // and passes. `is-a-constructor.js` tests (assert true) keep failing under
+    // this stub by design — no false conformance for constructors until the
+    // real Reflect.construct newTarget-validation lands.
     p += `
 
-function isConstructor(f: number): number { return 0; }`;
+function isConstructor(f: any): boolean { return false; }`;
   }
 
   if (needsDecimalToHex) {
@@ -1800,7 +1875,34 @@ function $DETACHBUFFER(buf: any): void {
 function testWithTypedArrayConstructors(fn: any): void {
   const constructors = [Int8Array, Uint8Array, Int16Array, Uint16Array, Int32Array, Uint32Array, Float32Array, Float64Array];
   for (let i = 0; i < constructors.length; i++) {
+    __harness_cb_expected = __harness_cb_expected + 1;
     fn(constructors[i]);
+  }
+}`;
+  }
+
+  // (#2939/#2940) BigInt TypedArray harness wrapper. The real test262
+  // `testWithBigIntTypedArrayConstructors(f, …)` (testTypedArray.js) calls
+  // `f(constructor, boundArgFactory)` — a 2-ARG invocation where the callback
+  // is typically `function (TA, makeCtorArg) { … }`. Passing only the ctor
+  // left `makeCtorArg` undefined; combined with the (now-fixed) nested-scope
+  // dispatch gap the whole callback body was dead (a vacuous host-free pass,
+  // ~814 tests). Shim the 2-arg signature with an identity `makeCtorArg`
+  // passthrough (maps a length/iterable straight to the ctor's first arg).
+  // Only emitted when the body actually references the BigInt variant, so the
+  // non-BigInt corpus preamble is byte-unchanged. Requires the #2939 dispatch
+  // fix to land in lockstep — else it produces dishonest vacuous passes.
+  if (needsTestBigIntTypedArray) {
+    p += `
+
+function __ta_makeCtorArgPassthrough(x: any): any {
+  return x;
+}
+function testWithBigIntTypedArrayConstructors(fn: any): void {
+  const constructors = [BigInt64Array, BigUint64Array];
+  for (let i = 0; i < constructors.length; i++) {
+    __harness_cb_expected = __harness_cb_expected + 1;
+    fn(constructors[i], __ta_makeCtorArgPassthrough);
   }
 }`;
   }
@@ -1972,6 +2074,7 @@ export function wrapTest(source: string, meta?: Test262Meta): WrapResult {
   body = body.replace(/\bassert\.sameValue\b/g, "assert_sameValue");
   body = body.replace(/\bassert\.notSameValue\b/g, "assert_notSameValue");
   body = body.replace(/\bassert\.compareArray\b/g, "assert_compareArray");
+  body = body.replace(/\bassert\.deepEqual\b/g, "assert_deepEqual");
   body = body.replace(/\bassert\s*\(/g, "assert_true(");
 
   // Strip 3rd argument from assert_sameValue / assert_notSameValue calls
@@ -1979,6 +2082,7 @@ export function wrapTest(source: string, meta?: Test262Meta): WrapResult {
   body = stripThirdArg(body, "assert_sameValue");
   body = stripThirdArg(body, "assert_notSameValue");
   body = stripThirdArg(body, "assert_compareArray");
+  body = stripThirdArg(body, "assert_deepEqual");
 
   // Convert typeof assertions to direct comparisons (our assert shims only handle numbers)
   // assert_sameValue(typeof X, "Y"); → increment counter, set __fail on mismatch
@@ -2136,6 +2240,7 @@ export function wrapTest(source: string, meta?: Test262Meta): WrapResult {
   const needsBoolAssert = /\bassert_(sameValue|notSameValue)_bool\b/.test(body);
   const needsCompareArray = /\bcompareArray\b/.test(body);
   const needsAssertCompareArray = /\bassert_compareArray\b/.test(body);
+  const needsAssertDeepEqual = /\bassert_deepEqual\b/.test(body);
   const needsAssertThrows = /\bassert_throws\b/.test(body);
   const needsAssertThrowsAsync = /\bassert_throwsAsync\b/.test(body);
 
@@ -2180,6 +2285,11 @@ export function wrapTest(source: string, meta?: Test262Meta): WrapResult {
   const needsAsyncTest = includes.includes("asyncHelpers.js") && /\basyncTest\b/.test(body);
   const needsDoneForAsyncTest = needsAsyncTest && !needsDone;
   const needsTestTypedArray = includes.includes("testTypedArray.js") && /testWithTypedArrayConstructors/.test(body);
+  // (#2939/#2940) The BigInt variant `testWithBigIntTypedArrayConstructors`
+  // ships in the SAME testTypedArray.js include; the plain regex above does not
+  // match its `…BigIntTypedArray…` infix, so it needs its own gate + shim.
+  const needsTestBigIntTypedArray =
+    includes.includes("testTypedArray.js") && /testWithBigIntTypedArrayConstructors/.test(body);
 
   // test262's testTypedArray.js include defines `var TypedArray = Object.getPrototypeOf(Int8Array);`
   // as the abstract %TypedArray% intrinsic. Our runtime's Object.getPrototypeOf(Int8Array) does not
@@ -2225,6 +2335,7 @@ export function wrapTest(source: string, meta?: Test262Meta): WrapResult {
     needsBoolAssert,
     needsCompareArray,
     needsAssertCompareArray,
+    needsAssertDeepEqual,
     needsPropertyHelper,
     needsFnGlobalObject,
     needsIsConstructor,
@@ -2237,6 +2348,7 @@ export function wrapTest(source: string, meta?: Test262Meta): WrapResult {
     needsAsyncTest,
     needsDoneForAsyncTest,
     needsTestTypedArray,
+    needsTestBigIntTypedArray,
     needsAssertThrowsAsync,
     needsTypedArrayBinding,
     needsIteratorBinding,
@@ -2255,6 +2367,7 @@ export function wrapTest(source: string, meta?: Test262Meta): WrapResult {
       needsBoolAssert,
       needsCompareArray,
       needsAssertCompareArray,
+      needsAssertDeepEqual,
       needsPropertyHelper,
       needsFnGlobalObject,
       needsIsConstructor,
@@ -2267,6 +2380,7 @@ export function wrapTest(source: string, meta?: Test262Meta): WrapResult {
       needsAsyncTest,
       needsDoneForAsyncTest,
       needsTestTypedArray,
+      needsTestBigIntTypedArray,
       needsAssertThrowsAsync,
       needsTypedArrayBinding,
       needsIteratorBinding,
@@ -2487,6 +2601,50 @@ export function test(): number {
     };
   }
 
+  // (#2932) Module-goal tests: hoist top-level `import` / `export … from`
+  // statements whose specifier references a `_FIXTURE` module OUT of the
+  // synthetic `export function test()` wrapper to module top level. An
+  // `import` nested inside a function body is not a real module import — the
+  // TS checker never resolves its binding, and the compiler's top-level
+  // import-alias scan (#2930) only sees top-level ImportDeclarations — so
+  // every fixture-importing module test read `null`. Each hoisted statement is
+  // replaced in the body by a placeholder comment padded to the same line
+  // count (keeps error line citations stable); the hoisted copies are emitted
+  // ahead of the preamble (bodyLineOffset is computed from preBody, so it
+  // adjusts automatically).
+  //
+  // Scope: `_FIXTURE` specifiers ONLY — the exact class the multi-file
+  // fixture branch links via `allowJs` (#2932's purpose). Hoisting is NOT
+  // applied to other specifiers: test262's module-namespace tests SELF-import
+  // (`import * as ns from './<own-filename>.js'`), and under the runner the
+  // test compiles under the virtual key `./test.ts`, so a hoisted self-import
+  // cannot resolve — 4 namespace/internals tests flipped pass→fail with
+  // "ns is not defined" in PR #2471's merge_group run. Non-fixture module
+  // imports keep their pre-#2932 (nested, leniently-ignored) behavior.
+  let hoistedImports = "";
+  if (resolvedMeta.flags?.includes("module")) {
+    const hoistedStmts: string[] = [];
+    const hoistOne = (m: string, stmt: string): string => {
+      hoistedStmts.push(stmt);
+      const newlines = m.split("\n").length - 1;
+      return "/* #2932: import/export-from hoisted to module top level */" + "\n".repeat(newlines);
+    };
+    // import x from '…_FIXTURE.js'; / import {a as b} from …; / import * as ns from …;
+    // import x, {a} from …; / import '…_FIXTURE.js';  ([^'";]*? forbids crossing statements)
+    bodyForFunc = bodyForFunc.replace(
+      /^[ \t]*(import\s+(?:[^'";]*?\bfrom\s*)?['"][^'"]*_FIXTURE[^'"]*['"]\s*;)/gm,
+      (m, stmt) => hoistOne(m, stmt),
+    );
+    // export * from '…'; / export * as ns from '…'; / export {a, b as c} from '…';
+    bodyForFunc = bodyForFunc.replace(
+      /^[ \t]*(export\s+(?:\*(?:\s+as\s+[A-Za-z_$][\w$]*)?|\{[^}]*\})\s*from\s*['"][^'"]*_FIXTURE[^'"]*['"]\s*;)/gm,
+      (m, stmt) => hoistOne(m, stmt),
+    );
+    if (hoistedStmts.length > 0) {
+      hoistedImports = hoistedStmts.join("\n") + "\n";
+    }
+  }
+
   // (#2895 PATH B) Async tests: pump the microtask ring before reading the
   // result so genuinely-pending async-frame continuations (which carry the
   // assertions) run. `__drain_microtasks()` is a compiler intrinsic — the native
@@ -2497,7 +2655,7 @@ export function test(): number {
   const asyncDrainDecl = isAsyncTest ? `declare function __drain_microtasks(): void;\n` : "";
   const asyncDrainCall = isAsyncTest ? `  __drain_microtasks();\n` : "";
   const preBody = `${strictDirective}
-${asyncDrainDecl}${preamble}
+${hoistedImports}${asyncDrainDecl}${preamble}
 ${hoistedDecls}
 export function test(): number {
   ${implicitDecls}
@@ -2509,6 +2667,9 @@ export function test(): number {
     throw e;
   }
 ${asyncDrainCall}  if (__fail) { return __fail; }
+  // (#2939/#2940) Vacuity gate: a would-be pass whose harness callback never
+  // executed (invoked wrapper + zero counted asserts) is VACUOUS, not a pass.
+  if (__harness_cb_expected > 0 && __assert_count === 1) { return -262; }
   return 1;
 }
 `;
@@ -2662,6 +2823,15 @@ export interface TestResult {
   status: "pass" | "fail" | "skip" | "compile_error";
   reason?: string;
   error?: string;
+  /**
+   * (#2939/#2940) True when this `fail` is actually a VACUITY correction: the
+   * test would have "passed" but its harness-wrapper callback (testWith*
+   * Constructors) never executed, so no assertion ran. Kept distinct from a
+   * genuine assertion/semantic fail so the report can tally the integrity
+   * correction separately (previously-counted-pass → not-pass). Excluded from
+   * `pass` (and thus `host_free_pass` / the standalone floor) by being `fail`.
+   */
+  vacuous?: boolean;
   timing?: TestTiming;
   /**
    * 12-char sha256 hex digest of the compiled Wasm binary, or null if no
@@ -2842,7 +3012,8 @@ export async function handleNegativeTest(
  * We try to extract the quoted function name from the stack trace.
  */
 export function extractWasmFuncName(err: any): string | undefined {
-  const stack = err?.stack ?? String(err);
+  // (#2962) guarded stringify — see extractWasmCallStack.
+  const stack = err?.stack ?? safeStringifyThrown(err);
   // V8 format: at funcName (wasm://...)
   const atMatch = stack.match(/at\s+(\w[\w$]*)\s+\(wasm:\/\//);
   if (atMatch) return atMatch[1];
@@ -2972,6 +3143,33 @@ function safeStringifyThrown(v: any): string {
   }
 }
 
+/**
+ * (#2962) Render a natively-thrown Wasm-GC payload through the module's own
+ * `__exn_render_prepare` / `__exn_render_char` exports (standalone/wasi
+ * binaries emit them at finalize). The module runs the payload through the
+ * same `__any_to_string` chain its in-module `String(x)` uses — so an
+ * `$Error_struct` renders "TypeError: boom" per §20.5.3.4 and a Test262Error
+ * yields its real assertion message — then exposes the flat string one code
+ * unit at a time (WasmGC arrays are not host-indexable). Returns `null`
+ * when the exports are absent (JS-host binaries), the payload renders empty,
+ * or anything throws — the caller then falls back to the #2870 opaque label.
+ * The 64k cap is defensive (a corrupt length must not build a giant string).
+ */
+function tryNativeExnRender(instance: any, payload: any): string | null {
+  try {
+    const prep = instance?.exports?.__exn_render_prepare;
+    const chr = instance?.exports?.__exn_render_char;
+    if (typeof prep !== "function" || typeof chr !== "function") return null;
+    const len = prep(payload);
+    if (typeof len !== "number" || len <= 0 || len > 65536) return null;
+    let out = "";
+    for (let i = 0; i < len; i++) out += String.fromCharCode(chr(i));
+    return out;
+  } catch {
+    return null;
+  }
+}
+
 export function extractWasmExceptionMessage(err: any, instance: any): string {
   if (typeof WebAssembly !== "undefined" && err instanceof (WebAssembly as any).Exception) {
     let payload: any = null;
@@ -2986,7 +3184,17 @@ export function extractWasmExceptionMessage(err: any, instance: any): string {
     if (payload instanceof Error) {
       return payload.message ?? safeStringifyThrown(payload);
     }
-    if (payload != null) return safeStringifyThrown(payload);
+    if (payload != null) {
+      // (#2962) A host-opaque GC payload (typeof "object"/"function") renders
+      // through the module's own exports before falling back to the #2870
+      // label. Host-readable primitives keep the direct String() path.
+      const t = typeof payload;
+      if (t === "object" || t === "function") {
+        const native = tryNativeExnRender(instance, payload);
+        if (native != null) return native;
+      }
+      return safeStringifyThrown(payload);
+    }
     return instance ? "TypeError (null/undefined access)" : "wasm exception during module init";
   }
   if (err instanceof Error) {
@@ -3009,7 +3217,11 @@ export function extractWasmExceptionMessage(err: any, instance: any): string {
  *    { name: "test",  offset: 0x1e7 }]
  */
 export function extractWasmCallStack(err: any): Array<{ name: string; offset: number }> {
-  const stack: string = err?.stack ?? String(err);
+  // (#2962) Same #2870 hazard one level up: `String(err)` on an exotic thrown
+  // value (poisoned/prototype-less object) throws a host TypeError that would
+  // crash the runner mid-test instead of recording the failure. Route through
+  // the guarded stringifier.
+  const stack: string = err?.stack ?? safeStringifyThrown(err);
   const frames: Array<{ name: string; offset: number }> = [];
   // V8 format: `at <name> (wasm://wasm/<hash>:wasm-function[N]:0xOFFSET)`
   const re = /at\s+(\S+)\s+\(wasm:\/\/[^:]*:wasm-function\[\d+\]:0x([0-9a-fA-F]+)\)/g;
@@ -3398,6 +3610,24 @@ export async function runTest262File(
     if (ret === 1 || ret === 1.0) {
       return { file: relPath, category, status: "pass", timing, wasm_sha };
     }
+    // (#2939/#2940) ret === -262: VACUITY sentinel — a would-be pass whose
+    // harness-wrapper callback never executed (invoked wrapper + zero counted
+    // asserts). Scored as `fail` (so host_free_pass / the standalone floor
+    // structurally exclude it) with a distinct `vacuous` marker + reason so the
+    // report can surface the integrity correction ("N previously-counted passes
+    // are vacuous"). This is the durable vacuity rule enforced in-runner: a dead
+    // callback is not a pass.
+    if (ret === -262) {
+      return {
+        file: relPath,
+        category,
+        status: "fail",
+        vacuous: true,
+        error: "vacuous: harness-wrapper callback never executed (#2940) — no assertion ran",
+        timing,
+        wasm_sha,
+      };
+    }
     // ret >= 2: the (ret-1)th assert (1-based) that failed
     //   (__assert_count starts at 1, incremented before check, so first assert → 2)
     // ret == -1: uncaught exception (not from an assert)
@@ -3584,6 +3814,13 @@ export function classifyError(errorMsg: string | undefined): string | undefined 
   // Assertion failures (returned N patterns)
   if (/^returned -1\b/.test(errorMsg)) return "exception_in_test";
   if (/^returned \d+/.test(errorMsg)) return "assertion_fail";
+  // (#2962) A thrown Test262Error IS an assertion failure by definition. The
+  // standalone exception renderer (#2962) surfaces these as
+  // "Test262Error: <assert text>" — before it, such failures were the opaque
+  // #2870 label and fell to "other". Host-lane records are unaffected: there
+  // the payload is a real JS Error and the recorded message is `.message`
+  // WITHOUT the constructor-name prefix.
+  if (/^Test262Error\b/.test(errorMsg)) return "assertion_fail";
 
   // Wasm compile/validation errors (from instantiation)
   if (/Compiling function|No dependency provided|not a function/i.test(errorMsg)) return "wasm_compile";

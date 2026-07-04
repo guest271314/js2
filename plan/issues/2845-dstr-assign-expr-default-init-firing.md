@@ -4,7 +4,7 @@ title: "Assignment-expression destructuring default initializers don't fire on a
 status: done
 assignee: ttraenkler/dstr4
 created: 2026-06-29
-updated: 2026-06-29
+updated: 2026-07-03
 completed: 2026-06-29
 priority: high
 feasibility: hard
@@ -16,7 +16,7 @@ language_feature: destructuring
 goal: spec-completeness
 parent: 2669
 related: [2669, 2758, 2808, 2811, 2769]
-sprint: current
+sprint: 69
 ---
 
 # #2845 — assignment-expression destructuring default-init firing

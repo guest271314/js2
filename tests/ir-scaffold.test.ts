@@ -89,6 +89,8 @@ describe("ir scaffold — phase 1", () => {
     // #1169a (Slice 1) widens the selector to accept `string` params and
     // `string` returns, plus string literals as expression leaves — so
     // `nonNumeric()` and `stringParam(s)` now also enter the IR path.
+    // (#2856 C1) `withWhile` — an early `return` directly as a while body —
+    // is now claimable (statement-level early-return inside C-style loops).
     expect([...sel.funcs].sort()).toEqual([
       "compound",
       "nonNumeric",
@@ -101,6 +103,7 @@ describe("ir scaffold — phase 1", () => {
       "withLet",
       "withLocal",
       "withParam",
+      "withWhile",
     ]);
   });
 

@@ -5,7 +5,7 @@ status: done
 assignee: ttraenkler/impl2910
 completed: 2026-07-01
 priority: medium
-sprint: current
+sprint: 69
 created: 2026-07-01
 feasibility: medium
 task_type: enhancement

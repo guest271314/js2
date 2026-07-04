@@ -4,7 +4,7 @@ title: "≤ES3: Function `.caller` poison-pill must throw TypeError on set (`bou
 status: done
 completed: 2026-06-30
 priority: high
-sprint: current
+sprint: 69
 created: 2026-06-30
 feasibility: medium
 task_type: bug

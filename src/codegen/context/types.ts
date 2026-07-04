@@ -7,6 +7,7 @@
  * to reference context/state shapes.
  */
 import { ts } from "../../ts-api.js";
+import type { TypeOracle } from "../../checker/oracle.js";
 import type { FieldDef, Instr, LocalDef, SourcePos, ValType, WasmModule } from "../../ir/types.js";
 import type { StandaloneRegExpEngineConfig } from "../regexp-standalone.js";
 import type { ObjectRuntimeTypes } from "../object-runtime.js";
@@ -82,6 +83,23 @@ export interface CodegenOptions {
    *  `__unbox_string` JS-host string imports. Used so the compiled module is
    *  runnable under pure-Wasm engines (wasmtime, wasmer) without a JS host. */
   standalone?: boolean;
+  /**
+   * (#2141 S1) Honest generic `any` boxing — the Stage-B regime flag. When ON,
+   * `boxToAny`'s externref arm routes through `__any_box_extern` (runtime
+   * classification → true `JsTag`) instead of the historical tag-5
+   * "box-the-externref" lie (#1888). Default OFF: byte-identical to the legacy
+   * regime (the honest helper is not even registered). Flips to default-on for
+   * standalone/wasi in slice S4 after the consumer migration (S2/S3) lands —
+   * see plan/issues/2141-tag5-abi-untangle-honest-boxing.md.
+   */
+  honestAnyBoxing?: boolean;
+  /** (#2141 S2/S3, #2626) Tag-5 boxed-VALUE equality classifier — see the
+   *  `CompileOptions.tag5ValueEqClassifier` doc. Default false (legacy). */
+  tag5ValueEqClassifier?: boolean;
+  /** (#2106 S1) Standalone `$undefined` tag-1 singleton regime — see the
+   *  `CompileOptions.undefinedSingleton` doc. Default false (legacy:
+   *  undefined ≡ null ≡ ref.null.extern in standalone, byte-identical). */
+  undefinedSingleton?: boolean;
   /** (#2796) Diff-test-harness fidelity: in JS-host mode, export the top-level
    *  `__module_init` and do NOT run it via the wasm `start` section, so the host
    *  invokes it AFTER `setExports` (symmetric with the standalone `_start`
@@ -96,6 +114,15 @@ export interface CodegenOptions {
    * direct-emission path (bit-by-bit divergence tests or emergency revert).
    */
   experimentalIR?: boolean;
+  /**
+   * (#2973) Opt out of the `JS2WASM_IR_FIRST` compile-once inversion for this
+   * compile, regardless of the ambient env flag. Set by semantics-critical
+   * in-process sub-compiles (the `eval` / `new Function` host shims) so an
+   * IR-first post-claim hard error there is not swallowed by the shim's
+   * fallback `catch` and silently turned into `undefined`. Leaves the ordinary
+   * IR overlay (`experimentalIR`) untouched. Default: false.
+   */
+  disableIrFirst?: boolean;
   /**
    * #2089 — count silent codegen fallbacks via `reportSilentFallback` and, when
    * set, surface each as a warning diagnostic. Used by
@@ -317,6 +344,18 @@ export interface FunctionContext {
   generatorReturnDepth?: number;
   /** Map from variable name → ref cell info (for mutable closure captures) */
   boxedCaptures?: Map<string, { refCellTypeIdx: number; valType: ValType }>;
+  /**
+   * (#2976) Per-activation memo locals for capture-carrying nested function
+   * declarations referenced as VALUES: funcName → local holding the
+   * `(ref null $__fn_cap_<name>_struct)` closure instance. Every reference
+   * site emits a `ref.is_null`-guarded lazy build into this local instead of
+   * constructing a fresh struct per reference, so `f === f` holds and
+   * sidecar/static writes land on the same instance every reference sees.
+   * The guard (rather than a prologue hoist) preserves the existing
+   * value-capture semantics: immutable captures are copied at the FIRST
+   * dynamic reference, exactly where the old per-site build copied them.
+   */
+  nestedFnClosureMemos?: Map<string, number>;
   /** Whether this function is a class constructor (for new.target support) */
   isConstructor?: boolean;
   /** Whether this constructor belongs to a class declared with `extends`. Spec §10.2.1.3
@@ -723,6 +762,14 @@ export interface FunctionContext {
 export interface CodegenContext {
   mod: WasmModule;
   checker: ts.TypeChecker;
+  /**
+   * (#1930) THE type-query boundary. Prefer `ctx.oracle` over raw
+   * `ctx.checker` in ALL new code — the oracle-ratchet CI gate fails on
+   * growth of direct checker usage under src/codegen/. Registry-free,
+   * side-effect-free, memoized; returns TypeFact (never ts.Type). The
+   * codegen-side fact→ValType adapter performs registration separately.
+   */
+  oracle: TypeOracle;
   /** Map from function name to its absolute index (imports + locals) */
   funcMap: Map<string, number>;
   /** Map from struct/interface name to type index */
@@ -826,14 +873,32 @@ export interface CodegenContext {
   exportSignatures: Map<string, import("../../ir/types.js").ExportSignature>;
   /** Map from className → parent className (for inheritance chain walk) */
   externClassParent: Map<string, string>;
-  /** Map from global name (e.g. "document") → import info */
-  declaredGlobals: Map<string, { type: ValType; funcIdx: number }>;
+  /** Map from global name (e.g. "document") → import info. `className` is
+   *  the extern class of the global's declared type ("Document") — recorded
+   *  at registration for the IR host-extern path (#2856), which types the
+   *  `call global_<name>` handle as `IrType.extern { className }`. */
+  declaredGlobals: Map<string, { type: ValType; funcIdx: number; className?: string }>;
   /** Counter for generated callback functions (__cb_0, __cb_1, ...) */
   callbackCounter: number;
   /** Map from captured variable name → global index in mod.globals */
   capturedGlobals: Map<string, number>;
   /** Captured globals whose type was widened from ref to ref_null for null init */
   capturedGlobalsWidened: Set<string>;
+  /**
+   * (#2029 family A) Mutable-capture ref-cell boxes promoted to module
+   * globals so an accessor body can materialize a nested function's closure.
+   * When an object-literal getter/setter references a nested function `f`
+   * whose captures include a MUTABLE outer local `v`, the closure-construction
+   * code inside the accessor needs the SAME ref-cell box the enclosing
+   * function writes through — an outer-fctx local slot (`cap.outerLocalIdx`)
+   * is unreachable from the accessor's own function (baking it emit-crashed
+   * with "local index out of range", or silently read the wrong local when
+   * the stale index happened to be in range). `promoteAccessorCapturesToGlobals`
+   * boxes `v` eagerly in the enclosing fctx and aliases the box in a module
+   * global of type `(ref null $cell)`; closure-materialization sites source
+   * the capture from here when the current fctx cannot resolve it.
+   */
+  capturedBoxGlobals?: Map<string, { globalIdx: number; refCellTypeIdx: number }>;
   /** Set of class names (local classes compiled to Wasm GC structs) */
   classSet: Set<string>;
   /**
@@ -1303,11 +1368,31 @@ export interface CodegenContext {
   preRegisteredBodyless?: Set<string>;
   /** Map from module-level variable name → global index in mod.globals */
   moduleGlobals: Map<string, number>;
+  /**
+   * (#2931) Names of function declarations that are *reassigned* somewhere in the
+   * realm (`fn = …`). ES function bindings are live/mutable, so such a name is
+   * backed by a mutable `externref` module global (registered in `moduleGlobals`)
+   * that both the reassignment (`global.set`) and every read (`global.get`) go
+   * through. Import aliases of a reassigned function propagate into this set too
+   * (see `registerImportBindingAliases`). Empty for the common case (no function
+   * declaration is ever reassigned), so non-affected programs stay byte-identical.
+   */
+  liveFuncBindingGlobals?: Set<string>;
   /** Deferred `export default <variable>` where variable is a module global (#1108).
    *  Resolved after all collectDeclarations calls when global indices are final. */
   deferredDefaultGlobalExport?: string;
   /** Module-level variable initializers (compiled into __module_init) */
   moduleInitStatements: ts.Statement[];
+  /**
+   * (#2976) Module-level dedupe of the value-closure artifacts for a
+   * capture-carrying nested function declaration: funcName → its ONE custom
+   * closure struct type and trampoline. Previously every reference site
+   * minted a fresh struct type + trampoline function (and a fresh instance —
+   * the identity bug). The trampoline is stored by NAME and re-resolved
+   * through `ctx.funcMap` at each emission so late-import funcIdx shifts
+   * cannot desync a cached raw index.
+   */
+  nestedFnClosureArtifacts?: Map<string, { structTypeIdx: number; trampolineName: string }>;
   /** Nested function capture info. */
   nestedFuncCaptures: Map<
     string,
@@ -1460,6 +1545,16 @@ export interface CodegenContext {
    * the #329 native-string finalize-shift hazard. `undefined` until reserved.
    */
   undefinedGlobalIdx?: number;
+  /**
+   * (#3032 / #2141-S2) Global index of the `mut i32` `__gen_eager_mode` flag
+   * for LAZY generator-expression creation. 0 (default) = a zero-param
+   * `function*(){}` expression returns a lazy thunk generator
+   * (`__create_generator(<self closure>, null)`); the host sets the flag via
+   * the exported `__gen_set_eager` around the deferred first-`next()` body
+   * run. Reserved lazily by `ensureGenEagerFlag` (closures.ts); `undefined`
+   * until the first lazy-eligible generator expression is compiled.
+   */
+  genEagerFlagGlobalIdx?: number;
   /** Map from any-value helper name → function index */
   anyHelpers: Map<string, number>;
   /** Whether any-value helper functions have been emitted */
@@ -1557,6 +1652,23 @@ export interface CodegenContext {
    * `ctx.standalone`).
    */
   objectHashConsumerVars: Set<string>;
+  /**
+   * (#2937) HOST-mode companion to `objectHashConsumerVars`, keyed by ts.Type
+   * identity instead of variable name. In a JS-mode source file (acorn.mjs),
+   * the checker EVOLVES `var o = {}` through its later static-named writes into
+   * an anonymous object type WITH those properties. `resolveWasmType` /
+   * `ensureStructForType` would auto-register that evolved type as a closed
+   * `__anon_N` struct and type the LOCAL (and every flow position: returns,
+   * class fields, receivers) as `(ref null __anon_N)` — while the poisoned
+   * initializer builds a host plain object (externref). The declaration's
+   * guarded cast then stores ref.null and every static read null-derefs (the
+   * compiled-acorn `getOptions` uniform throw). Types recorded here refuse
+   * struct resolution and stay externref end to end, so ALL access forms on a
+   * poisoned var route through the host MOP (`__extern_get`/`__extern_set`)
+   * coherently. Populated only in host/gc/wasi mode (standalone keeps its
+   * pre-existing codegen byte-identical; its matching gap is filed separately).
+   */
+  objectHashConsumerTypes: Set<ts.Type>;
   /**
    * (#2837) Variable names initialized by a NON-EMPTY object literal that later
    * receives an OUT-OF-SHAPE property write (a direct `V.k=` with `k` not in the
@@ -1774,6 +1886,21 @@ export interface CodegenContext {
    *  `__unbox_string`, `__str_from_mem`, `__str_to_mem`,
    *  `__str_extern_len`). Implies `nativeStrings === true`. */
   standalone: boolean;
+  /** (#2141 S1) Honest generic `any` boxing regime flag — see the
+   *  `CodegenOptions.honestAnyBoxing` doc. Default false (legacy tag-5
+   *  box-the-externref ABI, byte-identical). */
+  honestAnyBoxing: boolean;
+  /** (#2141 S2/S3, #2626) Tag-5 boxed-VALUE equality classifier — three-way
+   *  true-class dispatch in the both-tags-5 eq arm (numeric `f64.eq` /
+   *  string content / object `ref.eq`). Default false (legacy `0` for
+   *  non-string tag-5 pairs). `JS2WASM_TAG5_CLASSIFIER=1` env defaults it on
+   *  for runner-level A/B. */
+  tag5ValueEqClassifier: boolean;
+  /** (#2106 S1) Standalone `$undefined` tag-1 singleton regime flag — see the
+   *  `CompileOptions.undefinedSingleton` doc. Default false (legacy:
+   *  undefined ≡ null ≡ ref.null.extern, byte-identical). Only meaningful
+   *  under standalone/nativeStrings; host mode ignores it. */
+  undefinedSingleton: boolean;
   /** (#2796) Diff-test-harness fidelity: in JS-host mode, export the top-level
    *  `__module_init` and do NOT wire the wasm `start` section to it, so the host
    *  runs it after `setExports` (symmetric with the standalone `_start` model).
@@ -1815,6 +1942,31 @@ export interface CodegenContext {
    *  member name (e.g. `RegExp.prototype.test.length === 1`,
    *  `.name === "test"`). Populated by `ensureStandaloneNativeMethodClosure`. */
   nativeClosureMeta?: Map<number, { name: string; length: number }>;
+  /** (#2896) Struct-type index → static `{name, length}` metadata for builtin
+   *  function-closure values under `--target standalone`. Each (builtin, member)
+   *  closure gets a UNIQUE wrapper-struct SUBTYPE (fields `[funcref func,
+   *  (mut i32) bfnstate]`, supertype = its signature wrapper struct), so the
+   *  reflective runtime natives (`__getOwnPropertyDescriptor` / `__extern_get` /
+   *  `__hasOwnProperty` / `__getOwnPropertyNames` / `__delete_property`) can
+   *  `ref.test` the value at RUNTIME and answer its spec `name`/`length` own
+   *  properties. Populated by `ensureBuiltinFnMetaType` (builtin-fn-meta.ts);
+   *  consumed by `fillBuiltinFnMeta` (object-runtime.ts) at finalize. */
+  builtinFnMetaByTypeIdx?: Map<number, { name: string; length: number }>;
+  /** (#2896) Cache: `(builtin, member)` key → the meta struct-type index above.
+   *  Keeps `ensureBuiltinFnMetaType` idempotent per closure identity. */
+  builtinFnMetaTypeByKey?: Map<string, number>;
+  /** (#2963) Reified-builtin-value IDENTITY substrate. A builtin static method
+   *  read AS A VALUE (`const r = Promise.resolve`, `[1,2].map(Number.isInteger)`)
+   *  must be a MODULE-LEVEL SINGLETON: every read of the same (builtin, member)
+   *  yields the SAME ref so `Promise.resolve === Promise.resolve` holds and a
+   *  `delete fn.name` mutates the one shared object (ES: builtin methods are a
+   *  single function object). Keyed by the meta/wrapper struct-type index (the
+   *  per-(builtin, member) unique type from `ensureBuiltinFnMetaType`), the value
+   *  is the index of a `(ref null <structType>)` mutable global that
+   *  `pushBuiltinFnSingletonValueInstrs` lazily materializes once (a null-guarded
+   *  `struct.new` in a shift-covered function body — NOT a const-init, whose
+   *  embedded `ref.func` the late-import funcidx shifter does not walk). */
+  builtinFnSingletonGlobalByTypeIdx?: Map<number, number>;
   /** (#2193 PR-B) Struct-type indices of `$NativeProto` member closures whose
    *  FIRST user param is the receiver (`this`) — e.g. `Array.prototype.slice`'s
    *  `(self, this, start, end)` closure. Unlike a plain user function (which
@@ -2066,13 +2218,6 @@ export interface CodegenContext {
    * declared externref.
    */
   jsxRuntime?: import("../../import-resolver.js").JsxRuntimeImport;
-  /**
-   * #1261 — module-wide worst-case eval tier (1=no eval … 5=direct sloppy).
-   * Computed read-only by `classifyEvalTier`; downstream optimization gating
-   * (#1262–#1265) consumes it. Optional because not every context constructs
-   * from a full source file.
-   */
-  evalTier?: import("../eval-tiering.js").EvalTier;
 }
 
 export type { SourcePos };

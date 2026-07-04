@@ -3,7 +3,7 @@ id: 2897
 title: "≤ES3: `arguments` as assignment target crashes (null-deref)"
 status: done
 priority: high
-sprint: current
+sprint: 69
 created: 2026-06-30
 completed: 2026-06-30
 assignee: ttraenkler/es3-2897

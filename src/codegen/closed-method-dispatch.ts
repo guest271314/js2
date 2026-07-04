@@ -44,6 +44,7 @@ import { ensureObjVecBuilders } from "./object-runtime.js";
 import { addStringConstantGlobal } from "./registry/imports.js";
 import { addFuncType, getOrRegisterVecBaseType } from "./registry/types.js";
 import { addUnionImportsViaRegistry } from "./shared.js";
+import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S2 read chokepoint / S3b stable-regime minting)
 
 /**
  * (#2583) The callback-free, argument-taking array search/predicate methods
@@ -54,6 +55,28 @@ import { addUnionImportsViaRegistry } from "./shared.js";
  * `indexOf`/`lastIndexOf` use Strict Equality.
  */
 const VEC_SEARCH_METHODS = new Set(["indexOf", "lastIndexOf", "includes"]);
+
+/**
+ * (#2927 / #2784 residual) The in-place array MUTATION methods that get a native
+ * `$__vec_base` brand arm in the closed-method dispatcher so a genuinely-`any`
+ * array receiver (`const a:any=[…]; a.push(x)` / `a.pop()`) actually mutates the
+ * backing WasmGC vec instead of falling to the open-`$Object` arm (which returns
+ * `undefined` and silently DROPS the element — a host-free data-loss bug: on
+ * `--target standalone` `[1,2].push(3)` left `.length===2` and returned 0). The
+ * native-vec push/pop dispatch in `calls.ts` (#2784 S3) is JS-host/gc gated, so
+ * standalone/wasi `.push`/`.pop` on an `any`/externref vec previously no-op'd.
+ *
+ * `push` is arity 1 (`recv, arg0`), `pop` is arity 0 (`recv`). Both route to the
+ * carrier-generic `__vec_push` / `__vec_pop` helpers (grow-and-append / pop-last
+ * over every registered vec carrier), so no per-element-kind specialization is
+ * needed here.
+ */
+const VEC_MUTATE_METHODS = new Set(["push", "pop"]);
+
+/** True when `methodName`/`arity` is a supported native-vec mutation form. */
+function isVecMutateForm(methodName: string, arity: number): boolean {
+  return (methodName === "push" && arity === 1) || (methodName === "pop" && arity === 0);
+}
 
 /**
  * Mangle a method name + arg count into the reserved dispatcher export/funcMap
@@ -121,11 +144,24 @@ export function reserveClosedMethodDispatch(ctx: CodegenContext, methodName: str
     addUnionImportsViaRegistry(ctx);
   }
 
+  // (#2927) For the in-place array MUTATION methods (`push`/`pop`), register the
+  // native `$__vec_base` brand-arm deps NOW so the fill only READS funcMap
+  // (#1719): the `$__vec_base` supertype and `__box_number` (push returns an i32
+  // length that the arm boxes). The carrier-generic `__vec_push` / `__vec_pop`
+  // helper is reserved by the CALL SITE (`calls.ts`, which already imports
+  // `reserveVecMethodHelper` from `../index.js` — importing it here would form an
+  // eval-time circular-import cycle: `index.ts` imports this module for
+  // `fillClosedMethodDispatch`). Standalone/wasi only.
+  if ((ctx.standalone || ctx.wasi) && VEC_MUTATE_METHODS.has(methodName) && isVecMutateForm(methodName, arity)) {
+    getOrRegisterVecBaseType(ctx);
+    addUnionImportsViaRegistry(ctx); // __box_number for the push new-length result
+  }
+
   // Signature: (recv, arg0..arg{arity-1}) all externref → externref.
   const params: ValType[] = Array.from({ length: arity + 1 }, () => ({ kind: "externref" }) as ValType);
   const typeIdx = addFuncType(ctx, params, [{ kind: "externref" }], `$closed_method_dispatch_type_${arity}`);
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-  ctx.mod.functions.push({
+  const funcIdx = mintDefinedFunc(ctx);
+  pushDefinedFunc(ctx, funcIdx, {
     name,
     typeIdx,
     locals: [],
@@ -175,8 +211,8 @@ export function reserveClosedMethodDispatchVararg(ctx: CodegenContext, methodNam
     [{ kind: "externref" }],
     "$closed_method_dispatch_vararg_type",
   );
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-  ctx.mod.functions.push({
+  const funcIdx = mintDefinedFunc(ctx);
+  pushDefinedFunc(ctx, funcIdx, {
     name,
     typeIdx,
     locals: [],
@@ -214,7 +250,7 @@ function collectMethodEntries(ctx: CodegenContext, methodName: string, exactArit
 
     const funcIdx = ctx.funcMap.get(`${structName}_${methodName}`);
     if (funcIdx === undefined) continue;
-    const funcDef = mod.functions[funcIdx - ctx.numImportFuncs];
+    const funcDef = definedFuncAt(ctx, funcIdx);
     const funcType = funcDef ? mod.types[funcDef.typeIdx] : undefined;
     if (!funcType || funcType.kind !== "func") continue;
     // Must be `this` + (exactArity) declared params, unless vararg (any arity).
@@ -311,7 +347,7 @@ export function fillClosedMethodDispatch(ctx: CodegenContext): void {
     const arity = slash >= 0 ? Number.parseInt(key.slice(slash + 1), 10) || 0 : 0;
     const dispIdx = ctx.funcMap.get(dispatcherName(methodName, arity));
     if (dispIdx === undefined) continue;
-    const dispFn = mod.functions[dispIdx - ctx.numImportFuncs];
+    const dispFn = definedFuncAt(ctx, dispIdx);
     if (!dispFn) continue;
 
     // Param layout: local 0 = recv, locals 1..arity = externref args,
@@ -487,6 +523,76 @@ export function fillClosedMethodDispatch(ctx: CodegenContext): void {
       ];
     }
 
+    // (#2927) `$__vec_base` brand arm for the in-place array MUTATION methods
+    // (`push` arity 1 / `pop` arity 0). A genuinely-`any` array receiver is a
+    // `$__vec_base`-subtyped struct that matches no `entries` arm; without this
+    // it falls to the open-`$Object` bottom arm which returns `undefined` and (for
+    // push) silently drops the element — a host-free data-loss bug on
+    // `--target standalone` (the #2784 S3 JS-host/gc-gated native-vec dispatch
+    // never fires standalone). Route to the carrier-generic `__vec_push` /
+    // `__vec_pop` helpers (reserved at reserve-time; body filled in the finalize
+    // vec-export pass).
+    const vecPushIdx = ctx.funcMap.get("__vec_push");
+    const vecPopIdx = ctx.funcMap.get("__vec_pop");
+    const wantVecMutArm =
+      (ctx.standalone || ctx.wasi) &&
+      VEC_MUTATE_METHODS.has(methodName) &&
+      isVecMutateForm(methodName, arity) &&
+      ctx.vecBaseTypeIdx >= 0;
+    if (wantVecMutArm) {
+      let mutArmBody: Instr[] | undefined;
+      if (methodName === "push" && vecPushIdx !== undefined && ci.boxNumIdx !== undefined) {
+        // __vec_push(recv, arg0) -> i32 new length, or -1 when the vec's element
+        // kind is NOT push-supported (e.g. a native-string carrier — see
+        // `mutEntries` in index.ts, which covers only externref/f64/i32). On the
+        // -1 sentinel we must NOT box -1 as a bogus "new length"; instead return
+        // `undefined` (ref.null.extern), matching the pre-#2927 open-`$Object`
+        // fall-through so an unsupported carrier is no WORSE than before (its
+        // `.length` was already unchanged). A scratch i32 holds the result across
+        // the sign test.
+        const pushLenLocalIdx = arity + 1 + locals.length;
+        locals.push({ name: "__vpushlen", type: { kind: "i32" } });
+        mutArmBody = [
+          { op: "local.get", index: 0 } as Instr, // recv (externref)
+          { op: "local.get", index: 1 } as Instr, // arg0 (externref)
+          { op: "call", funcIdx: vecPushIdx } as Instr,
+          { op: "local.tee", index: pushLenLocalIdx } as Instr,
+          { op: "i32.const", value: 0 } as Instr,
+          { op: "i32.lt_s" } as Instr, // newLen < 0 → unsupported carrier
+          {
+            op: "if",
+            blockType: { kind: "val", type: { kind: "externref" } },
+            then: [{ op: "ref.null.extern" } as Instr], // undefined (pre-#2927 behavior)
+            else: [
+              { op: "local.get", index: pushLenLocalIdx } as Instr,
+              { op: "f64.convert_i32_s" } as Instr,
+              { op: "call", funcIdx: ci.boxNumIdx } as Instr,
+            ],
+          } as Instr,
+        ];
+      } else if (methodName === "pop" && vecPopIdx !== undefined) {
+        // __vec_pop(recv) -> externref (already-boxed last element; null.extern for
+        // an empty OR unsupported-carrier vec — both map to `undefined`, which is
+        // exactly the pre-#2927 fall-through result, so no guard is needed).
+        mutArmBody = [
+          { op: "local.get", index: 0 } as Instr, // recv (externref)
+          { op: "call", funcIdx: vecPopIdx } as Instr,
+        ];
+      }
+      if (mutArmBody !== undefined) {
+        current = [
+          { op: "local.get", index: anyLocalIdx } as Instr,
+          { op: "ref.test", typeIdx: ctx.vecBaseTypeIdx } as Instr,
+          {
+            op: "if",
+            blockType: { kind: "val", type: { kind: "externref" } },
+            then: mutArmBody,
+            else: current,
+          } as Instr,
+        ];
+      }
+    }
+
     for (const entry of entries) {
       const callAndCoerce = buildEntryArm(ci, anyLocalIdx, entry, (a) => [{ op: "local.get", index: 1 + a } as Instr]);
       current = [
@@ -516,7 +622,7 @@ export function fillClosedMethodDispatch(ctx: CodegenContext): void {
   for (const methodName of ctx.closedMethodDispatchVarargNames ?? []) {
     const dispIdx = ctx.funcMap.get(varargDispatcherName(methodName));
     if (dispIdx === undefined) continue;
-    const dispFn = mod.functions[dispIdx - ctx.numImportFuncs];
+    const dispFn = definedFuncAt(ctx, dispIdx);
     if (!dispFn) continue;
 
     // Param layout: local 0 = recv, local 1 = args (externref), local 2 = `any`.

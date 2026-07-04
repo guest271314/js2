@@ -69,3 +69,24 @@ territory, not a bounded JS-host dev point-fix. Routing there.
 Fold the ~15 rows into #1373b's CPS-await Phase C (synchronous-settlement of an
 in-tick-resolvable awaited value). Do NOT re-attempt as a legacy-arm host
 point-fix while `ASYNC_CPS_ENABLED = true`.
+
+## Unified-spec routing (architect, 2026-07-04) — supersedes the recommendation above
+
+This issue is now covered by the **unified Promise semantics spec in #2623
+(§P2 thenable assimilation, §P3 job-queue contract, §P7 slice queue)**. The
+routing splits by lane, and the "synchronous settlement" idea is explicitly
+REJECTED — collapsing an in-tick-resolvable await to synchronous settlement
+violates the spec tick contract (#2623 §P3 J-5, observable via the
+interleaving tests in this issue's own row list). The honest fix is:
+
+- **Host-lane rows (~15 here)** → **#2623 §P7 slice P-8** (runner drain
+  contract: the harness yields a turn before reading the verdict, plus the
+  `Test262Error.thrower` / `promiseHelper.js` shims). Harness change,
+  Opus-executable, MEASURED (expect honest flips both ways).
+- **Standalone twin** (await on a thenable under the native carrier) →
+  **#2623 §P7 slice P-4** (generic-thenable arm in `__promise_resolve_value`
+  + await-operand normalization through PromiseResolve on the #2906 suspend
+  terminator), sequenced after Fable slice P-3.
+
+The `depends_on: 1373b` framing is superseded by the P-8/P-4 routing; keep
+`blocked` until either slice lands, then re-measure this row list.

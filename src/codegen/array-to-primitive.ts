@@ -31,6 +31,7 @@ import type { CodegenContext } from "./context/types.js";
 import type { Instr, WasmFunction, ValType } from "../ir/types.js";
 import { addFuncType } from "./registry/types.js";
 import { nativeStringLiteralInstrs } from "./native-strings.js";
+import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S2 read chokepoint / S3b stable-regime minting)
 
 export const ARRAY_TO_PRIMITIVE_STRING = "__array_to_primitive_string";
 
@@ -45,7 +46,7 @@ export function reserveArrayToPrimitiveString(ctx: CodegenContext): number {
   const existing = ctx.funcMap.get(ARRAY_TO_PRIMITIVE_STRING);
   if (existing !== undefined) return existing;
   const sigIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "externref" }], "$array_to_primitive_string_type");
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const funcIdx = mintDefinedFunc(ctx);
   const placeholder: WasmFunction = {
     name: ARRAY_TO_PRIMITIVE_STRING,
     typeIdx: sigIdx,
@@ -56,7 +57,7 @@ export function reserveArrayToPrimitiveString(ctx: CodegenContext): number {
     body: [{ op: "unreachable" } as Instr],
     exported: false,
   };
-  ctx.mod.functions.push(placeholder);
+  pushDefinedFunc(ctx, funcIdx, placeholder);
   ctx.funcMap.set(ARRAY_TO_PRIMITIVE_STRING, funcIdx);
   ctx.arrayToPrimitiveReserved = true;
   return funcIdx;
@@ -83,7 +84,7 @@ export function fillArrayToPrimitive(ctx: CodegenContext): void {
   if (!ctx.arrayToPrimitiveReserved) return;
   const driverIdx = ctx.funcMap.get(ARRAY_TO_PRIMITIVE_STRING);
   if (driverIdx === undefined) return;
-  const fn = ctx.mod.functions[driverIdx - ctx.numImportFuncs];
+  const fn = definedFuncAt(ctx, driverIdx);
   if (!fn) return;
 
   const externLengthIdx = ctx.funcMap.get("__extern_length");
@@ -160,8 +161,13 @@ export function fillArrayToPrimitive(ctx: CodegenContext): void {
             { op: "f64.convert_i32_s" },
             { op: "call", funcIdx: externGetIdxIdx },
             { op: "local.tee", index: L_ELEM },
-            // §23.1.3.31: null/undefined element → "" (skip the concat)
-            { op: "ref.is_null" },
+            // §23.1.3.31: null/undefined element → "" (skip the concat).
+            // (#2106 S1) under the singleton regime an undefined element is a
+            // NON-null externref — test nullish, not bare null, or join would
+            // render it as "undefined".
+            ...(ctx.funcMap.has("__extern_is_nullish")
+              ? [{ op: "call", funcIdx: ctx.funcMap.get("__extern_is_nullish")! } as Instr]
+              : [{ op: "ref.is_null" } as Instr]),
             { op: "i32.eqz" },
             {
               op: "if",

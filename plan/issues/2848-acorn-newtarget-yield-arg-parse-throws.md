@@ -3,7 +3,7 @@ id: 2848
 title: "compiled-acorn THROWS parsing `new.target`, `yield <expr>`, and `for await…of` — additional parser-execution walls beyond the #2838 return wall"
 status: done
 completed: 2026-06-30
-sprint: current
+sprint: 69
 priority: medium
 horizon: m
 feasibility: hard

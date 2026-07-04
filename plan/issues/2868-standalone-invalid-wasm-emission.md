@@ -4,13 +4,13 @@ title: "Standalone: invalid Wasm binary emitted (correctness) — __uri_encode/_
 status: done
 completed: 2026-06-30
 created: 2026-06-30
-updated: 2026-06-30
+updated: 2026-07-03
 priority: high
 feasibility: medium
 task_type: bug
 area: codegen
 goal: standalone
-sprint: current
+sprint: 69
 horizon: m
 related: [2860]
 umbrella: 2860

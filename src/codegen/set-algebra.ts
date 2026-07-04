@@ -27,6 +27,7 @@ import { ts } from "../ts-api.js";
 import type { Instr, ValType } from "../ir/types.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { addFuncType } from "./registry/types.js";
+import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S3) stable-regime minting
 import type { InnerResult } from "./shared.js";
 import { compileExpression } from "./shared.js";
 import { ensureMapHelpers } from "./map-runtime.js";
@@ -116,9 +117,9 @@ export function ensureSetAlgebraHelpers(ctx: CodegenContext): void {
 
   const addFn = (name: string, results: ValType[], localTypes: ValType[], body: Instr[]): void => {
     const typeIdx = addFuncType(ctx, [mref, mref], results);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.mapHelpers.set(name, funcIdx);
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name,
       typeIdx,
       locals: localTypes.map((type, i) => ({ name: `__sa_l${i}`, type })),

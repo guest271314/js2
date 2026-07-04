@@ -162,8 +162,9 @@ RUN npm i -g @openai/codex
 
 # Copy and set up firewall script
 COPY init-firewall.sh /usr/local/bin/
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 USER root
-RUN chmod +x /usr/local/bin/init-firewall.sh && \
+RUN chmod +x /usr/local/bin/init-firewall.sh /usr/local/bin/entrypoint.sh && \
   echo "node ALL=(root) NOPASSWD: /usr/local/bin/init-firewall.sh" > /etc/sudoers.d/node-firewall && \
   echo "node ALL=(root) NOPASSWD: /usr/sbin/sshd" >> /etc/sudoers.d/node-firewall && \
   echo "node ALL=(root) NOPASSWD: /usr/bin/chown" >> /etc/sudoers.d/node-firewall && \
@@ -191,3 +192,7 @@ RUN wget -q "https://github.com/tsl0922/ttyd/releases/latest/download/ttyd.$(una
   chmod +x /usr/local/bin/ttyd
 
 USER node
+
+# Starts sshd on every container boot/restart (not just via devcontainer
+# postStartCommand, which doesn't re-fire on a bare `docker restart`).
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

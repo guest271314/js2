@@ -13,6 +13,7 @@ import {
   collectWrittenIdentifiers,
   compileArrowAsCallback,
   compileArrowAsClosure,
+  promoteAccessorCapturesToGlobals,
 } from "./closures.js";
 import { reportError } from "./context/errors.js";
 import { allocLocal, allocTempLocal, releaseTempLocal } from "./context/locals.js";
@@ -24,6 +25,7 @@ import { addUnionImports, cacheStringLiterals, getOrRegisterTupleType, resolveWa
 import { ensureObjectRuntime } from "./object-runtime.js";
 import { addStringConstantGlobal, ensureExnTag } from "./registry/imports.js";
 import { addFuncType, getArrTypeIdxFromVec, getOrRegisterRefCellType, getOrRegisterVecType } from "./registry/types.js";
+import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S3) stable-regime minting
 import type { InnerResult } from "./shared.js";
 import { coerceType, compileExpression, compileStatement, ensureLateImport, flushLateImportShifts } from "./shared.js";
 import {
@@ -1898,6 +1900,39 @@ export function compileObjectDefineProperty(
       }
     }
 
+    // (#2029 family A) Promote outer-fctx captures referenced by the
+    // descriptor's get/set bodies BEFORE compiling the bare accessor fns
+    // below. The object-literal accessor path (literals.ts) has always done
+    // this; the defineProperty descriptor path never did — so a descriptor
+    // getter like `get() { loadNextCount++; return next; }` compiled its body
+    // in a fresh fctx with no way to reach the enclosing function's locals,
+    // and materializing the nested fn `next`'s closure baked the enclosing
+    // function's local slot into the accessor body (the
+    // for-of/iterator-next-reference.js "local index out of range" emit
+    // crash — BOTH modes). `promoteAccessorCapturesToGlobals` also promotes
+    // the transitive captures of referenced nested functions (value global
+    // for immutable, shared ref-cell box global for mutable). Placed AFTER
+    // the S5c closure-lift arm so the standalone closure path keeps its
+    // existing capture sourcing.
+    const promoteDescriptorAccessorBody = (
+      node:
+        | ts.MethodDeclaration
+        | ts.GetAccessorDeclaration
+        | ts.SetAccessorDeclaration
+        | ts.FunctionExpression
+        | ts.ArrowFunction
+        | undefined,
+    ): void => {
+      if (!node) return;
+      if (ts.isArrowFunction(node) && !ts.isBlock(node.body)) {
+        promoteAccessorCapturesToGlobals(ctx, fctx, undefined, [node.body]);
+      } else if (node.body) {
+        promoteAccessorCapturesToGlobals(ctx, fctx, node.body as ts.Block);
+      }
+    };
+    promoteDescriptorAccessorBody(getNode);
+    promoteDescriptorAccessorBody(setNode);
+
     // Helper to get body statements from a getter/setter node
     const getBodyStatements = (
       node:
@@ -1940,7 +1975,7 @@ export function compileObjectDefineProperty(
         }
 
         const getterTypeIdx = addFuncType(ctx, getterParams, getterResults, `${getterName}_type`);
-        const getterFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+        const getterFuncIdx = mintDefinedFunc(ctx);
         ctx.funcMap.set(getterName, getterFuncIdx);
 
         const getterFunc: WasmFunction = {
@@ -1950,7 +1985,7 @@ export function compileObjectDefineProperty(
           body: [],
           exported: false,
         };
-        ctx.mod.functions.push(getterFunc);
+        pushDefinedFunc(ctx, getterFuncIdx, getterFunc);
 
         // Compile getter body
         const getterFctx: FunctionContext = {
@@ -2030,7 +2065,7 @@ export function compileObjectDefineProperty(
         }
 
         const setterTypeIdx = addFuncType(ctx, setterParams, [], `${setterName}_type`);
-        const setterFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+        const setterFuncIdx = mintDefinedFunc(ctx);
         ctx.funcMap.set(setterName, setterFuncIdx);
 
         const setterFunc: WasmFunction = {
@@ -2040,7 +2075,7 @@ export function compileObjectDefineProperty(
           body: [],
           exported: false,
         };
-        ctx.mod.functions.push(setterFunc);
+        pushDefinedFunc(ctx, setterFuncIdx, setterFunc);
 
         // Compile setter body
         const setterFctxParams: { name: string; type: ValType }[] = [
@@ -4237,8 +4272,18 @@ export function compilePropertyIntrospection(
     const hopIdx = ensureLateImport(ctx, importName, [{ kind: "externref" }, { kind: "externref" }], [{ kind: "i32" }]);
     flushLateImportShifts(ctx, fctx);
     if (hopIdx !== undefined) {
-      // Push receiver
-      compileExpression(ctx, fctx, propAccess.expression);
+      // Push receiver. `receiverWasm` is the receiver's STATIC type, which
+      // `resolveWasmType` reports as `externref` for a function/method type
+      // (e.g. `RegExp.prototype.test`). But the member access actually emits a
+      // concrete function-object struct `(ref $fn)`, not an externref — so the
+      // pushed value must still be coerced (`extern.convert_any`) to match the
+      // helper's `externref` param. Without this the receiver reached the call
+      // as a raw `struct.new` and produced `call[0] expected type externref,
+      // found struct.new of type (ref …)` invalid Wasm in standalone (#2934).
+      const recvType = compileExpression(ctx, fctx, propAccess.expression);
+      if (recvType && recvType.kind !== "externref") {
+        coerceType(ctx, fctx, recvType, { kind: "externref" });
+      }
       // Push key argument (or null if missing)
       if (expr.arguments[0]) {
         const argType = compileExpression(ctx, fctx, expr.arguments[0]);

@@ -2,7 +2,7 @@
 id: 2815
 title: "Suppress spurious 'Cannot find name Deno' (TS2304) warning on the recognized Deno stdio surface"
 status: done
-sprint: current
+sprint: 69
 priority: low
 area: checker
 related: [389, 2684, 1951, 2603]

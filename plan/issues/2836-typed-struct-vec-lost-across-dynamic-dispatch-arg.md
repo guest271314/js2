@@ -4,7 +4,7 @@ title: "[SENIOR-DEV ONLY] typed nominal-struct vec ($__vec_ref_*) loses its elem
 status: done
 completed: 2026-06-29
 assignee: ttraenkler/sendev-arrowparam
-sprint: current
+sprint: 69
 priority: high
 horizon: l
 feasibility: hard

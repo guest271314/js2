@@ -689,6 +689,21 @@ const STANDALONE_ROOT_CAUSE_BUCKETS = [
     match: (_record, text) => hasAny(text, ["__make_getter_callback", "make_getter_callback import"]),
   },
   {
+    // #2962 — the standalone exception renderer (`__exn_render_prepare`/
+    // `__exn_render_char` + native §20.5.3.4 Error toString) de-masked real
+    // assertion texts that previously collapsed into the #2870 opaque label.
+    // A "Test262Error: …" signature is a REAL assertion mismatch whose root
+    // cause lives in whatever feature the assert exercised — path-based
+    // buckets above claim the recognizable ones; this bucket owns the
+    // de-masked residual so the strict unclassified gate stays at 0 while the
+    // per-feature re-triage (#2962 follow-up harvest) splits it further.
+    id: "demasked-native-assertion",
+    issues: ["#2962"],
+    label:
+      "De-masked native assertion failure (Test262Error rendered by the #2962 standalone exception renderer) — real assertion mismatch, re-triage by feature path",
+    match: (_record, text) => hasAny(text, ["test262error"]),
+  },
+  {
     id: "misc-spec-tail",
     issues: ["#1577", "#779"],
     label: "Miscellaneous low-volume spec-completeness tail",
@@ -814,6 +829,27 @@ async function main() {
   let oracleVersion;
   let oracleVersionMixed = false;
 
+  // (#2913) Dedup duplicate result rows by `file` BEFORE counting. The merged
+  // JSONL can carry >1 row per test (the poison/flake retry path recording both
+  // the original and the retry, or a shard artifact concatenated twice), and the
+  // counters below run per-record — so a duplicated file double-counts into both
+  // numerator and denominator and, when the two rows disagree (e.g.
+  // compile_error vs fail), makes the headline pass rate non-deterministic.
+  // Keep exactly one row per file using a deterministic WORST-status precedence
+  // (compile_error > fail > timeout/crash > pass > skip), so the report is stable
+  // regardless of retry timing / row order.
+  const STATUS_PRECEDENCE = {
+    compile_error: 6,
+    fail: 5,
+    timeout: 4,
+    crash: 4,
+    pass: 3,
+    skip: 2,
+  };
+  const statusRank = (s) => STATUS_PRECEDENCE[s] ?? 1;
+  const recordsByFile = new Map();
+  let dedupDropped = 0;
+
   const rl = createInterface({
     input: createReadStream(args.input),
     crlfDelay: Infinity,
@@ -830,6 +866,30 @@ async function main() {
         oracleVersion = Math.min(oracleVersion, record.oracle_version);
       }
     }
+    // Dedup rows that carry a `file` key (every test row does). A row without a
+    // file is unexpected here but is passed through uncounted-dedup as its own
+    // key so nothing is silently dropped.
+    const dedupKey = record.file ?? `__nofile_${recordsByFile.size}`;
+    const prior = recordsByFile.get(dedupKey);
+    if (prior === undefined) {
+      recordsByFile.set(dedupKey, record);
+    } else {
+      dedupDropped++;
+      // Worst-status wins; on a tie keep the later row (last-write-wins) for
+      // determinism against a fixed input ordering.
+      if (statusRank(record.status) >= statusRank(prior.status)) {
+        recordsByFile.set(dedupKey, record);
+      }
+    }
+  }
+
+  if (dedupDropped > 0) {
+    console.warn(
+      `[build-test262-report] #2913: dropped ${dedupDropped} duplicate result row(s); counting ${recordsByFile.size} distinct file(s).`,
+    );
+  }
+
+  for (const record of recordsByFile.values()) {
     const status = record.status;
     const scope = record.scope ?? "standard";
     const scopeOfficial = record.scope_official ?? scope !== "proposal";
@@ -842,10 +902,17 @@ async function main() {
     // means the module ran without the JS host. Counted in parallel to status
     // so the honest standalone metric is available per scope/category.
     const hostFreePass = status === "pass" && !record.host_import_leak_class;
+    // (#2939/#2940) Vacuity correction: `fail` rows whose harness-wrapper
+    // callback never executed (previously-counted-as-pass before the in-runner
+    // vacuity gate). Tallied separately so the report surfaces the integrity
+    // correction ("N previously-counted passes are vacuous") without inflating
+    // the genuine-fail bucket's interpretation.
+    const isVacuous = record.vacuous === true;
 
     statuses.total++;
     statuses[status] = (statuses[status] ?? 0) + 1;
     if (hostFreePass) statuses.host_free_pass = (statuses.host_free_pass ?? 0) + 1;
+    if (isVacuous) statuses.vacuous = (statuses.vacuous ?? 0) + 1;
 
     if (!scopeCounts.has(scope)) scopeCounts.set(scope, createCounts());
     const scopeCounter = scopeCounts.get(scope);

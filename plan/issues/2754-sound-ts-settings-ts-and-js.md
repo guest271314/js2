@@ -3,7 +3,7 @@ id: 2754
 title: "Sound TS checker settings for .ts AND .js + codegen defensive-correctness where TS is deliberately unsound (#2698 track)"
 status: done
 created: 2026-06-27
-updated: 2026-06-28
+updated: 2026-07-03
 completed: 2026-06-28
 assignee: "ttraenkler/sendev-2754"
 priority: high
@@ -13,7 +13,7 @@ task_type: architecture
 area: checker
 language_feature: type-soundness
 goal: platform
-sprint: current
+sprint: 69
 es_edition: n/a
 parent: 2698
 related: [2698, 2748, 389]

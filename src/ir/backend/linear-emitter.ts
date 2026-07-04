@@ -3,11 +3,30 @@
 // LinearEmitter (#1714) — the SECOND BackendEmitter, proving the #1713 seam
 // abstracts a structurally different backend.
 //
-// Scope is deliberately narrow (issue #1714 "Notes / scope"): ONLY the vec
-// (array) length + element-read primitives, lowered to LINEAR MEMORY instead
-// of WasmGC structs/arrays. Every other BackendEmitter method throws a clear
-// not-implemented marker — covering the rest is a multi-sprint follow-up; the
-// value here is proving the seam, not coverage.
+// #1714 opened with a deliberately narrow surface — ONLY the vec (array)
+// length + element-read primitives, lowered to LINEAR MEMORY instead of
+// WasmGC structs/arrays — to prove the seam. #2954 extends that to the
+// CORE-OP families: const / binary / unary / locals / globals / drop /
+// select / return / unreachable / if / br / br_if / block / loop / direct
+// call. These emit CORE Wasm and both backends share the `Instr` encoding,
+// so the emitted stream is BYTE-IDENTICAL to `WasmGcEmitter` for them (the
+// divergence is only in the representation-specific families). Those core
+// methods are literal 1:1 copies of `WasmGcEmitter`'s (kept in sync
+// deliberately — a divergence there would be a bug, not a feature).
+//
+// What REMAINS `notImplemented` on LinearEmitter is only the genuinely
+// representation-divergent families, each annotated with the covering issue:
+//   - vec CONSTRUCTION (emitVecNewFixed) — bump-alloc store side (#1804)
+//   - aggregates (emitAggregateNew/emitFieldGet/emitFieldSet) — WasmGC
+//     `struct.*`; linear lowers objects to a memory layout (#2956)
+//   - ref-cells (emitRefCellNew/Get/Set) — 1-field mutable struct (#2953)
+//   - exceptions (emitThrow/emitRethrow/emitTry) — WasmGC EH; linear has no
+//     exception lowering yet (#2956)
+//   - typed-funcref call (emitCallRef) — `call_ref` over a reference-typed
+//     funcref; the linear backend dispatches through a table, not a GC
+//     funcref (#2956, closures)
+//   - boxing / strings / closures — routed through the resolver in lower.ts,
+//     not this emitter (strings: #679 dual backend; boxing/closures: #2956)
 //
 // Linear array layout (mirrors src/codegen-linear/runtime.ts:339
 // `addArrayRuntime`):
@@ -28,7 +47,9 @@
 // SAME IR `vec.len`/`vec.get` node → two completely different op sequences,
 // selected by which emitter `lower.ts` was handed. That is the proof.
 
-import type { Instr, ValType } from "../types.js";
+import { emitConstInstr } from "../lower.js";
+import type { IrBinop, IrInstr, IrUnop } from "../nodes.js";
+import type { BlockType, Instr, ValType } from "../types.js";
 import type { BackendEmitter } from "./emitter.js";
 import type { LinearVecLowering } from "./handles.js";
 
@@ -130,71 +151,116 @@ export class LinearEmitter implements BackendEmitter<Instr[]> {
     notImplemented("emitVecNewFixed");
   }
 
-  // ---- everything else: out of #1714 scope, fail loudly -------------------
+  // ---- core-op families (#2954) — CORE Wasm, byte-identical to WasmGc ------
+  //
+  // Every method below is a literal 1:1 copy of the corresponding
+  // `WasmGcEmitter` method. Both backends lower these node kinds to the same
+  // shared `Instr` variant (const / arithmetic / locals / globals / structured
+  // control flow / direct call are backend-agnostic core Wasm), so the emitted
+  // stream is byte-identical by construction. The divergence between the two
+  // emitters lives ONLY in the representation-specific families (vec/struct
+  // layout, boxing, strings, closures) — see the `notImplemented` block below.
 
-  emitConst(): void {
-    notImplemented("emitConst");
+  emitConst(instr: Extract<IrInstr, { kind: "const" }>, funcName: string, out: Instr[]): void {
+    // Delegate to the shared free function (same as WasmGcEmitter): the numeric
+    // / bool literal path is core Wasm (`f64.const` / `i32.const`). Argument
+    // order mirrors WasmGcEmitter — the trait's `(instr, funcName, out)` maps to
+    // the free fn's `(instr, out, funcName)`.
+    emitConstInstr(instr, out, funcName);
   }
-  emitBinary(): void {
-    notImplemented("emitBinary");
+
+  // The `as Instr` cast mirrors WasmGcEmitter/lower.ts: `IrBinop`/`IrUnop` are a
+  // superset of the bare-op `Instr` variants; composite `js.*` bitwise ops are
+  // lowered to a multi-op sequence in lower.ts and never reach here.
+  emitBinary(op: IrBinop, out: Instr[]): void {
+    out.push({ op } as Instr);
   }
-  emitUnary(): void {
-    notImplemented("emitUnary");
+
+  emitUnary(op: IrUnop, out: Instr[]): void {
+    out.push({ op } as Instr);
   }
-  emitLocalGet(): void {
-    notImplemented("emitLocalGet");
+
+  emitLocalGet(index: number, out: Instr[]): void {
+    out.push({ op: "local.get", index });
   }
-  emitLocalSet(): void {
-    notImplemented("emitLocalSet");
+
+  emitLocalSet(index: number, out: Instr[]): void {
+    out.push({ op: "local.set", index });
   }
-  emitLocalTee(): void {
-    notImplemented("emitLocalTee");
+
+  emitLocalTee(index: number, out: Instr[]): void {
+    out.push({ op: "local.tee", index });
   }
-  emitGlobalGet(): void {
-    notImplemented("emitGlobalGet");
+
+  emitGlobalGet(index: number, out: Instr[]): void {
+    out.push({ op: "global.get", index });
   }
-  emitGlobalSet(): void {
-    notImplemented("emitGlobalSet");
+
+  emitGlobalSet(index: number, out: Instr[]): void {
+    out.push({ op: "global.set", index });
   }
-  emitDrop(): void {
-    notImplemented("emitDrop");
+
+  emitDrop(out: Instr[]): void {
+    out.push({ op: "drop" });
   }
-  emitSelect(): void {
-    notImplemented("emitSelect");
+
+  emitSelect(out: Instr[]): void {
+    out.push({ op: "select" });
   }
-  emitReturn(): void {
-    notImplemented("emitReturn");
+
+  emitReturn(out: Instr[]): void {
+    out.push({ op: "return" });
   }
-  emitUnreachable(): void {
-    notImplemented("emitUnreachable");
+
+  emitUnreachable(out: Instr[]): void {
+    out.push({ op: "unreachable" });
   }
-  emitIf(): void {
-    notImplemented("emitIf");
+
+  emitIf(blockType: BlockType, then: Instr[], els: Instr[], out: Instr[]): void {
+    out.push({ op: "if", blockType, then, else: els });
   }
-  emitBr(): void {
-    notImplemented("emitBr");
+
+  emitBr(depth: number, out: Instr[]): void {
+    out.push({ op: "br", depth });
   }
-  emitBrIf(): void {
-    notImplemented("emitBrIf");
+
+  emitBrIf(depth: number, out: Instr[]): void {
+    out.push({ op: "br_if", depth });
   }
-  // (a3) control-flow family (#1584 §2a) — out of the #1714 vec-proof scope.
-  emitBlock(): void {
-    notImplemented("emitBlock");
+
+  emitBlock(blockType: BlockType, body: Instr[], out: Instr[]): void {
+    out.push({ op: "block", blockType, body });
   }
-  emitLoop(): void {
-    notImplemented("emitLoop");
+
+  emitLoop(blockType: BlockType, body: Instr[], out: Instr[]): void {
+    out.push({ op: "loop", blockType, body });
   }
-  // (a4) try-throw family (#1584 §2a) — out of the #1714 vec-proof scope.
-  emitThrow(): void {
-    notImplemented("emitThrow");
+
+  // Direct call — `{op:"call",funcIdx}` is core Wasm, identical on both backends
+  // (the linear backend calls the same defined function index). `emitCallRef`
+  // (typed funcref / `call_ref`) stays divergent — see the notImplemented block.
+  emitCall(funcIdx: number, out: Instr[]): void {
+    out.push({ op: "call", funcIdx });
   }
-  emitRethrow(): void {
-    notImplemented("emitRethrow");
+
+  // ---- representation-divergent families: still fail loudly (#2954) --------
+  // These lower to WasmGC-specific ops (struct.*, array construction, GC
+  // funcref, EH) that the linear backend realizes differently (memory layout,
+  // call_indirect, no EH yet). Each is annotated with the issue that will wire
+  // the linear analogue.
+
+  // emitVecNewFixed already declared above (the read side is #1714 scope; the
+  // bump-allocated store sequence is #1804).
+
+  // typed-funcref call — `call_ref` over a GC funcref (#2956, closures). The
+  // linear backend dispatches indirect calls through a table (`call_indirect`),
+  // not a reference-typed funcref, so this needs distinct lowering.
+  emitCallRef(): void {
+    notImplemented("emitCallRef");
   }
-  emitTry(): void {
-    notImplemented("emitTry");
-  }
-  // (a2) struct/object family (#1584 §2a) — out of the #1714 vec-proof scope.
+
+  // struct/object family — WasmGC `struct.new`/`struct.get`/`struct.set`; the
+  // linear backend lowers objects to a bump-allocated memory layout (#2956).
   emitAggregateNew(): void {
     notImplemented("emitAggregateNew");
   }
@@ -204,12 +270,28 @@ export class LinearEmitter implements BackendEmitter<Instr[]> {
   emitFieldSet(): void {
     notImplemented("emitFieldSet");
   }
-  // (a1) call family (#1584 §2a) — out of the #1714 linear vec-proof scope;
-  // fail loudly until the linear backend wires its call lowering.
-  emitCall(): void {
-    notImplemented("emitCall");
+
+  // try-throw family — WasmGC exception handling (`throw`/`try`/`rethrow`); the
+  // linear backend has no exception lowering yet (#2956).
+  emitThrow(): void {
+    notImplemented("emitThrow");
   }
-  emitCallRef(): void {
-    notImplemented("emitCallRef");
+  emitRethrow(): void {
+    notImplemented("emitRethrow");
+  }
+  emitTry(): void {
+    notImplemented("emitTry");
+  }
+
+  // ref-cell family — a 1-field mutable struct (`struct.new`/`get`/`set`),
+  // structurally the same as the object family; wires with it (#2953/#2956).
+  emitRefCellNew(): void {
+    notImplemented("emitRefCellNew");
+  }
+  emitRefCellGet(): void {
+    notImplemented("emitRefCellGet");
+  }
+  emitRefCellSet(): void {
+    notImplemented("emitRefCellSet");
   }
 }

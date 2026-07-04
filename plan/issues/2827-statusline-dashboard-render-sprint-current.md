@@ -12,7 +12,7 @@ reasoning_effort: medium
 task_type: chore
 area: tooling
 goal: maintainability
-sprint: current
+sprint: 69
 horizon: s
 architect_spec: done
 ---
