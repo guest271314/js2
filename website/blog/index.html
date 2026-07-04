@@ -133,19 +133,24 @@
         color: var(--fg);
       }
 
-      /* ── Conformance charts (landing donut + timeline components) ── */
+      /* ── Conformance charts (landing donut + timeline components) ──
+         No surrounding box. The chart block breaks out wider than the text
+         column so both donuts get their full ~380px orbit without clipping. */
       .figure {
-        margin: 26px 0;
-        padding: 24px 22px 20px;
-        background: var(--surface);
-        border: 1px solid var(--line);
-        border-radius: 12px;
+        margin: 34px 0;
+        padding: 0;
+        background: none;
+        border: none;
+        width: min(860px, calc(100vw - 32px));
+        margin-left: 50%;
+        transform: translateX(-50%);
       }
 
       .donut-pair {
         display: grid;
         grid-template-columns: 1fr 1fr;
-        gap: 16px;
+        gap: 20px;
+        align-items: center;
       }
 
       .donut-cell {
@@ -157,13 +162,14 @@
 
       .donut-cell t262-donut {
         width: 100%;
-        max-width: 240px;
+        max-width: 400px;
       }
 
       .trend-wrap {
-        margin-top: 24px;
-        padding-top: 22px;
+        margin: 20px auto 0;
+        padding-top: 26px;
         border-top: 1px solid var(--line);
+        max-width: 720px;
       }
 
       .trend-title {
@@ -179,13 +185,14 @@
       .figure .foot {
         font-size: 12px;
         color: var(--fg-faint);
-        margin: 20px 0 0;
+        margin: 18px auto 0;
+        max-width: 720px;
       }
 
-      @media (max-width: 560px) {
+      @media (max-width: 640px) {
         .donut-pair {
           grid-template-columns: 1fr;
-          gap: 24px;
+          gap: 8px;
         }
       }
 
@@ -354,9 +361,16 @@
           where that's structurally impossible, not just discouraged by a policy.
         </p>
         <p>
-          AI makes the problem sharper. A lot of the code we ship now was written faster than anyone can read it.
-          "Someone probably reviewed this" was always optimistic; at machine speed it's wishful thinking. If I can't
-          read all of it, I at least want to box it in.
+          In the age of generative AI this scales by orders of magnitude. A lot of the code we ship now was never
+          reviewed, written faster than anyone can read it. "Someone probably reviewed this" was always optimistic; at
+          machine speed it's wishful thinking. We need to contain the problem by limiting the blast radius of untrusted
+          code at a granular level, and make code modular and reusable so that less code has to be generated, reviewed,
+          and maintained in the first place. Small WebAssembly modules also make review — by a human or a machine — far
+          easier: fine-grained modularization keeps each piece small and self-contained instead of one giant one-off
+          monolithic codebase. That same fine granularity, along with portability across hosts and language-independent
+          module APIs, makes these modules far more reusable — write a piece once and compose it anywhere, in any
+          language. WebAssembly lends itself as a lightweight, portable, modular, and safe substrate for building a new,
+          trustworthy foundation for computing in the age of untrusted code.
         </p>
 
         <h2>The idea in a nutshell</h2>
@@ -564,7 +578,10 @@
     </footer>
 
     <script type="module" src="../components/site-nav.js"></script>
-    <script src="../components/t262-charts.js"></script>
+    <!-- t262-charts.js is an ES module (it `export {}`s at top level); loading
+         it as a classic script throws a SyntaxError and t262-donut never
+         registers. trend-chart.js is a classic script and loads as-is. -->
+    <script type="module" src="../components/t262-charts.js"></script>
     <script src="../components/trend-chart.js"></script>
     <script>
       // Standalone donut: refresh from the live baseline using the host-free

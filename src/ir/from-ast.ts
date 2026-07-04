@@ -748,23 +748,34 @@ function lowerTail(stmt: ts.Statement, cx: LowerCtx): void {
     // externref → __gen_push_ref). Same dispatch logic as `lowerYield`
     // except we get a `ts.Expression` already, not a YieldExpression.
     if (cx.funcKind === "generator") {
-      // #2035: a generator's `return <value>` value belongs ONLY to the
+      // #2951: a generator's `return <value>` value belongs ONLY to the
       // terminal `{value, done:true}` IteratorResult — it must NOT be pushed
       // into the eager yield buffer (where spread / for-of / Array.from would
       // surface it as a yielded `done:false` element). The legacy return path
-      // (`compileReturnStatement` in `codegen/statements/control-flow.ts`)
+      // (`compileReturnStatement` in `codegen/statements/control-flow.ts:144`)
       // routes the value through `__gen_set_return`, which stashes it on the
       // buffer as a side property for the host drain to emit once with
-      // `done:true`. The IR has no number-box primitive (so it cannot coerce a
-      // numeric return to the `externref` that `__gen_set_return` expects), so
-      // rather than re-emit the buffer-leak bug here we defer any generator
-      // carrying a `return <expr>` to the already-correct legacy path. Bare
-      // `return;` (no value) has nothing to leak and stays on the IR path.
+      // `done:true`. We now mirror that here via `gen.setReturn`: lower the
+      // value through the SAME dispatch `lowerYield` uses (f64 / i32 stay
+      // native; reference-shaped values coerce to externref), then emit
+      // `gen.setReturn` — the lowerer BOXES the value to externref (f64 →
+      // `__box_number`, and if the box helper is unresolvable it THROWS to
+      // defer to legacy). Finally the epilogue wraps the buffer with
+      // `__create_generator`. Bare `return;` (no value) has nothing to stash
+      // and skips straight to the epilogue.
       if (stmt.expression) {
-        throw new Error(
-          `ir/from-ast: generator 'return <value>' must route through __gen_set_return ` +
-            `(needs the number-box helper) — deferring to legacy in ${cx.funcName} (#2035)`,
-        );
+        // Same advisory-externref hint + `typeOf`-driven dispatch as
+        // `lowerYield`: numeric / bool returns keep their native f64 / i32
+        // representation (the `gen.setReturn` lowerer boxes them); every
+        // reference-shaped value is coerced to externref upstream so the
+        // lowerer's `externref → pass-through` arm sees the right Wasm type.
+        const value = lowerExpr(stmt.expression, cx, irVal({ kind: "externref" }));
+        const valTy = asVal(cx.builder.typeOf(value));
+        if (valTy?.kind === "f64" || valTy?.kind === "i32") {
+          cx.builder.emitGenSetReturn(value);
+        } else {
+          cx.builder.emitGenSetReturn(coerceYieldValueToExternref(value, cx));
+        }
       }
       const generatorObj = cx.builder.emitGenEpilogue();
       cx.builder.terminate({ kind: "return", values: [generatorObj] });

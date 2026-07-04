@@ -1547,6 +1547,34 @@ export interface IrInstrGenYieldStar extends IrInstrBase {
   readonly inner: IrValueId;
 }
 
+/**
+ * #2951 — a generator's `return <value>` stash. Mirrors legacy
+ * `compileReturnStatement` (`codegen/statements/control-flow.ts:144-170`):
+ * the return value belongs ONLY to the terminal `{value, done:true}`
+ * IteratorResult — it must NOT enter the eager yield buffer (where
+ * spread / for-of / Array.from would surface it as a `done:false`
+ * element). The value is stashed on the buffer via
+ * `__gen_set_return(buffer, value)` (signature `(externref, externref)
+ * → void`), and the host drain emits it once with `done:true`.
+ *
+ * Same shape as `gen.push` (statement-level, `result: null`,
+ * `resultType: null`, one `value` operand). The lowerer BOXES the value
+ * to externref before the call — `f64` → `__box_number`, `i32` →
+ * `f64.convert_i32_s` then box, `ref`/`ref_null` → `extern.convert_any`,
+ * `externref` → pass through. Only valid inside `funcKind ===
+ * "generator"`; the lowerer reads `IrFunction.generatorBufferSlot` for
+ * the buffer `local.get`.
+ *
+ * Lowering pattern:
+ *   local.get $__gen_buffer
+ *   <emit value; box to externref>
+ *   call $__gen_set_return
+ */
+export interface IrInstrGenSetReturn extends IrInstrBase {
+  readonly kind: "gen.setReturn";
+  readonly value: IrValueId;
+}
+
 // ---------------------------------------------------------------------------
 // Extern class ops (#1169i — IR Phase 4 Slice 10)
 // ---------------------------------------------------------------------------
@@ -2064,6 +2092,7 @@ export type IrInstr =
   | IrInstrGenPush
   | IrInstrGenEpilogue
   | IrInstrGenYieldStar
+  | IrInstrGenSetReturn
   | IrInstrForOfString
   // Slice 9 (#1169h) — exception handling.
   | IrInstrThrow
@@ -2369,6 +2398,7 @@ export function forEachNestedBuffer(instr: IrInstr, fn: (buffer: readonly IrInst
     case "gen.push":
     case "gen.epilogue":
     case "gen.yieldStar":
+    case "gen.setReturn":
     case "throw":
     case "br.label": // #2952 slice 2 — leaf (buffer-terminating branch)
     case "extern.new":
@@ -2509,6 +2539,7 @@ export function mapNestedBuffers(
     case "gen.push":
     case "gen.epilogue":
     case "gen.yieldStar":
+    case "gen.setReturn":
     case "throw":
     case "br.label": // #2952 slice 2 — leaf
     case "extern.new":
@@ -2625,6 +2656,8 @@ export function directUses(instr: IrInstr): readonly IrValueId[] {
       return [instr.value];
     case "gen.yieldStar":
       return [instr.inner];
+    case "gen.setReturn":
+      return [instr.value];
     case "forof.string":
       return [instr.str];
     case "throw":

@@ -638,6 +638,12 @@ function renameInstrOperands(inst: IrInstr, rename: ReadonlyMap<IrValueId, IrVal
       if (v === inst.inner) return inst;
       return { ...inst, inner: v };
     }
+    // #2951 — generator `return <value>` stash.
+    case "gen.setReturn": {
+      const v = mapId(rename, inst.value);
+      if (v === inst.value) return inst;
+      return { ...inst, value: v };
+    }
     // Slice 6 part 4 (#1183) — string for-of.
     case "forof.string": {
       const v = mapId(rename, inst.str);

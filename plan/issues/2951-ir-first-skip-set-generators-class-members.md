@@ -1,10 +1,11 @@
 ---
 id: 2951
 title: "IR-first skip set: include generators and class members (retire the two #2138 standing exclusions)"
-status: ready
+status: in-progress
+assignee: ttraenkler/opus-2951
 sprint: current
 created: 2026-07-02
-updated: 2026-07-02
+updated: 2026-07-04
 priority: medium
 horizon: m
 feasibility: hard
@@ -105,3 +106,75 @@ js-host lane A/B on the dstr/generator corpus net-zero-or-positive. NOTE the
 retires — it is still worth landing because the IR-first flip (#2950) is
 gated on IR parity NOW, and the instr becomes dead code W6 can delete
 wholesale.
+
+## Landed slice — IR `gen.setReturn` (opus-2951, 2026-07-04, PR pending)
+
+The predecessor slice is IN. IR generators now handle `return <value>`
+natively via a new `gen.setReturn` IR instr; the #2035 throw-defer in
+`from-ast.ts lowerTail` is retired.
+
+### What shipped (WHY, not just WHAT)
+
+- **New `gen.setReturn` IR instr** minted as an exact structural twin of
+  `gen.push` (statement-level, `result: null`, one `value` operand) across
+  all switch sites: `nodes.ts` (interface + union + `forEachNestedBuffer` /
+  `mapNestedBuffers` / `directUses` leaf arms), `builder.ts`
+  (`emitGenSetReturn`, guarded on `funcKind==="generator"` +
+  `generatorBufferSlot`), `from-ast.ts`, `lower.ts` (emit + use-collection),
+  `effects.ts` (heap+allSlots classification + DCE must-keep pin),
+  `verify.ts`, `passes/monomorphize.ts`, `passes/inline-small.ts`. `tsc`
+  enforces exhaustive-switch parity (nodes.ts `never` checks).
+- **from-ast** (`lowerTail` generator arm): the throw is replaced by lowering
+  the return expr through the SAME dispatch `lowerYield` uses (f64/i32 stay
+  native; reference-shaped coerced to externref via
+  `coerceYieldValueToExternref`), then `emitGenSetReturn` + the existing
+  `emitGenEpilogue` + return terminator. Bare `return;` unchanged. **Scope is
+  the TAIL return** — a mid-body generator `return` still throws in
+  `lowerEarlyReturn` (the eager-buffer model can't stop the rest of the body),
+  same as before; those generators stay selector-rejected/legacy.
+- **lower.ts** boxes the value to externref for the `(externref,externref)`
+  `__gen_set_return` signature: f64 → `__box_number`; i32 →
+  `f64.convert_i32_s` then box; ref/ref_null → `extern.convert_any`;
+  externref → pass through. `resolveFunc("__box_number")` is called WITHOUT a
+  swallow — if unresolvable (a lane with no host boxing), the throw demotes
+  the whole function to legacy via the integration.ts catch, so a raw f64 arg
+  can never reach the import (which would fail Wasm validation). Mirrors
+  legacy `compileReturnStatement`
+  (`codegen/statements/control-flow.ts:144`), which boxes via `coerceType`.
+
+### Verification
+
+- `tests/issue-2035.test.ts` 9/9 green (spread / for-of / Array.from / raw
+  next / yield* / gen.return all exclude the return value).
+- Probe (`irPostClaimErrors`): value-returning generators (numeric / object /
+  string / bare) now IR-CLAIM with **zero** post-claim demotions — previously
+  every non-bare case demoted with the #2035 message.
+- `tests/issue-1169f-7a.test.ts` + `7b.test.ts`: were RED on main (verified
+  against the `/workspace` control) with STALE pre-#2035 expectations (the
+  return literal leaked into the yield stream). Updated to the correct
+  return-excluded sequences; both now 16/16 green with legacy≡IR parity.
+- `generators.test.ts`, `issue-1017-yield-star`, `issue-2170` (standalone
+  native carrier) all green — unaffected (native carrier is `noJsHostTarget`,
+  a disjoint lane from the IR eager-buffer path).
+- `pnpm run check:ir-fallbacks`: OK, post-claim demotions unchanged (none).
+- Pre-existing unrelated RED (NOT this slice, confirmed on control):
+  `issue-1169q` "reports non-export-modifier for async functions" — a stale
+  async-bucket rename (`async-function` since #1373); out of scope here.
+
+### Banked follow-ups (this slice does NOT fully close #2951)
+
+1. **Generator skip-set widening (gate 2).** With `return <value>` now
+   IR-native, `computeIrFirstSkipSet` (`src/codegen/index.ts:1232`, `if (!fn
+   || fn.asteriskToken) continue; // gate 2 — generators`) can be narrowed to
+   INCLUDE IR-claimed generators. Deliberately NOT done here: gate 2 only
+   matters under `JS2WASM_IR_FIRST=1`, and lifting it needs the dedicated
+   "IR generator side-effects vs legacy compile side-effects" measurement the
+   gate-2 comment calls for (deviation 3) + a **full merge_group net-zero with
+   the flag on** (acceptance criterion 3). That is its own validated slice,
+   which this prerequisite unblocks. Verified-ready: the probe shows claimed
+   generators carry zero post-claim demotions, so a skipped legacy body would
+   be safely filled by the IR body.
+2. **Class-member half (deviation 4).** Untouched — carry the
+   `integration.ts` typeIdx-parity guard into the skip decision (a member is
+   skippable iff its IR signature byte-matches the class-bodies.ts
+   pre-allocation). Independent of the generator work.
