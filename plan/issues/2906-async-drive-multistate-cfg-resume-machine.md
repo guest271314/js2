@@ -2,7 +2,7 @@
 id: 2906
 title: "Standalone: generalize the async drive layer → multi-state, CFG-aware CPS resume machine (unlocks try/finally-across-await, for-await, multi-await)"
 status: in-progress
-assignee: ttraenkler/fable-2906
+assignee: ttraenkler/opus-2906-3b
 created: 2026-07-01
 priority: high
 feasibility: hard
@@ -387,6 +387,13 @@ Implementation notes (the hazards a cheaper model must not skip):
 
 ### 3b — for-await-of (async-iterator drive on 3a machinery)
 
+> **UPDATE (2026-07-04):** grounding for 3b found this design's `it.next()`→
+> `$Promise` step needs the native async-iterator **carrier**, which
+> standalone/wasi does not yet have — so 3b is NOT a planner-only slice. See
+> **"Slice 3b — … BANKED"** at the end of this file for the measured evidence,
+> the two sub-blockers (implicit-await coupling + async-iterator carrier), and
+> the concrete carrier contract. The drive machine (3a) is confirmed ready.
+
 `for await (const x of expr) body` lowers to (all on existing terminators):
 
 ```
@@ -507,3 +514,113 @@ and break→legacy-fallback. Blast radius green (async-await / issue-1042 /
 issue-1042-host-drive / issue-2895 / async-census + issue-2174/2611/1672); the
 2× issue-2865 and 3× issue-2906-gap3 failures are pre-existing on clean
 `origin/main`. `tsc --noEmit` clean.
+
+## Slice 3b — for-await-of: drive machine READY, blocked below it on the async-iterator carrier (BANKED, 2026-07-04, opus-2906-3b)
+
+**Verdict: the drive-machine layer for for-await is already done (3a); what
+remains is NOT a planner-only slice on the ready emitter — it is the
+async-iterator carrier + an analysis-substrate change, the "more than the drive
+machine" case flagged at dispatch.** Measured on current main (post-3a); the
+attempted synthetic-AST desugar was reverted — a fragile half-machine here is
+exactly the #2367 graveyard this issue warns against. No emitter/planner code
+lands; this section banks the follow-up with a concrete contract.
+
+### What was measured (host-free wasi, current main)
+
+1. **The drive machine already handles the for-await loop-drive shape.** The
+   spec-equivalent index lowering of `for await (const x of arr)`, written as
+   real source —
+   ```ts
+   const __src = arr; let __i = 0;
+   while (__i < __src.length) { const x = await __src[__i]; __i = __i + 1; /*body*/ }
+   ```
+   — compiles host-free (imports `[]`, valid Wasm) and runs correctly on the 3a
+   while-with-await machine (`[P.resolve(1),P.resolve(2),P.resolve(3)]` → sum 6,
+   both the fast-path advance and the `__drain_microtasks` resume). So the CFG
+   emitter needs NO change for for-await; the back-edge + loop-liveness 3a
+   shipped are sufficient.
+
+2. **The user-facing gap is real and severe.** `for await (const x of
+   [Promise.resolve(1), …]) { sum += x }` compiles host-free today but yields
+   **NaN** — for-await produces **no `ts.AwaitExpression`** (the per-element
+   suspension is implicit in `awaitModifier`), so `analyzeAsyncBody` reports
+   **zero await points**, every gate (`asyncFnNeedsDrive` / `asyncFnNeedsCps` /
+   spill computation) treats the function as non-suspending, and it falls to the
+   AG0 synchronous unwrap that never awaits the element. This is the concrete
+   bug 3b must fix.
+
+### The two sub-blockers, both BELOW the drive machine
+
+- **(A) Implicit-await coupling (analysis substrate).** Driving a for-await
+  requires the implicit element suspension to become a real suspend point the
+  pipeline can see. Today `analyzeAsyncBody` collects only explicit
+  `ts.AwaitExpression` nodes (`collectAwaitPoints`, async-cps.ts:441), so the
+  whole `awaitPoints`-keyed machinery (`liveAfterAwait`,
+  `bindingLiveAcrossLaterAwait`, `computeAsyncSpills`) never engages. This is a
+  change to the async-body **analyzer**, not the drive machine.
+
+- **(B) The native async-iterator carrier (standalone runtime).** The general
+  for-await — a source with a real `[Symbol.asyncIterator]`, async generators,
+  non-array sync iterables via the native protocol (the dominant real + test262
+  shape) — needs `GetAsyncIterator` + `AsyncFromSyncIterator` +
+  `next()` → **native `$Promise<IteratorResult>`**. Standalone/wasi has NONE of
+  this: `ensureAsyncIterator` (destructuring.ts:397) returns the **SYNC**
+  `__iterator`, and `next()` on it is synchronous `(i32 done, externref value)`,
+  never a `$Promise`. So `it.next()` cannot be a `suspend` terminator's awaited
+  operand — the banked 3b design's `it.next()`→`$Promise` step does not exist to
+  drive.
+
+### Why the carrier-free array subset did NOT land
+
+The one carrier-free realization is the index lowering above, produced by
+**synthesizing** the `const __src = SRC; while (__i < __src.length) { const x =
+await __src[__i]; … }` AST from the for-await and threading a synthetic function
+declaration through the 3a pipeline. Built and empirically tested
+(`desugarForAwaitToWhile` + async-activation wiring); **reverted** because:
+
+- Synthetic nodes have no `parent` pointers → first crash in
+  `compileVariableStatement` (`decl.parent.flags`, variables.ts:948). Fixable
+  with `ts.setParentRecursive`.
+- **But then it silently produces the WRONG value (loop body never runs, sum
+  = 0) for every source shape** — plain-number arrays, array literals, and
+  promise arrays alike. The synthetic `__src.length` / `__src[__i]` **mis-resolve
+  because the checker cannot type a synthetic identifier**: `getTypeAtLocation`
+  on `__src`/`__i` returns the error/`any` type, so `.length` and the numeric
+  index take the wrong (string-key / non-array) compile path and the condition
+  `__i < __src.length` is immediately false. The js2wasm codegen is
+  checker-heavy on property/element/index access; making synthetic AST correct
+  there would mean auditing every `checker.getTypeAtLocation` in the hot
+  property/element-access paths (high blast radius on the gc/host lanes) or a
+  full re-bind/re-check pass — both larger than 3b and byte-risky.
+
+Using the REAL identifier source (`arr.length`, `arr[__i]`) removes the `.length`
+mis-resolution but leaves the synthetic numeric index `__i` failing
+`isNumericIndexExpression`'s checker query → the string-key element path → still
+wrong. Each narrowing touches more hot code for a subset (for-await over a plain
+array of promises) that is NOT how real for-await / test262 for-await is written.
+
+### Banked follow-up contract (do these two, then 3b is planner-only)
+
+1. **`#26xx` async-iterator carrier (standalone).** Native `GetAsyncIterator(v)`:
+   call `v[@@asyncIterator]()` if present; else `CreateAsyncFromSyncIterator`
+   over `v[@@iterator]()` where the wrapper's `next(x)` does
+   `{value,done}=syncNext(x); return PromiseResolve(value).then(v=>({value:v,done}))`.
+   `next()` MUST return a native `$Promise<IteratorResult>` (the `$Promise` +
+   scheduler carrier from #2867/#2905 is already on main). Reuse the
+   `generators-native.ts` IteratorResult struct
+   (`RESULT_VALUE_FIELD`/`RESULT_DONE_FIELD`); do NOT fork the frame ABI. This is
+   the same carrier async generators (3d) need for their `next()` queue.
+
+2. **`analyzeAsyncBody` implicit-await recognition.** Teach the analyzer that an
+   `awaitModifier` for-of is a suspend point, OR add a dedicated
+   `planForAwaitCfg(fn, plan)` producer (parallel to `planWhileLoopCfg`) that
+   does not key off `plan.awaitPoints`. With the carrier present, the CFG is
+   exactly the banked design's `init/head/chk/body/exit` on existing
+   suspend/goto/condGoto terminators — `head: r = it.next()` becomes a `suspend`
+   awaiting the native `$Promise`, `chk: condGoto(step.done, exit, body0)` — no
+   emitter change (proven by measurement #1 above). `it.next()`/`step.done`/
+   `step.value` are emitted as **frame helpers / native reads**, not synthetic
+   TS AST, sidestepping the checker wall entirely (the carrier owns the Wasm).
+
+Until (1)+(2) land, for-await stays on AG0 (wrong for genuinely-pending
+sources). The 3a drive machine is confirmed ready to carry it.
