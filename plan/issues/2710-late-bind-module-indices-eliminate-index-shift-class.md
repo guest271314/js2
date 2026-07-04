@@ -645,3 +645,38 @@ be CLASSIFIED before deferring — validate BOTH binaries (`WebAssembly.validate
 - `WebAssembly.compile` for the error text), diff the compiler's own WAT, and
   bisect main — because a byte-identity oracle faithfully reproduces latent bugs.
   Here the deferral gate sat on top of a shipped invalid-Wasm regression.
+
+### Descope 2026-07-04 — declarations.ts flip DEFERRED; async-frame + promise-combinators land
+
+Per team-lead direction (budget will not cover a Fable review this window), PR
+#2612 is descoped to land the genuine fix without the regression:
+
+- **Reverted**: the `declarations.ts` producer flip (5 mint sites: bodyless
+  pre-registration, second-pass placeholder, both CJS function-expression
+  exports, `__module_init`) — back to the pre-PR live-regime pattern,
+  byte-equal to main's copy. **DEFERRED to a next-window Fable pass.** The full
+  diagnosis is banked above ("Park re-diagnosis 2026-07-04"): the flip breaks
+  `Object/defineProperty/15.2.3.6-4-255/256` — a top-level function used as an
+  array-index accessor getter, re-read after a failed non-configurable
+  redefine. The trigger needs the full test shape (simple funcref/getter
+  probes do NOT reproduce); whoever picks this up should start from those two
+  tests plus the array-index accessor property codegen path.
+- **Kept**: the `async-frame.ts` flips (resume placeholder + both `__cb_` step
+  adapters, retiring the unshifted `AsyncFrameInfo.*FuncIdx` staleness hole),
+  the `promise-combinators.ts` flips (×5), and the `ctx.liveBodies`
+  shifter-reachability fix — which together are the actual invalid-Wasm fix.
+- **Post-descope verification (all on merged main ab50f79a6)**:
+  1. `15.2.3.6-4-255.js` / `-256.js` → **pass** again (via `runTest262File`).
+  2. Byte-identity oracle vs fresh main golden (39 records): **exactly one
+     drift** — `async.ts::gc` 9060→9056 bytes, re-confirmed main
+     `validate:false` (`__async_resume_fmain` stack arity) → branch
+     `validate:true`. The shipped invalid-Wasm fix survives the descope —
+     the liveBodies reachability fix covers the live-regime declaration
+     indices, so the declarations flip was not needed for validity.
+  3. `tsc --noEmit` clean; `issue-2710-late-bind` (3) — unchanged, its
+     assertions target the async fix, not the declarations flip —
+     `issue-1042-host-drive` (11), issue-1916/1899/1677/1809/1839/2191/2193 +
+     async-await (59) all green.
+
+Remaining live-regime mints after this PR: `declarations.ts` ×5 (deferred,
+this note) + `index.ts` ×39 + `ir/integration.ts` ×1 (S3-final scope).
