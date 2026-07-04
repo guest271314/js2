@@ -703,6 +703,142 @@ array of promises) that is NOT how real for-await / test262 for-await is written
 Until (1)+(2) land, for-await stays on AG0 (wrong for genuinely-pending
 sources). The 3a drive machine is confirmed ready to carry it.
 
+## Slice 3d — async generators: NOT planner-only; blocked below the machine on a host-free async-gen PRODUCER carrier + an async-iterator for-await CONSUMER (BANKED, 2026-07-04, opus-2906-3d)
+
+**Verdict: 3d is an XL substrate slice, not the "planner-only `settleYield`
+terminator + result-promise queue" the 3b landing note optimistically banked.**
+Re-grounding against current main (post-#2656 for-await carrier, post-#2646
+phase-2 activation) with a direct measurement shows host-free async generators
+**do not compile at all today** — so there is nothing for a `settleYield`
+terminator to plug into yet. The producer machinery it presupposes (an async-gen
+object with a re-entrant `next()` returning `Promise<IteratorResult>`) does not
+exist host-free, and neither does the consumer path (`for await` over a real
+async iterator whose `next()` returns a promise). Building either is below the
+CFG drive machine, exactly the "more than the drive machine" case 3b hit. No
+emitter/planner code lands this slice; this section banks the real work with a
+measured contract and a de-risked slice plan, mirroring the 3b banking.
+
+### What was measured (current main `ca6d1729c`, `.tmp/probe-asyncgen.mts`)
+
+`async function* g(){ yield await Promise.resolve(1); yield 2 }` consumed by
+`for await (const x of g())`, compiled three ways:
+
+| target             | result                                                                                                                                                                      |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **wasi**           | **compile FAILS** — `function-body.ts:1016` gate: *"native generator lowering currently supports only sequential numeric yields in standalone/WASI targets (#680)."*        |
+| **standalone**     | **compile FAILS** — same #680 gate.                                                                                                                                        |
+| **gc (JS host)**   | compiles, but imports `__create_async_generator`, `__gen_create_buffer`, `__gen_push_f64`, `__gen_push_ref`, `__async_iterator`, `__iterator_next`, `Promise_resolve`, … — **host-backed, not host-free.** |
+
+Even a *plain-numeric* `async function*(){ yield 1; yield 2 }` fails in wasi: an
+`async function*` routes through the generator-buffer path
+(`function-body.ts` `isGenerator` branch, ~L1012), whose standalone arm is the
+#680 numeric-only native-generator lowering + the `__create_async_generator`
+host wrap. The async-drive machine (`async-frame.ts`) is **never reached** for an
+async generator — `maybeActivateAsync` only fires on the non-generator body path,
+and `ctx.asyncFunctions` deliberately **excludes** async generators (see the
+comment at `function-body.ts:1087`).
+
+### Why "planner-only `settleYield` + queue" is wrong (three missing substrates)
+
+1. **No host-free async-gen PRODUCER object.** The drive machine
+   (`emitAsyncFrameStateMachine`) drives an async *function* to completion,
+   settling **one** `result_promise`, and returns that promise. An async
+   *generator* is **called → returns an async-iterator object** (not a promise,
+   not driven to completion), whose `next(v)` allocates a **fresh** pending
+   promise, drives the frame to the next `yield`, and settles *that* promise with
+   `{value, done:false}`. There is no such object host-free: even **sync**
+   generator objects are built by the **host** import `__create_generator`
+   (host-free sync generators only work when for-of drives the resume *inline* via
+   `emitNativeGeneratorToVec` — there is no escaping object). So a host-free
+   async-gen object is strictly harder than a host-free sync-gen object, which
+   itself does not exist. `settleYield` needs *a promise to settle that a
+   re-entrant `next()` created* — that `next()` is the missing piece.
+
+2. **No async-iterator for-await CONSUMER.** The 3b carrier drives a **sync**
+   `__iterator` over a **boxed array** and `await`s each *element*
+   (`Await(value)`); `it.next()` is synchronous `(done, value)`. Consuming an
+   async generator is a **different** protocol: `p = it.next()` returns a
+   **Promise**, you `await p` (suspend on the *next()-promise*), then read
+   `done`/`value` from the resolved `IteratorResult`. `forAwaitNeedsDrive` gates
+   on `oracle.elementFactOf(source)` being a boxed **array** element — `g()`
+   (a call returning an AsyncGenerator) is not an array, so for-await over an
+   async gen falls to legacy/AG0. A new for-await CFG variant (await the next()
+   promise, read IteratorResult fields via emit hooks) is required — a sibling of
+   `planForAwaitCfg`, not a tweak to it.
+
+3. **The #680 routing gate.** `async function*` must be *intercepted before* the
+   generator-buffer branch and routed to a new host-free async-gen emitter
+   (`function-body.ts` `isGenerator` arm, gated like 3b's
+   `isStandalonePromiseActive`), or it errors out before any of the above runs.
+
+### Banked contract — the real slices (each inert, carrier-gated, independently mergeable)
+
+Reuse, do NOT fork: `AsyncFrameInfo`/`buildAsyncFrameInfo` (the frame ABL,
+frame-core spill/state helpers), the native `$Promise` + microtask scheduler
+(`async-scheduler.ts`), and the native `IteratorResult` structs
+(`generators-native.ts` `RESULT_VALUE_FIELD`/`RESULT_DONE_FIELD`,
+`isGeneratorResultStruct`). The frame's existing `result_promise` field becomes
+the **current-next()-promise** slot (mutable — `next()` overwrites it per call).
+
+- **3d-i — host-free async-gen PRODUCER (the core).**
+  - **New CFG terminator** `settleYield { value: AsyncCfgOperand; resumeState; handler }`
+    added to `AsyncCfgTerminator` (async-cps.ts) + `validateAsyncCfg`
+    (async-frame.ts). Emitter: build `IteratorResult{value, done:0}`, `fulfill`
+    the frame's current `result_promise` with it, `STATE = resumeState`, spill,
+    `return`. (Do NOT ship it dead — land it *with* its producer + a test that
+    exercises it, per the #2367 graveyard rule; slice-3 only shipped goto/condGoto
+    unreachable because 3a exercised them in the same effort.)
+  - **New planner** `planAsyncGenCfg(fn, plan)`: number a mixed `yield`/`await`
+    body into states — each `await e` → `suspend` (resume writes SENT), each
+    `yield e` → `settleYield` (resume-on-next), body completion →
+    `settleDone` (a `settleUndefined` sibling that settles `{value:ret,
+    done:1}`). Bounded first shape: linear body, identifier bindings, the same
+    spill-safe-type gate as slice 1/3a.
+  - **New call-site** `emitAsyncGenerator`: build the frame parked at STATE=0
+    **without** kicking resume; return a native async-gen **carrier** (the frame
+    externref itself is sufficient — no prototype methods needed if the consumer
+    drives via a runtime helper, exactly as 3b drives the sync `__iterator`).
+  - **Per-gen `next` helper** `__async_gen_next_f<name>(frame) -> $Promise`
+    (per-generator, like the step adapters — the `$Promise`/frame types are
+    per-gen so a single generic helper cannot type them): alloc fresh pending
+    `$Promise`, store into `result_promise`, store SENT, call resume, return the
+    promise. `return()`/`throw()` variants bank as 3d-iii.
+  - **Route** `async function*` (host-free lane only) to `emitAsyncGenerator`
+    before the #680 branch, gated like `isStandalonePromiseActive`.
+  - **Proof (non-vacuity, host-free):** a direct-drive wasi test — call the gen,
+    call the per-gen next helper, `__drain_microtasks`, read
+    `IteratorResult.value`/`.done` — shows `yield await P.resolve(1); yield 2`
+    delivers `1` then `2` then `done`, `imports [] `. This proves suspend+settle
+    without needing the consumer slice. Inject-throw probes on the
+    suspend/settle arms (a rejected awaited promise inside the gen must reject the
+    *current* next()-promise).
+- **3d-ii — async-iterator for-await CONSUMER.** `planForAwaitAsyncCfg` sibling of
+  `planForAwaitCfg`: `it = source` (the async gen IS its own async iterator);
+  head emits `p = <per-gen next>(it)`; `suspend(await p)`; resume reads
+  `res.done`/`res.value` from the awaited `IteratorResult` via emit hooks;
+  back-edge `goto(head)`. Gate for-await on an async-iterator source
+  (`oracle` async-iterable fact). This is what makes the *task's* headline proof —
+  `for await (const x of g())` → `[1,2]`, imports `[]` — pass end-to-end.
+- **3d-iii — edges (bank):** `return()`/`throw()` on the async gen; `yield*`
+  (async delegation); yielded-thenable adoption (`yield await` vs `yield P` —
+  §27.6 AsyncGeneratorYield awaits the operand); multi-`next()` **result-promise
+  QUEUE** (concurrent `next()` before the prior settles — a single
+  current-promise slot suffices for serial for-await drive, which is the
+  non-vacuity proof); try/finally across yield.
+
+### Answers to the dispatch questions
+
+- **Does async-gen drive host-free today?** **No.** It does not even compile in
+  wasi/standalone (#680 gate); the gc path is host-backed
+  (`__create_async_generator` + gen-buffer imports). The async-drive machine is
+  never reached for an async generator.
+- **Is #2865 (standalone async-gen) unblocked?** **No.** #2865 remains blocked on
+  **3d-i** (the host-free async-gen producer carrier). 3d is a real substrate
+  build, not a planner-only follow-up — it needs the producer object/`next()`
+  carrier and (for the for-await headline) the async-iterator consumer, both
+  below the CFG machine. Recommend scheduling **3d-i** first (self-provable via
+  direct drive, de-risks the rest), then **3d-ii** for the for-await proof.
+
 ## Slice 3d-i — async-generator PRODUCER core (LANDED, host-free wasi lane, 2026-07-05, opus-2906-3di)
 
 **What shipped.** `async function* g(){ yield await Promise.resolve(1); yield 2 }`
@@ -731,11 +867,13 @@ on the drain**. Previously this hit the #680 native-generator gate
   `__async_gen_next_<name>(frame) -> Promise<IteratorResult>` mints a FRESH
   pending result promise per call, stores it into `frame.result_promise` (the
   resume fn re-reads that field at entry, so each `next()`'s promise is the one
-  settled at the next yield), kicks resume, returns the promise. The Iterator
-  Result reuses `generators-native.ts` `ensureNativeGeneratorResultType`
-  (`{value,done}` — no frame-ABI fork). `AsyncFrameInfo.asyncGen` switches
-  `ensureAsyncResumeFunction` to `planAsyncGenCfg` and the `settleYield`/
-  `settleDone` emit arms; every other async fn is byte-untouched.
+  settled at the next yield — the single current-promise slot the 3d contract's
+  "serial for-await drive" non-vacuity note calls sufficient), kicks resume,
+  returns the promise. The IteratorResult reuses `generators-native.ts`
+  `ensureNativeGeneratorResultType` (`{value,done}` — no frame-ABI fork).
+  `AsyncFrameInfo.asyncGen` switches `ensureAsyncResumeFunction` to
+  `planAsyncGenCfg` and the `settleYield`/`settleDone` emit arms; every other
+  async fn is byte-untouched.
 - **`function-body.ts`** — intercepts a bounded async gen in the `isGenerator`
   branch BEFORE the #680 gate, gated on `isAsyncGenDriveCandidate`.
 
@@ -753,8 +891,9 @@ machine).** A FLAT body of `yield <E>` statements where `E` is plain / `await
 frame-spill widening the linear/loop drives already have — params ARE fine,
 captured in frame fields); no `yield*`, no yields nested in expressions/control
 flow. `next(v)`/`.throw()`/`.return()` sent-value handling + prototype-method
-dispatch are **3d-ii** (the for-await consumer). Own-locals/spills is the
-immediate 3d-i′ follow-up (reuse `computeAsyncSpills`).
+dispatch + the concurrent-`next()` result-promise QUEUE are **3d-ii** (the
+for-await consumer). Own-locals/spills is the immediate 3d-i′ follow-up (reuse
+`computeAsyncSpills`).
 
 **Byte-inertness proof (the −16/−29 discipline).** sha256 of 5 representative
 programs (plainAsync / multiAwait / forAwait / syncGen / plain) × {gc, standalone,
@@ -775,10 +914,12 @@ gap3-tryfinally throw-path, 2× promise-combinators host, 2× issue-2865 AG0 was
 **pre-existing on origin/main** — verified identical failure set in a base
 worktree. `tsc --noEmit` clean.
 
-**Unblocks 3d-ii + #2865.** The frame carrier + `__async_gen_next_<name>` driver
-+ the settleYield/settleDone suspend-resume substrate are exactly what the
-`for await (x of g())` consumer (3d-ii) drives — that headline is now a
-consumer-side wiring slice (dispatch `g()[Symbol.asyncIterator]().next()` onto
-this producer) rather than a producer-machine problem. #2865 (standalone
-async-gen) shares the carrier widen (slice-1d). Issue stays `in-progress` for
-3d-ii + the own-local/`yield*`/nested-yield widenings.
+**Answers the 3d dispatch questions.** *Does async-gen drive host-free now?*
+**Yes** — for the bounded producer shape, in wasi, imports `[]`, with genuine
+suspension. *Is 3d-ii / #2865 unblocked?* **Yes** — the frame carrier +
+`__async_gen_next_<name>` driver + settleYield/settleDone suspend-resume
+substrate are exactly what the `for await (x of g())` consumer (3d-ii) drives:
+that headline is now a consumer-side wiring slice (dispatch
+`g()[Symbol.asyncIterator]().next()` onto this producer) rather than a
+producer-machine problem; #2865 shares the carrier widen (slice-1d). Issue stays
+`in-progress` for 3d-ii + the own-local/`yield*`/nested-yield widenings.
