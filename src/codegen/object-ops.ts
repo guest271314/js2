@@ -4273,7 +4273,8 @@ export function compilePropertyIntrospection(
   // answer ('field'→true, 'method'→false). The type checker (`receiverType`)
   // already resolves through parens; this local gives the AST checks the same
   // paren-transparency.
-  const recvExpr = ts.skipParentheses(propAccess.expression);
+  let recvExpr: ts.Expression = propAccess.expression;
+  while (ts.isParenthesizedExpression(recvExpr)) recvExpr = recvExpr.expression;
 
   // For externref/any receivers (e.g. Object.create result), delegate to runtime
   // since we can't statically know their properties
