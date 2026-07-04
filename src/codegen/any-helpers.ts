@@ -2286,14 +2286,73 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
               { op: "return" },
             ],
           },
-          // if tagA != tagB → 0 (strict: no cross-type coercion)
+          // if tagA != tagB → 0 (strict: no cross-type coercion), EXCEPT the
+          // (#2175 V2-S3 — raw-anyref carrier) cross-representation identity case.
           { op: "local.get", index: 2 },
           { op: "local.get", index: 3 },
           { op: "i32.ne" },
           {
             op: "if",
             blockType: { kind: "val", type: { kind: "i32" } },
-            then: [{ op: "i32.const", value: 0 }],
+            // (#2175 V2-S3) Reference-IDENTITY reconciliation, cross-representation
+            // ONLY. A GC object can reach `===` under TWO $AnyValue reps that point
+            // at the SAME reference: tag-6 `refval` (raw GC ref via `__any_box_ref`)
+            // vs tag-5 `externval` (the SAME ref externref-wrapped, e.g. a
+            // descriptor `.value` / array-element read boxed via `__any_box_string`).
+            // Those differ in TAG, so they land in THIS `tagA != tagB` arm — where
+            // the legacy answer was a flat `0`. Recover each operand's reference
+            // payload (refval if non-null, else `any.convert_extern(externval)`) to
+            // a common `eqref`; if both are `eq` refs and `ref.eq`-identical they are
+            // the identical object → 1, else 0. This lives ONLY in the different-tag
+            // branch: same-tag pairs keep their existing tag-specific arms untouched
+            // (an earlier revision ran this before the tag gate — for ALL tag pairs —
+            // and regressed same-tag identity, measured −7228 host-free; #2175).
+            // Cannot false-positive a primitive: distinct number/string/object boxes
+            // are distinct refs. GATED on standalone/wasi (native-GC-only; host mode
+            // uses host externrefs and answers identity correctly, byte-identical).
+            then:
+              ctx.standalone === true || ctx.wasi === true
+                ? (() => {
+                    const EQ_HEAP_TYPE = -19; // WasmGC `eq` abstract heap type
+                    const recoverRefPayload = (opIdx: number, dstLocal: number): Instr[] => [
+                      { op: "local.get", index: opIdx } as Instr,
+                      { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 3 } as Instr, // refval (eqref)
+                      { op: "local.tee", index: dstLocal } as Instr,
+                      { op: "ref.is_null" } as Instr,
+                      {
+                        op: "if",
+                        blockType: { kind: "empty" },
+                        then: [
+                          { op: "local.get", index: opIdx } as Instr,
+                          { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 4 } as Instr, // externval (externref)
+                          { op: "any.convert_extern" } as Instr,
+                          { op: "local.set", index: dstLocal } as Instr,
+                        ],
+                      } as Instr,
+                    ];
+                    return [
+                      ...recoverRefPayload(0, 4),
+                      ...recoverRefPayload(1, 5),
+                      { op: "local.get", index: 4 } as Instr,
+                      { op: "ref.test", typeIdx: EQ_HEAP_TYPE } as Instr,
+                      { op: "local.get", index: 5 } as Instr,
+                      { op: "ref.test", typeIdx: EQ_HEAP_TYPE } as Instr,
+                      { op: "i32.and" } as Instr,
+                      {
+                        op: "if",
+                        blockType: { kind: "val", type: { kind: "i32" } },
+                        then: [
+                          { op: "local.get", index: 4 } as Instr,
+                          { op: "ref.cast", typeIdx: EQ_HEAP_TYPE } as Instr,
+                          { op: "local.get", index: 5 } as Instr,
+                          { op: "ref.cast", typeIdx: EQ_HEAP_TYPE } as Instr,
+                          { op: "ref.eq" } as Instr,
+                        ],
+                        else: [{ op: "i32.const", value: 0 } as Instr],
+                      } as Instr,
+                    ];
+                  })()
+                : [{ op: "i32.const", value: 0 }],
             else: [
               // Same tag — compare by tag type
               { op: "local.get", index: 2 },

@@ -2,7 +2,7 @@
 id: 2175
 title: "architect spec: standalone builtin-prototype object representation + native-method-closure dispatch"
 status: in-progress
-assignee: ttraenkler/opus-2175s2
+assignee: ttraenkler/opus-2175s3
 sprint: current
 created: 2026-06-16
 updated: 2026-07-04
@@ -1250,3 +1250,135 @@ when V2-S3 lands, prompting the flip to `.toBe(1)`.
 - The externref/`$Object`-vs-anyref `===` gap above is the concrete substrate
   V2-S3's D4 (raw-anyref carrier) exists to close — carry the raw closure
   struct, not an `extern.convert_any` box, in `$PropEntry.value`.
+
+---
+
+## Implementation log — V2-S3a (sdev opus-2175s3, 2026-07-04)
+
+PR: **V2-S3a of 7 — the raw-anyref carrier** (identity reconciliation).
+Branch `issue-2175-v2s3-dynamic-reader` (stacked on `issue-2175-v2s2`).
+Status: implemented, host-free, **standalone/wasi-gated (host byte-identical)**.
+
+### The senior-dev scoping call (WHY this is S3a, not the full C3)
+
+V2-S3 (C3) is two genuinely separable blast radii: **(a)** the raw-anyref
+carrier that reconciles GC-object identity across representations — this is
+what flips the banked `.toBe(0)` guard and fixes a broad #3027 identity class —
+and **(b)** the `$NativeProto` reader-arm MOP (`$props` table + populate +
+`ensure_props` + step-3/4 arms across the 7 reader natives) that makes a proto
+object *flowing as a runtime value* answer reflective reads. The v2 spec itself
+mandates keeping the reader-arm blast radius on its own CI evidence
+("Do not fold S3+S5 into one PR"). The carrier (a) is small, provably safe, and
+delivers the explicitly-requested acceptance signal; the reader arm (b) is a
+large object-runtime change. Landing (a) alone as a tight, well-proven slice —
+and **banking (b)** with the note below — is the disciplined call over one
+sprawling PR that conflates two minefields (equality machinery + reader natives)
+in a single CI signal. The equality machinery is the codebase's most
+regression-prone area (documented −162/−788/−794/−1245 incidents in
+`any-helpers.ts`), so it earns its own isolated evidence.
+
+### Root cause (traced, not narrative)
+
+`emitStrictEq` boxes both `any` operands to `$AnyValue` and calls
+`__any_strict_eq` (any-helpers.ts). A GC object reaches `===` under **two
+representations of the same reference**:
+- **raw GC ref** (e.g. `RegExp.prototype.exec`, a `(ref $wrap)` closure struct)
+  → `boxToAny` kind-`ref` arm → `__any_box_ref` → **tag-6** (`refval`, field 3);
+- **externref-wrapped GC ref** (the value `__extern_get` returns —
+  `object-runtime.ts:1134-1139`, `struct.get $PropEntry.value` +
+  `extern.convert_any` — for a descriptor `.value`, an array element, any
+  dynamic member read) → `boxToAny` kind-`externref` arm → `__any_box_string`
+  → **tag-5** (`externval`, field 4).
+
+`__any_strict_eq`'s `tagA != tagB → 0` gate (any-helpers.ts, right after the
+numeric-class arm) then answers **0** for that tag-5×tag-6 pair even though both
+point at the identical object. That is the measured wall behind
+`gOPD(p,"exec").value === p.exec` and the broad
+`const o:any={z:1}; const a:any[]=[o,o]; a[0]===a[1]` → 0 class (a large #3027
+subset: any object that round-trips through the externref reader loses `===`).
+
+### The fix
+
+A **reference-identity reconciliation arm** inserted in `__any_strict_eq`
+*after* the numeric-class arm and *before* `tagA != tagB → 0`: recover each
+operand's reference payload to a common `eqref` (`refval` field 3 if non-null,
+else `any.convert_extern(externval field 4)`), and if both are `eq` refs and
+`ref.eq`-identical → return 1. This is the exact discipline of the #2734
+`__extern_strict_eq` object-identity fast path, lifted onto the `$AnyValue`
+path so the **whole `any === any` surface** honours it (not just array-search).
+Reuses the `anyA`/`anyB` (locals 4/5) scratch already declared. **Gated on
+`ctx.standalone || ctx.wasi`** — the split is a native-GC phenomenon; host mode
+(objects = host externref proxies) already answers identity and stays
+byte-identical (zero host blast radius; #1888's host `isSameValue` untouched).
+
+**Why it cannot false-positive** (the safety argument): `ref.eq` is exact
+identity. Distinct number/string/object boxes are distinct refs → `ref.eq` 0 →
+falls through to the existing value arms unchanged (numbers already returned via
+the earlier numeric-class arm; content-equal distinct strings still reach the
+tag-5 content-eq arm). Only a genuinely identical reference short-circuits, and
+`x === x` for the same reference is always `true` in JS. So the arm only ever
+converts a *wrong 0* into a *correct 1*; it removes/flips no value comparison.
+This is categorically different from the tag-5 VALUE classifier (`tag5ValueEqThen`,
+flag-off) that unmasked −162: that changes value-equality of *distinct* boxes;
+this changes only reference-identity of the *same* box under mixed tags.
+
+### Proof (inject/contrast + anti-vacuity, host-free throughout)
+
+Baseline (`origin/issue-2175-v2s2`, my branch point) → with the arm:
+- `gOPD(RegExp.prototype,"exec").value === RegExp.prototype.exec`: **0 → 1**
+  (the banked characterization guard, now flipped to `.toBe(1)`);
+- `const o:any={z:1}; [o,o]; a[0]===a[1]`: **0 → 1** (#3027 identity class);
+- `const o:any={z:1}; const p:any=o; o===p`: **0 → 1**.
+- **Anti-vacuity (the arm DISCRIMINATES, is not always-1):** distinct objects
+  `{x:1}==={x:1}` → **0**; swap-guard `gOPD(...,"exec").value === RegExp.prototype.test`
+  → **0**; `exec !== test` → **0**; `a[0] === (a fresh {z:1})` → **0**;
+  content-eq strings `"ab" === "a"+"b"` → **1** (content path intact);
+  distinct strings → **0**; `23 === 23.0` → **1**; `1 === 2` → **0**;
+  `null === null` → **1**; `NaN === NaN` → **0**; `"x" === {x:1}` → **0**.
+
+Tests: `tests/issue-2175-v2s2-singleton-identity.test.ts` — the boundary guard
+flipped to `.toBe(1)` + two new anti-vacuity cases (swap-guard on the descriptor
+value; array-identity with a distinct-object negative) — **8/8**. Regression
+(isolated, load-flake-free): `issue-2734`, `issue-2040-tag5-field4-eq`,
+`loose-equality`, `issue-2063-switch-strict-equality`,
+`issue-2158-class-identity-standalone`, `issue-2579`,
+`issue-2583-any-array-method-brand`, `issue-2191-case-equals`, `issue-1888`
+(×3 files), `issue-2175-typeof-function-arm`, `issue-2175-native-proto-brands`
+— all green. `tsc --noEmit` clean. The 4 pre-existing
+`issue-2175-regexp-proto-readers` getter-body failures fail IDENTICALLY on the
+branch point (V2-S5 boundary, not regressed). Full #3027 blast radius validated
+on CI merge_group + standalone floor.
+
+### Banked for V2-S3b (the reader-arm MOP — the #3027 keystone breadth)
+
+Everything in the C3 spec §"Slice decomposition / V2-S3" EXCEPT the carrier:
+- **C1 layout**: append `6 $props (mut anyref)` to `$NativeProto`
+  (`native-proto.ts` `registerNativeProtoType` + the single `struct.new` in
+  `emitLazyNativeProtoGet` — append `ref.null any` before the `struct.new`);
+  fill `$parent`/`$ctor` in the init body (chain linking).
+- **Populate**: `__nativeproto_populate_<brand>(ref $NativeProto) -> ref $Object`
+  generated from glue; MUST store the **#2963 singleton** per member
+  (`pushBuiltinFnSingletonValueInstrs` against the same closure) so runtime-read
+  values keep identity with the syntactic surfaces — the carrier arm here then
+  makes `p.exec === RegExp.prototype.exec` hold for the *flowing-proto* read too.
+  Reuse the `__obj_insert` path; symbol members = real `$Symbol` carrier keys.
+- **Trigger**: `__nativeproto_ensure_props(anyref) -> ref $Object` reserve/fill
+  at FINALIZE (brand-switch over registered glue), reserve-then-fill (#1719) +
+  name-based funcIdx re-resolution after `flushLateImportShifts` (#2043).
+- **Step-3 reader arm**: in `__extern_get` (`object-runtime.ts:1041+`, after the
+  `ref.test $Object` gate at :1065 misses) add `ref.test $NativeProto` →
+  `ensure_props` → own-table find → resolve (data/accessor with recv as this);
+  miss → `$parent` walk. Mirror into `__extern_has`, `__hasOwnProperty`,
+  `__getOwnPropertyDescriptor`, `__getOwnPropertyNames`, `__extern_set`,
+  `__delete_property` (one semantics, per-native arms). This is what makes
+  `const p:any = RegExp.prototype; p.exec` / `"exec" in p` /
+  `Object.getPrototypeOf(RegExp.prototype) === Object.prototype` resolve at the
+  RUNTIME layer — the #3027 driver.
+- The reader-arm result (a raw closure struct read from `$PropEntry.value`) will
+  itself be `extern.convert_any`-wrapped by `__extern_get`'s return path and box
+  tag-5 — but **this S3a carrier already reconciles that** against the tag-6
+  syntactic singleton, so identity holds the moment the reader arm lands.
+  (Double-gOPD `gOPD(p,"exec").value === gOPD(p,"exec").value` currently throws
+  a Wasm exception from a SEPARATE gOPD engine body — a pre-existing limitation
+  unrelated to the carrier; resolved once the reader-arm MOP replaces the
+  synthesized-descriptor path.)
