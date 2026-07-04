@@ -1614,15 +1614,32 @@ export function forAwaitSpillInfo(
  * So the driven set is exactly the proven case: an array whose elements are
  * boxed (Promise arrays — the −32 for-await cluster — and object/string arrays).
  * Returns `false` for a non-for-await / non-bounded body.
+ *
+ * Element-type query goes through `ctx.oracle.elementFactOf` (the #1930 type
+ * boundary — NOT the raw checker, per the oracle-ratchet gate).
  */
 export function forAwaitNeedsDrive(ctx: CodegenContext, fn: ts.FunctionLikeDeclaration, plan: AsyncCpsPlan): boolean {
   const shape = analyzeForAwait(fn, plan);
   if (shape === null) return false;
-  const srcType = ctx.checker.getTypeAtLocation(shape.source);
-  const elem = srcType.getNumberIndexType();
-  if (elem === undefined) return false; // user iterable / unknown — legacy (3b′)
-  const wt = resolveWasmType(ctx, elem);
-  return wt.kind === "externref" || wt.kind === "ref" || wt.kind === "ref_null";
+  const elem = ctx.oracle.elementFactOf(shape.source);
+  switch (elem.kind) {
+    // Unboxed scalars settle immediately (`Await(v) = v`, legacy already
+    // correct) and their typed WasmGC arrays would trap the vec iterator.
+    case "number":
+    case "boolean":
+    case "bigint":
+    case "undefined":
+    case "null":
+    case "void":
+    // No element fact: a non-array / user-iterable source — keep on legacy (3b′).
+    case "unresolvable":
+      return false;
+    // Boxed element (Promise/object/class/builtin/string/array/tuple/function/
+    // any/unknown/union): the vec `__iterator` consumes it and `Await` can
+    // genuinely suspend.
+    default:
+      return true;
+  }
 }
 
 /**
