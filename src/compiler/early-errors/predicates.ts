@@ -725,11 +725,21 @@ export function isInsideClassWithPrivateName(node: ts.Node, privateName: string)
   let current: ts.Node | undefined = node.parent;
   while (current) {
     if (ts.isClassDeclaration(current) || ts.isClassExpression(current)) {
-      // Check if this class declares the private name
-      for (const member of current.members) {
-        if (member.name && ts.isPrivateIdentifier(member.name)) {
-          if ((member.name.escapedText as string) === privateName) {
-            return true;
+      // §15.7.14 ClassDefinitionEvaluation: the ClassHeritage (the `extends`
+      // clause) is evaluated with the OUTER PrivateEnvironment — the class's own
+      // private names are NOT yet in scope there. So a private reference that
+      // lives inside this class's heritage clause must NOT resolve against this
+      // class's private members (it is an early SyntaxError unless an *enclosing*
+      // class declares the name). Only count this class's members when the
+      // reference is reached via its BODY, not its heritage.
+      const inHeritage = current.heritageClauses?.some((hc) => isNodeWithin(node, hc)) ?? false;
+      if (!inHeritage) {
+        // Check if this class declares the private name
+        for (const member of current.members) {
+          if (member.name && ts.isPrivateIdentifier(member.name)) {
+            if ((member.name.escapedText as string) === privateName) {
+              return true;
+            }
           }
         }
       }
@@ -738,6 +748,16 @@ export function isInsideClassWithPrivateName(node: ts.Node, privateName: string)
       // Continue searching outer classes.
     }
     current = current.parent;
+  }
+  return false;
+}
+
+/** True when `node` is `ancestor` or a descendant of it (walks `.parent`). */
+function isNodeWithin(node: ts.Node, ancestor: ts.Node): boolean {
+  let cur: ts.Node | undefined = node;
+  while (cur) {
+    if (cur === ancestor) return true;
+    cur = cur.parent;
   }
   return false;
 }

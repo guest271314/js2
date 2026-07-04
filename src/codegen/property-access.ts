@@ -1168,6 +1168,32 @@ function ensureStandaloneBuiltinStaticMethodClosure(
       paramTypes = [{ kind: "externref" }, { kind: "externref" }];
       returnType = { kind: "externref" };
       break;
+    // (#2933) Namespace static-method VALUE reads for the fixed-arity `Reflect.*`
+    // methods that the standalone CALL path already backs with a simple
+    // externref/i32 native (calls.ts §"Reflect API"). The value closure calls
+    // the SAME native, so `const f: any = Reflect.get; f(o, "k")` is
+    // observationally identical to `Reflect.get(o, "k")`. The variadic
+    // (`Math.max`) and native-`$AnyValue`-return (`JSON.stringify`, `JSON.parse`)
+    // methods stay refused — they need variadic / anyref-boundary closure work
+    // (see the issue's remaining scope). `Reflect.get`/`set` fix the arity at 2/3
+    // (no explicit-receiver slot), matching the call path which refuses the
+    // receiver form under standalone (#2046).
+    case "Reflect.get":
+      paramTypes = [{ kind: "externref" }, { kind: "externref" }];
+      returnType = { kind: "externref" };
+      break;
+    case "Reflect.has":
+      paramTypes = [{ kind: "externref" }, { kind: "externref" }];
+      returnType = { kind: "i32" };
+      break;
+    case "Reflect.set":
+      paramTypes = [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }];
+      returnType = { kind: "i32" };
+      break;
+    case "Reflect.ownKeys":
+      paramTypes = [{ kind: "externref" }];
+      returnType = { kind: "externref" };
+      break;
     default:
       return null;
   }
@@ -1204,6 +1230,51 @@ function ensureStandaloneBuiltinStaticMethodClosure(
       closureFctx.body.push({ op: "local.get", index: 1 });
       closureFctx.body.push({ op: "local.get", index: 2 });
       closureFctx.body.push({ op: "call", funcIdx: gopdIdx });
+    } else if (key === "Reflect.get") {
+      // (#2933) Same native the 2-arg standalone `Reflect.get(target, key)` call
+      // path uses (calls.ts). The value closure is fixed 2-arg — the optional
+      // receiver form is unsupported in standalone (#2046), consistent there.
+      const idx = ensureLateImport(
+        ctx,
+        "__extern_get",
+        [{ kind: "externref" }, { kind: "externref" }],
+        [{ kind: "externref" }],
+      );
+      if (idx === undefined) return null;
+      closureFctx.body.push({ op: "local.get", index: 1 });
+      closureFctx.body.push({ op: "local.get", index: 2 });
+      closureFctx.body.push({ op: "call", funcIdx: idx });
+    } else if (key === "Reflect.has") {
+      const idx = ensureLateImport(
+        ctx,
+        "__extern_has",
+        [{ kind: "externref" }, { kind: "externref" }],
+        [{ kind: "i32" }],
+      );
+      if (idx === undefined) return null;
+      closureFctx.body.push({ op: "local.get", index: 1 });
+      closureFctx.body.push({ op: "local.get", index: 2 });
+      closureFctx.body.push({ op: "call", funcIdx: idx });
+    } else if (key === "Reflect.set") {
+      const idx = ensureLateImport(
+        ctx,
+        "__reflect_set",
+        [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
+        [{ kind: "i32" }],
+      );
+      if (idx === undefined) return null;
+      closureFctx.body.push({ op: "local.get", index: 1 });
+      closureFctx.body.push({ op: "local.get", index: 2 });
+      closureFctx.body.push({ op: "local.get", index: 3 });
+      closureFctx.body.push({ op: "call", funcIdx: idx });
+    } else if (key === "Reflect.ownKeys") {
+      // Native __object_keys — string own keys of the $Object hash-map, per the
+      // standalone `Reflect.ownKeys(target)` call path (Symbol/non-enumerable
+      // keys are out of scope for the open-object runtime, consistent with it).
+      const idx = ensureLateImport(ctx, "__object_keys", [{ kind: "externref" }], [{ kind: "externref" }]);
+      if (idx === undefined) return null;
+      closureFctx.body.push({ op: "local.get", index: 1 });
+      closureFctx.body.push({ op: "call", funcIdx: idx });
     }
 
     funcIdx = mintDefinedFunc(ctx);
