@@ -334,6 +334,29 @@ export function isGlobalRegExpType(type: ts.Type): boolean {
   return sym?.getName() === "RegExp" && isDeclarationFileOnlySymbol(sym);
 }
 
+/**
+ * (#2161 B2) A syntactically-undefined expression — the `undefined` global
+ * identifier or a `void 0`-style void expression. Used to apply the
+ * §22.1.3.23 / §22.2.6.14 "if limit is undefined, lim = 2^32-1" (and "if
+ * separator is undefined, return [S]") spec branches at compile time: these
+ * arguments otherwise compile to f64 NaN, and ToUint32(NaN) = 0 silently
+ * truncates the result to `[]` (`"a b".split(" ", undefined)` returned `[]`,
+ * not `["a","b"]`). A RUNTIME-undefined value (a variable holding undefined)
+ * is indistinguishable from a genuine NaN-coercing argument here and keeps
+ * the ToUint32 lowering.
+ */
+export function isStaticallyUndefinedExpr(expr: ts.Expression): boolean {
+  const e = stripStaticWrapper(expr);
+  if (ts.isIdentifier(e) && e.text === "undefined") return true;
+  if (ts.isVoidExpression(e)) {
+    // Only side-effect-free operands (`void 0`, `void "x"`, `void id`) may be
+    // folded away — `void f()` must still evaluate `f()`.
+    const op = stripStaticWrapper(e.expression);
+    return ts.isLiteralExpression(op) || ts.isIdentifier(op);
+  }
+  return false;
+}
+
 function staticStringValue(ctx: CodegenContext, expr: ts.Expression): string | null | undefined {
   const unwrapped = stripStaticWrapper(expr);
   if (ts.isStringLiteral(unwrapped) || ts.isNoSubstitutionTemplateLiteral(unwrapped)) {
@@ -380,6 +403,10 @@ function staticConstStringValue(
   const direct = staticStringValue(ctx, cur);
   if (direct !== null) return direct;
 
+  // (#2161 B4) `void 0`-style statically-undefined operands (side-effect-free
+  // only) take the spec's undefined default — `new RegExp(/re/g, void 0)`.
+  if (isStaticallyUndefinedExpr(cur)) return undefined;
+
   // `a + b` — fold when both operands fold to strings.
   if (ts.isBinaryExpression(cur) && cur.operatorToken.kind === ts.SyntaxKind.PlusToken) {
     const left = staticConstStringValue(ctx, cur.left, seen);
@@ -389,16 +416,39 @@ function staticConstStringValue(
     return left + right;
   }
 
-  // `const`-bound identifier → follow its initialiser once.
+  // `const`-bound — or provably never-reassigned `var`/`let`-bound —
+  // identifier → follow its initialiser once. (#2161 B4) The sputnik-era
+  // test262 RegExp suites bind patterns/flags with `var` (`var __re = "d+";
+  // RegExp(__re, "i")`), which the const-only fold refused, lowering the ctor
+  // to the runtime-trap placeholder ("illegal cast"). `bindingHasWrites` (the
+  // same whole-source write scan `isTrustedBackendCreatedRegExpBinding`
+  // already relies on) proves the binding is assigned only at its declaration;
+  // a multi-declaration `var` (re-declared with a second initialiser, which is
+  // NOT an assignment expression) is refused via the single-declaration guard.
   if (ts.isIdentifier(cur)) {
     const sym = ctx.checker.getSymbolAtLocation(cur);
     const decl = sym?.valueDeclaration;
-    if (!decl || !ts.isVariableDeclaration(decl) || !decl.initializer) return null;
+    if (!sym || !decl || !ts.isVariableDeclaration(decl)) return null;
     const list = decl.parent;
-    if (!ts.isVariableDeclarationList(list) || (list.flags & ts.NodeFlags.Const) === 0) return null;
+    if (!ts.isVariableDeclarationList(list)) return null;
+    const isConst = (list.flags & ts.NodeFlags.Const) !== 0;
+    if (!isConst) {
+      const varDecls = (sym.getDeclarations() ?? []).filter((d) => ts.isVariableDeclaration(d));
+      if (varDecls.length !== 1) return null;
+      if (bindingHasWrites(ctx, decl, sym)) return null;
+    }
+    // A never-written binding with NO initialiser is always `undefined`
+    // (`var x; new RegExp(/re/m, x)` — sputnik's hoisted-undefined flags form).
+    if (!decl.initializer) return isConst ? null : undefined;
     if (seen.has(decl.initializer)) return null;
+    // `seen` guards the ACTIVE resolution path (a self-referential cycle), so
+    // unwind it after the recursive fold — a diamond (`a + "x" + a`, the same
+    // binding referenced twice in one pattern) is legitimate and must fold
+    // (#2161 B4: the REX XML-parser concat chains reuse fragments repeatedly).
     seen.add(decl.initializer);
-    return staticConstStringValue(ctx, decl.initializer, seen);
+    const folded = staticConstStringValue(ctx, decl.initializer, seen);
+    seen.delete(decl.initializer);
+    return folded;
   }
 
   return null;
@@ -416,13 +466,54 @@ function staticRegExpLiteralCopy(
   ctx: CodegenContext,
   patternArg: ts.Expression,
   flagsArg: ts.Expression | undefined,
+  depth = 0,
 ): StaticRegExpPatternFlags | null {
-  const unwrapped = stripStaticWrapper(patternArg);
-  if (unwrapped.kind !== ts.SyntaxKind.RegularExpressionLiteral) return null;
-  const text = (unwrapped as ts.RegularExpressionLiteral).text;
-  const lastSlash = text.lastIndexOf("/");
-  const litPattern = lastSlash >= 0 ? text.slice(1, lastSlash) : text;
-  const litFlags = lastSlash >= 0 ? text.slice(lastSlash + 1) : "";
+  // (#2161 B4) Depth guard: the copy form can delegate back to
+  // `staticRegExpPatternFlags` (nested `new RegExp(new RegExp(...))` /
+  // binding chains), and a pathological self-referential binding
+  // (`var a = new RegExp(a)`) would otherwise recurse forever at COMPILE time.
+  if (depth > 16) return null;
+  let unwrapped = stripStaticWrapper(patternArg);
+  // (#2161 B4) Follow a const / never-reassigned binding to its regex-literal
+  // initialiser — the sputnik copy-ctor form (`var __pattern = /./i;
+  // new RegExp(__pattern)`). Same never-reassigned proof as
+  // `staticConstStringValue`'s identifier arm.
+  if (ts.isIdentifier(unwrapped)) {
+    const sym = ctx.checker.getSymbolAtLocation(unwrapped);
+    const decl = sym?.valueDeclaration;
+    if (
+      sym &&
+      decl &&
+      ts.isVariableDeclaration(decl) &&
+      decl.initializer &&
+      ts.isVariableDeclarationList(decl.parent)
+    ) {
+      const isConst = (decl.parent.flags & ts.NodeFlags.Const) !== 0;
+      const varDecls = (sym.getDeclarations() ?? []).filter((d) => ts.isVariableDeclaration(d));
+      if (isConst || (varDecls.length === 1 && !bindingHasWrites(ctx, decl, sym))) {
+        unwrapped = stripStaticWrapper(decl.initializer);
+      }
+    }
+  }
+  let litPattern: string;
+  let litFlags: string;
+  if (unwrapped.kind === ts.SyntaxKind.RegularExpressionLiteral) {
+    const text = (unwrapped as ts.RegularExpressionLiteral).text;
+    const lastSlash = text.lastIndexOf("/");
+    litPattern = lastSlash >= 0 ? text.slice(1, lastSlash) : text;
+    litFlags = lastSlash >= 0 ? text.slice(lastSlash + 1) : "";
+  } else if (ts.isNewExpression(unwrapped) || ts.isCallExpression(unwrapped)) {
+    // (#2161 B4) The copy SOURCE can itself be a statically-recoverable
+    // constructor form — `var p = new RegExp; new RegExp(p, "g")` (sputnik
+    // 15.10.4.1-1 / A1_T4/T5). Delegate to the full recoverer, which handles
+    // `new RegExp(...)` / `RegExp(...)` and trusted bindings.
+    const base = staticRegExpPatternFlags(ctx, unwrapped, depth + 1);
+    if (base === null) return null;
+    litPattern = base.pattern;
+    litFlags = base.flags;
+  } else {
+    return null;
+  }
 
   if (flagsArg === undefined) return { pattern: litPattern, flags: litFlags };
   const overrideFlags = staticConstStringValue(ctx, flagsArg);
@@ -441,7 +532,12 @@ interface StaticRegExpPatternFlags {
  * `/…/flags`, `new RegExp("…", "flags")`, `RegExp("…", "flags")`, or a
  * trusted binding initialized to one of those forms.
  */
-function staticRegExpPatternFlags(ctx: CodegenContext, expr: ts.Expression): StaticRegExpPatternFlags | null {
+function staticRegExpPatternFlags(
+  ctx: CodegenContext,
+  expr: ts.Expression,
+  depth = 0,
+): StaticRegExpPatternFlags | null {
+  if (depth > 16) return null; // see staticRegExpLiteralCopy's depth guard
   const unwrapped = stripStaticWrapper(expr);
   if (unwrapped.kind === ts.SyntaxKind.RegularExpressionLiteral) {
     const text = (unwrapped as ts.RegularExpressionLiteral).text;
@@ -458,7 +554,7 @@ function staticRegExpPatternFlags(ctx: CodegenContext, expr: ts.Expression): Sta
     const flagsArg = unwrapped.arguments?.[1];
     // #2161 — a regex-literal first arg is the §22.2.3.1 copy form.
     if (patternArg !== undefined) {
-      const copy = staticRegExpLiteralCopy(ctx, patternArg, flagsArg);
+      const copy = staticRegExpLiteralCopy(ctx, patternArg, flagsArg, depth + 1);
       if (copy !== null) return copy;
     }
     // #2161 — fold compile-time-constant pattern/flags (concat, const-bound)
@@ -474,7 +570,7 @@ function staticRegExpPatternFlags(ctx: CodegenContext, expr: ts.Expression): Sta
     if (!sym) return null;
     const decl = sym.getDeclarations()?.find((d) => ts.isVariableDeclaration(d)) as ts.VariableDeclaration | undefined;
     if (!decl?.initializer || !isTrustedBackendCreatedRegExpBinding(ctx, decl, sym)) return null;
-    return staticRegExpPatternFlags(ctx, decl.initializer);
+    return staticRegExpPatternFlags(ctx, decl.initializer, depth + 1);
   }
   return null;
 }
@@ -2010,7 +2106,10 @@ function emitStandaloneRegExpSplitCore(
   fctx.body.push({ op: "local.get", index: subjLocal });
   // lim (§22.2.6.14 step 12: undefined → 2^32-1, else ToUint32(limit)).
   // -1 reinterprets as 0xFFFFFFFF under the helper's unsigned compares.
-  if (limitExpr === undefined) {
+  // (#2161 B2) A statically-`undefined` limit (`s.split(re, undefined)`)
+  // takes the same unbounded branch — compiling it lowered to f64 NaN and
+  // ToUint32(NaN) = 0, truncating every such split to `[]`.
+  if (limitExpr === undefined || isStaticallyUndefinedExpr(limitExpr)) {
     fctx.body.push({ op: "i32.const", value: -1 });
   } else {
     const limType = compileExpression(ctx, fctx, limitExpr, { kind: "f64" });

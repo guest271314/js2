@@ -213,6 +213,31 @@ export function getVecInfo(ctx: CodegenContext, typeIdx: number): { arrTypeIdx: 
 }
 
 /**
+ * (#2161 B0) Structural twin of {@link getVecInfo} for vec-SHAPED structs that
+ * are not named `__vec_*` — a struct whose field 0 is `length: i32` and field 1
+ * is `data: ref/ref_null <array>` (the `$__regexp_match_vec` subtype shape).
+ * Used only by `emitSafeStructConversion` to route such sources through the
+ * element-copying vec→vec body instead of the trapping struct-narrow field
+ * copy. Deliberately NOT folded into `getVecInfo` itself: its other callers
+ * (extern-vec builders, host glue) assume genuine `__vec_*` layout semantics.
+ */
+function getVecShapedInfo(ctx: CodegenContext, typeIdx: number): { arrTypeIdx: number; elemType: ValType } | null {
+  const typeDef = ctx.mod.types[typeIdx];
+  if (!typeDef || typeDef.kind !== "struct") return null;
+  const sd = typeDef as StructTypeDef;
+  if (sd.fields.length < 2) return null;
+  const lenField = sd.fields[0]!;
+  const dataField = sd.fields[1]!;
+  if (lenField.name !== "length" || lenField.type.kind !== "i32") return null;
+  if (dataField.name !== "data") return null;
+  if (dataField.type.kind !== "ref" && dataField.type.kind !== "ref_null") return null;
+  const arrTypeIdx = (dataField.type as { typeIdx: number }).typeIdx;
+  const arrDef = ctx.mod.types[arrTypeIdx];
+  if (!arrDef || arrDef.kind !== "array") return null;
+  return { arrTypeIdx, elemType: (arrDef as ArrayTypeDef).element };
+}
+
+/**
  * Build instructions to construct a vec struct from a JS array (externref).
  * Uses __extern_length + __extern_get to read elements and build the WasmGC array.
  * Returns instruction array producing ref_null $vecType on the stack. (#792)
@@ -967,6 +992,40 @@ function emitSafeStructConversion(
     return true;
   }
 
+  // (#2161 B0) Vec-SHAPED source struct → genuine vec: ELEMENT COPY, never the
+  // struct-narrow field copy below. `getVecInfo` only recognises structs NAMED
+  // `__vec_*`, so the `$__regexp_match_vec` subtype (a `{length, data}` vec
+  // prefix + index/input/groups/indices result fields, #1914/#2588/#2589)
+  // missed Case 2 above and fell into struct narrowing. Narrowing "copies" the
+  // `data` field with a guarded ref-cast to the DESTINATION's array type —
+  // `__arr_ref_<anyStr>` never passes `ref.test $__arr_externref`, so the else
+  // arm produced null and the trailing non-null assert TRAPPED ("dereferencing
+  // a null pointer": every harness call passing a match result to an `any[]`
+  // param, e.g. `assert_compareArray("foo".match(re), ["foo"])`). Element-wise
+  // copy coerces each nullable-native-string capture to the destination element
+  // (null captures = `undefined` flow through as null externrefs). Checked
+  // AFTER the declared-subtype fast path so a match-vec flowing to its own base
+  // vec keeps identity (no copy).
+  if (!srcVec) {
+    const vecShaped = getVecShapedInfo(ctx, fromTypeIdx);
+    if (vecShaped) {
+      const dstVec = getVecInfo(ctx, toTypeIdx);
+      if (dstVec) {
+        const srcRefIdx =
+          vecShaped.elemType.kind === "ref" || vecShaped.elemType.kind === "ref_null"
+            ? (vecShaped.elemType as { typeIdx: number }).typeIdx
+            : undefined;
+        const dstRefIdx =
+          dstVec.elemType.kind === "ref" || dstVec.elemType.kind === "ref_null"
+            ? (dstVec.elemType as { typeIdx: number }).typeIdx
+            : undefined;
+        if (vecShaped.elemType.kind !== dstVec.elemType.kind || srcRefIdx !== dstRefIdx) {
+          return emitVecToVecBody(ctx, fctx, fromTypeIdx, toTypeIdx, vecShaped, dstVec);
+        }
+      }
+    }
+  }
+
   // Case 3: struct narrowing — destination fields are a subset of source fields
   const narrowInfo = getStructNarrowInfo(ctx, fromTypeIdx, toTypeIdx);
   if (narrowInfo) {
@@ -1465,7 +1524,27 @@ export function coerceType(
         releaseTempLocal(fctx, tmpCast);
       }
     }
-    fctx.body.push({ op: "ref.as_non_null" } as Instr);
+    // (#2161 family B0) NATIVE-STRING targets skip the non-null assert: a null
+    // native-string ref is the in-band `undefined` sentinel, not a bug. The
+    // non-strict checker ERASES `undefined` from unions, so a
+    // `["a", undefined, "c"]` literal types as `string[]` while its lowered
+    // array legitimately stores a null slot — the element read is `ref_null`
+    // and the `string`-typed sink requests `ref`. Asserting non-null here
+    // turned every such value into a "dereferencing a null pointer" trap (the
+    // standalone RegExp exec-vs-expected-array / split-harness family, 100+
+    // tests). Passing the null through is validation-safe — every native-string
+    // sink is physically NULLABLE (`string` params/locals/struct fields all
+    // encode `(ref null $AnyString)`) — and matches the behaviour of a
+    // `string | undefined` local, whose null already flows through compare/
+    // concat/call paths. Non-string ref targets keep the assert: their sinks
+    // (method dispatch on typed struct receivers) genuinely assume non-null.
+    const isNativeStringTarget =
+      ctx.nativeStrings &&
+      ((ctx.anyStrTypeIdx >= 0 && toNonNullIdx === ctx.anyStrTypeIdx) ||
+        (ctx.nativeStrTypeIdx >= 0 && toNonNullIdx === ctx.nativeStrTypeIdx));
+    if (!isNativeStringTarget) {
+      fctx.body.push({ op: "ref.as_non_null" } as Instr);
+    }
     return;
   }
 

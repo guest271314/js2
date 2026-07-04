@@ -2,10 +2,10 @@
 id: 2161
 title: "Standalone RegExp engine conformance residual (~579 tests)"
 status: blocked
-assignee: ttraenkler/sd1
+assignee: ttraenkler/fable-2161
 sprint: current
 created: 2026-06-15
-updated: 2026-06-25
+updated: 2026-07-04
 blocked_on: [2175]
 reconcile_note: "RECONCILED 2026-06-23 — all 4 sliced sub-issues merged (#2588/#2589 PR#1914, #2590 #1908, #2591 #1907). 2026-06-25 (sdev-async-sm): Slice 9 landed one MORE bounded substrate-independent win the prior reconcile missed — const-foldable new RegExp() patterns (concat / const-bound literal / §22.2.3.1 regex-literal copy-ctor) now compile to the native engine instead of runtime-trapping (see Slice 9). Remaining residual = RegExp.prototype reflection (gated on #2175) + dynamic/any-typed receivers + truly-runtime ctor patterns (need a runtime regex compiler — future architect-spec, NOT bounded). Umbrella stays blocked on #2175 for the reflection bucket."
 priority: high
@@ -496,3 +496,71 @@ runtime `throw`; not in this slice's scope and not in the CI equivalence gate).
 - **`RegExp.prototype` reflection (~126)** — still gated on **#2175** (in-progress;
   standalone builtin-prototype-object representation). Both are the next-sprint
   pickups for the #2161 umbrella.
+
+## Slice 10 (2026-07-04, fable-2161) — FRESH HARVEST + undefined-sentinel families (B0/B2/B4)
+
+**Fresh harvest, current main (post-#2630, standalone baseline 2026-07-04 12:10).**
+The stale "~579" framing recomputed: **510 RegExp-attributed host-pass/standalone-fail
+rows** (476 runtime `fail` + 34 `compile_error`), bucketed by error signature
+(`.tmp` harvest scripts; family map below). Root-caused the four biggest runtime
+families on current main; three had bounded fixes which THIS slice lands.
+
+### Family map (510 rows, by root cause)
+
+| family | rows | root cause | verdict |
+|---|---:|---|---|
+| **B0 — null native-string ≠ undefined sentinel** | ~76 in-bucket ("deref null in test()" 73 + compareArray 3; **109 across ALL standalone categories**) | THREE sinks mishandled the null-string = `undefined` sentinel (non-strict checker ERASES `undefined` from `["a",undefined]` unions; unmatched capture groups are null slots): (a) `coerceType` `ref_null→ref` emitted a trapping `ref.as_non_null` for native-string targets (type-coercion.ts ~1468); (b) the mixed `any === string` #1914 eq-arm and the tag-cascade eqref identity arm returned 0 for null/null (`ref.test` is false for null); (c) `$__regexp_match_vec` → `any[]` param fell into struct-NARROWING (`getVecInfo` only matches `__vec_*` names), ref-casting the `__arr_ref_<anyStr>` data array to `$__arr_externref` → null → trap; (d) `s === undefined` on a `string`-typed local constant-folded to false (#1105 gate was `ref_null`-only). | **FIXED this slice** |
+| **B2 — split undefined separator/limit** | ~15-25 of the split 72 | §22.1.3.23: `s.split()` / `s.split(undefined)` fell past the string-like-separator gate to the host marshal path (no standalone `string_split`) → null deref; a statically-`undefined` LIMIT compiled to f64 NaN → ToUint32(NaN)=0 → `[]`. | **FIXED this slice** |
+| **B4 — never-reassigned `var` pattern fold** | ~15-20 of the 37 "illegal cast" | Slice 9's fold was `const`-only; sputnik binds patterns/flags with `var` (`var __re="d+"; RegExp(__re,"i")`), uses `void 0` / hoisted-uninitialised flags, `new RegExp(ctorCopy, "g")`, and diamond concat chains (the `seen` cycle-guard blocked same-binding re-references). | **FIXED this slice** |
+| B1 — boxed `new String(x)` receiver | ~40 (`__str_flatten` deref) | `new String()` builds a `$Object` wrapper (`__new_String`, object-runtime.ts:~1390, primitive under `WRAPPER_PRIMITIVE_KEY`); the regex-native subject recovery (`emitRegexSearchCall` → externref→AnyString coercion) `ref.test $AnyString` fails on the wrapper → null → flatten trap. **Exact contract:** in the externref→native-string coercion's else-arm, add a wrapper-unwrap probe (ref.test `$Object` → read `WRAPPER_PRIMITIVE_KEY` → ref.test $AnyString) before producing null. Same substrate family as the memory-known "$Object dynamic reader drops native-string values". | Opus point-fix (bounded, shared-coercion blast radius — needs the full string-suite battery) |
+| B5 — annexB identity-escape fallbacks | ~6-10 | `/\x/`, `/\u/` (incomplete hex/unicode), `/\c1/`-class escapes: the pattern compiler refuses → placeholder trap. AnnexB says incomplete escapes fall through to IdentityEscape. **Exact contract:** in the bytecode pattern parser's escape handling, on failed `\x`/`\u` hex parse emit the literal char (annexB §B.1.4 ExtendedAtom); `\c` + non-letter → literal `\c`. Blocks `separator-regexp.js` (needs split-at-end-anchor fix too: our `__regex_split` matches at q==size — `"x".split(/$/)` → 2 elems, JS spec loops q<size → 1). | Opus point-fix (engine parser) |
+| F6 — reflection (`.name`/`.length`/prop-desc/`hasOwnProperty` on builtin methods, `RegExpStringIteratorPrototype`, legacy accessors `RegExp.$1`, cross-realm) | ~80+ (48 "Cannot access property" + hasOwnProperty clusters + 15 CE legacy-accessors) | Builtin-prototype-object representation. | dying via **#2175** (in-flight) — do NOT slice |
+| F7 — dynamic receivers / RegExpExec protocol observables (lastIndex-err tests, custom `exec`, `split.call(numberReceiver)`, ToPrimitive ctor args, `new RegExp(arr[i])`, 200-paren loop-built patterns) | ~120+ (38+8+5+4… clusters) | Needs the runtime regex compiler + runtime-externref receiver generalisation (documented Slice 9 "future architect-spec"). | architect-spec (NOT bounded) |
+| F8 — eval-based literal tests | 11 | `eval` unsupported by design. | wont-fix scope |
+| misc engine tail | ~30 | duplicate named groups (ES2025), regexp-modifiers, `\q{}` residue, step-limit (2), quantifier-integer-limit | separate small engine issues |
+
+### Shipped (this slice, all standalone, zero new host imports)
+
+- **B0a** `src/codegen/type-coercion.ts`: `ref_null→ref` same/different-idx coercion
+  SKIPS the trailing `ref.as_non_null` when the target is a native-string type —
+  null is the in-band `undefined` sentinel and every string sink (params/locals/
+  fields) is physically nullable, so the null flows exactly like a
+  `string | undefined` local already did. Non-string ref targets keep the assert.
+- **B0b** `src/codegen/type-coercion.ts`: `getVecShapedInfo` + a vec-shaped→vec
+  arm in `emitSafeStructConversion` — `$__regexp_match_vec` (length/data prefix +
+  result fields) now ELEMENT-COPIES into `any[]`/vec params via `emitVecToVecBody`
+  instead of falling into the trapping struct-narrow data-array cast. Declared-
+  subtype pairs (match-vec → its own base vec) still short-circuit (identity).
+- **B0c** `src/codegen/binary-ops.ts`: the #1914 mixed `any === string` arm and
+  the #1776 tag-cascade eqref identity arm both get a both-`ref.is_null` else
+  (null/null ⇒ equal — `undefined === undefined` through the compareArray /
+  assert_sameValue_str harness shapes); the #1105 `x === undefined` nullable-
+  string gate widened to non-null-claimed `ref` string locals (runtime
+  `ref.is_null` instead of constant-false).
+- **B2** `src/codegen/string-ops.ts` + `regexp-standalone.ts`: undefined-separator
+  split arm (returns `[S]` / `[]` per limit), statically-`undefined` limit →
+  unbounded (-1) in both the string-split and regex-split lowerings;
+  `isStaticallyUndefinedExpr` (side-effect-free `undefined`/`void 0` only).
+- **B4** `src/codegen/regexp-standalone.ts`: `staticConstStringValue` accepts
+  never-reassigned `var`/`let` bindings (single declaration + `bindingHasWrites`
+  scan — same proof as `isTrustedBackendCreatedRegExpBinding`), never-written
+  UNINITIALISED vars fold to `undefined`, `void 0` folds, the `seen` cycle-guard
+  unwinds after recursion (diamond `a + "x" + a` folds — REX XML chains);
+  `staticRegExpLiteralCopy` follows never-reassigned bindings to regex-literal
+  AND ctor-copy sources (`new RegExp(regObj, "g")`), with a depth guard against
+  self-referential bindings.
+- Tests: `tests/issue-2161-undefined-sentinel-families.test.ts` (16 cases:
+  6 B0 + 4 B2 + 6 B4, incl. controls for one-null-one-value inequality, numeric
+  limits, and the reassigned-var no-fold guard).
+
+**Validation.** Probes on real test262 files flipped fail→pass: S15.10.2.8_A3_T2/
+T15-class exec-vs-expected suites, lookBehind/misc.js, S15.10.3.1_A3_T1,
+S15.10.4.1_A1_T1-T4, 15.10.4.1-1.js, S15.10.2.8_A1_T4/A3_T19/T25/T26/T27, split
+undefined-separator forms. Regression battery (798 regex tests across 16 suites +
+equality/nullable-string/vec suites): every failure is PRE-EXISTING on clean main
+(verified by running the identical set on `/workspace` @ cf2fb1c40 — 10 regex +
+3 equality + 5 refusal-suite reds, byte-identical sets). tsc, stack-balance,
+coercion-sites, any-box-sites, prettier all clean.
+
+**#2161 stays open (blocked on #2175)** for F6 reflection; F7 dynamic-receiver
+architecture and B1/B5 point-fix contracts above are the next pickups.

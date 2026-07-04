@@ -517,8 +517,17 @@ export function compileBinaryExpression(
         // must reduce to ref.is_null rather than the always-false struct rule
         // below. Gate strictly on the AnyString type index so class-instance
         // struct refs keep `struct === undefined → false` semantics.
+        // (#2161 B0) Accept the non-null-CLAIMED `ref` kind too: a `string`-
+        // typed local is physically nullable (null = the undefined sentinel —
+        // e.g. an undefined element of a `(string|undefined)[]` that the
+        // non-strict checker typed as `string[]`), so `s === undefined` must
+        // runtime-test ref.is_null, not constant-fold to false. For a
+        // genuinely-assigned string the is_null test is simply false — same
+        // result as the old fold.
         const isNullableNativeString =
-          valType.kind === "ref_null" && ctx.nativeStrings && valType.typeIdx === ctx.anyStrTypeIdx;
+          (valType.kind === "ref_null" || valType.kind === "ref") &&
+          ctx.nativeStrings &&
+          valType.typeIdx === ctx.anyStrTypeIdx;
         if ((isStrictEqOp || isStrictNeqOp) && nullSideIsUndefinedId && !isNullableNativeString) {
           // struct === undefined → always false; struct !== undefined → always true
           fctx.body.push({ op: "drop" });
@@ -1922,7 +1931,15 @@ export function compileBinaryExpression(
             const tmpLeftAny = allocTempLocal(fctx, { kind: "anyref" });
             fctx.body.push({ op: "local.set", index: tmpLeftAny });
             // Both sides strings → content equality; otherwise strict
-            // string-vs-non-string is definitively unequal.
+            // string-vs-non-string is definitively unequal — EXCEPT when both
+            // sides are null. (#2161 B0) A null native-string ref is the
+            // in-band `undefined` sentinel (a `(string|undefined)[]` element,
+            // an unmatched capture group), and a null externref is standalone
+            // `undefined` — so `undefined === undefined` must be TRUE through
+            // this mixed shape (the test262 harness's
+            // `assert_sameValue_str(m[i], expected[i])` with both `undefined`).
+            // `ref.test` is false for null, so the old blanket `0` else-arm
+            // reported unequal. One-null-one-value stays unequal.
             fctx.body.push({ op: "local.get", index: tmpLeftAny });
             fctx.body.push({ op: "ref.test", typeIdx: ctx.anyStrTypeIdx } as Instr);
             fctx.body.push({ op: "local.get", index: tmpRightAny });
@@ -1940,7 +1957,13 @@ export function compileBinaryExpression(
                 { op: "call", funcIdx: flattenIdx } as Instr,
                 { op: "call", funcIdx: strEqIdx } as Instr,
               ],
-              else: [{ op: "i32.const", value: 0 } as Instr],
+              else: [
+                { op: "local.get", index: tmpLeftAny } as Instr,
+                { op: "ref.is_null" } as Instr,
+                { op: "local.get", index: tmpRightAny } as Instr,
+                { op: "ref.is_null" } as Instr,
+                { op: "i32.and" } as Instr,
+              ],
             } as Instr);
             releaseTempLocal(fctx, tmpLeftAny);
             releaseTempLocal(fctx, tmpRightAny);
@@ -2487,7 +2510,20 @@ export function compileBinaryExpression(
                             { op: "ref.cast", typeIdx: EQ_HEAP } as Instr,
                             { op: "ref.eq" } as Instr,
                           ],
-                          else: [{ op: "i32.const", value: 0 }],
+                          // (#2161 B0) `ref.test` is FALSE for null, so two
+                          // nullish operands (both `ref.null` — the standalone
+                          // undefined/null representation, e.g. two `undefined`
+                          // array elements in the test262 compareArray harness)
+                          // used to land here and report UNEQUAL. Both-null ⇒
+                          // equal (`undefined === undefined` / `null === null`);
+                          // one-null-one-value stays 0 via the i32.and.
+                          else: [
+                            { op: "local.get", index: lAny },
+                            { op: "ref.is_null" } as Instr,
+                            { op: "local.get", index: rAny },
+                            { op: "ref.is_null" } as Instr,
+                            { op: "i32.and" } as Instr,
+                          ],
                         } as Instr,
                       ];
                       // ── string? ── (#1914) Native strings are VALUE-compared
