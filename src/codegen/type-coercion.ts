@@ -16,6 +16,7 @@ import { addUnionImports, ensureAnyHelpers, ensureAnyToExternHelper, isAnyValue 
 import { ensureAnyToStringHelper, stringConstantExternrefInstrs } from "./native-strings.js";
 import { emitThrowTypeError } from "./expressions/helpers.js";
 import { ensureNativeArrayFromIterN } from "./iterator-native.js";
+import { markNoBrandSiblingShapes } from "./shape-brand.js";
 import { emitNativeNumberFormat } from "./number-format-native.js";
 import { addStringConstantGlobal } from "./registry/imports.js";
 import { addFuncType, getArrTypeIdxFromVec } from "./registry/types.js";
@@ -1385,6 +1386,9 @@ export function coerceType(
       }
       // For related struct types (subtypes), use guarded ref.cast to avoid
       // illegal cast traps when runtime type differs from static type.
+      // (#2853 park fix) If from/to are same-layout sibling shapes, this guarded
+      // downcast would trap post-brand — exclude both from nominal branding.
+      markNoBrandSiblingShapes(ctx.mod.types, ctx.noBrandShapeTypes, fromIdx, toIdx);
       {
         const guardFrom = from.kind === "ref_null" ? ({ kind: "anyref" } as ValType) : ({ kind: "anyref" } as ValType);
         const tmpGuard = allocTempLocal(fctx, guardFrom);
@@ -1433,6 +1437,8 @@ export function coerceType(
     const toRefNullIdx = (to as { typeIdx: number }).typeIdx;
     if (fromRefIdx !== toRefNullIdx) {
       if (!emitSafeStructConversion(ctx, fctx, fromRefIdx, toRefNullIdx)) {
+        // (#2853 park fix) same-layout sibling shapes → exclude from branding.
+        markNoBrandSiblingShapes(ctx.mod.types, ctx.noBrandShapeTypes, fromRefIdx, toRefNullIdx);
         // Guarded cast: ref $X → ref_null $Y — avoid illegal cast trap
         const tmpRefNull = allocTempLocal(fctx, { kind: "anyref" } as ValType);
         fctx.body.push({ op: "local.tee", index: tmpRefNull });
@@ -1508,6 +1514,8 @@ export function coerceType(
     const toNonNullIdx = (to as { typeIdx: number }).typeIdx;
     if (fromNullIdx !== toNonNullIdx) {
       if (!emitSafeStructConversion(ctx, fctx, fromNullIdx, toNonNullIdx)) {
+        // (#2853 park fix) same-layout sibling shapes → exclude from branding.
+        markNoBrandSiblingShapes(ctx.mod.types, ctx.noBrandShapeTypes, fromNullIdx, toNonNullIdx);
         // Guarded cast: ref_null $X → ref $Y
         const tmpCast = allocTempLocal(fctx, { kind: "anyref" } as ValType);
         fctx.body.push({ op: "local.tee", index: tmpCast });
