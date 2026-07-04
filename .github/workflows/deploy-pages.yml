@@ -67,6 +67,15 @@ jobs:
               mkdir -p .test262-cache
               cp /tmp/js2wasm-baselines/test262-standalone-current.jsonl .test262-cache/test262-standalone-current.jsonl
             fi
+            # Refresh the SERVED standalone report JSON, mirroring the host
+            # copy above. build-pages.js prefers the website/public copy, so
+            # without this the report page's Host/Standalone switch reads the
+            # stale committed test262-standalone-report.json (old corpus, no
+            # host_free field) while the host donut shows fresh numbers.
+            if [ -f /tmp/js2wasm-baselines/test262-standalone-current.json ]; then
+              cp /tmp/js2wasm-baselines/test262-standalone-current.json website/public/benchmarks/results/test262-standalone-report.json
+              cp /tmp/js2wasm-baselines/test262-standalone-current.json benchmarks/results/test262-standalone-report.json
+            fi
             [ -f /tmp/js2wasm-baselines/runs/index.json ] && \
               cp /tmp/js2wasm-baselines/runs/index.json benchmarks/results/runs/index.json
             echo "Fetched baseline data from js2wasm-baselines."
