@@ -5512,15 +5512,29 @@ function tryLowerUndefinedCompare(expr: ts.BinaryExpression, op: ts.SyntaxKind, 
     }
     return isStrictNeq ? cx.builder.emitUnary("i32.eqz", flag, irVal({ kind: "i32" })) : flag;
   }
-  // Never-undefined representations: fold. The lowered operand keeps its
-  // side effects; DCE strips the unused value only when pure.
-  const neverUndefined =
+  // Never-undefined representations: fold — but ONLY when the operand's TS
+  // static type proves the VALUE cannot be `undefined`. The Wasm-level rep
+  // alone is not enough: the IR erases `void x` (static type `undefined`)
+  // into an f64 NaN, so a rep-based fold would answer `void x === undefined`
+  // with false where JS says true (caught by
+  // tests/equivalence/logical-conditional-identity.test.ts). Types that
+  // include undefined/void/any/unknown demote to legacy, which tracks
+  // undefined-ness through its own lowering.
+  const staticTypeMayBeUndefined = (): boolean => {
+    if (!cx.checker) return true; // no checker — cannot prove; demote
+    const tsType = cx.checker.getTypeAtLocation(other);
+    const UNDEF_LIKE = ts.TypeFlags.Undefined | ts.TypeFlags.Void | ts.TypeFlags.Any | ts.TypeFlags.Unknown;
+    if (tsType.flags & UNDEF_LIKE) return true;
+    if (tsType.isUnion() && tsType.types.some((m) => (m.flags & UNDEF_LIKE) !== 0)) return true;
+    return false;
+  };
+  const neverUndefinedRep =
     (tv !== null && (tv.kind === "f64" || tv.kind === "i32" || tv.kind === "ref" || tv.kind === "ref_null")) ||
     t.kind === "class" ||
     t.kind === "object" ||
     t.kind === "closure" ||
     t.kind === "string"; // native-strings mode only (host mode took the branch above)
-  if (neverUndefined) {
+  if (neverUndefinedRep && !staticTypeMayBeUndefined()) {
     return cx.builder.emitConst({ kind: "bool", value: isStrictNeq }, irVal({ kind: "i32" }));
   }
   throw new Error(`ir/from-ast: undefined-compare on ${describeIrType(t)} not in IR scope (${cx.funcName})`);
