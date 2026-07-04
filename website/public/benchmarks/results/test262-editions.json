@@ -57,8 +57,8 @@
   },
   {
     "edition": "ES2015",
-    "pass": 11102,
-    "fail": 4100,
+    "pass": 11108,
+    "fail": 4094,
     "ce": 184,
     "skip": 0,
     "total": 15386,
@@ -336,12 +336,12 @@
       },
       {
         "name": "Symbol.isConcatSpreadable",
-        "pass": 11,
-        "fail": 21,
+        "pass": 12,
+        "fail": 20,
         "ce": 1,
         "skip": 0,
         "total": 33,
-        "pct": 33
+        "pct": 36
       },
       {
         "name": "tail-call-optimization",
@@ -680,21 +680,21 @@
   },
   {
     "edition": "ES2016",
-    "pass": 95,
-    "fail": 27,
+    "pass": 96,
+    "fail": 26,
     "ce": 1,
     "skip": 0,
     "total": 123,
-    "pct": 77,
+    "pct": 78,
     "features": [
       {
         "name": "exponentiation",
-        "pass": 56,
-        "fail": 14,
+        "pass": 57,
+        "fail": 13,
         "ce": 1,
         "skip": 0,
         "total": 71,
-        "pct": 79
+        "pct": 80
       },
       {
         "name": "Array.prototype.includes",
@@ -1462,8 +1462,8 @@
   },
   {
     "edition": "ES2020",
-    "pass": 848,
-    "fail": 990,
+    "pass": 849,
+    "fail": 989,
     "ce": 40,
     "skip": 18,
     "total": 1896,
@@ -1471,8 +1471,8 @@
     "features": [
       {
         "name": "BigInt",
-        "pass": 219,
-        "fail": 799,
+        "pass": 220,
+        "fail": 798,
         "ce": 8,
         "skip": 0,
         "total": 1026,
@@ -1525,21 +1525,21 @@
       },
       {
         "name": "ArrayBuffer",
-        "pass": 52,
-        "fail": 45,
+        "pass": 53,
+        "fail": 44,
         "ce": 0,
         "skip": 0,
         "total": 97,
-        "pct": 54
+        "pct": 55
       },
       {
         "name": "DataView",
-        "pass": 47,
-        "fail": 35,
+        "pass": 48,
+        "fail": 34,
         "ce": 0,
         "skip": 0,
         "total": 82,
-        "pct": 57
+        "pct": 59
       },
       {
         "name": "SharedArrayBuffer",
