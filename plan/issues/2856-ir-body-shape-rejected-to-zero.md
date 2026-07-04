@@ -828,11 +828,12 @@ from the working `for-of` vec path). `main` has both `const sorted = [1,3,…]`
 
 ## Slice RESULTS — algorithms.ts whole-component (2026-07-04, fable-2856exec)
 
-**Gate: `body-shape-rejected` 23 → 18 (−5), `call-graph-closure` 10 → 9 (−1
-bonus), `class-method` unchanged, post-claim demotions ZERO.** Net unintended
-38 → 32, banked via `--update-on-decrease`. (The plan's "25→20" numbers were
-grounded pre-#3000; the private-field pair had already cleared, so the live
-baseline was 23/10/5 — the −5 is the same five algorithms.ts functions.)
+**Gate: `body-shape-rejected` → 18, `call-graph-closure` → 9, `class-method`
+unchanged, post-claim demotions ZERO.** Relative to the pre-slice base
+(23/10/5) that is −5/−1; relative to post-#2952-slice-2 main (22/11/5, which
+this branch merged mid-flight) it is −4/−2. Net unintended 38 → 32 either
+way, banked in `scripts/ir-fallback-baseline.json`. (The plan's "25→20"
+numbers were grounded pre-#3000; the private-field pair had already cleared.)
 Whole-file verification: `js/algorithms.ts` IR-vs-legacy **console output
 identical (20/20 lines)**, zero demotions; standalone + wasi compiles stay
 clean (host-gated arms defer → legacy, as designed).
@@ -931,3 +932,31 @@ chains), classes.ts main (`instanceof`), async delay (Promise executor).
 This slice (−5 algorithms.ts component + −1 call-graph bonus) is merged
 work; the next executable slice per the Step-2 ordering is the
 benchmark-harness cluster AFTER #2858.
+
+### Post-merge reconciliation with #2952 slice 2 (same-day upstream landing)
+
+#2952 slice 2 landed mid-flight with a CONVERGENT `if.stmt` design (identical
+node shape) plus `br.label` break/continue and a ctrlStack depth resolver.
+Reconciliation on this branch: upstream's `if.stmt` + `emitBufferAsStatements`
++ ctrlStack machinery adopted wholesale (their arm pushes the plain CtrlFrames
+br.label depth-derivation needs; their `lowerIfBodyStatement` also upgrades
+the cond to truthiness via `coerceLoopCondToBool`); my duplicate `if.stmt`
+implementation deleted at every layer; `early.return` (mine alone) kept and
+now rides their emission helper. The #2856 zero-use side-effect fix collapsed
+from seven emission-loop sites into upstream's single `emitBufferAsStatements`
+(+ the remaining per-arm loops). Early-return barriers and #2952's `inLoop`
+threading coexist: break/continue may cross a try (br.label inlines crossed
+finallys) while early-return stays barred there. Verified post-merge:
+gate 18/9/5, cluster suite 18/18, #2952 suite 27/27, and a combined probe
+(`continue` + early `return` + `break` in one loop) claims with legacy parity.
+
+### Post-slice regression caught by the equivalence sweep (fixed in-branch)
+
+`void x === undefined` — the undefined-compare constant-fold was initially
+REP-based (f64 can't hold undefined), but the IR erases `void x` (static type
+`undefined`) into f64 NaN, folding the comparison to false where JS says
+true. Fix: the fold now ALSO requires the checker's static type to exclude
+undefined/void/any/unknown; undefined-able static types demote to legacy
+(which tracks undefined-ness). Full `tests/equivalence/` sweep on the final
+tree matches the pristine-main baseline (all remaining failures pre-existing
+container-env issues, verified side-by-side).
