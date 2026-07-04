@@ -683,6 +683,28 @@ with `JS2WASM_UNDEF_SINGLETON=1` (runner-level env, no code change needed);
 merge_group; (3) S2 (sNaN carve-out codify), S3 (number|undefined→externref,
 needs the box-protocol fix), S4 (union-collapse reversal) remain per plan.
 
+### S1 default-flip — A/B MEASUREMENT (dev-selfserve-2, 2026-07-04, PR #2655)
+
+Executes next-steps (1)+(2). Flips the `undefinedSingleton` default OFF→ON in
+`create-context.ts` (default now `process.env.JS2WASM_UNDEF_SINGLETON !== "0"`;
+`=0` forces the legacy regime for control/rollback). Branch
+`issue-2106-undef-default-flip`.
+
+- **Blast radius**: host (gc) mode BYTE-IDENTICAL regardless of the flag —
+  `undefinedSingletonActive()` also gates on `standalone||nativeStrings`.
+  Byte-diff proof (sha256, 10-op corpus): gc `default==off==on`; wasi
+  `default==on` and `on != off`. So the flip is active ONLY in
+  standalone/wasi/nativeStrings, exactly as intended.
+- **Local validation**: `tests/issue-2106-s1-undefined-singleton.test.ts` 9/9
+  (flag-off legacy control passes `undefinedSingleton:false` explicitly, so it
+  is unaffected by the default flip).
+- **The PR IS the A/B**: CI test262 regression gate measures the standalone
+  delta vs main (flag-off baseline). MERGE only if net-positive AND
+  standalone-floor-safe (the June partial flip PR #2025 breached the floor at
+  −1245 because producers/consumers were out of lockstep; PR #2633's complete
+  sweep is what this measures as the default). If net-negative or floor-breach:
+  close PR, keep default OFF, document the finding here.
+
 ## Residual (as of #2199, PO reconcile 2026-06-28)
 
 NOT done — the referencing merged PR was a REVERT (PR #2025 auto-parked: standalone floor breach, NET -1245 test262 rows), so it is floor-neutral undo, NOT progress. S1 (standalone tag-1 $undefined singleton) still requires the FULL ~40-site producer+consumer sweep (architect re-spec) — no narrow floor-saving subset exists. S2 (sNaN carve-out), S3 (number|undefined→externref), S4 (union-collapse reversal), typeof-null→object all remain. Stays in-progress; resume-only for a senior-dev at max effort.
