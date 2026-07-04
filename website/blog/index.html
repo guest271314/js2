@@ -354,9 +354,14 @@
           where that's structurally impossible, not just discouraged by a policy.
         </p>
         <p>
-          AI makes the problem sharper. A lot of the code we ship now was written faster than anyone can read it.
-          "Someone probably reviewed this" was always optimistic; at machine speed it's wishful thinking. If I can't
-          read all of it, I at least want to box it in.
+          In the age of generative AI this scales by orders of magnitude. A lot of the code we ship now was never
+          reviewed, written faster than anyone can read it. "Someone probably reviewed this" was always optimistic; at
+          machine speed it's wishful thinking. We need to contain the problem by limiting the blast radius of untrusted
+          code at a granular level, and make code modular and reusable so that less code has to be generated, reviewed,
+          and maintained in the first place. Small WebAssembly modules also make review — by a human or a machine — far
+          easier: fine-grained modularization keeps each piece small and self-contained instead of one giant one-off
+          monolithic codebase. WebAssembly lends itself as a lightweight, portable, modular, and safe substrate for
+          building a new, trustworthy foundation for computing in the age of untrusted code.
         </p>
 
         <h2>The idea in a nutshell</h2>
