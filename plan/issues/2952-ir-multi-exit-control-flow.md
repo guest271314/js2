@@ -219,6 +219,106 @@ state is outer-scope slots/locals), so the cond-first walk order is correct
 for both pre-test and post-test loops. Only the lowering emission order
 differs.
 
+## Slice 2 — unlabeled break/continue, implemented (2026-07-04, fable-2952s2)
+
+Full A1+A2+A3 machinery per the Design-A spec above, plus one discovery the
+spec missed: **the loop-body statement grammar had no statement-`if` at all**
+(top-level `if` uses the block-CFG layer, which nested buffers cannot reach),
+so `if (c) break;` — the canonical multi-exit shape — was unclaimable without
+a new void statement-if node. Slice 2 therefore ships TWO instr kinds:
+
+- **`IrInstrBrLabel { label, mode }`** (A2) — buffer-terminating, no stored
+  depth. Verifier rules: label must be bound by an enclosing loop in the same
+  buffer-nesting chain (walk mirrors the lowering ctrlStack), and the instr
+  must be last in its buffer (from-ast stops emitting after break/continue).
+- **`IrInstrIfStmt { cond, then, else }`** — void statement-if; `else` may be
+  empty (encodes as bare `if…end`). Both arms are body-statement buffers.
+
+**A1**: `loopLabel?: IrLabelId` on `while.loop` / `for.loop` / `forof.vec` /
+`forof.iter` / `forof.string`; from-ast always synthesises one per loop
+(`IrFunctionBuilder.freshLoopLabel`) and threads it as `LowerCtx.loopLabel`
+(innermost wins; lifted-closure ctxs are built fresh so it never crosses a
+function boundary).
+
+**A3 (the depth resolver)**: `lower.ts` keeps a `ctrlStack: CtrlFrame[]` —
+one frame per structured Wasm frame the emitter opens (block/loop/if/try are
+each exactly one Wasm label). `resolveBrLabel` scans from the top counting
+frames until it finds `{kind: mode, label}` and emits `br <depth>`. Continue
+targets per loop shape:
+
+- pre-test `while`, `forof.iter` → the `loop` frame itself (br re-runs
+  cond / `__iterator_next`);
+- `for`, do-while, `forof.vec`, `forof.string` → a dedicated body-wrapping
+  `block` that falls into the update / cond / counter-advance — emitted
+  ONLY when `bufferHasBrLabel(body, label, "continue")` (labels are
+  per-function unique, so the deep scan is exact), keeping continue-free
+  loops byte-identical.
+- `forof.iter` break lands exactly at the `__iterator_return` call after
+  the wrapping block — spec-correct IteratorClose (§14.7.5) for free.
+
+**Finally interaction (the reason A is sound)**: a try frame carries its
+`finallyBody` while the try-body buffer is emitted; `resolveBrLabel` inlines
+each crossed finally (innermost first) before the `br`, masking the frame
+during its own inline so a finally never re-runs itself. The catch path's
+obligation is owned by the existing inner-try wrap (its frame carries the
+finally while the catch body emits). `try { break } finally { continue }`
+resolves correctly by construction: the finally's `br` (continue) is emitted
+before the break's `br`, which becomes dead code — ECMA-262 completion
+overriding without any CFG.
+
+**Exhaustiveness** (slice 1 dodged this via postCond; slice 2 could not) —
+every switch extended: `forEachNestedBuffer` / `mapNestedBuffers` /
+`directUses` (nodes.ts), `effectsOf` (br.label = full-barrier control like
+throw — `effectsConflict` only consults heap/slot facets; if.stmt =
+arm-buffer union) + `isSideEffecting` (both — keeps deep use-walks alive in
+DCE), verify.ts `collectUses` + label-env walk, lower.ts `collectIrUses` +
+`-1` use recording + `allocLocalForInstr`, monomorphize `collectUses`,
+inline-small `canInline` (conservative skip) + `renameInstrOperands` (honest
+deep rename), backend legality (linear allow-list — core-Wasm `br`/`if`,
+backend-identical per the #1852/#1527 axis rule; bytecode stays rejected).
+
+**Selector** (`select.ts`): `inLoop` flag threaded through
+`isPhase1BodyStatement` / `isPhase1TryStatement`; loop shape-checkers pass
+`true` for their bodies. New arms: statement-`if` (arms recurse as body
+statements; cond is Phase-1 shape + i32/f64 at lowering — ref/string conds
+demote, same discipline as loop conds per #2136) and unlabeled
+break/continue (labeled → `body-labeled-break-continue`, outside a loop →
+`body-break-continue-outside-loop`). Claims are backed by
+`lowerBreakContinueStatement` + `lowerIfBodyStatement` — parity holds.
+
+**Byte-inertness (measured)**: 13/13 playground examples byte-identical
+(sha256) main↔branch with identical claim sets; 8 already-claimed loop
+shapes (while/for/do/forof/nested/try-in-loop/forof-string) byte-identical.
+Ratchet: `body-shape-rejected` 23→22 but `call-graph-closure` 10→11 — ONE
+function (`joinNums` in js/algorithms.ts) reclassified because the shape
+gate no longer binds on its loop-body `if`; the later call-graph gate does.
+Bytes unchanged (still legacy); baseline banked in this PR.
+
+**Deliberately NOT taken (slice-3 bank, with what slice 2 taught us)**:
+labeled break/continue and switch. Labeled is NOT nearly-free: a labeled
+break crossing an inner `forof.iter` must run that loop's
+`__iterator_return` (the close call sits after the loop's wrapping block, so
+a crossing `br` skips it) — the for-of break frame needs a finally-like
+`iter.return` obligation on its CtrlFrame, exactly the mechanism the try
+frames already use. That plus `labeled.block` for non-loop labels and
+`IrInstrSwitch`/`br_table` are their own slice.
+
+## Test Results (slice 2)
+
+- `tests/issue-2952-slice2.test.ts` — 21/21 (selector claims incl. both
+  negative boundaries; runtime semantics for break/continue across all five
+  loop kinds; continue-target placement incl. the for-update infinite-loop
+  hazard; break/continue across try/finally with exact finally counts;
+  dead-code-after-break; verifier rules via builder-constructed IR).
+- `tests/issue-2952.test.ts` — 6/6 (slice-1 break-rejection test flipped to
+  claim+run per the lifted boundary; labeled-break negative added).
+- Loop-heavy blast radius: `issue-1280` + `issue-2136` + `issue-1169n` +
+  `issue-1169h` (try) + `issue-1182`/`issue-1183` (for-of iter/string) +
+  `issue-1169e-bridge` — 108/108.
+- `npx tsc --noEmit` clean; `pnpm run check:ir-fallbacks` OK after bank.
+- test262 loop-statement dirs (break/continue/while/do-while/for/for-of,
+  1254 files): compile+run outcome diff main↔branch recorded below.
+
 ## Test Results (slice 1)
 
 - `tests/issue-2952.test.ts` — 5/5 pass (selector claim, post-test-once,
