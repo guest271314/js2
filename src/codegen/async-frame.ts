@@ -40,15 +40,19 @@ import type { AsyncCfgPlan, AsyncCfgState, AsyncCpsPlan, AsyncResumePoint } from
 import {
   ASYNC_CPS_ENABLED,
   FORAWAIT_ITER_SPILL,
+  analyzeAsyncBody,
   asyncFnNeedsCps,
   awaitedExprIsPromiseCombinator,
   forAwaitNeedsDrive,
   forAwaitSpillInfo,
+  isBoundedAsyncGenBody,
   isEmitOperand,
   loopAsyncSpillInfo,
   planAsyncCfg,
+  planAsyncGenCfg,
   planLinearAwaits,
 } from "./async-cps.js";
+import { ensureNativeGeneratorResultType } from "./generators-native.js";
 import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S3 / #2710) stable-regime minting
 import {
   type AsyncDriveRuntime,
@@ -57,6 +61,7 @@ import {
   PROMISE_STATE_REJECTED,
   ensureAsyncDriveRuntime,
   getOrRegisterPromiseType,
+  isStandalonePromiseActive,
 } from "./async-scheduler.js";
 import { reportError } from "./context/errors.js";
 import { allocLocal } from "./context/locals.js";
@@ -66,6 +71,8 @@ import {
   MODE_FIELD,
   MODE_THROW,
   PARAM_FIELD_OFFSET,
+  RESULT_DONE_FIELD,
+  RESULT_VALUE_FIELD,
   SENT_FIELD,
   STATE_FIELD,
   defaultSpillInstr,
@@ -76,7 +83,7 @@ import {
 import { ensureI32Condition, resolveWasmType } from "./index.js";
 import { ensureExnTag } from "./registry/imports.js";
 import { addFuncType } from "./registry/types.js";
-import { coerceType, compileExpression, compileStatement } from "./shared.js";
+import { coerceType, compileExpression, compileStatement, ensureLateImport } from "./shared.js";
 import { resolveSpillLocalValType } from "./statements/variables.js";
 
 /**
@@ -260,6 +267,15 @@ export interface AsyncFrameInfo {
   stepFulfillFuncIdx?: number;
   /** `__async_step_reject_f<name>(caps, value) -> externref` funcIdx — emitter slice. */
   stepRejectFuncIdx?: number;
+  /**
+   * (#2906 slice 3d-i) `true` when this frame drives an async GENERATOR producer:
+   * the resume machine is built from {@link planAsyncGenCfg} (not `planAsyncCfg`)
+   * and the `settleYield`/`settleDone` terminators fulfil the re-minted
+   * `next()`-promise with an IteratorResult instead of the async fn's raw value.
+   */
+  asyncGen?: boolean;
+  /** (#2906 slice 3d-i) `{value: externref, done: i32}` IteratorResult struct typeIdx (async-gen only). */
+  asyncGenResultTypeIdx?: number;
 }
 
 /**
@@ -640,6 +656,8 @@ function validateAsyncCfg(cfg: AsyncCfgPlan): string | null {
     if (st.id !== i) return `state ids not dense (states[${i}].id === ${st.id})`;
     const t = st.terminator;
     if (t.kind === "suspend" && !inRange(t.resumeState)) return `suspend.resumeState ${t.resumeState} out of range`;
+    if (t.kind === "settleYield" && !inRange(t.resumeState))
+      return `settleYield.resumeState ${t.resumeState} out of range`;
     if (t.kind === "goto" && !inRange(t.target)) return `goto.target ${t.target} out of range`;
     if (t.kind === "condGoto" && (!inRange(t.whenTrue) || !inRange(t.whenFalse))) {
       return `condGoto targets ${t.whenTrue}/${t.whenFalse} out of range`;
@@ -707,7 +725,10 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
   // into the loop CFG (head condGoto + body suspends + back-edge goto). The host
   // settle backend keeps the linear-only shape (loops there suspend on every
   // await — an N-round follow-up).
-  const cfg = planAsyncCfg(info.decl, plan, { allowLoops: !info.host });
+  // (#2906 slice 3d-i) An async GENERATOR builds its CFG from the yield-aware
+  // `planAsyncGenCfg` (settleYield/settleDone terminators); every other async fn
+  // uses the linear/while/for-await `planAsyncCfg`.
+  const cfg = info.asyncGen ? planAsyncGenCfg(info.decl) : planAsyncCfg(info.decl, plan, { allowLoops: !info.host });
   if (cfg === null) {
     reportError(ctx, info.decl, "internal: async-frame resume built on an unsupported body shape (#2906 slice 1/3a)");
     info.resumeFuncIdx = -1;
@@ -909,6 +930,8 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
   const reasonLocal = allocLocal(resumeFctx, "__async_reason", {
     kind: "externref",
   });
+  // (#2906 slice 3d-i) The yielded value slot for `settleYield` (async gen only).
+  const yieldValLocal = info.asyncGen ? allocLocal(resumeFctx, "__async_gen_yield", { kind: "externref" }) : -1;
 
   // (#2906 Gap 3 → slice 3) Handler regions. `inSrcTryLocal` (an i32
   // resume-local) records the id of the handler region control is currently in
@@ -1264,6 +1287,60 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
           out.push({ op: "return" });
           break;
         }
+        case "settleYield": {
+          // (#2906 slice 3d-i) `yield E`: fulfil the current `next()`-promise
+          // (`frame.result_promise`, re-minted per next() — already loaded into
+          // `resultPromiseLocal` at resume-fn entry) with an IteratorResult
+          // `{value: E, done: false}`, set STATE=resumeState, spill, and `return`.
+          // No reaction is registered (a yield does not await); the consumer's
+          // next `next()` kick re-dispatches at `resumeState`.
+          const resultTypeIdx = info.asyncGenResultTypeIdx!;
+          // Compute the yielded value (externref) into `yieldValLocal`.
+          if (term.fromSent) {
+            // `yield await P` — the awaited value delivered into SENT_FIELD.
+            out.push({ op: "local.get", index: frameLocal });
+            out.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: SENT_FIELD } as Instr);
+          } else if (term.value === null) {
+            out.push({ op: "ref.null.extern" } as Instr); // `yield;` → undefined
+          } else {
+            const vt = isEmitOperand(term.value)
+              ? term.value.emit(ctx, resumeFctx)
+              : compileExpression(ctx, resumeFctx, term.value);
+            if (vt !== null && vt !== undefined) {
+              coerceType(ctx, resumeFctx, vt as ValType, { kind: "externref" });
+            } else {
+              out.push({ op: "ref.null.extern" } as Instr);
+            }
+          }
+          out.push({ op: "local.set", index: yieldValLocal });
+          // result_promise.fulfil( IteratorResult{value: yieldVal, done: 0} )
+          out.push({ op: "local.get", index: resultPromiseLocal });
+          out.push({ op: "local.get", index: yieldValLocal });
+          out.push({ op: "i32.const", value: 0 }); // done = false
+          out.push({ op: "struct.new", typeIdx: resultTypeIdx } as Instr);
+          out.push({ op: "extern.convert_any" } as Instr);
+          out.push({ op: "call", funcIdx: settleFulfillIdx });
+          out.push({ op: "drop" });
+          // Suspend: STATE=resumeState, persist spills, return (await the next kick).
+          out.push(...setStateI32FromConst(info, frameLocal, STATE_FIELD, term.resumeState));
+          out.push(...storeSpills(info, resumeFctx, frameLocal));
+          out.push({ op: "return" });
+          break;
+        }
+        case "settleDone": {
+          // (#2906 slice 3d-i) Async-gen body end — fulfil the current
+          // `next()`-promise with `{value: undefined, done: true}`.
+          const resultTypeIdx = info.asyncGenResultTypeIdx!;
+          out.push({ op: "local.get", index: resultPromiseLocal });
+          out.push({ op: "ref.null.extern" } as Instr); // value = undefined
+          out.push({ op: "i32.const", value: 1 }); // done = true
+          out.push({ op: "struct.new", typeIdx: resultTypeIdx } as Instr);
+          out.push({ op: "extern.convert_any" } as Instr);
+          out.push({ op: "call", funcIdx: settleFulfillIdx });
+          out.push({ op: "drop" });
+          out.push({ op: "return" });
+          break;
+        }
       }
     } finally {
       resumeFctx.body = saved;
@@ -1557,4 +1634,210 @@ export function emitAsyncFrameStateMachine(
   fctx.body.push({ op: "local.get", index: resultPromiseLocal });
   if (!host) fctx.body.push({ op: "extern.convert_any" } as Instr);
   fctx.body.push({ op: "return" });
+}
+
+// ── async-generator PRODUCER core (#2906 slice 3d-i) ─────────────────────────
+
+/**
+ * Is `decl` a bounded async generator drivable host-free on the async-frame CFG
+ * machine? True only on a host-free target (`standalone`/`wasi`) for an async
+ * `function*` whose body is the bounded shape {@link isBoundedAsyncGenBody}
+ * accepts (a flat sequence of `yield <E>` / `yield await <P>` statements). The
+ * call-site routing (`function-body.ts`) uses this to intercept the async gen
+ * BEFORE the #680 native-generator gate; everything else stays on the legacy gen
+ * path (correct-or-legacy, the #2367 graveyard rule).
+ */
+export function isAsyncGenDriveCandidate(ctx: CodegenContext, decl: ts.FunctionLikeDeclaration): boolean {
+  if (!ASYNC_CPS_ENABLED) return false;
+  // Gate on the native-`$Promise` CARRIER (`isStandalonePromiseActive`,
+  // currently wasi-only) — the SAME gate the plain/for-await drive lanes use
+  // (`decideAsyncActivation`). In non-wasi standalone the awaited operand does
+  // not lower to a native `$Promise`, so the drive machine would be broken; the
+  // widen to `standalone` is the shared slice-1d carrier move.
+  if (!isStandalonePromiseActive(ctx)) return false;
+  return isBoundedAsyncGenBody(decl);
+}
+
+/**
+ * (#2906 slice 3d-i) Emit an async-generator PRODUCER: `g()` builds a resumable
+ * `$AsyncFrame` (the generator carrier — a bare externref, NO prototype methods)
+ * and returns it WITHOUT running any body code (async generators are lazy: the
+ * body starts on the first `next()`). The re-entrant driver is the per-gen
+ * `__async_gen_next_<name>(frame) -> Promise<IteratorResult>` helper, which mints
+ * a FRESH pending result promise, stores it into the frame's `result_promise`
+ * field, kicks the resume machine (runs to the next `yield`/`await`-suspend), and
+ * returns that promise. `yield` settles it `{value, done:false}` and suspends;
+ * body-end settles `{value:undefined, done:true}`. Native drive lane only.
+ *
+ * The frame externref + `__async_gen_next_<name>` + the reader probes are the
+ * substrate 3d-ii (the `for await (x of g())` consumer) builds on.
+ */
+export function emitAsyncGenerator(ctx: CodegenContext, fctx: FunctionContext, decl: ts.FunctionLikeDeclaration): void {
+  const rt = ensureAsyncDriveRuntime(ctx);
+  const promiseTypeIdx = getOrRegisterPromiseType(ctx);
+  const resultTypeIdx = ensureNativeGeneratorResultType(ctx, { kind: "externref" });
+  // Ensure the number (un)boxers used by the yield-value box + reader probe are
+  // registered up-front — under wasi these resolve to DEFINED (host-free) funcs.
+  ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
+  ensureLateImport(ctx, "__unbox_number", [{ kind: "externref" }], [{ kind: "f64" }]);
+
+  const plan = analyzeAsyncBody(ctx, decl);
+  const paramNames = fctx.params.map((p) => p.name);
+  const paramTypes = fctx.params.map((p) => p.type);
+  const info = buildAsyncFrameInfo(ctx, decl, plan, paramNames, paramTypes, promiseTypeIdx);
+  info.asyncGen = true;
+  info.asyncGenResultTypeIdx = resultTypeIdx;
+
+  const resumeFuncIdx = ensureAsyncResumeFunction(ctx, info, plan);
+  if (resumeFuncIdx < 0) {
+    reportError(ctx, decl, "internal: async-generator resume function unavailable (#2906 slice 3d-i)");
+    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    return;
+  }
+
+  // Per-gen re-entrant next() driver + the generic reader probes (once/module).
+  emitAsyncGenNextHelper(ctx, info, promiseTypeIdx);
+  ensureAsyncGenReaderProbes(ctx, promiseTypeIdx, resultTypeIdx);
+
+  // Build the frame WITHOUT kicking (lazy): state=0, sent/mode/abrupt/error inert,
+  // params, [no spills — bounded shape], result_promise = fresh pending.
+  fctx.body.push({ op: "i32.const", value: 0 }); // state
+  fctx.body.push({ op: "ref.null.extern" } as Instr); // sent
+  fctx.body.push({ op: "i32.const", value: 0 }); // mode = MODE_NEXT
+  fctx.body.push({ op: "ref.null.extern" } as Instr); // abrupt
+  fctx.body.push({ op: "ref.null.extern" } as Instr); // error
+  for (let i = 0; i < info.paramTypes.length; i++) {
+    fctx.body.push({ op: "local.get", index: i });
+  }
+  for (let i = 0; i < info.spillNames.length; i++) {
+    fctx.body.push(defaultSpillInstr(info.spillTypes[i]!));
+  }
+  // result_promise: fresh pending $Promise (overwritten by the first next()).
+  fctx.body.push({ op: "i32.const", value: PROMISE_STATE_PENDING });
+  fctx.body.push({ op: "ref.null.extern" } as Instr);
+  fctx.body.push({ op: "ref.null.extern" } as Instr);
+  fctx.body.push({ op: "struct.new", typeIdx: promiseTypeIdx } as Instr);
+  fctx.body.push({ op: "struct.new", typeIdx: info.stateTypeIdx } as Instr);
+
+  // Return the frame as the async-gen object (externref carrier).
+  fctx.body.push({ op: "extern.convert_any" } as Instr);
+  fctx.body.push({ op: "return" });
+  // Keep `rt` referenced (scheduler must be registered before the readers run).
+  void rt;
+}
+
+/**
+ * (#2906 slice 3d-i) Build + export the per-gen re-entrant driver
+ * `__async_gen_next_<name>(frame externref) -> Promise externref`: cast the
+ * carrier back to the typed frame, mint a fresh pending result promise, store it
+ * into `frame.result_promise`, kick the resume machine once, and return the
+ * promise. Exported so a direct-drive harness (the 3d-i self-proof) can advance
+ * the generator without the for-await consumer (3d-ii).
+ */
+function emitAsyncGenNextHelper(ctx: CodegenContext, info: AsyncFrameInfo, promiseTypeIdx: number): void {
+  const stem = sanitizeTypeName(info.functionName);
+  const name = `__async_gen_next_${stem}`;
+  if (ctx.funcMap.has(name)) return;
+  const typeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "externref" }], `${name}_type`);
+  const funcIdx = mintDefinedFunc(ctx);
+  ctx.funcMap.set(name, funcIdx);
+  // Re-read the resume funcIdx by name — emitting the resume body may have added
+  // late imports that shifted defined indices (the shifter patches funcMap).
+  const resumeIdx = ctx.funcMap.get(`__async_resume_f${stem}`) ?? info.resumeFuncIdx!;
+  const frameRef: ValType = { kind: "ref", typeIdx: info.stateTypeIdx };
+  const promiseRef: ValType = { kind: "ref", typeIdx: promiseTypeIdx };
+  const fLocal = 1; // param 0 = carrier externref
+  const pLocal = 2;
+  const body: Instr[] = [
+    { op: "local.get", index: 0 },
+    { op: "any.convert_extern" } as Instr,
+    { op: "ref.cast", typeIdx: info.stateTypeIdx } as Instr,
+    { op: "local.set", index: fLocal },
+    // fresh pending result promise
+    { op: "i32.const", value: PROMISE_STATE_PENDING },
+    { op: "ref.null.extern" } as Instr,
+    { op: "ref.null.extern" } as Instr,
+    { op: "struct.new", typeIdx: promiseTypeIdx } as Instr,
+    { op: "local.set", index: pLocal },
+    // frame.result_promise = p
+    { op: "local.get", index: fLocal },
+    { op: "local.get", index: pLocal },
+    { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: info.resultPromiseFieldIdx } as Instr,
+    // kick the resume machine
+    { op: "local.get", index: fLocal },
+    { op: "call", funcIdx: resumeIdx },
+    // return p (as externref)
+    { op: "local.get", index: pLocal },
+    { op: "extern.convert_any" } as Instr,
+  ];
+  pushDefinedFunc(ctx, funcIdx, {
+    name,
+    typeIdx,
+    locals: [
+      { name: "$f", type: frameRef },
+      { name: "$p", type: promiseRef },
+    ],
+    body,
+    exported: false,
+  });
+  ctx.mod.exports.push({ name, desc: { kind: "func", index: funcIdx } });
+}
+
+/**
+ * (#2906 slice 3d-i) Register + export the generic async-gen reader probes ONCE
+ * per module, letting a host-free direct-drive harness inspect a settled
+ * `next()`-promise's IteratorResult:
+ *   `__async_gen_p_state(p) -> i32`     — the promise state (0/1/2).
+ *   `__async_gen_result_done(p) -> i32` — the settled IteratorResult's `done`.
+ *   `__async_gen_result_value(p) -> f64`— the IteratorResult's numeric `value`.
+ * Both readers assume the promise is FULFILLED (drive + `__drain_microtasks`
+ * first, then check the state).
+ */
+function ensureAsyncGenReaderProbes(ctx: CodegenContext, promiseTypeIdx: number, resultTypeIdx: number): void {
+  if (ctx.funcMap.has("__async_gen_p_state")) return;
+  const unboxIdx = ctx.funcMap.get("__unbox_number");
+
+  const register = (name: string, result: ValType, body: Instr[]): void => {
+    const typeIdx = addFuncType(ctx, [{ kind: "externref" }], [result], `${name}_type`);
+    const funcIdx = mintDefinedFunc(ctx);
+    ctx.funcMap.set(name, funcIdx);
+    pushDefinedFunc(ctx, funcIdx, { name, typeIdx, locals: [], body, exported: false });
+    ctx.mod.exports.push({ name, desc: { kind: "func", index: funcIdx } });
+  };
+
+  // promise → state (i32).
+  register("__async_gen_p_state", { kind: "i32" }, [
+    { op: "local.get", index: 0 },
+    { op: "any.convert_extern" } as Instr,
+    { op: "ref.cast", typeIdx: promiseTypeIdx } as Instr,
+    { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 0 } as Instr, // state
+  ]);
+
+  // promise → (promise.value as IteratorResult).done (i32).
+  register("__async_gen_result_done", { kind: "i32" }, [
+    { op: "local.get", index: 0 },
+    { op: "any.convert_extern" } as Instr,
+    { op: "ref.cast", typeIdx: promiseTypeIdx } as Instr,
+    { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 1 } as Instr, // value (IteratorResult, boxed)
+    { op: "any.convert_extern" } as Instr,
+    { op: "ref.cast", typeIdx: resultTypeIdx } as Instr,
+    { op: "struct.get", typeIdx: resultTypeIdx, fieldIdx: RESULT_DONE_FIELD } as Instr,
+  ]);
+
+  // promise → unbox((promise.value as IteratorResult).value) (f64).
+  const valueBody: Instr[] = [
+    { op: "local.get", index: 0 },
+    { op: "any.convert_extern" } as Instr,
+    { op: "ref.cast", typeIdx: promiseTypeIdx } as Instr,
+    { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 1 } as Instr, // value (IteratorResult)
+    { op: "any.convert_extern" } as Instr,
+    { op: "ref.cast", typeIdx: resultTypeIdx } as Instr,
+    { op: "struct.get", typeIdx: resultTypeIdx, fieldIdx: RESULT_VALUE_FIELD } as Instr, // element (boxed number)
+  ];
+  if (unboxIdx !== undefined) {
+    valueBody.push({ op: "call", funcIdx: unboxIdx });
+  } else {
+    valueBody.push({ op: "drop" }, { op: "f64.const", value: NaN });
+  }
+  register("__async_gen_result_value", { kind: "f64" }, valueBody);
 }
