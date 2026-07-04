@@ -46,6 +46,7 @@ import { stringConstantExternrefInstrs } from "./native-strings.js";
 import { addStringConstantGlobal } from "./registry/imports.js";
 import { ensureLateImport, flushLateImportShifts } from "./shared.js";
 import { allocLocal } from "./context/locals.js";
+import { collectClosureBaseWrapperTypeIdxs as closureBaseWrapperTypeIdxs } from "./closure-classifier.js"; // (#2175 V2-S1) shared list
 
 // `$AnyValue` tag constants (mirror any-helpers.ts box helpers).
 const TAG_NULL = 0;
@@ -422,33 +423,7 @@ export function emitDynGet(ctx: CodegenContext, fctx: FunctionContext, keyName: 
   return true;
 }
 
-/**
- * (#2580 M1a v2) The deduped root struct types of every registered closure
- * wrapper, for `ref.test`-discriminating a closure receiver. Mirrors index.ts's
- * private `collectClosureBaseWrapperTypeIdxs` (walking each closure struct up its
- * `superTypeIdx` chain to the root) but lives here to avoid a circular import
- * (`index.ts` already imports `ensureDynReadHelpers` from this module).
- */
-function closureBaseWrapperTypeIdxs(ctx: CodegenContext): number[] {
-  const mod = ctx.mod;
-  const out: number[] = [];
-  const seen = new Set<number>();
-  for (const [typeIdx, info] of ctx.closureInfoByTypeIdx) {
-    if (!info) continue;
-    const typeDef = mod.types[typeIdx];
-    if (!typeDef || typeDef.kind !== "struct") continue;
-    let root = typeIdx;
-    let cur: typeof typeDef = typeDef;
-    while (cur && cur.kind === "struct" && cur.superTypeIdx !== undefined && cur.superTypeIdx >= 0) {
-      const parent = mod.types[cur.superTypeIdx];
-      if (!parent || parent.kind !== "struct") break;
-      root = cur.superTypeIdx;
-      cur = parent;
-    }
-    if (!seen.has(root)) {
-      seen.add(root);
-      out.push(root);
-    }
-  }
-  return out;
-}
+/* (#2175 V2-S1) The deduped closure-base-wrapper list now lives in the leaf
+ * `closure-classifier.ts` and is shared with index.ts's `__typeof*` natives —
+ * one predicate, never two divergent arm lists. Imported (aliased to the prior
+ * local name) at the top of this module. */
