@@ -793,15 +793,23 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
     return [{ op: "i32.const", value: 0 } as Instr];
   };
 
-  // (#2141 S2 DIAGNOSTIC — env-gated, OFF by default) The ejected #1888
-  // three-way tag-5 boxed-VALUE classifier (numeric f64.eq + string content +
-  // object ref.eq), force-enabled via JS2WASM_TAG5_CLASSIFIER=1 to root-cause
-  // the dstr-default reliance on the legacy always-false non-string tag-5 eq.
-  // Never enabled in production builds; S3 replaces this with the true-class
-  // dispatch once the relying site is fixed.
-  const tag5ClassifierEnabled = process.env.JS2WASM_TAG5_CLASSIFIER === "1";
+  // (#2141 S2/S3, #2626 — flag-gated, OFF by default) The three-way tag-5
+  // boxed-VALUE true-class classifier for the both-tags-5 arm of
+  // `__any_eq`/`__any_strict_eq`: Number×Number → `f64.eq` over
+  // `__any_to_f64` recovery (#2040; NaN self-false preserved), String×String
+  // → guarded content eq (the landed #1888 arm), Object×Object → `ref.eq`
+  // identity (#2585), else legacy `0`. Gated on `ctx.tag5ValueEqClassifier`
+  // (CompileOptions; `JS2WASM_TAG5_CLASSIFIER=1` env defaults it on for
+  // whole-runner A/B). OFF ⇒ byte-identical legacy: only the guarded string
+  // arm, so non-string tag-5 pairs answer `0` — which also makes a lie-boxed
+  // value SELF-unequal (fake NaN). The test262 comparator `isSameValue`
+  // (`a===b || (a!==a && b!==b)`) therefore answers TRUE for EVERY pair of
+  // lie-boxed operands — the vacuous-pass mask that made #1888's classifier
+  // eject at −162: the arms don't break dstr, they UNMASK latent failures of
+  // the eager-buffer generator fixture (see #2141 S2 root cause + #3032).
+  // Enable by default only after the #3032 waves land.
   const tag5ValueEqThen = (): Instr[] => {
-    if (!tag5ClassifierEnabled || !canNativeStrEq) return tag5StringEqThen();
+    if (!ctx.tag5ValueEqClassifier || !canNativeStrEq) return tag5StringEqThen();
     const recoverAny = (operandIdx: number, scratchIdx: number): Instr[] => [
       { op: "local.get", index: operandIdx } as Instr,
       { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 4 } as Instr,
@@ -842,11 +850,15 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
         op: "if",
         blockType: { kind: "val", type: { kind: "i32" } },
         then: [...castFlatten(4), ...castFlatten(5), { op: "call", funcIdx: nativeStrEqualsIdx } as Instr],
-        else: process.env.JS2WASM_TAG5_NO_OBJECT_ARM === "1" ? [{ op: "i32.const", value: 0 } as Instr] : objectArm,
+        else: objectArm,
       } as Instr,
     ];
+    // Numeric arm requires the native $BoxedNumber type (always registered in
+    // standalone/wasi before the eq helpers build — union imports first); the
+    // S2 bisect (2026-07-04) confirmed the numeric AND object arms EACH
+    // independently unmask the dstr canary, so there is no safe arm subset.
     const numericArm: Instr[] =
-      ctx.nativeBoxNumberTypeIdx >= 0 && process.env.JS2WASM_TAG5_NO_NUMERIC_ARM !== "1"
+      ctx.nativeBoxNumberTypeIdx >= 0
         ? [
             ...bothTest(ctx.nativeBoxNumberTypeIdx),
             {

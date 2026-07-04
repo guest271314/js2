@@ -93,6 +93,9 @@ export interface CodegenOptions {
    * see plan/issues/2141-tag5-abi-untangle-honest-boxing.md.
    */
   honestAnyBoxing?: boolean;
+  /** (#2141 S2/S3, #2626) Tag-5 boxed-VALUE equality classifier — see the
+   *  `CompileOptions.tag5ValueEqClassifier` doc. Default false (legacy). */
+  tag5ValueEqClassifier?: boolean;
   /** (#2796) Diff-test-harness fidelity: in JS-host mode, export the top-level
    *  `__module_init` and do NOT run it via the wasm `start` section, so the host
    *  invokes it AFTER `setExports` (symmetric with the standalone `_start`
@@ -1868,6 +1871,12 @@ export interface CodegenContext {
    *  `CodegenOptions.honestAnyBoxing` doc. Default false (legacy tag-5
    *  box-the-externref ABI, byte-identical). */
   honestAnyBoxing: boolean;
+  /** (#2141 S2/S3, #2626) Tag-5 boxed-VALUE equality classifier — three-way
+   *  true-class dispatch in the both-tags-5 eq arm (numeric `f64.eq` /
+   *  string content / object `ref.eq`). Default false (legacy `0` for
+   *  non-string tag-5 pairs). `JS2WASM_TAG5_CLASSIFIER=1` env defaults it on
+   *  for runner-level A/B. */
+  tag5ValueEqClassifier: boolean;
   /** (#2796) Diff-test-harness fidelity: in JS-host mode, export the top-level
    *  `__module_init` and do NOT wire the wasm `start` section to it, so the host
    *  runs it after `setExports` (symmetric with the standalone `_start` model).

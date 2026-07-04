@@ -1552,6 +1552,10 @@ function ensureGenEagerFlag(ctx: CodegenContext): number {
       exported: true,
     });
     ctx.funcMap.set("__gen_set_eager", funcIdx);
+    ctx.mod.exports.push({
+      name: "__gen_set_eager",
+      desc: { kind: "func", index: funcIdx },
+    });
   }
   return globalIdx;
 }

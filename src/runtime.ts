@@ -12212,6 +12212,57 @@ assert._isSameValue = isSameValue;
           // (`_GeneratorState.get(this)`) is unaffected.
           const proto = _getGeneratorInstancePrototype();
           const obj: any = Object.create(proto);
+          // (#3032) LAZY thunk mode: a non-Array first arg is the generator-
+          // expression CLOSURE itself (an opaque wasm ref), not an eager
+          // buffer. Defer the body: on the first `next()` re-invoke the
+          // closure through the module's `__call_fn_0` export with the
+          // `__gen_set_eager` flag held — the closure then takes its
+          // historical eager-buffer path and we adopt the inner generator's
+          // state. `return`/`throw` before the first `next()` complete the
+          // generator WITHOUT running the body (spec §27.5.3.2). This fixes
+          // the eager-at-creation side effects of the buffer lowering
+          // (test262 dstr fixture: `var iter = function*(){ iterations += 1 }()`
+          // must keep iterations === 0 until a resume).
+          if (buf !== null && buf !== undefined && !Array.isArray(buf)) {
+            const st: {
+              buf: any[];
+              index: number;
+              pendingThrow: any;
+              retVal?: any;
+              thunk?: any;
+              materialize?: () => void;
+            } = { buf: [], index: 0, pendingThrow: null, retVal: undefined, thunk: buf };
+            st.materialize = () => {
+              const DBG = process.env.GEN_DEBUG === "1";
+              const thunk = st.thunk;
+              st.thunk = undefined;
+              st.materialize = undefined;
+              const exports = callbackState?.getExports?.() as any;
+              const setEager = exports?.__gen_set_eager as ((v: number) => void) | undefined;
+              const callFn0 = exports?.__call_fn_0 as ((c: any) => any) | undefined;
+              if (!setEager || !callFn0) {
+                throw new TypeError(
+                  "lazy generator: __call_fn_0/__gen_set_eager exports unavailable (host must wire setExports)",
+                );
+              }
+              let inner: any;
+              try {
+                setEager(1);
+                inner = callFn0(thunk);
+              } finally {
+                setEager(0);
+              }
+              const innerSt = _GeneratorState.get(inner);
+              if (DBG) console.error("MATERIALIZE inner=", inner, "innerSt=", innerSt);
+              if (innerSt) {
+                st.buf = innerSt.buf;
+                st.pendingThrow = innerSt.pendingThrow;
+                st.retVal = innerSt.retVal;
+              }
+            };
+            _GeneratorState.set(obj, st);
+            return obj;
+          }
           // (#2035) Read the generator's return value off the buffer's side
           // property (set by `__gen_set_return`) into the instance state so the
           // terminal `{value, done:true}` result carries it — without it ever
