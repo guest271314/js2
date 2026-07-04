@@ -15180,6 +15180,29 @@ function compileCallExpression(
 
       // Try string method: string_methodName
       if (isStringType(receiverType)) {
+        // (#3027) Native-strings mode (standalone/wasi `--nativeStrings`)
+        // never registers the host `string_<method>` import looked up right
+        // below — a computed-key string method call (`"str"["charAt"](i)`,
+        // `new String(x)["slice"](i)`) always found `funcIdx === undefined`
+        // and fell through every later branch to the generic dynamic-call
+        // fallback, which produces a null/non-callable value for a native
+        // string or wrapper receiver (there is no host `$Object` to ask) —
+        // manifesting downstream as "Cannot access property on null or
+        // undefined". The dot form (`"str".charAt(i)`) already dispatches
+        // correctly through the native `__str_*` engine (incl. the String-
+        // wrapper `__to_primitive` unwrap) earlier in this same function;
+        // recompile this call as the equivalent dot form (same receiver, same
+        // method, same arguments) so it takes that exact path instead of
+        // duplicating the logic here.
+        if (ctx.nativeStrings && ctx.nativeStrTypeIdx >= 0) {
+          const syntheticProp = ts.factory.createPropertyAccessExpression(elemAccess.expression, methodName);
+          ts.setTextRange(syntheticProp, elemAccess);
+          (syntheticProp as unknown as { parent: ts.Node }).parent = expr;
+          const syntheticCall = ts.factory.createCallExpression(syntheticProp, expr.typeArguments, expr.arguments);
+          ts.setTextRange(syntheticCall, expr);
+          (syntheticCall as unknown as { parent: ts.Node }).parent = expr.parent;
+          return compileCallExpression(ctx, fctx, syntheticCall as ts.CallExpression);
+        }
         const importName = `string_${methodName}`;
         const funcIdx = ctx.funcMap.get(importName);
         if (funcIdx !== undefined) {
