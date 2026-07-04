@@ -4264,6 +4264,17 @@ export function compilePropertyIntrospection(
   const receiverType = ctx.checker.getTypeAtLocation(propAccess.expression);
   const receiverWasm = resolveWasmType(ctx, receiverType);
 
+  // (#3021 RC1) The test262 harness rewrites
+  // `Object.prototype.hasOwnProperty.call(X, k)` to `(X).hasOwnProperty(k)` —
+  // a *parenthesized* receiver. The AST-based receiver classification below
+  // (prototype-vs-instance, and the #1334/#2726 needsRuntime var-name gate)
+  // must see through those parens, or `(C.prototype).hasOwnProperty(...)` is
+  // misclassified as an instance receiver and constant-folds the INVERTED
+  // answer ('field'→true, 'method'→false). The type checker (`receiverType`)
+  // already resolves through parens; this local gives the AST checks the same
+  // paren-transparency.
+  const recvExpr = ts.skipParentheses(propAccess.expression);
+
   // For externref/any receivers (e.g. Object.create result), delegate to runtime
   // since we can't statically know their properties
   if (receiverWasm.kind === "externref") {
@@ -4422,8 +4433,7 @@ export function compilePropertyIntrospection(
   //   - Prototype:   methods + accessors are own; instance fields are NOT
   //   - Instance:    instance fields are own; methods are NOT (they're on prototype)
   //   - Constructor: static members are own; instance members are NOT
-  const isPrototypeReceiver =
-    ts.isPropertyAccessExpression(propAccess.expression) && propAccess.expression.name.text === "prototype";
+  const isPrototypeReceiver = ts.isPropertyAccessExpression(recvExpr) && recvExpr.name.text === "prototype";
 
   // A constructor type (typeof C) has construct signatures; an instance does not.
   const isConstructorReceiver = !isPrototypeReceiver && receiverType.getConstructSignatures().length > 0;
@@ -4549,7 +4559,7 @@ export function compilePropertyIntrospection(
     // queried key is in the (defineProperty-widened) struct shape, ignoring a
     // subsequent configurable `delete` that tombstoned it — the root of the
     // `11.4.1-4.a-1/-2`, `11.4.1-4-a-4-s` failures.
-    const recvVarName = ts.isIdentifier(propAccess.expression) ? propAccess.expression.text : undefined;
+    const recvVarName = ts.isIdentifier(recvExpr) ? recvExpr.text : undefined;
     let needsRuntime = false;
     if (recvVarName) {
       const prefix = `${recvVarName}:`;
