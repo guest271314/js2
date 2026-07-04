@@ -4669,6 +4669,18 @@ function _safeSet(
     // tokenizer loop (#1712): the write reached only the sidecar while the
     // guard read the stale struct field, so the guard never tripped.
     const ssetExports = exports ?? callbackState?.getExports();
+    // (#2853 B) Did the `__sset_<key>` writeback land in the LIVE struct
+    // field? Setters return i32 1 when a dispatch arm matched the receiver's
+    // runtime type and wrote. When they do, the sidecar must NOT also carry
+    // the value: the sidecar cannot be updated by compiled `struct.set`
+    // writes (e.g. acorn's `this.pos` advancing inside prototype methods),
+    // so a sidecar copy of a REAL field becomes a permanently-stale SHADOW
+    // that `_safeGet`-first readers prefer over the live field. That shadow
+    // froze `state.pos` at 0 for every parameter-path read in acorn's regexp
+    // validator, making every group `(…)` raise "Unmatched ')'". Older
+    // binaries' void setters return undefined → flag stays false → the
+    // prior sidecar-carries-it behaviour.
+    let fieldWrote = false;
     if (typeof key === "string" && ssetExports) {
       const setter = ssetExports[`__sset_${key}`];
       if (typeof setter === "function") {
@@ -4680,7 +4692,7 @@ function _safeSet(
           // *typed* `ref.eq` read compare unequal to the original struct. The
           // proxy is a pure host-side view — `_unwrapForHost` recovers the
           // canonical struct (1:1) and passes a non-proxy through unchanged.
-          setter(obj, _unwrapForHost(val));
+          fieldWrote = setter(obj, _unwrapForHost(val)) === 1;
         } catch {
           /* not a field of this struct's runtime type */
         }
@@ -4691,7 +4703,18 @@ function _safeSet(
     } catch {
       /* struct fields may reject unknown keys */
     }
-    _sidecarSet(obj, key, val);
+    // (#2853 B) A successful live-field write skips the sidecar and HEALS any
+    // stale sidecar entry for the key — EXCEPT for a #2731 shadowed field
+    // (deleted-then-re-added), whose live value deliberately lives in the
+    // sidecar for insertion-order enumeration.
+    const isShadowedField =
+      typeof key === "string" && fieldWrote ? _wasmStructShadowedFields.get(obj)?.has(key) === true : false;
+    if (fieldWrote && !isShadowedField) {
+      const sc = _wasmStructProps.get(obj);
+      if (sc && (key as string) in sc) delete sc[key as string];
+    } else {
+      _sidecarSet(obj, key, val);
+    }
     if (typeof key === "symbol") {
       const wasmKey = _symbolToWasm.get(key);
       if (wasmKey) _sidecarSet(obj, wasmKey, val);

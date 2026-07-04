@@ -778,6 +778,14 @@ export interface CodegenContext {
   typeIdxToStructName: Map<number, string>;
   /** Map from struct name to field info */
   structFields: Map<string, FieldDef[]>;
+  /** (#2853 park fix) Struct type indices that MUST NOT be nominally branded by
+   *  the shape-brand finalize pass, because a trapping guarded downcast between
+   *  two same-layout sibling `__anon_*`/`__fnctor_*` shapes was emitted for them
+   *  (e.g. a `var` reassigned across different-key object literals). Branding
+   *  them would separate previously-canonically-equal types → the baked
+   *  `ref.test`/`ref.as_non_null` narrowing would trap. Excluding them reverts
+   *  those shapes to exact pre-brand baseline behaviour (test262-safe). */
+  noBrandShapeTypes: Set<number>;
   /** Number of imported functions */
   numImportFuncs: number;
   /** wasm:js-string import indices — separate from funcMap to prevent
