@@ -140,7 +140,7 @@ import {
   ensureStandaloneNativeMethodClosure,
   getNativeProtoBuiltinGlue,
 } from "../native-proto.js";
-import { pushBuiltinFnClosureValueInstrs } from "../builtin-fn-meta.js";
+import { pushBuiltinFnSingletonValueInstrs } from "../builtin-fn-meta.js";
 import { compileStatement, hoistFunctionDeclarations } from "../statements.js";
 import {
   emitSetExtrasArgv,
@@ -7512,7 +7512,10 @@ function compileCallExpression(
               );
               flushLateImportShifts(ctx, fctx);
               if (createAccIdx !== undefined) {
-                fctx.body.push(...pushBuiltinFnClosureValueInstrs(ctx, protoClosure));
+                // (#2175 V2-S2) Identity-stable getter singleton so the accessor's
+                // `.get` is the SAME function object across repeated gOPD calls and
+                // the syntactic getter-invocation self (property-access.ts Site 3).
+                fctx.body.push(...pushBuiltinFnSingletonValueInstrs(ctx, protoClosure));
                 fctx.body.push({ op: "extern.convert_any" } as Instr); // get
                 fctx.body.push({ op: "ref.null.extern" } as Instr); // set = undefined
                 fctx.body.push({ op: "i32.const", value: 0x04 } as Instr); // FLAG_CONFIGURABLE
@@ -7530,7 +7533,11 @@ function compileCallExpression(
               );
               flushLateImportShifts(ctx, fctx);
               if (createIdx !== undefined) {
-                fctx.body.push(...pushBuiltinFnClosureValueInstrs(ctx, protoClosure));
+                // (#2175 V2-S2) Identity-stable method singleton so the data
+                // descriptor's `.value` is the SAME function object as the syntactic
+                // read `RegExp.prototype.exec` (property-access.ts method arm):
+                // `gOPD(p,"exec").value === RegExp.prototype.exec`.
+                fctx.body.push(...pushBuiltinFnSingletonValueInstrs(ctx, protoClosure));
                 fctx.body.push({ op: "extern.convert_any" } as Instr); // value
                 fctx.body.push({ op: "i32.const", value: 0x05 } as Instr); // FLAG_WRITABLE | FLAG_CONFIGURABLE
                 fctx.body.push({ op: "call", funcIdx: createIdx } as Instr);
