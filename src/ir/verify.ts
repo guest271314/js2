@@ -300,6 +300,24 @@ export function verifyIrFunction(func: IrFunction): IrVerifyError[] {
  * an unambiguous mismatch.
  */
 function returnTypeAssignable(actual: IrType, declared: IrType): boolean {
+  // #2949 slice 3 — R6 HARDENING: a `dynamic` declared result accepts ONLY a
+  // dynamic value (bare or tag-refined). Before slice 3 this fell through to
+  // the lenient both-reference-shaped arm below, which PASSED a bare
+  // `(ref $C)` / string / closure into a dynamic result — but the lowering
+  // of that flow is only valid through an explicit `box` (a raw struct ref
+  // is not an `$AnyValue` subtype in fast mode, and host mode needs the
+  // `extern.convert_any` re-tag the box arm emits). Slice 2's move-only
+  // producers never emit the flow (dyn return args are dyn-shaped by the
+  // scan), so this is zero-delta today; it exists so the FIRST producer
+  // that widens returns is forced through `box{toType: dynamic}` instead of
+  // silently emitting invalid Wasm (the latent trap the slice-2 handoff
+  // flagged). The dual direction (dynamic value into a non-dynamic declared
+  // result) keeps its existing arms: scalar results reject below via
+  // `asVal(dynamic) === null`; externref results legitimately accept the
+  // carrier (host: identity; fast: the return path's extern re-tag).
+  if (declared.kind === "dynamic") {
+    return actual.kind === "dynamic";
+  }
   const a = asVal(actual);
   const d = asVal(declared);
   const isScalar = (v: ValType | null): boolean =>

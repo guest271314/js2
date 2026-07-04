@@ -20,7 +20,8 @@
 // `plan/issues/1713-ir-backend-emitter-trait-seam.md` for that design step.
 // Nothing here changes for Phase 1.
 
-import type { ValType } from "../types.js";
+import type { Instr, ValType } from "../types.js";
+import type { JsTag } from "../../codegen/js-tag.js";
 
 /**
  * Information about a tagged-union struct type emitted into the WasmGC module.
@@ -143,6 +144,92 @@ export interface IrClassLowering {
   fieldIdx(name: string): number;
   readonly constructorFuncName: string;
   methodFuncName(name: string): string;
+}
+
+/**
+ * #2949 slice 3 — layout + op-emission handle for the `dynamic` IrType (the
+ * boxed-any carrier). Produced by `IrLowerResolver.resolveDynamicLowering()`
+ * (integration.ts, closed over the live `CodegenContext`) and consumed by the
+ * dynamic arms of `box` / `unbox` / `tag.test` in `lower.ts`.
+ *
+ * Two strategies, selected by the SAME mode split as `resolveDynamic()` (they
+ * must stay in lockstep — the carrier and its ops are one decision):
+ *
+ *   - `"gc"` (WasmGC fast/standalone): carrier is `ref_null $AnyValue`
+ *     (`{tag:i32, i32val:i32, f64val:f64, refval:eqref, externval:externref}`,
+ *     `ensureAnyValueType`). Boxing routes through the CANONICAL `__any_box_*`
+ *     helper family via `boxToAny` (value-tags.ts) — never a second boxing
+ *     engine (June-audit D4). Unboxing reads payload fields (numbers via the
+ *     canonical `__any_unbox_f64` / `__any_unbox_i32` readers, which honor the
+ *     V2 numeric-class invariant across tags {2,3}).
+ *   - `"host"` (WasmGC host / non-fast): carrier is `externref`; ops route
+ *     through the existing host import family (`__box_number` /
+ *     `__unbox_number` / `__unbox_boolean` / `__typeof_*`), registered
+ *     up-front by `preregisterDynamicSupport` (late-import shift discipline).
+ *
+ * All `emit*` methods resolve function indices BY NAME at emit time (the
+ * #2191/#2193 name-based-repoint lesson) and return the op sequence for the
+ * caller to `pushRaw` — mirroring the proven `emitStringConcat` resolver
+ * pattern. The `payloadFieldIdx` accessor exposes the gc layout for tests and
+ * for #2953's future emitter-trait routing of these pushes.
+ *
+ * V2 NUMERIC-CLASS CONTRACT (deliberate deviation from the slice-1 sketch,
+ * see the issue's slice-3 notes): `emitTagTest(NumberI32)` and
+ * `emitTagTest(NumberF64)` BOTH lower to the numeric-CLASS test ("is a
+ * number": gc `tag ∈ {2,3}`, host `typeof === "number"`). The host carrier
+ * cannot distinguish the i32/f64 partitions (`typeof` has one "number"), so
+ * an exact-tag gc test would be mode-divergent — a producer decision tree
+ * that works in host mode would silently misbehave in fast mode. Producers
+ * pick the payload via the UNBOX tag instead (`NumberF64` → f64 ToNumber-safe
+ * read; `NumberI32` → i32 read with trunc-sat narrowing), which both
+ * strategies implement consistently.
+ */
+export interface IrDynamicLowering {
+  /** The carrier ValType — MUST equal `resolveDynamic()`'s result. */
+  readonly carrier: ValType;
+  /** Lowering strategy — see the interface doc. */
+  readonly strategy: "gc" | "host";
+  /** gc: the `$AnyValue` struct typeIdx. host: -1. */
+  readonly anyValueTypeIdx: number;
+  /** gc: field index of the i32 tag (0). host: -1. */
+  readonly tagFieldIdx: number;
+  /**
+   * gc: payload field index for a partition — 1 (`i32val`) for
+   * NumberI32/Boolean, 2 (`f64val`) for NumberF64, 3 (`refval`, eqref) for
+   * Object/Function, 4 (`externval`, externref) for String (strings are
+   * carried extern-shaped under tag 5 in BOTH string modes — the #42 /
+   * tag-5-field-4 contract). Throws for the payload-less Null/Undefined
+   * partitions and for the host strategy.
+   */
+  payloadFieldIdx(tag: JsTag): number;
+  /**
+   * Value of ValType `from` on the stack → carrier on the stack.
+   * gc: the `__any_box_*` family via `boxToAny` (tag selection is the
+   * canonical Wasm-kind-keyed policy — behavior-identical to legacy's
+   * `any`-coercion for the same operand kind). host: `__box_number` family /
+   * `extern.convert_any` / identity for externref.
+   * Throws when the operand kind has no sound unbranded box (e.g. i64 host).
+   */
+  emitBox(from: ValType): readonly Instr[];
+  /**
+   * Carrier on the stack → the partition's payload. Caller must hold a
+   * `tag.test` proof (verifier R2); a wasm-null carrier here is a producer
+   * bug and traps (gc) / host-coerces (host). Result kind: NumberF64 → f64,
+   * NumberI32/Boolean → i32, String → externref, Object/Function → eqref
+   * (gc) / externref (host). Throws for Null/Undefined (R2 backstop).
+   */
+  emitUnbox(tag: JsTag): readonly Instr[];
+  /**
+   * Carrier on the stack → i32 (0/1): does the runtime tag match the
+   * partition? Number partitions test the CLASS (see the V2 contract above).
+   * `scratch` lazily allocates a carrier-typed function local — only invoked
+   * for arms that must read the operand twice (host Object test:
+   * `typeof === "object" && !== null`). gc arms `struct.get` the tag
+   * directly (a wasm-null carrier traps — same producer contract as unbox;
+   * the singleton-normalization producer slice decides null-carrier policy,
+   * see the issue notes + #2106).
+   */
+  emitTagTest(tag: JsTag, scratch: () => number): readonly Instr[];
 }
 
 /**
