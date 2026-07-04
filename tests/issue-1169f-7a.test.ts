@@ -17,10 +17,15 @@
 //   - `function* g() { yield 1; yield 2; ...; return <num>; }` —
 //     sequential numeric yields followed by an explicit numeric tail
 //     return. The selector requires a tail return because Phase 1's
-//     statement-list shape mandates it; legacy semantics (matched by
-//     slice 7a) push the return value onto the eager buffer as a
-//     final `done:false` value, so the test sequences include the
-//     return literal as the last yielded number.
+//     statement-list shape mandates it.
+//
+// #2035 / #2951 update: the generator `return <value>` belongs ONLY to the
+// terminal `{value, done:true}` IteratorResult — it is NOT a `done:false`
+// yielded element. Both the legacy path (`compileReturnStatement` via
+// `__gen_set_return`) and the IR path (`gen.setReturn`, #2951) now exclude
+// it. Since `drain()` stops at the first `done:true` step, the return literal
+// never appears in the collected sequence — so the expected yields below are
+// exactly the `yield`ed values, WITHOUT the return literal.
 //   - `function* g(arr: number[]) { for (const x of arr) yield <expr>;
 //     return 0; }` — yield inside a slice-6 vec for-of body. The
 //     for-of body's `lowerStmt` dispatcher accepts a yield-statement
@@ -116,10 +121,9 @@ const CASES: Case[] = [
     `,
     expectedClaimed: ["gen"],
     fn: "gen",
-    // Legacy generators push the return value onto the eager buffer
-    // as a final yielded value (control-flow.ts:89-123). Slice 7a
-    // mirrors this so consumers see identical sequences.
-    expectedYields: [1, 2, 3, 0],
+    // #2035/#2951 — `return 0` is the terminal done:true value, excluded
+    // from the done:false yield stream that `drain()` collects.
+    expectedYields: [1, 2, 3],
   },
 
   // ---- 2. arithmetic in the yield expression -----------------------------
@@ -135,7 +139,8 @@ const CASES: Case[] = [
     `,
     expectedClaimed: ["compute"],
     fn: "compute",
-    expectedYields: [5, 20, 3, 99],
+    // #2035/#2951 — `return 99` excluded from the yield stream.
+    expectedYields: [5, 20, 3],
   },
 
   // ---- 3. for-of over a vec, yielding doubled values --------------------
@@ -151,7 +156,8 @@ const CASES: Case[] = [
     expectedClaimed: ["doubled"],
     fn: "doubled",
     builder: { name: "builder", expect: [10, 20, 30] },
-    expectedYields: [20, 40, 60, -1],
+    // #2035/#2951 — `return -1` excluded from the yield stream.
+    expectedYields: [20, 40, 60],
   },
 ];
 

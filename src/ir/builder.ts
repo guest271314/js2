@@ -829,6 +829,26 @@ export class IrFunctionBuilder {
     this.pushInstr({ kind: "gen.yieldStar", inner, result: null, resultType: null });
   }
 
+  /**
+   * #2951: emit a `gen.setReturn` instr — stash a generator's `return
+   * <value>` on the buffer via `__gen_set_return(buf, value)`. The lowerer
+   * BOXES `value` to externref (f64 → __box_number; i32 → convert+box;
+   * ref/ref_null → extern.convert_any; externref → pass through). The caller
+   * passes `value` in its NATIVE dispatch shape (f64 / i32 stay native;
+   * reference-shaped values coerced to externref upstream), exactly like
+   * `emitGenPush`. Guarded on `funcKind === "generator"` +
+   * `generatorBufferSlot` set (mirrors the `emitGenPush` guards).
+   */
+  emitGenSetReturn(value: IrValueId): void {
+    if (this.funcKind !== "generator") {
+      throw new Error(`IrFunctionBuilder: emitGenSetReturn requires funcKind=generator (${this.name})`);
+    }
+    if (this.generatorBufferSlot === undefined) {
+      throw new Error(`IrFunctionBuilder: emitGenSetReturn requires setGeneratorBufferSlot first (${this.name})`);
+    }
+    this.pushInstr({ kind: "gen.setReturn", value, result: null, resultType: null });
+  }
+
   private requireBlock(): OpenBlock {
     if (this.current === null) {
       throw new Error(`IrFunctionBuilder: no open block (func ${this.name})`);
