@@ -725,6 +725,8 @@ function buildCodegenOptions(
     honestAnyBoxing: options.honestAnyBoxing,
     // (#2141 S2/S3, #2626) tag-5 boxed-VALUE eq classifier flag (default off).
     tag5ValueEqClassifier: options.tag5ValueEqClassifier,
+    // (#2106 S1) standalone $undefined tag-1 singleton regime flag (default off).
+    undefinedSingleton: options.undefinedSingleton,
     // (#2796) Diff-test-harness fidelity — defer top-level init to an export so
     // the host runs it after setExports (symmetric with standalone `_start`).
     deferTopLevelInit: options.deferTopLevelInit,

@@ -104,6 +104,107 @@ export function emitIsUndefinedSingleton(ctx: CodegenContext, fctx: FunctionCont
 }
 
 /**
+ * (#2106 S1) Is the `undefinedSingleton` regime ACTIVE for this module?
+ * True only when the flag is set AND we are in standalone/native-strings mode
+ * (host mode has a real host `undefined` via `__get_undefined` and is never
+ * affected). Every producer/consumer flip of the S1 sweep gates on this, so
+ * flag-off (default) modules are byte-identical to legacy.
+ */
+export function undefinedSingletonActive(ctx: CodegenContext): boolean {
+  return ctx.undefinedSingleton === true && (ctx.standalone || ctx.nativeStrings);
+}
+
+/**
+ * (#2106 S1) Push the `$undefined` singleton as an EXTERNREF (the externref-
+ * plane representation of `undefined` under the `undefinedSingleton` regime).
+ * Returns false (emitting nothing) when the regime is inactive or the
+ * singleton cannot be reserved — callers keep their legacy `ref.null.extern`.
+ */
+export function emitUndefinedExtern(ctx: CodegenContext, fctx: FunctionContext): boolean {
+  if (!undefinedSingletonActive(ctx)) return false;
+  if (!emitUndefinedSingleton(ctx, fctx)) return false;
+  fctx.body.push({ op: "extern.convert_any" } as Instr);
+  return true;
+}
+
+/**
+ * (#2106 S1) The externref-plane "undefined singleton" INSTRUCTION SEQUENCE for
+ * baked native bodies: `global.get $undefined; extern.convert_any`. Returns
+ * undefined when the regime is inactive (callers keep `ref.null.extern`).
+ * Reserves the singleton (via ensureAnyValueType) on first use.
+ */
+export function undefinedExternInstrs(ctx: CodegenContext): Instr[] | undefined {
+  if (!undefinedSingletonActive(ctx)) return undefined;
+  if (ctx.undefinedGlobalIdx === undefined) {
+    ensureAnyValueType(ctx);
+    if (ctx.undefinedGlobalIdx === undefined) return undefined;
+  }
+  return [{ op: "global.get", index: ctx.undefinedGlobalIdx } as Instr, { op: "extern.convert_any" } as Instr];
+}
+
+/**
+ * (#2106 S1) Build the flagged "is this externref `undefined`?" body for a
+ * `(externref) -> i32` native (param 0 = the value, `scratchAnyLocal` = an
+ * anyref local). Under the singleton regime the predicate is:
+ *   tag-1 `$AnyValue` box (the singleton, or any tag-1 box)  ∨
+ *   `$BoxedNumber` carrying the UNDEF_F64 sentinel bits (#2979 arm)
+ * and — critically — NOT `ref.is_null` (null is DISTINCT from undefined here;
+ * a null externref answers 0 through the failing `ref.test`s).
+ * Returns undefined when the regime is inactive or `$AnyValue` is unavailable
+ * (callers keep their legacy `ref.is_null`-based body).
+ */
+export function buildIsUndefinedExternBody(
+  ctx: CodegenContext,
+  scratchAnyLocal: number,
+  undefF64Bits: bigint,
+): Instr[] | undefined {
+  if (!undefinedSingletonActive(ctx)) return undefined;
+  if (ctx.anyValueTypeIdx < 0) ensureAnyValueType(ctx);
+  if (ctx.anyValueTypeIdx < 0) return undefined;
+  const anyTypeIdx = ctx.anyValueTypeIdx;
+  const boxedNumArm: Instr[] =
+    ctx.nativeBoxNumberTypeIdx >= 0
+      ? [
+          { op: "local.get", index: scratchAnyLocal },
+          { op: "ref.test", typeIdx: ctx.nativeBoxNumberTypeIdx },
+          {
+            op: "if",
+            blockType: { kind: "val", type: { kind: "i32" } },
+            then: [
+              { op: "local.get", index: scratchAnyLocal },
+              { op: "ref.cast", typeIdx: ctx.nativeBoxNumberTypeIdx },
+              { op: "struct.get", typeIdx: ctx.nativeBoxNumberTypeIdx, fieldIdx: 0 },
+              { op: "i64.reinterpret_f64" },
+              { op: "i64.const", value: undefF64Bits },
+              { op: "i64.eq" },
+            ],
+            else: [{ op: "i32.const", value: 0 }],
+          } as Instr,
+        ]
+      : [{ op: "i32.const", value: 0 } as Instr];
+  return [
+    // any = any.convert_extern(v)  (null externref → null anyref: both
+    // ref.tests below answer 0, so null → NOT undefined, as required.)
+    { op: "local.get", index: 0 },
+    { op: "any.convert_extern" } as Instr,
+    { op: "local.tee", index: scratchAnyLocal },
+    { op: "ref.test", typeIdx: anyTypeIdx },
+    {
+      op: "if",
+      blockType: { kind: "val", type: { kind: "i32" } },
+      then: [
+        { op: "local.get", index: scratchAnyLocal },
+        { op: "ref.cast", typeIdx: anyTypeIdx },
+        { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 0 },
+        { op: "i32.const", value: 1 },
+        { op: "i32.eq" },
+      ],
+      else: boxedNumArm,
+    } as Instr,
+  ];
+}
+
+/**
  * Lazily register wrapper struct types for Number, String, Boolean.
  * Each wrapper is a struct with a single `value` field holding the primitive.
  * Also registers WrapperX_valueOf functions that extract the value.
