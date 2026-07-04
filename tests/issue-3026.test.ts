@@ -98,3 +98,63 @@ describe("#3026 — 'async' prefix on a shorthand property", () => {
     expect(await isRejected("({async: 1});")).toBe(false);
   });
 });
+
+// Slice 3 — early errors for two private-name (#x) grammar rules.
+//
+// (a) A private name referenced inside a class's ClassHeritage (the `extends`
+//     clause) is NOT in that class's own private environment — §15.7.14
+//     ClassDefinitionEvaluation evaluates the heritage with the OUTER
+//     PrivateEnvironment. So `class C extends class { x = this.#foo } { #foo }`
+//     is an early SyntaxError: `#foo` (declared in C) is out of scope in C's
+//     heritage. Covers test262
+//     language/{expressions,statements}/class/elements/syntax/early-errors/
+//     grammar-private-environment-on-class-heritage*.
+//
+// (b) A PrivateIdentifier cannot be a property key in a destructuring pattern —
+//     ObjectBindingPattern / ObjectAssignmentPattern property names are
+//     PropertyName, which excludes PrivateIdentifier. `const { #x: v } = o` is
+//     an early SyntaxError even when `#x` is declared in the enclosing class.
+//     Covers grammar-private-field-on-object-destructuring.
+//
+// TypeScript's parser accepts both silently under skipSemanticDiagnostics (the
+// test262 harness mode), so nothing detected them until this slice.
+describe("#3026 — private name in class heritage / destructuring pattern", () => {
+  it("rejects a private name used in the class heritage (`extends class { x = this.#foo }`)", async () => {
+    expect(await isRejected("class C extends class { x = this.#foo; } {\n  #foo;\n}")).toBe(true);
+  });
+
+  it("rejects a private name used in a nested/recursive heritage", async () => {
+    expect(
+      await isRejected("class Base {}\nclass C extends (class extends Base { x = this.#foo; }) {\n  #foo;\n}"),
+    ).toBe(true);
+  });
+
+  it("rejects a private name as an object binding-pattern key (`const { #x: v } = this`)", async () => {
+    expect(await isRejected("class C {\n  #x = 1;\n  m() { const { #x: v } = this; return v; }\n}")).toBe(true);
+  });
+
+  it("rejects a private name as an object assignment-pattern key (`({ #x: v } = this)`)", async () => {
+    expect(await isRejected("class C {\n  #x = 1;\n  m() { let v; ({ #x: v } = this); return v; }\n}")).toBe(true);
+  });
+
+  // ── Valid controls: must NOT be rejected ──────────────────────────────────
+  it("accepts a private field read in the class body (`this.#x` in a method)", async () => {
+    expect(await isRejected("class C {\n  #x = 1;\n  m() { return this.#x; }\n}")).toBe(false);
+  });
+
+  it("accepts `#x in obj` and a normal object destructuring alongside a private class", async () => {
+    expect(
+      await isRejected(
+        "class C {\n  #x = 1;\n  has(o: any) { return #x in o; }\n  m(o: any) { const { a } = o; return a; }\n}",
+      ),
+    ).toBe(false);
+  });
+
+  it("accepts two sibling classes each with their own private field", async () => {
+    expect(
+      await isRejected(
+        "class A {\n  #p = 1;\n  m() { return this.#p; }\n}\nclass B {\n  #q = 2;\n  n() { return this.#q; }\n}",
+      ),
+    ).toBe(false);
+  });
+});
