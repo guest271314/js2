@@ -237,3 +237,31 @@ describe("#3026 — duplicate binding names within a destructuring parameter", (
     expect(await isRejected("const [a] = [1]; const {a: b} = {a: 2}; void b;")).toBe(false);
   });
 });
+
+// Slice 8 — early error: the contextual keyword of a MetaProperty
+// (`new.target` / `import.meta`) is a terminal symbol and must not contain
+// Unicode escape sequences. TypeScript parses `new.target` as a
+// MetaProperty whose name has the canonical `.text` ("target") but a raw
+// `.getText()` that still carries the escape, with no parse diagnostic, so
+// nothing detected it. Covers test262
+// language/expressions/new.target/escaped-target.js.
+describe("#3026 — escape sequences in a meta-property keyword", () => {
+  it("rejects an escaped `target` in `new.target` (`new.t\\u0061rget`)", async () => {
+    expect(await isRejected("function f() { new.t\\u0061rget; } f();")).toBe(true);
+  });
+
+  it("rejects a differently-escaped `target` (`new.\\u0074arget`)", async () => {
+    expect(await isRejected("function f() { return new.\\u0074arget; } f();")).toBe(true);
+  });
+
+  // ── Valid controls: must NOT be rejected ──────────────────────────────────
+  it("accepts a plain `new.target`", async () => {
+    expect(await isRejected("function f() { return new.target; } (f as any)();")).toBe(false);
+  });
+
+  it("accepts `new.target` inside a class constructor", async () => {
+    expect(
+      await isRejected("class C { k: boolean; constructor() { this.k = new.target !== undefined; } } new C();"),
+    ).toBe(false);
+  });
+});

@@ -917,6 +917,20 @@ export function runNodeChecks(ctx: EarlyErrorContext, node: ts.Node): void {
     checkSwitchCaseLexicalDuplicates(ctx, node);
   }
 
+  // ── MetaProperty contextual keyword must not contain escapes ──────
+  // ES grammar (5.1.5 Grammar Notation): terminal symbols must appear exactly
+  // as written, with no Unicode escape sequences. The `target` of `new.target`
+  // and the `meta` of `import.meta` are such terminals, so `new.target` /
+  // `import.meta` are SyntaxErrors. TypeScript parses these as a
+  // MetaProperty whose name node has the canonical `.text` ("target"/"meta")
+  // but a raw `.getText()` that still carries the escape — with no parse
+  // diagnostic — so nothing detected it. Covers test262
+  // language/expressions/new.target/escaped-target.js (and, in module code,
+  // language/expressions/import.meta/syntax/escape-sequence-meta.js).
+  if (ts.isMetaProperty(node) && node.name.getText(ctx.sourceFile) !== node.name.text) {
+    ctx.addError(node, "The meta property keyword must not contain escape sequences");
+  }
+
   // ── Class body: static prototype method/field ─────────────────────
   // ES spec: It is a SyntaxError if the PropName of a static method or
   // field is "prototype".
