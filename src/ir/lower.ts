@@ -1053,6 +1053,13 @@ export function lowerIrFunctionBody<S>(
               emitInstrTree(bodyInstr, target);
               emitter.emitLocalSet(localIdx.get(bodyInstr.result)!, target);
               materialized.add(bodyInstr.result);
+            } else if ((totalUses.get(bodyInstr.result) ?? 0) === 0 && isSideEffecting(bodyInstr)) {
+              // (#2856) Zero-use side-effecting instr inside a nested buffer —
+              // same eager emit + drop contract as `emitBlockBody` (a
+              // statement-position extern/host call whose unused result would
+              // otherwise be silently SKIPPED, dropping its side effect).
+              emitInstrTree(bodyInstr, target);
+              emitter.emitDrop(target);
             }
             // Intra-arm multi-use: handled at use site via tee pattern.
           }
@@ -1087,6 +1094,13 @@ export function lowerIrFunctionBody<S>(
               emitInstrTree(bodyInstr, target);
               emitter.emitLocalSet(localIdx.get(bodyInstr.result)!, target);
               materialized.add(bodyInstr.result);
+            } else if ((totalUses.get(bodyInstr.result) ?? 0) === 0 && isSideEffecting(bodyInstr)) {
+              // (#2856) Zero-use side-effecting instr inside a nested buffer —
+              // same eager emit + drop contract as `emitBlockBody` (a
+              // statement-position extern/host call whose unused result would
+              // otherwise be silently SKIPPED, dropping its side effect).
+              emitInstrTree(bodyInstr, target);
+              emitter.emitDrop(target);
             }
             // Intra-arm multi-use: handled at use site via tee pattern.
           }
@@ -1710,6 +1724,11 @@ export function lowerIrFunctionBody<S>(
               index: localIdx.get(bodyInstr.result)!,
             });
             materialized.add(bodyInstr.result);
+          } else if ((totalUses.get(bodyInstr.result) ?? 0) === 0 && isSideEffecting(bodyInstr)) {
+            // (#2856) Zero-use side-effecting instr — eager emit + drop,
+            // same contract as `emitBlockBody` (see the if-arm variant).
+            emitInstrTree(bodyInstr, loopBody as unknown as S);
+            emitter.emitDrop(loopBody as unknown as S);
           }
           // Intra-block multi-use: handled at use site via tee pattern.
         }
@@ -1846,6 +1865,11 @@ export function lowerIrFunctionBody<S>(
               index: localIdx.get(bodyInstr.result)!,
             });
             materialized.add(bodyInstr.result);
+          } else if ((totalUses.get(bodyInstr.result) ?? 0) === 0 && isSideEffecting(bodyInstr)) {
+            // (#2856) Zero-use side-effecting instr — eager emit + drop,
+            // same contract as `emitBlockBody` (see the if-arm variant).
+            emitInstrTree(bodyInstr, loopBody as unknown as S);
+            emitter.emitDrop(loopBody as unknown as S);
           }
         }
 
@@ -1915,6 +1939,11 @@ export function lowerIrFunctionBody<S>(
                 index: localIdx.get(bodyInstr.result)!,
               });
               materialized.add(bodyInstr.result);
+            } else if ((totalUses.get(bodyInstr.result) ?? 0) === 0 && isSideEffecting(bodyInstr)) {
+              // (#2856) Zero-use side-effecting instr — eager emit + drop,
+              // same contract as `emitBlockBody` (see the if-arm variant).
+              emitInstrTree(bodyInstr, target as unknown as S);
+              emitter.emitDrop(target as unknown as S);
             }
             // Intra-block multi-use: handled via tee at use site.
           }
@@ -2078,6 +2107,11 @@ export function lowerIrFunctionBody<S>(
               index: localIdx.get(bodyInstr.result)!,
             });
             materialized.add(bodyInstr.result);
+          } else if ((totalUses.get(bodyInstr.result) ?? 0) === 0 && isSideEffecting(bodyInstr)) {
+            // (#2856) Zero-use side-effecting instr — eager emit + drop,
+            // same contract as `emitBlockBody` (see the if-arm variant).
+            emitInstrTree(bodyInstr, loopBody as unknown as S);
+            emitter.emitDrop(loopBody as unknown as S);
           }
         }
 
@@ -2200,6 +2234,11 @@ export function lowerIrFunctionBody<S>(
                 index: localIdx.get(bodyInstr.result)!,
               });
               materialized.add(bodyInstr.result);
+            } else if ((totalUses.get(bodyInstr.result) ?? 0) === 0 && isSideEffecting(bodyInstr)) {
+              // (#2856) Zero-use side-effecting instr — eager emit + drop,
+              // same contract as `emitBlockBody` (see the if-arm variant).
+              emitInstrTree(bodyInstr, target as unknown as S);
+              emitter.emitDrop(target as unknown as S);
             }
             // Intra-block multi-use: handled at use site via tee pattern.
           }

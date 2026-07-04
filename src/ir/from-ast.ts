@@ -1555,6 +1555,38 @@ function lowerExpr(expr: ts.Expression, cx: LowerCtx, hint: IrType): IrValueId {
         }
         return r;
       }
+      // (#2856 C3) Module-scope binding holding an extern-class instance
+      // (`const fibCache = new Map()` at module level). The legacy backend
+      // allocated a `__mod_<name>` externref global (module-level statements
+      // always compile via legacy — the IR only claims functions), so the IR
+      // read is a `global.get` against the SAME storage slot, branded with
+      // the binding's extern class so member calls dispatch through the
+      // extern arms. When legacy tracked a TDZ flag for the binding, emit
+      // the same read-site check legacy does: `if (__tdz_<name> == 0) throw`.
+      const mg = cx.resolver?.getModuleScopeExternBinding?.(expr.text);
+      if (mg) {
+        assertNotDeferred(
+          hostExternCapability(cx.resolver?.jsHostExterns?.() === true),
+          `module-scope extern binding "${expr.text}"`,
+          cx.funcName,
+        );
+        if (mg.tdzGlobalName) {
+          const tdz = cx.builder.emitGlobalGet({ kind: "global", name: mg.tdzGlobalName }, irVal({ kind: "i32" }));
+          const cond = cx.builder.emitUnary("i32.eqz", tdz, irVal({ kind: "i32" }));
+          const thenBody = cx.builder.collectBodyInstrs(() => {
+            const nullExt = cx.builder.emitConst(
+              { kind: "null", ty: irVal({ kind: "externref" }) },
+              irVal({ kind: "externref" }),
+            );
+            cx.builder.emitThrow(nullExt);
+          });
+          cx.builder.emitIfStmt({ cond, then: thenBody, else: [] });
+        }
+        return cx.builder.emitGlobalGet(
+          { kind: "global", name: mg.globalName },
+          { kind: "extern", className: mg.className },
+        );
+      }
     }
     if (!p) throw new Error(`ir/from-ast: identifier "${expr.text}" is not in scope in ${cx.funcName}`);
     // Slice 6 part 2 (#1181): slot-bound identifier (let mutated across
@@ -2984,6 +3016,18 @@ function coerceToExpectedExtern(value: IrValueId, expected: ValType, cx: LowerCt
   if (expected.kind === "externref" && t.kind === "extern") {
     return value;
   }
+  // (#2856 C3) f64 → externref: box through the `__box_number` host import —
+  // the exact coercion legacy's `coerceType` emits for the same site (so the
+  // import is registered by legacy's own compile of the function in the
+  // dual-compile model). JS-host lane only: standalone has no `__box_number`
+  // (its boxing is the `$AnyValue` family), so demote there.
+  if (expected.kind === "externref" && got !== null && got.kind === "f64" && cx.resolver?.nativeStrings?.() === false) {
+    const boxed = cx.builder.emitCall({ kind: "func", name: "__box_number" }, [value], irVal({ kind: "externref" }));
+    if (boxed === null) {
+      throw new Error(`ir/from-ast: __box_number produced no result in ${cx.funcName}`);
+    }
+    return boxed;
+  }
   throw new Error(`ir/from-ast: ${where} expects ${expected.kind} but got ${describeIrType(t)} (${cx.funcName})`);
 }
 
@@ -3694,6 +3738,25 @@ function coerceYieldValueToExternref(value: IrValueId, cx: LowerCtx): IrValueId 
  */
 function coerceReturnValue(value: IrValueId, cx: LowerCtx): IrValueId {
   const declared = cx.returnType;
+  // (#2856 C3) externref value into a NUMBER (f64) declared result —
+  // `return hit;` where `hit = cache.get(n)` is the externref Map_get
+  // result. Unbox through `__unbox_number`, exactly what legacy emits for
+  // the same site (import registered by legacy's own compile in the
+  // dual-compile model). Host lane only — standalone demotes. Before this
+  // arm such returns slipped to the verifier's #1798 gate and demoted;
+  // now they lower like legacy.
+  if (declared && declared.kind === "val" && declared.val.kind === "f64") {
+    const actualT = cx.builder.typeOf(value);
+    const actualV = asVal(actualT);
+    if (actualV && actualV.kind === "externref" && cx.resolver?.nativeStrings?.() === false) {
+      const unboxed = cx.builder.emitCall({ kind: "func", name: "__unbox_number" }, [value], irVal({ kind: "f64" }));
+      if (unboxed === null) {
+        throw new Error(`ir/from-ast: __unbox_number produced no result in ${cx.funcName}`);
+      }
+      return unboxed;
+    }
+    return value;
+  }
   // Only the externref (TS `any`) declared-result case can mismatch here;
   // native scalar / matching-ref returns already line up via the hint.
   if (!declared || declared.kind !== "val" || declared.val.kind !== "externref") {
@@ -4939,6 +5002,19 @@ function lowerBinary(expr: ts.BinaryExpression, cx: LowerCtx, hint: IrType): IrV
   const nullFold = tryFoldNullCompare(expr, op, cx);
   if (nullFold !== null) return nullFold;
 
+  // (#2856 C3) STRICT undefined-compare — `hit !== undefined`. Dispatch on
+  // the non-undefined operand's IrType (mirrors the selector's acceptance):
+  //   - externref-shaped (externref val / extern class / host string):
+  //     runtime `__extern_is_undefined(v)` (the legacy check for the same
+  //     shape), inverted for `!==`.
+  //   - representations that can never hold the JS `undefined` VALUE
+  //     (unboxed f64/i32 scalars, non-null WasmGC refs incl. vecs/classes/
+  //     native strings — strict equality: `null !== undefined` is true too):
+  //     constant fold, evaluating the operand for side effects.
+  //   - anything else (boxed / union / dynamic): clean demote.
+  const undefCompare = tryLowerUndefinedCompare(expr, op, cx);
+  if (undefCompare !== null) return undefCompare;
+
   // #2781 (hybrid Row 7) — `+` operand-type proof gate. Run BEFORE operand
   // lowering (mirrors #2780's pre-element widening gate), so no dead operand
   // instrs are emitted and the demotion cause is the explicit HI reason rather
@@ -5332,6 +5408,71 @@ function typeOfValue(v: IrValueId, cx: LowerCtx): IrType {
  * Returns `null` when this isn't a `null`-compare (so the caller
  * proceeds with the normal lowering).
  */
+/**
+ * (#2856 C3) Lower a STRICT undefined-compare — `<expr> !== undefined` /
+ * `<expr> === undefined` (`undefined` as a free identifier, not shadowed).
+ * Returns null when the expression isn't that shape (caller proceeds with
+ * the normal lowering).
+ *
+ * Dispatch by the non-undefined operand's IrType:
+ *   - externref-shaped (externref val / extern class / host-mode string) —
+ *     the runtime CAN hold the host `undefined`: emit the same
+ *     `__extern_is_undefined(v)` check legacy emits for this shape (import
+ *     registered by legacy's own lowering of the identical site in the
+ *     dual-compile model), `i32.eqz`-inverted for `!==`.
+ *   - representations that can never hold the JS `undefined` VALUE —
+ *     unboxed f64/i32 scalars and WasmGC refs (vecs, classes, objects,
+ *     closures, native strings; STRICT equality means even a null ref
+ *     compares false against undefined): constant-fold, keeping the
+ *     operand's side effects (DCE drops the value only when pure).
+ *   - anything else (boxed / union / dynamic) — clean demote to legacy.
+ *
+ * LOOSE `==`/`!=` never reach here (selector rejects them against
+ * `undefined`): `null == undefined` is true, so nullable-ref operands would
+ * need a runtime null check this slice doesn't emit.
+ */
+function tryLowerUndefinedCompare(expr: ts.BinaryExpression, op: ts.SyntaxKind, cx: LowerCtx): IrValueId | null {
+  const isStrictEq = op === ts.SyntaxKind.EqualsEqualsEqualsToken;
+  const isStrictNeq = op === ts.SyntaxKind.ExclamationEqualsEqualsToken;
+  if (!isStrictEq && !isStrictNeq) return null;
+  const isUndefIdent = (e: ts.Expression): boolean =>
+    ts.isIdentifier(e) && e.text === "undefined" && !cx.scope.has("undefined");
+  const leftU = isUndefIdent(expr.left);
+  const rightU = isUndefIdent(expr.right);
+  if (!leftU && !rightU) return null;
+  if (leftU && rightU) {
+    // `undefined === undefined` → true / `!==` → false.
+    return cx.builder.emitConst({ kind: "bool", value: isStrictEq }, irVal({ kind: "i32" }));
+  }
+  const other = leftU ? expr.right : expr.left;
+  const v = lowerExpr(other, cx, irVal({ kind: "externref" }));
+  const t = cx.builder.typeOf(v);
+  const tv = asVal(t);
+  const externrefShaped =
+    (tv !== null && tv.kind === "externref") ||
+    t.kind === "extern" ||
+    (t.kind === "string" && cx.resolver?.nativeStrings?.() === false);
+  if (externrefShaped) {
+    const flag = cx.builder.emitCall({ kind: "func", name: "__extern_is_undefined" }, [v], irVal({ kind: "i32" }));
+    if (flag === null) {
+      throw new Error(`ir/from-ast: __extern_is_undefined produced no result in ${cx.funcName}`);
+    }
+    return isStrictNeq ? cx.builder.emitUnary("i32.eqz", flag, irVal({ kind: "i32" })) : flag;
+  }
+  // Never-undefined representations: fold. The lowered operand keeps its
+  // side effects; DCE strips the unused value only when pure.
+  const neverUndefined =
+    (tv !== null && (tv.kind === "f64" || tv.kind === "i32" || tv.kind === "ref" || tv.kind === "ref_null")) ||
+    t.kind === "class" ||
+    t.kind === "object" ||
+    t.kind === "closure" ||
+    t.kind === "string"; // native-strings mode only (host mode took the branch above)
+  if (neverUndefined) {
+    return cx.builder.emitConst({ kind: "bool", value: isStrictNeq }, irVal({ kind: "i32" }));
+  }
+  throw new Error(`ir/from-ast: undefined-compare on ${describeIrType(t)} not in IR scope (${cx.funcName})`);
+}
+
 function tryFoldNullCompare(expr: ts.BinaryExpression, op: ts.SyntaxKind, cx: LowerCtx): IrValueId | null {
   const isEq = op === ts.SyntaxKind.EqualsEqualsEqualsToken || op === ts.SyntaxKind.EqualsEqualsToken;
   const isNeq = op === ts.SyntaxKind.ExclamationEqualsEqualsToken || op === ts.SyntaxKind.ExclamationEqualsToken;

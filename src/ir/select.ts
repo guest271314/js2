@@ -303,6 +303,30 @@ export function planIrCompilation(
     options?.resolveHostGlobal && hostExternCapability(options?.jsHostExterns === true) !== "defer"
       ? options.resolveHostGlobal
       : null;
+  // (#2856 C3) Module-scope `const <m> = new Map(...)` bindings — the
+  // `<m>.get(k)` / `<m>.set(k, v)` method-call receiver arm of isPhase1Expr
+  // consults this set. JS-host lane only (same capability gate as the
+  // host-global resolver): in standalone/nativeStrings mode `Map` isn't a
+  // registered extern class, so from-ast couldn't lower the calls — the
+  // empty set keeps select↔build parity there.
+  currentModuleScopeMapConsts.clear();
+  if (hostExternCapability(options?.jsHostExterns === true) !== "defer") {
+    for (const stmt of sourceFile.statements) {
+      if (!ts.isVariableStatement(stmt)) continue;
+      if (!(stmt.declarationList.flags & ts.NodeFlags.Const)) continue;
+      for (const d of stmt.declarationList.declarations) {
+        if (
+          ts.isIdentifier(d.name) &&
+          d.initializer &&
+          ts.isNewExpression(d.initializer) &&
+          ts.isIdentifier(d.initializer.expression) &&
+          d.initializer.expression.text === "Map"
+        ) {
+          currentModuleScopeMapConsts.add(d.name.text);
+        }
+      }
+    }
+  }
   const fallbackReasons = new Map<string, IrFallbackReason>();
   // (#2856 Step-1) Parallel to `fallbackReasons`: the opt-in reject-arm detail
   // for `body-shape-rejected` entries (populated only when JS2WASM_IR_SHAPE_DIAG=1).
@@ -611,6 +635,16 @@ let currentFnIsVoidReturn = false;
  * see `hostExternCapability` in capability.ts).
  */
 let currentHostGlobalResolver: ((node: ts.Identifier) => string | undefined) | null = null;
+
+/**
+ * (#2856 C3) Module-scope `const <m> = new Map(...)` binding names for the
+ * CURRENT `planIrCompilation` run (JS-host lane only — cleared/refilled at
+ * the selector entry). Receiver acceptance for `<m>.get(k)` / `<m>.set(k, v)`
+ * method calls; the from-ast identifier arm resolves the same binding via
+ * `resolver.getModuleScopeExternBinding` (the legacy `__mod_<name>` global +
+ * extern-class brand), so accepted shapes always lower.
+ */
+const currentModuleScopeMapConsts = new Set<string>();
 
 function whyNotIrClaimable(
   fn: IrClaimableSubject,
@@ -2245,8 +2279,25 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
     return isPhase1Expr(expr.operand, scope, localClasses);
   }
   if (ts.isBinaryExpression(expr)) {
-    if (!isPhase1BinaryOp(expr.operatorToken.kind))
-      return shapeNo(`expr-binary-op-${ts.tokenToString(expr.operatorToken.kind) ?? expr.operatorToken.kind}`, expr);
+    const binOp = expr.operatorToken.kind;
+    // (#2856 C3) STRICT undefined-compare — `hit !== undefined` /
+    // `x === undefined`. The `undefined` identifier isn't in scope, so the
+    // generic operand recursion would reject it; accept it specially as one
+    // operand of a strict equality. The from-ast arm dispatches on the other
+    // operand's IrType (externref-shaped → runtime `__extern_is_undefined`;
+    // never-undefined representations → constant fold). LOOSE `==`/`!=` stay
+    // rejected: `null == undefined` is true, so a nullable-ref operand would
+    // need a runtime null check this slice doesn't emit.
+    if (binOp === ts.SyntaxKind.EqualsEqualsEqualsToken || binOp === ts.SyntaxKind.ExclamationEqualsEqualsToken) {
+      const isUndefIdent = (e: ts.Expression): boolean =>
+        ts.isIdentifier(e) && e.text === "undefined" && !scope.has("undefined");
+      const leftUndef = isUndefIdent(expr.left);
+      const rightUndef = isUndefIdent(expr.right);
+      if (leftUndef && rightUndef) return true;
+      if (rightUndef) return isPhase1Expr(expr.left, scope, localClasses);
+      if (leftUndef) return isPhase1Expr(expr.right, scope, localClasses);
+    }
+    if (!isPhase1BinaryOp(binOp)) return shapeNo(`expr-binary-op-${ts.tokenToString(binOp) ?? binOp}`, expr);
     return isPhase1Expr(expr.left, scope, localClasses) && isPhase1Expr(expr.right, scope, localClasses);
   }
   if (ts.isConditionalExpression(expr)) {
@@ -2276,6 +2327,28 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
         !ts.isSpreadElement(expr.arguments[0]!)
       ) {
         return isPhase1Expr(expr.arguments[0]!, scope, localClasses);
+      }
+      // (#2856 C3) `<moduleMapConst>.get(k)` / `.set(k, v)` — the receiver is
+      // a module-scope `const <m> = new Map(...)` binding (never in the local
+      // scope set, so the generic receiver check below would reject it). The
+      // from-ast identifier arm lowers the receiver as a TDZ-checked
+      // `global.get $__mod_<m>` branded `extern:Map`; `.get`/`.set` then ride
+      // the existing extern method-call machinery (Map_get / Map_set host
+      // imports, registered by the legacy source scan). JS-host lane only —
+      // the set is empty otherwise.
+      if (
+        ts.isIdentifier(expr.expression.expression) &&
+        !scope.has(expr.expression.expression.text) &&
+        currentModuleScopeMapConsts.has(expr.expression.expression.text) &&
+        (expr.expression.name.text === "get" || expr.expression.name.text === "set")
+      ) {
+        const wantArgs = expr.expression.name.text === "get" ? 1 : 2;
+        if (expr.arguments.length !== wantArgs) return shapeNo("expr-modmap-arity", expr);
+        for (const arg of expr.arguments) {
+          if (ts.isSpreadElement(arg)) return shapeNo("expr-modmap-spread", arg);
+          if (!isPhase1Expr(arg, scope, localClasses)) return false;
+        }
+        return true;
       }
       if (!isPhase1Expr(expr.expression.expression, scope, localClasses)) return false;
       for (const arg of expr.arguments) {
