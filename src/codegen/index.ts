@@ -1185,11 +1185,29 @@ interface IrOverlayPlan {
  *   1. It survived overrideMap resolution (`safeSelection.funcs` — computed
  *      strictly AFTER the #2023 `new.target` clear and after resolve-time
  *      drops), so the IR path WILL attempt it.
- *   2. It is not a generator (`function*`). Legacy generator compilation
- *      creates auxiliary machinery beyond the slot body; whether the IR
- *      generator lowering is fully standalone without the legacy compile's
- *      side effects is unproven, so the first cut keeps generators on the
- *      compile-twice path. Lift only after a dedicated measurement.
+ *   2. If it is a generator (`function*`), the compile targets a JS host
+ *      (`generatorsSkippable` — `!standalone && !wasi`). #2951 gate-2: the
+ *      IR generator lowering is now self-sufficient for the JS-host path —
+ *      it pre-registers its own generator host imports
+ *      (`addGeneratorImports` in `ir/integration.ts`, driven by any
+ *      `funcKind === "generator"` claim) and its own `__exn` tag, and the
+ *      source-level scan (`state.generatorFound` in `declarations.ts`)
+ *      registers the generator imports independently of ANY individual
+ *      generator's legacy body emission — so skipping a claimed generator's
+ *      legacy body drops no import/type/tag the IR body relies on. The
+ *      predecessor slice (`gen.setReturn`, #2640) closed the last
+ *      value-returning-`return` deferral, so value-carrying generators now
+ *      IR-claim with zero post-claim demotions (proven on a representative
+ *      host-drain corpus, `irPostClaimErrors` empty). Any generator SHAPE the
+ *      IR path still can't own is filtered UPSTREAM by the selector (async
+ *      generators, generator methods → `deferred-feature`; unresolved yield
+ *      shapes) so it never enters `safeSelection.funcs` and never reaches
+ *      this gate. STANDALONE/WASI generators stay compile-twice: legacy
+ *      restricts them to sequential-numeric-yield native lowering
+ *      (`function-body.ts` "#680" guard) and the IR path unconditionally
+ *      registers JS-host generator imports, so standalone self-sufficiency
+ *      is genuinely unproven (#2138 deviation 3) — lift in a follow-up after
+ *      a standalone measurement.
  *   3. Every DIRECT local callee is also in `safeSelection.funcs`. The
  *      selector's Step-2 closure already guarantees this against
  *      `selection.funcs`, but overrideMap resolution can re-open the closure
@@ -1220,7 +1238,11 @@ interface IrOverlayPlan {
  * placeholder must never ship) — surfacing exactly the selector↔builder
  * divergences this investigation exists to find (#2135).
  */
-function computeIrFirstSkipSet(plan: IrOverlayPlan, sourceFile: ts.SourceFile): ReadonlySet<string> {
+function computeIrFirstSkipSet(
+  plan: IrOverlayPlan,
+  sourceFile: ts.SourceFile,
+  generatorsSkippable: boolean,
+): ReadonlySet<string> {
   const skip = new Set<string>();
   const funcs = plan.safeSelection.funcs;
   if (funcs.size === 0) return skip;
@@ -1231,7 +1253,12 @@ function computeIrFirstSkipSet(plan: IrOverlayPlan, sourceFile: ts.SourceFile): 
   const moduleNames = collectModuleTopLevelNames(sourceFile);
   for (const name of funcs) {
     const fn = plan.declByName.get(name);
-    if (!fn || fn.asteriskToken) continue; // gate 2 — generators
+    if (!fn) continue;
+    // gate 2 (#2951) — a claimed generator is skippable only when targeting a
+    // JS host. Standalone/WASI generators stay compile-twice (legacy's
+    // native-generator restriction + unproven IR standalone self-sufficiency,
+    // #2138 deviation 3). Non-generators are unaffected.
+    if (fn.asteriskToken && !generatorsSkippable) continue;
     if (irFirstBodyReadsHostNode(fn, moduleNames)) continue; // gate 4 — host nodes
     if (irFirstBodyReadsStringElement(fn)) continue; // gate 5 — string element read (#2972)
     // Gate 6 (#2949 slice 2) — dynamic-signature functions stay compile-twice
@@ -1803,7 +1830,11 @@ export function generateModule(
     let irSkipBodies: ReadonlySet<string> | undefined;
     if (irFirst) {
       irPlan = planIrOverlay(ctx, ast);
-      irSkipBodies = computeIrFirstSkipSet(irPlan, ast.sourceFile);
+      // (#2951) generators are skippable only for the JS-host path — the same
+      // condition the selector uses for `jsHostExterns`. Standalone/WASI keep
+      // generators on the compile-twice path (see gate 2 in computeIrFirstSkipSet).
+      const generatorsSkippable = !(ctx.standalone || ctx.wasi || ctx.strictNoHostImports);
+      irSkipBodies = computeIrFirstSkipSet(irPlan, ast.sourceFile, generatorsSkippable);
     }
 
     // Third pass: compile function bodies
