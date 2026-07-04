@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-07-04T21:20:12.486Z",
-  "baseline_generated_at": "2026-07-04T21:20:12.486Z",
-  "baseline_sha": "d08a70f978b7ae1daf109844b931859a24b2b372",
+  "timestamp": "2026-07-04T23:13:54.446Z",
+  "baseline_generated_at": "2026-07-04T23:13:54.446Z",
+  "baseline_sha": "7f90320ea76040c2d04888822ced8511ba363952",
   "oracle_version": 1,
   "mode": {
     "target": "gc",
@@ -10,25 +10,25 @@
   },
   "summary": {
     "total": 43106,
-    "pass": 32152,
-    "fail": 10483,
+    "pass": 32168,
+    "fail": 10467,
     "compile_error": 371,
     "compile_timeout": 82,
     "skip": 18,
     "compilable": 42635,
-    "host_free_pass": 4340,
+    "host_free_pass": 4356,
     "leaky_pass": 27812,
     "stale": 0,
     "by_category": {
       "standard": {
         "total": 42020,
-        "pass": 31544,
-        "fail": 10025,
+        "pass": 31560,
+        "fail": 10009,
         "compile_error": 351,
         "compile_timeout": 82,
         "skip": 18,
         "compilable": 41569,
-        "host_free_pass": 4333,
+        "host_free_pass": 4349,
         "leaky_pass": 27211,
         "stale": 0,
         "label": "ECMAScript current standard"
@@ -61,26 +61,26 @@
       },
       "official": {
         "total": 43106,
-        "pass": 32152,
-        "fail": 10483,
+        "pass": 32168,
+        "fail": 10467,
         "compile_error": 371,
         "compile_timeout": 82,
         "skip": 18,
         "compilable": 42635,
-        "host_free_pass": 4340,
+        "host_free_pass": 4356,
         "leaky_pass": 27812,
         "stale": 0,
         "label": "standard + annex_b (default)"
       },
       "full": {
         "total": 48088,
-        "pass": 33643,
-        "fail": 13654,
+        "pass": 33659,
+        "fail": 13638,
         "compile_error": 585,
         "compile_timeout": 83,
         "skip": 123,
         "compilable": 47297,
-        "host_free_pass": 4533,
+        "host_free_pass": 4549,
         "leaky_pass": 29110,
         "stale": 0,
         "label": "standard + annex_b + proposals"
@@ -89,37 +89,37 @@
   },
   "official_summary": {
     "total": 43106,
-    "pass": 32152,
-    "fail": 10483,
+    "pass": 32168,
+    "fail": 10467,
     "compile_error": 371,
     "compile_timeout": 82,
     "skip": 18,
     "compilable": 42635,
-    "host_free_pass": 4340,
+    "host_free_pass": 4356,
     "leaky_pass": 27812,
     "stale": 0
   },
   "full_summary": {
     "total": 48088,
-    "pass": 33643,
-    "fail": 13654,
+    "pass": 33659,
+    "fail": 13638,
     "compile_error": 585,
     "compile_timeout": 83,
     "skip": 123,
     "compilable": 47297,
-    "host_free_pass": 4533,
+    "host_free_pass": 4549,
     "leaky_pass": 29110,
     "stale": 0
   },
   "strict_summary": {
     "total": 40597,
-    "pass": 30785,
-    "fail": 9434,
+    "pass": 30801,
+    "fail": 9418,
     "compile_error": 279,
     "compile_timeout": 81,
     "skip": 18,
     "compilable": 40219,
-    "host_free_pass": 4246,
+    "host_free_pass": 4262,
     "leaky_pass": 26539,
     "stale": 0
   },
@@ -150,13 +150,13 @@
     },
     "standard": {
       "total": 42020,
-      "pass": 31544,
-      "fail": 10025,
+      "pass": 31560,
+      "fail": 10009,
       "compile_error": 351,
       "compile_timeout": 82,
       "skip": 18,
       "compilable": 41569,
-      "host_free_pass": 4333,
+      "host_free_pass": 4349,
       "leaky_pass": 27211,
       "stale": 0
     }
@@ -990,13 +990,13 @@
     {
       "name": "language/expressions",
       "path": "language/expressions",
-      "pass": 8821,
-      "fail": 1877,
+      "pass": 8829,
+      "fail": 1869,
       "compile_error": 292,
       "compile_timeout": 28,
       "skip": 18,
       "total": 11036,
-      "host_free_pass": 1947
+      "host_free_pass": 1955
     },
     {
       "name": "language/function-code",
@@ -1133,13 +1133,13 @@
     {
       "name": "language/rest-parameters",
       "path": "language/rest-parameters",
-      "pass": 3,
-      "fail": 5,
+      "pass": 4,
+      "fail": 4,
       "compile_error": 3,
       "compile_timeout": 0,
       "skip": 0,
       "total": 11,
-      "host_free_pass": 0
+      "host_free_pass": 1
     },
     {
       "name": "language/source-text",
@@ -1166,13 +1166,13 @@
     {
       "name": "language/statements",
       "path": "language/statements",
-      "pass": 7660,
-      "fail": 1548,
+      "pass": 7667,
+      "fail": 1541,
       "compile_error": 97,
       "compile_timeout": 32,
       "skip": 0,
       "total": 9337,
-      "host_free_pass": 1486
+      "host_free_pass": 1493
     },
     {
       "name": "language/types",
@@ -1200,7 +1200,7 @@
   "error_categories": {
     "assertion_fail": 6051,
     "illegal_cast": 85,
-    "negative_test_fail": 74,
+    "negative_test_fail": 58,
     "null_deref": 203,
     "oob": 51,
     "other": 5371,

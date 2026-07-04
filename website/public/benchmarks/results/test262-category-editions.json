@@ -103,8 +103,8 @@
       "skip": 0
     },
     "ES2015": {
-      "pass": 2125,
-      "fail": 683,
+      "pass": 2127,
+      "fail": 681,
       "ce": 67,
       "skip": 0
     },
@@ -121,8 +121,8 @@
       "skip": 0
     },
     "ES2018": {
-      "pass": 1197,
-      "fail": 160,
+      "pass": 1198,
+      "fail": 159,
       "ce": 23,
       "skip": 0
     },
@@ -139,14 +139,22 @@
       "skip": 0
     },
     "ES2022": {
-      "pass": 1327,
-      "fail": 324,
+      "pass": 1332,
+      "fail": 319,
       "ce": 7,
       "skip": 0
     },
     "ES2025": {
       "pass": 59,
       "fail": 5,
+      "ce": 0,
+      "skip": 0
+    }
+  },
+  "built-ins/ArrayIteratorPrototype": {
+    "ES2015": {
+      "pass": 16,
+      "fail": 11,
       "ce": 0,
       "skip": 0
     }
@@ -168,14 +176,6 @@
       "pass": 13,
       "fail": 12,
       "ce": 1,
-      "skip": 0
-    }
-  },
-  "built-ins/ArrayIteratorPrototype": {
-    "ES2015": {
-      "pass": 16,
-      "fail": 11,
-      "ce": 0,
       "skip": 0
     }
   },
@@ -543,8 +543,8 @@
   },
   "language/statements": {
     "ES5": {
-      "pass": 2130,
-      "fail": 444,
+      "pass": 2131,
+      "fail": 443,
       "ce": 56,
       "skip": 0
     },
@@ -567,8 +567,8 @@
       "skip": 0
     },
     "ES2018": {
-      "pass": 1750,
-      "fail": 192,
+      "pass": 1751,
+      "fail": 191,
       "ce": 14,
       "skip": 0
     },
@@ -591,8 +591,8 @@
       "skip": 0
     },
     "ES2022": {
-      "pass": 1394,
-      "fail": 304,
+      "pass": 1399,
+      "fail": 299,
       "ce": 6,
       "skip": 0
     },
@@ -1123,18 +1123,18 @@
       "skip": 0
     }
   },
-  "built-ins/Uint8Array": {
-    "ES2015": {
-      "pass": 32,
-      "fail": 36,
-      "ce": 0,
-      "skip": 0
-    }
-  },
   "built-ins/decodeURIComponent": {
     "ES2015": {
       "pass": 53,
       "fail": 3,
+      "ce": 0,
+      "skip": 0
+    }
+  },
+  "built-ins/Uint8Array": {
+    "ES2015": {
+      "pass": 32,
+      "fail": 36,
       "ce": 0,
       "skip": 0
     }
@@ -1171,20 +1171,6 @@
       "skip": 0
     }
   },
-  "built-ins/global": {
-    "ES5": {
-      "pass": 18,
-      "fail": 9,
-      "ce": 0,
-      "skip": 0
-    },
-    "ES2020": {
-      "pass": 1,
-      "fail": 1,
-      "ce": 0,
-      "skip": 0
-    }
-  },
   "language/identifiers": {
     "ES5": {
       "pass": 49,
@@ -1208,6 +1194,20 @@
       "pass": 52,
       "fail": 0,
       "ce": 8,
+      "skip": 0
+    }
+  },
+  "built-ins/global": {
+    "ES5": {
+      "pass": 18,
+      "fail": 9,
+      "ce": 0,
+      "skip": 0
+    },
+    "ES2020": {
+      "pass": 1,
+      "fail": 1,
+      "ce": 0,
       "skip": 0
     }
   },
@@ -1305,6 +1305,28 @@
       "skip": 0
     }
   },
+  "language/computed-property-names": {
+    "ES5": {
+      "pass": 2,
+      "fail": 4,
+      "ce": 0,
+      "skip": 0
+    },
+    "ES2015": {
+      "pass": 22,
+      "fail": 12,
+      "ce": 8,
+      "skip": 0
+    }
+  },
+  "built-ins/decodeURI": {
+    "ES2015": {
+      "pass": 53,
+      "fail": 2,
+      "ce": 0,
+      "skip": 0
+    }
+  },
   "built-ins/encodeURIComponent": {
     "ES2015": {
       "pass": 29,
@@ -1318,28 +1340,6 @@
       "pass": 54,
       "fail": 1,
       "ce": 0,
-      "skip": 0
-    }
-  },
-  "built-ins/decodeURI": {
-    "ES2015": {
-      "pass": 53,
-      "fail": 2,
-      "ce": 0,
-      "skip": 0
-    }
-  },
-  "language/computed-property-names": {
-    "ES5": {
-      "pass": 2,
-      "fail": 4,
-      "ce": 0,
-      "skip": 0
-    },
-    "ES2015": {
-      "pass": 22,
-      "fail": 12,
-      "ce": 8,
       "skip": 0
     }
   },
@@ -1651,14 +1651,6 @@
       "skip": 0
     }
   },
-  "language/rest-parameters": {
-    "ES2015": {
-      "pass": 3,
-      "fail": 5,
-      "ce": 3,
-      "skip": 0
-    }
-  },
   "built-ins/NaN": {
     "ES5": {
       "pass": 5,
@@ -1670,6 +1662,14 @@
       "pass": 1,
       "fail": 0,
       "ce": 0,
+      "skip": 0
+    }
+  },
+  "language/rest-parameters": {
+    "ES2015": {
+      "pass": 4,
+      "fail": 4,
+      "ce": 3,
       "skip": 0
     }
   },
