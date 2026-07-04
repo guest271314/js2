@@ -885,13 +885,13 @@ function isIrClaimable(
 //   JS-host: externref) — the SAME carrier legacy `resolveWasmType`'s
 //   any/unknown arm gives these positions, so IR-claimed and legacy functions
 //   agree on the ABI by construction. The claim is additionally gated by
-//   `dynamicUsesAreMoveOnly`: slice 2 has no box/unbox/tag.test lowering, so
-//   dynamic values may only MOVE. NOTE the deliberate asymmetry with the
-//   explicit `any` ANNOTATION, which keeps its historical externref mapping
-//   (the AnyKeyword arms): unifying `any` onto `dynamic` changes currently-
-//   claimed functions' fast-mode signatures and is deferred to slice 3 (where
-//   it fixes a real fast-mode ABI divergence — see the issue file).
-type ResolvedKind = "f64" | "bool" | "string" | "object" | "any" | "void" | "closure" | "dynamic" | null;
+//   `dynamicUsesAreMoveOnly`: producers are still move-only (box/unbox
+//   producer widening is the #2949 follow-up slice), so dynamic values may
+//   only MOVE. (#2949 slice 3b) The explicit `any` ANNOTATION now resolves
+//   "dynamic" too — the historical "any" kind (externref in all modes, no
+//   use gating) is deleted: it diverged from legacy's fast-mode `any` ABI
+//   and was the last claim-then-demote channel for non-move any-uses.
+type ResolvedKind = "f64" | "bool" | "string" | "object" | "void" | "closure" | "dynamic" | null;
 
 /**
  * #2859 — build an `IrClosureSignature` from an explicit function-type
@@ -933,11 +933,16 @@ function resolveParamType(p: ts.ParameterDeclaration, mapped: LatticeType | unde
     if (p.type.kind === ts.SyntaxKind.NumberKeyword) return "f64";
     if (p.type.kind === ts.SyntaxKind.BooleanKeyword) return "bool";
     if (p.type.kind === ts.SyntaxKind.StringKeyword) return "string";
-    // Slice 14 (#1228) — `any` param lowers to externref. The IR's
-    // `resolvePositionType` returns `irVal({ kind: "externref" })` for
-    // AnyKeyword. JS spec leaves operations on `any` to runtime semantics,
-    // and externref is the catch-all that already accepts any host value.
-    if (p.type.kind === ts.SyntaxKind.AnyKeyword) return "any";
+    // (#2949 slice 3b) `any` IS the dynamic type. The historical #1228
+    // mapping ("any" kind → externref override) claimed EVERY any-param
+    // function unconditionally and relied on from-ast throwing for
+    // non-move uses — a claim-then-demote channel; it also pinned the
+    // fast-mode carrier to externref, diverging from legacy's mode-split
+    // `any` ABI (fast → ref_null $AnyValue). Resolving `dynamic` here
+    // routes any-params through the SAME move-only scan + carrier as
+    // unannotated dynamics: non-move uses now reject PRE-claim (no
+    // demotion), and the claimed ones share legacy's ABI in both modes.
+    if (p.type.kind === ts.SyntaxKind.AnyKeyword) return "dynamic";
     // #2859 — function-typed param (`fn: () => number`). Accepted when the
     // signature is expressible with the slice-3 closure surface; the param
     // lowers to the closure supertype struct and `fn()` dispatches through
@@ -988,8 +993,9 @@ function resolveReturnType(
     if (fn.type.kind === ts.SyntaxKind.StringKeyword) return "string";
     // Slice 14 (#1228) — `void` return: function has zero result types.
     if (fn.type.kind === ts.SyntaxKind.VoidKeyword) return "void";
-    // Slice 14 (#1228) — `any` return lowers to externref (same as for params).
-    if (fn.type.kind === ts.SyntaxKind.AnyKeyword) return "any";
+    // (#2949 slice 3b) `any` return IS the dynamic type (same rationale as
+    // the param arm — one `any` ABI, move-only-scanned).
+    if (fn.type.kind === ts.SyntaxKind.AnyKeyword) return "dynamic";
     if (ts.isTypeLiteralNode(fn.type) || ts.isTypeReferenceNode(fn.type) || ts.isArrayTypeNode(fn.type))
       return "object";
     return null;

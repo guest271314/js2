@@ -589,11 +589,17 @@ function resolvePositionType(
     if (node.kind === ts.SyntaxKind.NumberKeyword) return irVal({ kind: "f64" });
     if (node.kind === ts.SyntaxKind.BooleanKeyword) return irVal({ kind: "i32" });
     if (node.kind === ts.SyntaxKind.StringKeyword) return { kind: "string" };
-    // Slice 14 (#1228) — AnyKeyword lowers to externref. The IR's externref
-    // val type is the catch-all for host values; operations on `any`-typed
-    // SSA defs must be conservative (no field access, no arithmetic) but
-    // pass-through forwarding (return, parameter passing) is fine.
-    if (node.kind === ts.SyntaxKind.AnyKeyword) return irVal({ kind: "externref" });
+    // (#2949 slice 3b) AnyKeyword IS the dynamic type. The historical #1228
+    // mapping (externref in ALL modes) diverged from legacy's fast-mode
+    // `any` ABI — legacy `resolveWasmType` is mode-split (fast →
+    // `ref_null $AnyValue`, host → externref), so an IR-claimed
+    // `f(x: any)` had a DIFFERENT fast-mode signature than its legacy
+    // callers/callees (measured in the slice-2 session; class-method
+    // claims hit the typeIdx-parity guard for the same reason). `dynamic`
+    // lowers through `resolveDynamic()`, which mirrors that mode split
+    // exactly — one `any` ABI for both front-ends in both modes. Host-mode
+    // bytes are unchanged (dynamic lowers to externref there).
+    if (node.kind === ts.SyntaxKind.AnyKeyword) return irDynamic();
     // Slice 6 part 2 (#1181) — array type (T[] or Array<T>) resolves to a
     // vec ref. The legacy `getOrRegisterVecType` produces the same
     // (ref_null $vec_<elem>) struct ref the for-of vec fast path needs,
@@ -603,8 +609,17 @@ function resolvePositionType(
     // types throw and fall back to legacy.
     if (ts.isArrayTypeNode(node)) {
       const elemIr = resolvePositionType(node.elementType, undefined, ctx, classShapes);
+      // (#2949 slice 3b) `any[]` elements keep their historical externref
+      // vec representation — the AnyKeyword POSITION arm above now returns
+      // `dynamic`, but element storage is a vec-layout decision (the
+      // boxed-any element rep is #2379/#1852 territory, not this slice).
+      // Byte-preserving for every currently-claimed `any[]` shape.
       const elemVal =
-        elemIr.kind === "val" ? elemIr.val : elemIr.kind === "string" ? ({ kind: "externref" } as ValType) : null;
+        elemIr.kind === "val"
+          ? elemIr.val
+          : elemIr.kind === "string" || elemIr.kind === "dynamic"
+            ? ({ kind: "externref" } as ValType)
+            : null;
       if (!elemVal) {
         throw new Error(
           `array element TypeNode ${ts.SyntaxKind[node.elementType.kind]} could not be lowered to a primitive ValType`,

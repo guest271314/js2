@@ -636,6 +636,58 @@ externref there). Needs: the #1228 tests updated, a fast-mode cross-call
 probe (legacy caller → IR callee), and full CI. Do NOT fold into slice 3's
 lowering PR — separate, revertible.
 
+## Implementation Notes — Slice 3b (fable-2949s3, 2026-07-04, branch `issue-2949-slice3b-any-unification`, stacked on slice 3)
+
+Ships as planned: `resolvePositionType`'s AnyKeyword arm → `irDynamic()`
+(codegen/index.ts), the selector's AnyKeyword arms → `"dynamic"`, and the
+`"any"` ResolvedKind is DELETED. Findings beyond the plan:
+
+1. **`any[]` element preservation**: the AnyKeyword flip would have made
+   `resolvePositionType(any[])`'s element resolution return `dynamic` →
+   `null` elemVal → previously-claimed `any[]` functions silently drop to
+   legacy. Added an explicit `dynamic → externref` element arm in the
+   ArrayTypeNode case (element rep is #2379/#1852 territory, not 3b) —
+   byte-preserving, probe-verified. (Separately: the fast-mode any[]
+   IR-vs-legacy header divergence — legacy narrows to a different vec
+   type + i32 result — is PRE-EXISTING on main, probe-verified
+   side-by-side, untouched here.)
+2. **The plan's "fast-mode cross-call probe (legacy caller → IR callee)"
+   is unconstructible for top-level calls** — pinned in the tests: the
+   selector's call-graph-closure rule EVICTS a claimable any-callee when
+   a non-claimable function calls it, so mixed legacy→IR top-level edges
+   cannot exist. The ABI unification's cross-front-end exposure is the
+   export boundary, class-method claims (the typeIdx-parity guard now
+   MATCHES legacy in fast mode instead of demoting), and future producer
+   widenings. A future call-graph relaxation must revisit the ABI story —
+   the pinning test will fire.
+3. **Claim-then-demote channel closed**: the old `"any"` kind claimed
+   every any-param function unconditionally (from-ast threw on non-move
+   uses → post-claim demotion, NOT covered by gate 6 pre-3b since the
+   signature carried externref, not dynamic). Now any-annotated functions
+   run through `dynamicUsesAreMoveOnly` pre-claim (e.g. `a === b` on any
+   params: was claim→demote, now a clean `param-type-not-resolvable`
+   rejection) AND gate 6 covers the claims (dynamic signature ⇒
+   compile-twice under IR_FIRST).
+4. Byte-inert on the 39-hash corpus (no claimed any-functions there);
+   the behavior change is confined to any-annotated IR claims — fast-mode
+   signatures now equal legacy's (the FIX), host-mode bytes unchanged.
+
+## Test Results — Slice 3b (2026-07-04, fable-2949s3)
+
+- `tests/issue-2949-slice3b-any-dynamic.test.ts` — **8/8**: #1228 surface
+  stays claimed; `===`-on-any rejects PRE-claim with the scan's bucket;
+  mixed any/unannotated chains claim; host header parity (unchanged) and
+  **fast header parity — the FIX** (`func $f` == legacy's, NOT externref);
+  call-graph-closure eviction pinned; host-mode runtime identity across
+  number/string/null/undefined/bool/object; any[] claim + host header
+  parity + fast zero-demotion compile.
+- `tests/issue-1228.test.ts` 9/9 UNCHANGED (the `===` fallback test passes
+  via the new pre-claim rejection instead of post-claim demotion).
+- Slice 1/2/3 suites: 74/74 combined. `check:ir-fallbacks` OK, zero delta.
+- `prove-emit-identity` vs main baseline: IDENTICAL (39/39) — corpus has
+  no claimed any-functions; drift is confined to the intended population.
+- `npx tsc --noEmit` clean.
+
 ## Banked adoption slices (unlocked by this substrate; Opus-tier)
 
 ### A. #2963 Phase 2 — any-callable scalar-param dispatch
