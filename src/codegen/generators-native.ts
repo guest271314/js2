@@ -35,7 +35,7 @@ import type { CodegenContext, FunctionContext, NativeGeneratorInfo } from "./con
 import { reportError } from "./context/errors.js";
 import { nativeStringType } from "./native-strings.js";
 import { emitBrandCheckTypeError } from "./native-proto.js";
-import { addFuncType } from "./registry/types.js";
+import { addFuncType, getArrTypeIdxFromVec, getOrRegisterVecType } from "./registry/types.js";
 import { coerceType, compileExpression, compileStatement, valTypesMatch } from "./shared.js";
 import { UNDEF_F64_BITS } from "./value-tags.js";
 import { addUnionImports } from "./index.js";
@@ -104,9 +104,25 @@ type StateTerminator =
   // resume binding would clobber it with the `.next(v)` argument on re-entry).
   | {
       kind: "yield-star";
+      delegationKind: "native-gen";
       subject: ts.Expression;
       innerName: string;
       siteIndex: number;
+      next: number;
+      bindResultTo?: string;
+    }
+  // (#2173 slice-2a) `yield* <numeric-array/vec>` — delegate to a NUMERIC
+  // iterable by driving a vec cursor directly (the array for-of fast path),
+  // never the #1320 `__iterator` bridge (which would leak host box/unbox
+  // imports). `vecSiteIndex` keys the per-site `{ref null $Vec, i32 cursor}`
+  // slot pair. Like the native-gen kind this state is SELF-suspending: each
+  // `.next()` re-enters it, re-yields `vec.data[cursor]`, and advances the
+  // cursor until it is exhausted, then transfers to `next`.
+  | {
+      kind: "yield-star";
+      delegationKind: "vec";
+      subject: ts.Expression;
+      vecSiteIndex: number;
       next: number;
       bindResultTo?: string;
     };
@@ -149,6 +165,14 @@ interface NativeGeneratorPlan {
    * the outer generator's host re-entries.
    */
   delegationSites: { innerName: string }[];
+  /**
+   * (#2173 slice-2a) One entry per `yield* <numeric-array/vec>` site, in source
+   * order. `buildResumeInfo` resolves each `subject`'s vec type and allocates a
+   * `{ref null $Vec, i32 cursor}` field pair, appended AFTER the native-gen
+   * delegation slots so the f64 `spillFieldOffset` and native-gen slot indices
+   * are unaffected (byte-inert for non-vec-delegating generators).
+   */
+  vecDelegationSites: { subject: ts.Expression }[];
 }
 
 function noJsHostTarget(ctx: CodegenContext): boolean {
@@ -366,6 +390,9 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
   // (#2170) `yield*` delegation sites, allocated in source order; index into
   // this array is the terminator's `siteIndex`.
   const delegationSites: { innerName: string }[] = [];
+  // (#2173 slice-2a) `yield* <numeric-array/vec>` sites, allocated in source
+  // order; index into `vecDelegationSlots` at emit time.
+  const vecDelegationSites: { subject: ts.Expression }[] = [];
   // (#2864 R1) Names bound to a delegation COMPLETION value
   // (`const x = yield* inner()`). Spilled at f64 — the delegation gate admits
   // only f64-elem inners, and the inner's `return` value rides its result
@@ -563,6 +590,44 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
     if (yieldExpr.asteriskToken) {
       const subject = yieldExpr.expression;
       const innerName = subject ? nativeGeneratorDelegationName(subject) : undefined;
+      if (subject && innerName === undefined) {
+        // (#2173 slice-2a) Not a native-generator call — try a NUMERIC
+        // array / vec delegate (`yield* [1,2,3]`, `yield* arr`). Driven by a
+        // direct vec cursor (no host box/unbox), so it stays standalone-clean.
+        // Same carrier-mismatch gate as the native-gen path: the vec elements
+        // are f64, so an f64 outer re-yields them exactly and a boxed-any outer
+        // boxes via the `repairStructTypeMismatches` seam (fixups.ts); a STRING
+        // outer has a concrete-ref `value` no repair can bridge — bail it to the
+        // host path (standalone: the clean #680 refusal).
+        if (!elemIsString && isNumericIterableDelegate(ctx, subject)) {
+          // (#2864 R1) `const x = yield* [..]` — the delegation completion value
+          // (§27.5.3.7) of an array is `undefined`; the done-arm delivers the f64
+          // undefined sentinel into the binding's spill (a #2106 residual).
+          if (bindSentTo !== undefined) {
+            delegationBindingNames.add(bindSentTo);
+            addSpill(bindSentTo);
+          }
+          const vecSiteIndex = vecDelegationSites.length;
+          vecDelegationSites.push({ subject });
+          const nextId = startStateAfterYield(undefined, activeFinalizers);
+          finishState(curId, {
+            kind: "yield-star",
+            delegationKind: "vec",
+            subject,
+            vecSiteIndex,
+            next: nextId,
+            bindResultTo: bindSentTo,
+          });
+          curId = reserveState();
+          curStatements = [];
+          curResumeBindings = pendingResumeBindings;
+          curAbrupt = pendingAbrupt;
+          pendingResumeBindings = [];
+          pendingAbrupt = undefined;
+          return ok;
+        }
+        return fail();
+      }
       if (!subject || innerName === undefined) return fail();
       // (#2864 R1) Carrier-mismatch gate: the delegation yield-arm re-yields the
       // inner's f64 `value` through the OUTER result struct. For an f64 outer
@@ -586,6 +651,7 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
       const nextId = startStateAfterYield(undefined, activeFinalizers);
       finishState(curId, {
         kind: "yield-star",
+        delegationKind: "native-gen",
         subject,
         innerName,
         siteIndex,
@@ -638,6 +704,21 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
     const innerElem = generatorElemValType(ctx, innerDecl);
     if (innerElem === null || innerElem.kind !== "f64") return undefined;
     return callee.text;
+  }
+
+  // (#2173 slice-2a) True when `subject`'s static type is a NUMERIC array
+  // (`number[]` — an array literal of numbers, or an identifier/param typed
+  // `number[]`), which lowers to the canonical f64 vec. This is the direct-vec
+  // case driven by the array for-of fast path — `vec.data[idx]` reads f64 with
+  // zero host imports. Generic `{next()}` iterables / `arr.values()` iterators
+  // are NOT arrays and stay on the host path (slice-2b, the #1320 bridge); a
+  // string / string[] / object[] subject fails the numeric-element gate.
+  // (#1930) Uses the registry-free `ctx.oracle` type boundary, NOT the raw
+  // TS checker (the oracle-ratchet gate); the concrete vec ValType is resolved
+  // separately in `buildResumeInfo` via `getOrRegisterVecType`.
+  function isNumericIterableDelegate(ctx: CodegenContext, subject: ts.Expression): boolean {
+    const fact = ctx.oracle.typeFactOf(subject);
+    return fact.kind === "array" && fact.element.kind === "number";
   }
 
   // Reserve the successor of a yield and set up its resume binding/abrupt
@@ -1020,7 +1101,7 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
     spillTypes.set(name, resolved);
   }
 
-  return { states, spills, spillTypes, elemValType, delegationSites };
+  return { states, spills, spillTypes, elemValType, delegationSites, vecDelegationSites };
 }
 
 /** A `break`/`continue` inside a yield-loop body is not modeled in this slice. */
@@ -1455,6 +1536,39 @@ export function registerNativeGenerator(
     stateFields.push({ name: `deleg_${delegationSlots.length - 1}`, type: slotType, mutable: true });
   }
 
+  // (#2173 slice-2a) `yield* <numeric-array/vec>` slots — appended AFTER the
+  // native-gen delegation slots (and after spills) so neither the f64
+  // `spillFieldOffset` nor the native-gen slot field indices are affected;
+  // byte-inert for generators without a vec-delegation site. Each site gets TWO
+  // fields: `ref null $Vec` (materialized iterable) + `i32` cursor. The vec type
+  // is resolved once here from the subject's static type and stored on the info,
+  // so the emit-time cursor drive and this field layout use the SAME typeIdx.
+  const vecDelegationSlots: NonNullable<NativeGeneratorInfo["vecDelegationSlots"]> = [];
+  for (const _site of plan.vecDelegationSites) {
+    // The gate (`isNumericIterableDelegate`) has already established the subject
+    // is a `number[]`, which lowers to the canonical f64 vec. Resolve that vec
+    // type directly (registry call, no checker) so the field layout and the
+    // emit-time cursor drive use the SAME typeIdx as `compileExpression(subject)`
+    // produces (both go through `getOrRegisterVecType(ctx, "f64")`).
+    const vecTypeIdx = getOrRegisterVecType(ctx, "f64");
+    const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
+    const vecFieldIdx = stateFields.length;
+    stateFields.push({
+      name: `vecdeleg_${vecDelegationSlots.length}`,
+      type: { kind: "ref_null", typeIdx: vecTypeIdx },
+      mutable: true,
+    });
+    const cursorFieldIdx = stateFields.length;
+    stateFields.push({ name: `veccur_${vecDelegationSlots.length}`, type: { kind: "i32" }, mutable: true });
+    vecDelegationSlots.push({
+      vecFieldIdx,
+      cursorFieldIdx,
+      vecTypeIdx,
+      arrTypeIdx,
+      elemType: { kind: "f64" },
+    });
+  }
+
   const stateName = `__GenState_${sanitizeTypeName(functionName)}`;
   const stateTypeIdx = ctx.mod.types.length;
   ctx.mod.types.push({ kind: "struct", name: stateName, fields: stateFields });
@@ -1482,6 +1596,7 @@ export function registerNativeGenerator(
     doneState: plan.states.length - 1, // the final `done` state id
     elemValType,
     delegationSlots: delegationSlots.length > 0 ? delegationSlots : undefined,
+    vecDelegationSlots: vecDelegationSlots.length > 0 ? vecDelegationSlots : undefined,
   };
   ctx.nativeGenerators.set(functionName, info);
   return info;
@@ -1935,6 +2050,130 @@ function compileState(
       break;
     }
     case "yield-star": {
+      if (term.delegationKind === "vec") {
+        // (#2173 slice-2a) Delegate to a NUMERIC array / vec by driving a cursor
+        // over its f64 `data`, zero host imports (the array for-of fast path):
+        //   if (vec == null) { vec = <subject>(); cursor = 0 }   ; first entry
+        //   if (cursor >= vec.length) {                          ; exhausted
+        //     vec = null; bindResult = undefined; state = next; br loop;
+        //   } else {
+        //     state = THIS; mode = 0; cursor++;
+        //     result = { vec.data[cursor], done: 0 }; br exit;    ; re-enter here
+        //   }
+        const vslot = info.vecDelegationSlots?.[term.vecSiteIndex];
+        if (!vslot || vslot.vecTypeIdx === null) {
+          // Defensive: unresolved vec type — complete rather than emit invalid wasm.
+          body.push(...storeSpills(info, fctx, selfLocal));
+          body.push(...setStateInstrs(info, selfLocal, info.doneState));
+          body.push(...emptyResult(info));
+          body.push({ op: "local.set", index: resultLocal });
+          break;
+        }
+        const vecTypeIdx = vslot.vecTypeIdx;
+        const vecRefType: ValType = { kind: "ref_null", typeIdx: vecTypeIdx };
+        const vecLocal = allocLocal(fctx, `__gen_vec_${fctx.locals.length}`, vecRefType);
+        const cursorLocal = allocLocal(fctx, `__gen_veccur_${fctx.locals.length}`, { kind: "i32" });
+
+        // Spill straight-line locals computed in this state's prelude BEFORE
+        // suspending; the vec slot itself lives in the struct already.
+        body.push(...storeSpills(info, fctx, selfLocal));
+
+        // Lazily materialize the iterable on first entry (slot null): evaluate
+        // the subject ONCE (iterator semantics — GetIterator runs once) and
+        // reset the cursor to 0 (so a vec-yield* inside a loop re-iterates).
+        const materialize: Instr[] = [];
+        {
+          const savedC = fctx.body;
+          fctx.body = materialize;
+          compileExpression(ctx, fctx, term.subject, vecRefType);
+          fctx.body = savedC;
+        }
+        body.push({ op: "local.get", index: selfLocal });
+        body.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: vslot.vecFieldIdx });
+        body.push({ op: "ref.is_null" });
+        body.push({
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            { op: "local.get", index: selfLocal },
+            ...materialize,
+            { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: vslot.vecFieldIdx } as Instr,
+            { op: "local.get", index: selfLocal },
+            { op: "i32.const", value: 0 },
+            { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: vslot.cursorFieldIdx } as Instr,
+          ],
+          else: [],
+        });
+
+        // Load vec + cursor into locals.
+        body.push({ op: "local.get", index: selfLocal });
+        body.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: vslot.vecFieldIdx });
+        body.push({ op: "local.set", index: vecLocal });
+        body.push({ op: "local.get", index: selfLocal });
+        body.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: vslot.cursorFieldIdx });
+        body.push({ op: "local.set", index: cursorLocal });
+
+        // (#2864 R1) `const x = yield* [..]` — deliver the completion value
+        // (§27.5.3.7). An array's completion value is `undefined`; carry the f64
+        // undefined-as-NaN sentinel into the binding's local AND its spill.
+        // (#2106 residual: `x === x` diverges from Node — do not pin in tests.)
+        const bindInstrs: Instr[] = [];
+        if (term.bindResultTo !== undefined) {
+          const bindLocal = fctx.localMap.get(term.bindResultTo);
+          const bindSpillIdx = info.spillNames.indexOf(term.bindResultTo);
+          if (bindLocal !== undefined && bindSpillIdx >= 0) {
+            bindInstrs.push(
+              { op: "f64.const", value: NaN },
+              { op: "local.set", index: bindLocal },
+              { op: "local.get", index: selfLocal },
+              { op: "f64.const", value: NaN },
+              {
+                op: "struct.set",
+                typeIdx: info.stateTypeIdx,
+                fieldIdx: info.spillFieldOffset + bindSpillIdx,
+              } as Instr,
+            );
+          }
+        }
+
+        const doneArm: Instr[] = [
+          // exhausted — clear the slot, advance to the successor, re-enter.
+          { op: "local.get", index: selfLocal },
+          { op: "ref.null", typeIdx: vecTypeIdx },
+          { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: vslot.vecFieldIdx } as Instr,
+          ...bindInstrs,
+          ...setStateInstrs(info, selfLocal, term.next),
+          { op: "br", depth: loopDepth + 1 }, // +1 for the inner `if`
+        ];
+        const yieldArm: Instr[] = [
+          // element available — stay in THIS state; advance the cursor.
+          ...setStateInstrs(info, selfLocal, stateId),
+          ...setModeInstrs(info, selfLocal, 0),
+          { op: "local.get", index: selfLocal },
+          { op: "local.get", index: cursorLocal },
+          { op: "i32.const", value: 1 },
+          { op: "i32.add" },
+          { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: vslot.cursorFieldIdx } as Instr,
+          // result = { vec.data[cursor] (f64), done: 0 }
+          { op: "local.get", index: vecLocal },
+          { op: "ref.as_non_null" } as Instr,
+          { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 },
+          { op: "local.get", index: cursorLocal },
+          { op: "array.get", typeIdx: vslot.arrTypeIdx } as Instr,
+          { op: "i32.const", value: 0 },
+          { op: "struct.new", typeIdx: info.resultTypeIdx },
+          { op: "local.set", index: resultLocal },
+          { op: "br", depth: exitDepth + 1 }, // +1 for the inner `if`
+        ];
+        // if (cursor >= vec.length) doneArm else yieldArm
+        body.push({ op: "local.get", index: cursorLocal });
+        body.push({ op: "local.get", index: vecLocal });
+        body.push({ op: "ref.as_non_null" } as Instr);
+        body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 });
+        body.push({ op: "i32.ge_s" } as Instr);
+        body.push({ op: "if", blockType: { kind: "empty" }, then: doneArm, else: yieldArm });
+        break;
+      }
       // (#2170) Delegate to the inner native generator. §27.5.3.7:
       //   if (deleg == null) deleg = <inner>();           ; first entry
       //   innerRes = __gen_resume_<inner>(deleg);
@@ -2283,6 +2522,17 @@ export function compileNativeGeneratorFunction(
     } else {
       fctx.body.push({ op: "ref.null.eq" });
     }
+  }
+  // (#2173 slice-2a) `yield* <numeric-array/vec>` slots start `{null vec, 0}` —
+  // the iterable is materialized lazily on first entry into the vec-yield-star
+  // state, and the cursor is (re)set to 0 on that materialization.
+  for (const slot of info.vecDelegationSlots ?? []) {
+    if (slot.vecTypeIdx !== null) {
+      fctx.body.push({ op: "ref.null", typeIdx: slot.vecTypeIdx });
+    } else {
+      fctx.body.push({ op: "ref.null.eq" });
+    }
+    fctx.body.push({ op: "i32.const", value: 0 }); // cursor
   }
   fctx.body.push({ op: "struct.new", typeIdx: info.stateTypeIdx });
 }

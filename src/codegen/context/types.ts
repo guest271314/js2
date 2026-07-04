@@ -293,6 +293,24 @@ export interface NativeGeneratorInfo {
    * `innerName` resolves to the inner's `NativeGeneratorInfo` at emit time.
    */
   delegationSlots?: { fieldIdx: number; innerName: string }[];
+  /**
+   * (#2173 slice-2a) `yield*` delegation over a NUMERIC array / vec (e.g.
+   * `yield* [1,2,3]`), in source `vecSiteIndex` order. Each site owns TWO
+   * state-struct fields — a `ref null $Vec` holding the materialized iterable
+   * and an `i32` cursor — driven like the array for-of fast path: read
+   * `vec.data[cursor]` (already f64, no box), re-yield, `cursor++`, until
+   * `cursor >= vec.length`. Zero host imports (the #1320 `__iterator` bridge is
+   * NOT used — it would leak `__box_number`/`__unbox_number`). `vecTypeIdx` is
+   * null only in the defensive unresolved case (the emit arm then completes the
+   * generator rather than emit invalid wasm).
+   */
+  vecDelegationSlots?: {
+    vecFieldIdx: number;
+    cursorFieldIdx: number;
+    vecTypeIdx: number | null;
+    arrTypeIdx: number;
+    elemType: ValType;
+  }[];
 }
 
 export type NullishExclusion = "null" | "undefined" | "nullish";
