@@ -1095,6 +1095,30 @@ export interface IrInstrClassNew extends IrInstrBase {
 }
 
 /**
+ * #3000-C: allocate a fresh, default-initialised instance of a class WITHOUT
+ * running its constructor. This is the primitive the IR constructor-body
+ * lowering (`lowerFunctionAstToIr` for a `ConstructorDeclaration`) uses to
+ * synthesise `this` at body entry — the ctor body then writes fields via
+ * `class.set` and the epilogue `return`s the instance.
+ *
+ * Unlike `class.new` (which `call`s the legacy `<className>_new` constructor —
+ * the very function the ctor body is BEING compiled INTO, so reusing it would
+ * recurse), `class.alloc` lowers to the exact default-field + tag +
+ * `struct.new` prefix the legacy `<className>_new` emits before it tail-calls
+ * `<className>_init`. The default values, the `__tag` constant and the struct
+ * type index all come from the resolver's `IrClassLowering.allocInstrs`, which
+ * the `ClassRegistry` derives from the SAME `ctx.structFields` / `ctx.classTagMap`
+ * the legacy path uses — so the emitted allocation prefix is byte-identical.
+ *
+ * Takes no SSA operands (a pure, side-effect-free allocation, like `object.new`).
+ * Result type: `{ kind: "class"; shape }` → `(ref $ClassStruct)` (non-null).
+ */
+export interface IrInstrClassAlloc extends IrInstrBase {
+  readonly kind: "class.alloc";
+  readonly shape: IrClassShape;
+}
+
+/**
  * Read a named field from a class instance. `value` must be `IrType.class`
  * with a shape containing `fieldName`. Lowering emits:
  *   <emit value>
@@ -2073,6 +2097,7 @@ export type IrInstr =
   | IrInstrRefCellGet
   | IrInstrRefCellSet
   | IrInstrClassNew
+  | IrInstrClassAlloc
   | IrInstrClassGet
   | IrInstrClassSet
   | IrInstrClassCall
@@ -2381,6 +2406,7 @@ export function forEachNestedBuffer(instr: IrInstr, fn: (buffer: readonly IrInst
     case "refcell.get":
     case "refcell.set":
     case "class.new":
+    case "class.alloc":
     case "class.get":
     case "class.set":
     case "class.call":
@@ -2522,6 +2548,7 @@ export function mapNestedBuffers(
     case "refcell.get":
     case "refcell.set":
     case "class.new":
+    case "class.alloc":
     case "class.get":
     case "class.set":
     case "class.call":
@@ -2581,6 +2608,8 @@ export function directUses(instr: IrInstr): readonly IrValueId[] {
     case "slot.read":
     case "gen.epilogue":
     case "extern.regex":
+    // #3000-C: class.alloc takes no SSA operands — a value-less fresh allocation.
+    case "class.alloc":
       return [];
     case "call":
       return instr.args;

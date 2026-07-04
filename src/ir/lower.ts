@@ -1601,6 +1601,18 @@ export function lowerIrFunctionBody<S>(
         });
         return;
       }
+      case "class.alloc": {
+        // #3000-C: allocate a fresh, default-initialised instance (no ctor
+        // call). Replays the resolver's precomputed default-field + tag +
+        // `struct.new` prefix — byte-identical to the legacy `<className>_new`
+        // allocation. Takes no operands.
+        const cl = resolver.resolveClass?.(instr.shape);
+        if (!cl) {
+          throw new Error(`ir/lower: resolver cannot lower class ${instr.shape.className} (${func.name})`);
+        }
+        for (const op of cl.allocInstrs) emitter.pushRaw(out, op);
+        return;
+      }
       case "class.get": {
         const recvT = typeOf(instr.value);
         if (recvT.kind !== "class") {
@@ -2941,6 +2953,9 @@ function collectIrUses(instr: IrInstr): readonly IrValueId[] {
     // Slice 4 (#1169d): class ops.
     case "class.new":
       return instr.args;
+    case "class.alloc":
+      // #3000-C: no SSA operands (default-initialised allocation).
+      return [];
     case "class.get":
       return [instr.value];
     case "class.set":

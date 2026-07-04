@@ -2,7 +2,7 @@
 id: 3000
 title: "IR: class-member residual — private fields, accessors, inheritance/super (class-method → 0)"
 status: in-progress
-assignee: opus-3000-1b
+assignee: opus-3000c-impl
 sprint: current
 created: 2026-07-02
 updated: 2026-07-04
@@ -372,3 +372,147 @@ miscompile). Unrelated to accessor DECLARATIONS (this PR) and harmless for
 `classes.ts` (its accessor call sites live in the unclaimed `main`). A future slice
 should teach the caller-side member lowering to emit an accessor CALL when the name
 resolves to a get/set accessor.
+
+## #3000-C re-grounding (dev-selfserve-1, 2026-07-04) — measure-first baseline + exact integration points
+
+Branch `issue-3000-c-ctor` (pushed). Re-grounded against current `origin/main`
+(@386be684e). Turnkey findings for the implementation pass:
+
+### Measure-first (the byte-inert trap the telemetry solves)
+`irCompiledFuncs` on a flat class `class Animal { #name; age; constructor(n,a){…} speak(){…} }`:
+- `["test", "Animal_speak"]` — `Animal_speak` (method w/ private read) IS genuinely
+  IR-emitted (Phase-1a landed it).
+- **`Animal_new` is ABSENT** → the selector's ctor claim is byte-inert today; the
+  legacy ctor body still emits. **#3000-C's acceptance = `Animal_new` appears in
+  `irCompiledFuncs`** (genuine IR emission), not merely a metric/claim drop.
+
+### The two exact integration points
+1. **`src/ir/from-ast.ts:368` — `lowerFunctionAstToIr` currently THROWS on a
+   `ConstructorDeclaration`**: `throw new Error("constructor body lowering is
+   Phase C, not B")`. The signature already accepts `ts.ConstructorDeclaration`
+   (L336) and the scaffolding anticipates it (L255-258, L349, L359-370). Phase C =
+   replace that throw with real ctor lowering:
+   - NO `options.selfParam` (a ctor is not passed `__self`); instead synthesise
+     `this` = a freshly-**allocated struct** at body entry. Needs an IR
+     "allocate class instance" op (or reuse the legacy `struct.new` shape) whose
+     typeIdx is the class's pre-allocated struct (parity with the legacy
+     `${Class}_new` slot — see the `integration.ts:715` typeIdx parity guard).
+   - Run **field initialisers** (`age: number` property defaults + declared
+     field inits) then the **ctor body** statements (public/private `this.x = …`
+     writes — the private-write path is the void-tail-assignment gap noted in
+     Phase-1a finding 3; a ctor body assignment is a STATEMENT, not a tail, so it
+     may already pass `isPhase1BodyStatement` — verify).
+   - Synthesise the **`return this`** epilogue (result type = the class struct
+     ref).
+   - Bind `this` in `scope` to the allocated-struct SSA value so `this.field`
+     routes through the existing `class.get`/`class.set` lowerings.
+2. **`src/ir/integration.ts:314` — the Phase B walk only iterates
+   `MethodDeclaration`s** (`if (!ts.isMethodDeclaration(member)) continue`). Extend
+   to `ConstructorDeclaration`: funcName = `${className}_new`, no `selfParam`,
+   gate on `selected.classMembers.has(`${className}_new`)`, then verify + push to
+   `built` with `classMember: true` (the Phase-3 slot patch's typeIdx parity check
+   at `integration.ts:715` guards the overwrite).
+
+### Scope guards (keep it flat-class)
+- The `integration.ts:305` `extends`-skip and `buildIrClassShapes` non-extends-only
+  seeding already confine this to FLAT classes — `super(...)` ctor chaining is
+  Phase E (#3000-E), which builds ON this. Keep both guards; do NOT loosen them.
+- Proof harness: `irCompiledFuncs.includes("Animal_new")` for the genuine-emission
+  claim; byte-for-byte runtime parity of `new Animal(...)` field reads vs legacy;
+  ir-fallback baseline `class-method` decrement only if a member actually clears;
+  full test262 CI (this is a NON-byte-inert emission change — every metric drop
+  that reaches Phase B is real, gated by test262, per Phase-1a finding 2).
+
+### Status
+Set up + measure-first-baselined + fully scoped. The constructor-IR-emission
+substrate (from-ast ctor lowering + the struct-alloc/return-this shape + emitter
+support) is genuine XL/hard work best landed as its own focused pass on this
+branch. NOT started beyond re-grounding.
+
+## Implementation Notes — #3000-C: constructor IR emission LANDED (opus-3000c, 2026-07-04)
+
+**Acceptance met (genuine, non-vacuous emission).** `Animal_new` now APPEARS in
+`irCompiledFuncs` in BOTH lanes (host externref + native `$AnyString`), with
+ZERO post-claim demotions, and `new Animal("Rex",4)` round-trips exactly
+(`Rex Jr.|Rex Jr. makes a sound|4`). The re-grounding measured `Animal_new`
+ABSENT (byte-inert selector claim); it is now a real IR body. `check:ir-fallbacks`
+corpus unchanged (`class-method` 3, `body-shape-rejected` 18, post-claim
+demotions **none**). Byte-inert proven: a non-ctor program's wasm sha256 is
+identical to base (`94a0357…` / `177a858…`) — `class.alloc` is emitted ONLY by
+ctor lowering, so every non-ctor program is untouched.
+
+**The core design decision — a new `class.alloc` IR instr, NOT reuse of
+`class.new`.** `class.new` lowers to `call $<Class>_new` — the very function the
+ctor body is being compiled INTO, so reusing it recurses. The constructor body
+must ALLOCATE its own `this`. I added `class.alloc` (nodes/builder/lower/effects/
+verify/passes), a pure, operand-less allocation whose lowering replays the
+resolver's precomputed default-field + `__tag` + `struct.new` prefix. That prefix
+(`IrClassLowering.allocInstrs`, built in `ClassRegistry.resolve` via
+`defaultFieldAllocInstr`) mirrors the legacy `<Class>_new` `newBody` default
+switch (`class-bodies.ts`) EXACTLY, keyed off the SAME `ctx.structFields` /
+`ctx.classTagMap` — so the emitted allocation is byte-compatible with the struct
+the legacy path builds. This is why the ctor emission is provably a clean
+allocation, not a heuristic.
+
+**Why patching `<Class>_new` is safe under an existing subclass.** The legacy
+splits every non-externref class into `<Class>_new` (alloc + tail-call
+`<Class>_init`) and `<Class>_init` (field inits + ctor body). A derived class's
+`super(...)` calls the PARENT's `_init`, never `_new`. So making `Animal_new` a
+self-contained IR body (alloc + field writes + `return this`) leaves `Animal_init`
+untouched — `Dog`'s `super(name,age)` still routes to legacy `Animal_init`. The
+IR `_new` is only reached by a direct `new Animal(...)`. No inheritance breakage;
+`extends` classes stay Phase E (guards at `integration.ts` + `buildIrClassShapes`
+are unchanged).
+
+**Two integration points (as scoped).** (a) `from-ast.ts` `lowerFunctionAstToIr`
+ctor arm: NO `selfParam`; synthesise `this = class.alloc(shape)` at body entry,
+bind it, lower ctor body statements via the non-tail `lowerStmt` dispatcher (the
+SAME shapes the selector's `isPhase1BodyStatement` admits), then
+`terminate(return [this])`. Result type forced to `{kind:"class",shape}` →
+`(ref $struct)`, so the Phase-3 typeIdx-parity guard (`integration.ts`) sees the
+IR body's signature matching the legacy `<Class>_new` slot — a mismatch keeps
+legacy (worst case byte-inert, never miscompile). (b) `integration.ts` Phase-B
+walk extended from methods/accessors to `ConstructorDeclaration` under
+`${className}_new` with `constructorClassShape` (no `selfParam`).
+
+**Construction-effect guards (correctness, `select.ts` ctor arm).** The IR ctor
+path runs ONLY the ctor body. Two construction-time effects it does NOT lower are
+now rejected to legacy so a claimed-but-wrong ctor can't slip through (the
+typeIdx guard can't catch these — same signature): (a) **parameter properties**
+(`constructor(private x)`) declare+assign a field; (b) **PropertyDeclaration
+initialisers** (`x = 5`) run at construction. Both keep the field at its struct
+default under the IR path → wrong. Guarded → legacy → correct. Flat classes whose
+fields are declared (no initialiser) and assigned in the body — the common shape,
+incl. classes.ts's `Animal` — are unaffected. A field declared-but-never-assigned
+is fine: both IR and legacy leave it at the struct default (no divergence).
+
+**Banked follow-up (pre-existing, NOT this slice): void `this.method()` in
+statement position.** A ctor (or any method) body calling a VOID instance method
+as a statement (`this.add(a);`) demotes post-claim with
+`void method ... used in expression position` — the `class.call` void path does
+not honour statement position. Verified pre-existing: a plain method `M_run`
+calling `this.add()` demotes identically on base. Clean fallback (byte-inert,
+correct runtime), not ctor-specific, orthogonal to #3000-C — a shared
+`class.call` fix. Recommend a dedicated issue: "IR `class.call` void method in
+statement position".
+
+**Edits.**
+- `src/ir/nodes.ts` — `IrInstrClassAlloc` interface + union member + the three
+  instr-traversal switches (`forEachNestedBuffer`/`mapNestedBuffers` no-op group,
+  `directUses` → `[]`).
+- `src/ir/builder.ts` — `emitClassAlloc(shape)` (object alloc namespace).
+- `src/ir/backend/handles.ts` — `IrClassLowering.allocInstrs`.
+- `src/ir/integration.ts` — `defaultFieldAllocInstr` helper + `allocInstrs`
+  population in `ClassRegistry.resolve`; Phase-B walk extended to
+  `ConstructorDeclaration`.
+- `src/ir/lower.ts` — `class.alloc` emit (replay `allocInstrs`) + `collectIrUses`.
+- `src/ir/effects.ts` (pure group), `verify.ts`, `verify-alloc.ts` (map),
+  `passes/inline-small.ts`, `passes/monomorphize.ts`, `analysis/stack-alloc.ts`,
+  `backend/legality.ts` — `class.alloc` cases (mostly TS-exhaustiveness-forced).
+- `src/ir/from-ast.ts` — `constructorClassShape` option + ctor lowering branch.
+- `src/ir/select.ts` — ctor construction-effect guards.
+- `tests/issue-3000-c.test.ts` — genuine-emission proof (both lanes) + runtime
+  round-trip + numeric/empty-ctor + the two guard rejections.
+
+**Unblocks #3000-E** (inheritance / `super`), which builds `super(...)` ctor
+chaining on top of this ctor-emission substrate.
