@@ -940,6 +940,25 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
   // When a parameter is declared as e.g. function([x, y, z]) or function({a, b}),
   // the parameter is received as a single value (vec struct or struct ref) and
   // we need to extract the individual bindings into separate locals.
+  //
+  // (#3024) Keep the param-default materialization body reachable for the
+  // field-pad patch that fires while a nested pattern's DEFAULT object literal
+  // is compiled inside the destructure. A param OUTER default (`function f({ w:
+  // { x, y, z } = { x, y, z } } = { w: { x, z } })`) materializes its object
+  // literal into an `if.then` buffer embedded in THIS body; the destructure
+  // helpers then descend into detached branch buffers to compile the nested
+  // default, which — when it SHARES the outer sub-object's anonymous struct but
+  // carries MORE fields — grows that struct via `ensureComputedPropertyFields`.
+  // The resulting `patchStructNewForAddedField` walks `fctx.body` + `savedBodies`
+  // + `liveBodies`, but by then this outer body is off `fctx.body` (a plain swap,
+  // not on `savedBodies`), so the already-emitted outer `struct.new` was left one
+  // operand short of the grown field count ("struct.new need 3, got 2" invalid
+  // Wasm). Registering the body here (same mechanism as the var-decl #3024 fix in
+  // statements/destructuring.ts and the #2503/#2158 param-branch fixes) makes it
+  // reachable; removed after so it does not leak.
+  const paramDestructBody = fctx.body;
+  const paramDestructWasLive = ctx.liveBodies.has(paramDestructBody);
+  if (!paramDestructWasLive) ctx.liveBodies.add(paramDestructBody);
   for (let i = 0; i < decl.parameters.length; i++) {
     const param = decl.parameters[i]!;
     if (ts.isObjectBindingPattern(param.name)) {
@@ -948,6 +967,7 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
       destructureParamArray(ctx, fctx, i, param.name, params[i]!.type);
     }
   }
+  if (!paramDestructWasLive) ctx.liveBodies.delete(paramDestructBody);
 
   // Set up `arguments` object if the function body references it.
   // We create a vec struct (same as Array) populated from all function parameters.
