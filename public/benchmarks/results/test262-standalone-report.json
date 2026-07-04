@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-07-04T20:25:38.948Z",
-  "baseline_generated_at": "2026-07-04T20:25:38.948Z",
-  "baseline_sha": "0d2752c6d1e0e02308388722cf252f2a211aac2f",
+  "timestamp": "2026-07-04T20:32:39.371Z",
+  "baseline_generated_at": "2026-07-04T20:32:39.371Z",
+  "baseline_sha": "ea8d180477633b27f04961ad8d8b1d1fb19bf984",
   "oracle_version": 1,
   "mode": {
     "target": "standalone",
@@ -1199,11 +1199,11 @@
   ],
   "error_categories": {
     "assertion_fail": 8898,
-    "illegal_cast": 765,
+    "illegal_cast": 766,
     "negative_test_fail": 74,
     "null_deref": 306,
     "oob": 42,
-    "other": 4983,
+    "other": 4982,
     "promise_error": 184,
     "range_error": 44,
     "runtime_error": 511,
@@ -1280,8 +1280,8 @@
         },
         "sample_files": [
           "test/built-ins/Temporal/Now/zonedDateTimeISO/return-value.js",
-          "test/built-ins/Temporal/ZonedDateTime/prototype/eraYear/prop-desc.js",
           "test/built-ins/Temporal/PlainDateTime/subclass.js",
+          "test/built-ins/Temporal/ZonedDateTime/prototype/eraYear/prop-desc.js",
           "test/built-ins/Temporal/PlainDateTime/prototype/month/prop-desc.js",
           "test/built-ins/Temporal/Instant/prototype/toString/timezone-wrong-type.js"
         ],
@@ -1315,8 +1315,8 @@
           "runtime_error": 2
         },
         "sample_files": [
-          "test/built-ins/DisposableStack/prototype/use/throws-if-value-missing-Symbol.dispose.js",
           "test/built-ins/DisposableStack/prototype/use/throws-if-value-Symbol.dispose-property-is-null.js",
+          "test/built-ins/DisposableStack/prototype/use/throws-if-value-missing-Symbol.dispose.js",
           "test/built-ins/AsyncDisposableStack/undefined-newtarget-throws.js",
           "test/built-ins/AsyncDisposableStack/newtarget-prototype-is-not-object.js",
           "test/built-ins/DisposableStack/prototype/adopt/adds-value-onDispose.js"
@@ -1620,7 +1620,7 @@
           "runtime_error:L#:## Cannot convert object to primitive value",
           "other:L#:## Codegen error: '__get_builtin' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get/struct",
           "other:L#:## Codegen error: Atomics.waitAsync built-in static property value read is not supported in --target standalone (## / ## S6-b). Add a native built-in method closure for this pair.; L#:## Codegen error: '__get_builtin' (dynamic-shape obje",
-          "assertion_fail:returned # — assert ## at L#: assert.sameValue(keys[#], \"foo\");"
+          "other:L#:## Codegen error: Proxy not supported in standalone mode (## Phase C).; L#:## Codegen error: '__get_builtin' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal o"
         ]
       },
       {
@@ -1646,15 +1646,15 @@
           "test/built-ins/Reflect/enumerate/undefined.js",
           "test/built-ins/DataView/custom-proto-access-throws.js",
           "test/built-ins/Reflect/set/not-a-constructor.js",
-          "test/built-ins/Reflect/get/return-value.js",
-          "test/built-ins/Reflect/getOwnPropertyDescriptor/not-a-constructor.js"
+          "test/built-ins/Reflect/getOwnPropertyDescriptor/not-a-constructor.js",
+          "test/built-ins/Reflect/get/return-value.js"
         ],
         "sample_signatures": [
           "other:L#:## Codegen error: Reflect.hasOwnProperty not supported in standalone mode (## Phase C).",
           "other:L#:## Codegen error: Reflect.construct not supported in standalone mode (## Phase C).",
           "other:L#:## Codegen error: Reflect.set built-in static property value read is not supported in --target standalone (## / ## S6-b). Add a native built-in method closure for this pair.",
-          "assertion_fail:returned # — assert ## at L#: assert.sameValue( Reflect.get(o, 'p1'), 'value #', 'Return value from data descriptor' );",
-          "other:L#:## Codegen error: Reflect.getOwnPropertyDescriptor built-in static property value read is not supported in --target standalone (## / ## S6-b). Add a native built-in method closure for this pair."
+          "other:L#:## Codegen error: Reflect.getOwnPropertyDescriptor built-in static property value read is not supported in --target standalone (## / ## S6-b). Add a native built-in method closure for this pair.",
+          "assertion_fail:returned # — assert ## at L#: assert.sameValue( Reflect.get(o, 'p1'), 'value #', 'Return value from data descriptor' );"
         ]
       },
       {
@@ -1675,8 +1675,8 @@
           "assertion_fail": 1288,
           "wasm_compile": 69,
           "type_error": 445,
-          "other": 182,
-          "illegal_cast": 437,
+          "other": 181,
+          "illegal_cast": 438,
           "runtime_error": 90,
           "null_deref": 40,
           "promise_error": 12,
@@ -1845,7 +1845,7 @@
           "test/built-ins/TypedArray/resizable-buffer-length-tracking-1.js",
           "test/built-ins/TypedArrayConstructors/ctors/buffer-arg/defined-length-sab.js",
           "test/built-ins/TypedArrayConstructors/internals/Set/detached-buffer.js",
-          "test/built-ins/TypedArrayConstructors/ctors/typedarray-arg/same-ctor-returns-new-cloned-typedarray.js"
+          "test/built-ins/TypedArrayConstructors/internals/HasProperty/indexed-value.js"
         ],
         "sample_signatures": [
           "other:ReferenceError: ctors is not defined",
@@ -1955,7 +1955,7 @@
           "test/built-ins/decodeURI/S15.1.3.1_A2.4_T1.js",
           "test/built-ins/decodeURIComponent/S15.1.3.2_A2.5_T1.js",
           "test/built-ins/encodeURI/S15.1.3.3_A1.2_T1.js",
-          "test/built-ins/decodeURIComponent/S15.1.3.2_A2.2_T1.js"
+          "test/built-ins/encodeURIComponent/S15.1.3.4_A1.2_T1.js"
         ],
         "sample_signatures": [
           "assertion_fail:Test262Error: ##: var object = {valueOf: function() {return #}, toString: function() {return #}}; String(object) === \"#\". Actual: [object Object]",
@@ -1982,22 +1982,22 @@
         "error_categories": {
           "assertion_fail": 188,
           "type_error": 484,
-          "other": 16,
           "runtime_error": 8,
+          "other": 16,
           "wasm_compile": 1
         },
         "sample_files": [
           "test/annexB/language/global-code/if-decl-no-else-global-skip-early-err-try.js",
           "test/annexB/language/eval-code/direct/global-if-decl-no-else-eval-global-block-scoping.js",
-          "test/annexB/language/eval-code/direct/func-if-decl-else-stmt-eval-func-skip-early-err-for-in.js",
           "test/annexB/language/global-code/switch-case-global-no-skip-try.js",
+          "test/annexB/language/eval-code/direct/func-if-decl-else-stmt-eval-func-skip-early-err-for-in.js",
           "test/annexB/language/eval-code/indirect/global-if-decl-else-decl-b-eval-global-update.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert.throws(ReferenceError, function() { f; }, 'An initialized binding is not created following evaluation');",
           "type_error:TypeError: dynamic eval is not supported in standalone mode (##)",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue( f, undefined, 'Initialized binding created prior to evaluation' );",
-          "assertion_fail:returned # — assert ## at L#: assert.sameValue(typeof f, 'function');",
+          "runtime_error:L#:## Invalid left-hand side in for-in/for-of",
           "other:L#:## ';' expected."
         ]
       },
@@ -2089,15 +2089,15 @@
           "assertion_fail": 10
         },
         "sample_files": [
-          "test/built-ins/Math/SQRT2/value.js",
           "test/built-ins/Math/SQRT1_2/value.js",
+          "test/built-ins/Math/SQRT2/value.js",
           "test/built-ins/Math/LN2/value.js",
           "test/built-ins/Math/Symbol.toStringTag.js",
           "test/built-ins/Math/E/value.js"
         ],
         "sample_signatures": [
-          "assertion_fail:returned # — assert ## at L#: assert.notSameValue(Math.SQRT2, NaN);",
           "assertion_fail:returned # — assert ## at L#: assert.notSameValue(Math.SQRT1_2, NaN);",
+          "assertion_fail:returned # — assert ## at L#: assert.notSameValue(Math.SQRT2, NaN);",
           "assertion_fail:returned # — assert ## at L#: assert.notSameValue(Math.LN2, NaN);",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(Math[Symbol.toStringTag], 'Math');",
           "assertion_fail:returned # — assert ## at L#: assert.notSameValue(Math.E, NaN);"
@@ -2420,8 +2420,8 @@
         },
         "sample_files": [
           "test/built-ins/Promise/allSettled/resolve-element-function-name.js",
-          "test/built-ins/Promise/all/resolve-element-function-extensible.js",
           "test/built-ins/Promise/race/same-resolve-function.js",
+          "test/built-ins/Promise/all/resolve-element-function-extensible.js",
           "test/built-ins/Promise/allSettled/reject-element-function-multiple-calls.js",
           "test/built-ins/Promise/any/ctx-non-ctor.js"
         ],
