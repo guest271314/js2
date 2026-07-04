@@ -315,9 +315,19 @@ frames already use. That plus `labeled.block` for non-loop labels and
 - Loop-heavy blast radius: `issue-1280` + `issue-2136` + `issue-1169n` +
   `issue-1169h` (try) + `issue-1182`/`issue-1183` (for-of iter/string) +
   `issue-1169e-bridge` — 108/108.
-- `npx tsc --noEmit` clean; `pnpm run check:ir-fallbacks` OK after bank.
+- `npx tsc --noEmit` clean (pre- and post-merge of origin/main);
+  `pnpm run check:ir-fallbacks` OK after bank.
 - test262 loop-statement dirs (break/continue/while/do-while/for/for-of,
-  1254 files): compile+run outcome diff main↔branch recorded below.
+  **1254 files**): compile+run outcome diff main↔branch = **ZERO lines** —
+  every file's CE/OK/EXN outcome identical, so the newly-IR-claimed loop
+  shapes are behavior-equivalent to legacy across the whole surface.
+- Standalone target (`target: "standalone"`): break / continue-with-update /
+  try-finally-break probes all pass (core-Wasm `br` is backend-identical).
+- Wider equivalence sweep (11 loop-relevant suites, 158 tests): 87 pass;
+  all 71 fails verified PRE-EXISTING on current origin/main (70 × the
+  `__unbox_number` harness import-stub gap in tests/ir-*-equivalence — the
+  same gap slice 1 documented; 1 × arguments-capture `expected 30 to be
+  33` in arguments-nested-and-loops) — reproduced identically on main.
 
 ## Test Results (slice 1)
 
