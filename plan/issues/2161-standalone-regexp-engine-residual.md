@@ -570,6 +570,49 @@ coercion-sites, any-box-sites, prettier all clean.
 **#2161 stays open (blocked on #2175)** for F6 reflection; F7 dynamic-receiver
 architecture and B1/B5 point-fix contracts above are the next pickups.
 
+## Slice 12 (2026-07-04, opus-2161b1) — family B5: Annex B identity escapes + split-at-end-anchor — LANDED
+
+**Landed** the banked B5 contract (slice-10 family map, row B5). Two bounded
+regex-engine root causes, both runtime traps on current main:
+
+1. **Annex B §B.1.4 identity escapes** — `/\x/`, `/\u/` (incomplete hex) and
+   `/\c1/` trapped "illegal cast": the bytecode pattern parser
+   (`src/codegen/regex/parse.ts` `parseEscapedCodeUnit`) refused them
+   (`RegexUnsupportedError` → placeholder trap) instead of falling through to
+   IdentityEscape. In **non-unicode** mode an incomplete `\x`/`\u` is now the
+   literal `x`/`u` (read-without-consume so trailing chars re-parse: `/\xGG/`
+   matches `xGG`), and a `\c` not forming a control escape is a literal reverse
+   solidus with the following char re-parsed (`/\c1/` matches `\`,`c`,`1`).
+   Inside a character class, Annex B ClassControlLetter additionally admits
+   DecimalDigit and `_` (`/[\c1]/` → U+0011, `/[\c_]/` → U+001F) via a new
+   `inClass` parameter. u/v mode stays strict (a bad escape there is a real
+   SyntaxError — still refused).
+
+2. **`split` at an end-of-string anchor** — `"x".split(/$/)` returned `["x",""]`
+   instead of `["x"]`. §22.2.5.2's SplitMatch loop only tests positions
+   `q < size`, so a zero-width separator match STARTING at the end is never seen;
+   the native `__regex_split` (`src/codegen/native-regex.ts`) used a forward
+   `search` that could land such a match at `mstart == slen`. Added a
+   `mstart >= slen → break` guard right after the match bounds are read. A
+   non-end match starts at `mstart < slen`, so ordinary/multiline/empty-pattern
+   splits are unaffected (`"a\nb".split(/$/m)` still → `["a","\nb"]`).
+
+**Validation.** New `tests/issue-2161-b5-annexb-escapes.test.ts` (12 cases, all
+standalone + empty importObject, zero host-import leak): incomplete `\x`/`\u`
+identity + valid-hex controls, `\xGG` trailing re-parse, `\c1` atom vs
+`[\c1]`/`[\c_]` class ControlLetter, `\cA` control escape, `[\x]` in-class; the
+real test262 `built-ins/String/prototype/split/separator-regexp.js` shapes
+(`/$/`, `/^/`, plus ordinary/empty-pattern/lookahead no-regression splits). All
+13 assertions of `separator-regexp.js` verified byte-for-content against host JS.
+Blast-radius battery (11 regex suites: #1539/#1911/#1912/#1913/#1914/#1474/#2671/
+#2588/#2591/#2091 — 465 pass) shows every failure PRE-EXISTING on clean main
+(the same 6 #1474/#1539 "expects-refusal" reds); **zero** new failures.
+Byte-inert for non-regex programs (numeric/array/string/object sha256-identical
+vs clean main). tsc clean.
+
+**#2161 stays open (blocked on #2175)** for F6 reflection; F7 dynamic-receiver
+architecture remains the next (unbounded) pickup.
+
 ## Slice 11 (2026-07-04, opus-2161b1) — family B1: boxed `new String` receiver/argument — LANDED
 
 **Landed** the banked B1 contract (slice-10 family map, row B1). Regrounded on
