@@ -58,6 +58,13 @@ Rules the stack implies:
 
 ## The backend contract (what a NEW backend implements)
 
+> **Frozen as code (#3029-S1/S4, 2026-07-04):**
+> [`src/ir/backend/contract.ts`](../../src/ir/backend/contract.ts) declares
+> the five interfaces (ModuleAssembler invariants A1–A7 inline);
+> [`src/ir/backend/README.md`](../../src/ir/backend/README.md) is the
+> ownership/rules README; `src/ir/backend/contract-conformance.ts` is the
+> tsc-enforced conformance skeleton.
+
 A backend — WasmGC, linear, bytecode, or a future MLIR/Cranelift lowering —
 is **five declared parts**, all consulted through interfaces, none through
 imports of another backend's internals:
@@ -121,6 +128,11 @@ The size threshold is deliberately generous (the field's "understood in
 isolation" bar is 1–2k); the point is the _ratchet_, not the number.
 
 ## The IR interchange contract (summary — #3030 is normative)
+
+> **Frozen (#3030-T1, 2026-07-04):** [`docs/ir/ir-contract.md`](../ir/ir-contract.md)
+> (normative D1–D5 + node inventory + type rules) +
+> [`docs/ir/ir-module.schema.json`](../ir/ir-module.schema.json) +
+> `IR_FORMAT_VERSION` in `src/ir/contract.ts`.
 
 What an external consumer (other engine, out-of-tree backend, analysis tool)
 may rely on, once #3030 lands:

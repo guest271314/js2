@@ -1,7 +1,8 @@
 ---
 id: 3030
 title: "Stable serializable IR contract (interchange v1): versioned canonical JSON + schema, verified types, external-consumer ready"
-status: ready
+status: in-progress
+assignee: ttraenkler/fable-arch-slices
 sprint: current
 created: 2026-07-04
 updated: 2026-07-04
@@ -135,3 +136,46 @@ parallel with T2/T3.
   types in the interim.
 - **Drift between doc and code**: T5's schema snapshot + T4's shared rule
   tables are the anti-drift mechanisms; the doc alone would rot.
+
+## Progress log
+
+### T1 landed — v1.0 frozen (fable-arch-slices, 2026-07-04)
+
+Artifacts (all normative):
+
+- `docs/ir/ir-contract.md` — D1–D5 as normative text; the seven D3
+  guarantees (D3.3 explicitly marked "effective from verifier ≥ T4"); name
+  namespaces; document layout; the full node inventory with per-kind
+  operand/result type rules + effect classification (the tables T4
+  implements); frozen enum tables; versioning policy; per-slice status.
+- `docs/ir/ir-module.schema.json` — JSON Schema 2020-12. Precise shapes for
+  module/coverage/function/block/IrType/Const/terminators; instructions
+  pinned to the frozen 59-kind table + base shape, with conditionals for the
+  key discriminating payloads (const/call/global.\*/box/unbox/tag.test/
+  closure.new). The verifier is the semantic conformance gate (contract
+  §Conformance); T5 may deepen the schema.
+- `src/ir/contract.ts` — `IR_FORMAT_VERSION = "1.0"` (D2) + the
+  coverage-manifest / document-header types (D3.7). Nothing imports it yet;
+  T3 implements against it.
+- `tests/backend-contract.test.ts` — smoke: version constant, schema
+  parses, frozen tables (no `raw.wasm`, no indexed `ref` in the scalar set).
+
+Additional ratifications made at freeze time (T1 decisions the D-text
+implied but didn't pin):
+
+- **The `raw.wasm` serializability predicate (D4):** a function whose body
+  contains `raw.wasm` is manifest-listed `carrier: "legacy"`,
+  `reason: "raw-wasm-bridge"`, body not serialized — because `raw.wasm`
+  embeds backend `Instr` ops that D4 forbids.
+- **Pre-T2 honesty rule (D5):** until T2 lands, functions whose types carry
+  a module-relative `ref`/`ref_null` leaf are `carrier: "legacy"`
+  (`reason: "module-relative-type"`) instead of leaking a typeIdx.
+- **D1 details:** `i64` consts as decimal strings; f64 NaN/±Infinity/−0 as
+  strings; `ref_extern` added to the D5 closed scalar set (exists in
+  `ValType`, non-indexed, was missing from the issue's list).
+- **Slot-type rule (D4):** serialized `IrSlotDef.type` restricted to the
+  scalar set.
+- **Effects (D3.5):** derived, not serialized in v1.0 — the per-kind table
+  is published contract; serializing them is a possible additive minor.
+
+Open: T2–T6 (Opus lanes). Issue stays in-progress; claim released on merge.
