@@ -2127,6 +2127,17 @@ export function ensureRegexSplit(ctx: CodegenContext): number {
             { op: "i32.const", value: 1 },
             { op: "array.get", typeIdx: i32Arr },
             { op: "local.set", index: MEND },
+            // §22.2.5.2: the SplitMatch loop only tests positions q < size, so a
+            // separator match that STARTS at the end of the subject (a zero-width
+            // assertion like `/$/`, `/(?=$)/`, or `/\b/` at the end) is never
+            // seen — the loop exits first. Our forward `search` from q < size CAN
+            // land such a match at mstart == slen; treat it as no-match and stop
+            // so `"x".split(/$/)` → ["x"] (not ["x", ""]). A non-end match starts
+            // at mstart < slen, so this never fires for it.
+            { op: "local.get", index: MSTART },
+            { op: "local.get", index: SLEN },
+            { op: "i32.ge_s" },
+            { op: "br_if", depth: 1 },
             // Spec step 19.c.ii: e == p → no split; resume one unit further.
             { op: "local.get", index: MEND },
             { op: "local.get", index: P },
