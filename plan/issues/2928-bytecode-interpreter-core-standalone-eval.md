@@ -3,7 +3,7 @@ id: 2928
 title: "Bytecode interpreter core + standalone new Function / indirect eval"
 status: backlog
 created: 2026-07-02
-updated: 2026-07-02
+updated: 2026-07-04
 priority: medium
 horizon: xl
 feasibility: hard
@@ -14,8 +14,8 @@ language_feature: eval
 goal: runtime-eval
 sprint: Backlog
 parent: 1584
-depends_on: [2927]
-related: [1715, 1713, 2864, 2865]
+depends_on: [2927, 2853]
+related: [1715, 1713, 2864, 2865, 2960, 3017, 2929]
 ---
 
 # #2928 — Bytecode interpreter core + standalone `new Function` / indirect eval
@@ -92,3 +92,145 @@ Global-scope evaluation only, deliberately excluding direct-eval scope capture
 
 Depends on #2927 (parser + generic built-ins). Umbrella: #1584. Goal:
 `runtime-eval`.
+
+---
+
+## Implementation Plan (architect, 2026-07-04)
+
+Authoritative architecture: `docs/architecture/runtime-eval-interpreter.md`
+**Part II (§12–§16)** — the 4-tier ladder + routing rules (§12), the
+**bytecode-over-tree-walking ADR** (§13, decided: register+accumulator
+bytecode; tree-walking rejected with rationale — do not relitigate without
+new evidence), the unified name-resolution semantics (§14), the
+compiled-acorn feasibility verdict (§15), and this slice sequence (§16).
+
+### Root cause / why this exists
+
+Standalone mode has **zero** dynamic-code execution: every dynamic
+`eval`/`new Function` call site is Tier-3 today (#2960: compile warning +
+catchable call-time throw — correct diagnostics, no capability). This issue
+builds Tier 2 so standalone routes dynamic global-scope code to a real
+executor. Direct-eval scope capture is explicitly NOT here (→ #2929).
+
+### Two producers, one bytecode (design constraint — read before the ADR)
+
+The original wording "bytecode emitter as a second IR backend" conflated two
+producers (doc §12.1): **(a)** the *runtime* emitter, ESTree→bytecode,
+authored in TS, compiled into the module — that is THIS issue; **(b)** the
+*build-time* IR→bytecode backend (#1715 proof) as a future AOT deopt target
+for `with`-class features — NOT built here, but the opcode ADR must not
+preclude it (opcodes take boxed-any operands, carry no "parsed-at-runtime"
+assumptions).
+
+### Slices (each independently landable; sizes in doc §16)
+
+**E0 (S) — in-Wasm AST consumer probe.** Small TS walker compiled alongside
+Acorn (extend the #1710 harness, `tests/dogfood/`): call `parse` and walk the
+resulting AST **inside Wasm** (dynamic `$Object` field reads), return
+node-count / spot-field scalars. Purpose: arbitrate whether #2841/#2851/#2852
+(params/quasis/sequence-children blank) are host-marshalling-only — if the
+fields are intact in-Wasm, they leave this issue's critical path. Unblocked
+now (post-#2937).
+
+**P1/P2 (M each) — the #2853 parser blockers.** A: division after a numeric
+literal mis-tokenized as regex start (`1 / 2` throws — likely a js2wasm
+miscompile of acorn's token-context update, root-cause in the compiler); B:
+any regex group `(…)` throws in `validateRegExpPattern` (suspected
+#1690-family global-array typing). Both gate E2 wiring, neither gates E1.
+(#2850's surviving half folds into P2.)
+
+**E1 (L) — interpreter library, developed in Node.** New top-level source
+dir (suggest `src/interp/`, kept import-clean of compiler internals so it
+self-compiles): opcode definitions + encoder + ESTree→bytecode emitter +
+dispatch loop + `$Frame`/env-record types + a disassembler. Authored in the
+strictly-typed js2wasm-compilable TS subset (typed i32 PC, typed arrays for
+registers; boxed-any only for JS values), but **unit-tested in Node against
+node-acorn** over a fixture corpus of eval bodies — no Wasm involved. Write
+the opcode ADR to `docs/adr/` (register+accumulator, ~30 Phase-1 opcodes per
+the Scope list; i32-array bytecode + boxed-any constant pool + side exception
+table of `[tryStart, tryEnd, handlerPC]`; `$Frame = {meta, pc, regs, envRec,
+parent}`, hot fields cached in Wasm locals inside the loop). Runs fully in
+parallel with E0/P1/P2 — it has **no compiled-acorn dependency**.
+
+**E2 (L) — self-compile + standalone dynamic `new Function`.** Compile the
+E1 library through js2wasm into the emitted module, gated per-module by a
+may-contain-dynamic flag (the call-site classifier from
+`eval-inline.ts`/`calls.ts` already distinguishes constant vs dynamic — reuse
+it; a module with no dynamic sites must be byte-identical to today). Replace
+the #2960 Tier-3 call-time-throwing stub for `new Function(<dynamic>)`
+(`src/codegen/expressions/new-super.ts`) under standalone/wasi with: Acorn
+parse → emit → a callable closing over the bytecode + module global env,
+entering the dispatch loop. Global scope only (§20.2.1.1). Every gap where
+js2wasm can't compile the E1 library is filed under #1058 (this is the
+self-host stress test working as intended). Author E1/E2 to compile cleanly
+through the **IR front-end** where possible (per the #2927 IR-alignment
+note).
+
+**E3 (M) — indirect eval + global hoisting.** `(0,eval)(<dynamic>)`
+standalone via the same pipeline (`calls.ts` fall-through, replacing the
+Tier-3 throw); `var`/`function` in evaluated code hoist as properties on the
+globalThis `$Object` (#369), visible to AOT code and vice versa (doc §14 /
+§4.3). `LdGlobal`/`StGlobal` are the root-only case of the §14 resolution
+walk; a root miss throws `ReferenceError` (typed, catchable).
+
+**E4 (M) — exception bridging.** `Throw`/`TryStart`/`TryEnd` + Wasm EH-tag
+propagation across the AOT↔interpreter boundary in both directions
+(interpreted `throw` caught by AOT `try/catch` and vice versa).
+
+**E5 (M–L) — CallBuiltin.** Unified `CallBuiltin(name, recv, argsVec)`
+targeting the #2927-audited surface (`__extern_method_call` open-`$Object`
+path, `__get_builtin`, `__call_m_*` + brand arms, `__str_*`/`__vec_*`).
+Prerequisite gap slices (from the #2927 audit — each landable alone, shared
+with standalone AOT any-receiver work, NOT interpreter-only): **G1** Map/Set
+`ref.test` brand arms in the closed-method dispatcher (turnkey — mirrors the
+landed #2927 push/pop arm; route to `map-runtime.ts`/`set-runtime.ts`
+helpers); **G2** args-passing on the standalone generic path
+(`emitWrapperDynamicMethodCall` `wantArgs`) + `__apply_closure` arity>4 lift;
+**G3** array callback methods host-free (in-Wasm callback bridge replacing
+`env.__make_callback`); **G4** `string[]` carrier in `__vec_push`/`__vec_pop`
+(#2784). G1/G2 are hard prerequisites; G3/G4 degrade gracefully (those calls
+throw a clear "not supported" until landed).
+
+**E6 (M) — packaging.** Interpreter+Acorn as a separately-compiled module
+linked on demand via #2527 canonical rec-groups (zero-copy `$Object` share);
+a no-eval module keeps the size floor (acceptance already lists 5%); record
+one measured size figure for an eval-enabled module.
+
+### Edge cases (Phase 1)
+
+- `new Function` body with a `SyntaxError` → throw `SyntaxError` at
+  construction time (runtime parse — unlike Tier 0's compile-time error).
+- Param-string flatten (`"a", "b,c"`) per §20.2.1.1.1 — same rule #2924
+  implements for Tier 0; share the splitter.
+- Caller-local name in a `Function` body → resolves global / throws
+  `ReferenceError`, NEVER the caller binding (§14 strictness note; #2924's
+  no-capture invariant, now enforced by rooting the env chain at global).
+- Interpreted code calling an AOT-exported function and vice versa: boxed
+  values cross with `ref.eq` identity intact (acceptance test exists).
+- Re-entrancy: eval'd code calling `eval` (nested parse/emit while a frame is
+  live) — the emitter must be re-entrant; no module-level mutable scratch.
+- `arguments`/`this` inside a dynamic `Function` body: sloppy-mode `this` at
+  a bare call is `globalThis` (§10.4.3) — the interpreter CAN provide this
+  (unlike the Tier-0 splice, which bails on `this` for exactly this reason).
+
+### Milestone order within this issue
+
+E0 → (P1 ∥ P2 ∥ E1) → E2 → (E3 ∥ E4 ∥ E5) → E6. Recommend landing E0+E1 in
+one budget window (no substrate risk), E2 in its own (the self-compile is the
+risk concentration), E3–E6 as follow-on M slices. #2929 (direct eval, `with`,
+MOP, generators) starts only after E3/E4/E5.
+
+### Risks / conflicts
+
+- **Substrate races:** E2+ consume the boxed-any dynamic reader — land after,
+  not racing, in-flight value-rep work (roadmap §8 discipline).
+- **File conflicts:** `calls.ts`/`new-super.ts` are hot files (eval routing,
+  #2960 landed there); rebase early and often. `closed-method-dispatch.ts`
+  (G1/G2) is active #2151-family territory.
+- **Late-import funcIdx shifts** when reserving interpreter entry helpers —
+  follow the name-based repoint discipline (memory: `reference_2193`,
+  `project_standalone_hostimport_gate_index_shift`); reserve helpers at the
+  call site like the #2927 push/pop fix did.
+- **Size:** compiled Acorn alone is 651 KB — E6 (#2527 linking) is what keeps
+  the no-eval floor; do not inline the interpreter unconditionally even as an
+  interim step for CI's standalone-floor gate.

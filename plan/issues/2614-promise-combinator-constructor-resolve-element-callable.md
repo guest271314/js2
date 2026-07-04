@@ -318,3 +318,25 @@ gates `.finally` (7 fails) and `Promise.try` (3 fails) — see the
 "Downstream consumers (observed gaps)" section in
 `plan/issues/2623-promise-capability-cluster-multihop-callback-cast.md` for the
 exact test paths to fold into the #42 re-spec acceptance set.
+
+## Unified-spec routing (architect, 2026-07-04)
+
+The residual buckets here are now specced as concrete slices of the
+**unified Promise semantics spec in #2623**:
+
+- `invoke-resolve` assert-#1 element-identity (all/race) → **#2623 §P4 B-4 /
+  §P7 slice P-7 (Fable)** — the observable-resolve fix re-tested COMPOSED on
+  the now-landed B-1..B-3 substrate (its pre-#1940 net-negative regression
+  path is legal now).
+- `.finally` (7 rows) + `Promise.try` (3 rows) + `arguments.length`-through-
+  the-bridge reflection → also **P-7** (§P4 B-5: spec-algorithm
+  `Promise_finally` shim instead of delegating to native `.finally`).
+- `call-resolve-element` / `resolve-from-same-thenable` ("not callable"
+  residual) → **#2623 §P7 slice P-8** (`Test262Error.thrower` +
+  `promiseHelper.js` runner shims + drain contract) — the substrate half
+  landed with #1981; what remains on these two rows is harness, not codegen.
+- Element-function `.name`/`.length` shapes → re-measure after P-7/P-8;
+  file forward only if still red.
+
+`blocked_on: [2623]` stands, now with slice-level targets (P-7, P-8)
+instead of a monolithic dependency.
