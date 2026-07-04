@@ -227,7 +227,24 @@ function _getOrVivifyFnPrototype(
  */
 const _GeneratorState = new WeakMap<
   object,
-  { buf: any[]; index: number; pendingThrow: any; retVal?: any; retDone?: boolean }
+  {
+    buf: any[];
+    index: number;
+    pendingThrow: any;
+    retVal?: any;
+    retDone?: boolean;
+    /** (#3032) LAZY thunk mode: the generator-expression closure (an opaque
+     *  wasm externref) whose deferred invocation produces the buffer. Present
+     *  only until the first `next()` (or cleared without running by
+     *  `return`/`throw` on a not-yet-started generator — spec §27.5.3.2:
+     *  resuming a suspendedStart generator abruptly completes it WITHOUT
+     *  running the body). */
+    thunk?: any;
+    /** (#3032) Runs the thunk via the module's `__call_fn_0` export with the
+     *  `__gen_set_eager` flag held, then adopts the inner eager generator's
+     *  state. Captured at `__create_generator` time (needs `callbackState`). */
+    materialize?: () => void;
+  }
 >();
 const _AsyncGeneratorState = new WeakMap<
   object,
@@ -391,6 +408,8 @@ function _getGeneratorPrototype(): any {
     if (!state) {
       throw new TypeError("Generator.prototype.next called on incompatible receiver");
     }
+    // (#3032) Lazy generator: run the deferred body now (first resume).
+    if (state.materialize) state.materialize();
     if (state.index < state.buf.length) {
       return { value: state.buf[state.index++], done: false };
     }
@@ -417,6 +436,10 @@ function _getGeneratorPrototype(): any {
     // Early termination: skip the rest of the buffer AND suppress the
     // generator's own return value — the caller-supplied `value` becomes the
     // terminal result (§27.5.3.3). Mark retDone so a later next() is terminal.
+    // (#3032) A not-yet-started lazy generator completes WITHOUT running its
+    // body (§27.5.3.2 GeneratorResumeAbrupt on suspendedStart) — drop the thunk.
+    state.thunk = undefined;
+    state.materialize = undefined;
     state.index = state.buf.length;
     state.retDone = true;
     return { value, done: true };
@@ -427,6 +450,9 @@ function _getGeneratorPrototype(): any {
     if (!state) {
       throw new TypeError("Generator.prototype.throw called on incompatible receiver");
     }
+    // (#3032) See `return` — abrupt resume of suspendedStart never runs the body.
+    state.thunk = undefined;
+    state.materialize = undefined;
     state.index = state.buf.length;
     throw e;
   });

@@ -1510,6 +1510,52 @@ export function computeClosureWrapperSig(
   return { params: arrowParams, returnType: closureReturnType };
 }
 
+/**
+ * (#3032 / #2141-S2) Lazy generator-expression support flag.
+ *
+ * A `mut i32` module global (0 = lazy, the default) plus an exported
+ * `__gen_set_eager(i32)` setter the HOST generator runtime flips around the
+ * deferred body run. Mechanism: a zero-param `function*(){...}` expression's
+ * closure no longer runs its body at creation; with the flag 0 it returns
+ * `__create_generator(<self closure as externref>, null)` — the host detects
+ * the non-Array first arg as a LAZY THUNK and defers. On the first `next()`
+ * the host sets the flag via `__gen_set_eager(1)`, re-invokes the SAME
+ * closure through the `__call_fn_0` export (the closure then takes the
+ * historical eager-buffer path, byte-for-byte), adopts the inner generator's
+ * state, and resets the flag. The eager arm clears the flag at its TOP so
+ * generator creations nested inside the eagerly-run body are themselves lazy
+ * again (one flag serves the whole module without leaking eagerness).
+ *
+ * Why: the eager-buffer lowering ran generator bodies AT CREATION — the
+ * test262 dstr fixture `var iter = function*() { iterations += 1; }();` had
+ * `iterations === 1` before any `next()`, a latent failure masked only by the
+ * tag-5 comparator vacuity (#2141-S2 root cause; see the issue file).
+ */
+function ensureGenEagerFlag(ctx: CodegenContext): number {
+  if (ctx.genEagerFlagGlobalIdx !== undefined) return ctx.genEagerFlagGlobalIdx;
+  const globalIdx = ctx.numImportGlobals + ctx.mod.globals.length;
+  ctx.mod.globals.push({
+    name: "__gen_eager_mode",
+    type: { kind: "i32" },
+    mutable: true,
+    init: [{ op: "i32.const", value: 0 }] as Instr[],
+  });
+  ctx.genEagerFlagGlobalIdx = globalIdx;
+  if (!ctx.funcMap.has("__gen_set_eager")) {
+    const typeIdx = addFuncType(ctx, [{ kind: "i32" }], [], "__gen_set_eager");
+    const funcIdx = mintDefinedFunc(ctx);
+    pushDefinedFunc(ctx, funcIdx, {
+      name: "__gen_set_eager",
+      typeIdx,
+      locals: [],
+      body: [{ op: "local.get", index: 0 }, { op: "global.set", index: globalIdx } as Instr],
+      exported: true,
+    });
+    ctx.funcMap.set("__gen_set_eager", funcIdx);
+  }
+  return globalIdx;
+}
+
 export function compileArrowFunction(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -2415,6 +2461,21 @@ export function compileArrowAsClosure(
     // The body is wrapped in try/catch so that exceptions thrown before any yields
     // are captured as a "pending throw" and deferred to the first next() call,
     // matching lazy generator semantics (#928).
+    //
+    // (#3032 / #2141-S2) LAZY-FIRST-RESUME: for the zero-param non-async case
+    // the eager sequence below is wrapped in an `if (global $__gen_eager_mode)`
+    // — when the flag is 0 (default) the closure instead returns
+    // `__create_generator(<self as externref>, null)`, a lazy host generator
+    // holding this closure as a thunk; the host re-invokes it with the flag
+    // set on the FIRST `next()` (see ensureGenEagerFlag). Wrapping the whole
+    // sequence in one extra `if` level is branch-target-safe: every `br` the
+    // body emits targets the inner `block`/`try` (generator `return` uses
+    // generatorReturnDepth relative to that block), never a label outside the
+    // wrap, and the function-level `return` op is depth-independent.
+    const genLazyEligible = !isAsync && arrow.parameters.length === 0;
+    const genOuterBody = liftedFctx.body;
+    const eagerSeq: Instr[] = [];
+    if (genLazyEligible) liftedFctx.body = eagerSeq;
     const bufferLocal = allocLocal(liftedFctx, "__gen_buffer", { kind: "externref" });
     const pendingThrowLocal = allocLocal(liftedFctx, "__gen_pending_throw", { kind: "externref" });
     const createBufIdx = ctx.funcMap.get("__gen_create_buffer")!;
@@ -2466,6 +2527,31 @@ export function compileArrowAsClosure(
     liftedFctx.body.push({ op: "local.get", index: bufferLocal });
     liftedFctx.body.push({ op: "local.get", index: pendingThrowLocal });
     liftedFctx.body.push({ op: "call", funcIdx: createGenIdx });
+
+    // (#3032) Wrap the eager sequence behind the eager-mode flag; default (0)
+    // returns the LAZY thunk generator instead. The eager arm clears the flag
+    // at its top so nested generator creations during the deferred body run
+    // are themselves lazy again.
+    if (genLazyEligible) {
+      liftedFctx.body = genOuterBody;
+      const flagGlobalIdx = ensureGenEagerFlag(ctx);
+      liftedFctx.body.push({ op: "global.get", index: flagGlobalIdx } as Instr);
+      liftedFctx.body.push({
+        op: "if",
+        blockType: { kind: "val", type: { kind: "externref" } },
+        then: [
+          { op: "i32.const", value: 0 } as Instr,
+          { op: "global.set", index: flagGlobalIdx } as Instr,
+          ...eagerSeq,
+        ],
+        else: [
+          { op: "local.get", index: 0 } as Instr,
+          { op: "extern.convert_any" } as Instr,
+          { op: "ref.null.extern" } as Instr,
+          { op: "call", funcIdx: createGenIdx } as Instr,
+        ],
+      } as Instr);
+    }
     conciseBodyHasValue = true; // generator return value is already on stack
   } else if (ts.isBlock(body)) {
     for (const stmt of body.statements) {

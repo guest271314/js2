@@ -1523,6 +1523,16 @@ export interface CodegenContext {
    * the #329 native-string finalize-shift hazard. `undefined` until reserved.
    */
   undefinedGlobalIdx?: number;
+  /**
+   * (#3032 / #2141-S2) Global index of the `mut i32` `__gen_eager_mode` flag
+   * for LAZY generator-expression creation. 0 (default) = a zero-param
+   * `function*(){}` expression returns a lazy thunk generator
+   * (`__create_generator(<self closure>, null)`); the host sets the flag via
+   * the exported `__gen_set_eager` around the deferred first-`next()` body
+   * run. Reserved lazily by `ensureGenEagerFlag` (closures.ts); `undefined`
+   * until the first lazy-eligible generator expression is compiled.
+   */
+  genEagerFlagGlobalIdx?: number;
   /** Map from any-value helper name → function index */
   anyHelpers: Map<string, number>;
   /** Whether any-value helper functions have been emitted */
