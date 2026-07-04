@@ -50,6 +50,12 @@ export const STANDALONE_STATIC_METHOD_META: Record<string, { name: string; lengt
   "Array.isArray": { name: "isArray", length: 1 },
   "Object.keys": { name: "keys", length: 1 },
   "Object.getOwnPropertyDescriptor": { name: "getOwnPropertyDescriptor", length: 2 },
+  // (#2933) Fixed-arity Reflect.* namespace static-method value reads. Spec
+  // `length` per §28.1 (receiver arg is optional and not counted).
+  "Reflect.get": { name: "get", length: 2 },
+  "Reflect.has": { name: "has", length: 2 },
+  "Reflect.set": { name: "set", length: 3 },
+  "Reflect.ownKeys": { name: "ownKeys", length: 1 },
 };
 
 /**
