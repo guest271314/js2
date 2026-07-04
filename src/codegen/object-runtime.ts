@@ -1176,7 +1176,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   {
     const s1IsUndefTail = buildIsUndefinedExternBody(ctx, 1, UNDEF_F64_BITS);
     if (undefinedSingletonActive(ctx) && s1IsUndefTail !== undefined) {
-      registerNative(
+      const isNullishIdx = registerNative(
         "__extern_is_nullish",
         [{ kind: "externref" }],
         [{ kind: "i32" }],
@@ -1189,6 +1189,31 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
             blockType: { kind: "val", type: { kind: "i32" } },
             then: [{ op: "i32.const", value: 1 }],
             else: s1IsUndefTail,
+          } as Instr,
+        ],
+      );
+      // (#2106 S1, flag-only) __nullish_to_null(externref) -> externref —
+      // canonicalize nullish (null OR the undefined singleton OR the UNDEF-box)
+      // back to `ref.null.extern`. INTERNAL runtime lookups whose result feeds
+      // null-keyed control logic (to-primitive valueOf/toString resolution,
+      // proxy trap reads, descriptor field reads, method resolution, groupBy
+      // presence checks) append ONE call to this after `__extern_get`, keeping
+      // their entire downstream absence logic byte-identical to legacy instead
+      // of widening every `ref.is_null` in place. JS-VISIBLE reads do NOT
+      // normalize — they want the singleton.
+      registerNative(
+        "__nullish_to_null",
+        [{ kind: "externref" }],
+        [{ kind: "externref" }],
+        [],
+        [
+          { op: "local.get", index: 0 },
+          { op: "call", funcIdx: isNullishIdx } as Instr,
+          {
+            op: "if",
+            blockType: { kind: "val", type: { kind: "externref" } },
+            then: [{ op: "ref.null.extern" }],
+            else: [{ op: "local.get", index: 0 }],
           } as Instr,
         ],
       );
@@ -2487,10 +2512,20 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       } as Instr,
     ];
 
+    // (#2106 S1) Normalize the method lookup back to the legacy null-keyed
+    // convention: under the singleton regime a MISSING valueOf/toString comes
+    // back as the non-null `$undefined` singleton, which the `ref.is_null`
+    // absence check below would treat as a callable method — the exact source
+    // of PR #2025's 948 "Cannot convert object to primitive value" CEs.
+    const s1ToPrimNorm: Instr[] = (() => {
+      const idx = ctx.funcMap.get("__nullish_to_null");
+      return idx !== undefined ? [{ op: "call", funcIdx: idx } as Instr] : [];
+    })();
     const tryOrdinaryMethod = (name: "valueOf" | "toString", defaultObjectToStringOnMissing: boolean): Instr[] => [
       { op: "local.get", index: 0 },
       ...stringExtern(name),
       { op: "call", funcIdx: externGetIdx },
+      ...s1ToPrimNorm.map((i) => ({ ...i }) as Instr),
       { op: "local.tee", index: L_METHOD },
       { op: "ref.is_null" },
       {
@@ -4181,6 +4216,10 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       numberToStringIdx: objArrayLikeArms ? ctx.funcMap.get("number_toString")! : -1,
       externGetIdx: objArrayLikeArms ? ctx.funcMap.get("__extern_get")! : -1,
       vecArms: [],
+      // (#2106 S1) OOB / non-indexable miss = undefined under the singleton
+      // regime (`arr[oob] === undefined`), consistent with the `$Object` arm
+      // which delegates to the (flipped) `__extern_get`. Legacy: null.
+      missInstrs: () => undefinedExternInstrs(ctx) ?? [{ op: "ref.null.extern" } as Instr],
     });
     registerNative(
       "__extern_get_idx",
@@ -5363,6 +5402,11 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       { op: "local.get", index: L_RAW_DESC },
       ...keyRef(key),
       { op: "call", funcIdx: externGetIdx },
+      // (#2106 S1) normalize missing/undefined descriptor fields back to the
+      // legacy null convention so downstream null-keyed logic is unchanged.
+      ...(ctx.funcMap.has("__nullish_to_null")
+        ? [{ op: "call", funcIdx: ctx.funcMap.get("__nullish_to_null")! } as Instr]
+        : []),
     ];
     const setFlag = (bit: number): Instr[] => [
       { op: "local.get", index: L_FLAGS },
@@ -5788,6 +5832,11 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       { op: "local.get", index: L_DESC },
       ...keyRef(key),
       { op: "call", funcIdx: externGetIdx },
+      // (#2106 S1) normalize missing/undefined descriptor fields back to the
+      // legacy null convention so downstream null-keyed logic is unchanged.
+      ...(ctx.funcMap.has("__nullish_to_null")
+        ? [{ op: "call", funcIdx: ctx.funcMap.get("__nullish_to_null")! } as Instr]
+        : []),
     ];
     const setFlag = (bit: number): Instr[] => [
       { op: "local.get", index: L_FLAGS },
@@ -7011,6 +7060,11 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
           { op: "local.get", index: 0 },
           { op: "local.get", index: 1 },
           { op: "call", funcIdx: externGetIdx },
+          // (#2106 S1) a missing method resolves to the undefined singleton —
+          // normalize to null so __apply_closure keeps its legacy null path.
+          ...(ctx.funcMap.has("__nullish_to_null")
+            ? [{ op: "call", funcIdx: ctx.funcMap.get("__nullish_to_null")! } as Instr]
+            : []),
           // __apply_closure(m, recv, args)
           { op: "local.get", index: 0 },
           { op: "local.get", index: 2 },
@@ -7880,6 +7934,11 @@ function ensureProxyRuntime(
       { op: "local.get", index: 1 },
       ...stringConstantExternrefInstrs(ctx, name),
       { op: "call", funcIdx: externGetIdx },
+      // (#2106 S1) a missing trap resolves to the undefined singleton —
+      // normalize to null so the trap-dispatch null checks keep working.
+      ...(ctx.funcMap.has("__nullish_to_null")
+        ? [{ op: "call", funcIdx: ctx.funcMap.get("__nullish_to_null")! } as Instr]
+        : []),
     ];
     const proxyCreateBody: Instr[] = [
       // if target == null → throw
@@ -8541,6 +8600,11 @@ export function ensureObjectGroupBy(ctx: CodegenContext): number {
             { op: "local.get", index: 4 },
             { op: "local.get", index: 6 },
             { op: "call", funcIdx: externGetIdx },
+            // (#2106 S1) group-absent = undefined singleton → normalize to
+            // null so the presence check below keeps its legacy shape.
+            ...(ctx.funcMap.has("__nullish_to_null")
+              ? [{ op: "call", funcIdx: ctx.funcMap.get("__nullish_to_null")! } as Instr]
+              : []),
             { op: "local.set", index: 7 },
             // if group is null → group = __objvec_new(); __extern_set(out, key, group)
             { op: "local.get", index: 7 },
@@ -8926,6 +8990,13 @@ interface ExternGetIdxBodyParams {
   externGetIdx: number;
   /** Pre-built per-`__vec_<k>` dispatch arms (empty at registration time). */
   vecArms: Instr[];
+  /** (#2106 S1) Factory for the miss ("index absent") result instrs. A FACTORY
+   *  — not a shared array — because the miss appears in several branches and
+   *  shared Instr objects get double-remapped by the finalize walks (see
+   *  `reference_shared_instr_object_dce_double_remap`). Legacy:
+   *  `[{ ref.null.extern }]`; singleton regime: `global.get $undefined ;
+   *  extern.convert_any`. */
+  missInstrs: () => Instr[];
 }
 
 /**
@@ -8978,7 +9049,7 @@ function buildExternGetIdxBody(p: ExternGetIdxBodyParams): Instr[] {
     {
       op: "if",
       blockType: { kind: "empty" },
-      then: [{ op: "ref.null.extern" }, { op: "return" }],
+      then: [...p.missInstrs(), { op: "return" } as Instr],
     },
     // vec = cast<$ObjVec>(any) ; i = i32(idx)
     { op: "local.get", index: 2 },
@@ -8987,13 +9058,13 @@ function buildExternGetIdxBody(p: ExternGetIdxBodyParams): Instr[] {
     { op: "local.get", index: 1 },
     { op: "i32.trunc_sat_f64_s" },
     { op: "local.tee", index: 4 },
-    // if i < 0 || i >= vec.len → null
+    // if i < 0 || i >= vec.len → miss
     { op: "i32.const", value: 0 },
     { op: "i32.lt_s" },
     {
       op: "if",
       blockType: { kind: "empty" },
-      then: [{ op: "ref.null.extern" }, { op: "return" }],
+      then: [...p.missInstrs(), { op: "return" } as Instr],
     },
     { op: "local.get", index: 4 },
     { op: "local.get", index: 3 },
@@ -9003,7 +9074,7 @@ function buildExternGetIdxBody(p: ExternGetIdxBodyParams): Instr[] {
     {
       op: "if",
       blockType: { kind: "empty" },
-      then: [{ op: "ref.null.extern" }, { op: "return" }],
+      then: [...p.missInstrs(), { op: "return" } as Instr],
     },
     // return vec.data[i]
     { op: "local.get", index: 3 },
@@ -9058,6 +9129,11 @@ export function fillExternGetIdxVecArms(ctx: CodegenContext): void {
   }
   carriers.sort((a, b) => a.typeIdx - b.typeIdx);
 
+  // (#2106 S1) OOB miss = undefined under the singleton regime (fresh instr
+  // objects per use — a factory, never a shared array, per the finalize
+  // double-remap hazard). The singleton instrs carry no funcIdx/typeIdx, so
+  // splicing them at FINALIZE cannot desync any index-shift walk.
+  const idxMiss = (): Instr[] => undefinedExternInstrs(ctx) ?? [{ op: "ref.null.extern" } as Instr];
   const vecArms: Instr[] = [];
   for (const { typeIdx, arrTypeIdx, elemType } of carriers) {
     const boxOps = boxVecElementToExternref(ctx, elemType);
@@ -9066,7 +9142,7 @@ export function fillExternGetIdxVecArms(ctx: CodegenContext): void {
       op: "if",
       blockType: { kind: "empty" },
       then: [
-        // i = trunc_sat(idx) ; if i < 0 → null
+        // i = trunc_sat(idx) ; if i < 0 → miss
         { op: "local.get", index: 1 },
         { op: "i32.trunc_sat_f64_s" },
         { op: "local.tee", index: 4 },
@@ -9075,9 +9151,9 @@ export function fillExternGetIdxVecArms(ctx: CodegenContext): void {
         {
           op: "if",
           blockType: { kind: "empty" },
-          then: [{ op: "ref.null.extern" }, { op: "return" }],
+          then: [...idxMiss(), { op: "return" } as Instr],
         } as Instr,
-        // if i >= vec.length → null
+        // if i >= vec.length → miss
         { op: "local.get", index: 4 },
         { op: "local.get", index: 2 },
         { op: "ref.cast", typeIdx },
@@ -9086,7 +9162,7 @@ export function fillExternGetIdxVecArms(ctx: CodegenContext): void {
         {
           op: "if",
           blockType: { kind: "empty" },
-          then: [{ op: "ref.null.extern" }, { op: "return" }],
+          then: [...idxMiss(), { op: "return" } as Instr],
         } as Instr,
         // return box(vec.data[i])
         { op: "local.get", index: 2 },

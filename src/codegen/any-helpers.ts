@@ -205,6 +205,44 @@ export function buildIsUndefinedExternBody(
 }
 
 /**
+ * (#2106 S1) Emit a test that the externref in local `externLocalIdx` is a
+ * tag-1 `$AnyValue` box (the `$undefined` singleton shape) — leaving an i32.
+ * Deliberately does NOT include the #2979 UNDEF_F64 `$BoxedNumber` arm: this
+ * is for CONTAINER-position checks (destructure guard) where the boxed
+ * sentinel can be a scalarized `[undefined]` array, not undefined itself
+ * (the #3010 55-test regression). `scratchAnyIdx` must be an anyref local.
+ * Returns false (emitting nothing) when the regime is inactive.
+ */
+export function emitIsUndefinedSingletonExternAt(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  externLocalIdx: number,
+  scratchAnyIdx: number,
+): boolean {
+  if (!undefinedSingletonActive(ctx)) return false;
+  if (ctx.anyValueTypeIdx < 0) ensureAnyValueType(ctx);
+  if (ctx.anyValueTypeIdx < 0) return false;
+  const t = ctx.anyValueTypeIdx;
+  fctx.body.push({ op: "local.get", index: externLocalIdx } as Instr);
+  fctx.body.push({ op: "any.convert_extern" } as Instr);
+  fctx.body.push({ op: "local.tee", index: scratchAnyIdx } as Instr);
+  fctx.body.push({ op: "ref.test", typeIdx: t } as Instr);
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "val", type: { kind: "i32" } },
+    then: [
+      { op: "local.get", index: scratchAnyIdx },
+      { op: "ref.cast", typeIdx: t },
+      { op: "struct.get", typeIdx: t, fieldIdx: 0 },
+      { op: "i32.const", value: 1 },
+      { op: "i32.eq" },
+    ],
+    else: [{ op: "i32.const", value: 0 }],
+  } as Instr);
+  return true;
+}
+
+/**
  * Lazily register wrapper struct types for Number, String, Boolean.
  * Each wrapper is a struct with a single `value` field holding the primitive.
  * Also registers WrapperX_valueOf functions that extract the value.
