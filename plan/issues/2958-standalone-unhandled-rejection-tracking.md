@@ -144,3 +144,23 @@ WASI-compile + run under wasmtime (or the standalone harness):
 - reject → microtask → late `.catch` within the same drain → **no** report. (AC3)
 
 ### On claim: re-scope `horizon: s → m` in the frontmatter.
+
+## Unified-spec ratification (architect, 2026-07-04)
+
+The banked plan above is **RATIFIED as-is** as slice **P-6** of the unified
+Promise semantics spec (**#2623 §P5** — unhandled rejection; see §P7 for the
+slice queue). Two additions from the spec, both cheap:
+
+1. The resolve-value REJECT adoption arm (`__then_identity_reject`) settles
+   via `__promise_reject` and therefore inherits the tracking with no extra
+   code — assert that in the tests (a chain `p.then(...)` whose adopted inner
+   rejects unhandled must report on the DERIVED promise).
+2. Coordinate with **#2623 §P3 J-2 (slice P-1)**: the settle-body callback-
+   list reversal only runs on non-null lists, so the "callbacks null at
+   settle → push onto `__unhandled_head`" check is unaffected — but land P-1
+   and P-6 serially (same `buildPromiseSettleBody` region).
+
+**Sequencing gate re-checked 2026-07-04: OPEN.** #2959 is done and #2867's
+remaining gaps (#2906 slices 3d + widen) live in async-cps/async-frame, not
+the scheduler — the `async-scheduler.ts` churn this was deferred on has
+settled. Claimable (Opus, `horizon: m`).

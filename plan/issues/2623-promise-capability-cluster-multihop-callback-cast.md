@@ -1,9 +1,12 @@
 ---
 id: 2623
-title: "Promise capability-cluster: multi-hop host→wasm resolve-element callback cast + ctx-ctor species/prototype identity through the bridge"
-status: in-progress
-assignee: ttraenkler/sendev-promise-subclass
+title: "Promise capability-cluster: multi-hop host→wasm resolve-element callback cast + ctx-ctor species/prototype identity through the bridge — ANCHOR for the unified Promise semantics spec (§P)"
+status: ready
+# stale in-progress claim (ttraenkler/sendev-promise-subclass) cleared 2026-07-04 by the
+# architect: that agent's landable slices merged (#1977 identity, #1981 box-depth) and the
+# deep tail was formalized as #2637 (done). No record existed on the issue-assignments ref.
 created: 2026-06-22
+updated: 2026-07-04
 priority: medium
 feasibility: hard
 reasoning_effort: max
@@ -13,7 +16,8 @@ language_feature: promise, async, proxy
 goal: async-model
 sprint: current
 parent: 1528
-related: [2614, 2618, 1373b, 1042, 86, 56]
+architect_spec: authored
+related: [2614, 2618, 1373b, 1042, 86, 56, 2613, 2958, 2867, 2906, 2959, 2980]
 note: "Spun off from #86 (class-ctor arm, merged) + #55 async-bucket scope (PR #1947). The #56/#1940 closure-construct bridge + #86 executor-call host-routing landed the SURFACE of the capability lane; this issue is the DEEPER shared substrate behind three clusters that the surface fixes did NOT close."
 ---
 # #2623 — Promise capability-cluster: multi-hop host→wasm callback cast + species identity
@@ -746,3 +750,352 @@ carries the full architecture spec (B1 → B2 sequencing, WAT evidence, ABI shap
 floor discipline). #2623's landable slices are done (box-depth #1981 + identity
 #1977 merged); #2618 (Proxy apply/construct, Slice C) and #2623-D (invoke-resolve)
 remain as separate forward items.
+
+---
+
+# Unified Promise Semantics Spec — both lanes (architect/Fable, 2026-07-04)
+
+> **Placement decision.** This issue is the anchor for the Promise
+> CONFORMANCE-SEMANTICS layer across BOTH lanes (JS-host bridge + standalone
+> native carrier). No new umbrella id was allocated: the consuming issues
+> (#2613, #2614, #2958, #2867, #2906, #2980) only need section-level pointers,
+> and a sixth Promise umbrella would just add routing indirection. Cite
+> sections as `#2623 §P<n>`. The async EXECUTION machinery (state machines,
+> drive layer, carrier gates) is owned by #2906/#2867/#2980 and is NOT
+> re-specced here — this layer sits on top of it and changes nothing about the
+> suspend/resume ABI.
+>
+> **Tier ruling (who implements what).** Bridge-identity design + capability
+> protocol = **Fable**. Combinator arm wiring + assimilation point-fixes =
+> **Opus**, executing on the #2906 machine / Gap-4 substrate with the designs
+> written out below. Each slice in §P7 is marked.
+
+## §P0 — The two lanes and what "unified" means
+
+| | JS-host lane | Standalone carrier lane |
+|---|---|---|
+| Promise value | real V8 Promise (externref) | `$Promise{state:i32 mut, value:externref mut, callbacks:externref mut}` (`getOrRegisterPromiseType`, async-scheduler.ts:258) |
+| Semantics engine | V8 itself; conformance = the **bridge** (closure wrappers, `__promise_subclass_ctor` + `__register_promise_subclass_ctor` protocol, #2637 B1+B2 landed) | native settle helpers (`__promise_fulfill/__promise_reject/__promise_resolve_value`), `$PromiseCallback` reaction nodes, microtask ring + `__drain_microtasks`/`__run_event_loop` |
+| Reactions | V8 job queue | FIFO ring (`ensureMicrotaskQueue`); reaction *lists* currently LIFO — see §P3 J-2 |
+| `new Promise(executor)` | `Promise_new` host import | native (#2959, `src/codegen/promise-executor.ts` — the `$__promise_settle_cap` trampolines) |
+| Combinators | delegate to V8 (`Promise.all.call(C, _toIterable(arr))`, runtime.ts ~12043) | native `all`/`race` array-literal form (#2867 Gap 4, `promise-combinators.ts`); `allSettled`/`any`/generic-iterable → host fallback |
+| Gate | always | `isStandalonePromiseActive` / `isStandaloneThenChainNativeActive` = `ctx.wasi` only; widen governed by #2980 (ratified NO-FLIP until measured positive) |
+
+"Unified" means: one written contract for what MUST behave identically in
+both lanes (§P1-§P5), one divergence map for what legitimately differs
+(§P6), and one slice queue (§P7) so the two lanes stop accreting
+independent point-fixes for the same spec operation.
+
+## §P1 — PromiseCapability & species protocol (NewPromiseCapability, ES §27.2.1.5)
+
+**Host lane** — V8 owns `NewPromiseCapability`/`Get(C,"resolve")`/element
+functions. Conformance is a pure bridge-identity problem, contracted in §P4.
+State: #2637 B1+B2 landed (user ctor body runs on V8's capability `this`);
+residuals are B-4/B-5 (§P4).
+
+**Standalone lane — the capability primitive.** #2959's settle-closure
+trampolines ARE `CreateResolvingFunctions` in disguise: `$__promise_settle_cap`
+(a subtype of the canonical `(externref)->()` func-ref wrapper, so the value
+dispatches through the normal native closure `ref.test/ref.cast/call_ref`
+path) + `__promise_resolve_cl`/`__promise_reject_cl` (promise-executor.ts:83-160).
+Promote them from a `promise-executor.ts`-private detail to THE capability
+primitive:
+
+- **New** `emitStandalonePromiseCapability(ctx, fctx) → {promiseLocal,
+  resolveLocal, rejectLocal}` in `async-scheduler.ts`: allocate a pending
+  `$Promise`; materialize resolve/reject as `$__promise_settle_cap` values
+  (`ref.func $__promise_{resolve,reject}_cl; local.get p; struct.new;
+  extern.convert_any`). Move `ensurePromiseExecutorClosures` (and its
+  context cache) into `async-scheduler.ts` next to
+  `ensurePromiseSettleFunctions`; `promise-executor.ts` becomes its first
+  consumer (behavior-identical — prove with the #2959 byte-hash probes).
+- **Consumers**: `new Promise(executor)` (#2959, existing) ·
+  `Promise.withResolvers` (a trivial native static once the primitive
+  exists: `{promise, resolve, reject}` object literal) · the thenable-job
+  resolving functions (§P2) · combinator element functions when standalone
+  combinators grow observable-element support (not now — §P6).
+- **First-settle-wins** is already structural: `buildPromiseSettleBody`'s
+  `state != PENDING → return` guard (async-scheduler.ts:847-859) subsumes the
+  spec's shared `[[AlreadyResolved]]` record for a single promise. No
+  separate flag needed for the resolve/reject PAIR.
+- **Element functions are NOT the same thing**: spec element resolve
+  functions (`PerformPromiseAll` step 8.j-k) carry a per-element
+  `[[AlreadyCalled]]` that is INDEPENDENT of the aggregate promise's state.
+  The Gap-4 `$CombinatorElemCaps{state, index}` has no such flag, and
+  `__combinator_all_fulfill` decrements `remaining` unconditionally — a
+  double-invoked element function would double-decrement and settle the
+  aggregate early. Unobservable today (standalone element fns never escape
+  to user code), but it becomes load-bearing the moment §P2's thenable jobs
+  can call an element function twice. Add `alreadyCalled: i32 mut` to
+  `$CombinatorElemCaps` and guard both `__combinator_all_fulfill` and
+  `__combinator_reject` — cheap, closes the trap before it's reachable.
+- **Species/subclass**: standalone has NO Promise subclass/`@@species`
+  protocol and must not pretend to (a `class extends Promise` under the
+  carrier falls to the non-carrier path / host fallback; document, don't
+  emulate). Host lane species = §P4 B-2/B-5.
+- **`Get(C,"resolve")` observability** (`PerformPromiseAll` step 5-6):
+  host = native V8, already works. Standalone: combinators are compiled
+  statically; a monkey-patched `Promise.resolve` is NOT observed. This is a
+  DOCUMENTED divergence (§P6) until the dynamic-descriptor cluster (#2965
+  family) gives statics a patchable identity — do not fake it with a
+  half-observable shim.
+
+## §P2 — Thenable assimilation (PromiseResolve §27.2.4.7.1, ResolvePromise §27.2.1.3.2, NewPromiseResolveThenableJob §27.2.2.2)
+
+Normative behavior BOTH lanes must give:
+1. `resolve(x)` where `x === promise` → reject with TypeError (self-resolution).
+2. `x` not an object → fulfill with `x`.
+3. `x` object: `then = Get(x, "then")` — ONE observable read. Abrupt → reject.
+4. `then` not callable → fulfill with `x`.
+5. `then` callable → enqueue a **PromiseResolveThenableJob** (a NEW microtask
+   that calls `then.call(x, resolveFn, rejectFn)`); never call `then`
+   synchronously from `resolve`. A throw from `then` before either resolving
+   function was called → reject.
+6. `Await(V)` = `PromiseResolve(%Promise%, V)` + `PerformPromiseThen` — with
+   the PromiseResolve **identity fast path**: if `IsPromise(V)` and
+   `V.constructor === %Promise%`, return `V` itself (this is the 2018 await
+   tick-count optimization; it is spec-observable via interleaving tests).
+
+**Standalone gaps (verified in source, 2026-07-04):**
+
+- `__promise_resolve_value` (async-scheduler.ts:961-1049) adopts only values
+  that `ref.test $Promise`; **everything else fulfills directly** (the
+  else-arm at :1041-1046). A user thenable `{then(res){res(42)}}` is
+  fulfilled AS the object — steps 3-5 are missing entirely. There is also
+  **no self-resolution check** (step 1).
+- `emitStandalonePromiseResolve` (:3109) builds a FULFILLED struct directly
+  — so standalone `Promise.resolve(p)` wraps a promise in a promise
+  (violates the identity fast path AND assimilation), and
+  `Promise.resolve(thenable)` never assimilates.
+
+**Design (standalone):**
+
+- **`__promise_resolve_value` grows a three-way arm** (this function is the
+  single chokepoint — executor resolve, `.then` handler-result settle,
+  identity-fulfill passthrough, and (after the fix below) `Promise.resolve`
+  all route through it, so fixing it once fixes every producer):
+  1. `ref.test $Promise` → existing adoption path, PLUS a leading `ref.eq`
+     self-check (`value` cast vs `promise`) → reject TypeError. (TypeError
+     construction: use the #2962 native error carrier when it lands; until
+     then reject with a tagged message string — the same interim #2958 uses.)
+  2. **NEW thenable arm**: if the value is a dynamic-shape object (the
+     `$Object` dynamic rep — gate the check to receivers the dynamic reader
+     can serve), read `"then"` through the dynamic-reader MOP (#2175 spec)
+     ONCE into a local; if the result passes the canonical-closure-wrapper
+     `ref.test` (the same callability test the #2959 executor dispatch
+     uses), enqueue a thenable job (below). Non-`$Object` nominal-struct
+     thenables are out of scope for the first slice (they need the #2175
+     unified method-value dispatch; note the limitation in the slice PR).
+  3. else → fulfill (existing).
+- **Thenable job**: new `$__thenable_job_caps{thenable: externref, then:
+  externref, promise: (ref $Promise)}` + a microtask fn
+  `__promise_thenable_job(caps, _unused)` (signature = the ring's
+  `microtaskFuncTypeIdx`): build a fresh resolve/reject pair over `promise`
+  via the §P1 capability primitive, then `then.call(thenable, resolveFn,
+  rejectFn)` through the native closure dispatch, inside `try/catch $exn →
+  __promise_reject(promise, e)` (the settle guard makes the reject a no-op
+  if a resolving fn already ran — matching spec step "if completion is
+  abrupt and alreadyResolved is false"). Enqueue with the existing
+  `state.enqueueFuncIdx`. FuncIdx minted up-front (`mintDefinedFunc` before
+  any reference — the #2918 discipline; add the new slot to
+  `ASYNC_SCHEDULER_FUNC_IDX_KEYS`, :3354, or it WILL desync on a late import).
+- **`Promise.resolve(x)` lowering** (new emitter; keep
+  `emitStandalonePromiseResolve` for INTERNAL fulfilled-promise construction
+  sites, which are not `PromiseResolve` and must stay direct):
+  `ref.test $Promise → reuse x as-is (identity)`; else allocate pending +
+  `call __promise_resolve_value`. Standalone has no subclasses, so the
+  `constructor === %Promise%` half of the fast-path condition is vacuously
+  true.
+- **Await-operand normalization (#2613's standalone twin)**: the #2906
+  machine's `suspend` terminator must route its awaited operand through the
+  same `PromiseResolve` shape — `ref.test $Promise` → register the reaction
+  directly (existing); else allocate + `__promise_resolve_value` and
+  register on THAT promise (which, with the thenable arm, drives
+  `await <thenable>` correctly and gives the spec tick count). Verify at
+  implementation where the current emitter assumes/casts `$Promise` — that
+  cast site is the fix point (it is also #2980 residual class 1's sibling).
+
+**Host lane**: `Promise_resolve` import delegates to V8 `Promise.resolve`
+(runtime.ts:12063) — identity fast path and thenable jobs are V8-native and
+already correct. The #2613 host rows are NOT an assimilation bug: they are
+the **runner drain contract** (§P3 J-4) plus, historically, the inbound
+continuation-callback substrate that #1981 already fixed.
+
+## §P3 — Job-queue ordering contract
+
+Normative guarantees, BOTH lanes:
+
+- **J-1 FIFO jobs**: microtasks run in enqueue order; a job enqueued during
+  a job runs after everything already queued. (Standalone ring: holds.
+  Host: V8.)
+- **J-2 Reaction registration order**: multiple reactions on ONE promise
+  fire in `.then`-call order (`PerformPromiseThen` appends to
+  `[[PromiseFulfillReactions]]`). **Standalone currently violates this**:
+  the pending-receiver arm of `emitStandalonePromiseThen` PREPENDS the
+  `$PromiseCallback` node (async-scheduler.ts:3253-3267, acknowledged in
+  the comment), as does the adoption path (:1022-1034), and
+  `buildPromiseSettleBody` walks head-first → reactions enqueue LIFO.
+  **Fix in ONE place**: reverse the detached callback list in
+  `buildPromiseSettleBody` between detach (:869-876) and the enqueue loop —
+  a standard 3-local in-place list reversal (prev/cur/next over field 4),
+  O(n) at settle, no node-shape change, and it makes EVERY producer's
+  prepend correct at once. (Alternative — tail-pointer append at attach —
+  touches every producer and changes `$Promise`'s shape; rejected.)
+- **J-3 Run-to-completion**: a settle during a running job only enqueues;
+  it never re-enters user code synchronously. (Both lanes: holds by
+  construction — settle helpers only `enqueue`.)
+- **J-4 Drain / completion observability — the runner contract**: an async
+  test's verdict is defined ONLY after the job queue drains. Standalone:
+  the #2404 `__drain_microtasks` hook already does this. Host: the runner
+  reads `ret` synchronously after `test()` with NO microtask turn
+  (tests/test262-runner.ts, the #2613 finding) — so every post-await
+  assertion lands after the verdict is read. The fix is the HARNESS, not
+  the lowering: for `flags:[async]`-style tests the runner must yield at
+  least one macrotask turn (`await new Promise(setImmediate)`-class) — or
+  await the exported entry's returned promise when there is one — before
+  reading the pass/fail cell. This is a **measured** change (it can flip
+  currently-"passing" tests whose late rejection was never observed —
+  honest corrections, but they count as regressions in the diff; land with
+  merge_group evidence and a bucket breakdown). Also fold in the two known
+  harness shims the #2623-A re-grounding documented: `Test262Error.thrower`
+  and `promiseHelper.js` (`checkSettledPromises`/`checkSequence`) — without
+  them the two Slice-A headline rows stay red for non-substrate reasons.
+- **J-5 Tick parity (interleaving)**: `await <native promise>` = 1 reaction
+  job (PromiseResolve identity); `await <thenable>` = thenable job + then's
+  own resolve + reaction (≥2 jobs). Acceptance fixtures:
+  `expressions/await/async-await-interleaved.js`,
+  `for-await-of-interleaved.js`, `await-awaits-thenables*.js`. Standalone
+  reaches parity via §P2; host via J-4.
+
+## §P4 — Host↔wasm bridge identity contract (the #2623 cluster, stated as invariants)
+
+What identity MUST survive the bridge (each invariant names its state):
+
+- **B-1 Closure round-trip**: any wasm closure crossing to host is wrapped
+  via `_wrapWasmClosureUnknownArity` with `_wasmClosureWrapperTargets`
+  recorded; any re-entry (as callee OR as argument to another wasm closure)
+  recovers the raw struct + captured env. LANDED in substance via box-depth
+  #1981 (the trap class is gone). Residual: `arguments.length`/`.name`/
+  `.length` reflection through `wasmClosureDynamicBridge` (the #2614
+  assert-#2 finding) — bank as part of P-7, not a separate lane.
+- **B-2 One constructor object per name**: `class extends Promise`
+  value-read ≡ combinator receiver ≡ capability ctor — the single cached
+  `__promise_subclass_ctor` singleton. LANDED (#1977).
+- **B-3 Executor body on capability `this`**: `NewPromiseCapability(C)`
+  runs the user ctor body on V8's capability promise. LANDED (#2637 B1+B2).
+- **B-4 Argument/element identity**: an externref the user holds must reach
+  V8's observable `resolve` as the SAME reference through the iterable
+  round-trip (`emitIterableArg` array materialization / `_toIterable`) —
+  the `all/race invoke-resolve` assert-#1 identity break (#2623-D). The
+  sandbox-realm observable-resolve fix was proven net-negative ALONE
+  (pre-#1940); with B-1..B-3 now landed the cross-realm construct it
+  regressed on is legal — **re-test it COMPOSED**, per the original 2623-D
+  deferral. OPEN.
+- **B-5 Observable-then**: every operation the spec defines via
+  `Invoke(target, "then")` must read the receiver's OWN `then` —
+  monkey-patched `then` included. Host `p.finally(cb)` (runtime.ts:12099)
+  calls V8-native `then` on the host promise, so a wasm-side patched `then`
+  and the receiver's `constructor[@@species]` are never observed — the 7
+  `.finally` rows. **Fix direction**: rewrite the `Promise_finally` shim to
+  the spec algorithm (§27.2.5.3: read `C = SpeciesConstructor(this)`, build
+  ThenFinally/CatchFinally over the wrapped `onFinally`, then
+  `Invoke(this, "then", …)` so a patched `then` is hit) instead of
+  delegating to native `.finally`. Same substrate serves `Promise.try`'s 3
+  identity rows (via B-2/B-3). OPEN.
+
+Non-goal: making the bridge transparent for arbitrary host-side prototype
+dispatch on returned wasm instances (the #2628 acorn-host residual) — ~0
+conformance payoff, separate lane, per the #2623-B re-grounding.
+
+## §P5 — Unhandled rejection (HostPromiseRejectionTracker §27.2.1.9 / host semantics)
+
+Semantics both lanes must DETECT identically; the REPORT channel may differ:
+
+- Track `"reject"`: a promise settles rejected with zero reactions.
+- Track `"handle"`: a reaction is later attached to an already-rejected
+  promise (same-drain late attach → NOT reported; matches JS).
+- Derived promises count individually: every `.then`-chained promise that
+  rejects without its own reactions is its own unhandled rejection (a
+  `.catch` at the END of a chain handles every link, because each link's
+  reject reaction is the next link — this falls out of the settle-site
+  tracking for free; no chain-walk needed).
+- Report point: event-loop/drain EXIT only (`_start` end / `__run_event_loop`
+  termination) — never mid-drain (J-4).
+
+**Standalone**: the #2958 banked plan (in that issue file, 2026-07-03 rev)
+is RATIFIED as-is as the implementation of this section — `$Promise` +
+`handled:i32 mut` + `unhandledNext:externref mut` (appended fields, idx
+0/1/2 stable), intrusive `__unhandled_head` list pushed in the REJECTED
+settle variant when callbacks are null, `handled=1` on the already-rejected
+`.then` attach branch, `__report_unhandled_rejections` wired at `_start`
+end, `proc_exit(1)`, constant stderr line until #2962 stringification.
+Two additions from this spec: (a) the resolve-value REJECT adoption arm
+(identity-reject) settles via `__promise_reject` and therefore inherits the
+tracking with no extra code — assert that in the tests; (b) after §P3 J-2's
+list reversal, the "callbacks null at settle" check is unaffected (reversal
+only runs on non-null lists). Sequencing: the async-scheduler churn it was
+deferred on has settled (#2959 done; #2867's remaining gaps live in
+async-cps/async-frame, not the scheduler) — claimable now as §P7 P-6.
+
+**Host**: inherits V8/Node `unhandledrejection`. MUST-match: detection
+semantics above (observable via `Promise.reject` + late-`.catch` tests).
+MAY-differ: report channel, exit code, message text.
+
+## §P6 — Divergence map (MUST-match vs MAY-differ)
+
+| Concern | Contract |
+|---|---|
+| Settlement values, first-settle-wins, throw→reject routing | MUST match (both lanes, already structural) |
+| Reaction order (J-2), job FIFO (J-1), tick parity (J-5) | MUST match spec — standalone J-2 fix required (P-1) |
+| Thenable assimilation incl. self-resolution | MUST match for `$Object`-shape thenables (P-3/P-4); nominal-struct thenables standalone: documented gap until #2175 MOP dispatch |
+| `PromiseResolve` identity (`Promise.resolve(p) === p`) | MUST match (P-2) |
+| Unhandled-rejection DETECTION | MUST match (P-6); report channel MAY differ |
+| Promise subclass / `@@species` / ctx-ctor capability | host: MUST (B-2/B-3, landed; B-5 open). standalone: MAY-diverge (unsupported, falls back; never a wrong-answer emulation) |
+| `Get(C,"resolve")` / patched statics observability | host: MUST (V8-native). standalone: MAY-diverge until #2965-class dynamic statics |
+| `allSettled`/`any`/generic-iterable combinators | host: MUST (V8). standalone: host-fallback today; native arms = P-5 |
+| Report/exit mechanics, error stringification | MAY differ (#2962 converges text later) |
+| Cross-realm / multiple-realm capability behavior | host-only concern (sandbox realm); standalone single-realm by construction |
+
+## §P7 — Slice decomposition (sequenced; tier-marked)
+
+Every standalone slice: carrier-gated (`isStandalonePromiseActive`, wasi
+today), byte-inert for gc/host + still-host-backed standalone (sha256
+proof, the −16/−29 discipline), and each shrinks a #2980 residual class —
+the widen re-measure (rule 5 there) is the shared acceptance instrument.
+funcIdx hazards: every new scheduler funcIdx goes in
+`ASYNC_SCHEDULER_FUNC_IDX_KEYS`; mint before reference (#2918).
+
+| id | tier | size | what | depends on |
+|---|---|---|---|---|
+| **P-1** | Opus | S | §P3 J-2: reverse detached callback list in `buildPromiseSettleBody`; ordering tests (2× `.then` on one promise, then+adoption mix) | — |
+| **P-2** | Opus | M | §P2: standalone `Promise.resolve` = identity fast path + resolve-value routing (new emitter; internal sites untouched) | — |
+| **P-3** | **Fable** | M | §P1: capability primitive — promote #2959 trampolines to `emitStandalonePromiseCapability`; `withResolvers` native; self-resolution TypeError in `__promise_resolve_value`; elem-caps `alreadyCalled` | — |
+| **P-4** | Opus | M | §P2: generic-thenable arm + `__promise_thenable_job` + await-operand normalization on the #2906 suspend terminator | P-3; #2906 slice-3 (landed) |
+| **P-5** | Opus | M | §P1/§P6: standalone `allSettled` ({status,value} objects) + `any` (AggregateError) arms on the Gap-4 substrate | P-3 (uses elem-caps guard) |
+| **P-6** | Opus | M | §P5: #2958 unhandled rejection, banked plan ratified + the two additions | best after P-1 (same settle body) |
+| **P-7** | **Fable** | L | §P4 B-4+B-5: observable-resolve identity composed re-test (2623-D) + spec-algorithm `Promise_finally` shim + `Promise.try` sweep + B-1 reflection residual | — (host lane) |
+| **P-8** | Opus | M | §P3 J-4: runner drain contract for host async tests + `Test262Error.thrower` / `promiseHelper.js` shims — MEASURED (merge_group bucket breakdown mandatory; expect honest flips both ways) | — (harness) |
+
+Parallelizable: {P-1, P-2, P-3} · {P-7} · {P-8}. P-4/P-5/P-6 follow their
+deps. File contention: P-1..P-6 all touch `async-scheduler.ts` — land
+serially or coordinate; P-7 is `runtime.ts`, P-8 is `tests/`.
+
+## §P8 — Acceptance fixtures (per slice)
+
+- P-1: new `tests/issue-2623-p1-reaction-order.test.ts` (host-free wasi,
+  `__drain_microtasks`); no test262 row directly, prevents a latent class.
+- P-2: `built-ins/Promise/resolve/resolve-{self,thenable,prm-cstm-ctor}.js`
+  standalone lane; identity probe `Promise.resolve(p) === p`.
+- P-3/P-4: `expressions/await/await-awaits-thenables*.js`,
+  `await-non-promise-thenable.js` (standalone lane), executor
+  resolve-with-thenable (#2959 suite stays green), self-resolution
+  TypeError probe.
+- P-5: `built-ins/Promise/allSettled/*`, `any/*` standalone leak-elim
+  (import-section scan, the #2959 pattern).
+- P-6: #2958's AC1-AC3 verbatim.
+- P-7: `all/race invoke-resolve.js` (assert #1→green),
+  `prototype/finally/{species-constructor,this-value-*,invokes-then-*}.js`
+  (7 rows), `Promise/try/{promise,ctx-ctor,not-a-constructor}.js` (3 rows).
+- P-8: the #2613 row list (~15) + `allSettled/call-resolve-element.js`,
+  `race/resolve-from-same-thenable.js` — with the honest-flip bucket
+  breakdown attached to the PR.
