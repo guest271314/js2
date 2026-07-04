@@ -803,6 +803,14 @@ function lowerTail(stmt: ts.Statement, cx: LowerCtx): void {
       cx.builder.terminate({ kind: "return", values: [] });
       return;
     }
+    // (#2856 C4) Direct-call tail in a void function — `quicksort(arr, p +
+    // 1, hi);` as the last statement. Statement position, so a void callee
+    // is legal.
+    if (ts.isCallExpression(stmt.expression) && ts.isIdentifier(stmt.expression.expression)) {
+      void lowerCall(stmt.expression, cx, /* statementPosition */ true);
+      cx.builder.terminate({ kind: "return", values: [] });
+      return;
+    }
     // Lower the expression for side effects, discard the value.
     lowerExpr(stmt.expression, cx, irVal({ kind: "externref" }));
     cx.builder.terminate({ kind: "return", values: [] });
@@ -4362,7 +4370,8 @@ function lowerStmt(stmt: ts.Statement, cx: LowerCtx): void {
         void lowerMethodCall(stmt.expression, cx, /* statementPosition */ true);
         return;
       }
-      void lowerExpr(stmt.expression, cx, irVal({ kind: "f64" }));
+      // (#2856 C4) Statement position — a VOID direct call is legal.
+      void lowerCall(stmt.expression, cx, /* statementPosition */ true);
       return;
     }
     // Slice 7a (#1169f): `yield <expr>;` inside a for-of body. The

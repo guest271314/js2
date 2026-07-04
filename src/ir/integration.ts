@@ -26,7 +26,8 @@ import { ts } from "../ts-api.js";
 
 import { ensureAnyValueType } from "../codegen/any-helpers.js"; // (#2949) boxed-any carrier for IrType.dynamic
 import { getOrRegisterPromiseType } from "../codegen/async-scheduler.js";
-import { addGeneratorImports, addIteratorImports, addStringImports } from "../codegen/index.js";
+import { addGeneratorImports, addIteratorImports, addStringImports, TYPED_ARRAY_NAMES } from "../codegen/index.js";
+import { ensureVecElemSet, VEC_ELEM_SET_PREFIX } from "../codegen/vec-elem-set.js"; // (#2856 C2) on-demand element-store helper
 import { classMemberFuncKey } from "../codegen/class-member-keys.js"; // (#1983) collision-free class-member funcMap keys
 import {
   ensureNativeStringHelpers,
@@ -177,7 +178,7 @@ export function compileIrPathFunctions(
   // Phase 3 once the registries exist; both share the same underlying
   // logic for the methods both expose.
   // -------------------------------------------------------------------------
-  const fromAstResolver = makeFromAstResolver(ctx);
+  const fromAstResolver = makeFromAstResolver(ctx, sourceFile);
 
   // -------------------------------------------------------------------------
   // Phase 1 — Build: lower every selected AST function to an IrFunction.
@@ -936,7 +937,7 @@ function externResultClassName(
   }
 }
 
-function makeFromAstResolver(ctx: CodegenContext): IrFromAstResolver {
+function makeFromAstResolver(ctx: CodegenContext, sourceFile?: ts.SourceFile): IrFromAstResolver {
   return {
     nativeStrings(): boolean {
       return ctx.nativeStrings;
@@ -980,6 +981,52 @@ function makeFromAstResolver(ctx: CodegenContext): IrFromAstResolver {
     // host-extern arms.
     jsHostExterns(): boolean {
       return !(ctx.standalone || ctx.wasi || ctx.strictNoHostImports);
+    },
+    // (#2856 C2) TypedArray-view receiver detection for element STORES —
+    // the same checker walk as the legacy `elementAccessTypedArrayName`
+    // (assignment.ts): symbol name of the receiver's TS type against the
+    // TYPED_ARRAY_NAMES registry. Writes into those views carry per-view
+    // conversion semantics (ToUint8/ToUint8Clamp/packing) that the plain
+    // vec store helper must not bypass, so the IR demotes them.
+    isTypedArrayViewExpr(expr: ts.Expression): boolean {
+      const t = ctx.checker.getTypeAtLocation(expr);
+      let name = t.getSymbol()?.name ?? t.aliasSymbol?.name;
+      if ((!name || !TYPED_ARRAY_NAMES.has(name)) && ts.isNewExpression(expr) && ts.isIdentifier(expr.expression)) {
+        name = expr.expression.text;
+      }
+      return !!name && TYPED_ARRAY_NAMES.has(name);
+    },
+    // (#2856 C3) Module-scope binding → the Wasm global the legacy backend
+    // allocated (`__mod_<name>` in ctx.mod.globals, TDZ flag `__tdz_<name>`
+    // when tracked) + the extern-class brand of the held value from the
+    // checker at the DECLARATION site. Only externref-shaped extern-class
+    // instances resolve (e.g. `const cache = new Map()` → "Map"); plain
+    // scalars / non-extern values return undefined so the identifier arm
+    // demotes cleanly.
+    getModuleScopeExternBinding(name: string) {
+      if (!ctx.moduleGlobals.has(name)) return undefined;
+      const globalName = `__mod_${name}`;
+      const g = ctx.mod.globals.find((gl) => gl.name === globalName);
+      if (!g || g.type.kind !== "externref") return undefined;
+      // Brand from the checker: the module-level declaration's type symbol
+      // must name a REGISTERED extern class (host mode only — in
+      // standalone/nativeStrings the class isn't registered, so this
+      // resolves nothing and the function demotes to legacy, which has the
+      // native runtime interception).
+      const sf = sourceFile;
+      if (!sf) return undefined;
+      let className: string | undefined;
+      for (const stmt of sf.statements) {
+        if (!ts.isVariableStatement(stmt)) continue;
+        for (const d of stmt.declarationList.declarations) {
+          if (!ts.isIdentifier(d.name) || d.name.text !== name) continue;
+          const t = ctx.checker.getTypeAtLocation(d.name);
+          className = t.getSymbol()?.name ?? t.aliasSymbol?.name;
+        }
+      }
+      if (!className || !ctx.externClasses.has(className)) return undefined;
+      const tdzGlobalName = ctx.mod.globals.some((gl) => gl.name === `__tdz_${name}`) ? `__tdz_${name}` : null;
+      return { globalName, tdzGlobalName, className };
     },
     // (#2856) Variant selection for `console.<m>(arg)` — the SAME checker
     // predicates as the legacy `collectConsoleImports` registration scan
@@ -1100,6 +1147,18 @@ function makeResolver(
       // functions. On-demand keeps the helper out of modules that never use
       // `%` (parity with legacy, which also emits it lazily).
       if (ref.name === FMOD_FN) return ensureFmod(ctx);
+      // (#2856 C2) `__vec_elem_set_<vecTypeIdx>` — element-store helper with
+      // full legacy grow semantics. Materialized on demand, same append-only
+      // defined-function discipline as `ensureFmod` (never an import, no
+      // existing funcIdx shifts). Idempotent via funcMap.
+      if (ref.name.startsWith(VEC_ELEM_SET_PREFIX)) {
+        const vecTypeIdx = Number(ref.name.slice(VEC_ELEM_SET_PREFIX.length));
+        const helperIdx = Number.isInteger(vecTypeIdx) ? ensureVecElemSet(ctx, vecTypeIdx) : null;
+        if (helperIdx === null) {
+          throw new Error(`ir/integration: cannot materialize ${ref.name} (not a recognisable vec struct)`);
+        }
+        return helperIdx;
+      }
       const idx = ctx.funcMap.get(ref.name);
       if (idx !== undefined) return idx;
       // Slice 6 part 4 (#1183): native-string helpers (`__str_charAt`,

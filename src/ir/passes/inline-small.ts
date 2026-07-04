@@ -264,6 +264,14 @@ function canInline(callee: IrFunction, recursiveSet: ReadonlySet<string>): boole
       inst.kind === "try" ||
       inst.kind === "while.loop" ||
       inst.kind === "for.loop" ||
+      // (#2856) The value-producing `if` (#1392) carries then/else arm
+      // buffers with their OWN SSA defs, which `renameAllInInstr` does not
+      // deep-rename — splicing one into a caller produced duplicate SSA
+      // defs (post-inline verify failure → silent legacy demote). It was
+      // missed when #1392 added the kind; latent until #2856's call-arg
+      // ref→ref_null widening made single-block callees with bounds-checked
+      // vec reads (emitSafeVecGet emits an `if`) actually inlinable.
+      inst.kind === "if" ||
       // (#2856) if.stmt is buffer-bearing (same nested SSA def-space concern
       // as the kinds above). early.return lowers to a Wasm `return` — spliced
       // into a caller it would return from the CALLER, not simulate the
