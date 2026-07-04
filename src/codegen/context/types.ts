@@ -97,8 +97,9 @@ export interface CodegenOptions {
    *  `CompileOptions.tag5ValueEqClassifier` doc. Default false (legacy). */
   tag5ValueEqClassifier?: boolean;
   /** (#2106 S1) Standalone `$undefined` tag-1 singleton regime — see the
-   *  `CompileOptions.undefinedSingleton` doc. Default false (legacy:
-   *  undefined ≡ null ≡ ref.null.extern in standalone, byte-identical). */
+   *  `CompileOptions.undefinedSingleton` doc. Default TRUE (#2106
+   *  default-flip); `JS2WASM_UNDEF_SINGLETON=0` forces the legacy
+   *  (undefined ≡ null ≡ ref.null.extern) regime. */
   undefinedSingleton?: boolean;
   /** (#2796) Diff-test-harness fidelity: in JS-host mode, export the top-level
    *  `__module_init` and do NOT run it via the wasm `start` section, so the host
@@ -1923,9 +1924,10 @@ export interface CodegenContext {
    *  for runner-level A/B. */
   tag5ValueEqClassifier: boolean;
   /** (#2106 S1) Standalone `$undefined` tag-1 singleton regime flag — see the
-   *  `CompileOptions.undefinedSingleton` doc. Default false (legacy:
-   *  undefined ≡ null ≡ ref.null.extern, byte-identical). Only meaningful
-   *  under standalone/nativeStrings; host mode ignores it. */
+   *  `CompileOptions.undefinedSingleton` doc. Default TRUE (#2106
+   *  default-flip); `JS2WASM_UNDEF_SINGLETON=0` forces the legacy
+   *  (undefined ≡ null ≡ ref.null.extern) regime. Only meaningful under
+   *  standalone/nativeStrings; host mode ignores it. */
   undefinedSingleton: boolean;
   /** (#2796) Diff-test-harness fidelity: in JS-host mode, export the top-level
    *  `__module_init` and do NOT wire the wasm `start` section to it, so the host

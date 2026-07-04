@@ -255,10 +255,15 @@ export function createCodegenContext(
     // (#2141 S2/S3, #2626) tag-5 boxed-VALUE eq classifier — default OFF
     // (legacy); JS2WASM_TAG5_CLASSIFIER=1 env defaults it on for runner A/B.
     tag5ValueEqClassifier: options?.tag5ValueEqClassifier ?? process.env.JS2WASM_TAG5_CLASSIFIER === "1",
-    // (#2106 S1) standalone $undefined tag-1 singleton regime — default OFF
-    // (legacy: undefined ≡ null ≡ ref.null.extern, byte-identical);
-    // JS2WASM_UNDEF_SINGLETON=1 env defaults it on for runner A/B.
-    undefinedSingleton: options?.undefinedSingleton ?? process.env.JS2WASM_UNDEF_SINGLETON === "1",
+    // (#2106 S1 default-flip) standalone $undefined tag-1 singleton regime —
+    // default ON. The complete lockstep producer+consumer sweep landed behind
+    // this flag in PR #2633; this flip makes the singleton the default
+    // standalone/nativeStrings `undefined` representation so undefined is
+    // observable to ===/??/?./typeof/ToString instead of aliasing null.
+    // Host mode is unaffected (`undefinedSingletonActive` also gates on
+    // standalone||nativeStrings). Set JS2WASM_UNDEF_SINGLETON=0 to force the
+    // legacy (undefined ≡ null ≡ ref.null.extern) regime for A/B control.
+    undefinedSingleton: options?.undefinedSingleton ?? process.env.JS2WASM_UNDEF_SINGLETON !== "0",
     // (#2796) Diff-test-harness fidelity — export __module_init + skip the wasm
     // start section so the host runs top-level code after setExports.
     deferTopLevelInit: options?.deferTopLevelInit ?? false,
