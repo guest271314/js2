@@ -461,3 +461,49 @@ the frame ABI (both layouts already share frame-core).
 - **#2980 slice-1d (carrier widen)**: stays LAST, after 3a/3b land, gated on
   the full merge_group standalone corpus measuring net-positive. This slice
   changed nothing it depends on.
+
+## Slice 3a landed — while-with-await (2026-07-04, opus-2957p2)
+
+**Done** (native host-free drive lane). `while (cond) { …≥1 canonical await… }`
+async bodies now drive on the multi-state CFG machine. Measure-first on the
+branch base: a while-await wasi fn was host-free-compilable but never completed
+(the loop CFG was producer-unreachable). After 3a the canonical loop resolves
+across genuine suspensions with the accumulator surviving each spill/restore.
+
+**How** (planner + spill only — the emitter already had goto/condGoto):
+- `async-cps.ts` — `planAsyncCfg(fn, plan, {allowLoops})` is now the single CFG
+  producer for the drive lane. Linear bodies **delegate** to the byte-identical
+  `linearPlanToCfg(planLinearAwaits(...))` path (proven: the 69-test async drive
+  blast radius stays green); when `allowLoops` (native lane only) and the body is
+  a canonical single-`while`-with-await, `planWhileLoopCfg` builds the loop CFG:
+  entry (pre-leads) → head `condGoto(cond, body0, exit)` → body suspend states →
+  continuation `goto(head)` back-edge → exit `settleUndefined`. Reuses
+  `lowerLinearStatements` for the loop body. `loopAsyncSpillInfo` exposes the
+  widened spill set.
+- `async-frame.ts` — routed the emitter + `asyncFnNeedsDrive` + `computeAsyncSpills`
+  through `planAsyncCfg`/`computeLoopSpills`. **Loop-liveness (the silent-miscompile
+  trap, contract rule 3/4):** every own-local referenced anywhere in the loop is
+  spilled (a local read before the await is read again after resume next
+  iteration); the drive gate falls back to legacy if any such local is not a
+  spill-safe type. Host settle backend keeps the linear-only shape (loops =
+  N-round follow-up).
+- **Emitter fix (latent, uncovered by 3a):** the never-exercised `goto`/`condGoto`
+  `br` depths were off by one. The re-dispatch `loop` is at `loopDepth` (id+2)
+  from ONE level inside an `if` arm (where the proven suspend fast-path advance br
+  sits) → `loopDepth-1` from a state-body top level. `goto` (top level) now uses
+  `loopDepth-1`; `condGoto` (br inside its `if(cond)` arm) uses `loopDepth`.
+
+**Scope / bank.** Bounded to a single `while` whose body is linear-canonical with
+no `break`/`continue`/`return`/labeled/nested-loop/`switch`/`try` and an
+await-free condition; anything richer falls back to legacy. Follow-ups (per the
+banked design): do-while, await-in-condition, break/continue as `goto exit`/
+`goto head` (3a′), for-await-of (3b), try/catch + return-through-finally (3c),
+host-lane loops. Issue stays `in-progress`.
+
+**Tests** `tests/issue-2906-3a-while-await.test.ts` (6): sync-settled full run,
+genuinely-pending across 3 iterations (accumulator survives spill), zero-iteration,
+prefix-local carried across the back-edge, bare-`await` side effects in order,
+and break→legacy-fallback. Blast radius green (async-await / issue-1042 /
+issue-1042-host-drive / issue-2895 / async-census + issue-2174/2611/1672); the
+2× issue-2865 and 3× issue-2906-gap3 failures are pre-existing on clean
+`origin/main`. `tsc --noEmit` clean.

@@ -1157,6 +1157,260 @@ export function linearPlanToCfg(linear: LinearAwaitPlan): AsyncCfgPlan {
 }
 
 // ---------------------------------------------------------------------------
+// CFG producer + while-loop planner (#2906 slice 3a).
+//
+// `planAsyncCfg` is the single entry point the drive lane uses to obtain an
+// `AsyncCfgPlan`. For a LINEAR body it delegates to the proven
+// `planLinearAwaits` → `linearPlanToCfg` path, so every non-loop program's
+// emitted machine is byte-identical to the pre-3a emitter. When `opts.allowLoops`
+// is set (native drive lane only, from `asyncFnNeedsDrive`) and the body is a
+// single canonical `while (cond) { …await… }` shape, `planWhileLoopCfg` builds
+// the loop CFG directly: a head state whose `condGoto` enters the body or the
+// exit, body suspend states, and a continuation state whose `goto(head)` is the
+// back-edge. The emitter already handles `goto`/`condGoto`/back-edges (a target
+// ≤ the current id is a loop), so this is planner-only.
+// ---------------------------------------------------------------------------
+
+/** Options for {@link planAsyncCfg}. */
+export interface AsyncCfgOptions {
+  /**
+   * Accept loop shapes (while-with-await). Set only on the native drive lane
+   * (`asyncFnNeedsDrive`); the JS-host lane keeps the linear-only shape until a
+   * follow-up widens it (the host lane suspends on EVERY await → N iterations =
+   * N microtask rounds; correct but needs its own corpus check).
+   */
+  readonly allowLoops: boolean;
+}
+
+/**
+ * The single CFG producer for the drive lane. Linear bodies delegate to the
+ * byte-identical `linearPlanToCfg(planLinearAwaits(...))` path; when loops are
+ * allowed, a canonical `while`-with-await body is lowered by
+ * {@link planWhileLoopCfg}. Returns `null` (→ legacy/AG0 fallback) for anything
+ * outside the accepted shapes.
+ */
+export function planAsyncCfg(
+  fn: ts.FunctionLikeDeclaration,
+  plan: AsyncCpsPlan,
+  opts: AsyncCfgOptions,
+): AsyncCfgPlan | null {
+  const linear = planLinearAwaits(fn, plan);
+  if (linear !== null) return linearPlanToCfg(linear);
+  if (opts.allowLoops) return planWhileLoopCfg(fn, plan);
+  return null;
+}
+
+/**
+ * Structural analysis of a single-`while`-with-await async body. Returns the
+ * pre-loop leads, the loop condition, the lowered body (suspend segments + tail),
+ * and the post-loop leads — or `null` when the body is not the bounded 3a shape.
+ *
+ * Bounded slice (everything else → legacy/AG0 fallback):
+ *   - the body is a flat statement block whose ONLY awaiting statement is a
+ *     single `while` (pre/post statements are await-free);
+ *   - the `while` condition is await-free (an awaiting condition needs a
+ *     condition-eval state — a follow-up);
+ *   - the loop body is linear-canonical (the same per-statement await positions
+ *     `lowerLinearStatements` accepts) with ≥1 await and NO `return await`
+ *     (a function return through the loop is a follow-up);
+ *   - no `break`/`continue`/labeled statement/nested loop/`switch`/`try`/`return`
+ *     inside the loop body (abrupt loop/function exit — a follow-up).
+ */
+function analyzeWhileAsync(
+  fn: ts.FunctionLikeDeclaration,
+  plan: AsyncCpsPlan,
+): {
+  pre: ts.Statement[];
+  cond: ts.Expression;
+  segments: LinearAwaitSegment[];
+  tail: ts.Statement[];
+  post: ts.Statement[];
+  whileStmt: ts.WhileStatement;
+} | null {
+  if (plan.awaitPoints.length === 0) return null;
+  const body = fn.body;
+  if (body === undefined || !ts.isBlock(body)) return null;
+  const awaitSet = new Set<ts.AwaitExpression>(plan.awaitPoints);
+
+  // Find the single top-level statement carrying awaits; it must be a `while`.
+  let whileIdx = -1;
+  for (let i = 0; i < body.statements.length; i++) {
+    const c = countAwaitsInStatement(body.statements[i]!, awaitSet);
+    if (c === 0) continue;
+    if (whileIdx !== -1) return null; // awaits in >1 top-level statement — not this shape
+    if (!ts.isWhileStatement(body.statements[i]!)) return null; // await outside a while
+    whileIdx = i;
+  }
+  if (whileIdx === -1) return null;
+  const whileStmt = body.statements[whileIdx] as ts.WhileStatement;
+
+  // await in the condition → needs a condition-eval state (follow-up).
+  if (countAwaitsInStatement(whileStmt.expression, awaitSet) > 0) return null;
+
+  // Reject abrupt-exit / non-linear control inside the loop body.
+  if (loopBodyHasUnsupportedControl(whileStmt.statement)) return null;
+
+  const bodyStmts = ts.isBlock(whileStmt.statement) ? whileStmt.statement.statements : [whileStmt.statement];
+
+  // Lower the loop body into suspend segments via the shared linear lowering.
+  const st: LowerState = {
+    segments: [],
+    lead: [],
+    leadInTry: [],
+    finalizer: null,
+    theFinalizer: null,
+    usedFinally: false,
+    sawReturnAwait: false,
+  };
+  if (!lowerLinearStatements(bodyStmts, st, awaitSet)) return null;
+  if (st.segments.length === 0) return null; // no canonical await in the body
+  if (st.segments.length !== plan.awaitPoints.length) return null; // stray await elsewhere
+  for (const seg of st.segments) if (seg.isReturnAwait) return null; // return-await in loop — follow-up
+  if (st.theFinalizer !== null) return null; // try/finally in loop — follow-up
+
+  return {
+    pre: [...body.statements.slice(0, whileIdx)],
+    cond: whileStmt.expression,
+    segments: st.segments,
+    tail: st.lead,
+    post: [...body.statements.slice(whileIdx + 1)],
+    whileStmt,
+  };
+}
+
+/** True when the loop body contains control the bounded 3a slice cannot express. */
+function loopBodyHasUnsupportedControl(loopBody: ts.Statement): boolean {
+  let bad = false;
+  const walk = (node: ts.Node): void => {
+    if (bad) return;
+    if (isNestedFunctionScope(node)) return; // a nested fn's break/return is its own
+    if (
+      ts.isBreakStatement(node) ||
+      ts.isContinueStatement(node) ||
+      ts.isReturnStatement(node) ||
+      ts.isLabeledStatement(node) ||
+      ts.isSwitchStatement(node) ||
+      ts.isForStatement(node) ||
+      ts.isForOfStatement(node) ||
+      ts.isForInStatement(node) ||
+      ts.isWhileStatement(node) ||
+      ts.isDoStatement(node) ||
+      ts.isTryStatement(node)
+    ) {
+      bad = true;
+      return;
+    }
+    forEachChild(node, walk);
+  };
+  walk(loopBody);
+  return bad;
+}
+
+/**
+ * Build the loop CFG for a bounded `while (cond) { …await… }` async body.
+ * State layout (dense ids in push order):
+ *   [entry]  pre-loop leads → goto(head)          (only when pre is non-empty)
+ *    head    lead=[]        → condGoto(cond, body0, exit)   ← back-edge target
+ *    body_k  seg_k leads    → suspend(seg_k.await, resume→next)   (k = 0..m-1)
+ *    cont    tail leads     → goto(head)                    (the back-edge)
+ *    exit    post leads     → settleUndefined
+ */
+function planWhileLoopCfg(fn: ts.FunctionLikeDeclaration, plan: AsyncCpsPlan): AsyncCfgPlan | null {
+  const shape = analyzeWhileAsync(fn, plan);
+  if (shape === null) return null;
+  const { pre, cond, segments, tail, post } = shape;
+  const m = segments.length;
+
+  const hasPre = pre.length > 0;
+  const headId = hasPre ? 1 : 0;
+  const body0Id = headId + 1;
+  const contId = body0Id + m; // continuation after the last body await
+  const exitId = contId + 1;
+
+  const asLead = (stmts: readonly ts.Statement[]): AsyncCfgStmt[] => stmts.map((stmt) => ({ stmt, handler: 0 }));
+
+  const states: AsyncCfgState[] = [];
+  if (hasPre) {
+    states.push({ id: 0, resumeFrom: null, lead: asLead(pre), terminator: { kind: "goto", target: headId } });
+  }
+  // Loop head: evaluate the condition, branch into the body or the exit.
+  states.push({
+    id: headId,
+    resumeFrom: null,
+    lead: [],
+    terminator: { kind: "condGoto", cond, whenTrue: body0Id, whenFalse: exitId, handler: 0 },
+  });
+  // Body suspend states (one per await).
+  for (let k = 0; k < m; k++) {
+    const seg = segments[k]!;
+    states.push({
+      id: body0Id + k,
+      resumeFrom: k === 0 ? null : { binding: segments[k - 1]!.resumeBinding, handler: 0 },
+      lead: asLead(seg.leadStmts),
+      terminator: {
+        kind: "suspend",
+        awaited: seg.awaitedExpr,
+        resumeState: k < m - 1 ? body0Id + k + 1 : contId,
+        handler: 0,
+      },
+    });
+  }
+  // Continuation: deliver the last await's value, run the tail, loop back.
+  states.push({
+    id: contId,
+    resumeFrom: { binding: segments[m - 1]!.resumeBinding, handler: 0 },
+    lead: asLead(tail),
+    terminator: { kind: "goto", target: headId },
+  });
+  // Exit: run the post-loop statements, settle undefined.
+  states.push({
+    id: exitId,
+    resumeFrom: null,
+    lead: asLead(post),
+    terminator: { kind: "settleUndefined" },
+  });
+
+  return { states, handlers: [] };
+}
+
+/**
+ * (#2906 slice 3a) The own-locals that must be spilled for a `while`-with-await
+ * body, plus the body's suspend segments (for resume-binding spill types). Every
+ * own-local (non-param) referenced anywhere in the loop statement is live across
+ * the loop-carried await — a local read textually BEFORE the await is read again
+ * AFTER the resume on the next iteration — so the whole set is spilled (rule 3/4
+ * of the 3a contract: widen to every loop own-local + every resume binding is
+ * self-live). Returns `null` when the body is not the bounded while shape.
+ */
+export function loopAsyncSpillInfo(
+  fn: ts.FunctionLikeDeclaration,
+  plan: AsyncCpsPlan,
+): { names: string[]; segments: readonly LinearAwaitSegment[] } | null {
+  const shape = analyzeWhileAsync(fn, plan);
+  if (shape === null) return null;
+  const ownLocals = new Set<string>();
+  collectAllDeclaredNames(fn, ownLocals);
+  const paramNames = new Set<string>();
+  for (const p of fn.parameters) {
+    if (ts.isIdentifier(p.name)) paramNames.add(p.name.text);
+    else collectBindingPatternNames(p.name, paramNames);
+  }
+  // Names referenced anywhere in the while statement that are own body locals.
+  const names: string[] = [];
+  const seen = new Set<string>();
+  const walk = (node: ts.Node): void => {
+    if (isNestedFunctionScope(node)) return;
+    if (ts.isIdentifier(node) && ownLocals.has(node.text) && !paramNames.has(node.text) && !seen.has(node.text)) {
+      seen.add(node.text);
+      names.push(node.text);
+    }
+    forEachChild(node, walk);
+  };
+  walk(shape.whileStmt);
+  return { names, segments: shape.segments };
+}
+
+// ---------------------------------------------------------------------------
 // Internal helpers (private to async-cps.ts)
 // ---------------------------------------------------------------------------
 

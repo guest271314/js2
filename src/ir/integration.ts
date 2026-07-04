@@ -312,11 +312,13 @@ export function compileIrPathFunctions(
       if (!classShape) continue;
 
       for (const member of stmt.members) {
-        if (!ts.isMethodDeclaration(member) || !member.name) continue;
-        // Phase B v1 — instance methods only. Static methods skip `self`
-        // injection and use a different funcMap entry shape; defer to a
-        // follow-up. Abstract methods have no body — Phase A already
+        // Phase B v1 — instance methods + (#3000-B) instance get/set accessors.
+        // Static members skip `self` injection and use a different funcMap
+        // entry shape; defer. Abstract methods have no body — Phase A already
         // rejected them as `class-method`.
+        const isAccessor = ts.isGetAccessorDeclaration(member) || ts.isSetAccessorDeclaration(member);
+        if (!ts.isMethodDeclaration(member) && !isAccessor) continue;
+        if (!member.name) continue;
         const isStatic = member.modifiers?.some((m) => m.kind === ts.SyntaxKind.StaticKeyword) ?? false;
         if (isStatic) continue;
         if (member.modifiers?.some((m) => m.kind === ts.SyntaxKind.AbstractKeyword)) continue;
@@ -325,13 +327,26 @@ export function compileIrPathFunctions(
         // numeric-literal — replicate the dispatch here without re-importing
         // the helper (it's selector-private). The synthetic name format
         // mirrors `class-bodies.ts:275` exactly.
-        let methodNameRaw: string;
-        if (ts.isIdentifier(member.name)) methodNameRaw = member.name.text;
+        let memberBaseName: string;
+        if (ts.isIdentifier(member.name)) memberBaseName = member.name.text;
         else if (ts.isStringLiteral(member.name) || ts.isNumericLiteral(member.name)) {
-          methodNameRaw = member.name.text;
+          memberBaseName = member.name.text;
         } else continue; // computed / private name — skipped by selector
 
-        const memberName = `${className}_${methodNameRaw}`;
+        // #3000-B: accessors register under `${className}_get_${prop}` /
+        // `${className}_set_${prop}` funcMap keys (see `class-bodies.ts`); a
+        // setter is VOID (`returnTypeOverride: null`), a getter returns
+        // `member.type` unchanged. Methods keep `${className}_${name}`.
+        let memberName: string;
+        let returnTypeOverride: IrType | null | undefined;
+        if (ts.isGetAccessorDeclaration(member)) {
+          memberName = `${className}_get_${memberBaseName}`;
+        } else if (ts.isSetAccessorDeclaration(member)) {
+          memberName = `${className}_set_${memberBaseName}`;
+          returnTypeOverride = null; // set accessor bodies return void
+        } else {
+          memberName = `${className}_${memberBaseName}`;
+        }
         if (!selected.classMembers.has(memberName)) continue;
 
         try {
@@ -339,6 +354,7 @@ export function compileIrPathFunctions(
             exported: false, // class methods are not directly exported
             funcName: memberName,
             selfParam: { type: { kind: "class", shape: classShape } as IrType },
+            returnTypeOverride,
             calleeTypes,
             classShapes,
             resolver: fromAstResolver,

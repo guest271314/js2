@@ -36,12 +36,13 @@ import type { Instr, ValType, WasmFunction } from "../ir/types.js";
  * drive layer exists is precisely the AG0 −31 regression).
  */
 import { forEachChild, ts } from "../ts-api.js";
-import type { AsyncCfgPlan, AsyncCfgState, AsyncCpsPlan, AsyncResumePoint, LinearAwaitPlan } from "./async-cps.js";
+import type { AsyncCfgPlan, AsyncCfgState, AsyncCpsPlan, AsyncResumePoint } from "./async-cps.js";
 import {
   ASYNC_CPS_ENABLED,
   asyncFnNeedsCps,
   awaitedExprIsPromiseCombinator,
-  linearPlanToCfg,
+  loopAsyncSpillInfo,
+  planAsyncCfg,
   planLinearAwaits,
 } from "./async-cps.js";
 import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S3 / #2710) stable-regime minting
@@ -426,7 +427,15 @@ export function asyncFnNeedsDrive(ctx: CodegenContext, fn: ts.FunctionLikeDeclar
   const anyRealSuspension = plan.awaitPoints.some((a) => plan.awaitedStaticallyResolved.get(a) !== true);
   if (!anyRealSuspension) return false; // fully await-elidable → sync + resolved promise
   const linear = planLinearAwaits(fn, plan);
-  if (linear === null) return false;
+  if (linear === null) {
+    // (#2906 slice 3a) `while`-with-await loop shape (native drive lane only).
+    // Eligible when every widened loop spill local has a spill-safe type — a
+    // non-spill-safe field (e.g. a non-nullable ref with no inert default) would
+    // make the frame layout invalid, so those fall back to legacy.
+    const loop = computeLoopSpills(ctx, fn, plan);
+    if (loop === null) return false;
+    return loop.spillTypes.every(isSpillSafeType);
+  }
   // Parity with asyncFnNeedsCps: a lone `await Promise.all(...)`/`.race`/… already
   // yields a real Promise — keep it on the legacy identity path.
   if (linear.segments.length === 1 && awaitedExprIsPromiseCombinator(linear.segments[0]!.awaitedExpr)) return false;
@@ -439,6 +448,44 @@ export function asyncFnNeedsDrive(ctx: CodegenContext, fn: ts.FunctionLikeDeclar
     if (!isSpillSafeType(resumeBindingValType(ctx, rb))) return false;
   }
   return true;
+}
+
+/**
+ * (#2906 slice 3a) The widened spill layout for a `while`-with-await body: every
+ * own-local referenced anywhere in the loop statement is live across the
+ * loop-carried await (a local read before the await is read again after resume
+ * on the next iteration), so the whole set is spilled. Resume-binding names use
+ * their {@link resumeBindingValType} (matching the SENT-coercion target); other
+ * locals use `resolveSpillLocalValType`, defaulting to externref. Returns `null`
+ * when the body is not the bounded while shape.
+ */
+function computeLoopSpills(
+  ctx: CodegenContext,
+  decl: ts.FunctionLikeDeclaration,
+  plan: AsyncCpsPlan,
+): { spillNames: string[]; spillTypes: ValType[] } | null {
+  const loop = loopAsyncSpillInfo(decl, plan);
+  if (loop === null) return null;
+  const rbTypeByName = new Map<string, ValType>();
+  for (const seg of loop.segments) {
+    if (seg.resumeBinding) rbTypeByName.set(seg.resumeBinding.name, resumeBindingValType(ctx, seg.resumeBinding));
+  }
+  const declByName = collectVarDeclsByName(decl);
+  const spillNames: string[] = [];
+  const spillTypes: ValType[] = [];
+  for (const name of loop.names) {
+    const rbType = rbTypeByName.get(name);
+    if (rbType !== undefined) {
+      spillNames.push(name);
+      spillTypes.push(rbType);
+      continue;
+    }
+    const declNode = declByName.get(name);
+    const resolved = declNode ? resolveSpillLocalValType(ctx, declNode) : null;
+    spillNames.push(name);
+    spillTypes.push(resolved ?? { kind: "externref" });
+  }
+  return { spillNames, spillTypes };
 }
 
 /**
@@ -465,7 +512,11 @@ function computeAsyncSpills(
   paramNames: string[],
 ): { spillNames: string[]; spillTypes: ValType[] } {
   const linear = planLinearAwaits(decl, plan);
-  if (linear === null) return { spillNames: [], spillTypes: [] };
+  if (linear === null) {
+    // (#2906 slice 3a) `while`-with-await loop: widened spill set (all loop
+    // own-locals). Returns empty for any non-loop non-linear body.
+    return computeLoopSpills(ctx, decl, plan) ?? { spillNames: [], spillTypes: [] };
+  }
   const paramSet = new Set(paramNames);
 
   const rbTypeByName = new Map<string, ValType>();
@@ -603,18 +654,20 @@ function validateAsyncCfg(cfg: AsyncCfgPlan): string | null {
 export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameInfo, plan: AsyncCpsPlan): number {
   if (info.resumeFuncIdx !== undefined) return info.resumeFuncIdx;
 
-  const linear = planLinearAwaits(info.decl, plan);
-  if (linear === null) {
-    reportError(ctx, info.decl, "internal: async-frame resume built on an unsupported body shape (#2906 slice 1)");
+  // (#2906 slice 3/3a) Build the general CFG plan the emitter drives.
+  // `planAsyncCfg` delegates linear bodies to the byte-identical
+  // `linearPlanToCfg(planLinearAwaits(...))` path, and — on the native drive lane
+  // only (`allowLoops: !info.host`) — lowers a canonical `while`-with-await body
+  // into the loop CFG (head condGoto + body suspends + back-edge goto). The host
+  // settle backend keeps the linear-only shape (loops there suspend on every
+  // await — an N-round follow-up).
+  const cfg = planAsyncCfg(info.decl, plan, { allowLoops: !info.host });
+  if (cfg === null) {
+    reportError(ctx, info.decl, "internal: async-frame resume built on an unsupported body shape (#2906 slice 1/3a)");
     info.resumeFuncIdx = -1;
     return -1;
   }
 
-  // (#2906 slice 3) Lower the linear plan into the general CFG plan the emitter
-  // drives. `linearPlanToCfg` is the only producer today, so the emitted machine
-  // is byte-identical to the pre-CFG emitter for every accepted shape; richer
-  // planners (loops, try/catch, for-await) plug in HERE without emitter changes.
-  const cfg = linearPlanToCfg(linear);
   const cfgError = validateAsyncCfg(cfg);
   if (cfgError !== null) {
     reportError(ctx, info.decl, `internal: async CFG plan violates the emitter contract — ${cfgError} (#2906)`);
@@ -1090,8 +1143,15 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
         }
         case "goto": {
           // Unconditional state transition (loop back-edge when target ≤ id).
+          // (#2906 slice 3a) `loopDepth` (== id+2) is the depth that reaches the
+          // re-dispatch `loop` from ONE level inside an `if` arm — that is where
+          // the suspend fast-path `advanceArm` br sits (inside `if(suspended)`),
+          // the only pre-3a exerciser of the re-dispatch br. This `goto` br is
+          // emitted at the STATE-BODY TOP LEVEL (one level shallower), so the
+          // loop is one nearer: `loopDepth - 1`. (Fixes the off-by-one the
+          // producer-unreachable slice-3 goto shipped with.)
           out.push(...setStateI32FromConst(info, frameLocal, STATE_FIELD, term.target));
-          out.push({ op: "br", depth: loopDepth } as Instr);
+          out.push({ op: "br", depth: loopDepth - 1 } as Instr);
           break;
         }
         case "condGoto": {
@@ -1107,13 +1167,14 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
             blockType: { kind: "empty" },
             then: [
               ...setStateI32FromConst(info, frameLocal, STATE_FIELD, term.whenTrue),
-              // +1: the `br` sits inside this `if` arm, one level below the arm
-              // top where `loopDepth` is measured.
-              { op: "br", depth: loopDepth + 1 } as Instr,
+              // The br sits inside this `if(cond)` arm — one level deep, exactly
+              // like the suspend `advanceArm` br — so it reaches the loop at
+              // `loopDepth` (id+2), NOT loopDepth+1.
+              { op: "br", depth: loopDepth } as Instr,
             ],
             else: [
               ...setStateI32FromConst(info, frameLocal, STATE_FIELD, term.whenFalse),
-              { op: "br", depth: loopDepth + 1 } as Instr,
+              { op: "br", depth: loopDepth } as Instr,
             ],
           } as Instr);
           break;

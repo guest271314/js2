@@ -30,7 +30,6 @@ import { emitCachedMethodClosureAccess, emitFuncRefAsClosure, getOrCreateFuncRef
 import {
   BUILTIN_STATIC_METHOD_ARITY,
   ensureBuiltinFnMetaType,
-  pushBuiltinFnClosureValueInstrs,
   pushBuiltinFnSingletonValueInstrs,
   STANDALONE_STATIC_METHOD_META,
 } from "./builtin-fn-meta.js";
@@ -1116,7 +1115,11 @@ function tryCompileStandaloneBuiltinProtoMemberRead(
     if (!closureInfo) return undefined;
 
     // self struct (param 0) — unused by the body (no captures) but type-required.
-    fctx.body.push(...pushBuiltinFnClosureValueInstrs(ctx, closure));
+    // (#2175 V2-S2) Use the identity-stable singleton so the getter function object
+    // invoked here is the SAME object gOPD's `.get` synthesis returns (calls.ts
+    // Site-2) — `gOPD(p,"flags").get === gOPD(p,"flags").get`. One value per
+    // (brand, member), everywhere (C2).
+    fctx.body.push(...pushBuiltinFnSingletonValueInstrs(ctx, closure));
     // `this` arg (param 1): the builtin proto object externref.
     if (!emitLazyNativeProtoGet(ctx, fctx, brand)) return undefined;
     // call_ref operand: the typed funcref. `ref.func` yields `(ref liftedType)`
@@ -1127,7 +1130,15 @@ function tryCompileStandaloneBuiltinProtoMemberRead(
     return closureInfo.returnType ?? { kind: "externref" };
   }
 
-  fctx.body.push(...pushBuiltinFnClosureValueInstrs(ctx, closure));
+  // (#2175 V2-S2) IDENTITY-STABLE method value: read via a module-level singleton
+  // so `RegExp.prototype.exec === RegExp.prototype.exec` (a fresh `struct.new` per
+  // read gave two distinct instances → `!==`). The value struct is the UNIQUE
+  // per-(brand, member) meta subtype (`ensureBuiltinFnMetaType` cache key
+  // `proto:<brand>:method:<member>`), so the singleton global keys on that distinct
+  // typeIdx and `RegExp.prototype.exec !== RegExp.prototype.test` still holds. This
+  // is the SAME singleton the #2885 gOPD synthesis (calls.ts Site-2) materializes,
+  // so `gOPD(RegExp.prototype,"exec").value === RegExp.prototype.exec`.
+  fctx.body.push(...pushBuiltinFnSingletonValueInstrs(ctx, closure));
   return closure.type;
 }
 

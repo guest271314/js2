@@ -330,7 +330,16 @@ export interface LoweredFunctionResult {
 }
 
 export function lowerFunctionAstToIr(
-  fn: ts.FunctionDeclaration | ts.MethodDeclaration | ts.ConstructorDeclaration,
+  fn:
+    | ts.FunctionDeclaration
+    | ts.MethodDeclaration
+    | ts.ConstructorDeclaration
+    // #3000-B: get/set accessors lower as no-arg / one-arg instance members
+    // over the (now-supported) private slot. A getter behaves like a no-param
+    // method whose return type is `fn.type`; a setter behaves like a one-param
+    // VOID method (setters carry no source-level return type).
+    | ts.GetAccessorDeclaration
+    | ts.SetAccessorDeclaration,
   options: AstToIrOptions = {},
 ): LoweredFunctionResult {
   // #1370 Phase B: name resolution.
@@ -372,7 +381,10 @@ export function lowerFunctionAstToIr(
   // bare `return;` / fall-through tails.
   const isVoidReturn =
     !isGenerator &&
-    (options.returnTypeOverride === null ||
+    // #3000-B: a set accessor is inherently void (no source-level return type);
+    // treat it as void even if the caller forgot the explicit override.
+    (ts.isSetAccessorDeclaration(fn) ||
+      options.returnTypeOverride === null ||
       (options.returnTypeOverride === undefined && fn.type?.kind === ts.SyntaxKind.VoidKeyword));
   const returnType: IrType | null = isGenerator
     ? irVal({ kind: "externref" })
@@ -823,6 +835,32 @@ function lowerTail(stmt: ts.Statement, cx: LowerCtx): void {
       cx.builder.terminate({ kind: "return", values: [] });
       return;
     }
+    // #3000-B: property-store assignment as a void tail — the SET accessor
+    // body shape `set name(v) { this.#name = v; }`. Route through the SAME
+    // `lowerPropertyAssignment` the non-tail statement path uses (see
+    // `lowerStatementList`), so a setter's lone assignment produces bytes
+    // identical to the mid-body case, then synthesize the implicit return.
+    if (
+      ts.isBinaryExpression(stmt.expression) &&
+      stmt.expression.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      ts.isPropertyAccessExpression(stmt.expression.left)
+    ) {
+      lowerPropertyAssignment(stmt.expression, cx);
+      cx.builder.terminate({ kind: "return", values: [] });
+      return;
+    }
+    // #3000-B: element-store assignment as a void tail (`arr[i] = v;` as the
+    // final statement of a void function) — mirror the non-tail element-store
+    // arm for select↔build parity.
+    if (
+      ts.isBinaryExpression(stmt.expression) &&
+      stmt.expression.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      ts.isElementAccessExpression(stmt.expression.left)
+    ) {
+      lowerElementStore(stmt.expression.left, stmt.expression.right, cx);
+      cx.builder.terminate({ kind: "return", values: [] });
+      return;
+    }
     // Lower the expression for side effects, discard the value.
     lowerExpr(stmt.expression, cx, irVal({ kind: "externref" }));
     cx.builder.terminate({ kind: "return", values: [] });
@@ -1065,7 +1103,13 @@ interface LowerCtx {
  * to their own scope and don't influence the outer's slot decisions.
  */
 function collectMutatedLetNames(
-  fn: ts.FunctionDeclaration | ts.MethodDeclaration | ts.ConstructorDeclaration,
+  fn:
+    | ts.FunctionDeclaration
+    | ts.MethodDeclaration
+    | ts.ConstructorDeclaration
+    // #3000-B: accessors reach this via `lowerFunctionAstToIr`; only `.body` is read.
+    | ts.GetAccessorDeclaration
+    | ts.SetAccessorDeclaration,
 ): Set<string> {
   const writes = new Set<string>();
   if (!fn.body) return writes;

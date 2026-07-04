@@ -2,7 +2,7 @@
 id: 2175
 title: "architect spec: standalone builtin-prototype object representation + native-method-closure dispatch"
 status: in-progress
-assignee: ttraenkler/fable-2175
+assignee: ttraenkler/opus-2175s2
 sprint: current
 created: 2026-06-16
 updated: 2026-07-04
@@ -1148,3 +1148,105 @@ narrative): `const f = (x)=>x*2; const a:any=f;`
 - **V2-S3 (proto table)**: the reader arms will read closure structs back as
   `$PropEntry.value` (raw anyref, D4) — their `typeof`/Function-ness now
   resolves through this same classifier for free.
+
+---
+
+## Implementation log — V2-S2 (sdev opus-2175s2, 2026-07-04)
+
+PR: **V2-S2 of 7** — singleton unification of builtin-proto method/getter
+values. Branch `issue-2175-v2s2`. Status: implemented, host-free,
+standalone-gated, byte-neutral off-path.
+
+### What landed
+
+Switched the three C2 surfaces that reify a builtin-prototype method/getter
+VALUE from a fresh per-read `struct.new` (`pushBuiltinFnClosureValueInstrs`)
+to the #2963 identity-stable module singleton
+(`pushBuiltinFnSingletonValueInstrs`):
+
+1. **`property-access.ts` method arm** (`tryCompileStandaloneBuiltinProtoMemberRead`,
+   the syntactic `RegExp.prototype.exec` value read).
+2. **`property-access.ts` getter arm** (the getter self-struct operand for the
+   `call_ref` that invokes an accessor getter — so the getter object invoked
+   here is the same one gOPD's `.get` returns).
+3. **`calls.ts` #2885 gOPD Site-2** — both the data-descriptor `.value` and the
+   accessor-descriptor `.get`.
+
+Removed the now-unused `pushBuiltinFnClosureValueInstrs` import from
+`property-access.ts`; `calls.ts` swapped its import to the singleton.
+
+### Why it is correct AND collision-free (the load-bearing invariant)
+
+`pushBuiltinFnSingletonValueInstrs` keys its per-value module global on
+`closure.type.typeIdx`. That typeIdx is the **UNIQUE per-(brand,member) meta
+subtype** minted by `ensureBuiltinFnMetaType` under cache key
+`proto:<brand>:<kind>:<member>` (verified: `builtin-fn-meta.ts:199-219`
+memoizes on that key, one typeIdx per key). So:
+- **same member, different surface** (syntactic read vs gOPD synthesis) →
+  same cacheKey → same typeIdx → same global → **one object** →
+  `gOPD(p,"exec").value` and `RegExp.prototype.exec` are the same singleton;
+- **different member** (`exec` vs `test`) → different cacheKey → different
+  typeIdx → different global → **distinct objects** → `exec !== test` holds by
+  construction (the swap-guard is structural, not incidental).
+
+### Proof (inject/contrast, not narrative — builtin-proto hides coincidental passes)
+
+- **Surface-1 identity is genuinely fixed:** on baseline (`HEAD~1`, fresh
+  struct.new) `const a:any=RegExp.prototype.exec; const b:any=RegExp.prototype.exec; a===b`
+  → **0**; with the singleton → **1**. Swap-guard `exec===test` → **0** on
+  BOTH (proves `===` discriminates; the `1` is not always-true, and the
+  `typeof===\"function\"` guard proves it is not `null===null`).
+- **Surface-3 materializes the RIGHT singleton:** `typeof gOPD(...).value ===
+  \"function\"` and `.value.name === \"exec\"`; `typeof gOPD(...,\"flags\").get
+  === \"function\"` and `.get.name === \"get flags\"` (§10.2.9). The function
+  classification flows through the **V2-S1 shared closure classifier**
+  (`closure-classifier.ts` via the materialized `__typeof` arm) — V2-S2
+  consumes it, mints no new arm list.
+- **Byte-neutral off-path:** `prove-emit-identity` — all 39 (file,target)
+  corpus emits IDENTICAL across gc/standalone/wasi. The four sites are
+  `ctx.standalone`-gated and only fire on a builtin-proto member VALUE read /
+  gOPD synthesis, so host mode and every non-reflective program are unchanged.
+- **No regression:** #2963 reification, #2896 fn-meta, #2861 glue wave (proto
+  value reads), #2949 slice3/3b dynamic, #2580 dyn-read, #2885, #2175 typeof,
+  #2175 native-proto-brands — 189+ tests green. The 4 pre-existing failures in
+  `issue-2175-regexp-proto-readers.test.ts` (getter-engine-body boundary) fail
+  IDENTICALLY on `HEAD~1` — not regressed here; they belong to V2-S5.
+
+Test: `tests/issue-2175-v2s2-singleton-identity.test.ts` (6/6).
+
+### KEY FINDING for V2-S3 (banked — this de-risks the keystone slice)
+
+The end-to-end gate `gOPD(RegExp.prototype,\"exec\").value === RegExp.prototype.exec`
+is **NOT** achievable by singleton unification alone, and the reason is NOT the
+singleton: the descriptor stores the correct singleton, but its `.value` reads
+back as an **externref-wrapped `$Object`**, and the standalone `===` lowering
+does **not** `ref.eq`-compare an externref-wrapped GC ref against a raw anyref.
+This is a **pre-existing, broad** value-representation gap, proven independent
+of this change:
+- `const o:any={z:1}; const a:any[]=[o,o]; a[0]===a[1]` → **0** (a plain user
+  object referenced twice loses identity through the externref boundary);
+- `gOPD(RegExp.prototype,\"exec\").value === gOPD(...).value` (same field, two
+  reads) → **0**;
+- yet `const o:any=RegExp.prototype.exec; const a:any[]=[o,o]; a[0]===a[1]` →
+  **1** (anyref/GC-ref identity via `ref.eq` DOES work — the gap is specifically
+  the externref-wrapped read-back, not `===` generally).
+
+So this is squarely **C3 (the dynamic-reader MOP + value representation)**,
+owned by V2-S3: once the reader returns closure structs back as **raw anyref**
+`$PropEntry.value` (D4 — the spec already mandates this), the descriptor
+`.value`/`.get` become GC refs, `ref.eq` fires, and the identity gate **flips
+to 1 for free** — the descriptor already carries the right singleton (this
+slice). `tests/issue-2175-v2s2-singleton-identity.test.ts` includes an explicit
+`.toBe(0)` **characterization guard** for this boundary that will FAIL LOUDLY
+when V2-S3 lands, prompting the flip to `.toBe(1)`.
+
+### Banked for V2-S3+
+
+- The three value surfaces are unified — V2-S3's proto table populate body
+  (`__nativeproto_populate_<brand>`) MUST store the **same** singleton
+  (emit `pushBuiltinFnSingletonValueInstrs` against the same closure) so the
+  runtime-read value keeps identity with the syntactic surfaces. One value per
+  (brand, member), everywhere.
+- The externref/`$Object`-vs-anyref `===` gap above is the concrete substrate
+  V2-S3's D4 (raw-anyref carrier) exists to close — carry the raw closure
+  struct, not an `extern.convert_any` box, in `$PropEntry.value`.
