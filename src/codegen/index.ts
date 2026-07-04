@@ -1559,6 +1559,8 @@ export function generateModule(
   fallbackCounts?: FallbackCounts;
   // #1923 — IR post-claim demotions (only when trackIrPostClaim is set).
   irPostClaimErrors?: { kind: string; func: string; message: string }[];
+  // #3000 — functions/class-members actually IR-emitted (genuine-emission signal).
+  irCompiledFuncs?: readonly string[];
   // #2138 — legacy bodies skipped under JS2WASM_IR_FIRST=1 (undefined when off).
   irFirstSkipped?: readonly string[];
 } {
@@ -1960,6 +1962,10 @@ export function generateModule(
       const plan = irPlan ?? planIrOverlay(ctx, ast);
       const { selection, classShapes, overrideMap, safeSelection, trackFallbacks } = plan;
       const report = compileIrPathFunctions(ctx, ast.sourceFile, safeSelection, overrideMap, classShapes);
+      // #3000 — record the set of functions/class-members whose slots were
+      // actually patched with an IR body (genuine-emission signal; a mere
+      // selector claim does not imply this — see `irCompiledFuncs` doc).
+      ctx.irCompiledFuncs = report.compiled;
       // Slice 12 (#1169o) — most IR-path failures are NOT compile errors. The
       // legacy path has already produced a working `body` for every function
       // before `compileIrPathFunctions` runs; an ordinary IR throw here is a
@@ -2471,6 +2477,7 @@ export function generateModule(
     errors: ctx.errors,
     fallbackCounts: ctx.fallbackCounts,
     irPostClaimErrors: ctx.irPostClaimErrors,
+    irCompiledFuncs: ctx.irCompiledFuncs,
     irFirstSkipped,
   };
 }
@@ -6739,6 +6746,8 @@ export function generateMultiModule(
   fallbackCounts?: FallbackCounts;
   // #1923 — IR post-claim demotions (only when trackIrPostClaim is set).
   irPostClaimErrors?: { kind: string; func: string; message: string }[];
+  // #3000 — functions/class-members actually IR-emitted (genuine-emission signal).
+  irCompiledFuncs?: readonly string[];
 } {
   const mod = createEmptyModule();
   const ctx = createCodegenContext(mod, multiAst.checker, options);
@@ -7092,6 +7101,7 @@ export function generateMultiModule(
     errors: ctx.errors,
     fallbackCounts: ctx.fallbackCounts,
     irPostClaimErrors: ctx.irPostClaimErrors,
+    irCompiledFuncs: ctx.irCompiledFuncs,
   };
 }
 
