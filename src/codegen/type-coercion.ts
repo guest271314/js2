@@ -15,6 +15,7 @@ import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js
 import { addUnionImports, ensureAnyHelpers, ensureAnyToExternHelper, isAnyValue } from "./index.js";
 import { ensureAnyToStringHelper, stringConstantExternrefInstrs } from "./native-strings.js";
 import { emitThrowTypeError } from "./expressions/helpers.js";
+import { ensureWrapperStringValueHelper } from "./object-runtime.js";
 import { ensureNativeArrayFromIterN } from "./iterator-native.js";
 import { markNoBrandSiblingShapes } from "./shape-brand.js";
 import { emitNativeNumberFormat } from "./number-format-native.js";
@@ -1811,6 +1812,33 @@ export function coerceType(
       const tupleFields = getTupleFields(ctx, toIdx);
       if (tupleFields) {
         elseBranch = buildTupleFromExternref(ctx, fctx, tmpAnyLocal, toIdx, tupleFields, tmpExternLocal);
+      } else if (
+        // (#2161 B1) externref → native `$AnyString` where the cast failed: the
+        // source may be a boxed-`new String(...)` wrapper ($Object carrying its
+        // [[StringData]] under the FLAG_INTERNAL WRAPPER_PRIMITIVE_KEY slot). The
+        // generic `ref.test $AnyString` misses it (a wrapper is an object, not a
+        // string) so it was dropped to null → downstream `__str_flatten` trapped
+        // on `new String(s).split/search/match/replace`. Recover the wrapper's
+        // primitive string via `__wrapper_string_value` (the same internal-slot
+        // read `__to_primitive` does inline, WITHOUT the OrdinaryToPrimitive
+        // valueOf/toString dispatch — a bare slot probe). Gated on the object
+        // runtime already being present (`ensureWrapperStringValueHelper` returns
+        // -1 for gc/host mode or a string-free / object-free module) so string-
+        // free programs stay byte-identical. Only the `$AnyString` supertype
+        // target qualifies — the wrapper's stored string is a native-string
+        // subtype of it, so the helper's `ref.cast $AnyString` never traps;
+        // narrower string-subtype targets keep the prior null fallthrough.
+        toIdx === ctx.anyStrTypeIdx &&
+        ctx.anyStrTypeIdx >= 0 &&
+        ctx.objectRuntimeTypes !== undefined &&
+        ctx.funcMap.has("__obj_find") &&
+        ensureWrapperStringValueHelper(ctx) >= 0
+      ) {
+        const wrapperValIdx = ctx.funcMap.get("__wrapper_string_value")!;
+        elseBranch = [
+          { op: "local.get", index: tmpExternLocal },
+          { op: "call", funcIdx: wrapperValIdx },
+        ];
       } else {
         elseBranch = [{ op: "ref.null", typeIdx: toIdx } as Instr];
       }

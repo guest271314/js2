@@ -612,3 +612,62 @@ vs clean main). tsc clean.
 
 **#2161 stays open (blocked on #2175)** for F6 reflection; F7 dynamic-receiver
 architecture remains the next (unbounded) pickup.
+
+## Slice 11 (2026-07-04, opus-2161b1) — family B1: boxed `new String` receiver/argument — LANDED
+
+**Landed** the banked B1 contract (slice-10 family map, row B1). Regrounded on
+current main: every `new String(...)` receiver/argument in a standalone
+RegExp/String-method context trapped **"dereferencing a null pointer"** — split /
+search / match / replace / matchAll on a boxed-String receiver, and
+`re.exec(new String(s))` / `re.test(new String(s))` in the argument position.
+
+**Root cause (verified).** `new String(x)` builds a `$Object` wrapper
+(`__new_String`, object-runtime.ts) carrying its [[StringData]] under the
+reserved FLAG_INTERNAL `WRAPPER_PRIMITIVE_KEY` slot. When that wrapper reached
+the externref → native-`$AnyString` coercion else-arm in `coerceType`
+(type-coercion.ts — the string-method subject / string-argument path both target
+`nativeStringType` = `ref $AnyString`), the generic `ref.test $AnyString` missed
+it (a wrapper is an object, not a string) and the value was dropped to
+`ref.null` → the downstream `__str_flatten` trapped on null.
+
+**Fix** (zero new host imports, standalone-only, byte-inert for non-boxing
+programs):
+
+- `src/codegen/object-runtime.ts`: new lazily-registered
+  `ensureWrapperStringValueHelper(ctx)` → defines
+  `__wrapper_string_value(externref) -> ref null $AnyString`. It extracts JUST
+  the wrapper's primitive-string slot — the SAME internal-slot read
+  `__to_primitive` performs inline (§7.1.1.1: `ref.test $Object` →
+  `__obj_find(WRAPPER_PRIMITIVE_KEY)` → FLAG_INTERNAL check → `ref.test
+$AnyString` on the slot value → cast, else null) — WITHOUT pulling in
+  OrdinaryToPrimitive (the valueOf/toString method dispatch). Returns the native
+  string for a boxed-String wrapper, null for every other value (plain object,
+  other wrapper kind, non-string slot). Registered on demand and idempotently, so
+  a module that never boxes a String stays byte-identical.
+- `src/codegen/type-coercion.ts`: the externref → `ref/ref_null` arm's failed-cast
+  else-branch, when the target is exactly `$AnyString` (`toIdx ===
+ctx.anyStrTypeIdx`) and the object runtime is present
+  (`ctx.objectRuntimeTypes` + `__obj_find`), now calls `__wrapper_string_value`
+  instead of dropping to null. Only the `$AnyString` supertype target qualifies —
+  the wrapper's stored string is a native-string subtype, so the helper's
+  `ref.cast $AnyString` never traps; narrower string-subtype targets keep the
+  prior null fallthrough. gc/host mode (anyStrTypeIdx = -1) and string-free
+  modules fall through unchanged.
+
+**Validation.** New `tests/issue-2161-b1-boxed-string.test.ts` (11 cases, all
+standalone + empty importObject asserting zero non-`wasm:js-string` import leak):
+the real test262 `instance-is-string-hello` split shape (length/`[0]`/`[1]`/`[2]`),
+split-by-string, search, match (global + numbered captures), replace, matchAll on
+a boxed receiver; `re.exec` / `re.test` with a boxed-String argument; plus
+no-regression controls (plain string receiver, plain-object argument stays a
+non-match). Byte-inertness confirmed: numeric / array / string / object programs
+compile to sha256-identical binaries vs clean main (helper is emitted only when a
+qualifying coercion needs it). Blast-radius battery (~35 files: regex #1539/#1911/
+#1912/#1913/#1914/#1474/#2161-_/#2175/#2588/#2591/#2671, wrapper #1910-_/#2029/
+#2160-wrapper-_, equality #2191/#2503b, string-coercion #1470-_/#2160/#2598/#2600/
+#2374, coercion #1917/call-arg/#2934) shows every failure is PRE-EXISTING on clean
+main (identical sets — the #1539/#2161 "expects-refusal" reds and the #2175
+in-flight / #2600 gc-mode reds) — my change adds **zero** new failures. tsc clean.
+
+**#2161 stays open (blocked on #2175)** for F6 reflection; F7 dynamic-receiver
+architecture and the B5 annexB-escape point-fix are the remaining pickups.
