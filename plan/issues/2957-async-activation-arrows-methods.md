@@ -59,12 +59,12 @@ subset; test262 async tests overwhelmingly use arrows and methods.
 Canonical single-tail-await body `await g(x)` in all four shapes, compiled
 host-mode, `f(1)` inspected in JS for `typeof result.then === 'function'`:
 
-| shape                    | `f(1)` returns        | activated? |
-| ------------------------ | --------------------- | ---------- |
-| `async function` decl    | real Promise (→ 2)    | YES        |
-| `const f = async () =>`  | sync number `2`       | **NO**     |
-| `const f = async fn(){}` | sync number `2`       | **NO**     |
-| class `async method`     | sync number `2`       | **NO**     |
+| shape                    | `f(1)` returns     | activated? |
+| ------------------------ | ------------------ | ---------- |
+| `async function` decl    | real Promise (→ 2) | YES        |
+| `const f = async () =>`  | sync number `2`    | **NO**     |
+| `const f = async fn(){}` | sync number `2`    | **NO**     |
+| class `async method`     | sync number `2`    | **NO**     |
 
 Confirms the bug for all three non-declaration shapes. (Note a naive probe
 that assigns the result into an `any`/externref slot and checks
@@ -102,7 +102,7 @@ Good news: the machinery is already shape-agnostic below the hook. All of
 `asyncFnNeedsHostDrive`, `emitAsyncStateMachine`, and
 `emitAsyncFrameStateMachine` already take `ts.FunctionLikeDeclaration` and
 build the frame from `fctx.params` + the body — no declaration assumption in
-the emitters themselves. The gap is purely that nobody *calls* them from the
+the emitters themselves. The gap is purely that nobody _calls_ them from the
 arrow/method paths.
 
 Recommended factoring: extract the activation block from `function-body.ts`
@@ -159,9 +159,9 @@ new shared module `src/codegen/async-activation.ts`, exporting:
 export function maybeActivateAsync(
   ctx: CodegenContext,
   fctx: FunctionContext,
-  decl: ts.FunctionLikeDeclaration,   // widened from FunctionDeclaration for phases 2–3
+  decl: ts.FunctionLikeDeclaration, // widened from FunctionDeclaration for phases 2–3
   func: WasmFunction,
-): boolean            // true ⇒ caller skips its statement loop (body already emitted)
+): boolean; // true ⇒ caller skips its statement loop (body already emitted)
 ```
 
 `compileFunctionBody` now calls it; the internal `ts.isFunctionDeclaration`
