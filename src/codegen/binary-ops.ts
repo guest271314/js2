@@ -1934,6 +1934,34 @@ export function compileBinaryExpression(
       const isStrictNeq = op === ts.SyntaxKind.ExclamationEqualsEqualsToken;
       if (isStrictEq || isStrictNeq) {
         if (leftIsRef && rightIsRef) {
+          // (#3037 CS1b(ii)) When BOTH operands are the tagged `$AnyValue` box (in
+          // standalone), raw `ref.eq` is the WRONG strict-eq: `$AnyValue` is a
+          // discriminated union, so two boxes of the same logical value have
+          // distinct struct identity but must compare by TAG (a tag-3 number by
+          // value, a tag-5 string by content, a tag-6 object by `refval` identity).
+          // This pair reaches here only when binary-ops' line-1086 any-dispatch was
+          // skipped because `anyValueTypeIdx` was still unregistered at the binary
+          // expression's entry, yet an operand later became `$AnyValue` (the CS1b
+          // element/member-read carrier registers the type lazily). Route to the
+          // tag-aware `__any_strict_eq` so `const a: any = [5,5]; a[0] === a[1]`
+          // (and the string analogue) stay correct. Non-`$AnyValue` ref pairs
+          // (class instances, nominal structs) keep genuine `ref.eq` identity.
+          const bothAnyValue =
+            ctx.standalone &&
+            ctx.anyValueTypeIdx >= 0 &&
+            leftType.kind === "ref" &&
+            rightType.kind === "ref" &&
+            leftType.typeIdx === ctx.anyValueTypeIdx &&
+            rightType.typeIdx === ctx.anyValueTypeIdx;
+          if (bothAnyValue) {
+            ensureAnyHelpers(ctx);
+            const strictEqIdx = ctx.funcMap.get("__any_strict_eq");
+            if (strictEqIdx !== undefined) {
+              fctx.body.push({ op: "call", funcIdx: strictEqIdx });
+              if (isStrictNeq) fctx.body.push({ op: "i32.eqz" });
+              return { kind: "i32" };
+            }
+          }
           fctx.body.push({ op: "ref.eq" });
           if (isStrictNeq) fctx.body.push({ op: "i32.eqz" });
           return { kind: "i32" };
