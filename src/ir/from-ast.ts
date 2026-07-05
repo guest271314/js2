@@ -3466,13 +3466,22 @@ function lowerMethodCall(expr: ts.CallExpression, cx: LowerCtx, statementPositio
     }
     args.push(argVal);
   }
-  if (method.returnType === null) {
+  // #3051: a VOID instance method is legal in STATEMENT position
+  // (`this.add(x);` / `obj.tick();`) — only reject void in EXPRESSION position
+  // (mirrors the `super.method()` arm above and the extern-class arm below).
+  // The `class.call` emit + lowering already carry a null result through: a
+  // void method's Wasm slot leaves nothing on the operand stack, so the
+  // statement emits balanced (no drop needed) via `emitBlockBody`'s
+  // `result === null` in-place path. The selector already CLAIMS this shape —
+  // before this slice from-ast threw here, demoting the caller post-claim to
+  // legacy (banked in #3000-C's notes).
+  if (method.returnType === null && !statementPosition) {
     throw new Error(
       `ir/from-ast: void method ${recvType.shape.className}.${methodName} used in expression position (${cx.funcName})`,
     );
   }
   const r = cx.builder.emitClassCall(recv, methodName, args, method.returnType);
-  if (r === null) {
+  if (method.returnType !== null && r === null) {
     // Defensive — emitClassCall returns null only when resultType is null.
     throw new Error(`ir/from-ast: class.call produced no result in ${cx.funcName}`);
   }
