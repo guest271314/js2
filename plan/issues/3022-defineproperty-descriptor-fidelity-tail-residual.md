@@ -1,23 +1,31 @@
 ---
 id: 3022
-title: "spec gap: Object.defineProperty(ies) descriptor fidelity tail + non-object receiver arm (~728 default-lane fails)"
-status: blocked
+title: "UMBRELLA: Object.defineProperty(ies) descriptor fidelity + non-object-receiver tail (~728 default-lane fails)"
+status: ready
 sprint: current
 created: 2026-07-03
-updated: 2026-07-04
+updated: 2026-07-05
 priority: high
 horizon: m
-feasibility: medium
+feasibility: hard
 reasoning_effort: medium
-task_type: bugfix
+task_type: umbrella
 area: runtime
 language_feature: object-defineproperty, property-descriptors
 es_edition: 5
 goal: spec-completeness
 test262_category: built-ins/Object/defineProperty, built-ins/Object/defineProperties
 test262_fail: 728
-related: [1334, 1629, 1629a, 1631]
+related: [1334, 1629, 1629a, 1631, 2726]
+children: [3042, 3043, 3044, 3045, 3046]
 ---
+
+> **UMBRELLA (decomposed 2026-07-05, dev-2726).** This 728-fail blob is NOT a
+> single dispatchable task — it fragments into distinct root causes across two
+> clusters (descriptor-fidelity ~600, non-object-receiver ~128). Filed
+> sub-issues + cause-scoped clusters are in `## Decomposition` below. Keep this
+> issue `ready` as the umbrella tracker; dispatch the **children**. Do NOT claim
+> #3022 itself for implementation.
 
 # #3022 — Object.defineProperty(ies): descriptor fidelity tail + non-object receiver
 
@@ -132,3 +140,60 @@ distinct senior-dev-sized fix in value-rep / array-exotic / #1712 machinery; 4 i
 a grab-bag). None is a low-regression-risk single `medium` PR. No code change is
 proposed here — shipping a partial fix to any one cause risks broad regressions
 across the host-mode object surface without a full-CI validation pass.
+
+## Decomposition (2026-07-05, dev-2726)
+
+Acting on the dev-3022 recommendation above (which analysed the causes but did
+not file them). Re-harvested both clusters from
+`.test262-cache/test262-current.jsonl` and cross-tabulated error string × feature
+to separate true root causes from shared symptoms.
+
+### Cluster 1 — descriptor-fidelity (~600, `built-ins/Object/define{Property,Properties}`)
+
+The dev-3022 causes 1–3 are the **senior** value-rep / exotic / closure clusters;
+the grab-bag (cause 4) splits into three cleaner pieces. Filed vs cause-scoped:
+
+| root cause | fails | scope | tracked as |
+|---|---|---|---|
+| **attribute round-trip fidelity** (writable/enumerable/configurable via `verifyProperty`, primitive values) | ~74 | **DEV** | **#3042** (filed) |
+| **illegal-transition + SameValue validation** (non-configurable redefine should-throw; +0/-0/NaN; false-positive Cannot-redefine) — dev-3022 cause 4 | ~50 | **SENIOR** | **#3043** (filed) |
+| **descriptor-shape codegen crashes** (invalid Wasm / illegal cast / op.endsWith / ctors-not-defined) | ~16 | **DEV** | **#3044** (filed) |
+| **value round-trip: struct-widening vs sidecar read** (`value: undefined`/object read returns struct default, `SameValue`-differs) — dev-3022 cause 1 | ~40+ | **SENIOR** (value-rep, #1629 S3 / #2106) | cause-scoped, file when a senior picks it up |
+| **array exotic `[[DefineOwnProperty]]`** (plural `defineProperties(arr,…)`, array-index/`length` §10.4.2) — dev-3022 cause 2 | ~83 | **SENIOR** (array-exotic, #2186 vec) | cause-scoped |
+| **prototype-chain descriptor-field read** (inherited `value`/`get` dropped; function-scope fnctor instance not registered) — dev-3022 cause 3 | ~33 | **SENIOR** (#1712 closure/global machinery) | cause-scoped |
+
+The three **cause-scoped** senior clusters keep their full repros in the dev-3022
+section above; they are deliberately NOT filed as separate issues yet (each is a
+senior-dev-sized value-rep/exotic fix — file on pickup to avoid stale un-owned
+issues). #3042/#3044 are the immediately **dev-dispatchable** wins.
+
+### Cluster 2 — non-object-receiver (~128, "called on non-object")
+
+Cross-tab (error string × feature) shows these are NOT one bug — they are
+internal `Object`/`Reflect` ops hitting a non-object receiver across ~7 features:
+
+| root cause | fails | scope | tracked as |
+|---|---|---|---|
+| **top-level `this` / global-object model** (`Object.defineProperty(this,…)` at script top level; global/eval var+func declaration binding) | ~89 | **ARCH/SENIOR** | folds into **#2726 (b)** — same structural root (top-level-`this`-as-global-object). Route to that issue's architect spec; do NOT dup. |
+| **class private-element brand check** (`Reflect.has` on non-object; private methods/generators/static-private) | ~8 | **DEV** | **#3045** (filed) |
+| **JSON.parse reviver `this`-binding** (reviver `this` must be the holder) | 4 | **DEV** | **#3046** (filed) |
+| **module namespace exotic object** (`Reflect.{has,deleteProperty,defineProperty,set,preventExtensions}` on `import * as ns`) | 10 | **SENIOR** (namespace-object representation) | cause-scoped, file on pickup |
+| **annexB `[[IsHTMLDDA]]`** (document.all emulation as `@@replace`/`@@match`) | 6 | DEFERRED (niche annexB) | note only |
+| **`$262.createRealm` cross-realm** (`create-proto-from-ctor-realm-*`; OArray undefined — realms unsupported) | 6 | DEFERRED (realm infra) | note only |
+| misc singletons (Date/Error/RegExp.prototype called-as-function, Proxy, typeof get-value, defineProperties edge) | ~5 | mixed | note only |
+
+**Big finding:** ~89 of the 128 "non-object" fails share the **top-level-`this`-
+as-global-object** root cause — the SAME structural gap as the two remaining
+#2726 group-(b) tests (`S11.4.1_A3.1` `delete this.y`, `S11.4.1_A3.3_T1`
+implicit-global). Fixing the global-object model (architect spec on #2726 (b))
+would clear ~89 defineProperty fails as a side effect. This is the single
+highest-leverage item in the whole #3022 tail and is architect-gated.
+
+### Dispatch summary
+
+- **DEV-dispatchable now:** #3042 (attribute fidelity), #3044 (codegen crashes),
+  #3045 (class private brand-check), #3046 (JSON reviver `this`).
+- **SENIOR:** #3043 (transition validation) + the 3 cause-scoped descriptor
+  clusters (value-round-trip, array-exotic, prototype-chain) + module-namespace.
+- **ARCH-gated:** the ~89-fail top-level-`this`/global-object model → #2726 (b).
+- **DEFERRED:** annexB `[[IsHTMLDDA]]`, `$262.createRealm` realms.
