@@ -1712,6 +1712,62 @@ function genBodyReferencesThis(node: ts.Node): boolean {
   return found;
 }
 
+/**
+ * (#3046) True when `node` is the **reviver** argument (2nd arg) of a
+ * `JSON.parse(text, reviver)` call. Per ECMA-262 §25.5.1.1
+ * `InternalizeJSONProperty`, the reviver is invoked as
+ * `Call(reviver, holder, «name, val»)` — `this` MUST be the holder. The host
+ * `JSON_parse` / `_invokeJsonCallable` bridge applies the holder as the JS
+ * receiver, so the reviver callback must route through the `this`-forwarding
+ * `__make_getter_callback` maker (needsThis) rather than the bare
+ * `__make_callback`, which drops the receiver and leaves `this` non-object
+ * (a `this.`-op such as `Object.defineProperty(this, …)` then throws
+ * "called on non-object").
+ */
+function isJsonReviverArgument(node: ts.Node): boolean {
+  const parent = node.parent;
+  if (!parent || !ts.isCallExpression(parent)) return false;
+  if (parent.arguments[1] !== node) return false; // must be the 2nd arg
+  const callee = parent.expression;
+  return (
+    ts.isPropertyAccessExpression(callee) &&
+    ts.isIdentifier(callee.expression) &&
+    callee.expression.text === "JSON" &&
+    callee.name.text === "parse"
+  );
+}
+
+/**
+ * (#3046) True when the function-expression / arrow `fn` references `this`
+ * from ITS OWN scope: descend through nested arrows (they inherit `fn`'s
+ * `this`), but stop at nested function expressions / declarations / methods /
+ * classes (they rebind `this`). Used to gate the reviver `this`-forwarding so
+ * a reviver that never touches `this` keeps the unchanged `__make_callback`
+ * path (zero-risk), and only `this`-using revivers take the getter-callback
+ * bridge.
+ */
+export function functionBodyReferencesThis(fn: ts.ArrowFunction | ts.FunctionExpression): boolean {
+  const walk = (node: ts.Node): boolean => {
+    if (node.kind === ts.SyntaxKind.ThisKeyword) return true;
+    if (
+      ts.isFunctionExpression(node) ||
+      ts.isFunctionDeclaration(node) ||
+      ts.isMethodDeclaration(node) ||
+      ts.isAccessor(node) ||
+      ts.isClassLike(node)
+    ) {
+      return false; // own `this` binding — does not inherit fn's receiver
+    }
+    let found = false;
+    forEachChild(node, (child) => {
+      if (!found && walk(child)) found = true;
+    });
+    return found;
+  };
+  // Inspect the body only (not `fn` itself, which is a function boundary).
+  return walk(fn.body);
+}
+
 export function compileArrowFunction(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -1720,7 +1776,11 @@ export function compileArrowFunction(
   // If used as callback argument to a host call, use the __make_callback path
   if (isHostCallbackArgument(arrow, ctx)) {
     const deferredInvocation = isDeferredCallbackArgument(arrow, ctx);
-    return compileArrowAsCallback(ctx, fctx, arrow, { deferredInvocation });
+    // (#3046) A JSON.parse reviver that reads `this` must have the holder
+    // forwarded as its receiver (§25.5.1.1). Route it through the
+    // `this`-forwarding `__make_getter_callback` bridge.
+    const needsThis = isJsonReviverArgument(arrow) && functionBodyReferencesThis(arrow);
+    return compileArrowAsCallback(ctx, fctx, arrow, { deferredInvocation, needsThis });
   }
   // Otherwise, compile as a first-class closure value
   return compileArrowAsClosure(ctx, fctx, arrow);

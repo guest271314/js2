@@ -23,7 +23,12 @@ import { ensureWrapperTypes } from "./any-helpers.js";
 import { ASYNC_CPS_ENABLED, analyzeAsyncBody, asyncFnNeedsCps } from "./async-cps.js";
 import { asyncFnNeedsHostDrive } from "./async-frame.js";
 import { collectClassDeclaration, compileClassBodies } from "./class-bodies.js";
-import { collectBindingPatternNames, collectReferencedIdentifiers, emitCachedFuncClosureAccess } from "./closures.js";
+import {
+  collectBindingPatternNames,
+  collectReferencedIdentifiers,
+  emitCachedFuncClosureAccess,
+  functionBodyReferencesThis,
+} from "./closures.js";
 import { addFunctionOwnLocals } from "./binding-info.js"; // (#2103) memoized own-locals oracle
 import { reportError } from "./context/errors.js";
 import type { CodegenContext, FunctionContext, OptionalParamInfo } from "./context/types.js";
@@ -916,6 +921,27 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
             }
           }
         }
+      }
+    }
+  }
+  // ── getterCallbackFound: JSON.parse(text, reviver) reviver that reads `this` (#3046) ──
+  // §25.5.1.1 InternalizeJSONProperty invokes the reviver with the holder as
+  // `this`. A reviver that touches `this` must route through the
+  // `this`-forwarding `__make_getter_callback` bridge (see
+  // `compileArrowFunction` in closures.ts). Register the import here so the
+  // needsThis emit at the call site has it available.
+  if (!state.getterCallbackFound && ts.isCallExpression(node)) {
+    const callee = node.expression;
+    if (
+      ts.isPropertyAccessExpression(callee) &&
+      ts.isIdentifier(callee.expression) &&
+      callee.expression.text === "JSON" &&
+      callee.name.text === "parse" &&
+      node.arguments.length >= 2
+    ) {
+      const reviver = node.arguments[1]!;
+      if ((ts.isFunctionExpression(reviver) || ts.isArrowFunction(reviver)) && functionBodyReferencesThis(reviver)) {
+        state.getterCallbackFound = true;
       }
     }
   }
