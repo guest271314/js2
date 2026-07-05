@@ -111,8 +111,9 @@ describe("#3000 — IR private-field substrate", () => {
     for (const fb of sel.fallbacks ?? []) reasons.set(fb.name, fb.reason);
     expect(reasons.get("Animal_speak")).toBeUndefined();
     expect(reasons.get("Animal_new")).toBeUndefined();
-    // Inheritance / super members stay class-method (later #3000 phases).
-    expect(reasons.get("Dog_speak")).toBe("class-method");
+    // #3000-E landed inheritance/super: `Dog_speak` (a `super.speak()` override)
+    // is now CLAIMED, not deferred as class-method. (Was `class-method` pre-#3000-E.)
+    expect(reasons.get("Dog_speak")).toBeUndefined();
   });
 
   it("compiles + runs: private read via IR, incl. super-dispatch to the IR parent method", async () => {

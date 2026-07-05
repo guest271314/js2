@@ -42,7 +42,7 @@ import {
   noJsHost,
   resolveDeclaringClassForPrivateName,
 } from "./expressions/helpers.js";
-import { undefinedSingletonActive } from "./any-helpers.js";
+import { ensureAnyFromExternHelper, undefinedSingletonActive } from "./any-helpers.js";
 import { emitUndefined, patchStructNewForAddedField } from "./expressions/late-imports.js";
 import { emitSymbolDescLoad } from "./symbol-native.js";
 import {
@@ -227,6 +227,71 @@ const WELL_KNOWN_SYMBOLS: Record<string, number> = {
   dispose: 13,
   asyncDispose: 14,
 };
+
+/**
+ * (#3037 CS1b) True when `expr` is a direct operand of a standalone
+ * `any === any` / `!==` / `==` / `!=` comparison — the EXACT shape that
+ * binary-ops.ts routes through the AnyValue equality dispatch
+ * (`compileAnyBinaryDispatch` → `emitAnyEqOperands`), which fires only when BOTH
+ * operands are statically `any` (`leftTsType.flags & Any` on both sides,
+ * binary-ops.ts:1082-1090). Mirroring that gate exactly guarantees a carrier
+ * produced here can only ever flow into `emitAnyEqOperands`'s `isAnyValue`
+ * fast-path and never into a downstream read/store.
+ */
+function isAnyEqualityOperand(ctx: CodegenContext, expr: ts.Expression): boolean {
+  const parent = expr.parent;
+  if (!parent || !ts.isBinaryExpression(parent)) return false;
+  const op = parent.operatorToken.kind;
+  const isEq =
+    op === ts.SyntaxKind.EqualsEqualsToken ||
+    op === ts.SyntaxKind.ExclamationEqualsToken ||
+    op === ts.SyntaxKind.EqualsEqualsEqualsToken ||
+    op === ts.SyntaxKind.ExclamationEqualsEqualsToken;
+  if (!isEq) return false;
+  if (parent.left !== expr && parent.right !== expr) return false;
+  // #1930 oracle-ratchet: query type facts through `ctx.oracle` (never the raw
+  // TS checker). `typeFactOf(...).kind === "any"` is the exact equivalent of the
+  // `flags & TypeFlags.Any` gate binary-ops.ts uses to route the pair through the
+  // AnyValue equality dispatch (the oracle maps the `Any` type flag to
+  // `{ kind: "any" }`), so this mirrors that gate precisely.
+  const leftAny = ctx.oracle.typeFactOf(parent.left).kind === "any";
+  const rightAny = ctx.oracle.typeFactOf(parent.right).kind === "any";
+  return leftAny && rightAny;
+}
+
+/**
+ * (#3037 CS1b — dynamic member-read carrier) When a dynamic `any`-typed member
+ * READ compiled to a bare externref and is a direct operand of a standalone
+ * `any`-equality (see {@link isAnyEqualityOperand}), re-classify it through the
+ * ALWAYS-honest `__any_from_extern_honest` classifier so it reaches `===` as a
+ * proper `$AnyValue`: an object → **tag-6** (identity in `refval` → the tag-6
+ * same-tag `ref.eq` arm answers identity), a `$BoxedNumber` → **tag-3** (value),
+ * a `$BoxedBoolean` → **tag-4**, a `$AnyString` → **tag-5** (content). This flips
+ * the CS0 residuals `o.a === o.b` (case b), `o.n === o.n` (case e) and
+ * `gOPD.value === gOPD.value` (case a) WITHOUT touching the generic `boxToAny`
+ * externref arm (−788) or the `===` operand seam (−299) — the change is purely
+ * the reader's result ValType (externref → `$AnyValue`), gated to exactly the
+ * shape that routes through `emitAnyEqOperands` so the carrier never reaches a
+ * subsequent read/store (which `$AnyValue` would break — the CS1a finding).
+ *
+ * Byte-inert off-path: any precondition unmet → the bare externref is returned
+ * unchanged (a half-migrated tag-6 × tag-5 pair still reconciles via S3a's
+ * cross-tag arm, so partial coverage only under-fixes, never regresses).
+ */
+export function maybeWrapAnyReadEqualityCarrier(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.Expression,
+  result: ValType | null,
+): ValType | null {
+  if (!ctx.standalone) return result;
+  if (!result || result.kind !== "externref") return result;
+  if (!isAnyEqualityOperand(ctx, expr)) return result;
+  const classifyIdx = ensureAnyFromExternHelper(ctx, { forceHonest: true });
+  if (classifyIdx === undefined || ctx.anyValueTypeIdx < 0) return result;
+  fctx.body.push({ op: "call", funcIdx: classifyIdx } as Instr);
+  return { kind: "ref", typeIdx: ctx.anyValueTypeIdx };
+}
 
 /**
  * #2020: resolve an inherited static-property global by walking the class
@@ -2025,6 +2090,82 @@ export function emitNullGuardedStructGet(
     blockType: { kind: "val" as const, type: resultType },
     then: nullBranch,
     else: [{ op: "local.get", index: tmp } as Instr, { op: "struct.get", typeIdx, fieldIdx } as Instr],
+  });
+}
+
+/**
+ * (#3039) Resolve a name to a DIRECT boxed captured global — a
+ * transitively-captured mutable local that a method-shorthand / class-method /
+ * class-accessor body reads or writes itself. `promoteAccessorCapturesToGlobals`
+ * aliases the ref-cell BOX in a module global and records the inner value type
+ * in `ctx.capturedBoxGlobals`. Returns the entry only when `valType` is present:
+ * transitive-fn box entries (used only by closure materialization in calls.ts)
+ * leave it undefined and must NOT be dereferenced by the scalar read/write
+ * sites. The read/write sites (identifiers.ts / assignment.ts /
+ * unary-updates.ts) consult this FIRST — before `capturedGlobals` — so a boxed
+ * capture derefs the cell instead of treating the global as holding the value.
+ */
+export function getCapturedBoxGlobal(
+  ctx: CodegenContext,
+  name: string,
+): { globalIdx: number; refCellTypeIdx: number; valType: ValType } | undefined {
+  const e = ctx.capturedBoxGlobals?.get(name);
+  if (e && e.valType) {
+    return e as { globalIdx: number; refCellTypeIdx: number; valType: ValType };
+  }
+  return undefined;
+}
+
+/**
+ * (#3039) Emit a null-guarded READ of a boxed captured global. Leaves the inner
+ * value on the stack and returns its type. Mirrors the `boxedCaptures`
+ * (local-box) read in identifiers.ts, sourcing the box ref from a module global
+ * instead of a local slot. The box is initialised to null and set by the
+ * enclosing function at object/class construction, so an uninitialised cell
+ * yields the type default (never traps) — matching the local-box semantics.
+ */
+export function emitCapturedBoxGlobalRead(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  entry: { globalIdx: number; refCellTypeIdx: number; valType: ValType },
+): ValType {
+  fctx.body.push({ op: "global.get", index: entry.globalIdx });
+  emitNullGuardedStructGet(
+    ctx,
+    fctx,
+    { kind: "ref_null", typeIdx: entry.refCellTypeIdx },
+    entry.valType,
+    entry.refCellTypeIdx,
+    0,
+    undefined /* propName */,
+    false /* throwOnNull — ref cells use default for uninitialized captures */,
+  );
+  return entry.valType;
+}
+
+/**
+ * (#3039) Emit a null-guarded WRITE through a boxed captured global. The value
+ * to store must already sit in `valLocalIdx` (typed as `entry.valType`). Mirrors
+ * the `boxedCaptures` (local-box) write in assignment.ts: if the box ref is null
+ * the store is skipped (#702), otherwise `struct.set field 0` writes through the
+ * shared cell so the enclosing scope observes the mutation.
+ */
+export function emitCapturedBoxGlobalWrite(
+  fctx: FunctionContext,
+  entry: { globalIdx: number; refCellTypeIdx: number },
+  valLocalIdx: number,
+): void {
+  fctx.body.push({ op: "global.get", index: entry.globalIdx });
+  fctx.body.push({ op: "ref.is_null" });
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: [] as Instr[],
+    else: [
+      { op: "global.get", index: entry.globalIdx } as Instr,
+      { op: "local.get", index: valLocalIdx } as Instr,
+      { op: "struct.set", typeIdx: entry.refCellTypeIdx, fieldIdx: 0 } as Instr,
+    ],
   });
 }
 
@@ -7022,6 +7163,40 @@ export function compileElementAccess(
         fctx.body.push({ op: "call", funcIdx: charAtIdx });
         return { kind: "ref", typeIdx: ctx.nativeStrTypeIdx };
       }
+    }
+  }
+
+  // (#3027) Computed non-numeric key on a string/String-wrapper-typed
+  // receiver — `"str"["length"]`, `new String("x")["length"]`. Native-strings
+  // mode has no `$Object` sidecar for a bare string or wrapper receiver, so
+  // the generic "non-vec, non-tuple struct" fallback further below
+  // (`extern.convert_any` + host `__extern_get`) always returns null for a
+  // computed string-property read — there is no host to ask, and the struct
+  // shape (len/off/data) never matches a property name like "length". The
+  // dot form (`"str".length`) already dispatches correctly through
+  // `compilePropertyAccess`; recompile this access as the equivalent dot form
+  // (same receiver, same statically-resolved key) so it takes that exact path
+  // instead of duplicating the logic here. Numeric keys are handled above
+  // (#1910 R4) or by the array/vec paths below; only fires for a
+  // non-numeric, statically-resolvable key.
+  if (
+    ctx.nativeStrings &&
+    ctx.anyStrTypeIdx >= 0 &&
+    !isNumericIndexExpression(ctx, expr.argumentExpression) &&
+    // (#1930) Query the receiver's static string-ness via the TypeOracle, not
+    // the raw checker. `isStringType` matched BOTH a primitive string and the
+    // `String` wrapper object; the oracle equivalents are
+    // `staticJsTypeOf === "string"` (primitive) OR `builtinReceiverOf ===
+    // "String"` (`new String(x)` wrapper), which together cover the same set.
+    (ctx.oracle.staticJsTypeOf(expr.expression) === "string" ||
+      ctx.oracle.builtinReceiverOf(expr.expression) === "String")
+  ) {
+    const key = resolveComputedKeyExpression(ctx, expr.argumentExpression);
+    if (key !== undefined) {
+      const syntheticProp = ts.factory.createPropertyAccessExpression(expr.expression, key);
+      ts.setTextRange(syntheticProp, expr);
+      (syntheticProp as unknown as { parent: ts.Node }).parent = expr.parent;
+      return compilePropertyAccess(ctx, fctx, syntheticProp);
     }
   }
 

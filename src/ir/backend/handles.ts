@@ -145,6 +145,16 @@ export interface IrClassLowering {
   readonly constructorFuncName: string;
   methodFuncName(name: string): string;
   /**
+   * #3000-E: legacy-registered name of the constructor-init function
+   * (`<className>_init`) — signature `(...ctorParams, self) -> (ref $struct)`,
+   * carrying field inits + the ctor body, operating on a caller-allocated
+   * instance. A derived `super(...)` lowers to `call <parent>_init(args..., self)`.
+   * The resolver's `resolveFunc` maps it to the funcIdx. Present for every
+   * WasmGC-struct (non-externref-backed) class, which is exactly the set that
+   * can appear as an IR-claimable subclass parent.
+   */
+  readonly initFuncName: string;
+  /**
    * #3000-C: the raw Wasm instruction sequence that allocates a fresh,
    * default-initialised instance of this class — the default field values
    * (with the `__tag` slot set to the class's discrimination constant)
@@ -248,6 +258,51 @@ export interface IrDynamicLowering {
    * see the issue notes + #2106).
    */
   emitTagTest(tag: JsTag, scratch: () => number): readonly Instr[];
+  /**
+   * Carrier on the stack → i32 (0/1): `ToBoolean(carrier)` (§7.1.2, #2949
+   * S5.1). Routes to the SAME `coercion-engine.emitToBoolean` legacy uses —
+   * `__any_unbox_bool` on the gc `$AnyValue` carrier, `__is_truthy` on the
+   * host externref carrier — so `0`/`NaN`/`""`/`null`/`undefined` are falsy
+   * in both strategies, byte-parity with legacy's condition lowering (one
+   * ToBoolean engine, June-audit D4). Unlike `emitUnbox(Boolean)` (which
+   * reads a PROVEN boolean's payload), this is defined over EVERY partition
+   * and needs no `tag.test` proof.
+   */
+  emitToBoolean(): readonly Instr[];
+  /**
+   * One carrier on the stack → the operand shape this backend's equality
+   * helper takes (#2949 S5.2). Emitted once per operand, immediately after that
+   * operand is pushed:
+   *   - gc: the carrier IS `(ref null $AnyValue)`, exactly what
+   *     `__any_strict_eq`/`__any_eq` take → identity (`[]`).
+   *   - host: the carrier is `externref`, exactly what
+   *     `__host_eq`/`__host_loose_eq` take → identity (`[]`).
+   * (It exists as a hook because a future backend might need a real
+   * per-operand marshalling; today both are identity.)
+   */
+  emitEqOperand(): readonly Instr[];
+  /**
+   * Two operands on the stack (each run through {@link emitEqOperand}) → i32
+   * (0/1): STRICT equality `===` (§7.2.16), routed to the SAME helper the
+   * matching legacy backend uses (D4, byte-parity with the legacy runtime
+   * result). `negate` appends `i32.eqz` for `!==`.
+   *   - gc/fast/standalone: the native `__any_strict_eq` — its tag-5 field-4
+   *     classifier owns cross-type falsity, numeric-class `23 === 23.0`,
+   *     `NaN === NaN → false` (the helper's `f64.eq`), and reference identity.
+   *   - host: `__host_eq` (JS `===`). (The `__any_strict_eq` path is NOT
+   *     host's — legacy host `any === any` compares the raw externrefs; the
+   *     `__any_*_eq` helper family is the standalone/`noJsHost` branch.)
+   */
+  emitStrictEq(negate: boolean): readonly Instr[];
+  /**
+   * Two operands on the stack → i32 (0/1): LOOSE equality `==` (§7.2.15),
+   * routed to the matching legacy backend's helper (D4). `negate` appends
+   * `i32.eqz` for `!=`.
+   *   - gc/fast/standalone: `__any_eq` (String⇄Number / `null == undefined` /
+   *     ToPrimitive arms live in the helper body).
+   *   - host: `__host_loose_eq` (JS `==`).
+   */
+  emitLooseEq(negate: boolean): readonly Instr[];
 }
 
 /**

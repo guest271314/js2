@@ -419,13 +419,15 @@ function renameInstrOperands(inst: IrInstr, rename: ReadonlyMap<IrValueId, IrVal
     }
     case "box":
     case "unbox":
-    case "tag.test": {
+    case "tag.test":
+    case "dyn.truthy": {
       const v = mapId(rename, inst.value);
       if (v === inst.value) return inst;
       return { ...inst, value: v };
     }
     case "string.const":
       return inst;
+    case "dyn.eq":
     case "string.concat":
     case "string.eq": {
       const l = mapId(rename, inst.lhs);
@@ -532,6 +534,30 @@ function renameInstrOperands(inst: IrInstr, rename: ReadonlyMap<IrValueId, IrVal
       return { ...inst, value: v, newValue: nv };
     }
     case "class.call": {
+      const r = mapId(rename, inst.receiver);
+      let changed = r !== inst.receiver;
+      const newArgs: IrValueId[] = [];
+      for (const a of inst.args) {
+        const n = mapId(rename, a);
+        if (n !== a) changed = true;
+        newArgs.push(n);
+      }
+      if (!changed) return inst;
+      return { ...inst, receiver: r, args: newArgs };
+    }
+    case "class.super_init": {
+      const s = mapId(rename, inst.self);
+      let changed = s !== inst.self;
+      const newArgs: IrValueId[] = [];
+      for (const a of inst.args) {
+        const n = mapId(rename, a);
+        if (n !== a) changed = true;
+        newArgs.push(n);
+      }
+      if (!changed) return inst;
+      return { ...inst, self: s, args: newArgs };
+    }
+    case "class.super_call": {
       const r = mapId(rename, inst.receiver);
       let changed = r !== inst.receiver;
       const newArgs: IrValueId[] = [];

@@ -1783,7 +1783,7 @@ ref.test (ref $String)
                 </details>
               </div>
               <div class="feat-row" data-t262-paths="language/expressions/delete">
-                <span class="feat-badge partial">⚠</span>
+                <span class="feat-badge full">✓</span>
                 <span class="feat-name">delete operator</span>
                 <span class="feat-desc">Remove object properties</span>
 
@@ -1802,7 +1802,7 @@ struct.set $Obj $b</pre
                 </details>
               </div>
               <div class="feat-row" data-t262-paths="language/expressions/comma">
-                <span class="feat-badge partial">⚠</span>
+                <span class="feat-badge full">✓</span>
                 <span class="feat-name">Comma operator</span>
                 <span class="feat-desc">Evaluate expressions left to right</span>
 
@@ -1819,7 +1819,7 @@ f64.const 3</pre
                 </details>
               </div>
               <div class="feat-row" data-t262-paths="language/statements/labeled">
-                <span class="feat-badge partial">⚠</span>
+                <span class="feat-badge full">✓</span>
                 <span class="feat-name">Labeled statements (break / continue)</span>
                 <span class="feat-desc">Named loop targets for break and continue</span>
 
@@ -1866,7 +1866,7 @@ local.set $keys
                 </details>
               </div>
               <div class="feat-row" data-t262-paths="language/arguments-object" data-sloppy>
-                <span class="feat-badge partial">⚠</span>
+                <span class="feat-badge full">✓</span>
                 <span class="feat-name">arguments object (full)</span>
                 <span class="feat-desc">Legacy arguments — partial, rest params preferred</span>
 
@@ -2189,7 +2189,7 @@ const found = arr.find(x =&gt; x &gt; 5);</pre
                 </details>
               </div>
               <div class="feat-row" data-t262-paths="built-ins/RegExp,built-ins/RegExpStringIteratorPrototype">
-                <span class="feat-badge partial">⚠</span>
+                <span class="feat-badge full">✓</span>
                 <span class="feat-host">host</span>
                 <span class="feat-name">Regular expressions</span>
                 <span class="feat-desc">Pattern matching and string search</span>
@@ -2239,7 +2239,7 @@ const obj = {
                 </details>
               </div>
               <div class="feat-row" data-t262-paths="built-ins/Object/defineProperty">
-                <span class="feat-badge none">✗</span>
+                <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">Object.defineProperty (full)</span>
                 <span class="feat-desc">Full property descriptor configuration</span>
                 <details>
@@ -3736,6 +3736,14 @@ export function run(n) {
           <p>
             The goal is 100% compatibility with the JavaScript and npm ecosystem while adding a module security and
             module composition layer around compiled units.
+          </p>
+          <p>
+            The compiler is being built around a typed intermediate representation (IR) &mdash; a single checked layer
+            between the source and the emitted Wasm where it performs its own type analysis, reasoning about the
+            JavaScript that TypeScript cannot: plain code with no annotations, and the cases where TypeScript is unsound
+            and its declared types do not match what actually runs. Each construct is lowered once from those recovered
+            types, and that one description can target more than one Wasm backend (WasmGC today, a linear-memory backend
+            in development). The goal is a principled core rather than a pile of per-feature special cases.
           </p>
         </div>
 

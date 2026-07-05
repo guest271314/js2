@@ -37,6 +37,7 @@ import {
 } from "./predicates.js";
 import { validateArrayAssignmentPattern, validateObjectAssignmentPattern } from "./assignment.js";
 import {
+  checkDuplicateDefaultClause,
   checkDuplicateLexicalDeclarations,
   checkDuplicateParams,
   checkDuplicatePrivateNames,
@@ -915,6 +916,22 @@ export function runNodeChecks(ctx: EarlyErrorContext, node: ts.Node): void {
   // contains any duplicate entries.
   if (ts.isCaseBlock(node)) {
     checkSwitchCaseLexicalDuplicates(ctx, node);
+    checkDuplicateDefaultClause(ctx, node);
+  }
+
+  // ── throw [no LineTerminator here] Expression ─────────────────────
+  // ES spec: ThrowStatement : throw [no LineTerminator here] Expression ;
+  // `throw` requires an Expression on the SAME line. A LineTerminator right
+  // after `throw` triggers ASI — which would leave `throw;` (no operand), a
+  // SyntaxError — after which TS reparses the trailing expression as its own
+  // statement and synthesizes a zero-width (missing) throw operand. A bare
+  // `throw;` with no operand at all produces the same missing node. Either way,
+  // a ThrowStatement whose Expression is missing (zero width) is an early error;
+  // a valid `throw <expr>` always has a non-empty operand, even when the
+  // expression itself wraps across lines (`throw new Error(\n …)`). Covers
+  // test262 language/asi/S7.9_A4.js.
+  if (ts.isThrowStatement(node) && node.expression.getFullWidth() === 0) {
+    ctx.addError(node, "Illegal newline after throw / missing throw operand");
   }
 
   // ── MetaProperty contextual keyword must not contain escapes ──────

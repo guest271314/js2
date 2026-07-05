@@ -199,6 +199,53 @@ describe("#3026 — rest element / parameter must be last (element after rest)",
   });
 });
 
+describe("#3026 — at most one default clause in a switch", () => {
+  // ES CaseBlock : { CaseClauses_opt DefaultClause CaseClauses_opt } — a
+  // SyntaxError if a CaseBlock contains more than one DefaultClause. TypeScript's
+  // parser accepts a second `default:` silently. Covers test262
+  // language/statements/switch/S12.11_A2_T1.js.
+  it("rejects two default clauses in one switch", async () => {
+    expect(await isRejected("switch (0) { case 1: break; default: break; default: break; }")).toBe(true);
+  });
+
+  it("rejects two default clauses inside a function body", async () => {
+    expect(
+      await isRejected("function f(v: number) { switch (v) { default: return 1; default: return 2; } } f(0);"),
+    ).toBe(true);
+  });
+
+  it("rejects adjacent duplicate default clauses", async () => {
+    expect(await isRejected("switch (0) { default: default: }")).toBe(true);
+  });
+
+  // ── Valid controls: must NOT be rejected ──────────────────────────────────
+  it("accepts a switch with a single default clause", async () => {
+    expect(
+      await isRejected("function f(v: number) { switch (v) { case 0: return 1; default: return 2; } } f(0);"),
+    ).toBe(false);
+  });
+
+  it("accepts a switch with no default clause", async () => {
+    expect(
+      await isRejected("function f(v: number) { switch (v) { case 0: return 1; case 1: return 2; } return 0; } f(0);"),
+    ).toBe(false);
+  });
+
+  it("accepts a default clause before case clauses (single default)", async () => {
+    expect(
+      await isRejected("function f(v: number) { switch (v) { default: return 9; case 0: return 1; } } f(0);"),
+    ).toBe(false);
+  });
+
+  it("accepts separate switches that each have their own default", async () => {
+    expect(
+      await isRejected(
+        "function f(v: number) { switch (v) { default: break; } switch (v) { default: break; } return 1; } f(0);",
+      ),
+    ).toBe(false);
+  });
+});
+
 // Slice 5 — early error: a parameter list with a non-simple (destructuring /
 // default / rest) parameter, or any arrow/method/strict function, may not bind
 // the same name twice. BoundNames of the FormalParameterList must contain no
@@ -263,5 +310,39 @@ describe("#3026 — escape sequences in a meta-property keyword", () => {
     expect(
       await isRejected("class C { k: boolean; constructor() { this.k = new.target !== undefined; } } new C();"),
     ).toBe(false);
+  });
+});
+
+// Slice 7 — restricted production: `throw [no LineTerminator here] Expression`.
+// A LineTerminator right after `throw` triggers ASI, leaving `throw;` (no
+// operand) — a SyntaxError. TypeScript reparses the trailing expression as its
+// own statement and synthesizes a zero-width (missing) throw operand, emitting no
+// diagnostic, so nothing detected it. Covers test262 language/asi/S7.9_A4.js.
+describe("#3026 — no line terminator between `throw` and its expression", () => {
+  it("rejects a newline immediately after `throw` (`throw\\n 1`)", async () => {
+    expect(await isRejected("try { throw\n 1; } catch (e) {}")).toBe(true);
+  });
+
+  it("rejects a CRLF after `throw`", async () => {
+    expect(await isRejected("try { throw\r\n new Error('x'); } catch (e) {}")).toBe(true);
+  });
+
+  it("rejects a comment-then-newline after `throw`", async () => {
+    expect(await isRejected("try { throw /* c */\n 1; } catch (e) {}")).toBe(true);
+  });
+
+  // ── Valid controls: must NOT be rejected ──────────────────────────────────
+  it("accepts `throw` with its expression on the same line", async () => {
+    expect(await isRejected("function f(x: number) { if (x < 0) throw new Error('neg'); return x; } f(1);")).toBe(
+      false,
+    );
+  });
+
+  it("accepts `throw <string>` on the same line", async () => {
+    expect(await isRejected("function h(b: boolean) { if (b) throw 'bad'; return 1; } h(false);")).toBe(false);
+  });
+
+  it("accepts a `throw` whose expression wraps across lines (newline inside the operand)", async () => {
+    expect(await isRejected("function w() { throw new Error(\n  'multi'\n); } try { w(); } catch (e) {}")).toBe(false);
   });
 });

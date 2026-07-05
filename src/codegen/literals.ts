@@ -970,6 +970,52 @@ export function objectLiteralSpreadTakesHostPath(ctx: CodegenContext, expr: ts.O
   );
 }
 
+/**
+ * (#3037 CS1a) True when a **non-empty, spread-free, data-only** object literal
+ * is produced into a genuine `any`/`unknown` contextual position under
+ * `--target standalone` — a subset of the `isAnyContextNonEmpty` branch of
+ * `compileObjectLiteral` that builds it as an open `$Object` and hands back an
+ * **externref**. This is the object-identity CS1a "carrier" site: such a literal
+ * assigned to an `any`-typed local is currently carried as an externref, so at
+ * `===` it boxes **tag-5** and loses `ref.eq` identity (an object is not `===`
+ * to itself). The variable-declaration local typing (statements/variables.ts)
+ * consults this predicate to slot the local as a raw `ref $Object` instead — so
+ * the value boxes **tag-6** (`__any_box_ref`, identity in `refval`) at `===`
+ * (the tag-6 same-tag `ref.eq` arm answers identity) while dynamic `any`-typed
+ * reads coerce the ref back to externref (`extern.convert_any`) for
+ * `__extern_get`. This keeps the local representation and the literal's value in
+ * lockstep, the same discipline `objectLiteralSpreadTakesHostPath` enforces.
+ *
+ * Scoped tightly to keep the beachhead low-risk and to avoid colliding with the
+ * earlier `compileObjectLiteral` gates: **no spreads** (those route via
+ * `objectLiteralSpreadTakesHostPath` → host path), **no accessors/methods/
+ * computed keys** (all-data-property + resolvable-name check), non-empty, not a
+ * parameter default. The pure string-index DICTIONARY case is intentionally
+ * excluded (it must keep the externref carrier for runtime `o[k]=v` writes).
+ */
+export function objectLiteralIsStandaloneAnyObjectCarrier(
+  ctx: CodegenContext,
+  expr: ts.ObjectLiteralExpression,
+): boolean {
+  if (!ctx.standalone) return false;
+  if (expr.properties.length === 0) return false;
+  if (ts.isParameter(expr.parent)) return false;
+  // Data-only, spread-free, statically-named keys — matches the open-`$Object`
+  // any-context branch of `compileObjectLiteral` (minus spreads / dictionaries).
+  if (!expr.properties.every((p) => ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p))) {
+    return false;
+  }
+  if (!expr.properties.every((p) => resolvePropertyNameText(ctx, p) !== undefined)) return false;
+  // (#1930) Query the contextual type through the oracle boundary, not the raw
+  // TypeChecker. `contextualFactOf` classifies `any`/`unknown` directly; the
+  // `object` keyword (NonPrimitive) is not a distinct fact — it is intentionally
+  // NOT covered here (an `object`-keyword-typed carrier is a rare, safe
+  // under-fix: the literal stays externref/tag-5, reconciled by S3a). The `any`
+  // case is the CS1a beachhead.
+  const ctxFact = ctx.oracle.contextualFactOf(expr);
+  return ctxFact !== undefined && (ctxFact.kind === "any" || ctxFact.kind === "unknown");
+}
+
 export function compileObjectLiteral(
   ctx: CodegenContext,
   fctx: FunctionContext,

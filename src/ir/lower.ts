@@ -1383,6 +1383,55 @@ export function lowerIrFunctionBody<S>(
         emitter.pushRaw(out, { op: "i32.eq" });
         return;
       }
+      case "dyn.truthy": {
+        // #2949 S5.1 — ToBoolean on a boxed-any carrier. The operand MUST be
+        // dynamic (verifier enforces); the op sequence comes from the
+        // `IrDynamicLowering` handle, which routes to the CANONICAL
+        // `coercion-engine.emitToBoolean` (`__any_unbox_bool` gc /
+        // `__is_truthy` host) — one ToBoolean engine, byte-parity with the
+        // legacy condition path (June-audit D4). Result is i32, directly
+        // usable as an if / loop / ternary condValue.
+        const valueIrType = typeOf(instr.value);
+        if (valueIrType.kind !== "dynamic") {
+          throw new Error(`ir/lower: dyn.truthy operand must be dynamic, got ${valueIrType.kind} (${func.name})`);
+        }
+        const dyn = resolver.resolveDynamicLowering?.();
+        if (!dyn) {
+          throw new Error(
+            `ir/lower: resolver cannot lower dyn.truthy (resolveDynamicLowering missing/null) (${func.name})`,
+          );
+        }
+        emitValue(instr.value, out);
+        for (const op of dyn.emitToBoolean()) emitter.pushRaw(out, op);
+        return;
+      }
+      case "dyn.eq": {
+        // #2949 S5.2 — strict/loose equality over two boxed-any carriers,
+        // routed through the CANONICAL `__any_strict_eq` / `__any_eq` helpers
+        // (June-audit D4). Both operands MUST be dynamic (verifier enforces);
+        // each is marshalled to the `(ref null $AnyValue)` eq-helper ABI by
+        // `emitEqOperand` (gc: identity; host: `__any_from_extern`) IMMEDIATELY
+        // after it is pushed, so no scratch local is needed. The tag-5
+        // classifier — incl. `NaN === NaN → false` — stays in the helper body.
+        const lt = typeOf(instr.lhs);
+        const rt = typeOf(instr.rhs);
+        if (lt.kind !== "dynamic" || rt.kind !== "dynamic") {
+          throw new Error(`ir/lower: dyn.eq operands must be dynamic, got ${lt.kind}/${rt.kind} (${func.name})`);
+        }
+        const dyn = resolver.resolveDynamicLowering?.();
+        if (!dyn) {
+          throw new Error(
+            `ir/lower: resolver cannot lower dyn.eq (resolveDynamicLowering missing/null) (${func.name})`,
+          );
+        }
+        emitValue(instr.lhs, out);
+        for (const op of dyn.emitEqOperand()) emitter.pushRaw(out, op);
+        emitValue(instr.rhs, out);
+        for (const op of dyn.emitEqOperand()) emitter.pushRaw(out, op);
+        const call = instr.loose ? dyn.emitLooseEq(instr.negate) : dyn.emitStrictEq(instr.negate);
+        for (const op of call) emitter.pushRaw(out, op);
+        return;
+      }
       case "string.const": {
         const ops = resolver.emitStringConst?.(instr.value, instr.alloc);
         if (!ops) throw new Error(`ir/lower: resolver cannot emit string.const (${func.name})`);
@@ -1658,6 +1707,45 @@ export function lowerIrFunctionBody<S>(
           throw new Error(`ir/lower: resolver cannot lower class ${recvT.shape.className} (${func.name})`);
         }
         // `this` first, then user args, then call $<className>_<methodName>.
+        emitValue(instr.receiver, out);
+        for (const a of instr.args) emitValue(a, out);
+        emitter.pushRaw(out, {
+          op: "call",
+          funcIdx: resolver.resolveFunc({
+            kind: "func",
+            name: cl.methodFuncName(instr.methodName),
+          }),
+        });
+        return;
+      }
+      case "class.super_init": {
+        // #3000-E: `super(args)` — run the PARENT's `<parent>_init` on the
+        // already-allocated `self`. Legacy `_init` signature is
+        // `(...ctorParams, self) -> (ref $struct)` (self LAST), so emit the user
+        // args first, then `self`, then call. The returned instance is discarded
+        // (super() is a statement) → drop.
+        const cl = resolver.resolveClass?.(instr.parentShape);
+        if (!cl) {
+          throw new Error(`ir/lower: resolver cannot lower super class ${instr.parentShape.className} (${func.name})`);
+        }
+        for (const a of instr.args) emitValue(a, out);
+        emitValue(instr.self, out);
+        emitter.pushRaw(out, {
+          op: "call",
+          funcIdx: resolver.resolveFunc({ kind: "func", name: cl.initFuncName }),
+        });
+        emitter.pushRaw(out, { op: "drop" });
+        return;
+      }
+      case "class.super_call": {
+        // #3000-E: `super.method(args)` — static-dispatch to the PARENT's method
+        // slot (`<parent>_<method>`) with the subclass receiver first, then args.
+        // Resolving against `parentShape` (not the receiver's shape) bypasses any
+        // subclass override.
+        const cl = resolver.resolveClass?.(instr.parentShape);
+        if (!cl) {
+          throw new Error(`ir/lower: resolver cannot lower super class ${instr.parentShape.className} (${func.name})`);
+        }
         emitValue(instr.receiver, out);
         for (const a of instr.args) emitValue(a, out);
         emitter.pushRaw(out, {
@@ -2916,7 +3004,10 @@ function collectIrUses(instr: IrInstr): readonly IrValueId[] {
     case "box":
     case "unbox":
     case "tag.test":
+    case "dyn.truthy":
       return [instr.value];
+    case "dyn.eq":
+      return [instr.lhs, instr.rhs];
     case "string.const":
       return [];
     case "string.concat":
@@ -2961,6 +3052,10 @@ function collectIrUses(instr: IrInstr): readonly IrValueId[] {
     case "class.set":
       return [instr.value, instr.newValue];
     case "class.call":
+      return [instr.receiver, ...instr.args];
+    case "class.super_init":
+      return [...instr.args, instr.self];
+    case "class.super_call":
       return [instr.receiver, ...instr.args];
     // Slice 6 (#1169e): slot / vec / for-of ops.
     case "slot.read":

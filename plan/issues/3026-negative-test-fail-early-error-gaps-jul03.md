@@ -216,6 +216,54 @@ the same name reused across two SEPARATE (non-parameter) destructuring bindings,
 all remain valid; sloppy-mode simple-parameter duplicates (`function f(x, x) {}`,
 still legal) are unaffected (the non-simple / arrow / strict gate is unchanged).
 
+## Slice 6 landed — at most one `default` clause in a switch (2026-07-05)
+
+**Delivered:** an early error for a switch statement whose `CaseBlock` contains
+more than one `DefaultClause`. ES `CaseBlock : { CaseClauses_opt DefaultClause
+CaseClauses_opt }` Static Semantics: Early Errors — it is a Syntax Error if a
+CaseBlock contains more than one `DefaultClause`. Covers test262
+`language/statements/switch/S12.11_A2_T1.js`.
+
+**Root cause:** TypeScript's parser accepts a second `default:` clause with no
+diagnostic (it parses two `DefaultClause` nodes into the same `CaseBlock`), so
+nothing in the early-error pass detected it. The fix adds
+`checkDuplicateDefaultClause` — a linear scan of `caseBlock.clauses` that flags
+the second and any later `DefaultClause` — wired into the existing
+`ts.isCaseBlock(node)` branch of the per-node walk (so it fires for nested
+switches too).
+
+**Files:** `src/compiler/early-errors/duplicates.ts` (new
+`checkDuplicateDefaultClause`) and `src/compiler/early-errors/node-checks.ts`
+(import + one call in the `CaseBlock` branch). Tests: `tests/issue-3026.test.ts`
+(+3 reject, +4 valid-control). Byte-inert for valid programs — verified: a switch
+with a single default, no default, a default-before-cases, a nested switch, and
+fallthrough all compile to byte-identical Wasm (sha256-compared against the
+pre-change compiler); only a switch with two-or-more default clauses newly raises
+the early SyntaxError.
+
+## Slice 7 landed — no line terminator between `throw` and its expression (2026-07-05)
+
+**Delivered:** an early error for the restricted production `ThrowStatement :
+throw [no LineTerminator here] Expression ;`. A LineTerminator right after
+`throw` triggers ASI, which would leave `throw;` (no operand) — a SyntaxError.
+Covers test262 `language/asi/S7.9_A4.js`.
+
+**Root cause:** unlike `return` / `break` / `continue` (where ASI produces a
+valid statement), TypeScript's parser silently reparses the expression after the
+newline as its own statement and synthesizes a **zero-width (missing)** throw
+operand, emitting no diagnostic — so nothing in the early-error pass detected it.
+The fix flags any `ThrowStatement` whose `expression` has `getFullWidth() === 0`
+(a missing operand). This also covers a bare `throw;` with no operand at all.
+
+**Files:** `src/compiler/early-errors/node-checks.ts` (one additive check in the
+per-node walk). Tests: `tests/issue-3026.test.ts` (+3 reject, +3 valid-control).
+Byte-inert for valid programs — verified via sha256: `throw <expr>` on the same
+line (including a `throw` whose operand itself wraps across lines, e.g.
+`throw new Error(\n …)`, and a `throw` inside a switch case) all compile to
+byte-identical Wasm against the pre-change compiler; only a `throw` with a
+missing operand (newline immediately after `throw`, or bare `throw;`) newly
+raises the early SyntaxError.
+
 ## Slice 8 landed — escape sequences in a meta-property keyword (2026-07-05)
 
 **Delivered:** an early error for a `MetaProperty` (`new.target` / `import.meta`)

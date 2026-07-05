@@ -4,7 +4,7 @@ title: "codegen: invalid Wasm binary emission residual — default (JS-host) lan
 status: ready
 sprint: current
 created: 2026-07-03
-updated: 2026-07-03
+updated: 2026-07-04
 priority: high
 horizon: m
 feasibility: medium
@@ -204,3 +204,68 @@ loops, strings, objects, any, bitwise, for-of) is **byte-identical** (sha256) to
 - `__vec_from_extern_*` `array.set`, async-gen `__closure_*`, `struct.new` arg
   count. The 131 bucket has multiple independent root causes; this PR clears the
   eval-redeclaration numeric/compound sub-cluster only.
+
+---
+
+## Landed: nested-object-destructuring shared-struct `struct.new` sub-cluster (dev-3024, 2026-07-04)
+
+**PR:** `issue-3024-dstr-nested-objlit-structnew` — clears the `struct.new` "not
+enough arguments" cluster (9 test262 files) whose shape is a nested object
+pattern with an object-literal default, e.g.
+`const { w: { x, y, z } = { x: 4, y: 5, z: 6 } } = { w: { x: undefined, z: 7 } }`.
+
+### Root cause (orphaned buffer misses the field-pad patch — verified by instrument)
+An anonymous struct registered for the RHS (or param OUTER-default) **sub-object**
+`{ x, z }` (2 fields) is later **grown** to 3 fields by the nested pattern's
+DEFAULT literal `{ x, y, z }`: both resolve to the SAME `__anon_N`, and when the
+larger default compiles, `ensureComputedPropertyFields` (literals.ts) appends the
+missing field `y` and calls `patchStructNewForAddedField` to pad every already-
+emitted `struct.new` of that type with a default operand.
+
+That pad walks only `mod.functions` + `fctx.body` + `fctx.savedBodies` +
+`ctx.liveBodies`. The RHS/param-default `struct.new` sits in an **orphaned outer
+body** — swapped off `fctx.body` by a plain JS-local swap that never lands on
+`savedBodies` (the destructure helpers descend into detached branch buffers to
+compile the nested default). So the pad could not reach it and left it one operand
+short of the grown 3-field type → `struct.new (need 3, got 2)` invalid Wasm.
+Instrumentation confirmed `reach=0, orphanBufs=1, saved=2, live=0` at patch time.
+
+Same bug **class** as the #2503 / #2158 / #779d param-branch late-shift fixes, but
+for the field-pad patch and for the **outer** destructuring/param-default body.
+
+### Fix (register the orphaned body in `ctx.liveBodies` for the destructure window)
+Byte-inert, mirrors the existing `liveBodies` precedents. Three call-sites, each
+registering the current (outer-materialization-holding) `fctx.body`/`liftedFctx.body`
+around the destructure that compiles the nested default, then removing it:
+- `src/codegen/statements/destructuring.ts` (`compileObjectDestructuring`) — the
+  variable-declaration path (`const/let/var/for` object destructuring).
+- `src/codegen/function-body.ts` — top-level function-declaration params.
+- `src/codegen/statements/nested-declarations.ts` (both param loops) — hoisted /
+  nested function declarations (covers the `function`/`generators`/`async-generator`
+  `dflt-obj-ptrn-prop-obj` cases, which route through `compileNestedFunctionDeclaration`).
+
+### Proofs
+- Repro + discriminators VALIDATE (`WebAssembly.compile`): `x`-only, `default-fires`,
+  `full-object-bypass` all VALID; the `rhs-has-all3` / `default-2fields` controls
+  were already valid and stay valid.
+- **All 9 real test262 files PASS end-to-end** via `runTest262File` (oracle-checked,
+  not merely valid): `{const,let,variable}/dstr/obj-ptrn-prop-obj`,
+  `for/dstr/{const,let,var}-obj-ptrn-prop-obj`,
+  `{function,generators,async-generator}/dstr/dflt-obj-ptrn-prop-obj`.
+- Full 198-file default-lane invalid-Wasm harvest re-run: **STILL-invalid 113 → 104**
+  (net −9, exactly this cluster), **zero new invalid signatures**.
+- **Byte-identical** (sha256) output vs base across a 14-program corpus (plain /
+  default / nested / param destructuring, arrays, classes, strings, closures,
+  for-of, spread, optional-chaining) — the fix only toggles `liveBodies` around the
+  destructure and is a no-op for code that does not grow a shared struct.
+- 71 adjacent destructuring/param unit tests pass (default-params, issue-1025/1128/
+  1553a/b/c/1372, fn-param-dstr-rest, class-dstr-rest, generator-method-dstr) plus
+  the new `tests/issue-3024.test.ts` (4 tests).
+
+### Still open (roll forward — NOT this PR)
+- The remaining ~104 default-lane invalid-Wasm files are scattered across ~40
+  distinct signatures (mostly singletons): `f64.local.tee`/`externref.local.get`
+  numeric/eval residue, `__cb_0` / `Parent_new` / iterator-close shapes, the
+  `Array.from` source-object-iterator pair, `class super in-static-methods`,
+  `AsyncFromSyncIteratorPrototype`. These are independent root causes tracked under
+  this same issue; this PR clears the largest *concentrated* remaining cluster only.

@@ -184,6 +184,17 @@ export interface IrClassShape {
   readonly fields: readonly IrClassFieldDescriptor[];
   readonly methods: readonly IrClassMethodDescriptor[];
   readonly constructorParams: readonly IrType[];
+  /**
+   * #3000-E: the immediate parent class shape for a subclass declared via
+   * `class Sub extends Parent`. Present only when `Parent` is a locally-declared
+   * user class whose own shape projected (single-level, WasmGC-struct parent).
+   * Drives `super(...)` (→ the parent's `_init`) and `super.method()` (→ the
+   * parent's method slot). Absent (undefined) for flat / root classes and for
+   * subclasses of a builtin/externref-backed parent (which stay on legacy).
+   * `classShapeEquals` deliberately does NOT compare `parent` — a shape is
+   * identified by `className` alone (see the doc there).
+   */
+  readonly parent?: IrClassShape;
 }
 
 export type IrType =
@@ -858,6 +869,56 @@ export interface IrInstrTagTest extends IrInstrBase {
   readonly jsTag?: JsTag;
 }
 
+/**
+ * `ToBoolean(value)` on a boxed-any carrier — the dynamic-value truthiness
+ * op (#2949 S5.1). `value` MUST be `IrType.dynamic`; result (via
+ * `IrInstrBase.result`) is `i32` (1 = truthy, 0 = falsy), suitable directly
+ * as an `if` / loop / ternary `condValue`.
+ *
+ * This is deliberately NOT `unbox{Boolean}`: unboxing reads the Boolean
+ * *partition* payload and is only valid on a proven boolean, whereas JS
+ * `ToBoolean` (§7.1.2) is defined over EVERY partition — `0`/`NaN`/`""`/
+ * `null`/`undefined` are falsy, every other value truthy. Lowering routes
+ * through the SAME `coercion-engine.emitToBoolean` legacy uses (`__any_
+ * unbox_bool` on the gc `$AnyValue` carrier / `__is_truthy` on the host
+ * externref carrier) via `IrDynamicLowering.emitToBoolean` — one ToBoolean
+ * engine (June-audit D4), byte-parity with legacy. The known-literal
+ * `tag.test`+`unbox` fast path is reserved for producers that statically
+ * know the partition; general truthiness is this node.
+ */
+export interface IrInstrDynTruthy extends IrInstrBase {
+  readonly kind: "dyn.truthy";
+  readonly value: IrValueId;
+}
+
+/**
+ * `dyn.eq{lhs, rhs, loose, negate}` — strict/loose equality (§7.2.15 /
+ * §7.2.16) between two boxed-any carriers, result `i32` (0/1) (#2949 S5.2).
+ *
+ * BOTH operands MUST be `dynamic`: the producer boxes any concrete operand
+ * into the carrier first (via `box{toType: dynamic}`), leaving the dyn side
+ * as-is, so this node always sees two carriers — exactly the `(ref null
+ * $AnyValue, ref null $AnyValue)` shape the canonical equality helpers take.
+ * Lowering routes through the SAME `__any_strict_eq` (`===`/`!==`, `loose:
+ * false`) / `__any_eq` (`==`/`!=`, `loose: true`) helpers legacy's
+ * `compileAnyBinaryDispatch` uses — one equality engine, byte-parity with
+ * legacy, and the tag-5 field-4 classifier (incl. `NaN === NaN → false` via
+ * the helper's `f64.eq`) stays in the helper body, never re-implemented
+ * (June-audit D4). `negate` appends `i32.eqz` for the `!==`/`!=` form (the
+ * helper always computes the positive `===`/`==`). The payload-less
+ * `dyn === null` / `dyn === undefined` STRICT cases are NOT this node — the
+ * producer lowers those via the cheaper exact `tag.test{Null|Undefined}`.
+ */
+export interface IrInstrDynEq extends IrInstrBase {
+  readonly kind: "dyn.eq";
+  readonly lhs: IrValueId;
+  readonly rhs: IrValueId;
+  /** `true` = loose `==`/`!=` (`__any_eq`); `false` = strict `===`/`!==` (`__any_strict_eq`). */
+  readonly loose: boolean;
+  /** `true` = `!==`/`!=` — append `i32.eqz` to the helper's positive result. */
+  readonly negate: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // String operations (#1169a — IR Phase 4 Slice 1)
 // ---------------------------------------------------------------------------
@@ -1166,6 +1227,45 @@ export interface IrInstrClassSet extends IrInstrBase {
  */
 export interface IrInstrClassCall extends IrInstrBase {
   readonly kind: "class.call";
+  readonly receiver: IrValueId;
+  readonly methodName: string;
+  readonly args: readonly IrValueId[];
+}
+
+/**
+ * #3000-E: a derived constructor's `super(args)` call. Runs the PARENT class's
+ * `<parent>_init` on the already-allocated `self` — NOT the parent's `_new`
+ * (which would allocate a second, wrong-typed instance). The legacy backend
+ * splits every WasmGC-struct class into `<Class>_new` (alloc + tail-call init)
+ * and `<Class>_init` (`(...ctorParams, self) -> (ref $struct)` — field inits +
+ * ctor body, self LAST), and lowers a derived `super(...)` to
+ * `call <Parent>_init(args..., self)`. This instr mirrors that exactly.
+ *
+ * Statement-only (no SSA result): `<Parent>_init` returns `(ref $ParentStruct)`
+ * but `super(...)` as a statement discards it, so the lowering drops the result.
+ * `self` is a `(ref $SubStruct)` — a WasmGC subtype of `(ref $ParentStruct)`, so
+ * the raw `call` typechecks. Lowering emits: <each arg>, <self>, call, drop.
+ */
+export interface IrInstrClassSuperInit extends IrInstrBase {
+  readonly kind: "class.super_init";
+  readonly parentShape: IrClassShape;
+  readonly self: IrValueId;
+  readonly args: readonly IrValueId[];
+}
+
+/**
+ * #3000-E: a `super.method(args)` call inside a subclass method. Static-dispatches
+ * to the PARENT's method slot (`<parent>_<method>`) with the subclass receiver.
+ * Unlike `class.call` (which resolves the method against the RECEIVER's shape),
+ * this resolves against `parentShape` so an override on the subclass is bypassed.
+ * The receiver value is a `(ref $SubStruct)` passed where the parent method
+ * expects `(ref $ParentStruct)` (valid WasmGC subtyping). Lowering emits:
+ *   <receiver> <each arg> call $<parent>_<method>
+ * Result type: the parent method descriptor's `returnType` (null → void).
+ */
+export interface IrInstrClassSuperCall extends IrInstrBase {
+  readonly kind: "class.super_call";
+  readonly parentShape: IrClassShape;
   readonly receiver: IrValueId;
   readonly methodName: string;
   readonly args: readonly IrValueId[];
@@ -2083,6 +2183,8 @@ export type IrInstr =
   | IrInstrBox
   | IrInstrUnbox
   | IrInstrTagTest
+  | IrInstrDynTruthy
+  | IrInstrDynEq
   | IrInstrStringConst
   | IrInstrStringConcat
   | IrInstrStringEq
@@ -2098,6 +2200,8 @@ export type IrInstr =
   | IrInstrRefCellSet
   | IrInstrClassNew
   | IrInstrClassAlloc
+  | IrInstrClassSuperInit
+  | IrInstrClassSuperCall
   | IrInstrClassGet
   | IrInstrClassSet
   | IrInstrClassCall
@@ -2392,6 +2496,8 @@ export function forEachNestedBuffer(instr: IrInstr, fn: (buffer: readonly IrInst
     case "box":
     case "unbox":
     case "tag.test":
+    case "dyn.truthy":
+    case "dyn.eq":
     case "string.const":
     case "string.concat":
     case "string.eq":
@@ -2410,6 +2516,8 @@ export function forEachNestedBuffer(instr: IrInstr, fn: (buffer: readonly IrInst
     case "class.get":
     case "class.set":
     case "class.call":
+    case "class.super_init":
+    case "class.super_call":
     case "slot.read":
     case "slot.write":
     case "vec.len":
@@ -2534,6 +2642,8 @@ export function mapNestedBuffers(
     case "box":
     case "unbox":
     case "tag.test":
+    case "dyn.truthy":
+    case "dyn.eq":
     case "string.const":
     case "string.concat":
     case "string.eq":
@@ -2552,6 +2662,8 @@ export function mapNestedBuffers(
     case "class.get":
     case "class.set":
     case "class.call":
+    case "class.super_init":
+    case "class.super_call":
     case "slot.read":
     case "slot.write":
     case "vec.len":
@@ -2626,7 +2738,9 @@ export function directUses(instr: IrInstr): readonly IrValueId[] {
     case "box":
     case "unbox":
     case "tag.test":
+    case "dyn.truthy":
       return [instr.value];
+    case "dyn.eq":
     case "string.concat":
     case "string.eq":
       return [instr.lhs, instr.rhs];
@@ -2657,6 +2771,10 @@ export function directUses(instr: IrInstr): readonly IrValueId[] {
     case "class.set":
       return [instr.value, instr.newValue];
     case "class.call":
+      return [instr.receiver, ...instr.args];
+    case "class.super_init":
+      return [...instr.args, instr.self];
+    case "class.super_call":
       return [instr.receiver, ...instr.args];
     case "slot.write":
       return [instr.value];

@@ -11,7 +11,12 @@ import type { CodegenContext, FunctionContext, NullGuardFact, NullishExclusion }
 import { emitCoercedLocalSet, noJsHost } from "../expressions/helpers.js";
 import { emitUndefined } from "../expressions/late-imports.js";
 import { needsTdzFlag, resolveWasmType, varBindingNeedsExternrefForUndefined } from "../index.js";
-import { objectLiteralSpreadTakesHostPath, resolveComputedKeyExpression } from "../literals.js";
+import {
+  objectLiteralIsStandaloneAnyObjectCarrier,
+  objectLiteralSpreadTakesHostPath,
+  resolveComputedKeyExpression,
+} from "../literals.js";
+import { ensureObjectRuntime } from "../object-runtime.js"; // (#3037 CS1a) $Object type idx for any-object carrier
 import { localGlobalIdx } from "../registry/imports.js";
 import { getOrRegisterArrayType, getOrRegisterSubviewType, getOrRegisterVecType } from "../registry/types.js";
 import { coerceType, compileExpression, valTypesMatch } from "../shared.js";
@@ -877,39 +882,63 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
       isProxyConstruction(decl.initializer) &&
       ts.isIdentifier(decl.name) &&
       !proxyResultEscapesToCall(decl, decl.name.text);
+    // (#3037 CS1a) A spread-free, data-only object literal produced into an
+    // `any`/`unknown`/`object` context (standalone) is built as an open `$Object`
+    // and normally lands in an externref local — where at `===` it boxes tag-5
+    // and loses `ref.eq` identity (`const o: any = {z:1}; o === o` → 0). Slot the
+    // local as a raw `ref $Object` instead: the store coerces the object externref
+    // to the ref (`any.convert_extern` + guarded `ref.cast $Object`), `===` then
+    // boxes it **tag-6** via `boxToAny`'s `ref` arm (`__any_box_ref`, identity in
+    // `refval` → the tag-6 same-tag `ref.eq` arm answers identity), and dynamic
+    // `any`-typed member reads coerce the ref back to externref (`extern.convert_
+    // any`) for `__extern_get`. This is the same lockstep discipline
+    // `objectLiteralSpreadTakesHostPath` uses for its externref locals, and does
+    // NOT touch the `===` operand seam (−299) or the generic externref boxing arm
+    // (−788). Excludes growable literals (out-of-shape writes need the externref
+    // dictionary carrier); accessor/spread/computed-key literals are already
+    // excluded by the predicate. `objectTypeIdx` is fetched via the idempotent
+    // `ensureObjectRuntime` (the literal compile forces it anyway).
+    const initIsAnyObjectCarrier =
+      decl.initializer !== undefined &&
+      ts.isObjectLiteralExpression(decl.initializer) &&
+      !(ts.isIdentifier(decl.name) && ctx.growableObjectLiteralVars.has(decl.name.text)) &&
+      objectLiteralIsStandaloneAnyObjectCarrier(ctx, decl.initializer);
+    const anyObjectCarrierTypeIdx = initIsAnyObjectCarrier ? ensureObjectRuntime(ctx).objectTypeIdx : -1;
     const wasmType: ValType =
       initIsAccessorLiteral || initIsHostSpreadLiteral || initIsGrowableObjectLiteral
         ? { kind: "externref" as const }
-        : isI32CoercedLocal
-          ? { kind: "i32" }
-          : isI32SpecializedArray
-            ? { kind: "ref_null" as const, typeIdx: getOrRegisterVecType(ctx, "i32", { kind: "i32" }) }
-            : widenedTypeIdx !== undefined
-              ? { kind: "ref_null" as const, typeIdx: widenedTypeIdx }
-              : (subarraySubviewType ??
-                inferredVecType ??
-                standaloneRegExpMatchArrayType ??
-                (decl.initializer && isStringMethodReturningHostArray(ctx, decl.initializer)
-                  ? { kind: "externref" as const }
-                  : decl.initializer && isPromiseHostCall(ctx, decl.initializer)
+        : initIsAnyObjectCarrier && anyObjectCarrierTypeIdx >= 0
+          ? { kind: "ref_null" as const, typeIdx: anyObjectCarrierTypeIdx }
+          : isI32CoercedLocal
+            ? { kind: "i32" }
+            : isI32SpecializedArray
+              ? { kind: "ref_null" as const, typeIdx: getOrRegisterVecType(ctx, "i32", { kind: "i32" }) }
+              : widenedTypeIdx !== undefined
+                ? { kind: "ref_null" as const, typeIdx: widenedTypeIdx }
+                : (subarraySubviewType ??
+                  inferredVecType ??
+                  standaloneRegExpMatchArrayType ??
+                  (decl.initializer && isStringMethodReturningHostArray(ctx, decl.initializer)
                     ? { kind: "externref" as const }
-                    : // (#2615) `new Proxy(target, handler)` returns a host/native
-                      // Proxy externref. The checker types it as the TARGET's
-                      // struct (ProxyConstructor returns T), so the default slot
-                      // would `ref.test` the Proxy against that struct, fail, null
-                      // it, and trap every read via a direct `struct.get`. Force an
-                      // externref local so reads route through `__extern_get` (the
-                      // only path that runs the Proxy MOP / trap). Both modes emit
-                      // a Proxy externref, so this is mode-agnostic.
-                      initIsProxy
+                    : decl.initializer && isPromiseHostCall(ctx, decl.initializer)
                       ? { kind: "externref" as const }
-                      : // (#1337) `fn.bind(...)` / `Function.prototype.bind.call(...)`
-                        // returns a host bound-function externref in JS-host mode;
-                        // force an externref local so the value isn't ref.cast to
-                        // the target's closure struct (which traps → null binding).
-                        decl.initializer && !ctx.standalone && !noJsHost(ctx) && isBindHostCall(decl.initializer)
+                      : // (#2615) `new Proxy(target, handler)` returns a host/native
+                        // Proxy externref. The checker types it as the TARGET's
+                        // struct (ProxyConstructor returns T), so the default slot
+                        // would `ref.test` the Proxy against that struct, fail, null
+                        // it, and trap every read via a direct `struct.get`. Force an
+                        // externref local so reads route through `__extern_get` (the
+                        // only path that runs the Proxy MOP / trap). Both modes emit
+                        // a Proxy externref, so this is mode-agnostic.
+                        initIsProxy
                         ? { kind: "externref" as const }
-                        : localTypeForDeclaration(ctx, varType, decl)));
+                        : // (#1337) `fn.bind(...)` / `Function.prototype.bind.call(...)`
+                          // returns a host bound-function externref in JS-host mode;
+                          // force an externref local so the value isn't ref.cast to
+                          // the target's closure struct (which traps → null binding).
+                          decl.initializer && !ctx.standalone && !noJsHost(ctx) && isBindHostCall(decl.initializer)
+                          ? { kind: "externref" as const }
+                          : localTypeForDeclaration(ctx, varType, decl)));
 
     // (#2814) Bug C: re-align a block-scoped let/const with its OWN pre-hoisted
     // slot. `saveBlockScopedShadows` removed this name's localMap (and TDZ-flag)
@@ -998,6 +1027,27 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
       (isVar || isHoistedLetConst) && existingIdx !== undefined && existingIdx >= fctx.params.length
         ? existingIdx
         : allocLocal(fctx, name, wasmType);
+
+    // (#3037 CS1a) A let/const any-object-carrier reuses a slot the hoist pre-pass
+    // pre-allocated as externref (from `resolveWasmType(any)`), so the `wasmType`
+    // above (ref $Object) is bypassed. Retype the reused slot to the `$Object` ref
+    // so the value boxes tag-6 at `===` (identity) while reads coerce back to
+    // externref — the same fixup the initializer-driven ref upgrade (below) does,
+    // applied up front for the carrier. Skip closure-captured slots (a boxed /
+    // promoted-global capture threads the value through a cell/global of its own
+    // type; leave those externref — safe via S3a, only under-fixes).
+    if (
+      initIsAnyObjectCarrier &&
+      anyObjectCarrierTypeIdx >= 0 &&
+      localIdx >= fctx.params.length &&
+      !(fctx.boxedCaptures?.has(name) ?? false) &&
+      !ctx.capturedGlobals.has(name)
+    ) {
+      const carrierSlot = fctx.locals[localIdx - fctx.params.length];
+      if (carrierSlot && carrierSlot.type.kind === "externref") {
+        carrierSlot.type = { kind: "ref_null", typeIdx: anyObjectCarrierTypeIdx };
+      }
+    }
 
     // #1607: A block-scoped let/const that did NOT reuse a pre-hoisted slot
     // (because `saveBlockScopedShadows` removed its hoisted localMap/TDZ entry

@@ -54,9 +54,11 @@ import {
 } from "./capability.js";
 import type { IrLowerResolver, IrVecLowering } from "./lower.js";
 import { mathUnaryToIrOp } from "./select.js";
+import { JsTag } from "../codegen/js-tag.js"; // #2949 S5.2 — box-refinement tags for dynamic equality operands
 import {
   asVal,
   closureSignatureEquals,
+  irDynamic,
   irTypeEquals,
   irVal,
   type IrBinop,
@@ -2722,6 +2724,40 @@ function phase1PropertyName(name: ts.PropertyName): string | null {
  * or the propagation pass converged on a dynamic type that the selector
  * ignored — both are bugs.
  */
+/**
+ * #3000-E: the SSA value of the current `this` binding (the allocated instance
+ * in a ctor, or the `__self` param in a method). Throws if `this` isn't bound —
+ * `super` outside a class member never reaches here (the selector rejects it).
+ */
+function requireThisValue(cx: LowerCtx): IrValueId {
+  const p = cx.scope.get("this");
+  if (!p || p.kind !== "local") {
+    throw new Error(`ir/from-ast: super used with no 'this' binding in ${cx.funcName}`);
+  }
+  return p.value;
+}
+
+/**
+ * #3000-E: the parent `IrClassShape` for a `super(...)` / `super.method()` in the
+ * current class member. Read from the `this` binding's class shape `.parent`,
+ * which `buildIrClassShapes` populates only for a single-level subclass of a
+ * local user class. Throws (→ clean legacy fallback) when absent — e.g. a
+ * subclass whose parent's shape didn't project.
+ */
+function requireSuperParentShape(cx: LowerCtx): IrClassShape {
+  const p = cx.scope.get("this");
+  if (!p || p.kind !== "local" || p.type.kind !== "class") {
+    throw new Error(`ir/from-ast: super used with no class 'this' binding in ${cx.funcName}`);
+  }
+  const parent = p.type.shape.parent;
+  if (!parent) {
+    throw new Error(
+      `ir/from-ast: super used in ${p.type.shape.className} which has no IR-projected parent shape (${cx.funcName})`,
+    );
+  }
+  return parent;
+}
+
 function lowerCall(expr: ts.CallExpression, cx: LowerCtx, statementPosition = false): IrValueId | null {
   // Optional call (`fn?.()` / `obj?.method()`, #1281). The IR has no
   // short-circuit primitive for nullable callees, and at this point we
@@ -2732,6 +2768,34 @@ function lowerCall(expr: ts.CallExpression, cx: LowerCtx, statementPosition = fa
   // optional-call IR support is a follow-up.
   if (expr.questionDotToken) {
     throw new Error(`ir/from-ast: optional call (?.()) not in slice 11 (${cx.funcName})`);
+  }
+  // #3000-E: `super(args)` — a derived constructor chaining to its parent's
+  // `_init`. Intercepted BEFORE the property-access / identifier dispatch below
+  // because `super` is a keyword, not an identifier the receiver-lowering can
+  // handle. The `this` binding (the allocated subclass instance) and the parent
+  // shape (`this` shape's `.parent`) drive the emitted `<parent>_init` call.
+  if (expr.expression.kind === ts.SyntaxKind.SuperKeyword) {
+    const parentShape = requireSuperParentShape(cx);
+    const self = requireThisValue(cx);
+    if (expr.arguments.length !== parentShape.constructorParams.length) {
+      throw new Error(
+        `ir/from-ast: super(...) has ${expr.arguments.length} args, expected ${parentShape.constructorParams.length} in ${cx.funcName}`,
+      );
+    }
+    const args: IrValueId[] = [];
+    for (let i = 0; i < expr.arguments.length; i++) {
+      const expected = parentShape.constructorParams[i]!;
+      const argVal = lowerExpr(expr.arguments[i]!, cx, expected);
+      const argType = cx.builder.typeOf(argVal);
+      if (!irTypeEquals(argType, expected)) {
+        throw new Error(
+          `ir/from-ast: super() arg ${i} is ${describeIrType(argType)}, expected ${describeIrType(expected)} in ${cx.funcName}`,
+        );
+      }
+      args.push(argVal);
+    }
+    cx.builder.emitClassSuperInit(parentShape, self, args);
+    return null;
   }
   // Slice 4 (#1169d): method call — `<recv>.<methodName>(args)`. The
   // receiver must lower to an IrType.class; the method must exist on
@@ -3167,6 +3231,43 @@ function lowerMethodCall(expr: ts.CallExpression, cx: LowerCtx, statementPositio
     throw new Error(`ir/from-ast: malformed method call in ${cx.funcName}`);
   }
   const methodName = expr.expression.name.text;
+
+  // #3000-E: `super.method(args)` — static-dispatch to the PARENT's method slot.
+  // Intercepted BEFORE receiver lowering: `super` is a keyword lowerExpr can't
+  // produce a value for. The receiver passed to the parent method is `this` (the
+  // subclass instance — a WasmGC subtype of the parent), and the method resolves
+  // against the parent shape so a subclass override is bypassed.
+  if (expr.expression.expression.kind === ts.SyntaxKind.SuperKeyword) {
+    const parentShape = requireSuperParentShape(cx);
+    const self = requireThisValue(cx);
+    const method = parentShape.methods.find((m) => m.name === methodName);
+    if (!method) {
+      throw new Error(
+        `ir/from-ast: super.${methodName}() — parent class ${parentShape.className} has no method "${methodName}" in ${cx.funcName}`,
+      );
+    }
+    if (expr.arguments.length !== method.params.length) {
+      throw new Error(
+        `ir/from-ast: super.${methodName}() has ${expr.arguments.length} args, expected ${method.params.length} in ${cx.funcName}`,
+      );
+    }
+    const args: IrValueId[] = [];
+    for (let i = 0; i < expr.arguments.length; i++) {
+      const expected = method.params[i]!;
+      const argVal = lowerExpr(expr.arguments[i]!, cx, expected);
+      const argType = cx.builder.typeOf(argVal);
+      if (!irTypeEquals(argType, expected)) {
+        throw new Error(
+          `ir/from-ast: super.${methodName}() arg ${i} is ${describeIrType(argType)}, expected ${describeIrType(expected)} in ${cx.funcName}`,
+        );
+      }
+      args.push(argVal);
+    }
+    if (method.returnType === null && !statementPosition) {
+      throw new Error(`ir/from-ast: void super.${methodName}() used in expression position (${cx.funcName})`);
+    }
+    return cx.builder.emitClassSuperCall(parentShape, self, methodName, args, method.returnType);
+  }
 
   // (#2856) console.<m>(arg) — host console variant call. Intercepted BEFORE
   // receiver lowering (like the Math arm below): `console` has NO
@@ -4026,7 +4127,18 @@ function lowerForOfStatement(stmt: ts.ForOfStatement, cx: LowerCtx): void {
  * buffer so the coercion instructions re-run each iteration.
  */
 function coerceLoopCondToBool(condValue: IrValueId, cx: LowerCtx, loopKind: "while" | "for" | "do" | "if"): IrValueId {
-  const kind = asVal(cx.builder.typeOf(condValue))?.kind;
+  const irType = cx.builder.typeOf(condValue);
+  // #2949 S5.1 — a boxed-any (dynamic) condition lowers ToBoolean via
+  // `dyn.truthy` (→ `__any_unbox_bool` gc / `__is_truthy` host), the same
+  // JS-truthiness the legacy condition path emits. Emitted INTO the current
+  // (cond) buffer so it re-runs each iteration, exactly like the numeric arm
+  // below. This arm is reachable only once the selector admits a dynamic
+  // condition (S5.P); until then the move-only gate rejects such functions,
+  // so it is exercised only by hand-built-IR unit tests (byte-inert).
+  if (irType.kind === "dynamic") {
+    return cx.builder.emitDynTruthy(condValue);
+  }
+  const kind = asVal(irType)?.kind;
   if (kind === "i32") return condValue;
   if (kind === "f64") {
     // ToBoolean(f64) = abs(x) > 0  (false for 0, -0, NaN; true otherwise).
@@ -4892,9 +5004,14 @@ function lowerIncrementDecrement(id: ts.Identifier, op: ts.SyntaxKind, cx: Lower
 }
 
 function lowerConditional(expr: ts.ConditionalExpression, cx: LowerCtx): IrValueId {
-  const cond = lowerExpr(expr.condition, cx, irVal({ kind: "i32" }));
-  const condType = cx.builder.typeOf(cond);
-  if (asVal(condType)?.kind !== "i32") {
+  const rawCond = lowerExpr(expr.condition, cx, irVal({ kind: "i32" }));
+  const condType = cx.builder.typeOf(rawCond);
+  // #2949 S5.1 — a boxed-any (dynamic) ternary condition lowers ToBoolean via
+  // `dyn.truthy`, emitted before the `if` so it evaluates once. Reachable only
+  // when the selector admits a dynamic condition (S5.P); exercised by
+  // hand-built-IR unit tests until then (byte-inert on the corpus).
+  const cond = condType.kind === "dynamic" ? cx.builder.emitDynTruthy(rawCond) : rawCond;
+  if (condType.kind !== "dynamic" && asVal(condType)?.kind !== "i32") {
     throw new Error(`ir/from-ast: ternary condition must be bool in ${cx.funcName}`);
   }
 
@@ -5207,6 +5324,22 @@ function lowerBinary(expr: ts.BinaryExpression, cx: LowerCtx, hint: IrType): IrV
   const rhs = lowerExpr(expr.right, cx, irVal({ kind: "f64" }));
   const lt = typeOfValue(lhs, cx);
   const rt = typeOfValue(rhs, cx);
+
+  // #2949 S5.2 — dynamic equality: `===`/`!==`/`==`/`!=` where either operand
+  // is a boxed-any carrier. The concrete operand is boxed into the carrier
+  // (refining the box tag from a literal's kind where known), the dyn operand
+  // is left as-is, and `dyn.eq` lowers through the CANONICAL
+  // `__any_strict_eq`/`__any_eq` helpers (D4). Must precede the string-operand
+  // path below (a `dyn === "s"` mixes dynamic + string). The payload-less
+  // STRICT `dyn === null`/`dyn === undefined` cases were already handled by
+  // `tryFoldNullCompare`/`tryLowerUndefinedCompare`'s dynamic arms (cheaper
+  // exact `tag.test`), so they never reach here. Reachable only once the S5.P
+  // selector scan admits dynamic-eq bodies; today the move-only gate rejects
+  // them, so this arm is byte-inert.
+  if (lt.kind === "dynamic" || rt.kind === "dynamic") {
+    const dynEq = tryLowerDynamicEq(expr, op, lhs, rhs, lt, rt, cx);
+    if (dynEq !== null) return dynEq;
+  }
 
   // String operand path (slice 1, #1169a) — `+`, `===`, `!==`, `==`, `!=`.
   // Any other operator with a string operand throws so the function falls
@@ -5602,6 +5735,14 @@ function tryLowerUndefinedCompare(expr: ts.BinaryExpression, op: ts.SyntaxKind, 
   const other = leftU ? expr.right : expr.left;
   const v = lowerExpr(other, cx, irVal({ kind: "externref" }));
   const t = cx.builder.typeOf(v);
+  // #2949 S5.2 — a dynamic (boxed-any) operand: strict `=== undefined` /
+  // `!== undefined` is the exact Undefined-partition tag test (cheaper and
+  // more precise than boxing `undefined` into the carrier + the general
+  // helper). Only strict ops reach here (`isStrictEq`/`isStrictNeq` gate).
+  if (t.kind === "dynamic") {
+    const flag = cx.builder.emitTagTest(v, JsTag.Undefined);
+    return isStrictNeq ? cx.builder.emitUnary("i32.eqz", flag, irVal({ kind: "i32" })) : flag;
+  }
   const tv = asVal(t);
   const externrefShaped =
     (tv !== null && tv.kind === "externref") ||
@@ -5658,6 +5799,18 @@ function tryFoldNullCompare(expr: ts.BinaryExpression, op: ts.SyntaxKind, cx: Lo
   const v = lowerExpr(other, cx, irVal({ kind: "f64" }));
   const otherType = cx.builder.typeOf(v);
 
+  // #2949 S5.2 — a dynamic (boxed-any) operand: STRICT `=== null` / `!== null`
+  // is the exact Null-partition tag test. LOOSE `== null` / `!= null` matches
+  // BOTH null and undefined (§7.2.15) — NOT a single tag test — so it is left
+  // to legacy (return null → demote), NOT folded.
+  if (otherType.kind === "dynamic") {
+    if (op === ts.SyntaxKind.EqualsEqualsEqualsToken || op === ts.SyntaxKind.ExclamationEqualsEqualsToken) {
+      const flag = cx.builder.emitTagTest(v, JsTag.Null);
+      return isNeq ? cx.builder.emitUnary("i32.eqz", flag, irVal({ kind: "i32" })) : flag;
+    }
+    return null;
+  }
+
   // Slice 1 only knows non-nullable types: `val<...>`, `string`, and
   // unions whose members are non-null (V1 unions only carry f64/i32).
   // `boxed` is deferred; bail so the caller errors cleanly.
@@ -5701,6 +5854,66 @@ function tryFoldNullCompare(expr: ts.BinaryExpression, op: ts.SyntaxKind, cx: Lo
   }
 
   return cx.builder.emitConst({ kind: "bool", value: isNeq }, irVal({ kind: "i32" }));
+}
+
+/**
+ * #2949 S5.2 — lower `dyn === x` / `dyn !== x` / `dyn == x` / `dyn != x` (either
+ * or both operands dynamic) to a `dyn.eq` node. Boxes the concrete operand into
+ * the boxed-any carrier (refining the box tag from a literal's kind where
+ * known) and leaves the dyn operand as-is, so `dyn.eq` sees two carriers — the
+ * `(ref null $AnyValue, ref null $AnyValue)` shape the canonical
+ * `__any_strict_eq`/`__any_eq` helpers take. Returns `null` (clean demote) for a
+ * concrete operand this slice cannot soundly box into the carrier (union / ref /
+ * an un-refinable non-literal `i32` whose number-vs-boolean brand is ambiguous),
+ * or for a non-equality operator.
+ */
+function tryLowerDynamicEq(
+  expr: ts.BinaryExpression,
+  op: ts.SyntaxKind,
+  lhs: IrValueId,
+  rhs: IrValueId,
+  lt: IrType,
+  rt: IrType,
+  cx: LowerCtx,
+): IrValueId | null {
+  const loose = op === ts.SyntaxKind.EqualsEqualsToken || op === ts.SyntaxKind.ExclamationEqualsToken;
+  const strict = op === ts.SyntaxKind.EqualsEqualsEqualsToken || op === ts.SyntaxKind.ExclamationEqualsEqualsToken;
+  if (!loose && !strict) return null;
+  const negate = op === ts.SyntaxKind.ExclamationEqualsToken || op === ts.SyntaxKind.ExclamationEqualsEqualsToken;
+
+  const dynL = lt.kind === "dynamic" ? lhs : boxConcreteToDynamic(lhs, lt, expr.left, cx);
+  if (dynL === null) return null;
+  const dynR = rt.kind === "dynamic" ? rhs : boxConcreteToDynamic(rhs, rt, expr.right, cx);
+  if (dynR === null) return null;
+  return cx.builder.emitDynEq(dynL, dynR, { loose, negate });
+}
+
+/**
+ * #2949 S5.2 — box a CONCRETE equality operand into the boxed-any carrier, tag-
+ * refined from its literal kind / IR type. Returns `null` when the operand has
+ * no sound carrier box in this slice, so the caller demotes cleanly rather than
+ * mis-tagging (e.g. a boxed boolean must carry tag-4, never the number default).
+ */
+function boxConcreteToDynamic(v: IrValueId, t: IrType, operand: ts.Expression, cx: LowerCtx): IrValueId | null {
+  if (t.kind === "string") {
+    return cx.builder.emitBox(v, irDynamic(JsTag.String));
+  }
+  const tv = asVal(t);
+  if (!tv) return null;
+  // Boolean literal (`true`/`false`) → tag-4 box; without the refinement the i32
+  // would box as a NUMBER and `dyn === true` would fail against a boxed boolean.
+  if (operand.kind === ts.SyntaxKind.TrueKeyword || operand.kind === ts.SyntaxKind.FalseKeyword) {
+    return cx.builder.emitBox(v, irDynamic(JsTag.Boolean));
+  }
+  // Numeric literal or an f64-typed value → number box (f64 hosts only the
+  // number brand).
+  if (tv.kind === "f64" || ts.isNumericLiteral(operand)) {
+    return cx.builder.emitBox(v, irDynamic(JsTag.NumberF64));
+  }
+  // A bare non-literal `i32` is number-vs-boolean-ambiguous with no cheap proof
+  // here — demote rather than risk a wrong tag. S5.P can refine with the
+  // checker (isProvablyBoolean) when it opens the scan.
+  return null;
 }
 
 /** Result-type hints aren't used in Phase 1 (we always know from the op). */

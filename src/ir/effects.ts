@@ -119,6 +119,8 @@ export function effectsOf(instr: IrInstr, cache: Map<IrInstr, IrEffects> = new M
     case "box":
     case "unbox":
     case "tag.test":
+    case "dyn.truthy": // #2949 S5.1 — ToBoolean read on the carrier: pure (no heap/control effect)
+    case "dyn.eq": // #2949 S5.2 — equality read over two carriers: pure (no heap/control effect)
     case "coerce.to_externref":
     case "string.concat":
     case "string.eq":
@@ -151,6 +153,8 @@ export function effectsOf(instr: IrInstr, cache: Map<IrInstr, IrEffects> = new M
     // trigger a host getter; iterator ops advance host iterator state.
     case "call":
     case "class.call":
+    case "class.super_init": // #3000-E — runs parent `_init` (writes parent fields on self)
+    case "class.super_call": // #3000-E — static-dispatched parent method (arbitrary heap effect)
     case "closure.call":
     case "extern.call":
     case "class.new":
@@ -441,6 +445,13 @@ export function isSideEffecting(i: IrInstr): boolean {
     i.kind === "class.call" ||
     i.kind === "class.set" ||
     i.kind === "class.new" ||
+    // #3000-E: super(...) runs the parent `_init` (writes parent fields on self);
+    // super.method() invokes the parent method body — both arbitrary effects, and
+    // super_init is void-result so DCE MUST keep it (and its operands) live via
+    // this predicate, not the `result === null` path (which keeps the instr but
+    // does NOT seed its operand uses — that dropped `super(<const>)`'s arg, #3000-E).
+    i.kind === "class.super_init" ||
+    i.kind === "class.super_call" ||
     // Slice 6 (#1169e): slot.write and forof.vec are statement-level
     // side effects — the loop's body executes for every element.
     // slot.read is pure (load a Wasm local) but always-keep to avoid

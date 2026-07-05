@@ -598,6 +598,39 @@ function verifyBlock(
           }
         }
       }
+      // #2949 S5.1 — dyn.truthy is ToBoolean on the boxed-any carrier: the
+      // operand MUST be dynamic (a concrete scalar has an inline ToBoolean
+      // and must not route through the carrier helper). Result is i32,
+      // already enforced structurally by the loop/if condValue rules.
+      if (instr.kind === "dyn.truthy") {
+        const operandIr = operandIrType(func, block, instr.value, localDefs);
+        if (operandIr && operandIr.kind !== "dynamic") {
+          errors.push({
+            message: `dyn.truthy operand must be a dynamic IrType, got ${operandIr.kind} (#2949)`,
+            func: func.name,
+            block: block.id as number,
+          });
+        }
+      }
+      // #2949 S5.2 — dyn.eq compares TWO boxed-any carriers via the canonical
+      // `__any_strict_eq`/`__any_eq` helpers (which take `(ref null $AnyValue,
+      // ref null $AnyValue)`). BOTH operands MUST be dynamic — the producer
+      // boxes any concrete operand into the carrier before this node, so a
+      // non-dynamic operand here is a producer bug (a concrete-vs-concrete
+      // `===` has an inline `i32.eq`/`f64.eq` and must never route through the
+      // carrier helper). Result is i32, satisfying downstream condValue rules.
+      if (instr.kind === "dyn.eq") {
+        for (const operand of [instr.lhs, instr.rhs]) {
+          const operandIr = operandIrType(func, block, operand, localDefs);
+          if (operandIr && operandIr.kind !== "dynamic") {
+            errors.push({
+              message: `dyn.eq operand must be a dynamic IrType, got ${operandIr.kind} (#2949)`,
+              func: func.name,
+              block: block.id as number,
+            });
+          }
+        }
+      }
 
       if (instr.result !== null) {
         if (defs.has(instr.result)) {
@@ -679,7 +712,10 @@ function collectUses(instr: IrBlock["instrs"][number]): readonly IrValueId[] {
     case "box":
     case "unbox":
     case "tag.test":
+    case "dyn.truthy":
       return [instr.value];
+    case "dyn.eq":
+      return [instr.lhs, instr.rhs];
     case "string.const":
       return [];
     case "string.concat":
@@ -715,6 +751,10 @@ function collectUses(instr: IrBlock["instrs"][number]): readonly IrValueId[] {
     case "class.alloc":
       // #3000-C: fresh default-initialised allocation — no SSA operands.
       return [];
+    case "class.super_init":
+      return [...instr.args, instr.self];
+    case "class.super_call":
+      return [instr.receiver, ...instr.args];
     case "class.get":
       return [instr.value];
     case "class.set":

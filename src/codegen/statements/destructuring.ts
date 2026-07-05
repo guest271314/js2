@@ -861,10 +861,29 @@ export function compileObjectDestructuring(
   const bindingKind: BindingKind =
     decl.parent.flags & ts.NodeFlags.Const ? "const" : decl.parent.flags & ts.NodeFlags.Let ? "let" : "var";
 
+  // (#3024) Keep the RHS-materialization buffer reachable for the field-pad
+  // patch that fires while the nested pattern's DEFAULT object literal is
+  // compiled. `destructureParamObject` compiles nested defaults into DETACHED
+  // branch buffers (plain JS-local swaps, tracked in `ctx.liveBodies` only for
+  // the immediate inner branch), so the OUTER body holding the initializer's
+  // `struct.new` is orphaned once we descend. When a nested default literal
+  // (e.g. `{ w: { x, y, z } = { x, y, z } } = { w: { x, z } }`) SHARES the same
+  // anonymous struct as the initializer's sub-object but carries MORE fields, it
+  // grows that struct via `ensureComputedPropertyFields`; the resulting
+  // `patchStructNewForAddedField` walks `fctx.body` + `savedBodies` +
+  // `liveBodies` and previously could NOT reach the already-emitted initializer
+  // `struct.new` sitting in this orphaned outer body — leaving it one operand
+  // short of the grown field count ("struct.new need 3, got 2" invalid Wasm).
+  // Registering the buffer here (same mechanism as the destructuring-PARAM
+  // #2503/#2158 fixes) makes it reachable; removed after so it does not leak.
+  const rhsBody = fctx.body;
+  const rhsAlreadyLive = ctx.liveBodies.has(rhsBody);
+  if (!rhsAlreadyLive) ctx.liveBodies.add(rhsBody);
   destructureParamObject(ctx, fctx, tmpLocal, pattern, paramType, {
     mode: "decl",
     bindingKind,
   });
+  if (!rhsAlreadyLive) ctx.liveBodies.delete(rhsBody);
 
   // Module-global sync stays in the caller — the helper only writes to locals.
   syncDestructuredLocalsToGlobals(ctx, fctx, pattern);
