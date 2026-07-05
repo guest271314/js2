@@ -27,6 +27,8 @@ The format follows Michael Nygard's 2011 ADR template: **Context**,
 | 012 | Accepted¹ | [Intermediate representation: multi-stage typed IR](./0012-intermediate-representation.md)                             |
 | 013 | Accepted  | [Explicit allocation sites in the IR](./0013-ir-allocation-sites.md)                                                   |
 | 014 | Accepted  | [Ownership and access-semantics analysis on IR values](./0014-ownership-access-analysis.md)                            |
+| 015 | Accepted  | [String encoding tracking](./0015-string-encoding-tracking.md)                                                         |
+| 016 | Accepted  | [Differential codegen performance analysis](./0016-differential-codegen-perf-analysis.md)                             |
 | 017 | Accepted  | [Linear-backend bump/arena allocator; one fixed GC strategy, not pluggable](./0017-linear-bump-arena-allocator.md)     |
 | 018 | Accepted  | [Structured IR: optimize inside nested control-flow buffers](./0018-structured-ir-nested-buffers.md)                   |
 

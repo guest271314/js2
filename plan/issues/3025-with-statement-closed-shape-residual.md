@@ -1,10 +1,11 @@
 ---
 id: 3025
 title: "with statement: closed object-literal shape residual (~167 default-lane fails, CE leaks into unrelated with-adjacent tests)"
-status: ready
+status: done
 sprint: current
 created: 2026-07-03
-updated: 2026-07-04
+updated: 2026-07-05
+completed: 2026-07-05
 priority: medium
 horizon: s
 feasibility: medium
@@ -152,3 +153,48 @@ banked fix directions: **both, ordered, different owners** —
 the compile path owns `with` in compiled source; the interpreter (#2929 §2)
 owns `with` inside eval/Function-ctor text only — one shared MOP surface
 (#3031 §3.4).
+
+---
+
+## Slice W1 landed (2026-07-05, dev-3025)
+
+**Implemented the Tier-1 struct-typed-target extension** in
+`src/codegen/with-scope.ts` (`compileWithStatement` +
+`proveStructTypedWithTarget` + shared `finalizeStaticWithScope`). A
+`with (<identifier>)` whose target's **declaration** type `resolveStructName`s
+to a closed WasmGC struct is now compiled into a struct-typed local and pushes a
+`static` `WithScope`, so bare-identifier reads/writes route to direct
+`struct.get`/`struct.set` — closing the dominant `var o = { … }; with (o) { … }`
+bucket that Tier-2 could not serve (a struct wrapped `extern.convert_any` is
+opaque to host `in`/get reflection → every own-field read missed → `ReferenceError`).
+
+Key implementation notes:
+
+- **Declaration-site typing.** Inside a `with` body the TS checker widens every
+  identifier to `any` and returns no symbol, so the target type is resolved via
+  `getSymbolAtLocation` → `getTypeOfSymbolAtLocation(symbol, valueDeclaration)`,
+  which is immune to the widening and matches the WasmGC local's struct.
+- **No forced `ensureStructForType`.** Only a variable the compiler *already*
+  lowered to a struct is accepted; an object demoted to an externref `$Object`
+  (e.g. mutated with `env[Symbol.unscopables] = …`) resolves to `undefined` and
+  stays on Tier-2 (whose host reflection honours @@unscopables).
+- **Conservative soundness gates — all fall through to Tier-2, never a CE:**
+  bare-identifier target only; reject `any`/`unknown`/`null`/`undefined`/union/
+  intersection; reject a `@@unscopables` struct member; reject if the target
+  receives a computed/Symbol-keyed element **write** anywhere in scope
+  (`o[k] = v`); reject bodies containing `delete <identifier>` (cascade/
+  configurability is Tier-2-only); reject a body-referenced name that is an
+  inherited `Object.prototype` key or an own member the struct dropped.
+- **Partial nested-`with` improvement:** the OUTER struct scope's fields now
+  resolve inside a nested `with` (was a hard `ReferenceError` on main); the inner
+  target stays Tier-2 (checker types it `any`) until #3027's substrate reader
+  lands, at which point nested works for free.
+
+Tests: `tests/issue-3025.test.ts` (8 cases). #2663 (delete/var-precedence) and
+#2663 unscopables suites stay green (the gates route those back to Tier-2). The 4
+pre-existing `issue-1387*` diagnostic-test failures are stale (pre-#2663 CE
+assertions superseded by the dynamic path) and fail identically on `origin/main`
+— untouched here, and not in the required CI checks.
+
+Substrate follow-up (Tier-2 struct-field visibility, nested inner targets) stays
+owned by **#3027**; the @@unscopables + abrupt-propagation tail stays **W2**.
