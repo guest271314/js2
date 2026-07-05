@@ -10,9 +10,9 @@
   },
   {
     "edition": "ES5",
-    "pass": 10305,
-    "fail": 2655,
-    "ce": 115,
+    "pass": 10338,
+    "fail": 2628,
+    "ce": 109,
     "skip": 0,
     "total": 13075,
     "pct": 79,
@@ -57,9 +57,9 @@
   },
   {
     "edition": "ES2015",
-    "pass": 11191,
+    "pass": 11193,
     "fail": 4034,
-    "ce": 161,
+    "ce": 159,
     "skip": 0,
     "total": 15386,
     "pct": 73,
@@ -1462,12 +1462,12 @@
   },
   {
     "edition": "ES2020",
-    "pass": 850,
+    "pass": 871,
     "fail": 988,
-    "ce": 40,
+    "ce": 19,
     "skip": 18,
     "total": 1896,
-    "pct": 45,
+    "pct": 46,
     "features": [
       {
         "name": "BigInt",
@@ -1489,12 +1489,12 @@
       },
       {
         "name": "dynamic-import",
-        "pass": 363,
+        "pass": 384,
         "fail": 50,
-        "ce": 21,
+        "ce": 0,
         "skip": 18,
         "total": 452,
-        "pct": 80
+        "pct": 85
       },
       {
         "name": "Symbol",
@@ -1624,12 +1624,12 @@
       },
       {
         "name": "async-iteration",
-        "pass": 28,
+        "pass": 29,
         "fail": 11,
-        "ce": 1,
+        "ce": 0,
         "skip": 2,
         "total": 42,
-        "pct": 67
+        "pct": 69
       },
       {
         "name": "arrow-function",
