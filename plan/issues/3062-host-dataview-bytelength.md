@@ -1,7 +1,8 @@
 ---
 id: 3062
 title: "codegen: DataView.byteLength / byteOffset return NaN in JS-host mode (native accessor gated to standalone only)"
-status: in-progress
+status: done
+completed: 2026-07-06
 sprint: current
 priority: medium
 horizon: s

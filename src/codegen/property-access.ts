@@ -3801,8 +3801,10 @@ export function compilePropertyAccess(
   // `ab.byteLength` / `ab.byteOffset` read back NaN (~45 test262 fails). The
   // `i32_byte` backing (field-0 = byte count, element size 1) is IDENTICAL across
   // host and standalone, so the `isBuffer` arm below is representation-safe in both
-  // modes. TypedArray / DataView stay standalone-only here (their backings are
-  // element-scaled / windowed and diverge in host mode — see #3060 follow-up).
+  // modes. (#3062) DataView is ALSO host-handled now, via the `__dv_view_byte_attr`
+  // helper that reads the `_dvViewMeta` window (see the dedicated arm below).
+  // TypedArray stays standalone-only here (its element-scaled backing diverges in
+  // host mode — a separate follow-up).
   const hostBufferByteAttr =
     !noJsHost(ctx) && !ctx.strictNoHostImports && (propName === "byteLength" || propName === "byteOffset");
   if (
@@ -3861,6 +3863,36 @@ export function compilePropertyAccess(
       } as Instr);
       if (!ctx.fast) fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
       return ctx.fast ? { kind: "i32" } : { kind: "f64" };
+    }
+    // (#3062) JS-host DataView `byteLength` / `byteOffset`. In host mode
+    // `new DataView(buf, offset, length)` returns the raw i32_byte buffer struct
+    // (no `$__dv_window` wrapper — that shape is `noJsHost`-only, see
+    // new-super.ts); the view window is recorded out-of-band in `_dvViewMeta` by
+    // `__dv_register_view` at construction. Without this arm the read falls
+    // through to `__extern_get(struct, "byteLength")` → undefined → NaN. Recover
+    // the window via the `__dv_view_byte_attr(view, sel)` host helper:
+    //   sel 0 → byteOffset, sel 1 → byteLength (windowed; sentinel handled host-side).
+    if (isDataView && !noJsHost(ctx) && propName !== "BYTES_PER_ELEMENT") {
+      const attrIdx = ensureLateImport(
+        ctx,
+        "__dv_view_byte_attr",
+        [{ kind: "externref" }, { kind: "i32" }],
+        [{ kind: "i32" }],
+      );
+      flushLateImportShifts(ctx, fctx);
+      if (attrIdx !== undefined) {
+        const recvType = compileExpression(ctx, fctx, expr.expression);
+        // The helper takes an externref. DataView locals are already externref;
+        // an inline `new DataView(...)` receiver may hand back a GC ref
+        // (`ref`/`ref_null`) — recover it to externref before the call.
+        if (recvType && recvType.kind !== "externref") {
+          fctx.body.push({ op: "extern.convert_any" } as Instr);
+        }
+        fctx.body.push({ op: "i32.const", value: propName === "byteOffset" ? 0 : 1 } as Instr);
+        fctx.body.push({ op: "call", funcIdx: attrIdx } as Instr);
+        if (!ctx.fast) fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+        return ctx.fast ? { kind: "i32" } : { kind: "f64" };
+      }
     }
     if (isBuffer || isTypedArr) {
       // byteOffset on a fresh-backing view is always 0.
