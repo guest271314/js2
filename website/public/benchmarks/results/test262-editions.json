@@ -57,8 +57,8 @@
   },
   {
     "edition": "ES2015",
-    "pass": 11224,
-    "fail": 4018,
+    "pass": 11231,
+    "fail": 4011,
     "ce": 144,
     "skip": 0,
     "total": 15386,
@@ -84,12 +84,12 @@
       },
       {
         "name": "TypedArray",
-        "pass": 389,
-        "fail": 713,
+        "pass": 395,
+        "fail": 707,
         "ce": 1,
         "skip": 0,
         "total": 1103,
-        "pct": 35
+        "pct": 36
       },
       {
         "name": "default-parameters",
@@ -525,12 +525,12 @@
       },
       {
         "name": "Uint8Array",
-        "pass": 2,
-        "fail": 5,
+        "pass": 3,
+        "fail": 4,
         "ce": 0,
         "skip": 0,
         "total": 7,
-        "pct": 29
+        "pct": 43
       },
       {
         "name": "DataView.prototype.getFloat64",
@@ -781,8 +781,8 @@
   },
   {
     "edition": "ES2017",
-    "pass": 447,
-    "fail": 213,
+    "pass": 448,
+    "fail": 212,
     "ce": 7,
     "skip": 0,
     "total": 667,
@@ -799,12 +799,12 @@
       },
       {
         "name": "SharedArrayBuffer",
-        "pass": 84,
-        "fail": 158,
+        "pass": 85,
+        "fail": 157,
         "ce": 3,
         "skip": 0,
         "total": 245,
-        "pct": 34
+        "pct": 35
       },
       {
         "name": "Atomics",
@@ -1462,8 +1462,8 @@
   },
   {
     "edition": "ES2020",
-    "pass": 871,
-    "fail": 988,
+    "pass": 872,
+    "fail": 987,
     "ce": 19,
     "skip": 18,
     "total": 1896,
@@ -1471,12 +1471,12 @@
     "features": [
       {
         "name": "BigInt",
-        "pass": 220,
-        "fail": 798,
+        "pass": 221,
+        "fail": 797,
         "ce": 8,
         "skip": 0,
         "total": 1026,
-        "pct": 21
+        "pct": 22
       },
       {
         "name": "TypedArray",
@@ -1525,21 +1525,21 @@
       },
       {
         "name": "ArrayBuffer",
-        "pass": 53,
-        "fail": 44,
+        "pass": 54,
+        "fail": 43,
         "ce": 0,
         "skip": 0,
         "total": 97,
-        "pct": 55
+        "pct": 56
       },
       {
         "name": "DataView",
-        "pass": 48,
-        "fail": 34,
+        "pass": 49,
+        "fail": 33,
         "ce": 0,
         "skip": 0,
         "total": 82,
-        "pct": 59
+        "pct": 60
       },
       {
         "name": "SharedArrayBuffer",
@@ -1633,12 +1633,12 @@
       },
       {
         "name": "arrow-function",
-        "pass": 32,
-        "fail": 6,
+        "pass": 33,
+        "fail": 5,
         "ce": 0,
         "skip": 0,
         "total": 38,
-        "pct": 84
+        "pct": 87
       },
       {
         "name": "coalesce-expression",
@@ -2784,8 +2784,8 @@
   },
   {
     "edition": "ES2024",
-    "pass": 361,
-    "fail": 277,
+    "pass": 362,
+    "fail": 276,
     "ce": 7,
     "skip": 0,
     "total": 645,
@@ -2793,8 +2793,8 @@
     "features": [
       {
         "name": "TypedArray",
-        "pass": 24,
-        "fail": 214,
+        "pass": 25,
+        "fail": 213,
         "ce": 4,
         "skip": 0,
         "total": 242,
@@ -2811,12 +2811,12 @@
       },
       {
         "name": "align-detached-buffer-semantics-with-web-reality",
-        "pass": 0,
-        "fail": 153,
+        "pass": 1,
+        "fail": 152,
         "ce": 0,
         "skip": 0,
         "total": 153,
-        "pct": 0
+        "pct": 1
       },
       {
         "name": "BigInt",
