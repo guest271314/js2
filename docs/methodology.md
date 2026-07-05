@@ -4,14 +4,14 @@
 
 ## Status
 
-This document is current as of the start of sprint 46 (2026-04-30).
+This document was last refreshed 2026-07-05 (sprint 69). Specific counts are point-in-time; `plan/` is the live source.
 At that point the project has accumulated:
 
-- **45 completed sprints** (current is sprint 46)
+- **69 development sprints**
 - **95 merged pull requests** to `main`
 - **8,884 commits** in the public repository
-- **1,162 issue files** under `plan/issues/sprints/`, plus a backlog and a `wont-fix/` archive
-- **825 test files** under `tests/` (302 issue-scoped, 178 equivalence-suite, plus other)
+- **2,650+ issue files**, flat under `plan/issues/` (`plan/issues/<id>-<slug>.md`); sprint membership + status live in frontmatter, not the directory
+- **2,100+ test files** under `tests/` (1,500+ issue-scoped, 200+ equivalence-suite, plus other)
 - **26,004 / 43,168 test262 passes** (60.2% of the official suite, full ECMAScript spec conformance)
 - **12 Architecture Decision Records** under `docs/adr/`
 
@@ -182,9 +182,10 @@ synthesis):
   architectural issues. Used when an issue is marked
   `feasibility: hard` or `reasoning_effort: max`. Same workflow as a
   regular developer; deeper reasoning per task.
-- **Scrum Master.** A teammate agent spawned at end-of-sprint. Reviews
+- **Process retrospectives.** At end-of-sprint the tech lead reviews
   what shipped, identifies process problems, and proposes changes to
-  the checklists in `plan/method/`.
+  the checklists in `plan/method/`. (This was a standalone "scrum master"
+  agent earlier; the role has since been folded into the tech lead.)
 
 ### Communication protocol
 
@@ -535,8 +536,8 @@ architecture-section docs — so they survive context resets.
 ### Cost
 
 At current Anthropic API pricing, a typical sprint week
-(8 active developers, 1 PO, 1 architect, 1 tech lead, 1
-scrum master, with a mix of Opus and Sonnet) runs at a cost
+(8 active developers, 1 PO, 1 architect, 1 tech lead,
+with a mix of Opus and Sonnet) runs at a cost
 that scales linearly with developer-hours. Precise figures
 will be added once the project's token-tracking logs cover a
 representative sprint range; current estimates are within
@@ -566,7 +567,7 @@ The standard open-source flow:
 2. Read one ADR (`docs/adr/`) and one recent sprint retrospective
    (`plan/log/retrospectives/`) — together they convey the
    architectural and process context.
-3. Pick an issue from `plan/issues/sprints/<current>/` with
+3. Pick an issue from `plan/issues/` (filter frontmatter `status: ready`) with
    `status: ready` (or from `plan/issues/backlog/` if you want to
    propose a new direction).
 4. Create a branch and a worktree under
@@ -581,7 +582,7 @@ agent on your branch.
 ### AI agent contributors
 
 Spawn a `developer` agent (definition in
-`.claude/agents/developer.md`) pointed at a `plan/issues/sprints/<N>/<id>.md`
+`.claude/agents/developer.md`) pointed at a `plan/issues/<id>-<slug>.md`
 file. The agent reads the issue, creates a worktree, implements
 the spec, opens a PR, and self-merges if CI passes. The TaskList
 mechanism (see `plan/method/team-setup.md`) provides the work
