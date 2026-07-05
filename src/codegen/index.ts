@@ -1461,12 +1461,21 @@ function planIrOverlay(ctx: CodegenContext, ast: TypedAST): IrOverlayPlan {
   // time from-ast lowers (post-`compileDeclarations`), which is where member
   // resolution happens.
   const jsHostExterns = !(ctx.standalone || ctx.wasi || ctx.strictNoHostImports);
+  // (#3053 U2) The gc `__dyn_member_get` body is sound in every config EXCEPT
+  // fast host-js-string (`fast && !standalone && !wasi`): there the carrier is
+  // the gc `$AnyValue` but strings are host js-string externrefs, so the native
+  // honest classifier mis-tags reads and the body is invalid. Gate the dynamic
+  // member-read claim off in that ONE config (clean pre-claim rejection, not a
+  // claim-then-demote). The carrier keying in `ensureDynMemberGet` matches
+  // (`ctx.fast`), so every claimed config emits a valid, carrier-aligned body.
+  const dynMemberReadBuildable = !(ctx.fast && !ctx.standalone && !ctx.wasi);
   const selection = planIrCompilation(
     ast.sourceFile,
     {
       experimentalIR: true,
       trackFallbacks,
       jsHostExterns,
+      dynMemberReadBuildable,
       resolveHostGlobal: makeIrHostGlobalResolver(ast.checker),
     },
     typeMap,

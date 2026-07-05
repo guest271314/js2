@@ -2,7 +2,7 @@
 id: 3053
 title: "Unified dynamic-reader carrier substrate — one __dyn_member_get primitive under #3037 CS3 (identity) AND #2949 S5.4 (IR claim-rate)"
 status: in-progress
-assignee: ttraenkler/opus-u1-wire
+assignee: ttraenkler/opus-u2-flip
 sprint: current
 created: 2026-07-05
 updated: 2026-07-05
@@ -658,3 +658,126 @@ to accept a dynamic receiver (result → `dynamic`), co-landed with the S5.P
 truthiness/eq/relational arms and gated by the #2949 §4 anti-vacuity probe — AND
 the carrier mode-split alignment above. That is the measured, FLOOR-SENSITIVE
 claim-flip; U1 deliberately leaves the scan closed.
+
+## U2 — LANDED (the claim-flip: scan opened for dynamic member/element reads)
+
+**Author:** opus-u2-flip. **Branch:** `issue-3053-u2-claim-flip` (from
+`upstream/main` with U0+U1 merged). **Floor verdict realised: BYTE-INERT on the
+prove-emit corpus; claim-delta ~0 on the measured population (honest per §4).**
+
+### 1. Carrier mode-split alignment (the mandatory U2 prerequisite) — FIXED
+
+`ensureDynMemberGet` now keys its body on **`ctx.fast`**, the SAME predicate
+`resolveDynamic` / `makeDynamicLowering` (`integration.ts`) use for the carrier
+ValType. Previously the body keyed on `ctx.standalone || ctx.wasi`, which
+DISAGREED with the carrier in two configs (the KNOWN-GAP table). Empirically
+verified across the full `{fast} × {standalone|wasi|host}` matrix — every config
+that CLAIMS now emits a **VALID, carrier-aligned** module:
+
+| config (`fast` / `standalone|wasi`) | carrier (`ctx.fast`) | body (now `ctx.fast`) | claims + valid |
+| --- | --- | --- | --- |
+| fast + standalone/wasi | gc `$AnyValue` | gc `$AnyValue` | ✅ |
+| default host (neither) | externref | externref wrapper | ✅ |
+| **non-fast standalone/wasi** (prove-emit `standalone`/`wasi` targets, `fast:undefined`) | externref | **externref wrapper** (was gc — the bug) | ✅ FIXED |
+| **fast host-js-string** (`fast && !standalone`) | gc `$AnyValue` | gc `$AnyValue` | ⛔ **gated OFF** (see §2) |
+
+The critical realisation: **prove-emit-identity's `standalone`/`wasi` targets run
+with `fast:undefined` (=false)**, so they are the `!fast && standalone` config —
+which the old keying mishandled (gc body vs externref carrier ⇒ invalid Wasm the
+moment a read emits). Aligning on `ctx.fast` makes the non-fast standalone/wasi
+targets use the externref host-wrapper body (calling native `__extern_get`),
+matching their externref carrier. Confirmed valid + behaviourally correct.
+
+### 2. Fast host-js-string is UNSOUND for the gc body — clean pre-claim gate
+
+In `fast && !standalone && !wasi` the carrier is gc `$AnyValue` yet strings are
+host js-string externrefs, so the native honest classifier (`$AnyString`-shaped)
+mis-tags reads → **forcing the gc body to build there produced an INVALID
+module**. Rather than rely on the benign IR-demote (a wasteful claim-then-demote,
+gate-6-absorbed but fragile), U2 adds a config-aware selector capability
+`IrSelectionOptions.dynMemberReadBuildable` (set from `ctx` at
+`codegen/index.ts`: `!(ctx.fast && !ctx.standalone && !ctx.wasi)`). When false the
+`dynamicUsesAreMoveOnly` member/element arms give a **clean pre-claim rejection**
+(function keeps its `param-/return-type-not-resolvable` bucket) — never a
+claim-then-demote. `check:ir-fallbacks` (default-host compile = sound) is
+unaffected (default `true`).
+
+### 3. The scan opening (`select.ts` `dynamicUsesAreMoveOnly`)
+
+- `isDynShaped` extended to recognise member/element reads off a dyn-producing
+  receiver (`dyn.a`, `dyn[i]`, chains `dyn.a.b`) — so the receiver classifier and
+  the alias tracker (`const y = o.x`) both see the dynamic result.
+- **Property access** `dyn.name`: accepted in a dyn-wanted position (`expectDyn`);
+  from-ast always boxes the named key, so no key-shape gate (1:1 with the
+  producer).
+- **Element access** `dyn[key]`: accepted ONLY for the key shapes from-ast
+  produces a non-null carrier for — **string-literal / numeric-literal / dynamic
+  index**. Any other index (bare i32, dynamic arithmetic `idx-1`) stays rejected,
+  because from-ast would demote (the JS2WASM_IR_FIRST skipped-slot contract).
+- Result is `dynamic`, so it flows only to a dyn-accepting position; a member
+  read into a concrete position (`o.x + 1`) still rejects.
+
+### 4. Anti-vacuity measurement (§4) — HONEST: claim-delta ~0 on the corpus
+
+Real-`compile()` claim sweeps (production `irCompiledFuncs`, default-host = sound
+config):
+
+| corpus | baseline (U1, scan closed) | U2 (scan open) | Δ claims | post-claim demotions |
+| --- | --- | --- | --- | --- |
+| playground examples + test262/language stride-150 (159 files) | 6 | 6 | **0** | 0 |
+| `check:ir-fallbacks` playground gate | (baseline) | unchanged, all buckets Δ0 | **0** | 0 |
+| `prove-emit-identity` (39 (file,target), gc/standalone/wasi) | — | **IDENTICAL 39/39** | — | — |
+
+**Verdict — property-access-alone is corpus-vacuous, exactly as §4/§5 and the s4
+/ S5.4 investigations predicted.** The reachable test262 population (reduce-style
+`callbackfn`: `idx>0 && obj[idx]===cur && obj[idx-1]===prev`) needs a CONJUNCTION
+of forms — relational + eq + element-access **and dynamic arithmetic** (`idx-1`)
+— not property-access alone. Even the full S5.P form set (eq + relational +
+truthiness + access) would not claim `callbackfn` (the `idx-1` dynamic-arith
+index has no producer). So the corpus claim-delta is ~0 today; it grows only as
+the co-requisite forms (S5.P eq/relational/truthiness) AND dynamic arithmetic AND
+the #1370/#2855 body-shape surface land.
+
+**But the mechanism is proven NON-VACUOUS in unit tests** (`issue-3053-u2-claim-
+flip.test.ts`, 19 green): `return o.x`, `return o[i]`, `return o[0]`,
+`return o["k"]`, `const y=o.x;return y`, chained `o.a.b`, and member-read →
+dyn-param-call ALL claim, build valid Wasm in every sound config, and RUN
+correctly (value + string/number by content). **Object IDENTITY is preserved
+through the carrier** — `fwd(outer) === outer.x` holds (the #3037 CS3 ride-on
+works for any function that DOES claim a member read).
+
+### 5. Floor expectation
+
+**Byte-inert on the prove-emit corpus (39/39 IDENTICAL) ⇒ cannot regress the
+standalone floor.** No corpus/test262-sample function claims a new member read,
+so `usesDynMemberGet` is never set and the carrier-alignment change is never
+realised there. The only behavioural change is for the (currently ~0 on the
+sample) test262 functions that DO claim a dynamic member read — and those emit
+valid, identity-preserving code (unit-proven). Expected merge_group floor delta:
+**~0 (byte-inert), NET ≥ 0** (any claimed member-read gains #3037 identity via the
+tag-6 carrier; none loses correctness). Not the −162/−299/−788/−794 seams — none
+touched.
+
+### 6. U3 (#3037 CS3 identity) reachability THROUGH this IR claim — YES, mechanically
+
+The carrier is now uniform: a function the IR claims carries `any` reads as the
+tag-honest `$AnyValue` (tag-6 objects), and `fwd(o)===o.x`-style identity holds
+through `__dyn_member_get` (proven in the U2 runtime test). So U3's identity
+payoff is reachable through U1/U2 for any claimed function — **contingent on the
+IR CLAIMING the identity-sensitive function** (dominantly the `assert.sameValue`
+harness comparator). Per the §4 measurement, that claim does NOT happen yet on the
+corpus: the comparator body uses forms beyond property-access (eq + `String()` +
+`typeof` + throw + arithmetic). So CS3's magnitude remains **contingent on the
+co-requisite S5.P forms landing** (the honest asymmetry §"HONEST tractability
+verdict" already flagged). U2 delivers the substrate + the carrier alignment + the
+identity mechanism; the CS3 keystone lands when the IR claim reaches the
+comparator.
+
+### Follow-ups (to make the corpus claim-delta non-vacuous)
+
+1. **S5.P eq/relational/truthiness scan arms** (co-land, mirroring the from-ast
+   `tryLowerDynamicEq`/`tryLowerDynamicRelational`/`emitDynTruthy` producers that
+   already exist) — the conjunction the reachable population needs.
+2. **Dynamic arithmetic** (`dyn - 1`, `dyn + 1`) — the missing producer for
+   `obj[idx-1]`-style reduce bodies (new #2949 slice).
+3. **#1370/#2855 body-shape widening** — the other half of the claim ceiling.

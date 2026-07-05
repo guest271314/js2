@@ -245,6 +245,22 @@ export interface IrSelectionOptions {
   /** (#2856) True iff the compile targets a JS host (NOT standalone / wasi /
    *  strictNoHostImports). Gates the host-extern capability. */
   readonly jsHostExterns?: boolean;
+  /**
+   * (#3053 U2) True iff the unified gc member-read primitive `__dyn_member_get`
+   * (#3053 U0) has a SOUND body in this compile config. The gc `$AnyValue` body
+   * reads via native `__extern_get` and re-boxes with the native honest
+   * classifier (`$AnyString`/`$Object` shaped) — which is correct in
+   * fast+standalone/wasi (uniform native value-rep) and in every non-fast
+   * (externref-carrier) config (thin `__extern_get` wrapper), but NOT in
+   * `fast && !standalone && !wasi` (host js-string): there the carrier is the gc
+   * `$AnyValue` yet strings are host js-string externrefs, so the classifier
+   * mis-tags them and the emitted body is invalid. In that ONE config the
+   * selector must NOT claim a dynamic member read (a clean pre-claim rejection,
+   * keeping the function in `param-/return-type-not-resolvable`) rather than
+   * claim-then-demote. Provided by the real-compile call site from `ctx`; the
+   * default (undefined ⇒ true) is correct for the default-host fallback path.
+   */
+  readonly dynMemberReadBuildable?: boolean;
 }
 
 /**
@@ -309,6 +325,10 @@ export function planIrCompilation(
   // host-global resolver): in standalone/nativeStrings mode `Map` isn't a
   // registered extern class, so from-ast couldn't lower the calls — the
   // empty set keeps select↔build parity there.
+  // (#3053 U2) Latch the config-soundness of the gc member-read primitive for
+  // this run (default true = the sound default-host / fallback path). Read by
+  // `dynamicUsesAreMoveOnly` to gate the dynamic member/element-access claim.
+  currentDynMemberReadBuildable = options?.dynMemberReadBuildable ?? true;
   currentModuleScopeMapConsts.clear();
   if (hostExternCapability(options?.jsHostExterns === true) !== "defer") {
     for (const stmt of sourceFile.statements) {
@@ -695,6 +715,16 @@ let currentHostGlobalResolver: ((node: ts.Identifier) => string | undefined) | n
  * extern-class brand), so accepted shapes always lower.
  */
 const currentModuleScopeMapConsts = new Set<string>();
+
+/**
+ * (#3053 U2) Whether the gc `__dyn_member_get` body is sound in the CURRENT
+ * `planIrCompilation` run's compile config (see `IrSelectionOptions.
+ * dynMemberReadBuildable`). Set at selector entry, read by
+ * `dynamicUsesAreMoveOnly`'s member/element-access arms. Defaults to `true`
+ * (the sound default-host / fallback path). Module-scope, mirroring
+ * `currentModuleScopeMapConsts` — `planIrCompilation` is not reentrant.
+ */
+let currentDynMemberReadBuildable = true;
 
 function whyNotIrClaimable(
   fn: IrClaimableSubject,
@@ -1208,13 +1238,24 @@ function dynamicUsesAreMoveOnly(
     return e;
   };
 
-  /** Is `e` shaped like a dynamic-typed value? (dyn name | dyn-returning local call) */
+  /**
+   * Does `e` PRODUCE a dynamic-typed value?
+   *   - a dyn name (alias-tracked local / param);
+   *   - a dyn-returning direct local call;
+   *   - (#3053 U2 / #2949 S5.P) a member/element read off a dynamic-producing
+   *     receiver — `dyn.a`, `dyn[i]`, and chains `dyn.a.b` — since a member read
+   *     of any is any (routes through `__dyn_member_get`, result `dynamic`).
+   * The member-read arms only CLASSIFY the receiver here; `scanExpr` re-validates
+   * the full access (key shape, chain) against the from-ast producer contract.
+   */
   const isDynShaped = (e: ts.Expression): boolean => {
     e = unwrap(e);
     if (ts.isIdentifier(e)) return dynNames.has(e.text);
     if (ts.isCallExpression(e) && ts.isIdentifier(e.expression) && !dynNames.has(e.expression.text)) {
       return calleeReturnIsDynamic(e.expression.text, typeMap);
     }
+    if (ts.isPropertyAccessExpression(e)) return isDynShaped(e.expression);
+    if (ts.isElementAccessExpression(e)) return isDynShaped(e.expression);
     return false;
   };
 
@@ -1287,10 +1328,39 @@ function dynamicUsesAreMoveOnly(
       return scanExpr(e.condition, false) && scanExpr(e.whenTrue, false) && scanExpr(e.whenFalse, false);
     }
     if (ts.isPropertyAccessExpression(e)) {
+      // #3053 U2 / #2949 S5.P — the claim-flip. A named read off a DYNAMIC
+      // receiver (`dyn.name`) routes through `__dyn_member_get` (U0/U1) and
+      // yields a `dynamic` result, so it is a valid MOVE exactly where a dynamic
+      // value is wanted (`expectDyn`): return of a dyn-returning fn, a dyn-param
+      // arg, a dyn alias/reassignment. from-ast's `lowerPropertyAccess` dyn arm
+      // ALWAYS boxes the named key (tag-5), so there is no key-shape gate here —
+      // the claim is 1:1 with the producer (never claim-then-demote).
+      if (isDynShaped(e.expression)) {
+        return currentDynMemberReadBuildable && expectDyn && scanExpr(e.expression, true);
+      }
+      // Concrete receiver: the existing typed member-read path (unchanged).
       if (expectDyn) return false;
       return scanExpr(e.expression, false);
     }
     if (ts.isElementAccessExpression(e)) {
+      // #3053 U2 / #2949 S5.P — an indexed read off a DYNAMIC receiver
+      // (`dyn[key]`) → `dynamic` result. from-ast's `lowerElementAccess` dyn arm
+      // produces a NON-NULL key (so it does NOT demote) ONLY for: a string-literal
+      // key (tag-5), a dynamic index (used as-is), or a numeric literal (tag-3).
+      // Restrict the scan to EXACTLY those key shapes so the claim is 1:1 with the
+      // producer — any other index (e.g. a bare i32 local, or dynamic arithmetic
+      // like `idx-1`) may box to null / has no dynamic-arith producer, which would
+      // claim-then-demote (a HARD error under JS2WASM_IR_FIRST). Result flows only
+      // to a dyn-accepting position (`expectDyn`).
+      if (isDynShaped(e.expression)) {
+        if (!currentDynMemberReadBuildable || !expectDyn) return false;
+        if (!scanExpr(e.expression, true)) return false;
+        const key = unwrap(e.argumentExpression);
+        if (ts.isStringLiteralLike(key) || ts.isNumericLiteral(key)) return true;
+        if (ts.isIdentifier(key) && dynNames.has(key.text)) return true; // dynamic index → used as-is
+        return false; // any other index shape is out of the producer contract
+      }
+      // Concrete receiver: the existing typed element-read path (unchanged).
       if (expectDyn) return false;
       return scanExpr(e.expression, false) && scanExpr(e.argumentExpression, false);
     }
