@@ -263,3 +263,25 @@ line (including a `throw` whose operand itself wraps across lines, e.g.
 byte-identical Wasm against the pre-change compiler; only a `throw` with a
 missing operand (newline immediately after `throw`, or bare `throw;`) newly
 raises the early SyntaxError.
+
+## Slice 8 landed — escape sequences in a meta-property keyword (2026-07-05)
+
+**Delivered:** an early error for a `MetaProperty` (`new.target` / `import.meta`)
+whose contextual keyword carries a Unicode escape. Per ES grammar notation
+(5.1.5) a terminal symbol must appear exactly as written — so `new.target`
+(and, in module code, `import.meta`) are SyntaxErrors. Covers test262
+`language/expressions/new.target/escaped-target.js`.
+
+**Root cause:** TypeScript parses `new.target` as a `MetaProperty` whose name
+node has the canonical `.text` (`"target"`) but a raw `.getText()` that still
+carries the escape, with **no** parse diagnostic — so nothing detected it. The
+fix flags any `MetaProperty` where `name.getText() !== name.text` (the raw source
+differs from the canonical keyword ⇒ an escape was used). The same check also
+covers escaped `import.meta` in module code.
+
+**Files:** `src/compiler/early-errors/node-checks.ts` (one additive per-node
+check). Tests: `tests/issue-3026.test.ts` (+2 reject, +2 valid-control).
+Byte-inert for valid programs — verified via sha256: `new.target` in a
+constructor, in a plain function, and in a comparison all compile to
+byte-identical Wasm against the pre-change compiler; only an escaped meta-property
+keyword newly raises the early SyntaxError.
