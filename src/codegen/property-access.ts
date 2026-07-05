@@ -3811,11 +3811,24 @@ export function compilePropertyAccess(
     (ctx.wasi || ctx.standalone || ctx.strictNoHostImports || hostBufferByteAttr) &&
     (propName === "byteLength" || propName === "byteOffset" || propName === "BYTES_PER_ELEMENT")
   ) {
-    const recvName =
+    const recvNameRaw =
       objType.getSymbol()?.name ??
       (ts.isNewExpression(expr.expression) && ts.isIdentifier(expr.expression.expression)
         ? expr.expression.expression.text
         : undefined);
+    // (#3062) `DataView.prototype.byteLength` / `ArrayBuffer.prototype.byteLength`
+    // etc. — a `.prototype` receiver has the buffer/view TYPE name but is NOT an
+    // instance (no [[DataView]] / [[ArrayBufferData]] internal slot), so per spec
+    // (§25.3.4.1 / §25.1.5.1 step 3) the getter must throw a TypeError. The native
+    // accessor arms below would instead read a bogus 0 off the non-instance
+    // prototype object (`__dv_byte_len` misses → 0, or a trapping `ref.cast`
+    // standalone). Null out `recvName` for a `<ctor>.prototype` receiver so every
+    // arm skips it and the read falls through to the generic reader, which
+    // reports the required TypeError (matches pre-#3061/#3062 behaviour).
+    const recvName =
+      ts.isPropertyAccessExpression(expr.expression) && expr.expression.name.text === "prototype"
+        ? undefined
+        : recvNameRaw;
     // (#3061) In JS-host mode only the plain ArrayBuffer arm is
     // representation-safe (`i32_byte`, field-0 = byte count, identical to
     // standalone). SharedArrayBuffer's host-mode backing differs (a bare

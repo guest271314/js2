@@ -95,4 +95,33 @@ describe("#3062 host-mode DataView byteLength/byteOffset", () => {
       ),
     ).toBe(8);
   });
+
+  // #3062 regression: the getter's `this` = DataView.prototype has no
+  // [[DataView]] internal slot, so `DataView.prototype.byteLength` must throw a
+  // TypeError (§25.3.4.1) — the native arm must NOT read a bogus 0 off the
+  // prototype (test262 built-ins/DataView/prototype/{byteLength,byteOffset}/
+  // invoked-as-accessor.js).
+  async function throws(source: string): Promise<boolean> {
+    const result = await compile(source);
+    if (!result.success) return false;
+    const imports = buildImports(result.imports, undefined, result.stringPool);
+    const { instance } = await WebAssembly.instantiate(result.binary, imports);
+    (imports as unknown as { setExports?: (e: Record<string, Function>) => void }).setExports?.(
+      instance.exports as Record<string, Function>,
+    );
+    try {
+      (instance.exports as Record<string, () => unknown>).test!();
+      return false;
+    } catch {
+      return true;
+    }
+  }
+
+  it("DataView.prototype.byteLength throws (not a DataView instance)", async () => {
+    expect(await throws(`export function test(): number { return DataView.prototype.byteLength; }`)).toBe(true);
+  });
+
+  it("DataView.prototype.byteOffset throws (not a DataView instance)", async () => {
+    expect(await throws(`export function test(): number { return DataView.prototype.byteOffset; }`)).toBe(true);
+  });
 });
