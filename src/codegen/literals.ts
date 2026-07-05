@@ -972,8 +972,8 @@ export function objectLiteralSpreadTakesHostPath(ctx: CodegenContext, expr: ts.O
 
 /**
  * (#3037 CS1a) True when a **non-empty, spread-free, data-only** object literal
- * is produced into a genuine `any`/`unknown`/`object` contextual position under
- * `--target standalone` — i.e. exactly the `isAnyContextNonEmpty` branch of
+ * is produced into a genuine `any`/`unknown` contextual position under
+ * `--target standalone` — a subset of the `isAnyContextNonEmpty` branch of
  * `compileObjectLiteral` that builds it as an open `$Object` and hands back an
  * **externref**. This is the object-identity CS1a "carrier" site: such a literal
  * assigned to an `any`-typed local is currently carried as an externref, so at
@@ -1006,13 +1006,14 @@ export function objectLiteralIsStandaloneAnyObjectCarrier(
     return false;
   }
   if (!expr.properties.every((p) => resolvePropertyNameText(ctx, p) !== undefined)) return false;
-  const ctxType = ctx.checker.getContextualType(expr);
-  if (!ctxType) return false;
-  return (
-    (ctxType.flags & ts.TypeFlags.Any) !== 0 ||
-    (ctxType.flags & ts.TypeFlags.Unknown) !== 0 ||
-    (ctxType.flags & ts.TypeFlags.NonPrimitive) !== 0
-  );
+  // (#1930) Query the contextual type through the oracle boundary, not the raw
+  // TypeChecker. `contextualFactOf` classifies `any`/`unknown` directly; the
+  // `object` keyword (NonPrimitive) is not a distinct fact — it is intentionally
+  // NOT covered here (an `object`-keyword-typed carrier is a rare, safe
+  // under-fix: the literal stays externref/tag-5, reconciled by S3a). The `any`
+  // case is the CS1a beachhead.
+  const ctxFact = ctx.oracle.contextualFactOf(expr);
+  return ctxFact !== undefined && (ctxFact.kind === "any" || ctxFact.kind === "unknown");
 }
 
 export function compileObjectLiteral(
