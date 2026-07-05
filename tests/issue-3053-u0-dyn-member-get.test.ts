@@ -28,9 +28,24 @@
 // + honest classifier + `__any_strict_eq` + `__unbox_number` the drivers depend
 // on.
 
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll } from "vitest";
 import { compile } from "../src/index.js";
 import { buildImports } from "../src/runtime.js";
+
+// Force-emit the U0 helper + self-test drivers ONLY for the duration of a single
+// compile, then restore. Scoping the env this tightly (rather than for the whole
+// file via beforeAll/afterAll) prevents any cross-test contamination if CI runs
+// test files in a shared worker where `process.env` is process-global.
+async function compileForced(source: string, opts?: Parameters<typeof compile>[1]) {
+  const prev = process.env.JS2WASM_FORCE_DYN_MEMBER_GET;
+  process.env.JS2WASM_FORCE_DYN_MEMBER_GET = "1";
+  try {
+    return await compile(source, opts);
+  } finally {
+    if (prev === undefined) Reflect.deleteProperty(process.env, "JS2WASM_FORCE_DYN_MEMBER_GET");
+    else process.env.JS2WASM_FORCE_DYN_MEMBER_GET = prev;
+  }
+}
 
 // The source pools every driver key ("a"/"b"/"s"/"n"/"bo"/"z") via a dynamic
 // read, and pulls in the natives the drivers use in EACH mode: the object
@@ -50,18 +65,8 @@ const SOURCE = `export function run(): number {
   return acc;
 }`;
 
-let prevForce: string | undefined;
-beforeAll(() => {
-  prevForce = process.env.JS2WASM_FORCE_DYN_MEMBER_GET;
-  process.env.JS2WASM_FORCE_DYN_MEMBER_GET = "1";
-});
-afterAll(() => {
-  if (prevForce === undefined) Reflect.deleteProperty(process.env, "JS2WASM_FORCE_DYN_MEMBER_GET");
-  else process.env.JS2WASM_FORCE_DYN_MEMBER_GET = prevForce;
-});
-
 async function standaloneExports(): Promise<Record<string, () => number>> {
-  const r = await compile(SOURCE, { target: "standalone" });
+  const r = await compileForced(SOURCE, { target: "standalone" });
   expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
   // Host-free: a leaked `env` import would mean the case ran on a JS host path.
   const leaked = r.imports.filter((i) => i.module === "env").map((i) => i.name);
@@ -72,7 +77,7 @@ async function standaloneExports(): Promise<Record<string, () => number>> {
 }
 
 async function gcExports(): Promise<Record<string, () => number>> {
-  const r = await compile(SOURCE); // default target: "gc" (host mode)
+  const r = await compileForced(SOURCE); // default target: "gc" (host mode)
   expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
   expect(WebAssembly.validate(r.binary), "gc module must be valid Wasm").toBe(true);
   const imports = buildImports(r.imports, undefined, r.stringPool);
