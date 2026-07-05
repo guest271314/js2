@@ -3,7 +3,7 @@
   "codegen/array-object-proto.ts": 1,
   "codegen/array-to-primitive.ts": 5,
   "codegen/async-scheduler.ts": 3,
-  "codegen/binary-ops.ts": 33,
+  "codegen/binary-ops.ts": 34,
   "codegen/class-to-primitive.ts": 1,
   "codegen/closed-method-dispatch.ts": 1,
   "codegen/declarations.ts": 22,

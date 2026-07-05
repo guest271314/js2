@@ -237,6 +237,19 @@ const WELL_KNOWN_SYMBOLS: Record<string, number> = {
  * binary-ops.ts:1082-1090). Mirroring that gate exactly guarantees a carrier
  * produced here can only ever flow into `emitAnyEqOperands`'s `isAnyValue`
  * fast-path and never into a downstream read/store.
+ *
+ * (#3037 CS1b(ii)) The gate MUST mirror binary-ops' condition **byte-for-byte**:
+ * the raw checker `getTypeAtLocation(operand).flags & TypeFlags.Any` on BOTH
+ * sides — NOT `ctx.oracle.typeFactOf(...).kind === "any"`. The two DISAGREE for
+ * element-access operands: for `const a: any = [5,5]; a[0] === a[1]` the oracle
+ * reports `a[0]` as `"any"` but the checker narrows it away from the `Any` flag,
+ * so binary-ops does NOT enter `compileAnyBinaryDispatch` — the `ref $AnyValue`
+ * the carrier produced then lands in the raw `ref.eq` struct-identity arm
+ * (binary-ops.ts:1937), which compares two freshly-allocated `$AnyValue` structs
+ * → always false → value-equal numbers/strings wrongly `!==`. Using the checker
+ * flag (the actual gate binary-ops keys on) fires the carrier iff the operand
+ * pair truly routes through `__any_strict_eq`. Under-firing is safe (S3a
+ * cross-tag reconciliation); over-firing (the oracle's failure mode) is the bug.
  */
 function isAnyEqualityOperand(ctx: CodegenContext, expr: ts.Expression): boolean {
   const parent = expr.parent;
@@ -249,13 +262,12 @@ function isAnyEqualityOperand(ctx: CodegenContext, expr: ts.Expression): boolean
     op === ts.SyntaxKind.ExclamationEqualsEqualsToken;
   if (!isEq) return false;
   if (parent.left !== expr && parent.right !== expr) return false;
-  // #1930 oracle-ratchet: query type facts through `ctx.oracle` (never the raw
-  // TS checker). `typeFactOf(...).kind === "any"` is the exact equivalent of the
-  // `flags & TypeFlags.Any` gate binary-ops.ts uses to route the pair through the
-  // AnyValue equality dispatch (the oracle maps the `Any` type flag to
-  // `{ kind: "any" }`), so this mirrors that gate precisely.
-  const leftAny = ctx.oracle.typeFactOf(parent.left).kind === "any";
-  const rightAny = ctx.oracle.typeFactOf(parent.right).kind === "any";
+  // Mirror binary-ops.ts:1082-1084 EXACTLY (the raw checker `Any` flag on both
+  // operands) — this is the precise condition that routes the pair through
+  // `compileAnyBinaryDispatch` → `__any_strict_eq`. See the doc-comment above for
+  // why the `ctx.oracle` form over-fires on element-access operands.
+  const leftAny = (ctx.checker.getTypeAtLocation(parent.left).flags & ts.TypeFlags.Any) !== 0;
+  const rightAny = (ctx.checker.getTypeAtLocation(parent.right).flags & ts.TypeFlags.Any) !== 0;
   return leftAny && rightAny;
 }
 
@@ -287,8 +299,23 @@ export function maybeWrapAnyReadEqualityCarrier(
   if (!ctx.standalone) return result;
   if (!result || result.kind !== "externref") return result;
   if (!isAnyEqualityOperand(ctx, expr)) return result;
+  // (#3037 CS1b(ii)) Mirror binary-ops.ts:1081's `ctx.anyValueTypeIdx >= 0` guard,
+  // and check it BEFORE `ensureAnyFromExternHelper` (which lazily REGISTERS the
+  // `$AnyValue` type as a side effect). binary-ops routes an `any===any` pair
+  // through the `__any_strict_eq` dispatch only when `anyValueTypeIdx >= 0` at the
+  // binary expression's entry; the carrier runs later, during operand compilation.
+  // If the carrier registered-then-fired when the type was still unregistered, it
+  // would hand binary-ops a `ref $AnyValue` for a pair binary-ops already decided
+  // to compile down its numeric path — landing in the raw `ref.eq` struct-identity
+  // arm (binary-ops.ts:1937), which compares two freshly-allocated `$AnyValue`
+  // structs and returns a spurious `!==` for value-equal numbers/strings (e.g.
+  // `const a: any = [5,5]; a[0] === a[1]`, where the module never otherwise
+  // registers `$AnyValue`). Staying inert here leaves the bare externref, which
+  // binary-ops' externref-equality path answers correctly (and S3a reconciles any
+  // half-migrated pair) — never a regression, only under-fixing.
+  if (ctx.anyValueTypeIdx < 0) return result;
   const classifyIdx = ensureAnyFromExternHelper(ctx, { forceHonest: true });
-  if (classifyIdx === undefined || ctx.anyValueTypeIdx < 0) return result;
+  if (classifyIdx === undefined) return result;
   fctx.body.push({ op: "call", funcIdx: classifyIdx } as Instr);
   return { kind: "ref", typeIdx: ctx.anyValueTypeIdx };
 }
