@@ -271,6 +271,72 @@ export function isSubviewTypeIdx(ctx: CodegenContext, typeIdx: number): boolean 
 }
 
 /**
+ * (#3054 B1) Get or register the `$__ta_view_<name>` struct — a byte-backed
+ * TypedArray view over an ArrayBuffer that SHARES the buffer's backing store:
+ *   `{length: i32, buf: (ref null $__vec_i32_byte), byteOffset: i32}`.
+ *
+ * Unlike `$__subview` (which pins the parent's raw *element* array), a
+ * `$__ta_view` holds a ref to the ArrayBuffer's `$__vec_i32_byte` **vec struct**
+ * and byte-decodes each element little-endian from `buf.data` at the element's
+ * byteOffset (via the dataview-native engine). This is mandatory because WasmGC
+ * array types are nominal per element kind — the buffer's packed-i8 array
+ * (`$__arr_i32_byte`) cannot be aliased/reinterpreted as an f64/i32 element
+ * array — so uniform byte-decoding is the only sound shared-backing scheme
+ * (Phase A A.1, option (c) impossible). Refing the *vec struct* (not the inner
+ * array) is a deliberate forward-compat choice: a future resize (Phase C) swaps
+ * the vec's `data` field in place and the view — which reads `buf.data` at each
+ * access — observes it, so length-tracking falls out for free.
+ *
+ * `length` is field 0 (subtypes `$__vec_base`) so uniform `.length` reads and the
+ * externref-length helper keep working. Keyed per TS view NAME (each view kind
+ * needs a distinct typeIdx so element access can recover its byte width /
+ * signedness / float / clamp behaviour purely from the receiver's static
+ * ValType.typeIdx — no runtime tag). Idempotent.
+ */
+export function getOrRegisterTaViewType(ctx: CodegenContext, viewName: string): number {
+  const existing = ctx.taViewTypeMap.get(viewName);
+  if (existing !== undefined) return existing;
+
+  const vecBaseIdx = getOrRegisterVecBaseType(ctx);
+  // The shared ArrayBuffer/DataView backing vec (packed i8 bytes, one per slot).
+  const bufVecTypeIdx = getOrRegisterVecType(ctx, "i32_byte", { kind: "i8" });
+
+  const idx = ctx.mod.types.length;
+  const name = `__ta_view_${viewName}`;
+  ctx.mod.types.push({
+    kind: "struct",
+    name,
+    superTypeIdx: vecBaseIdx, // length-prefix compatible with $__vec_base
+    fields: [
+      { name: "length", type: { kind: "i32" }, mutable: true },
+      { name: "buf", type: { kind: "ref_null", typeIdx: bufVecTypeIdx }, mutable: false },
+      { name: "byteOffset", type: { kind: "i32" }, mutable: false },
+    ],
+  });
+  ctx.taViewTypeMap.set(viewName, idx);
+  ctx.structMap.set(name, idx);
+  ctx.typeIdxToStructName.set(idx, name);
+  ctx.structFields.set(name, [
+    { name: "length", type: { kind: "i32" as const }, mutable: true },
+    { name: "buf", type: { kind: "ref_null" as const, typeIdx: bufVecTypeIdx }, mutable: false },
+    { name: "byteOffset", type: { kind: "i32" as const }, mutable: false },
+  ]);
+  return idx;
+}
+
+/** (#3054 B1) True iff `typeIdx` is a registered `$__ta_view_<name>` struct. */
+export function isTaViewTypeIdx(ctx: CodegenContext, typeIdx: number): boolean {
+  for (const v of ctx.taViewTypeMap.values()) if (v === typeIdx) return true;
+  return false;
+}
+
+/** (#3054 B1) The TS view name (`"Uint8Array"` …) for a `$__ta_view` typeIdx, or undefined. */
+export function getTaViewName(ctx: CodegenContext, typeIdx: number): string | undefined {
+  for (const [name, v] of ctx.taViewTypeMap.entries()) if (v === typeIdx) return name;
+  return undefined;
+}
+
+/**
  * Get or register the template vec struct type for tagged template string arrays.
  */
 export function getOrRegisterTemplateVecType(ctx: CodegenContext): number {

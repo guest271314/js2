@@ -30,7 +30,9 @@ import {
   getOrRegisterSubviewType,
   getOrRegisterVecType,
   getSubviewArrTypeIdx,
+  isTaViewTypeIdx,
 } from "./registry/types.js";
+import { emitTaViewToVec } from "./dataview-native.js"; // (#3054 B1 Option A) de-view materialization
 import { noJsHost } from "./expressions/helpers.js";
 import { ensureNativeIteratorRuntime, getOrRegisterIterRecType } from "./iterator-native.js";
 import { ensureObjVecBuilders } from "./object-runtime.js";
@@ -2910,6 +2912,12 @@ export function compileArrayMethodCall(
   // through `compileArrayJoinExtern` whenever this is set so the WasmGC-
   // native loop doesn't try to extract a vec struct from a JS array.
   let receiverIsExternref = false;
+  // (#3054 B1 Option A) When the receiver is a `$__ta_view` (shared-backing TA
+  // over a buffer), it can't be `ref.cast` to the native element-typed vec the
+  // method operates on. We materialize the view into a native vec and rebind the
+  // receiver identifier; these hold the rebind so we can restore it post-dispatch.
+  let taViewRebindName: string | undefined;
+  let taViewRebindSaved: number | undefined;
 
   // The receiver's actual Wasm type may differ from the TS type — e.g.
   // `[0, true].lastIndexOf(...)` infers i32 elements during construction,
@@ -2972,13 +2980,32 @@ export function compileArrayMethodCall(
       (actualType as { typeIdx: number }).typeIdx !== vecTypeIdx
     ) {
       const actualVecIdx = (actualType as { typeIdx: number }).typeIdx;
-      const actualArrIdx = getArrTypeIdxFromVec(ctx, actualVecIdx);
-      if (actualArrIdx >= 0) {
-        const actualArrDef = ctx.mod.types[actualArrIdx];
-        if (actualArrDef && actualArrDef.kind === "array") {
-          vecTypeIdx = actualVecIdx;
-          arrTypeIdx = actualArrIdx;
-          elemType = actualArrDef.element;
+      // (#3054 B1 Option A) `$__ta_view` receiver: materialize into the native
+      // element-typed vec (`vecTypeIdx`, from `resolveArrayInfo`) and rebind the
+      // identifier so the method's receiver re-compile loads the copy instead of
+      // ref.cast-trapping on the view. Only the identifier-local case (the
+      // measured regression: `ta.fill(...)`/`ta.includes(...)`); other receiver
+      // shapes are rarer and fall through unchanged.
+      if (isTaViewTypeIdx(ctx, actualVecIdx) && ts.isIdentifier(receiverExpr) && fctx.localMap.has(receiverExpr.text)) {
+        const matLocal = allocLocal(fctx, `__tav_mrecv_${fctx.locals.length}`, {
+          kind: "ref_null",
+          typeIdx: vecTypeIdx,
+        });
+        compileExpression(ctx, fctx, receiverExpr); // loads the view ref
+        emitTaViewToVec(ctx, fctx, actualVecIdx, vecTypeIdx); // → native vec
+        fctx.body.push({ op: "local.set", index: matLocal });
+        taViewRebindName = receiverExpr.text;
+        taViewRebindSaved = fctx.localMap.get(receiverExpr.text);
+        fctx.localMap.set(receiverExpr.text, matLocal);
+      } else {
+        const actualArrIdx = getArrTypeIdxFromVec(ctx, actualVecIdx);
+        if (actualArrIdx >= 0) {
+          const actualArrDef = ctx.mod.types[actualArrIdx];
+          if (actualArrDef && actualArrDef.kind === "array") {
+            vecTypeIdx = actualVecIdx;
+            arrTypeIdx = actualArrIdx;
+            elemType = actualArrDef.element;
+          }
         }
       }
     }
@@ -3230,6 +3257,15 @@ export function compileArrayMethodCall(
     if (ts.isIdentifier(propAccess.expression)) {
       fctx.localMap.delete(propAccess.expression.text);
     }
+  }
+
+  // (#3054 B1 Option A) Restore the receiver identifier's original binding after
+  // the method dispatched on the materialized native-vec copy. The original var
+  // is still the `$__ta_view` (its buffer aliasing is intact for later element
+  // access); only this method call saw the de-viewed copy.
+  if (taViewRebindName !== undefined) {
+    if (taViewRebindSaved !== undefined) fctx.localMap.set(taViewRebindName, taViewRebindSaved);
+    else fctx.localMap.delete(taViewRebindName);
   }
 
   return result;

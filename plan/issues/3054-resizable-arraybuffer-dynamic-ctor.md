@@ -1,7 +1,8 @@
 ---
 id: 3054
 title: "Resizable ArrayBuffer + dynamic `new <ctorVar>(rab)` — the ~180 codegen gap under #1524"
-status: ready
+status: in-progress
+assignee: ttraenkler/opus-3054-b1
 created: 2026-07-05
 updated: 2026-07-05
 priority: medium
@@ -412,3 +413,107 @@ Probes (compile + instantiate via
 `src/runtime-instantiate.ts#compileAndInstantiate`, WAT via `compileToWat`)
 confirmed each gap above. Full probe transcript in the PR discussion / sendev
 report.
+
+## B1 — shared-backing views (LANDED, opus-3054-b1, on `upstream/main` @ ad61af55d)
+
+**Scope shipped:** `new <TA>(arrayBuffer)` / `new DataView(arrayBuffer)` now
+produce a SHARED-BACKING view that refs the buffer's vec struct instead of
+copying its bytes — offset-0, default-length window, element read + write. Fixes
+the exact verified bug (sibling TA + DataView write-observability). Standalone /
+WASI lane only (the native `i32_byte` vec representation of ArrayBuffer exists
+only host-free; host-mode buffers are host objects — see the lane note below).
+
+### What changed (WHY, per the A.1 decision)
+- **New type `$__ta_view_<name>`** (`getOrRegisterTaViewType`, `registry/types.ts`)
+  — `{length:i32 (elem count), buf:(ref null $__vec_i32_byte), byteOffset:i32}`,
+  subtype of `$__vec_base`. Registered **late + once, memoized on
+  `ctx.taViewTypeMap`**, keyed per TS view name (each kind needs a distinct
+  typeIdx so element decode — width / signedness / float / clamp — is recovered
+  purely from the receiver's static `ValType.typeIdx`, no runtime tag). Mirrors
+  `getOrRegisterSubviewType` / `getOrRegisterDvWindowType` exactly → no
+  type-index-shift hazard (types are append-only; the subtype follows its
+  supertype in the recgroup, same as `$__subview`). **`buf` refs the VEC STRUCT,
+  not the inner array** — the deliberate A.1 forward-compat choice so a future
+  Phase-C resize (swap `buf.data`) is observed by the view for free.
+- **Ctor swap** (`emitTaViewConstruct`, `dataview-native.ts`): replaced the copy
+  loop `emitTypedArrayFromByteBuffer` (deleted) with `struct.new $__ta_view
+  {length = buf.byteLength/elemSize, buf, byteOffset = 0}`. Wired at both ctor
+  sites (`new-super.ts` ~3603 / ~4600).
+- **Element arms** (`emitTaViewElementGet` / `emitTaViewElementSet`,
+  `dataview-native.ts`): `ta[i]` byte-decodes LE from `buf.data` at
+  `byteOffset + i*width` via the EXISTING `emitReadBytes` / `emitWriteBytes`
+  engine. Read arm in `property-access.ts` (before the `$__subview` arm), write
+  arm in `assignment.ts` (before the vec-struct-assign check). Uint8Clamped write
+  applies ToUint8Clamp (`f64.nearest` ties-to-even + `[0,255]` clamp; NaN→0 via
+  trunc_sat).
+- **Local-type inference** (`inferTaViewType`, `statements/variables.ts`): a
+  `const a = new <TA>(buffer)` binding resolves its LOCAL type to the
+  `$__ta_view` (mirroring `inferSubarraySubviewType`) so `a[i]` / `a[i]=v` /
+  `a.length` pick the view lowering at compile time. **Without this the local
+  took `resolveWasmType(Uint8Array)` = the native vec type and the arms were
+  bypassed** (the reason the first cut null-deref'd). Gate matches the ctor
+  exactly: host-free lane, single non-numeric buffer arg.
+- **`.length` arm** (`property-access.ts` ~5081): the local-type length reader
+  now also accepts a `$__ta_view` (its field0 is the element count) — was
+  keyed on `fields[1] === "data"`, which a view (`fields[1] === "buf"`) failed,
+  reading 0. Element count, not byte length.
+
+### Lane note (why standalone-only, corrects a premise)
+The task framed this as fixing the host lane too, but measurement showed
+host-mode `new ArrayBuffer(8).byteLength` → `NaN`: **host-mode ArrayBuffer is a
+host object, not a native `i32_byte` vec.** The view needs the native vec, so
+enabling it in host mode would `ref.cast`-trap on host buffers (the exact #1670
+class that gated the original copy path to `noJsHost`). B1 therefore stays
+host-free-lane; host buffer-view support is a separate follow-up (route through
+the runtime). The standalone floor is where B1's delta lands (CI merge_group).
+
+### Validation
+- **Reproduction fixed** — the verified probes now pass in standalone:
+  `a[0]=99;b[0]` → 99; DataView-over-buf → 7; Int32 sibling → 12345.
+- **`tests/issue-3054-b1-shared-views.test.ts`** — 15 standalone assertions
+  (sibling/DataView both directions, cross-width byte layout, sign-extend,
+  modular wrap, Uint32 > 2^31, Float32/64, Uint8Clamped clamp + ties-to-even,
+  `.length` element count, `.length`-loop iteration). All green.
+- **Byte-inert proof** — sha256 of the standalone binary is IDENTICAL between
+  `upstream/main` and this branch for 6 control programs (arith, plain array,
+  string, **TA count-ctor `new Uint8Array(4)`**, **DataView setInt32/getInt32**,
+  class object). Only `new <TA>(buffer)` programs change bytes.
+- `tsc --noEmit` clean; prettier clean.
+
+### Next: B2 is cleanly next
+B2 (view accessor props `.byteLength`/`.byteOffset`/`.buffer` identity/
+`BYTES_PER_ELEMENT` + `new TA(buf, byteOffset, length)` windowing) composes on
+this representation with no rework — the `$__ta_view` already carries a
+`byteOffset` field (pinned 0 in B1) that B2 populates, and the byte engine is
+offset-agnostic. B3 (proto methods over a view receiver) then follows.
+
+### B1 addendum — Option A (de-view materialization) + floor-neutral (opus-3054-b1)
+
+The first B1 cut regressed **-2** on the scoped standalone floor: 2 `resizable-arraybuffer`
+tests (`fill/absent-indices-…`, `includes/index-compared-…`) construct a TA over a buffer
+then call a prototype method; `.fill`/`.includes` `ref.cast` the receiver to the native
+element-typed vec, which **traps** on a `$__ta_view` (the B3 gap). Fixed **floor-neutral**:
+- **De-view materialization** (`emitTaViewToVec`): at `compileArrayMethodCall`, a
+  `$__ta_view` identifier-local receiver is byte-decoded into a fresh native vec and the
+  `localMap` is rebound for the call (restored after). De-aliasing — mutating-method writes
+  land in the copy, not the buffer (B1 never claimed proto-method write-through; that's B3).
+- **Bounds-checked view read/write**: OOB read → NaN (§10.4.5.15 undefined), OOB write →
+  no-op (§10.4.5.16), matching the native bounds-checked vec (no trap).
+- **Re-measured**: NET **0** (+0/-0) on built-ins/{TypedArray,DataView,ArrayBuffer} (2195
+  files) vs upstream/main. Byte-inert preserved (sha256 identical for array-method controls).
+
+### Measurement-integrity finding (surfaced to the lead — separate issue)
+While measuring, discovered the **standalone lane does not enforce NUMERIC equality
+assertions**. Reproduced through the real `wrapTest`: `assert.sameValue(1, 2)` → standalone
+`test()` returns **1 (pass)**, host returns 2 (fail); `assert.sameValue("a","b")` → 2 in
+BOTH (strings enforced). Trigger: the harness preamble **unconditionally** injects
+`class Test262Error`; with it present, the numeric assert path
+`assert_sameValue`→`isSameValue(a: any, b: any)`→`a === b` compiles the `any`-boxed number
+compare incorrectly in standalone (returns "equal" for unequal), so `__fail` is never set.
+String/bool asserts route to typed `assert_sameValue_str`/`_bool` (test262-runner.ts:1633/
+1651) and ARE enforced; there is **no `_num` specialization** so numeric asserts fall onto
+the buggy `any` path. **Implication:** a large fraction of numeric-heavy standalone
+"passes" (TypedArray/DataView/ArrayBuffer/Number/Math) are vacuous → the standalone floor %
+and the standalone-gap prioritization need recalibration. Fix directions: (a) harness-prelude
+`assert_sameValue_num(number,number)` routing (cheap, sidesteps the codegen bug), or (b) fix
+standalone `any === any`-on-boxed-numbers when an object-runtime/class is present.
