@@ -161,8 +161,8 @@
       "ctxChecker": 22
     },
     "src/codegen/property-access.ts": {
-      "getTypeAtLocation": 28,
-      "ctxChecker": 52
+      "getTypeAtLocation": 31,
+      "ctxChecker": 54
     },
     "src/codegen/regexp-standalone.ts": {
       "getTypeAtLocation": 14,
