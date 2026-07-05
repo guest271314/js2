@@ -65,7 +65,7 @@ import { compileArrowFunction } from "./closures.js";
 // Property access + binary ops (used inside compileExpressionInner)
 import { compileBinaryExpression } from "./binary-ops.js";
 import { compileArrayLiteral, compileObjectLiteral } from "./literals.js";
-import { compileElementAccess, compilePropertyAccess } from "./property-access.js";
+import { compileElementAccess, compilePropertyAccess, maybeWrapAnyReadEqualityCarrier } from "./property-access.js";
 import { compileTaggedTemplateExpression, compileTemplateExpression } from "./string-ops.js";
 import { compileDeleteExpression, compileRegExpLiteral, compileTypeofExpression } from "./typeof-delete.js";
 
@@ -1347,12 +1347,17 @@ function compileExpressionInner(
     // (#2128) Property reads can dispatch a host GETTER callback whose
     // mutable captures live in ref cells (see the assignment arm above for
     // the setter counterpart) — re-sync the outer locals after the read.
+    // (#3037 CS1b) Re-classify a dynamic `any`-member read that is a direct
+    // operand of a standalone `any`-equality into the `$AnyValue` tag-6 carrier
+    // (object identity), byte-inert off that exact shape. Applied BEFORE the
+    // getter-writeback resync so the classifier consumes the read result while
+    // it is still on top of the stack (the writebacks are net-zero local
+    // re-syncs that leave the carrier value in place).
+    const readResult = maybeWrapAnyReadEqualityCarrier(ctx, fctx, expr, compilePropertyAccess(ctx, fctx, expr));
     if (fctx.persistentCallbackWritebacks && fctx.persistentCallbackWritebacks.length > 0) {
-      const readResult = compilePropertyAccess(ctx, fctx, expr);
       fctx.body.push(...fctx.persistentCallbackWritebacks.map((instr) => structuredClone(instr)));
-      return readResult;
     }
-    return compilePropertyAccess(ctx, fctx, expr);
+    return readResult;
   }
 
   if (ts.isElementAccessExpression(expr)) {

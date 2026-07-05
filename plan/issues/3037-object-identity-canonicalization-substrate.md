@@ -2,7 +2,7 @@
 id: 3037
 title: "Object-identity canonicalization substrate for standalone dynamic reads (foundation under #3027 / V2-S3b reader-arm)"
 status: in-progress
-assignee: opus-3037-cs1a
+assignee: opus-3037-cs1b
 sprint: current
 created: 2026-07-05
 updated: 2026-07-05
@@ -587,3 +587,92 @@ CS1a is low-risk (byte-inert corpus) but floor-sensitive: **not self-merged on
 PR-green alone** — flagged the lead for a monitored `merge_group` standalone
 `host_free_pass` floor enqueue (expect NET-POSITIVE / neutral). Any floor
 regression ⇒ a non-object leaked into tag-6 → diagnose, don't force.
+
+---
+
+## CS1b (member-read family) — LANDED (opus-3037-cs1b): dynamic `any`-member-read tag-6 carrier
+
+**PR:** dynamic `any`-member-READ carrier (member-read family only; element
+access + the reflective producers are separate follow-up PRs). **Flips CS0
+FLIP-TARGETs (a) `gOPD.value === gOPD.value`, (b) `o.a === o.b` (aliased object),
+and (e) `o.n === o.n` (dynamic number)** — all three are `PropertyAccessExpression`
+reads, so one member-read interception covers them. (c) stays 1 (CS1a); (d)
+`getPrototypeOf` stays 0 (its reads land in identifier locals, not member reads →
+that is CS1c). All 10 CS0 INVARIANTs + all CS1a tests unchanged.
+
+### The mechanism (CORRECTS the RE-SCOPE "reader has no migratable site" premise)
+
+CS0 measured that the reader returns a **bare externref** and the tag is decided
+downstream at the operand seam. The re-scope concluded "box at the reader" has no
+site. **CS1b resolves this by making the reader context-aware:** a member read is
+re-classified to the tag-6 carrier **only when it is a direct operand of a
+standalone `any`-equality** — the EXACT shape (`leftIsAny && rightIsAny &&
+isEqualityOp`, binary-ops.ts) that routes through `compileAnyBinaryDispatch →
+emitAnyEqOperands`. So the carrier can only ever flow into the equality helper's
+`isAnyValue` fast-path and NEVER into a subsequent read/store — side-stepping the
+CS1a finding that a `$AnyValue`-typed value breaks dynamic reads (`__any_to_extern`
+keeps the box wrapped). This is why the carrier here is a `$AnyValue` (not the
+`ref $Object` CS1a used for a statically-known object): a dynamic read is
+statically `any`, so it needs the FULL runtime classifier, and the equality-operand
+scoping makes `$AnyValue` safe.
+
+- **Carrier production:** `maybeWrapAnyReadEqualityCarrier` (property-access.ts),
+  called at the single member-read choke point in `compileExpression`
+  (expressions.ts, `ts.isPropertyAccessExpression` arm). When `ctx.standalone`,
+  the read compiled to `externref`, and `isAnyEqualityOperand(expr)` holds, it
+  appends `call __any_from_extern_honest` and returns `(ref $AnyValue)`. Every
+  precondition unmet → the bare externref is returned unchanged (byte-inert).
+- **Classifier reuse (NO second classifier):** `ensureAnyFromExternHelper` gains a
+  `{ forceHonest }` option that emits its honest body (the SAME `$AnyString`→tag-5,
+  `$BoxedNumber`→tag-3, `$BoxedBoolean`→tag-4, other-eq→tag-6 arms) under a
+  DISTINCT name `__any_from_extern_honest`, irrespective of the module-wide
+  `honestAnyBoxing` flag (default OFF). The flag-driven generic instance that the
+  −788 chokepoint depends on is neither renamed nor mutated. `$BoxedNumber`
+  eq-castability (a plain struct → `eq` subtype) is handled because the classifier
+  peels tag-3/tag-4 BEFORE the eq test (the settled CS0 probe).
+- **Untouched:** the generic `boxToAny` externref arm (−788), the tag-5 same-tag
+  arm (−162), and the `===` operand seam / `emitAnyEqOperands` (−299) — all
+  byte-identical. The change is purely the reader's result ValType at the enumerated
+  shape.
+
+### Partial-coverage safety (S3a)
+
+Scoped to member reads that are direct `any`-equality operands. A member read
+stored in a local first (`const x:any=o.a; x===o.b`) leaves `x` tag-5 and migrates
+only `o.b` → the mixed tag-6×tag-5 pair reconciles via S3a's cross-tag arm → still
+`1` (verified). So partial coverage **never regresses, only under-fixes** — the
+element-access and reflective-producer families can land independently later.
+
+### Files
+
+- `src/codegen/any-helpers.ts` — `ensureAnyFromExternHelper(ctx, { forceHonest })`
+  → forced-honest `__any_from_extern_honest` sibling (same body).
+- `src/codegen/property-access.ts` — `isAnyEqualityOperand` +
+  `maybeWrapAnyReadEqualityCarrier` (exported).
+- `src/codegen/expressions.ts` — call the wrapper at the member-read choke point
+  (applied before the getter-writeback resync, which is net-zero on the stack).
+- `tests/issue-3037-cs0-identity-characterization.test.ts` — (a)/(b)/(e) updated
+  `0 → 1` (`FLIPPED by CS1b`); (c) stays 1 (CS1a), (d) stays 0 (CS1c).
+- `tests/issue-3037-cs1b-member-read-carrier.test.ts` — new: pins the 3 flips,
+  negation, the S3a half-migrated pair, anti-vacuity negatives, and the
+  classification/consumer invariants (string/number/boolean by value, chained read
+  `o.a.z`, arithmetic, `typeof`).
+
+### Floor discipline
+
+Higher breadth-risk than CS1a (it changes a common reader lowering's result
+ValType) — the equality-operand scoping is the safety boundary. **NOT self-merged
+on PR-green alone**; flagged the lead for a monitored `merge_group` standalone
+`host_free_pass` floor enqueue (expect NET-POSITIVE — drives #3027). Any floor
+regression ⇒ a non-object leaked into tag-6 → diagnose, don't force.
+
+### Remaining CS1b families (separate PRs, isolated merge_group evidence each)
+
+- **CS1b(ii) element access** — same interception at the `ts.isElementAccessExpression`
+  choke point (`arr[i] === arr[j]`); needs `compileElementAccess`'s any-result
+  externref path re-classified. Not folded here (a floor regression there must not
+  sink the member-read flip).
+- **CS1b(iii) descriptor `.value`/`.get` producer** — `.value` reads are already
+  covered when they are equality operands (case a flips here); the remaining work
+  is the producer-side canonicalization for `.value` results that flow elsewhere.
+- **CS1c** getPrototypeOf/reflective producer carrier (case d).
