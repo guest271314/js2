@@ -36,6 +36,7 @@ import {
 } from "./nodes.js";
 import type { AllocSiteRegistry } from "./alloc-registry.js";
 import type { Instr, ValType } from "./types.js";
+import { JsTag, jsTagUnboxKind } from "../codegen/js-tag.js";
 
 interface OpenBlock {
   readonly id: IrBlockId;
@@ -313,6 +314,102 @@ export class IrFunctionBuilder {
     const resultType: IrType = { kind: "val", val: { kind: "f64" } };
     this.valueTypes.set(result, resultType);
     this.pushInstr({ kind: "string.len", value, result, resultType });
+    return result;
+  }
+
+  // --- dynamic value ops (#2949 S5.0) -------------------------------------
+  //
+  // Builder-level emit vocabulary for the `IrType.dynamic` boxed-any carrier:
+  // `box` erases a concrete value into the carrier, `unbox` reads a proven
+  // partition's payload back out, and `tag.test` classifies the carrier's
+  // runtime JS tag. These are the plumbing the S5.1–S5.P dynamic-use-in-body
+  // producers consume; the node-level LOWERING already landed in slices 2/3
+  // (`lower.ts` box/unbox/tag.test cases → `resolveDynamicLowering` →
+  // `IrDynamicLowering`, backed by `$AnyValue` / `__any_box_*` on WasmGC and
+  // the `__box_number` / classifier import family on host).
+  //
+  // S5.0 is byte-inert by construction: these methods only APPEND verifier-
+  // clean nodes, and no producer calls them yet (from-ast/select unchanged),
+  // so no compiled function's Wasm changes (prove-emit-identity IDENTICAL).
+
+  /**
+   * Emit `box{value → toType}` — erase a concrete value into a boxed-any
+   * carrier (`toType.kind === "dynamic"`) or a scalar tagged union
+   * (`toType.kind === "union"`). Result type is `toType`.
+   *
+   * The operand must NOT itself be dynamic — a re-box is provably redundant
+   * (verifier R1); this is asserted here so a producer bug surfaces at
+   * construction time rather than as a malformed double-boxed carrier that
+   * only fails later in verify/lower.
+   *
+   * A `dynamic` `toType` may carry a `tag` refinement (`irDynamic(JsTag.X)`);
+   * lowering maps it onto the canonical boxing helper's representation hint
+   * (e.g. a Boolean-refined i32 boxes as tag-4, not an unbranded number),
+   * so producers that statically know the partition SHOULD refine the box
+   * target — see slice-3 note 4 in the #2949 issue file.
+   */
+  emitBox(value: IrValueId, toType: IrType): IrValueId {
+    if (this.typeOf(value).kind === "dynamic") {
+      throw new Error(
+        `IrFunctionBuilder: emitBox operand ${value} is already dynamic — re-boxing a dynamic value is invalid (#2949 R1) (func ${this.name})`,
+      );
+    }
+    const result = this.allocator.fresh();
+    this.valueTypes.set(result, toType);
+    this.pushInstr({ kind: "box", value, toType, result, resultType: toType });
+    return result;
+  }
+
+  /**
+   * Emit `unbox{value, jsTag}` — read the proven JS partition's payload off
+   * a boxed-any carrier. The caller MUST have proved the tag already (via an
+   * earlier `emitTagTest`, or a static refinement); lowering emits a payload
+   * read without a runtime re-check.
+   *
+   * `jsTag` must be payload-bearing: Null/Undefined are singleton partitions
+   * with no payload (`jsTagUnboxKind === null`, verifier R2) — their identity
+   * is observed via `emitTagTest` alone, so unboxing them is rejected here.
+   *
+   * Result type is the partition's payload ValType per `jsTagUnboxKind`:
+   * `i32` (NumberI32 / Boolean), `f64` (NumberF64), or a ref-shaped carrier
+   * for String/Object/Function. The exact ref ValType is a resolver/consumer
+   * decision at lowering (host: the externref carrier is the value; WasmGC:
+   * String rides `externval`, Object/Function ride `refval` — see slice-3
+   * hazard (b)); the plumbing declares the ref-shaped result as `externref`
+   * and the S5.4 member-read producer refines it where a native ref is
+   * needed.
+   */
+  emitUnbox(value: IrValueId, jsTag: JsTag): IrValueId {
+    const payload = jsTagUnboxKind(jsTag);
+    if (payload === null) {
+      throw new Error(
+        `IrFunctionBuilder: emitUnbox with payload-less JsTag ${JsTag[jsTag]} is invalid — use emitTagTest (#2949 R2) (func ${this.name})`,
+      );
+    }
+    const payloadVal: ValType =
+      payload === "i32" ? { kind: "i32" } : payload === "f64" ? { kind: "f64" } : { kind: "externref" };
+    const resultType = irVal(payloadVal);
+    const result = this.allocator.fresh();
+    this.valueTypes.set(result, resultType);
+    this.pushInstr({ kind: "unbox", value, jsTag, result, resultType });
+    return result;
+  }
+
+  /**
+   * Emit `tag.test{value, jsTag}` — does the carrier's runtime tag match the
+   * JS partition? Result is `i32` (1 if it matches, else 0).
+   *
+   * `jsTag` may be ANY partition, including the payload-less Null/Undefined
+   * (testing for them is the point — verifier R3). Per the V2 numeric-class
+   * invariant the two number partitions are ONE class, so `tag.test` against
+   * either `NumberI32` or `NumberF64` lowers to the same numeric-class test
+   * in both backends (see slice-3 note 3 in the #2949 issue file).
+   */
+  emitTagTest(value: IrValueId, jsTag: JsTag): IrValueId {
+    const resultType = irVal({ kind: "i32" });
+    const result = this.allocator.fresh();
+    this.valueTypes.set(result, resultType);
+    this.pushInstr({ kind: "tag.test", value, jsTag, result, resultType });
     return result;
   }
 
