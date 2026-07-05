@@ -11,20 +11,22 @@ es_edition: ES5
 language_feature: delete
 task_type: bug
 created: 2026-06-26
-updated: 2026-07-02
+updated: 2026-07-05
 ---
 
-> **Partial resolution (2026-06-29, del2726).** Group **(a)** is now DONE
-> (sloppy `delete <unresolvable identifier>` → `true`; +4 test262, 0
-> regressions — see `## Resolution — group (a)`). Groups **(c)** and **(d)**
-> were DONE earlier (+6 test262 incl. siblings, 0 regressions — see
-> `## Resolution — groups (c) + (d)`). Remaining open scope: **(b)** sloppy
-> global-object model (now 3/4 — `S11.4.1_A3.2_T1` implicit-global was carried
-> by the (a) oracle as a bonus; `S11.4.1_A3.1`, `S11.4.1_A3.3_T1`,
-> `11.4.1-4.a-8` remain) is STRUCTURAL (architect-spec first); **(e)**
-> mapped-arguments delete is DEFERRED to #1726; **(f)**/**(g)** re-route to
-> their owning feature issues (not delete bugs). This issue stays open
-> (`status: ready`) for (b) — route to architect before further dispatch.
+> **Partial resolution (2026-07-05, dev-2726).** Group **(a)** DONE (sloppy
+> `delete <unresolvable identifier>` → `true`; +4 test262). Groups **(c)** and
+> **(d)** DONE earlier (+6 test262). Group **(b)** is now **2/4**: the
+> configurable-built-in-global case **`11.4.1-4.a-8`** (`delete JSON === true`)
+> is DONE (+1 test262, 0 regressions — see `## Resolution — group (b) 11.4.1-4.a-8`),
+> alongside `S11.4.1_A3.2_T1` (carried earlier by the (a) oracle). The **2
+> remaining (b) tests are STRUCTURAL** and need the global-object model
+> (architect-spec first): `S11.4.1_A3.1` (`delete this.y === false` — top-level
+> `this` as the global object) and `S11.4.1_A3.3_T1` (`x = 1; delete x; x` →
+> ReferenceError — implicit-global creation + real deletion + unresolved read).
+> **(e)** mapped-arguments delete DEFERRED to #1726; **(f)**/**(g)** re-route to
+> their owning feature issues. This issue stays open (`status: ready`) for the 2
+> structural (b) tests — route to architect before further dispatch.
 
 # #2726 — delete residual (non-throw) semantics
 
@@ -142,6 +144,49 @@ Net **+4** test262. Flipped fail→pass: `S11.4.1_A2.2_T1`, `S11.4.1_A3.3_T6`,
 `x = 1; delete x === true`, carried by the same oracle). Regression test:
 `tests/issue-2726-sloppy-unresolvable-delete.test.ts`.
 
+## Resolution — group (b) `11.4.1-4.a-8` (2026-07-05, dev-2726)
+
+**Scope.** The configurable-built-in-global slice of group (b) —
+`11.4.1-4.a-8.js` (`delete JSON === true`). The other two (b) tests
+(`S11.4.1_A3.1`, `S11.4.1_A3.3_T1`) remain STRUCTURAL and out of this slice
+(see the top note / Residual).
+
+**Root cause.** After group (a) flipped only the *unresolvable* bare-identifier
+`delete` to `true`, every *resolvable* bare identifier still emitted `false`
+("variables are not deletable"). But §13.5.1.2 step 5 makes `delete` of a
+**configurable** property of the global object return `true`. Per ECMA-262 §19
+**every** built-in global (`JSON`/`Object`/`Math`/`parseInt`/…) is
+`{[[Configurable]]: true}`; only `NaN`/`Infinity`/`undefined` are
+non-configurable. So `delete JSON` must be `true`, not `false`.
+
+**Oracle.** Distinguish a configurable built-in global from a user-declared
+`var`/`function` (whose global binding is non-configurable ⇒ `false`) by TS
+**symbol provenance**: a built-in's `symbol.declarations` are ALL in ambient
+`.d.ts` lib files (`decl.getSourceFile().isDeclarationFile`), whereas a user
+binding is declared in the program's own source. Two guards make it precise:
+- name-exclude the three non-configurable intrinsics
+  `NON_CONFIGURABLE_GLOBALS = {NaN, Infinity, undefined}` (all three are
+  ambient-declared, so provenance alone wouldn't separate them);
+- require `decls.length > 0`, which keeps `undefined`/`globalThis`/`arguments`
+  (empty `declarations`) out of the `true` branch.
+Eval-body nodes never reach this branch (their symbol is `undefined`, already
+handled by the group-(a) arm). Front-end constant flip (`i32.const 1`), so the
+host and standalone lanes agree — **no new host import**.
+`src/codegen/typeof-delete.ts` (bare-identifier arm + `NON_CONFIGURABLE_GLOBALS`).
+
+### Test Results — group (b) 11.4.1-4.a-8 (host/gc lane, authoritative `runTest262File`)
+
+| cluster | baseline → fix |
+|---|---|
+| `language/expressions/delete` (full dir, 69 files) | 63 → **64** pass, **0 regressions** |
+| collateral (`delete <builtin>` elsewhere: `built-ins/undefined`, `staging/sm`) | no change (0 collateral) |
+
+Net **+1** test262. Flipped fail→pass: `11.4.1-4.a-8`. Guards verified unchanged:
+`delete NaN`/`delete undefined`/`delete <user var|func>` stay `false`
+(`11.4.1-4.a-4`, `built-ins/undefined/S15.1.1.3_A3_T2`, `11.4.1-4.a-5/-13/-16`).
+Regression test: `tests/issue-2726-configurable-global-delete.test.ts` (+ the
+corrected JSON/Object assertion in `tests/issue-2726-sloppy-unresolvable-delete.test.ts`).
+
 ## Resolution — groups (c) + (d) (2026-06-27, dev2)
 
 **Root cause (c).** `var o = {}` infers an empty struct type, so the receiver
@@ -194,16 +239,18 @@ flipped fail→pass: `11.4.1-4.a-1`, `11.4.1-4.a-2`, `11.4.1-4-a-4-s` (c),
 `Object/seal/object-seal-inherited-accessor-properties-are-ignored`.
 Regression test: `tests/issue-2726.test.ts`.
 
-## Residual (as of #2199, PO reconcile 2026-06-28; updated 2026-06-29 del2726)
+## Residual (as of #2199, PO reconcile 2026-06-28; updated 2026-07-05 dev-2726)
 
 NOT done — partially resolved. DONE so far: (a) sloppy unresolvable-identifier
 oracle (+4 test262, 0 regressions, 2026-06-29, **PR #2296**), (c) hasOwnProperty-
 after-configurable-delete + (d) non-configurable accessor delete (+6 test262, 0
-regressions, **PR #2177**). Remaining OPEN: **(b) sloppy global-object model** — now 3/4
-(`S11.4.1_A3.2_T1` implicit-global was carried by the (a) oracle; still failing:
-`S11.4.1_A3.1` `delete this.y === false`, `S11.4.1_A3.3_T1` `delete x; x` →
-ReferenceError, `11.4.1-4.a-8` `delete JSON === true`). (b) is STRUCTURAL (needs
-top-level-`this`-as-global-object + configurable-global tracking) and needs an
-architect spec first (NOT dev-claimable as-is). (e) mapped-arguments delete →
-#1726; (f)/(g) re-routed to owning feature issues. Stays `in-progress` for (b) —
-route to architect before further dispatch.
+regressions, **PR #2177**), (b-partial) configurable-built-in-global
+`11.4.1-4.a-8` `delete JSON === true` (+1 test262, 0 regressions, 2026-07-05,
+dev-2726). Remaining OPEN: **(b) sloppy global-object model** — now **2/4**
+(`S11.4.1_A3.2_T1` + `11.4.1-4.a-8` done; still failing: `S11.4.1_A3.1`
+`delete this.y === false`, `S11.4.1_A3.3_T1` `delete x; x` → ReferenceError).
+These 2 are STRUCTURAL (need top-level-`this`-as-global-object + implicit-global
+creation/real-deletion/unresolved-read) and need an architect spec first (NOT
+dev-claimable as-is). (e) mapped-arguments delete → #1726; (f)/(g) re-routed to
+owning feature issues. Stays `ready` for the 2 structural (b) tests — route to
+architect before further dispatch.

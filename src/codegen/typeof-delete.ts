@@ -24,6 +24,12 @@ import { compileExpression, ensureAnyHelpers, isAnyValue } from "./shared.js";
 import { compileStringLiteral } from "./string-ops.js";
 import { emitDynamicWithDelete, findWithBinding, resolveWithBinding } from "./with-scope.js";
 
+// (#2726 group (b), partial) The only value properties of the global object with
+// `[[Configurable]]: false` (ECMA-262 §19.1). `delete <bareIdentifier>` of any of
+// these must evaluate to `false`; every OTHER built-in global property
+// (`JSON`/`Object`/`Math`/`parseInt`/…) is configurable ⇒ `delete` returns `true`.
+const NON_CONFIGURABLE_GLOBALS = new Set(["NaN", "Infinity", "undefined"]);
+
 /**
  * (#2703) Emit an unconditional `throw` of a string-valued exception, used for
  * the spec error cases of `delete` (§13.5.1.2): a super reference, a null/
@@ -298,15 +304,36 @@ export function compileDeleteExpression(
     // such nodes, so fall through to the existing `false` (the prior behaviour,
     // correct for the resolvable-outer-binding case `11.4.1-4.a-7.js`). Precise
     // eval-scope delete resolution is out of scope (eval-substrate lane).
-    if (
-      ctx.checker.getSymbolAtLocation(ident) === undefined &&
-      ident.getSourceFile().fileName !== EVAL_SOURCE_FILENAME
-    ) {
+    const identSym = ctx.checker.getSymbolAtLocation(ident);
+    const notEvalBody = ident.getSourceFile().fileName !== EVAL_SOURCE_FILENAME;
+    if (identSym === undefined && notEvalBody) {
       fctx.body.push({ op: "i32.const", value: 1 });
       return { kind: "i32" };
     }
-    // A resolvable binding (var/let/const/param/function/intrinsic global) is
-    // not deletable — return false.
+    // (#2726 group (b), partial) §13.5.1.2 step 5: a `delete IdentifierReference`
+    // that resolves to a CONFIGURABLE property of the global object evaluates to
+    // `true` in sloppy mode (the property is deletable). Per ECMA-262 §19 every
+    // built-in global (`JSON`/`Object`/`Math`/`parseInt`/…) is
+    // `{[[Configurable]]: true}` EXCEPT the three intrinsics `NaN`/`Infinity`/
+    // `undefined`. Distinguish a built-in global from a user-declared
+    // var/function (whose global binding is non-configurable ⇒ `false`) by
+    // symbol provenance: a built-in's declarations are ALL in ambient `.d.ts`
+    // lib files, whereas a user binding is declared in the program's own source.
+    //   - `undefined`/`globalThis`/`arguments` have NO declarations (empty
+    //     `declarations`), so the `decls.length > 0` guard keeps them out — and
+    //     `undefined` is name-excluded anyway.
+    //   - eval-body nodes never reach here (their symbol is `undefined`, handled
+    //     above), so no explicit eval guard is needed for this branch.
+    if (identSym !== undefined && notEvalBody && !NON_CONFIGURABLE_GLOBALS.has(ident.text)) {
+      const decls = identSym.declarations ?? [];
+      const allAmbient = decls.length > 0 && decls.every((d) => d.getSourceFile().isDeclarationFile);
+      if (allAmbient) {
+        fctx.body.push({ op: "i32.const", value: 1 });
+        return { kind: "i32" };
+      }
+    }
+    // A resolvable non-configurable binding (var/let/const/param/function, or a
+    // non-configurable intrinsic global) is not deletable — return false.
     fctx.body.push({ op: "i32.const", value: 0 });
     return { kind: "i32" };
   }
