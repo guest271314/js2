@@ -10,7 +10,7 @@ Direct AOT compilation from JavaScript and TypeScript to WebAssembly GC.
 `js2wasm` is a free and open-source project developed by **Loopdive GmbH** and released under the **Apache License 2.0 with LLVM Exceptions**. It is developed fully in the open, including its agentic engineering workflow: the repository contains the compiler source, the complete planning surface (`plan/`), and the agent coordination infrastructure (`.claude/`) that a small team uses to ship fixes in parallel.
 
 <!-- AUTO:conformance-start -->
-**test262 conformance**: 32,236 / 43,106 (74.8 %)
+**test262 conformance**: 32,239 / 43,106 (74.8 %)
 <!-- AUTO:conformance-end -->
 
 Live figures, the trend graph, and the per-feature breakdown are in **[STATUS.md](./STATUS.md)**, the [Playground](https://js2.loopdive.com/playground/), and the [Roadmap](./ROADMAP.md). The auto-updated figure above (refreshed by CI on every merge) is the JS-host path. Standalone (no-JS-host) pass-rate and benchmark figures are intentionally omitted until the current standalone regression is fixed.

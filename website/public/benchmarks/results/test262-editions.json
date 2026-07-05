@@ -57,9 +57,9 @@
   },
   {
     "edition": "ES2015",
-    "pass": 11137,
-    "fail": 4088,
-    "ce": 161,
+    "pass": 11139,
+    "fail": 4083,
+    "ce": 164,
     "skip": 0,
     "total": 15386,
     "pct": 72,
@@ -1462,8 +1462,8 @@
   },
   {
     "edition": "ES2020",
-    "pass": 849,
-    "fail": 989,
+    "pass": 850,
+    "fail": 988,
     "ce": 40,
     "skip": 18,
     "total": 1896,
@@ -1660,12 +1660,12 @@
       },
       {
         "name": "import.meta",
-        "pass": 10,
-        "fail": 12,
+        "pass": 11,
+        "fail": 11,
         "ce": 1,
         "skip": 0,
         "total": 23,
-        "pct": 43
+        "pct": 48
       },
       {
         "name": "arbitrary-module-namespace-names",
@@ -3925,9 +3925,9 @@
   {
     "edition": "Proposals",
     "pass": 1491,
-    "fail": 3171,
+    "fail": 3180,
     "ce": 215,
-    "skip": 105,
+    "skip": 96,
     "total": 4982,
     "pct": 30
   }
