@@ -420,7 +420,8 @@ function renameInstrOperands(inst: IrInstr, rename: ReadonlyMap<IrValueId, IrVal
     case "box":
     case "unbox":
     case "tag.test":
-    case "dyn.truthy": {
+    case "dyn.truthy":
+    case "dyn.to_number": {
       const v = mapId(rename, inst.value);
       if (v === inst.value) return inst;
       return { ...inst, value: v };

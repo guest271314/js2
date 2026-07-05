@@ -5339,6 +5339,17 @@ function lowerBinary(expr: ts.BinaryExpression, cx: LowerCtx, hint: IrType): IrV
   if (lt.kind === "dynamic" || rt.kind === "dynamic") {
     const dynEq = tryLowerDynamicEq(expr, op, lhs, rhs, lt, rt, cx);
     if (dynEq !== null) return dynEq;
+    // #2949 S5.3 — dynamic relational: `<`/`>`/`<=`/`>=` where either operand
+    // is a boxed-any carrier. Each dynamic operand is ToNumber'd to f64 via
+    // `dyn.to_number` (routing to the CANONICAL `__any_to_f64` gc /
+    // `__unbox_number` host — D4), then the existing `f64.lt`/`gt`/`le`/`ge`
+    // compare runs. SCOPE — numeric-abstract only: a non-f64 concrete operand
+    // (and hence the string×string lexicographic case) demotes cleanly. Same
+    // byte-inertness as the eq arm — reachable only once the S5.P scan admits
+    // dynamic-relational bodies (restricted to a numeric-literal counter-
+    // operand, where ARC never takes the both-strings branch).
+    const dynRel = tryLowerDynamicRelational(op, lhs, rhs, lt, rt, cx);
+    if (dynRel !== null) return dynRel;
   }
 
   // String operand path (slice 1, #1169a) — `+`, `===`, `!==`, `==`, `!=`.
@@ -5913,6 +5924,65 @@ function boxConcreteToDynamic(v: IrValueId, t: IrType, operand: ts.Expression, c
   // A bare non-literal `i32` is number-vs-boolean-ambiguous with no cheap proof
   // here — demote rather than risk a wrong tag. S5.P can refine with the
   // checker (isProvablyBoolean) when it opens the scan.
+  return null;
+}
+
+/**
+ * #2949 S5.3 — lower `dyn < x` / `dyn > x` / `dyn <= x` / `dyn >= x` (either or
+ * both operands dynamic) as a NUMERIC-ABSTRACT relational compare: each dynamic
+ * operand is ToNumber'd to `f64` via `dyn.to_number`, then the existing
+ * `f64.lt`/`gt`/`le`/`ge` compare (result `i32`) runs. Returns `null` (clean
+ * demote) for a non-relational operator, or for a concrete operand this slice
+ * cannot feed the f64 compare (see {@link relOperandToF64}) — including the
+ * string×string lexicographic case, which is DEFERRED (a boxed-string operand
+ * ToNumbers to NaN in gc / `Number(s)` in host: spec-correct ONLY against a
+ * numeric counter-operand, which is why the S5.P scan restricts admission to a
+ * numeric-literal counter-operand).
+ */
+function tryLowerDynamicRelational(
+  op: ts.SyntaxKind,
+  lhs: IrValueId,
+  rhs: IrValueId,
+  lt: IrType,
+  rt: IrType,
+  cx: LowerCtx,
+): IrValueId | null {
+  let binop: IrBinop;
+  switch (op) {
+    case ts.SyntaxKind.LessThanToken:
+      binop = "f64.lt";
+      break;
+    case ts.SyntaxKind.LessThanEqualsToken:
+      binop = "f64.le";
+      break;
+    case ts.SyntaxKind.GreaterThanToken:
+      binop = "f64.gt";
+      break;
+    case ts.SyntaxKind.GreaterThanEqualsToken:
+      binop = "f64.ge";
+      break;
+    default:
+      return null;
+  }
+  const lf = relOperandToF64(lhs, lt, cx);
+  if (lf === null) return null;
+  const rf = relOperandToF64(rhs, rt, cx);
+  if (rf === null) return null;
+  return cx.builder.emitBinary(binop, lf, rf, irVal({ kind: "i32" }));
+}
+
+/**
+ * #2949 S5.3 — coerce ONE relational operand to `f64` for the numeric-abstract
+ * compare: a dynamic carrier ToNumbers via `dyn.to_number`; a concrete `f64` is
+ * used as-is. Any other concrete kind (i32/ref/string) returns `null` so the
+ * caller demotes cleanly — this slice only converts the dynamic side, and adds
+ * no i32/string→number coercion (numeric literals lower to `f64` under the f64
+ * hint the operands were lowered with, so `dyn > 0` / `dyn <= 10` are covered).
+ */
+function relOperandToF64(v: IrValueId, t: IrType, cx: LowerCtx): IrValueId | null {
+  if (t.kind === "dynamic") return cx.builder.emitDynToNumber(v);
+  const tv = asVal(t);
+  if (tv && tv.kind === "f64") return v;
   return null;
 }
 

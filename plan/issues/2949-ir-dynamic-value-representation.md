@@ -2,7 +2,7 @@
 id: 2949
 title: "IR dynamic value representation: JsTag-carrying `dynamic` kind in IrType (make untyped JS claimable)"
 status: in-progress
-assignee: ttraenkler/opus-s5-2
+assignee: ttraenkler/opus-s5-3
 sprint: current
 created: 2026-07-02
 updated: 2026-07-05
@@ -1472,3 +1472,133 @@ dyn-string ToNumber = NaN gives all-false, spec-correct for `"a" > 0` but WRONG
 for `"b" > "a"`). Same mechanism-slice discipline: byte-inert, prove-emit-identity
 39/39, hand-built-IR unit tests over gc + host. The claim-flip stays back-loaded
 onto S5.P (§4 anti-vacuity probe).
+
+## Implementation Notes — S5.3 (opus-s5-3, 2026-07-05, branch `issue-2949-s5-3-relational`)
+
+S5.3 ships **dynamic-value numeric-abstract relational** — `dyn </<=/>/>= x`
+(either or both operands boxed-any carriers) → `i32`, via a new single-operand
+`dyn.to_number{value}` node (ToNumber → f64) feeding the EXISTING `f64.lt`/`gt`/
+`le`/`ge` compare path. Mechanism slice, byte-inert by construction (the move-only
+selector gate still rejects a dynamic-relational body, so from-ast never builds
+`dyn.to_number` in a CLAIMED function). **prove-emit-identity: 39/39 IDENTICAL**
+vs the branch base (`e66b066d4`). Decisions and the WHY:
+
+1. **A single-operand `IrInstrDynToNumber` node → f64 (the `dyn.truthy` shape,
+   NOT the two-operand `dyn.eq` shape).** Unlike equality — where the WHOLE
+   comparison routes through one helper (`__any_strict_eq`/`__host_eq`) — the
+   relational mechanism per the S5 plan is `ToNumber(dyn) → f64` + the existing
+   numeric compare. So the node is a ToNumber PRIMITIVE (like `dyn.truthy` is a
+   ToBoolean primitive), and from-ast emits `emitBinary("f64.lt", …)` on the
+   converted operands. Same `never`-exhaustive blast radius as S5.1's
+   `dyn.truthy`: nodes.ts (union + the two no-nested-buffer switch groups +
+   `directUses`), lower.ts (case + `collectIrUses`), verify.ts (operand-dynamic
+   rule + `collectUses`), effects.ts (pure), integration `isDynamicOp`,
+   monomorphize + inline-small single-operand rename/uses — tsc's exhaustiveness
+   flagged each; `dyn.to_number` joins the single-operand `[instr.value]` group.
+
+2. **THE LOAD-BEARING FINDING — legacy `any < any` is a FULL Abstract Relational
+   Comparison (§7.2.11), mode-split THREE ways, NONE of them a bare ToNumber.**
+   The task asked, mirroring S5.2's `__host_eq` lesson, whether legacy host
+   `any < any` routes through a `__host_*` JS-relational helper. It DOES — and
+   there are three distinct legacy lowerings (verified against the REAL compiler,
+   `compileToWat` of `function f(a:any,b:any){return a<b?1:0}` in each mode):
+   - **host (default)**: `a < b` → `call __host_compare(a, b)` then compare the
+     result to `-1` — a JS-relational IMPORT (full ARC incl. string×string
+     lexicographic). This is the exact analog of S5.2's `__host_eq`.
+   - **fast (JS-host, WasmGC rep)**: relational FALLS THROUGH
+     `compileAnyBinaryDispatch` (only `+`/equality dispatch through it —
+     `binary-ops.ts:1091-1096`) to "compile with numeric hint" → `__unbox_number`
+     (`Number(v)`) per operand + numeric compare. String-correct via `Number()`.
+   - **standalone**: a pure-Wasm runtime branch — `if both-are-strings →
+     lexicographic string compare, else → __any_to_f64 each + f64.lt` (the full
+     ARC in Wasm; the else arm reads the box's f64 slot for a string → 0, a known
+     legacy mixed-string/number gap).
+   The `__any_lt`/`__any_gt`/`__any_le`/`__any_ge` helper family EXISTS
+   (`any-helpers.ts:2466`, `__any_to_f64` both operands + `f64.op`) but is NOT the
+   path `a < b` on two `any` operands actually takes (relational falls through
+   dispatch). So there is no single "legacy relational helper" for me to route the
+   whole comparison through — the S5-plan design (ToNumber(dyn) + f64 compare) is
+   the numeric ARM of this ARC, deliberately implementing ONLY the numeric case.
+
+3. **Per-backend ToNumber routing (D4-faithful, byte-parity with each backend's
+   ToNumber engine):**
+   - **gc/fast/standalone** → `__any_to_f64` — THE canonical boxed-any→f64 helper
+     legacy's `__any_lt` family + the arithmetic helpers use (null→0, undefined→
+     NaN, boolean→0/1, number→value). Chosen DIRECTLY, deviating from the plan's
+     "route through `coercion-engine.emitToNumber`", because that function's
+     `$AnyValue` arm goes through `coerceType(…,"number")`, which allocates a
+     temp local via `allocTempLocal` (verified — it crashes on a body-only shim);
+     the handle's pure `readonly Instr[]` contract cannot supply the function
+     locals. `__any_to_f64` is the single-call, no-locals, D4-canonical
+     equivalent (registered by `ensureAnyHelpers`, resolved by NAME at emit time).
+   - **host** → `coercion-engine.emitToNumber` on the externref carrier →
+     `__unbox_number` (`Number(v)`, §7.1.4). The externref arm is a clean single
+     call with NO local allocation (verified), so the body-only `FunctionContext`
+     shim is sound (same pattern as the gc `emitBox`). `addUnionImports` (run
+     up-front in `preregisterDynamicSupport` — `isDynamicOp` gained a
+     `dyn.to_number` arm) registers `__unbox_number`, so the internal
+     `addUnionImports` is an idempotent no-op — no mid-emission funcIdx shift.
+
+4. **String relational is DEFERRED (scope), and the numeric-literal restriction
+   makes the numeric arm spec-complete.** A boxed-string operand ToNumbers (host
+   `Number("5")=5`; gc `__any_to_f64` reads the box's f64 slot → 0, matching
+   legacy `__any_lt`). ARC only takes the both-strings lexicographic branch when
+   BOTH operands are strings; against a NUMBER, ARC does ToNumber both — so
+   `dyn <rel> numericLiteral` is spec-correct under the numeric arm even when
+   `dyn` is a string (host: `Number(dyn)`; the gc string→0 gap matches legacy
+   `__any_lt` and is the documented deferred imperfection). Hence the S5.P scan
+   admits a dynamic relational operand ONLY against a numeric literal/concrete.
+   The `from-ast` `relOperandToF64` helper enforces the mechanism side: a dynamic
+   operand ToNumbers via `dyn.to_number`; a concrete `f64` is used as-is; ANY
+   other concrete kind (i32/ref/string) returns `null` → clean demote (no
+   i32/string→number coercion added here; numeric literals lower to `f64` under
+   the f64 operand hint, covering `dyn > 0` / `dyn <= 10`).
+
+5. **NaN is correct in both modes** — the numeric arm is a plain `f64.{lt,gt,le,
+   ge}`, and every relational compare with a NaN operand is `false` (§7.2.11).
+   `undefined` ToNumbers to NaN → all relational false; `null` → 0; boolean →
+   0/1. Verified at runtime in BOTH strategies (no S5.1-style inherited quirk —
+   relational never touches `__any_unbox_bool`).
+
+6. **Verifier hard backstop**: `dyn.to_number` operand must be `dynamic`
+   (verify.ts structural rule + a construction-time guard in `emitDynToNumber`).
+   A concrete numeric operand already converts to f64 inline, so routing one
+   through the carrier ToNumber helper is a producer bug — rejected loudly at
+   build and verify. Result is f64, consumed by the numeric compare.
+
+## Test Results — S5.3 (2026-07-05, opus-s5-3)
+
+- `tests/issue-2949-s5-3-relational.test.ts` — **7/7 pass**: node shape + f64
+  result + verifier-clean; construction-time non-dynamic-operand guard; verifier
+  rejection of a hand-crafted concrete-operand `dyn.to_number` (defense in
+  depth); handle→helper D4 routing (gc single `__any_to_f64`, host single
+  `__unbox_number`); and RUNTIME execution against the PRODUCTION
+  `makeDynamicLowering` over a real `CodegenContext` in BOTH strategies —
+  gc ($AnyValue): dyn(number) vs concrete + dyn<dyn for `</<=/>/>=`, fractional
+  f64 compare (not i32 truncation), boolean partition (`true`→1/`false`→0),
+  `NaN → false`; host (externref): number/bool/null(→0)/undefined(→NaN→false)/
+  string(`Number()`, spec-correct against a numeric operand) across
+  `</>/>=`, plus dyn<dyn.
+- **Byte-inertness PROVEN**: `prove-emit-identity.mjs` baseline captured on a
+  clean worktree at the branch base (`e66b066d4`), `check` on this branch →
+  **IDENTICAL, all 39 (file,target) hashes** across gc/standalone/wasi.
+- `pnpm run check:ir-fallbacks` — OK, zero delta in every bucket, no post-claim
+  demotions (no selector/producer change, as designed).
+- Adjacent #2949 suites: S5.0 8/8, S5.1 7/7, S5.2 7/7, slice 1 19/19, slice 2
+  22/22, slice 3 16/16 — **86/86 combined with S5.3**.
+- `npx tsc --noEmit` clean; prettier clean; biome introduces ZERO new errors
+  (the per-file counts are byte-identical at the base `e66b066d4` — pre-existing
+  IR-codebase biome-vs-prettier style deltas; prettier is the CI quality gate).
+
+**S5.4 (dynamic member read: `dyn[i]` / `dyn.p`) is ready next — but it is the
+HEAVIEST sub-slice and substrate-adjacent** (per §S5.4). Unlike S5.1–S5.3, the
+`$Object` dynamic-reader has NO clean single-helper carrier op today (memory
+`project_standalone_any_string_value_read_substrate` — the reader drops
+native-string values). The next agent MUST first identify whether a legacy
+any-member reader in `property-access.ts` / `object-ops.ts` is cleanly reusable
+(route through it, D4) or whether S5.4 is BLOCKED on a substrate helper — in
+which case file the dependency and do NOT hand-roll (per the §S5.4 "BLOCKED on a
+substrate helper" clause). If S5.4 blocks, S5.P proceeds WITHOUT property-access
+and its §4 reachability probe re-runs on the reduced form set. The S5.1–S5.3
+mechanism substrate (truthiness / equality / relational ToNumber) is complete and
+consumed by both S5.P and the banked #2963/#2984/#3015 adoption slices regardless.

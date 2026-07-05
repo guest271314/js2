@@ -270,6 +270,28 @@ export interface IrDynamicLowering {
    */
   emitToBoolean(): readonly Instr[];
   /**
+   * Carrier on the stack → f64: `ToNumber(carrier)` (§7.1.4, #2949 S5.3), the
+   * single-operand ToNumber that the numeric-abstract relational lowering
+   * (`< > <= >=`) applies to a dynamic operand before the existing `f64.lt`/
+   * `gt`/`le`/`ge` compare.
+   *   - gc/fast/standalone: `__any_to_f64` — the SAME boxed-any→f64 helper
+   *     legacy's `__any_lt`/`__any_gt`/… + the arithmetic helpers use (null→0,
+   *     undefined→NaN, boolean→0/1, number→value). It is chosen directly (not
+   *     via `coercion-engine.emitToNumber`, whose `$AnyValue` arm routes through
+   *     `coerceType` and REQUIRES temp-local allocation the handle's pure
+   *     `Instr[]` contract cannot provide).
+   *   - host: `coercion-engine.emitToNumber` on the externref carrier →
+   *     `__unbox_number` (`Number(v)`) — the canonical host ToNumber, single
+   *     call, no locals.
+   * SCOPE — numeric-abstract only; string×string lexicographic relational is
+   * DEFERRED (legacy `any < any` is a full ARC, mode-split three ways: host
+   * `__host_compare`, standalone runtime both-strings-else-numeric branch, fast
+   * numeric-hint). Spec-correct only when the OTHER relational operand is a
+   * number — the S5.P producer admits a dynamic relational operand ONLY against
+   * a numeric literal/concrete.
+   */
+  emitToNumber(): readonly Instr[];
+  /**
    * One carrier on the stack → the operand shape this backend's equality
    * helper takes (#2949 S5.2). Emitted once per operand, immediately after that
    * operand is pushed:
