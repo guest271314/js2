@@ -767,3 +767,127 @@ Same as CS1b: the equality-operand scoping is the safety boundary. **NOT
 self-merged on PR-green alone** — flagged the lead for a monitored `merge_group`
 standalone `host_free_pass` floor enqueue (expect NET-POSITIVE — drives #3027).
 Any floor regression ⇒ a non-object leaked into tag-6 → diagnose, don't force.
+
+---
+
+## CS1c (getPrototypeOf / reflective producer) — RE-PROBED (opus-3037-cs1c): case (d) is a null-canon symptom, no bounded carrier win
+
+**PR:** byte-inert regression-LOCK test only (no `src/` change).
+`prove-emit-identity` **39/39 IDENTICAL**. The task framed CS1c as "apply the
+carrier at the getPrototypeOf result choke point, flipping CS0 case (d) 0→1". A
+per-choke-point re-probe against current `upstream/main` (7eb51a2c5) shows there
+is **no bounded, floor-safe operand-carrier win** here, and — crucially — that
+**CS0 case (d) is not an object-identity carrier target at all**.
+
+### What the re-probe measured (traced, not narrative)
+
+1. **Plain-object / array `[[Prototype]]` is NULL in standalone.**
+   `__getPrototypeOf` (`object-runtime.ts:2761`) returns
+   `struct.get $Object.$proto` for a `$Object`, else **NULL**. A plain object
+   literal's `$proto` is unset (Object.prototype is not modeled as a standalone
+   `$Object`), and an array `[1]` is a vec (not a `$Object`) so `ref.test
+   $Object` fails → NULL. Hence `Object.getPrototypeOf([1]) === null` **and**
+   `Object.getPrototypeOf({z:1}) === null` are BOTH `1`. **CS0 case (d)
+   (`const a:any=[1]; p1=gpo(a); p2=gpo(a); p1===p2`) is a null comparison, not
+   object identity.**
+
+2. **Case (d)'s residual 0 is a stored-in-local NULL-canonicalization symptom.**
+   A `null` LITERAL stored in two `any` locals compares `===` → **1** (it boxes
+   the null/undefined SINGLETON, tag-0/1 → `ref.eq`). But getPrototypeOf's
+   `ref.null.extern`, stored in an `any` local, is boxed **tag-5**
+   (externval-null) at the `===` operand seam → the guarded tag-5 same-tag arm →
+   **0**. This asymmetry is the **same reader-result-into-`any`-local defect as
+   CS1b(iii)'s residual** — the operand-scoped carrier cannot reach it (the
+   equality operands are LOCALS, not reads). Flipping case (d) = canonicalising a
+   reader/producer result INTO an `any` local independent of downstream use =
+   the **UNIVERSAL-reader carrier (CS3 / V2-S3b, the −299 minefield)**.
+
+3. **The genuine object-identity getPrototypeOf gaps are ALSO out of reach.** A
+   class instance has a real proto struct anchor (`emitLazyProtoGet` singleton):
+   `getPrototypeOf(f) === getPrototypeOf(f)` direct → already 1; stored in `any`
+   locals → **0** (the same stored-in-local CS3 problem); `getPrototypeOf(f) ===
+   Foo.prototype` → **0** and **NOT carrier-flippable** — `Foo.prototype` is
+   typed `Foo` (the instance type), not `any`, so the `isAnyEqualityOperand`
+   both-operands-`Any` gate never fires.
+
+### Verdict — the operand carrier has hit its coverage ceiling
+
+The operand-scoped carrier (CS1a → CS1b(i) → CS1b(ii)) can only fix a value that
+appears as a **DIRECT `any===any` operand**. Every remaining identity gap under
+#3027 — descriptor/member/element/getPrototypeOf results stored in a local,
+passed as a function arg / returned, or paired with a non-`any` operand — reduces
+to the **reader-result-INTO-`any` universal carrier = CS3**, the −299 minefield.
+**CS3 is not a bounded slice; it needs its own architect pass** (see the CS3
+readiness assessment below).
+
+### Deliverable
+
+`tests/issue-3037-cs1c-getprototypeof-carrier.test.ts` — a byte-inert
+**regression-LOCK**: the null-proto facts (`gpo([1])===null`, `gpo({})===null`,
+null-literal-stored identity, the coincidental direct null===null the #3013
+lesson warns about), the class-proto direct-operand pass, and 3 KNOWN-GAP rows
+(case (d) null-canon stored-in-local, class-proto stored-in-local CS3, and the
+non-`any`-operand `gpo(f)===Foo.prototype`) pinned at `0` so the eventual CS3
+flip is auditable. No `src/` change; no floor movement expected.
+
+---
+
+## CS3 readiness assessment (opus, 2026-07-05) — needs its own architect pass; NOT a bounded slice
+
+**Question posed:** now that CS1a–CS1c establish the identity carrier, is the
+V2-S3b reader-arm (CS3, the ~1,552-test #3027 driver) safe/dispatchable, or does
+the universal-reader ValType change still detonate the −299 consumer-breadth
+mine?
+
+**Verdict: CS3 still detonates the −299 mine. It is NOT a bounded slice and
+requires its own architect pass.** The evidence is the convergent finding across
+CS1b(iii) + CS1c (both re-probed on current main):
+
+- The landed carrier (CS1a/b) is **strictly operand-scoped**: it re-classifies a
+  reader result to tag-6 **only** when the read is a DIRECT operand of a
+  standalone `any===any`/`!==`/`==`/`!=` (the exact shape routing through
+  `emitAnyEqOperands`). That scoping is precisely what keeps it floor-safe — the
+  value can only ever flow into the equality helper's `isAnyValue` fast-path,
+  never into a subsequent read/store (a `$AnyValue` local breaks dynamic reads —
+  the CS1a finding; `__any_to_extern` keeps the box wrapped).
+- **Every remaining #3027 identity gap is OUTSIDE that scope.** Measured classes,
+  all reducing to one root cause (reader/producer result carried as externref
+  INTO an `any` slot, tag-5-boxed downstream): (i) result stored in an
+  intermediate `any` local (`const v=o.a; v===w`); (ii) result passed as a
+  function ARG and compared inside the callee — the `assert.sameValue`/
+  `isSameValue` harness comparator shape, which is the DOMINANT test262 form;
+  (iii) result paired with a non-`any` operand (`gpo(f)===Foo.prototype`);
+  (iv) getPrototypeOf/null-proto canonicalization. The operand carrier cannot
+  reach any of these.
+- Fixing them means changing the ValType a reader/producer hands to the any-flow
+  **independent of whether it is a direct `===` operand** — i.e. the UNIVERSAL
+  reader carrier (Mechanism A / V2-S3b), which lands on the harness-comparator
+  seam. That seam is the documented **−788 / −794 / −299** chokepoint: the
+  test262 comparator marshals ALL its `any` operands through the externref→
+  `$AnyValue` boxing arm and depends on main's tag-5 behaviour. #2661 and V2-S3b
+  both died here.
+
+**Why the substrate does NOT unblock it yet.** The #3037 thesis is that once
+objects reach `===` tag-6-canonical, the reader arm needs no `===` change. But
+CS1a–CS1c only make objects tag-6 at the *direct-operand* seam — they do NOT make
+a reader result tag-6 when it enters an `any` local/arg/return. The harness
+comparator receives its operands as `any` PARAMS (produced by the general
+externref→`$AnyValue` boxing, tag-5), not as direct reads. So the substrate the
+reader arm needs — objects tag-6 *at production into any*, universally — is
+exactly the piece CS1 deliberately did NOT build (it is the −788 arm). CS3 is
+that piece.
+
+**Recommendation (report to lead):**
+1. CS3 is a **hard, architect-owned** slice, not a dev carrier PR. It needs a
+   dedicated spec that solves the universal reader/producer → tag-6 carrier
+   WITHOUT touching the harness-comparator externref boxing arm — likely by
+   canonicalizing at the `$Object` dynamic-READER natives (`__extern_get` et al.)
+   returning a tag-6-carrying `$AnyValue` for object payloads while keeping
+   strings tag-5, gated so the comparator's own operand marshalling is untouched.
+   That is a genuinely different seam from the operand site and must be proven
+   against the full `merge_group` floor per micro-step.
+2. The carrier families (CS1a/b/ii) have banked their bounded wins; CS1b(iii)
+   and CS1c are **RE-PROBED no-ops** (regression-locks only) — the operand
+   carrier's coverage ceiling is reached. Do not spend further dev effort trying
+   to flip stored-in-local / harness-comparator cases with the operand carrier.
+3. Keep the CS1b(iii)/CS1c KNOWN-GAP test rows as the auditable CS3 flip targets.
