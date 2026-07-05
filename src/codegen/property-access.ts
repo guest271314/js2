@@ -7025,6 +7025,40 @@ export function compileElementAccess(
     }
   }
 
+  // (#3027) Computed non-numeric key on a string/String-wrapper-typed
+  // receiver — `"str"["length"]`, `new String("x")["length"]`. Native-strings
+  // mode has no `$Object` sidecar for a bare string or wrapper receiver, so
+  // the generic "non-vec, non-tuple struct" fallback further below
+  // (`extern.convert_any` + host `__extern_get`) always returns null for a
+  // computed string-property read — there is no host to ask, and the struct
+  // shape (len/off/data) never matches a property name like "length". The
+  // dot form (`"str".length`) already dispatches correctly through
+  // `compilePropertyAccess`; recompile this access as the equivalent dot form
+  // (same receiver, same statically-resolved key) so it takes that exact path
+  // instead of duplicating the logic here. Numeric keys are handled above
+  // (#1910 R4) or by the array/vec paths below; only fires for a
+  // non-numeric, statically-resolvable key.
+  if (
+    ctx.nativeStrings &&
+    ctx.anyStrTypeIdx >= 0 &&
+    !isNumericIndexExpression(ctx, expr.argumentExpression) &&
+    // (#1930) Query the receiver's static string-ness via the TypeOracle, not
+    // the raw checker. `isStringType` matched BOTH a primitive string and the
+    // `String` wrapper object; the oracle equivalents are
+    // `staticJsTypeOf === "string"` (primitive) OR `builtinReceiverOf ===
+    // "String"` (`new String(x)` wrapper), which together cover the same set.
+    (ctx.oracle.staticJsTypeOf(expr.expression) === "string" ||
+      ctx.oracle.builtinReceiverOf(expr.expression) === "String")
+  ) {
+    const key = resolveComputedKeyExpression(ctx, expr.argumentExpression);
+    if (key !== undefined) {
+      const syntheticProp = ts.factory.createPropertyAccessExpression(expr.expression, key);
+      ts.setTextRange(syntheticProp, expr);
+      (syntheticProp as unknown as { parent: ts.Node }).parent = expr.parent;
+      return compilePropertyAccess(ctx, fctx, syntheticProp);
+    }
+  }
+
   const objType = compileExpression(ctx, fctx, expr.expression);
   if (!objType) return null;
 

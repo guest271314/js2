@@ -2722,6 +2722,40 @@ function phase1PropertyName(name: ts.PropertyName): string | null {
  * or the propagation pass converged on a dynamic type that the selector
  * ignored — both are bugs.
  */
+/**
+ * #3000-E: the SSA value of the current `this` binding (the allocated instance
+ * in a ctor, or the `__self` param in a method). Throws if `this` isn't bound —
+ * `super` outside a class member never reaches here (the selector rejects it).
+ */
+function requireThisValue(cx: LowerCtx): IrValueId {
+  const p = cx.scope.get("this");
+  if (!p || p.kind !== "local") {
+    throw new Error(`ir/from-ast: super used with no 'this' binding in ${cx.funcName}`);
+  }
+  return p.value;
+}
+
+/**
+ * #3000-E: the parent `IrClassShape` for a `super(...)` / `super.method()` in the
+ * current class member. Read from the `this` binding's class shape `.parent`,
+ * which `buildIrClassShapes` populates only for a single-level subclass of a
+ * local user class. Throws (→ clean legacy fallback) when absent — e.g. a
+ * subclass whose parent's shape didn't project.
+ */
+function requireSuperParentShape(cx: LowerCtx): IrClassShape {
+  const p = cx.scope.get("this");
+  if (!p || p.kind !== "local" || p.type.kind !== "class") {
+    throw new Error(`ir/from-ast: super used with no class 'this' binding in ${cx.funcName}`);
+  }
+  const parent = p.type.shape.parent;
+  if (!parent) {
+    throw new Error(
+      `ir/from-ast: super used in ${p.type.shape.className} which has no IR-projected parent shape (${cx.funcName})`,
+    );
+  }
+  return parent;
+}
+
 function lowerCall(expr: ts.CallExpression, cx: LowerCtx, statementPosition = false): IrValueId | null {
   // Optional call (`fn?.()` / `obj?.method()`, #1281). The IR has no
   // short-circuit primitive for nullable callees, and at this point we
@@ -2732,6 +2766,34 @@ function lowerCall(expr: ts.CallExpression, cx: LowerCtx, statementPosition = fa
   // optional-call IR support is a follow-up.
   if (expr.questionDotToken) {
     throw new Error(`ir/from-ast: optional call (?.()) not in slice 11 (${cx.funcName})`);
+  }
+  // #3000-E: `super(args)` — a derived constructor chaining to its parent's
+  // `_init`. Intercepted BEFORE the property-access / identifier dispatch below
+  // because `super` is a keyword, not an identifier the receiver-lowering can
+  // handle. The `this` binding (the allocated subclass instance) and the parent
+  // shape (`this` shape's `.parent`) drive the emitted `<parent>_init` call.
+  if (expr.expression.kind === ts.SyntaxKind.SuperKeyword) {
+    const parentShape = requireSuperParentShape(cx);
+    const self = requireThisValue(cx);
+    if (expr.arguments.length !== parentShape.constructorParams.length) {
+      throw new Error(
+        `ir/from-ast: super(...) has ${expr.arguments.length} args, expected ${parentShape.constructorParams.length} in ${cx.funcName}`,
+      );
+    }
+    const args: IrValueId[] = [];
+    for (let i = 0; i < expr.arguments.length; i++) {
+      const expected = parentShape.constructorParams[i]!;
+      const argVal = lowerExpr(expr.arguments[i]!, cx, expected);
+      const argType = cx.builder.typeOf(argVal);
+      if (!irTypeEquals(argType, expected)) {
+        throw new Error(
+          `ir/from-ast: super() arg ${i} is ${describeIrType(argType)}, expected ${describeIrType(expected)} in ${cx.funcName}`,
+        );
+      }
+      args.push(argVal);
+    }
+    cx.builder.emitClassSuperInit(parentShape, self, args);
+    return null;
   }
   // Slice 4 (#1169d): method call — `<recv>.<methodName>(args)`. The
   // receiver must lower to an IrType.class; the method must exist on
@@ -3167,6 +3229,43 @@ function lowerMethodCall(expr: ts.CallExpression, cx: LowerCtx, statementPositio
     throw new Error(`ir/from-ast: malformed method call in ${cx.funcName}`);
   }
   const methodName = expr.expression.name.text;
+
+  // #3000-E: `super.method(args)` — static-dispatch to the PARENT's method slot.
+  // Intercepted BEFORE receiver lowering: `super` is a keyword lowerExpr can't
+  // produce a value for. The receiver passed to the parent method is `this` (the
+  // subclass instance — a WasmGC subtype of the parent), and the method resolves
+  // against the parent shape so a subclass override is bypassed.
+  if (expr.expression.expression.kind === ts.SyntaxKind.SuperKeyword) {
+    const parentShape = requireSuperParentShape(cx);
+    const self = requireThisValue(cx);
+    const method = parentShape.methods.find((m) => m.name === methodName);
+    if (!method) {
+      throw new Error(
+        `ir/from-ast: super.${methodName}() — parent class ${parentShape.className} has no method "${methodName}" in ${cx.funcName}`,
+      );
+    }
+    if (expr.arguments.length !== method.params.length) {
+      throw new Error(
+        `ir/from-ast: super.${methodName}() has ${expr.arguments.length} args, expected ${method.params.length} in ${cx.funcName}`,
+      );
+    }
+    const args: IrValueId[] = [];
+    for (let i = 0; i < expr.arguments.length; i++) {
+      const expected = method.params[i]!;
+      const argVal = lowerExpr(expr.arguments[i]!, cx, expected);
+      const argType = cx.builder.typeOf(argVal);
+      if (!irTypeEquals(argType, expected)) {
+        throw new Error(
+          `ir/from-ast: super.${methodName}() arg ${i} is ${describeIrType(argType)}, expected ${describeIrType(expected)} in ${cx.funcName}`,
+        );
+      }
+      args.push(argVal);
+    }
+    if (method.returnType === null && !statementPosition) {
+      throw new Error(`ir/from-ast: void super.${methodName}() used in expression position (${cx.funcName})`);
+    }
+    return cx.builder.emitClassSuperCall(parentShape, self, methodName, args, method.returnType);
+  }
 
   // (#2856) console.<m>(arg) — host console variant call. Intercepted BEFORE
   // receiver lowering (like the Math arm below): `console` has NO

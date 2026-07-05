@@ -410,6 +410,16 @@ export function planIrCompilation(
     // disqualifying). Track the rejection reason for every method so the
     // telemetry shows them as `class-method` rather than silently dropping.
     const hasParent = stmt.heritageClauses?.some((h) => h.token === ts.SyntaxKind.ExtendsKeyword) ?? false;
+    // #3000-E: a subclass whose parent is a locally-declared user class is
+    // IR-claimable — `super(...)` chains to the parent's `_init` and
+    // `super.method()` static-dispatches to the parent slot (both need the
+    // parent's WasmGC struct, which only a local user class has). A subclass of a
+    // builtin / externref-backed parent (`extends Error`, `extends Uint8Array`)
+    // stays deferred: `super` there routes through host `__new_<Parent>` shapes
+    // the IR doesn't model. `buildIrClassShapes` mirrors this exact predicate, so
+    // a claim here always finds a shape in Phase B (no post-claim demotion).
+    const parentName = extendsParentName(stmt);
+    const parentIsLocalClass = parentName !== null && localClasses.has(parentName);
     for (const member of stmt.members) {
       let memberName: string;
       let memberNode:
@@ -482,7 +492,16 @@ export function planIrCompilation(
       const isStaticMethod =
         ts.isMethodDeclaration(memberNode) &&
         (memberNode.modifiers?.some((m) => m.kind === ts.SyntaxKind.StaticKeyword) ?? false);
-      const claimableUnderParent = isStaticMethod && !referencesSuper(memberNode);
+      // A static method with no `super` is claimable under ANY parent (#2857 —
+      // no instance layout dependency). #3000-E adds: INSTANCE members (ctor /
+      // method / accessor) are claimable when the parent is a local user class
+      // (the inheritance/`super` substrate provides `super(...)` → parent `_init`
+      // and `super.method()` → parent slot, both keyed on the instance `this`). A
+      // `super`-using STATIC stays deferred — static `super` is a class-object
+      // mechanism the IR path (which keys `super` off `this`) does not model. The
+      // body-shape gate (`whyNotIrClaimable`, which now accepts instance `super`)
+      // still runs below — this only lifts the wholesale `hasParent` reject.
+      const claimableUnderParent = isStaticMethod ? !referencesSuper(memberNode) : parentIsLocalClass;
       if (hasParent && !claimableUnderParent) {
         if (trackFallbacks) fallbackReasons.set(memberName, "class-method");
         continue;
@@ -2445,6 +2464,32 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
     );
   }
   if (ts.isCallExpression(expr)) {
+    // #3000-E: `super(args)` — a derived ctor chaining to its parent. `super` is
+    // a keyword, not an identifier/property-access the generic receiver checks
+    // below handle, so recognise the shape here. Args must be Phase-1 exprs; the
+    // lowerer (from-ast) resolves the parent `_init` and validates arity/types.
+    if (expr.expression.kind === ts.SyntaxKind.SuperKeyword) {
+      for (const arg of expr.arguments) {
+        if (ts.isSpreadElement(arg)) return shapeNo("super-call-spread", arg);
+        if (!isPhase1Expr(arg, scope, localClasses)) return false;
+      }
+      return true;
+    }
+    // #3000-E: `super.method(args)` — static-dispatch to the parent's method slot.
+    // The receiver is the `super` keyword; recognise it before the generic
+    // property-access receiver check (which would reject `super` as a non-Phase-1
+    // receiver). Method name must be a plain identifier; args Phase-1 exprs.
+    if (
+      ts.isPropertyAccessExpression(expr.expression) &&
+      expr.expression.expression.kind === ts.SyntaxKind.SuperKeyword
+    ) {
+      if (!ts.isIdentifier(expr.expression.name)) return shapeNo("super-method-computed", expr);
+      for (const arg of expr.arguments) {
+        if (ts.isSpreadElement(arg)) return shapeNo("super-method-spread", arg);
+        if (!isPhase1Expr(arg, scope, localClasses)) return false;
+      }
+      return true;
+    }
     // Slice 4 (#1169d): accept method calls — `<recv>.<methodName>(...)`.
     // The receiver must itself be a Phase-1 expression; the lowerer
     // enforces that the receiver is a class instance whose shape carries
@@ -2767,6 +2812,22 @@ function referencesSuper(node: ts.Node): boolean {
   };
   visit(node);
   return found;
+}
+
+/**
+ * #3000-E: the name of a class's `extends` parent when it is a bare identifier
+ * (`class Dog extends Animal`). Returns null for no-extends, an `implements`-only
+ * heritage, or a non-identifier parent expression (e.g. `extends foo.Bar` /
+ * `extends mixin(Base)` — deferred). The caller cross-checks the name against
+ * `localClasses` to confirm the parent is an IR-projectable user class.
+ */
+function extendsParentName(stmt: ts.ClassDeclaration): string | null {
+  for (const h of stmt.heritageClauses ?? []) {
+    if (h.token !== ts.SyntaxKind.ExtendsKeyword) continue;
+    const first = h.types[0]?.expression;
+    if (first && ts.isIdentifier(first)) return first.text;
+  }
+  return null;
 }
 
 // #2135 — the operator predicates consume the shared capability table
