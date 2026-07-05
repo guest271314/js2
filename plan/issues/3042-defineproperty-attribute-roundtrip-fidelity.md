@@ -1,12 +1,14 @@
 ---
 id: 3042
 title: "Object.defineProperty: attribute round-trip fidelity (writable/enumerable/configurable not faithfully stored + reported)"
-status: ready
+status: done
 sprint: current
 priority: high
 horizon: m
 feasibility: medium
 created: 2026-07-05
+completed: 2026-07-05
+assignee: ttraenkler/dev-3042
 task_type: bugfix
 area: runtime, codegen
 language_feature: object-defineproperty, property-descriptors
@@ -68,3 +70,36 @@ var d = Object.getOwnPropertyDescriptor(obj, "foo");
   drop materially (target: the 74 listed → near zero).
 - No regression in `Object/{freeze,seal,preventExtensions,getOwnPropertyDescriptor}`.
 - Scope: **DEV** — locally validatable via `runTest262File` on the cluster.
+
+## Resolution (2026-07-05, dev-3042)
+
+**Root cause (narrower than hypothesised).** The `getOwnPropertyDescriptor`
+reader and the sidecar attribute bits already round-trip correctly. The failing
+`verifyProperty` rows are the runner's *value* check (`assert_sameValue(obj[name],
+descValue)`): a **value-less** data descriptor (`{ enumerable: false }`) on a
+struct-typed receiver (`var obj = {}`, widened to carry the
+defineProperty-introduced field) creates a property whose `[[Value]]` defaults to
+`undefined` (ES §10.1.6.3), but the read returned **`null`**.
+
+`compileWidenedEmptyObject` (`src/codegen/literals.ts`) initialised widened
+`externref` field defaults to `ref.null.extern` (→ reads as `null`). The
+value-less define lowers to a struct no-op, so the field kept that default. Fix:
+emit JS `undefined` (`emitUndefined`) for the widened-field default, matching the
+main object-literal path (its "missing fields" branch, ~literals.ts:2242, which
+already documents this: JS defaults fire on `=== undefined`, not `null`).
+
+**Impact.** +14 of 19 value-less-plain-object rows flip to pass (e.g.
+`15.2.3.6-4-79/-81/-73`); **0 regressions** on the previously-passing
+define{Property,Properties} set (identical clean-vs-fix counts) and on the vitest
+object/widening/assignment suites.
+
+**Out of scope (deferred — the value-LOSS half, #3022 DF-3).** The 5 remaining
+rows use an **explicit** `{ value: undefined }` (e.g. `15.2.3.6-4-61/-101`). There
+the widened field is typed `f64` (from a prior `obj.x = number` or resolver
+default) and cannot hold `undefined`; the explicit-undefined path routes through
+`emitDefinePropertyDescRuntime`. That is the value/identity-loss half the issue
+explicitly separates from attribute fidelity — a distinct root cause left for the
+#3022 tail. The array-index and Arguments-object defineProperty rows
+(`15.2.3.6-4-243/-289`) are likewise separate receiver paths.
+
+Tests: `tests/issue-3042.test.ts`.
