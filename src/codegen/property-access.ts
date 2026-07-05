@@ -249,8 +249,13 @@ function isAnyEqualityOperand(ctx: CodegenContext, expr: ts.Expression): boolean
     op === ts.SyntaxKind.ExclamationEqualsEqualsToken;
   if (!isEq) return false;
   if (parent.left !== expr && parent.right !== expr) return false;
-  const leftAny = (ctx.checker.getTypeAtLocation(parent.left).flags & ts.TypeFlags.Any) !== 0;
-  const rightAny = (ctx.checker.getTypeAtLocation(parent.right).flags & ts.TypeFlags.Any) !== 0;
+  // #1930 oracle-ratchet: query type facts through `ctx.oracle` (never the raw
+  // TS checker). `typeFactOf(...).kind === "any"` is the exact equivalent of the
+  // `flags & TypeFlags.Any` gate binary-ops.ts uses to route the pair through the
+  // AnyValue equality dispatch (the oracle maps the `Any` type flag to
+  // `{ kind: "any" }`), so this mirrors that gate precisely.
+  const leftAny = ctx.oracle.typeFactOf(parent.left).kind === "any";
+  const rightAny = ctx.oracle.typeFactOf(parent.right).kind === "any";
   return leftAny && rightAny;
 }
 
