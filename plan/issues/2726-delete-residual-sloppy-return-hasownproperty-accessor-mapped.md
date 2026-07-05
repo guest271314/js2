@@ -24,9 +24,10 @@ updated: 2026-07-05
 > (architect-spec first): `S11.4.1_A3.1` (`delete this.y === false` — top-level
 > `this` as the global object) and `S11.4.1_A3.3_T1` (`x = 1; delete x; x` →
 > ReferenceError — implicit-global creation + real deletion + unresolved read).
-> **(e)** mapped-arguments delete DEFERRED to #1726; **(f)**/**(g)** re-route to
-> their owning feature issues. This issue stays open (`status: ready`) for the 2
-> structural (b) tests — route to architect before further dispatch.
+> **(e)** mapped-arguments delete now **DONE** (2026-07-05, opus-2726: +1 test262
+> `11.4.1-4.a-17`, 0 regressions — see `## Resolution — group (e)`); **(f)**/**(g)**
+> re-route to their owning feature issues. This issue stays open (`status: ready`)
+> for the 2 structural (b) tests — route to architect before further dispatch.
 
 # #2726 — delete residual (non-throw) semantics
 
@@ -77,11 +78,12 @@ on its throw-semantics scope.
   (host `__delete_property` does not see the accessor's `configurable:false`
   flag). Runtime descriptor-storage fix in `src/runtime.ts`.
 
-### (e) Mapped-arguments delete (1)
+### (e) Mapped-arguments delete (1) — DONE (2026-07-05)
 `11.4.1-4.a-17.js`
 - `delete arguments[0]` in a mapped-arguments function: `=== true` and the slot
   reads `undefined` afterward. Routes through the `mappedArgsInfo` bookkeeping in
   `compileDeleteExpression` plus the element-delete on `arguments`.
+- **Resolved** — see `## Resolution — group (e)`.
 
 ### (f) preventExtensions interaction (1)
 `11.4.1-5-a-27-s.js`
@@ -186,6 +188,43 @@ Net **+1** test262. Flipped fail→pass: `11.4.1-4.a-8`. Guards verified unchang
 (`11.4.1-4.a-4`, `built-ins/undefined/S15.1.1.3_A3_T2`, `11.4.1-4.a-5/-13/-16`).
 Regression test: `tests/issue-2726-configurable-global-delete.test.ts` (+ the
 corrected JSON/Object assertion in `tests/issue-2726-sloppy-unresolvable-delete.test.ts`).
+
+## Resolution — group (e) (2026-07-05, opus-2726)
+
+**Scope.** `11.4.1-4.a-17.js` — `delete arguments[0]` in a mapped-arguments
+function returns `true` AND `arguments[0]` reads `undefined` afterward.
+
+**Root cause (e).** The mapped-`arguments[i]` delete arm in
+`compileDeleteExpression` (`src/codegen/typeof-delete.ts`) recorded the
+sever-bookkeeping (`unmappedIndices.add(argIndex)`) and then **fell through to
+the generic `__delete_property` path**. That path reports `true` for a mapped
+arguments object but never clears the **WasmGC-vec backing slot** — the vec's
+indices carry no sidecar descriptor — so a subsequent `arguments[i]` read still
+returned the original argument. (The arguments object is vec-backed:
+`arguments[i]` reads array field 1 of the vec directly; param writes
+forward-sync into it, slot writes reverse-sync into the param. §10.4.4.5.)
+
+**Fix (e).** In the mapped, configurable-index arm, after recording the sever,
+write the canonical `undefined` externref into the backing slot
+(`vec.data[argIndex]`, null-guarded, mirroring `emitMappedArgParamSync`'s slot
+write) and emit `i32.const 1` (`true`), **short-circuiting the generic path**.
+The already-present `unmappedIndices` entry stops a later parameter write from
+resurrecting the slot (§10.4.4.2). The non-configurable arm (returns `false`) is
+untouched. Front-end only — no new host import; standalone and host lanes agree.
+`src/codegen/typeof-delete.ts`.
+
+### Test Results — group (e) (host/gc lane, authoritative `runTest262File`)
+
+| cluster | baseline → fix |
+|---|---|
+| `language/expressions/delete` (69 files) | 64 → **65** pass, **0 regressions** |
+| `language/arguments-object/mapped` (43 files) | 39 → 39 (no change; 4 pre-existing defineProperty fails unchanged) |
+
+Net **+1** test262. Flipped fail→pass: `11.4.1-4.a-17`. Remaining `delete`-dir
+fails are all out-of-scope: `S11.4.1_A3.1` + `S11.4.1_A3.3_T1` (structural (b),
+architect-first), `11.4.1-5-a-27-s` (f, preventExtensions), `S8.12.7_A2_T2`
+(g, prototype-chain read). Regression test:
+`tests/issue-2726-mapped-args-delete.test.ts`.
 
 ## Resolution — groups (c) + (d) (2026-06-27, dev2)
 
