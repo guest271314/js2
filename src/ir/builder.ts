@@ -439,6 +439,40 @@ export class IrFunctionBuilder {
     return result;
   }
 
+  /**
+   * Emit `dyn.eq{lhs, rhs, loose, negate}` — strict/loose equality between two
+   * boxed-any carriers, result `i32` (0/1) (#2949 S5.2).
+   *
+   * BOTH operands MUST be `dynamic`. The producer boxes any concrete operand
+   * into the carrier first (`emitBox(v, irDynamic(...))`), leaving the dyn side
+   * as-is, so both operands are carriers by the time they reach here — exactly
+   * the `(ref null $AnyValue, ref null $AnyValue)` shape the canonical
+   * `__any_strict_eq` / `__any_eq` helpers take. A concrete operand slipping
+   * through is a producer bug (a concrete `===` has an inline scalar compare),
+   * rejected at construction rather than mis-lowered through the carrier.
+   *
+   * @param opts.loose  `true` = `==`/`!=` (`__any_eq`); `false` = `===`/`!==`
+   *                    (`__any_strict_eq`).
+   * @param opts.negate `true` = `!==`/`!=` — append `i32.eqz` at lowering.
+   */
+  emitDynEq(lhs: IrValueId, rhs: IrValueId, opts: { loose: boolean; negate: boolean }): IrValueId {
+    for (const [label, v] of [
+      ["lhs", lhs],
+      ["rhs", rhs],
+    ] as const) {
+      if (this.typeOf(v).kind !== "dynamic") {
+        throw new Error(
+          `IrFunctionBuilder: emitDynEq ${label} operand ${v} is not dynamic — carrier equality applies only to boxed-any operands; box concrete operands first (#2949 S5.2) (func ${this.name})`,
+        );
+      }
+    }
+    const resultType = irVal({ kind: "i32" });
+    const result = this.allocator.fresh();
+    this.valueTypes.set(result, resultType);
+    this.pushInstr({ kind: "dyn.eq", lhs, rhs, loose: opts.loose, negate: opts.negate, result, resultType });
+    return result;
+  }
+
   // --- object ops (#1169b) ------------------------------------------------
 
   /**

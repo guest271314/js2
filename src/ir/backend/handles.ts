@@ -269,6 +269,40 @@ export interface IrDynamicLowering {
    * and needs no `tag.test` proof.
    */
   emitToBoolean(): readonly Instr[];
+  /**
+   * One carrier on the stack → the operand shape this backend's equality
+   * helper takes (#2949 S5.2). Emitted once per operand, immediately after that
+   * operand is pushed:
+   *   - gc: the carrier IS `(ref null $AnyValue)`, exactly what
+   *     `__any_strict_eq`/`__any_eq` take → identity (`[]`).
+   *   - host: the carrier is `externref`, exactly what
+   *     `__host_eq`/`__host_loose_eq` take → identity (`[]`).
+   * (It exists as a hook because a future backend might need a real
+   * per-operand marshalling; today both are identity.)
+   */
+  emitEqOperand(): readonly Instr[];
+  /**
+   * Two operands on the stack (each run through {@link emitEqOperand}) → i32
+   * (0/1): STRICT equality `===` (§7.2.16), routed to the SAME helper the
+   * matching legacy backend uses (D4, byte-parity with the legacy runtime
+   * result). `negate` appends `i32.eqz` for `!==`.
+   *   - gc/fast/standalone: the native `__any_strict_eq` — its tag-5 field-4
+   *     classifier owns cross-type falsity, numeric-class `23 === 23.0`,
+   *     `NaN === NaN → false` (the helper's `f64.eq`), and reference identity.
+   *   - host: `__host_eq` (JS `===`). (The `__any_strict_eq` path is NOT
+   *     host's — legacy host `any === any` compares the raw externrefs; the
+   *     `__any_*_eq` helper family is the standalone/`noJsHost` branch.)
+   */
+  emitStrictEq(negate: boolean): readonly Instr[];
+  /**
+   * Two operands on the stack → i32 (0/1): LOOSE equality `==` (§7.2.15),
+   * routed to the matching legacy backend's helper (D4). `negate` appends
+   * `i32.eqz` for `!=`.
+   *   - gc/fast/standalone: `__any_eq` (String⇄Number / `null == undefined` /
+   *     ToPrimitive arms live in the helper body).
+   *   - host: `__host_loose_eq` (JS `==`).
+   */
+  emitLooseEq(negate: boolean): readonly Instr[];
 }
 
 /**

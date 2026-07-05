@@ -2,7 +2,7 @@
 id: 2949
 title: "IR dynamic value representation: JsTag-carrying `dynamic` kind in IrType (make untyped JS claimable)"
 status: in-progress
-assignee: ttraenkler/opus-s5-1
+assignee: ttraenkler/opus-s5-2
 sprint: current
 created: 2026-07-02
 updated: 2026-07-05
@@ -1352,3 +1352,123 @@ fast-path primitives (S5.0). S5.2 adds `IrDynamicLowering.emitStrictEq`/
 helper. Mechanism slice, byte-inert, same prove-emit-identity + unit-test
 discipline. The claim-flip stays back-loaded onto S5.P (§4 anti-vacuity
 probe gates it).
+
+## Implementation Notes — S5.2 (opus-s5-2, 2026-07-05, branch `issue-2949-s5-2-eq`)
+
+S5.2 ships **dynamic-value strict/loose equality** — `dyn === x` / `dyn !== x`
+/ `dyn == x` / `dyn != x` (either or both operands boxed-any carriers) → `i32`.
+Mechanism slice: byte-inert by construction (the selector's move-only gate
+still rejects a dynamic-eq body, so from-ast never builds `dyn.eq` in a CLAIMED
+function). **prove-emit-identity: 39/39 IDENTICAL** vs the branch base
+(`bfa59bc68`). Decisions and the WHY:
+
+1. **A dedicated `IrInstrDynEq{lhs, rhs, loose, negate}` node (→ i32), not a
+   `binary`.** Verifier R4 forbids dynamic operands on `binary`/`unary`; carrier
+   equality is its own op (both operands MUST be dynamic — the producer boxes any
+   concrete operand into the carrier first). `loose` selects `==`/`!=` vs
+   `===`/`!==`; `negate` appends `i32.eqz` for the `!==`/`!=` half (the helper
+   always computes the positive form). Same `never`-exhaustive blast radius as
+   S5.1's `dyn.truthy` — nodes.ts (union + `forEachNestedBuffer` /
+   `mapNestedBuffers` leaf groups + `directUses`), lower.ts uses + case,
+   verify.ts (collectUses + operand-dynamic rule), effects.ts (pure), integration
+   `isDynamicOp`, monomorphize + inline-small rename/uses — tsc's exhaustiveness
+   flagged each. `dyn.eq` joins the two-operand `[lhs, rhs]` group (string.eq),
+   NOT the single-operand `dyn.truthy` group.
+
+2. **THE LOAD-BEARING FINDING — the equality engine is MODE-SPLIT; the spec's
+   `__any_strict_eq`/`__any_eq` is the gc/standalone path ONLY, NOT host.** The
+   spec said "route through `__any_strict_eq`/`__any_eq`". That is correct for
+   the **gc (fast/standalone)** carrier — there the operands ARE `$AnyValue`,
+   `emitEqOperand` is identity, and `__any_strict_eq`/`__any_eq` are exactly what
+   legacy `compileAnyBinaryDispatch` emits (byte-parity, and the tag-5 field-4
+   classifier owns cross-type falsity + numeric-class `5 === 5.0` + `NaN === NaN
+   → false` via `f64.eq`). **But for the host (non-fast) externref carrier it is
+   WRONG.** I verified against the real compiler (probe on `compileAndInstantiate`
+   of `function looseEq(a:any,b:any){return a==b?1:0}` in host mode): legacy host
+   `"5" == 5 → 1`, `null == undefined → 1` (spec-correct). Routing the host path
+   through `boxToAny(externref,"unknown")` + `__any_eq` (my first attempt,
+   mirroring `emitAnyEqOperands`) gives `"5" == 5 → 0`, `null == undefined → 0` —
+   a DIVERGENCE, because `boxToAny("unknown")` is a compile-time tag decision that
+   boxes every externref as opaque tag-5, so `__any_eq`'s §7.2.15 String⇄Number /
+   tag-1 null==undefined arms never fire. The `__any_*_eq` family is the
+   **standalone `noJsHost` branch** in `binary-ops.ts` (`emitAnyEqFromExternTemps`),
+   not host's. **Legacy host `any === any` compares the raw externrefs via
+   `__host_eq` (JS `===`) / `__host_loose_eq` (JS `==`).** So the host strategy
+   routes through those imports: `emitEqOperand` = `[]` (externref IS the
+   `__host_eq` operand shape), `emitStrictEq` = `__host_eq`, `emitLooseEq` =
+   `__host_loose_eq`. This is D4-faithful (one equality engine PER BACKEND — the
+   SAME the matching legacy lowering uses) and byte-parity with the legacy host
+   runtime result. `preregisterDynamicSupport` registers `__host_eq` /
+   `__host_loose_eq` (late imports, funcIdx-shift-safe up-front) for a host module
+   carrying a `dyn.eq`; the gc `ensureAnyHelpers` already covers `__any_*_eq`.
+   Standalone/wasi is the `gc` strategy (fast) → `__any_*_eq`, no host-import leak
+   into a host-free module.
+
+3. **`emitEqOperand` is a per-operand hook, emitted immediately after each
+   operand is pushed** (so no scratch local is needed), currently identity in
+   BOTH strategies. It exists so a future backend that needs real per-operand
+   marshalling has the seam; today gc-carrier == `$AnyValue` == `__any_*_eq`
+   shape, host-carrier == externref == `__host_*_eq` shape, both identity.
+
+4. **`dyn === null` / `dyn === undefined` (STRICT) use the exact
+   `tag.test{Null|Undefined}` fast path, NOT the general helper**, wired inside
+   from-ast's existing `tryFoldNullCompare` / `tryLowerUndefinedCompare` (they
+   already lower the "other" operand and branch on its IrType — the natural home
+   for a dynamic arm). LOOSE `== null` / `== undefined` is NOT a single tag test
+   (`== null` matches both null and undefined, §7.2.15), so it is left to legacy
+   (return null → demote), never folded. The general `dyn === x` / `dyn === dyn`
+   arm lives in `lowerBinary` after operand lowering, before the string-operand
+   path (a `dyn === "s"` mixes dynamic + string), and boxes the concrete operand
+   with a literal-kind refinement (numeric literal / f64 → NumberF64; `true`/
+   `false` → Boolean so it boxes tag-4, NOT the number default; string → String);
+   an un-refinable non-literal `i32` (number-vs-boolean-ambiguous) demotes cleanly
+   rather than mis-tagging. All from-ast arms are reachable only once S5.P opens
+   the scan; today the move-only gate rejects a dynamic-eq body, so they are
+   byte-inert (proven) and exercised only by hand-built-IR unit tests.
+
+5. **NaN respects `NaN !== NaN`** — the task's explicit concern. The gc
+   `__any_strict_eq` number arm is `f64.eq` (any-helpers.ts ~L2285), so
+   `NaN === NaN → 0`; host `__host_eq` is JS `===`, likewise `0`. Verified at
+   runtime in BOTH strategies. This is CLEANER than S5.1's inherited
+   `__any_unbox_bool` NaN-is-truthy quirk — equality gets NaN right in both modes
+   because both helpers compare numbers with the spec `f64.eq` semantics.
+
+## Test Results — S5.2 (2026-07-05, opus-s5-2)
+
+- `tests/issue-2949-s5-2-eq.test.ts` — **7/7 pass**: node shape + i32 result +
+  loose/negate flags + verifier-clean; construction-time non-dynamic-operand
+  guard (lhs AND rhs); verifier rejection of a hand-crafted concrete-operand
+  `dyn.eq`; handle→helper D4 routing (gc: `emitEqOperand` identity +
+  `__any_strict_eq`/`__any_eq` +eqz-on-negate; host: identity + `__host_eq`/
+  `__host_loose_eq`); and RUNTIME execution against the PRODUCTION
+  `makeDynamicLowering` over a real `CodegenContext` in BOTH strategies —
+  gc: strict/loose number eq incl. `NaN === NaN → 0` (spec-correct) and `0 ===
+  -0 → 1`, `!==` negation, numeric-CLASS (tag-2 i32 box === tag-3 f64 box),
+  cross-type strict falsity (boxed number vs boxed boolean → 0); host: full
+  spectrum via externref params — number/string/bool equality, cross-type
+  falsity (`"5" === 5`, `true === 1` → 0), `NaN === NaN → 0`, null/undefined
+  (`null === null → 1`, `null === undefined → 0` strict), LOOSE coercions
+  (`"5" == 5 → 1`, `null == undefined → 1`, `0 == false → 1`), and the strict
+  null/undefined `tag.test` FAST-PATH primitive.
+- **Byte-inertness PROVEN**: `prove-emit-identity.mjs` baseline captured on a
+  clean worktree at the branch base (`bfa59bc68`), `check` on this branch →
+  **IDENTICAL, all 39 (file,target) hashes** across gc/standalone/wasi.
+- `pnpm run check:ir-fallbacks` — OK, zero delta in every bucket, no post-claim
+  demotions (no selector/producer change, as designed).
+- Adjacent #2949 suites: S5.0 8/8, S5.1 7/7, slice 1 19/19, slice 2 22/22,
+  slice 3 16/16, slice 3b 8/8 — **87/87 combined with S5.2**. `tests/ir/` +
+  `issue-2104-value-tags`: the only failures are the pre-existing 7 (`ir/passes`
+  4, `ir/inline-small` 3 — `__unbox_number` harness LinkError) recorded
+  identically in the S5.0 / S5.1 / slice-3 notes.
+- `npx tsc --noEmit` clean; prettier + biome clean.
+
+**S5.3 (relational: `dyn </<=/>/>=`) is ready next** — the substrate it needs
+exists: `emitBox` (S5.0), and the coercion-engine `emitToNumber` (carrier →
+f64) is the target for a new `IrDynamicLowering.emitToNumber` arm + `emitDynToNumber`
+on the builder + the `lowerBinary` relational arm (ToNumber(dyn) → `f64.lt`/`gt`/…).
+Scope guard per the S5 plan §S5.3: numeric-abstract-relational only, admit a dyn
+operand only against a NUMERIC literal (string×string relational deferred — a
+dyn-string ToNumber = NaN gives all-false, spec-correct for `"a" > 0` but WRONG
+for `"b" > "a"`). Same mechanism-slice discipline: byte-inert, prove-emit-identity
+39/39, hand-built-IR unit tests over gc + host. The claim-flip stays back-loaded
+onto S5.P (§4 anti-vacuity probe).
