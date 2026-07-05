@@ -440,6 +440,34 @@ export class IrFunctionBuilder {
   }
 
   /**
+   * Emit `dyn.to_number{value}` — `ToNumber(value)` (§7.1.4) on a boxed-any
+   * carrier. Result is `f64`, feeding the existing `f64.lt`/`gt`/`le`/`ge`
+   * numeric-abstract relational compare path (#2949 S5.3).
+   *
+   * The operand MUST be `dynamic` — this is the carrier ToNumber, not a
+   * concrete-scalar conversion (a concrete numeric operand converts to f64
+   * inline). Feeding a concrete value here is a producer bug, rejected at
+   * construction time rather than mis-lowering the carrier. Lowering routes
+   * through `IrDynamicLowering.emitToNumber` — `__any_to_f64` (gc, the SAME
+   * boxed-any→f64 helper legacy's `__any_lt` family uses) / `__unbox_number`
+   * (host, `Number(v)`) — one ToNumber engine (D4). SCOPE: numeric-abstract
+   * only; string×string lexicographic relational is DEFERRED (see the
+   * `IrInstrDynToNumber` node doc).
+   */
+  emitDynToNumber(value: IrValueId): IrValueId {
+    if (this.typeOf(value).kind !== "dynamic") {
+      throw new Error(
+        `IrFunctionBuilder: emitDynToNumber operand ${value} is not dynamic — carrier ToNumber applies only to the boxed-any carrier (#2949 S5.3) (func ${this.name})`,
+      );
+    }
+    const resultType = irVal({ kind: "f64" });
+    const result = this.allocator.fresh();
+    this.valueTypes.set(result, resultType);
+    this.pushInstr({ kind: "dyn.to_number", value, result, resultType });
+    return result;
+  }
+
+  /**
    * Emit `dyn.eq{lhs, rhs, loose, negate}` — strict/loose equality between two
    * boxed-any carriers, result `i32` (0/1) (#2949 S5.2).
    *

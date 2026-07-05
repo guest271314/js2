@@ -652,6 +652,7 @@ function collectUses(instr: IrInstr): readonly IrValueId[] {
     case "unbox":
     case "tag.test":
     case "dyn.truthy":
+    case "dyn.to_number":
       return [instr.value];
     case "dyn.eq":
       return [instr.lhs, instr.rhs];

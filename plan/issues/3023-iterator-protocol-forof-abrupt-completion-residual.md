@@ -1,10 +1,11 @@
 ---
 id: 3023
 title: "iterator protocol: synthesized-iterator .next callability + for-of/for-await abrupt-completion residual (~508 default-lane fails)"
-status: ready
+status: done
 sprint: current
 created: 2026-07-03
-updated: 2026-07-03
+updated: 2026-07-04
+completed: 2026-07-04
 priority: high
 horizon: m
 feasibility: medium
@@ -144,3 +145,64 @@ build a fix around it. Verified findings:
   robustness follow-up (wrap the `getSemanticDiagnostics` call so a TS-internal
   throw degrades to "no semantic diagnostics" instead of a hard process crash)
   — it does not move the test262 number and is out of scope for this issue.
+
+## Resolution (2026-07-04, dev-3023) — `.next is not a function` sub-bucket
+
+Landed the highest-value scoped slice: the **`.next is not a function`**
+destructuring bucket (recorded 114). Root cause confirmed by tracing the
+default (JS-host) lane: `var it = {}; it[Symbol.iterator] = function () {
+return { next(){…}, return(){…} } }` compiles the returned iterator object to a
+**closed nominal WasmGC struct** whose `.next` / `.return` are NOT native JS
+properties. Array destructuring materializes the source through the host import
+`__array_from_iter_n` → `_arrayFromIter` → (fall-through) `_drainIterable`,
+which did a naive `it.next()` and threw `it.next is not a function`. The robust
+protocol walk (resolving members via native → sidecar → `__sget_*` →
+wasm-closure `__call_fn_0`, with §7.4.6 IteratorClose on the bounded/abrupt
+stop) existed **only** for the case where `@@iterator` itself is a wasm
+closure, not for the (common) case where a native-function `@@iterator`
+*returns* a wasm-struct iterator.
+
+**Fix** (all in `src/runtime.ts`, JS-host runtime — no codegen change, so zero
+compile-time impact):
+- Extracted the robust walk into a shared `_walkWasmIterator(iteratorObj,
+  limit)` helper (bounded materialization + IteratorClose-on-cap; `limit ===
+  Infinity` drains to natural done without closing).
+- Routed the wasm-closure-`@@iterator` path through the helper (behaviour-
+  preserving refactor).
+- `_drainIterable` now diverts a wasm-struct iterator (`typeof it.next !==
+  "function"`) to `_walkWasmIterator`; plain JS iterators keep the existing
+  naive fast path unchanged.
+
+**Measured (default-lane in-process harness, 174-file set = the 114
+`.next is not a function` files + a 60-file currently-passing dstr/iter
+regression sample):** BEFORE 46 pass → AFTER 118 pass, **+72 newly passing, 0
+regressions**. Within the 114-file bucket specifically, **68 flip to pass**
+(114 → ~46), materially below the recorded 113 — acceptance criterion met.
+
+**Deliberately left for follow-up slices** (distinct code paths, not the
+iterator-protocol `.next` callability this slice scopes; all were already
+failing, none regressed):
+- **Default-parameter destructuring** over a custom iterable
+  (`static method([x] = iter)` — `destructure*Param*` path): now fails with
+  "Cannot destructure 'null' or 'undefined'" (the default-value application,
+  not the iterator protocol). ~32 files.
+- **Rest-binding codegen** for `[a, ...rest]` / `[...rest]` over a custom
+  iterable: the values now materialize correctly (`_walkWasmIterator` drains
+  them), but the rest-slice binding drops them (`rest` ends up empty). Separate
+  codegen bug in the array-destructuring rest-slice path.
+- **Generator-`yield`-inside-destructuring** + §7.4.6-step-9
+  (`return()` returns a non-object → TypeError), driven through the
+  generator-CPS `.return()` path (`array-elem-trlg-iter-list-rtrn-close-null`).
+- The remaining `for-of` / `for-await-of` abrupt-completion residual and the
+  `src/cli.ts` late-bound-symbol robustness follow-up.
+
+## Test Results
+
+`tests/issue-3023.test.ts` (5 cases, all pass): `const [x]` closes a not-done
+iterator (IteratorClose → `return()` once); `const [x]` over an already-`done`
+iterator does NOT close; multi-element `const [a, b]` binds each value and
+closes when still yielding; `for (const [x] of [iter])` inner destructuring;
+assignment destructuring `[_x] = iterable` over an exhausted iterator (no
+close). Broad regression sweep: 83/83 pass across 13 iterator/spread/
+destructuring suites (generators, rest-in-rest, spread, Array.from drivers,
+dstr-tdz). `tsc --noEmit` and `biome lint` clean.
