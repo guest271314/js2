@@ -638,15 +638,30 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
       continue;
     }
 
-    // Class expression: const C = class { ... } — skip, already handled as class declaration
-    if (decl.initializer && ts.isClassExpression(decl.initializer)) {
-      continue;
-    }
-
-    // For arrow/function expression initializers, compile the expression first
-    // to get the actual closure struct ref type (resolveWasmType returns externref
-    // for function types, but closures need ref $struct)
-    if (decl.initializer && (ts.isArrowFunction(decl.initializer) || ts.isFunctionExpression(decl.initializer))) {
+    // For arrow/function expression AND class-expression initializers, compile
+    // the expression first to get the actual closure struct ref type
+    // (resolveWasmType returns externref for function types, but closures need
+    // ref $struct).
+    //
+    // (#3045) Class expressions (`const C = class { ... }`) MUST also flow
+    // through here. The class BODY is lowered like a declaration, but the
+    // BINDING must still hold the constructor-object VALUE — otherwise the
+    // (pre-hoisted, instance-struct-typed) local `$C` is never stored, so
+    // reading `C` as an rvalue (passing it to a function, `Reflect.has(C, k)`,
+    // `Object.prototype.hasOwnProperty.call(C, k)`, …) reads an uninitialized
+    // null local → `extern.convert_any` on null → a host `Reflect.has called on
+    // non-object` / `Cannot convert undefined or null to object` trap. Compiling
+    // the class expression here yields the constructor value (a closure struct →
+    // externref, via emitClassCtorValue), and this branch re-types the
+    // pre-hoisted slot to that closure type before storing — exactly as for
+    // arrow/function-expression bindings. `new C()` is unaffected (it resolves
+    // the class statically via classSet, not through the binding value).
+    if (
+      decl.initializer &&
+      (ts.isArrowFunction(decl.initializer) ||
+        ts.isFunctionExpression(decl.initializer) ||
+        ts.isClassExpression(decl.initializer))
+    ) {
       const actualType = compileExpression(ctx, fctx, decl.initializer);
       const closureType = actualType ?? { kind: "externref" as const };
 
