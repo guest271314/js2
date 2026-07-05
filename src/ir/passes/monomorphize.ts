@@ -656,6 +656,8 @@ function collectUses(instr: IrInstr): readonly IrValueId[] {
       return [instr.value];
     case "dyn.eq":
       return [instr.lhs, instr.rhs];
+    case "dyn.member_get":
+      return [instr.recv, instr.key];
     case "string.const":
       return [];
     case "string.concat":

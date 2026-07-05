@@ -25,6 +25,7 @@
 import { ts } from "../ts-api.js";
 
 import { ensureAnyHelpers, ensureAnyValueType } from "../codegen/any-helpers.js"; // (#2949) boxed-any carrier for IrType.dynamic
+import { ensureDynMemberGet } from "../codegen/dyn-read.js"; // (#3053 U1) unified dynamic-reader carrier primitive __dyn_member_get
 import { ensureLateImport } from "../codegen/shared.js"; // (#2949 S5.2) host __host_eq / __host_loose_eq registration
 import { getOrRegisterPromiseType } from "../codegen/async-scheduler.js";
 import {
@@ -1706,7 +1707,24 @@ function isDynamicOp(instr: IrInstr): boolean {
   // #2949 S5.2 — dyn.eq consumes two carriers and calls the canonical equality
   // helpers, so it too requires the dynamic backing pre-registered.
   if (instr.kind === "dyn.eq") return true;
+  // #3053 U1 / #2949 S5.4 — dyn.member_get calls `__dyn_member_get`, which is
+  // built on the canonical any-helper family (`__any_from_extern_honest` /
+  // `__any_to_extern` / `__box_*`), so it requires the dynamic backing too.
+  // The helper itself is registered separately below (`ensureDynMemberGet`).
+  if (instr.kind === "dyn.member_get") return true;
   return false;
+}
+
+/**
+ * #3053 U1 — does this instruction lower through the unified dynamic-reader
+ * carrier primitive `__dyn_member_get` (#3053 U0)? That helper is a DEFINED
+ * function built at finalize by `ensureDynMemberGet`, gated on the
+ * `ctx.usesDynMemberGet` latch; it must be REGISTERED up-front (before Phase 3)
+ * so the handle's `emitMemberGet` can resolve its funcidx by name, exactly like
+ * the any/eq helper families above.
+ */
+function usesDynMemberGet(instr: IrInstr): boolean {
+  return instr.kind === "dyn.member_get";
 }
 
 /**
@@ -1768,18 +1786,20 @@ function jsTagToStaticType(
 function preregisterDynamicSupport(ctx: CodegenContext, fns: readonly BuiltFnRef[]): void {
   let usesDynamicOps = false;
   let usesEq = false;
+  let usesMemberGet = false;
   for (const entry of fns) {
     for (const block of entry.fn.blocks) {
       for (const instr of block.instrs) {
         forEachInstrDeep(instr, (i) => {
           if (isDynamicOp(i)) usesDynamicOps = true;
           if (usesDynEq(i)) usesEq = true;
+          if (usesDynMemberGet(i)) usesMemberGet = true;
         });
-        if (usesDynamicOps && usesEq) break;
+        if (usesDynamicOps && usesEq && usesMemberGet) break;
       }
-      if (usesDynamicOps && usesEq) break;
+      if (usesDynamicOps && usesEq && usesMemberGet) break;
     }
-    if (usesDynamicOps && usesEq) break;
+    if (usesDynamicOps && usesEq && usesMemberGet) break;
   }
   if (!usesDynamicOps) return;
   if (ctx.fast) {
@@ -1800,6 +1820,23 @@ function preregisterDynamicSupport(ctx: CodegenContext, fns: readonly BuiltFnRef
       ensureLateImport(ctx, "__host_eq", [{ kind: "externref" }, { kind: "externref" }], [{ kind: "i32" }]);
       ensureLateImport(ctx, "__host_loose_eq", [{ kind: "externref" }, { kind: "externref" }], [{ kind: "i32" }]);
     }
+  }
+  // #3053 U1 — a `dyn.member_get` present in any IR body needs the unified
+  // reader primitive `__dyn_member_get` (#3053 U0) REGISTERED up-front so the
+  // handle's `emitMemberGet` resolves its funcidx by name at emit time (the
+  // finalize `ensureDynMemberGet` runs AFTER Phase 3, too late for that). Flip
+  // the latch and register here; `ensureDynMemberGet` mints only DEFINED funcs
+  // (`addFuncType` + `mintDefinedFunc` — no import shift) and reuses the any-
+  // helper family just registered above, so this is funcidx-shift-safe at
+  // preregister time. It self-guards (bails, resetting the latch, if the object
+  // runtime's `__extern_get` is not yet registered), and the finalize pass is
+  // then idempotent via the `dynMemberGetHelpersEmitted` latch. Byte-inert
+  // until S5.P (U2) opens the selector scan: no from-ast producer emits
+  // `dyn.member_get` in a claimed function today, so `usesMemberGet` is never
+  // set in a production compile.
+  if (usesMemberGet) {
+    ctx.usesDynMemberGet = true;
+    ensureDynMemberGet(ctx);
   }
 }
 
@@ -1957,6 +1994,24 @@ export function makeDynamicLowering(ctx: CodegenContext): IrDynamicLowering | nu
       emitLooseEq(negate: boolean): readonly Instr[] {
         return negate ? [callHelper("__any_eq"), { op: "i32.eqz" }] : [callHelper("__any_eq")];
       },
+      emitMemberGet(): readonly Instr[] {
+        // #3053 U1 / #2949 S5.4 — dynamic member read via the unified reader
+        // primitive. The carrier IS `(ref null $AnyValue)`, exactly the
+        // `__dyn_member_get(recv, key)` param shape, and the result is the same
+        // carrier — no marshalling. Flip the latch that makes the finalize
+        // `ensureDynMemberGet` pass build the helper; it was pre-registered
+        // up-front by `preregisterDynamicSupport`, so `callHelper` resolves it
+        // by name with no mid-emission funcidx shift.
+        ctx.usesDynMemberGet = true;
+        return [callHelper("__dyn_member_get")];
+      },
+      emitElementGet(): readonly Instr[] {
+        // Indexed form — the reader is key-uniform (the helper's own
+        // `__any_to_extern(key)` converts a boxed number key to a decimal
+        // property key), so it lowers to the identical bare call.
+        ctx.usesDynMemberGet = true;
+        return [callHelper("__dyn_member_get")];
+      },
     };
   }
 
@@ -2104,6 +2159,19 @@ export function makeDynamicLowering(ctx: CodegenContext): IrDynamicLowering | nu
       // Host LOOSE `==` via `__host_loose_eq` (JS `==`, §7.2.15) — the coercion
       // arms (String⇄Number, `null == undefined`) are JS's, matching legacy.
       return negate ? [callImport("__host_loose_eq"), { op: "i32.eqz" }] : [callImport("__host_loose_eq")];
+    },
+    emitMemberGet(): readonly Instr[] {
+      // #3053 U1 / #2949 S5.4 — dynamic member read. In host mode the carrier
+      // IS `externref` and `__dyn_member_get` is a thin `__extern_get` wrapper
+      // (a DEFINED function, resolved by name — same funcMap lookup as
+      // `callImport`), so the read is a bare call with no box/peel. Flip the
+      // latch the finalize `ensureDynMemberGet` reads.
+      ctx.usesDynMemberGet = true;
+      return [callImport("__dyn_member_get")];
+    },
+    emitElementGet(): readonly Instr[] {
+      ctx.usesDynMemberGet = true;
+      return [callImport("__dyn_member_get")];
     },
   };
 }

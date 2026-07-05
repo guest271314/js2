@@ -2,7 +2,7 @@
 id: 3053
 title: "Unified dynamic-reader carrier substrate — one __dyn_member_get primitive under #3037 CS3 (identity) AND #2949 S5.4 (IR claim-rate)"
 status: in-progress
-assignee: ttraenkler/opus-u0-carrier
+assignee: ttraenkler/opus-u1-wire
 sprint: current
 created: 2026-07-05
 updated: 2026-07-05
@@ -543,3 +543,118 @@ standalone body relies on native `__extern_get`, and the host body is the thin
 `__extern_get` wrapper; the runtime-key-dispatched host `.length` arms are best
 added in U1 against a real call site (they were not needed for the byte-inert
 substrate and carry no floor risk deferred).
+
+---
+
+## U1 — LANDED (byte-inert-off-path IR member-read wiring)
+
+**Author:** opus-u1-wire. **Branch:** `issue-3053-u1-ir-wire` (predecessor-
+stacked on `issue-3053-u0-carrier-helper`). **Floor verdict realised:
+BYTE-INERT-OFF-PATH** — the wiring exists but is UNREACHED in every claimed
+function until S5.P (U2) opens the selector scan. Proven, see below.
+
+### The floor-sensitivity determination (measure-first — the whole point)
+
+The task's central question — does U1 change EMITTED code for any
+currently-claimed function? — was settled **empirically against the U0 base**,
+not by narrative:
+
+- **The IR selector rejects every dynamic-receiver member read TODAY.** In
+  `select.ts` `dynamicUsesAreMoveOnly` (~L1289–1296) a member/element access
+  scans its receiver with `expectDyn = false` — a dynamic-name receiver returns
+  `false` ⇒ the function is NOT claimed. And a chained/call-return intermediate
+  dynamic (`o.a.b` where `o.a: any`) that would reach `lowerPropertyAccess` with
+  a dynamic receiver hit the pre-U1 `throw` — a claim-then-demote the selector's
+  phase-1 shape gate is precisely tuned to NEVER produce (a claim-then-demote is
+  a HARD ERROR under `JS2WASM_IR_FIRST`). So the set of claimed functions with a
+  dynamic member read is **empty**.
+- **Probes** (host + standalone, `JS2WASM_IR_FIRST=1`): every dynamic-receiver
+  shape (`p.x` on an any param; `x.p` on an any local; `o.a.b`/`o.a[0]`
+  intermediate-dynamic; call-return `foo().b`) reported `irCompiledFuncs: []` on
+  BOTH the U0 base and the U1 tree — never claimed, never emitted a
+  `__dyn_member_get`. A concrete-numeric control claimed as expected.
+- **`prove-emit-identity` = 39/39 (file,target) IDENTICAL** vs the U0 base
+  (`91e556f`). The from-ast arm REPLACES the prior dynamic-receiver `throw`, but
+  since that throw was unreachable-in-claimed-functions, so is the replacement —
+  zero emitted-byte change. **`check:ir-fallbacks` all deltas 0** (no
+  claim/fallback behaviour change; the selector is untouched).
+
+**Verdict: byte-inert-off-path.** Self-merge safe; NO monitored floor enqueue
+needed (there is no floor delta to measure). The floor-sensitive step is U2, when
+the scan opens and these reads start emitting.
+
+### What shipped (the thin wiring)
+
+- **IR node `dyn.member_get{recv, key}`** (`src/ir/nodes.ts`) — both operands
+  `dynamic` carriers, result `dynamic`; added to the `IrInstr` union + every
+  exhaustive `instr.kind` switch (operands extractor, buffer/leaf `never`
+  checks).
+- **`builder.emitDynMemberGet(recv, key)`** (`src/ir/builder.ts`) — constructs
+  the node; rejects a non-dynamic recv/key at construction (carrier-only). Uses
+  `irDynamic()` result.
+- **Verifier** (`src/ir/verify.ts`) — R-rule: recv, key, AND result must all be
+  `dynamic`; the hard backstop behind the builder guard.
+- **`lower.ts` arm** — `emitValue(recv)`, `emitValue(key)`, then the handle's
+  member-get ops (the `__dyn_member_get(recv, key)` operand order); throws on a
+  non-dynamic operand.
+- **`IrDynamicLowering.emitMemberGet()` / `emitElementGet()`**
+  (`backend/handles.ts` interface + `integration.ts` gc + host arms) — both
+  return `[call __dyn_member_get]` (resolved BY NAME) and flip
+  `ctx.usesDynMemberGet` (the latch U0's finalize `ensureDynMemberGet` reads).
+- **`preregisterDynamicSupport`** (`integration.ts`) — detects `dyn.member_get`
+  in the built IR (`isDynamicOp` + a new `usesDynMemberGet` scan), then
+  `ctx.usesDynMemberGet = true; ensureDynMemberGet(ctx)` UP-FRONT (before Phase 3)
+  so the emit-by-name resolves — the finalize `ensureDynMemberGet` runs AFTER
+  Phase 3, too late. Registers only DEFINED funcs (no import shift), self-guards
+  on missing object runtime, and is idempotent with the finalize pass.
+- **from-ast dynamic-receiver arms** — `lowerPropertyAccess` boxes the property
+  NAME as a tag-5 string carrier; `lowerElementAccess` boxes a string-literal key
+  as tag-5 or lowers+boxes the index (`boxConcreteToDynamic`), then
+  `builder.emitDynMemberGet`. These REPLACE the prior dynamic-receiver `throw`.
+- **Effects** (`effects.ts`) — `dyn.member_get` is call-like (reads+writes heap):
+  `__dyn_member_get` walks the proto chain and may fire a getter.
+- **Tests** (`tests/issue-3053-u1-ir-member-read.test.ts`, 10 green) — node
+  shape + construction guards + verifier backstops (non-dynamic recv/key/result
+  all bite); handle routing in BOTH aligned strategies (standalone-gc emits the
+  bare call to the registered `__dyn_member_get` + the gc peel helper is present;
+  host emits the wrapper call, no peel; missing-registration throws a clear
+  error); the latch re-flips on each emit; lower drives `[recv][key][call]` in
+  order and rejects a concrete operand. Runtime value+tag preservation of the
+  helper itself stays proven by U0's `issue-3053-u0-dyn-member-get.test.ts`.
+
+### KNOWN GAP — carrier mode-split alignment is a U2 PREREQUISITE (must fix before opening the scan)
+
+`makeDynamicLowering` / `resolveDynamic` select the carrier on **`ctx.fast`**
+(`fast` ⇒ gc `$AnyValue`, else externref). U0's `ensureDynMemberGet` selects its
+helper BODY on **`ctx.standalone || ctx.wasi`** (gc `$AnyValue` body vs the host
+externref wrapper). `createCodegenContext` sets `ctx.fast = options.fast ?? false`
+and does **NOT** derive `fast` from `standalone` — `compiler.ts` maps
+`target:"standalone"` → `standalone:true` but passes `fast` through independently.
+So the two splits agree only in a subset of configs:
+
+| config (`fast` / `standalone|wasi`) | handle carrier | helper body | aligned? |
+| --- | --- | --- | --- |
+| fast + standalone/wasi | gc `$AnyValue` | gc `$AnyValue` | ✅ |
+| default (neither) | externref | externref wrapper | ✅ |
+| fast-only (host js-string playground) | gc `$AnyValue` | externref wrapper | ❌ |
+| non-fast standalone/wasi | externref | gc `$AnyValue` | ❌ |
+
+In the ❌ rows the emit would call `__dyn_member_get` with the wrong carrier ABI →
+invalid Wasm. This is **harmless in U1** (byte-inert: no producer emits
+`dyn.member_get`, so the mismatch is never realised — `prove-emit-identity`
+39/39), but **U2 MUST first align the two mode splits** (make
+`ensureDynMemberGet` key its carrier on `ctx.fast`, having first confirmed the gc
+body's `__extern_get`/honest-classifier deps are valid — or gate the scan to the
+aligned configs) BEFORE any function starts emitting the node. The U1 tests use
+the two aligned configs (`{fast:true, standalone:true}` gc, `{}` host) only.
+
+### U2 readiness — YES (with the alignment prerequisite above)
+
+The mechanism is complete and byte-inert: builder → node → verifier → lower →
+handle → `[call __dyn_member_get]` → finalize `ensureDynMemberGet`, plus the
+from-ast producer arms. U2 is `src/ir/select.ts` `dynamicUsesAreMoveOnly`
+(~L1289–1296): relax the member/element-access receiver from `expectDyn=false`
+to accept a dynamic receiver (result → `dynamic`), co-landed with the S5.P
+truthiness/eq/relational arms and gated by the #2949 §4 anti-vacuity probe — AND
+the carrier mode-split alignment above. That is the measured, FLOOR-SENSITIVE
+claim-flip; U1 deliberately leaves the scan closed.

@@ -1455,6 +1455,33 @@ export function lowerIrFunctionBody<S>(
         for (const op of call) emitter.pushRaw(out, op);
         return;
       }
+      case "dyn.member_get": {
+        // #3053 U1 / #2949 S5.4 — dynamic member read `recv[key]` / `recv.name`
+        // through the unified reader primitive `__dyn_member_get(recv, key)`
+        // (#3053 U0). Both operands MUST be dynamic carriers (verifier +
+        // builder enforce); the handle emits a bare `[call __dyn_member_get]`
+        // and flips `ctx.usesDynMemberGet` so the finalize `ensureDynMemberGet`
+        // pass builds the helper. The result is the identity-preserving,
+        // tag-honest carrier — no externref↔$AnyValue impedance at the boundary
+        // (the helper closes the round-trip in its own frame).
+        const recvT = typeOf(instr.recv);
+        const keyT = typeOf(instr.key);
+        if (recvT.kind !== "dynamic" || keyT.kind !== "dynamic") {
+          throw new Error(
+            `ir/lower: dyn.member_get operands must be dynamic, got ${recvT.kind}/${keyT.kind} (${func.name})`,
+          );
+        }
+        const dyn = resolver.resolveDynamicLowering?.();
+        if (!dyn) {
+          throw new Error(
+            `ir/lower: resolver cannot lower dyn.member_get (resolveDynamicLowering missing/null) (${func.name})`,
+          );
+        }
+        emitValue(instr.recv, out);
+        emitValue(instr.key, out);
+        for (const op of dyn.emitMemberGet()) emitter.pushRaw(out, op);
+        return;
+      }
       case "string.const": {
         const ops = resolver.emitStringConst?.(instr.value, instr.alloc);
         if (!ops) throw new Error(`ir/lower: resolver cannot emit string.const (${func.name})`);
@@ -3032,6 +3059,8 @@ function collectIrUses(instr: IrInstr): readonly IrValueId[] {
       return [instr.value];
     case "dyn.eq":
       return [instr.lhs, instr.rhs];
+    case "dyn.member_get":
+      return [instr.recv, instr.key];
     case "string.const":
       return [];
     case "string.concat":
