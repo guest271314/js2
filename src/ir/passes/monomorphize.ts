@@ -653,6 +653,8 @@ function collectUses(instr: IrInstr): readonly IrValueId[] {
     case "tag.test":
     case "dyn.truthy":
       return [instr.value];
+    case "dyn.eq":
+      return [instr.lhs, instr.rhs];
     case "string.const":
       return [];
     case "string.concat":

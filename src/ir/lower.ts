@@ -1405,6 +1405,33 @@ export function lowerIrFunctionBody<S>(
         for (const op of dyn.emitToBoolean()) emitter.pushRaw(out, op);
         return;
       }
+      case "dyn.eq": {
+        // #2949 S5.2 — strict/loose equality over two boxed-any carriers,
+        // routed through the CANONICAL `__any_strict_eq` / `__any_eq` helpers
+        // (June-audit D4). Both operands MUST be dynamic (verifier enforces);
+        // each is marshalled to the `(ref null $AnyValue)` eq-helper ABI by
+        // `emitEqOperand` (gc: identity; host: `__any_from_extern`) IMMEDIATELY
+        // after it is pushed, so no scratch local is needed. The tag-5
+        // classifier — incl. `NaN === NaN → false` — stays in the helper body.
+        const lt = typeOf(instr.lhs);
+        const rt = typeOf(instr.rhs);
+        if (lt.kind !== "dynamic" || rt.kind !== "dynamic") {
+          throw new Error(`ir/lower: dyn.eq operands must be dynamic, got ${lt.kind}/${rt.kind} (${func.name})`);
+        }
+        const dyn = resolver.resolveDynamicLowering?.();
+        if (!dyn) {
+          throw new Error(
+            `ir/lower: resolver cannot lower dyn.eq (resolveDynamicLowering missing/null) (${func.name})`,
+          );
+        }
+        emitValue(instr.lhs, out);
+        for (const op of dyn.emitEqOperand()) emitter.pushRaw(out, op);
+        emitValue(instr.rhs, out);
+        for (const op of dyn.emitEqOperand()) emitter.pushRaw(out, op);
+        const call = instr.loose ? dyn.emitLooseEq(instr.negate) : dyn.emitStrictEq(instr.negate);
+        for (const op of call) emitter.pushRaw(out, op);
+        return;
+      }
       case "string.const": {
         const ops = resolver.emitStringConst?.(instr.value, instr.alloc);
         if (!ops) throw new Error(`ir/lower: resolver cannot emit string.const (${func.name})`);
@@ -2979,6 +3006,8 @@ function collectIrUses(instr: IrInstr): readonly IrValueId[] {
     case "tag.test":
     case "dyn.truthy":
       return [instr.value];
+    case "dyn.eq":
+      return [instr.lhs, instr.rhs];
     case "string.const":
       return [];
     case "string.concat":
