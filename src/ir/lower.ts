@@ -1405,6 +1405,29 @@ export function lowerIrFunctionBody<S>(
         for (const op of dyn.emitToBoolean()) emitter.pushRaw(out, op);
         return;
       }
+      case "dyn.to_number": {
+        // #2949 S5.3 — ToNumber on a boxed-any carrier → f64 (the numeric-
+        // abstract relational operand conversion). The operand MUST be dynamic
+        // (verifier enforces); the op sequence comes from the
+        // `IrDynamicLowering` handle, which routes to the CANONICAL per-backend
+        // ToNumber (`__any_to_f64` gc / `__unbox_number` host) — one ToNumber
+        // engine (June-audit D4). String×string lexicographic relational is
+        // DEFERRED (see the `dyn.to_number` node doc); this arm implements only
+        // the numeric path.
+        const valueIrType = typeOf(instr.value);
+        if (valueIrType.kind !== "dynamic") {
+          throw new Error(`ir/lower: dyn.to_number operand must be dynamic, got ${valueIrType.kind} (${func.name})`);
+        }
+        const dyn = resolver.resolveDynamicLowering?.();
+        if (!dyn) {
+          throw new Error(
+            `ir/lower: resolver cannot lower dyn.to_number (resolveDynamicLowering missing/null) (${func.name})`,
+          );
+        }
+        emitValue(instr.value, out);
+        for (const op of dyn.emitToNumber()) emitter.pushRaw(out, op);
+        return;
+      }
       case "dyn.eq": {
         // #2949 S5.2 — strict/loose equality over two boxed-any carriers,
         // routed through the CANONICAL `__any_strict_eq` / `__any_eq` helpers
@@ -3005,6 +3028,7 @@ function collectIrUses(instr: IrInstr): readonly IrValueId[] {
     case "unbox":
     case "tag.test":
     case "dyn.truthy":
+    case "dyn.to_number":
       return [instr.value];
     case "dyn.eq":
       return [instr.lhs, instr.rhs];
