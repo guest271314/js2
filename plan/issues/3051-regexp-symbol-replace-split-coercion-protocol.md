@@ -1,12 +1,14 @@
 ---
 id: 3051
 title: "RegExp.prototype[@@replace] / [@@split] coercion protocol: ToString/ToInteger/ToLength on result-array + lastIndex/limit/flags args (~48 fails)"
-status: in-progress
-assignee: ttraenkler/dev-3051b
+status: ready
 sprint: current
 priority: medium
 horizon: m
-feasibility: medium
+feasibility: hard
+reasoning_effort: max
+model: fable
+architect_spec: done
 created: 2026-07-05
 task_type: bugfix
 area: codegen, runtime
@@ -213,3 +215,127 @@ Not addressed by Slice 1 or Slice 2. Distinct mechanisms, all senior-depth:
 `tests/issue-3051.test.ts` — 5/5 pass. Local default-lane sweep of
 `built-ins/RegExp/prototype/Symbol.{replace,split}`: replace 54/69, split 28/43
 (was 39/69, 28/43).
+
+## Implementation Plan (arch, 2026-07-05) — Slice 3+ (senior-depth)
+
+**Slices 1 & 2 landed** (dev-3051 / dev-3051b). Re-scoped `status: ready`,
+`feasibility: hard`, `model: fable` for the four remaining clusters. These are
+distinct mechanisms; land each as its own commit. All four live in the JS-host
+lane's `__regex_symbol_call` (`src/runtime.ts:10587`) and the
+`_wrapForHost`/`_wrapExecReturnForHost` bridge (runtime.ts:2347). Standalone lane
+delegates to the native RegExp backend (#682) — verify each fix has a standalone
+story or is host-lane-gated so the standalone floor is unaffected.
+
+### Cluster 1 — `result-*-err` abrupt-throw through a throwing getter (the biggest)
+
+Files: `result-get-{index,length,matched}-err`, `result-get-groups-prop-err`,
+`result-coerce-groups-err`. The exec result object has `get index(){ throw new
+Test262Error() }`. V8's native `@@replace`/`@@split` reads it through the
+`_wrapForHost` proxy (`_wrapExecReturnForHost`, runtime.ts:2347) → invokes the
+compiled getter closure → the wasm `throw` must surface as a **JS exception V8
+propagates** back to the user's `try/catch`.
+
+**Mechanism to build:** the get-trap in `_wrapForHost` that dispatches a struct's
+accessor/getter closure (grep the get-trap accessor arm near runtime.ts:5278 and
+the `WebAssembly.RuntimeError` guards at runtime.ts:2941-3074) catches wasm traps
+today (`e instanceof WebAssembly.RuntimeError`) and converts them to a
+`_PRIM_ABSENT`/undefined sentinel (runtime.ts:3057). A user `throw new
+Test262Error()` in a compiled getter surfaces as a wasm exception (tag
+`ensureExnTag`), NOT a `WebAssembly.RuntimeError` — so it must be **re-thrown as
+the underlying JS error value**, not swallowed. The fix: in the getter-dispatch
+arm, when the caught exception is a wasm-thrown user exception (has the exn tag /
+carries a boxed JS error payload), extract the payload and `throw` it as a JS
+value so V8's protocol propagates it to the user catch. Confirm how compiled
+`throw new X()` is represented at the host boundary (does the module export a
+helper to unwrap the thrown externref? grep `ensureExnTag` consumers + any
+`__get_pending_exception`/`getArg` host-side unwrap). This is the reusable
+"wasm-exception → host → user-catch" bridge — once built it also helps #3050's
+host lane and any throwing-getter-through-native-protocol case.
+
+**Edge:** an actually-buggy wasm trap (real RuntimeError) must STILL be swallowed
+to the absent sentinel where it is today — only *user* throws propagate. Keep the
+two exception classes distinct.
+
+### Cluster 2 — `Cannot convert object to primitive value` (@@split object args)
+
+Files: `coerce-flags`, `limit-0-bail`, `str-coerce-lastindex`,
+`str-result-coerce-length`, `str-set-lastindex-{match,no-match}`. An object arg /
+`lastIndex` round-trip that must `ToString`/`ToLength`/`ToPrimitive` traps at the
+wasm boundary before reaching the protocol. Slice 2's data-struct guard fixed the
+*throwing-valueOf* subset (`coerce-limit-err`); these plain object-to-primitive
+cases still trap because the value is passed to V8 as an opaque wasm struct with
+no `[Symbol.toPrimitive]`/`valueOf`/`toString` visible.
+
+**Fix:** ensure EVERY object-typed arg into `__regex_symbol_call` (runtime.ts:
+10588 params `arg0`,`arg1`) and every `lastIndex`/`flags` value read from the
+compiled RegExp is routed through `_wrapForHost` (property proxy) **before** it
+reaches V8's native protocol, so native `ToPrimitive`/`ToString`/`ToLength`
+dispatches the struct's coercion closures — same treatment Slice 2 applied to the
+replaceValue via the `__is_data_struct` discriminator (runtime.ts:1809
+`wrapCallable`). Audit the arg-wrapping at runtime.ts:10599-10621 and the
+`flags`/`lastIndex` get/set host bindings (grep `str-set-lastindex`,
+`RegExp_set_lastindex`, the #2671 lastIndex-as-externref treatment referenced in
+Slice 2). The `@@split` splitter's `lastIndex` get/set protocol
+(`str-set-lastindex-*`) needs the compiled RegExp's `lastIndex` to round-trip as
+externref (mirror `.global`/`.unicode` retype from Slice 2, and the #2671
+`lastIndex`).
+
+### Cluster 3 — `SpeciesConstructor` for @@split
+
+Files: `species-ctor{,-y,-err}`, `species-ctor-non-obj`, `species-non-ctor`,
+`splitter-proto-from-ctor-realm`. §22.2.6.14 `[Symbol.split]`: `C = ?
+SpeciesConstructor(rx, %RegExp%)` then `splitter = ? Construct(C, [rx,
+newFlags])`. Our @@split delegates to V8's native `RegExp.prototype[Symbol.split]`
+via `__regex_symbol_call`, so **V8 already runs SpeciesConstructor** — but on the
+value it sees as `rx.constructor`. The failure is that a **user constructor**
+(`class MyRegExp extends RegExp` or a `Symbol.species` getter returning a compiled
+ctor) is a wasm closure/struct that V8's `Construct` can't invoke.
+
+**Fix:** the compiled RegExp handed to V8 must expose `constructor` /
+`Symbol.species` such that native `SpeciesConstructor` resolves to a
+host-callable constructor bridge. When `rx[Symbol.species]` / `rx.constructor` is
+a compiled class, wrap it via the callable-ctor host bridge (`_wrapCallableForHost`
+/ the `@@species` handling at runtime.ts:4223, 4374, 4451-4454) so
+`Construct(C, [rx, flags])` invokes the compiled constructor and returns a value
+whose `exec`/`lastIndex` V8 can drive. The `-non-obj`/`-non-ctor` variants must
+`TypeError` — ensure the bridge preserves the constructor-ness check (a
+non-constructor species must throw, not silently pass). `splitter-proto-from-
+ctor-realm` needs the constructed splitter's `[[Prototype]]` to come from the
+ctor's realm — verify the bridge doesn't flatten it to the base %RegExp%.prototype.
+This is the deepest cluster (user constructor through native split); may itself
+split into a sub-slice.
+
+### Cluster 4 — well-known-symbol method as a first-class value (`name.js`)
+
+`RegExp.prototype[Symbol.replace]` accessed as a **value** (to read its `.name`),
+not called. Codegen resolves the member to the protocol-id `i32.const 8`
+(`_symbolIdToKeys` id 8 = `@@replace`, runtime.ts:4377), so
+`verifyProperty(<the i32 8>, "name", …)` fails — the i32 is not the method
+function object.
+
+**Fix (codegen, distinct from the runtime clusters):** when a well-known-symbol
+method (`RegExp.prototype[Symbol.replace]` etc.) is accessed as a **value** (not
+in call position), the codegen must yield a first-class **function object** for
+that method (with correct `.name` = `"[Symbol.replace]"`, `.length`), not the
+bare protocol-id i32. Grep the member-access lowering that emits `i32.const 8` for
+`obj[Symbol.replace]` (property-access.ts / the `_symbolIdToKeys` producer in
+codegen) and split call-position (keep the `__regex_symbol_call` fast path) from
+value-position (materialize a host function wrapper via a `__get_wks_method`-style
+import that returns the native `RegExp.prototype[Symbol.replace]` with its real
+`.name`). This is a separate feature ("well-known-symbol method as first-class
+value") and could be its own issue if it doesn't fall out cheaply — scope it last.
+
+### Ordering & risk
+
+- Cluster 1 (throwing-getter bridge) is the highest-value and most reusable —
+  do it first; it is genuinely senior (wasm-exn→host propagation).
+- Cluster 2 (object-arg ToPrimitive) reuses Slice 2's `_wrapForHost` discipline —
+  medium within this set.
+- Cluster 3 (SpeciesConstructor) is the deepest; may sub-split.
+- Cluster 4 is a codegen value-vs-call feature, orthogonal to 1-3.
+
+Each cluster: verify **no regression** in the delegating corpus
+(`String.prototype.{replace,replaceAll,split,match,matchAll,search}` +
+`RegExp.prototype.{Symbol.match,Symbol.matchAll,Symbol.search}` — 459 files
+dev-3051b already swept) and in `tests/issue-3051.test.ts`. Full `merge_group`
+per cluster; standalone floor green (host-lane-gated).
