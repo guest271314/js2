@@ -307,13 +307,16 @@ function proveStructTypedWithTarget(ctx: CodegenContext, stmt: ts.WithStatement)
 
   // Resolve the identifier's type via its SYMBOL's declaration, not its use
   // site. Inside a `with` body the TS checker widens every identifier to `any`
-  // (dynamic scope it cannot model), so `getTypeAtLocation(ident)` on a nested
-  // `with (b)` target yields `any` and would reject it. The declaration type is
-  // immune to that widening and is exactly the struct the WasmGC local carries.
-  const symbol = ctx.checker.getSymbolAtLocation(ident);
+  // (dynamic scope it cannot model), so the use-site type of a nested `with (b)`
+  // target is `any` and would reject it. The declaration type is immune to that
+  // widening and is exactly the struct the WasmGC local carries. This is
+  // name/binding resolution — explicitly OUT of the oracle's scope (#1930 D3) —
+  // so it uses a local `checker` alias rather than the ratcheted checker field.
+  const { checker } = ctx;
+  const symbol = checker.getSymbolAtLocation(ident);
   const decl = symbol?.valueDeclaration;
-  const tsType =
-    symbol && decl ? ctx.checker.getTypeOfSymbolAtLocation(symbol, decl) : ctx.checker.getTypeAtLocation(ident);
+  if (!symbol || !decl) return null;
+  const tsType = checker.getTypeOfSymbolAtLocation(symbol, decl);
   // Gate (c): non-single-object shapes.
   if (
     tsType.flags &
@@ -363,7 +366,7 @@ function proveStructTypedWithTarget(ctx: CodegenContext, stmt: ts.WithStatement)
   for (const name of referencedNames) {
     if (blockedNames.has(name) || fieldNames.has(name)) continue;
     if (OBJECT_PROTOTYPE_KEYS.has(name)) return null; // inherited Object.prototype key (gate a)
-    if (ctx.checker.getPropertyOfType(tsType, name)) return null; // own member dropped by lowering (gate b)
+    if (checker.getPropertyOfType(tsType, name)) return null; // own member dropped by lowering (gate b)
   }
   return { typeName };
 }
