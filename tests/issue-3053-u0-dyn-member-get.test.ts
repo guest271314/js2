@@ -68,7 +68,12 @@ const SOURCE = `export function run(): number {
 }`;
 
 async function standaloneExports(): Promise<Record<string, () => number>> {
-  const r = await compileForced(SOURCE, { target: "standalone" });
+  // (#3053 U2) The gc `$AnyValue` `__dyn_member_get` body (and its `__dmg_st_*`
+  // self-test drivers) is keyed on `ctx.fast` — matching the carrier decision in
+  // `resolveDynamic`/`makeDynamicLowering`. `--target standalone` alone sets
+  // `standalone:true` but leaves `fast:false`, which now (correctly) selects the
+  // externref host-wrapper body; the gc carrier path needs `fast:true`.
+  const r = await compileForced(SOURCE, { target: "standalone", fast: true });
   expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
   // Host-free: a leaked `env` import would mean the case ran on a JS host path.
   const leaked = r.imports.filter((i) => i.module === "env").map((i) => i.name);

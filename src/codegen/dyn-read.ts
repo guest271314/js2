@@ -536,8 +536,23 @@ export function ensureDynMemberGet(ctx: CodegenContext): void {
     return funcIdx;
   }
 
-  if (ctx.standalone || ctx.wasi) {
-    // ── gc/standalone carrier = (ref null $AnyValue) ──────────────────────
+  // (#3053 U2) Carrier mode-split alignment — MUST key on `ctx.fast`, the SAME
+  // predicate `resolveDynamic` / `makeDynamicLowering` (integration.ts) use to
+  // choose the carrier ValType. The IR handle passes `$AnyValue` when `ctx.fast`
+  // and `externref` otherwise; keying the helper BODY on `ctx.standalone||wasi`
+  // (as U0/U1 did) DISAGREED with the carrier in two configs — `fast && !standalone`
+  // (host js-string playground: gc carrier, externref body) and
+  // `!fast && (standalone||wasi)` (gc body, externref carrier — e.g. the
+  // prove-emit-identity `standalone`/`wasi` targets, which pass `fast:undefined`)
+  // — so a call to `__dyn_member_get` would carry the wrong ABI ⇒ invalid Wasm.
+  // Harmless in U1 (byte-inert: no producer emits `dyn.member_get`), but U2 opens
+  // the scan and those reads start emitting, so the split is realised. Aligning
+  // on `ctx.fast` makes body == carrier in ALL four configs. The gc body's native
+  // deps (`__extern_get`, honest classifier, `__box_number`/`__box_boolean`) are
+  // ensured at preregister time for the fast path (preregisterDynamicSupport);
+  // the self-guards below stay as the finalize-late backstop.
+  if (ctx.fast) {
+    // ── gc carrier = (ref null $AnyValue) (fast: standalone OR host-js-string) ─
     const anyIdx = ctx.anyValueTypeIdx;
     if (anyIdx < 0) {
       ctx.dynMemberGetHelpersEmitted = false;

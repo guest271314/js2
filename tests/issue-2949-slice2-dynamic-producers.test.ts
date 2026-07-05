@@ -135,7 +135,10 @@ describe("#2949 slice 2 — non-move dynamic uses keep their rejection buckets",
       `export function f(x) { if (x) { return x; } else { return x; } }`,
       "param-type-not-resolvable",
     ],
-    ["property access on dyn param", `export function f(x) { return x.foo; }`, "param-type-not-resolvable"],
+    // NOTE: `return x.foo` (property access on a dyn param) was rejected in
+    // slice 2, but #3053 U2 opens the selector scan for dynamic member/element
+    // reads (routed through `__dyn_member_get`), so it now CLAIMS. The flip is
+    // asserted positively in tests/issue-3053-u2-claim-flip.test.ts.
     [
       "mixed dynamic/concrete returns",
       `export function f(x) { if (x === 1) { return x; } else { return 0; } }`,
