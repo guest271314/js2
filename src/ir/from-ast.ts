@@ -2328,6 +2328,25 @@ function lowerPropertyAccess(expr: ts.PropertyAccessExpression, cx: LowerCtx): I
     }
   }
 
+  // #3053 U1 / #2949 S5.4 — named read `recv.name` on a boxed-any (dynamic)
+  // receiver: route through the unified reader primitive
+  // `__dyn_member_get(recv, key)` (#3053 U0). The receiver already IS the
+  // carrier; the key is the property name boxed as a tag-5 string carrier, so
+  // the helper's own `__any_to_extern(key)` yields the property key. The result
+  // is the identity-preserving, tag-honest carrier (`dynamic`) — the S5.4
+  // carrier-impedance blocker is dissolved.
+  //
+  // MECHANISM ONLY: the selector's move-only scan (`select.ts`
+  // `dynamicUsesAreMoveOnly`) still REJECTS a dyn receiver in a member read, so
+  // no claimed function reaches this arm until S5.P (U2) opens the scan — it is
+  // wired but unreached (byte-inert). It replaces the prior unconditional throw
+  // for a dynamic receiver, which — being a claim-then-demote the selector
+  // never actually produces — was itself unreachable in a claimed function.
+  if (recvType.kind === "dynamic") {
+    const key = cx.builder.emitBox(cx.builder.emitStringConst(propName), irDynamic(JsTag.String));
+    return cx.builder.emitDynMemberGet(recv, key);
+  }
+
   throw new Error(
     `ir/from-ast: property access .${propName} on ${describeIrType(recvType)} is not in slice 2 (${cx.funcName})`,
   );
@@ -2690,6 +2709,32 @@ function lowerElementAccess(expr: ts.ElementAccessExpression, cx: LowerCtx): IrV
       const r = lowerStringMethodCall("charAt", recv, ts.factory.createNodeArray([arg]), cx);
       if (r !== null) return r;
       throw new Error(`ir/from-ast: internal — charAt delegation produced no value in ${cx.funcName}`);
+    }
+  }
+
+  // #3053 U1 / #2949 S5.4 — indexed read `recv[key]` on a boxed-any (dynamic)
+  // receiver: route through the unified reader primitive
+  // `__dyn_member_get(recv, key)` (#3053 U0). A string-literal key boxes as a
+  // tag-5 string carrier; any other key is lowered concrete and boxed
+  // (`boxConcreteToDynamic` — a numeric index boxes tag-3, and the helper's own
+  // `__any_to_extern(key)` converts it to the decimal property key). `null` box
+  // (an ambiguous key kind) demotes cleanly to the throw below.
+  //
+  // MECHANISM ONLY (see the twin arm in `lowerPropertyAccess`): the selector's
+  // move-only scan rejects a dyn receiver in an element read until S5.P (U2),
+  // so this arm is unreached in a claimed function today — byte-inert.
+  if (recvType.kind === "dynamic") {
+    let key: IrValueId | null;
+    if (isStringLitKey) {
+      const propName = (arg as ts.StringLiteral | ts.NoSubstitutionTemplateLiteral).text;
+      key = cx.builder.emitBox(cx.builder.emitStringConst(propName), irDynamic(JsTag.String));
+    } else {
+      const idx = lowerExpr(arg, cx, irVal({ kind: "f64" }));
+      const idxType = cx.builder.typeOf(idx);
+      key = idxType.kind === "dynamic" ? idx : boxConcreteToDynamic(idx, idxType, arg, cx);
+    }
+    if (key !== null) {
+      return cx.builder.emitDynMemberGet(recv, key);
     }
   }
 

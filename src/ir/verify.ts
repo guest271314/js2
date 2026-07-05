@@ -645,6 +645,34 @@ function verifyBlock(
           }
         }
       }
+      // #3053 U1 / #2949 S5.4 — dyn.member_get reads a member off a boxed-any
+      // receiver via `__dyn_member_get(recv, key)`, which takes and returns the
+      // carrier. BOTH operands MUST be dynamic (the producer boxes the receiver
+      // and the property key into the carrier first) and the RESULT must be
+      // dynamic (the honest-boxed read value) — anything else is a producer bug
+      // that would mis-shape the reader ABI.
+      if (instr.kind === "dyn.member_get") {
+        for (const [label, operand] of [
+          ["recv", instr.recv],
+          ["key", instr.key],
+        ] as const) {
+          const operandIr = operandIrType(func, block, operand, localDefs);
+          if (operandIr && operandIr.kind !== "dynamic") {
+            errors.push({
+              message: `dyn.member_get ${label} must be a dynamic IrType, got ${operandIr.kind} (#3053 U1)`,
+              func: func.name,
+              block: block.id as number,
+            });
+          }
+        }
+        if (instr.resultType === null || instr.resultType.kind !== "dynamic") {
+          errors.push({
+            message: `dyn.member_get result must be a dynamic IrType, got ${instr.resultType?.kind ?? "null"} (#3053 U1)`,
+            func: func.name,
+            block: block.id as number,
+          });
+        }
+      }
 
       if (instr.result !== null) {
         if (defs.has(instr.result)) {
@@ -731,6 +759,8 @@ function collectUses(instr: IrBlock["instrs"][number]): readonly IrValueId[] {
       return [instr.value];
     case "dyn.eq":
       return [instr.lhs, instr.rhs];
+    case "dyn.member_get":
+      return [instr.recv, instr.key];
     case "string.const":
       return [];
     case "string.concat":

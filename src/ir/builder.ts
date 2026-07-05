@@ -11,6 +11,7 @@ import {
   asLabelId,
   asValueId,
   irVal,
+  irDynamic,
   AllocKind,
   AllocSiteId,
   IrBinop,
@@ -498,6 +499,45 @@ export class IrFunctionBuilder {
     const result = this.allocator.fresh();
     this.valueTypes.set(result, resultType);
     this.pushInstr({ kind: "dyn.eq", lhs, rhs, loose: opts.loose, negate: opts.negate, result, resultType });
+    return result;
+  }
+
+  /**
+   * Emit `dyn.member_get{recv, key}` — a dynamic member read `recv[key]` /
+   * `recv.name` on a boxed-any receiver, result `dynamic` (#3053 U1 / #2949
+   * S5.4).
+   *
+   * BOTH operands MUST be `dynamic` carriers. The receiver is already the
+   * carrier (an `any`-typed value); the key is a boxed property name (string)
+   * or boxed index — the producer boxes them first, so this node always sees
+   * the `(carrier, carrier) -> carrier` shape the unified reader primitive
+   * `__dyn_member_get(recv, key)` (#3053 U0) takes and returns. A concrete
+   * operand slipping through is a producer bug (the receiver would need a box,
+   * the key its own `ToPropertyKey`), rejected here at construction rather than
+   * mis-lowered through the carrier ABI.
+   *
+   * Lowering routes through `IrDynamicLowering.emitMemberGet` — a bare
+   * `[call __dyn_member_get]` that flips `ctx.usesDynMemberGet`. The result
+   * carrier is identity-preserving + tag-honest (the helper closes the
+   * externref↔carrier round-trip in its OWN frame, U0), so the read composes:
+   * `recv.a.z` is two chained `dyn.member_get`s with no `__any_to_extern`
+   * tag-6 breaker in between.
+   */
+  emitDynMemberGet(recv: IrValueId, key: IrValueId): IrValueId {
+    for (const [label, v] of [
+      ["recv", recv],
+      ["key", key],
+    ] as const) {
+      if (this.typeOf(v).kind !== "dynamic") {
+        throw new Error(
+          `IrFunctionBuilder: emitDynMemberGet ${label} operand ${v} is not dynamic — the dynamic member read applies only to boxed-any carriers; box the receiver/key first (#3053 U1 / #2949 S5.4) (func ${this.name})`,
+        );
+      }
+    }
+    const resultType = irDynamic();
+    const result = this.allocator.fresh();
+    this.valueTypes.set(result, resultType);
+    this.pushInstr({ kind: "dyn.member_get", recv, key, result, resultType });
     return result;
   }
 

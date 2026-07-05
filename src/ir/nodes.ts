@@ -951,6 +951,41 @@ export interface IrInstrDynEq extends IrInstrBase {
   readonly negate: boolean;
 }
 
+/**
+ * `dyn.member_get{recv, key}` — a dynamic member read `recv[key]` / `recv.name`
+ * on a boxed-any receiver, result `dynamic` (#3053 U1 / #2949 S5.4).
+ *
+ * BOTH operands are `dynamic` carriers: the producer boxes the receiver (an
+ * `any`-typed value already IS the carrier) and the key (a property-name string
+ * for `.name`, or a boxed index for `[i]`) into the carrier first, so this node
+ * always sees the `(carrier, carrier) -> carrier` shape the unified reader
+ * primitive `__dyn_member_get(recv, key)` (#3053 U0) takes and returns.
+ *
+ * Lowering routes through `IrDynamicLowering.emitMemberGet` (named) /
+ * `emitElementGet` (indexed) — both emit a bare `[call __dyn_member_get]` and
+ * flip the `ctx.usesDynMemberGet` latch that makes the finalize
+ * `ensureDynMemberGet` pass build the helper. The helper closes the
+ * externref↔carrier round-trip INSIDE its own frame (U0), so the result is the
+ * identity-preserving, tag-honest carrier (object→tag-6, string→tag-5,
+ * number→tag-3, …) with NO externref↔$AnyValue impedance at the IR boundary —
+ * the S5.4 carrier-impedance blocker is dissolved because the helper takes and
+ * returns the carrier directly. `key` is carried dynamic so the helper's own
+ * `__any_to_extern(key)` performs `ToPropertyKey` (string as-is, number →
+ * decimal) inside its frame.
+ *
+ * MECHANISM ONLY in U1: the IR selector's move-only scan still REJECTS a dyn
+ * receiver in a member read (`select.ts` `dynamicUsesAreMoveOnly`), so no
+ * from-ast producer reaches this node in a claimed function until S5.P (U2)
+ * opens the scan. The node + lowering are wired but unreached — byte-inert.
+ */
+export interface IrInstrDynMemberGet extends IrInstrBase {
+  readonly kind: "dyn.member_get";
+  /** The receiver carrier (`dynamic`). */
+  readonly recv: IrValueId;
+  /** The property key carrier (`dynamic`): a boxed string name or boxed index. */
+  readonly key: IrValueId;
+}
+
 // ---------------------------------------------------------------------------
 // String operations (#1169a — IR Phase 4 Slice 1)
 // ---------------------------------------------------------------------------
@@ -2218,6 +2253,7 @@ export type IrInstr =
   | IrInstrDynTruthy
   | IrInstrDynToNumber
   | IrInstrDynEq
+  | IrInstrDynMemberGet
   | IrInstrStringConst
   | IrInstrStringConcat
   | IrInstrStringEq
@@ -2532,6 +2568,7 @@ export function forEachNestedBuffer(instr: IrInstr, fn: (buffer: readonly IrInst
     case "dyn.truthy":
     case "dyn.to_number":
     case "dyn.eq":
+    case "dyn.member_get":
     case "string.const":
     case "string.concat":
     case "string.eq":
@@ -2679,6 +2716,7 @@ export function mapNestedBuffers(
     case "dyn.truthy":
     case "dyn.to_number":
     case "dyn.eq":
+    case "dyn.member_get":
     case "string.const":
     case "string.concat":
     case "string.eq":
@@ -2780,6 +2818,8 @@ export function directUses(instr: IrInstr): readonly IrValueId[] {
     case "string.concat":
     case "string.eq":
       return [instr.lhs, instr.rhs];
+    case "dyn.member_get":
+      return [instr.recv, instr.key];
     case "string.len":
       return [instr.value];
     case "object.new":

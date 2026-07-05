@@ -162,6 +162,10 @@ export function effectsOf(instr: IrInstr, cache: Map<IrInstr, IrEffects> = new M
     case "extern.new":
     case "extern.prop":
     case "extern.propSet":
+    // #3053 U1 — `__dyn_member_get` walks the proto chain and may fire a getter
+    // (`__extern_get` runs accessors), so a dynamic member read is call-like:
+    // it may read AND write arbitrary heap state. Conservative like extern.prop.
+    case "dyn.member_get":
     case "iter.new":
     case "iter.next":
     case "iter.done":

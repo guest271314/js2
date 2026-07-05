@@ -325,6 +325,38 @@ export interface IrDynamicLowering {
    *   - host: `__host_loose_eq` (JS `==`).
    */
   emitLooseEq(negate: boolean): readonly Instr[];
+  /**
+   * Two carriers on the stack (`recv`, then `key`) → one carrier: a dynamic
+   * member read `recv[key]` / `recv.name` (#3053 U1 / #2949 S5.4). Both
+   * strategies emit a bare `[call __dyn_member_get]` — the unified reader
+   * primitive (#3053 U0) whose result is the identity-preserving, tag-honest
+   * carrier (object→tag-6, string→tag-5, number→tag-3, …). The helper closes
+   * the externref↔carrier round-trip inside its OWN frame (the receiver peel
+   * `__carrier_recv_to_extern` + `__extern_get` + `__any_from_extern_honest`),
+   * so there is NO externref↔$AnyValue impedance at the IR boundary and reads
+   * compose (`recv.a.z` = two chained calls) without re-triggering the
+   * `__any_to_extern` tag-6 breaker.
+   *
+   * As a side effect this flips `ctx.usesDynMemberGet`, the latch the finalize
+   * `ensureDynMemberGet` pass reads to build the helper (U0 registers it
+   * up-front via `preregisterDynamicSupport`; the funcidx is resolved BY NAME
+   * here — the #2191/#2193 name-based-repoint discipline).
+   *   - gc/fast/standalone: carrier = `(ref null $AnyValue)`; the helper does
+   *     the tag-6 receiver peel + honest re-box internally.
+   *   - host: carrier = `externref`; the helper is a thin `__extern_get`
+   *     wrapper (the host carrier IS externref).
+   */
+  emitMemberGet(): readonly Instr[];
+  /**
+   * Two carriers on the stack (`recv`, then the boxed index `key`) → one
+   * carrier: a dynamic indexed read `recv[i]` (#3053 U1 / #2949 S5.4). The
+   * indexed form of {@link emitMemberGet} — the index is carried `dynamic`
+   * (boxed number) so the helper's own `__any_to_extern(key)` performs the
+   * `ToPropertyKey` number→decimal conversion inside its frame. Emits the same
+   * `[call __dyn_member_get]` (the reader is key-uniform) and flips the same
+   * `ctx.usesDynMemberGet` latch.
+   */
+  emitElementGet(): readonly Instr[];
 }
 
 /**

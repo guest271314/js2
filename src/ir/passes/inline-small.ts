@@ -436,6 +436,12 @@ function renameInstrOperands(inst: IrInstr, rename: ReadonlyMap<IrValueId, IrVal
       if (l === inst.lhs && r === inst.rhs) return inst;
       return { ...inst, lhs: l, rhs: r };
     }
+    case "dyn.member_get": {
+      const recv = mapId(rename, inst.recv);
+      const key = mapId(rename, inst.key);
+      if (recv === inst.recv && key === inst.key) return inst;
+      return { ...inst, recv, key };
+    }
     case "string.len": {
       const v = mapId(rename, inst.value);
       if (v === inst.value) return inst;
