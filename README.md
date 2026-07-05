@@ -306,7 +306,7 @@ For a long-form, technical account of the methodology — how the team is struct
 `js2wasm` validates correctness through three complementary test layers:
 
 - **Unit & equivalence tests** — `npm test` (vitest). Targeted regression coverage and JS↔Wasm equivalence assertions. See `tests/equivalence/`.
-- **Test262 conformance** — `pnpm run test:262` runs the official ECMAScript test suite (~43k tests run) and reports per-edition / per-path pass rates. CI runs this sharded on every PR; the [report](https://loopdive.github.io/js2wasm/benchmarks/report.html) is regenerated on each merge.
+- **Test262 conformance** — `pnpm run test:262` runs the ECMAScript test suite (~48k tests: ~43k official plus ~5k staging/proposal tests) and reports per-edition / per-path pass rates. The headline conformance figure is scored against the 43,106 official tests (proposals excluded); CI runs this sharded on every PR and the [report](https://loopdive.github.io/js2wasm/benchmarks/report.html) is regenerated on each merge.
 - **Differential testing vs V8** — `pnpm run test:diff` (#1203). For each program in `tests/differential/corpus/`, the harness runs Node-V8 directly and the compiled `.wasm` and compares stdout. test262 measures spec compliance; differential testing measures whether real programs actually produce the right answer. CI gates each PR on a delta against `benchmarks/results/diff-test-baseline.json` — no new mismatches allowed. Use `pnpm run test:diff:triage` to bucket mismatches by category for follow-up filing.
 
 ## Licensing
