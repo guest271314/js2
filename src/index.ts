@@ -1,4 +1,41 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
+/**
+ * `@loopdive/js2` — an ahead-of-time compiler from JavaScript and TypeScript to
+ * WebAssembly GC.
+ *
+ * This is the package's main entry point. Use {@link compile} to turn source
+ * text into a {@link CompileResult} (a Wasm binary plus a `.d.ts`, host import
+ * helpers, and diagnostics), or the higher-level {@link compileFiles} /
+ * {@link compileProject} for multi-file and on-disk projects. The full option
+ * surface — target backend (`gc` / `linear` / `wasi` / `standalone`), native
+ * strings, wasm-opt optimization, WIT generation, source maps, and more — is
+ * documented on {@link CompileOptions}.
+ *
+ * @example
+ * ```ts
+ * import { compile } from "@loopdive/js2";
+ *
+ * const result = await compile(`
+ *   export function add(a: number, b: number): number {
+ *     return a + b;
+ *   }
+ * `);
+ * const { instance } = await WebAssembly.instantiate(result.binary, result.importObject);
+ * console.log((instance.exports.add as (a: number, b: number) => number)(2, 3)); // 5
+ * ```
+ *
+ * @module
+ */
+
+/**
+ * A single host capability an emitted module may need from its import object.
+ *
+ * The compiler analyzes the source and, for every JS-host operation it cannot
+ * lower to pure Wasm (string ops, `console.log`, `Math.*`, boxing/unboxing,
+ * `typeof`, extern property get/set, timers, Node builtins, the JSX runtime,
+ * …), records an `ImportIntent`. The runtime ({@link buildImports}) reads these
+ * to synthesize the matching host functions. Discriminated on the `type` field.
+ */
 export type ImportIntent =
   | { type: "string_literal"; value: string }
   | { type: "math"; method: string }
@@ -52,16 +89,28 @@ export type ImportIntent =
       specifier: string;
     };
 
+/**
+ * Describes one import the compiled module declares, so the host runtime can
+ * build the matching entry in the Wasm import object.
+ */
 export interface ImportDescriptor {
+  /** Wasm import namespace the entry lives in. */
   module: "env" | "wasm:js-string" | "string_constants";
+  /** Import field name within {@link ImportDescriptor.module}. */
   name: string;
+  /** Whether the import is a function or a global. */
   kind: "func" | "global";
+  /** The host capability this import provides (see {@link ImportIntent}). */
   intent: ImportIntent;
 }
 
 export type { ExportSignature, TypedArrayKind } from "./ir/types.js";
 import type { ExportSignature } from "./ir/types.js";
 
+/**
+ * The output of a `compile*` call: the compiled Wasm binary plus the artifacts
+ * and metadata needed to instantiate, type, and debug it.
+ */
 export interface CompileResult {
   /** Wasm binary with GC proposal */
   binary: Uint8Array;
@@ -163,10 +212,15 @@ export interface CompileResult {
   irFirstSkipped?: readonly string[];
 }
 
+/** A single compile diagnostic (error or warning) with its source position. */
 export interface CompileError {
+  /** Human-readable diagnostic message. */
   message: string;
+  /** 1-based line number in the source. */
   line: number;
+  /** 1-based column number in the source. */
   column: number;
+  /** Whether the diagnostic is fatal (`"error"`) or advisory (`"warning"`). */
   severity: "error" | "warning";
   /** TS diagnostic code (if from TypeScript diagnostics) */
   code?: number;
@@ -180,14 +234,27 @@ export interface CompileError {
   file?: string;
 }
 
+/** Restricts DOM access of compiled code to a subtree (safe-mode containment). */
 export interface DomContainmentOptions {
+  /** Root element or shadow root that scopes all DOM access. */
   domRoot: Element | ShadowRoot;
 }
 
+/**
+ * Policy controlling which host imports a module is allowed to use
+ * (see {@link checkPolicy}).
+ */
 export interface ImportPolicy {
+  /** Set of import names that are disallowed. */
   blocked: Set<string>;
 }
 
+/**
+ * Options controlling a compile: target backend, string representation,
+ * optimization, diagnostics, host/platform surface, and output artifacts.
+ * Every field is optional; the defaults produce a browser-oriented WasmGC
+ * module.
+ */
 export interface CompileOptions {
   /** Emit WAT debug output (default: true) */
   emitWat?: boolean;

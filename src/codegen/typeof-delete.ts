@@ -11,7 +11,12 @@ import { allocLocal, allocTempLocal, releaseTempLocal } from "./context/locals.j
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { isStrictContext } from "./expressions/assignment.js";
 import { EVAL_SOURCE_FILENAME } from "./expressions/eval-inline.js";
-import { ensureLateImport, flushLateImportShifts, shiftLateImportIndices } from "./expressions/late-imports.js";
+import {
+  emitUndefined,
+  ensureLateImport,
+  flushLateImportShifts,
+  shiftLateImportIndices,
+} from "./expressions/late-imports.js";
 import { resolveStructName } from "./expressions/misc.js";
 import { addUnionImports, parseRegExpLiteral, resolveWasmType } from "./index.js";
 import { emitExternrefDestructureGuard } from "./destructuring-params.js";
@@ -365,7 +370,44 @@ export function compileDeleteExpression(
         fctx.body.push({ op: "i32.const", value: 0 });
         return { kind: "i32" };
       }
-      (fctx.mappedArgsInfo.unmappedIndices ??= new Set<number>()).add(argIndex);
+      // (#2726 group (e)) A *successful* `delete arguments[i]` on a mapped,
+      // configurable index (§10.4.4.5 → OrdinaryDelete) does two things:
+      //   1. severs the param↔arguments map so later parameter writes no longer
+      //      mirror into `arguments[i]` (`unmappedIndices`), and
+      //   2. actually removes the slot — a subsequent `arguments[i]` read
+      //      observes `undefined`.
+      // The generic `__delete_property` path below reports `true` but never
+      // clears the WasmGC-vec-backed slot (indices carry no sidecar
+      // descriptor), so the read still returns the original argument. Clear the
+      // backing slot here (write the canonical `undefined` externref, mirroring
+      // `emitMappedArgParamSync`'s slot write) and report `true`,
+      // short-circuiting the generic path.
+      const info = fctx.mappedArgsInfo;
+      (info.unmappedIndices ??= new Set<number>()).add(argIndex);
+      // val = undefined (canonical externref), stashed for the null-guarded slot
+      // write below.
+      emitUndefined(ctx, fctx);
+      const undefLocal = allocLocal(fctx, `__del_arg_undef_${fctx.locals.length}`, { kind: "externref" });
+      fctx.body.push({ op: "local.set", index: undefLocal });
+      // arguments vec slot write: vec.data[argIndex] = undefined (null-guarded;
+      // the slot exists since argIndex < paramCount, so no grow is needed).
+      fctx.body.push({ op: "local.get", index: info.argsLocalIdx });
+      fctx.body.push({ op: "ref.is_null" });
+      fctx.body.push({
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [] as Instr[],
+        else: [
+          { op: "local.get", index: info.argsLocalIdx } as Instr,
+          { op: "struct.get", typeIdx: info.vecTypeIdx, fieldIdx: 1 } as Instr,
+          { op: "i32.const", value: argIndex } as Instr,
+          { op: "local.get", index: undefLocal } as Instr,
+          { op: "array.set", typeIdx: info.arrTypeIdx } as Instr,
+        ],
+      });
+      // OrdinaryDelete succeeded → `delete` evaluates to `true`.
+      fctx.body.push({ op: "i32.const", value: 1 });
+      return { kind: "i32" };
     }
   }
 
