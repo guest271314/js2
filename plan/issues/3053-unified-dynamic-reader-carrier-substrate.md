@@ -1,7 +1,8 @@
 ---
 id: 3053
 title: "Unified dynamic-reader carrier substrate — one __dyn_member_get primitive under #3037 CS3 (identity) AND #2949 S5.4 (IR claim-rate)"
-status: ready
+status: in-progress
+assignee: ttraenkler/opus-u0-carrier
 sprint: current
 created: 2026-07-05
 updated: 2026-07-05
@@ -448,3 +449,97 @@ U0 is the prerequisite; the CS3 keystone lands through the IR, not around it.
   with the #2175 V2-S3b wave (U4) since both consume the carrier.
 - The `__dyn_member_get` author should pair with the #2949 S5.4 owner
   (opus-s5-4's filed substrate dependency IS U0) and the #3037 CS3 owner.
+
+---
+
+## U0 — LANDED (byte-inert substrate helper)
+
+**Author:** opus-u0-carrier. **Branch:** `issue-3053-u0-carrier-helper`.
+**Risk realised: LOW** — byte-inert, zero emitted-byte change in every normal
+compile (proven, see below).
+
+### What shipped
+
+- `src/codegen/dyn-read.ts` — new `ensureDynMemberGet(ctx)` registering, in
+  gc/standalone (`ctx.standalone || ctx.wasi`):
+  - `__carrier_recv_to_extern(v: (ref null $AnyValue)) -> externref` — the
+    novel piece. It **PEELS** the carrier to the externref `__extern_get`
+    needs: tag 6 → `extern.convert_any(v.refval)` (the RAW `$Object`, field 3,
+    so `__extern_get`'s `ref.test $Object` HITS); tag 5 → `v.externval`
+    (field 4); tag 3 → `__box_number(v.f64val)`; tag 4 →
+    `__box_boolean(v.i32val)`; tag 2 → `__box_number(f64.convert_i32_s(...))`;
+    tag 0/1/null → `ref.null.extern` (null/undefined receiver → miss). This is
+    exactly the tag-6 unwrap the global `__any_to_extern` **deliberately does
+    NOT do** (`any-helpers.ts:814-824` keeps tag-6 WRAPPED — the CS1a
+    read-breaker). Because the peel lives INSIDE the helper and its output
+    feeds ONLY `__extern_get`, the global `__any_to_extern` seam stays
+    byte-identical.
+  - `__dyn_member_get(recv, key) -> (ref null $AnyValue)` — the self-contained
+    round-trip: `__carrier_recv_to_extern(recv)` → `__any_to_extern(key)` →
+    `__extern_get` → `__any_from_extern_honest` (the settled #3037 CS1b
+    classifier — tag-3/tag-4 peel BEFORE the eq test, then tag-5 string /
+    tag-6 object; reused verbatim, NOT re-minted).
+  - Host mode: `__dyn_member_get(recv,key) -> externref` = a thin
+    `__extern_get(recv,key)` wrapper (carrier IS externref; no box/peel).
+- Context latch `ctx.usesDynMemberGet` + idempotence latch
+  `dynMemberGetHelpersEmitted` (`context/types.ts`, `create-context.ts`).
+- `src/codegen/index.ts` — `ensureDynMemberGet(ctx)` wired at BOTH finalize
+  points beside `ensureDynReadHelpers` (before dead-elim/freeze).
+
+### Why floor-safe (the −162/−299/−788/−794 minefield, 3 prior deaths)
+
+The helper touches NONE of the four forbidden seams: `emitAnyEqOperands`
+(−299), the generic `boxToAny` externref arm / `honestAnyBoxing` (−788/−794),
+`__any_to_extern`'s tag-6 wrap (CS1a read-breaker), the tag-5 same-tag arm
+(−162). The externref↔carrier round-trip lives INSIDE the helper. **Verified
+byte-inert:** `scripts/prove-emit-identity.mjs check` → **39/39 (file,target)
+emits IDENTICAL** vs the pre-change base (`88f529d83`). Byte-inertness is
+guaranteed by the `usesDynMemberGet` LATCH (nothing sets it in U0), not by
+dead-elim — an uncalled DEFINED function is not import-pruned.
+
+### funcidx-shift safety
+
+Helpers are minted stable-handle (`mintDefinedFunc`); `eliminateDeadImports`
+remaps live-import call immediates in all defined bodies (incl. finalize-minted)
+and SKIPS stable handles — so the host body's baked `call __extern_get`
+(a live import) is remapped, and standalone's stable-handle calls are immune.
+No struct types registered at finalize (only `addFuncType`); the honest
+classifier / `__any_to_extern` reuse struct types reserved during body comp.
+
+### Self-test (anti-vacuity) — `JS2WASM_FORCE_DYN_MEMBER_GET=1`
+
+`ensureDynMemberGet` under the FORCE escape also emits exported `__dmg_*`
+drivers that build a receiver, call the helper, and return an i32 verdict
+entirely in Wasm (a `(ref $AnyValue)` can't cross to JS). The drivers compare
+via **direct carrier-field `ref.eq` / `f64.eq`** (not `__any_strict_eq`) so no
+sealed coercion helper is invoked from `dyn-read.ts` — the #2108 coercion-drift
+gate stays at 0. Covered by `tests/issue-3053-u0-dyn-member-get.test.ts` (12
+assertions, all green):
+- **standalone ($AnyValue carrier):** object read → **tag-6**; aliased reads ARE
+  `===` (refval `ref.eq` → 1), distinct objects NOT (→ 0, assertions bite);
+  string → **tag-5**, same stored ref via externval `ref.eq` → 1; number →
+  **tag-3**, f64val `f64.eq` → 1; boolean → **tag-4**; RE-READ
+  `dmg(dmg(o,"a"),"z")` → tag-3 value 7 (proves the internal peel round-trips —
+  the `__any_to_extern` tag-6 breaker is NOT re-triggered).
+- **gc/host (externref carrier):** the host object model is JS-side and box/
+  marshal semantics are opaque, so the driver reports a marshalling-independent
+  i32 — a present-key read through the host wrapper is a non-null externref (1),
+  proving the host `__dyn_member_get` (thin `__extern_get` wrapper) is emitted,
+  valid, and executes without trapping (deep host read semantics are
+  `__extern_get`'s, tested elsewhere).
+
+### U1 readiness — YES
+
+U0 is exactly the locals-free, carrier-uniform, named-key primitive #2949 S5.4
+was blocked on: the call site is a bare `call __dyn_member_get`, carrier in/out
+is `(ref null $AnyValue)` (gc/standalone) / externref (host) with NO
+externref↔$AnyValue impedance at the IR boundary. U1 wires
+`IrDynamicLowering.emitMemberGet()`/`emitElementGet()` → `[call
+__dyn_member_get]` and sets `ctx.usesDynMemberGet` at that call site (the latch
+that makes this finalize pass emit the helper). The pure-`{body:[]}` IR shim
+works because the op is a bare `call`. Deferred from U0 (scope): the host-mode
+`.length`/vec-index/closure/null-receiver dispatch arms of `emitDynGet` — U0's
+standalone body relies on native `__extern_get`, and the host body is the thin
+`__extern_get` wrapper; the runtime-key-dispatched host `.length` arms are best
+added in U1 against a real call site (they were not needed for the byte-inert
+substrate and carry no floor risk deferred).

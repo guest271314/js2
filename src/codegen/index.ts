@@ -51,7 +51,7 @@ import { eliminateDeadImports } from "./dead-elimination.js";
 import { ensureMapRuntimeTypes } from "./map-runtime.js";
 import { scanForNewTarget } from "./new-target.js"; // (#2023)
 import { scanForArrayHoles, ensureHoleType } from "./array-holes.js"; // (#2001 S1)
-import { ensureDynReadHelpers } from "./dyn-read.js"; // (#2580 M0)
+import { ensureDynReadHelpers, ensureDynMemberGet } from "./dyn-read.js"; // (#2580 M0) / (#3053 U0)
 import { collectClosureBaseWrapperTypeIdxs, buildClosureRefTestArms } from "./closure-classifier.js"; // (#2175 V2-S1)
 import { ensureNativeIteratorRuntime, fillNativeIteratorUserArms } from "./iterator-native.js";
 import { fillCombinatorToVec } from "./promise-combinators.js"; // (#2922) dynamic combinator-arg drain fill
@@ -2477,6 +2477,12 @@ export function generateModule(
     // which M0 never sets, so this is a no-op in M0 → byte-identical. Runs before
     // dead-elim/freeze so the helper funcIdx values are stable.
     ensureDynReadHelpers(ctx);
+    // (#3053 U0) Emit the unified dynamic-reader carrier primitive
+    // (__dyn_member_get + __carrier_recv_to_extern) iff a call site flagged the
+    // module needs it (U1+). Gated on ctx.usesDynMemberGet, which U0 never sets,
+    // so this is a no-op in U0 → byte-identical. Runs beside ensureDynReadHelpers
+    // (before dead-elim/freeze) so the helper funcIdx values are stable.
+    ensureDynMemberGet(ctx);
 
     // (#2800) Allocate + wire the `__in_module_init` flag global now that every
     // import global has settled (final absolute index), patching the recorded
@@ -7102,6 +7108,9 @@ export function generateMultiModule(
     // which M0 never sets, so this is a no-op in M0 → byte-identical. Runs before
     // dead-elim/freeze so the helper funcIdx values are stable.
     ensureDynReadHelpers(ctx);
+    // (#3053 U0) See the single-module pipeline note above. No-op unless
+    // ctx.usesDynMemberGet is set (U1+); byte-identical in U0.
+    ensureDynMemberGet(ctx);
 
     // (#2800) Allocate + wire the `__in_module_init` flag global now that every
     // import global has settled (final absolute index), patching the recorded
@@ -14638,6 +14647,33 @@ function collectInterfaceMembers(
       // their native struct-field RegExp path (the `RegExp_*_lastIndex` extern
       // import is never emitted there), so only true host mode is retyped.
       if (info.className === "RegExp" && propName === "lastIndex" && !ctx.standalone && !ctx.wasi) {
+        wasmType = { kind: "externref" };
+      }
+      // (#3051 Slice 2) `RegExp.prototype.global` / `.unicode` are spec-readonly
+      // booleans, but test262's @@replace/@@split coercion tests redefine them as
+      // writable data properties (`Object.defineProperty(r,'global',{writable:true})`)
+      // and then assign arbitrary values (`r.global = Symbol.replace`, `= {}`,
+      // `= NaN`, …). §22.2.6.11/§22.2.6.14 read the flag back through
+      // `ToBoolean(? Get(rx, "global"|"unicode"))` — i.e. any value coerces at
+      // read time, it is NOT constrained to a boolean on write. Typing the extern
+      // property `boolean` makes the generated `RegExp_set_global(externref, i32)`
+      // setter eagerly ToNumber the assigned value: a Symbol RHS traps ("Cannot
+      // convert a Symbol value to a number") and an object RHS traps ("Cannot
+      // convert object to primitive value") at the wasm boundary, before the value
+      // is ever stored. Carry the slot as `externref` in host mode (mirroring the
+      // #2671 `lastIndex` treatment) so the raw value round-trips onto the native
+      // RegExp and the native @@replace/@@split protocol performs the spec
+      // ToBoolean itself; explicit `r.global` reads coerce externref→boolean at the
+      // use site (a boxed `false` unboxes correctly — see the Slice 2 controls).
+      // Standalone / WASI keep their native struct-field RegExp path (the
+      // `RegExp_*_global` extern import is never emitted there), so only host mode
+      // is retyped.
+      if (
+        info.className === "RegExp" &&
+        (propName === "global" || propName === "unicode") &&
+        !ctx.standalone &&
+        !ctx.wasi
+      ) {
         wasmType = { kind: "externref" };
       }
       const isReadonly = member.modifiers?.some((m) => m.kind === ts.SyntaxKind.ReadonlyKeyword) ?? false;
