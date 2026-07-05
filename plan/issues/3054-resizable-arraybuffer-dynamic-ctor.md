@@ -2,7 +2,7 @@
 id: 3054
 title: "Resizable ArrayBuffer + dynamic `new <ctorVar>(rab)` — the ~180 codegen gap under #1524"
 status: in-progress
-assignee: ttraenkler/opus-3054-b2
+assignee: ttraenkler/opus-3054-c
 created: 2026-07-05
 updated: 2026-07-05
 priority: medium
@@ -582,3 +582,89 @@ Uint8/Int32/Float64 windows, DataView-write-observed-by-window, and 3 RangeError
 Recommendation: **B3 next** — it removes the last correctness caveat on the view
 representation (proto-method write-through) before the resizable cluster piles semantics on
 top; C can proceed in parallel since it touches the buffer subtype, not the view methods.
+
+## C — resizable ArrayBuffer semantics (LANDED, opus-3054-c, on `upstream/main` @ a5fe91b2d)
+
+**Scope shipped (standalone/WASI lane):** `new ArrayBuffer(n, {maxByteLength})` now
+allocates a resizable buffer; `.maxByteLength` / `.resizable` getters, `.resize()`
+(grow/shrink with bounds + realloc), ctor + resize RangeError/TypeError validation,
+and **auto-length view tracking** (a view over a resizable buffer reflects a later
+`resize()` in `.length` / `.byteLength` / element bounds) all work. Built on Phase A
+A.2's `$__resizable_ab` subtype. **Fully byte-inert for every program that does not
+construct a resizable ArrayBuffer** (sha256-verified, see below).
+
+### What changed (WHY, per A.2)
+- **New type `$__resizable_ab`** (`getOrRegisterResizableAbType`, `registry/types.ts`)
+  — a WasmGC **SUBTYPE of `$__vec_i32_byte`** adding `maxByteLength: i32`:
+  `{length:i32(mut), data:(ref $__arr_i32_byte)(mut), maxByteLength:i32}`. The subtype
+  IDENTITY is the resizable bit (`ref.test $__resizable_ab` ⇒ resizable), so a fixed
+  buffer whose `maxByteLength === byteLength` is still distinguishable — this is why
+  the subtype beats the issue's framed option 1. Registered late+once, memoized on
+  `ctx.resizableAbTypeIdx`, mirroring `getOrRegisterTaViewType`.
+  - **Type-index-ordering hazard (the one real A.2 risk) — verified resolved.**
+    `wasm-dis` of the actual `compile()` binary confirms the emitted order
+    `$__vec_base ($3, open) → $__vec_i32_byte ($5, `sub $3`, **non-final**) →
+    $__resizable_ab ($8, `sub final $5`)`: the subtype follows its supertype, and the
+    parent is **non-final** so subtyping is legal. `getOrRegisterResizableAbType` calls
+    `getOrRegisterVecType` FIRST so the parent is always at a lower type index; the
+    supertype ref points BACKWARD, which `computeRecGroups` never reorders (it only
+    extends a group FORWARD on forward refs). Both the unoptimized AND the `-O`
+    (wasm-opt) binaries validate + run correctly.
+- **Ctor** (`new-super.ts`, `className === "ArrayBuffer"`): an object-literal options
+  arg carrying `maxByteLength` → `struct.new $__resizable_ab` (backing array sized to
+  the CURRENT byteLength; `.resize()` reallocs). ToIndex byteLength/maxByteLength;
+  RangeError on `n > maxByteLength` (§AllocateArrayBuffer). Non-object / no-maxByteLength
+  options ⇒ non-resizable (spec GetArrayBufferMaxByteLengthOption). Returns the PARENT
+  vec ValType so the 23 `i32_byte` consumers are byte-untouched (is-a).
+- **Getters** (`property-access.ts`): `.maxByteLength` = resizable ? field2 : byteLength
+  (§25.1.5.4); `.resizable` = `ref.test $__resizable_ab`. Discriminated on a static
+  ArrayBuffer receiver in the host-free lane.
+- **`.resize()`** (`emitArrayBufferResize`, `dataview-native.ts`; dispatched in
+  `calls.ts` beside `.slice`): TypeError on a fixed receiver; ToIndex + RangeError if
+  `> maxByteLength`; `array.new_default` + `array.copy min(old,new)` + `struct.set`
+  field1(data) + field0(length) **in place on the same struct** — so shared views
+  observe the new backing (Phase A A.1).
+- **Auto-length view tracking** (the "free" claim was only true for BYTES, not the
+  cached length): field0 of a `$__ta_view` now stores a `-1` sentinel when the offset-0
+  view is built over a `$__resizable_ab` (`emitTaViewConstruct` runtime `ref.test` +
+  `select`); `pushTaViewEffectiveLen` derives the live element count from
+  `buf.length / elemSize` for the sentinel. Applied at the 4 length-reading sites
+  (`.length` arm, element-access bounds, `.byteLength`, construct). **All 4 are gated on
+  `ctx.resizableAbTypeIdx >= 0`** so a module with no resizable buffer emits B1/B2-
+  identical bytes.
+
+### Byte-inert proof
+sha256 of the standalone binary is **IDENTICAL** to `upstream/main` for all 7 controls
+— arith, plain array, string, `new Uint8Array(4)`, DataView setInt32/getInt32,
+**`new Uint8Array(buffer)`**, **`new Int32Array(buffer)`**. Only programs that construct
+a resizable ArrayBuffer change bytes. (The gate on `ctx.resizableAbTypeIdx` is what keeps
+non-resizable buffer-view programs byte-identical — without it, the length-tracking
+`ref.test`/`select` would perturb every buffer-view program.)
+
+### Validation (host-enforced, per #3055/#3056)
+`tests/issue-3054-c-resizable.test.ts` — 22 HOST-enforced assertions (ctor + metadata,
+resize grow/shrink/0/boundary/RangeError/TypeError, byte-preservation, view length +
+byteLength tracking, Int32 element-count tracking, newly-available-index write, sibling
+observability, OOB-after-shrink → NaN, non-resizable fixed-length). B1 (15) + B2 (22)
+suites still green. tsc + prettier clean.
+
+### Known scope boundaries (flagged, not regressions)
+- **Standalone-only** (host-mode ArrayBuffer is a host object — same lane boundary as
+  B1/B2). Host-lane resizable buffers are a separate follow-up.
+- **Options must be an object literal** — a dynamic/spread options object stays
+  non-resizable (compile-time `maxByteLength` extraction; a dynamic-object read needs
+  the object-runtime — deferred). Covers the entire test262 resizable corpus.
+- **Auto-length tracking assumes buffer-before-view codegen order** (the gate reads
+  `ctx.resizableAbTypeIdx` at view-construction time). True for the local
+  create-rab→create-view→resize pattern of every resizable test; a cross-function view
+  compiled before its resizable buffer would stay fixed (at worst neutral — that case
+  had NO tracking before C either).
+- **Windowed auto-length views** (`new TA(rab, byteOffset)` no length) stay fixed —
+  only offset-0 auto-length tracks. Rare; noted for a B3/follow-up.
+
+### Epic status after C
+- **D (dynamic `new <ctorVar>(rab)`)** and **E (harness shim)** remain. C is independent
+  and does NOT close them: D needs the `ref.test`-dispatch `[[Construct]]` (builds views
+  over the ctor value), E needs the runner `buildPreamble` shim landed WITH D so the
+  `resizableArrayBufferUtils.js` fixtures (`ctors`/`CreateRabForTest`/…) resolve. The
+  resizable BUFFER semantics C provides are the substrate D+E score against.

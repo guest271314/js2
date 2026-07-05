@@ -44,7 +44,7 @@ import { getArrTypeIdxFromVec, getOrRegisterVecType } from "./index.js";
 import { stringConstantExternrefInstrs } from "./native-strings.js";
 import { emitWasiErrorConstructor } from "./registry/error-types.js";
 import { addStringConstantGlobal, ensureExnTag } from "./registry/imports.js";
-import { getOrRegisterTaViewType, getTaViewName } from "./registry/types.js";
+import { getOrRegisterResizableAbType, getOrRegisterTaViewType, getTaViewName } from "./registry/types.js";
 import { ensureLateImport, flushLateImportShifts } from "./shared.js";
 import { coerceType } from "./type-coercion.js";
 
@@ -219,6 +219,149 @@ export function emitArrayBufferSlice(
   fctx.body.push({ op: "struct.new", typeIdx: vecTypeIdx } as Instr);
   fctx.body.push({ op: "extern.convert_any" } as Instr);
   return { kind: "externref" };
+}
+
+/**
+ * (#3054 C) `rab.resize(newByteLength)` in no-JS-host mode, per §25.1.6.
+ * `resize` exists only on a resizable buffer (a `$__resizable_ab` instance):
+ *   1. If the receiver is NOT a `$__resizable_ab` (a fixed buffer / anything
+ *      else) → TypeError (§25.1.6.1 step 3, IsFixedLengthArrayBuffer).
+ *   2. newByteLength = ToIndex(arg); if `newByteLength > maxByteLength` (or < 0)
+ *      → RangeError (step 6).
+ *   3. Reallocate: `array.new_default $__arr_i32_byte` of size `newByteLength`,
+ *      `array.copy` `min(oldLen, newLen)` bytes from the old data, then
+ *      `struct.set field1` (swap `data` in place on the SAME struct) and
+ *      `struct.set field0` (new byteLength). Views hold the vec-struct ref, so
+ *      they observe the swap → length-tracking-on-resize is free (Phase A A.1).
+ * Returns undefined (`resize` is a void method) — the caller drops nothing.
+ */
+export function emitArrayBufferResize(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  receiver: import("../ts-api.js").ts.Expression,
+  args: readonly import("../ts-api.js").ts.Expression[],
+  compileExpr: (expr: import("../ts-api.js").ts.Expression, hint?: ValType) => ValType | null,
+): ValType | null {
+  const rabTypeIdx = getOrRegisterResizableAbType(ctx);
+  const arrTypeIdx = getArrTypeIdxFromVec(ctx, getOrRegisterVecType(ctx, "i32_byte", { kind: "i8" }));
+  if (arrTypeIdx < 0) return null;
+
+  // Recover the receiver as anyref, then require it to be a $__resizable_ab.
+  const recvType = compileExpr(receiver);
+  if (recvType?.kind === "externref") {
+    fctx.body.push({ op: "any.convert_extern" } as Instr);
+  } else if (!recvType || (recvType.kind !== "ref" && recvType.kind !== "ref_null")) {
+    return null;
+  }
+  const anyLocal = allocLocal(fctx, `__rabz_any_${fctx.locals.length}`, { kind: "anyref" });
+  fctx.body.push({ op: "local.set", index: anyLocal } as Instr);
+
+  // TypeError on a non-resizable receiver (IsFixedLengthArrayBuffer).
+  fctx.body.push({ op: "local.get", index: anyLocal } as Instr);
+  fctx.body.push({ op: "ref.test", typeIdx: rabTypeIdx } as Instr);
+  fctx.body.push({ op: "i32.eqz" } as Instr);
+  {
+    const msg = "TypeError: ArrayBuffer.prototype.resize called on non-resizable buffer";
+    addStringConstantGlobal(ctx, msg);
+    const tagIdx = ensureExnTag(ctx);
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [...stringConstantExternrefInstrs(ctx, msg), { op: "throw", tagIdx } as Instr],
+      else: [],
+    } as Instr);
+  }
+
+  // rab = ref.cast $__resizable_ab (the checked receiver).
+  const rabLocal = allocLocal(fctx, `__rabz_rab_${fctx.locals.length}`, { kind: "ref", typeIdx: rabTypeIdx });
+  fctx.body.push({ op: "local.get", index: anyLocal } as Instr);
+  fctx.body.push({ op: "ref.cast", typeIdx: rabTypeIdx } as Instr);
+  fctx.body.push({ op: "local.set", index: rabLocal } as Instr);
+
+  // newLen = ToIndex(arg): NaN→0, truncate toward zero.
+  const newLenF64 = allocLocal(fctx, `__rabz_nl_f64_${fctx.locals.length}`, { kind: "f64" });
+  if (args.length >= 1) {
+    compileExpr(args[0]!, { kind: "f64" });
+  } else {
+    fctx.body.push({ op: "f64.const", value: 0 } as Instr);
+  }
+  fctx.body.push({ op: "local.set", index: newLenF64 } as Instr);
+  // NaN → 0
+  fctx.body.push({ op: "local.get", index: newLenF64 } as Instr);
+  fctx.body.push({ op: "local.get", index: newLenF64 } as Instr);
+  fctx.body.push({ op: "f64.ne" } as Instr);
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: [{ op: "f64.const", value: 0 } as Instr, { op: "local.set", index: newLenF64 } as Instr],
+    else: [],
+  } as Instr);
+  fctx.body.push({ op: "local.get", index: newLenF64 } as Instr);
+  fctx.body.push({ op: "f64.trunc" } as Instr);
+  fctx.body.push({ op: "local.set", index: newLenF64 } as Instr);
+  const newLen = allocLocal(fctx, `__rabz_nl_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "local.get", index: newLenF64 } as Instr);
+  fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
+  fctx.body.push({ op: "local.set", index: newLen } as Instr);
+
+  // RangeError if newLen < 0 OR newLen > maxByteLength (field 2).
+  fctx.body.push({ op: "local.get", index: newLen } as Instr);
+  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+  fctx.body.push({ op: "i32.lt_s" } as Instr);
+  fctx.body.push({ op: "local.get", index: newLen } as Instr);
+  fctx.body.push({ op: "local.get", index: rabLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: rabTypeIdx, fieldIdx: 2 } as Instr);
+  fctx.body.push({ op: "i32.gt_s" } as Instr);
+  fctx.body.push({ op: "i32.or" } as Instr);
+  {
+    const msg = "RangeError: ArrayBuffer.prototype.resize length exceeds maxByteLength";
+    addStringConstantGlobal(ctx, msg);
+    const tagIdx = ensureExnTag(ctx);
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [...stringConstantExternrefInstrs(ctx, msg), { op: "throw", tagIdx } as Instr],
+      else: [],
+    } as Instr);
+  }
+
+  // oldLen = min(rab.length, newLen) — bytes to preserve.
+  const oldLen = allocLocal(fctx, `__rabz_ol_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "local.get", index: rabLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: rabTypeIdx, fieldIdx: 0 } as Instr);
+  fctx.body.push({ op: "local.set", index: oldLen } as Instr);
+  const copyLen = allocLocal(fctx, `__rabz_cl_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "local.get", index: oldLen } as Instr);
+  fctx.body.push({ op: "local.get", index: newLen } as Instr);
+  fctx.body.push({ op: "local.get", index: oldLen } as Instr);
+  fctx.body.push({ op: "local.get", index: newLen } as Instr);
+  fctx.body.push({ op: "i32.lt_s" } as Instr);
+  fctx.body.push({ op: "select" } as Instr);
+  fctx.body.push({ op: "local.set", index: copyLen } as Instr);
+
+  // newArr = new i8[newLen]; array.copy newArr[0..copyLen) ← rab.data[0..copyLen).
+  const newArr = allocLocal(fctx, `__rabz_na_${fctx.locals.length}`, { kind: "ref", typeIdx: arrTypeIdx });
+  fctx.body.push({ op: "local.get", index: newLen } as Instr);
+  fctx.body.push({ op: "array.new_default", typeIdx: arrTypeIdx } as Instr);
+  fctx.body.push({ op: "local.set", index: newArr } as Instr);
+  // array.copy dst dstIdx src srcIdx len
+  fctx.body.push({ op: "local.get", index: newArr } as Instr);
+  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+  fctx.body.push({ op: "local.get", index: rabLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: rabTypeIdx, fieldIdx: 1 } as Instr);
+  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+  fctx.body.push({ op: "local.get", index: copyLen } as Instr);
+  fctx.body.push({ op: "array.copy", dstTypeIdx: arrTypeIdx, srcTypeIdx: arrTypeIdx } as Instr);
+
+  // struct.set field1 = newArr; struct.set field0 = newLen (same struct → views observe).
+  fctx.body.push({ op: "local.get", index: rabLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: newArr } as Instr);
+  fctx.body.push({ op: "struct.set", typeIdx: rabTypeIdx, fieldIdx: 1 } as Instr);
+  fctx.body.push({ op: "local.get", index: rabLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: newLen } as Instr);
+  fctx.body.push({ op: "struct.set", typeIdx: rabTypeIdx, fieldIdx: 0 } as Instr);
+
+  return null;
 }
 
 /**
@@ -945,6 +1088,59 @@ export function taViewDecode(
 }
 
 /**
+ * (#3054 C) Push the CURRENT element length of a `$__ta_view` (held in `tvLocal`)
+ * as an i32. Field 0 stores either a fixed element count (`>= 0`, the B1/B2 case
+ * — a view over a NON-resizable buffer) or the **auto-length-tracking sentinel
+ * `-1`** (set by `emitTaViewConstruct` when the offset-0 view is built over a
+ * `$__resizable_ab`). For the sentinel, the live length is derived from the shared
+ * buffer's current byte length (`buf.length / elementSize`), so after
+ * `rab.resize(n)` swaps the buffer's `length`/`data` the view reflects the new
+ * length — length-tracking-on-resize (Phase A A.1), which is only "free" for the
+ * BYTES (the byte engine already reads `buf.data` live); the length field is
+ * cached and needs this indirection. A fixed view (field0 >= 0) takes the
+ * `then`-branch → byte-identical to the pre-C direct `struct.get 0` read.
+ */
+export function pushTaViewEffectiveLen(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  tvLocal: number,
+  taViewTypeIdx: number,
+): void {
+  // Byte-inert gate: a module with no resizable ArrayBuffer type can have NO
+  // auto-length view, so the sentinel is impossible — read field0 directly,
+  // byte-identical to B1. The tracking indirection is emitted only once a
+  // `$__resizable_ab` exists in the module.
+  if (ctx.resizableAbTypeIdx < 0) {
+    fctx.body.push({ op: "local.get", index: tvLocal } as Instr);
+    fctx.body.push({ op: "struct.get", typeIdx: taViewTypeIdx, fieldIdx: 0 } as Instr);
+    return;
+  }
+  const { vecTypeIdx } = i32ByteVec(ctx);
+  const bytes = taViewDecode(ctx, taViewTypeIdx)?.bytes ?? 1;
+  const storedLocal = allocLocal(fctx, `__tav_slen_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "local.get", index: tvLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: taViewTypeIdx, fieldIdx: 0 } as Instr);
+  fctx.body.push({ op: "local.tee", index: storedLocal } as Instr);
+  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+  fctx.body.push({ op: "i32.ge_s" } as Instr);
+  const elseInstrs: Instr[] = [
+    { op: "local.get", index: tvLocal } as Instr,
+    { op: "struct.get", typeIdx: taViewTypeIdx, fieldIdx: 1 } as Instr, // buf (ref_null $__vec_i32_byte)
+    { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr, // buf.length (byte count)
+  ];
+  if (bytes !== 1) {
+    elseInstrs.push({ op: "i32.const", value: bytes } as Instr);
+    elseInstrs.push({ op: "i32.div_u" } as Instr);
+  }
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "val", type: { kind: "i32" } },
+    then: [{ op: "local.get", index: storedLocal } as Instr],
+    else: elseInstrs,
+  } as Instr);
+}
+
+/**
  * (#3054 B1) `new <TA>(arrayBuffer)` → a shared-backing `$__ta_view_<name>` that
  * REFS the buffer's `$__vec_i32_byte` struct instead of COPYING its bytes into a
  * fresh backing array (the verified copy bug: sibling views / DataViews over the
@@ -983,13 +1179,31 @@ export function emitTaViewConstruct(
   const bufLocal = allocLocal(fctx, `__tav_buf_${fctx.locals.length}`, { kind: "ref", typeIdx: vecTypeIdx });
   fctx.body.push({ op: "local.set", index: bufLocal } as Instr);
 
-  // struct.new order = [length, buf, byteOffset].
-  // length = buf.length (field0 = byteLength) / elementSize.
+  // struct.new order = [length, buf, byteOffset]. length field = fixed element
+  // count `buf.length / elementSize` (B1/B2). (#3054 C) When the MODULE contains a
+  // resizable ArrayBuffer (`ctx.resizableAbTypeIdx >= 0`), this offset-0 view may
+  // be AUTO-LENGTH over a `$__resizable_ab` (§23.2.5.1 — length arg omitted +
+  // resizable backing ⇒ length-tracking): store the sentinel `-1` when the runtime
+  // buffer is resizable so `pushTaViewEffectiveLen` derives the live length from
+  // `buf.length` at each read (reflecting a later `rab.resize()`). This extra
+  // `ref.test`/`select` is emitted ONLY when a resizable buffer type exists in the
+  // module, so a program that uses only fixed buffers is BYTE-IDENTICAL to B1.
   fctx.body.push({ op: "local.get", index: bufLocal } as Instr);
   fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr);
   if (desc.bytes !== 1) {
     fctx.body.push({ op: "i32.const", value: desc.bytes } as Instr);
     fctx.body.push({ op: "i32.div_u" } as Instr);
+  }
+  if (ctx.resizableAbTypeIdx >= 0) {
+    const rabTypeIdx = ctx.resizableAbTypeIdx;
+    // -1 (auto-length sentinel). Wasm `select` yields `cond ? a : b` with `a` the
+    // deeper operand (= fixedLen). We want `resizable ? -1 : fixedLen`, so invert
+    // the test with `i32.eqz`: cond = !resizable ⇒ select = resizable ? -1 : fixedLen.
+    fctx.body.push({ op: "i32.const", value: -1 } as Instr);
+    fctx.body.push({ op: "local.get", index: bufLocal } as Instr);
+    fctx.body.push({ op: "ref.test", typeIdx: rabTypeIdx } as Instr);
+    fctx.body.push({ op: "i32.eqz" } as Instr);
+    fctx.body.push({ op: "select" } as Instr);
   }
   // buf (shared vec ref) — `ref` widens to the field's `ref_null` type.
   fctx.body.push({ op: "local.get", index: bufLocal } as Instr);
@@ -1021,10 +1235,12 @@ function emitTaViewAddress(
   // Stash the receiver.
   const tvLocal = allocLocal(fctx, `__tav_recv_${fctx.locals.length}`, { kind: "ref_null", typeIdx: taViewTypeIdx });
   fctx.body.push({ op: "local.set", index: tvLocal } as Instr);
-  // len = tv.length (field0 = ELEMENT count) — for the bounds check.
+  // len = the view's CURRENT element count — for the bounds check. Reads field0
+  // directly for a fixed view, or derives it live from `buf.length` for an
+  // auto-length view over a resizable buffer (#3054 C), so a `rab.resize()` grow
+  // widens the in-bounds range and a shrink narrows it.
   const lenLocal = allocLocal(fctx, `__tav_len_${fctx.locals.length}`, { kind: "i32" });
-  fctx.body.push({ op: "local.get", index: tvLocal } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: taViewTypeIdx, fieldIdx: 0 } as Instr);
+  pushTaViewEffectiveLen(ctx, fctx, tvLocal, taViewTypeIdx);
   fctx.body.push({ op: "local.set", index: lenLocal } as Instr);
   // arr = tv.buf.data  (buf is field1 → ref_null $__vec_i32_byte; .data is its field1)
   fctx.body.push({ op: "local.get", index: tvLocal } as Instr);
@@ -1410,7 +1626,20 @@ export function emitTaViewAccessor(
     return { kind: "ref_null", typeIdx: vecTypeIdx };
   }
   if (propName === "byteLength") {
-    fctx.body.push({ op: "struct.get", typeIdx: taViewTypeIdx, fieldIdx: 0 } as Instr);
+    // (#3054 C) Effective element count × elementSize. When a resizable buffer
+    // type exists in the module, stash the receiver + derive the live length so a
+    // resize is tracked; otherwise read field0 directly (BYTE-IDENTICAL to B2 —
+    // no extra local, receiver stays on the stack).
+    if (ctx.resizableAbTypeIdx >= 0) {
+      const tvLocal = allocLocal(fctx, `__tav_bl_recv_${fctx.locals.length}`, {
+        kind: "ref_null",
+        typeIdx: taViewTypeIdx,
+      });
+      fctx.body.push({ op: "local.set", index: tvLocal } as Instr);
+      pushTaViewEffectiveLen(ctx, fctx, tvLocal, taViewTypeIdx);
+    } else {
+      fctx.body.push({ op: "struct.get", typeIdx: taViewTypeIdx, fieldIdx: 0 } as Instr);
+    }
     if (elemSize !== 1) {
       fctx.body.push({ op: "i32.const", value: elemSize } as Instr);
       fctx.body.push({ op: "i32.mul" } as Instr);

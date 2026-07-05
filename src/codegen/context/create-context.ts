@@ -196,6 +196,7 @@ export function createCodegenContext(
     subviewTypeIdx: -1, // (#2159/#2357/#47) standalone TypedArray subarray view, lazy
     subviewTypeMap: new Map(), // (#2357) per-elem-kind $__subview type idx
     taViewTypeMap: new Map(), // (#3054 B1) per-TA-name $__ta_view shared-backing view idx
+    resizableAbTypeIdx: -1, // (#3054 C) $__resizable_ab subtype of $__vec_i32_byte, lazy
     errorStructTypeIdx: -1,
     widenedTypeProperties: new Map(),
     widenedVarStructMap: new Map(),

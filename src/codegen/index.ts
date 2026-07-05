@@ -16485,6 +16485,7 @@ export {
   getArrTypeIdxFromVec,
   getOrRegisterArrayType,
   getOrRegisterRefCellType,
+  getOrRegisterResizableAbType,
   getOrRegisterTemplateVecType,
   getOrRegisterVecType,
 } from "./registry/types.js";

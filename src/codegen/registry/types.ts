@@ -337,6 +337,72 @@ export function getTaViewName(ctx: CodegenContext, typeIdx: number): string | un
 }
 
 /**
+ * (#3054 C) Get or register the `$__resizable_ab` struct — a WasmGC SUBTYPE of the
+ * ArrayBuffer backing vec `$__vec_i32_byte`, carrying one extra `maxByteLength`
+ * field:
+ *   `{length: i32 (mut), data: (ref $__arr_i32_byte) (mut), maxByteLength: i32}`.
+ *
+ * `new ArrayBuffer(n, {maxByteLength})` allocates one of these instead of a plain
+ * `$__vec_i32_byte`. The **subtype identity IS the resizable bit**:
+ * `ref.test $__resizable_ab` ⇒ resizable, a plain `$__vec_i32_byte` ⇒ fixed — no
+ * separate flag, so a resizable buffer whose `maxByteLength === byteLength` is
+ * still distinguishable from a fixed one (the flaw of the "over-allocate + derive"
+ * option). Because it is a subtype, every one of the ~23 `i32_byte` read sites
+ * that does `ref.cast $__vec_i32_byte; struct.get 0/1` succeeds on a
+ * `$__resizable_ab` instance UNCHANGED (is-a) — only the resizable-aware sites
+ * (the ctor, `.resize()`, and the `maxByteLength`/`resizable` getters) know the
+ * subtype. `$__vec_i32_byte` is emitted open (`sub`, non-final — every vec
+ * subtypes `$__vec_base` with no `final` flag), so a further subtype of it is
+ * legal.
+ *
+ * Type-index discipline (the one real hazard, Phase A A.2): registered LATE +
+ * ONCE, memoized on `ctx.resizableAbTypeIdx`, mirroring `getOrRegisterTaViewType`
+ * / `getOrRegisterDvWindowType`. `getOrRegisterVecType` is called FIRST so the
+ * parent `$__vec_i32_byte` is always at a LOWER type index than this subtype —
+ * the subtype's supertype reference points BACKWARD, which is valid without a rec
+ * group and never triggers `computeRecGroups` to reorder (that pass only extends a
+ * group FORWARD on forward refs; a backward supertype ref is left as a singleton).
+ * Types are append-only (`ctx.mod.types.length`), and DCE preserves relative
+ * order + keeps a live subtype's supertype reachable (it is referenced as both
+ * `superTypeIdx` and the `data` field's array elem type). So the subtype always
+ * follows its supertype in the final type section. Idempotent.
+ */
+export function getOrRegisterResizableAbType(ctx: CodegenContext): number {
+  if (ctx.resizableAbTypeIdx >= 0) return ctx.resizableAbTypeIdx;
+
+  // Register the parent buffer vec FIRST so it precedes this subtype in the type
+  // index order (the mandatory supertype-before-subtype ordering).
+  const bufVecTypeIdx = getOrRegisterVecType(ctx, "i32_byte", { kind: "i8" });
+  const arrTypeIdx = getArrTypeIdxFromVec(ctx, bufVecTypeIdx);
+
+  const idx = ctx.mod.types.length;
+  const name = "__resizable_ab";
+  ctx.mod.types.push({
+    kind: "struct",
+    name,
+    superTypeIdx: bufVecTypeIdx, // SUBTYPE of $__vec_i32_byte — inherits length + data
+    fields: [
+      // fields 0 + 1 MUST match the parent's shape exactly (subtype invariance on
+      // mutable fields): length + data, same types + mutability as $__vec_i32_byte.
+      { name: "length", type: { kind: "i32" }, mutable: true },
+      { name: "data", type: { kind: "ref", typeIdx: arrTypeIdx }, mutable: true },
+      // field 2 — the resizable-only metadata. Immutable (a buffer's declared
+      // maxByteLength never changes after construction).
+      { name: "maxByteLength", type: { kind: "i32" }, mutable: false },
+    ],
+  });
+  ctx.resizableAbTypeIdx = idx;
+  ctx.structMap.set(name, idx);
+  ctx.typeIdxToStructName.set(idx, name);
+  ctx.structFields.set(name, [
+    { name: "length", type: { kind: "i32" as const }, mutable: true },
+    { name: "data", type: { kind: "ref" as const, typeIdx: arrTypeIdx }, mutable: true },
+    { name: "maxByteLength", type: { kind: "i32" as const }, mutable: false },
+  ]);
+  return idx;
+}
+
+/**
  * Get or register the template vec struct type for tagged template string arrays.
  */
 export function getOrRegisterTemplateVecType(ctx: CodegenContext): number {
