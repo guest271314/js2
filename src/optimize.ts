@@ -7,6 +7,12 @@
  * 2. A system `wasm-opt` binary on PATH
  *
  * If neither is available, returns the original binary unchanged and emits a warning.
+ *
+ * This is the `/optimize` entry point of `@loopdive/js2`: call
+ * {@link optimizeBinaryAsync} with a compiled Wasm binary and
+ * {@link OptimizeOptions} to get an {@link OptimizeResult}.
+ *
+ * @module
  */
 
 // Dynamic imports to avoid vite bundling node-only modules for the browser.
@@ -108,6 +114,7 @@ function getNodeImportsSync() {
   }
 }
 
+/** Settings for {@link optimizeBinaryAsync} (Binaryen wasm-opt configuration). */
 export interface OptimizeOptions {
   /** Optimization level: 1 (-O1), 2 (-O2), 3 (-O3), 4 (-O4). Default: 3 */
   level?: 1 | 2 | 3 | 4;
@@ -119,7 +126,9 @@ export interface OptimizeOptions {
   exceptionHandling?: boolean;
 }
 
+/** Result of {@link optimizeBinaryAsync}. */
 export interface OptimizeResult {
+  /** The optimized binary, or the original bytes if optimization was skipped. */
   binary: Uint8Array;
   /** true if optimization was applied */
   optimized: boolean;
