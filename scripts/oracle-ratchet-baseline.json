@@ -9,8 +9,8 @@
       "ctxChecker": 1
     },
     "src/codegen/async-cps.ts": {
-      "getTypeAtLocation": 2,
-      "ctxChecker": 1
+      "getTypeAtLocation": 3,
+      "ctxChecker": 2
     },
     "src/codegen/async-frame.ts": {
       "getTypeAtLocation": 1,
