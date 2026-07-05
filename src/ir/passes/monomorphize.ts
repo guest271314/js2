@@ -651,6 +651,7 @@ function collectUses(instr: IrInstr): readonly IrValueId[] {
     case "box":
     case "unbox":
     case "tag.test":
+    case "dyn.truthy":
       return [instr.value];
     case "string.const":
       return [];

@@ -258,6 +258,17 @@ export interface IrDynamicLowering {
    * see the issue notes + #2106).
    */
   emitTagTest(tag: JsTag, scratch: () => number): readonly Instr[];
+  /**
+   * Carrier on the stack → i32 (0/1): `ToBoolean(carrier)` (§7.1.2, #2949
+   * S5.1). Routes to the SAME `coercion-engine.emitToBoolean` legacy uses —
+   * `__any_unbox_bool` on the gc `$AnyValue` carrier, `__is_truthy` on the
+   * host externref carrier — so `0`/`NaN`/`""`/`null`/`undefined` are falsy
+   * in both strategies, byte-parity with legacy's condition lowering (one
+   * ToBoolean engine, June-audit D4). Unlike `emitUnbox(Boolean)` (which
+   * reads a PROVEN boolean's payload), this is defined over EVERY partition
+   * and needs no `tag.test` proof.
+   */
+  emitToBoolean(): readonly Instr[];
 }
 
 /**

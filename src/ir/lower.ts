@@ -1383,6 +1383,28 @@ export function lowerIrFunctionBody<S>(
         emitter.pushRaw(out, { op: "i32.eq" });
         return;
       }
+      case "dyn.truthy": {
+        // #2949 S5.1 — ToBoolean on a boxed-any carrier. The operand MUST be
+        // dynamic (verifier enforces); the op sequence comes from the
+        // `IrDynamicLowering` handle, which routes to the CANONICAL
+        // `coercion-engine.emitToBoolean` (`__any_unbox_bool` gc /
+        // `__is_truthy` host) — one ToBoolean engine, byte-parity with the
+        // legacy condition path (June-audit D4). Result is i32, directly
+        // usable as an if / loop / ternary condValue.
+        const valueIrType = typeOf(instr.value);
+        if (valueIrType.kind !== "dynamic") {
+          throw new Error(`ir/lower: dyn.truthy operand must be dynamic, got ${valueIrType.kind} (${func.name})`);
+        }
+        const dyn = resolver.resolveDynamicLowering?.();
+        if (!dyn) {
+          throw new Error(
+            `ir/lower: resolver cannot lower dyn.truthy (resolveDynamicLowering missing/null) (${func.name})`,
+          );
+        }
+        emitValue(instr.value, out);
+        for (const op of dyn.emitToBoolean()) emitter.pushRaw(out, op);
+        return;
+      }
       case "string.const": {
         const ops = resolver.emitStringConst?.(instr.value, instr.alloc);
         if (!ops) throw new Error(`ir/lower: resolver cannot emit string.const (${func.name})`);
@@ -2955,6 +2977,7 @@ function collectIrUses(instr: IrInstr): readonly IrValueId[] {
     case "box":
     case "unbox":
     case "tag.test":
+    case "dyn.truthy":
       return [instr.value];
     case "string.const":
       return [];
