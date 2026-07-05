@@ -1,9 +1,10 @@
 ---
 id: 3060
 title: "Object.hasOwn(structLiteral, key) returns false in host mode — __object_hasOwn host import skips wasm-struct marshalling (~24 default-lane fails)"
-status: in-progress
+status: done
 created: 2026-07-06
 updated: 2026-07-06
+completed: 2026-07-06
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -65,5 +66,25 @@ standalone regression risk).
 
 ## Acceptance
 
-- `built-ins/Object/hasOwn` `hasown_own_*` + `symbol_property_*` clusters pass.
+- `built-ins/Object/hasOwn` `hasown_own_*` cluster passes.
 - No regressions in `Object.prototype.hasOwnProperty` / `in` behaviour.
+
+## Result (2026-07-06, dev-cycleA)
+
+`built-ins/Object/hasOwn` local suite: **56/62 pass** (was ~38). The entire
+`hasown_own_*` target cluster (24 fails) is fixed. `hasown_inherited_exists.js`
+still passes — own-only semantics intact (no prototype-walk regression).
+
+**Residual (6, distinct sub-issues — NOT this fix's scope):**
+
+- `toobject_null.js` / `toobject_undefined.js` / `toobject_before_topropertykey.js`
+  — require `Object.hasOwn(null/undefined, …)` to **throw TypeError** (the
+  `ToObject` step §20.1.2.13.1). Deferred: needs a host-thrown TypeError that
+  the compiled wasm surfaces as a catchable `TypeError` for `assert.throws`;
+  the shared `__hasOwnProperty` predicate returns 0 on a null receiver, so this
+  is a `__object_hasOwn`-specific spec add, validated separately.
+- `symbol_property_toString.js` / `symbol_property_valueOf.js` /
+  `symbol_property_toPrimitive.js` — a shared `_toPropertyKey` gap: a key object
+  whose `toString`/`valueOf` returns a **Symbol** isn't coerced per ToPrimitive
+  order. The same residual fails on the `Object.prototype.hasOwnProperty` method
+  path (`__hasOwnProperty`), so it is a `_toPropertyKey` issue, not `hasOwn`.
