@@ -105,6 +105,8 @@ export function createCodegenContext(
     inModuleInitGlobalIdx: undefined, // (#2800) __in_module_init flag global (set at finalize)
     usesDynRead: false, // (#2580 M0) set by a __dyn_has/__dyn_get call site (M1+); M0 adds none
     dynReadHelpersEmitted: false, // (#2580 M0) ensureDynReadHelpers idempotence latch
+    usesDynMemberGet: false, // (#3053 U0) set by U1's IR member-read call site; U0 adds none
+    dynMemberGetHelpersEmitted: false, // (#3053 U0) ensureDynMemberGet idempotence latch
     classThrowsOnEval: new Set(),
     topLevelFunctionNames: new Set(), // (#1983) for class-member funcMap key collision detection
     classMethodSet: new Set(),
