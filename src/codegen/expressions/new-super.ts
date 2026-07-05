@@ -3802,7 +3802,10 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       // vecs (#1670). MUST match `inferTaViewType`'s multi-arg gate so the
       // local's type and the constructed value agree.
       if (noJsHost(ctx) && args.length >= 2 && !ts.isNumericLiteral(args[0]!)) {
-        const winArgSymName = ctx.checker.getTypeAtLocation(args[0]!).getSymbol?.()?.name;
+        // (#1930) Query the type-oracle boundary, not the raw checker — this
+        // also keeps the gate in lock-step with `inferTaViewType` (variables.ts),
+        // which resolves the buffer arg through the same oracle.
+        const winArgSymName = ctx.oracle.builtinReceiverOf(args[0]!);
         if (winArgSymName === "ArrayBuffer" || winArgSymName === "SharedArrayBuffer" || winArgSymName === "DataView") {
           const winResult = emitTaViewConstructWindowed(
             ctx,
