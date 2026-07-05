@@ -1016,21 +1016,30 @@ function emitTaViewAddress(
   arrLocal: number,
   offLocal: number,
   leLocal: number,
-): void {
+): { idxLocal: number; lenLocal: number } {
   const { vecTypeIdx, arrTypeIdx } = i32ByteVec(ctx);
   // Stash the receiver.
   const tvLocal = allocLocal(fctx, `__tav_recv_${fctx.locals.length}`, { kind: "ref_null", typeIdx: taViewTypeIdx });
   fctx.body.push({ op: "local.set", index: tvLocal } as Instr);
+  // len = tv.length (field0 = ELEMENT count) — for the bounds check.
+  const lenLocal = allocLocal(fctx, `__tav_len_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "local.get", index: tvLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: taViewTypeIdx, fieldIdx: 0 } as Instr);
+  fctx.body.push({ op: "local.set", index: lenLocal } as Instr);
   // arr = tv.buf.data  (buf is field1 → ref_null $__vec_i32_byte; .data is its field1)
   fctx.body.push({ op: "local.get", index: tvLocal } as Instr);
   fctx.body.push({ op: "struct.get", typeIdx: taViewTypeIdx, fieldIdx: 1 } as Instr);
   fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr);
   fctx.body.push({ op: "local.set", index: arrLocal } as Instr);
-  // off = tv.byteOffset + index*bytes
-  fctx.body.push({ op: "local.get", index: tvLocal } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: taViewTypeIdx, fieldIdx: 2 } as Instr);
+  // idx = ToInt32(indexExpr) — kept for the bounds check.
+  const idxLocal = allocLocal(fctx, `__tav_idx_${fctx.locals.length}`, { kind: "i32" });
   const it = compileExpr(indexExpr, { kind: "i32" });
   if (it && it.kind !== "i32") coerceType(ctx, fctx, it, { kind: "i32" });
+  fctx.body.push({ op: "local.set", index: idxLocal } as Instr);
+  // off = tv.byteOffset + idx*bytes
+  fctx.body.push({ op: "local.get", index: tvLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: taViewTypeIdx, fieldIdx: 2 } as Instr);
+  fctx.body.push({ op: "local.get", index: idxLocal } as Instr);
   if (bytes !== 1) {
     fctx.body.push({ op: "i32.const", value: bytes } as Instr);
     fctx.body.push({ op: "i32.mul" } as Instr);
@@ -1041,12 +1050,16 @@ function emitTaViewAddress(
   fctx.body.push({ op: "i32.const", value: 1 } as Instr);
   fctx.body.push({ op: "local.set", index: leLocal } as Instr);
   void arrTypeIdx;
+  return { idxLocal, lenLocal };
 }
 
 /**
  * `ta[i]` read for a `$__ta_view` receiver (already on the stack). Byte-decodes
- * the element little-endian and leaves an f64 on the stack. Returns the result
- * ValType, or null if `taViewTypeIdx` is not a registered view.
+ * the element little-endian and leaves an f64 on the stack. An out-of-bounds
+ * index yields `NaN` (the f64 image of the spec's `undefined` — §10.4.5.15
+ * IntegerIndexedElementGet returns undefined for OOB) rather than trapping,
+ * matching the native bounds-checked vec read. Returns the result ValType, or
+ * null if `taViewTypeIdx` is not a registered view.
  */
 export function emitTaViewElementGet(
   ctx: CodegenContext,
@@ -1061,7 +1074,21 @@ export function emitTaViewElementGet(
   const arrLocal = allocLocal(fctx, `__tav_arr_${fctx.locals.length}`, { kind: "ref", typeIdx: arrTypeIdx });
   const offLocal = allocLocal(fctx, `__tav_off_${fctx.locals.length}`, { kind: "i32" });
   const leLocal = allocLocal(fctx, `__tav_le_${fctx.locals.length}`, { kind: "i32" });
-  emitTaViewAddress(ctx, fctx, taViewTypeIdx, desc.bytes, indexExpr, compileExpr, arrLocal, offLocal, leLocal);
+  const { idxLocal, lenLocal } = emitTaViewAddress(
+    ctx,
+    fctx,
+    taViewTypeIdx,
+    desc.bytes,
+    indexExpr,
+    compileExpr,
+    arrLocal,
+    offLocal,
+    leLocal,
+  );
+  // if ((unsigned)idx < len) { decode } else { NaN }
+  const readInstrs: Instr[] = [];
+  const savedBody = fctx.body;
+  fctx.body = readInstrs;
   emitReadBytes(
     ctx,
     fctx,
@@ -1071,6 +1098,16 @@ export function emitTaViewElementGet(
     leLocal,
     arrTypeIdx,
   );
+  fctx.body = savedBody;
+  fctx.body.push({ op: "local.get", index: idxLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
+  fctx.body.push({ op: "i32.lt_u" } as Instr);
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "val", type: { kind: "f64" } },
+    then: readInstrs,
+    else: [{ op: "f64.const", value: NaN } as Instr],
+  } as Instr);
   return { kind: "f64" };
 }
 
@@ -1093,8 +1130,18 @@ export function emitTaViewElementSet(
   const arrLocal = allocLocal(fctx, `__tav_sarr_${fctx.locals.length}`, { kind: "ref", typeIdx: arrTypeIdx });
   const offLocal = allocLocal(fctx, `__tav_soff_${fctx.locals.length}`, { kind: "i32" });
   const leLocal = allocLocal(fctx, `__tav_sle_${fctx.locals.length}`, { kind: "i32" });
-  emitTaViewAddress(ctx, fctx, taViewTypeIdx, desc.bytes, indexExpr, compileExpr, arrLocal, offLocal, leLocal);
-  // value → f64
+  const { idxLocal, lenLocal } = emitTaViewAddress(
+    ctx,
+    fctx,
+    taViewTypeIdx,
+    desc.bytes,
+    indexExpr,
+    compileExpr,
+    arrLocal,
+    offLocal,
+    leLocal,
+  );
+  // value → f64 (evaluated for its side effects regardless of bounds)
   const valLocal = allocLocal(fctx, `__tav_sval_${fctx.locals.length}`, { kind: "f64" });
   const vt = compileExpr(valueExpr, { kind: "f64" });
   if (vt && vt.kind !== "f64") coerceType(ctx, fctx, vt, { kind: "f64" });
@@ -1109,6 +1156,11 @@ export function emitTaViewElementSet(
     fctx.body.push({ op: "f64.min" } as Instr);
   }
   fctx.body.push({ op: "local.set", index: valLocal } as Instr);
+  // OOB write is a silent no-op (§10.4.5.16 IntegerIndexedElementSet): guard the
+  // store on `(unsigned)idx < len` so an out-of-range write doesn't trap.
+  const writeInstrs: Instr[] = [];
+  const savedBody = fctx.body;
+  fctx.body = writeInstrs;
   emitWriteBytes(
     ctx,
     fctx,
@@ -1119,9 +1171,130 @@ export function emitTaViewElementSet(
     leLocal,
     arrTypeIdx,
   );
+  fctx.body = savedBody;
+  fctx.body.push({ op: "local.get", index: idxLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
+  fctx.body.push({ op: "i32.lt_u" } as Instr);
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: writeInstrs } as Instr);
   // Assignment is an expression — re-push the coerced value as the result.
   fctx.body.push({ op: "local.get", index: valLocal } as Instr);
   return { kind: "f64" };
+}
+
+/**
+ * (#3054 B1, Option A) Materialize a `$__ta_view` into a fresh NATIVE
+ * `$__vec_<elem>` by byte-decoding every element little-endian, so consumers that
+ * expect a native typed-vec receiver (the shared array-method dispatch, which
+ * `ref.cast`s the receiver to the native vec type) work on a view without
+ * trapping. The view ref must already be on the stack; a `(ref null
+ * nativeVecTypeIdx)` is left on the stack. This is a de-aliasing COPY — writes by
+ * a mutating method (`.fill`/`.set`) land in the copy, NOT back in the buffer (B1
+ * never claimed proto-method write-through; B3 will teach the methods to operate
+ * on the view directly). `nativeVecTypeIdx` is the element-typed vec
+ * `resolveArrayInfo` picked for the receiver's TS type, and drives the element
+ * coercion (integer vecs truncate the decoded f64; f64 vecs keep it).
+ */
+export function emitTaViewToVec(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  taViewTypeIdx: number,
+  nativeVecTypeIdx: number,
+): void {
+  const desc = taViewDecode(ctx, taViewTypeIdx);
+  const nativeArrTypeIdx = getArrTypeIdxFromVec(ctx, nativeVecTypeIdx);
+  const nativeArrDef = ctx.mod.types[nativeArrTypeIdx];
+  if (!desc || nativeArrTypeIdx < 0 || !nativeArrDef || nativeArrDef.kind !== "array") {
+    // Shouldn't happen for a registered view; leave the view ref as-is (a later
+    // ref.cast will surface the mismatch rather than silently miscompiling).
+    return;
+  }
+  const nativeElemKind = nativeArrDef.element.kind;
+  const { arrTypeIdx: bufArrTypeIdx } = i32ByteVec(ctx);
+
+  // view (on stack) → local
+  const vLocal = allocLocal(fctx, `__tav_mv_${fctx.locals.length}`, { kind: "ref_null", typeIdx: taViewTypeIdx });
+  fctx.body.push({ op: "local.set", index: vLocal } as Instr);
+  // len = view.length (field0)
+  const lenLocal = allocLocal(fctx, `__tav_mlen_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "local.get", index: vLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: taViewTypeIdx, fieldIdx: 0 } as Instr);
+  fctx.body.push({ op: "local.set", index: lenLocal } as Instr);
+  // arr = view.buf.data ; base = view.byteOffset ; le = 1
+  const arrLocal = allocLocal(fctx, `__tav_marr_${fctx.locals.length}`, { kind: "ref", typeIdx: bufArrTypeIdx });
+  const { vecTypeIdx: bufVecTypeIdx } = i32ByteVec(ctx);
+  fctx.body.push({ op: "local.get", index: vLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: taViewTypeIdx, fieldIdx: 1 } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: bufVecTypeIdx, fieldIdx: 1 } as Instr);
+  fctx.body.push({ op: "local.set", index: arrLocal } as Instr);
+  const baseLocal = allocLocal(fctx, `__tav_mbase_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "local.get", index: vLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: taViewTypeIdx, fieldIdx: 2 } as Instr);
+  fctx.body.push({ op: "local.set", index: baseLocal } as Instr);
+  const leLocal = allocLocal(fctx, `__tav_mle_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "i32.const", value: 1 } as Instr);
+  fctx.body.push({ op: "local.set", index: leLocal } as Instr);
+  // nativeArr = array.new_default(len)
+  const nArrLocal = allocLocal(fctx, `__tav_mnarr_${fctx.locals.length}`, { kind: "ref", typeIdx: nativeArrTypeIdx });
+  fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
+  fctx.body.push({ op: "array.new_default", typeIdx: nativeArrTypeIdx } as Instr);
+  fctx.body.push({ op: "local.set", index: nArrLocal } as Instr);
+  // for (i = 0; i < len; i++) nativeArr[i] = coerce(decode(base + i*width))
+  const iLocal = allocLocal(fctx, `__tav_mi_${fctx.locals.length}`, { kind: "i32" });
+  const offLocal = allocLocal(fctx, `__tav_moff_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+  fctx.body.push({ op: "local.set", index: iLocal } as Instr);
+  const isIntArr = nativeElemKind === "i8" || nativeElemKind === "i16" || nativeElemKind === "i32";
+  const decodeInstrs: Instr[] = [];
+  // offLocal = base + i*width
+  decodeInstrs.push({ op: "local.get", index: baseLocal } as Instr);
+  decodeInstrs.push({ op: "local.get", index: iLocal } as Instr);
+  if (desc.bytes !== 1) {
+    decodeInstrs.push({ op: "i32.const", value: desc.bytes } as Instr);
+    decodeInstrs.push({ op: "i32.mul" } as Instr);
+  }
+  decodeInstrs.push({ op: "i32.add" } as Instr);
+  decodeInstrs.push({ op: "local.set", index: offLocal } as Instr);
+  // nativeArr[i] = <decoded>
+  decodeInstrs.push({ op: "local.get", index: nArrLocal } as Instr);
+  decodeInstrs.push({ op: "local.get", index: iLocal } as Instr);
+  // NOTE: emitReadBytes pushes an f64 directly onto fctx.body; capture it by
+  // temporarily swapping the body so the read lands inside decodeInstrs.
+  const savedBody = fctx.body;
+  fctx.body = decodeInstrs;
+  emitReadBytes(
+    ctx,
+    fctx,
+    { kind: "get", bytes: desc.bytes, signed: desc.signed, float: desc.float },
+    arrLocal,
+    offLocal,
+    leLocal,
+    bufArrTypeIdx,
+  );
+  fctx.body = savedBody;
+  if (isIntArr) decodeInstrs.push({ op: "i32.trunc_sat_f64_s" } as Instr);
+  decodeInstrs.push({ op: "array.set", typeIdx: nativeArrTypeIdx } as Instr);
+  // i++
+  decodeInstrs.push({ op: "local.get", index: iLocal } as Instr);
+  decodeInstrs.push({ op: "i32.const", value: 1 } as Instr);
+  decodeInstrs.push({ op: "i32.add" } as Instr);
+  decodeInstrs.push({ op: "local.set", index: iLocal } as Instr);
+  decodeInstrs.push({ op: "br", depth: 0 } as Instr);
+  const loopBody: Instr[] = [
+    { op: "local.get", index: iLocal } as Instr,
+    { op: "local.get", index: lenLocal } as Instr,
+    { op: "i32.ge_s" } as Instr,
+    { op: "br_if", depth: 1 } as Instr,
+    ...decodeInstrs,
+  ];
+  fctx.body.push({
+    op: "block",
+    blockType: { kind: "empty" },
+    body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr],
+  } as Instr);
+  // struct.new nativeVec(len, nativeArr)
+  fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: nArrLocal } as Instr);
+  fctx.body.push({ op: "struct.new", typeIdx: nativeVecTypeIdx } as Instr);
 }
 
 /**
