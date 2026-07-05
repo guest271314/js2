@@ -2,7 +2,7 @@
 id: 3054
 title: "Resizable ArrayBuffer + dynamic `new <ctorVar>(rab)` — the ~180 codegen gap under #1524"
 status: in-progress
-assignee: ttraenkler/opus-3054-b1
+assignee: ttraenkler/opus-3054-b2
 created: 2026-07-05
 updated: 2026-07-05
 priority: medium
@@ -517,3 +517,68 @@ the buggy `any` path. **Implication:** a large fraction of numeric-heavy standal
 and the standalone-gap prioritization need recalibration. Fix directions: (a) harness-prelude
 `assert_sameValue_num(number,number)` routing (cheap, sidesteps the codegen bug), or (b) fix
 standalone `any === any`-on-boxed-numbers when an object-runtime/class is present.
+
+## B2 — view accessor props + windowing constructor (LANDED, opus-3054-b2)
+
+**Scope shipped, on B1's `$__ta_view {length, buf, byteOffset}` verbatim (no rework,
+exactly as B1 predicted):**
+1. **Accessor props on a `$__ta_view` receiver** — `.byteLength` (= field0 element
+   count × elementSize), `.byteOffset` (= field2), `.buffer` (= field1, the shared
+   buffer vec ref → **object IDENTITY**: `a.buffer === b.buffer` and `a.buffer === buf`
+   are `ref.eq`-true), `BYTES_PER_ELEMENT` (per-view constant). `.length` (B1) verified.
+2. **Windowing ctor** `new <TA>(buffer, byteOffset[, length])` — POPULATES the
+   byteOffset field (B1 pinned 0) and computes the windowed element `length`, with the
+   §23.2.5.1 RangeError validation (ToIndex offset/length; offset multiple-of-elemSize;
+   offset+length ≤ buffer; auto-length remainder multiple-of-elemSize).
+
+### What changed (WHY)
+- **`emitTaViewAccessor`** (`dataview-native.ts`) reads the props straight off the view
+  struct. It MUST run **before** the pre-existing name-discriminated accessor arms
+  (`property-access.ts` ~3621/3769): those key on the TS type NAME (`Uint8Array`…), so
+  for a B1 view local they `ref.cast` the view to a NATIVE vec — which read `.byteLength`
+  as **0** (ref.test miss) and synthesized a **fresh, non-identity** `.buffer`. The B2
+  arm is compile-time discriminated by the receiver's resolved LOCAL typeIdx
+  (`taViewReceiverTypeIdx` → `isTaViewTypeIdx`), so native TAs / plain arrays / non-buffer
+  programs never reach it (**byte-inert** — sha256 identical for 8 controls incl. native
+  `new Int32Array(4).byteLength`).
+- **`emitTaViewConstructWindowed`** (`dataview-native.ts`) mirrors `emitTaViewConstruct`'s
+  buffer-vec recovery, then `struct.new $__ta_view {length, buf, byteOffset}` with a
+  non-zero byteOffset. **The byte engine needed ZERO change**: element access already
+  addresses `byteOffset + i*width` and bounds-checks `i < length` (both view fields), so a
+  windowed view reads/writes the correct absolute buffer bytes and is mutually observable
+  with sibling views / DataViews. An offset-0 window is **byte-identical to B1**
+  (offsetLocal = 0). Wired into `new-super.ts`'s first TA path multi-arg branch (was an
+  empty-array fallback); `inferTaViewType` (`variables.ts`) widened 1→1..3 args so the
+  windowed local resolves to the view (ctor + infer gates stay in lock-step).
+- **Floor-safety (proto methods on a windowed view)**: B1's Option-A de-view
+  (`emitTaViewToVec`) already reads field2 (byteOffset) into its base offset, so a windowed
+  `$__ta_view` reaching array-method dispatch de-views correctly — **no new trap**.
+
+### Validation (the REAL validation — host-enforced, per #3055/#3056)
+The standalone floor does NOT enforce in-Wasm numeric asserts (#3055), so B2 correctness is
+INVISIBLE to a standalone pass-count. Validated instead by **`tests/issue-3054-b2-view-accessors.test.ts`**
+— 22 HOST-enforced assertions (each program returns a number to JS; vitest `expect` enforces
+it): all accessor values, sibling `.buffer` identity + identity-to-source, windowed
+read/write hitting the right absolute buffer bytes (both directions), auto-length window,
+Uint8/Int32/Float64 windows, DataView-write-observed-by-window, and 3 RangeError throw cases;
++ 2 DataView-windowing regression guards. All green. B1 suite (15) still green.
+- **Byte-inert proof**: sha256 of the standalone binary is IDENTICAL to upstream/main for 8
+  controls (arith, plain array, string, `new Uint8Array(4)`, `new Int32Array([…])`,
+  DataView setInt32/getInt32, class object, **native `new Int32Array(4).byteLength`**). Only
+  buffer-backed-view programs change bytes.
+- `tsc --noEmit` clean; prettier clean; no new biome violations (pre-existing `noExplicitAny`
+  + whole-file format disagreements only — CI `quality` uses prettier).
+- **Floor**: expected FLOOR-NEUTRAL (byte-inert off-path; windowed views de-view safely via
+  Option A). Authoritative standalone-floor delta confirmed on the `merge_group` re-run
+  (standalone floor is only measured there).
+
+### Next: B3 or C
+- **B3 (proto methods over a view receiver)** is the natural next slice and the true
+  floor-safety prereq — Option A currently de-view-materializes (copy) for mutating methods,
+  so `view.fill()/.set()/.sort()` don't write through to the buffer. B3 makes proto methods
+  operate on the view in place (write-through). Moderate risk (touches array-method dispatch).
+- **C (resizable ArrayBuffer)** is independent of B3 and builds on A.2's `$__resizable_ab`
+  subtype; the B1 vec-struct-ref means length-tracking-on-resize falls out for free.
+Recommendation: **B3 next** — it removes the last correctness caveat on the view
+representation (proto-method write-through) before the resizable cluster piles semantics on
+top; C can proceed in parallel since it touches the buffer subtype, not the view methods.

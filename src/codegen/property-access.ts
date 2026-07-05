@@ -119,7 +119,7 @@ import {
   isSubviewTypeIdx,
   isTaViewTypeIdx,
 } from "./registry/types.js";
-import { emitTaViewElementGet } from "./dataview-native.js"; // (#3054 B1) shared-backing TA view read
+import { emitTaViewAccessor, emitTaViewElementGet } from "./dataview-native.js"; // (#3054 B1/B2) shared-backing TA view read + accessor props
 import {
   coerceType,
   compileExpression,
@@ -3390,6 +3390,33 @@ function isGetProtoOfWiredViewProtoCall(expr: ts.Expression): boolean {
   );
 }
 
+/**
+ * (#3054 B2) If `recvExpr` is an identifier local whose resolved type is a
+ * registered `$__ta_view_<name>` (a shared-backing TypedArray-over-buffer view,
+ * B1), return that view's typeIdx; else undefined. Discriminates the B2 accessor
+ * arm at COMPILE time by the receiver's LOCAL ValType (set by `inferTaViewType`),
+ * so native TypedArrays / plain arrays / non-buffer programs never reach it.
+ */
+function taViewReceiverTypeIdx(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  recvExpr: ts.Expression,
+): number | undefined {
+  if (!ts.isIdentifier(recvExpr)) return undefined;
+  const localIdx = fctx.localMap.get(recvExpr.text);
+  if (localIdx === undefined) return undefined;
+  const localType =
+    localIdx < fctx.params.length ? fctx.params[localIdx]!.type : fctx.locals[localIdx - fctx.params.length]?.type;
+  if (
+    (localType?.kind === "ref" || localType?.kind === "ref_null") &&
+    localType.typeIdx !== undefined &&
+    isTaViewTypeIdx(ctx, localType.typeIdx)
+  ) {
+    return localType.typeIdx;
+  }
+  return undefined;
+}
+
 export function compilePropertyAccess(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -3615,6 +3642,29 @@ export function compilePropertyAccess(
         fctx.body.push({ op: "i32.const", value: 0 } as Instr);
         return { kind: "i32" };
       }
+    }
+  }
+
+  // (#3054 B2) Accessor props on a shared-backing `$__ta_view` receiver
+  // (`.byteLength`, `.byteOffset`, `.buffer` identity, `BYTES_PER_ELEMENT`). Runs
+  // BEFORE the generic TypedArray accessor arms below, which discriminate on the
+  // TS type NAME and would `ref.cast` the view to a native vec (→ read 0 for
+  // `.byteLength`, synthesize a fresh non-identity buffer for `.buffer`). The view
+  // is discriminated by the receiver's resolved LOCAL typeIdx, so native TAs /
+  // plain arrays / non-buffer programs never reach this arm (byte-inert). `.length`
+  // stays on the B1 local-type arm further down.
+  if (
+    propName === "byteLength" ||
+    propName === "byteOffset" ||
+    propName === "buffer" ||
+    propName === "BYTES_PER_ELEMENT"
+  ) {
+    const tvIdx = taViewReceiverTypeIdx(ctx, fctx, expr.expression);
+    if (tvIdx !== undefined) {
+      const r = emitTaViewAccessor(ctx, fctx, tvIdx, propName, expr.expression, (e, h) =>
+        compileExpression(ctx, fctx, e, h),
+      );
+      if (r) return r;
     }
   }
 
