@@ -3737,6 +3737,12 @@ export function run(n) {
             The goal is 100% compatibility with the JavaScript and npm ecosystem while adding a module security and
             module composition layer around compiled units.
           </p>
+          <p>
+            Inside, the compiler is moving from ad-hoc, per-syntax translation onto a typed intermediate representation
+            (IR) &mdash; a checked middle layer between the source and the emitted Wasm. Lowering is written once and
+            reused instead of reinvented per feature, and one front-end can target more than one Wasm backend (WasmGC
+            today, a linear-memory backend in development). The migration is incremental, node kind by node kind.
+          </p>
         </div>
 
         <div class="how-sidebyside">

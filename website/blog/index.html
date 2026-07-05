@@ -454,6 +454,16 @@
           And frontier language models let me grind through the long tail of the spec at a pace I could never manage by
           hand. That second part is the one people are most skeptical about, so let me be upfront about it.
         </p>
+        <p>
+          There's an architecture bet inside the compiler too. The quick way to add a language feature is a one-off path
+          from syntax straight to Wasm — do that a few hundred times and you get a pile of special cases that fight each
+          other. So I'm moving the front end onto a typed
+          <strong>intermediate representation (IR)</strong>
+          : a checked middle layer between the source and the Wasm, where lowering is written once and reused instead of
+          reinvented per feature, and where the same front end can target more than one Wasm backend (WasmGC today, a
+          linear-memory backend in development). It's a gradual migration, one syntax form at a time — and it's what
+          keeps the compiler honest as the language coverage climbs.
+        </p>
 
         <h2>How I build it</h2>
         <p>
