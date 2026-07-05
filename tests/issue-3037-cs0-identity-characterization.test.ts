@@ -61,7 +61,21 @@
 //
 // ── Table legend ──────────────────────────────────────────────────────────────
 //   FLIP-TARGET : currently 0; the CS1+ substrate fix must turn it to 1.
+//   FLIPPED     : a FLIP-TARGET the landed CS1a carrier already turned to 1.
 //   INVARIANT   : must NEVER change (anti-vacuity negatives + already-correct).
+//
+// ── CS1a landed (any-object-literal carrier) ───────────────────────────────────
+// Case (c) — `const inner: any = {z:1}; inner === inner` — is now **1**. CS1a
+// (statements/variables.ts + literals.ts `objectLiteralIsStandaloneAnyObjectCarrier`)
+// slots a spread-free data-only object literal produced into an `any` context as a
+// raw `ref $Object` local instead of an externref: at `===` it boxes **tag-6**
+// (`__any_box_ref`, identity in `refval`) so the tag-6 same-tag `ref.eq` arm answers
+// identity, while dynamic `any`-typed reads coerce the ref back to externref
+// (`extern.convert_any`) for `__extern_get`. The `===` operand seam (−299) and the
+// generic externref boxing arm (−788) are untouched. The OTHER FLIP-TARGETs stay 0:
+// (a) gOPD `.value`, (b) two dynamic reads of an aliased object, (d) getPrototypeOf,
+// (e) a dynamically-read number — those flip via CS1b (dynamic-read carrier) / CS1c
+// (reflective-producer carrier), separate slices whose reads still box tag-5.
 
 import { describe, it, expect } from "vitest";
 import { compile } from "../src/index.js";
@@ -102,15 +116,17 @@ describe("#3037 CS0 — standalone object-identity characterization (FLIP-TARGET
     ).toBe(0);
   });
 
-  it("(c) an any-typed object is NOT === to ITSELF  [FLIP-TARGET 0->1]", async () => {
-    // The pivotal finding: identity loss is not reader-specific. An object value
-    // materialised in an `any` context is carried as externref -> tag-5.
+  it("(c) an any-typed object IS === to ITSELF  [FLIPPED by CS1a: now 1]", async () => {
+    // The pivotal case. Before CS1a the object literal in an `any` context was
+    // carried as externref -> tag-5 -> guarded same-tag arm -> 0 (an object not
+    // `===` to itself). CS1a slots the local as a raw `ref $Object` so `===` boxes
+    // it tag-6 (identity in `refval`) -> the tag-6 `ref.eq` arm answers identity.
     expect(
       await runStandalone(`export function run(): number {
         const inner: any = { z: 1 };
         return (inner === inner) ? 1 : 0;
       }`),
-    ).toBe(0);
+    ).toBe(1);
   });
 
   it("(d) getPrototypeOf(x) === getPrototypeOf(x) is NOT ===  [FLIP-TARGET 0->1]", async () => {

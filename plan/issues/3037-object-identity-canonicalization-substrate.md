@@ -1,7 +1,8 @@
 ---
 id: 3037
 title: "Object-identity canonicalization substrate for standalone dynamic reads (foundation under #3027 / V2-S3b reader-arm)"
-status: ready
+status: in-progress
+assignee: opus-3037-cs1a
 sprint: current
 created: 2026-07-05
 updated: 2026-07-05
@@ -341,3 +342,248 @@ enumerated production sites so they never enter the overloaded tag-5 same-tag
 arm. Once CS1 lands, the V2-S3b reader-arm re-lands with no `===` change and the
 #3027 keystone + guard-flip stack on top. The hardness is concentrated in CS1's
 floor-adjacency, managed by strict scoping and merge_group-only validation.
+
+---
+
+## RE-SCOPE (2026-07-05, arch) — the `any`-object CARRIER, not the reader site
+
+> **This section SUPERSEDES the CS1 framing above.** A senior-dev
+> (opus-identity-cs1) traced CS1 against the actual code and landed the CS0
+> characterization (PR #2683, `tests/issue-3037-cs0-identity-characterization.test.ts`).
+> The measurement — verified, not narrative — disproves the "dynamic-reader
+> production site" premise. Grounded on `upstream/main @ af6eff6c1` + PR #2683.
+> The Options A/B/C analysis, the tag-5-minefield facts, and INV-1/INV-2 above
+> all still hold; only the *location and shape* of the fix change.
+
+### What CS0 actually measured (correcting the reader-only premise)
+
+1. **There is no migratable "reader production site."** A temporary
+   `emitAnyEqOperands` probe (`coercion-engine.ts:454`) confirmed the `===`
+   operand of a dynamic `any`-member read has ValType **externref**
+   (`isAnyValue = false`): the reader returns a **bare externref**, and tag-5 is
+   decided **downstream** at the operand-marshalling site —
+   `emitAnyEqOperands` → `coerceType(externref → $AnyValue)` → the generic
+   `boxToAny` externref arm → `__any_box_string` (`value-tags.ts:213`). That
+   site *is* the #1888 **−788 chokepoint** / the **−299** operand site this
+   spec already forbids. "Box at the reader" has no site to target.
+
+2. **The defect is UNIVERSAL, not reader-specific.**
+   `const inner: any = {z:1}; inner === inner` → **0** — an object is not `===`
+   to *itself*. Any object value materialised in a contextually-`any` position
+   is carried as **externref** and boxed **tag-5**. The controls prove the fix
+   direction: a *typed* object (`const inner = {z:1}`) stays a raw `ref $Object`
+   → `__any_box_ref` → **tag-6** → the tag-6 `ref.eq` arm answers identity
+   (`pos1`/`pos3`/`pos4` all `1`; `arr[0]===arr[1]` on a typed `any[]` already
+   `1`). So the fix must convert the **externref** carrier of an any-object into
+   the **tag-6** carrier the typed path already uses — narrow reader-site boxing
+   would not move #3027.
+
+3. **`$BoxedNumber` eq-castability is settled (must respect):**
+   `__box_number_struct` (`index.ts:11690`) is a plain WasmGC struct → an `eq`
+   subtype → `ref.test (ref eq)` returns 1 for it. A **bare** eq classifier
+   would mis-route a boxed number to tag-6 and re-break numeric `===`. Any
+   carrier boxing MUST reuse the **FULL** `__any_from_extern` classifier, which
+   peels `$BoxedNumber`→tag-3 (`any-helpers.ts:497-512`) and `$BoxedBoolean`→
+   tag-4 (`:513-528`) via `ref.test nativeBox*TypeIdx` **before** the
+   `$AnyString`-first / eq-second `fallbackStringAny` classification (`:427-469`)
+   — **never** the bare `fallbackStringAny` eq fragment.
+
+### The two candidate carrier mechanisms (floor-risk for EACH)
+
+Both make an any-object reach `===` as tag-6. They differ in WHERE the tag is
+decided.
+
+#### Mechanism A — honest classification at the externref→`$AnyValue` boxing seam
+
+Make `coerceType(externref → $AnyValue)` (equivalently the generic `boxToAny`
+externref arm, i.e. the `honestAnyBoxing` classification) route objects to tag-6
+instead of the blanket `__any_box_string` tag-5.
+
+- **Coverage:** total in one edit — every any-object funnels through this seam
+  at `===`.
+- **Floor risk: SEVERE — this is the forbidden class.** The seam is exactly
+  where the test262 harness comparator (`assert.sameValue`/`isSameValue`) marshals
+  its `any` operands; flipping it is the measured **−788/−794** (global honest
+  flip) and **−299** (operand-site tag-6, V2-S3b's death). It cannot be scoped
+  to "objects only at ===" without still being the `===` operand site, because
+  the harness comparison *is* an `===` over any operands. **REJECT** — this is
+  the operand-site the spec forbids, re-discovered.
+
+#### Mechanism B — canonical `any`-object carrier (upstream tag-6 production) — RECOMMENDED
+
+Never externalize an object into an `any` slot. At each site where a GC-ref
+value is *produced into* an `any`-typed slot, carry it as a **`ref $AnyValue`
+tag-6** box (the typed path's representation) rather than an externref, reusing
+the FULL `__any_from_extern` classifier. Objects then flow as `$AnyValue`
+(`isAnyValue = true`); at `===`, `emitAnyEqOperands` skips the coercion seam
+entirely (line 458/463 `isAnyValue` guard) and the tag-6 `ref.eq` arm answers
+identity. **The generic externref arm (−788) and the `===` operand site (−299)
+are both untouched — the change is at value-production-INTO-any, upstream of
+equality.**
+
+- **Coverage:** per production-site; grows as sites migrate.
+- **Floor risk: MODERATE and localizable.** It changes the ValType a producing
+  site hands to the any-flow (externref → `ref $AnyValue`). Blast radius = the
+  non-`===` consumers of that value (method call, string concat, host handoff),
+  which must accept `$AnyValue` and `coerceType` back to externref on demand —
+  `coerceType($AnyValue → externref)` already exists (`:1663-1664`,
+  `extern.convert_any` of refval/externval), so the round-trip is in place.
+  **Partial coverage is SAFE by construction:** a migrated tag-6 operand paired
+  with an un-migrated tag-5 operand of the *same* object hits S3a's cross-tag
+  reconciliation arm (`any-helpers.ts:2291-2355`) → `ref.eq` → 1 (standalone
+  internalize is bijective), so no half-migration ever regresses — it only
+  under-fixes. This is what makes B decomposable and merge_group-gateable.
+
+**Recommendation: Mechanism B.** A is the clean single-site fix but lands
+squarely on the −788/−299 mine; B trades one clean site for a wider but
+*floor-safe* set of production sites, each independently gateable and each
+never-regressing under S3a.
+
+### Exact `any`-object-carrier box sites (Mechanism B targets)
+
+The broken sites are precisely those that produce **externref-into-any** where
+the typed path would produce `ref`→tag-6. Enumerated from CS0's FLIP-TARGETs:
+
+1. **Object/array literal in a contextually-`any` position** (`case c`, `case e`):
+   the object-literal / array-literal lowering, when the target/contextual type
+   is `any`/externref, externalizes instead of boxing tag-6. Emit the
+   `ref $Object` and box via the full classifier. *This is the tightest,
+   lowest-risk site — start here.*
+2. **Dynamic `any`-member / element read result** (`case a`, `case b`, `case e`,
+   `case num-lit`): the property-access / element-access lowering for an
+   `any`-typed access returns the `__extern_get` externref bare. When the static
+   result type is `any` and the value flows into an any context, box the result
+   to `$AnyValue` tag-6 at the read expression (honest classifier). *Highest
+   breadth — the bulk of #3027 — split per read family (member / element /
+   descriptor `.value`).*
+3. **`Object.getPrototypeOf` / reflective producers returning externref**
+   (`case d`): return the per-brand `$NativeProto` global boxed tag-6 (composes
+   with CS2's synthesized-anchor audit).
+4. **`any` param binding / `any` return / `any[]` element store** — verify these
+   already carry tag-6 (the `pos1/pos3/pos4` controls pass, so the typed→any
+   path is fine); only add coverage if a measured case regresses.
+
+### Re-scoped slices (each merge_group-floor-gated; partial coverage safe via S3a)
+
+- **CS0 (S) — DONE (PR #2683).** Characterization + invariant lock; byte-inert;
+  `prove-emit-identity` 39/39. 5 FLIP-TARGETs (`0`), 10 INVARIANTs.
+- **CS1a (M) — object-literal-into-`any` carrier.** Site (1). Box a
+  contextually-`any` object/array literal to `$AnyValue` tag-6 via the FULL
+  `__any_from_extern` classifier. *Gate:* `case c` (`inner===inner`) → 1;
+  `neg1` distinct-shape stays 0; `str3` string stays tag-5/`typeof "string"`;
+  `num-lit` stays 1. Full merge_group + `check-standalone-highwater`.
+- **CS1b (L, decompose per read family) — dynamic-read-into-`any` carrier.**
+  Site (2), split: (i) member read, (ii) element read, (iii) gOPD `.value`/`.get`.
+  Box the any-typed read result to tag-6 at the read expression; consumers
+  `coerceType` back to externref on demand. *Gate per sub-slice:* the matching
+  FLIP-TARGET (`a`/`b`/`e`) → 1; all INVARIANTs hold; a non-`===` consumer probe
+  (`o.m()`, `o.s + o.s`) still works. Merge_group only.
+- **CS1c (S) — `getPrototypeOf`/reflective producer carrier.** Site (3);
+  composes with CS2. *Gate:* `case d` → 1.
+- **CS2 (S) — synthesized-anchor audit + lock** (unchanged from above).
+- **CS3 (L) — V2-S3b reader-arm MOP**, now stacked on the carrier (unchanged;
+  owned by the #2175 wave). With CS1 the reader-arm needs no `===` change.
+
+**Order:** CS1a → CS1b(i) → CS1b(ii) → CS1b(iii) → CS1c → CS2 → CS3. CS1a is the
+lowest-risk beachhead that flips the pivotal `inner===inner` case and proves the
+carrier mechanism end-to-end before the higher-breadth read-family slices.
+
+### Floor-risk verdict
+
+Mechanism **B** is the only path that does not re-detonate the −788/−299 mine.
+Its residual risk is the ValType change at each producing site (a value that was
+externref becomes `ref $AnyValue`), contained by (a) the pre-existing
+`coerceType($AnyValue → externref)` round-trip for non-`===` consumers, (b) S3a
+making every half-migrated pair a safe `1`, and (c) per-site merge_group
+gating. **CS1a is low risk; CS1b is the genuine breadth risk** (it changes the
+result ValType of the most common dynamic-read lowerings) and must land per read
+family with isolated merge_group evidence — never folded, never scoped-swept.
+Mechanism A is recorded here only to document *why* the obvious one-site fix is
+forbidden.
+
+---
+
+## CS1a — LANDED (opus-3037-cs1a): object-literal-into-`any` tag-6 carrier
+
+**PR:** object-literal-into-`any` carrier. **Flips CS0 case (c)**
+(`const inner: any = {z:1}; inner === inner` → **1**). All 10 CS0 INVARIANTs and
+the other 4 FLIP-TARGETs (a/b/d/e) stay unchanged (those are CS1b/CS1c).
+`prove-emit-identity` **39/39 IDENTICAL** (host/gc/standalone/wasi) — byte-inert
+off-path.
+
+### What changed vs. the RE-SCOPE Mechanism-B framing (important correction)
+
+The RE-SCOPE section recommends carrying the any-object as a **`ref $AnyValue`
+tag-6** box (via the honest classifier). Tracing that against the actual code
+**disproved** it as the CS1a carrier: `coerceType($AnyValue → externref)` routes
+through `__any_to_extern`, whose tag-6 arm (`any-helpers.ts:873-887`) keeps the
+box **wrapped** (`extern.convert_any` of the whole `$AnyValue` struct) rather than
+unwrapping the `$Object` payload — deliberately, so re-boxing through an `any`
+boundary round-trips. Consequence: an `$AnyValue`-typed any-object local **breaks
+every dynamic member read** — `__extern_get`'s `ref.test $Object` sees the
+`$AnyValue` struct, not the `$Object`, and returns null/0 (verified: `o.z`,
+`o.s+o.s`, `typeof` all regress). The honest classifier is therefore **not**
+needed at CS1a and was **not** used.
+
+**The carrier that works is a raw `ref $Object`** — exactly the representation the
+already-passing typed control (`pos1`) uses:
+
+- At `===`, `boxToAny`'s `ref` arm (`value-tags.ts:228`) boxes a `ref $Object` as
+  **tag-6** via `__any_box_ref` (identity in `refval`) → `__any_strict_eq`'s
+  tag-6 same-tag `ref.eq` arm (`any-helpers.ts:2404-2416`) answers identity. No
+  classifier, no honest helper — the value is statically a plain `$Object`.
+- Dynamic `any`-typed member reads coerce the ref back to externref via the
+  ordinary `extern.convert_any` (a NON-`$AnyValue` ref → externref, NOT
+  `__any_to_extern`) → `__extern_get` succeeds. Reads/writes/method-calls/`typeof`/
+  spread/`Object.keys`/`delete`/destructuring all keep working (battery-verified).
+- The `===` operand seam (−299) and the generic externref boxing arm (−788) are
+  **untouched** — the change is purely the local's storage ValType at a
+  production site.
+
+### Where (files)
+
+1. `src/codegen/literals.ts` — new exported predicate
+   `objectLiteralIsStandaloneAnyObjectCarrier(ctx, expr)`: true for a **non-empty,
+   spread-free, data-only, statically-named** object literal in a genuine
+   `any`/`unknown`/`object` context under `ctx.standalone` — exactly the
+   `isAnyContextNonEmpty` branch of `compileObjectLiteral` that builds an open
+   `$Object` externref. Spreads/accessors/computed-keys/dictionaries are excluded
+   (they route via other gates / need the externref carrier).
+2. `src/codegen/statements/variables.ts` — when a `const/let x: any = <carrier>`
+   declaration matches the predicate (and is not a closure-captured slot), slot
+   the local as `ref_null $Object` (`ensureObjectRuntime(ctx).objectTypeIdx`)
+   instead of externref. Because let/const slots are **pre-hoisted** as externref
+   by `hoistLetConstWithTdz`, the `wasmType` decision alone is bypassed — an
+   explicit slot retype after `localIdx` resolution covers the reused pre-hoisted
+   slot (skipped for boxed/promoted-global captures — those stay externref, safe
+   via S3a). The store coerces the object externref → `ref $Object`
+   (`any.convert_extern` + guarded `ref.cast`).
+
+### Scope / partial-coverage safety
+
+Scoped to **variable declarations** whose initializer is the carrier literal —
+the CS0 flip case (c) is exactly that. Other any-context object-literal positions
+(function args, returns, nested values) still produce externref and stay tag-5;
+per S3a's cross-tag reconciliation arm a transitional tag-6 × tag-5 pair of the
+same object still `ref.eq`s to 1, so partial coverage **never regresses, only
+under-fixes**. CS1b (dynamic-read carrier — cases a/b/e) and CS1c (reflective
+producer — case d) remain the next slices and are cleanly separable: they change
+the result ValType of the dynamic reader, a wider (breadth-risk) surface that must
+land per read-family with isolated merge_group evidence.
+
+### Tests
+
+- `tests/issue-3037-cs0-identity-characterization.test.ts` — case (c) updated
+  `0 → 1` (`FLIPPED by CS1a`); all other rows unchanged.
+- `tests/issue-3037-cs1a-objlit-carrier.test.ts` — new: pins the identity flip
+  (self-`===`, fn round-trip) AND the non-`===` consumer invariants (member
+  read/write, method call, `typeof`, distinct-object anti-vacuity, reassign,
+  typed-struct control) so a future change can't restore identity by breaking
+  reads.
+
+### Floor discipline
+
+CS1a is low-risk (byte-inert corpus) but floor-sensitive: **not self-merged on
+PR-green alone** — flagged the lead for a monitored `merge_group` standalone
+`host_free_pass` floor enqueue (expect NET-POSITIVE / neutral). Any floor
+regression ⇒ a non-object leaked into tag-6 → diagnose, don't force.
