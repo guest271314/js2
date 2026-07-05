@@ -4,8 +4,8 @@ title: "GeneratorPrototype.throw() resumption through try/finally / try/catch hi
 status: ready
 sprint: current
 priority: medium
-horizon: s
-feasibility: medium
+horizon: m
+feasibility: hard
 created: 2026-07-05
 task_type: bugfix
 area: codegen
@@ -53,3 +53,47 @@ routed to the resume point's enclosing try-region. Compare against the working
 - All 6 `GeneratorPrototype/throw/try-{catch,finally}-*` files pass.
 - `.next()` resumption and non-generator try/finally are unaffected.
 - No test262 regression.
+
+## Investigation (2026-07-05, dev-3042) — reassessed: SENIOR / architectural, not a bounded [S] dev fix
+
+**All 6 files route to the LEGACY eager-buffer generator lowering, which cannot
+inject a `.throw()` at a suspended yield.** Confirmed root cause, deeper than the
+"resume-PC handler-table" hypothesis:
+
+1. The NATIVE lazy state-machine lowering (`src/codegen/generators-native.ts`)
+   explicitly **rejects** these shapes in `lowerStatements`:
+   - `if (stmt.catchClause || !stmt.finallyBlock) return fail();` — any `try`
+     with a **catch clause** across a yield is unsupported (the 3 `try-catch-*`
+     files).
+   - `if (!statementsAreYieldFree(stmt.finallyBlock.statements)) return fail();`
+     — a **yield inside the finally** is unsupported (all 3 `try-finally-*`
+     files put `yield 3` in the finally).
+   The author's own note at generators-native.ts:2037 flags this: *"try/catch
+   across yield stays the next slice."*
+
+2. Rejected generators fall back to the **legacy eager model**
+   (`src/codegen/function-body.ts:1052+`, mirrored in `closures.ts` /
+   `class-bodies.ts`): the whole body is **evaluated eagerly**, buffering every
+   yield into `__gen_create_buffer`, then wrapped by `__create_generator` which
+   replays the buffer. Because the body already ran to completion, the statement
+   after a suspended `yield` (`unreachable += 1`) executes **during eager eval,
+   before `.throw()` is ever called** — so `iter.throw()` cannot skip it.
+   Verified: a minimal `try { yield 2 } finally { yield 3; unreachable += 1 }`
+   returns `unreachable === 1` (spec requires `0`).
+
+**Why this is not a bounded dev fix.** Correct `.throw()`-at-yield semantics
+require the LAZY native state machine to (a) permit yields inside `finally`,
+(b) support `try/catch` across yields, and (c) route an injected throw at a
+suspended yield to the enclosing try-region — running/exiting the correct
+`finally`, entering the matching `catch`, and propagating otherwise
+(§27.5.3.4 GeneratorResumeAbrupt + AbruptCompletion through the try model). That
+is the deferred generator-state-machine slice, not a localized bug. The eager
+fallback is architecturally incapable of it (no suspension point survives).
+
+**Recommendation:** re-scope to **senior-developer** (or `/architect-spec`
+first). Bumped `feasibility: hard`, `horizon: m`. Suggested plan: extend
+`generators-native.ts` try handling to model try-regions with per-yield
+membership + a resume-mode router (reuse the existing `abruptResume` /
+`MODE_THROW` machinery, generalised from finally-only to catch + yield-in-finally),
+then remove the two `fail()` guards. TDD against the tight 6-file matrix
+(before/within/following × catch/finally).
