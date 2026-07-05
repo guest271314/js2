@@ -57,9 +57,9 @@
   },
   {
     "edition": "ES2015",
-    "pass": 11204,
-    "fail": 4037,
-    "ce": 145,
+    "pass": 11218,
+    "fail": 4024,
+    "ce": 144,
     "skip": 0,
     "total": 15386,
     "pct": 73,
@@ -201,21 +201,21 @@
       },
       {
         "name": "Symbol.toPrimitive",
-        "pass": 40,
-        "fail": 41,
+        "pass": 41,
+        "fail": 40,
         "ce": 0,
         "skip": 0,
         "total": 81,
-        "pct": 49
+        "pct": 51
       },
       {
         "name": "Symbol.match",
-        "pass": 57,
+        "pass": 58,
         "fail": 18,
-        "ce": 1,
+        "ce": 0,
         "skip": 0,
         "total": 76,
-        "pct": 75
+        "pct": 76
       },
       {
         "name": "WeakMap",
@@ -228,12 +228,12 @@
       },
       {
         "name": "Symbol.replace",
-        "pass": 40,
-        "fail": 35,
+        "pass": 53,
+        "fail": 22,
         "ce": 0,
         "skip": 0,
         "total": 75,
-        "pct": 53
+        "pct": 71
       },
       {
         "name": "let",
@@ -1026,8 +1026,8 @@
   },
   {
     "edition": "ES2018",
-    "pass": 3842,
-    "fail": 381,
+    "pass": 3844,
+    "fail": 379,
     "ce": 28,
     "skip": 0,
     "total": 4251,
@@ -1107,12 +1107,12 @@
       },
       {
         "name": "regexp-named-groups",
-        "pass": 81,
-        "fail": 11,
+        "pass": 83,
+        "fail": 9,
         "ce": 1,
         "skip": 0,
         "total": 93,
-        "pct": 87
+        "pct": 89
       },
       {
         "name": "default-parameters",
@@ -1197,12 +1197,12 @@
       },
       {
         "name": "Symbol.replace",
-        "pass": 2,
-        "fail": 6,
+        "pass": 4,
+        "fail": 4,
         "ce": 1,
         "skip": 0,
         "total": 9,
-        "pct": 22
+        "pct": 44
       },
       {
         "name": "Reflect.construct",
