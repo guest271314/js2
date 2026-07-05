@@ -444,11 +444,13 @@
           approaches accept only a small, statically-typed subset of the language. Others define a new Wasm-shaped
           language that looks like TypeScript but drops the prototype chain, dynamic values, and closures — which means
           existing code and npm packages have to be rewritten rather than compiled. Others ship an entire JS engine
-          inside every module, or hand-write a garbage collector in linear memory. JS² takes none of these: it compiles
-          the actual language, unchanged, so existing code and packages are the input rather than a porting target, and
-          it lowers objects to typed WasmGC structs so the host runtime owns the heap. What always blocked that direct
-          route was scope — full ECMAScript is thousands of built-ins and edge cases that have kept engine teams busy
-          for a decade.
+          inside every module; still others hand-write a garbage collector in linear memory, or skip garbage collection
+          altogether and simply leak. And across all of them, none targets the full ECMAScript language — or comes close
+          to passing it. JS² takes none of these shortcuts: it compiles the actual language, unchanged, so existing code
+          and packages are the input rather than a porting target; it lowers objects to typed WasmGC structs so the host
+          runtime owns the heap; and full ECMAScript conformance, measured against the complete Test262 suite, is the
+          explicit target. What always made that direct route hard was scope — full ECMAScript is thousands of built-ins
+          and edge cases that have kept engine teams busy for a decade.
         </p>
         <p>
           Two things changed the calculus.
