@@ -1,7 +1,9 @@
 ---
 id: 3047
 title: "false CE — `var x; function x(){}` same-name coexistence inside a block wrongly rejected as 'Cannot redeclare block-scoped variable' (#1389 residual)"
-status: ready
+status: done
+assignee: ttraenkler/dev-3047
+completed: 2026-07-05
 sprint: current
 priority: high
 horizon: m
@@ -68,3 +70,48 @@ nested block scopes. Keep rejecting genuine `let`/`const`/class re-declarations.
 - No new false-negatives: real lexical re-declaration (`let x; let x;`,
   `let x; function x(){}` in a block) still errors.
 - No test262 regression.
+
+## Resolution (dev-3047, 2026-07-05)
+
+The harvest's hypothesis (a *block-nested* redeclaration bug, and that
+`if (true) { var x; function x(){} }` should compile) was **partly incorrect**.
+Verified against V8/Node:
+
+- `var f; function f(){}` at **Script / function-body top level** → **legal**
+  (a FunctionDeclaration is VAR-scoped there — `TopLevelLexicallyDeclaredNames`
+  excludes HoistableDeclarations).
+- `{ var f; function f(){} }` in a **genuine nested Block** (incl. `if`/`for`/
+  `try` blocks) → **SyntaxError in BOTH strict and sloppy mode**. Annex B relaxes
+  only the *duplicate-FunctionDeclaration* rule (B.3.3.5), never lexical-vs-var.
+  test262 carries **negative** parse tests for exactly this
+  (`language/block-scope/syntax/redeclaration/var-name-redeclaration-attempt-with-function.js`
+  et al.), so it must keep erroring.
+
+**True root cause of the ~50 harvested false CEs:** the test262 harness
+(`wrapTest`) places every test body inside `try { ... }`. A `try` block is a
+genuine nested Block, so a legal top-level `var f; function f(){}` becomes
+`try { var f; function f(){} }` — a real SyntaxError. Two complementary fixes:
+
+1. **Compiler** (`src/compiler/early-errors/duplicates.ts`,
+   `checkVarLexicalConflicts`): a FunctionDeclaration is treated as lexical
+   (var-conflicting) only inside a *genuine nested Block statement* — not at
+   SourceFile scope nor at a **function-body** top level (new
+   `isFunctionBodyBlock` predicate). Genuine nested-block cases still error.
+
+2. **Harness** (`tests/test262-runner.ts`, `wrapTest`): when a body's top-level
+   statements bind the same name as both a `var` and a `function`, hoist that
+   function declaration out of the `try` to the `test()` body top level
+   (functions hoist → runtime byte-preserved). Guarded strictly to the
+   coexistence pattern (byte-identical for every other test); equal-line padding
+   preserves error-line citations.
+
+**Recovers 50/52** harvested `Cannot redeclare block-scoped variable` files. The
+2 remaining are distinct root causes (out of scope, follow-ups):
+`language/statements/let/syntax/escaped-let.js` (escaped-`let` keyword parse) and
+`annexB/language/function-code/function-redeclaration-switch.js` (duplicate
+functions across switch clauses, blocked by a TS `Duplicate function
+implementation` checker diagnostic, not our early-error).
+
+Tests: `tests/issue-3047.test.ts` (12 cases — both fixes + nested-block
+regression guards). All acceptance-criteria negative cases (`let x; let x;`,
+`let x; function x(){}` in a block) still error.
