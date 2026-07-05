@@ -2,7 +2,7 @@
 id: 2949
 title: "IR dynamic value representation: JsTag-carrying `dynamic` kind in IrType (make untyped JS claimable)"
 status: in-progress
-assignee: ttraenkler/opus-2949s4
+assignee: ttraenkler/opus-s5-0
 sprint: current
 created: 2026-07-02
 updated: 2026-07-04
@@ -1181,3 +1181,73 @@ scan-flip is gated.
   rate delta at first, growing only as S5.4's substrate and the #1370/#2855
   shape surface widen. Do not promise a large delta from S5.1–S5.3 alone; the
   probe in §4 sets the expectation before the code is written.
+
+## Implementation Notes — S5.0 (opus-s5-0, 2026-07-05, branch `issue-2949-s5-0-emit-plumbing`)
+
+S5.0 ships the builder-level emit vocabulary for the dynamic carrier —
+`IrFunctionBuilder.emitBox` / `emitUnbox` / `emitTagTest` (`src/ir/builder.ts`).
+These are the ONLY missing piece #1 the §0 grounding named: the node-level
+LOWERING already landed in slices 2/3 (`lower.ts` box/unbox/tag.test cases →
+`resolveDynamicLowering` → `IrDynamicLowering`), but a producer had no way to
+CONSTRUCT the nodes. Now it does. **Pure plumbing, byte-inert by
+construction**: no producer calls the methods (select.ts/from-ast.ts
+untouched), so no compiled function changes.
+
+Decisions and the WHY:
+
+1. **Result-type mapping mirrors the node contracts (nodes.ts §box/unbox/
+   tag.test), not a new policy.** `emitBox → toType`; `emitTagTest → irVal
+   i32`; `emitUnbox → irVal(<payload ValType>)` where the payload kind comes
+   from the canonical `jsTagUnboxKind` (js-tag.ts): `i32` (NumberI32/Boolean),
+   `f64` (NumberF64), `ref` (String/Object/Function). This is the SAME table
+   the verifier (R2/R3) and the gc `payloadFieldIdx` use — one tag/payload
+   policy (D4), no second table.
+
+2. **The `ref` payload declares `externref` (deliberate, plumbing-level).**
+   The runtime ref ValType is mode-split — host: the externref carrier IS the
+   value (identity unbox); WasmGC: String rides `externval` (externref),
+   Object/Function ride `refval` (eqref) — so no single static ValType is
+   exactly right in both backends. `externref` is the host-universal and the
+   gc-String choice; the S5.4 member-read producer (the first ref-payload
+   consumer) refines it where a native ref is required (slice-3 hazard (b)).
+   S5.0 has no ref-payload consumer, so this is inert.
+
+3. **Two construction-time guards, matching verifier R1/R2, for a sharper
+   error than a downstream verify/lower failure**: `emitBox` throws on an
+   already-dynamic operand (re-box is redundant — R1); `emitUnbox` throws on
+   a payload-less singleton jsTag (Null/Undefined — R2; also, there is no
+   payload ValType to declare). Valid uses are unaffected — the guards only
+   fire on producer bugs, so byte-inertness holds.
+
+4. **Compose with the S5.1+ coercion-engine plan, not against it.** These
+   methods construct the RAW box/unbox/tag.test nodes; S5.1+ route the
+   general body-uses (truthiness/equality/relational) through the EXISTING
+   coercion-engine helpers (`emitToBoolean`/`__any_strict_eq`/`emitToNumber`)
+   exposed as new `IrDynamicLowering` methods (§1 of the S5 plan), reserving
+   `tag.test`+`unbox` for the known-literal fast paths. S5.0's vocabulary is
+   exactly those fast-path primitives plus the box every producer needs.
+
+## Test Results — S5.0 (2026-07-05, opus-s5-0)
+
+- `tests/issue-2949-s5-0-emit-plumbing.test.ts` — **8/8 pass**. Node-shape +
+  result-IrType assertions for all three methods (incl. the full
+  `jsTagUnboxKind` payload table), the R1 re-box guard and R2 singleton-unbox
+  guard, verifier-clean built functions, and — RAISED to full runtime
+  execution against the PRODUCTION `makeDynamicLowering` over a real
+  `CodegenContext` — `box → tag.test → unbox → select` round-trips executed
+  in BOTH strategies: gc ($AnyValue, pure module) and host (externref +
+  import family). f64 value round-trip (incl. −0/NaN/2^40), numeric-class
+  tag.test true, cross-tag (String) tag.test false → guarded 0,
+  Boolean-refined box round-trip, NumberI32 box round-trip.
+- **Byte-inertness PROVEN**: `prove-emit-identity.mjs` baseline captured on a
+  clean worktree at the base (`647cd6763`), `check` on this branch →
+  **IDENTICAL, all 39 (file,target) hashes** across gc/standalone/wasi.
+- Adjacent #2949 suites: slice 1 (`ir-dynamic-type`) 19/19, slice 2
+  (`slice2-dynamic-producers`) 22/22, slice 3 (`slice3-dynamic-lowering`)
+  16/16 — 65/65 combined with S5.0.
+- `npx tsc --noEmit` clean; prettier clean.
+- **S5.1 (truthiness) is ready to build on this**: it adds the
+  `emitDynTruthy` builder method + `IrDynamicLowering.emitToBoolean` handle
+  arm (routing to `coercion-engine.emitToBoolean`) and the from-ast `if`/loop
+  condition arm; the box/unbox/tag.test primitives it needs for the
+  known-literal paths now exist.
