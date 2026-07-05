@@ -3466,7 +3466,7 @@ function lowerMethodCall(expr: ts.CallExpression, cx: LowerCtx, statementPositio
     }
     args.push(argVal);
   }
-  // #3051: a VOID instance method is legal in STATEMENT position
+  // #3052: a VOID instance method is legal in STATEMENT position
   // (`this.add(x);` / `obj.tick();`) — only reject void in EXPRESSION position
   // (mirrors the `super.method()` arm above and the extern-class arm below).
   // The `class.call` emit + lowering already carry a null result through: a

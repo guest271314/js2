@@ -1,6 +1,6 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 //
-// #3051 — IR `class.call`: void instance method in STATEMENT position.
+// #3052 — IR `class.call`: void instance method in STATEMENT position.
 //
 // BANKED in #3000-C's Implementation Notes: a class (ctor or plain method) body
 // calling a VOID instance method as a STATEMENT (`this.add(x);` / `obj.tick();`)
@@ -53,7 +53,7 @@ const COUNTER = `
   }
 `;
 
-describe("#3051 — IR class.call void method in statement position — genuine emission", () => {
+describe("#3052 — IR class.call void method in statement position — genuine emission", () => {
   for (const nativeStrings of [false, true]) {
     const lane = nativeStrings ? "native/standalone ($AnyString)" : "host (externref)";
 

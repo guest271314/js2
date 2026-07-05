@@ -1,5 +1,5 @@
 ---
-id: 3051
+id: 3052
 title: "IR `class.call`: void instance method in statement position"
 status: done
 assignee: opus-classcall
@@ -19,7 +19,7 @@ parent: 3000
 related: [3000, 2855, 1370]
 ---
 
-# #3051 — IR `class.call`: void instance method in statement position
+# #3052 — IR `class.call`: void instance method in statement position
 
 Banked in #3000-C's Implementation Notes. A class body (constructor **or** plain
 method) that calls a **void** instance method as a **statement**
@@ -110,7 +110,7 @@ No new IR instr is needed — the `class.call` instr, `emitClassCall` builder, a
   (raw-`WebAssembly.instantiate` `string_constants`/`wasm:js-string` harness
   noise + the #582 struct.new test; both #3034-class harness issues, not
   compiler regressions); the only delta is **+5 passes** = this issue's new
-  `tests/issue-3051.test.ts`.
+  `tests/issue-3052.test.ts`.
 
 ## Corpus / fallback-bucket delta
 
@@ -119,13 +119,13 @@ already driven to **0** by #3000-E and post-claim demotions were already
 `(none)` on the playground corpus — this exact void-statement-position shape is
 not present in `playground/examples/`, so the fix shows no corpus count delta
 (and, importantly, no regression). The improvement is proven by the dedicated
-`#3051` test + `irCompiledFuncs` telemetry, not a corpus number.
+`#3052` test + `irCompiledFuncs` telemetry, not a corpus number.
 
 ## Files
 
 - `src/ir/from-ast.ts` — `lowerMethodCall` class-method arm honours
   `statementPosition` (2-line guard change).
-- `tests/issue-3051.test.ts` — genuine-emission proof (both lanes), chained +
+- `tests/issue-3052.test.ts` — genuine-emission proof (both lanes), chained +
   non-`this` runtime parity, and the expression-position-demotion guard.
 
 ## Provenance
