@@ -10620,6 +10620,31 @@ assert._isSameValue = isSameValue;
             if (!_isWasmStruct(a)) return a;
             // Try arities 4 → 1; pick the first emitted dispatcher.
             const exps = callbackState?.getExports();
+            // (#3051 Slice 2) A non-callable DATA struct passed as the second
+            // @@replace/@@split arg — `re[@@replace]("s", {toString(){…}})` /
+            // `re[@@split]("s", {valueOf(){…}})` — must NOT be wrapped as a
+            // callable. §22.2.6.11 does `IsCallable(replaceValue)` (false here)
+            // then `ToString(replaceValue)`; §22.2.6.14 does `ToUint32(limit)`.
+            // But `_wrapWasmClosure` false-positives on ANY struct whenever the
+            // module exports `__call_fn_N` (it checks dispatcher existence, not
+            // closure-ness), so the object-literal arg got wrapped as a callable
+            // `replacerBridge`, V8 saw `functionalReplace = true`, INVOKED it,
+            // and `ToString` of the bogus return produced "null" (the
+            // `arg-2-coerce` failure). Gate on the positive `__is_data_struct`
+            // discriminator (the same marker `_wrapForHost`'s get-trap uses):
+            // a data struct routes straight to `_wrapForHost` (property proxy)
+            // so native `ToString` / `ToPrimitive` reaches its `toString` /
+            // `valueOf` closure fields. Genuine function closures are never in
+            // the data-struct set, so they still fall through to the callable
+            // bridge below unchanged.
+            try {
+              const isDataFn = exps?.__is_data_struct as ((v: any) => number) | undefined;
+              if (typeof isDataFn === "function" && isDataFn(a) === 1) {
+                return _wrapForHost(a, exps);
+              }
+            } catch {
+              // discriminator unavailable — fall through to the closure-bridge path
+            }
             if (exps) {
               for (const ar of [4, 3, 2, 1] as const) {
                 if (typeof exps[`__call_fn_${ar}`] === "function") {
