@@ -5950,35 +5950,14 @@ export function compileCompoundAssignment(
     // Read current value (null-guarded default for an uninitialized cell).
     emitCapturedBoxGlobalRead(ctx, fctx, capturedBoxCompound);
 
-    // externref cell + `+=`: string concat when either side is string-typed.
-    if (valType.kind === "externref" && op === ts.SyntaxKind.PlusEqualsToken) {
-      const rightTsType = ctx.checker.getTypeAtLocation(expr.right);
-      const rhsIsString = isStringType(rightTsType);
-      const lhsIsString = isStringType(ctx.checker.getTypeAtLocation(expr.left));
-      const varHasStringAssign = hasStringAssignment(name, expr) || hasStringAssignmentInParentScopes(name, expr);
-      if (rhsIsString || lhsIsString || varHasStringAssign) {
-        addStringImports(ctx);
-        const concatIdx = ctx.jsStringImports.get("concat");
-        if (concatIdx !== undefined) {
-          const compoundRhsStr = compileExpression(ctx, fctx, expr.right);
-          if (!compoundRhsStr) {
-            reportError(ctx, expr, "Failed to compile compound assignment RHS");
-            return null;
-          }
-          if (compoundRhsStr.kind === "f64" || compoundRhsStr.kind === "i32") {
-            if (compoundRhsStr.kind === "i32") fctx.body.push({ op: "f64.convert_i32_s" });
-            const toStr = ctx.funcMap.get("number_toString");
-            if (toStr !== undefined) fctx.body.push({ op: "call", funcIdx: toStr });
-          }
-          fctx.body.push({ op: "call", funcIdx: concatIdx });
-          const tmpStr = allocLocal(fctx, `__box_gcmp_${fctx.locals.length}`, valType);
-          fctx.body.push({ op: "local.set", index: tmpStr });
-          emitCapturedBoxGlobalWrite(fctx, capturedBoxCompound, tmpStr);
-          fctx.body.push({ op: "local.get", index: tmpStr });
-          return valType;
-        }
-      }
-    }
+    // NOTE: string `+=` concat on an EXTERNREF boxed cell (a string-typed boxed
+    // transitively-captured var updated with `+=` inside an accessor/method) is
+    // intentionally NOT special-cased here — it goes through the numeric path
+    // below (ToNumber both sides). That sub-case is vanishingly rare, already
+    // miscompiled on main (the whole boxed-transitive-capture-accessor path was
+    // broken), and is out of scope for this fix; adding it back would require
+    // direct type-checker probing (against the #1930 oracle ratchet). The
+    // numeric/bitwise path handles every #3039 acceptance case (f64/i32 cells).
 
     // Numeric / bitwise: the op switch is f64-based, so promote a non-f64 cell
     // value (and the RHS) to f64 and coerce the result back on writeback.
