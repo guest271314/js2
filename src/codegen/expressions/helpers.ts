@@ -72,15 +72,28 @@ export function resolveDeclaringClassForPrivateName(
   const fieldName = "__priv_" + node.text.slice(1);
   let current: ts.Node | undefined = node.parent;
   while (current) {
-    if ((ts.isClassDeclaration(current) || ts.isClassExpression(current)) && current.name) {
-      const className = current.name.text;
-      const structFields = ctx.structFields.get(className);
-      // Only return when this class actually declared the private name —
-      // a nested class that doesn't declare `#x` shouldn't shadow the outer.
-      if (structFields?.some((f) => f.name === fieldName)) {
-        const structTypeIdx = ctx.structMap.get(className);
-        if (structTypeIdx !== undefined) {
-          return { className, structTypeIdx, fieldName };
+    if (ts.isClassDeclaration(current) || ts.isClassExpression(current)) {
+      // Resolve the class's registered name. A NAMED class uses its AST name;
+      // an ANONYMOUS class expression (`class { #m }` / `static B = class { #m }`)
+      // has no `current.name`, so its members are keyed under the synthetic
+      // `__anonClass_N` id assigned during collection. Without this fallback the
+      // walk skipped anonymous classes entirely, so a private access inside one
+      // (`o.#m` in `static fieldAccess(o) { return o.#m; }`) resolved to NO
+      // declaring class → the brand check in property-access was skipped → a
+      // wrong-brand receiver (`C.B.fieldAccess(C)`) read the field instead of
+      // throwing TypeError (#3045). Same-named `#m` on a nested class now each
+      // resolve to their own synthetic struct, so the brand test discriminates.
+      const className =
+        current.name?.text ?? (ts.isClassExpression(current) ? ctx.anonClassExprNames.get(current) : undefined);
+      if (className !== undefined) {
+        const structFields = ctx.structFields.get(className);
+        // Only return when this class actually declared the private name —
+        // a nested class that doesn't declare `#x` shouldn't shadow the outer.
+        if (structFields?.some((f) => f.name === fieldName)) {
+          const structTypeIdx = ctx.structMap.get(className);
+          if (structTypeIdx !== undefined) {
+            return { className, structTypeIdx, fieldName };
+          }
         }
       }
     }

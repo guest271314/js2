@@ -672,6 +672,34 @@ function compileIdentifierCore(ctx: CodegenContext, fctx: FunctionContext, id: t
     return declaredType;
   }
 
+  // (#3045) Lexical class-name binding — a class body evaluates in a dedicated
+  // class scope whose sole binding is the class's own name (ES2015 §14.6.13
+  // ClassDefinitionEvaluation steps 3–5 & §13.2.1: `classBinding` is bound in
+  // `classScope`, immutable, and shadows any outer binding of that name). So in
+  //   let C = 'outside'; var cls = class C { method() { return C; } };
+  // the `C` inside `method` denotes the CLASS, not the outer `C`. Without this,
+  // the read falls to the captured/module-global branches below and returns the
+  // outer shadow (`'outside'`), so `cls.prototype.method() === cls` was false
+  // (a −2 regression surfaced by #2719 once the binding itself materialized to
+  // the canonical singleton). Resolve the enclosing class's own inner name to
+  // its canonical `__class_<Name>` singleton — the SAME object the binding read,
+  // `instance.constructor`, and `C.staticProp` resolve to — placed AFTER
+  // `localMap` (a genuine method-local `C` still shadows the class name) but
+  // BEFORE the captured/module-global branches (so the class name wins over an
+  // outer same-named binding, per spec). Canonicalize through `classExprNameMap`
+  // so both dual-registration names (#1394) collapse to one singleton.
+  if (fctx.enclosingClassName !== undefined) {
+    const innerEsName = ctx.functionNameMap.get(fctx.enclosingClassName);
+    if (innerEsName !== undefined && innerEsName === name && !fctx.localMap.has(name)) {
+      const canonicalClassName = ctx.classExprNameMap.get(name) ?? fctx.enclosingClassName;
+      if (ctx.classObjectGlobals?.has(canonicalClassName)) {
+        if (emitLazyClassObjectGet(ctx, fctx, canonicalClassName)) {
+          return { kind: "externref" };
+        }
+      }
+    }
+  }
+
   // (#3039) Check BOXED captured globals FIRST — a transitively-captured
   // mutable var (ref cell) that a method-shorthand / class-method / accessor
   // body reads. The promoted global holds the box; deref it (global.get;
