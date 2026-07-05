@@ -57,8 +57,8 @@
   },
   {
     "edition": "ES2015",
-    "pass": 11218,
-    "fail": 4024,
+    "pass": 11224,
+    "fail": 4018,
     "ce": 144,
     "skip": 0,
     "total": 15386,
@@ -228,12 +228,12 @@
       },
       {
         "name": "Symbol.replace",
-        "pass": 53,
-        "fail": 22,
+        "pass": 57,
+        "fail": 18,
         "ce": 0,
         "skip": 0,
         "total": 75,
-        "pct": 71
+        "pct": 76
       },
       {
         "name": "let",
@@ -255,12 +255,12 @@
       },
       {
         "name": "Symbol.split",
-        "pass": 33,
-        "fail": 23,
+        "pass": 35,
+        "fail": 21,
         "ce": 1,
         "skip": 0,
         "total": 57,
-        "pct": 58
+        "pct": 61
       },
       {
         "name": "upsert",
