@@ -21,6 +21,7 @@ import { localGlobalIdx } from "../registry/imports.js";
 import { getOrRegisterArrayType, getOrRegisterSubviewType, getOrRegisterVecType } from "../registry/types.js";
 import { coerceType, compileExpression, valTypesMatch } from "../shared.js";
 import { emitGuardedRefCast } from "../type-coercion.js";
+import { emitLazyClassObjectGet } from "../expressions/extern.js";
 import { compileArrayDestructuring, compileObjectDestructuring } from "./destructuring.js";
 import { emitLocalTdzInit, emitTdzInit } from "./tdz.js";
 import { ensureNativeStringHelpers } from "../native-strings.js";
@@ -662,7 +663,33 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
         ts.isFunctionExpression(decl.initializer) ||
         ts.isClassExpression(decl.initializer))
     ) {
-      const actualType = compileExpression(ctx, fctx, decl.initializer);
+      // (#3045 identity) Materialize a class-expression BINDING as the class's
+      // canonical `__class_<Name>` singleton (identity-stable externref) rather
+      // than the ctor-CLOSURE `compileClassExpression` emits. This is what makes
+      // `const cls = class C {}` satisfy `new cls().m() === cls` and
+      // `inst.constructor === cls`: the binding, the inner class name (`C` via
+      // identifiers.ts), `instance.constructor`, and `C.staticProp` all resolve
+      // to the ONE singleton. Scope is deliberately the BINDING ONLY — every
+      // other class-expression-as-value context (a `new Proxy(class {}, {})`
+      // target, a call argument, an inline `(class {}).f`) keeps
+      // `compileClassExpression`'s callable ctor-closure, which the Proxy /
+      // Function.prototype.toString host path needs (a struct singleton is not
+      // callable → `proxy-class` broke when this was applied globally). Falls
+      // back to `compileExpression` for a class with no singleton (externref-
+      // backed builtin subclass) or an unresolved synthetic name.
+      let actualType: ValType | null;
+      const clsSynth = ts.isClassExpression(decl.initializer)
+        ? ctx.anonClassExprNames.get(decl.initializer)
+        : undefined;
+      if (
+        clsSynth !== undefined &&
+        ctx.classObjectGlobals?.has(clsSynth) &&
+        emitLazyClassObjectGet(ctx, fctx, clsSynth)
+      ) {
+        actualType = { kind: "externref" };
+      } else {
+        actualType = compileExpression(ctx, fctx, decl.initializer);
+      }
       const closureType = actualType ?? { kind: "externref" as const };
 
       // If this is a module-level variable, also store in the module global

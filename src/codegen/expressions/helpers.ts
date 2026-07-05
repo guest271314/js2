@@ -73,23 +73,36 @@ export function resolveDeclaringClassForPrivateName(
   let current: ts.Node | undefined = node.parent;
   while (current) {
     if (ts.isClassDeclaration(current) || ts.isClassExpression(current)) {
-      // Resolve the class's registered name. A NAMED class uses its AST name;
-      // an ANONYMOUS class expression (`class { #m }` / `static B = class { #m }`)
-      // has no `current.name`, so its members are keyed under the synthetic
-      // `__anonClass_N` id assigned during collection. Without this fallback the
-      // walk skipped anonymous classes entirely, so a private access inside one
-      // (`o.#m` in `static fieldAccess(o) { return o.#m; }`) resolved to NO
-      // declaring class → the brand check in property-access was skipped → a
-      // wrong-brand receiver (`C.B.fieldAccess(C)`) read the field instead of
-      // throwing TypeError (#3045). Same-named `#m` on a nested class now each
-      // resolve to their own synthetic struct, so the brand test discriminates.
-      const className =
-        current.name?.text ?? (ts.isClassExpression(current) ? ctx.anonClassExprNames.get(current) : undefined);
-      if (className !== undefined) {
-        const structFields = ctx.structFields.get(className);
-        // Only return when this class actually declared the private name —
-        // a nested class that doesn't declare `#x` shouldn't shadow the outer.
-        if (structFields?.some((f) => f.name === fieldName)) {
+      // The declaring class is the nearest lexically-enclosing class that
+      // declares this private name in its OWN body (ES2022 §8.2.7: a private
+      // name is bound in the class's PrivateEnvironment). Match on the class's
+      // own member list — NOT `structFields`, which folds in fields INHERITED
+      // through `extends`. A subclass that inherits `#x` (`class extends Outer {
+      // f(){ return self.#x } }`) must NOT claim to declare it: resolving there
+      // would brand-check the receiver against the SUBCLASS struct, so a genuine
+      // `Outer` instance (`self`) fails `ref.test $Sub` and wrongly throws
+      // TypeError (regressed `privatefieldget-success-1`). The walk skips such a
+      // subclass and continues to the real declarer, `Outer`.
+      const declaresOwn = current.members.some(
+        (m) => m.name !== undefined && ts.isPrivateIdentifier(m.name) && m.name.text === node.text,
+      );
+      if (declaresOwn) {
+        // Resolve the class's registered name. A NAMED class uses its AST name;
+        // an ANONYMOUS class expression (`class { #m }` / `static B = class { #m }`)
+        // has no `current.name`, so its members are keyed under the synthetic
+        // `__anonClass_N` id assigned during collection. Without this fallback
+        // the walk skipped anonymous classes entirely, so a private access
+        // inside one (`o.#m` in `static fieldAccess(o) { return o.#m; }`)
+        // resolved to NO declaring class → the brand check in property-access
+        // was skipped → a wrong-brand receiver (`C.B.fieldAccess(C)`) read the
+        // field instead of throwing TypeError (#3045). Same-named `#m` on a
+        // nested class now each resolve to their own synthetic struct.
+        const className =
+          current.name?.text ?? (ts.isClassExpression(current) ? ctx.anonClassExprNames.get(current) : undefined);
+        // Guard: the field must exist in the resolved struct (own private
+        // *fields* live in structFields; a private method/getter is handled by
+        // the accessor path in property-access, so require the field slot here).
+        if (className !== undefined && ctx.structFields.get(className)?.some((f) => f.name === fieldName)) {
           const structTypeIdx = ctx.structMap.get(className);
           if (structTypeIdx !== undefined) {
             return { className, structTypeIdx, fieldName };

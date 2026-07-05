@@ -62,7 +62,7 @@ import { compileStringLiteral } from "../string-ops.js";
 import { coerceType as coerceTypeImpl, pushDefaultValue } from "../type-coercion.js";
 import { ensureDateDaysFromCivilHelper, ensureDateStruct } from "./builtins.js";
 import { emitNativeDateParse } from "../date-parse-native.js"; // (#2164) pure-Wasm new Date(str)
-import { compileSpreadCallArgs, emitLazyClassObjectGet } from "./extern.js";
+import { compileSpreadCallArgs } from "./extern.js";
 import { compileTemporalNewExpression } from "../temporal-native.js";
 import {
   emitThrowReferenceError,
@@ -1796,32 +1796,6 @@ function compileClassExpression(ctx: CodegenContext, fctx: FunctionContext, expr
     emitThrowTypeError(ctx, fctx, "Classes may not have a static property named 'prototype'");
     fctx.body.push({ op: "unreachable" });
     return { kind: "externref" };
-  }
-
-  // (#3045 / #1395 identity unification) When the class has a `__class_<Name>`
-  // class-object singleton, the class-expression VALUE must BE that singleton —
-  // NOT a fresh closure-wrapped ctor funcref. The singleton is the canonical
-  // object that every OTHER read of this class resolves to: the inner class name
-  // (`class C { m() { return C; } }` → `C` via `classExprNameMap`), the outer
-  // binding read (`cls` via the class-object block in identifiers.ts), `C.staticProp`,
-  // `instance.constructor`, and the dynamic-`new` type-test fallback. Before this,
-  // `const cls = class C {...}` materialized the binding as a ctor CLOSURE (a
-  // distinct object identity), so `new cls().m() === cls` was false — two objects
-  // for one class. Emitting the lazy singleton here collapses them to ONE identity
-  // (`emitLazyClassObjectGet` returns the same cached global on every access) and
-  // is still an externref (subtype-safe, so the #1602 funcref-in-externref-context
-  // hazard the ctor-closure fallback guarded against does not recur). The
-  // ctor-closure path below stays as the fallback for classes WITHOUT a
-  // class-object singleton (externref-backed builtin subclasses, #1366a/#2623).
-  if (syntheticName && ctx.classObjectGlobals?.has(syntheticName)) {
-    if (emitLazyClassObjectGet(ctx, fctx, syntheticName)) {
-      return { kind: "externref" };
-    }
-  }
-  if (expr.name && ctx.classObjectGlobals?.has(expr.name.text)) {
-    if (emitLazyClassObjectGet(ctx, fctx, expr.name.text)) {
-      return { kind: "externref" };
-    }
   }
 
   if (syntheticName) {
