@@ -2,7 +2,7 @@
 id: 3051
 title: "RegExp.prototype[@@replace] / [@@split] coercion protocol: ToString/ToInteger/ToLength on result-array + lastIndex/limit/flags args (~48 fails)"
 status: in-progress
-assignee: ttraenkler/dev-3051
+assignee: ttraenkler/dev-3051b
 sprint: current
 priority: medium
 horizon: m
@@ -138,9 +138,52 @@ Arrays / non-struct returns pass through unchanged. Covers @@replace, @@split,
 - Newly passing: `result-coerce-{index,index-undefined,matched,matched-global,capture,length,groups}` and their `-err` twins where the throw was already in the coercion arm, plus `coerce-lastindex`, `g-pos-increment`, `g-pos-decrement`.
 - No in-corpus regressions; `issue-1329-b3` / `issue-2161` still green. (`issue-682`'s 4 failures are **pre-existing** on `origin/main`, unrelated — standalone refusal tests.)
 
-## Remaining Work (Slice 2+ — several senior-depth)
+## Landed Slice 2 (dev-3051b) — replaceValue ToString bridge + flag Symbol-coercion
 
-Not addressed by Slice 1 (still ~30 default-lane fails). Distinct mechanisms:
+**PR: `src/runtime.ts` (`wrapCallable` data-struct guard) + `src/codegen/index.ts`
+(RegExp `.global`/`.unicode` externref retype) + `tests/issue-3051.test.ts`.**
+Two dev-doable clusters from the Slice-1 remaining list:
+
+- **replaceValue `ToString` (cluster 2 — `arg-2-coerce{,-err}`):** in
+  `__regex_symbol_call`, the second @@replace/@@split arg was routed through
+  `wrapCallable`, whose `_wrapWasmClosure` probe **false-positives on ANY struct**
+  when the module exports `__call_fn_N` (it checks dispatcher existence, not
+  closure-ness). So a non-callable object-literal replaceValue
+  (`{toString(){…}}`) got wrapped as a callable bridge → V8 saw
+  `functionalReplace = true`, INVOKED it, and `ToString` of the bogus return was
+  `"null"`. Fix: gate `wrapCallable` on the **positive `__is_data_struct`
+  discriminator** (same marker `_wrapForHost`'s get-trap uses) — a data struct
+  routes straight to `_wrapForHost` (property proxy) so native `ToString` /
+  `ToPrimitive` reaches its `toString`/`valueOf` closure fields; genuine closures
+  are never in the data-struct set, so functional replace is unchanged.
+- **flag Symbol-coercion (cluster 3 — `coerce-global`, `coerce-unicode`):**
+  test262 re-marks the spec-readonly `.global`/`.unicode` writable
+  (`Object.defineProperty(r,'global',{writable:true})`) then assigns arbitrary
+  values (`r.global = Symbol.replace`). The extern property typed `boolean` made
+  the generated `RegExp_set_global(externref, i32)` setter eagerly ToNumber the
+  RHS → a Symbol trapped at the wasm boundary before storing. Fix: **retype
+  `.global`/`.unicode` to `externref` in host mode** (mirroring the #2671
+  `lastIndex` treatment) so the raw value round-trips onto the native RegExp and
+  the native @@replace/@@split protocol performs the spec `ToBoolean` itself;
+  explicit `r.global` reads coerce externref→boolean at the use site (verified a
+  boxed `false` still unboxes falsy, and `=== true`/`=== false` still work).
+
+**Impact (local default-lane, isolated per-file sweep of
+`built-ins/RegExp/prototype/Symbol.{replace,split}`, apples-to-apples vs the
+same runner on `origin/main`): 83 → 88 pass (+5), zero regressions.** Flips:
+`arg-2-coerce`, `arg-2-coerce-err`, `coerce-global`, `coerce-unicode`, and
+`Symbol.split/coerce-limit-err` (bonus — the same `wrapCallable` data-struct
+guard lets the @@split `limit` object's throwing `valueOf` propagate).
+Broader validation: isolated sweep of the delegating corpus (459 files across
+`String.prototype.{replace,replaceAll,split,match,matchAll,search}` +
+`RegExp.prototype.{global,unicode,Symbol.match,Symbol.matchAll,Symbol.search}`)
+showed **0 regressions**; regex vitest suites (issue-1329-b3 / 1539 / 1911 /
+1912 / 2161) unchanged (the 2 pre-existing standalone-refusal fails are on
+`origin/main` too). `tests/issue-3051.test.ts` — 10/10 pass.
+
+## Remaining Work (Slice 3+ — senior-depth)
+
+Not addressed by Slice 1 or Slice 2. Distinct mechanisms, all senior-depth:
 
 1. **`result-*-err` abrupt-throw propagation** (`result-get-{index,length,matched}-err`,
    `result-get-groups-prop-err`, `result-coerce-groups-err`): the result object
@@ -149,26 +192,18 @@ Not addressed by Slice 1 (still ~30 default-lane fails). Distinct mechanisms:
    wasm `throw` must surface as a JS exception V8 propagates back to the user's
    `try/catch`. Wasm-exception → host → user-catch bridging across the native
    protocol is **senior-depth**.
-2. **replaceValue `ToString` (`arg-2-coerce{,-err}`)**: `re[@@replace](s, obj)`
-   where `obj` is a non-callable struct with `toString`. `__regex_symbol_call`'s
-   `wrapCallable(arg1)` wraps it via `_wrapForHost`, but `ToString(proxy)` returns
-   `"null"` instead of the struct's `toString` result — the `wrapCallable` /
-   `_wrapForHost` `toString`-field dispatch drops the value. Needs deeper look at
-   the non-closure-struct arm of `wrapCallable`.
-3. **`Cannot convert a Symbol value to a number` (`coerce-global`, `coerce-unicode`)**:
-   the test does `Object.defineProperty(r,'global',{writable:true}); r.global = Symbol.replace`
-   (and `= {}`, `= NaN`, …). Assigning arbitrary values to the **typed** `.global`/
-   `.unicode` boolean property makes codegen coerce the RHS Symbol → number →
-   throw. Static-type-coercion / property-write issue in codegen, not the protocol.
-4. **`Cannot convert object to primitive value` (@@split cluster:** `coerce-flags`,
+2. **`Cannot convert object to primitive value` (@@split cluster:** `coerce-flags`,
    `limit-0-bail`, `str-coerce-lastindex`, `str-result-coerce-length`,
    `str-set-lastindex-{match,no-match}`): object args / lastIndex round-trips that
-   throw before reaching the protocol — same static-coercion family as (3).
-5. **`SpeciesConstructor` for @@split** (`species-ctor{,-y,-err,-ctor-non-obj,-species-non-ctor}`,
+   throw before reaching the protocol. Note `coerce-limit-err` (a *throwing*
+   valueOf) was fixed by Slice 2's data-struct guard, but these plain
+   object-to-primitive cases still trap — a deeper static-coercion / value-read
+   family. **Senior-depth.**
+3. **`SpeciesConstructor` for @@split** (`species-ctor{,-y,-err,-ctor-non-obj,-species-non-ctor}`,
    `splitter-proto-from-ctor-realm`): `C = SpeciesConstructor(rx, %RegExp%)` then
    `Construct(C, [rx, flags])` — bridging a user constructor through the native
-   split. Deep.
-6. **method-as-value (`name.js`)**: `RegExp.prototype[Symbol.replace]` accessed as
+   split. Deep. **Senior-depth.**
+4. **method-as-value (`name.js`)**: `RegExp.prototype[Symbol.replace]` accessed as
    a **value** (for `.name`) rather than called — the codegen resolves the member
    to the protocol-id `i32.const 8`, so `verifyProperty(<8>, "name", …)` fails.
    Separate feature (well-known-symbol method as first-class value).
