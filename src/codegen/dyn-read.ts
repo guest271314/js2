@@ -39,7 +39,11 @@ import type { Instr, ValType } from "../ir/types.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { addFuncType } from "./registry/types.js";
 import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S3) stable-regime minting
-import { undefinedSingletonActive } from "./any-helpers.js"; // (#2106 S1)
+import {
+  undefinedSingletonActive, // (#2106 S1)
+  ensureAnyFromExternHelper, // (#3053 U0) settled honest classifier (CS1b)
+  ensureAnyToExternHelper, // (#3053 U0) key marshalling
+} from "./any-helpers.js";
 import { ensureGetUndefined } from "./expressions/late-imports.js";
 import { ensureObjectRuntime } from "./object-runtime.js";
 import { stringConstantExternrefInstrs } from "./native-strings.js";
@@ -427,3 +431,667 @@ export function emitDynGet(ctx: CodegenContext, fctx: FunctionContext, keyName: 
  * `closure-classifier.ts` and is shared with index.ts's `__typeof*` natives —
  * one predicate, never two divergent arm lists. Imported (aliased to the prior
  * local name) at the top of this module. */
+
+// ───────────────────────────────────────────────────────────────────────────
+// (#3053 U0) Unified dynamic-reader carrier substrate.
+//
+// `__dyn_member_get(recv, key) -> carrier` is the ONE locals-free, carrier-
+// uniform primitive that both #3037 CS3 (object-identity) and #2949 S5.4 (IR
+// claim-rate) converge on. It reads a named/indexed member from a dynamic
+// receiver and returns a tag-HONEST carrier — a `$AnyValue` in gc/standalone
+// (externref in host) — instead of the identity-losing bare externref the
+// legacy `emitDynGet`/`__extern_get` hand back (which downstream tag-5-boxes,
+// losing BOTH object identity and the typed carrier).
+//
+// The whole design turns on ONE floor-safety rule that all three prior −299/
+// −788 deaths violated: the externref↔carrier round-trip lives INSIDE this
+// helper, never in a shared seam. Concretely the standalone body is:
+//
+//   recvExt = __carrier_recv_to_extern(recv)   ;; INTERNAL peel — see below
+//   keyExt  = __any_to_extern(key)             ;; existing key marshalling
+//   resExt  = __extern_get(recvExt, keyExt)    ;; existing proto-walk reader
+//   return  __any_from_extern_honest(resExt)   ;; settled CS1b classifier
+//
+// The critical, DIFFERENT-from-`__any_to_extern` piece is
+// `__carrier_recv_to_extern`: unlike the global `__any_to_extern` (which keeps
+// a tag-6 payload WRAPPED so an `any` boundary round-trips through the generic
+// classifier — the CS1a read-breaker), this PEELS the tag-6 payload to the RAW
+// `$Object` ref so `__extern_get`'s `ref.test $Object` HITS. Because the peel
+// lives INSIDE the substrate helper and its output feeds ONLY `__extern_get`
+// (then is immediately re-boxed honest), the global `__any_to_extern` seam —
+// and every other consumer of it — stays byte-identical, and re-reads compose:
+// `__dyn_member_get(__dyn_member_get(o,"a"),"z")` never hits the `__any_to_extern`
+// tag-6 breaker.
+//
+// This is U0: BUILD the helper only. NOTHING calls it yet (U1 wires it into the
+// IR member-read). So it is byte-inert: `ensureDynMemberGet` is gated on the
+// `ctx.usesDynMemberGet` latch, which nothing sets in U0, plus a
+// `JS2WASM_FORCE_DYN_MEMBER_GET=1` self-test escape (mirrors #2580 M0's
+// `ensureDynReadHelpers` / `JS2WASM_FORCE_DYN_READ`). The latch — NOT dead-elim —
+// guarantees zero bytes for every module that never calls it (an uncalled
+// DEFINED function is not import-pruned). Under FORCE the helper is emitted AND
+// a family of exported `__dmg_*` self-test drivers exercise the carrier round-
+// trip (object→tag-6 identity, string→tag-5 content, number→tag-3 value, the
+// re-read composition) on host + standalone. Registered stable-handle
+// (mintDefinedFunc) so a later dead-elim import shift can never desync a baked
+// call (the #2043 late-shift class): live-import call immediates are remapped by
+// `eliminateDeadImports`, stable handles are skipped.
+
+// `$AnyValue` struct field layout (mirrors ensureAnyValueType):
+//   0 tag(i32) · 1 i32val(i32) · 2 f64val(f64) · 3 refval(eqref) · 4 externval(externref)
+const AV_TAG = 0;
+const AV_I32 = 1;
+const AV_F64 = 2;
+const AV_REF = 3;
+const AV_EXT = 4;
+
+/**
+ * (#3053 U0) Register the unified dynamic-reader carrier primitive
+ * `__dyn_member_get` (+ the internal `__carrier_recv_to_extern` peel in gc/
+ * standalone). Idempotent and **gated on `ctx.usesDynMemberGet`** — a no-op
+ * unless a call site (U1+) has flagged the module needs it, so U0 (no call
+ * sites) emits nothing and every module is byte-identical.
+ *
+ * `JS2WASM_FORCE_DYN_MEMBER_GET=1` force-emits the helper AND a set of exported
+ * `__dmg_*` unit-test drivers (the U0 anti-vacuity self-test). Off by default;
+ * never set in production, so it cannot affect any normal/CI compile.
+ *
+ * Call this in the finalize phase, right after `ensureDynReadHelpers`, BEFORE
+ * dead-elim/freeze so the baked funcIdx values are stable. Like
+ * `ensureDynReadHelpers`, it does NOT call `ensureObjectRuntime` (registering
+ * struct types this late desyncs the type-index space — #2043); it looks the
+ * required natives up by name and bails without emitting if any is absent (the
+ * call site keeps its prior lowering — no regression).
+ */
+export function ensureDynMemberGet(ctx: CodegenContext): void {
+  const forceSelfTest = process.env.JS2WASM_FORCE_DYN_MEMBER_GET === "1";
+  if (forceSelfTest) ctx.usesDynMemberGet = true;
+  if (!ctx.usesDynMemberGet) return; // U0 / member-get-free modules: byte-identical.
+  if (ctx.dynMemberGetHelpersEmitted) return;
+  ctx.dynMemberGetHelpersEmitted = true;
+
+  const externref: ValType = { kind: "externref" };
+  const i32: ValType = { kind: "i32" };
+
+  const externGetIdx = ctx.funcMap.get("__extern_get");
+  if (externGetIdx === undefined) {
+    ctx.dynMemberGetHelpersEmitted = false;
+    ctx.usesDynMemberGet = false;
+    return;
+  }
+
+  function addHelper(
+    name: string,
+    params: ValType[],
+    results: ValType[],
+    body: Instr[],
+    locals: { name: string; type: ValType }[] = [],
+  ): number | undefined {
+    const existing = ctx.funcMap.get(name);
+    if (existing !== undefined) return existing;
+    const typeIdx = addFuncType(ctx, params, results, name);
+    const funcIdx = mintDefinedFunc(ctx);
+    pushDefinedFunc(ctx, funcIdx, { name, typeIdx, locals, body, exported: false } as never);
+    ctx.funcMap.set(name, funcIdx);
+    return funcIdx;
+  }
+
+  if (ctx.standalone || ctx.wasi) {
+    // ── gc/standalone carrier = (ref null $AnyValue) ──────────────────────
+    const anyIdx = ctx.anyValueTypeIdx;
+    if (anyIdx < 0) {
+      ctx.dynMemberGetHelpersEmitted = false;
+      ctx.usesDynMemberGet = false;
+      return;
+    }
+    const anyRefNull: ValType = { kind: "ref_null", typeIdx: anyIdx };
+
+    // The settled #3037 CS1b honest classifier (tag-3/tag-4 peel BEFORE the eq
+    // test, then tag-5 string / tag-6 object) and the key marshaller. Registering
+    // these at finalize is safe: both only `addFuncType` + mint and reuse struct
+    // types reserved during body compilation (`ensureAnyValueType` early-returns).
+    const honestIdx = ensureAnyFromExternHelper(ctx, { forceHonest: true });
+    const anyToExternIdx = ensureAnyToExternHelper(ctx);
+    const boxNumberIdx = ctx.funcMap.get("__box_number");
+    const boxBooleanIdx = ctx.funcMap.get("__box_boolean");
+    if (
+      honestIdx === undefined ||
+      anyToExternIdx === undefined ||
+      boxNumberIdx === undefined ||
+      boxBooleanIdx === undefined
+    ) {
+      ctx.dynMemberGetHelpersEmitted = false;
+      ctx.usesDynMemberGet = false;
+      return;
+    }
+
+    // __carrier_recv_to_extern(v: (ref null $AnyValue)) -> externref
+    //   PEELS the carrier to the externref `__extern_get` needs — the load-bearing
+    //   difference from `__any_to_extern` (which WRAPS tag-6). tag 6 → the RAW
+    //   `$Object` ref (field 3) so `__extern_get`'s `ref.test $Object` hits;
+    //   tag 5 → the string externref (field 4); tag 2/3 → __box_number;
+    //   tag 4 → __box_boolean; tag 0/1/null → ref.null.extern (a null/undefined
+    //   receiver → __extern_get miss → the singleton, no null-deref).
+    const peelBody: Instr[] = [
+      { op: "local.get", index: 0 } as Instr,
+      { op: "ref.is_null" } as Instr,
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "ref.null.extern" } as Instr, { op: "return" } as Instr],
+      } as Instr,
+      // tag = v.tag
+      { op: "local.get", index: 0 } as Instr,
+      { op: "ref.as_non_null" } as Instr,
+      { op: "struct.get", typeIdx: anyIdx, fieldIdx: AV_TAG } as Instr,
+      { op: "local.set", index: 1 } as Instr,
+      // tag 6 → extern.convert_any(v.refval)  — the RAW $Object
+      { op: "local.get", index: 1 } as Instr,
+      { op: "i32.const", value: TAG_REF } as Instr,
+      { op: "i32.eq" } as Instr,
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: 0 } as Instr,
+          { op: "ref.as_non_null" } as Instr,
+          { op: "struct.get", typeIdx: anyIdx, fieldIdx: AV_REF } as Instr,
+          { op: "extern.convert_any" } as Instr,
+          { op: "return" } as Instr,
+        ],
+      } as Instr,
+      // tag 5 → v.externval (string externref)
+      { op: "local.get", index: 1 } as Instr,
+      { op: "i32.const", value: 5 } as Instr,
+      { op: "i32.eq" } as Instr,
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: 0 } as Instr,
+          { op: "ref.as_non_null" } as Instr,
+          { op: "struct.get", typeIdx: anyIdx, fieldIdx: AV_EXT } as Instr,
+          { op: "return" } as Instr,
+        ],
+      } as Instr,
+      // tag 3 → __box_number(v.f64val)
+      { op: "local.get", index: 1 } as Instr,
+      { op: "i32.const", value: 3 } as Instr,
+      { op: "i32.eq" } as Instr,
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: 0 } as Instr,
+          { op: "ref.as_non_null" } as Instr,
+          { op: "struct.get", typeIdx: anyIdx, fieldIdx: AV_F64 } as Instr,
+          { op: "call", funcIdx: boxNumberIdx } as Instr,
+          { op: "return" } as Instr,
+        ],
+      } as Instr,
+      // tag 4 → __box_boolean(v.i32val)
+      { op: "local.get", index: 1 } as Instr,
+      { op: "i32.const", value: 4 } as Instr,
+      { op: "i32.eq" } as Instr,
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: 0 } as Instr,
+          { op: "ref.as_non_null" } as Instr,
+          { op: "struct.get", typeIdx: anyIdx, fieldIdx: AV_I32 } as Instr,
+          { op: "call", funcIdx: boxBooleanIdx } as Instr,
+          { op: "return" } as Instr,
+        ],
+      } as Instr,
+      // tag 2 → __box_number(f64.convert_i32_s(v.i32val))
+      { op: "local.get", index: 1 } as Instr,
+      { op: "i32.const", value: 2 } as Instr,
+      { op: "i32.eq" } as Instr,
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: 0 } as Instr,
+          { op: "ref.as_non_null" } as Instr,
+          { op: "struct.get", typeIdx: anyIdx, fieldIdx: AV_I32 } as Instr,
+          { op: "f64.convert_i32_s" } as Instr,
+          { op: "call", funcIdx: boxNumberIdx } as Instr,
+          { op: "return" } as Instr,
+        ],
+      } as Instr,
+      // tag 0 (null) / 1 (undefined) receiver → null externref → __extern_get miss
+      { op: "ref.null.extern" } as Instr,
+    ];
+    const peelIdx = addHelper("__carrier_recv_to_extern", [anyRefNull], [externref], peelBody, [
+      { name: "tag", type: i32 },
+    ]);
+    if (peelIdx === undefined) {
+      ctx.dynMemberGetHelpersEmitted = false;
+      ctx.usesDynMemberGet = false;
+      return;
+    }
+
+    // __dyn_member_get(recv, key) -> (ref null $AnyValue): the self-contained
+    // round-trip. The result of `__any_from_extern_honest` is a (ref $AnyValue),
+    // a subtype of the (ref null $AnyValue) result, so it flows unchanged.
+    const dmgBody: Instr[] = [
+      { op: "local.get", index: 0 } as Instr,
+      { op: "call", funcIdx: peelIdx } as Instr,
+      { op: "local.get", index: 1 } as Instr,
+      { op: "call", funcIdx: anyToExternIdx } as Instr,
+      { op: "call", funcIdx: externGetIdx } as Instr,
+      { op: "call", funcIdx: honestIdx } as Instr,
+    ];
+    const dmgIdx = addHelper("__dyn_member_get", [anyRefNull, anyRefNull], [anyRefNull], dmgBody);
+    if (dmgIdx === undefined) {
+      ctx.dynMemberGetHelpersEmitted = false;
+      ctx.usesDynMemberGet = false;
+      return;
+    }
+
+    if (forceSelfTest) {
+      emitDynMemberGetSelfTestStandalone(ctx, {
+        anyIdx,
+        dmgIdx,
+        honestIdx,
+        boxNumberIdx,
+        boxBooleanIdx,
+      });
+    }
+    return;
+  }
+
+  // ── host (gc) carrier = externref ───────────────────────────────────────
+  // The host `__extern_get` import already returns the spec `Get` externref; the
+  // carrier IS externref, so no box/peel. `externGetIdx` is a live import index;
+  // a later dead-elim import shift remaps this baked call (stable-handle body,
+  // scanned by `eliminateDeadImports`).
+  const dmgHostBody: Instr[] = [
+    { op: "local.get", index: 0 } as Instr,
+    { op: "local.get", index: 1 } as Instr,
+    { op: "call", funcIdx: externGetIdx } as Instr,
+  ];
+  const dmgHostIdx = addHelper("__dyn_member_get", [externref, externref], [externref], dmgHostBody);
+  if (dmgHostIdx === undefined) {
+    ctx.dynMemberGetHelpersEmitted = false;
+    ctx.usesDynMemberGet = false;
+    return;
+  }
+  if (forceSelfTest) emitDynMemberGetSelfTestHost(ctx, dmgHostIdx);
+}
+
+/**
+ * (#3053 U0) Register an EXPORTED self-test driver (FORCE mode only). Uses a
+ * stable handle so a dead-elim import shift can't desync the exported index.
+ */
+function addDriverExport(
+  ctx: CodegenContext,
+  name: string,
+  results: ValType[],
+  locals: { name: string; type: ValType }[],
+  body: Instr[],
+): void {
+  if (ctx.funcMap.has(name)) return;
+  const typeIdx = addFuncType(ctx, [], results, name);
+  const funcIdx = mintDefinedFunc(ctx);
+  pushDefinedFunc(ctx, funcIdx, { name, typeIdx, locals, body, exported: true } as never);
+  ctx.funcMap.set(name, funcIdx);
+  ctx.mod.exports.push({ name, desc: { kind: "func", index: funcIdx } });
+}
+
+/**
+ * (#3053 U0) Standalone/gc self-test drivers. Each builds a receiver with the
+ * object runtime, boxes it to a tag-6 carrier via the honest classifier, calls
+ * `__dyn_member_get`, and returns an i32 verdict the unit test asserts. The keys
+ * ("a"/"b"/"s"/"n"/"bo"/"z") and value "ab" MUST already be pooled by the test
+ * source (dynamic reads pool them) so `stringConstantExternrefInstrs` never adds
+ * an import at finalize.
+ */
+function emitDynMemberGetSelfTestStandalone(
+  ctx: CodegenContext,
+  ids: { anyIdx: number; dmgIdx: number; honestIdx: number; boxNumberIdx: number; boxBooleanIdx: number },
+): void {
+  const { anyIdx, dmgIdx, honestIdx, boxNumberIdx, boxBooleanIdx } = ids;
+  const i32: ValType = { kind: "i32" };
+  const externref: ValType = { kind: "externref" };
+  const anyRefNull: ValType = { kind: "ref_null", typeIdx: anyIdx };
+  const newObjIdx = ctx.funcMap.get("__new_plain_object");
+  const externSetIdx = ctx.funcMap.get("__extern_set");
+  const strictEqIdx = ctx.funcMap.get("__any_strict_eq");
+  if (
+    newObjIdx === undefined ||
+    externSetIdx === undefined ||
+    strictEqIdx === undefined ||
+    !ctx.stringGlobalMap.has("a") ||
+    !ctx.stringGlobalMap.has("b") ||
+    !ctx.stringGlobalMap.has("s") ||
+    !ctx.stringGlobalMap.has("n") ||
+    !ctx.stringGlobalMap.has("bo") ||
+    !ctx.stringGlobalMap.has("z") ||
+    !ctx.stringGlobalMap.has("ab")
+  ) {
+    return; // dependency missing → skip drivers (self-test will surface it)
+  }
+  const key = (s: string): Instr[] => stringConstantExternrefInstrs(ctx, s) as Instr[];
+  const newObj = (): Instr[] => [{ op: "call", funcIdx: newObjIdx } as Instr];
+  const call = (fn: number): Instr => ({ op: "call", funcIdx: fn }) as Instr;
+  const box = (carrier: number): Instr => call(carrier); // honest classifier / box helper
+  // carrierOf(objLocal): honest($AnyValue tag-6) of the object externref in a local
+  const carrierOf = (objLocal: number): Instr[] => [{ op: "local.get", index: objLocal } as Instr, call(honestIdx)];
+  const keyCarrier = (s: string): Instr[] => [...key(s), call(honestIdx)];
+  const readTag = (): Instr[] => [
+    { op: "ref.as_non_null" } as Instr,
+    { op: "struct.get", typeIdx: anyIdx, fieldIdx: AV_TAG } as Instr,
+  ];
+
+  // Driver 1 — object read → tag 6.
+  addDriverExport(
+    ctx,
+    "__dmg_st_object_tag",
+    [i32],
+    [
+      { name: "o", type: externref },
+      { name: "inner", type: externref },
+    ],
+    [
+      ...newObj(),
+      { op: "local.set", index: 1 } as Instr, // inner
+      ...newObj(),
+      { op: "local.set", index: 0 } as Instr, // o
+      { op: "local.get", index: 0 } as Instr,
+      ...key("a"),
+      { op: "local.get", index: 1 } as Instr,
+      call(externSetIdx),
+      ...carrierOf(0),
+      ...keyCarrier("a"),
+      call(dmgIdx),
+      ...readTag(),
+    ],
+  );
+
+  // Driver 2 — aliased object reads ARE === (identity via tag-6 ref.eq → 1).
+  const aliasedIdentity = (k1: string, k2: string, distinct: boolean): Instr[] => [
+    ...newObj(),
+    { op: "local.set", index: 1 } as Instr, // inner
+    ...(distinct ? [...newObj(), { op: "local.set", index: 2 } as Instr] : []), // inner2 (distinct only)
+    ...newObj(),
+    { op: "local.set", index: 0 } as Instr, // o
+    { op: "local.get", index: 0 } as Instr,
+    ...key(k1),
+    { op: "local.get", index: 1 } as Instr,
+    call(externSetIdx),
+    { op: "local.get", index: 0 } as Instr,
+    ...key(k2),
+    { op: "local.get", index: distinct ? 2 : 1 } as Instr,
+    call(externSetIdx),
+    ...carrierOf(0),
+    ...keyCarrier(k1),
+    call(dmgIdx),
+    ...carrierOf(0),
+    ...keyCarrier(k2),
+    call(dmgIdx),
+    call(strictEqIdx),
+  ];
+  addDriverExport(
+    ctx,
+    "__dmg_st_object_identity",
+    [i32],
+    [
+      { name: "o", type: externref },
+      { name: "inner", type: externref },
+      { name: "inner2", type: externref },
+    ],
+    aliasedIdentity("a", "b", false),
+  );
+  // Driver 3 — distinct objects are NOT === (anti-vacuity → 0).
+  addDriverExport(
+    ctx,
+    "__dmg_st_object_distinct",
+    [i32],
+    [
+      { name: "o", type: externref },
+      { name: "inner", type: externref },
+      { name: "inner2", type: externref },
+    ],
+    aliasedIdentity("a", "b", true),
+  );
+
+  // Driver 4/5 — string read → tag 5, content-=== → 1.
+  const buildStringObj: Instr[] = [
+    ...newObj(),
+    { op: "local.set", index: 0 } as Instr,
+    { op: "local.get", index: 0 } as Instr,
+    ...key("s"),
+    ...key("ab"),
+    call(externSetIdx),
+  ];
+  addDriverExport(
+    ctx,
+    "__dmg_st_string_tag",
+    [i32],
+    [{ name: "o", type: externref }],
+    [...buildStringObj, ...carrierOf(0), ...keyCarrier("s"), call(dmgIdx), ...readTag()],
+  );
+  addDriverExport(
+    ctx,
+    "__dmg_st_string_value",
+    [i32],
+    [{ name: "o", type: externref }],
+    [
+      ...buildStringObj,
+      ...carrierOf(0),
+      ...keyCarrier("s"),
+      call(dmgIdx),
+      ...carrierOf(0),
+      ...keyCarrier("s"),
+      call(dmgIdx),
+      call(strictEqIdx),
+    ],
+  );
+
+  // Driver 6/7 — number read → tag 3, value-=== → 1.
+  const buildNumberObj: Instr[] = [
+    ...newObj(),
+    { op: "local.set", index: 0 } as Instr,
+    { op: "local.get", index: 0 } as Instr,
+    ...key("n"),
+    { op: "f64.const", value: 42 } as Instr,
+    box(boxNumberIdx),
+    call(externSetIdx),
+  ];
+  addDriverExport(
+    ctx,
+    "__dmg_st_number_tag",
+    [i32],
+    [{ name: "o", type: externref }],
+    [...buildNumberObj, ...carrierOf(0), ...keyCarrier("n"), call(dmgIdx), ...readTag()],
+  );
+  addDriverExport(
+    ctx,
+    "__dmg_st_number_value",
+    [i32],
+    [{ name: "o", type: externref }],
+    [
+      ...buildNumberObj,
+      ...carrierOf(0),
+      ...keyCarrier("n"),
+      call(dmgIdx),
+      ...carrierOf(0),
+      ...keyCarrier("n"),
+      call(dmgIdx),
+      call(strictEqIdx),
+    ],
+  );
+
+  // Driver 8 — boolean read → tag 4.
+  addDriverExport(
+    ctx,
+    "__dmg_st_boolean_tag",
+    [i32],
+    [{ name: "o", type: externref }],
+    [
+      ...newObj(),
+      { op: "local.set", index: 0 } as Instr,
+      { op: "local.get", index: 0 } as Instr,
+      ...key("bo"),
+      { op: "i32.const", value: 1 } as Instr,
+      box(boxBooleanIdx),
+      call(externSetIdx),
+      ...carrierOf(0),
+      ...keyCarrier("bo"),
+      call(dmgIdx),
+      ...readTag(),
+    ],
+  );
+
+  // Driver 9 — RE-READ composition `dmg(dmg(o,"a"),"z")`. Proves the internal
+  // peel round-trips (the CS1a `__any_to_extern` breaker is NOT re-triggered):
+  // inner.z = 7, o.a = inner; reading o.a yields a tag-6 carrier for inner, then
+  // reading .z off THAT carrier yields tag-3 value 7. Returns tag*1000 + value.
+  addDriverExport(
+    ctx,
+    "__dmg_st_reread",
+    [i32],
+    [
+      { name: "o", type: externref },
+      { name: "inner", type: externref },
+      { name: "r", type: anyRefNull },
+    ],
+    [
+      ...newObj(),
+      { op: "local.set", index: 1 } as Instr, // inner
+      { op: "local.get", index: 1 } as Instr,
+      ...key("z"),
+      { op: "f64.const", value: 7 } as Instr,
+      box(boxNumberIdx),
+      call(externSetIdx),
+      ...newObj(),
+      { op: "local.set", index: 0 } as Instr, // o
+      { op: "local.get", index: 0 } as Instr,
+      ...key("a"),
+      { op: "local.get", index: 1 } as Instr,
+      call(externSetIdx),
+      // r = dmg(dmg(carrier(o), "a"), "z")
+      ...carrierOf(0),
+      ...keyCarrier("a"),
+      call(dmgIdx),
+      ...keyCarrier("z"),
+      call(dmgIdx),
+      { op: "local.set", index: 2 } as Instr,
+      // tag*1000
+      { op: "local.get", index: 2 } as Instr,
+      { op: "ref.as_non_null" } as Instr,
+      { op: "struct.get", typeIdx: anyIdx, fieldIdx: AV_TAG } as Instr,
+      { op: "i32.const", value: 1000 } as Instr,
+      { op: "i32.mul" } as Instr,
+      // + trunc(f64val)
+      { op: "local.get", index: 2 } as Instr,
+      { op: "ref.as_non_null" } as Instr,
+      { op: "struct.get", typeIdx: anyIdx, fieldIdx: AV_F64 } as Instr,
+      { op: "i32.trunc_f64_s" } as Instr,
+      { op: "i32.add" } as Instr,
+    ],
+  );
+}
+
+/**
+ * (#3053 U0) Host (gc) self-test drivers. In host mode the carrier IS externref
+ * and `__dyn_member_get` is a thin `__extern_get` wrapper; objects from the host
+ * `__new_plain_object` are plain JS objects, so writes go through the host
+ * `__extern_set_strict` import and identity through the host `__host_eq` (JS
+ * `===`) import — NOT the WasmGC `__extern_set`/`ref.eq` (the standalone path).
+ * Verifies value (number readback) + object identity + distinctness end-to-end
+ * through the host runtime. Keys "a"/"b"/"n" pooled by the test source.
+ */
+function emitDynMemberGetSelfTestHost(ctx: CodegenContext, dmgIdx: number): void {
+  const i32: ValType = { kind: "i32" };
+  const externref: ValType = { kind: "externref" };
+  const newObjIdx = ctx.funcMap.get("__new_plain_object");
+  const externSetIdx = ctx.funcMap.get("__extern_set_strict");
+  const boxNumberIdx = ctx.funcMap.get("__box_number");
+  const unboxNumberIdx = ctx.funcMap.get("__unbox_number");
+  const hostEqIdx = ctx.funcMap.get("__host_eq");
+  if (
+    newObjIdx === undefined ||
+    externSetIdx === undefined ||
+    boxNumberIdx === undefined ||
+    unboxNumberIdx === undefined ||
+    hostEqIdx === undefined ||
+    !ctx.stringGlobalMap.has("a") ||
+    !ctx.stringGlobalMap.has("b") ||
+    !ctx.stringGlobalMap.has("n")
+  ) {
+    return;
+  }
+  const key = (s: string): Instr[] => stringConstantExternrefInstrs(ctx, s) as Instr[];
+  const call = (fn: number): Instr => ({ op: "call", funcIdx: fn }) as Instr;
+
+  // Value: o.n = 7; return trunc(unbox(dmg(o, "n"))).
+  addDriverExport(
+    ctx,
+    "__dmg_gc_value",
+    [i32],
+    [{ name: "o", type: externref }],
+    [
+      { op: "call", funcIdx: newObjIdx } as Instr,
+      { op: "local.set", index: 0 } as Instr,
+      { op: "local.get", index: 0 } as Instr,
+      ...key("n"),
+      { op: "f64.const", value: 7 } as Instr,
+      call(boxNumberIdx),
+      call(externSetIdx),
+      { op: "local.get", index: 0 } as Instr,
+      ...key("n"),
+      call(dmgIdx),
+      call(unboxNumberIdx),
+      { op: "i32.trunc_f64_s" } as Instr,
+    ],
+  );
+
+  // Identity: inner aliased at o.a & o.b; __host_eq(dmg(o,"a"), dmg(o,"b")).
+  const identity = (distinct: boolean): Instr[] => [
+    { op: "call", funcIdx: newObjIdx } as Instr,
+    { op: "local.set", index: 1 } as Instr, // inner
+    ...(distinct ? [{ op: "call", funcIdx: newObjIdx } as Instr, { op: "local.set", index: 2 } as Instr] : []),
+    { op: "call", funcIdx: newObjIdx } as Instr,
+    { op: "local.set", index: 0 } as Instr, // o
+    { op: "local.get", index: 0 } as Instr,
+    ...key("a"),
+    { op: "local.get", index: 1 } as Instr,
+    call(externSetIdx),
+    { op: "local.get", index: 0 } as Instr,
+    ...key("b"),
+    { op: "local.get", index: distinct ? 2 : 1 } as Instr,
+    call(externSetIdx),
+    { op: "local.get", index: 0 } as Instr,
+    ...key("a"),
+    call(dmgIdx),
+    { op: "local.get", index: 0 } as Instr,
+    ...key("b"),
+    call(dmgIdx),
+    call(hostEqIdx),
+  ];
+  addDriverExport(
+    ctx,
+    "__dmg_gc_identity",
+    [i32],
+    [
+      { name: "o", type: externref },
+      { name: "inner", type: externref },
+      { name: "inner2", type: externref },
+    ],
+    identity(false),
+  );
+  addDriverExport(
+    ctx,
+    "__dmg_gc_distinct",
+    [i32],
+    [
+      { name: "o", type: externref },
+      { name: "inner", type: externref },
+      { name: "inner2", type: externref },
+    ],
+    identity(true),
+  );
+}

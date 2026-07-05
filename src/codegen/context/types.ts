@@ -1042,6 +1042,20 @@ export interface CodegenContext {
   usesDynRead: boolean;
   /** (#2580 M0) Idempotence latch for `ensureDynReadHelpers` (once per module). */
   dynReadHelpersEmitted: boolean;
+  /**
+   * (#3053 U0) Unified dynamic-reader carrier substrate. Set true by a call site
+   * (U1's IR member-read wiring) that needs the carrier-uniform
+   * `__dyn_member_get(recv,key) -> carrier` primitive. Gates `ensureDynMemberGet`:
+   * when clear (the common case AND all of U0, which adds NO call sites), the
+   * helper is never emitted, so every module is byte-identical — the latch, not
+   * dead-elim, guarantees zero bytes for an uncalled defined function. The
+   * `JS2WASM_FORCE_DYN_MEMBER_GET=1` self-test escape sets this (and additionally
+   * emits exported unit-test drivers) so U0's bodies are validated as VALID Wasm
+   * (gc + standalone) before U1 wires the real call sites.
+   */
+  usesDynMemberGet: boolean;
+  /** (#3053 U0) Idempotence latch for `ensureDynMemberGet` (once per module). */
+  dynMemberGetHelpersEmitted: boolean;
   /** Classes that must throw TypeError at evaluation time */
   classThrowsOnEval: Set<string>;
   /**

@@ -51,7 +51,7 @@ import { eliminateDeadImports } from "./dead-elimination.js";
 import { ensureMapRuntimeTypes } from "./map-runtime.js";
 import { scanForNewTarget } from "./new-target.js"; // (#2023)
 import { scanForArrayHoles, ensureHoleType } from "./array-holes.js"; // (#2001 S1)
-import { ensureDynReadHelpers } from "./dyn-read.js"; // (#2580 M0)
+import { ensureDynReadHelpers, ensureDynMemberGet } from "./dyn-read.js"; // (#2580 M0) / (#3053 U0)
 import { collectClosureBaseWrapperTypeIdxs, buildClosureRefTestArms } from "./closure-classifier.js"; // (#2175 V2-S1)
 import { ensureNativeIteratorRuntime, fillNativeIteratorUserArms } from "./iterator-native.js";
 import { fillCombinatorToVec } from "./promise-combinators.js"; // (#2922) dynamic combinator-arg drain fill
@@ -2477,6 +2477,12 @@ export function generateModule(
     // which M0 never sets, so this is a no-op in M0 → byte-identical. Runs before
     // dead-elim/freeze so the helper funcIdx values are stable.
     ensureDynReadHelpers(ctx);
+    // (#3053 U0) Emit the unified dynamic-reader carrier primitive
+    // (__dyn_member_get + __carrier_recv_to_extern) iff a call site flagged the
+    // module needs it (U1+). Gated on ctx.usesDynMemberGet, which U0 never sets,
+    // so this is a no-op in U0 → byte-identical. Runs beside ensureDynReadHelpers
+    // (before dead-elim/freeze) so the helper funcIdx values are stable.
+    ensureDynMemberGet(ctx);
 
     // (#2800) Allocate + wire the `__in_module_init` flag global now that every
     // import global has settled (final absolute index), patching the recorded
@@ -7102,6 +7108,9 @@ export function generateMultiModule(
     // which M0 never sets, so this is a no-op in M0 → byte-identical. Runs before
     // dead-elim/freeze so the helper funcIdx values are stable.
     ensureDynReadHelpers(ctx);
+    // (#3053 U0) See the single-module pipeline note above. No-op unless
+    // ctx.usesDynMemberGet is set (U1+); byte-identical in U0.
+    ensureDynMemberGet(ctx);
 
     // (#2800) Allocate + wire the `__in_module_init` flag global now that every
     // import global has settled (final absolute index), patching the recorded
