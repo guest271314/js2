@@ -755,6 +755,11 @@ async function main() {
   // (#2910) Every classified, tagged test — the input to computeFeatureRowCounts
   // which patches the landing-page feature-row counts in feature-examples.json.
   const taggedTests: ClassifiedTest[] = [];
+  // Path-indexed pass/fail per classified test, for feature rows that predate
+  // `features:` tags (Operators, typeof, delete, …). These are headline-only
+  // under the tag map, but they carry precise `testCategories` paths, so we can
+  // still score them by path prefix (see patchFeatureExamples).
+  const pathTests: Array<{ file: string; status: StatusKey }> = [];
 
   let classified = 0;
   let unclassified = 0;
@@ -778,6 +783,10 @@ async function main() {
 
     const edition = classifyEdition(fm, file);
     const key = resolveStatusKey(record, hostFree);
+
+    // Every non-proposal standard test, indexed by file path (all editions),
+    // so headline-only feature rows can be scored by their `testCategories`.
+    pathTests.push({ file, status: key });
 
     if (edition === 0 || edition === -1) unclassified++;
     else classified++;
@@ -951,7 +960,7 @@ async function main() {
     !args.includes("--no-feature-examples") &&
     (outputPath === OUTPUT_PATH || getArg(args, "--feature-examples") != null);
   if (wantFeatureExamples) {
-    patchFeatureExamples(featureExamplesPath, taggedTests);
+    patchFeatureExamples(featureExamplesPath, taggedTests, pathTests);
   }
 }
 
@@ -965,7 +974,11 @@ async function main() {
  * set to 0/0 so the runtime treats them as headline-only (no phantom count).
  * Best-effort: a missing map or catalog leaves the file untouched.
  */
-function patchFeatureExamples(examplesPath: string, taggedTests: ClassifiedTest[]): void {
+function patchFeatureExamples(
+  examplesPath: string,
+  taggedTests: ClassifiedTest[],
+  pathTests: Array<{ file: string; status: StatusKey }>,
+): void {
   if (!existsSync(examplesPath)) {
     console.warn(`[#2910] feature-examples not found at ${examplesPath} — skipping row reconciliation.`);
     return;
@@ -1006,7 +1019,25 @@ function patchFeatureExamples(examplesPath: string, taggedTests: ClassifiedTest[
 
   const rowCounts = computeFeatureRowCounts(taggedTests, featureTags, featureEditionYear);
 
+  // Path-prefix scorer for feature rows that predate `features:` tags but carry
+  // precise `testCategories` paths (Operators, typeof, delete, …). Normalize
+  // each test's path once (strip leading "test/") so a row is scored by the
+  // same paths its "View test results" link already points at.
+  const normTests = pathTests.map((t) => ({
+    f: t.file.startsWith("test/") ? t.file.slice(5) : t.file,
+    s: t.status,
+  }));
+  const countByPaths = (prefixes: string[]): FeatureRowCount => {
+    const acc: Record<StatusKey, number> = { pass: 0, fail: 0, ce: 0, skip: 0 };
+    for (const t of normTests) {
+      if (prefixes.some((p) => t.f === p || t.f.startsWith(p + "/"))) acc[t.s]++;
+    }
+    const total = acc.pass + acc.fail + acc.ce + acc.skip;
+    return { ...acc, total, pct: total > 0 ? Math.round((acc.pass / total) * 100) : 0 };
+  };
+
   let reconciled = 0;
+  let pathScored = 0;
   let headlineOnly = 0;
   const unmapped: string[] = [];
   for (const f of examples.features) {
@@ -1017,11 +1048,23 @@ function patchFeatureExamples(examplesPath: string, taggedTests: ClassifiedTest[
       f.totalCount = c.total;
       reconciled++;
     } else {
-      // Not in the tag map → headline-only (no per-row live count). Zero out any
-      // path-glob population so the phantom count never reaches the page.
-      f.passCount = 0;
-      f.totalCount = 0;
-      headlineOnly++;
+      // Not in the tag map. If the row carries `testCategories` paths, score it
+      // by path prefix so core pre-`features:` rows still show a real number.
+      // Rows with no paths stay headline-only (0/0).
+      const paths = Array.isArray(f.testCategories)
+        ? f.testCategories.filter((p): p is string => typeof p === "string" && p.length > 0)
+        : [];
+      if (paths.length > 0) {
+        const c = countByPaths(paths);
+        f.passCount = c.pass;
+        f.totalCount = c.total;
+        if (c.total > 0) pathScored++;
+        else headlineOnly++;
+      } else {
+        f.passCount = 0;
+        f.totalCount = 0;
+        headlineOnly++;
+      }
       const yr = editionStringToYear(typeof f.edition === "string" ? f.edition : "");
       if (yr !== undefined && yr >= 2015 && nm) unmapped.push(nm);
     }
@@ -1029,7 +1072,7 @@ function patchFeatureExamples(examplesPath: string, taggedTests: ClassifiedTest[
 
   writeFileSync(examplesPath, JSON.stringify(examples, null, 2) + "\n");
   console.log(
-    `\n[#2910] Reconciled feature-examples row counts: ${reconciled} tag-sliced, ${headlineOnly} headline-only → ${examplesPath}`,
+    `\n[#2910] Reconciled feature-examples row counts: ${reconciled} tag-sliced, ${pathScored} path-scored, ${headlineOnly} headline-only → ${examplesPath}`,
   );
   if (unmapped.length > 0) {
     console.warn(
