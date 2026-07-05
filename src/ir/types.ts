@@ -122,8 +122,11 @@ export interface WasmModule {
 /** TS-level kind hint for a single export parameter or result (#1700). */
 export type TypedArrayKind = "uint8array" | "typed-array" | "other";
 
+/** TS-level TypedArray classification of one export's params and result (#1700). */
 export interface ExportSignature {
+  /** Per-parameter TypedArray kind, positionally. */
   params: TypedArrayKind[];
+  /** TypedArray kind of the return value. */
   result: TypedArrayKind;
 }
 

@@ -1,4 +1,19 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
+/**
+ * Host runtime and instantiation helpers for `@loopdive/js2` (the `/runtime`
+ * entry point).
+ *
+ * In the default JS-host (WasmGC) target a compiled binary needs an import
+ * object wiring up strings, number boxing, and other host capabilities. This
+ * module builds those imports ({@link buildImports},
+ * {@link buildStringConstants}, {@link buildWasiPolyfill}) and offers one-call
+ * instantiation helpers ({@link instantiateWasm},
+ * {@link instantiateWasmStreaming}, {@link compileAndInstantiate}), plus
+ * {@link wrapExports} for marshalling `Uint8Array` (and other TypedArray)
+ * arguments and returns across the JS↔Wasm boundary.
+ *
+ * @module
+ */
 import { compileSource } from "./compiler.js";
 import type { ImportDescriptor, ImportIntent, ImportPolicy } from "./index.js";
 import { createEvalShim, createNewFunctionShim } from "./runtime-eval.js";
@@ -14567,7 +14582,9 @@ export function buildImports(
  * (b) wrap the returned plain `Array<number>` back into a `Uint8Array`.
  */
 export interface WrapExportsSignature {
+  /** Per-parameter TypedArray kind, positionally. */
   params: ("uint8array" | "typed-array" | "other")[];
+  /** TypedArray kind of the return value. */
   result: "uint8array" | "typed-array" | "other";
 }
 
@@ -14622,6 +14639,14 @@ function marshalTypedArrayArgs(
   return out;
 }
 
+/**
+ * Wrap a Wasm instance's exports so `Uint8Array` (and other TypedArray)
+ * arguments and return values marshal correctly across the JS↔Wasm boundary.
+ *
+ * Pass the per-export type metadata from {@link CompileResult.exportSignatures}
+ * as `options.signatures`; without it the wrapper is a passthrough. Returns a
+ * new exports object; the original is left untouched.
+ */
 export function wrapExports(
   rawExports: WebAssembly.Exports,
   options?: {

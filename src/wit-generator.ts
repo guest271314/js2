@@ -22,6 +22,7 @@ import { ts } from "./ts-api.js";
 import type { TypedAST } from "./checker/index.js";
 import type { Import, TypeDef, ValType } from "./ir/types.js";
 
+/** Options for {@link generateWit} — controls the generated WIT world's naming. */
 export interface WitGeneratorOptions {
   /** Package name for the WIT world (default: derived from the source filename) */
   packageName?: string;

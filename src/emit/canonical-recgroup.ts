@@ -216,8 +216,11 @@ export function canonicalHashOfTypeGroup(group: readonly FlatTypeDef[], absIndic
 
 /** A member of the extracted runtime group: its name + absolute index + def. */
 export interface RuntimeGroupMember {
+  /** Type name within the runtime rec-group. */
   name: string;
+  /** Absolute type index of the member in the module's type table. */
   absIndex: number;
+  /** Flattened structural definition of the member type. */
   def: FlatTypeDef;
 }
 

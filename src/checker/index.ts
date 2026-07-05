@@ -21,6 +21,11 @@ function getBundledLibFiles(): Record<string, string> | undefined {
   return files && typeof files === "object" ? (files as Record<string, string>) : undefined;
 }
 
+/**
+ * Pre-seed the TypeScript lib files (e.g. `lib.d.ts`) the checker uses, so
+ * environments without filesystem access can still type-check. Merges into any
+ * previously registered lib files.
+ */
 export function preloadLibFiles(files: Record<string, string>): void {
   const globalObject = globalThis as TsLibGlobal;
   globalObject.__js2wasmTsLibFiles = {
