@@ -20,6 +20,7 @@ import {
   ensureExnTag,
   getArrTypeIdxFromVec,
   getOrRegisterRefCellType,
+  getOrRegisterResizableAbType,
   getOrRegisterVecType,
   resolveWasmType,
   typedArrayVecStorage,
@@ -4661,6 +4662,129 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     const vecTypeIdx = getOrRegisterVecType(ctx, "i32_byte", elemType);
     const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
     const args = expr.arguments ?? [];
+
+    // (#3054 C) Resizable ArrayBuffer: `new ArrayBuffer(n, {maxByteLength: m})`.
+    // Per §25.1.3.1 / GetArrayBufferMaxByteLengthOption: a non-object options or
+    // an options object without a `maxByteLength` property ⇒ NON-resizable (fall
+    // through to the plain path below). We handle the object-literal options form
+    // (the entire test262 resizable corpus passes an object literal) at compile
+    // time — resolving `maxByteLength` off an arbitrary dynamic object would need
+    // the object-runtime and is deferred (a dynamic options object stays
+    // non-resizable rather than mis-constructing). Host-free lane only: the native
+    // vec / `$__resizable_ab` representation exists only standalone (a host-mode
+    // ArrayBuffer is a host object — same lane boundary as B1/B2).
+    let maxByteLenInit: ts.Expression | undefined;
+    if (noJsHost(ctx) && args.length >= 2 && ts.isObjectLiteralExpression(args[1]!)) {
+      for (const prop of args[1]!.properties) {
+        if (
+          ts.isPropertyAssignment(prop) &&
+          (ts.isIdentifier(prop.name) || ts.isStringLiteral(prop.name)) &&
+          prop.name.text === "maxByteLength"
+        ) {
+          maxByteLenInit = prop.initializer;
+        }
+      }
+    }
+
+    if (maxByteLenInit !== undefined) {
+      const rabTypeIdx = getOrRegisterResizableAbType(ctx);
+      // byteLength (arg 0) → i32, with the same non-negative-integer RangeError
+      // guard the plain path uses.
+      compileExpression(ctx, fctx, args[0]!, { kind: "f64" });
+      const lenF64 = allocLocal(fctx, `__rab_len_f64_${fctx.locals.length}`, { kind: "f64" });
+      fctx.body.push({ op: "local.tee", index: lenF64 });
+      fctx.body.push({ op: "local.get", index: lenF64 });
+      fctx.body.push({ op: "f64.floor" });
+      fctx.body.push({ op: "f64.ne" });
+      fctx.body.push({ op: "local.get", index: lenF64 });
+      fctx.body.push({ op: "f64.const", value: 0 });
+      fctx.body.push({ op: "f64.lt" });
+      fctx.body.push({ op: "i32.or" });
+      {
+        const rangeErrMsg = "RangeError: Invalid array buffer length";
+        addStringConstantGlobal(ctx, rangeErrMsg);
+        const tagIdx = ensureExnTag(ctx);
+        fctx.body.push({
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [...stringConstantExternrefInstrs(ctx, rangeErrMsg), { op: "throw", tagIdx } as Instr],
+          else: [],
+        });
+      }
+      const lenI32 = allocLocal(fctx, `__rab_len_i32_${fctx.locals.length}`, { kind: "i32" });
+      fctx.body.push({ op: "local.get", index: lenF64 });
+      fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+      fctx.body.push({ op: "local.set", index: lenI32 });
+
+      // maxByteLength (options) → i32 via ToIndex: NaN→0, truncate toward zero,
+      // and `< 0` → RangeError (the upper 2^53-1 bound is subsumed by the i32 cap).
+      compileExpression(ctx, fctx, maxByteLenInit, { kind: "f64" });
+      const maxF64 = allocLocal(fctx, `__rab_max_f64_${fctx.locals.length}`, { kind: "f64" });
+      fctx.body.push({ op: "local.set", index: maxF64 });
+      // NaN → 0
+      fctx.body.push({ op: "local.get", index: maxF64 });
+      fctx.body.push({ op: "local.get", index: maxF64 });
+      fctx.body.push({ op: "f64.ne" });
+      fctx.body.push({
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "f64.const", value: 0 } as Instr, { op: "local.set", index: maxF64 } as Instr],
+        else: [],
+      });
+      // truncate toward zero
+      fctx.body.push({ op: "local.get", index: maxF64 });
+      fctx.body.push({ op: "f64.trunc" });
+      fctx.body.push({ op: "local.set", index: maxF64 });
+      // maxByteLength < 0 → RangeError
+      fctx.body.push({ op: "local.get", index: maxF64 });
+      fctx.body.push({ op: "f64.const", value: 0 });
+      fctx.body.push({ op: "f64.lt" });
+      {
+        const rangeErrMsg = "RangeError: Invalid array buffer max byte length";
+        addStringConstantGlobal(ctx, rangeErrMsg);
+        const tagIdx = ensureExnTag(ctx);
+        fctx.body.push({
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [...stringConstantExternrefInstrs(ctx, rangeErrMsg), { op: "throw", tagIdx } as Instr],
+          else: [],
+        });
+      }
+      const maxI32 = allocLocal(fctx, `__rab_max_i32_${fctx.locals.length}`, { kind: "i32" });
+      fctx.body.push({ op: "local.get", index: maxF64 });
+      fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+      fctx.body.push({ op: "local.set", index: maxI32 });
+
+      // AllocateArrayBuffer: byteLength > maxByteLength → RangeError.
+      fctx.body.push({ op: "local.get", index: lenI32 });
+      fctx.body.push({ op: "local.get", index: maxI32 });
+      fctx.body.push({ op: "i32.gt_s" });
+      {
+        const rangeErrMsg = "RangeError: ArrayBuffer byteLength exceeds maxByteLength";
+        addStringConstantGlobal(ctx, rangeErrMsg);
+        const tagIdx = ensureExnTag(ctx);
+        fctx.body.push({
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [...stringConstantExternrefInstrs(ctx, rangeErrMsg), { op: "throw", tagIdx } as Instr],
+          else: [],
+        });
+      }
+
+      // struct.new $__resizable_ab { length = byteLength, data = new i8[byteLength],
+      // maxByteLength }. The backing array is sized to the CURRENT byteLength (GC
+      // arrays are fixed-length; `.resize()` reallocs + swaps `data`, per A.2).
+      fctx.body.push({ op: "local.get", index: lenI32 });
+      fctx.body.push({ op: "local.get", index: lenI32 });
+      fctx.body.push({ op: "array.new_default", typeIdx: arrTypeIdx });
+      fctx.body.push({ op: "local.get", index: maxI32 });
+      fctx.body.push({ op: "struct.new", typeIdx: rabTypeIdx });
+      // Return the PARENT vec type: a `$__resizable_ab` IS-A `$__vec_i32_byte`, so
+      // every downstream buffer consumer (byteLength, DataView, TA views, slice)
+      // treats it identically — only `.resize()`/`.maxByteLength`/`.resizable`
+      // `ref.test` the subtype. The runtime value keeps its resizable_ab identity.
+      return { kind: "ref_null", typeIdx: vecTypeIdx };
+    }
 
     if (args.length >= 1) {
       // new ArrayBuffer(byteLength) → create vec with byteLength elements, all 0

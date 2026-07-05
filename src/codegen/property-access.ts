@@ -114,12 +114,13 @@ import {
 import { getOrRegisterDvWindowType } from "./dataview-native.js"; // (#2159/#38) DataView windowing
 import {
   getArrTypeIdxFromVec,
+  getOrRegisterResizableAbType,
   getOrRegisterVecType,
   getSubviewArrTypeIdx,
   isSubviewTypeIdx,
   isTaViewTypeIdx,
 } from "./registry/types.js";
-import { emitTaViewAccessor, emitTaViewElementGet } from "./dataview-native.js"; // (#3054 B1/B2) shared-backing TA view read + accessor props
+import { emitTaViewAccessor, emitTaViewElementGet, pushTaViewEffectiveLen } from "./dataview-native.js"; // (#3054 B1/B2/C) shared-backing TA view read + accessor props + resize length-tracking
 import {
   coerceType,
   compileExpression,
@@ -3668,6 +3669,65 @@ export function compilePropertyAccess(
     }
   }
 
+  // (#3054 C) Standalone `.maxByteLength` / `.resizable` on an ArrayBuffer
+  // receiver. The resizable-ness is the runtime type identity: a
+  // `$__resizable_ab` instance (from `new ArrayBuffer(n, {maxByteLength})`) vs a
+  // plain `$__vec_i32_byte`. Discriminated with `ref.test $__resizable_ab`:
+  //   `.resizable`     → the test result (true for resizable, false for fixed).
+  //   `.maxByteLength` → resizable: field 2; fixed: field 0 (byteLength) per
+  //                      §25.1.5.4 (a fixed buffer reports its byteLength).
+  // Only reached for a static ArrayBuffer receiver in the host-free lane; native
+  // TAs / plain arrays / non-buffer programs never take this arm (byte-inert).
+  if (
+    (ctx.wasi || ctx.standalone || ctx.strictNoHostImports) &&
+    (propName === "maxByteLength" || propName === "resizable")
+  ) {
+    const recvName =
+      objType.getSymbol()?.name ??
+      (ts.isNewExpression(expr.expression) && ts.isIdentifier(expr.expression.expression)
+        ? expr.expression.expression.text
+        : undefined);
+    if (recvName === "ArrayBuffer" && noJsHost(ctx)) {
+      const vecTypeIdx = getOrRegisterVecType(ctx, "i32_byte", { kind: "i8" });
+      const rabTypeIdx = getOrRegisterResizableAbType(ctx);
+      // Recover the receiver as an anyref so `ref.test $__resizable_ab` is valid
+      // regardless of whether the local is typed as the vec or externref.
+      const recvType = compileExpression(ctx, fctx, expr.expression);
+      if (recvType?.kind === "externref") {
+        fctx.body.push({ op: "any.convert_extern" } as Instr);
+      }
+      const abAny = allocLocal(fctx, `__rab_any_${fctx.locals.length}`, { kind: "anyref" });
+      fctx.body.push({ op: "local.set", index: abAny } as Instr);
+      if (propName === "resizable") {
+        fctx.body.push({ op: "local.get", index: abAny } as Instr);
+        fctx.body.push({ op: "ref.test", typeIdx: rabTypeIdx } as Instr);
+        // Boolean result. In non-fast mode surface it as an f64 0/1 (truthy in
+        // conditionals, and `=== true` compares fold correctly downstream).
+        if (!ctx.fast) fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+        return ctx.fast ? { kind: "i32", boolean: true } : { kind: "f64" };
+      }
+      // maxByteLength: if resizable read field 2, else the byteLength (field 0).
+      fctx.body.push({ op: "local.get", index: abAny } as Instr);
+      fctx.body.push({ op: "ref.test", typeIdx: rabTypeIdx } as Instr);
+      fctx.body.push({
+        op: "if",
+        blockType: { kind: "val", type: { kind: "i32" } as ValType },
+        then: [
+          { op: "local.get", index: abAny } as Instr,
+          { op: "ref.cast", typeIdx: rabTypeIdx } as Instr,
+          { op: "struct.get", typeIdx: rabTypeIdx, fieldIdx: 2 } as Instr,
+        ],
+        else: [
+          { op: "local.get", index: abAny } as Instr,
+          { op: "ref.cast", typeIdx: vecTypeIdx } as Instr,
+          { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr,
+        ],
+      } as Instr);
+      if (!ctx.fast) fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+      return ctx.fast ? { kind: "i32" } : { kind: "f64" };
+    }
+  }
+
   // (#2159 Slice 2) Standalone/WASI `byteLength` / `byteOffset` view-semantics
   // for ArrayBuffer / SharedArrayBuffer / TypedArrays. In JS-host mode the JS
   // runtime supplies these; with no host they fell through to `__extern_length`
@@ -5135,8 +5195,16 @@ export function compilePropertyAccess(
             typeDef.fields[0]?.name === "length" &&
             (typeDef.fields[1]?.name === "data" || isTaViewTypeIdx(ctx, vecTypeIdx))
           ) {
-            fctx.body.push({ op: "local.get", index: localIdx });
-            fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 });
+            if (isTaViewTypeIdx(ctx, vecTypeIdx)) {
+              // (#3054 C) A `$__ta_view` over a resizable buffer is auto-length —
+              // derive the CURRENT element count (field0 == -1 sentinel → live
+              // buf.length/elemSize) so `a.length` reflects a `rab.resize()`. A
+              // fixed view reads field0 directly (byte-identical to pre-C).
+              pushTaViewEffectiveLen(ctx, fctx, localIdx, vecTypeIdx);
+            } else {
+              fctx.body.push({ op: "local.get", index: localIdx });
+              fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 });
+            }
             if (!ctx.fast) fctx.body.push({ op: "f64.convert_i32_s" });
             return ctx.fast ? { kind: "i32" } : { kind: "f64" };
           }

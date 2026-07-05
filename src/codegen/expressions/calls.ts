@@ -241,6 +241,7 @@ import {
 import { emitVariadicStringConcat, hostStringRepr, nativeStringRepr } from "../builtin-scaffold.js";
 import { URI_DECODE_MASK, URI_ENCODE_MASK } from "../uri-encoding-native.js";
 import {
+  emitArrayBufferResize,
   emitArrayBufferSlice,
   emitDataViewAccessor,
   getOrRegisterDvWindowType,
@@ -10211,6 +10212,20 @@ function compileCallExpression(
           compileExpression(ctx, fctx, e, hint),
         );
         if (sliceResult) return sliceResult;
+      }
+    }
+
+    // (#3054 C) Native `rab.resize(newByteLength)` in no-JS-host mode. Only a
+    // `$__resizable_ab` receiver actually resizes (checked at runtime inside the
+    // emitter — a fixed buffer throws TypeError); reallocs the backing array,
+    // swaps `data` + `length` in place so shared views observe the new length.
+    if (propAccess.name.text === "resize" && noJsHost(ctx)) {
+      const recvSym = receiverType.getSymbol()?.name;
+      if (recvSym === "ArrayBuffer") {
+        emitArrayBufferResize(ctx, fctx, propAccess.expression, expr.arguments, (e, hint) =>
+          compileExpression(ctx, fctx, e, hint),
+        );
+        return VOID_RESULT;
       }
     }
 

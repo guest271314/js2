@@ -1699,6 +1699,20 @@ export interface CodegenContext {
    * byte-inert. Map miss = not registered. (Spec: plan/issues/3054 Phase A/B1.)
    */
   taViewTypeMap: Map<string, number>;
+  /**
+   * (#3054 C) Type index for the standalone `$__resizable_ab` struct — a WasmGC
+   * SUBTYPE of `$__vec_i32_byte` carrying an extra `maxByteLength: i32` field:
+   * `{length: i32 (mut), data: (ref $__arr_i32_byte) (mut), maxByteLength: i32}`.
+   * Produced by `new ArrayBuffer(n, {maxByteLength})`. The subtype identity IS the
+   * resizable bit (`ref.test $__resizable_ab` ⇒ resizable; a plain
+   * `$__vec_i32_byte` ⇒ fixed) — no separate flag needed. Because it is a subtype,
+   * the 23 `i32_byte` read sites `ref.cast` to the parent vec UNCHANGED (is-a);
+   * only the resizable-aware sites (ctor, `.resize()`, `.maxByteLength`/`.resizable`
+   * getters) know the subtype. Registered late+once (mirrors `getOrRegisterTaViewType`),
+   * so the subtype always follows its supertype in type-index order → no reorder
+   * hazard. -1 = not yet registered. (Spec: plan/issues/3054 Phase A A.2.)
+   */
+  resizableAbTypeIdx: number;
   /** Type index for the WasmGC `$Error_struct` used in standalone/WASI mode (#1104). -1 = not yet registered. */
   errorStructTypeIdx: number;
   /** Extra properties for empty object variables */
