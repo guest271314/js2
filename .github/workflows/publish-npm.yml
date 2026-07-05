@@ -163,9 +163,21 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - uses: pnpm/action-setup@v4
+
       - uses: actions/setup-node@v6
         with:
           node-version: 20
+          cache: "pnpm"
 
+      # `jsr publish` runs `deno publish --unstable-byonm` (bring-your-own-node-
+      # modules), which type-resolves the published source (src/**/*.ts). That
+      # source imports `typescript` (src/ts-api.ts), so node_modules must exist
+      # or Deno fails with "Could not find typescript in a node_modules folder".
+      - name: Install deps
+        run: pnpm install --frozen-lockfile
+
+      # --allow-slow-types: the exported API has many inferred types; JSR's
+      # slow-type check would otherwise reject the publish.
       - name: Publish to JSR
-        run: npx jsr publish
+        run: npx jsr publish --allow-slow-types
