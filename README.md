@@ -3,17 +3,27 @@
 Direct AOT compilation from JavaScript and TypeScript to WebAssembly GC.
 
 > **Status: early-stage research prototype — a tech demo, not a production-ready compiler.**
-> `js2wasm` is an experimental ahead-of-time JavaScript/TypeScript-to-WasmGC compiler under active development. It explores one specific point in the design space: full ECMAScript backwards compatibility via direct AOT compilation, with no JavaScript engine or interpreter bundled into the output. It does **not** claim production readiness, full language coverage, or stable APIs — expect rough edges, gaps, and breaking changes. Beyond the single auto-updated conformance figure below, live numbers live in **[STATUS.md](./STATUS.md)** (they change frequently and are not otherwise duplicated here).
+> `js2wasm` is an experimental ahead-of-time JavaScript/TypeScript-to-WasmGC compiler under active development. It explores one specific point in the design space: full ECMAScript backwards compatibility via direct AOT compilation, with no JavaScript engine or interpreter bundled into the output. It does **not** claim production readiness, full language coverage, or stable APIs — expect rough edges, gaps, and breaking changes. Beyond the two auto-updated conformance figures below, live numbers live in **[STATUS.md](./STATUS.md)** (they change frequently and are not otherwise duplicated here).
 
 `js2wasm` compiles source code into WasmGC binaries without embedding a JavaScript interpreter or shipping a bundled runtime. That avoids the runtime tax common in the interpreter-based and engine-embedding approaches — where a JavaScript interpreter or full engine is compiled to Wasm and shipped inside every module — and keeps the output aligned with Wasm-native deployment models.
 
 `js2wasm` is a free and open-source project developed by **Loopdive GmbH** and released under the **Apache License 2.0 with LLVM Exceptions**. It is developed fully in the open, including its agentic engineering workflow: the repository contains the compiler source, the complete planning surface (`plan/`), and the agent coordination infrastructure (`.claude/`) that a small team uses to ship fixes in parallel.
 
+Conformance is tracked along the two compile paths — both figures auto-update on every merge to `main`:
+
 <!-- AUTO:conformance-start -->
 **test262 conformance**: 32,236 / 43,106 (74.8 %)
 <!-- AUTO:conformance-end -->
 
-Live figures, the trend graph, and the per-feature breakdown are in **[STATUS.md](./STATUS.md)**, the [Playground](https://js2.loopdive.com/playground/), and the [Roadmap](./ROADMAP.md). The auto-updated figure above (refreshed by CI on every merge) is the JS-host path. Standalone (no-JS-host) pass-rate and benchmark figures are intentionally omitted until the current standalone regression is fixed.
+The line above is the **JS-host path** (default `gc` target): runs alongside the js2wasm JS runtime, which supplies host imports for some built-ins.
+
+<!-- AUTO:conformance-standalone-start -->
+**standalone (host-free) test262 conformance**: 20,609 / 43,106 (47.8 %)
+<!-- AUTO:conformance-standalone-end -->
+
+The line above is the **standalone path** (`--target standalone`/`wasi`): pure WasmGC with no JS host, measured host-free on the same official denominator. Lower today and actively hardening — this is where the current gap is.
+
+Full breakdowns, the trend graph, and benchmarks are in **[STATUS.md](./STATUS.md)**, the [Playground](https://js2.loopdive.com/playground/), and the [Roadmap](./ROADMAP.md).
 
 ## Value Proposition
 
@@ -53,7 +63,7 @@ The structural observation behind the project is that this *combination* of trad
 - a JS-hosted compilation path passing a substantial subset of Test262 (the figure above)
 - a public browser [Playground](https://js2.loopdive.com/playground/)
 - continuous conformance and benchmark reporting on every change
-- a standalone (no-JS-host) path that is in progress; its public numeric baselines are paused here until the current regression is fixed
+- a standalone (no-JS-host) path that is in progress — host-free conformance (see the figure above) is meaningfully lower than the JS-host path and actively hardening
 
 ## Quick Start
 
@@ -203,7 +213,7 @@ output, see [docs/standalone-io.md](./docs/standalone-io.md).
 In a JS host, `js2wasm` passes a substantial subset of Test262 — enough that a
 large, useful slice of the language works — but there are real gaps, and you
 will hit them. The current pass rate lives in [STATUS.md](./STATUS.md) and the
-full [Test262 report](https://loopdive.github.io/js2wasm/benchmarks/report.html);
+full [Test262 report](https://js2.loopdive.com/benchmarks/report.html);
 this section is the qualitative high-level shape, and the report is the
 authoritative per-feature detail. Note that Test262 measures conformance to the
 ECMAScript *language* specification — it does **not** cover Web APIs, Node.js
@@ -225,8 +235,8 @@ high pass rate is necessary but not sufficient for "runs real JavaScript."
 - standard-library built-ins — many are implemented, but not the full surface;
   some methods are missing or only handle the common overloads
 - `Map`, `Set`, `RegExp`, `JSON` — present but not fully spec-complete
-- standalone (no-JS-host) mode — actively in progress; standalone numeric
-  baselines are temporarily omitted while the current regression is fixed
+- standalone (no-JS-host) mode — actively in progress; host-free conformance
+  (~48% official, see the two-path figures near the top) trails the JS-host path
 - getters/setters and other highly dynamic patterns — limited
 
 **Not yet** (intentionally unsupported or out of scope today):
@@ -237,7 +247,7 @@ high pass rate is necessary but not sufficient for "runs real JavaScript."
 - dropping in an arbitrary npm package unchanged
 
 If a pattern you rely on does not work, check the
-[Test262 report](https://loopdive.github.io/js2wasm/benchmarks/report.html) or
+[Test262 report](https://js2.loopdive.com/benchmarks/report.html) or
 open an issue. This is an actively developed compiler with a growing
 compatibility baseline and a clear infrastructure target — but it is a research
 prototype, not yet a "drop in any npm package" story.
@@ -306,7 +316,7 @@ For a long-form, technical account of the methodology — how the team is struct
 `js2wasm` validates correctness through three complementary test layers:
 
 - **Unit & equivalence tests** — `npm test` (vitest). Targeted regression coverage and JS↔Wasm equivalence assertions. See `tests/equivalence/`.
-- **Test262 conformance** — `pnpm run test:262` runs the ECMAScript test suite (~48k tests: ~43k official plus ~5k staging/proposal tests) and reports per-edition / per-path pass rates. The headline conformance figure is scored against the 43,106 official tests (proposals excluded); CI runs this sharded on every PR and the [report](https://loopdive.github.io/js2wasm/benchmarks/report.html) is regenerated on each merge.
+- **Test262 conformance** — `pnpm run test:262` runs the ECMAScript test suite (~48k tests: ~43k official plus ~5k staging/proposal tests) and reports per-edition / per-path pass rates. The headline conformance figure is scored against the 43,106 official tests (proposals excluded); CI runs this sharded on every PR and the [report](https://js2.loopdive.com/benchmarks/report.html) is regenerated on each merge.
 - **Differential testing vs V8** — `pnpm run test:diff` (#1203). For each program in `tests/differential/corpus/`, the harness runs Node-V8 directly and the compiled `.wasm` and compares stdout. test262 measures spec compliance; differential testing measures whether real programs actually produce the right answer. CI gates each PR on a delta against `benchmarks/results/diff-test-baseline.json` — no new mismatches allowed. Use `pnpm run test:diff:triage` to bucket mismatches by category for follow-up filing.
 
 ## Licensing
