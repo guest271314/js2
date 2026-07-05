@@ -612,6 +612,20 @@ function verifyBlock(
           });
         }
       }
+      // #2949 S5.3 — dyn.to_number is ToNumber on the boxed-any carrier → f64:
+      // the operand MUST be dynamic (a concrete numeric operand converts to f64
+      // inline and must not route through the carrier ToNumber helper). Result
+      // is f64, consumed by the numeric-abstract relational compare.
+      if (instr.kind === "dyn.to_number") {
+        const operandIr = operandIrType(func, block, instr.value, localDefs);
+        if (operandIr && operandIr.kind !== "dynamic") {
+          errors.push({
+            message: `dyn.to_number operand must be a dynamic IrType, got ${operandIr.kind} (#2949)`,
+            func: func.name,
+            block: block.id as number,
+          });
+        }
+      }
       // #2949 S5.2 — dyn.eq compares TWO boxed-any carriers via the canonical
       // `__any_strict_eq`/`__any_eq` helpers (which take `(ref null $AnyValue,
       // ref null $AnyValue)`). BOTH operands MUST be dynamic — the producer
@@ -713,6 +727,7 @@ function collectUses(instr: IrBlock["instrs"][number]): readonly IrValueId[] {
     case "unbox":
     case "tag.test":
     case "dyn.truthy":
+    case "dyn.to_number":
       return [instr.value];
     case "dyn.eq":
       return [instr.lhs, instr.rhs];

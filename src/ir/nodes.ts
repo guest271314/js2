@@ -892,6 +892,38 @@ export interface IrInstrDynTruthy extends IrInstrBase {
 }
 
 /**
+ * `dyn.to_number{value}` — `ToNumber(value)` (§7.1.4) on a boxed-any carrier,
+ * result `f64` (#2949 S5.3). The single-operand ToNumber primitive that the
+ * numeric-abstract relational lowering (`< > <= >=`) uses: from-ast converts a
+ * dynamic relational operand to `f64` with this node, then feeds the existing
+ * `f64.lt`/`gt`/`le`/`ge` compare path (a concrete numeric operand is used
+ * as-is — no node).
+ *
+ * Lowering routes to the CANONICAL per-backend ToNumber engine via
+ * `IrDynamicLowering.emitToNumber` — one ToNumber policy (June-audit D4):
+ *   - gc/fast/standalone: `__any_to_f64` (the SAME boxed-any→f64 helper legacy's
+ *     `__any_lt`/`__any_gt`/… + the arithmetic helpers use — null→0,
+ *     undefined→NaN, boolean→0/1, number→value).
+ *   - host: `__unbox_number` (`Number(v)`, §7.1.4 — the canonical host ToNumber
+ *     `coercion-engine.emitToNumber` emits for the externref carrier).
+ *
+ * SCOPE — numeric-abstract only. Legacy `any < any` is a FULL Abstract
+ * Relational Comparison (§7.2.11) that is mode-split three ways (host
+ * `__host_compare`; standalone a runtime both-strings-lexicographic-else-numeric
+ * branch; fast numeric-hint) — NOT a bare ToNumber. This node deliberately
+ * implements only the numeric arm; string×string lexicographic relational is
+ * DEFERRED. A boxed-string operand ToNumbers (host: `Number("5")=5`; gc:
+ * `__any_to_f64` reads the box's f64 slot, matching legacy `__any_lt`), which is
+ * spec-correct ONLY when the OTHER operand is a number (ARC never takes the
+ * both-strings branch) — hence the S5.P producer admits a dynamic relational
+ * operand ONLY against a numeric literal/concrete.
+ */
+export interface IrInstrDynToNumber extends IrInstrBase {
+  readonly kind: "dyn.to_number";
+  readonly value: IrValueId;
+}
+
+/**
  * `dyn.eq{lhs, rhs, loose, negate}` — strict/loose equality (§7.2.15 /
  * §7.2.16) between two boxed-any carriers, result `i32` (0/1) (#2949 S5.2).
  *
@@ -2184,6 +2216,7 @@ export type IrInstr =
   | IrInstrUnbox
   | IrInstrTagTest
   | IrInstrDynTruthy
+  | IrInstrDynToNumber
   | IrInstrDynEq
   | IrInstrStringConst
   | IrInstrStringConcat
@@ -2497,6 +2530,7 @@ export function forEachNestedBuffer(instr: IrInstr, fn: (buffer: readonly IrInst
     case "unbox":
     case "tag.test":
     case "dyn.truthy":
+    case "dyn.to_number":
     case "dyn.eq":
     case "string.const":
     case "string.concat":
@@ -2643,6 +2677,7 @@ export function mapNestedBuffers(
     case "unbox":
     case "tag.test":
     case "dyn.truthy":
+    case "dyn.to_number":
     case "dyn.eq":
     case "string.const":
     case "string.concat":
@@ -2739,6 +2774,7 @@ export function directUses(instr: IrInstr): readonly IrValueId[] {
     case "unbox":
     case "tag.test":
     case "dyn.truthy":
+    case "dyn.to_number":
       return [instr.value];
     case "dyn.eq":
     case "string.concat":

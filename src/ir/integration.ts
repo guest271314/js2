@@ -36,7 +36,10 @@ import {
 } from "../codegen/index.js";
 import { boxToAny } from "../codegen/value-tags.js"; // (#2949 slice 3) THE canonical boxing entry point (D4)
 // (#2949 S5.1) THE canonical ToBoolean engine — one truthiness path for legacy and IR (D4).
-import { emitToBoolean as emitCoercionToBoolean } from "../codegen/coercion-engine.js";
+import {
+  emitToBoolean as emitCoercionToBoolean,
+  emitToNumber as emitCoercionToNumber,
+} from "../codegen/coercion-engine.js";
 import { JsTag, jsTagUnboxKind } from "../codegen/js-tag.js";
 import { ensureVecElemSet, VEC_ELEM_SET_PREFIX } from "../codegen/vec-elem-set.js"; // (#2856 C2) on-demand element-store helper
 import { classMemberFuncKey } from "../codegen/class-member-keys.js"; // (#1983) collision-free class-member funcMap keys
@@ -1696,6 +1699,10 @@ function isDynamicOp(instr: IrInstr): boolean {
   // #2949 S5.1 — dyn.truthy always consumes the boxed-any carrier, so its
   // presence requires the dynamic backing (ensureAnyHelpers / addUnionImports).
   if (instr.kind === "dyn.truthy") return true;
+  // #2949 S5.3 — dyn.to_number consumes the carrier and calls the canonical
+  // ToNumber helper (`__any_to_f64` gc / `__unbox_number` host), so it requires
+  // the dynamic backing pre-registered too.
+  if (instr.kind === "dyn.to_number") return true;
   // #2949 S5.2 — dyn.eq consumes two carriers and calls the canonical equality
   // helpers, so it too requires the dynamic backing pre-registered.
   if (instr.kind === "dyn.eq") return true;
@@ -1923,6 +1930,19 @@ export function makeDynamicLowering(ctx: CodegenContext): IrDynamicLowering | nu
         // mid-emission funcIdx shift.
         return emitCoercionToBoolean(ctx, { kind: "ref_null", typeIdx: anyTypeIdx }, []);
       },
+      emitToNumber(): readonly Instr[] {
+        // #2949 S5.3 — ToNumber(carrier) for the gc `$AnyValue` carrier via
+        // `__any_to_f64`: THE canonical boxed-any→f64 helper legacy's
+        // `__any_lt`/`__any_gt`/… + arithmetic helpers use (null→0, undefined→
+        // NaN, boolean→0/1, number→value) — one ToNumber engine (D4). Chosen
+        // directly rather than through `coercion-engine.emitToNumber`, whose
+        // `$AnyValue` arm routes to `coerceType(…,"number")` and allocates a
+        // temp local (via `allocTempLocal`), which the handle's pure `Instr[]`
+        // contract cannot supply. `ensureAnyHelpers` (run up-front in
+        // `preregisterDynamicSupport`) registers `__any_to_f64`, so `callHelper`
+        // resolves it by name with no mid-emission funcIdx shift.
+        return [callHelper("__any_to_f64")];
+      },
       emitEqOperand(): readonly Instr[] {
         // #2949 S5.2 — the gc carrier IS `(ref null $AnyValue)`, already the
         // `__any_strict_eq`/`__any_eq` parameter shape. No marshalling.
@@ -2047,6 +2067,20 @@ export function makeDynamicLowering(ctx: CodegenContext): IrDynamicLowering | nu
       // internal `addUnionImports` / `ensureLateImport` here find the import
       // by name and add nothing — no import shift mid-emission.
       return emitCoercionToBoolean(ctx, { kind: "externref" }, []);
+    },
+    emitToNumber(): readonly Instr[] {
+      // #2949 S5.3 — ToNumber(externref carrier) via THE canonical
+      // `coercion-engine.emitToNumber` (D4): for the externref carrier it emits
+      // a single `__unbox_number` (`Number(v)`, §7.1.4 — string→StringToNumber,
+      // null→0, undefined→NaN, boolean→0/1). No temp-local allocation for the
+      // externref arm (unlike the gc `$AnyValue` arm), so the body-only
+      // `FunctionContext` shim is sound (same pattern as the gc `emitBox`).
+      // `addUnionImports` already ran in `preregisterDynamicSupport` (which
+      // registers `__unbox_number`), so the internal `addUnionImports` here
+      // finds it by name and adds nothing — no import shift mid-emission.
+      const shim = { body: [] as Instr[] } as unknown as FunctionContext;
+      emitCoercionToNumber(ctx, shim, { kind: "externref" });
+      return shim.body;
     },
     emitEqOperand(): readonly Instr[] {
       // #2949 S5.2 — the host carrier is `externref`, which is EXACTLY the
