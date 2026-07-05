@@ -2,7 +2,7 @@
 id: 2949
 title: "IR dynamic value representation: JsTag-carrying `dynamic` kind in IrType (make untyped JS claimable)"
 status: in-progress
-assignee: ttraenkler/opus-s5-3
+assignee: ttraenkler/opus-s5-4
 sprint: current
 created: 2026-07-02
 updated: 2026-07-05
@@ -1602,3 +1602,163 @@ substrate helper" clause). If S5.4 blocks, S5.P proceeds WITHOUT property-access
 and its §4 reachability probe re-runs on the reduced form set. The S5.1–S5.3
 mechanism substrate (truthiness / equality / relational ToNumber) is complete and
 consumed by both S5.P and the banked #2963/#2984/#3015 adoption slices regardless.
+
+## Implementation Notes — S5.4 (INVESTIGATION VERDICT: substrate-BLOCKED as a thin-wiring slice; the value-drop premise is CORRECTED) (opus-s5-4, 2026-07-05, branch `issue-2949-s5-4-member-read`)
+
+**Verdict: S5.4 (dynamic member read) is NOT a clean "route through a legacy
+reader" wiring slice like S5.1–S5.3. It is substrate-BLOCKED — but for a
+DIFFERENT and more precise reason than the `project_standalone_any_string_value_
+read_substrate` memory framed it. Per the §S5.4 "BLOCKED on a substrate helper …
+do NOT hand-roll" clause and the task's explicit "do NOT hand-roll a carrier"
+instruction, S5.4 ships as this docs finding + a filed substrate dependency, and
+S5.P proceeds WITHOUT property-access on the reduced form set (truthiness + eq +
+relational).** Evidence and the exact reasons below.
+
+### Premise correction — the native-string-value-drop substrate is FIXED on current main
+
+The memory (`project_standalone_any_string_value_read_substrate`, dated
+2026-06-21) says the `$Object` dynamic (`any`-typed) reader `__extern_get` DROPS
+native-string VALUES in standalone (`const o: any = {v:"hi"}; o.v.length → 0`).
+**Re-probed against current main (`b4e368b9a`) — it no longer reproduces.** The
+#2580 M-series dyn-read substrate (`src/codegen/dyn-read.ts`) + #2896 fixed it.
+Four probes (banked in `.tmp/probe-s54-*.mts`), value returned [want]:
+
+| probe (host / standalone) | host | standalone |
+| --- | --- | --- |
+| `const o:any={v:"hello"}; o.v.length` [5] | 5 | 5 |
+| `const o:any={n:7}; o.n` [7] | 7 | 7 |
+| cross-`any`-boundary `reader(o).v.length`, `o={v:"hello"}` [5] | 5 | 5 |
+| cross-`any`-boundary `reader(o).v === "hi"` [1] | 1 | 1 |
+| dynamic-param `o[0]` on `[7,8,9]` [7] | 7 | (compiles) |
+| dynamic-param `o[i]` on `({a:5},"a")` [5] | 5 | (compiles) |
+| dynamic-param `o["k"]` on `{k:3}` [3] | 3 | (compiles) |
+
+So string values survive (host + standalone), and named + static-index +
+DYNAMIC-index reads all work in legacy. The "reader drops values" blocker is
+gone. **This premise correction is the load-bearing finding — do not re-cite the
+2026-06-21 memory as the S5.4 blocker; it is stale.**
+
+### The REAL blocker — there is no single reusable carrier op; the legacy any-read is the whole AST/oracle-driven dispatch tree
+
+The reason S5.4 cannot be a thin wiring slice is architectural, not a value bug:
+
+1. **The legacy `any`-receiver read is `compilePropertyAccess` + the element-access
+   dispatch (`src/codegen/property-access.ts`, ~3364 onward) — thousands of lines
+   of AST-node + checker-oracle + speculative-recompile logic**: transactional
+   `snapshotSpeculative`/`rollbackSpeculative`, the `.length` special-case, the
+   `moduleUsesDelete` tombstone-aware arms (#2179), the native-string arms, the
+   vec fast-paths + struct-field alternates, the async-body decline (#2602 desync
+   guard), the #2077 `catch (e)` arm. It reads `ctx.oracle.typeFactOf(node)` and
+   branches on a dozen static conditions. **An `IrDynamicLowering` handle method
+   (pure `readonly Instr[]`, driven from `lower.ts` off a body-only
+   `FunctionContext` shim) has NONE of those inputs** — no `ts.Node`, no checker
+   oracle, no speculation machinery. It cannot route through that tree with
+   byte-parity.
+
+2. **The one leaf-shaped helper — `emitDynGet` (`src/codegen/dyn-read.ts:224`) —
+   breaks the pure-handle contract that S5.0–S5.3 are built on.** It does NOT
+   return `Instr[]`; it pushes directly into a live `fctx.body`, ALLOCATES real
+   function locals (`allocLocal(fctx, …)` in the host `.length` vec/closure-meta
+   arm), and does mid-emit late-import shifting (`ensureLateImport` +
+   `flushLateImportShifts(ctx, fctx)`) on the REAL function body. The
+   `makeDynamicLowering` resolver (integration.ts:1835) emits every op through a
+   `{ body: [] } as unknown as FunctionContext` shim precisely because the S5.0–3
+   ops touch ONLY `.body`. `emitDynGet` on that shim would (a) crash
+   `allocLocal` (no `.locals` array), and (b) run `flushLateImportShifts` against
+   the shim's empty body while the REAL IR-emitted body's baked funcidx go
+   un-shifted — the #2043/#2078 mid-emission funcidx-shift class. **This is the
+   exact wall S5.3 hit** (its note 3: it rejected `coercion-engine.emitToNumber`'s
+   `$AnyValue` arm for the identical `allocTempLocal`-on-a-shim reason and chose
+   the locals-free `__any_to_f64` instead). For member-read there is no
+   locals-free equivalent — the `.length` vec-dispatch and the ToPropertyKey path
+   genuinely need scratch locals and receiver-kind `ref.test` chains.
+
+3. **Carrier impedance (gc): `emitDynGet` yields a UNIFORM `externref`
+   (dyn-read.ts:143), but the gc/standalone `dynamic` carrier is
+   `(ref null $AnyValue)`** (the handle's `carrier`, `resolveDynamic()`). A
+   faithful `dyn.p → dynamic` in gc mode therefore needs an externref→`$AnyValue`
+   conversion AFTER the read. The available op (`__any_from_extern`) re-tags an
+   opaque externref as tag-5 — which is lossy for the number/boolean partitions
+   the result may carry. That re-tag IS the tag-preservation hazard the §S5.4
+   acceptance flags ("value + tag preservation … MUST be covered"); it is not a
+   clean identity like the host case (host carrier == externref == `emitDynGet`'s
+   result).
+
+4. **The population-dominant `obj[idx]` form has no single-helper path even
+   though legacy supports it.** `emitDynGet` is NAMED-key only (`keyName: string`);
+   its comments (dyn-read.ts:264) state non-`length` keys "skip the vec arm … go
+   straight to `__extern_get`" and vec INDEXED reads are "a later slice." A
+   dynamic index (`obj[idx]`, idx dynamic) needs `ToPropertyKey(dyn)` first, which
+   the dyn-read substrate does not expose as a call-site primitive. Legacy handles
+   `o[i]` via its element-access dispatch (a different code path than
+   `emitDynGet`), again AST-driven. §S5.4 itself says "the reachable population's
+   real weight sits in `obj[idx]`" — so the form S5.P most needs is the one with
+   the least reusable substrate.
+
+### Why NOT ship a narrow host-only named-`.p` slice anyway (the s4 anti-vacuity discipline)
+
+A narrow S5.4 (host-mode named-`dyn.p` via `emitDynGet`, deferring gc + indexed +
+dynamic-index) was considered and rejected: (a) it still requires a NEW
+fctx-carrying handle-method contract + a key-dependent `preregisterDynamicSupport`
+walk — an architectural change to `IrDynamicLowering`, not thin wiring; (b) it is
+host-clean only (gc needs the lossy carrier conversion); (c) being byte-inert with
+no producer, its ONLY consumer is S5.P, whose reachable population needs INDEXED
+reads on BOTH backends — so it would be dead mechanism carrying a load-bearing
+scan↔builder lockstep obligation (a `JS2WASM_IR_FIRST` skipped-slot hard error on
+drift) for ~zero claim payoff. That is exactly the s4 vacuity anti-pattern this
+issue's own §4/§5 warn against. A mechanism slice is only valuable if a producer
+can consume it; S5.4's producer can't consume a host-only-named-key half-slice.
+
+### The substrate dependency to file (the clean unblock — Option B, recommended)
+
+Extract a genuine single-helper carrier op in the dyn-read substrate that the IR
+handle can route through with byte-parity, locals-free at the call site:
+
+```
+__dyn_member_get(recv: <carrier>, key: <carrier>) -> <carrier>
+```
+
+- Mode-correct carrier in AND out ($AnyValue gc/standalone, externref host) — no
+  externref↔$AnyValue impedance at the IR boundary.
+- Handles named + indexed + dynamic-index uniformly (absorb `ToPropertyKey(dyn)`
+  and the `.length`/vec-index/receiver-kind dispatch INTO the helper body, so the
+  call site is a bare `call` with no scratch locals — the same shape as
+  `__any_strict_eq`/`__any_to_f64` that S5.2/S5.3 route through cleanly).
+- Registered up-front by `preregisterDynamicSupport` (idempotent, funcidx-shift-
+  safe), so the IR handle method stays a pure `readonly Instr[]` `[call
+  __dyn_member_get]` and the S5.0–3 body-only-shim contract is preserved.
+- Then S5.4 becomes the intended thin wiring: `IrDynamicLowering.emitMemberGet()`
+  → `[call __dyn_member_get]`; `builder.emitDynMemberGet(recv,key) → dynamic`;
+  the `from-ast` `lowerPropertyAccess`/`lowerElementAccess` dynamic-receiver arm.
+
+This is a **senior-dev/value-rep substrate slice** (the memory's "one focused
+senior-dev/value-rep change" disposition still applies — just re-aimed from
+"stop dropping string values" (done) to "expose a locals-free, carrier-uniform,
+named+indexed member-get primitive"). It should get its own architect pass; it is
+NOT dev-tractable as thin wiring on top of the current `emitDynGet` shape.
+
+### Coordination with #3037 CS1b(ii) (opus-3037-cs1bii)
+
+Confirmed no collision: this investigation is IR-layer + docs only and does NOT
+modify `src/codegen/property-access.ts` or the element-access identity carrier.
+The concluded direction (a NEW `__dyn_member_get` substrate helper in
+`dyn-read.ts`, routed THROUGH — not modifying — the existing readers) also stays
+clear of #3037's equality-operand tag-6 carrier work in property-access.ts. If the
+filed substrate dependency is picked up, its author should coordinate with the
+#3037 line since both touch the any-member-read substrate.
+
+### S5.P readiness — reduced form set (truthiness + eq + relational), gated on its own §4 probe
+
+Per §4: with property-access BLOCKED, S5.P ships WITHOUT the property-access scan
+arm and re-runs its anti-vacuity reachability probe on the REDUCED form set
+(truthiness + eq + relational-vs-numeric-literal only). **Caution for the S5.P
+author (do NOT skip §4):** the s4 measurement + slice-3 note 7 already showed the
+reachable unannotated-param population overwhelmingly needs a CONJUNCTION that
+INCLUDES property access (e.g. the `Array.prototype.reduce` `callbackfn`:
+`idx>0 && obj[idx]===curVal && obj[idx-1]===prevVal` — property-access + eq). With
+property access removed, the reduced flip set is likely near-empty, in which case
+S5.P is DEFERRED (documented, like s4), not shipped byte-inert. The S5.1–S5.3
+mechanism substrate remains valuable regardless (consumed by the banked
+#2963/#2984/#3015 adoption slices). Run the §4 ceiling + real-selector probes on
+the reduced set BEFORE writing any S5.P scan-arm flip; build only a non-empty
+flip set.
