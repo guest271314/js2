@@ -375,17 +375,30 @@ export function isAnyValue(type: ValType, ctx: CodegenContext): boolean {
   );
 }
 
-export function ensureAnyFromExternHelper(ctx: CodegenContext): number | undefined {
+export function ensureAnyFromExternHelper(ctx: CodegenContext, opts?: { forceHonest?: boolean }): number | undefined {
   if (!(ctx.standalone || ctx.wasi)) return undefined;
   if (ctx.nativeBoxNumberTypeIdx < 0 || ctx.nativeBoxBooleanTypeIdx < 0) return undefined;
 
-  const existing = ctx.funcMap.get("__any_from_extern");
+  // (#3037 CS1b) The reader-carrier consumers need an ALWAYS-honest classifier
+  // (`$AnyString`→tag-5, `$BoxedNumber`→tag-3, `$BoxedBoolean`→tag-4,
+  // other-eq-castable GC ref→tag-6 identity) irrespective of the module-wide
+  // `honestAnyBoxing` flag (default OFF). It is emitted under a DISTINCT name
+  // (`__any_from_extern_honest`) so it never collides with, nor mutates, the
+  // flag-driven generic instance that the −788 chokepoint depends on. Honest
+  // classification requires the `$AnyString` type to be reserved; without it a
+  // genuine string would mis-classify tag-6, so refuse (the caller keeps the
+  // bare externref — safe, only under-fixes via S3a's cross-tag arm).
+  const forceHonest = opts?.forceHonest === true;
+  if (forceHonest && ctx.anyStrTypeIdx < 0) return undefined;
+  const helperName = forceHonest ? "__any_from_extern_honest" : "__any_from_extern";
+
+  const existing = ctx.funcMap.get(helperName);
   if (existing !== undefined) return existing;
 
   ensureAnyValueType(ctx);
   const anyTypeIdx = ctx.anyValueTypeIdx;
   const anyRef: ValType = { kind: "ref", typeIdx: anyTypeIdx };
-  const typeIdx = addFuncType(ctx, [{ kind: "externref" }], [anyRef], "__any_from_extern");
+  const typeIdx = addFuncType(ctx, [{ kind: "externref" }], [anyRef], helperName);
   const funcIdx = mintDefinedFunc(ctx);
   const EQ_HEAP_TYPE = -19;
 
@@ -399,7 +412,7 @@ export function ensureAnyFromExternHelper(ctx: CodegenContext): number | undefin
   // in standalone/wasi; kept total). Honest additionally requires
   // `anyStrTypeIdx` — without the string test a genuine string would
   // mis-classify as tag-6 object, so fall back to the legacy arms instead.
-  const honest = ctx.honestAnyBoxing === true && ctx.anyStrTypeIdx >= 0;
+  const honest = (forceHonest || ctx.honestAnyBoxing === true) && ctx.anyStrTypeIdx >= 0;
   // (#2106 S1) Under the `undefinedSingleton` regime a NULL externref means JS
   // NULL (undefined is the non-null tag-1 singleton, recovered exactly by the
   // `ref.test $AnyValue` arm below) — so the null arm boxes tag-0. This is
@@ -531,14 +544,14 @@ export function ensureAnyFromExternHelper(ctx: CodegenContext): number | undefin
   ];
 
   pushDefinedFunc(ctx, funcIdx, {
-    name: "__any_from_extern",
+    name: helperName,
     typeIdx,
     locals: [{ name: "any", type: { kind: "anyref" } }],
     body,
     exported: false,
   });
-  ctx.funcMap.set("__any_from_extern", funcIdx);
-  ctx.anyHelpers.set("__any_from_extern", funcIdx);
+  ctx.funcMap.set(helperName, funcIdx);
+  ctx.anyHelpers.set(helperName, funcIdx);
   return funcIdx;
 }
 

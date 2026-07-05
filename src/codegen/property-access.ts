@@ -42,7 +42,7 @@ import {
   noJsHost,
   resolveDeclaringClassForPrivateName,
 } from "./expressions/helpers.js";
-import { undefinedSingletonActive } from "./any-helpers.js";
+import { ensureAnyFromExternHelper, undefinedSingletonActive } from "./any-helpers.js";
 import { emitUndefined, patchStructNewForAddedField } from "./expressions/late-imports.js";
 import { emitSymbolDescLoad } from "./symbol-native.js";
 import {
@@ -227,6 +227,71 @@ const WELL_KNOWN_SYMBOLS: Record<string, number> = {
   dispose: 13,
   asyncDispose: 14,
 };
+
+/**
+ * (#3037 CS1b) True when `expr` is a direct operand of a standalone
+ * `any === any` / `!==` / `==` / `!=` comparison — the EXACT shape that
+ * binary-ops.ts routes through the AnyValue equality dispatch
+ * (`compileAnyBinaryDispatch` → `emitAnyEqOperands`), which fires only when BOTH
+ * operands are statically `any` (`leftTsType.flags & Any` on both sides,
+ * binary-ops.ts:1082-1090). Mirroring that gate exactly guarantees a carrier
+ * produced here can only ever flow into `emitAnyEqOperands`'s `isAnyValue`
+ * fast-path and never into a downstream read/store.
+ */
+function isAnyEqualityOperand(ctx: CodegenContext, expr: ts.Expression): boolean {
+  const parent = expr.parent;
+  if (!parent || !ts.isBinaryExpression(parent)) return false;
+  const op = parent.operatorToken.kind;
+  const isEq =
+    op === ts.SyntaxKind.EqualsEqualsToken ||
+    op === ts.SyntaxKind.ExclamationEqualsToken ||
+    op === ts.SyntaxKind.EqualsEqualsEqualsToken ||
+    op === ts.SyntaxKind.ExclamationEqualsEqualsToken;
+  if (!isEq) return false;
+  if (parent.left !== expr && parent.right !== expr) return false;
+  // #1930 oracle-ratchet: query type facts through `ctx.oracle` (never the raw
+  // TS checker). `typeFactOf(...).kind === "any"` is the exact equivalent of the
+  // `flags & TypeFlags.Any` gate binary-ops.ts uses to route the pair through the
+  // AnyValue equality dispatch (the oracle maps the `Any` type flag to
+  // `{ kind: "any" }`), so this mirrors that gate precisely.
+  const leftAny = ctx.oracle.typeFactOf(parent.left).kind === "any";
+  const rightAny = ctx.oracle.typeFactOf(parent.right).kind === "any";
+  return leftAny && rightAny;
+}
+
+/**
+ * (#3037 CS1b — dynamic member-read carrier) When a dynamic `any`-typed member
+ * READ compiled to a bare externref and is a direct operand of a standalone
+ * `any`-equality (see {@link isAnyEqualityOperand}), re-classify it through the
+ * ALWAYS-honest `__any_from_extern_honest` classifier so it reaches `===` as a
+ * proper `$AnyValue`: an object → **tag-6** (identity in `refval` → the tag-6
+ * same-tag `ref.eq` arm answers identity), a `$BoxedNumber` → **tag-3** (value),
+ * a `$BoxedBoolean` → **tag-4**, a `$AnyString` → **tag-5** (content). This flips
+ * the CS0 residuals `o.a === o.b` (case b), `o.n === o.n` (case e) and
+ * `gOPD.value === gOPD.value` (case a) WITHOUT touching the generic `boxToAny`
+ * externref arm (−788) or the `===` operand seam (−299) — the change is purely
+ * the reader's result ValType (externref → `$AnyValue`), gated to exactly the
+ * shape that routes through `emitAnyEqOperands` so the carrier never reaches a
+ * subsequent read/store (which `$AnyValue` would break — the CS1a finding).
+ *
+ * Byte-inert off-path: any precondition unmet → the bare externref is returned
+ * unchanged (a half-migrated tag-6 × tag-5 pair still reconciles via S3a's
+ * cross-tag arm, so partial coverage only under-fixes, never regresses).
+ */
+export function maybeWrapAnyReadEqualityCarrier(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.Expression,
+  result: ValType | null,
+): ValType | null {
+  if (!ctx.standalone) return result;
+  if (!result || result.kind !== "externref") return result;
+  if (!isAnyEqualityOperand(ctx, expr)) return result;
+  const classifyIdx = ensureAnyFromExternHelper(ctx, { forceHonest: true });
+  if (classifyIdx === undefined || ctx.anyValueTypeIdx < 0) return result;
+  fctx.body.push({ op: "call", funcIdx: classifyIdx } as Instr);
+  return { kind: "ref", typeIdx: ctx.anyValueTypeIdx };
+}
 
 /**
  * #2020: resolve an inherited static-property global by walking the class

@@ -93,9 +93,12 @@ async function runStandalone(source: string): Promise<number> {
 }
 
 describe("#3037 CS0 — standalone object-identity characterization (FLIP-TARGETs)", () => {
-  it("(a) two gOPD().value reads of the same data property are NOT ===  [FLIP-TARGET 0->1]", async () => {
-    // Descriptor `.value` stores the raw ref honestly; the loss is at the read +
-    // === operand-marshalling (both reads box tag-5). CS1 must make this `1`.
+  it("(a) two gOPD().value reads of the same data property ARE ===  [FLIPPED by CS1b: now 1]", async () => {
+    // Descriptor `.value` stores the raw ref honestly; the loss was at the read +
+    // === operand-marshalling (both reads boxed tag-5). CS1b re-classifies a
+    // dynamic `any`-member read that is a direct `any`-equality operand through
+    // `__any_from_extern_honest` -> the shared function ref boxes tag-6 -> the
+    // tag-6 `ref.eq` arm answers identity.
     expect(
       await runStandalone(`export function run(): number {
         const p: any = { exec: function () { return 1; } };
@@ -103,17 +106,20 @@ describe("#3037 CS0 — standalone object-identity characterization (FLIP-TARGET
         const d2: any = Object.getOwnPropertyDescriptor(p, "exec");
         return (d1.value === d2.value) ? 1 : 0;
       }`),
-    ).toBe(0);
+    ).toBe(1);
   });
 
-  it("(b) two dynamic reads of one aliased object are NOT ===  [FLIP-TARGET 0->1]", async () => {
+  it("(b) two dynamic reads of one aliased object ARE ===  [FLIPPED by CS1b: now 1]", async () => {
+    // The pivotal CS1b case: `o.a` and `o.b` alias one stored ref. Each read is a
+    // direct operand of the `any === any` comparison, so CS1b classifies both to
+    // tag-6 (identity in `refval`) -> the tag-6 same-tag `ref.eq` arm -> 1.
     expect(
       await runStandalone(`export function run(): number {
         const inner = { z: 1 };
         const o: any = { a: inner, b: inner };
         return (o.a === o.b) ? 1 : 0;
       }`),
-    ).toBe(0);
+    ).toBe(1);
   });
 
   it("(c) an any-typed object IS === to ITSELF  [FLIPPED by CS1a: now 1]", async () => {
@@ -140,16 +146,16 @@ describe("#3037 CS0 — standalone object-identity characterization (FLIP-TARGET
     ).toBe(0);
   });
 
-  it("(e) a dynamically-read number is NOT === to a re-read of itself  [FLIP-TARGET 0->1]", async () => {
-    // A boxed-number externval read twice boxes tag-5 twice -> guarded string
-    // arm -> 0. The honest classifier (peels $BoxedNumber -> tag-3) fixes this
-    // by value (spec-correct), a bonus of the same substrate change.
+  it("(e) a dynamically-read number IS === to a re-read of itself  [FLIPPED by CS1b: now 1]", async () => {
+    // A boxed-number externval read twice boxed tag-5 twice -> guarded string
+    // arm -> 0. CS1b's honest classifier peels `$BoxedNumber` -> tag-3 BEFORE the
+    // eq test, so `o.n === o.n` compares by value (42 === 42) -> 1, spec-correct.
     expect(
       await runStandalone(`export function run(): number {
         const o: any = { n: 42 };
         return (o.n === o.n) ? 1 : 0;
       }`),
-    ).toBe(0);
+    ).toBe(1);
   });
 });
 
