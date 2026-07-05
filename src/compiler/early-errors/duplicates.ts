@@ -261,8 +261,45 @@ export function checkDuplicatePrivateNames(
   }
 }
 
+/**
+ * True when `block` is the *body* of a function-like node (function
+ * declaration/expression, arrow, method, constructor, or accessor).
+ *
+ * At the top level of such a body — exactly as at SourceFile (Script/Module)
+ * scope — a FunctionDeclaration is VAR-scoped, not lexical: the top-level
+ * statement list uses TopLevelLexicallyDeclaredNames, which excludes
+ * HoistableDeclarations (ES §15.2.2 / FunctionBody §10.2.11). So a same-name
+ * `var` and function declaration legally coexist there
+ * (`function test(){ var f; function f(){} }` is valid, matching V8).
+ *
+ * Only inside a *genuine nested Block statement* (parent is a statement — if /
+ * for / while / labeled / a `{ }` block, etc.) is a FunctionDeclaration
+ * lexically scoped (ES §14.2.1), where `{ var f; function f(){} }` IS a
+ * SyntaxError in both strict and sloppy mode — Annex B relaxes only the
+ * duplicate-FunctionDeclaration rule, never lexical-vs-var.
+ */
+function isFunctionBodyBlock(block: ts.Block | ts.SourceFile): boolean {
+  if (!ts.isBlock(block)) return false;
+  const parent = block.parent;
+  return (
+    !!parent &&
+    (ts.isFunctionDeclaration(parent) ||
+      ts.isFunctionExpression(parent) ||
+      ts.isArrowFunction(parent) ||
+      ts.isMethodDeclaration(parent) ||
+      ts.isConstructorDeclaration(parent) ||
+      ts.isGetAccessorDeclaration(parent) ||
+      ts.isSetAccessorDeclaration(parent))
+  );
+}
+
 /** Check for var/lexical declaration conflicts in a block or source file. */
 export function checkVarLexicalConflicts(ctx: EarlyErrorContext, block: ts.Block | ts.SourceFile): void {
+  // A FunctionDeclaration contributes a lexical binding (that a same-name `var`
+  // conflicts with) only inside a genuine nested Block statement — not at
+  // SourceFile scope nor at the top level of a function body, where it is
+  // var-scoped. See isFunctionBodyBlock.
+  const functionsAreLexical = ts.isBlock(block) && !isFunctionBodyBlock(block);
   // Collect lexically-declared names (let, const, function, class)
   const lexicalNames = new Set<string>();
   for (const stmt of block.statements) {
@@ -276,10 +313,12 @@ export function checkVarLexicalConflicts(ctx: EarlyErrorContext, block: ts.Block
         }
       }
     } else if (ts.isFunctionDeclaration(stmt) && stmt.name) {
-      // At SourceFile scope, function declarations are var-scoped — no conflict with var
-      // (LexicallyDeclaredNames does not include VarDeclaredNames per ES §13.1.1).
-      // Only inside a Block are function declarations lexically scoped (ES §B.3.2).
-      if (ts.isBlock(block)) {
+      // At SourceFile scope AND at the top level of a function body, function
+      // declarations are var-scoped — no conflict with a same-name var
+      // (TopLevelLexicallyDeclaredNames excludes HoistableDeclarations,
+      // ES §15.2.2 / §10.2.11). Only inside a genuine nested Block are they
+      // lexically scoped (ES §14.2.1 + §B.3.2).
+      if (functionsAreLexical) {
         lexicalNames.add(stmt.name.text);
       }
     } else if (ts.isClassDeclaration(stmt) && stmt.name) {

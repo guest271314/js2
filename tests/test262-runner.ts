@@ -14,6 +14,7 @@ import { createHash } from "crypto";
 import { createContext, runInContext } from "node:vm";
 import { compile } from "../src/index.js";
 import { buildImports } from "../src/runtime.js";
+import { ts } from "../src/ts-api.js";
 
 // #1310: per-shard global isolation for test262.
 //
@@ -2654,12 +2655,70 @@ export function test(): number {
   const isAsyncTest = resolvedMeta.flags?.includes("async") || needsAsyncTest;
   const asyncDrainDecl = isAsyncTest ? `declare function __drain_microtasks(): void;\n` : "";
   const asyncDrainCall = isAsyncTest ? `  __drain_microtasks();\n` : "";
+
+  // (#3047) Sloppy/top-level `var X` + `function X(){}` coexistence.
+  //
+  // At Script / function-body top level a FunctionDeclaration is VAR-scoped
+  // (TopLevelLexicallyDeclaredNames excludes HoistableDeclarations), so a
+  // same-name `var` and function declaration legally coexist there — e.g.
+  // `var f; function f(){}` is valid in V8. But this wrapper places the test
+  // body inside `try { ... }`, and a *nested Block* makes the function
+  // *lexically* scoped, so `try { var f; function f(){} }` becomes a genuine
+  // SyntaxError (V8 agrees). That mis-wrapping was reported as ~50 false
+  // `Cannot redeclare block-scoped variable` compile errors (dynamic-import
+  // /syntax/valid, redeclaration-global, RegExp exec/test, S13*/S10* fn tests).
+  //
+  // Fix: when a body's TOP-LEVEL statements bind the same name as both a `var`
+  // and a `function`, hoist that function declaration out of the `try` to the
+  // `test()` body top level. FunctionDeclarations hoist, so runtime semantics
+  // are byte-preserved, and the function regains its legal function-body-top-
+  // level (var) scope. Guarded strictly to the coexistence pattern, so every
+  // other test is emitted unchanged. Line positions of the remaining body are
+  // preserved by replacing each hoisted declaration with an equal-line comment.
+  let hoistedFns = "";
+  try {
+    const bodySf = ts.createSourceFile("__body.ts", bodyForFunc, ts.ScriptTarget.Latest, /*setParentNodes*/ false);
+    const topLevelVarNames = new Set<string>();
+    const topLevelFnDecls: { name: string; start: number; end: number }[] = [];
+    for (const stmt of bodySf.statements) {
+      if (ts.isVariableStatement(stmt)) {
+        const flags = stmt.declarationList.flags;
+        if ((flags & ts.NodeFlags.Let) === 0 && (flags & ts.NodeFlags.Const) === 0) {
+          for (const decl of stmt.declarationList.declarations) {
+            if (ts.isIdentifier(decl.name)) topLevelVarNames.add(decl.name.text);
+          }
+        }
+      } else if (ts.isFunctionDeclaration(stmt) && stmt.name && stmt.body) {
+        topLevelFnDecls.push({ name: stmt.name.text, start: stmt.getStart(bodySf), end: stmt.end });
+      }
+    }
+    const toHoist = topLevelFnDecls.filter((f) => topLevelVarNames.has(f.name));
+    if (toHoist.length > 0) {
+      const hoisted: string[] = [];
+      // Splice out in reverse so earlier offsets stay valid.
+      let patched = bodyForFunc;
+      for (const f of [...toHoist].sort((a, b) => b.start - a.start)) {
+        const text = patched.slice(f.start, f.end);
+        hoisted.unshift(text);
+        const newlineCount = text.split("\n").length - 1;
+        const pad = "/* #3047: function declaration hoisted to test() body top level */" + "\n".repeat(newlineCount);
+        patched = patched.slice(0, f.start) + pad + patched.slice(f.end);
+      }
+      bodyForFunc = patched;
+      hoistedFns = hoisted.join("\n") + "\n";
+    }
+  } catch {
+    // Defensive: if the body cannot be parsed standalone, skip the hoist and
+    // emit the body unchanged (byte-identical to pre-#3047 behavior).
+    hoistedFns = "";
+  }
+
   const preBody = `${strictDirective}
 ${hoistedImports}${asyncDrainDecl}${preamble}
 ${hoistedDecls}
 export function test(): number {
   ${implicitDecls}
-  try {
+  ${hoistedFns}try {
     `;
   const postBody = `
   } catch (e) {
