@@ -1532,6 +1532,8 @@ function buildPreamble(
   needsDetachBuffer: boolean,
   needs262: boolean,
   needsProxyTraps: boolean,
+  needsTypedArrayCtorArrays: boolean,
+  needsByteConversionValues: boolean,
 ): string {
   let p = `let __fail: number = 0;
 let __assert_count: number = 1;
@@ -1983,6 +1985,99 @@ let $262: any = {
 };`;
   }
 
+  if (needsTypedArrayCtorArrays) {
+    // (#1524) test262 harness/testTypedArray.js also DEFINES the constructor-list
+    // constants (`typedArrayConstructors`, `floatArrayConstructors`,
+    // `nonClampedIntArrayConstructors`, `intArrayConstructors`) that many tests
+    // reference directly (not via a testWith* wrapper). The runner previously
+    // shimmed only the wrapper functions, so bodies iterating these bare arrays
+    // threw `… is not defined`. Values mirror the upstream file.
+    p += `
+
+const floatArrayConstructors: any[] = [Float64Array, Float32Array];
+const nonClampedIntArrayConstructors: any[] = [
+  Int32Array, Int16Array, Int8Array, Uint32Array, Uint16Array, Uint8Array,
+];
+const intArrayConstructors: any[] = [
+  Int32Array, Int16Array, Int8Array, Uint32Array, Uint16Array, Uint8Array, Uint8ClampedArray,
+];
+const typedArrayConstructors: any[] = [
+  Float64Array, Float32Array,
+  Int32Array, Int16Array, Int8Array, Uint32Array, Uint16Array, Uint8Array, Uint8ClampedArray,
+];`;
+  }
+
+  if (needsByteConversionValues) {
+    // (#1524) test262 harness/byteConversionValues.js. Tests reference the
+    // `byteConversionValues` object (a `values` array + per-type `expected`
+    // arrays) at top level; without the include inlined they threw
+    // `byteConversionValues is not defined`. Ported verbatim from the harness.
+    p += `
+
+const byteConversionValues: any = {
+  values: [
+    127, 128, 32767, 32768, 2147483647, 2147483648,
+    255, 256, 65535, 65536, 4294967295, 4294967296,
+    9007199254740991, 9007199254740992,
+    1.1, 0.1, 0.5, 0.50000001, 0.6, 0.7, undefined,
+    -1, -0, -0.1, -1.1, NaN,
+    -127, -128, -32767, -32768, -2147483647, -2147483648,
+    -255, -256, -65535, -65536, -4294967295, -4294967296,
+    -9007199254740991, -9007199254740992,
+    Infinity, -Infinity,
+  ],
+  expected: {
+    Int8: [
+      127, -128, -1, 0, -1, 0, -1, 0, -1, 0, -1, 0, -1, 0,
+      1, 0, 0, 0, 0, 0, 0, -1, 0, 0, -1, 0,
+      -127, -128, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 0, 0,
+    ],
+    Uint8: [
+      127, 128, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0,
+      1, 0, 0, 0, 0, 0, 0, 255, 0, 0, 255, 0,
+      129, 128, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 0, 0,
+    ],
+    Uint8Clamped: [
+      127, 128, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+      1, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 0,
+    ],
+    Int16: [
+      127, 128, 32767, -32768, -1, 0, 255, 256, -1, 0, -1, 0, -1, 0,
+      1, 0, 0, 0, 0, 0, 0, -1, 0, 0, -1, 0,
+      -127, -128, -32767, -32768, 1, 0, -255, -256, 1, 0, 1, 0, 1, 0, 0, 0,
+    ],
+    Uint16: [
+      127, 128, 32767, 32768, 65535, 0, 255, 256, 65535, 0, 65535, 0, 65535, 0,
+      1, 0, 0, 0, 0, 0, 0, 65535, 0, 0, 65535, 0,
+      65409, 65408, 32769, 32768, 1, 0, 65281, 65280, 1, 0, 1, 0, 1, 0, 0, 0,
+    ],
+    Int32: [
+      127, 128, 32767, 32768, 2147483647, -2147483648, 255, 256, 65535, 65536, -1, 0, -1, 0,
+      1, 0, 0, 0, 0, 0, 0, -1, 0, 0, -1, 0,
+      -127, -128, -32767, -32768, -2147483647, -2147483648, -255, -256, -65535, -65536, 1, 0, 1, 0, 0, 0,
+    ],
+    Uint32: [
+      127, 128, 32767, 32768, 2147483647, 2147483648, 255, 256, 65535, 65536, 4294967295, 0, 4294967295, 0,
+      1, 0, 0, 0, 0, 0, 0, 4294967295, 0, 0, 4294967295, 0,
+      4294967169, 4294967168, 4294934529, 4294934528, 2147483649, 2147483648, 4294967041, 4294967040, 4294901761, 4294901760, 1, 0, 1, 0, 0, 0,
+    ],
+    Float32: [
+      127, 128, 32767, 32768, 2147483648, 2147483648, 255, 256, 65535, 65536, 4294967296, 4294967296, 9007199254740992, 9007199254740992,
+      1.100000023841858, 0.10000000149011612, 0.5, 0.5000000149011612, 0.6000000238418579, 0.699999988079071, NaN,
+      -1, -0, -0.10000000149011612, -1.100000023841858, NaN,
+      -127, -128, -32767, -32768, -2147483648, -2147483648, -255, -256, -65535, -65536, -4294967296, -4294967296, -9007199254740992, -9007199254740992, Infinity, -Infinity,
+    ],
+    Float64: [
+      127, 128, 32767, 32768, 2147483647, 2147483648, 255, 256, 65535, 65536, 4294967295, 4294967296, 9007199254740991, 9007199254740992,
+      1.1, 0.1, 0.5, 0.50000001, 0.6, 0.7, NaN,
+      -1, -0, -0.1, -1.1, NaN,
+      -127, -128, -32767, -32768, -2147483647, -2147483648, -255, -256, -65535, -65536, -4294967295, -4294967296, -9007199254740991, -9007199254740992, Infinity, -Infinity,
+    ],
+  },
+};`;
+  }
+
   if (needsProxyTraps) {
     // #2183: test262 harness/proxyTrapsHelper.js. Returns a Proxy handler where
     // every trap defaults to a stub that throws a Test262Error when invoked
@@ -2322,6 +2417,17 @@ export function wrapTest(source: string, meta?: Test262Meta): WrapResult {
   // includes this helper failed at construction.
   const needsProxyTraps = includes.includes("proxyTrapsHelper.js") && /\ballowProxyTraps\b/.test(body);
 
+  // (#1524) testTypedArray.js constructor-list constants referenced directly
+  // (not via a testWith* wrapper).
+  const needsTypedArrayCtorArrays =
+    includes.includes("testTypedArray.js") &&
+    /\b(typedArrayConstructors|floatArrayConstructors|nonClampedIntArrayConstructors|intArrayConstructors)\b/.test(
+      body,
+    );
+  // (#1524) byteConversionValues.js fixture object.
+  const needsByteConversionValues =
+    includes.includes("byteConversionValues.js") && /\bbyteConversionValues\b/.test(body);
+
   // #1523: test262 host-object `$262`. Tests use it as a precondition for
   // realm creation, ArrayBuffer detach, agent messaging, and global access.
   // We expose a minimal stub: createRealm returns a fresh global with eval,
@@ -2356,6 +2462,8 @@ export function wrapTest(source: string, meta?: Test262Meta): WrapResult {
     needsDetachBuffer,
     needs262,
     needsProxyTraps,
+    needsTypedArrayCtorArrays,
+    needsByteConversionValues,
   ]
     .map((b) => (b ? "1" : "0"))
     .join("");
@@ -2388,6 +2496,8 @@ export function wrapTest(source: string, meta?: Test262Meta): WrapResult {
       needsDetachBuffer,
       needs262,
       needsProxyTraps,
+      needsTypedArrayCtorArrays,
+      needsByteConversionValues,
     );
     preambleCache.set(cacheKey, preamble);
   }
