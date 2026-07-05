@@ -10,8 +10,8 @@
   },
   {
     "edition": "ES5",
-    "pass": 10343,
-    "fail": 2630,
+    "pass": 10346,
+    "fail": 2627,
     "ce": 102,
     "skip": 0,
     "total": 13075,
@@ -57,9 +57,9 @@
   },
   {
     "edition": "ES2015",
-    "pass": 11218,
-    "fail": 4024,
-    "ce": 144,
+    "pass": 11224,
+    "fail": 4016,
+    "ce": 146,
     "skip": 0,
     "total": 15386,
     "pct": 73,
@@ -228,12 +228,12 @@
       },
       {
         "name": "Symbol.replace",
-        "pass": 53,
-        "fail": 22,
+        "pass": 57,
+        "fail": 18,
         "ce": 0,
         "skip": 0,
         "total": 75,
-        "pct": 71
+        "pct": 76
       },
       {
         "name": "let",
@@ -255,12 +255,12 @@
       },
       {
         "name": "Symbol.split",
-        "pass": 33,
-        "fail": 23,
+        "pass": 35,
+        "fail": 21,
         "ce": 1,
         "skip": 0,
         "total": 57,
-        "pct": 58
+        "pct": 61
       },
       {
         "name": "upsert",
@@ -2141,8 +2141,8 @@
   },
   {
     "edition": "ES2022",
-    "pass": 3264,
-    "fail": 938,
+    "pass": 3266,
+    "fail": 936,
     "ce": 32,
     "skip": 0,
     "total": 4234,
@@ -2150,8 +2150,8 @@
     "features": [
       {
         "name": "class",
-        "pass": 2333,
-        "fail": 442,
+        "pass": 2335,
+        "fail": 440,
         "ce": 15,
         "skip": 0,
         "total": 2790,
@@ -2159,17 +2159,17 @@
       },
       {
         "name": "class-fields-public",
-        "pass": 1652,
-        "fail": 402,
+        "pass": 1654,
+        "fail": 400,
         "ce": 0,
         "skip": 0,
         "total": 2054,
-        "pct": 80
+        "pct": 81
       },
       {
         "name": "class-fields-private",
-        "pass": 1042,
-        "fail": 67,
+        "pass": 1044,
+        "fail": 65,
         "ce": 17,
         "skip": 0,
         "total": 1126,
@@ -2177,8 +2177,8 @@
       },
       {
         "name": "class-methods-private",
-        "pass": 859,
-        "fail": 106,
+        "pass": 861,
+        "fail": 104,
         "ce": 1,
         "skip": 0,
         "total": 966,
@@ -3925,9 +3925,9 @@
   {
     "edition": "Proposals",
     "pass": 1491,
-    "fail": 3171,
+    "fail": 3180,
     "ce": 215,
-    "skip": 105,
+    "skip": 96,
     "total": 4982,
     "pct": 30
   }
