@@ -510,15 +510,23 @@ classifier / `__any_to_extern` reuse struct types reserved during body comp.
 
 `ensureDynMemberGet` under the FORCE escape also emits exported `__dmg_*`
 drivers that build a receiver, call the helper, and return an i32 verdict
-entirely in Wasm (a `(ref $AnyValue)` can't cross to JS). Covered by
-`tests/issue-3053-u0-dyn-member-get.test.ts` (14 assertions, all green):
-- **standalone ($AnyValue carrier):** object read → **tag-6**, aliased reads
-  ARE `===` (identity → 1), distinct objects NOT `===` (→ 0, assertions bite);
-  string → **tag-5** content-`===`; number → **tag-3** value-`===`; boolean →
-  **tag-4**; RE-READ `dmg(dmg(o,"a"),"z")` → tag-3 value 7 (proves the internal
-  peel round-trips — the `__any_to_extern` tag-6 breaker is NOT re-triggered).
-- **gc/host (externref carrier):** number readback (7); object identity via
-  `__host_eq` (aliased → 1, distinct → 0).
+entirely in Wasm (a `(ref $AnyValue)` can't cross to JS). The drivers compare
+via **direct carrier-field `ref.eq` / `f64.eq`** (not `__any_strict_eq`) so no
+sealed coercion helper is invoked from `dyn-read.ts` — the #2108 coercion-drift
+gate stays at 0. Covered by `tests/issue-3053-u0-dyn-member-get.test.ts` (12
+assertions, all green):
+- **standalone ($AnyValue carrier):** object read → **tag-6**; aliased reads ARE
+  `===` (refval `ref.eq` → 1), distinct objects NOT (→ 0, assertions bite);
+  string → **tag-5**, same stored ref via externval `ref.eq` → 1; number →
+  **tag-3**, f64val `f64.eq` → 1; boolean → **tag-4**; RE-READ
+  `dmg(dmg(o,"a"),"z")` → tag-3 value 7 (proves the internal peel round-trips —
+  the `__any_to_extern` tag-6 breaker is NOT re-triggered).
+- **gc/host (externref carrier):** the host object model is JS-side and box/
+  marshal semantics are opaque, so the driver reports a marshalling-independent
+  i32 — a present-key read through the host wrapper is a non-null externref (1),
+  proving the host `__dyn_member_get` (thin `__extern_get` wrapper) is emitted,
+  valid, and executes without trapping (deep host read semantics are
+  `__extern_get`'s, tested elsewhere).
 
 ### U1 readiness — YES
 
