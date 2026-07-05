@@ -669,9 +669,8 @@ regression ⇒ a non-object leaked into tag-6 → diagnose, don't force.
 ### Remaining CS1b families (separate PRs, isolated merge_group evidence each)
 
 - **CS1b(ii) element access** — LANDED (opus-3037-cs1bii). See the section below.
-- **CS1b(iii) descriptor `.value`/`.get` producer** — `.value` reads are already
-  covered when they are equality operands (case a flips here); the remaining work
-  is the producer-side canonicalization for `.value` results that flow elsewhere.
+- **CS1b(iii) descriptor `.value`/`.get` producer** — RE-PROBED: no
+  carrier-addressable descriptor-specific gap remains. See the section below.
 - **CS1c** getPrototypeOf/reflective producer carrier (case d).
 
 ---
@@ -767,3 +766,75 @@ Same as CS1b: the equality-operand scoping is the safety boundary. **NOT
 self-merged on PR-green alone** — flagged the lead for a monitored `merge_group`
 standalone `host_free_pass` floor enqueue (expect NET-POSITIVE — drives #3027).
 Any floor regression ⇒ a non-object leaked into tag-6 → diagnose, don't force.
+
+---
+
+## CS1b(iii) (descriptor `.value`/`.get` producer) — RE-PROBED (opus-3037-cs1biii): no carrier-addressable gap
+
+**PR:** byte-inert regression-LOCK test only (no `src/` change).
+`prove-emit-identity` **39/39 IDENTICAL**. The task framed CS1b(iii) as "apply
+the same equality-operand carrier at the descriptor-`.value` choke point". A
+per-choke-point re-probe against current `upstream/main` (7eb51a2c5) **disproves
+that premise** — the same way CS0 disproved the "reader production site" premise
+and CS1a disproved the "`$AnyValue` carrier" premise. There is **no remaining
+carrier-addressable descriptor-specific gap** to implement.
+
+### What the re-probe measured (traced, not narrative)
+
+Every descriptor `.value`/`.get` read that is a **DIRECT operand** of a
+standalone `any` `===`/`!==`/`==` comparison **already answers identity
+correctly** on current main (identical → 1, distinct → 1 under `!==`). Two
+already-landed paths cover the entire descriptor equality-operand surface:
+
+1. **Direct gOPD Site-2 synthesis** —
+   `Object.getOwnPropertyDescriptor(RegExp.prototype,"exec").value` materialises
+   the per-`(brand,member)` **singleton** (`pushBuiltinFnSingletonValueInstrs`,
+   property-access.ts:1214/1233), a raw `ref` → boxed **tag-6** (`__any_box_ref`)
+   → the tag-6 `ref.eq` arm answers identity with **no carrier needed**. This is
+   also why `gOPD(RegExp.prototype,"exec").value === RegExp.prototype.exec` holds.
+2. **User-object descriptor read** —
+   `Object.getOwnPropertyDescriptor(p,"m").value` routes `.value` through the
+   **generic `compilePropertyAccess`** member-read choke point, where the
+   CS1b(i) member-read carrier (`maybeWrapAnyReadEqualityCarrier`,
+   expressions.ts:1356) **already fires** because `.value` is a direct
+   `any`-equality operand. So descriptor `.value` was **absorbed by CS1b(i)'s
+   placement at the generic choke point** — there is no separate descriptor site
+   that returns a bare externref the carrier misses. (`defineProperty` accessor
+   `.get`, data `.value` on an object value, `.writable` boolean, distinct-`!==`
+   — all verified 1 / correct.)
+
+### The one residual `0` is NOT descriptor-specific and NOT carrier-addressable
+
+The only descriptor `.value` case that still returns **0** is when the `.value`
+result is stored in an **intermediate `any` local** and the **locals** are
+compared:
+
+```ts
+const d1: any = Object.getOwnPropertyDescriptor(p, "exec");
+const v1: any = d1.value;
+const v2: any = d1.value;
+return (v1 === v2) ? 1 : 0;   // → 0
+```
+
+This is **identical** to a plain member read stored in a local
+(`const v1: any = o.a; const v2: any = o.a; v1 === v2` → **0** — same root
+cause, verified as the control). The equality operands here are **locals, not
+reads**, so the operand-scoped carrier cannot fire; and the value must flow as a
+general `any` usable anywhere, so it cannot be slotted as a `$AnyValue` local
+(that breaks dynamic reads — the CS1a finding) nor as a raw `ref $Object` (a
+dynamic read is statically `any`, a union of string/object/number). **Making a
+reader result canonical into an `any` LOCAL independent of downstream use is the
+UNIVERSAL-reader carrier = CS3 / V2-S3b — the −299 minefield**, not a bounded
+CS1b sub-slice. (Note: the harness-comparator shape — descriptor `.value`
+passed as a function ARG and compared inside the callee — already returns 1, so
+the test262-realistic pattern is not blocked by this residual.)
+
+### Deliverable
+
+`tests/issue-3037-cs1biii-descriptor-value-carrier.test.ts` — a byte-inert
+**regression-LOCK**: 10 descriptor equality-operand cases pinned at their
+correct answers (so a future refactor of the member-read carrier or the gOPD
+Site-2 synthesis can't silently regress descriptor `.value` identity), 3
+anti-vacuity invariants, and the 2 KNOWN-GAP rows pinned at `0` (descriptor +
+plain-read control) marked **CS3-owned** so the eventual universal-reader flip
+is auditable. No `src/` change; no floor movement expected.
