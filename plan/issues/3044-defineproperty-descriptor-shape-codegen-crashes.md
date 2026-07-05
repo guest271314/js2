@@ -1,12 +1,14 @@
 ---
 id: 3044
 title: "Object.defineProperty: compiler crashes on specific descriptor test shapes (invalid Wasm / illegal cast / op.endsWith / ctors-not-defined)"
-status: ready
+status: done
+completed: 2026-07-05
 sprint: current
 priority: high
 horizon: s
 feasibility: medium
 created: 2026-07-05
+assignee: ttraenkler/dev-3044
 task_type: bugfix
 area: codegen
 language_feature: object-defineproperty
@@ -55,3 +57,39 @@ invalid binary or throws internally) and can be picked off individually.
 
 - The listed files compile to a valid binary (pass or a spec-correct runtime
   result), no compiler-internal throw. Scope: **DEV**, pick individual files.
+
+## Resolution (2026-07-05, dev-3044)
+
+**`op.endsWith is not a function` — root-caused and fixed.** In
+`compileMathCall` (`src/codegen/expressions/builtins.ts`) the six native-unary
+opcodes were dispatched via `if (method in nativeUnary)`. The `in` operator
+walks the prototype chain, so an inherited `Object.prototype` method name
+reaching a `Math.<method>()` call — `Math.hasOwnProperty("prop")`,
+`Math.toString()`, `Math.valueOf()`, `Math.isPrototypeOf(x)`,
+`Math.propertyIsEnumerable(x)`, `Math.constructor` — spuriously matched the
+table and pushed `{ op: nativeUnary[method] }`, where the value is the inherited
+*function*, not a string. That non-string `op` survived into `stack-balance`,
+whose `op.endsWith(".load")` threw and aborted the whole module compile. Fixed
+by dispatching with `Object.hasOwn(nativeUnary, method)` (own-property
+semantics); inherited names now fall through to `return undefined` → generic
+call handling. Strict narrowing — real math methods (own props) still match, and
+the removed inherited-name path only ever emitted an invalid module, so it
+cannot regress a passing test.
+
+Impact (all three suite files that trigger it —
+`defineProperty/15.2.3.6-4-{411,587}.js`, `defineProperties/15.2.3.7-6-a-17.js`):
+`compile_error → runnable`. **`15.2.3.6-4-411.js` flips compile_error → pass**
+(it asserts `Math.hasOwnProperty("prop") === false`, correctly resolved by
+generic handling). `4-587` / `6-a-17` now run but still `fail` — they assert a
+property *stored on `Math` by an earlier `Object.defineProperty(Math, …)`*,
+which is the `defineProperty`-on-builtin storage/fidelity gap tracked by the
+**#3022** umbrella, not a codegen crash. Regression test: `tests/issue-3044.test.ts`.
+
+**Other cited signatures are stale on current main** (verified via
+`runTest262File`): `15.2.3.6-4-{255,256}.js` (invalid-Wasm) already **pass**;
+the `illegal cast` files `4-117` / `6-a-113` already compile to a valid binary
+and `fail` on semantics only (no compiler throw); they call `.hasOwnProperty`
+on arrays/objects, not `Math`, so they never went through `compileMathCall`.
+The `ctors is not defined` typed-array files reference a harness global — a
+harness/skip matter, not a codegen crash. Remaining semantics failures belong to
+#3022 descriptor fidelity, not to this codegen-crash issue.

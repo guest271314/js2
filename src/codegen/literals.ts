@@ -1746,7 +1746,18 @@ export function compileWidenedEmptyObject(
         fctx.body.push({ op: "i32.const", value: 0 });
         break;
       case "externref":
-        fctx.body.push({ op: "ref.null.extern" });
+        // (#3042) A widened `externref` field that is never assigned — e.g. a
+        // property introduced ONLY through `Object.defineProperty(obj, k, desc)`
+        // with a value-less descriptor (`{ enumerable: false }`), which lowers to
+        // a struct no-op — must read back as JS `undefined`, not `null`. Per ES
+        // §10.1.6.3 a value-less data descriptor defaults `[[Value]]` to
+        // `undefined`; reading a would-be-absent property likewise yields
+        // `undefined`. `ref.null.extern` reads as `null` and breaks the
+        // defineProperty attribute round-trip (verifyProperty's `value:
+        // undefined` check). Mirror the established default-value semantics of
+        // the main object-literal path (its "missing fields" branch), which uses
+        // `emitUndefined` for exactly this reason.
+        emitUndefined(ctx, fctx);
         break;
       default:
         if (field.type.kind === "ref" || field.type.kind === "ref_null") {
