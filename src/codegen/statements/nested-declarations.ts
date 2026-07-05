@@ -625,6 +625,12 @@ export function compileNestedFunctionDeclaration(
     emitDefaultParamInit(ctx, liftedFctx, stmt, paramTypes, 0);
 
     // Destructure parameters with binding patterns
+    // (#3024) Keep the param-default materialization body reachable for the
+    // nested-default field-pad patch (see function-body.ts / statements/
+    // destructuring.ts for the full rationale).
+    const pdBodyNC = liftedFctx.body;
+    const pdLiveNC = ctx.liveBodies.has(pdBodyNC);
+    if (!pdLiveNC) ctx.liveBodies.add(pdBodyNC);
     for (let pi = 0; pi < stmt.parameters.length; pi++) {
       const param = stmt.parameters[pi]!;
       if (ts.isObjectBindingPattern(param.name)) {
@@ -633,6 +639,7 @@ export function compileNestedFunctionDeclaration(
         destructureParamArray(ctx, liftedFctx, pi, param.name, paramTypes[pi]!);
       }
     }
+    if (!pdLiveNC) ctx.liveBodies.delete(pdBodyNC);
 
     // Set up `arguments` object if the function body references it.
     // (#2743) Unmapped when strict OR the parameter list is non-simple
@@ -935,6 +942,12 @@ export function compileNestedFunctionDeclaration(
     emitDefaultParamInit(ctx, liftedFctx, stmt, paramTypes, leadingParamCount);
 
     // Destructure parameters with binding patterns (offset by leading params)
+    // (#3024) Keep the param-default materialization body reachable for the
+    // nested-default field-pad patch (see function-body.ts / statements/
+    // destructuring.ts for the full rationale).
+    const pdBodyNC2 = liftedFctx.body;
+    const pdLiveNC2 = ctx.liveBodies.has(pdBodyNC2);
+    if (!pdLiveNC2) ctx.liveBodies.add(pdBodyNC2);
     for (let pi = 0; pi < stmt.parameters.length; pi++) {
       const param = stmt.parameters[pi]!;
       const paramIdx = leadingParamCount + pi;
@@ -944,6 +957,7 @@ export function compileNestedFunctionDeclaration(
         destructureParamArray(ctx, liftedFctx, paramIdx, param.name, paramTypes[pi]!);
       }
     }
+    if (!pdLiveNC2) ctx.liveBodies.delete(pdBodyNC2);
 
     // Set up `arguments` object if the function body references it.
     // (#2743) Unmapped when strict OR the parameter list is non-simple
