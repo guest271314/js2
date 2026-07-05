@@ -99,3 +99,12 @@ count bumped to 259 (default); still `feasibility: easy`, still `backlog`.
 Flagging as a good candidate for promotion to `sprint: current` — cheap,
 well-scoped, and now confirmed to unblock **259 + 175 = 434** combined
 test262 fails across both lanes (PO call, not made here).
+
+**Harvest 2026-07-05 re-confirm:** still 259 default-lane `is not defined`
+records (`ctors` / `floatArrayConstructors` / `byteConversionValues` /
+`nonAtomicsFriendlyTypedArrayConstructors`), and this fixture gap is
+additionally the upstream root cause of the **1,496** default-lane
+"vacuous harness-wrapper" fails filed under #2940 (the harness helper throws
+before the assertion callback runs). Blast radius is materially larger than
+the recorded 434. Reiterating: cheap, `feasibility: easy`, high-leverage —
+strongest single non-substrate default-lane candidate for `sprint: current`.
