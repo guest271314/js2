@@ -2142,8 +2142,8 @@
   {
     "edition": "ES2022",
     "pass": 3266,
-    "fail": 936,
-    "ce": 32,
+    "fail": 771,
+    "ce": 197,
     "skip": 0,
     "total": 4234,
     "pct": 77,
@@ -2214,8 +2214,8 @@
       {
         "name": "resizable-arraybuffer",
         "pass": 150,
-        "fail": 276,
-        "ce": 6,
+        "fail": 111,
+        "ce": 171,
         "skip": 0,
         "total": 432,
         "pct": 35
@@ -2466,8 +2466,8 @@
       {
         "name": "Array.prototype.includes",
         "pass": 0,
-        "fail": 11,
-        "ce": 0,
+        "fail": 5,
+        "ce": 6,
         "skip": 0,
         "total": 11,
         "pct": 0
