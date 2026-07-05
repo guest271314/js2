@@ -106,12 +106,14 @@ jobs:
         if: github.event_name == 'push' || inputs.dry-run == 'false'
         run: npm publish --provenance --access public
 
-      # DISABLED: the unscoped js2wasm proxy is unpublished, has no trusted
-      # publisher, and pins @loopdive/js2 at a stale 0.52.0. Re-enable (and add
-      # its own trusted publisher + a dep bump) once you want `npm install
-      # js2wasm` to resolve. See loopdive/js2#389.
+      # The unscoped js2wasm proxy re-exports @loopdive/js2 for discoverability
+      # (`npm install js2wasm`). Its package.json version tracks the canonical
+      # package in lockstep (scripts/release.mjs) and its dependency pins the
+      # matching @loopdive/js2 version. Requires an npm trusted publisher
+      # configured for the `js2wasm` package (same GitHub OIDC provider as
+      # @loopdive/js2). See loopdive/js2#389.
       - name: Publish js2wasm proxy
-        if: false
+        if: github.event_name == 'push' || inputs.dry-run == 'false'
         working-directory: packages/js2wasm
         run: npm publish --provenance --access public
 
@@ -119,9 +121,13 @@ jobs:
     name: JSR publish (@loopdive/js2)
     runs-on: ubuntu-latest
     needs: publish-npm
-    # DISABLED: JSR publishing needs its own OIDC link (jsr.io ↔ this repo) set
-    # up separately. Re-enable once the JSR package + GitHub link are configured.
-    if: false
+    # Tokenless OIDC — jsr publish authenticates via the workflow's id-token
+    # (id-token: write is granted at the workflow level). Requires the JSR
+    # package `@loopdive/js2` to exist and be linked to this GitHub repo on
+    # jsr.io (Settings → link a GitHub repository) so OIDC publishing is
+    # authorized. jsr.json carries the version (kept in lockstep with the npm
+    # packages by scripts/release.mjs).
+    if: github.event_name == 'push' || inputs.dry-run == 'false'
     steps:
       - uses: actions/checkout@v5
 
