@@ -14640,6 +14640,33 @@ function collectInterfaceMembers(
       if (info.className === "RegExp" && propName === "lastIndex" && !ctx.standalone && !ctx.wasi) {
         wasmType = { kind: "externref" };
       }
+      // (#3051 Slice 2) `RegExp.prototype.global` / `.unicode` are spec-readonly
+      // booleans, but test262's @@replace/@@split coercion tests redefine them as
+      // writable data properties (`Object.defineProperty(r,'global',{writable:true})`)
+      // and then assign arbitrary values (`r.global = Symbol.replace`, `= {}`,
+      // `= NaN`, …). §22.2.6.11/§22.2.6.14 read the flag back through
+      // `ToBoolean(? Get(rx, "global"|"unicode"))` — i.e. any value coerces at
+      // read time, it is NOT constrained to a boolean on write. Typing the extern
+      // property `boolean` makes the generated `RegExp_set_global(externref, i32)`
+      // setter eagerly ToNumber the assigned value: a Symbol RHS traps ("Cannot
+      // convert a Symbol value to a number") and an object RHS traps ("Cannot
+      // convert object to primitive value") at the wasm boundary, before the value
+      // is ever stored. Carry the slot as `externref` in host mode (mirroring the
+      // #2671 `lastIndex` treatment) so the raw value round-trips onto the native
+      // RegExp and the native @@replace/@@split protocol performs the spec
+      // ToBoolean itself; explicit `r.global` reads coerce externref→boolean at the
+      // use site (a boxed `false` unboxes correctly — see the Slice 2 controls).
+      // Standalone / WASI keep their native struct-field RegExp path (the
+      // `RegExp_*_global` extern import is never emitted there), so only host mode
+      // is retyped.
+      if (
+        info.className === "RegExp" &&
+        (propName === "global" || propName === "unicode") &&
+        !ctx.standalone &&
+        !ctx.wasi
+      ) {
+        wasmType = { kind: "externref" };
+      }
       const isReadonly = member.modifiers?.some((m) => m.kind === ts.SyntaxKind.ReadonlyKeyword) ?? false;
       info.properties.set(propName, { type: wasmType, readonly: isReadonly });
     }
