@@ -486,3 +486,34 @@ B2 (view accessor props `.byteLength`/`.byteOffset`/`.buffer` identity/
 this representation with no rework — the `$__ta_view` already carries a
 `byteOffset` field (pinned 0 in B1) that B2 populates, and the byte engine is
 offset-agnostic. B3 (proto methods over a view receiver) then follows.
+
+### B1 addendum — Option A (de-view materialization) + floor-neutral (opus-3054-b1)
+
+The first B1 cut regressed **-2** on the scoped standalone floor: 2 `resizable-arraybuffer`
+tests (`fill/absent-indices-…`, `includes/index-compared-…`) construct a TA over a buffer
+then call a prototype method; `.fill`/`.includes` `ref.cast` the receiver to the native
+element-typed vec, which **traps** on a `$__ta_view` (the B3 gap). Fixed **floor-neutral**:
+- **De-view materialization** (`emitTaViewToVec`): at `compileArrayMethodCall`, a
+  `$__ta_view` identifier-local receiver is byte-decoded into a fresh native vec and the
+  `localMap` is rebound for the call (restored after). De-aliasing — mutating-method writes
+  land in the copy, not the buffer (B1 never claimed proto-method write-through; that's B3).
+- **Bounds-checked view read/write**: OOB read → NaN (§10.4.5.15 undefined), OOB write →
+  no-op (§10.4.5.16), matching the native bounds-checked vec (no trap).
+- **Re-measured**: NET **0** (+0/-0) on built-ins/{TypedArray,DataView,ArrayBuffer} (2195
+  files) vs upstream/main. Byte-inert preserved (sha256 identical for array-method controls).
+
+### Measurement-integrity finding (surfaced to the lead — separate issue)
+While measuring, discovered the **standalone lane does not enforce NUMERIC equality
+assertions**. Reproduced through the real `wrapTest`: `assert.sameValue(1, 2)` → standalone
+`test()` returns **1 (pass)**, host returns 2 (fail); `assert.sameValue("a","b")` → 2 in
+BOTH (strings enforced). Trigger: the harness preamble **unconditionally** injects
+`class Test262Error`; with it present, the numeric assert path
+`assert_sameValue`→`isSameValue(a: any, b: any)`→`a === b` compiles the `any`-boxed number
+compare incorrectly in standalone (returns "equal" for unequal), so `__fail` is never set.
+String/bool asserts route to typed `assert_sameValue_str`/`_bool` (test262-runner.ts:1633/
+1651) and ARE enforced; there is **no `_num` specialization** so numeric asserts fall onto
+the buggy `any` path. **Implication:** a large fraction of numeric-heavy standalone
+"passes" (TypedArray/DataView/ArrayBuffer/Number/Math) are vacuous → the standalone floor %
+and the standalone-gap prioritization need recalibration. Fix directions: (a) harness-prelude
+`assert_sameValue_num(number,number)` routing (cheap, sidesteps the codegen bug), or (b) fix
+standalone `any === any`-on-boxed-numbers when an object-runtime/class is present.
