@@ -263,6 +263,9 @@ copyFileIfExists(PUBLIC_REPORT_SHORT, join(PAGES_DIST, "benchmarks", "report.htm
 // them.
 if (hasDashboardBundle) {
   copyFile(join(DASHBOARD_DIR, "index.html"), join(PAGES_DIST, "dashboard", "index.html"));
+  // issue.html is the detail page every kanban card links to
+  // (issue.html?slug=…); without it, those links 404 on the deployed site.
+  copyFile(join(DASHBOARD_DIR, "issue.html"), join(PAGES_DIST, "dashboard", "issue.html"));
   copyDirectory(join(DASHBOARD_DIR, "data"), join(PAGES_DIST, "dashboard", "data"));
   copyFile(join(DASHBOARD_DIR, "data.js"), join(PAGES_DIST, "dashboard", "data.js"));
 }
