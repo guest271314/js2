@@ -427,6 +427,7 @@ function renameInstrOperands(inst: IrInstr, rename: ReadonlyMap<IrValueId, IrVal
     }
     case "string.const":
       return inst;
+    case "dyn.eq":
     case "string.concat":
     case "string.eq": {
       const l = mapId(rename, inst.lhs);

@@ -25,6 +25,7 @@
 import { ts } from "../ts-api.js";
 
 import { ensureAnyHelpers, ensureAnyValueType } from "../codegen/any-helpers.js"; // (#2949) boxed-any carrier for IrType.dynamic
+import { ensureLateImport } from "../codegen/shared.js"; // (#2949 S5.2) host __host_eq / __host_loose_eq registration
 import { getOrRegisterPromiseType } from "../codegen/async-scheduler.js";
 import {
   addGeneratorImports,
@@ -1695,7 +1696,21 @@ function isDynamicOp(instr: IrInstr): boolean {
   // #2949 S5.1 — dyn.truthy always consumes the boxed-any carrier, so its
   // presence requires the dynamic backing (ensureAnyHelpers / addUnionImports).
   if (instr.kind === "dyn.truthy") return true;
+  // #2949 S5.2 — dyn.eq consumes two carriers and calls the canonical equality
+  // helpers, so it too requires the dynamic backing pre-registered.
+  if (instr.kind === "dyn.eq") return true;
   return false;
+}
+
+/**
+ * #2949 S5.2 — does this instruction lower through the canonical any-equality
+ * helper family (`__any_strict_eq` / `__any_eq`, plus `__any_from_extern` in
+ * host mode)? These are DEFINED functions built by `ensureAnyHelpers`, which
+ * the host (non-fast) preregister path does NOT otherwise run — so a `dyn.eq`
+ * in a host module needs the extra registration below.
+ */
+function usesDynEq(instr: IrInstr): boolean {
+  return instr.kind === "dyn.eq";
 }
 
 /**
@@ -1745,23 +1760,39 @@ function jsTagToStaticType(
  */
 function preregisterDynamicSupport(ctx: CodegenContext, fns: readonly BuiltFnRef[]): void {
   let usesDynamicOps = false;
+  let usesEq = false;
   for (const entry of fns) {
     for (const block of entry.fn.blocks) {
       for (const instr of block.instrs) {
         forEachInstrDeep(instr, (i) => {
           if (isDynamicOp(i)) usesDynamicOps = true;
+          if (usesDynEq(i)) usesEq = true;
         });
-        if (usesDynamicOps) break;
+        if (usesDynamicOps && usesEq) break;
       }
-      if (usesDynamicOps) break;
+      if (usesDynamicOps && usesEq) break;
     }
-    if (usesDynamicOps) break;
+    if (usesDynamicOps && usesEq) break;
   }
   if (!usesDynamicOps) return;
   if (ctx.fast) {
+    // gc: ensureAnyHelpers registers $AnyValue + the __any_box_*/__any_unbox_*
+    // family AND the equality helpers (__any_strict_eq / __any_eq) — one call
+    // covers every gc dynamic op, dyn.eq included.
     ensureAnyHelpers(ctx);
   } else {
+    // host: the classifier / box import family for box/unbox/tag.test/truthy.
     addUnionImports(ctx);
+    // #2949 S5.2 — dyn.eq in host mode calls `__host_eq` (JS `===`) /
+    // `__host_loose_eq` (JS `==`) — the SAME host-import equality legacy
+    // `any === any` uses. Register them up-front (they are LATE IMPORTS that
+    // shift defined funcIdxs) so no emit can trigger a mid-emission shift
+    // (#329/#2078), exactly like `addUnionImports` above. Both are idempotent;
+    // only fired when a host module actually carries a dyn.eq.
+    if (usesEq) {
+      ensureLateImport(ctx, "__host_eq", [{ kind: "externref" }, { kind: "externref" }], [{ kind: "i32" }]);
+      ensureLateImport(ctx, "__host_loose_eq", [{ kind: "externref" }, { kind: "externref" }], [{ kind: "i32" }]);
+    }
   }
 }
 
@@ -1892,6 +1923,20 @@ export function makeDynamicLowering(ctx: CodegenContext): IrDynamicLowering | nu
         // mid-emission funcIdx shift.
         return emitCoercionToBoolean(ctx, { kind: "ref_null", typeIdx: anyTypeIdx }, []);
       },
+      emitEqOperand(): readonly Instr[] {
+        // #2949 S5.2 — the gc carrier IS `(ref null $AnyValue)`, already the
+        // `__any_strict_eq`/`__any_eq` parameter shape. No marshalling.
+        return [];
+      },
+      emitStrictEq(negate: boolean): readonly Instr[] {
+        // Canonical `===` engine (D4): the tag-5 classifier — cross-type
+        // falsity, numeric-class `23 === 23.0`, `NaN === NaN → false`
+        // (`f64.eq`), reference identity — lives in `__any_strict_eq`'s body.
+        return negate ? [callHelper("__any_strict_eq"), { op: "i32.eqz" }] : [callHelper("__any_strict_eq")];
+      },
+      emitLooseEq(negate: boolean): readonly Instr[] {
+        return negate ? [callHelper("__any_eq"), { op: "i32.eqz" }] : [callHelper("__any_eq")];
+      },
     };
   }
 
@@ -2002,6 +2047,29 @@ export function makeDynamicLowering(ctx: CodegenContext): IrDynamicLowering | nu
       // internal `addUnionImports` / `ensureLateImport` here find the import
       // by name and add nothing — no import shift mid-emission.
       return emitCoercionToBoolean(ctx, { kind: "externref" }, []);
+    },
+    emitEqOperand(): readonly Instr[] {
+      // #2949 S5.2 — the host carrier is `externref`, which is EXACTLY the
+      // `(externref, externref)` shape `__host_eq` / `__host_loose_eq` take.
+      // No marshalling — legacy host `any === any` compares the raw externrefs
+      // (verified: a `boxToAny`+`__any_eq` marshalling DIVERGES — it drops the
+      // §7.2.15 coercions, giving `"5" == 5 → false`; the `__any_eq` path is the
+      // STANDALONE `noJsHost` branch in binary-ops, not host's).
+      return [];
+    },
+    emitStrictEq(negate: boolean): readonly Instr[] {
+      // #2949 S5.2 — host STRICT `===` via the SAME `__host_eq` (JS `===`,
+      // §7.2.16) legacy host `any === any` uses (D4, byte-parity with the host
+      // runtime result). `__host_eq` is a host import in this (non-fast,
+      // JS-host) mode; standalone/wasi is the `gc` strategy, which uses the
+      // native `__any_strict_eq` instead — so there is no host-import leak into
+      // a host-free module.
+      return negate ? [callImport("__host_eq"), { op: "i32.eqz" }] : [callImport("__host_eq")];
+    },
+    emitLooseEq(negate: boolean): readonly Instr[] {
+      // Host LOOSE `==` via `__host_loose_eq` (JS `==`, §7.2.15) — the coercion
+      // arms (String⇄Number, `null == undefined`) are JS's, matching legacy.
+      return negate ? [callImport("__host_loose_eq"), { op: "i32.eqz" }] : [callImport("__host_loose_eq")];
     },
   };
 }

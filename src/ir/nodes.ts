@@ -891,6 +891,34 @@ export interface IrInstrDynTruthy extends IrInstrBase {
   readonly value: IrValueId;
 }
 
+/**
+ * `dyn.eq{lhs, rhs, loose, negate}` — strict/loose equality (§7.2.15 /
+ * §7.2.16) between two boxed-any carriers, result `i32` (0/1) (#2949 S5.2).
+ *
+ * BOTH operands MUST be `dynamic`: the producer boxes any concrete operand
+ * into the carrier first (via `box{toType: dynamic}`), leaving the dyn side
+ * as-is, so this node always sees two carriers — exactly the `(ref null
+ * $AnyValue, ref null $AnyValue)` shape the canonical equality helpers take.
+ * Lowering routes through the SAME `__any_strict_eq` (`===`/`!==`, `loose:
+ * false`) / `__any_eq` (`==`/`!=`, `loose: true`) helpers legacy's
+ * `compileAnyBinaryDispatch` uses — one equality engine, byte-parity with
+ * legacy, and the tag-5 field-4 classifier (incl. `NaN === NaN → false` via
+ * the helper's `f64.eq`) stays in the helper body, never re-implemented
+ * (June-audit D4). `negate` appends `i32.eqz` for the `!==`/`!=` form (the
+ * helper always computes the positive `===`/`==`). The payload-less
+ * `dyn === null` / `dyn === undefined` STRICT cases are NOT this node — the
+ * producer lowers those via the cheaper exact `tag.test{Null|Undefined}`.
+ */
+export interface IrInstrDynEq extends IrInstrBase {
+  readonly kind: "dyn.eq";
+  readonly lhs: IrValueId;
+  readonly rhs: IrValueId;
+  /** `true` = loose `==`/`!=` (`__any_eq`); `false` = strict `===`/`!==` (`__any_strict_eq`). */
+  readonly loose: boolean;
+  /** `true` = `!==`/`!=` — append `i32.eqz` to the helper's positive result. */
+  readonly negate: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // String operations (#1169a — IR Phase 4 Slice 1)
 // ---------------------------------------------------------------------------
@@ -2156,6 +2184,7 @@ export type IrInstr =
   | IrInstrUnbox
   | IrInstrTagTest
   | IrInstrDynTruthy
+  | IrInstrDynEq
   | IrInstrStringConst
   | IrInstrStringConcat
   | IrInstrStringEq
@@ -2468,6 +2497,7 @@ export function forEachNestedBuffer(instr: IrInstr, fn: (buffer: readonly IrInst
     case "unbox":
     case "tag.test":
     case "dyn.truthy":
+    case "dyn.eq":
     case "string.const":
     case "string.concat":
     case "string.eq":
@@ -2613,6 +2643,7 @@ export function mapNestedBuffers(
     case "unbox":
     case "tag.test":
     case "dyn.truthy":
+    case "dyn.eq":
     case "string.const":
     case "string.concat":
     case "string.eq":
@@ -2709,6 +2740,7 @@ export function directUses(instr: IrInstr): readonly IrValueId[] {
     case "tag.test":
     case "dyn.truthy":
       return [instr.value];
+    case "dyn.eq":
     case "string.concat":
     case "string.eq":
       return [instr.lhs, instr.rhs];

@@ -54,9 +54,11 @@ import {
 } from "./capability.js";
 import type { IrLowerResolver, IrVecLowering } from "./lower.js";
 import { mathUnaryToIrOp } from "./select.js";
+import { JsTag } from "../codegen/js-tag.js"; // #2949 S5.2 — box-refinement tags for dynamic equality operands
 import {
   asVal,
   closureSignatureEquals,
+  irDynamic,
   irTypeEquals,
   irVal,
   type IrBinop,
@@ -5323,6 +5325,22 @@ function lowerBinary(expr: ts.BinaryExpression, cx: LowerCtx, hint: IrType): IrV
   const lt = typeOfValue(lhs, cx);
   const rt = typeOfValue(rhs, cx);
 
+  // #2949 S5.2 — dynamic equality: `===`/`!==`/`==`/`!=` where either operand
+  // is a boxed-any carrier. The concrete operand is boxed into the carrier
+  // (refining the box tag from a literal's kind where known), the dyn operand
+  // is left as-is, and `dyn.eq` lowers through the CANONICAL
+  // `__any_strict_eq`/`__any_eq` helpers (D4). Must precede the string-operand
+  // path below (a `dyn === "s"` mixes dynamic + string). The payload-less
+  // STRICT `dyn === null`/`dyn === undefined` cases were already handled by
+  // `tryFoldNullCompare`/`tryLowerUndefinedCompare`'s dynamic arms (cheaper
+  // exact `tag.test`), so they never reach here. Reachable only once the S5.P
+  // selector scan admits dynamic-eq bodies; today the move-only gate rejects
+  // them, so this arm is byte-inert.
+  if (lt.kind === "dynamic" || rt.kind === "dynamic") {
+    const dynEq = tryLowerDynamicEq(expr, op, lhs, rhs, lt, rt, cx);
+    if (dynEq !== null) return dynEq;
+  }
+
   // String operand path (slice 1, #1169a) — `+`, `===`, `!==`, `==`, `!=`.
   // Any other operator with a string operand throws so the function falls
   // back to legacy.
@@ -5717,6 +5735,14 @@ function tryLowerUndefinedCompare(expr: ts.BinaryExpression, op: ts.SyntaxKind, 
   const other = leftU ? expr.right : expr.left;
   const v = lowerExpr(other, cx, irVal({ kind: "externref" }));
   const t = cx.builder.typeOf(v);
+  // #2949 S5.2 — a dynamic (boxed-any) operand: strict `=== undefined` /
+  // `!== undefined` is the exact Undefined-partition tag test (cheaper and
+  // more precise than boxing `undefined` into the carrier + the general
+  // helper). Only strict ops reach here (`isStrictEq`/`isStrictNeq` gate).
+  if (t.kind === "dynamic") {
+    const flag = cx.builder.emitTagTest(v, JsTag.Undefined);
+    return isStrictNeq ? cx.builder.emitUnary("i32.eqz", flag, irVal({ kind: "i32" })) : flag;
+  }
   const tv = asVal(t);
   const externrefShaped =
     (tv !== null && tv.kind === "externref") ||
@@ -5773,6 +5799,18 @@ function tryFoldNullCompare(expr: ts.BinaryExpression, op: ts.SyntaxKind, cx: Lo
   const v = lowerExpr(other, cx, irVal({ kind: "f64" }));
   const otherType = cx.builder.typeOf(v);
 
+  // #2949 S5.2 — a dynamic (boxed-any) operand: STRICT `=== null` / `!== null`
+  // is the exact Null-partition tag test. LOOSE `== null` / `!= null` matches
+  // BOTH null and undefined (§7.2.15) — NOT a single tag test — so it is left
+  // to legacy (return null → demote), NOT folded.
+  if (otherType.kind === "dynamic") {
+    if (op === ts.SyntaxKind.EqualsEqualsEqualsToken || op === ts.SyntaxKind.ExclamationEqualsEqualsToken) {
+      const flag = cx.builder.emitTagTest(v, JsTag.Null);
+      return isNeq ? cx.builder.emitUnary("i32.eqz", flag, irVal({ kind: "i32" })) : flag;
+    }
+    return null;
+  }
+
   // Slice 1 only knows non-nullable types: `val<...>`, `string`, and
   // unions whose members are non-null (V1 unions only carry f64/i32).
   // `boxed` is deferred; bail so the caller errors cleanly.
@@ -5816,6 +5854,66 @@ function tryFoldNullCompare(expr: ts.BinaryExpression, op: ts.SyntaxKind, cx: Lo
   }
 
   return cx.builder.emitConst({ kind: "bool", value: isNeq }, irVal({ kind: "i32" }));
+}
+
+/**
+ * #2949 S5.2 — lower `dyn === x` / `dyn !== x` / `dyn == x` / `dyn != x` (either
+ * or both operands dynamic) to a `dyn.eq` node. Boxes the concrete operand into
+ * the boxed-any carrier (refining the box tag from a literal's kind where
+ * known) and leaves the dyn operand as-is, so `dyn.eq` sees two carriers — the
+ * `(ref null $AnyValue, ref null $AnyValue)` shape the canonical
+ * `__any_strict_eq`/`__any_eq` helpers take. Returns `null` (clean demote) for a
+ * concrete operand this slice cannot soundly box into the carrier (union / ref /
+ * an un-refinable non-literal `i32` whose number-vs-boolean brand is ambiguous),
+ * or for a non-equality operator.
+ */
+function tryLowerDynamicEq(
+  expr: ts.BinaryExpression,
+  op: ts.SyntaxKind,
+  lhs: IrValueId,
+  rhs: IrValueId,
+  lt: IrType,
+  rt: IrType,
+  cx: LowerCtx,
+): IrValueId | null {
+  const loose = op === ts.SyntaxKind.EqualsEqualsToken || op === ts.SyntaxKind.ExclamationEqualsToken;
+  const strict = op === ts.SyntaxKind.EqualsEqualsEqualsToken || op === ts.SyntaxKind.ExclamationEqualsEqualsToken;
+  if (!loose && !strict) return null;
+  const negate = op === ts.SyntaxKind.ExclamationEqualsToken || op === ts.SyntaxKind.ExclamationEqualsEqualsToken;
+
+  const dynL = lt.kind === "dynamic" ? lhs : boxConcreteToDynamic(lhs, lt, expr.left, cx);
+  if (dynL === null) return null;
+  const dynR = rt.kind === "dynamic" ? rhs : boxConcreteToDynamic(rhs, rt, expr.right, cx);
+  if (dynR === null) return null;
+  return cx.builder.emitDynEq(dynL, dynR, { loose, negate });
+}
+
+/**
+ * #2949 S5.2 — box a CONCRETE equality operand into the boxed-any carrier, tag-
+ * refined from its literal kind / IR type. Returns `null` when the operand has
+ * no sound carrier box in this slice, so the caller demotes cleanly rather than
+ * mis-tagging (e.g. a boxed boolean must carry tag-4, never the number default).
+ */
+function boxConcreteToDynamic(v: IrValueId, t: IrType, operand: ts.Expression, cx: LowerCtx): IrValueId | null {
+  if (t.kind === "string") {
+    return cx.builder.emitBox(v, irDynamic(JsTag.String));
+  }
+  const tv = asVal(t);
+  if (!tv) return null;
+  // Boolean literal (`true`/`false`) → tag-4 box; without the refinement the i32
+  // would box as a NUMBER and `dyn === true` would fail against a boxed boolean.
+  if (operand.kind === ts.SyntaxKind.TrueKeyword || operand.kind === ts.SyntaxKind.FalseKeyword) {
+    return cx.builder.emitBox(v, irDynamic(JsTag.Boolean));
+  }
+  // Numeric literal or an f64-typed value → number box (f64 hosts only the
+  // number brand).
+  if (tv.kind === "f64" || ts.isNumericLiteral(operand)) {
+    return cx.builder.emitBox(v, irDynamic(JsTag.NumberF64));
+  }
+  // A bare non-literal `i32` is number-vs-boolean-ambiguous with no cheap proof
+  // here — demote rather than risk a wrong tag. S5.P can refine with the
+  // checker (isProvablyBoolean) when it opens the scan.
+  return null;
 }
 
 /** Result-type hints aren't used in Phase 1 (we always know from the op). */
