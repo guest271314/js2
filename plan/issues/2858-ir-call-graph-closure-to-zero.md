@@ -1,10 +1,12 @@
 ---
 id: 2858
 title: "IR: drive call-graph-closure fallback bucket to zero (derivative of body-shape + class-method)"
-status: ready
+status: done
 sprint: current
 created: 2026-06-30
-updated: 2026-07-02
+updated: 2026-07-05
+completed: 2026-07-05
+assignee: ttraenkler/opus-2858
 priority: high
 horizon: m
 feasibility: medium
@@ -86,3 +88,71 @@ entries clear as their callees' `body-shape-rejected` /
 dependency) causes are fixed by #2856/#2857 — expect this bucket to shrink
 substantially without direct work; re-run the gate before triaging what
 remains.
+
+## Resolution (2026-07-05, opus-2858)
+
+**Bucket: `call-graph-closure` 9 → 0** (baseline key removed).
+
+### Root cause (measure-first)
+
+Re-ran `check:ir-fallbacks --verbose` on `upstream/main` @ b8db7821: the bucket
+was **9** — `benchmarks/helpers.ts` 2, `dom/calendar.ts` 4, `js/builtins.ts` 3.
+A per-function probe (`planIrCompilation`, `trackFallbacks`) showed **all 9 are
+CALLER-direction demotions**: individually-claimable *leaf helpers* (`el`,
+`mname`, `dimOf`, `priceOf`, `crd`, `rw`, `bcrd`) demoted purely because a
+**legacy caller** (a `body-shape-rejected` function) calls them — not because of
+any bad *callee*. So this bucket is not derivative of the callees here; it is the
+call-graph closure's **caller** arm being over-conservative.
+
+### Why the caller arm was obsolete (in host mode)
+
+The closure demotes both directions to avoid a legacy-caller ↔ IR-callee
+*signature* mismatch. That mismatch class was **eliminated by #2949 slice 3b**:
+`AnyKeyword` now resolves to `irDynamic()` — one `any` ABI for both front-ends in
+both modes (previously an IR-claimed `f(x: any)` had a different fast-mode
+signature than its legacy callers, the original motivation for the caller arm).
+A claimed callee's funcIdx is pre-allocated by legacy `compileDeclarations` and
+its signature is derived from the same annotations via the same
+`resolvePositionType`/`resolveWasmType`, so a legacy caller of an IR callee is
+now signature-safe. Empirically: dropping the caller arm produced **0 post-claim
+demotions** across the corpus and all three affected files compiled to
+`WebAssembly.validate`-clean binaries.
+
+### The standalone/wasi caveat (why the relaxation is host-mode-gated)
+
+A blanket removal flipped exactly one ir test — `ir-algorithms-cluster >
+standalone / wasi compiles stay clean`. Under `--target wasi`, relaxing the
+caller arm claimed `joinNums`, which then hit a *latent* post-claim failure
+(`.toString()` on f64 — a host-only op absent in standalone/wasi). The caller arm
+had **incidentally masked** it: `joinNums`'s caller uses `Map` (host-gated), so it
+defers under wasi, and the caller-direction demotion pulled `joinNums` down with
+it. IR coverage still has these host-only-op gaps outside host mode.
+
+**Fix:** gate the caller-direction demotion on `jsHostExterns` — relax it in
+JS-host mode only; keep the conservative behavior in standalone/wasi. The tracked
+gate is measured in host mode, so the bucket reaches 0 there while
+standalone/wasi is byte-for-byte unchanged (verified: `joinNums` post-claim
+errors back to 0 under both `standalone` and `wasi`).
+
+### Verification
+
+- Gate (host): `call-graph-closure` 9 → 0; no other bucket moved; **0 post-claim
+  demotions**. Baseline ratcheted via `--update-on-decrease` (key removed).
+- All 3 affected files compile + `WebAssembly.validate` = true, 0 post-claim errs.
+- `tests/ir-*.test.ts`: **11 failed / 285 passed — identical to base** (the 11 are
+  pre-existing: `ir-scaffold` ×2 `func.params is not iterable`,
+  `ir-bytecode-wasmgc-vm` ×9). Zero regressions from this change.
+- `tsc --noEmit` clean; `prettier` clean.
+
+### Residual (banked, NOT done here)
+
+1. **`STRICT_IR_REASONS` promotion (criterion 3) is deliberately NOT applied.**
+   Adding `"call-graph-closure"` there promotes any such fallback to a hard
+   compile error — but the caller arm still legitimately fires in standalone/wasi
+   (see caveat above), so it would break those targets. Promote only after the
+   caller arm is eliminated in *all* modes.
+2. **Eliminate the caller arm in standalone/wasi too.** Blocked on the body-shape
+   work (#2856/#2857) rejecting host-only-op callee bodies (f64 `.toString()`,
+   `Map` arms) *up front* in standalone/wasi, so relaxing the caller arm there no
+   longer surfaces latent post-claim failures. Once that lands, drop the
+   `jsHostExterns` gate and complete criterion 3.

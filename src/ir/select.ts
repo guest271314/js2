@@ -562,14 +562,38 @@ export function planIrCompilation(
   //
   // Build each function's set of local callers + local callees (restricted
   // to functions declared in this source file). Iteratively remove any
-  // claimed function whose any LOCAL caller or any LOCAL callee is not
-  // also claimed. Repeat until stable.
+  // claimed function whose LOCAL callee is not also claimed (and, in
+  // standalone/wasi, whose LOCAL caller is not claimed either — see below).
+  // Repeat until stable.
   //
   // This safeguards against signature mismatch: the IR path replaces a
   // function's typeIdx after the legacy path has already compiled its
   // callers' bodies. Ensuring both sides of every cross-function edge are
   // on the same side (IR or legacy) avoids cross-signature `call` ops.
+  //
+  // #2858 — the CALLER direction of this closure is only demoted OUTSIDE
+  // JS-host mode. Rationale:
+  //   * A legacy caller of an IR-claimed callee is signature-safe: the
+  //     callee's funcIdx is pre-allocated by legacy `compileDeclarations`
+  //     and its signature is derived from the same TS annotations via the
+  //     same mode-consistent `resolvePositionType`/`resolveWasmType`. The
+  //     historical `f(x: any)` fast-mode ABI divergence that motivated the
+  //     caller-direction demotion was eliminated by #2949 slice 3b
+  //     (AnyKeyword → `irDynamic()`: one `any` ABI for both front-ends in
+  //     both modes). So in host mode the caller-direction demotion is an
+  //     obsolete safeguard — dropping it claims individually-claimable leaf
+  //     helpers whose only unclaimed edge is a legacy caller, driving the
+  //     `call-graph-closure` bucket (measured in host mode) to zero with
+  //     zero post-claim demotions (verified: DOM/benchmark corpus).
+  //   * In standalone / wasi (`jsHostExterns` false) IR coverage still has
+  //     gaps (host-only ops such as f64 `.toString()`, `Map`), so a
+  //     claimed function whose caller defers can surface a *latent*
+  //     post-claim failure that the caller-direction demotion incidentally
+  //     masks (e.g. `joinNums` in `algorithms.ts` under wasi). Keep the
+  //     conservative caller-direction demotion there until those callee
+  //     bodies are rejected up front by the body-shape work (#2856/#2857).
   // -------------------------------------------------------------------------
+  const demoteOnLegacyCaller = options?.jsHostExterns !== true;
   const { callers, callees, hasExternalCall } = buildLocalCallGraph(declByName, localClasses);
 
   const claimed = new Set(individuallyClaimed);
@@ -588,13 +612,16 @@ export function planIrCompilation(
   while (changed) {
     changed = false;
     for (const name of [...claimed]) {
-      const myCallers = callers.get(name) ?? new Set<string>();
       const myCallees = callees.get(name) ?? new Set<string>();
       let safe = true;
-      for (const c of myCallers) {
-        if (!claimed.has(c)) {
-          safe = false;
-          break;
+      // Caller-direction demotion: standalone/wasi only (#2858).
+      if (demoteOnLegacyCaller) {
+        const myCallers = callers.get(name) ?? new Set<string>();
+        for (const c of myCallers) {
+          if (!claimed.has(c)) {
+            safe = false;
+            break;
+          }
         }
       }
       if (safe) {
