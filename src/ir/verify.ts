@@ -598,6 +598,20 @@ function verifyBlock(
           }
         }
       }
+      // #2949 S5.1 — dyn.truthy is ToBoolean on the boxed-any carrier: the
+      // operand MUST be dynamic (a concrete scalar has an inline ToBoolean
+      // and must not route through the carrier helper). Result is i32,
+      // already enforced structurally by the loop/if condValue rules.
+      if (instr.kind === "dyn.truthy") {
+        const operandIr = operandIrType(func, block, instr.value, localDefs);
+        if (operandIr && operandIr.kind !== "dynamic") {
+          errors.push({
+            message: `dyn.truthy operand must be a dynamic IrType, got ${operandIr.kind} (#2949)`,
+            func: func.name,
+            block: block.id as number,
+          });
+        }
+      }
 
       if (instr.result !== null) {
         if (defs.has(instr.result)) {
@@ -679,6 +693,7 @@ function collectUses(instr: IrBlock["instrs"][number]): readonly IrValueId[] {
     case "box":
     case "unbox":
     case "tag.test":
+    case "dyn.truthy":
       return [instr.value];
     case "string.const":
       return [];

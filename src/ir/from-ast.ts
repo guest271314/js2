@@ -4125,7 +4125,18 @@ function lowerForOfStatement(stmt: ts.ForOfStatement, cx: LowerCtx): void {
  * buffer so the coercion instructions re-run each iteration.
  */
 function coerceLoopCondToBool(condValue: IrValueId, cx: LowerCtx, loopKind: "while" | "for" | "do" | "if"): IrValueId {
-  const kind = asVal(cx.builder.typeOf(condValue))?.kind;
+  const irType = cx.builder.typeOf(condValue);
+  // #2949 S5.1 — a boxed-any (dynamic) condition lowers ToBoolean via
+  // `dyn.truthy` (→ `__any_unbox_bool` gc / `__is_truthy` host), the same
+  // JS-truthiness the legacy condition path emits. Emitted INTO the current
+  // (cond) buffer so it re-runs each iteration, exactly like the numeric arm
+  // below. This arm is reachable only once the selector admits a dynamic
+  // condition (S5.P); until then the move-only gate rejects such functions,
+  // so it is exercised only by hand-built-IR unit tests (byte-inert).
+  if (irType.kind === "dynamic") {
+    return cx.builder.emitDynTruthy(condValue);
+  }
+  const kind = asVal(irType)?.kind;
   if (kind === "i32") return condValue;
   if (kind === "f64") {
     // ToBoolean(f64) = abs(x) > 0  (false for 0, -0, NaN; true otherwise).
@@ -4991,9 +5002,14 @@ function lowerIncrementDecrement(id: ts.Identifier, op: ts.SyntaxKind, cx: Lower
 }
 
 function lowerConditional(expr: ts.ConditionalExpression, cx: LowerCtx): IrValueId {
-  const cond = lowerExpr(expr.condition, cx, irVal({ kind: "i32" }));
-  const condType = cx.builder.typeOf(cond);
-  if (asVal(condType)?.kind !== "i32") {
+  const rawCond = lowerExpr(expr.condition, cx, irVal({ kind: "i32" }));
+  const condType = cx.builder.typeOf(rawCond);
+  // #2949 S5.1 — a boxed-any (dynamic) ternary condition lowers ToBoolean via
+  // `dyn.truthy`, emitted before the `if` so it evaluates once. Reachable only
+  // when the selector admits a dynamic condition (S5.P); exercised by
+  // hand-built-IR unit tests until then (byte-inert on the corpus).
+  const cond = condType.kind === "dynamic" ? cx.builder.emitDynTruthy(rawCond) : rawCond;
+  if (condType.kind !== "dynamic" && asVal(condType)?.kind !== "i32") {
     throw new Error(`ir/from-ast: ternary condition must be bool in ${cx.funcName}`);
   }
 

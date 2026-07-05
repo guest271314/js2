@@ -869,6 +869,28 @@ export interface IrInstrTagTest extends IrInstrBase {
   readonly jsTag?: JsTag;
 }
 
+/**
+ * `ToBoolean(value)` on a boxed-any carrier — the dynamic-value truthiness
+ * op (#2949 S5.1). `value` MUST be `IrType.dynamic`; result (via
+ * `IrInstrBase.result`) is `i32` (1 = truthy, 0 = falsy), suitable directly
+ * as an `if` / loop / ternary `condValue`.
+ *
+ * This is deliberately NOT `unbox{Boolean}`: unboxing reads the Boolean
+ * *partition* payload and is only valid on a proven boolean, whereas JS
+ * `ToBoolean` (§7.1.2) is defined over EVERY partition — `0`/`NaN`/`""`/
+ * `null`/`undefined` are falsy, every other value truthy. Lowering routes
+ * through the SAME `coercion-engine.emitToBoolean` legacy uses (`__any_
+ * unbox_bool` on the gc `$AnyValue` carrier / `__is_truthy` on the host
+ * externref carrier) via `IrDynamicLowering.emitToBoolean` — one ToBoolean
+ * engine (June-audit D4), byte-parity with legacy. The known-literal
+ * `tag.test`+`unbox` fast path is reserved for producers that statically
+ * know the partition; general truthiness is this node.
+ */
+export interface IrInstrDynTruthy extends IrInstrBase {
+  readonly kind: "dyn.truthy";
+  readonly value: IrValueId;
+}
+
 // ---------------------------------------------------------------------------
 // String operations (#1169a — IR Phase 4 Slice 1)
 // ---------------------------------------------------------------------------
@@ -2133,6 +2155,7 @@ export type IrInstr =
   | IrInstrBox
   | IrInstrUnbox
   | IrInstrTagTest
+  | IrInstrDynTruthy
   | IrInstrStringConst
   | IrInstrStringConcat
   | IrInstrStringEq
@@ -2444,6 +2467,7 @@ export function forEachNestedBuffer(instr: IrInstr, fn: (buffer: readonly IrInst
     case "box":
     case "unbox":
     case "tag.test":
+    case "dyn.truthy":
     case "string.const":
     case "string.concat":
     case "string.eq":
@@ -2588,6 +2612,7 @@ export function mapNestedBuffers(
     case "box":
     case "unbox":
     case "tag.test":
+    case "dyn.truthy":
     case "string.const":
     case "string.concat":
     case "string.eq":
@@ -2682,6 +2707,7 @@ export function directUses(instr: IrInstr): readonly IrValueId[] {
     case "box":
     case "unbox":
     case "tag.test":
+    case "dyn.truthy":
       return [instr.value];
     case "string.concat":
     case "string.eq":

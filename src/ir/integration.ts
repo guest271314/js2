@@ -34,6 +34,8 @@ import {
   TYPED_ARRAY_NAMES,
 } from "../codegen/index.js";
 import { boxToAny } from "../codegen/value-tags.js"; // (#2949 slice 3) THE canonical boxing entry point (D4)
+// (#2949 S5.1) THE canonical ToBoolean engine — one truthiness path for legacy and IR (D4).
+import { emitToBoolean as emitCoercionToBoolean } from "../codegen/coercion-engine.js";
 import { JsTag, jsTagUnboxKind } from "../codegen/js-tag.js";
 import { ensureVecElemSet, VEC_ELEM_SET_PREFIX } from "../codegen/vec-elem-set.js"; // (#2856 C2) on-demand element-store helper
 import { classMemberFuncKey } from "../codegen/class-member-keys.js"; // (#1983) collision-free class-member funcMap keys
@@ -1690,6 +1692,9 @@ function preregisterExceptionSupport(ctx: CodegenContext, fns: readonly BuiltFnR
 function isDynamicOp(instr: IrInstr): boolean {
   if (instr.kind === "box") return instr.toType.kind === "dynamic";
   if (instr.kind === "unbox" || instr.kind === "tag.test") return instr.jsTag !== undefined;
+  // #2949 S5.1 — dyn.truthy always consumes the boxed-any carrier, so its
+  // presence requires the dynamic backing (ensureAnyHelpers / addUnionImports).
+  if (instr.kind === "dyn.truthy") return true;
   return false;
 }
 
@@ -1878,6 +1883,15 @@ export function makeDynamicLowering(ctx: CodegenContext): IrDynamicLowering | nu
           { op: "i32.eq" },
         ];
       },
+      emitToBoolean(): readonly Instr[] {
+        // #2949 S5.1 — ToBoolean(carrier) via THE canonical coercion-engine
+        // path (D4): for the `$AnyValue` carrier it emits `__any_unbox_bool`
+        // (proper JS truthiness — `0`/`NaN`/`""`/`null`/`undefined` falsy).
+        // `ensureAnyHelpers` already ran in `preregisterDynamicSupport`, so
+        // the internal `ensureAnyHelpers` here is an idempotent no-op — no
+        // mid-emission funcIdx shift.
+        return emitCoercionToBoolean(ctx, { kind: "ref_null", typeIdx: anyTypeIdx }, []);
+      },
     };
   }
 
@@ -1979,6 +1993,15 @@ export function makeDynamicLowering(ctx: CodegenContext): IrDynamicLowering | nu
         default:
           throw new Error(`ir/integration: no host tag.test arm for ${JsTag[tag]} (#2949)`);
       }
+    },
+    emitToBoolean(): readonly Instr[] {
+      // #2949 S5.1 — ToBoolean(externref carrier) via the canonical
+      // coercion-engine path (D4): `__is_truthy` (0/NaN/null/undefined/""
+      // → falsy). `addUnionImports` already ran in
+      // `preregisterDynamicSupport` (which registers `__is_truthy`), so the
+      // internal `addUnionImports` / `ensureLateImport` here find the import
+      // by name and add nothing — no import shift mid-emission.
+      return emitCoercionToBoolean(ctx, { kind: "externref" }, []);
     },
   };
 }

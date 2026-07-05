@@ -119,6 +119,7 @@ export function effectsOf(instr: IrInstr, cache: Map<IrInstr, IrEffects> = new M
     case "box":
     case "unbox":
     case "tag.test":
+    case "dyn.truthy": // #2949 S5.1 — ToBoolean read on the carrier: pure (no heap/control effect)
     case "coerce.to_externref":
     case "string.concat":
     case "string.eq":

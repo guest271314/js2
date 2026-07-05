@@ -413,6 +413,32 @@ export class IrFunctionBuilder {
     return result;
   }
 
+  /**
+   * Emit `dyn.truthy{value}` — `ToBoolean(value)` (§7.1.2) on a boxed-any
+   * carrier. Result is `i32` (1 = truthy, 0 = falsy), usable directly as an
+   * `if` / loop / ternary `condValue` (#2949 S5.1).
+   *
+   * The operand MUST be `dynamic` — this is the general JS-truthiness op, not
+   * a Boolean-partition read. Feeding a concrete scalar here is a producer
+   * bug (a concrete value already lowers ToBoolean inline via the existing
+   * `coerceLoopCondToBool` arms), so it is rejected at construction time
+   * rather than silently mis-lowering the carrier. Lowering routes through
+   * `IrDynamicLowering.emitToBoolean` → `coercion-engine.emitToBoolean`
+   * (`__any_unbox_bool` gc / `__is_truthy` host) — one ToBoolean engine (D4).
+   */
+  emitDynTruthy(value: IrValueId): IrValueId {
+    if (this.typeOf(value).kind !== "dynamic") {
+      throw new Error(
+        `IrFunctionBuilder: emitDynTruthy operand ${value} is not dynamic — general truthiness applies only to the boxed-any carrier (#2949 S5.1) (func ${this.name})`,
+      );
+    }
+    const resultType = irVal({ kind: "i32" });
+    const result = this.allocator.fresh();
+    this.valueTypes.set(result, resultType);
+    this.pushInstr({ kind: "dyn.truthy", value, result, resultType });
+    return result;
+  }
+
   // --- object ops (#1169b) ------------------------------------------------
 
   /**
