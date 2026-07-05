@@ -18,7 +18,12 @@ import {
 } from "../literals.js";
 import { ensureObjectRuntime } from "../object-runtime.js"; // (#3037 CS1a) $Object type idx for any-object carrier
 import { localGlobalIdx } from "../registry/imports.js";
-import { getOrRegisterArrayType, getOrRegisterSubviewType, getOrRegisterVecType } from "../registry/types.js";
+import {
+  getOrRegisterArrayType,
+  getOrRegisterSubviewType,
+  getOrRegisterTaViewType,
+  getOrRegisterVecType,
+} from "../registry/types.js";
 import { coerceType, compileExpression, valTypesMatch } from "../shared.js";
 import { emitGuardedRefCast } from "../type-coercion.js";
 import { emitLazyClassObjectGet } from "../expressions/extern.js";
@@ -318,6 +323,45 @@ function inferSubarraySubviewType(
   const elemKind = recvName?.replace(/^__vec_/, "").replace(/^__subview_/, "");
   if (elemKind === undefined || elemKind === recvName) return null;
   return { kind: "ref_null", typeIdx: getOrRegisterSubviewType(ctx, elemKind) };
+}
+
+const TA_VIEW_CTOR_NAMES = new Set([
+  "Int8Array",
+  "Uint8Array",
+  "Uint8ClampedArray",
+  "Int16Array",
+  "Uint16Array",
+  "Int32Array",
+  "Uint32Array",
+  "Float32Array",
+  "Float64Array",
+]);
+
+/**
+ * (#3054 B1) A `const a = new <TA>(buffer)` binding in standalone/WASI mode holds
+ * a shared-backing `$__ta_view` that refs the ArrayBuffer's vec (not a copy), so
+ * sibling views / DataViews observe each other's writes. Resolve the binding's
+ * local type to that view HERE — at the variable-declaration site — so the local
+ * carries the `struct.new $__ta_view` the ctor emits, and element access on `a`
+ * picks the byte-decoding view lowering at compile time (rather than the native
+ * vec type `resolveWasmType(Uint8Array)` would return, which would route
+ * `a[i]`/`a[i]=v` through the plain-vec path and drop the aliasing). This MUST
+ * mirror the ctor's own gating (`emitTaViewConstruct` in `new-super.ts`): single
+ * non-numeric buffer arg (ArrayBuffer/SharedArrayBuffer/DataView), host-free lane.
+ */
+function inferTaViewType(ctx: CodegenContext, initializer: ts.Expression | undefined): ValType | null {
+  if (!noJsHost(ctx) || !initializer) return null;
+  const unwrapped = stripInferenceWrapper(initializer);
+  if (!ts.isNewExpression(unwrapped) || !ts.isIdentifier(unwrapped.expression)) return null;
+  const viewName = unwrapped.expression.text;
+  if (!TA_VIEW_CTOR_NAMES.has(viewName)) return null;
+  const args = unwrapped.arguments;
+  // B1 scope: single buffer arg, offset-0 window. Multi-arg windowed ctors
+  // (`new TA(buf, byteOffset, length)`) are B2 — leave them on the current path.
+  if (!args || args.length !== 1 || ts.isNumericLiteral(args[0]!)) return null;
+  const argSymName = ctx.checker.getTypeAtLocation(args[0]!).getSymbol?.()?.name;
+  if (argSymName !== "ArrayBuffer" && argSymName !== "SharedArrayBuffer" && argSymName !== "DataView") return null;
+  return { kind: "ref_null", typeIdx: getOrRegisterTaViewType(ctx, viewName) };
 }
 
 function nullishLiteralKind(expr: ts.Expression): "null" | "undefined" | null {
@@ -912,6 +956,8 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
 
     const standaloneRegExpMatchArrayType = inferStandaloneRegExpMatchArrayType(ctx, decl.initializer);
     const subarraySubviewType = inferSubarraySubviewType(ctx, fctx, decl.initializer);
+    // (#3054 B1) `new <TA>(buffer)` → shared-backing `$__ta_view` local type.
+    const taViewType = inferTaViewType(ctx, decl.initializer);
     // (#2615) `new Proxy(...)` initializer — the slot must be externref so reads
     // route through `__extern_get` (the Proxy MOP), not a static `struct.get`.
     // NARROWED (#2615 regression fix): only when the Proxy variable stays local
@@ -957,7 +1003,8 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
               ? { kind: "ref_null" as const, typeIdx: getOrRegisterVecType(ctx, "i32", { kind: "i32" }) }
               : widenedTypeIdx !== undefined
                 ? { kind: "ref_null" as const, typeIdx: widenedTypeIdx }
-                : (subarraySubviewType ??
+                : (taViewType ??
+                  subarraySubviewType ??
                   inferredVecType ??
                   standaloneRegExpMatchArrayType ??
                   (decl.initializer && isStringMethodReturningHostArray(ctx, decl.initializer)

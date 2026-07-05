@@ -117,7 +117,9 @@ import {
   getOrRegisterVecType,
   getSubviewArrTypeIdx,
   isSubviewTypeIdx,
+  isTaViewTypeIdx,
 } from "./registry/types.js";
+import { emitTaViewElementGet } from "./dataview-native.js"; // (#3054 B1) shared-backing TA view read
 import {
   coerceType,
   compileExpression,
@@ -5076,10 +5078,12 @@ export function compilePropertyAccess(
         if ((localType?.kind === "ref" || localType?.kind === "ref_null") && localType.typeIdx !== undefined) {
           const vecTypeIdx = (localType as { typeIdx: number }).typeIdx;
           const typeDef = ctx.mod.types[vecTypeIdx];
+          // Plain vec ({length, data}) OR a `$__ta_view` ({length, buf, byteOffset},
+          // #3054 B1) — both keep the ELEMENT count at field 0.
           if (
             typeDef?.kind === "struct" &&
             typeDef.fields[0]?.name === "length" &&
-            typeDef.fields[1]?.name === "data"
+            (typeDef.fields[1]?.name === "data" || isTaViewTypeIdx(ctx, vecTypeIdx))
           ) {
             fctx.body.push({ op: "local.get", index: localIdx });
             fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 });
@@ -7528,6 +7532,19 @@ export function compileElementAccessBody(
   // `isVecStructAccess` (exactly 2 fields) is false and the tuple path would
   // mis-handle it. Compile-time discriminated by the receiver typeIdx, so plain
   // arrays (vec struct, not subview) never reach this arm.
+  // (#3054 B1) `$__ta_view` receiver (shared-backing TypedArray over an
+  // ArrayBuffer) — byte-decode `ta[i]` little-endian from the SHARED buffer vec
+  // at `byteOffset + i*width`. Must run BEFORE the tuple/struct-field check (a
+  // `$__ta_view` is a 3-field {length, buf, byteOffset} struct). Compile-time
+  // discriminated by receiver typeIdx, so plain arrays / native TAs never reach
+  // this arm.
+  if (typeDef?.kind === "struct" && isTaViewTypeIdx(ctx, typeIdx)) {
+    const r = emitTaViewElementGet(ctx, fctx, typeIdx, expr.argumentExpression, (e, h) =>
+      compileExpression(ctx, fctx, e, h),
+    );
+    if (r) return r;
+  }
+
   if (typeDef?.kind === "struct" && isSubviewTypeIdx(ctx, typeIdx)) {
     const subArrTypeIdx = getSubviewArrTypeIdx(ctx, typeIdx);
     const subArrDef = ctx.mod.types[subArrTypeIdx];

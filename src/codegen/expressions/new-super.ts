@@ -25,7 +25,7 @@ import {
   typedArrayVecStorage,
 } from "../index.js";
 import { coercionPlan } from "../coercion-plan.js"; // (#2934 1c) single coercion table for the copy-ctor element bridge
-import { getOrRegisterDvWindowType } from "../dataview-native.js"; // (#2159/#38) DataView windowing wrapper
+import { emitTaViewConstruct, getOrRegisterDvWindowType } from "../dataview-native.js"; // (#2159/#38) DataView windowing wrapper; (#3054 B1) shared-backing TA views
 import { emitBoundsCheckedArrayGet } from "../array-methods.js";
 import { ensureMapHelpers, coerceMapKeyToAnyref } from "../map-runtime.js";
 import { emitSetNewTargetBeforeCall, ensureNewTargetGlobal } from "../new-target.js"; // (#2023)
@@ -3600,13 +3600,23 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
         // handles the buffer arg correctly via the runtime, so skip the
         // native view path there.
         const argSymName = argSym?.name;
-        if (
+        // (#3054 B1) Build a SHARED-BACKING `$__ta_view` that refs the buffer's
+        // vec (not a copy) so sibling views / DataViews observe writes. Gated on
+        // `noJsHost` (standalone/WASI): the native `i32_byte` vec representation
+        // of ArrayBuffer/DataView only exists in the host-free lane. In JS-host
+        // mode an ArrayBuffer is a host object (no native vec), so the recover
+        // `any.convert_extern` + `ref.cast` would trap — host mode routes buffers
+        // through the runtime instead (#1670). This replaces the former copy loop
+        // (`emitTypedArrayFromByteBuffer`) that CLONED the bytes into a fresh
+        // backing array, which broke sibling/DataView observability.
+        const taViewOk =
           noJsHost(ctx) &&
-          (argSymName === "ArrayBuffer" || argSymName === "SharedArrayBuffer" || argSymName === "DataView") &&
-          !ts.isNumericLiteral(args[0]!) &&
-          emitTypedArrayFromByteBuffer(ctx, fctx, args[0]!, vecTypeIdx, arrTypeIdx)
-        ) {
-          return { kind: "ref_null", typeIdx: vecTypeIdx };
+          (argSymName === "ArrayBuffer" || argSymName === "SharedArrayBuffer" || argSymName === "DataView");
+        if (taViewOk && !ts.isNumericLiteral(args[0]!)) {
+          const viewResult = emitTaViewConstruct(ctx, fctx, args[0]!, expr.expression.text, (e, h) =>
+            compileExpression(ctx, fctx, e, h),
+          );
+          if (viewResult) return viewResult;
         }
         const isArrayLike =
           argSym?.name === "Array" ||
@@ -4587,15 +4597,21 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
         // bytes into this TypedArray's backing vec.
         const argTsType = ctx.checker.getTypeAtLocation(args[0]!);
         const argSymName = argTsType.getSymbol?.()?.name;
-        // #1670 — gate on no-JS-host (see the matching guard above): the
-        // native byte-buffer view emits an unconditional `ref.cast` to the
-        // `i32_byte` vec that traps in JS-host mode, where the buffer is not
-        // that struct.
-        const isBufferArg =
+        // (#3054 B1) Shared-backing `$__ta_view` (see the matching guard above).
+        // Standalone/WASI only — host-mode buffers are host objects, not native
+        // vecs, so the recover cast would trap (#1670).
+        // B1: single buffer arg only (offset-0). Windowed `new TA(buf, off, len)`
+        // is B2 — MUST match `inferTaViewType`'s `args.length === 1` gate so the
+        // local's type and the constructed value agree.
+        const taViewOk =
           noJsHost(ctx) &&
+          args.length === 1 &&
           (argSymName === "ArrayBuffer" || argSymName === "SharedArrayBuffer" || argSymName === "DataView");
-        if (isBufferArg && emitTypedArrayFromByteBuffer(ctx, fctx, args[0]!, vecTypeIdx, arrTypeIdx)) {
-          return { kind: "ref_null", typeIdx: vecTypeIdx };
+        if (taViewOk && !ts.isNumericLiteral(args[0]!)) {
+          const viewResult = emitTaViewConstruct(ctx, fctx, args[0]!, className, (e, h) =>
+            compileExpression(ctx, fctx, e, h),
+          );
+          if (viewResult) return viewResult;
         }
         // new Uint8Array(n) → array of size n, all zeros
         compileExpression(ctx, fctx, args[0]!, { kind: "f64" });
@@ -5104,128 +5120,6 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
 
   reportError(ctx, expr, `Unsupported new expression for class: ${className}`);
   return null;
-}
-
-/**
- * #1654 — `new Uint8Array(arrayBuffer)`: copy the ArrayBuffer's bytes into the
- * TypedArray backing array.
- *
- * The ArrayBuffer / DataView is backed by an `i32_byte` vec (field 0 = length,
- * field 1 = array of i32, one byte per element). User code lowers ArrayBuffer
- * variables to externref, so recover the struct via any.convert_extern +
- * ref.cast, read its length, allocate a destination array of that length, and
- * copy byte-by-byte. Returns true on success; false to let the caller fall back
- * to the numeric-length path.
- */
-function emitTypedArrayFromByteBuffer(
-  ctx: CodegenContext,
-  fctx: FunctionContext,
-  bufExpr: ts.Expression,
-  dstVecTypeIdx: number,
-  dstArrTypeIdx: number,
-): boolean {
-  const srcVecTypeIdx = getOrRegisterVecType(ctx, "i32_byte", { kind: "i8" }); // (#2835) packed byte buffer
-  const srcArrTypeIdx = getArrTypeIdxFromVec(ctx, srcVecTypeIdx);
-  if (srcArrTypeIdx < 0 || dstArrTypeIdx < 0) return false;
-
-  // Compile the buffer expression and recover the i32_byte vec struct.
-  const bufType = compileExpression(ctx, fctx, bufExpr);
-  if (!bufType) return false;
-  if (bufType.kind === "externref") {
-    fctx.body.push({ op: "any.convert_extern" } as Instr);
-    fctx.body.push({ op: "ref.cast", typeIdx: srcVecTypeIdx } as Instr);
-  } else if (bufType.kind === "ref" || bufType.kind === "ref_null") {
-    if ("typeIdx" in bufType && bufType.typeIdx !== srcVecTypeIdx) {
-      fctx.body.push({ op: "ref.cast", typeIdx: srcVecTypeIdx } as Instr);
-    }
-  } else {
-    fctx.body.push({ op: "drop" } as Instr);
-    return false;
-  }
-  const srcVecLocal = allocLocal(fctx, `__tab_src_${fctx.locals.length}`, {
-    kind: "ref",
-    typeIdx: srcVecTypeIdx,
-  });
-  fctx.body.push({ op: "local.set", index: srcVecLocal });
-
-  // len = src.length (field 0)
-  const lenLocal = allocLocal(fctx, `__tab_len_${fctx.locals.length}`, {
-    kind: "i32",
-  });
-  fctx.body.push({ op: "local.get", index: srcVecLocal });
-  fctx.body.push({
-    op: "struct.get",
-    typeIdx: srcVecTypeIdx,
-    fieldIdx: 0,
-  } as Instr);
-  fctx.body.push({ op: "local.set", index: lenLocal });
-
-  // srcArr = src.data (field 1)
-  const srcArrLocal = allocLocal(fctx, `__tab_srcarr_${fctx.locals.length}`, {
-    kind: "ref",
-    typeIdx: srcArrTypeIdx,
-  });
-  fctx.body.push({ op: "local.get", index: srcVecLocal });
-  fctx.body.push({
-    op: "struct.get",
-    typeIdx: srcVecTypeIdx,
-    fieldIdx: 1,
-  } as Instr);
-  fctx.body.push({ op: "local.set", index: srcArrLocal });
-
-  const dstArrDef = ctx.mod.types[dstArrTypeIdx];
-  const dstElemKind = dstArrDef?.kind === "array" ? dstArrDef.element.kind : undefined;
-
-  // dstArr = new element[len]
-  const dstArrLocal = allocLocal(fctx, `__tab_dstarr_${fctx.locals.length}`, {
-    kind: "ref",
-    typeIdx: dstArrTypeIdx,
-  });
-  fctx.body.push({ op: "local.get", index: lenLocal });
-  fctx.body.push({ op: "array.new_default", typeIdx: dstArrTypeIdx } as Instr);
-  fctx.body.push({ op: "local.set", index: dstArrLocal });
-
-  // for (i = 0; i < len; i++) dstArr[i] = srcArr[i] converted to dst element type.
-  const iLocal = allocLocal(fctx, `__tab_i_${fctx.locals.length}`, {
-    kind: "i32",
-  });
-  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-  fctx.body.push({ op: "local.set", index: iLocal });
-  const loopBody: Instr[] = [
-    // if (i >= len) break (br 1 out of loop)
-    { op: "local.get", index: iLocal } as Instr,
-    { op: "local.get", index: lenLocal } as Instr,
-    { op: "i32.ge_s" } as Instr,
-    { op: "br_if", depth: 1 } as Instr,
-    // dstArr[i] = converted srcArr[i] byte
-    { op: "local.get", index: dstArrLocal } as Instr,
-    { op: "local.get", index: iLocal } as Instr,
-    { op: "local.get", index: srcArrLocal } as Instr,
-    { op: "local.get", index: iLocal } as Instr,
-    // (#2835) packed i8 source byte → unsigned read.
-    { op: "array.get_u", typeIdx: srcArrTypeIdx } as Instr,
-    { op: "i32.const", value: 0xff } as Instr,
-    { op: "i32.and" } as Instr,
-    ...(dstElemKind === "f64" ? ([{ op: "f64.convert_i32_u" } as Instr] as Instr[]) : []),
-    { op: "array.set", typeIdx: dstArrTypeIdx } as Instr,
-    // i++
-    { op: "local.get", index: iLocal } as Instr,
-    { op: "i32.const", value: 1 } as Instr,
-    { op: "i32.add" } as Instr,
-    { op: "local.set", index: iLocal } as Instr,
-    { op: "br", depth: 0 } as Instr,
-  ];
-  fctx.body.push({
-    op: "block",
-    blockType: { kind: "empty" },
-    body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr],
-  } as Instr);
-
-  // struct.new dstVec(len, dstArr)
-  fctx.body.push({ op: "local.get", index: lenLocal });
-  fctx.body.push({ op: "local.get", index: dstArrLocal });
-  fctx.body.push({ op: "struct.new", typeIdx: dstVecTypeIdx } as Instr);
-  return true;
 }
 
 export { compileClassExpression, compileNewExpression, compileSuperElementMethodCall, compileSuperMethodCall };

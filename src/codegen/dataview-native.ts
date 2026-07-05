@@ -44,7 +44,9 @@ import { getArrTypeIdxFromVec, getOrRegisterVecType } from "./index.js";
 import { stringConstantExternrefInstrs } from "./native-strings.js";
 import { emitWasiErrorConstructor } from "./registry/error-types.js";
 import { addStringConstantGlobal, ensureExnTag } from "./registry/imports.js";
+import { getOrRegisterTaViewType, getTaViewName } from "./registry/types.js";
 import { ensureLateImport, flushLateImportShifts } from "./shared.js";
+import { coerceType } from "./type-coercion.js";
 
 /** DataView accessor descriptor parsed from a method name like "getUint32". */
 interface DvAccessor {
@@ -904,6 +906,222 @@ function emitWriteBytes(
     then: storeAll(true),
     else: storeAll(false),
   });
+}
+
+// ---------------------------------------------------------------------------
+// (#3054 B1) Shared-backing TypedArray view element access.
+//
+// A `$__ta_view_<name>` is a byte-backed view over an ArrayBuffer's
+// `$__vec_i32_byte` struct (field1 `buf`). Element `ta[i]` byte-decodes from
+// `buf.data` at `byteOffset + i*width` using the SAME little/big-endian byte
+// engine the native DataView accessors use — pinned little-endian (TypedArrays
+// use native/platform endianness, and Wasm's is LE). Because the view holds a
+// ref to the SHARED buffer vec, sibling views and DataViews over the same buffer
+// observe each other's writes (the verified #3054 bug). Discriminated purely by
+// the receiver's static ValType.typeIdx at compile time, so plain-array /
+// native-TA element access never reaches these arms — byte-inert.
+// ---------------------------------------------------------------------------
+
+/** Per-view-name byte-decode descriptor (width, signedness, float, clamp-on-write). */
+const TA_VIEW_DECODE: Record<string, { bytes: number; signed: boolean; float: boolean; clamp: boolean }> = {
+  Int8Array: { bytes: 1, signed: true, float: false, clamp: false },
+  Uint8Array: { bytes: 1, signed: false, float: false, clamp: false },
+  Uint8ClampedArray: { bytes: 1, signed: false, float: false, clamp: true },
+  Int16Array: { bytes: 2, signed: true, float: false, clamp: false },
+  Uint16Array: { bytes: 2, signed: false, float: false, clamp: false },
+  Int32Array: { bytes: 4, signed: true, float: false, clamp: false },
+  Uint32Array: { bytes: 4, signed: false, float: false, clamp: false },
+  Float32Array: { bytes: 4, signed: false, float: true, clamp: false },
+  Float64Array: { bytes: 8, signed: false, float: true, clamp: false },
+};
+
+/** Resolve a `$__ta_view` typeIdx to its byte-decode descriptor, or undefined. */
+export function taViewDecode(
+  ctx: CodegenContext,
+  taViewTypeIdx: number,
+): { bytes: number; signed: boolean; float: boolean; clamp: boolean } | undefined {
+  const name = getTaViewName(ctx, taViewTypeIdx);
+  return name ? TA_VIEW_DECODE[name] : undefined;
+}
+
+/**
+ * (#3054 B1) `new <TA>(arrayBuffer)` → a shared-backing `$__ta_view_<name>` that
+ * REFS the buffer's `$__vec_i32_byte` struct instead of COPYING its bytes into a
+ * fresh backing array (the verified copy bug: sibling views / DataViews over the
+ * same buffer didn't observe writes). Offset-0, default-length window (B1 scope;
+ * B2 adds `(buffer, byteOffset, length)`). `viewName` is the TS TypedArray name.
+ * `compileExpr` compiles the buffer arg expression. Returns the view ValType, or
+ * null (leaving the stack balanced) when the buffer can't be recovered as a
+ * native vec — the caller then falls back to the numeric-length ctor path.
+ */
+export function emitTaViewConstruct(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  bufExpr: import("../ts-api.js").ts.Expression,
+  viewName: string,
+  compileExpr: (expr: import("../ts-api.js").ts.Expression, hint?: ValType) => ValType | null,
+): ValType | null {
+  const desc = TA_VIEW_DECODE[viewName];
+  if (!desc) return null;
+  const taViewTypeIdx = getOrRegisterTaViewType(ctx, viewName);
+  const { vecTypeIdx } = i32ByteVec(ctx);
+
+  // Compile the buffer expression and recover the shared i32_byte vec struct.
+  const bufType = compileExpr(bufExpr);
+  if (!bufType) return null;
+  if (bufType.kind === "externref") {
+    fctx.body.push({ op: "any.convert_extern" } as Instr);
+    fctx.body.push({ op: "ref.cast", typeIdx: vecTypeIdx } as Instr);
+  } else if (bufType.kind === "ref" || bufType.kind === "ref_null") {
+    if ("typeIdx" in bufType && (bufType as { typeIdx: number }).typeIdx !== vecTypeIdx) {
+      fctx.body.push({ op: "ref.cast", typeIdx: vecTypeIdx } as Instr);
+    }
+  } else {
+    fctx.body.push({ op: "drop" } as Instr);
+    return null;
+  }
+  const bufLocal = allocLocal(fctx, `__tav_buf_${fctx.locals.length}`, { kind: "ref", typeIdx: vecTypeIdx });
+  fctx.body.push({ op: "local.set", index: bufLocal } as Instr);
+
+  // struct.new order = [length, buf, byteOffset].
+  // length = buf.length (field0 = byteLength) / elementSize.
+  fctx.body.push({ op: "local.get", index: bufLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr);
+  if (desc.bytes !== 1) {
+    fctx.body.push({ op: "i32.const", value: desc.bytes } as Instr);
+    fctx.body.push({ op: "i32.div_u" } as Instr);
+  }
+  // buf (shared vec ref) — `ref` widens to the field's `ref_null` type.
+  fctx.body.push({ op: "local.get", index: bufLocal } as Instr);
+  // byteOffset = 0 (B1: offset-0 window).
+  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+  fctx.body.push({ op: "struct.new", typeIdx: taViewTypeIdx } as Instr);
+  return { kind: "ref_null", typeIdx: taViewTypeIdx };
+}
+
+/**
+ * Recover `buf.data` (the shared i8 backing array) and the absolute byte offset
+ * `byteOffset + index*width` for a `$__ta_view` receiver into the given locals.
+ * The receiver ref (ref/ref_null `$__ta_view`) must already be on the stack; it
+ * is consumed. `indexExpr` is compiled via `compileExpr`. Also sets `leLocal`
+ * to 1 (little-endian, TypedArray native endianness).
+ */
+function emitTaViewAddress(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  taViewTypeIdx: number,
+  bytes: number,
+  indexExpr: import("../ts-api.js").ts.Expression,
+  compileExpr: (expr: import("../ts-api.js").ts.Expression, hint?: ValType) => ValType | null,
+  arrLocal: number,
+  offLocal: number,
+  leLocal: number,
+): void {
+  const { vecTypeIdx, arrTypeIdx } = i32ByteVec(ctx);
+  // Stash the receiver.
+  const tvLocal = allocLocal(fctx, `__tav_recv_${fctx.locals.length}`, { kind: "ref_null", typeIdx: taViewTypeIdx });
+  fctx.body.push({ op: "local.set", index: tvLocal } as Instr);
+  // arr = tv.buf.data  (buf is field1 → ref_null $__vec_i32_byte; .data is its field1)
+  fctx.body.push({ op: "local.get", index: tvLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: taViewTypeIdx, fieldIdx: 1 } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr);
+  fctx.body.push({ op: "local.set", index: arrLocal } as Instr);
+  // off = tv.byteOffset + index*bytes
+  fctx.body.push({ op: "local.get", index: tvLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: taViewTypeIdx, fieldIdx: 2 } as Instr);
+  const it = compileExpr(indexExpr, { kind: "i32" });
+  if (it && it.kind !== "i32") coerceType(ctx, fctx, it, { kind: "i32" });
+  if (bytes !== 1) {
+    fctx.body.push({ op: "i32.const", value: bytes } as Instr);
+    fctx.body.push({ op: "i32.mul" } as Instr);
+  }
+  fctx.body.push({ op: "i32.add" } as Instr);
+  fctx.body.push({ op: "local.set", index: offLocal } as Instr);
+  // little-endian
+  fctx.body.push({ op: "i32.const", value: 1 } as Instr);
+  fctx.body.push({ op: "local.set", index: leLocal } as Instr);
+  void arrTypeIdx;
+}
+
+/**
+ * `ta[i]` read for a `$__ta_view` receiver (already on the stack). Byte-decodes
+ * the element little-endian and leaves an f64 on the stack. Returns the result
+ * ValType, or null if `taViewTypeIdx` is not a registered view.
+ */
+export function emitTaViewElementGet(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  taViewTypeIdx: number,
+  indexExpr: import("../ts-api.js").ts.Expression,
+  compileExpr: (expr: import("../ts-api.js").ts.Expression, hint?: ValType) => ValType | null,
+): ValType | null {
+  const desc = taViewDecode(ctx, taViewTypeIdx);
+  if (!desc) return null;
+  const { arrTypeIdx } = i32ByteVec(ctx);
+  const arrLocal = allocLocal(fctx, `__tav_arr_${fctx.locals.length}`, { kind: "ref", typeIdx: arrTypeIdx });
+  const offLocal = allocLocal(fctx, `__tav_off_${fctx.locals.length}`, { kind: "i32" });
+  const leLocal = allocLocal(fctx, `__tav_le_${fctx.locals.length}`, { kind: "i32" });
+  emitTaViewAddress(ctx, fctx, taViewTypeIdx, desc.bytes, indexExpr, compileExpr, arrLocal, offLocal, leLocal);
+  emitReadBytes(
+    ctx,
+    fctx,
+    { kind: "get", bytes: desc.bytes, signed: desc.signed, float: desc.float },
+    arrLocal,
+    offLocal,
+    leLocal,
+    arrTypeIdx,
+  );
+  return { kind: "f64" };
+}
+
+/**
+ * `ta[i] = v` write for a `$__ta_view` receiver (already on the stack).
+ * Byte-encodes `v` little-endian into the shared buffer backing (true aliasing).
+ * Leaves the (coerced) value on the stack as the assignment-expression result.
+ */
+export function emitTaViewElementSet(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  taViewTypeIdx: number,
+  indexExpr: import("../ts-api.js").ts.Expression,
+  valueExpr: import("../ts-api.js").ts.Expression,
+  compileExpr: (expr: import("../ts-api.js").ts.Expression, hint?: ValType) => ValType | null,
+): ValType | null {
+  const desc = taViewDecode(ctx, taViewTypeIdx);
+  if (!desc) return null;
+  const { arrTypeIdx } = i32ByteVec(ctx);
+  const arrLocal = allocLocal(fctx, `__tav_sarr_${fctx.locals.length}`, { kind: "ref", typeIdx: arrTypeIdx });
+  const offLocal = allocLocal(fctx, `__tav_soff_${fctx.locals.length}`, { kind: "i32" });
+  const leLocal = allocLocal(fctx, `__tav_sle_${fctx.locals.length}`, { kind: "i32" });
+  emitTaViewAddress(ctx, fctx, taViewTypeIdx, desc.bytes, indexExpr, compileExpr, arrLocal, offLocal, leLocal);
+  // value → f64
+  const valLocal = allocLocal(fctx, `__tav_sval_${fctx.locals.length}`, { kind: "f64" });
+  const vt = compileExpr(valueExpr, { kind: "f64" });
+  if (vt && vt.kind !== "f64") coerceType(ctx, fctx, vt, { kind: "f64" });
+  if (desc.clamp) {
+    // Uint8Clamped: ToUint8Clamp §7.1.11 — round-half-to-even then clamp [0,255].
+    // f64.nearest rounds ties-to-even; f64.max/min clamp; NaN propagates through
+    // max/min and `emitWriteBytes` (trunc_sat_f64_s(NaN)=0) → NaN maps to 0.
+    fctx.body.push({ op: "f64.nearest" } as Instr);
+    fctx.body.push({ op: "f64.const", value: 0 } as Instr);
+    fctx.body.push({ op: "f64.max" } as Instr);
+    fctx.body.push({ op: "f64.const", value: 255 } as Instr);
+    fctx.body.push({ op: "f64.min" } as Instr);
+  }
+  fctx.body.push({ op: "local.set", index: valLocal } as Instr);
+  emitWriteBytes(
+    ctx,
+    fctx,
+    { kind: "set", bytes: desc.bytes, signed: desc.signed, float: desc.float },
+    arrLocal,
+    offLocal,
+    valLocal,
+    leLocal,
+    arrTypeIdx,
+  );
+  // Assignment is an expression — re-push the coerced value as the result.
+  fctx.body.push({ op: "local.get", index: valLocal } as Instr);
+  return { kind: "f64" };
 }
 
 /**

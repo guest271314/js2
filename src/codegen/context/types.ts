@@ -1687,6 +1687,18 @@ export interface CodegenContext {
   subviewTypeIdx: number;
   /** (#2357) Per-element-kind `$__subview` struct type indices, keyed by elemKind. */
   subviewTypeMap: Map<string, number>;
+  /**
+   * (#3054 B1) Per-TypedArray-name `$__ta_view_<name>` struct type indices, keyed
+   * by the TS view name (`"Uint8Array"`, `"Int32Array"`, …). A `$__ta_view` is a
+   * byte-backed TypedArray view that holds a ref to the source ArrayBuffer's
+   * `$__vec_i32_byte` struct (SHARED backing — sibling views and DataViews over
+   * the same buffer observe each other's writes) plus an element `byteOffset`.
+   * Element access byte-decodes little-endian via the dataview-native engine,
+   * discriminated at COMPILE time by the receiver's resolved ValType.typeIdx
+   * (mirroring `subviewTypeMap`), so plain-array / native-TA hot paths are
+   * byte-inert. Map miss = not registered. (Spec: plan/issues/3054 Phase A/B1.)
+   */
+  taViewTypeMap: Map<string, number>;
   /** Type index for the WasmGC `$Error_struct` used in standalone/WASI mode (#1104). -1 = not yet registered. */
   errorStructTypeIdx: number;
   /** Extra properties for empty object variables */

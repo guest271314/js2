@@ -28,7 +28,8 @@ import {
   resolveWasmType,
   TYPED_ARRAY_NAMES,
 } from "../index.js";
-import { getSubviewArrTypeIdx, isSubviewTypeIdx } from "../registry/types.js"; // (#2357/#47) subview write
+import { getSubviewArrTypeIdx, isSubviewTypeIdx, isTaViewTypeIdx } from "../registry/types.js"; // (#2357/#47) subview write; (#3054 B1) TA view write
+import { emitTaViewElementSet } from "../dataview-native.js"; // (#3054 B1) shared-backing TA view write
 import { buildDestructureNullThrow, patternIteratorStepCount } from "../destructuring-params.js";
 import { resolveComputedKeyExpression } from "../literals.js";
 import { resolveReceiverStruct } from "../fnctor-escape-gate.js"; // (#2681/#2686 A3) pinned-struct write dispatch
@@ -3880,6 +3881,19 @@ function compileElementAssignment(
   // 2-field `isVecStructAssign` test is false and the field path would mis-handle
   // it. Compile-time discriminated by the receiver typeIdx; plain vec arrays never
   // reach this arm. The receiver ref is already on the stack (from line ~2765).
+  // (#3054 B1) `$__ta_view` target (shared-backing TypedArray over an
+  // ArrayBuffer): byte-encode `ta[i] = v` little-endian into the SHARED buffer
+  // vec (true aliasing → sibling views / DataViews observe it). Must run BEFORE
+  // the 2-field vec-struct assign check (a `$__ta_view` is a 3-field struct).
+  // Compile-time discriminated by receiver typeIdx. Receiver ref already on the
+  // stack (from the `compileExpression(target.expression)` above).
+  if (typeDef?.kind === "struct" && isTaViewTypeIdx(ctx, typeIdx)) {
+    const r = emitTaViewElementSet(ctx, fctx, typeIdx, target.argumentExpression, value, (e, h) =>
+      compileExpression(ctx, fctx, e, h),
+    );
+    if (r) return r;
+  }
+
   if (typeDef?.kind === "struct" && isSubviewTypeIdx(ctx, typeIdx)) {
     const subArrTypeIdx = getSubviewArrTypeIdx(ctx, typeIdx);
     const subArrDef = ctx.mod.types[subArrTypeIdx];
