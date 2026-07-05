@@ -184,6 +184,17 @@ export interface IrClassShape {
   readonly fields: readonly IrClassFieldDescriptor[];
   readonly methods: readonly IrClassMethodDescriptor[];
   readonly constructorParams: readonly IrType[];
+  /**
+   * #3000-E: the immediate parent class shape for a subclass declared via
+   * `class Sub extends Parent`. Present only when `Parent` is a locally-declared
+   * user class whose own shape projected (single-level, WasmGC-struct parent).
+   * Drives `super(...)` (→ the parent's `_init`) and `super.method()` (→ the
+   * parent's method slot). Absent (undefined) for flat / root classes and for
+   * subclasses of a builtin/externref-backed parent (which stay on legacy).
+   * `classShapeEquals` deliberately does NOT compare `parent` — a shape is
+   * identified by `className` alone (see the doc there).
+   */
+  readonly parent?: IrClassShape;
 }
 
 export type IrType =
@@ -1171,6 +1182,45 @@ export interface IrInstrClassCall extends IrInstrBase {
   readonly args: readonly IrValueId[];
 }
 
+/**
+ * #3000-E: a derived constructor's `super(args)` call. Runs the PARENT class's
+ * `<parent>_init` on the already-allocated `self` — NOT the parent's `_new`
+ * (which would allocate a second, wrong-typed instance). The legacy backend
+ * splits every WasmGC-struct class into `<Class>_new` (alloc + tail-call init)
+ * and `<Class>_init` (`(...ctorParams, self) -> (ref $struct)` — field inits +
+ * ctor body, self LAST), and lowers a derived `super(...)` to
+ * `call <Parent>_init(args..., self)`. This instr mirrors that exactly.
+ *
+ * Statement-only (no SSA result): `<Parent>_init` returns `(ref $ParentStruct)`
+ * but `super(...)` as a statement discards it, so the lowering drops the result.
+ * `self` is a `(ref $SubStruct)` — a WasmGC subtype of `(ref $ParentStruct)`, so
+ * the raw `call` typechecks. Lowering emits: <each arg>, <self>, call, drop.
+ */
+export interface IrInstrClassSuperInit extends IrInstrBase {
+  readonly kind: "class.super_init";
+  readonly parentShape: IrClassShape;
+  readonly self: IrValueId;
+  readonly args: readonly IrValueId[];
+}
+
+/**
+ * #3000-E: a `super.method(args)` call inside a subclass method. Static-dispatches
+ * to the PARENT's method slot (`<parent>_<method>`) with the subclass receiver.
+ * Unlike `class.call` (which resolves the method against the RECEIVER's shape),
+ * this resolves against `parentShape` so an override on the subclass is bypassed.
+ * The receiver value is a `(ref $SubStruct)` passed where the parent method
+ * expects `(ref $ParentStruct)` (valid WasmGC subtyping). Lowering emits:
+ *   <receiver> <each arg> call $<parent>_<method>
+ * Result type: the parent method descriptor's `returnType` (null → void).
+ */
+export interface IrInstrClassSuperCall extends IrInstrBase {
+  readonly kind: "class.super_call";
+  readonly parentShape: IrClassShape;
+  readonly receiver: IrValueId;
+  readonly methodName: string;
+  readonly args: readonly IrValueId[];
+}
+
 // ---------------------------------------------------------------------------
 // Slot ops + for-of (#1169e — IR Phase 4 Slice 6)
 // ---------------------------------------------------------------------------
@@ -2098,6 +2148,8 @@ export type IrInstr =
   | IrInstrRefCellSet
   | IrInstrClassNew
   | IrInstrClassAlloc
+  | IrInstrClassSuperInit
+  | IrInstrClassSuperCall
   | IrInstrClassGet
   | IrInstrClassSet
   | IrInstrClassCall
@@ -2410,6 +2462,8 @@ export function forEachNestedBuffer(instr: IrInstr, fn: (buffer: readonly IrInst
     case "class.get":
     case "class.set":
     case "class.call":
+    case "class.super_init":
+    case "class.super_call":
     case "slot.read":
     case "slot.write":
     case "vec.len":
@@ -2552,6 +2606,8 @@ export function mapNestedBuffers(
     case "class.get":
     case "class.set":
     case "class.call":
+    case "class.super_init":
+    case "class.super_call":
     case "slot.read":
     case "slot.write":
     case "vec.len":
@@ -2657,6 +2713,10 @@ export function directUses(instr: IrInstr): readonly IrValueId[] {
     case "class.set":
       return [instr.value, instr.newValue];
     case "class.call":
+      return [instr.receiver, ...instr.args];
+    case "class.super_init":
+      return [...instr.args, instr.self];
+    case "class.super_call":
       return [instr.receiver, ...instr.args];
     case "slot.write":
       return [instr.value];

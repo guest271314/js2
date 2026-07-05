@@ -283,6 +283,16 @@ function applyInstrEffect(instr: IrInstr, state: State, allocOf: Map<IrValueId, 
       markEscaped(state, instr.receiver, allocOf);
       for (const a of instr.args) markEscaped(state, a, allocOf);
       break;
+    // #3000-E: super(...) / super.method() reach into an opaque parent function;
+    // `self`/receiver + args escape with full access, same as class.call.
+    case "class.super_init":
+      markEscaped(state, instr.self, allocOf);
+      for (const a of instr.args) markEscaped(state, a, allocOf);
+      break;
+    case "class.super_call":
+      markEscaped(state, instr.receiver, allocOf);
+      for (const a of instr.args) markEscaped(state, a, allocOf);
+      break;
     case "closure.call":
       markEscaped(state, instr.callee, allocOf);
       for (const a of instr.args) markEscaped(state, a, allocOf);

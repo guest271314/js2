@@ -10,8 +10,8 @@
   },
   {
     "edition": "ES5",
-    "pass": 10221,
-    "fail": 2727,
+    "pass": 10223,
+    "fail": 2725,
     "ce": 127,
     "skip": 0,
     "total": 13075,
@@ -57,8 +57,8 @@
   },
   {
     "edition": "ES2015",
-    "pass": 11110,
-    "fail": 4092,
+    "pass": 11113,
+    "fail": 4089,
     "ce": 184,
     "skip": 0,
     "total": 15386,
@@ -1026,8 +1026,8 @@
   },
   {
     "edition": "ES2018",
-    "pass": 3807,
-    "fail": 405,
+    "pass": 3809,
+    "fail": 403,
     "ce": 39,
     "skip": 0,
     "total": 4251,
@@ -1044,8 +1044,8 @@
       },
       {
         "name": "destructuring-binding",
-        "pass": 1121,
-        "fail": 169,
+        "pass": 1123,
+        "fail": 167,
         "ce": 5,
         "skip": 0,
         "total": 1295,
@@ -1089,12 +1089,12 @@
       },
       {
         "name": "object-rest",
-        "pass": 159,
-        "fail": 77,
+        "pass": 161,
+        "fail": 75,
         "ce": 0,
         "skip": 0,
         "total": 236,
-        "pct": 67
+        "pct": 68
       },
       {
         "name": "object-spread",
@@ -2141,8 +2141,8 @@
   },
   {
     "edition": "ES2022",
-    "pass": 3254,
-    "fail": 948,
+    "pass": 3264,
+    "fail": 938,
     "ce": 32,
     "skip": 0,
     "total": 4234,
@@ -2150,17 +2150,17 @@
     "features": [
       {
         "name": "class",
-        "pass": 2323,
-        "fail": 452,
+        "pass": 2333,
+        "fail": 442,
         "ce": 15,
         "skip": 0,
         "total": 2790,
-        "pct": 83
+        "pct": 84
       },
       {
         "name": "class-fields-public",
-        "pass": 1644,
-        "fail": 410,
+        "pass": 1652,
+        "fail": 402,
         "ce": 0,
         "skip": 0,
         "total": 2054,
@@ -2168,12 +2168,12 @@
       },
       {
         "name": "class-fields-private",
-        "pass": 1032,
-        "fail": 77,
+        "pass": 1042,
+        "fail": 67,
         "ce": 17,
         "skip": 0,
         "total": 1126,
-        "pct": 92
+        "pct": 93
       },
       {
         "name": "class-methods-private",
@@ -2573,12 +2573,12 @@
       },
       {
         "name": "destructuring-binding",
-        "pass": 0,
-        "fail": 2,
+        "pass": 2,
+        "fail": 0,
         "ce": 0,
         "skip": 0,
         "total": 2,
-        "pct": 0
+        "pct": 100
       },
       {
         "name": "Int8Array",

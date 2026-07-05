@@ -906,9 +906,29 @@ function buildIrClassShapes(
   sourceFile: ts.SourceFile,
 ): Map<string, import("../ir/nodes.js").IrClassShape> {
   const out = new Map<string, import("../ir/nodes.js").IrClassShape>();
+  // #3000-E: className → declaration, for parent-chain field re-derivation and
+  // parent-shape lookup on a subclass.
+  const classDeclByName = new Map<string, ts.ClassDeclaration>();
+  for (const stmt of sourceFile.statements) {
+    if (ts.isClassDeclaration(stmt) && stmt.name) classDeclByName.set(stmt.name.text, stmt);
+  }
   for (const stmt of sourceFile.statements) {
     if (!ts.isClassDeclaration(stmt) || !stmt.name) continue;
-    if (stmt.heritageClauses && stmt.heritageClauses.length > 0) continue; // slice 4 defers inheritance
+    // #3000-E: a single-level `extends` of a LOCAL user class projects (its own
+    // shape carries the parent as `.parent`, driving `super(...)` / `super.method`
+    // lowering). A class with `extends` of a builtin / externref-backed / not-yet-
+    // built parent, or a non-identifier heritage expression, still defers to legacy
+    // — `parentShape` stays undefined and the `continue` below drops it. An
+    // `implements`-only class (no `extends`) is structurally flat and projects. This
+    // predicate MIRRORS the selector's `hasParent && parentIsLocalClass` gate
+    // (`src/ir/select.ts`) so a claimed subclass member always finds a shape here.
+    let parentShape: import("../ir/nodes.js").IrClassShape | undefined;
+    const extendsName = extendsParentClassName(stmt);
+    if (extendsName !== null) {
+      const ps = out.get(extendsName);
+      if (!ps) continue; // parent isn't a local projected class (builtin, or declared later) → defer
+      parentShape = ps;
+    }
     const className = stmt.name.text;
     if (!ctx.classSet.has(className)) continue;
     if (!ctx.structFields.has(className)) continue;
@@ -967,25 +987,43 @@ function buildIrClassShapes(
       const ir = tsTypeToClassPositionIr(ctx, tsType, out);
       if (ir) astFieldIr.set(mangled, ir);
     };
-    // Property declarations (`#name: string;`, `x: number;`) — legacy reads the
-    // field type off the member node itself; mirror that source exactly.
-    for (const member of stmt.members) {
-      if (ts.isPropertyDeclaration(member) && member.name && !hasStaticModifier(member)) {
-        recordField(member.name, member);
-      }
+    // #3000-E: the legacy `structFields` for a subclass is `[...parentFields,
+    // ...ownFields]` (see `collectClassDeclaration`), so a subclass's slot set
+    // includes fields DECLARED on its ancestors — e.g. Dog's `__priv_name` is
+    // Animal's string field. The AST re-derivation must therefore walk the whole
+    // ancestor chain (self + every local parent), or an inherited STRING field
+    // has no `astFieldIr` entry and falls to the null-returning ValType path,
+    // rejecting the whole subclass. Numeric/boolean inherited fields survive the
+    // ValType path regardless; this walk is what recovers inherited string fields.
+    const chain: ts.ClassDeclaration[] = [stmt];
+    for (let cursor: string | null = extendsParentClassName(stmt); cursor !== null; ) {
+      const decl = classDeclByName.get(cursor);
+      if (!decl) break; // non-local ancestor (builtin) — its fields aren't struct slots here
+      chain.push(decl);
+      cursor = extendsParentClassName(decl);
     }
-    // Constructor-body `this.x = …` field introductions — legacy reads the
-    // field type off the property-access LHS node; mirror that source.
-    if (ctor?.body) {
-      for (const s of ctor.body.statements) {
-        if (
-          ts.isExpressionStatement(s) &&
-          ts.isBinaryExpression(s.expression) &&
-          s.expression.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
-          ts.isPropertyAccessExpression(s.expression.left) &&
-          s.expression.left.expression.kind === ts.SyntaxKind.ThisKeyword
-        ) {
-          recordField(s.expression.left.name, s.expression.left);
+    for (const decl of chain) {
+      // Property declarations (`#name: string;`, `x: number;`) — legacy reads the
+      // field type off the member node itself; mirror that source exactly.
+      for (const member of decl.members) {
+        if (ts.isPropertyDeclaration(member) && member.name && !hasStaticModifier(member)) {
+          recordField(member.name, member);
+        }
+      }
+      // Constructor-body `this.x = …` field introductions — legacy reads the
+      // field type off the property-access LHS node; mirror that source.
+      const declCtor = decl.members.find(ts.isConstructorDeclaration) as ts.ConstructorDeclaration | undefined;
+      if (declCtor?.body) {
+        for (const s of declCtor.body.statements) {
+          if (
+            ts.isExpressionStatement(s) &&
+            ts.isBinaryExpression(s.expression) &&
+            s.expression.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+            ts.isPropertyAccessExpression(s.expression.left) &&
+            s.expression.left.expression.kind === ts.SyntaxKind.ThisKeyword
+          ) {
+            recordField(s.expression.left.name, s.expression.left);
+          }
         }
       }
     }
@@ -1054,9 +1092,28 @@ function buildIrClassShapes(
       fields,
       methods,
       constructorParams,
+      // #3000-E: present only for a single-level subclass of a local user class.
+      ...(parentShape ? { parent: parentShape } : {}),
     });
   }
   return out;
+}
+
+/**
+ * #3000-E: the name of a class's `extends` parent when it is a bare identifier
+ * (`class Dog extends Animal` → "Animal"). Returns null for no `extends` (flat /
+ * `implements`-only) and for a non-identifier heritage expression (`extends
+ * ns.Base`, `extends mixin(X)` — deferred). Mirrors `extendsParentName` in
+ * `src/ir/select.ts` so the shape builder and selector agree on which subclasses
+ * are IR-eligible.
+ */
+function extendsParentClassName(stmt: ts.ClassDeclaration): string | null {
+  for (const h of stmt.heritageClauses ?? []) {
+    if (h.token !== ts.SyntaxKind.ExtendsKeyword) continue;
+    const first = h.types[0]?.expression;
+    if (first && ts.isIdentifier(first)) return first.text;
+  }
+  return null;
 }
 
 /**

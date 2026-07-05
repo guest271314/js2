@@ -1168,6 +1168,32 @@ function ensureStandaloneBuiltinStaticMethodClosure(
       paramTypes = [{ kind: "externref" }, { kind: "externref" }];
       returnType = { kind: "externref" };
       break;
+    // (#2933) Namespace static-method VALUE reads for the fixed-arity `Reflect.*`
+    // methods that the standalone CALL path already backs with a simple
+    // externref/i32 native (calls.ts §"Reflect API"). The value closure calls
+    // the SAME native, so `const f: any = Reflect.get; f(o, "k")` is
+    // observationally identical to `Reflect.get(o, "k")`. The variadic
+    // (`Math.max`) and native-`$AnyValue`-return (`JSON.stringify`, `JSON.parse`)
+    // methods stay refused — they need variadic / anyref-boundary closure work
+    // (see the issue's remaining scope). `Reflect.get`/`set` fix the arity at 2/3
+    // (no explicit-receiver slot), matching the call path which refuses the
+    // receiver form under standalone (#2046).
+    case "Reflect.get":
+      paramTypes = [{ kind: "externref" }, { kind: "externref" }];
+      returnType = { kind: "externref" };
+      break;
+    case "Reflect.has":
+      paramTypes = [{ kind: "externref" }, { kind: "externref" }];
+      returnType = { kind: "i32" };
+      break;
+    case "Reflect.set":
+      paramTypes = [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }];
+      returnType = { kind: "i32" };
+      break;
+    case "Reflect.ownKeys":
+      paramTypes = [{ kind: "externref" }];
+      returnType = { kind: "externref" };
+      break;
     default:
       return null;
   }
@@ -1204,6 +1230,51 @@ function ensureStandaloneBuiltinStaticMethodClosure(
       closureFctx.body.push({ op: "local.get", index: 1 });
       closureFctx.body.push({ op: "local.get", index: 2 });
       closureFctx.body.push({ op: "call", funcIdx: gopdIdx });
+    } else if (key === "Reflect.get") {
+      // (#2933) Same native the 2-arg standalone `Reflect.get(target, key)` call
+      // path uses (calls.ts). The value closure is fixed 2-arg — the optional
+      // receiver form is unsupported in standalone (#2046), consistent there.
+      const idx = ensureLateImport(
+        ctx,
+        "__extern_get",
+        [{ kind: "externref" }, { kind: "externref" }],
+        [{ kind: "externref" }],
+      );
+      if (idx === undefined) return null;
+      closureFctx.body.push({ op: "local.get", index: 1 });
+      closureFctx.body.push({ op: "local.get", index: 2 });
+      closureFctx.body.push({ op: "call", funcIdx: idx });
+    } else if (key === "Reflect.has") {
+      const idx = ensureLateImport(
+        ctx,
+        "__extern_has",
+        [{ kind: "externref" }, { kind: "externref" }],
+        [{ kind: "i32" }],
+      );
+      if (idx === undefined) return null;
+      closureFctx.body.push({ op: "local.get", index: 1 });
+      closureFctx.body.push({ op: "local.get", index: 2 });
+      closureFctx.body.push({ op: "call", funcIdx: idx });
+    } else if (key === "Reflect.set") {
+      const idx = ensureLateImport(
+        ctx,
+        "__reflect_set",
+        [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
+        [{ kind: "i32" }],
+      );
+      if (idx === undefined) return null;
+      closureFctx.body.push({ op: "local.get", index: 1 });
+      closureFctx.body.push({ op: "local.get", index: 2 });
+      closureFctx.body.push({ op: "local.get", index: 3 });
+      closureFctx.body.push({ op: "call", funcIdx: idx });
+    } else if (key === "Reflect.ownKeys") {
+      // Native __object_keys — string own keys of the $Object hash-map, per the
+      // standalone `Reflect.ownKeys(target)` call path (Symbol/non-enumerable
+      // keys are out of scope for the open-object runtime, consistent with it).
+      const idx = ensureLateImport(ctx, "__object_keys", [{ kind: "externref" }], [{ kind: "externref" }]);
+      if (idx === undefined) return null;
+      closureFctx.body.push({ op: "local.get", index: 1 });
+      closureFctx.body.push({ op: "call", funcIdx: idx });
     }
 
     funcIdx = mintDefinedFunc(ctx);
@@ -6951,6 +7022,40 @@ export function compileElementAccess(
         fctx.body.push({ op: "call", funcIdx: charAtIdx });
         return { kind: "ref", typeIdx: ctx.nativeStrTypeIdx };
       }
+    }
+  }
+
+  // (#3027) Computed non-numeric key on a string/String-wrapper-typed
+  // receiver — `"str"["length"]`, `new String("x")["length"]`. Native-strings
+  // mode has no `$Object` sidecar for a bare string or wrapper receiver, so
+  // the generic "non-vec, non-tuple struct" fallback further below
+  // (`extern.convert_any` + host `__extern_get`) always returns null for a
+  // computed string-property read — there is no host to ask, and the struct
+  // shape (len/off/data) never matches a property name like "length". The
+  // dot form (`"str".length`) already dispatches correctly through
+  // `compilePropertyAccess`; recompile this access as the equivalent dot form
+  // (same receiver, same statically-resolved key) so it takes that exact path
+  // instead of duplicating the logic here. Numeric keys are handled above
+  // (#1910 R4) or by the array/vec paths below; only fires for a
+  // non-numeric, statically-resolvable key.
+  if (
+    ctx.nativeStrings &&
+    ctx.anyStrTypeIdx >= 0 &&
+    !isNumericIndexExpression(ctx, expr.argumentExpression) &&
+    // (#1930) Query the receiver's static string-ness via the TypeOracle, not
+    // the raw checker. `isStringType` matched BOTH a primitive string and the
+    // `String` wrapper object; the oracle equivalents are
+    // `staticJsTypeOf === "string"` (primitive) OR `builtinReceiverOf ===
+    // "String"` (`new String(x)` wrapper), which together cover the same set.
+    (ctx.oracle.staticJsTypeOf(expr.expression) === "string" ||
+      ctx.oracle.builtinReceiverOf(expr.expression) === "String")
+  ) {
+    const key = resolveComputedKeyExpression(ctx, expr.argumentExpression);
+    if (key !== undefined) {
+      const syntheticProp = ts.factory.createPropertyAccessExpression(expr.expression, key);
+      ts.setTextRange(syntheticProp, expr);
+      (syntheticProp as unknown as { parent: ts.Node }).parent = expr.parent;
+      return compilePropertyAccess(ctx, fctx, syntheticProp);
     }
   }
 
