@@ -10,12 +10,12 @@
   },
   {
     "edition": "ES5",
-    "pass": 10237,
-    "fail": 2720,
-    "ce": 118,
+    "pass": 10305,
+    "fail": 2655,
+    "ce": 115,
     "skip": 0,
     "total": 13075,
-    "pct": 78,
+    "pct": 79,
     "features": [
       {
         "name": "caller",
@@ -57,26 +57,26 @@
   },
   {
     "edition": "ES2015",
-    "pass": 11139,
-    "fail": 4083,
-    "ce": 164,
+    "pass": 11191,
+    "fail": 4034,
+    "ce": 161,
     "skip": 0,
     "total": 15386,
-    "pct": 72,
+    "pct": 73,
     "features": [
       {
         "name": "destructuring-binding",
-        "pass": 2083,
-        "fail": 422,
+        "pass": 2134,
+        "fail": 371,
         "ce": 28,
         "skip": 0,
         "total": 2533,
-        "pct": 82
+        "pct": 84
       },
       {
         "name": "generators",
-        "pass": 971,
-        "fail": 400,
+        "pass": 977,
+        "fail": 394,
         "ce": 20,
         "skip": 0,
         "total": 1391,
@@ -102,12 +102,12 @@
       },
       {
         "name": "Symbol.iterator",
-        "pass": 294,
-        "fail": 300,
+        "pass": 346,
+        "fail": 248,
         "ce": 30,
         "skip": 0,
         "total": 624,
-        "pct": 47
+        "pct": 55
       },
       {
         "name": "Symbol",
@@ -1026,8 +1026,8 @@
   },
   {
     "edition": "ES2018",
-    "pass": 3838,
-    "fail": 385,
+    "pass": 3842,
+    "fail": 381,
     "ce": 28,
     "skip": 0,
     "total": 4251,
@@ -1035,8 +1035,8 @@
     "features": [
       {
         "name": "async-iteration",
-        "pass": 2981,
-        "fail": 276,
+        "pass": 2985,
+        "fail": 272,
         "ce": 27,
         "skip": 0,
         "total": 3284,
@@ -1053,12 +1053,12 @@
       },
       {
         "name": "Symbol.iterator",
-        "pass": 538,
-        "fail": 46,
+        "pass": 542,
+        "fail": 42,
         "ce": 14,
         "skip": 0,
         "total": 598,
-        "pct": 90
+        "pct": 91
       },
       {
         "name": "regexp-unicode-property-escapes",
@@ -3925,9 +3925,9 @@
   {
     "edition": "Proposals",
     "pass": 1491,
-    "fail": 3180,
+    "fail": 3171,
     "ce": 215,
-    "skip": 96,
+    "skip": 105,
     "total": 4982,
     "pct": 30
   }
