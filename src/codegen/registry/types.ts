@@ -337,6 +337,89 @@ export function getTaViewName(ctx: CodegenContext, typeIdx: number): string | un
 }
 
 /**
+ * (#3054 D) Canonical ordered list of TypedArray element kinds a first-class
+ * `$__ta_ctor` value can name. The array INDEX is the runtime `kind` stored in the
+ * struct; every dynamic-construct / `BYTES_PER_ELEMENT` dispatch iterates this list
+ * so the ordering is the single source of truth. BigInt64/Float16 views are omitted
+ * (unsupported elsewhere in the standalone lane).
+ */
+export const TA_CTOR_KINDS: readonly string[] = [
+  "Int8Array",
+  "Uint8Array",
+  "Uint8ClampedArray",
+  "Int16Array",
+  "Uint16Array",
+  "Int32Array",
+  "Uint32Array",
+  "Float32Array",
+  "Float64Array",
+];
+
+/** (#3054 D) Element byte width per `TA_CTOR_KINDS` entry (BYTES_PER_ELEMENT). */
+export const TA_CTOR_BYTES: readonly number[] = [1, 1, 1, 2, 2, 4, 4, 4, 8];
+
+/** (#3054 D) The `kind` index for a TS TypedArray name, or -1 if not a first-class TA ctor. */
+export function taCtorKindOf(name: string): number {
+  return TA_CTOR_KINDS.indexOf(name);
+}
+
+/**
+ * (#3054 D) Get or register the `$__ta_ctor` struct — `{kind: i32}` — the
+ * first-class runtime value for a TypedArray CONSTRUCTOR used in value position.
+ * A bare TA name in value position (`const c = Uint8Array`, `[Uint8Array, …]`,
+ * a `new ctor(rab)` callee) previously degraded to `ref.null.extern`
+ * (indistinguishable — `Uint8Array === Int8Array` was `true`), so a dynamic
+ * `new ctor(rab)` dropped the ctor and produced null. The immutable `kind` field
+ * (index into `TA_CTOR_KINDS`) drives the runtime-switch dynamic construct and
+ * `ctor.BYTES_PER_ELEMENT`. A plain struct (NOT a vec subtype) so it never collides
+ * with buffer/view `ref.test`s. Registered late+once, memoized on `ctx.taCtorTypeIdx`.
+ */
+export function getOrRegisterTaCtorType(ctx: CodegenContext): number {
+  if (ctx.taCtorTypeIdx >= 0) return ctx.taCtorTypeIdx;
+  const idx = ctx.mod.types.length;
+  const name = "__ta_ctor";
+  ctx.mod.types.push({
+    kind: "struct",
+    name,
+    fields: [{ name: "kind", type: { kind: "i32" }, mutable: false }],
+  });
+  ctx.taCtorTypeIdx = idx;
+  ctx.structMap.set(name, idx);
+  ctx.typeIdxToStructName.set(idx, name);
+  ctx.structFields.set(name, [{ name: "kind", type: { kind: "i32" as const }, mutable: false }]);
+  return idx;
+}
+
+/**
+ * (#3054 D) Get or register `$__ta_dyn_view` — a shared-backing TypedArray view
+ * whose element kind is carried in a runtime `kind` field (index into
+ * `TA_CTOR_KINDS`), for views built by a dynamic `new ctor(rab)` where the kind is
+ * only known at runtime. B1's per-kind `$__ta_view_<K>` are structurally identical
+ * → WasmGC canonicalizes them to ONE runtime type, so a boxed view can't recover
+ * its kind via `ref.test`; this struct stores it explicitly. Subtype of
+ * `$__vec_base` so `.length` reads field0 uniformly. Registered late+once.
+ */
+export function getOrRegisterTaDynViewType(ctx: CodegenContext): number {
+  if (ctx.taDynViewTypeIdx >= 0) return ctx.taDynViewTypeIdx;
+  const vecBaseIdx = getOrRegisterVecBaseType(ctx);
+  const bufVecTypeIdx = getOrRegisterVecType(ctx, "i32_byte", { kind: "i8" });
+  const idx = ctx.mod.types.length;
+  const name = "__ta_dyn_view";
+  const fields = [
+    { name: "length", type: { kind: "i32" as const }, mutable: true },
+    { name: "buf", type: { kind: "ref_null" as const, typeIdx: bufVecTypeIdx }, mutable: false },
+    { name: "byteOffset", type: { kind: "i32" as const }, mutable: false },
+    { name: "kind", type: { kind: "i32" as const }, mutable: false },
+  ];
+  ctx.mod.types.push({ kind: "struct", name, superTypeIdx: vecBaseIdx, fields });
+  ctx.taDynViewTypeIdx = idx;
+  ctx.structMap.set(name, idx);
+  ctx.typeIdxToStructName.set(idx, name);
+  ctx.structFields.set(name, fields);
+  return idx;
+}
+
+/**
  * (#3054 C) Get or register the `$__resizable_ab` struct — a WasmGC SUBTYPE of the
  * ArrayBuffer backing vec `$__vec_i32_byte`, carrying one extra `maxByteLength`
  * field:

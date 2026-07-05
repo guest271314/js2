@@ -1713,6 +1713,33 @@ export interface CodegenContext {
    * hazard. -1 = not yet registered. (Spec: plan/issues/3054 Phase A A.2.)
    */
   resizableAbTypeIdx: number;
+  /**
+   * (#3054 D) Type index for the standalone `$__ta_ctor` struct — a first-class
+   * runtime value for a TypedArray CONSTRUCTOR used in value position
+   * (`const c = Uint8Array`, `ctors = [Uint8Array, …]`, a `new ctor(rab)` callee).
+   * `{kind: i32}` where `kind` indexes `TA_CTOR_KINDS` (the 9 element kinds). Before
+   * this a bare TA name in value position degraded to `ref.null.extern`
+   * (indistinguishable — `Uint8Array === Int8Array` was `true`), so a dynamic
+   * `new ctor(rab)` dropped the ctor and produced null. The `kind` field drives the
+   * runtime-switch dynamic construct + `ctor.BYTES_PER_ELEMENT`. Registered
+   * late+once; -1 = not yet registered. Byte-inert: only emitted when a TA ctor is
+   * used as a value. (Spec: plan/issues/3054 Phase A/D.)
+   */
+  taCtorTypeIdx: number;
+  /** (#3054 D) Per-kind memoized singleton module-global holding the boxed `$__ta_ctor` value (identity via `ref.eq`). Key = kind index. */
+  taCtorSingletonGlobals: Map<number, number>;
+  /**
+   * (#3054 D) Type index for `$__ta_dyn_view` — a shared-backing TypedArray view
+   * whose element kind is only known at RUNTIME (built by a dynamic `new
+   * ctor(rab)`). Unlike B1's per-kind `$__ta_view_<K>` (which are structurally
+   * identical → WasmGC canonicalizes them to ONE runtime type, so `ref.test` can't
+   * recover the kind), this struct carries a `kind: i32` field:
+   * `{length: i32 (mut), buf: (ref null $__vec_i32_byte), byteOffset: i32, kind: i32}`,
+   * subtype of `$__vec_base`. All dynamic-view access (`.byteLength`, element
+   * get/set) dispatches on the stored `kind` (not `ref.test`). Registered late+once;
+   * -1 = not yet registered. Byte-inert: only emitted for a dynamic `new ctor(…)`.
+   */
+  taDynViewTypeIdx: number;
   /** Type index for the WasmGC `$Error_struct` used in standalone/WASI mode (#1104). -1 = not yet registered. */
   errorStructTypeIdx: number;
   /** Extra properties for empty object variables */

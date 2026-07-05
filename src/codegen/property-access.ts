@@ -119,8 +119,15 @@ import {
   getSubviewArrTypeIdx,
   isSubviewTypeIdx,
   isTaViewTypeIdx,
+  taCtorKindOf,
 } from "./registry/types.js";
-import { emitTaViewAccessor, emitTaViewElementGet, pushTaViewEffectiveLen } from "./dataview-native.js"; // (#3054 B1/B2/C) shared-backing TA view read + accessor props + resize length-tracking
+import {
+  emitTaCtorBytesPerElement,
+  emitTaViewAccessor,
+  emitTaViewDynamicByteLength,
+  emitTaViewElementGet,
+  pushTaViewEffectiveLen,
+} from "./dataview-native.js"; // (#3054 B1/B2/C) shared-backing TA view read + accessor props + resize length-tracking; (#3054 D) dynamic ctor BYTES_PER_ELEMENT + dynamic view byteLength
 import {
   coerceType,
   compileExpression,
@@ -3436,6 +3443,52 @@ export function compilePropertyAccess(
 
   const objType = ctx.checker.getTypeAtLocation(expr.expression);
   const propName = ts.isPrivateIdentifier(expr.name) ? "__priv_" + expr.name.text.slice(1) : expr.name.text;
+
+  // (#3054 D) `ctor.BYTES_PER_ELEMENT` where `ctor` is a first-class `$__ta_ctor`
+  // value (the kind is only known at runtime — `for (c of ctors) … c.BYTES_PER_ELEMENT`,
+  // `CreateRabForTest(ctor)`'s `4 * ctor.BYTES_PER_ELEMENT`). Placed at the TOP so
+  // it wins over the generic dynamic-member dispatchers below (which return
+  // `undefined`/0 for a `$__ta_ctor` receiver — a param/loop-var typed `any`).
+  // Byte-inert: only when a `$__ta_ctor` type already exists in the module (it is
+  // registered when a TA name is used as a value, e.g. the `ctors` array). Excludes
+  // the static `Uint8Array.BYTES_PER_ELEMENT` NAME form (kept on its dedicated path)
+  // and native TypedArray/DataView/ArrayBuffer INSTANCES (their own instance arm).
+  if (
+    propName === "BYTES_PER_ELEMENT" &&
+    noJsHost(ctx) &&
+    !(ts.isIdentifier(expr.expression) && taCtorKindOf(expr.expression.text) >= 0)
+  ) {
+    const recvSym = objType.getSymbol()?.name;
+    const isNativeInstance =
+      recvSym !== undefined &&
+      (taCtorKindOf(recvSym) >= 0 || recvSym === "DataView" || recvSym === "ArrayBuffer" || recvSym === "TypedArray");
+    // A `$__ta_ctor` value only ever flows through an `any`/`unknown`/union-typed
+    // receiver (a concrete TA / native instance never holds one). Gate on that so
+    // non-dynamic reads stay byte-inert, and register the ctor type on demand (the
+    // read may compile before the value that would register it).
+    const isDynamicReceiver =
+      (objType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0 || objType.isUnion() || ctx.taCtorTypeIdx >= 0;
+    if (!isNativeInstance && isDynamicReceiver) {
+      const r = emitTaCtorBytesPerElement(ctx, fctx, () => compileExpression(ctx, fctx, expr.expression));
+      if (r) return r;
+    }
+  }
+
+  // (#3054 D) `.byteLength` on a boxed `$__ta_view` read back through an `any`/union
+  // receiver (a dynamically-constructed view stored in an `any[]`, e.g.
+  // length-tracking-N's `for (ta of tas) … ta.byteLength`). The compile-time-typeIdx
+  // `$__ta_view` accessor arm can't fire (the local is externref), and the generic
+  // dynamic reader THROWS on `.byteLength`. Runtime `ref.test` dispatch instead.
+  // Gated to a dynamic receiver + at least one registered `$__ta_view` type
+  // (byte-inert otherwise); a static ArrayBuffer/DataView/TA `.byteLength` keeps its
+  // own concrete arm below (its receiver type is not `any`/union).
+  if (propName === "byteLength" && noJsHost(ctx) && ctx.taDynViewTypeIdx >= 0) {
+    const isDynamicReceiver = (objType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0 || objType.isUnion();
+    if (isDynamicReceiver) {
+      const r = emitTaViewDynamicByteLength(ctx, fctx, () => compileExpression(ctx, fctx, expr.expression));
+      if (r) return r;
+    }
+  }
 
   // (#2743 a) `arguments.constructor.prototype` → %Object.prototype% (§10.4.4):
   // the arguments object's `.constructor` is %Object%, whose `.prototype` is

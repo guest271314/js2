@@ -38,6 +38,8 @@ import { getOrRegisterErrorStructType, isWasiErrorName } from "../registry/error
 import { allocLocal } from "../context/locals.js";
 import { popBody, pushBody } from "../context/bodies.js";
 import { reportSilentFallback } from "../fallback-telemetry.js";
+import { emitTaCtorValue } from "../dataview-native.js";
+import { taCtorKindOf } from "../registry/types.js";
 import { emitThrowReferenceError, emitThrowTypeError, noJsHost } from "./helpers.js";
 import { emitDynamicWithGet, emitWithBindingGet, resolveWithBinding } from "../with-scope.js";
 import {
@@ -1085,6 +1087,26 @@ function compileIdentifierCore(ctx: CodegenContext, fctx: FunctionContext, id: t
       fctx.body.push({ op: "throw", tagIdx });
     }
     return { kind: "externref" };
+  }
+
+  // (#3054 D) First-class TypedArray CONSTRUCTOR value. A bare TA name used as a
+  // VALUE (not `new TA()` / type position — those are handled syntactically in
+  // new-super / property-access) previously fell through to the null-externref
+  // default below, so every TA ctor was indistinguishable (`Uint8Array ===
+  // Int8Array` was `true`) and a dynamic `new ctor(rab)` dropped the ctor. Emit a
+  // `$__ta_ctor{kind}` so `ctors = [Uint8Array, …]`, `for (ctor of ctors)`, and
+  // dynamic `new ctor(rab)` / `ctor.BYTES_PER_ELEMENT` work. Standalone/WASI lane
+  // only (the view/construct substrate is host-free); gated on the name not being
+  // shadowed by a local/captured binding or a user class.
+  if (
+    noJsHost(ctx) &&
+    taCtorKindOf(name) >= 0 &&
+    fctx.localMap.get(name) === undefined &&
+    !(fctx.boxedCaptures?.has(name) ?? false) &&
+    !ctx.classSet.has(name)
+  ) {
+    const taCtorVt = emitTaCtorValue(ctx, fctx, name);
+    if (taCtorVt) return taCtorVt;
   }
 
   // Graceful fallback for known but unimplemented globals (Symbol, Object,

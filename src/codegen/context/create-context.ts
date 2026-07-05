@@ -197,6 +197,9 @@ export function createCodegenContext(
     subviewTypeMap: new Map(), // (#2357) per-elem-kind $__subview type idx
     taViewTypeMap: new Map(), // (#3054 B1) per-TA-name $__ta_view shared-backing view idx
     resizableAbTypeIdx: -1, // (#3054 C) $__resizable_ab subtype of $__vec_i32_byte, lazy
+    taCtorTypeIdx: -1, // (#3054 D) $__ta_ctor {kind:i32} first-class TA constructor value, lazy
+    taCtorSingletonGlobals: new Map(), // (#3054 D) per-kind boxed $__ta_ctor singleton module-globals
+    taDynViewTypeIdx: -1, // (#3054 D) $__ta_dyn_view {length,buf,byteOffset,kind} runtime-kinded view, lazy
     errorStructTypeIdx: -1,
     widenedTypeProperties: new Map(),
     widenedVarStructMap: new Map(),
