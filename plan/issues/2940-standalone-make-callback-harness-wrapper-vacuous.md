@@ -267,3 +267,19 @@ single-realm stub cannot model cross-realm constructor access standalone;
 (b) `Reflect.construct` unsupported standalone; (c) latent `__closure_3`
 invalid-wasm on `as-generator-iterable-returns.js` (pre-existing CE). None are
 PR-caused regressions.
+
+## Harvest 2026-07-05 — residual flag (default lane)
+
+Error-harvest against baselines run `20260705-102746` (gitHash `5a965dfa`, =
+current upstream/main − 3 commits) finds **1,496 DEFAULT-lane** official
+failures still self-citing `#2940` with `"vacuous: harness-wrapper callback
+never executed — no assertion ran"` (top default-lane citation by a wide
+margin). This issue was scored/closed on the **standalone** lane; the
+default-lane vacuous set is a distinct, still-open manifestation. Sample
+cluster: `built-ins/TypedArray/prototype/fill/fill-values-relative-end.js`,
+`built-ins/Array/prototype/fill/resizable-buffer.js`. Root cause of the
+default-lane subset is almost certainly **#1524** (harness `ctors` /
+resizable-buffer fixture globals `is not defined` → the assertion callback
+throws before running → vacuous fail), not a #2940 codegen regression. Not
+reopening #2940; flagging for triage — the fix belongs in #1524 (harness
+fixture), which remains `backlog`.
