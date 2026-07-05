@@ -9227,6 +9227,107 @@ assert._isSameValue = isSameValue;
         // rather than fast-pathing the array — otherwise a throwing custom
         // @@iterator on Array.prototype is silently swallowed (#1454).
         const _origArrayIter: any = (Array.prototype as any)[Symbol.iterator];
+        // (#3023) Robust iterator-protocol walk for an ITERATOR OBJECT whose
+        // methods may be wasm closures. A compiled object-literal iterator
+        // (`{ next() {…}, return() {…} }`, e.g. from `it[Symbol.iterator] =
+        // function () { return { next, return } }`) lowers to a closed nominal
+        // WasmGC struct: its `.next` / `.return` are NOT native JS properties,
+        // so a plain `iteratorObj.next()` throws "next is not a function".
+        // Resolve each member through native → sidecar (`_safeGet`) → wasm
+        // struct getter (`__sget_*`) → wasm-closure call (`__call_fn_0`),
+        // collect at most `limit` values, and perform §7.4.6 IteratorClose
+        // (`.return()`) ONLY on an abrupt bounded/defensive-cap stop (never on
+        // natural `done:true`, a null result, or a missing `.next`). Shared by
+        // both the wasm-closure-`@@iterator` path and `_drainIterable` (a
+        // native `@@iterator` that RETURNS a wasm-struct iterator).
+        const _walkWasmIterator = (iteratorObj: any, limit: number): any[] => {
+          const exps = callbackState?.getExports();
+          const callFn0 = exps?.["__call_fn_0"];
+          const resolveProp = (target: any, key: string): any => {
+            const direct = target?.[key];
+            if (direct !== undefined) return direct;
+            const safe = _safeGet(target, key);
+            if (safe !== undefined) return safe;
+            const sget = exps?.[`__sget_${key}`];
+            if (typeof sget === "function") return sget(target);
+            return undefined;
+          };
+          const out: any[] = [];
+          // Defensive cap: a non-spec-compliant iterator that never sets
+          // `done:true` would otherwise hang. 64K is well above any reasonable
+          // destructuring source (#1219).
+          const MAX_ITER = 1 << 16;
+          let iterCount = 0;
+          let cappedOut = false;
+          while (true) {
+            // A no-rest binding pattern consumes EXACTLY `limit` IteratorStep
+            // calls; §8.5.3 then requires IteratorClose because the record's
+            // [[Done]] is still false. Rest/spread pass limit === Infinity and
+            // drain to natural done WITHOUT closing (dstr/*-iter-no-close).
+            if (out.length >= limit) {
+              cappedOut = true;
+              break;
+            }
+            if (iterCount++ >= MAX_ITER) {
+              cappedOut = true;
+              break;
+            }
+            const nextFn = resolveProp(iteratorObj, "next");
+            let result: any;
+            if (typeof nextFn === "function") {
+              result = nextFn.call(iteratorObj);
+            } else if (
+              nextFn != null &&
+              typeof nextFn === "object" &&
+              _isWasmStruct(nextFn) &&
+              typeof callFn0 === "function"
+            ) {
+              // Wasm closure — invoke via __call_fn_0. Spec-mandated throws
+              // from the user's `next()` propagate (dstr/*-iter-step-err).
+              result = callFn0(nextFn);
+            } else {
+              // No callable .next — malformed iterator. Spec says NOT to call
+              // return() here (dstr/*-ary-init-iter-no-close).
+              break;
+            }
+            if (result == null) break;
+            const done = resolveProp(result, "done");
+            if (done) break;
+            // §7.4.5 IteratorValue — a `.value` getter may throw; propagate.
+            const value = resolveProp(result, "value");
+            out.push(value);
+          }
+          if (cappedOut) {
+            const returnFn = resolveProp(iteratorObj, "return");
+            // §7.4.6 IteratorClose steps 6+9: call `return`, and if it returns
+            // a value whose Type is not Object, throw a TypeError. (The bounded
+            // stop is a NormalCompletion, so step 7's "outer throw wins" does not
+            // apply here — a non-object return result IS observable.) Absent
+            // return method → step 4 NormalCompletion, no call, no throw.
+            let innerResult: any;
+            let called = false;
+            if (typeof returnFn === "function") {
+              innerResult = returnFn.call(iteratorObj);
+              called = true;
+            } else if (
+              returnFn != null &&
+              typeof returnFn === "object" &&
+              _isWasmStruct(returnFn) &&
+              typeof callFn0 === "function"
+            ) {
+              innerResult = callFn0(returnFn);
+              called = true;
+            }
+            // Else: no return method — spec §7.4.6 returns NormalCompletion.
+            if (
+              called &&
+              (innerResult === null || (typeof innerResult !== "object" && typeof innerResult !== "function"))
+            ) {
+              throw new TypeError("iterator close: return() did not return an Object");
+            }
+          }
+          return out;
+        };
         // Materialize an iterable/array-like to a real JS array, consuming AT
         // MOST `limit` iterator steps. `limit === Infinity` (the unbounded
         // case, used by rest patterns and spread) is byte-for-byte the legacy
@@ -9314,119 +9415,12 @@ assert._isSameValue = isSameValue;
                   // miss .next() throws (test262 dstr/*-iter-step-err). (#1016)
                   const iteratorObj = callFn0(iterFn);
                   if (iteratorObj != null && typeof iteratorObj === "object") {
-                    const out: any[] = [];
-                    // Cap iterations defensively — non-spec-compliant
-                    // iterators that never set .done would otherwise hang.
-                    // 64K is well above any reasonable destructuring source;
-                    // higher caps cost ~20µs per closure roundtrip and
-                    // produced 22-28 s test262 hangs at the prior 1M ceiling
-                    // (#1219). Real generators rarely yield more than a few
-                    // thousand values.
-                    const MAX_ITER = 1 << 16;
-                    let iterCount = 0;
-                    // Track whether we exited via the defensive MAX_ITER cap.
-                    // Per ECMA-262 §7.4.6 IteratorClose, `iterator.return()`
-                    // must only be called on ABRUPT termination — i.e. when
-                    // the consumer abandons an iterator that was still
-                    // yielding values. The defensive cap is the proxy for
-                    // that case here (a non-spec-compliant iterator that
-                    // never sets done:true; #1219 fixed 26 ary-init-iter-close
-                    // hangs by capping at 64K then closing). Other early
-                    // exits — natural `done:true`, `result == null`, missing
-                    // `.next` — must NOT trigger return() (test262
-                    // dstr/*-ary-init-iter-no-close.js fails otherwise).
-                    let cappedOut = false;
-                    // Resolve a property from the iterator/result object using
-                    // the same lookup order as _safeGet so JS-defined accessors
-                    // (set via Object.defineProperty) fire on read.
-                    const resolveProp = (target: any, key: string): any => {
-                      // Native access first — works for plain JS objects (e.g.
-                      // an iterator-result literal `{value, done}` from outside
-                      // the wasm world). For opaque wasm structs this returns
-                      // undefined and we fall through.
-                      const direct = target?.[key];
-                      if (direct !== undefined) return direct;
-                      // Sidecar accessor: Object.defineProperty(obj, key, {get})
-                      // installs `__get_<key>` in `_wasmStructProps[obj]`. Firing
-                      // it is required for spec compliance (test262
-                      // dstr/*-iter-val-err — the result.value getter throws,
-                      // and that throw must propagate). Use `_safeGet` so any
-                      // throw flows out unchanged.
-                      const safe = _safeGet(target, key);
-                      if (safe !== undefined) return safe;
-                      // Final fallback: wasm-exported struct getter.
-                      const sget = exps?.[`__sget_${key}`];
-                      if (typeof sget === "function") return sget(target);
-                      return undefined;
-                    };
-                    while (true) {
-                      // Bounded materialization (#1592): stop once we've
-                      // collected `limit` values. A no-rest array binding
-                      // pattern consumes EXACTLY `limit` IteratorStep calls;
-                      // §8.5.3 then requires IteratorClose because the iterator
-                      // record's [[Done]] is still false (we stopped while it
-                      // was still yielding). So this counts as an abrupt-from-
-                      // the-iterator's-view termination → set cappedOut to
-                      // trigger iterator.return() below. (This is the SAME
-                      // close path #1219 exercises for the single-element `[x]`
-                      // pattern over an infinite iterator.) Rest patterns pass
-                      // limit === Infinity and never take this branch, so they
-                      // drain to natural done and do NOT close — preserving the
-                      // dstr/*-ary-init-iter-no-close.js tuning. Checked before
-                      // MAX_ITER so a finite bound always wins.
-                      if (out.length >= limit) {
-                        cappedOut = true;
-                        break;
-                      }
-                      if (iterCount++ >= MAX_ITER) {
-                        cappedOut = true;
-                        break;
-                      }
-                      const nextFn = resolveProp(iteratorObj, "next");
-                      let result: any;
-                      if (typeof nextFn === "function") {
-                        result = nextFn.call(iteratorObj);
-                      } else if (nextFn != null && typeof nextFn === "object" && _isWasmStruct(nextFn)) {
-                        // Wasm closure — invoke via __call_fn_0. Throws here
-                        // (e.g. spec-mandated TypeError from the user's
-                        // `next: function() { throw … }`) propagate.
-                        result = callFn0(nextFn);
-                      } else {
-                        // No callable .next — malformed iterator. Spec says
-                        // not to call return() in this case (NormalCompletion
-                        // expected from the absence of .next).
-                        break;
-                      }
-                      // Iterator-result was null/undefined — treat as iterator
-                      // exhausted with NormalCompletion. Per spec we do not
-                      // invoke return() on a malformed result either; the
-                      // pre-#1219 behavior was a silent break.
-                      if (result == null) break;
-                      // Spec §7.4.4 IteratorComplete coerces .done to boolean.
-                      const done = resolveProp(result, "done");
-                      if (done) break;
-                      // Spec §7.4.5 IteratorValue reads .value (may throw via
-                      // a getter — propagated by resolveProp/_safeGet).
-                      const value = resolveProp(result, "value");
-                      out.push(value);
-                    }
-                    // Spec §7.4.6 IteratorClose: only call iterator.return()
-                    // when we abruptly terminated by hitting the defensive
-                    // cap (the iterator was still yielding but the consumer
-                    // gave up). For natural `done:true` or malformed results,
-                    // calling return() would violate spec — see
-                    // test262 dstr/*-ary-init-iter-no-close.js.
-                    if (cappedOut) {
-                      const returnFn = resolveProp(iteratorObj, "return");
-                      if (typeof returnFn === "function") {
-                        returnFn.call(iteratorObj);
-                      } else if (returnFn != null && typeof returnFn === "object" && _isWasmStruct(returnFn)) {
-                        callFn0(returnFn);
-                      }
-                      // Else: no return method — spec says "return normal
-                      // completion" (no-op).
-                    }
-                    return out;
+                    // (#3023) Robust protocol walk (bounded materialization +
+                    // §7.4.6 IteratorClose on the abrupt bounded stop). The
+                    // iterator's `.next` is typically ALSO a wasm closure, so a
+                    // plain `Array.from(iteratorObj)` would re-enter this fallback
+                    // and miss .next() throws (test262 dstr/*-iter-step-err).
+                    return _walkWasmIterator(iteratorObj, limit);
                   }
                 }
               }
@@ -9445,10 +9439,27 @@ assert._isSameValue = isSameValue;
         // / the .value getter propagate unchanged (#1150/#1454). With
         // limit === Infinity this matches Array.from's full drain.
         function _drainIterable(obj: any, limit: number): any[] {
-          if (!(limit < Infinity)) return Array.from(obj);
           const itFn = (obj as any)?.[Symbol.iterator];
+          // No callable @@iterator — let Array.from handle array-likes / the
+          // legacy unbounded shapes exactly as before.
           if (typeof itFn !== "function") return Array.from(obj);
           const it = itFn.call(obj);
+          // (#3023) A native `@@iterator` may still RETURN a wasm-struct
+          // iterator (a compiled object-literal `{ next() {…} }` lowers to a
+          // closed nominal WasmGC struct whose `.next` is not a native JS
+          // property). A plain `it.next()` — or `Array.from(obj)` for the
+          // unbounded rest/spread case — would throw "next is not a function";
+          // route such iterators through the robust walk, which resolves
+          // `.next`/`.value`/`.done`/`.return` via sidecar / `__sget_*` /
+          // `__call_fn_0` and performs §7.4.6 IteratorClose on the bounded stop
+          // (limit === Infinity drains to natural done WITHOUT closing).
+          if (it != null && typeof it === "object" && typeof (it as any).next !== "function") {
+            return _walkWasmIterator(it, limit);
+          }
+          // Plain JS iterator: step the iterator we already obtained. For the
+          // unbounded case this matches `Array.from`'s full drain; a finite
+          // `limit` stops early (Array.from can't be bounded). Throws from
+          // `.next()` / the `.value` getter propagate unchanged (#1150/#1454).
           const out: any[] = [];
           while (out.length < limit) {
             const r = it.next();
