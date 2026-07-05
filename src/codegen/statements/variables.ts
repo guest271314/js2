@@ -359,7 +359,8 @@ function inferTaViewType(ctx: CodegenContext, initializer: ts.Expression | undef
   // B1 scope: single buffer arg, offset-0 window. Multi-arg windowed ctors
   // (`new TA(buf, byteOffset, length)`) are B2 — leave them on the current path.
   if (!args || args.length !== 1 || ts.isNumericLiteral(args[0]!)) return null;
-  const argSymName = ctx.checker.getTypeAtLocation(args[0]!).getSymbol?.()?.name;
+  // (#1930) Query the type-oracle boundary, not the raw checker.
+  const argSymName = ctx.oracle.builtinReceiverOf(args[0]!);
   if (argSymName !== "ArrayBuffer" && argSymName !== "SharedArrayBuffer" && argSymName !== "DataView") return null;
   return { kind: "ref_null", typeIdx: getOrRegisterTaViewType(ctx, viewName) };
 }
