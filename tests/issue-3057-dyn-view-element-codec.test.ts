@@ -191,6 +191,56 @@ describe("#3057 dynamic $__ta_dyn_view element codec", () => {
     ).toBe(83);
   });
 
+  it("windowed fixed-length view goes fully OOB when the buffer shrinks below the window, then back on regrow", async () => {
+    // §10.4.5.11 IsTypedArrayOutOfBounds: a NON-length-tracking view over a
+    // resizable buffer is all-or-nothing — shrinking the buffer below
+    // `byteOffset + length*elemSize` makes EVERY index read `undefined`; regrowing
+    // restores the (byte-preserved) elements. The stored-length reader (used by
+    // `.byteLength`) got this wrong (stale in-bounds value after a shrink) — this
+    // was the #3057 de-vacuification regression on out-of-bounds-get-and-set.js.
+    expect(
+      await run(`
+        function mk(bl: number, mx: number): ArrayBuffer { return new ArrayBuffer(bl, { maxByteLength: mx }); }
+        export function f(): number {
+          const ctors: any[] = [Int32Array];
+          let code = 0;
+          for (const c of ctors) {
+            const rab = mk(16, 160);        // 4 Int32
+            const a = new c(rab, 0, 4);
+            a[0] = 7;
+            const before = a[0];            // in-bounds → 7
+            rab.resize(8);                  // window needs 16 bytes → view OOB
+            const oob = a[0] === undefined ? 1 : 0; // → 1
+            rab.resize(16);                 // regrow → in-bounds again
+            const after = a[0];             // 7 (bytes preserved)
+            code = before * 100 + oob * 10 + after;
+          }
+          return code; // 717
+        }`),
+    ).toBe(717);
+  });
+
+  it("length-tracking view shrinks its in-bounds range on resize (a[large] → undefined)", async () => {
+    expect(
+      await run(`
+        function mk(bl: number, mx: number): ArrayBuffer { return new ArrayBuffer(bl, { maxByteLength: mx }); }
+        export function f(): number {
+          const ctors: any[] = [Int32Array];
+          let code = 0;
+          for (const c of ctors) {
+            const rab = mk(16, 160);        // 4 Int32, auto-length
+            const a = new c(rab);
+            a[3] = 9;
+            const before = a[3];            // 9
+            rab.resize(8);                  // now 2 Int32 → a[3] OOB
+            const oob = a[3] === undefined ? 1 : 0; // → 1
+            code = before * 10 + oob;
+          }
+          return code; // 91
+        }`),
+    ).toBe(91);
+  });
+
   it("Uint16 little-endian write is observed byte-exact by a Uint8 sibling view", async () => {
     expect(
       await run(`

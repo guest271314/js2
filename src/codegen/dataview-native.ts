@@ -1616,7 +1616,7 @@ export function emitTaDynViewElementGet(
   fctx.body.push({ op: "local.set", index: kindLocal } as Instr);
   pushElemSizeForKind(fctx, kindLocal);
   fctx.body.push({ op: "local.set", index: esLocal } as Instr);
-  pushTaDynViewEffectiveLen(ctx, fctx, dvLocal, kindLocal, esLocal);
+  pushTaDynViewInBoundsLen(ctx, fctx, dvLocal, esLocal);
   fctx.body.push({ op: "local.set", index: lenLocal } as Instr);
   // idx (i32) = trunc(idxF64) — a negative / huge index fails the unsigned bounds
   // check below → OOB → undefined (spec IsValidIntegerIndex).
@@ -1757,7 +1757,7 @@ export function emitTaDynViewElementSet(
   fctx.body.push({ op: "local.set", index: kindLocal } as Instr);
   pushElemSizeForKind(fctx, kindLocal);
   fctx.body.push({ op: "local.set", index: esLocal } as Instr);
-  pushTaDynViewEffectiveLen(ctx, fctx, dvLocal, kindLocal, esLocal);
+  pushTaDynViewInBoundsLen(ctx, fctx, dvLocal, esLocal);
   fctx.body.push({ op: "local.set", index: lenLocal } as Instr);
   fctx.body.push({ op: "local.get", index: idxF64 } as Instr);
   fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
@@ -1799,6 +1799,73 @@ export function emitTaDynViewElementSet(
   // Assignment is an expression — the value is its result.
   fctx.body.push({ op: "local.get", index: valExt } as Instr);
   return { kind: "externref" };
+}
+
+/**
+ * (#3057) Push the SPEC-CORRECT in-bounds element length of a `$__ta_dyn_view`
+ * (`dvLocal`), given its runtime `elemSize` (`esLocal`), as an i32 — for the
+ * element-access bounds check (IsValidIntegerIndex, §10.4.5.13). Unlike
+ * `pushTaDynViewEffectiveLen` (which powers `.byteLength` and returns the STORED
+ * length verbatim for a fixed view), this also enforces the resizable-buffer
+ * out-of-bounds rule: when the backing buffer has SHRUNK below the view's window
+ * (`byteOffset + storedLen*elemSize > buf.length`), a NON-length-tracking view is
+ * fully out-of-bounds and every index reads `undefined` / writes no-op, so the
+ * effective length is `0` (all-or-nothing per §10.4.5.11 IsTypedArrayOutOfBounds).
+ * A length-tracking view (stored sentinel `-1`) tracks the live buffer:
+ * `max(0, buf.length - byteOffset) / elemSize`. Reading this at each access is
+ * what makes `array[i]` reflect a later `rab.resize()` (shrink → OOB, regrow →
+ * back in-bounds), which the stored-length reader silently got wrong (returned a
+ * stale in-bounds value after a shrink — the #3057 regression on
+ * out-of-bounds-get-and-set.js).
+ */
+function pushTaDynViewInBoundsLen(ctx: CodegenContext, fctx: FunctionContext, dvLocal: number, esLocal: number): void {
+  const dynIdx = ctx.taDynViewTypeIdx;
+  const { vecTypeIdx } = i32ByteVec(ctx);
+  const storedLocal = allocLocal(fctx, `__tdvib_s_${fctx.locals.length}`, { kind: "i32" });
+  const availLocal = allocLocal(fctx, `__tdvib_av_${fctx.locals.length}`, { kind: "i32" });
+  // availElems = max(0, buf.length - byteOffset) / elemSize.
+  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 1 } as Instr); // buf
+  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr); // buf.length (bytes)
+  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 2 } as Instr); // byteOffset
+  fctx.body.push({ op: "i32.sub" } as Instr); // availBytes (may be < 0 after a deep shrink)
+  // clamp availBytes to >= 0. `select` yields `cond ? val1 : val2` (val1 pushed
+  // FIRST / deeper), so with val1=0, val2=availBytes, cond=(availBytes<0):
+  // (availBytes<0) ? 0 : availBytes.
+  const availBytesLocal = allocLocal(fctx, `__tdvib_ab_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "local.set", index: availBytesLocal } as Instr);
+  fctx.body.push({ op: "i32.const", value: 0 } as Instr); // val1 (deep) = 0
+  fctx.body.push({ op: "local.get", index: availBytesLocal } as Instr); // val2 = availBytes
+  fctx.body.push({ op: "local.get", index: availBytesLocal } as Instr);
+  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+  fctx.body.push({ op: "i32.lt_s" } as Instr); // cond = availBytes < 0
+  fctx.body.push({ op: "select" } as Instr); // (availBytes < 0) ? 0 : availBytes
+  fctx.body.push({ op: "local.get", index: esLocal } as Instr);
+  fctx.body.push({ op: "i32.div_u" } as Instr);
+  fctx.body.push({ op: "local.set", index: availLocal } as Instr);
+  // storedLen = field0.
+  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 0 } as Instr);
+  fctx.body.push({ op: "local.tee", index: storedLocal } as Instr);
+  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+  fctx.body.push({ op: "i32.lt_s" } as Instr); // storedLen < 0 → length-tracking
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "val", type: { kind: "i32" } },
+    // length-tracking: availElems.
+    then: [{ op: "local.get", index: availLocal } as Instr],
+    // fixed length: storedLen if the window still fits, else 0 (view is OOB). val1=0
+    // (deep), val2=storedLen, cond=(storedLen>avail) → (storedLen>avail) ? 0 : storedLen.
+    else: [
+      { op: "i32.const", value: 0 } as Instr, // val1 (deep) = 0
+      { op: "local.get", index: storedLocal } as Instr, // val2 = storedLen
+      { op: "local.get", index: storedLocal } as Instr,
+      { op: "local.get", index: availLocal } as Instr,
+      { op: "i32.gt_u" } as Instr, // cond = storedLen > availElems (window overflows buffer)
+      { op: "select" } as Instr, // (storedLen > avail) ? 0 : storedLen
+    ],
+  } as Instr);
 }
 
 // ---------------------------------------------------------------------------
