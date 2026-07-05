@@ -10,8 +10,8 @@
   },
   {
     "edition": "ES5",
-    "pass": 10343,
-    "fail": 2630,
+    "pass": 10346,
+    "fail": 2627,
     "ce": 102,
     "skip": 0,
     "total": 13075,
@@ -2141,8 +2141,8 @@
   },
   {
     "edition": "ES2022",
-    "pass": 3264,
-    "fail": 938,
+    "pass": 3266,
+    "fail": 936,
     "ce": 32,
     "skip": 0,
     "total": 4234,
@@ -2150,8 +2150,8 @@
     "features": [
       {
         "name": "class",
-        "pass": 2333,
-        "fail": 442,
+        "pass": 2335,
+        "fail": 440,
         "ce": 15,
         "skip": 0,
         "total": 2790,
@@ -2159,17 +2159,17 @@
       },
       {
         "name": "class-fields-public",
-        "pass": 1652,
-        "fail": 402,
+        "pass": 1654,
+        "fail": 400,
         "ce": 0,
         "skip": 0,
         "total": 2054,
-        "pct": 80
+        "pct": 81
       },
       {
         "name": "class-fields-private",
-        "pass": 1042,
-        "fail": 67,
+        "pass": 1044,
+        "fail": 65,
         "ce": 17,
         "skip": 0,
         "total": 1126,
@@ -2177,8 +2177,8 @@
       },
       {
         "name": "class-methods-private",
-        "pass": 859,
-        "fail": 106,
+        "pass": 861,
+        "fail": 104,
         "ce": 1,
         "skip": 0,
         "total": 966,
