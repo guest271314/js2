@@ -26,7 +26,12 @@ import {
   typedArrayVecStorage,
 } from "../index.js";
 import { coercionPlan } from "../coercion-plan.js"; // (#2934 1c) single coercion table for the copy-ctor element bridge
-import { emitTaViewConstruct, emitTaViewConstructWindowed, getOrRegisterDvWindowType } from "../dataview-native.js"; // (#2159/#38) DataView windowing wrapper; (#3054 B1/B2) shared-backing TA views + windowing
+import {
+  emitDynamicTaViewConstruct,
+  emitTaViewConstruct,
+  emitTaViewConstructWindowed,
+  getOrRegisterDvWindowType,
+} from "../dataview-native.js"; // (#2159/#38) DataView windowing wrapper; (#3054 B1/B2) shared-backing TA views + windowing; (#3054 D) dynamic ctor construct
 import { emitBoundsCheckedArrayGet } from "../array-methods.js";
 import { ensureMapHelpers, coerceMapKeyToAnyref } from "../map-runtime.js";
 import { emitSetNewTargetBeforeCall, ensureNewTargetGlobal } from "../new-target.js"; // (#2023)
@@ -4409,6 +4414,30 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
             : (dynCallee as ts.NonNullExpression).expression;
       }
       if (ts.isIdentifier(dynCallee) && !ctx.classSet.has(dynCallee.text)) {
+        // (#3054 D) Dynamic `new <ctorVal>(buffer[, off[, len]])` where `ctorVal`
+        // is a first-class `$__ta_ctor` value (a TA constructor held in a var /
+        // array element — test262 `CreateRabForTest`, `for (ctor of ctors) new
+        // ctor(rab, …)`). The callee is `any`, so `className` is undefined and the
+        // static TA paths above are bypassed. Runtime kind-switch builds the right
+        // shared-backing `$__ta_view` in the standalone lane (no host import).
+        // Gated to a buffer-typed first arg so `new ctor(5)` (count ctor) is NOT
+        // captured here (a boxed number would `ref.cast`-trap).
+        if (noJsHost(ctx) && args.length >= 1 && !ts.isNumericLiteral(args[0]!)) {
+          const arg0Sym = ctx.checker.getTypeAtLocation(args[0]!).getSymbol?.()?.name;
+          if (arg0Sym === "ArrayBuffer" || arg0Sym === "SharedArrayBuffer" || arg0Sym === "DataView") {
+            // Compile the ctor value once into an anyref local to type-test.
+            const ctorTy = compileExpression(ctx, fctx, dynCallee, { kind: "externref" });
+            if (ctorTy && ctorTy.kind !== "externref") coerceType(ctx, fctx, ctorTy, { kind: "externref" });
+            else if (ctorTy === null) fctx.body.push({ op: "ref.null.extern" });
+            fctx.body.push({ op: "any.convert_extern" } as Instr);
+            const ctorAnyLocal = allocLocal(fctx, `__dynctor_${fctx.locals.length}`, { kind: "anyref" } as ValType);
+            fctx.body.push({ op: "local.set", index: ctorAnyLocal });
+            const dtav = emitDynamicTaViewConstruct(ctx, fctx, ctorAnyLocal, args[0]!, args[1], args[2], (e, h) =>
+              compileExpression(ctx, fctx, e, h),
+            );
+            if (dtav) return dtav;
+          }
+        }
         if (emitDynamicNewFallback(ctx, fctx, expr, dynCallee, ctorName)) {
           return { kind: "externref" };
         }

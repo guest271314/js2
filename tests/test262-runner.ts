@@ -1534,6 +1534,7 @@ function buildPreamble(
   needsProxyTraps: boolean,
   needsTypedArrayCtorArrays: boolean,
   needsByteConversionValues: boolean,
+  needsResizableAbUtils: boolean,
 ): string {
   let p = `let __fail: number = 0;
 let __assert_count: number = 1;
@@ -2078,6 +2079,55 @@ const byteConversionValues: any = {
 };`;
   }
 
+  if (needsResizableAbUtils) {
+    // (#3054 E) Adapted resizableArrayBufferUtils.js. The upstream file builds
+    // `ctors` via `new Function('return class My… extends … {}')()` (eval), which
+    // this compiler can't run; we inline an eval-free version: the 9 builtin
+    // TypedArray constructors (BigInt64/BigUint64/Float16 and the `My*` eval
+    // subclasses dropped — unsupported here). Helper returns are typed `ArrayBuffer`
+    // so the dynamic `new <ctorVar>(rab)` construct (#3054 D) sees a statically-known
+    // buffer arg (an `any`-typed buffer makes the ctor decline → the view is null).
+    // `MayNeedBigInt` is a no-op passthrough (no BigInt typed arrays here).
+    p += `
+
+const ctors: any[] = [
+  Uint8Array, Int8Array, Uint16Array, Int16Array, Uint32Array, Int32Array,
+  Float32Array, Float64Array, Uint8ClampedArray,
+];
+const floatCtors: any[] = [Float32Array, Float64Array];
+function CreateResizableArrayBuffer(byteLength: number, maxByteLength: number): ArrayBuffer {
+  return new ArrayBuffer(byteLength, { maxByteLength: maxByteLength });
+}
+function Convert(item: any): any { return item; }
+function ToNumbers(array: any): any {
+  let result: any[] = [];
+  for (let i = 0; i < array.length; i++) { result.push(Convert(array[i])); }
+  return result;
+}
+function MayNeedBigInt(ta: any, n: number): any { return n; }
+function CreateRabForTest(ctor: any): ArrayBuffer {
+  const rab = CreateResizableArrayBuffer(4 * ctor.BYTES_PER_ELEMENT, 8 * ctor.BYTES_PER_ELEMENT);
+  const taWrite = new ctor(rab);
+  for (let i = 0; i < 4; ++i) { taWrite[i] = MayNeedBigInt(taWrite, 2 * i); }
+  return rab;
+}
+function CollectValuesAndResize(n: any, values: any, rab: any, resizeAfter: number, resizeTo: number): boolean {
+  values.push(Number(n));
+  if (values.length == resizeAfter) { rab.resize(resizeTo); }
+  return true;
+}
+function TestIterationAndResize(iterable: any, expected: any, rab: any, resizeAfter: number, newByteLength: number): void {
+  let values: any[] = [];
+  let resized = false;
+  for (let value of iterable) {
+    values.push(Number(value));
+    if (!resized && values.length == resizeAfter) { rab.resize(newByteLength); resized = true; }
+  }
+  assert.compareArray(values, expected, "TestIterationAndResize: list of iterated values");
+  assert(resized, "TestIterationAndResize: resize condition should have been hit");
+}`;
+  }
+
   if (needsProxyTraps) {
     // #2183: test262 harness/proxyTrapsHelper.js. Returns a Proxy handler where
     // every trap defaults to a stub that throws a Test262Error when invoked
@@ -2428,6 +2478,20 @@ export function wrapTest(source: string, meta?: Test262Meta): WrapResult {
   const needsByteConversionValues =
     includes.includes("byteConversionValues.js") && /\bbyteConversionValues\b/.test(body);
 
+  // (#3054 E) resizableArrayBufferUtils.js fixtures (`ctors`/`floatCtors`/
+  // `CreateResizableArrayBuffer`/`CreateRabForTest`/`CollectValuesAndResize`/
+  // `TestIterationAndResize`/`MayNeedBigInt`/`ToNumbers`). The upstream harness
+  // builds `ctors` via `new Function('return class …')()` (eval — unsupported), so
+  // we inject an ADAPTED, eval-free version (the 9 builtin TA ctors; BigInt/Float16
+  // and the eval subclasses dropped). Helper returns are typed `ArrayBuffer` so the
+  // dynamic `new <ctorVar>(rab)` construct (#3054 D) sees a statically-known buffer
+  // arg. Include-gated + name-gated so it's byte-inert for every other test.
+  const needsResizableAbUtils =
+    includes.includes("resizableArrayBufferUtils.js") &&
+    /\b(ctors|floatCtors|CreateResizableArrayBuffer|CreateRabForTest|CollectValuesAndResize|TestIterationAndResize|MayNeedBigInt|ToNumbers|Convert)\b/.test(
+      body,
+    );
+
   // #1523: test262 host-object `$262`. Tests use it as a precondition for
   // realm creation, ArrayBuffer detach, agent messaging, and global access.
   // We expose a minimal stub: createRealm returns a fresh global with eval,
@@ -2464,6 +2528,7 @@ export function wrapTest(source: string, meta?: Test262Meta): WrapResult {
     needsProxyTraps,
     needsTypedArrayCtorArrays,
     needsByteConversionValues,
+    needsResizableAbUtils,
   ]
     .map((b) => (b ? "1" : "0"))
     .join("");
@@ -2498,6 +2563,7 @@ export function wrapTest(source: string, meta?: Test262Meta): WrapResult {
       needsProxyTraps,
       needsTypedArrayCtorArrays,
       needsByteConversionValues,
+      needsResizableAbUtils,
     );
     preambleCache.set(cacheKey, preamble);
   }

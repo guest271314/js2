@@ -44,7 +44,16 @@ import { getArrTypeIdxFromVec, getOrRegisterVecType } from "./index.js";
 import { stringConstantExternrefInstrs } from "./native-strings.js";
 import { emitWasiErrorConstructor } from "./registry/error-types.js";
 import { addStringConstantGlobal, ensureExnTag } from "./registry/imports.js";
-import { getOrRegisterResizableAbType, getOrRegisterTaViewType, getTaViewName } from "./registry/types.js";
+import {
+  getOrRegisterResizableAbType,
+  getOrRegisterTaCtorType,
+  getOrRegisterTaDynViewType,
+  getOrRegisterTaViewType,
+  getTaViewName,
+  TA_CTOR_BYTES,
+  TA_CTOR_KINDS,
+  taCtorKindOf,
+} from "./registry/types.js";
 import { ensureLateImport, flushLateImportShifts } from "./shared.js";
 import { coerceType } from "./type-coercion.js";
 
@@ -1579,6 +1588,377 @@ export function emitTaViewConstructWindowed(
   fctx.body.push({ op: "local.get", index: offsetLocal } as Instr);
   fctx.body.push({ op: "struct.new", typeIdx: taViewTypeIdx } as Instr);
   return { kind: "ref_null", typeIdx: taViewTypeIdx };
+}
+
+/**
+ * (#3054 D) Emit a first-class TypedArray CONSTRUCTOR value for a bare TA name in
+ * value position (`const c = Uint8Array`, `[Uint8Array, …]`, a `new ctor(rab)`
+ * callee). Produces a `$__ta_ctor {kind}` struct boxed to externref — a distinct,
+ * non-null value whose runtime `kind` (index into `TA_CTOR_KINDS`) drives the
+ * dynamic `new ctor(…)` construct + `ctor.BYTES_PER_ELEMENT`. Before this the name
+ * degraded to `ref.null.extern` (all TA ctors indistinguishable). Returns the
+ * externref ValType, or null when `name` is not one of the 9 supported TA kinds.
+ * Standalone/WASI lane only (the caller gates on `noJsHost`).
+ */
+export function emitTaCtorValue(ctx: CodegenContext, fctx: FunctionContext, name: string): ValType | null {
+  const kind = taCtorKindOf(name);
+  if (kind < 0) return null;
+  const taCtorTypeIdx = getOrRegisterTaCtorType(ctx);
+  fctx.body.push({ op: "i32.const", value: kind } as Instr);
+  fctx.body.push({ op: "struct.new", typeIdx: taCtorTypeIdx } as Instr);
+  // Box the struct ref to externref (ref → externref, per coerceType).
+  fctx.body.push({ op: "extern.convert_any" } as Instr);
+  return { kind: "externref" };
+}
+
+/**
+ * (#3054 D) Read `ctor.BYTES_PER_ELEMENT` where `ctor` is a first-class
+ * `$__ta_ctor` value (dynamic — the ctor kind is only known at runtime). Compiles
+ * the receiver, `ref.test $__ta_ctor`, and on a match maps the runtime `kind` to
+ * its byte width via a `select` chain over `TA_CTOR_BYTES`; a non-ctor receiver
+ * yields `NaN`/`0` (declines gracefully). Returns the numeric ValType, or null if
+ * no `$__ta_ctor` type is registered in the module (byte-inert). `compileRecv`
+ * puts the receiver value on the stack as externref.
+ */
+export function emitTaCtorBytesPerElement(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  compileRecv: () => ValType | null,
+): ValType | null {
+  // Register the ctor type on demand: a dynamic `.BYTES_PER_ELEMENT` read may
+  // compile BEFORE the value-position TA name that would otherwise register it
+  // (e.g. `CreateRabForTest`'s body compiles before the top-level `ctors` array).
+  const taCtorTypeIdx = getOrRegisterTaCtorType(ctx);
+  const rt = compileRecv();
+  if (rt === null) {
+    fctx.body.push({ op: "ref.null.extern" } as Instr);
+  } else if (rt.kind !== "externref") {
+    coerceType(ctx, fctx, rt, { kind: "externref" });
+  }
+  const anyLocal = allocLocal(fctx, `__tac_recv_${fctx.locals.length}`, { kind: "anyref" } as ValType);
+  fctx.body.push({ op: "any.convert_extern" } as Instr);
+  fctx.body.push({ op: "local.set", index: anyLocal } as Instr);
+  // kind = ref.test $__ta_ctor ? ctor.kind : (ref.test $__ta_dyn_view ? view.kind : -1)
+  // — handles BOTH `ctor.BYTES_PER_ELEMENT` (a first-class ctor value) and
+  // `view.BYTES_PER_ELEMENT` (a dynamically-constructed view instance, §23.2.3.1).
+  const kindLocal = allocLocal(fctx, `__tac_kind_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "i32.const", value: -1 } as Instr);
+  fctx.body.push({ op: "local.set", index: kindLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: anyLocal } as Instr);
+  fctx.body.push({ op: "ref.test", typeIdx: taCtorTypeIdx } as Instr);
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: [
+      { op: "local.get", index: anyLocal } as Instr,
+      { op: "ref.cast", typeIdx: taCtorTypeIdx } as Instr,
+      { op: "struct.get", typeIdx: taCtorTypeIdx, fieldIdx: 0 } as Instr,
+      { op: "local.set", index: kindLocal } as Instr,
+    ],
+    else: [],
+  } as Instr);
+  if (ctx.taDynViewTypeIdx >= 0) {
+    const dynIdx = ctx.taDynViewTypeIdx;
+    fctx.body.push({ op: "local.get", index: anyLocal } as Instr);
+    fctx.body.push({ op: "ref.test", typeIdx: dynIdx } as Instr);
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: anyLocal } as Instr,
+        { op: "ref.cast", typeIdx: dynIdx } as Instr,
+        { op: "struct.get", typeIdx: dynIdx, fieldIdx: 3 } as Instr, // kind
+        { op: "local.set", index: kindLocal } as Instr,
+      ],
+      else: [],
+    } as Instr);
+  }
+  // Map kind → byte width via a select chain (default 0 for a non-ctor receiver).
+  // `select` returns val1 (the deeper operand = running result) when cond≠0, so the
+  // condition is `kind != k`: (kind != k) ? prevResult : bytes[k] ≡ (kind == k) ?
+  // bytes[k] : prevResult.
+  fctx.body.push({ op: "i32.const", value: 0 } as Instr); // running result = 0 (val1)
+  for (let k = 0; k < TA_CTOR_KINDS.length; k++) {
+    fctx.body.push({ op: "i32.const", value: TA_CTOR_BYTES[k]! } as Instr); // val2 = bytes[k]
+    fctx.body.push({ op: "local.get", index: kindLocal } as Instr);
+    fctx.body.push({ op: "i32.const", value: k } as Instr);
+    fctx.body.push({ op: "i32.ne" } as Instr); // cond = (kind != k)
+    fctx.body.push({ op: "select" } as Instr);
+  }
+  if (ctx.fast) return { kind: "i32" };
+  fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+  return { kind: "f64" };
+}
+
+/**
+ * (#3054 D) Push the element byte width for a runtime `kind` (i32 in `kindLocal`,
+ * index into `TA_CTOR_KINDS`) via a `select` chain over `TA_CTOR_BYTES`. Leaves an
+ * i32 on the stack; a kind out of range yields 1 (harmless default).
+ */
+function pushElemSizeForKind(fctx: FunctionContext, kindLocal: number): void {
+  fctx.body.push({ op: "i32.const", value: 1 } as Instr); // running result (val1) = 1
+  for (let k = 0; k < TA_CTOR_BYTES.length; k++) {
+    fctx.body.push({ op: "i32.const", value: TA_CTOR_BYTES[k]! } as Instr); // val2 = bytes[k]
+    fctx.body.push({ op: "local.get", index: kindLocal } as Instr);
+    fctx.body.push({ op: "i32.const", value: k } as Instr);
+    fctx.body.push({ op: "i32.ne" } as Instr); // cond = (kind != k) → (kind==k) ? bytes[k] : prev
+    fctx.body.push({ op: "select" } as Instr);
+  }
+}
+
+/**
+ * (#3054 D) Read `.byteLength` (or `.BYTES_PER_ELEMENT`) off a boxed `$__ta_dyn_view`
+ * at RUNTIME — a dynamically-constructed view read back through an `any`/union
+ * receiver (e.g. length-tracking-N's `for (ta of tas) … ta.byteLength`), where the
+ * compile-time-typeIdx accessor arm can't fire and the generic dynamic reader THROWS
+ * on `.byteLength`. The view's element kind is stored in the struct's `kind` field
+ * (B1's per-kind `$__ta_view_<K>` canonicalize together and can't be told apart by
+ * `ref.test`, which is exactly why the dynamic path uses `$__ta_dyn_view`).
+ * `byteLength = effectiveLen × elemSize(kind)`; a bare ArrayBuffer/DataView vec →
+ * its byte length; anything else → 0 (never throws). `wantElemSize` returns
+ * `elemSize(kind)` instead (for a dynamic `view.BYTES_PER_ELEMENT`). Returns the
+ * numeric ValType, or null when no `$__ta_dyn_view` type exists (byte-inert).
+ */
+export function emitTaViewDynamicByteLength(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  compileRecv: () => ValType | null,
+  wantElemSize = false,
+): ValType | null {
+  if (ctx.taDynViewTypeIdx < 0) return null;
+  const dynIdx = ctx.taDynViewTypeIdx;
+  const { vecTypeIdx } = i32ByteVec(ctx);
+  const rt = compileRecv();
+  if (rt === null) {
+    fctx.body.push({ op: "ref.null.extern" } as Instr);
+  } else if (rt.kind !== "externref") {
+    coerceType(ctx, fctx, rt, { kind: "externref" });
+  }
+  const anyLocal = allocLocal(fctx, `__tvbl_recv_${fctx.locals.length}`, { kind: "anyref" } as ValType);
+  fctx.body.push({ op: "any.convert_extern" } as Instr);
+  fctx.body.push({ op: "local.set", index: anyLocal } as Instr);
+  const resultLocal = allocLocal(fctx, `__tvbl_res_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+  fctx.body.push({ op: "local.set", index: resultLocal } as Instr);
+
+  // $__ta_dyn_view arm: read kind → elemSize; result = elemSize (BYTES_PER_ELEMENT)
+  // or effectiveLen × elemSize (byteLength).
+  const dvLocal = allocLocal(fctx, `__tvbl_dv_${fctx.locals.length}`, { kind: "ref", typeIdx: dynIdx });
+  const kindLocal = allocLocal(fctx, `__tvbl_k_${fctx.locals.length}`, { kind: "i32" });
+  const esLocal = allocLocal(fctx, `__tvbl_es_${fctx.locals.length}`, { kind: "i32" });
+  const arm: Instr[] = [];
+  const saved = fctx.body;
+  fctx.body = arm;
+  fctx.body.push({ op: "local.get", index: anyLocal } as Instr);
+  fctx.body.push({ op: "ref.cast", typeIdx: dynIdx } as Instr);
+  fctx.body.push({ op: "local.tee", index: dvLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 3 } as Instr); // kind
+  fctx.body.push({ op: "local.set", index: kindLocal } as Instr);
+  pushElemSizeForKind(fctx, kindLocal);
+  fctx.body.push({ op: "local.set", index: esLocal } as Instr);
+  if (wantElemSize) {
+    fctx.body.push({ op: "local.get", index: esLocal } as Instr);
+    fctx.body.push({ op: "local.set", index: resultLocal } as Instr);
+  } else {
+    pushTaDynViewEffectiveLen(ctx, fctx, dvLocal, kindLocal, esLocal);
+    fctx.body.push({ op: "local.get", index: esLocal } as Instr);
+    fctx.body.push({ op: "i32.mul" } as Instr);
+    fctx.body.push({ op: "local.set", index: resultLocal } as Instr);
+  }
+  fctx.body = saved;
+  fctx.body.push({ op: "local.get", index: anyLocal } as Instr);
+  fctx.body.push({ op: "ref.test", typeIdx: dynIdx } as Instr);
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: arm, else: [] } as Instr);
+
+  // Fallback (byteLength only): a bare ArrayBuffer/DataView vec → its byte length.
+  if (!wantElemSize) {
+    fctx.body.push({ op: "local.get", index: anyLocal } as Instr);
+    fctx.body.push({ op: "ref.test", typeIdx: vecTypeIdx } as Instr);
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: anyLocal } as Instr,
+        { op: "ref.cast", typeIdx: vecTypeIdx } as Instr,
+        { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr,
+        { op: "local.set", index: resultLocal } as Instr,
+      ],
+      else: [],
+    } as Instr);
+  }
+
+  fctx.body.push({ op: "local.get", index: resultLocal } as Instr);
+  if (ctx.fast) return { kind: "i32" };
+  fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+  return { kind: "f64" };
+}
+
+/**
+ * (#3054 D) Push the CURRENT element length of a `$__ta_dyn_view` (`dvLocal`), given
+ * its `kind` and `elemSize`. Field0 holds either a fixed element count (`>= 0`) or
+ * the auto-length sentinel `-1` (a view built over a resizable buffer with no
+ * explicit length); for the sentinel the live length is `buf.length / elemSize`
+ * (length-tracking on resize, mirroring `pushTaViewEffectiveLen`).
+ */
+function pushTaDynViewEffectiveLen(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  dvLocal: number,
+  _kindLocal: number,
+  esLocal: number,
+): void {
+  const dynIdx = ctx.taDynViewTypeIdx;
+  const { vecTypeIdx } = i32ByteVec(ctx);
+  const storedLocal = allocLocal(fctx, `__tdvl_s_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 0 } as Instr);
+  fctx.body.push({ op: "local.tee", index: storedLocal } as Instr);
+  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+  fctx.body.push({ op: "i32.ge_s" } as Instr);
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "val", type: { kind: "i32" } },
+    then: [{ op: "local.get", index: storedLocal } as Instr],
+    else: [
+      { op: "local.get", index: dvLocal } as Instr,
+      { op: "struct.get", typeIdx: dynIdx, fieldIdx: 1 } as Instr, // buf
+      { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr, // buf.length (bytes)
+      { op: "local.get", index: esLocal } as Instr,
+      { op: "i32.div_u" } as Instr,
+    ],
+  } as Instr);
+}
+
+/**
+ * (#3054 D) Dynamic `new <ctorVal>(buffer[, byteOffset[, length]])` where
+ * `ctorVal` is a first-class `$__ta_ctor` value (the kind is only known at
+ * runtime — test262 `CreateRabForTest`, `for (ctor of ctors) new ctor(rab, …)`).
+ * Recovers the buffer vec ONCE, reads the ctor `kind`, then a runtime kind-switch
+ * builds the concrete per-kind `$__ta_view_<K>` (shared-backing, length-tracking
+ * over a resizable buffer via the `-1` auto-length sentinel) and boxes it to
+ * externref (the static result type is a TA union → externref). A non-`$__ta_ctor`
+ * callee, or a buffer that can't be recovered as a native vec, yields
+ * `ref.null.extern` (declines gracefully — same as the pre-D host-import drop).
+ *
+ * `ctorAnyLocal` is an anyref local already holding `any.convert_extern(ctorValue)`.
+ * Strict RangeError validation (offset alignment / bounds) is intentionally omitted
+ * on this dynamic path — B1's bounds-checked view read/write already degrades OOB
+ * to NaN/no-op, so an out-of-range window can't trap. Byte-inert: only reachable
+ * once a `$__ta_ctor` value exists in the module.
+ */
+export function emitDynamicTaViewConstruct(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  ctorAnyLocal: number,
+  bufExpr: import("../ts-api.js").ts.Expression,
+  offsetExpr: import("../ts-api.js").ts.Expression | undefined,
+  lengthExpr: import("../ts-api.js").ts.Expression | undefined,
+  compileExpr: (expr: import("../ts-api.js").ts.Expression, hint?: ValType) => ValType | null,
+): ValType | null {
+  const taCtorTypeIdx = getOrRegisterTaCtorType(ctx);
+  const { vecTypeIdx } = i32ByteVec(ctx);
+
+  // Result (boxed view) — default null so a non-ctor / unrecoverable buffer declines.
+  const resultLocal = allocLocal(fctx, `__dtav_res_${fctx.locals.length}`, { kind: "externref" });
+  fctx.body.push({ op: "ref.null.extern" } as Instr);
+  fctx.body.push({ op: "local.set", index: resultLocal } as Instr);
+
+  // Recover the shared buffer vec struct (mirror emitTaViewConstruct).
+  const bufType = compileExpr(bufExpr);
+  if (!bufType) return null;
+  if (bufType.kind === "externref") {
+    fctx.body.push({ op: "any.convert_extern" } as Instr);
+    fctx.body.push({ op: "ref.cast", typeIdx: vecTypeIdx } as Instr);
+  } else if (bufType.kind === "ref" || bufType.kind === "ref_null") {
+    if ("typeIdx" in bufType && (bufType as { typeIdx: number }).typeIdx !== vecTypeIdx) {
+      fctx.body.push({ op: "ref.cast", typeIdx: vecTypeIdx } as Instr);
+    }
+  } else {
+    fctx.body.push({ op: "drop" } as Instr);
+    return null;
+  }
+  const bufLocal = allocLocal(fctx, `__dtav_buf_${fctx.locals.length}`, { kind: "ref", typeIdx: vecTypeIdx });
+  fctx.body.push({ op: "local.set", index: bufLocal } as Instr);
+
+  // bufByteLen = buf.length (field0).
+  const bufByteLenLocal = allocLocal(fctx, `__dtav_blen_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "local.get", index: bufLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr);
+  fctx.body.push({ op: "local.set", index: bufByteLenLocal } as Instr);
+
+  // byteOffset = ToIndex(offsetExpr) (0 when omitted). Element-count length arg is
+  // kind-independent, so compute it ONCE (shared across all arms).
+  const offsetLocal = allocLocal(fctx, `__dtav_off_${fctx.locals.length}`, { kind: "i32" });
+  if (offsetExpr) {
+    emitToIndexI32(ctx, fctx, offsetExpr, compileExpr, offsetLocal, "RangeError: Invalid typed array offset");
+  } else {
+    fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+    fctx.body.push({ op: "local.set", index: offsetLocal } as Instr);
+  }
+  const lenGiven = lengthExpr !== undefined;
+  const lenElemsLocal = allocLocal(fctx, `__dtav_len_${fctx.locals.length}`, { kind: "i32" });
+  if (lengthExpr) {
+    emitToIndexI32(ctx, fctx, lengthExpr, compileExpr, lenElemsLocal, "RangeError: Invalid typed array length");
+  }
+
+  // kind = ref.test $__ta_ctor ? struct.get 0 : -1  (a non-ctor callee → -1 → the
+  // gate below leaves the null result).
+  const kindLocal = allocLocal(fctx, `__dtav_kind_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "i32.const", value: -1 } as Instr);
+  fctx.body.push({ op: "local.set", index: kindLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: ctorAnyLocal } as Instr);
+  fctx.body.push({ op: "ref.test", typeIdx: taCtorTypeIdx } as Instr);
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: [
+      { op: "local.get", index: ctorAnyLocal } as Instr,
+      { op: "ref.cast", typeIdx: taCtorTypeIdx } as Instr,
+      { op: "struct.get", typeIdx: taCtorTypeIdx, fieldIdx: 0 } as Instr,
+      { op: "local.set", index: kindLocal } as Instr,
+    ],
+    else: [],
+  } as Instr);
+
+  // Build ONE `$__ta_dyn_view` carrying the runtime kind (B1's per-kind
+  // `$__ta_view_<K>` canonicalize together, so a boxed view can't recover its kind
+  // via `ref.test` — the dynamic path stores it). Only when `kind >= 0`.
+  const dynIdx = getOrRegisterTaDynViewType(ctx);
+  const resizable = ctx.resizableAbTypeIdx >= 0;
+  const buildArm: Instr[] = [];
+  const savedBody = fctx.body;
+  fctx.body = buildArm;
+  // length (field0):
+  if (lenGiven) {
+    fctx.body.push({ op: "local.get", index: lenElemsLocal } as Instr);
+  } else if (resizable) {
+    // Auto-length over a possibly-resizable buffer → -1 sentinel so the effective
+    // length is derived live from `buf.length / elemSize` (length-tracking).
+    fctx.body.push({ op: "i32.const", value: -1 } as Instr);
+  } else {
+    // Fixed auto length = (bufByteLen - offset) / elemSize(kind).
+    fctx.body.push({ op: "local.get", index: bufByteLenLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: offsetLocal } as Instr);
+    fctx.body.push({ op: "i32.sub" } as Instr);
+    pushElemSizeForKind(fctx, kindLocal);
+    fctx.body.push({ op: "i32.div_u" } as Instr);
+  }
+  // buf (shared vec ref) + byteOffset + kind.
+  fctx.body.push({ op: "local.get", index: bufLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: offsetLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: kindLocal } as Instr);
+  fctx.body.push({ op: "struct.new", typeIdx: dynIdx } as Instr);
+  fctx.body.push({ op: "extern.convert_any" } as Instr);
+  fctx.body.push({ op: "local.set", index: resultLocal } as Instr);
+  fctx.body = savedBody;
+
+  fctx.body.push({ op: "local.get", index: kindLocal } as Instr);
+  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+  fctx.body.push({ op: "i32.ge_s" } as Instr);
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: buildArm, else: [] } as Instr);
+
+  fctx.body.push({ op: "local.get", index: resultLocal } as Instr);
+  return { kind: "externref" };
 }
 
 /**

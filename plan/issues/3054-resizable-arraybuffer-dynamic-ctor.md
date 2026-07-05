@@ -1,8 +1,9 @@
 ---
 id: 3054
 title: "Resizable ArrayBuffer + dynamic `new <ctorVar>(rab)` — the ~180 codegen gap under #1524"
-status: in-progress
-assignee: ttraenkler/opus-3054-c
+status: done
+assignee: ttraenkler/opus-3054-de
+completed: 2026-07-05
 created: 2026-07-05
 updated: 2026-07-05
 priority: medium
@@ -749,3 +750,90 @@ works) fully demonstrate write-through.
 - A small follow-up to fix native packed-TA `.sort`/`.reverse`/Uint32-`.fill`
   would let B3's write-through cover those methods too (currently gated by the
   pre-existing native bugs).
+
+## D + E — dynamic `new <ctorVar>(rab)` + harness shim (LANDED, opus-3054-de, on C base @ 66024ef0c)
+
+**Scope shipped:** first-class TypedArray CONSTRUCTOR values + a Wasm-native dynamic
+`new <ctorVar>(rab)` construct (no host import) + the runner harness shim — landed
+TOGETHER so the resizable-`ctors` cluster runs host-free.
+
+### Measure-first — the spec premise was wrong (decisive finding)
+The Phase-A/D spec assumed a "`ref.test`-dispatch over the TA-intrinsic singletons."
+**Measurement disproved it:** a TA constructor used as a VALUE (`const c = Uint8Array`)
+compiled to `ref.null.extern`, so `Uint8Array === Int8Array` was `true` — there were
+**no singletons to test against**. And B1's per-kind `$__ta_view_<K>` structs are
+**structurally identical → WasmGC canonicalizes them to ONE runtime type**, so a boxed
+view can't recover its kind via `ref.test` either (a naive dispatch read byteLength =
+64 = 8×8, always the last arm). D therefore needed two NEW representations the spec
+didn't anticipate, not a localized patch.
+
+### What changed (WHY)
+1. **`$__ta_ctor {kind:i32}`** (`getOrRegisterTaCtorType`, registry/types) — a
+   first-class value for a TA ctor in value position. `identifiers.ts` emits it for a
+   bare TA name used as a value (gated: `noJsHost`, not shadowed/class). `kind` indexes
+   `TA_CTOR_KINDS`. Fixes `Uint8Array === Int8Array` (now distinct) and lets a ctor be
+   stored in an `any[]`, passed to a param, and `ref.test`-dispatched.
+2. **`$__ta_dyn_view {length, buf, byteOffset, kind}`** (`getOrRegisterTaDynViewType`)
+   — a runtime-kinded shared-backing view built by the dynamic construct. Carries the
+   kind EXPLICITLY (B1's per-kind views can't — they canonicalize together). One
+   `struct.new`, not a 9-arm switch.
+3. **`emitDynamicTaViewConstruct`** (dataview-native) — `new ctor(rab[, off[, len]])`:
+   recover buffer vec once, read ctor `kind`, build one `$__ta_dyn_view` (auto-length
+   `-1` sentinel over a resizable buffer → length-tracking). Wired in `new-super.ts`'s
+   unknown-ctor block, gated to a statically-buffer-typed first arg (so `new c(5)`
+   count-ctors don't `ref.cast`-trap). A non-`$__ta_ctor` callee → null (declines).
+4. **`ctor.BYTES_PER_ELEMENT` + `view.BYTES_PER_ELEMENT`** (`emitTaCtorBytesPerElement`)
+   — runtime `ref.test` over `$__ta_ctor`/`$__ta_dyn_view` → kind → `select` chain over
+   `TA_CTOR_BYTES`. Placed at the TOP of `compilePropertyAccess` (the generic dynamic
+   dispatchers below return 0/throw); registers the type on demand (the read can compile
+   before the value that registers it — `CreateRabForTest` before the top-level `ctors`).
+5. **Dynamic `view.byteLength`** (`emitTaViewDynamicByteLength`) — a boxed dyn view read
+   back through an `any` receiver: `ref.test $__ta_dyn_view` → kind → `effectiveLen ×
+   elemSize` (resize-tracked); bare AB/DataView vec → its byte length; else 0. The
+   generic reader THREW on `.byteLength` before this.
+6. **E — runner shim** (`buildPreamble`, test262-runner) — adapted, eval-free
+   `resizableArrayBufferUtils.js`: `ctors`/`floatCtors`/`CreateResizableArrayBuffer`/
+   `CreateRabForTest`/`CollectValuesAndResize`/`TestIterationAndResize`/`MayNeedBigInt`/
+   `ToNumbers`. Helper returns typed **`ArrayBuffer`** so the dynamic construct's
+   static buffer-arg gate passes (an `any` buffer → ctor declines → null view). The
+   upstream `new Function('return class …')()` eval subclasses + BigInt/Float16 are
+   dropped. Include-gated → byte-inert for every other test.
+
+### Measured pass-count delta (the epic payoff)
+Scoped standalone lane over the **188** `resizableArrayBufferUtils.js`-including tests,
+this branch vs base C (main-equivalent), via the real runner (`runTest262File(…,
+"standalone")`):
+- **base C: 0 pass** / 181 fail / 4 compile_error / 3 skip.
+- **this branch: 17 pass** / 155 fail / 13 compile_error / 3 skip.
+- **NET = +17 standalone passes, 0 pass→non-pass regressions.** The 26 fail→(other)
+  and 9 fail→compile_error moves are all non-pass→non-pass (no floor loss). The 155
+  remaining fails + 13 CE are dominated by **element read/WRITE on a dynamic view**
+  (`ta[i]` / `ta[i]=v`), which is BANKED (see below) — those tests now RUN host-free but
+  their `assert.compareArray`/element-value checks need the byte-decode-by-runtime-kind
+  arm. Many of the 155 will flip once that lands.
+
+### Byte-inert proof
+sha256 of the standalone binary is **IDENTICAL** between base C and this branch for 7
+controls: arithmetic, plain array, native `Uint8Array` element+`BYTES_PER_ELEMENT`,
+static `Int32Array.BYTES_PER_ELEMENT`, DataView set/get, string `.length`, native
+`Int32Array.byteLength`. Only programs that use a TA ctor as a VALUE change bytes. All
+72 B1/B2/B3/C tests still green; `tests/issue-3054-de-dynctor.test.ts` (9 host-enforced)
+green; tsc/prettier/biome clean.
+
+### Banked follow-up (deliberate, per floor discipline) — element access on `$__ta_dyn_view`
+Element read/write on a *dynamically-constructed* view (`ta[i]` / `ta[i] = v` where
+`ta` is `any`) is NOT implemented: the boxed view's kind is only known at runtime, so it
+needs a runtime-kind byte-decode/encode arm in the dynamic INDEX path (the compile-time
+`$__ta_view` arms are typeIdx-gated and never fire for a boxed view). Currently such
+access falls to the generic index path, which emits an invalid `array.get` on the
+`$__ta_dyn_view` struct → those 13 tests are `compile_error` (they were **`fail`** on
+base — non-pass→non-pass, NOT a floor regression, confined to shim tests). A safe
+fall-through can't be added at the top (a boxed plain-array `values[i]` read shares the
+`any` receiver), so it belongs in the generic dispatch itself. **Recommend a scoped
+follow-up issue: "dynamic `$__ta_dyn_view` element get/set (runtime-kind byte codec)"** —
+it should flip a large share of the 155 fails and remove the 13 invalid-Wasm CE.
+
+### #3054 epic status
+B1 (#2736) · B2 (#2737) · B3 (#2738) · C (#2739) · **D+E (this PR)** all landed. The
+resizable-`ctors` cluster now runs host-free with +17 floor-positive passes; the
+element-access byte-codec is the one banked follow-up. Epic **closed**.
