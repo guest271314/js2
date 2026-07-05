@@ -668,3 +668,84 @@ suites still green. tsc + prettier clean.
   over the ctor value), E needs the runner `buildPreamble` shim landed WITH D so the
   `resizableArrayBufferUtils.js` fixtures (`ctors`/`CreateRabForTest`/…) resolve. The
   resizable BUFFER semantics C provides are the substrate D+E score against.
+## B3 — proto-method WRITE-THROUGH on view receivers (LANDED, opus-3054-b3, on `upstream/main` @ bb239d65b)
+
+**Scope shipped:** a mutating TypedArray prototype method (`.fill` / `.set` /
+`.copyWithin`, and structurally `.sort` / `.reverse`) on a `$__ta_view`
+identifier-local receiver now WRITES THROUGH to the underlying ArrayBuffer — the
+mutation is observable by sibling views and DataViews over the same buffer. This
+closes B1's Option-A de-alias caveat (proto-method writes landed in the throwaway
+copy and were LOST).
+
+### What changed (WHY — write-back copy, not method-rewrites)
+B1's Option-A de-view (`emitTaViewToVec`, `dataview-native.ts`) byte-decodes a
+`$__ta_view` receiver into a fresh native `$__vec_<elem>` so the shared
+array-method dispatch (which `ref.cast`s to the native element-typed vec) doesn't
+trap. That copy was **de-aliased** — a mutating method mutated the copy, never
+the buffer.
+
+B3 makes the de-viewed path write-through by the **reverse** of `emitTaViewToVec`,
+NOT by rewriting each method to operate on the view:
+- **`emitTaViewWriteBack`** (`dataview-native.ts`, new export): after the method
+  runs, for each element `i` reads the native copy `matArr[i]` → f64 (native vec
+  element opcode; signedness per the TA kind = `desc.signed`; **packed i8/i16 use
+  `array.get_s`/`_u`, non-packed i32_elem uses plain `array.get` then
+  `f64.convert_i32_s/_u`** — `array.get_s/_u` are illegal on a full-width i32
+  element), then byte-encodes it back into `view.buf.data` at
+  `view.byteOffset + i*width` via the SAME `emitWriteBytes` LE engine
+  `emitTaViewElementSet` uses. Encode ∘ decode is bit-exact, so the round trip is
+  faithful. Reads `view.byteOffset` (field2, B2-populated) → windowed views write
+  the correct absolute bytes.
+- **Dispatch wiring** (`array-methods.ts`, `compileArrayMethodCall`): the de-view
+  block now also records `{taViewWbTypeIdx, taViewWbViewLocal (= the original
+  view local), taViewWbMatLocal (= the native copy), taViewWbNativeVecIdx}`.
+  After the switch, gated **exactly like the existing module-global write-back**
+  (`MUTATING.has(methodName) && result !== null && result !== undefined`), it
+  calls `emitTaViewWriteBack`. Read-only methods (`.includes`/`.indexOf`/`.reduce`
+  /…) are NOT in `MUTATING` → no write-back (nothing to propagate) → B1's de-view
+  stays a pure copy for them.
+
+Why write-back over method-rewrites: it confines B3 to the already-de-viewed
+mutating path (additive, one new helper + a gated call), avoiding a rewrite of
+the whole array-method dispatch — the exact broad-blast move the floor discipline
+forbids. Standalone/WASI lane only (mirrors B1/B2 — host-mode buffers are host
+objects, not native `i32_byte` vecs).
+
+### Validation (host-enforced — standalone doesn't enforce numeric asserts, #3055/#3056)
+- **`tests/issue-3054-b3-writethrough.test.ts`** — 13 host-run standalone
+  assertions, all green: `.fill`→sibling; `.set`→buffer; `.set` with offset;
+  `.copyWithin`→buffer; read-only `.includes`/`.indexOf` do NOT clobber the
+  buffer; Int32 `.fill` cross-width LE bytes; Int16 negative LE; Float32
+  round-trip; **Uint32 unsigned i32_elem read path** (value ≤2^31); **Int32
+  negative signed i32_elem read path**; window-offset `.fill` hits the right
+  absolute bytes; subsequent element-read reflects the mutation.
+- **Byte-inert proof** — sha256 of the standalone binary is IDENTICAL between
+  `upstream/main` (@ bb239d65b) and this branch for 6 controls: arith, **plain
+  array `.fill`**, **plain array `.sort`**, native `Uint8Array` count-ctor,
+  **native `Uint8Array.fill`**, DataView setInt32/getInt32. Only
+  `new <TA>(buffer)` de-view mutating-method programs change bytes (the write-back
+  is unreachable unless a `$__ta_view` de-view already happened → floor-safe).
+- B1 (15) + B2 (22) suites still green (37/37).
+- `tsc --noEmit`, prettier `--check`, `biome lint --diagnostic-level=error` clean.
+
+### Pre-existing native-method gaps (NOT B3 regressions — flagged, separate)
+Verified on this SAME base with NO views / NO B3 code:
+- native `new Uint8Array(4).sort()` is a **no-op** (returns input order);
+- native `Uint8Array.reverse()` **leaks a packed `i8`** into a value position at
+  binary emit (`encodeValType` throw);
+- native `Uint32Array.fill(v)` for `v > 2^31` **saturates** to 2^31-1 (via
+  `i32.trunc_sat_f64_s` in the native fill).
+B3's write-back is DOWNSTREAM of the method and faithfully propagates whatever the
+method produced, so `.sort`/`.reverse` write-through can't be validated through a
+broken native method. These packed-TA native-method fixes are a **separate
+pre-existing issue** — recommend a follow-up (they also affect plain native TAs,
+no views involved). `.fill`/`.set`/`.copyWithin` (whose native packed lowering
+works) fully demonstrate write-through.
+
+### Next
+- **C (resizable ArrayBuffer)** remains independent of B3 (it touches the buffer
+  `$__resizable_ab` subtype, not the view methods) — **ready to dispatch in
+  parallel**.
+- A small follow-up to fix native packed-TA `.sort`/`.reverse`/Uint32-`.fill`
+  would let B3's write-through cover those methods too (currently gated by the
+  pre-existing native bugs).

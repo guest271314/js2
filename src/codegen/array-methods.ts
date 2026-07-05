@@ -32,7 +32,7 @@ import {
   getSubviewArrTypeIdx,
   isTaViewTypeIdx,
 } from "./registry/types.js";
-import { emitTaViewToVec } from "./dataview-native.js"; // (#3054 B1 Option A) de-view materialization
+import { emitTaViewToVec, emitTaViewWriteBack } from "./dataview-native.js"; // (#3054 B1 Option A) de-view; (B3) write-through
 import { noJsHost } from "./expressions/helpers.js";
 import { ensureNativeIteratorRuntime, getOrRegisterIterRecType } from "./iterator-native.js";
 import { ensureObjVecBuilders } from "./object-runtime.js";
@@ -2918,6 +2918,14 @@ export function compileArrayMethodCall(
   // receiver identifier; these hold the rebind so we can restore it post-dispatch.
   let taViewRebindName: string | undefined;
   let taViewRebindSaved: number | undefined;
+  // (#3054 B3) write-through: after a MUTATING method runs on the de-viewed
+  // native-vec copy, byte-encode it back into the view's shared buffer. Capture
+  // the view typeIdx, the original view local, the native-vec copy local and its
+  // vec typeIdx so `emitTaViewWriteBack` can round-trip the mutation.
+  let taViewWbTypeIdx: number | undefined;
+  let taViewWbViewLocal: number | undefined;
+  let taViewWbMatLocal: number | undefined;
+  let taViewWbNativeVecIdx: number | undefined;
 
   // The receiver's actual Wasm type may differ from the TS type — e.g.
   // `[0, true].lastIndexOf(...)` infers i32 elements during construction,
@@ -2997,6 +3005,13 @@ export function compileArrayMethodCall(
         taViewRebindName = receiverExpr.text;
         taViewRebindSaved = fctx.localMap.get(receiverExpr.text);
         fctx.localMap.set(receiverExpr.text, matLocal);
+        // (#3054 B3) remember the pieces needed to write the copy back through
+        // the view's buffer after a mutating method. `taViewRebindSaved` is the
+        // original view local (the shared-backing `$__ta_view` ref).
+        taViewWbTypeIdx = actualVecIdx;
+        taViewWbViewLocal = taViewRebindSaved;
+        taViewWbMatLocal = matLocal;
+        taViewWbNativeVecIdx = vecTypeIdx;
       } else {
         const actualArrIdx = getArrTypeIdxFromVec(ctx, actualVecIdx);
         if (actualArrIdx >= 0) {
@@ -3257,6 +3272,24 @@ export function compileArrayMethodCall(
     if (ts.isIdentifier(propAccess.expression)) {
       fctx.localMap.delete(propAccess.expression.text);
     }
+  }
+
+  // (#3054 B3) WRITE-THROUGH: a mutating method (`.fill`/`.set`/`.sort`/
+  // `.copyWithin`/`.reverse`) ran on the de-viewed native-vec copy — byte-encode
+  // the (mutated) copy back into the view's shared buffer so sibling views /
+  // DataViews observe it. Gated exactly like the module-global write-back above:
+  // only for MUTATING methods that actually ran (result present). Read-only
+  // methods skip this (nothing to propagate); B1's de-view stays a pure copy.
+  if (
+    taViewWbTypeIdx !== undefined &&
+    taViewWbViewLocal !== undefined &&
+    taViewWbMatLocal !== undefined &&
+    taViewWbNativeVecIdx !== undefined &&
+    MUTATING.has(methodName) &&
+    result !== null &&
+    result !== undefined
+  ) {
+    emitTaViewWriteBack(ctx, fctx, taViewWbTypeIdx, taViewWbViewLocal, taViewWbMatLocal, taViewWbNativeVecIdx);
   }
 
   // (#3054 B1 Option A) Restore the receiver identifier's original binding after

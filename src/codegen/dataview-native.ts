@@ -1690,10 +1690,16 @@ export function emitTaViewToVec(
   // view (on stack) → local
   const vLocal = allocLocal(fctx, `__tav_mv_${fctx.locals.length}`, { kind: "ref_null", typeIdx: taViewTypeIdx });
   fctx.body.push({ op: "local.set", index: vLocal } as Instr);
-  // len = view.length (field0)
+  // len = EFFECTIVE element count, not raw field0. (#3054 C×B3) An auto-length
+  // view over a resizable buffer stores a -1 sentinel in field0 (C); reading it
+  // raw would de-view -1 elements (empty native copy) and B3's write-back would
+  // then iterate the same -1 and lose every write. pushTaViewEffectiveLen
+  // resolves the sentinel to the live count (buf.length / elemSize) and is
+  // byte-inert-gated: a module with no resizable AB (resizableAbTypeIdx < 0)
+  // emits the identical raw field0 read. emitTaViewWriteBack MUST use the same
+  // length so native-copy-len == write-back-len.
   const lenLocal = allocLocal(fctx, `__tav_mlen_${fctx.locals.length}`, { kind: "i32" });
-  fctx.body.push({ op: "local.get", index: vLocal } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: taViewTypeIdx, fieldIdx: 0 } as Instr);
+  pushTaViewEffectiveLen(ctx, fctx, vLocal, taViewTypeIdx);
   fctx.body.push({ op: "local.set", index: lenLocal } as Instr);
   // arr = view.buf.data ; base = view.byteOffset ; le = 1
   const arrLocal = allocLocal(fctx, `__tav_marr_${fctx.locals.length}`, { kind: "ref", typeIdx: bufArrTypeIdx });
@@ -1771,6 +1777,160 @@ export function emitTaViewToVec(
   fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
   fctx.body.push({ op: "local.get", index: nArrLocal } as Instr);
   fctx.body.push({ op: "struct.new", typeIdx: nativeVecTypeIdx } as Instr);
+}
+
+/**
+ * (#3054 B3) WRITE-THROUGH — the reverse of {@link emitTaViewToVec}. After a
+ * mutating TypedArray prototype method (`.fill` / `.set` / `.sort` /
+ * `.copyWithin` / `.reverse`) has run on the DE-VIEWED native `$__vec_<elem>`
+ * copy (`matLocalIdx`), byte-encode every (possibly-mutated) element back into
+ * the view's SHARED buffer (`view.buf.data`) at `byteOffset + i*width`,
+ * little-endian — so the mutation is observable through the underlying buffer
+ * and every sibling view / DataView over it (per §23.2/§25 IntegerIndexed
+ * element semantics).
+ *
+ * WHY a write-back copy, not method-rewrites: B1's Option-A de-view is a
+ * de-ALIASING copy — writes by a mutating method landed in the copy and were
+ * LOST (never reached the buffer). Rewriting each TA method to operate directly
+ * on the view would touch the whole array-method dispatch (high floor risk). The
+ * write-back confines B3 to the already-de-viewed path: the copy round-trips
+ * back into the buffer, restoring shared-backing semantics with a bounded,
+ * additive change.
+ *
+ * Bit-exact round trip: the value read out of the native copy is the exact
+ * numeric value the method computed (sort permutes, fill sets a constant, set
+ * writes new values, copyWithin/reverse move existing ones — all already coerced
+ * to the view's element domain). It is read with the native vec's element opcode
+ * (signedness per the TA kind = `desc.signed`) and re-encoded through the SAME
+ * {@link emitWriteBytes} engine {@link emitTaViewElementSet} uses, so encode ∘
+ * decode is identity. `viewLocalIdx` holds the `$__ta_view` ref (the receiver
+ * identifier's ORIGINAL local, saved before the de-view rebind) — reading
+ * `view.byteOffset` (field2, B2-populated) makes windowed views write to the
+ * correct absolute bytes. Read-only methods MUST NOT call this (the caller gates
+ * on the mutating-method set).
+ */
+export function emitTaViewWriteBack(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  taViewTypeIdx: number,
+  viewLocalIdx: number,
+  matLocalIdx: number,
+  nativeVecTypeIdx: number,
+): void {
+  const desc = taViewDecode(ctx, taViewTypeIdx);
+  const nativeArrTypeIdx = getArrTypeIdxFromVec(ctx, nativeVecTypeIdx);
+  const nativeArrDef = ctx.mod.types[nativeArrTypeIdx];
+  if (!desc || nativeArrTypeIdx < 0 || !nativeArrDef || nativeArrDef.kind !== "array") {
+    // Shouldn't happen for a registered view + resolved native vec. Skipping the
+    // write-back merely reverts to B1's lost-write behaviour (correctness-safe),
+    // never a miscompile.
+    return;
+  }
+  const nativeElemKind = nativeArrDef.element.kind;
+  const { vecTypeIdx: bufVecTypeIdx, arrTypeIdx: bufArrTypeIdx } = i32ByteVec(ctx);
+
+  // len = EFFECTIVE element count == the native copy length produced by
+  // emitTaViewToVec (which uses the SAME pushTaViewEffectiveLen). (#3054 C×B3)
+  // For an auto-length view over a resizable buffer field0 is a -1 sentinel (C)
+  // and must be resolved to the live count; byte-inert-gated so a non-resizable
+  // module reads raw field0, identical to B3's original bytes.
+  const lenLocal = allocLocal(fctx, `__tav_wblen_${fctx.locals.length}`, { kind: "i32" });
+  pushTaViewEffectiveLen(ctx, fctx, viewLocalIdx, taViewTypeIdx);
+  fctx.body.push({ op: "local.set", index: lenLocal } as Instr);
+  // bufArr = view.buf.data  (buf field1 → $__vec_i32_byte; .data is its field1).
+  const bufArrLocal = allocLocal(fctx, `__tav_wbarr_${fctx.locals.length}`, { kind: "ref", typeIdx: bufArrTypeIdx });
+  fctx.body.push({ op: "local.get", index: viewLocalIdx } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: taViewTypeIdx, fieldIdx: 1 } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: bufVecTypeIdx, fieldIdx: 1 } as Instr);
+  fctx.body.push({ op: "local.set", index: bufArrLocal } as Instr);
+  // base = view.byteOffset (field2) — non-zero for a windowed view (B2).
+  const baseLocal = allocLocal(fctx, `__tav_wbbase_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "local.get", index: viewLocalIdx } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: taViewTypeIdx, fieldIdx: 2 } as Instr);
+  fctx.body.push({ op: "local.set", index: baseLocal } as Instr);
+  // matArr = matLocal.data (native vec field1).
+  const matArrLocal = allocLocal(fctx, `__tav_wbmarr_${fctx.locals.length}`, {
+    kind: "ref",
+    typeIdx: nativeArrTypeIdx,
+  });
+  fctx.body.push({ op: "local.get", index: matLocalIdx } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: nativeVecTypeIdx, fieldIdx: 1 } as Instr);
+  fctx.body.push({ op: "local.set", index: matArrLocal } as Instr);
+  const leLocal = allocLocal(fctx, `__tav_wble_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "i32.const", value: 1 } as Instr);
+  fctx.body.push({ op: "local.set", index: leLocal } as Instr);
+
+  const iLocal = allocLocal(fctx, `__tav_wbi_${fctx.locals.length}`, { kind: "i32" });
+  const offLocal = allocLocal(fctx, `__tav_wboff_${fctx.locals.length}`, { kind: "i32" });
+  const valLocal = allocLocal(fctx, `__tav_wbval_${fctx.locals.length}`, { kind: "f64" });
+  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+  fctx.body.push({ op: "local.set", index: iLocal } as Instr);
+
+  const stepInstrs: Instr[] = [];
+  // off = base + i*width
+  stepInstrs.push({ op: "local.get", index: baseLocal } as Instr);
+  stepInstrs.push({ op: "local.get", index: iLocal } as Instr);
+  if (desc.bytes !== 1) {
+    stepInstrs.push({ op: "i32.const", value: desc.bytes } as Instr);
+    stepInstrs.push({ op: "i32.mul" } as Instr);
+  }
+  stepInstrs.push({ op: "i32.add" } as Instr);
+  stepInstrs.push({ op: "local.set", index: offLocal } as Instr);
+  // val = f64(matArr[i]) — read the native element with the TA kind's signedness.
+  stepInstrs.push({ op: "local.get", index: matArrLocal } as Instr);
+  stepInstrs.push({ op: "local.get", index: iLocal } as Instr);
+  if (nativeElemKind === "f64") {
+    stepInstrs.push({ op: "array.get", typeIdx: nativeArrTypeIdx } as Instr);
+  } else if (nativeElemKind === "f32") {
+    stepInstrs.push({ op: "array.get", typeIdx: nativeArrTypeIdx } as Instr);
+    stepInstrs.push({ op: "f64.promote_f32" } as Instr);
+  } else if (nativeElemKind === "i8" || nativeElemKind === "i16") {
+    // PACKED int element (i8/i16): `array.get_s`/`array.get_u` sign/zero-extend
+    // the sub-word storage per the view's signedness, then convert to f64.
+    stepInstrs.push({ op: desc.signed ? "array.get_s" : "array.get_u", typeIdx: nativeArrTypeIdx } as Instr);
+    stepInstrs.push({ op: desc.signed ? "f64.convert_i32_s" : "f64.convert_i32_u" } as Instr);
+  } else {
+    // NON-packed i32 element (Int32/Uint32 `i32_elem`): `array.get_s`/`_u` are
+    // illegal on a full-width type — read with plain `array.get`, then apply the
+    // signedness at the f64 convert. Uint32 needs `convert_i32_u` so a high-bit-
+    // set i32 image maps to the >2^31 double.
+    stepInstrs.push({ op: "array.get", typeIdx: nativeArrTypeIdx } as Instr);
+    stepInstrs.push({ op: desc.signed ? "f64.convert_i32_s" : "f64.convert_i32_u" } as Instr);
+  }
+  stepInstrs.push({ op: "local.set", index: valLocal } as Instr);
+  // bufArr[off .. off+width] = encode(val)  — same LE engine as element set.
+  // emitWriteBytes pushes onto fctx.body, so redirect it into stepInstrs.
+  const savedBody = fctx.body;
+  fctx.body = stepInstrs;
+  emitWriteBytes(
+    ctx,
+    fctx,
+    { kind: "set", bytes: desc.bytes, signed: desc.signed, float: desc.float },
+    bufArrLocal,
+    offLocal,
+    valLocal,
+    leLocal,
+    bufArrTypeIdx,
+  );
+  fctx.body = savedBody;
+  // i++
+  stepInstrs.push({ op: "local.get", index: iLocal } as Instr);
+  stepInstrs.push({ op: "i32.const", value: 1 } as Instr);
+  stepInstrs.push({ op: "i32.add" } as Instr);
+  stepInstrs.push({ op: "local.set", index: iLocal } as Instr);
+  stepInstrs.push({ op: "br", depth: 0 } as Instr);
+  const loopBody: Instr[] = [
+    { op: "local.get", index: iLocal } as Instr,
+    { op: "local.get", index: lenLocal } as Instr,
+    { op: "i32.ge_s" } as Instr,
+    { op: "br_if", depth: 1 } as Instr,
+    ...stepInstrs,
+  ];
+  fctx.body.push({
+    op: "block",
+    blockType: { kind: "empty" },
+    body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr],
+  } as Instr);
 }
 
 /**
