@@ -154,6 +154,250 @@ reworked by Phase B. That is exactly the lateral/broad-blast move opus-1524's
 measure-first (and this project's floor discipline) says to avoid. Deliberately
 banked as this scoped epic instead.
 
+## Implementation Plan — Phase A (architect decision, esch 2026-07-05, on `upstream/main`)
+
+Grounded in the actual representation code (verified against the source cited
+inline). This section **decides** the two representations the epic is gated on
+and sequences the floor-gated slices. **No code here — this is the spec devs
+implement.**
+
+### A.0 — What already exists (the decision leans on this)
+The compiler ALREADY has every primitive shared-backing views need; Phase B
+**composes** them rather than inventing machinery:
+
+1. **Aliasing view structs, compile-time typeIdx-discriminated** — two live
+   precedents:
+   - `$__dv_window {buf: (ref null $__vec_i32_byte), byteOffset: i32, byteLength: i32}`
+     (`registry/types.ts` via `getOrRegisterDvWindowType`, `dataview-native.ts:286`).
+     Its `buf` field holds a **ref to the ArrayBuffer's vec struct** — a windowed
+     DataView write IS visible through the buffer today. `recoverDvBacking`
+     (`dataview-native.ts:320`) reads `buf.data` at access time.
+   - `$__subview_<elem> {length: i32, data: (ref null $__arr_<elem>), byteOffset: i32}`
+     (`registry/types.ts:227`). TypedArray `.subarray` result; shares the
+     PARENT's backing **array** (not vec) — element read at
+     `property-access.ts:7531` (`isSubviewTypeIdx` arm) does `data[byteOffset + i]`.
+   Both are discriminated purely by the receiver's static `ValType.typeIdx` at
+   compile time, so plain-array / typed-TA hot paths never reach these arms.
+2. **A complete little/big-endian byte read/write engine** —
+   `emitReadBytes`/`emitReadI32`/`emitReadI64`/`emitWriteBytes`/`emitStoreByte`
+   (`dataview-native.ts:608-927`), already standalone-native. These assemble a
+   1/2/4/8-byte value out of a packed-i8 array at a byte offset. A buffer-backed
+   TA element access is exactly one of these with the endianness pinned LE and
+   the width fixed per element kind.
+3. **`$__vec_base` length supertype + open (`sub`, non-final) vec structs** —
+   every `__vec_<elem>` is registered `superTypeIdx: vecBaseIdx` with no `final`
+   flag, so the binary encoder emits `sub` (verified `src/emit/binary.ts:678-710`
+   — `t.final ? sub_final : sub`). **A subtype of `$__vec_i32_byte` is therefore
+   legal** — this is what makes the resizable-metadata decision (A.2) cheap.
+
+### A.1 — DECISION: shared-backing TypedArray/DataView representation
+
+**Chosen: option (a) — a discriminated byte-backed view struct that refs the
+ArrayBuffer's vec, with byte-decoded element access.** Register
+
+```
+$__ta_view_<elem>  (subtype of $__vec_base)
+  field0  length     : i32   (mut)   ; ELEMENT count → uniform .length via $__vec_base
+  field1  buf        : (ref null $__vec_i32_byte) (immut) ; SHARED buffer vec struct
+  field2  byteOffset : i32   (immut) ; base byte offset of the window into buf.data
+```
+
+Element access is **discriminated at compile time by receiver
+`ValType.typeIdx`** (add an `isTaViewTypeIdx` arm beside the existing
+`isSubviewTypeIdx` arm at `property-access.ts:7531`):
+- `ta[i]` → recover `buf.data` (the ArrayBuffer's `$__arr_i32_byte`), compute
+  `byteOffset + i*elementSize`, and `emitReadBytes(width, elemKind, /*LE=*/true)`.
+- `ta[i] = v` → same address, `emitWriteBytes` (LE), with per-kind coercion
+  (Uint8Clamped clamp, float store, integer truncation/masking).
+
+**Why (a) and not the alternatives — soundness + blast radius:**
+
+- **(b) "unify ALL TypedArrays onto one byte-backing store"** (every TA, incl.
+  `new Uint32Array(8)`, is a byte view over an implicit AB): spec-purest, but it
+  **rewrites the standalone-allocated TA fast path** — every element read/write,
+  every TA prototype method, in **both** lanes — replacing a direct
+  `array.get`/`array.set` on a typed `$__vec_<elem>` with a multi-byte
+  assemble/scatter. Huge perf regression on the common typed path and a
+  standalone-floor **minefield** (exactly the broad-blast move the project's
+  floor discipline forbids). **Rejected.**
+- **(c) "share the same array ref, typed differently"** (view holds the AB's i8
+  array but reads it as f64/i32): **impossible in WasmGC.** Array types are
+  nominal with a fixed element kind; there is no `array.cast`/reinterpret across
+  element kinds. Confirmed the nominal wall independently: `getOrRegisterArrayType`
+  keys the array cache on the **elemKind string** (`registry/types.ts:90`), so
+  `"i32_byte"` (ArrayBuffer) and `"i8_byte"` (native `Uint8Array`) are DISTINCT
+  `(array i8)` types even though structurally identical — a Uint8Array view
+  cannot even alias the AB's i8 array directly. **You MUST byte-decode.** This is
+  the decisive fact: it eliminates (c) and forces the byte-view representation
+  of (a) for **all** element kinds uniformly (a 1-byte view is just `width=1`).
+
+- **Soundness vs the verified probes:** two sibling `$__ta_view` over one buffer
+  share `buf` → both write/read `buf.data` → `a[0]=99; b[0] === 99` ✓. A
+  `$__dv_window`/bare-`$__vec_i32_byte` DataView over the same buffer reads
+  `buf.data` → sees the TA write ✓. Fixes both verified failures.
+- **Blast radius:** does **NOT** touch the 23 `i32_byte` sites — the ArrayBuffer
+  backing is unchanged; the view merely holds a ref to it. New surface is
+  additive and typeIdx-gated: one struct type + one element-read arm + one
+  element-write arm (both reuse the existing byte engine) + the ctor emit swap
+  (A.B1) + a handful of accessor-prop arms (A.B2). Plain arrays and
+  standalone-allocated TAs are a different `typeIdx` → never reach the new arm →
+  **byte-inert**.
+- **Lane behaviour:** the byte engine is already standalone-native and
+  lane-agnostic. The COPY culprit (`emitTypedArrayFromByteBuffer`,
+  `new-super.ts:5120`) runs in **both** lanes today, so both lanes are broken;
+  the native view fixes **both**. Recommend the native `$__ta_view` in both
+  lanes (retire the host `__new_ctor` copy for buffer-backed TAs). **Scope note:**
+  this is WasmGC-backend only (`src/codegen`); the linear backend
+  (`src/codegen-linear`) models AB/TA in linear memory and is a separate,
+  out-of-scope representation.
+
+**Why view.buf refs the VEC STRUCT, not the inner array** (a deliberate, free
+forward-compat choice): a resize (Phase C) reallocs a new `$__arr_i32_byte` and
+swaps the vec's mutable `data` field in place. Because the view reads `buf.data`
+at **each** access (mirroring `recoverDvBacking`), it observes the swap →
+length-tracking-on-resize falls out with zero extra Phase-B cost. (Contrast
+`$__subview`, which pins the raw array ref and thus can't track a resize — so
+`$__ta_view` intentionally differs from it. Subarray-of-a-buffer-view =
+view-over-view is a later, out-of-B/C concern; flag it.)
+
+### A.2 — DECISION: resizable-metadata representation
+
+**Chosen: a WasmGC SUBTYPE of the buffer vec** —
+
+```
+$__resizable_ab  (subtype of $__vec_i32_byte)     ; open/non-final parent (verified)
+  field0  length       : i32 (mut)   ; inherited — current byteLength
+  field1  data         : (ref $__arr_i32_byte) (mut) ; inherited — swapped on grow
+  field2  maxByteLength : i32 (immut)
+```
+
+The **resizable-ness bit is the type identity itself**: `ref.test $__resizable_ab`
+⇒ resizable; a plain `$__vec_i32_byte` ⇒ fixed. This **solves option-1's
+"no bit to distinguish a fixed buffer from a resizable one whose
+maxByteLength === byteLength"** — the subtype IS the bit, independent of the
+field values.
+
+**Why the subtype beats the issue's framed options 1–3:**
+- vs **option 1 (over-allocate at max, derive from `array.len`)**: no
+  distinguishing bit (the stated flaw) AND WasmGC GC arrays are fixed-length, so
+  "grow within capacity by bumping a logical length" still needs a length field
+  separate from `array.len` — you end up adding state anyway. The subtype adds
+  exactly the needed state, cleanly.
+- vs **option 2 (distinct wrapper struct every consumer must branch on)**: the
+  issue's own objection ("every `.byteLength`/`.slice`/DataView/TA consumer casts
+  to the shared vec type and must handle both shapes") **evaporates under
+  subtyping**. A read-only consumer that does `any.convert_extern; ref.cast
+  $__vec_i32_byte; struct.get 0/1` succeeds on a `$__resizable_ab` instance
+  unchanged (is-a). So the **23 `i32_byte` sites need ZERO changes.** Only ~4
+  resizable-AWARE sites know the subtype: the ctor, `.resize()`, and the
+  `maxByteLength`/`resizable` getters.
+- vs **option 3 (side channel / identity map)**: no clean WasmGC identity-map
+  primitive; rejected by the issue and here.
+
+**resize() semantics on WasmGC** (Phase C): GC arrays can't grow in place, so
+`.resize(n)`:
+1. bounds-check `0 <= n <= maxByteLength` (RangeError otherwise, §25.1.6.x);
+2. `array.new_default $__arr_i32_byte` of size `n`; `array.copy` `min(oldLen,n)`
+   bytes; **`struct.set field1`** (swap `data` in place on the SAME vec struct);
+3. `struct.set field0 = n` (new byteLength).
+Views hold the vec struct ref (A.1) → observe the swap. (Grow-then-shrink zero
+re-extends per spec; array.copy min handles it.)
+
+**Type-index discipline (mandatory):** register `$__resizable_ab` **once, late,
+via a dedicated `getOrRegisterResizableAbType(ctx)`** memoized on ctx, mirroring
+`getOrRegisterDvWindowType`. Inserting a struct into `mod.types` shifts type
+indices; follow the established late+once registration pattern and verify
+`canonical-recgroup`/`resolve-layout` don't reorder it ahead of its supertype
+(the subtype must follow `$__vec_i32_byte` in type-index order or share its rec
+group). This is the one real hazard in A.2 — call it out in the C PR.
+
+### A.3 — Floor-gated sub-slice sequence
+
+Each slice is byte-inert-or-correct for non-buffer programs and
+**merge_group-floor-validated** (standalone floor is only checked on
+`merge_group`, per project rule). Ordered smallest-first:
+
+- **B1 — shared-backing views, offset-0, read+write (the landable first PR).**
+  Register `$__ta_view_<elem>` + `getOrRegisterTaViewType`. Replace
+  `emitTypedArrayFromByteBuffer`'s copy loop (`new-super.ts:5120-5228`) with a
+  `struct.new $__ta_view` holding `{length = bufByteLen/elemSize, buf = the
+  recovered vec, byteOffset = 0}`. Add the `isTaViewTypeIdx` element read+write
+  arm at `property-access.ts:7531` reusing `emitReadBytes`/`emitWriteBytes`
+  (LE). Also route the buffer-arg branch at `new-super.ts:3605` / `4597`.
+  **Fixes the exact verified probe** (sibling + DataView observability).
+  Floor risk: **LOW** — only the buffer-arg TA ctor path changes; typed-TA /
+  plain-array hot paths untouched (different typeIdx); non-buffer TAs byte-inert.
+- **B2 — view accessor props + windowing.** `$__ta_view` arms for `.length`,
+  `.byteLength` (`length*elemSize`), `.byteOffset`, `.buffer` (return `buf` as
+  externref — object identity!), `BYTES_PER_ELEMENT`; and
+  `new TypedArray(buf, byteOffset, length)` (non-zero window: ToIndex + RangeError
+  validation, byteOffset must be elemSize-aligned). Reuses the accessor arm at
+  `property-access.ts:3619`. Floor risk: **LOW** (additive prop reads).
+- **B3 — TA prototype methods over a view receiver.** `.set`, `.subarray`
+  (→ nested `$__ta_view` sharing `buf`, added byteOffset), `.fill`, `.slice`
+  (→ copy to fresh buffer per spec), iteration. Touches array-method dispatch to
+  recognise the view receiver. Floor risk: **MODERATE**; incremental, deferrable.
+- **C — resizable semantics (~62 candidate tests).** On A.2's subtype. C1:
+  `new ArrayBuffer(n, {maxByteLength})` → `$__resizable_ab` (TypeError non-object
+  options; RangeError `n > maxByteLength` or `maxByteLength > 2^53-1`;
+  `new-super.ts:4617` reads only `args[0]` today). C2: `maxByteLength`/`resizable`
+  getters (`ref.test $__resizable_ab`-discriminated; today degrade via
+  `emitProtoMemberBodyRefusal`, `array-object-proto.ts:642`). C3: `.resize()`
+  (realloc+swap+len per A.2). Length-tracking views reflect resize for free (B1
+  view refs the vec struct). Floor risk: **MODERATE** — the type-index insertion
+  hazard in A.2 is the thing to watch; the 23 sites are subtype-safe.
+- **D — dynamic `new <ctorVar>(rab)` real `[[Construct]]`, standalone.** A
+  `ref.test`-dispatch over the known TA intrinsics, mirroring
+  `emitDynamicNewFallback` (#2026) but for externref-backed builtins; constructs
+  a `$__ta_view` in both lanes (drops the host `__new_ctor` selector-losing
+  path). Floor risk: **MODERATE**. Gated on B (it builds views).
+- **E — runner harness shim** (`ctors`/`floatCtors`/`CreateResizableArrayBuffer`/
+  `CreateRabForTest`/`CollectValuesAndResize`/`TestIterationAndResize` in
+  `buildPreamble`, `tests/test262-runner.ts`). Lands **WITH** B–D so it yields
+  passes, not a lateral `ctors is not defined` → compile_error move. Floor risk:
+  **LOW** (runner-only, no codegen). MUST NOT land alone (opus-1524 measured
+  0 passes + `single bucket >50` gate risk).
+
+### A.4 — Estimated pass-count
+- **Non-resizable TA/DV shared-backing (Phase B, NO harness shim needed** — these
+  tests don't reference `ctors`): the subset of `built-ins/TypedArray` +
+  `built-ins/DataView` asserting a view observes buffer/sibling writes, `.buffer`
+  identity, and byteOffset windowing. Honest bounded estimate: **~20–45 directly
+  flipped** by B1+B2 (double-digit), with more unlocked as B3 lands. The value is
+  **broad but diffuse** — this is substrate under many TA/DV tests, so the
+  *directly-attributable* B1 delta is modest even though it removes a
+  widely-shared blocker. (A scoped `built-ins/{TypedArray,DataView}` run on the
+  B1 branch will pin the real number; recommend the dev capture it in the PR.)
+- **Resizable cluster (C+D+E together):** ~62 candidate
+  (`resize:22, maxByteLength:11, resizable:10`, ctor-options ~19). The dominant
+  ~180 `resizable-ctors` sub-bucket of #1524 becomes **reachable** once E lands
+  with B–D, but not all 180 flip — many need the full
+  length-tracking-mid-iteration chain (B1's vec-struct-ref makes it *possible*;
+  each test still exercises specific semantics). Realistic landed delta for
+  C+D+E: **~40–80**, with the remainder of the 180 following incrementally.
+
+### A.5 — HONEST verdict
+**Phase B is a tractable, bounded slice on this representation — specifically B1
+is a single focused dev PR.** The reason it is bounded (not a full array-rep
+rewrite) is the deliberate design of A.1+A.2: the discriminated byte-view +
+the vec **subtype** confine the blast radius so the shared vec struct and its 23
+sites are **untouched**. B1 does not invent machinery — it composes the already-
+present byte engine (`dataview-native.ts`) with the already-present typeIdx-
+discrimination pattern (`$__subview`), swapping one copy loop for a `struct.new`
++ two access arms.
+
+**The array-rep change itself does NOT need to be staged as a multi-PR rewrite**
+— that is the whole point of choosing subtype-over-mutate. What IS staged is the
+**epic** (B1→B2→B3→C→D→E): only B (views) is independently floor-positive early;
+C/D must land together with E's shim to score the resizable cluster.
+
+**Recommended smallest floor-positive first PR: B1.** It fixes the verified
+correctness bug (sibling/DataView observability) that independently blocks a
+slice of non-resizable TA/DV, is byte-inert for everything else, and lays the
+exact representation (vec-struct-ref views + subtype-ready buffer) that C builds
+on with no rework. This is a **large deliberate campaign with a genuinely small,
+correct, floor-positive first step** — proceed with B1.
+
 ## Acceptance criteria (for the epic, not one PR)
 - Sibling TA/DataView views over one ArrayBuffer observe each other's writes.
 - `new ArrayBuffer(n, {maxByteLength})` stores max; `.resize()` updates
