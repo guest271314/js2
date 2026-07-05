@@ -2329,6 +2329,35 @@ function _maybeWrapCallableUnknownArity(
 }
 
 /**
+ * (#3051) Wrap a callable stored as `regexp.exec` so its RETURN value — the
+ * match result object the RegExp protocol reads — is exposed to the native
+ * engine via `_wrapForHost`. The user overrides `exec` with a compiled
+ * function that returns a plain object literal (`{0: '…', index: {valueOf…},
+ * length: …, groups: …}`). Compiled object literals are opaque WasmGC structs;
+ * when V8's `RegExp.prototype[@@replace]` / `[@@split]` / `[@@match]` /
+ * `[@@search]` protocol does `Get(result, "0" | "index" | "length" | "groups")`
+ * on that struct it reads `undefined`, and the spec-mandated `ToString` /
+ * `ToIntegerOrInfinity` / `ToLength` coercions (including nested `valueOf` /
+ * `toString` on capture / index sub-objects) never run. Routing the return
+ * through `_wrapForHost` presents the struct as a host proxy whose get-trap
+ * surfaces the numeric / named fields and wraps nested closures, so the native
+ * protocol's Get + ToXxx chain observes the right values. Arrays and non-struct
+ * returns pass through unchanged (`_wrapForHost` is a no-op on them).
+ */
+function _wrapExecReturnForHost(
+  fn: (...args: any[]) => any,
+  callbackState?: { getExports: () => Record<string, Function> | undefined },
+): (...args: any[]) => any {
+  return function execReturnBridge(this: any, ...args: any[]): any {
+    const ret = fn.apply(this, args);
+    if (ret != null && typeof ret === "object" && _isWasmStruct(ret)) {
+      return _wrapForHost(ret, callbackState?.getExports());
+    }
+    return ret;
+  };
+}
+
+/**
  * (#2702) Tri-state result of `V instanceof target` per ECMA-262 §13.10.2
  * (InstanceofOperator) + §7.3.20 (OrdinaryHasInstance). The wasm caller turns
  * this into a value or a *wasm-thrown* `TypeError` (a host-thrown JS error
@@ -8391,7 +8420,15 @@ assert._isSameValue = isSameValue;
           // struct — `p1.then = fn; Promise.race([p1])` traps with
           // "object is not a function". Wrap it via __call_fn_<arity> so
           // host-driven invocation reaches the closure body.
-          const wrappedVal = _maybeWrapCallableUnknownArity(val, callbackState);
+          let wrappedVal = _maybeWrapCallableUnknownArity(val, callbackState);
+          // (#3051) `regexp.exec = fn` override: the native RegExp protocol
+          // (@@replace/@@split/@@match/@@search) calls this and reads the
+          // returned match-result object via Get + ToXxx. A compiled result
+          // object literal is an opaque WasmGC struct, so wrap the return in a
+          // host proxy for the spec coercions to observe its fields.
+          if (typeof wrappedVal === "function" && key === "exec" && obj instanceof RegExp) {
+            wrappedVal = _wrapExecReturnForHost(wrappedVal, callbackState);
+          }
           _safeSet(obj, key, wrappedVal, undefined, callbackState);
         };
       // (#2017) Strict-mode property write — identical to `__extern_set` except a
@@ -8402,7 +8439,12 @@ assert._isSameValue = isSameValue;
       // throw catchable by the user's try/catch.
       if (name === "__extern_set_strict")
         return (obj: any, key: any, val: any) => {
-          const wrappedVal = _maybeWrapCallableUnknownArity(val, callbackState);
+          let wrappedVal = _maybeWrapCallableUnknownArity(val, callbackState);
+          // (#3051) See __extern_set: wrap a `regexp.exec` override's return so
+          // the native RegExp protocol can read the compiled result object.
+          if (typeof wrappedVal === "function" && key === "exec" && obj instanceof RegExp) {
+            wrappedVal = _wrapExecReturnForHost(wrappedVal, callbackState);
+          }
           _safeSet(obj, key, wrappedVal, undefined, callbackState, /* strict */ true);
         };
       if (name === "__extern_length")
@@ -13473,7 +13515,13 @@ assert._isSameValue = isSameValue;
       return (obj: any, key: any, val: any) => {
         // (#860) Wrap closure-as-value before storing — see __extern_set
         // binding above. Mirrors the by-name path.
-        const wrappedVal = _maybeWrapCallableUnknownArity(val, callbackState);
+        let wrappedVal = _maybeWrapCallableUnknownArity(val, callbackState);
+        // (#3051) `regexp.exec = fn` override — wrap the return so the native
+        // RegExp protocol (@@replace/@@split/@@match/@@search) can read the
+        // compiled match-result object (a WasmGC struct) via Get + ToXxx.
+        if (typeof wrappedVal === "function" && key === "exec" && obj instanceof RegExp) {
+          wrappedVal = _wrapExecReturnForHost(wrappedVal, callbackState);
+        }
         _safeSet(obj, key, wrappedVal, undefined, callbackState);
       };
     case "extern_set_strict":
@@ -13483,7 +13531,12 @@ assert._isSameValue = isSameValue;
       // `obj.k = v` accessor writes here (ESM is always strict); the throw is
       // catchable in the user's try/catch via the host-import exception bridge.
       return (obj: any, key: any, val: any) => {
-        const wrappedVal = _maybeWrapCallableUnknownArity(val, callbackState);
+        let wrappedVal = _maybeWrapCallableUnknownArity(val, callbackState);
+        // (#3051) See extern_set — wrap a `regexp.exec` override's return so the
+        // native RegExp protocol can read the compiled result object.
+        if (typeof wrappedVal === "function" && key === "exec" && obj instanceof RegExp) {
+          wrappedVal = _wrapExecReturnForHost(wrappedVal, callbackState);
+        }
         _safeSet(obj, key, wrappedVal, undefined, callbackState, /* strict */ true);
       };
     case "host_eq":
