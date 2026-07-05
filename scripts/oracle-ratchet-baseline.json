@@ -227,6 +227,12 @@
       "reason": "#3000 Phase-1b: the single ctx.checker.getTypeAtLocation call above (buildIrClassShapes field-type derivation)."
     },
     {
+      "file": "src/codegen/index.ts",
+      "field": "getTypeAtLocation",
+      "extra": 1,
+      "reason": "#3057: sourceHasDynamicTaConstruct pre-scan gates the dynamic-`new ctorVar(buffer)` element-codec flag on the first arg's NOMINAL buffer type (getSymbol().name === 'ArrayBuffer'/'SharedArrayBuffer'/'DataView'), mirroring the runtime dynamic-construct gate in new-super.ts. ctx.oracle's TypeFact union exposes only jsTag/shape, not the nominal symbol name this precision gate requires (dropping it over-triggers on new Map(x)/new Set(x)/... and breaks byte-inertness). Uses a local `checker` param (not ctx.checker), so only getTypeAtLocation grows."
+    },
+    {
       "file": "src/codegen/generators-native.ts",
       "field": "getTypeAtLocation",
       "extra": 1,

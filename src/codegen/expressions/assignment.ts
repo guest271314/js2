@@ -29,7 +29,7 @@ import {
   TYPED_ARRAY_NAMES,
 } from "../index.js";
 import { getSubviewArrTypeIdx, isSubviewTypeIdx, isTaViewTypeIdx } from "../registry/types.js"; // (#2357/#47) subview write; (#3054 B1) TA view write
-import { emitTaViewElementSet } from "../dataview-native.js"; // (#3054 B1) shared-backing TA view write
+import { emitTaDynViewElementSet, emitTaViewElementSet } from "../dataview-native.js"; // (#3054 B1) shared-backing TA view write; (#3057) dynamic view element write
 import { buildDestructureNullThrow, patternIteratorStepCount } from "../destructuring-params.js";
 import { resolveComputedKeyExpression } from "../literals.js";
 import { resolveReceiverStruct } from "../fnctor-escape-gate.js"; // (#2681/#2686 A3) pinned-struct write dispatch
@@ -41,6 +41,7 @@ import {
   emitCapturedBoxGlobalWrite,
   emitNullGuardedStructGet,
   getCapturedBoxGlobal,
+  isNumericIndexExpression,
   isProvablyNonNull,
   isSafeBoundsEliminated,
   tryEmitDeleteAwareDynamicSet,
@@ -3870,6 +3871,26 @@ function compileElementAssignment(
 
   // Non-ref types (externref, f64, i32): fallback to __extern_set(obj, key, val)
   if (arrType.kind !== "ref" && arrType.kind !== "ref_null") {
+    // (#3057) A boxed `$__ta_dyn_view` (dynamic `new <ctorVar>(rab)`) reaches here as
+    // an externref receiver with a numeric index. Its element kind is a RUNTIME
+    // field, so `__extern_set` can't byte-encode it (writes silently no-op'd —
+    // #3054 D+E banked this). Route through the runtime-kind byte codec, which
+    // `ref.test $__ta_dyn_view` FIRST and falls through to the EXACT `__extern_set`
+    // path (via compileExternSetFallback semantics) for any non-dyn-view receiver,
+    // so plain-array `any[i]=v` is unaffected. Gated on the module pre-scan
+    // (`moduleUsesDynTaView`) so a helper compiled before the construct still routes
+    // correctly; byte-inert when the module has no dynamic TA view. Standalone lane.
+    if (
+      arrType.kind === "externref" &&
+      ctx.standalone &&
+      ctx.moduleUsesDynTaView &&
+      isNumericIndexExpression(ctx, target.argumentExpression)
+    ) {
+      const dynR = emitTaDynViewElementSet(ctx, fctx, target.argumentExpression, value, (e, h) =>
+        compileExpression(ctx, fctx, e, h),
+      );
+      if (dynR) return dynR;
+    }
     return compileExternSetFallback(ctx, fctx, target, value, arrType);
   }
   const typeIdx = (arrType as { typeIdx: number }).typeIdx;

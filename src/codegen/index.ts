@@ -352,6 +352,71 @@ function sourceContainsDelete(sourceFile: ts.SourceFile): boolean {
 }
 
 /**
+ * (#3057) True when the source dynamically constructs a `$__ta_dyn_view` —
+ * `new <ctorExpr>(bufferArg[, off[, len]])` where `<ctorExpr>` is an IDENTIFIER
+ * that is NOT a statically-named TA constructor (so it's a TA constructor held in
+ * a variable / array element, type `any` or a TA-ctor union — test262
+ * `for (ctor of ctors) new ctor(rab, …)` / `CreateRabForTest`) and NOT a user
+ * class. Mirrors the runtime dynamic-construct gate in `new-super.ts` (buffer-typed
+ * first arg, non-numeric-literal). Used to enable the runtime-kind element byte
+ * codec on the generic index path for helper functions compiled BEFORE the
+ * construct (the `$__ta_dyn_view` type registers lazily). Byte-inert: modules
+ * without this pattern never set the flag, so they never emit the codec arm.
+ */
+function sourceHasDynamicTaConstruct(checker: ts.TypeChecker, sourceFile: ts.SourceFile): boolean {
+  const TA_NAMES = new Set([
+    "Int8Array",
+    "Uint8Array",
+    "Uint8ClampedArray",
+    "Int16Array",
+    "Uint16Array",
+    "Int32Array",
+    "Uint32Array",
+    "Float32Array",
+    "Float64Array",
+  ]);
+  let found = false;
+  function walk(node: ts.Node): void {
+    if (found) return;
+    if (ts.isNewExpression(node) && node.arguments && node.arguments.length >= 1) {
+      let callee: ts.Expression = node.expression;
+      while (ts.isParenthesizedExpression(callee) || ts.isAsExpression(callee) || ts.isNonNullExpression(callee)) {
+        callee = callee.expression;
+      }
+      const arg0 = node.arguments[0]!;
+      if (ts.isIdentifier(callee) && !ts.isNumericLiteral(arg0)) {
+        // Static TA name (`new Uint8Array(buf)`) is handled by the static view
+        // ctor path, never the dynamic one — skip it.
+        if (!TA_NAMES.has(callee.text)) {
+          // A user class callee resolves to a ClassDeclaration value — skip; only
+          // a value-bound ctor (variable / param / any) reaches the dynamic path.
+          const sym = checker.getSymbolAtLocation(callee);
+          const decl = sym?.valueDeclaration;
+          const isUserClass = decl !== undefined && ts.isClassDeclaration(decl);
+          if (!isUserClass) {
+            // Buffer-typed first arg gates the dynamic TA construct (matches the
+            // runtime gate) — excludes `new fn(x)` on unrelated identifiers.
+            let arg0Sym: string | undefined;
+            try {
+              arg0Sym = checker.getTypeAtLocation(arg0).getSymbol?.()?.name;
+            } catch {
+              arg0Sym = undefined;
+            }
+            if (arg0Sym === "ArrayBuffer" || arg0Sym === "SharedArrayBuffer" || arg0Sym === "DataView") {
+              found = true;
+              return;
+            }
+          }
+        }
+      }
+    }
+    forEachChild(node, walk);
+  }
+  walk(sourceFile);
+  return found;
+}
+
+/**
  * #1623 — true when the source contains any object/array binding pattern
  * (destructuring) in a parameter, variable declaration, or assignment target.
  * Used to decide whether to pre-emit the WASI/standalone TypeError constructor
@@ -1657,6 +1722,14 @@ export function generateModule(
   // byte-identical. Side-effect free; safe to run unconditionally (no fnctor
   // `new` sites ⇒ empty result ⇒ no-op).
   ctx.fnctorEscapeGate = analyzeFnctorEscapeGate(ast.checker, ast.sourceFile);
+  // (#3057) Pre-scan for a dynamic `new <ctorVar>(buffer)` construct so the
+  // runtime-kind element byte codec on the generic index path (`ta[i]` / `ta[i]=v`
+  // for an `any` receiver) is enabled in helper functions compiled BEFORE the
+  // construct (the `$__ta_dyn_view` type registers lazily). Host-free lane only;
+  // byte-inert when the pattern is absent.
+  if (ctx.standalone || ctx.wasi) {
+    ctx.moduleUsesDynTaView = sourceHasDynamicTaConstruct(ast.checker, ast.sourceFile);
+  }
   try {
     // WASI target: register linear memory, bump pointer global, and WASI imports
     if (ctx.wasi) {

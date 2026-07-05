@@ -1740,6 +1740,17 @@ export interface CodegenContext {
    * -1 = not yet registered. Byte-inert: only emitted for a dynamic `new ctor(…)`.
    */
   taDynViewTypeIdx: number;
+  /**
+   * (#3057) Set by a module pre-scan when the source contains a dynamic
+   * `new <ctorVar>(bufferArg)` (a `$__ta_dyn_view`-producing construct). Enables the
+   * runtime-kind element byte-codec arm on the generic dynamic index path (`ta[i]` /
+   * `ta[i]=v` for an `any` receiver) even in a helper function compiled BEFORE the
+   * construct — the `$__ta_dyn_view` type is registered lazily, so a plain
+   * `taDynViewTypeIdx >= 0` check would miss cross-function reads (ToNumbers/Collect).
+   * Byte-inert: false for any module without the construct, so those never emit the
+   * codec arm and never register the type.
+   */
+  moduleUsesDynTaView: boolean;
   /** Type index for the WasmGC `$Error_struct` used in standalone/WASI mode (#1104). -1 = not yet registered. */
   errorStructTypeIdx: number;
   /** Extra properties for empty object variables */

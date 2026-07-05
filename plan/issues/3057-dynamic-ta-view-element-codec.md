@@ -1,7 +1,9 @@
 ---
 id: 3057
 title: "Dynamic `$__ta_dyn_view` element get/set — runtime-kind byte codec on the generic dynamic index path"
-status: ready
+status: done
+assignee: opus-3057
+completed: 2026-07-05
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -115,3 +117,61 @@ story #3054 D+E opened.
 - `src/codegen/dataview-native.ts` -- the LE byte codec to reuse.
 - `src/codegen/property-access.ts` -- the generic dynamic index dispatch site
   where the new `ref.test $__ta_dyn_view` codec arm lands.
+
+## Implementation notes (opus-3057)
+
+### Measure-first: the trap hypothesis was DISPROVEN
+
+The issue framing (from #2740) hypothesised element access might TRAP or CE,
+which would make fixing the codec a large trap→run floor win. Direct standalone
+probes on current main proved otherwise: **element access does NOT trap and does
+NOT CE — it RUNS and returns `0`** (writes silently no-op'd through `__extern_set`
+on the opaque struct; reads returned `0` through `__extern_get_idx`). Confirmed
+for Int32/Uint8/Float64 round-trips + sibling-view aliasing (all returned 0).
+
+Running the actual resizable element-access test262 files through the standalone
+lane (`runTest262File(..., "standalone")`) classified the failures as a MIX:
+some numeric-only element tests (`out-of-bounds-get-and-set.js`) already pass
+**vacuously** (return 0, unenforced numeric asserts — #3055/#3056); the failing
+ones fail on **enforced structural asserts** that read elements via
+`ToNumbers`/`Collect`/`compareArray` through an `any` receiver (sort / copyWithin
+/ reduce / forEach `assert.compareArray(ToNumbers(taFull), [...])`). The CE/trap
+buckets in that sample are unrelated proto/species gaps (`.from`, `.entries`,
+`.slice`, speciesctor), **not** the raw index codec. So the payoff is the
+smaller correctness-flip case (enforced structural element asserts) plus
+**de-vacuifying** the already-passing numeric tests — NOT a ~155 trap→run flip.
+The fix is correct and needed regardless of the exact floor count.
+
+### Design
+
+Two new functions in `dataview-native.ts` — `emitTaDynViewElementGet` /
+`emitTaDynViewElementSet` — reuse the existing LE `emitReadBytes`/`emitWriteBytes`
+engine via nested `if`-chains over the 9 `TA_CTOR_KINDS` (each arm carries the
+STATIC per-kind width/signedness/float descriptor; the Uint8Clamped arm applies
+ToUint8Clamp before the write). The address is `byteOffset + i*elemSize(kind)`
+with a runtime `elemSize` (`pushElemSizeForKind`) and the effective (length-
+tracking) bound from `pushTaDynViewEffectiveLen`. Get returns externref (boxed
+number in-bounds, `undefined`/`ref.null.extern` OOB); Set no-ops OOB (§10.4.5.16).
+
+### Hazard guard (opus-3054-de flag)
+
+The generic dynamic index path is SHARED with boxed plain-array `any` receivers.
+Both functions `ref.test $__ta_dyn_view` FIRST and, on a miss, fall through to the
+EXACT existing behavior (`__extern_get_idx` for read, `__extern_set` for write) —
+so plain-array `any[i]` get/set is byte-behavior-preserved (verified: identical
+result with and without a dyn view in the module). Index and value are each
+compiled ONCE (single-evaluation) and shared across both branches.
+
+### Ordering hazard + fix (the non-obvious part)
+
+The `$__ta_dyn_view` type registers LAZILY at the construct. A helper like
+`ToNumbers(array)` that reads `array[i]` is compiled BEFORE the construct, so a
+naive `taDynViewTypeIdx >= 0` gate would MISS every cross-function read (the
+common test262 shape) — it returned 0. Fixed with a module pre-scan
+(`sourceHasDynamicTaConstruct` in `index.ts` → `ctx.moduleUsesDynTaView`) that
+detects a dynamic `new <ctorVar>(bufferArg)` and enables the codec arm for ALL
+functions; the type is then registered on demand (`getOrRegisterTaDynViewType`)
+at whichever site compiles first. Byte-inert: the flag is false for any module
+without the construct, so no new instruction is emitted and the type is never
+registered (all new emit paths are behind the flag). Static `new Uint8Array(buf)`
+is excluded (handled by the static-view path), as are user-class callees.

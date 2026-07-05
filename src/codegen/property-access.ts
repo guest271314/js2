@@ -123,11 +123,12 @@ import {
 } from "./registry/types.js";
 import {
   emitTaCtorBytesPerElement,
+  emitTaDynViewElementGet,
   emitTaViewAccessor,
   emitTaViewDynamicByteLength,
   emitTaViewElementGet,
   pushTaViewEffectiveLen,
-} from "./dataview-native.js"; // (#3054 B1/B2/C) shared-backing TA view read + accessor props + resize length-tracking; (#3054 D) dynamic ctor BYTES_PER_ELEMENT + dynamic view byteLength
+} from "./dataview-native.js"; // (#3054 B1/B2/C) shared-backing TA view read + accessor props + resize length-tracking; (#3054 D) dynamic ctor BYTES_PER_ELEMENT + dynamic view byteLength; (#3057) dynamic view element get
 import {
   coerceType,
   compileExpression,
@@ -7478,7 +7479,7 @@ export function compileElementAccess(
  * property key, which `__extern_get` must keep handling). False on any checker
  * error.
  */
-function isNumericIndexExpression(ctx: CodegenContext, index: ts.Expression): boolean {
+export function isNumericIndexExpression(ctx: CodegenContext, index: ts.Expression): boolean {
   // Strip parens / `as` wrappers so `a[(i)]` / `a[i as number]` still match.
   let inner: ts.Expression = index;
   while (ts.isParenthesizedExpression(inner) || ts.isAsExpression(inner) || ts.isTypeAssertionExpression(inner)) {
@@ -7624,6 +7625,22 @@ export function compileElementAccessBody(
     // wasi and host mode keep the existing `__extern_get` path. A non-numeric
     // (string/symbol/computed) key always stays on `__extern_get`.
     if (ctx.standalone && isNumericIndexExpression(ctx, expr.argumentExpression)) {
+      // (#3057) A boxed `$__ta_dyn_view` (dynamic `new <ctorVar>(rab)`) reaches this
+      // arm as an `any`/externref receiver with a numeric index. Its element kind is
+      // a RUNTIME field, so `__extern_get_idx` can't byte-decode it (reads returned
+      // 0 — #3054 D+E banked this). Route through the runtime-kind byte codec, which
+      // `ref.test $__ta_dyn_view` FIRST and — crucially — falls through to the EXACT
+      // `__extern_get_idx` path below for any non-dyn-view receiver (plain arrays /
+      // `$ObjVec` / `$Object`), so plain-array `any[i]` is unaffected. Gated on the
+      // module pre-scan (`moduleUsesDynTaView`) so a helper compiled before the
+      // construct still routes correctly; byte-inert when the module has no
+      // dynamic TA view.
+      if (ctx.moduleUsesDynTaView) {
+        const dynR = emitTaDynViewElementGet(ctx, fctx, expr.argumentExpression, (e, h) =>
+          compileExpression(ctx, fctx, e, h),
+        );
+        if (dynR) return dynR;
+      }
       compileExpression(ctx, fctx, expr.argumentExpression, { kind: "f64" });
       const getIdxFn = ensureLateImport(
         ctx,
