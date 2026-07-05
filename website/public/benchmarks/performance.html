@@ -1,0 +1,533 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>js2wasm — Performance benchmarks</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      :root {
+        --bg: #060a14;
+        --bg-soft: #0c1220;
+        --surface: rgba(255, 255, 255, 0.05);
+        --surface-hover: rgba(255, 255, 255, 0.08);
+        --border: rgba(255, 255, 255, 0.12);
+        --text: #ffffff;
+        --text-muted: rgba(255, 255, 255, 0.46);
+        --pass: #3fb950;
+        --fail: #f85149;
+        --skip: rgba(255, 255, 255, 0.4);
+        --error: #d29922;
+        --accent: rgba(255, 255, 255, 0.75);
+        --bar-bg: rgba(255, 255, 255, 0.1);
+        --mono: "JetBrains Mono", "SF Mono", SFMono-Regular, Consolas, monospace;
+        --font: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        font-family: var(--font);
+        background: var(--bg);
+        color: var(--text);
+        line-height: 1.5;
+        padding: 2rem;
+        padding-top: 88px;
+        max-width: 1200px;
+        margin: 0 auto;
+      }
+      h1 {
+        font-size: 2.625rem;
+        font-weight: 600;
+        margin-bottom: 0.25rem;
+      }
+      .brand {
+        font-size: 1.5rem;
+        font-weight: 700;
+        margin-bottom: 1.5rem;
+      }
+      h2 {
+        font-size: 1.25rem;
+        font-weight: 600;
+        margin: 2rem 0 1rem;
+        color: var(--text);
+      }
+      h3 {
+        font-size: 1rem;
+        font-weight: 600;
+        margin: 1.5rem 0 0.5rem;
+        color: var(--text-muted);
+      }
+      .intro {
+        color: rgba(255, 255, 255, 0.7);
+        font-size: 0.95rem;
+        margin: -0.25rem 0 1.5rem;
+        max-width: 70ch;
+      }
+      .back-link {
+        display: inline-block;
+        margin-bottom: 1.5rem;
+        color: #6db3ff;
+        text-decoration: none;
+        font-size: 0.9rem;
+      }
+      .back-link:hover {
+        text-decoration: underline;
+      }
+      .no-data {
+        color: var(--text-muted);
+        font-style: italic;
+        padding: 2rem;
+        text-align: center;
+      }
+      .legend {
+        display: flex;
+        gap: 1.5rem;
+        margin-bottom: 1rem;
+        font-size: 0.75rem;
+        color: var(--text-muted);
+      }
+      .legend-item {
+        display: flex;
+        align-items: center;
+        gap: 0.375rem;
+      }
+      .legend-dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 2px;
+        flex-shrink: 0;
+      }
+      .bench-section {
+        max-width: 1200px;
+        margin: 0 auto;
+      }
+      .bench-snippet-grid {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: center;
+        align-items: flex-start;
+        gap: 1rem;
+        margin-top: 1rem;
+      }
+      .bench-snippet-card {
+        display: inline-block;
+        flex: 1 1 560px;
+        min-width: 320px;
+        max-width: 100%;
+        overflow: visible;
+      }
+      .bench-snippet-head {
+        padding: 0 0 0.75rem;
+        font-size: 0.8rem;
+        font-weight: 600;
+      }
+      .bench-example-chart {
+        margin: 0 0 1rem;
+        min-width: 0;
+        max-width: calc(40ch + 76px);
+      }
+      .bench-snippet-card pre {
+        margin: 0;
+        overflow-x: auto;
+      }
+      .report-code-block {
+        display: inline-block;
+        min-width: 0;
+        width: max-content;
+        max-width: calc(40ch + 76px);
+        overflow-x: auto;
+        padding: 34px 38px;
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        background: #0c1220;
+        font-family: var(--mono);
+        font-size: 14px;
+        line-height: 1.8;
+        color: rgba(255, 255, 255, 0.72);
+        margin: 0;
+      }
+      .bench-name {
+        font-weight: 600;
+        font-size: 0.875rem;
+        margin-bottom: 0.75rem;
+      }
+      .trend-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+        gap: 1rem;
+      }
+      .trend-card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        padding: 1rem;
+      }
+      .trend-card .bench-name {
+        margin-bottom: 0.5rem;
+      }
+      .trend-card svg {
+        display: block;
+        width: 100%;
+      }
+      .trend-meta {
+        display: flex;
+        justify-content: space-between;
+        font-size: 0.6875rem;
+        color: var(--text-muted);
+        margin-top: 0.375rem;
+        font-family: var(--mono);
+      }
+      .trend-delta {
+        font-weight: 600;
+      }
+      .trend-delta.improved {
+        color: var(--pass);
+      }
+      .trend-delta.regressed {
+        color: var(--fail);
+      }
+      .trend-delta.neutral {
+        color: var(--text-muted);
+      }
+      @media (max-width: 640px) {
+        body {
+          padding: 1rem;
+          padding-top: 80px;
+        }
+        h1 {
+          font-size: 2rem;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <site-nav base="../"></site-nav>
+    <h1 class="brand">Performance benchmarks</h1>
+    <p class="intro">
+      How js2wasm-compiled WebAssembly performs against plain JavaScript across a set of representative workloads —
+      runtime speed per benchmark, plus how those numbers have trended across benchmark runs over time.
+    </p>
+    <a class="back-link" href="../#benchmarks">← Back to home</a>
+    <div id="app"><div class="no-data">Loading benchmark data…</div></div>
+
+    <script type="module" src="../components/perf-benchmark-chart.js"></script>
+    <script src="../components/site-nav.js"></script>
+    <script>
+      const BENCH_SUITE_FILES = [
+        "benchmarks/suites/strings.ts",
+        "benchmarks/suites/arrays.ts",
+        "benchmarks/suites/dom.ts",
+        "benchmarks/suites/mixed.ts",
+      ];
+      const BASE_PATH = window.location.pathname.replace(/\/benchmarks\/.*$/, "");
+
+      function assetPath(path) {
+        if (!BASE_PATH) return `/${path}`;
+        return `${BASE_PATH}/${path}`;
+      }
+
+      async function loadJSON(url) {
+        try {
+          const r = await fetch(url);
+          return r.ok ? r.json() : null;
+        } catch {
+          return null;
+        }
+      }
+
+      function el(tag, attrs, ...children) {
+        const e = document.createElement(tag);
+        if (attrs)
+          for (const [k, v] of Object.entries(attrs)) {
+            if (k === "style" && typeof v === "object") Object.assign(e.style, v);
+            else if (k === "className") e.className = v;
+            else e.setAttribute(k, v);
+          }
+        for (const c of children) {
+          if (typeof c === "string") e.appendChild(document.createTextNode(c));
+          else if (c) e.appendChild(c);
+        }
+        return e;
+      }
+
+      function makeLegend(items) {
+        const legend = el("div", { className: "legend" });
+        for (const [label, color] of items) {
+          const dot = el("div", {
+            className: "legend-dot",
+            style: { background: color },
+          });
+          const item = el("div", { className: "legend-item" }, dot, " " + label);
+          legend.appendChild(item);
+        }
+        return legend;
+      }
+
+      let prettierBundlePromise = null;
+      async function formatBenchmarkSnippet(source) {
+        try {
+          prettierBundlePromise ||= Promise.all([
+            import("https://esm.sh/prettier@3.8.1/standalone"),
+            import("https://esm.sh/prettier@3.8.1/plugins/typescript"),
+            import("https://esm.sh/prettier@3.8.1/plugins/estree"),
+          ]);
+          const [{ format }, tsPlugin, estreePlugin] = await prettierBundlePromise;
+          return await format(source, {
+            parser: "typescript",
+            plugins: [tsPlugin.default ?? tsPlugin, estreePlugin.default ?? estreePlugin],
+            printWidth: 40,
+            semi: true,
+          });
+        } catch {
+          return source;
+        }
+      }
+
+      async function loadBenchmarkSnippets() {
+        const snippets = new Map();
+        await Promise.all(
+          BENCH_SUITE_FILES.map(async (path) => {
+            try {
+              const resp = await fetch(assetPath(path));
+              if (!resp.ok) return;
+              const source = await resp.text();
+              const pattern = /name:\s*"([^"]+)"[\s\S]*?source:\s*`([\s\S]*?)`,/g;
+              for (const match of source.matchAll(pattern)) {
+                const name = match[1];
+                const rawSnippet = match[2].replace(/^\n+|\n+$/g, "");
+                const snippet = await formatBenchmarkSnippet(rawSnippet);
+                if (name && snippet) snippets.set(name, snippet);
+              }
+            } catch {
+              // Keep the benchmark cards visible even if snippet files are unavailable.
+            }
+          }),
+        );
+        return snippets;
+      }
+
+      async function highlightReportCode() {
+        try {
+          const { codeToHtml } = await import("https://esm.sh/shiki@4.0.2/bundle/web");
+          const pres = document.querySelectorAll(".report-code-block");
+          for (const pre of pres) {
+            if (pre.dataset.highlighted === "true") continue;
+            const code = pre.textContent || "";
+            if (!code.trim()) continue;
+            const html = await codeToHtml(code.trim(), { lang: "typescript", theme: "material-theme-ocean" });
+            const match = html.match(/<code[^>]*>([\s\S]*)<\/code>/);
+            if (match) {
+              pre.innerHTML = match[1];
+              pre.dataset.highlighted = "true";
+            }
+          }
+        } catch {
+          // Keep plain code blocks if the highlighter fails to load.
+        }
+      }
+
+      function renderBenchmarks(snippets, container) {
+        const section = el("div", { className: "bench-section" });
+        section.appendChild(el("h2", null, "Performance Benchmarks"));
+        const snippetEntries = [...snippets.entries()];
+        if (snippetEntries.length > 0) {
+          section.appendChild(el("h3", null, "Benchmark Code Examples"));
+          const snippetGrid = el("div", { className: "bench-snippet-grid" });
+          for (const [name, snippet] of snippetEntries) {
+            const card = el("div", { className: "bench-snippet-card" });
+            card.appendChild(el("div", { className: "bench-snippet-head" }, name.split("/")[1] || name));
+            const runtimeChart = document.createElement("perf-benchmark-chart");
+            runtimeChart.className = "bench-example-chart";
+            runtimeChart.setAttribute("src", assetPath("benchmarks/results/latest.json"));
+            runtimeChart.setAttribute("mode", "benchmark-runtime");
+            runtimeChart.setAttribute("benchmark", name);
+            runtimeChart.setAttribute("title", "Runtime Speed");
+            runtimeChart.setAttribute("legend", "Wasm runtime speed relative to JS (larger is better, whisker = ±1σ)");
+            card.appendChild(runtimeChart);
+            card.appendChild(el("pre", { className: "report-code-block" }, snippet));
+            snippetGrid.appendChild(card);
+          }
+          section.appendChild(snippetGrid);
+        }
+        container.appendChild(section);
+      }
+
+      const STRAT_COLORS = {
+        js: "#8b949e",
+        "host-call": "#58a6ff",
+        "gc-native": "#3fb950",
+        "linear-memory": "#d29922",
+      };
+
+      function renderTrends(history, container) {
+        if (!history || history.length < 2) return;
+
+        container.appendChild(el("h2", null, "Performance Trends"));
+        container.appendChild(el("div", { className: "subtitle" }, history.length + " benchmark runs"));
+        container.appendChild(
+          makeLegend([
+            ["JavaScript", STRAT_COLORS.js],
+            ["Host-call", STRAT_COLORS["host-call"]],
+            ["GC-native", STRAT_COLORS["gc-native"]],
+            ["Linear-memory", STRAT_COLORS["linear-memory"]],
+          ]),
+        );
+
+        // Collect all benchmark names that appear in at least 2 runs
+        const allNames = new Set();
+        for (const run of history) {
+          for (const name of Object.keys(run.benchmarks)) allNames.add(name);
+        }
+
+        const benchGroups = new Map();
+        for (const name of [...allNames].sort()) {
+          const group = name.split("/")[0];
+          if (!benchGroups.has(group)) benchGroups.set(group, []);
+          benchGroups.get(group).push(name);
+        }
+
+        for (const [group, names] of benchGroups) {
+          container.appendChild(el("h3", null, group.charAt(0).toUpperCase() + group.slice(1)));
+          const grid = el("div", { className: "trend-grid" });
+
+          for (const name of names) {
+            // Collect data points per strategy
+            const stratData = {};
+            for (let i = 0; i < history.length; i++) {
+              const b = history[i].benchmarks[name];
+              if (!b) continue;
+              for (const [strat, ms] of Object.entries(b)) {
+                if (!stratData[strat]) stratData[strat] = [];
+                stratData[strat].push({ idx: i, ms });
+              }
+            }
+
+            // Skip if fewer than 2 data points for all strategies
+            const hasData = Object.values(stratData).some((d) => d.length >= 2);
+            if (!hasData) continue;
+
+            const card = el("div", { className: "trend-card" });
+            const shortN = name.split("/")[1] || name;
+            const nameEl = el("div", { className: "bench-name" }, shortN);
+            card.appendChild(nameEl);
+
+            // SVG sparkline chart
+            const W = 300,
+              H = 80,
+              PAD = 4;
+            const svgNS = "http://www.w3.org/2000/svg";
+            const svg = document.createElementNS(svgNS, "svg");
+            svg.setAttribute("viewBox", "0 0 " + W + " " + H);
+            svg.setAttribute("preserveAspectRatio", "none");
+            svg.style.height = H + "px";
+
+            // Find global min/max across all strategies for this benchmark
+            let globalMin = Infinity,
+              globalMax = 0;
+            for (const pts of Object.values(stratData)) {
+              for (const p of pts) {
+                if (p.ms < globalMin) globalMin = p.ms;
+                if (p.ms > globalMax) globalMax = p.ms;
+              }
+            }
+            if (globalMax === globalMin) globalMax = globalMin + 1;
+            // Add 10% padding
+            const range = globalMax - globalMin;
+            globalMin = Math.max(0, globalMin - range * 0.1);
+            globalMax = globalMax + range * 0.1;
+
+            const xScale = (idx) => PAD + (idx / (history.length - 1)) * (W - 2 * PAD);
+            const yScale = (ms) => PAD + (1 - (ms - globalMin) / (globalMax - globalMin)) * (H - 2 * PAD);
+
+            // Draw lines for each strategy
+            for (const [strat, pts] of Object.entries(stratData)) {
+              if (pts.length < 2) continue;
+              const color = STRAT_COLORS[strat] || "#888";
+
+              let d = "";
+              for (let i = 0; i < pts.length; i++) {
+                const x = xScale(pts[i].idx);
+                const y = yScale(pts[i].ms);
+                d += (i === 0 ? "M" : "L") + x.toFixed(1) + "," + y.toFixed(1);
+              }
+
+              const path = document.createElementNS(svgNS, "path");
+              path.setAttribute("d", d);
+              path.setAttribute("fill", "none");
+              path.setAttribute("stroke", color);
+              path.setAttribute("stroke-width", "2");
+              path.setAttribute("stroke-linecap", "round");
+              path.setAttribute("stroke-linejoin", "round");
+              svg.appendChild(path);
+
+              // Draw dots at each point
+              for (const p of pts) {
+                const circle = document.createElementNS(svgNS, "circle");
+                circle.setAttribute("cx", xScale(p.idx).toFixed(1));
+                circle.setAttribute("cy", yScale(p.ms).toFixed(1));
+                circle.setAttribute("r", "3");
+                circle.setAttribute("fill", color);
+                svg.appendChild(circle);
+              }
+            }
+
+            card.appendChild(svg);
+
+            // Show delta for the primary strategy (host-call preferred, then gc-native, then js)
+            const primaryStrat = stratData["host-call"] ? "host-call" : stratData["gc-native"] ? "gc-native" : "js";
+            const pts = stratData[primaryStrat];
+            if (pts && pts.length >= 2) {
+              const first = pts[0].ms;
+              const last = pts[pts.length - 1].ms;
+              const delta = ((last - first) / first) * 100;
+              const meta = el("div", { className: "trend-meta" });
+
+              const firstDate = history[pts[0].idx].timestamp.split("T")[0];
+              const lastDate = history[pts[pts.length - 1].idx].timestamp.split("T")[0];
+              meta.appendChild(el("span", null, firstDate + " → " + lastDate));
+
+              const deltaClass = delta < -5 ? "improved" : delta > 5 ? "regressed" : "neutral";
+              const deltaText = delta > 0 ? "+" + delta.toFixed(0) + "%" : delta.toFixed(0) + "%";
+              meta.appendChild(
+                el("span", { className: "trend-delta " + deltaClass }, deltaText + " (" + primaryStrat + ")"),
+              );
+
+              card.appendChild(meta);
+            }
+
+            grid.appendChild(card);
+          }
+          container.appendChild(grid);
+        }
+      }
+
+      async function main() {
+        const [benchmarkHistory, snippets] = await Promise.all([
+          loadJSON(assetPath("benchmarks/results/history.json")),
+          loadBenchmarkSnippets(),
+        ]);
+        const app = document.getElementById("app");
+        app.textContent = "";
+
+        renderBenchmarks(snippets, app);
+        await highlightReportCode();
+
+        if (benchmarkHistory && benchmarkHistory.length >= 2) {
+          renderTrends(benchmarkHistory, app);
+        } else {
+          app.appendChild(
+            el("div", { className: "no-data" }, "Not enough benchmark history yet to plot performance trends."),
+          );
+        }
+      }
+
+      main();
+    </script>
+  </body>
+</html>
