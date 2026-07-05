@@ -67,6 +67,41 @@ export function resolveConstantString(expr: ts.Expression): string | null {
 }
 
 /**
+ * (#3048) True when the parsed eval AST contains an object-literal shape that
+ * lowers through the `__make_getter_callback` host bridge in JS-host / GC mode:
+ * a get/set accessor, or a computed-property method whose key is not a plain
+ * numeric/string literal (the well-known-`Symbol` and runtime-key arms in
+ * literals.ts — a plain-literal computed key resolves to a static method name
+ * and takes the bridge-free struct path). Mirrors the `collectCallbackImports`
+ * detection in declarations.ts so an eval-embedded accessor gets its late import
+ * registered before the inline codegen references it.
+ */
+function evalNeedsGetterCallbackBridge(root: ts.Node): boolean {
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    if (found) return;
+    if (ts.isObjectLiteralExpression(node)) {
+      for (const p of node.properties) {
+        if (ts.isGetAccessorDeclaration(p) || ts.isSetAccessorDeclaration(p)) {
+          found = true;
+          return;
+        }
+        if (ts.isMethodDeclaration(p) && ts.isComputedPropertyName(p.name)) {
+          const inner = p.name.expression;
+          if (!(ts.isNumericLiteral(inner) || ts.isStringLiteralLike(inner))) {
+            found = true;
+            return;
+          }
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(root);
+  return found;
+}
+
+/**
  * Try to inline `eval("<constant>")` at compile time.
  *
  * Returns:
@@ -143,6 +178,23 @@ export function tryStaticEvalInline(
   const bodyIsStrict = evalBodyHasUseStrictDirective(stmts);
   if (!allNodesInlineSupported(sf, bodyIsStrict)) {
     return undefined;
+  }
+
+  // (#3048) The outer-file collection pre-pass (collectCallbackImports) never
+  // saw inside this eval SOURCE STRING, so any object-literal getter/setter or
+  // bridge-routed computed method it contains has NOT had its
+  // `__make_getter_callback` late-import registered — the inline getter/method
+  // codegen would then hit a hard CE "Missing __make_getter_callback import"
+  // (test262 `language/expressions/object/11.1.5*` compile a `get`/`set`
+  // accessor through `eval("o = {get foo(){…}}")`). Register the bridge here,
+  // before compiling the spliced statements, and flush the late-import index
+  // shift immediately (the `literals.ts` well-known-symbol arm uses the same
+  // ensure-then-flush discipline). Host/GC only: under no-JS-host mode the
+  // accessor/method lowers to a host-free closure (#1888 S5b / #2194) and must
+  // not declare the unsatisfiable `env::` bridge import.
+  if (!noJsHost(ctx) && evalNeedsGetterCallbackBridge(sf)) {
+    ensureLateImport(ctx, "__make_getter_callback", [{ kind: "i32" }, { kind: "externref" }], [{ kind: "externref" }]);
+    flushLateImportShifts(ctx, fctx);
   }
 
   // Hoist var / function declarations into the enclosing function scope
