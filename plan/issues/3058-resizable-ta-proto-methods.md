@@ -201,3 +201,102 @@ Bucket C (~7 files) + iterators (1 CE) banked as harder follow-ups.
 - `src/codegen/array-methods.ts:~2985-3026` — the dispatch/rebind site.
 - `src/codegen/dataview-native.ts:2515` (`emitTaViewToVec`), `:2654`
   (`emitTaViewWriteBack`), `:1551`/`:1684` (element codec) — reuse.
+
+## Landing-mode status (senior-dev opus-3058, 2026-07-05 — NOT started; banked clean)
+
+Claimed under a hard budget-cliff (8% remaining → 5-day wait). After a full
+read of the dispatch site + the #3057 codec, I made the disciplined call to
+**bank rather than ship a half-PR**, because I found a **gap in the plan's
+step 3 that materially changes the size** and cannot be closed safely in a
+sub-15-min green slice. No compiler code was written; the implementation claim
+is released. **This section de-risks the next attempt — read it first.**
+
+### The crux the measure-first plan under-specified (the real blocker)
+
+Plan step 3 says *"rebind the identifier exactly like the B1 `$__ta_view`
+rebind at array-methods.ts:2997, and let the ordinary f64-vec method impl
+run."* That B1 rebind is **UNCONDITIONAL and compile-time-typed**: at 2997 the
+receiver's `actualType` is a concrete `ref`/`ref_null` `$__ta_view` typeIdx
+known at compile time (`isTaViewTypeIdx(ctx, actualVecIdx)`), so it is *always*
+that view and the local can be rebound to the materialized native vec with no
+runtime guard.
+
+For a **dynamic** `$__ta_dyn_view` the receiver identifier is statically
+`any`/externref (`receiverIsExternref = true`, array-methods.ts:2969-2983) —
+its dyn-view-ness is a **runtime** `ref.test`, not a compile-time fact. So an
+*unconditional* rebind to an f64-vec local is **wrong**: within a
+`moduleUsesDynTaView` module, any *other* `any`-typed receiver method call
+(e.g. a plain-array `values.join(...)` where `values : any`) would then run the
+f64-vec impl and `ref.cast`-trap — a real regression, exactly the "don't hijack
+the shared dispatch site" hazard called out in the issue's Hazard section.
+
+**Correct shape (what the next attempt must build):** a **runtime `ref.test
+$__ta_dyn_view` branch that wraps BOTH method arms**, mirroring
+`emitTaDynViewElementGet` (dataview-native.ts:1551) but around the *method*:
+
+```
+if (ref.test $__ta_dyn_view on <probe-compiled receiver>) {
+    emitTaDynViewValidate(...)         // OOB fixed-length view → throw TypeError
+    matVec = emitTaDynViewToVec(...)   // widen every runtime kind → __vec_f64
+    <ordinary f64-vec method impl over matVec>     // arm 1
+} else {
+    <EXACT existing externref/plain-array method impl>   // arm 2 (unchanged)
+}
+```
+
+The cost is that the generic method impl must be emitted into **two arms**
+(the dyn-view f64-vec arm and the existing externref arm), which the current
+`compileArrayMethodCall` structure does **not** do — it emits one impl after
+the single rebind. Getting a second, guarded copy of the method body without a
+recursive re-entry into `compileArrayMethodCall` is the actual engineering
+work, and it is what makes this **L-sized**, not the per-method arms.
+
+**Two viable implementations, pick in the next attempt:**
+
+1. **Dedicated per-method inline emitters** (recommended for the FIRST small
+   slice): write `emitTaDynViewAt` / `emitTaDynViewIndexOf` that fully compute
+   the result inline over the #3057 byte codec behind a `ref.test` gate, with
+   the `else` arm calling back into the *normal* method path. This keeps the
+   blast radius to one or two methods and never touches the generic
+   two-arm-ification. `.at` and `.indexOf` each flip a couple of enforced-assert
+   `*/resizable-buffer.js` files (`at/`, `indexOf/`) — the smallest
+   floor-positive slice. Still needs `emitTaDynViewValidate` for the interleaved
+   `assert.throws(TypeError, ...)` asserts.
+2. **Generic two-arm materialize** (the full Bucket A): restructure the dispatch
+   so the whole method impl is emitted inside the `if ref.test` then-arm over a
+   materialized `__vec_f64`, and the existing impl in the else-arm. Higher value
+   (~15 files) but this is the L-sized restructure — do NOT attempt under a
+   budget cliff.
+
+### Scaffolding still to build (unchanged from the plan, all reusable):
+
+- `emitTaDynViewToVec` — mirror `emitTaViewToVec` (dataview-native.ts:2515) but
+  materialize into a single `__vec_f64` (widen every runtime kind to f64), using
+  `emitDynDecodeDispatch` (the #3057 per-kind decode chain,
+  dataview-native.ts:1443) for the element read and `pushTaDynViewInBoundsLen`
+  (`:1821`) / `pushElemSizeForKind` (`:2160`) for length + width. Read-side
+  Bucket-A methods then run through the existing f64-vec impls for free.
+- `emitTaDynViewValidate` — a fixed-length dyn view (field0 length ≥ 0) is OOB
+  when `byteOffset + storedLen*elemSize(kind) > buf.byteLength`; on OOB call
+  `emitThrowTypeError` (`./expressions/helpers.js`, already used across
+  property-access.ts / binary-ops.ts in standalone). Auto-length views
+  (field0 = -1) are OOB only when `byteOffset > buf.byteLength`. This is
+  REQUIRED — every `*/resizable-buffer.js` interleaves `rab.resize()` with
+  `assert.throws(TypeError, () => ta.<m>())`.
+- Bucket B write-back (`emitTaViewWriteBack` template, dataview-native.ts:2654,
+  using `emitDynEncodeDispatch` at `:1488`) and Bucket C species/new-view
+  producers remain banked as follow-ups.
+
+### Byte-inertness (verified path, not yet coded)
+
+Gate every new emit behind `ctx.moduleUsesDynTaView` + the runtime
+`ref.test $__ta_dyn_view` FIRST, else fall through to the EXACT existing path —
+so a module without a dynamic TA construct is byte-identical (sha256). The
+`$__ta_dyn_view` type is registered on demand via `getOrRegisterTaDynViewType`.
+
+### Oracle-ratchet note for the next attempt
+
+`emitThrowTypeError` in a new dyn-view arm adds native `throw` sites; per the
+#3000/#3057 precedent, if the oracle new-checker-call ratchet trips, pre-auth
+the added call sites with a reason in the PR. No verdict-logic change is
+involved, so no `oracle_version` bump is needed.
