@@ -1362,15 +1362,30 @@ function compileExpressionInner(
 
   if (ts.isElementAccessExpression(expr)) {
     // (#2128) Same getter-dispatch re-sync as the property-access arm above.
+    // (#3037 CS1b(ii)) Re-classify a dynamic `any`-element read (`a[i]`, `o[key]`)
+    // that is a direct operand of a standalone `any`-equality into the `$AnyValue`
+    // tag-6 carrier (object identity) — the SAME context-aware carrier the
+    // property-access arm applies, now at the ElementAccessExpression choke point
+    // (`arr[i] === arr[j]`). Byte-inert off that exact shape: the wrapper is a
+    // no-op unless the read compiled to a bare externref AND both `===` operands
+    // are statically `any` (see maybeWrapAnyReadEqualityCarrier). Applied BEFORE
+    // the getter-writeback resync so the classifier consumes the read result while
+    // it is still on top of the stack (the writebacks are net-zero local re-syncs
+    // that leave the carrier value in place).
     if (fctx.persistentCallbackWritebacks && fctx.persistentCallbackWritebacks.length > 0) {
-      const readResult = compileElementAccess(ctx, fctx, expr, expectedType);
+      const readResult = maybeWrapAnyReadEqualityCarrier(
+        ctx,
+        fctx,
+        expr,
+        compileElementAccess(ctx, fctx, expr, expectedType),
+      );
       fctx.body.push(...fctx.persistentCallbackWritebacks.map((instr) => structuredClone(instr)));
       return readResult;
     }
     // (#2760 F1) Forward the value-context hint so the primitive OOB→undefined
     // widening is suppressed in a numeric (f64/i32) context (avoids boxing + a
     // late-import shift under a funcIdx already captured by a numeric caller).
-    return compileElementAccess(ctx, fctx, expr, expectedType);
+    return maybeWrapAnyReadEqualityCarrier(ctx, fctx, expr, compileElementAccess(ctx, fctx, expr, expectedType));
   }
 
   if (ts.isObjectLiteralExpression(expr)) {

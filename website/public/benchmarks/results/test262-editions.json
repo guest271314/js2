@@ -10,9 +10,9 @@
   },
   {
     "edition": "ES5",
-    "pass": 10338,
-    "fail": 2628,
-    "ce": 109,
+    "pass": 10343,
+    "fail": 2630,
+    "ce": 102,
     "skip": 0,
     "total": 13075,
     "pct": 79,
@@ -57,9 +57,9 @@
   },
   {
     "edition": "ES2015",
-    "pass": 11193,
-    "fail": 4034,
-    "ce": 159,
+    "pass": 11204,
+    "fail": 4037,
+    "ce": 145,
     "skip": 0,
     "total": 15386,
     "pct": 73,
@@ -75,9 +75,9 @@
       },
       {
         "name": "generators",
-        "pass": 977,
-        "fail": 394,
-        "ce": 20,
+        "pass": 978,
+        "fail": 398,
+        "ce": 15,
         "skip": 0,
         "total": 1391,
         "pct": 70
@@ -112,8 +112,8 @@
       {
         "name": "Symbol",
         "pass": 386,
-        "fail": 231,
-        "ce": 6,
+        "fail": 236,
+        "ce": 1,
         "skip": 0,
         "total": 623,
         "pct": 62
@@ -129,12 +129,12 @@
       },
       {
         "name": "Proxy",
-        "pass": 201,
-        "fail": 223,
+        "pass": 203,
+        "fail": 221,
         "ce": 2,
         "skip": 0,
         "total": 426,
-        "pct": 47
+        "pct": 48
       },
       {
         "name": "Reflect.construct",
@@ -2785,8 +2785,8 @@
   {
     "edition": "ES2024",
     "pass": 361,
-    "fail": 276,
-    "ce": 8,
+    "fail": 277,
+    "ce": 7,
     "skip": 0,
     "total": 645,
     "pct": 56,
@@ -2857,8 +2857,8 @@
       {
         "name": "Array.fromAsync",
         "pass": 73,
-        "fail": 21,
-        "ce": 1,
+        "fail": 22,
+        "ce": 0,
         "skip": 0,
         "total": 95,
         "pct": 77
@@ -3509,8 +3509,8 @@
   {
     "edition": "ES2026",
     "pass": 182,
-    "fail": 159,
-    "ce": 8,
+    "fail": 160,
+    "ce": 7,
     "skip": 0,
     "total": 349,
     "pct": 52,
@@ -3572,8 +3572,8 @@
       {
         "name": "json-parse-with-source",
         "pass": 18,
-        "fail": 1,
-        "ce": 2,
+        "fail": 2,
+        "ce": 1,
         "skip": 0,
         "total": 21,
         "pct": 86

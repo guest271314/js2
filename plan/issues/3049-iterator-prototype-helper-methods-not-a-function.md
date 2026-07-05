@@ -69,3 +69,55 @@ isn't double-fixed.
   `flattens-*`) pass; helper `next`/`return` resolution works on a plain-object
   iterator.
 - No regression in the generator-receiver helper paths or in #3023.
+
+## Investigation (2026-07-05, dev-3042) — root cause pinned; handing off with findings
+
+**Confirmed root cause: the array-iterator prototype chain does not reach the
+helper-bearing `%IteratorPrototype%`.** The 27 `*/this-plain-iterator.js` files
+all call `Iterator.prototype.<helper>.call(plainIter, …)`, where the runner
+injects `Iterator.prototype = getPrototypeOf(getPrototypeOf([][Symbol.iterator]()))`
+(test262-runner.ts:1938). So the fix is purely: **that expression must resolve
+to the object carrying the helper methods.** It currently does not —
+`Iterator.prototype.<helper>` is `undefined` → "object is not a function".
+
+What I verified:
+- The 11 helpers (map/filter/take/drop/flatMap/reduce/some/find/every/forEach/
+  toArray) **are implemented** in `runtime.ts` and installed by
+  `_installIteratorHelperPolyfills()` (called from `buildImports`) onto `Iproto`
+  = the host's native `globalThis.Iterator.prototype` (Node ≥22 has it), with
+  `_getIteratorPrototype()` (our `compilerIteratorProto`) `setPrototypeOf`-chained
+  to it. So the helpers ARE reachable **from** `_getIteratorPrototype()`.
+- **Generators** work: a generator instance chains
+  `instance → GeneratorPrototype → _getIteratorPrototype()` (runtime.ts:403), so
+  generator receivers resolve the helpers.
+- **Array iterators do NOT.** `[][Symbol.iterator]()` lowers to the
+  `env::__iterator` host import → `__call_@@iterator` (the **compiled** array
+  iterator), NOT the runtime synthesized fallback. Probe:
+  `getPrototypeOf(getPrototypeOf([][Symbol.iterator]())).map === undefined`, and
+  its `.__proto__.map` is also undefined — i.e. the chain lands on
+  `Object.prototype`, one level shy of (and never reaching) the helper proto.
+
+Two candidate emission sites, **neither chains to `%IteratorPrototype%`**:
+1. Compiled `%ArrayIteratorPrototype%` — `emitArrayIteratorPrototypeSingleton`
+   (`src/codegen/array-object-proto.ts:2001`) builds it via `__new_plain_object()`
+   and never sets its `[[Prototype]]` to the runtime `_getIteratorPrototype()`.
+   Spec §23.1.5.2: array iterators are `ObjectCreate(%ArrayIteratorPrototype%)`
+   and `%ArrayIteratorPrototype%.[[Prototype]] === %IteratorPrototype%`.
+2. Runtime synthesized fallback (`runtime.ts` `__iterator`, ~line 12403) uses a
+   **one-level** `Object.create(nativeIteratorPrototype)`; a two-level
+   `Object.create(Object.create(_getIteratorPrototype()))` fixes the off-by-one
+   there (drafted + reverted — it compiled clean but is NOT the path
+   `[][Symbol.iterator]()` takes, so it didn't move the 27; keep as a follow-up).
+
+**Suggested fix (bounded, but cross codegen/runtime boundary — take care):** wire
+the compiled `%ArrayIteratorPrototype%` singleton's `[[Prototype]]` to the
+runtime helper-bearing `%IteratorPrototype%` (`_getIteratorPrototype()`), so
+`getPrototypeOf(getPrototypeOf(arrayIter))` === that proto. Confirm the same for
+string/map/set iterators. Then the `.call(plainIter, …)` helper body runs on the
+plain-object receiver via `GetIteratorDirect` (already implemented). The
+`return-is-forwarded` / `exhaustion-does-not-call-return` / `flattens-iterable`
+files share the same resolution root — retest after the chain fix.
+
+**Status:** claim released; feasibility stays `medium` (bounded dev fix, just
+spans codegen↔runtime prototype identity). Not started as a code change — no PR
+beyond this findings note.
