@@ -200,6 +200,7 @@ export function createCodegenContext(
     taCtorTypeIdx: -1, // (#3054 D) $__ta_ctor {kind:i32} first-class TA constructor value, lazy
     taCtorSingletonGlobals: new Map(), // (#3054 D) per-kind boxed $__ta_ctor singleton module-globals
     taDynViewTypeIdx: -1, // (#3054 D) $__ta_dyn_view {length,buf,byteOffset,kind} runtime-kinded view, lazy
+    moduleUsesDynTaView: false, // (#3057) set by pre-scan when a dynamic `new ctorVar(buf)` exists
     errorStructTypeIdx: -1,
     widenedTypeProperties: new Map(),
     widenedVarStructMap: new Map(),

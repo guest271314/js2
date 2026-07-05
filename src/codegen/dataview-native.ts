@@ -1407,6 +1407,401 @@ export function emitTaViewElementSet(
 }
 
 // ---------------------------------------------------------------------------
+// (#3057) Runtime-kind byte codec for a boxed `$__ta_dyn_view` element get/set.
+//
+// A `new <ctorVar>(rab)` where `ctorVar` is a TypedArray constructor held in a
+// variable produces a `$__ta_dyn_view {length, buf, byteOffset, kind}` whose
+// element kind is a RUNTIME field (B1's per-kind `$__ta_view_<K>` canonicalize to
+// one WasmGC type, so the boxed view can't recover its kind via `ref.test`). When
+// such a view is read back through an `any` receiver — `ta[i]` / `ta[i]=v` — the
+// generic dynamic INDEX path has no arm that switches on that runtime `kind` byte,
+// so #3054 D+E BANKED element access (reads returned 0, writes silently no-op via
+// `__extern_get_idx`/`__extern_set` on the opaque struct). These two functions add
+// a `ref.test $__ta_dyn_view`-gated arm that byte-decodes/encodes at
+// `byteOffset + i*elemSize(kind)` through the SAME little-endian engine
+// (`emitReadBytes`/`emitWriteBytes`) the static `$__ta_view` path and the
+// proto-method write-through already use — switching on `kind` for width /
+// signedness / float-vs-int (+ the Uint8Clamped clamp on set).
+//
+// HAZARD (opus-3054-de): the generic dynamic index path is SHARED with boxed
+// plain-array `any` receivers (`values[i]` where `values` is statically `any`).
+// The new arm MUST NOT hijack those — it gates on the concrete
+// `ref.test $__ta_dyn_view` FIRST and, on a miss, falls through to the EXACT
+// existing behavior (`__extern_get_idx` for read, `__extern_set` for write). The
+// whole arm is only emitted when `ctx.taDynViewTypeIdx >= 0` (a dynamic TA-ctor
+// view exists in the module), so a program without one is byte-identical.
+// ---------------------------------------------------------------------------
+
+/**
+ * (#3057) Build the runtime-kind element DECODE dispatch: a nested `if`-chain over
+ * the 9 `TA_CTOR_KINDS`, each arm byte-decoding `acc.bytes` bytes from `arrLocal`
+ * at `offLocal` (little-endian) via {@link emitReadBytes} with the STATIC per-kind
+ * descriptor. Leaves an f64 on the stack; an unrecognised kind yields `0`. Returns
+ * the self-contained instruction list (the caller splices it into a bounds-guarded
+ * arm).
+ */
+function emitDynDecodeDispatch(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  kindLocal: number,
+  arrLocal: number,
+  offLocal: number,
+  leLocal: number,
+  arrTypeIdx: number,
+): Instr[] {
+  // Build bottom-up so each `chain` is referenced exactly once (as the `else` of
+  // the next-outer `if`) — no aliased-Instr[] double-remap hazard.
+  let chain: Instr[] = [{ op: "f64.const", value: 0 } as Instr];
+  for (let k = TA_CTOR_KINDS.length - 1; k >= 0; k--) {
+    const desc = TA_VIEW_DECODE[TA_CTOR_KINDS[k]!]!;
+    const decodeK: Instr[] = [];
+    const saved = fctx.body;
+    fctx.body = decodeK;
+    emitReadBytes(
+      ctx,
+      fctx,
+      { kind: "get", bytes: desc.bytes, signed: desc.signed, float: desc.float },
+      arrLocal,
+      offLocal,
+      leLocal,
+      arrTypeIdx,
+    );
+    fctx.body = saved;
+    chain = [
+      { op: "local.get", index: kindLocal } as Instr,
+      { op: "i32.const", value: k } as Instr,
+      { op: "i32.eq" } as Instr,
+      { op: "if", blockType: { kind: "val", type: { kind: "f64" } }, then: decodeK, else: chain } as Instr,
+    ];
+  }
+  return chain;
+}
+
+/**
+ * (#3057) Build the runtime-kind element ENCODE dispatch: a nested `if`-chain over
+ * the 9 `TA_CTOR_KINDS`, each arm byte-encoding the f64 in `valF64Local` into
+ * `arrLocal` at `offLocal` (little-endian) via {@link emitWriteBytes} with the
+ * STATIC per-kind descriptor. The Uint8Clamped arm applies ToUint8Clamp
+ * (round-half-to-even + clamp `[0,255]`) into a temp before the write. An
+ * unrecognised kind is a no-op. Returns the self-contained instruction list.
+ */
+function emitDynEncodeDispatch(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  kindLocal: number,
+  arrLocal: number,
+  offLocal: number,
+  valF64Local: number,
+  leLocal: number,
+  arrTypeIdx: number,
+): Instr[] {
+  let chain: Instr[] = [];
+  for (let k = TA_CTOR_KINDS.length - 1; k >= 0; k--) {
+    const desc = TA_VIEW_DECODE[TA_CTOR_KINDS[k]!]!;
+    const encodeK: Instr[] = [];
+    const saved = fctx.body;
+    fctx.body = encodeK;
+    let valForWrite = valF64Local;
+    if (desc.clamp) {
+      // Uint8Clamped ToUint8Clamp (§7.1.11): f64.nearest is round-ties-to-even,
+      // then clamp to [0,255]; NaN propagates through max/min and the i64 trunc in
+      // emitWriteBytes maps it to 0 (spec: NaN → 0).
+      const clampedLocal = allocLocal(fctx, `__dtas_clv_${fctx.locals.length}`, { kind: "f64" });
+      fctx.body.push({ op: "local.get", index: valF64Local } as Instr);
+      fctx.body.push({ op: "f64.nearest" } as Instr);
+      fctx.body.push({ op: "f64.const", value: 0 } as Instr);
+      fctx.body.push({ op: "f64.max" } as Instr);
+      fctx.body.push({ op: "f64.const", value: 255 } as Instr);
+      fctx.body.push({ op: "f64.min" } as Instr);
+      fctx.body.push({ op: "local.set", index: clampedLocal } as Instr);
+      valForWrite = clampedLocal;
+    }
+    emitWriteBytes(
+      ctx,
+      fctx,
+      { kind: "set", bytes: desc.bytes, signed: desc.signed, float: desc.float },
+      arrLocal,
+      offLocal,
+      valForWrite,
+      leLocal,
+      arrTypeIdx,
+    );
+    fctx.body = saved;
+    chain = [
+      { op: "local.get", index: kindLocal } as Instr,
+      { op: "i32.const", value: k } as Instr,
+      { op: "i32.eq" } as Instr,
+      { op: "if", blockType: { kind: "empty" }, then: encodeK, else: chain } as Instr,
+    ];
+  }
+  return chain;
+}
+
+/**
+ * (#3057) `ta[i]` read where `ta` is a boxed `$__ta_dyn_view` reached through an
+ * `any`/externref receiver. The receiver boxed externref is already on the stack.
+ * Compiles the index ONCE (single evaluation), then a `ref.test $__ta_dyn_view`
+ * gate byte-decodes on the runtime `kind` (in-bounds → boxed number, OOB →
+ * `undefined`), falling through to the existing `__extern_get_idx` for any
+ * non-dyn-view receiver (plain arrays / `$ObjVec` / `$Object`). Returns externref
+ * (the caller coerces to f64 in numeric context), or null when no `$__ta_dyn_view`
+ * type exists (byte-inert — caller keeps its existing path with the receiver still
+ * on the stack).
+ */
+export function emitTaDynViewElementGet(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  indexExpr: import("../ts-api.js").ts.Expression,
+  compileExpr: (expr: import("../ts-api.js").ts.Expression, hint?: ValType) => ValType | null,
+): ValType | null {
+  // Register the runtime-kinded view type on demand: this may compile in a helper
+  // BEFORE the construct that would otherwise register it (the caller gates on the
+  // module-level `moduleUsesDynTaView` pre-scan flag, so the type WILL exist).
+  const dynIdx = getOrRegisterTaDynViewType(ctx);
+  const { vecTypeIdx, arrTypeIdx } = i32ByteVec(ctx);
+
+  // Receiver boxed externref is on the stack — stash it (needed by both arms).
+  const recvLocal = allocLocal(fctx, `__dtag_recv_${fctx.locals.length}`, { kind: "externref" });
+  fctx.body.push({ op: "local.set", index: recvLocal } as Instr);
+
+  // Index compiled ONCE → f64 (single evaluation; used by the byte path AND the
+  // __extern_get_idx fallback).
+  const idxF64 = allocLocal(fctx, `__dtag_idx_${fctx.locals.length}`, { kind: "f64" });
+  const it = compileExpr(indexExpr, { kind: "f64" });
+  if (it && it.kind !== "f64") coerceType(ctx, fctx, it, { kind: "f64" });
+  fctx.body.push({ op: "local.set", index: idxF64 } as Instr);
+
+  // Resolve the fallback / boxing imports up front, then flush the funcIdx shift
+  // once (before any body-swap building) so every captured funcIdx stays live.
+  const getIdxFn = ensureLateImport(
+    ctx,
+    "__extern_get_idx",
+    [{ kind: "externref" }, { kind: "f64" }],
+    [{ kind: "externref" }],
+  );
+  const boxNumFn = ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
+  flushLateImportShifts(ctx, fctx);
+
+  const resultLocal = allocLocal(fctx, `__dtag_res_${fctx.locals.length}`, { kind: "externref" });
+  if (getIdxFn === undefined || boxNumFn === undefined) {
+    // Defensive: the imports are always registerable in the noJsHost lane (the only
+    // lane where a `$__ta_dyn_view` exists), so this is unreachable — but keep the
+    // stack balanced if it ever fires.
+    fctx.body.push({ op: "local.get", index: recvLocal } as Instr);
+    return { kind: "externref" };
+  }
+
+  const anyLocal = allocLocal(fctx, `__dtag_any_${fctx.locals.length}`, { kind: "anyref" } as ValType);
+  fctx.body.push({ op: "local.get", index: recvLocal } as Instr);
+  fctx.body.push({ op: "any.convert_extern" } as Instr);
+  fctx.body.push({ op: "local.set", index: anyLocal } as Instr);
+
+  // THEN arm — receiver IS a $__ta_dyn_view: byte-decode on the runtime kind.
+  const dvLocal = allocLocal(fctx, `__dtag_dv_${fctx.locals.length}`, { kind: "ref", typeIdx: dynIdx });
+  const kindLocal = allocLocal(fctx, `__dtag_k_${fctx.locals.length}`, { kind: "i32" });
+  const esLocal = allocLocal(fctx, `__dtag_es_${fctx.locals.length}`, { kind: "i32" });
+  const lenLocal = allocLocal(fctx, `__dtag_len_${fctx.locals.length}`, { kind: "i32" });
+  const idxI32 = allocLocal(fctx, `__dtag_i_${fctx.locals.length}`, { kind: "i32" });
+  const arrLocal = allocLocal(fctx, `__dtag_arr_${fctx.locals.length}`, { kind: "ref", typeIdx: arrTypeIdx });
+  const offLocal = allocLocal(fctx, `__dtag_off_${fctx.locals.length}`, { kind: "i32" });
+  const leLocal = allocLocal(fctx, `__dtag_le_${fctx.locals.length}`, { kind: "i32" });
+
+  const thenArm: Instr[] = [];
+  const saved = fctx.body;
+  fctx.body = thenArm;
+  fctx.body.push({ op: "local.get", index: anyLocal } as Instr);
+  fctx.body.push({ op: "ref.cast", typeIdx: dynIdx } as Instr);
+  fctx.body.push({ op: "local.tee", index: dvLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 3 } as Instr); // kind
+  fctx.body.push({ op: "local.set", index: kindLocal } as Instr);
+  pushElemSizeForKind(fctx, kindLocal);
+  fctx.body.push({ op: "local.set", index: esLocal } as Instr);
+  pushTaDynViewEffectiveLen(ctx, fctx, dvLocal, kindLocal, esLocal);
+  fctx.body.push({ op: "local.set", index: lenLocal } as Instr);
+  // idx (i32) = trunc(idxF64) — a negative / huge index fails the unsigned bounds
+  // check below → OOB → undefined (spec IsValidIntegerIndex).
+  fctx.body.push({ op: "local.get", index: idxF64 } as Instr);
+  fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
+  fctx.body.push({ op: "local.set", index: idxI32 } as Instr);
+  // arr = dv.buf.data (buf = field1 → $__vec_i32_byte; .data = its field1).
+  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 1 } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr);
+  fctx.body.push({ op: "local.set", index: arrLocal } as Instr);
+  // off = dv.byteOffset + idx*elemSize(kind).
+  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 2 } as Instr); // byteOffset
+  fctx.body.push({ op: "local.get", index: idxI32 } as Instr);
+  fctx.body.push({ op: "local.get", index: esLocal } as Instr);
+  fctx.body.push({ op: "i32.mul" } as Instr);
+  fctx.body.push({ op: "i32.add" } as Instr);
+  fctx.body.push({ op: "local.set", index: offLocal } as Instr);
+  fctx.body.push({ op: "i32.const", value: 1 } as Instr); // little-endian
+  fctx.body.push({ op: "local.set", index: leLocal } as Instr);
+  const decodeInstrs = emitDynDecodeDispatch(ctx, fctx, kindLocal, arrLocal, offLocal, leLocal, arrTypeIdx);
+  const inBounds: Instr[] = [
+    ...decodeInstrs,
+    { op: "call", funcIdx: boxNumFn } as Instr,
+    { op: "local.set", index: resultLocal } as Instr,
+  ];
+  // if ((unsigned)idx < len) { box(decode) } else { undefined }
+  fctx.body.push({ op: "local.get", index: idxI32 } as Instr);
+  fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
+  fctx.body.push({ op: "i32.lt_u" } as Instr);
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: inBounds,
+    else: [{ op: "ref.null.extern" } as Instr, { op: "local.set", index: resultLocal } as Instr],
+  } as Instr);
+  fctx.body = saved;
+
+  // ELSE arm — any other boxed receiver keeps the EXACT existing behavior.
+  const elseArm: Instr[] = [
+    { op: "local.get", index: recvLocal } as Instr,
+    { op: "local.get", index: idxF64 } as Instr,
+    { op: "call", funcIdx: getIdxFn } as Instr,
+    { op: "local.set", index: resultLocal } as Instr,
+  ];
+
+  fctx.body.push({ op: "local.get", index: anyLocal } as Instr);
+  fctx.body.push({ op: "ref.test", typeIdx: dynIdx } as Instr);
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: thenArm, else: elseArm } as Instr);
+  fctx.body.push({ op: "local.get", index: resultLocal } as Instr);
+  return { kind: "externref" };
+}
+
+/**
+ * (#3057) `ta[i] = v` write where `ta` is a boxed `$__ta_dyn_view` reached through
+ * an `any`/externref receiver. The receiver boxed externref is already on the
+ * stack. Compiles the index and value ONCE each, then a `ref.test $__ta_dyn_view`
+ * gate byte-encodes `v` little-endian on the runtime `kind` into the SHARED buffer
+ * (true aliasing — sibling views / DataViews observe it); an OOB write is a silent
+ * no-op (§10.4.5.16). Any non-dyn-view receiver falls through to the existing
+ * `__extern_set`. Leaves the assigned value (externref) as the expression result.
+ * Returns null when no `$__ta_dyn_view` type exists (byte-inert).
+ */
+export function emitTaDynViewElementSet(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  indexExpr: import("../ts-api.js").ts.Expression,
+  valueExpr: import("../ts-api.js").ts.Expression,
+  compileExpr: (expr: import("../ts-api.js").ts.Expression, hint?: ValType) => ValType | null,
+): ValType | null {
+  // Register the runtime-kinded view type on demand (see emitTaDynViewElementGet).
+  const dynIdx = getOrRegisterTaDynViewType(ctx);
+  const { vecTypeIdx, arrTypeIdx } = i32ByteVec(ctx);
+
+  // Receiver boxed externref on the stack → recvLocal.
+  const recvLocal = allocLocal(fctx, `__dtas_recv_${fctx.locals.length}`, { kind: "externref" });
+  fctx.body.push({ op: "local.set", index: recvLocal } as Instr);
+
+  // Index ONCE → f64.
+  const idxF64 = allocLocal(fctx, `__dtas_idx_${fctx.locals.length}`, { kind: "f64" });
+  const it = compileExpr(indexExpr, { kind: "f64" });
+  if (it && it.kind !== "f64") coerceType(ctx, fctx, it, { kind: "f64" });
+  fctx.body.push({ op: "local.set", index: idxF64 } as Instr);
+
+  // Value ONCE → externref (natural rep for the __extern_set fallback so a
+  // non-number plain-array value survives intact; unboxed to f64 for the byte
+  // path — the dyn-view arm only runs for a TA element write, where v is a number).
+  const valExt = allocLocal(fctx, `__dtas_valx_${fctx.locals.length}`, { kind: "externref" });
+  const vt = compileExpr(valueExpr, { kind: "externref" });
+  if (vt && vt.kind !== "externref") coerceType(ctx, fctx, vt, { kind: "externref" });
+  fctx.body.push({ op: "local.set", index: valExt } as Instr);
+
+  // Unbox the value to f64 up front (used only by the dyn-view THEN arm). Doing it
+  // here — not inside the body-swapped arm — keeps coerceType's late imports on the
+  // main body so no funcIdx shift lands mid-arm.
+  const valF64 = allocLocal(fctx, `__dtas_valf_${fctx.locals.length}`, { kind: "f64" });
+  fctx.body.push({ op: "local.get", index: valExt } as Instr);
+  coerceType(ctx, fctx, { kind: "externref" }, { kind: "f64" });
+  fctx.body.push({ op: "local.set", index: valF64 } as Instr);
+
+  const setFn = ensureLateImport(
+    ctx,
+    "__extern_set",
+    [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
+    [],
+  );
+  const boxNumFn = ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
+  flushLateImportShifts(ctx, fctx);
+  if (setFn === undefined || boxNumFn === undefined) {
+    // Defensive (unreachable in the noJsHost lane): keep the value as the result.
+    fctx.body.push({ op: "local.get", index: valExt } as Instr);
+    return { kind: "externref" };
+  }
+
+  const anyLocal = allocLocal(fctx, `__dtas_any_${fctx.locals.length}`, { kind: "anyref" } as ValType);
+  fctx.body.push({ op: "local.get", index: recvLocal } as Instr);
+  fctx.body.push({ op: "any.convert_extern" } as Instr);
+  fctx.body.push({ op: "local.set", index: anyLocal } as Instr);
+
+  // THEN arm — byte-encode into the shared backing on the runtime kind.
+  const dvLocal = allocLocal(fctx, `__dtas_dv_${fctx.locals.length}`, { kind: "ref", typeIdx: dynIdx });
+  const kindLocal = allocLocal(fctx, `__dtas_k_${fctx.locals.length}`, { kind: "i32" });
+  const esLocal = allocLocal(fctx, `__dtas_es_${fctx.locals.length}`, { kind: "i32" });
+  const lenLocal = allocLocal(fctx, `__dtas_len_${fctx.locals.length}`, { kind: "i32" });
+  const idxI32 = allocLocal(fctx, `__dtas_i_${fctx.locals.length}`, { kind: "i32" });
+  const arrLocal = allocLocal(fctx, `__dtas_arr_${fctx.locals.length}`, { kind: "ref", typeIdx: arrTypeIdx });
+  const offLocal = allocLocal(fctx, `__dtas_off_${fctx.locals.length}`, { kind: "i32" });
+  const leLocal = allocLocal(fctx, `__dtas_le_${fctx.locals.length}`, { kind: "i32" });
+
+  const thenArm: Instr[] = [];
+  const saved = fctx.body;
+  fctx.body = thenArm;
+  fctx.body.push({ op: "local.get", index: anyLocal } as Instr);
+  fctx.body.push({ op: "ref.cast", typeIdx: dynIdx } as Instr);
+  fctx.body.push({ op: "local.tee", index: dvLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 3 } as Instr); // kind
+  fctx.body.push({ op: "local.set", index: kindLocal } as Instr);
+  pushElemSizeForKind(fctx, kindLocal);
+  fctx.body.push({ op: "local.set", index: esLocal } as Instr);
+  pushTaDynViewEffectiveLen(ctx, fctx, dvLocal, kindLocal, esLocal);
+  fctx.body.push({ op: "local.set", index: lenLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: idxF64 } as Instr);
+  fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
+  fctx.body.push({ op: "local.set", index: idxI32 } as Instr);
+  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 1 } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr);
+  fctx.body.push({ op: "local.set", index: arrLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 2 } as Instr); // byteOffset
+  fctx.body.push({ op: "local.get", index: idxI32 } as Instr);
+  fctx.body.push({ op: "local.get", index: esLocal } as Instr);
+  fctx.body.push({ op: "i32.mul" } as Instr);
+  fctx.body.push({ op: "i32.add" } as Instr);
+  fctx.body.push({ op: "local.set", index: offLocal } as Instr);
+  fctx.body.push({ op: "i32.const", value: 1 } as Instr);
+  fctx.body.push({ op: "local.set", index: leLocal } as Instr);
+  const encodeInstrs = emitDynEncodeDispatch(ctx, fctx, kindLocal, arrLocal, offLocal, valF64, leLocal, arrTypeIdx);
+  // OOB write is a silent no-op — guard the encode on `(unsigned)idx < len`.
+  fctx.body.push({ op: "local.get", index: idxI32 } as Instr);
+  fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
+  fctx.body.push({ op: "i32.lt_u" } as Instr);
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: encodeInstrs, else: [] } as Instr);
+  fctx.body = saved;
+
+  // ELSE arm — any other boxed receiver keeps the EXACT existing behavior:
+  // __extern_set(recv, box(idx), val).
+  const elseArm: Instr[] = [
+    { op: "local.get", index: recvLocal } as Instr,
+    { op: "local.get", index: idxF64 } as Instr,
+    { op: "call", funcIdx: boxNumFn } as Instr,
+    { op: "local.get", index: valExt } as Instr,
+    { op: "call", funcIdx: setFn } as Instr,
+  ];
+
+  fctx.body.push({ op: "local.get", index: anyLocal } as Instr);
+  fctx.body.push({ op: "ref.test", typeIdx: dynIdx } as Instr);
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: thenArm, else: elseArm } as Instr);
+  // Assignment is an expression — the value is its result.
+  fctx.body.push({ op: "local.get", index: valExt } as Instr);
+  return { kind: "externref" };
+}
+
+// ---------------------------------------------------------------------------
 // (#3054 B2) View accessor props + windowing constructor on a `$__ta_view`.
 //
 // B1 populated a `$__ta_view {length, buf, byteOffset}` with byteOffset pinned
