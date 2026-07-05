@@ -668,11 +668,102 @@ regression ⇒ a non-object leaked into tag-6 → diagnose, don't force.
 
 ### Remaining CS1b families (separate PRs, isolated merge_group evidence each)
 
-- **CS1b(ii) element access** — same interception at the `ts.isElementAccessExpression`
-  choke point (`arr[i] === arr[j]`); needs `compileElementAccess`'s any-result
-  externref path re-classified. Not folded here (a floor regression there must not
-  sink the member-read flip).
+- **CS1b(ii) element access** — LANDED (opus-3037-cs1bii). See the section below.
 - **CS1b(iii) descriptor `.value`/`.get` producer** — `.value` reads are already
   covered when they are equality operands (case a flips here); the remaining work
   is the producer-side canonicalization for `.value` results that flow elsewhere.
 - **CS1c** getPrototypeOf/reflective producer carrier (case d).
+
+---
+
+## CS1b(ii) (element-access family) — LANDED (opus-3037-cs1bii): dynamic `any`-element-read tag-6 carrier
+
+**PR:** dynamic `any`-element-READ carrier (`arr[i] === arr[j]`, `o[key] === o[key2]`).
+Applies the SAME context-aware carrier CS1b (member-read) landed, now at the
+`ts.isElementAccessExpression` choke point in `compileExpression`
+(expressions.ts). `maybeWrapAnyReadEqualityCarrier` / `isAnyEqualityOperand` are
+REUSED verbatim (both already `expr: ts.Expression`-generic) — no new classifier,
+no re-mint of `__any_from_extern_honest`. Flips `const a: any = [inner, inner];
+a[0] === a[1]` (aliased) `0 → 1` and the `o["a"] === o["b"]` computed-member
+analogue. All CS0/CS1a/CS1b member-read tests (45) stay green;
+`prove-emit-identity` **39/39 IDENTICAL** (host/gc/standalone/wasi).
+
+### Two carrier-support fixes this slice required (traced, not assumed)
+
+The blanket element carrier initially regressed three probe classes; the
+re-probe (on current main) + WAT disassembly pinned two real defects that the
+member-read family never triggered because `__extern_get` (member) is better
+behaved than `__extern_get_idx` (element) and because the member cases always had
+`$AnyValue` pre-registered. Both fixes are `ctx.standalone`-gated and byte-inert
+off-path.
+
+1. **Gate: `isAnyEqualityOperand` must key on the RAW CHECKER, not `ctx.oracle`.**
+   The carrier's premise is "the operand only ever flows into
+   `emitAnyEqOperands`'s `isAnyValue` fast-path". That holds iff binary-ops routes
+   the pair through `compileAnyBinaryDispatch`, whose gate is
+   `leftTsType.flags & TypeFlags.Any` on both sides (binary-ops.ts:1082-1084 —
+   the RAW `ctx.checker.getTypeAtLocation(...)`). For **element** operands the
+   oracle and the checker DISAGREE: `const a: any = [5,5]; a[0]` reads as
+   `oracle.kind === "any"` but the checker narrows it, so binary-ops does NOT
+   dispatch and the carrier's `ref $AnyValue` lands in the raw `ref.eq`
+   struct-identity arm → value-equal numbers/strings wrongly `!==`. Switching the
+   gate to the checker flag (mirroring binary-ops **exactly**) fires the carrier
+   iff the pair truly routes through `__any_strict_eq`. (Member-read cases pass
+   both gates identically, so this is byte-neutral for CS1b member-read — the 15
+   member tests confirm.)
+
+2. **`$AnyValue` operand pairs at binary-ops.ts:1937 route to `__any_strict_eq`,
+   not `ref.eq`.** Even with the checker gate, a module that registers `$AnyValue`
+   **lazily** (the carrier / element read is the FIRST any-value in an otherwise
+   number-only module) makes binary-ops' line-1081 `anyValueTypeIdx >= 0`
+   dispatch-gate evaluate to `false` at the binary expression's ENTRY — so
+   binary-ops commits to its numeric/`ref.eq` path, and the carrier's later
+   `ref $AnyValue` reaches the raw `leftIsRef && rightIsRef` strict-eq arm. That
+   arm's `ref.eq` is the WRONG strict-eq for a discriminated `$AnyValue` union
+   (two boxes of the same value have distinct struct identity but must compare by
+   TAG). The fix: when **both** operands are exactly `ctx.anyValueTypeIdx` (in
+   standalone), call `__any_strict_eq` (tag-aware); non-`$AnyValue` ref pairs
+   (class instances, nominal structs) keep genuine `ref.eq` identity — verified by
+   the class-identity / switch-strict-eq suites (85 tests) staying green.
+
+The carrier itself also now checks `ctx.anyValueTypeIdx >= 0` BEFORE
+`ensureAnyFromExternHelper` (which lazily registers the type) so it stays inert in
+a module that has no any-machinery at all.
+
+### Files
+
+- `src/codegen/expressions.ts` — call `maybeWrapAnyReadEqualityCarrier` at the
+  `ts.isElementAccessExpression` arm (both the getter-writeback and normal
+  return paths), mirroring the member-read arm.
+- `src/codegen/property-access.ts` — `isAnyEqualityOperand` re-gated to the raw
+  checker `Any` flag; carrier's `anyValueTypeIdx`-before-`ensure` guard.
+- `src/codegen/binary-ops.ts` — `$AnyValue`-pair strict-eq routes to
+  `__any_strict_eq` (standalone, both operands `anyValueTypeIdx`).
+- `tests/issue-3037-cs1bii-element-read-carrier.test.ts` — new: the aliased-object
+  flips, the computed-member (`o[key]`) flip, negation, the S3a half-migrated
+  pair, anti-vacuity negatives, the value-tag regression guards (number/string
+  by value/content, undefined/null/OOB by value), and the typed-array control.
+
+### Known limitation (pre-existing reader gap, NOT introduced here)
+
+A **typed-nominal-element** array boxed to `any` (`const a: any = [{z:1},{z:2}]`)
+compiles to a `sub final $7` vec whose element array is a nominal-struct array —
+a shape `__extern_get_idx` does NOT handle (it tests only the externref / f64 /
+`$1` vec variants), so `a[i]` returns **null** (a #2186-class reader gap;
+`a[i].z` already TRAPs on main). The honest classifier maps that null to the
+undefined singleton, so two such reads compare `===` **1** (where main
+accidentally gave `0`). This surfaces ONLY under an explicit TS
+`const a: any = [<object literals>]` annotation — a construct that **does not
+occur in test262 (pure JS)** and whose reads are already broken on main.
+JS-realistic forms (`var a = [{}, {}]`, no `: any`) are unaffected: their
+operands are not TS-`any`, the carrier does not fire, and the ordinary
+typed-struct identity path answers correctly (`distinct → 0`, `aliased → 1` —
+covered by the control test). Fixing `__extern_get_idx` for nominal-element vecs
+is out of CS1b(ii) scope (its own #2186-class slice).
+
+### Floor discipline
+
+Same as CS1b: the equality-operand scoping is the safety boundary. **NOT
+self-merged on PR-green alone** — flagged the lead for a monitored `merge_group`
+standalone `host_free_pass` floor enqueue (expect NET-POSITIVE — drives #3027).
+Any floor regression ⇒ a non-object leaked into tag-6 → diagnose, don't force.
