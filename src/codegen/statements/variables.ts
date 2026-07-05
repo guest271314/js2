@@ -346,8 +346,11 @@ const TA_VIEW_CTOR_NAMES = new Set([
  * picks the byte-decoding view lowering at compile time (rather than the native
  * vec type `resolveWasmType(Uint8Array)` would return, which would route
  * `a[i]`/`a[i]=v` through the plain-vec path and drop the aliasing). This MUST
- * mirror the ctor's own gating (`emitTaViewConstruct` in `new-super.ts`): single
- * non-numeric buffer arg (ArrayBuffer/SharedArrayBuffer/DataView), host-free lane.
+ * mirror the ctor's own gating (`emitTaViewConstruct` / `emitTaViewConstructWindowed`
+ * in `new-super.ts`): a non-numeric buffer arg (ArrayBuffer/SharedArrayBuffer/
+ * DataView), host-free lane. (#3054 B2) The multi-arg windowed form
+ * `new TA(buf, byteOffset[, length])` also resolves to a `$__ta_view` (with the
+ * byteOffset field populated), so 1..3 args are accepted here.
  */
 function inferTaViewType(ctx: CodegenContext, initializer: ts.Expression | undefined): ValType | null {
   if (!noJsHost(ctx) || !initializer) return null;
@@ -356,9 +359,10 @@ function inferTaViewType(ctx: CodegenContext, initializer: ts.Expression | undef
   const viewName = unwrapped.expression.text;
   if (!TA_VIEW_CTOR_NAMES.has(viewName)) return null;
   const args = unwrapped.arguments;
-  // B1 scope: single buffer arg, offset-0 window. Multi-arg windowed ctors
-  // (`new TA(buf, byteOffset, length)`) are B2 — leave them on the current path.
-  if (!args || args.length !== 1 || ts.isNumericLiteral(args[0]!)) return null;
+  // Buffer-backed view: single buffer arg (offset-0, B1) or windowed
+  // `new TA(buf, byteOffset[, length])` (B2). A numeric first arg is the
+  // count-ctor (native vec), not a view — leave it on the current path.
+  if (!args || args.length < 1 || args.length > 3 || ts.isNumericLiteral(args[0]!)) return null;
   // (#1930) Query the type-oracle boundary, not the raw checker.
   const argSymName = ctx.oracle.builtinReceiverOf(args[0]!);
   if (argSymName !== "ArrayBuffer" && argSymName !== "SharedArrayBuffer" && argSymName !== "DataView") return null;

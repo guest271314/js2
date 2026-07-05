@@ -1181,6 +1181,253 @@ export function emitTaViewElementSet(
   return { kind: "f64" };
 }
 
+// ---------------------------------------------------------------------------
+// (#3054 B2) View accessor props + windowing constructor on a `$__ta_view`.
+//
+// B1 populated a `$__ta_view {length, buf, byteOffset}` with byteOffset pinned
+// 0. B2 (a) reads the accessor props off that struct (`.byteLength`,
+// `.byteOffset`, `.buffer` identity, `BYTES_PER_ELEMENT`; `.length` stays on the
+// B1 arm) and (b) the `(buffer, byteOffset, length)` windowing ctor that
+// POPULATES byteOffset (byte offset) + a windowed element `length`. The byte
+// engine is offset-agnostic (it reads `buf.data` at `byteOffset + i*width` and
+// bounds-checks `i < length` — both fields the view already carries), so a
+// windowed view reads/writes the correct absolute buffer bytes with ZERO byte-
+// engine change. An offset-0 window is byte-identical to B1 (offsetLocal = 0).
+// ---------------------------------------------------------------------------
+
+/** Emit an `if (cond) throw RangeError(msg)` — the i32 condition is on the stack. */
+function emitThrowRangeErrorIf(ctx: CodegenContext, fctx: FunctionContext, msg: string): void {
+  addStringConstantGlobal(ctx, msg);
+  const tagIdx = ensureExnTag(ctx);
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: [...stringConstantExternrefInstrs(ctx, msg), { op: "throw", tagIdx } as Instr],
+    else: [],
+  } as Instr);
+}
+
+/**
+ * ToIndex (§7.1.22) into `outLocal` (i32): compile `expr` → f64, NaN → 0,
+ * truncate toward 0, RangeError if < 0 or > 2^53-1, then narrow to i32. Used by
+ * the windowing ctor for both byteOffset and (element) length args.
+ */
+function emitToIndexI32(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: import("../ts-api.js").ts.Expression,
+  compileExpr: (expr: import("../ts-api.js").ts.Expression, hint?: ValType) => ValType | null,
+  outLocal: number,
+  rangeErrMsg: string,
+): void {
+  const f64Local = allocLocal(fctx, `__tav_ti_${fctx.locals.length}`, { kind: "f64" });
+  const vt = compileExpr(expr, { kind: "f64" });
+  if (vt && vt.kind !== "f64") coerceType(ctx, fctx, vt, { kind: "f64" });
+  fctx.body.push({ op: "local.set", index: f64Local } as Instr);
+  // NaN → 0 (v != v is true only for NaN).
+  fctx.body.push({ op: "local.get", index: f64Local } as Instr);
+  fctx.body.push({ op: "local.get", index: f64Local } as Instr);
+  fctx.body.push({ op: "f64.ne" } as Instr);
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: [{ op: "f64.const", value: 0 } as Instr, { op: "local.set", index: f64Local } as Instr],
+    else: [],
+  } as Instr);
+  // Truncate toward zero (ToIntegerOrInfinity for finite non-NaN).
+  fctx.body.push({ op: "local.get", index: f64Local } as Instr);
+  fctx.body.push({ op: "f64.trunc" } as Instr);
+  fctx.body.push({ op: "local.set", index: f64Local } as Instr);
+  // RangeError if < 0 or > 2^53-1.
+  fctx.body.push({ op: "local.get", index: f64Local } as Instr);
+  fctx.body.push({ op: "f64.const", value: 0 } as Instr);
+  fctx.body.push({ op: "f64.lt" } as Instr);
+  fctx.body.push({ op: "local.get", index: f64Local } as Instr);
+  fctx.body.push({ op: "f64.const", value: 9007199254740991 } as Instr); // 2^53 - 1
+  fctx.body.push({ op: "f64.gt" } as Instr);
+  fctx.body.push({ op: "i32.or" } as Instr);
+  emitThrowRangeErrorIf(ctx, fctx, rangeErrMsg);
+  fctx.body.push({ op: "local.get", index: f64Local } as Instr);
+  fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
+  fctx.body.push({ op: "local.set", index: outLocal } as Instr);
+}
+
+/**
+ * (#3054 B2) `new <TA>(buffer, byteOffset[, length])` → a windowed shared-backing
+ * `$__ta_view` that refs the buffer's vec (like `emitTaViewConstruct`) but with a
+ * non-zero `byteOffset` field and a windowed element `length`. Validates per
+ * §23.2.5.1 InitializeTypedArrayFromArrayBuffer: byteOffset is ToIndex'd and must
+ * be a multiple of the element size; with an explicit length, byteOffset +
+ * length*elemSize must fit the buffer; with the length omitted, the remaining
+ * byte span must be a multiple of the element size. `lengthExpr` undefined ⇒
+ * auto-length (2-arg form). Returns the view ValType, or null (stack balanced) if
+ * the buffer can't be recovered as a native vec.
+ */
+export function emitTaViewConstructWindowed(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  bufExpr: import("../ts-api.js").ts.Expression,
+  offsetExpr: import("../ts-api.js").ts.Expression,
+  lengthExpr: import("../ts-api.js").ts.Expression | undefined,
+  viewName: string,
+  compileExpr: (expr: import("../ts-api.js").ts.Expression, hint?: ValType) => ValType | null,
+): ValType | null {
+  const desc = TA_VIEW_DECODE[viewName];
+  if (!desc) return null;
+  const elemSize = desc.bytes;
+  const taViewTypeIdx = getOrRegisterTaViewType(ctx, viewName);
+  const { vecTypeIdx } = i32ByteVec(ctx);
+
+  // Recover the shared buffer vec struct (mirror emitTaViewConstruct exactly).
+  const bufType = compileExpr(bufExpr);
+  if (!bufType) return null;
+  if (bufType.kind === "externref") {
+    fctx.body.push({ op: "any.convert_extern" } as Instr);
+    fctx.body.push({ op: "ref.cast", typeIdx: vecTypeIdx } as Instr);
+  } else if (bufType.kind === "ref" || bufType.kind === "ref_null") {
+    if ("typeIdx" in bufType && (bufType as { typeIdx: number }).typeIdx !== vecTypeIdx) {
+      fctx.body.push({ op: "ref.cast", typeIdx: vecTypeIdx } as Instr);
+    }
+  } else {
+    fctx.body.push({ op: "drop" } as Instr);
+    return null;
+  }
+  const bufLocal = allocLocal(fctx, `__tavw_buf_${fctx.locals.length}`, { kind: "ref", typeIdx: vecTypeIdx });
+  fctx.body.push({ op: "local.set", index: bufLocal } as Instr);
+
+  // bufByteLen = buf.length (field0 = byte count for an ArrayBuffer vec).
+  const bufByteLenLocal = allocLocal(fctx, `__tavw_blen_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "local.get", index: bufLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr);
+  fctx.body.push({ op: "local.set", index: bufByteLenLocal } as Instr);
+
+  // byteOffset = ToIndex(offsetExpr).
+  const offsetLocal = allocLocal(fctx, `__tavw_off_${fctx.locals.length}`, { kind: "i32" });
+  emitToIndexI32(ctx, fctx, offsetExpr, compileExpr, offsetLocal, "RangeError: Invalid typed array offset");
+
+  // byteOffset must be a multiple of the element size (§23.2.5.1 step 11).
+  if (elemSize !== 1) {
+    fctx.body.push({ op: "local.get", index: offsetLocal } as Instr);
+    fctx.body.push({ op: "i32.const", value: elemSize } as Instr);
+    fctx.body.push({ op: "i32.rem_u" } as Instr);
+    fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+    fctx.body.push({ op: "i32.ne" } as Instr);
+    emitThrowRangeErrorIf(ctx, fctx, `RangeError: start offset of ${viewName} should be a multiple of ${elemSize}`);
+  }
+
+  const lenLocal = allocLocal(fctx, `__tavw_len_${fctx.locals.length}`, { kind: "i32" });
+  if (lengthExpr) {
+    // Explicit element length. byteOffset + length*elemSize must fit the buffer.
+    emitToIndexI32(ctx, fctx, lengthExpr, compileExpr, lenLocal, "RangeError: Invalid typed array length");
+    fctx.body.push({ op: "local.get", index: offsetLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
+    if (elemSize !== 1) {
+      fctx.body.push({ op: "i32.const", value: elemSize } as Instr);
+      fctx.body.push({ op: "i32.mul" } as Instr);
+    }
+    fctx.body.push({ op: "i32.add" } as Instr);
+    fctx.body.push({ op: "local.get", index: bufByteLenLocal } as Instr);
+    fctx.body.push({ op: "i32.gt_s" } as Instr);
+    emitThrowRangeErrorIf(ctx, fctx, "RangeError: Invalid typed array length");
+  } else {
+    // Auto length. byteOffset must not exceed the buffer, and the remaining byte
+    // span must be a whole number of elements. length = (bufByteLen - offset)/elemSize.
+    fctx.body.push({ op: "local.get", index: offsetLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: bufByteLenLocal } as Instr);
+    fctx.body.push({ op: "i32.gt_s" } as Instr);
+    emitThrowRangeErrorIf(ctx, fctx, "RangeError: Start offset is outside the bounds of the buffer");
+    const remLocal = allocLocal(fctx, `__tavw_rem_${fctx.locals.length}`, { kind: "i32" });
+    fctx.body.push({ op: "local.get", index: bufByteLenLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: offsetLocal } as Instr);
+    fctx.body.push({ op: "i32.sub" } as Instr);
+    fctx.body.push({ op: "local.set", index: remLocal } as Instr);
+    if (elemSize !== 1) {
+      fctx.body.push({ op: "local.get", index: remLocal } as Instr);
+      fctx.body.push({ op: "i32.const", value: elemSize } as Instr);
+      fctx.body.push({ op: "i32.rem_u" } as Instr);
+      fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+      fctx.body.push({ op: "i32.ne" } as Instr);
+      emitThrowRangeErrorIf(ctx, fctx, `RangeError: byte length of ${viewName} should be a multiple of ${elemSize}`);
+    }
+    fctx.body.push({ op: "local.get", index: remLocal } as Instr);
+    if (elemSize !== 1) {
+      fctx.body.push({ op: "i32.const", value: elemSize } as Instr);
+      fctx.body.push({ op: "i32.div_u" } as Instr);
+    }
+    fctx.body.push({ op: "local.set", index: lenLocal } as Instr);
+  }
+
+  // struct.new $__ta_view {length (elements), buf (shared vec), byteOffset (bytes)}.
+  fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: bufLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: offsetLocal } as Instr);
+  fctx.body.push({ op: "struct.new", typeIdx: taViewTypeIdx } as Instr);
+  return { kind: "ref_null", typeIdx: taViewTypeIdx };
+}
+
+/**
+ * (#3054 B2) Read an accessor prop off a `$__ta_view` receiver:
+ *   `.byteLength`   = length (field0, element count) × elementSize
+ *   `.byteOffset`   = byteOffset (field2)
+ *   `.buffer`       = the SHARED buffer vec (field1) itself — object IDENTITY, so
+ *                     `a.buffer === b.buffer` for sibling views is `ref.eq`-true
+ *   `BYTES_PER_ELEMENT` = the per-view element size (constant)
+ * `.length` is intentionally NOT handled here — the B1 local-type `.length` arm
+ * (property-access.ts) already reads field0. `receiverExpr` is the view receiver
+ * (compiled via `compileExpr`). Returns the result ValType, or null (declining).
+ */
+export function emitTaViewAccessor(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  taViewTypeIdx: number,
+  propName: string,
+  receiverExpr: import("../ts-api.js").ts.Expression,
+  compileExpr: (expr: import("../ts-api.js").ts.Expression, hint?: ValType) => ValType | null,
+): ValType | null {
+  const desc = taViewDecode(ctx, taViewTypeIdx);
+  if (!desc) return null;
+  const { vecTypeIdx } = i32ByteVec(ctx);
+  const elemSize = desc.bytes;
+
+  // BYTES_PER_ELEMENT is a compile-time constant — drop the (side-effecting) recv.
+  if (propName === "BYTES_PER_ELEMENT") {
+    const rt = compileExpr(receiverExpr);
+    if (rt !== null) fctx.body.push({ op: "drop" } as Instr);
+    fctx.body.push({ op: ctx.fast ? "i32.const" : "f64.const", value: elemSize } as Instr);
+    return ctx.fast ? { kind: "i32" } : { kind: "f64" };
+  }
+
+  // Compile the receiver (the $__ta_view ref) onto the stack.
+  const rt = compileExpr(receiverExpr);
+  if (rt?.kind === "externref") {
+    fctx.body.push({ op: "any.convert_extern" } as Instr);
+    fctx.body.push({ op: "ref.cast", typeIdx: taViewTypeIdx } as Instr);
+  }
+
+  if (propName === "buffer") {
+    // Object identity: return the shared buffer vec (field1) directly.
+    fctx.body.push({ op: "struct.get", typeIdx: taViewTypeIdx, fieldIdx: 1 } as Instr);
+    return { kind: "ref_null", typeIdx: vecTypeIdx };
+  }
+  if (propName === "byteLength") {
+    fctx.body.push({ op: "struct.get", typeIdx: taViewTypeIdx, fieldIdx: 0 } as Instr);
+    if (elemSize !== 1) {
+      fctx.body.push({ op: "i32.const", value: elemSize } as Instr);
+      fctx.body.push({ op: "i32.mul" } as Instr);
+    }
+    if (!ctx.fast) fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+    return ctx.fast ? { kind: "i32" } : { kind: "f64" };
+  }
+  if (propName === "byteOffset") {
+    fctx.body.push({ op: "struct.get", typeIdx: taViewTypeIdx, fieldIdx: 2 } as Instr);
+    if (!ctx.fast) fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+    return ctx.fast ? { kind: "i32" } : { kind: "f64" };
+  }
+  // Unknown prop — leave the stack balanced and decline.
+  fctx.body.push({ op: "drop" } as Instr);
+  return null;
+}
+
 /**
  * (#3054 B1, Option A) Materialize a `$__ta_view` into a fresh NATIVE
  * `$__vec_<elem>` by byte-decoding every element little-endian, so consumers that

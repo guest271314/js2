@@ -25,7 +25,7 @@ import {
   typedArrayVecStorage,
 } from "../index.js";
 import { coercionPlan } from "../coercion-plan.js"; // (#2934 1c) single coercion table for the copy-ctor element bridge
-import { emitTaViewConstruct, getOrRegisterDvWindowType } from "../dataview-native.js"; // (#2159/#38) DataView windowing wrapper; (#3054 B1) shared-backing TA views
+import { emitTaViewConstruct, emitTaViewConstructWindowed, getOrRegisterDvWindowType } from "../dataview-native.js"; // (#2159/#38) DataView windowing wrapper; (#3054 B1/B2) shared-backing TA views + windowing
 import { emitBoundsCheckedArrayGet } from "../array-methods.js";
 import { ensureMapHelpers, coerceMapKeyToAnyref } from "../map-runtime.js";
 import { emitSetNewTargetBeforeCall, ensureNewTargetGlobal } from "../new-target.js"; // (#2023)
@@ -3792,6 +3792,29 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
         fctx.body.push({ op: "array.new_default", typeIdx: arrTypeIdx });
         fctx.body.push({ op: "struct.new", typeIdx: vecTypeIdx });
         return { kind: "ref_null", typeIdx: vecTypeIdx };
+      }
+
+      // (#3054 B2) `new <TA>(buffer, byteOffset[, length])` — windowed
+      // shared-backing view. Build a `$__ta_view` with the byteOffset field
+      // populated (B1 pinned it 0) so `a[i]` addresses `byteOffset + i*width`
+      // into the SHARED buffer (sibling/DataView windows mutually observable).
+      // Standalone/WASI only — host-mode buffers are host objects, not native
+      // vecs (#1670). MUST match `inferTaViewType`'s multi-arg gate so the
+      // local's type and the constructed value agree.
+      if (noJsHost(ctx) && args.length >= 2 && !ts.isNumericLiteral(args[0]!)) {
+        const winArgSymName = ctx.checker.getTypeAtLocation(args[0]!).getSymbol?.()?.name;
+        if (winArgSymName === "ArrayBuffer" || winArgSymName === "SharedArrayBuffer" || winArgSymName === "DataView") {
+          const winResult = emitTaViewConstructWindowed(
+            ctx,
+            fctx,
+            args[0]!,
+            args[1]!,
+            args[2],
+            expr.expression.text,
+            (e, h) => compileExpression(ctx, fctx, e, h),
+          );
+          if (winResult) return winResult;
+        }
       }
 
       // new TypedArray() with multiple args — shouldn't happen per spec, but handle gracefully
