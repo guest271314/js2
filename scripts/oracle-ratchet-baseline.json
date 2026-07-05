@@ -97,8 +97,8 @@
       "ctxChecker": 5
     },
     "src/codegen/expressions/new-super.ts": {
-      "getTypeAtLocation": 21,
-      "ctxChecker": 45
+      "getTypeAtLocation": 22,
+      "ctxChecker": 46
     },
     "src/codegen/expressions/unary-updates.ts": {
       "getTypeAtLocation": 4,
