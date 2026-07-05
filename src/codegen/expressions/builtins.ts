@@ -3156,7 +3156,15 @@ function compileMathCall(
     return { kind: "f64" };
   }
 
-  if (method in nativeUnary && expr.arguments.length >= 1) {
+  // Use own-property semantics, NOT the `in` operator: `in` walks the prototype
+  // chain, so an inherited `Object.prototype` name — `Math.hasOwnProperty(…)`,
+  // `Math.toString()`, `Math.valueOf()`, `Math.constructor(…)`, etc. — would
+  // spuriously match this table and push `{ op: <inherited function> }` (a
+  // non-string op), crashing codegen downstream with "op.endsWith is not a
+  // function" (#3044). `Object.hasOwn` keeps the dispatch to the six genuine
+  // native-unary Math methods; anything else falls through to `return undefined`
+  // → generic call handling (which resolves `Math.hasOwnProperty` correctly).
+  if (Object.hasOwn(nativeUnary, method) && expr.arguments.length >= 1) {
     compileExpression(ctx, fctx, expr.arguments[0]!, f64Hint);
     fctx.body.push({ op: nativeUnary[method]! } as Instr);
     return { kind: "f64" };
