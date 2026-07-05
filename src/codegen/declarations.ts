@@ -885,12 +885,31 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
       }
       if (ts.isMethodDeclaration(p) && ts.isComputedPropertyName(p.name)) {
         const inner = p.name.expression;
+        // (#1433) Symbol.dispose / asyncDispose computed methods.
         if (
           ts.isPropertyAccessExpression(inner) &&
           ts.isIdentifier(inner.expression) &&
           inner.expression.text === "Symbol" &&
           (inner.name.text === "dispose" || inner.name.text === "asyncDispose")
         ) {
+          state.getterCallbackFound = true;
+          break;
+        }
+        // (#3048) A non-plain-literal computed method key routes through the
+        // host plain-object method arms in literals.ts — the well-known-`Symbol`
+        // arm (`{ [Symbol.iterator]() {} }`) and the runtime-key arm
+        // (`{ [ID(2)]() {} }`, `{ [k]() {} }`) — both of which install the method
+        // value via the `__make_getter_callback` bridge. Only a plain
+        // numeric/string-literal key (`{ [1]() {} }`, `{ ["x"]() {} }`) resolves
+        // to a static method name and takes the struct/string path (no bridge),
+        // so it needs no registration. The pre-pass previously registered the
+        // bridge only for the `dispose`/`asyncDispose` arm above, so every other
+        // well-known-symbol / runtime computed method missed it → hard CE
+        // "Missing __make_getter_callback import" (#1027 resurgence). Host/GC
+        // only: standalone/WASI compile the method as a host-free closure (#2194)
+        // and must not declare the unsatisfiable `env::` bridge import.
+        const isPlainLiteralKey = ts.isNumericLiteral(inner) || ts.isStringLiteralLike(inner);
+        if (!isPlainLiteralKey && !ctx.standalone && !ctx.wasi) {
           state.getterCallbackFound = true;
           break;
         }
