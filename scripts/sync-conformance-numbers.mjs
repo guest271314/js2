@@ -32,9 +32,19 @@ import { resolve, relative } from "node:path";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const REPORT_PATH = resolve(ROOT, "benchmarks/results/test262-current.json");
+// Standalone (host-free) high-water mark — the pure-Wasm, no-JS-host path.
+// Refreshed by CI's promote-baseline job alongside the JS-host baseline
+// (see check-standalone-highwater.mjs + test262-sharded.yml). Carries the
+// host-free pass counts; `official_pass`/`official_total` are the
+// standard+annexB scope, matching the JS-host `summary` denominator.
+const STANDALONE_PATH = resolve(ROOT, "benchmarks/results/test262-standalone-highwater.json");
 
 const START = "<!-- AUTO:conformance-start -->";
 const END = "<!-- AUTO:conformance-end -->";
+// Optional second block. Files without this anchor pair are skipped, not
+// errored — only the README surfaces the two-path axis today.
+const SA_START = "<!-- AUTO:conformance-standalone-start -->";
+const SA_END = "<!-- AUTO:conformance-standalone-end -->";
 
 /** Files we manage. Path is relative to repo root. */
 const TARGETS = ["ROADMAP.md", "plan/goals/goal-graph.md", "README.md", "CLAUDE.md"];
@@ -74,6 +84,34 @@ function loadReport() {
 }
 
 /**
+ * Load the standalone (host-free) high-water mark. Optional: returns null
+ * (with a warning) if the file is absent or malformed, so a missing
+ * standalone baseline never blocks the JS-host sync.
+ */
+function loadStandalone() {
+  if (!existsSync(STANDALONE_PATH)) {
+    console.warn(
+      `[sync-conformance] standalone high-water not found at ${STANDALONE_PATH} — skipping standalone block.`,
+    );
+    return null;
+  }
+  let json;
+  try {
+    json = JSON.parse(readFileSync(STANDALONE_PATH, "utf8"));
+  } catch (err) {
+    console.warn(`[sync-conformance] failed to parse ${STANDALONE_PATH}: ${err.message} — skipping standalone block.`);
+    return null;
+  }
+  if (typeof json.official_pass !== "number" || typeof json.official_total !== "number") {
+    console.warn(
+      `[sync-conformance] standalone high-water missing official_pass/official_total — skipping standalone block.`,
+    );
+    return null;
+  }
+  return { pass: json.official_pass, total: json.official_total };
+}
+
+/**
  * Build the block contents that go between the anchor comments.
  * Single source of truth for the wording — every target file gets the
  * exact same line so they cannot diverge.
@@ -105,30 +143,42 @@ function renderBlock(report) {
 }
 
 /**
- * Replace the contents between START and END in `text` with `body`.
+ * Standalone (host-free) block. Same pass/total/percentage shape as the
+ * JS-host block, on the same official denominator, so the two lines read as
+ * a clean side-by-side of the two compile paths.
+ */
+function renderStandaloneBlock(report) {
+  const passStr = fmtNumber(report.pass);
+  const totalStr = fmtNumber(report.total);
+  const pct = fmtPercent(report.pass, report.total);
+  return `**standalone (host-free) test262 conformance**: ${passStr} / ${totalStr} (${pct} %)`;
+}
+
+/**
+ * Replace the contents between `start` and `end` in `text` with `body`.
  * Returns the new text. Throws if the anchor pair is missing or malformed.
  */
-function replaceAnchorBlock(text, body, label) {
-  const startIdx = text.indexOf(START);
-  const endIdx = text.indexOf(END);
+function replaceAnchorBlock(text, body, label, start = START, end = END) {
+  const startIdx = text.indexOf(start);
+  const endIdx = text.indexOf(end);
   if (startIdx === -1 || endIdx === -1) {
     throw new Error(
-      `${label}: missing anchor pair. Expected both \`${START}\` and \`${END}\`. ` +
+      `${label}: missing anchor pair. Expected both \`${start}\` and \`${end}\`. ` +
         `Add the anchors manually first; this script refuses to guess where to write.`,
     );
   }
   if (endIdx < startIdx) {
-    throw new Error(`${label}: \`${END}\` appears before \`${START}\`.`);
+    throw new Error(`${label}: \`${end}\` appears before \`${start}\`.`);
   }
   // Count to ensure exactly one of each.
-  const startCount = text.split(START).length - 1;
-  const endCount = text.split(END).length - 1;
+  const startCount = text.split(start).length - 1;
+  const endCount = text.split(end).length - 1;
   if (startCount !== 1 || endCount !== 1) {
     throw new Error(
       `${label}: expected exactly one START and one END anchor, found ${startCount} START / ${endCount} END.`,
     );
   }
-  const before = text.slice(0, startIdx + START.length);
+  const before = text.slice(0, startIdx + start.length);
   const after = text.slice(endIdx);
   return `${before}\n${body}\n${after}`;
 }
@@ -150,6 +200,31 @@ function processFile(relPath, report, { check }) {
   return { path: relPath, changed: true };
 }
 
+/**
+ * Optional standalone block. Files that lack the standalone anchor pair are
+ * skipped (returns { skipped: true }) rather than erroring — only files that
+ * opt in by carrying the anchor get the second line.
+ */
+function processStandaloneFile(relPath, report, { check }) {
+  const abs = resolve(ROOT, relPath);
+  if (!existsSync(abs)) {
+    throw new Error(`Target file missing: ${relPath}`);
+  }
+  const orig = readFileSync(abs, "utf8");
+  if (!orig.includes(SA_START) && !orig.includes(SA_END)) {
+    return { path: relPath, skipped: true, changed: false };
+  }
+  const body = renderStandaloneBlock(report);
+  const next = replaceAnchorBlock(orig, body, relPath, SA_START, SA_END);
+  if (next === orig) {
+    return { path: relPath, changed: false };
+  }
+  if (!check) {
+    writeFileSync(abs, next, "utf8");
+  }
+  return { path: relPath, changed: true };
+}
+
 function main() {
   const check = process.argv.includes("--check");
   let report;
@@ -159,6 +234,7 @@ function main() {
     console.error(`[sync-conformance] ${err.message}`);
     process.exit(1);
   }
+  const standalone = loadStandalone();
 
   const errors = [];
   const results = [];
@@ -167,6 +243,14 @@ function main() {
       results.push(processFile(t, report, { check }));
     } catch (err) {
       errors.push({ path: t, message: err.message });
+    }
+    if (standalone) {
+      try {
+        const r = processStandaloneFile(t, standalone, { check });
+        if (!r.skipped) results.push({ ...r, path: `${r.path} (standalone)` });
+      } catch (err) {
+        errors.push({ path: `${t} (standalone)`, message: err.message });
+      }
     }
   }
 

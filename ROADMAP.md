@@ -10,16 +10,16 @@ The goal: enable JS/TS developers to target WebAssembly as a first-class compila
 
 ## What We've Achieved
 
-Over 31 development sprints and **784 closed issues**, js2wasm has grown from a proof-of-concept into a functional compiler covering a significant portion of the ECMAScript specification.
+Across 69 development sprints and **2,700+ merged pull requests**, js2wasm has grown from a proof-of-concept into a functional compiler covering a significant portion of the ECMAScript specification.
 
 ### Conformance
 
 <!-- AUTO:conformance-start -->
-**test262 conformance**: 32,236 / 43,106 (74.8 %)
+**test262 conformance**: 32,239 / 43,106 (74.8 %)
 <!-- AUTO:conformance-end -->
 
-- Automated conformance tracking with historical trend data and a public [conformance report](https://loopdive.github.io/js2wasm/benchmarks/report.html)
-- 195 project-level equivalence tests validating JS↔Wasm output parity
+- Automated conformance tracking with historical trend data and a public [conformance report](https://js2.loopdive.com/benchmarks/report.html)
+- 200+ project-level equivalence tests validating JS↔Wasm output parity
 
 ### Language Features (compiled to native Wasm)
 
@@ -46,7 +46,7 @@ Over 31 development sprints and **784 closed issues**, js2wasm has grown from a 
 
 ### Tooling
 
-- **[Live Playground](https://loopdive.github.io/js2wasm/playground/)** — compile and run TypeScript as WebAssembly in the browser
+- **[Live Playground](https://js2.loopdive.com/playground/)** — compile and run TypeScript as WebAssembly in the browser
 - **WAT inspector** — view generated WebAssembly Text Format
 - **Module analyzer** — binary size treemap visualization
 - **CLI** with WAT, `.d.ts`, and imports helper output
@@ -54,17 +54,25 @@ Over 31 development sprints and **784 closed issues**, js2wasm has grown from a 
 
 ## Planned Work
 
-### Near-Term (Sprints 32–40) — Target: 60% Conformance
+_Priorities and targets below are indicative and PO-owned; the authoritative
+current baselines are in the [conformance section above](#conformance)._
+
+### Near-Term — Target: ≥80% JS-host conformance + close the standalone gap
+
+The original 60% JS-host milestone has been surpassed (currently ~75%). The
+near-term focus is pushing JS-host past 80% via the areas below, and closing
+the standalone (host-free) gap, which trails the JS-host path.
 
 | Area | Expected Impact | Description |
 |------|----------------|-------------|
+| **Standalone (host-free) path** | large | Wasm-native replacements for the built-ins still routed through JS host imports; the main lever on the standalone pass rate |
 | **Property descriptors** | ~5,000 test fixes | Full `Object.defineProperty`, `Object.getOwnPropertyDescriptor`, property attributes (writable, enumerable, configurable) |
 | **Prototype chain** | ~2,500 test fixes | Correct prototype lookup, `Object.create`, `Object.getPrototypeOf`, inherited property access |
 | **Iterator protocol** | ~1,500 test fixes | Wasm-native iterators replacing current host-delegated implementation |
 | **Type coercion edge cases** | ~1,000 test fixes | Spec-compliant `ToPrimitive`, `ToString`, `ToNumber` for all input types |
-| **CI/CD conformance gating** | — | Automated test262 runs on every PR with regression detection |
+| **CI/CD conformance gating** | ✅ shipped | Sharded test262 on every PR with regression detection + merge-queue re-validation |
 
-### Medium-Term (6 months) — Target: 80% Conformance
+### Medium-Term — Target: 85% Conformance
 
 - **Full ES2024 compliance** for common application patterns
 - **Wasm-native RegExp** engine (removing the largest JS host dependency)
@@ -112,6 +120,9 @@ Same TypeScript input produces the same Wasm binary output. No runtime behavior 
 
 ## Current Performance
 
+_Point-in-time snapshot for illustration — the live, auto-refreshed benchmark
+panels on the [landing page](https://js2.loopdive.com/) are canonical._
+
 ```
 Benchmark     WASM          JS        Ratio     n
 ──────────────────────────────────────────────────────────────
@@ -128,10 +139,10 @@ Compute-intensive workloads (fibonacci, loops, array operations) already match o
 ## Get Involved
 
 - **Repository**: [github.com/loopdive/js2](https://github.com/loopdive/js2)
-- **Playground**: [Live demo](https://loopdive.github.io/js2wasm/playground/)
-- **Conformance report**: [Historical compatibility tracking](https://loopdive.github.io/js2wasm/benchmarks/report.html)
+- **Playground**: [Live demo](https://js2.loopdive.com/playground/)
+- **Conformance report**: [Historical compatibility tracking](https://js2.loopdive.com/benchmarks/report.html)
 - **License**: Apache 2.0 with LLVM Exceptions
 
 ---
 
-*Last updated: April 2026*
+*Last updated: July 2026*
