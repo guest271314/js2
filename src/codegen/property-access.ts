@@ -3794,8 +3794,19 @@ export function compilePropertyAccess(
   // is always 0 for our non-offset views (a fresh backing store per view), which
   // already reads correctly today — handled here only for the externref-receiver
   // case so it doesn't leak `__extern_get`.
+  // (#3061) `.byteLength` / `.byteOffset` on an ArrayBuffer / SharedArrayBuffer
+  // are ALSO computed natively in JS-host mode. The host `__extern_get` fallback
+  // returns `undefined` for these accessors on the opaque WasmGC byte-vec struct
+  // (they are not real struct fields and no `__sget_byteLength` export exists), so
+  // `ab.byteLength` / `ab.byteOffset` read back NaN (~45 test262 fails). The
+  // `i32_byte` backing (field-0 = byte count, element size 1) is IDENTICAL across
+  // host and standalone, so the `isBuffer` arm below is representation-safe in both
+  // modes. TypedArray / DataView stay standalone-only here (their backings are
+  // element-scaled / windowed and diverge in host mode — see #3060 follow-up).
+  const hostBufferByteAttr =
+    !noJsHost(ctx) && !ctx.strictNoHostImports && (propName === "byteLength" || propName === "byteOffset");
   if (
-    (ctx.wasi || ctx.standalone || ctx.strictNoHostImports) &&
+    (ctx.wasi || ctx.standalone || ctx.strictNoHostImports || hostBufferByteAttr) &&
     (propName === "byteLength" || propName === "byteOffset" || propName === "BYTES_PER_ELEMENT")
   ) {
     const recvName =
@@ -3803,8 +3814,14 @@ export function compilePropertyAccess(
       (ts.isNewExpression(expr.expression) && ts.isIdentifier(expr.expression.expression)
         ? expr.expression.expression.text
         : undefined);
-    const isBuffer = recvName === "ArrayBuffer" || recvName === "SharedArrayBuffer";
-    const isTypedArr = recvName !== undefined && TYPED_ARRAY_NAMES.has(recvName);
+    // (#3061) In JS-host mode only the plain ArrayBuffer arm is
+    // representation-safe (`i32_byte`, field-0 = byte count, identical to
+    // standalone). SharedArrayBuffer's host-mode backing differs (a bare
+    // `i32_byte` `ref.test` misses → a wrong `0`), so keep SAB — like
+    // TypedArray — gated to no-host; both fall through to the generic reader in
+    // host mode exactly as before.
+    const isBuffer = recvName === "ArrayBuffer" || (recvName === "SharedArrayBuffer" && noJsHost(ctx));
+    const isTypedArr = recvName !== undefined && TYPED_ARRAY_NAMES.has(recvName) && noJsHost(ctx);
     const isDataView = recvName === "DataView";
     // (#2159/#38) DataView `byteOffset` / `byteLength` honour the constructor's
     // window. The receiver is either a `$__dv_window` wrapper (windowed view) or
