@@ -34,10 +34,10 @@
 import { isBooleanType, isStringType } from "../checker/type-mapper.js";
 import type { Instr, ValType } from "../ir/types.js";
 import { ts } from "../ts-api.js";
+import { ensureAnyFromExternHelper } from "./any-helpers.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { noJsHost } from "./expressions/helpers.js";
 import { addUnionImports, nativeStringType } from "./index.js";
-import { ensureAnyFromExternHelper } from "./any-helpers.js";
 import { ensureAnyToStringHelper } from "./native-strings.js";
 import {
   compileExpression,
@@ -453,16 +453,36 @@ export function emitToBoolean(ctx: CodegenContext, valType: ValType | null, sink
  */
 function emitAnyEqOperands(ctx: CodegenContext, fctx: FunctionContext, expr: ts.BinaryExpression): boolean {
   const anyValueTarget: ValType = { kind: "ref_null", typeIdx: ctx.anyValueTypeIdx };
+  // (#3055) An `externref` operand is a boxed value whose runtime tag must be
+  // RECOVERED, not assumed. `coerceType(externref → $AnyValue)` boxes it via the
+  // `__any_box_string` DEFAULT (value-tags.ts) — the #1888 tag-5 "string" lie —
+  // so two boxed NUMBERS (`$BoxedNumber` externrefs from `__box_number`) become
+  // two tag-5 boxes and `__any_strict_eq`'s string-content arm answers
+  // equal-for-unequal (`1 === 2` → true). That silently vacuified every numeric
+  // `assert.sameValue` in the standalone harness (isSameValue rides this exact
+  // path). `__any_from_extern` classifies by tag instead — `$BoxedNumber` → tag-3
+  // (numeric `f64.eq`), `$BoxedBoolean` → tag-4, and (in its non-honest default
+  // instance) strings/objects keep the SAME tag-5 fallback byte-for-byte — so the
+  // fix repairs numbers/bools without perturbing string/object equality or the
+  // #3037 tag-6 identity carrier. `emitAnyEqFromExternTemps` (the loose-eq
+  // externref tail) already marshals through this helper; this makes the
+  // freshly-compiled-operand path consistent. Only reachable in standalone/wasi
+  // (the helper is undefined otherwise → host lane keeps `coerceType`).
+  const fromExternIdx = ensureAnyFromExternHelper(ctx);
+  const marshal = (t: ValType): void => {
+    if (isAnyValue(t, ctx)) return;
+    if (fromExternIdx !== undefined && t.kind === "externref") {
+      fctx.body.push({ op: "call", funcIdx: fromExternIdx });
+      return;
+    }
+    coerceType(ctx, fctx, t, anyValueTarget);
+  };
   const leftType = compileExpression(ctx, fctx, expr.left);
   if (!leftType) return false;
-  if (!isAnyValue(leftType, ctx)) {
-    coerceType(ctx, fctx, leftType, anyValueTarget);
-  }
+  marshal(leftType);
   const rightType = compileExpression(ctx, fctx, expr.right);
   if (!rightType) return false;
-  if (!isAnyValue(rightType, ctx)) {
-    coerceType(ctx, fctx, rightType, anyValueTarget);
-  }
+  marshal(rightType);
   return true;
 }
 

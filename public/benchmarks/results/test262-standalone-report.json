@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-07-06T02:31:52.927Z",
-  "baseline_generated_at": "2026-07-06T02:31:52.927Z",
-  "baseline_sha": "f20fb32f0265d719495e941a0a345a03a5caf252",
+  "timestamp": "2026-07-06T03:21:00.054Z",
+  "baseline_generated_at": "2026-07-06T03:21:00.054Z",
+  "baseline_sha": "2aa204b418294bc91a1b52e058badf17cebfde5d",
   "oracle_version": 1,
   "mode": {
     "target": "standalone",
@@ -1278,8 +1278,8 @@
         },
         "sample_files": [
           "test/built-ins/Temporal/Now/zonedDateTimeISO/return-value.js",
-          "test/built-ins/Temporal/ZonedDateTime/prototype/eraYear/prop-desc.js",
           "test/built-ins/Temporal/PlainDateTime/subclass.js",
+          "test/built-ins/Temporal/ZonedDateTime/prototype/eraYear/prop-desc.js",
           "test/built-ins/Temporal/PlainDateTime/prototype/month/prop-desc.js",
           "test/built-ins/Temporal/Instant/prototype/toString/timezone-wrong-type.js"
         ],
@@ -1307,22 +1307,22 @@
         },
         "error_categories": {
           "wasm_compile": 17,
-          "other": 9,
           "assertion_fail": 34,
+          "other": 9,
           "type_error": 9,
           "runtime_error": 2
         },
         "sample_files": [
           "test/built-ins/DisposableStack/prototype/use/throws-if-value-missing-Symbol.dispose.js",
           "test/built-ins/DisposableStack/prototype/use/throws-if-value-Symbol.dispose-property-is-null.js",
-          "test/built-ins/AsyncDisposableStack/newtarget-prototype-is-not-object.js",
           "test/built-ins/AsyncDisposableStack/undefined-newtarget-throws.js",
+          "test/built-ins/AsyncDisposableStack/newtarget-prototype-is-not-object.js",
           "test/built-ins/DisposableStack/prototype/adopt/adds-value-onDispose.js"
         ],
         "sample_signatures": [
           "wasm_compile:L#:## Symbol(Symbol.dispose) is not a function",
-          "other:L#:## Codegen error: Reflect.construct not supported in standalone mode (## Phase C).; L#:## Codegen error: Reflect.construct not supported in standalone mode (## Phase C).; L#:## Codegen error: Reflect.construct not supported in standalone",
           "assertion_fail:returned # — assert ## at L#: assert.throws(TypeError, function() { AsyncDisposableStack(); });",
+          "other:L#:## Codegen error: Reflect.construct not supported in standalone mode (## Phase C).; L#:## Codegen error: Reflect.construct not supported in standalone mode (## Phase C).; L#:## Codegen error: Reflect.construct not supported in standalone",
           "type_error:TypeError: Cannot access property on null or undefined at #:#",
           "wasm_compile:L#:## [object Object] is not a function"
         ]
@@ -1428,8 +1428,8 @@
           "test/built-ins/JSON/parse/15.12.2-2-2.js",
           "test/built-ins/JSON/stringify/space-wrong-type.js",
           "test/built-ins/JSON/parse/reviver-array-define-prop-err.js",
-          "test/built-ins/JSON/stringify/replacer-array-empty.js",
-          "test/built-ins/JSON/parse/15.12.2-2-6.js"
+          "test/built-ins/JSON/parse/15.12.2-2-6.js",
+          "test/built-ins/JSON/stringify/replacer-array-empty.js"
         ],
         "sample_signatures": [
           "illegal_cast:L#:## illegal cast [in test()]",
@@ -1648,7 +1648,7 @@
           "other:L#:## Codegen error: Reflect.construct not supported in standalone mode (## Phase C).",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue( Reflect.get(o, 'p1'), 'value #', 'Return value from data descriptor' );",
           "other:L#:## Codegen error: Reflect.getOwnPropertyDescriptor built-in static property value read is not supported in --target standalone (## / ## S6-b). Add a native built-in method closure for this pair.",
-          "other:L#:## Codegen error: Reflect.set with an explicit receiver argument is not yet supported in --target standalone (##); the receiver would be silently dropped and accessor setters would write to the target instead of the receiver."
+          "other:L#:## Codegen error: Reflect.preventExtensions not supported in standalone mode (## Phase C).; L#:## Codegen error: Reflect.preventExtensions not supported in standalone mode (## Phase C)."
         ]
       },
       {
@@ -1838,7 +1838,7 @@
           "test/built-ins/TypedArrayConstructors/internals/Set/detached-buffer.js",
           "test/built-ins/TypedArrayConstructors/ctors/buffer-arg/defined-length-sab.js",
           "test/built-ins/TypedArrayConstructors/ctors/typedarray-arg/same-ctor-returns-new-cloned-typedarray.js",
-          "test/built-ins/TypedArrayConstructors/internals/Get/key-is-symbol.js"
+          "test/built-ins/TypedArrayConstructors/internals/HasProperty/indexed-value.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert(i in array);",
@@ -1913,14 +1913,14 @@
           "test/language/expressions/object/literal-property-name-bigint.js",
           "test/language/statements/variable/12.2.1-21-s.js",
           "test/built-ins/String/fromCharCode/S15.5.3.2_A3_T2.js",
-          "test/built-ins/Object/defineProperties/15.2.3.7-5-b-247.js"
+          "test/built-ins/Object/create/properties-arg-to-object-bigint.js"
         ],
         "sample_signatures": [
           "type_error:TypeError: Cannot destructure 'null' or 'undefined'",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(o[\"#\"], true, \"the property name must be the string representation of the numeric value.\");",
           "type_error:TypeError: Cannot access property on null or undefined",
           "other:L#:## Codegen error: String.fromCharCode built-in static property value read is not supported in --target standalone (## / ## S6-b). Add a native built-in method closure for this pair.",
-          "type_error:TypeError: Object.defineProperties unsupported descriptor shape in standalone mode (##)"
+          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: extern.convert_any[#] expected type shared anyref, found i64.const of type i64 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $proto ex"
         ]
       },
       {
@@ -1991,7 +1991,7 @@
           "type_error:TypeError: dynamic eval is not supported in standalone mode (##)",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue( f, undefined, 'Initialized binding created prior to evaluation' );",
           "runtime_error:L#:## Invalid left-hand side in for-in/for-of",
-          "assertion_fail:returned # — assert ## at L#: assert.sameValue(typeof f, 'function');"
+          "other:L#:## ';' expected."
         ]
       },
       {
@@ -2082,15 +2082,15 @@
           "assertion_fail": 10
         },
         "sample_files": [
-          "test/built-ins/Math/SQRT1_2/value.js",
           "test/built-ins/Math/SQRT2/value.js",
+          "test/built-ins/Math/SQRT1_2/value.js",
           "test/built-ins/Math/LN2/value.js",
           "test/built-ins/Math/Symbol.toStringTag.js",
           "test/built-ins/Math/E/value.js"
         ],
         "sample_signatures": [
-          "assertion_fail:returned # — assert ## at L#: assert.notSameValue(Math.SQRT1_2, NaN);",
           "assertion_fail:returned # — assert ## at L#: assert.notSameValue(Math.SQRT2, NaN);",
+          "assertion_fail:returned # — assert ## at L#: assert.notSameValue(Math.SQRT1_2, NaN);",
           "assertion_fail:returned # — assert ## at L#: assert.notSameValue(Math.LN2, NaN);",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(Math[Symbol.toStringTag], 'Math');",
           "assertion_fail:returned # — assert ## at L#: assert.notSameValue(Math.E, NaN);"
@@ -2362,8 +2362,8 @@
           "host_free_pass": 0
         },
         "error_categories": {
-          "type_error": 5,
           "assertion_fail": 103,
+          "type_error": 5,
           "promise_error": 4,
           "wasm_compile": 9,
           "negative_test_fail": 13,
@@ -2373,15 +2373,15 @@
           "runtime_error": 2
         },
         "sample_files": [
-          "test/language/module-code/namespace/internals/delete-non-exported.js",
           "test/language/module-code/instn-local-bndng-cls.js",
+          "test/language/module-code/namespace/internals/delete-non-exported.js",
           "test/language/statements/for/dstr/const-ary-ptrn-elem-id-iter-val-err.js",
           "test/language/statements/for/dstr/const-ary-ptrn-rest-id-iter-val-err.js",
           "test/language/statements/const/dstr/obj-ptrn-prop-ary-value-null.js"
         ],
         "sample_signatures": [
-          "type_error:TypeError: Cannot destructure 'null' or 'undefined'",
           "assertion_fail:returned # — assert ## at L#: assert.throws(ReferenceError, function() { typeof test262; }, 'Binding is created but not initialized.');",
+          "type_error:TypeError: Cannot destructure 'null' or 'undefined'",
           "assertion_fail:returned # — assert ## at L#: throw new Test262Error();",
           "assertion_fail:returned # — assert ## at L#: assert.throws(TypeError, function() { const { w: [x, y, z] = [#, #, #] } = { w: null }; });",
           "assertion_fail:returned # — assert ## at L#: assert.throws(ReferenceError, function() { typeof D; }, 'binding is created but not initialized');"
@@ -2412,8 +2412,8 @@
         },
         "sample_files": [
           "test/built-ins/Promise/allSettled/resolve-element-function-name.js",
-          "test/built-ins/Promise/race/same-resolve-function.js",
           "test/built-ins/Promise/all/resolve-element-function-extensible.js",
+          "test/built-ins/Promise/race/same-resolve-function.js",
           "test/built-ins/Promise/allSettled/reject-element-function-multiple-calls.js",
           "test/built-ins/Promise/any/ctx-non-ctor.js"
         ],
@@ -2525,7 +2525,7 @@
           "test/language/line-terminators/S7.3_A7_T6.js",
           "test/language/directive-prologue/14.1-3-s.js",
           "test/language/expressions/import.meta/syntax/goal-script.js",
-          "test/language/line-terminators/S7.3_A7_T8.js"
+          "test/language/line-terminators/S7.3_A7_T2.js"
         ],
         "sample_signatures": [
           "assertion_fail:Test262Error: ##: Check Function Expression for automatic semicolon insertion",

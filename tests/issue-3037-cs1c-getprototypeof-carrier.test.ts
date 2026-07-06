@@ -130,11 +130,14 @@ describe("#3037 CS1c — class-instance getPrototypeOf (real proto anchor)", () 
 });
 
 describe("#3037 CS1c — KNOWN-GAPs beyond the operand carrier (CS3 / non-any-operand)", () => {
-  it("[KNOWN-GAP: null-canon stored-in-local] CS0 case (d) — gpo([1]) stored then === [0 today]", async () => {
+  it("[CLOSED by #3055] CS0 case (d) — gpo([1]) stored then === [now 1]", async () => {
     // Both operands are null externref from getPrototypeOf, stored in `any`
-    // locals → boxed tag-5 at the operand seam → guarded same-tag arm → 0.
-    // A null LITERAL (above) is 1. The fix is the universal reader/producer
-    // carrier (CS3), not a bounded operand carrier.
+    // locals. Previously the operand seam boxed each via `__any_box_string`
+    // (tag-5 lie) → the guarded same-tag string arm answered 0. #3055 made the
+    // any-equality operand seam classify externrefs by tag via
+    // `__any_from_extern`: a null externref now boxes tag-1 (null), so
+    // `null === null` → 1 (the semantically correct answer — two reads of the
+    // same object's prototype ARE ===).
     expect(
       await runStandalone(`export function run(): number {
         const a: any = [1];
@@ -142,10 +145,12 @@ describe("#3037 CS1c — KNOWN-GAPs beyond the operand carrier (CS3 / non-any-op
         const p2: any = Object.getPrototypeOf(a);
         return (p1 === p2) ? 1 : 0;
       }`),
-    ).toBe(0);
+    ).toBe(1);
   });
 
-  it("[KNOWN-GAP: CS3 stored-in-local] class getPrototypeOf stored in `any` locals then === [0 today]", async () => {
+  it("[CLOSED by #3055] class getPrototypeOf stored in `any` locals then === [now 1]", async () => {
+    // Same as above for a class instance: honest tag-1 null boxing at the
+    // operand seam (#3055) makes the stored-in-local prototype `===` correct.
     expect(
       await runStandalone(`class Foo { x: number = 1; }
         export function run(): number {
@@ -154,7 +159,7 @@ describe("#3037 CS1c — KNOWN-GAPs beyond the operand carrier (CS3 / non-any-op
           const p2: any = Object.getPrototypeOf(f);
           return (p1 === p2) ? 1 : 0;
         }`),
-    ).toBe(0);
+    ).toBe(1);
   });
 
   it("[KNOWN-GAP: non-any operand] getPrototypeOf(instance) === Foo.prototype [0 today]", async () => {
