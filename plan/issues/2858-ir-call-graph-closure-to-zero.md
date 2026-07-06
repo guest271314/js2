@@ -196,3 +196,27 @@ tagged-template 24-fix win and the bucket-9→0 ratchet.
 **State:** branch `issue-2858-ir-callgraph` holds the bucket-9→0 work + a CLEAN
 re-merge of `upstream/main` (local only, not pushed — freeze). PR #2752 kept `hold`.
 Bucket ratchet (`scripts/ir-fallback-baseline.json` 9→0) stays committed on-branch.
+
+## FIX (2026-07-06, sendev fix-2752) — narrow the caller-arm relaxation
+
+Applied the banked fix direction: the host-mode caller-arm relaxation
+(`demoteOnLegacyCaller`) is now narrowed per-function. Added `hasCallableParam(name)`
+in `src/ir/select.ts` (looks up the `ts.FunctionDeclaration` in `declByName` and
+tests each parameter for `ts.isFunctionTypeNode(p.type)`). The caller-direction
+demotion now fires when `demoteOnLegacyCaller || hasCallableParam(name)` — i.e. it
+still relaxes in host mode for **value-param** leaf helpers (preserving the
+bucket-9→0 win + the 24 tagged-template fixes), but keeps demoting any helper that
+takes a **callable/closure param** (`fn: () => number`, `(x: number) => number`) so
+it stays on the legacy path alongside its legacy caller. That closes the exact
+signature-safety hazard #2949 slice-3b did not cover (closure-as-callable-param ABI).
+
+### Verification
+
+- `check:ir-fallbacks --verbose`: gate OK, `call-graph-closure` stays **0** — the
+  playground-corpus leaf helpers carry no callable param, so the narrowing does not
+  re-demote any of them; baseline (`scripts/ir-fallback-baseline.json`) unchanged.
+- Direct run of the 2 regressed files — `illegal-cast-assert-throws.test.ts` (6) +
+  `optimize-differential.test.ts` (4) — **10/10 pass**, incl. all 3 previously-failing
+  cases (closure-with-captures callable param ×2 + higher-order map-like).
+- `tsc --noEmit` clean; `prettier --check src/ir/select.ts` clean.
+- Full `equivalence-gate.mjs` re-run to confirm no other regression before land.

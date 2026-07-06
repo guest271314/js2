@@ -594,6 +594,26 @@ export function planIrCompilation(
   //     bodies are rejected up front by the body-shape work (#2856/#2857).
   // -------------------------------------------------------------------------
   const demoteOnLegacyCaller = options?.jsHostExterns !== true;
+  // #2858 host-mode narrowing (BANKED 2026-07-06 regression fix). Relaxing the
+  // caller-direction demotion in host mode is sound for value-param leaf helpers
+  // (the #2949 slice-3b `any`-ABI unification makes a legacy caller of an IR
+  // callee signature-safe). It is NOT sound when the claimed helper takes a
+  // **callable/closure param** (a `FunctionTypeNode` parameter, e.g.
+  // `fn: () => number`): #2949's `any`-ABI unification does not cover the
+  // closure-as-callable-param ABI. If such a helper is claimed for IR only
+  // because its lone unclaimed edge is a legacy caller passing it a
+  // captured-closure argument, the IR lowering illegal-casts that legacy
+  // captured-closure struct (legacy closure ABI ≠ IR callable/funcref
+  // signature) and diverges from the legacy output (the 3 equivalence-gate
+  // regressions on #2752). Keep the conservative caller-direction demotion for
+  // any function carrying a callable param so it stays on the legacy path
+  // alongside its legacy caller; value-param leaves keep the relaxation
+  // (bucket→0 win + the 24 tagged-template fixes preserved).
+  const hasCallableParam = (name: string): boolean => {
+    const fn = declByName.get(name);
+    if (!fn) return false;
+    return fn.parameters.some((p) => p.type !== undefined && ts.isFunctionTypeNode(p.type));
+  };
   const { callers, callees, hasExternalCall } = buildLocalCallGraph(declByName, localClasses);
 
   const claimed = new Set(individuallyClaimed);
@@ -614,8 +634,10 @@ export function planIrCompilation(
     for (const name of [...claimed]) {
       const myCallees = callees.get(name) ?? new Set<string>();
       let safe = true;
-      // Caller-direction demotion: standalone/wasi only (#2858).
-      if (demoteOnLegacyCaller) {
+      // Caller-direction demotion: always in standalone/wasi (#2858), and in
+      // host mode only for functions with a callable/closure param (BANKED
+      // 2026-07-06 — see `hasCallableParam` above).
+      if (demoteOnLegacyCaller || hasCallableParam(name)) {
         const myCallers = callers.get(name) ?? new Set<string>();
         for (const c of myCallers) {
           if (!claimed.has(c)) {
