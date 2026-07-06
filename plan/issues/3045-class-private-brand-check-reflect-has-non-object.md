@@ -223,3 +223,33 @@ expression failures (a class expression used as an `extends` heritage or
    expressions must stay eager/unchanged.
 5. Full `merge_group` — class-expression scope capture is broad; standalone floor
    green.
+
+## arch-3049 re-verification (2026-07-06) — CONFIRMED, with a line-drift caveat
+
+Re-checked against current `main` @ 52937f5. **Root cause holds; Bug 2 is still
+unfixed; spec is implementable — BUT the `declarations.ts` line numbers have
+drifted, so grep by SYMBOL, not by the cited line.**
+
+- **Bug 2 confirmed unfixed.** The class-expression variable path
+  (`statements/variables.ts:713–768`, Bug-1 materialization) makes **zero** real
+  calls to `promoteAccessorCapturesToGlobals` (the only occurrence in the file,
+  `:1101`, is inside a comment). The asymmetry the spec names holds: class
+  **declarations** route `compileStatement → compileNestedClassDeclaration`
+  (`statements.ts:273`) which runs the capture-promotion loop
+  (`statements/nested-declarations.ts:129/133/137`) then `compileClassBodies`
+  (`:148`); the class-**expression** var-path does neither.
+- **Two #3045 commits landed AFTER this spec was written and shifted the line
+  refs (main advanced):** `c170bc6` (Bug 1 — materialize class-expr ctor value)
+  and `e25d3da` (class-identity-to-binding narrowing + `resolveDeclaringClass
+  ForPrivateName` own-member fix). **Neither touches Bug 2.** Net effect on the
+  spec: symbols intact, but `declarations.ts` refs are ~35 lines low —
+  `anonClassExprNames.set` is at **`:3429`** (spec said 3394); the `var C =
+  class{}` deferral `deferredClassBodies.add(decl.name.text)` is at **`:4889`**
+  (spec said 4852–4854); the class-decl deferral is at **`:4864/4876`** (spec
+  said 4826–4829). `compileClassBodies` union signature is at `class-bodies.ts:
+  1475`; `funcStack`/`parentBodiesStack` push at `:1505–1506`.
+
+No downgrade — the design (run the class-expression analog of
+`compileNestedClassDeclaration` at the var-path, preserving the #779a index-shift
+guards) is correct and greppable. Flagged only so the senior doesn't trust the
+stale `declarations.ts` line numbers.

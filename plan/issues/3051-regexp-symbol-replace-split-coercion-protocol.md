@@ -339,3 +339,27 @@ Each cluster: verify **no regression** in the delegating corpus
 `RegExp.prototype.{Symbol.match,Symbol.matchAll,Symbol.search}` — 459 files
 dev-3051b already swept) and in `tests/issue-3051.test.ts`. Full `merge_group`
 per cluster; standalone floor green (host-lane-gated).
+
+## arch-3049 re-verification (2026-07-06) — CONFIRMED, with a line-drift caveat
+
+Re-checked against current `main` @ 52937f5. **All four Slice-3+ cluster
+mechanisms exist and the root-cause claims hold — BUT `runtime.ts` (now 14,913
+lines) has advanced since 2026-07-05, so the cited line numbers are off by
+~15–300 lines. Grep by SYMBOL.**
+
+- `__regex_symbol_call` is at **`:10628`** (spec said 10587); the local
+  `wrapCallable` data-struct guard is at **`:10659`** with the `__is_data_struct`
+  gate at **`:10674–10682`** (Cluster 2). Note: the spec's "`wrapCallable` at
+  runtime.ts:1809" is imprecise — `:1824` is a `wrapCallable?` *parameter* of a
+  different accessor-bridge fn; the actual RegExp guard is the local at `:10659`.
+- `_wrapExecReturnForHost` at **`:2362`** (spec 2347); `_wrapForHost` at
+  **`:5575`** (spec cited 5278 for its get-trap arm). `_PRIM_ABSENT` still exists
+  (aliased to `_MISS`, `:2911`); the `WebAssembly.RuntimeError` swallow guards are
+  at `:2956–2998`, `_PRIM_ABSENT` returns at `:3023/3034` (Cluster 1).
+- `_symbolIdToKeys` at **`:4384`**; **id 8 = `@@replace` CONFIRMED exact**
+  (Cluster 4 `name.js`). `[Symbol.species,"@@species"]` at `:4238`;
+  species-bridge sites near `:4451/4466`.
+
+No downgrade — the cluster designs (wasm-exn→host throwing-getter bridge,
+object-arg `_wrapForHost` routing, SpeciesConstructor ctor bridge, WKS-method
+value-vs-call) are correct. Flagged only for the line drift.

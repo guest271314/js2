@@ -225,3 +225,24 @@ a throw/exit. Fix the branch, don't rebuild the drive.
    gate runs only in `merge_group` — this is where an OOM regression would surface;
    Part A+B must be validated there, not by a scoped sweep). Confirm no CI worker
    OOM: the test completes well inside the 15 s timeout.
+
+## arch-3049 re-verification (2026-07-06) — spec CONFIRMED trustworthy
+
+Re-checked against current `main` @ 52937f5. **Most accurate of the batch — line
+refs are spot-on and the Part-A bug is confirmed present.**
+
+- **Part A bug confirmed live.** `statements/loops.ts:5045` calls
+  `returnMethodIdx` (resolved at `:4917`, guarded by `if (returnMethodIdx !==
+  undefined)` at `:5036`) and `:5046` is the **unconditional `{ op: "drop" }`**
+  that underflows for a void `return()`. The arity-guard fix is exactly targeted.
+  Sibling `__iterator_return` sites (`returnIdx` at `:5210`, refs `:5136/5399/
+  5419`) use the fixed-arity helper — unaffected, as the spec says.
+- **Part B anchors accurate.** `async-cps.ts` `forAwaitPoints` field at `:83`,
+  collection at `:121/129`, native for-await drive at `:1527/1565–1568`.
+  `async-scheduler.ts` `buildPromiseResolveValueBody` at `:961`, the
+  "already rejected: schedule reject reaction" arm at `:1015`,
+  `emitStandalonePromiseThen` at `:3152`.
+- The hard pairing constraint (land Part A validity fix WITH Part B so making the
+  module valid never exposes the OOM to CI shard workers) is sound — honor it.
+
+No downgrade. `architect_spec: done` is reliable.
