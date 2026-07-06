@@ -111,6 +111,8 @@ interface UnifiedCollectorState {
   dateParseHostNeeded: boolean;
   // -- collectURIImports --
   uriNeeded: Set<string>;
+  // -- collectEscapeImports (#3063) — legacy global escape/unescape (§B.2.1/.2) --
+  escapeNeeded: Set<string>;
   // -- collectStringStaticImports --
   needsFromCharCode: boolean;
   needsFromCodePoint: boolean;
@@ -214,6 +216,7 @@ export function createUnifiedCollectorState(sourceFile: ts.SourceFile): UnifiedC
     parseNeeded: new Set(),
     dateParseHostNeeded: false,
     uriNeeded: new Set(),
+    escapeNeeded: new Set(),
     needsFromCharCode: false,
     needsFromCodePoint: false,
     promiseNeeded: new Set(),
@@ -684,6 +687,14 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
       name === "encodeURIComponent"
     ) {
       state.uriNeeded.add(name);
+    }
+    // (#3063) Legacy `escape` / `unescape` (§B.2.1 / §B.2.2) — pure string
+    // transforms. JS-host mode routes to the native JS globals via an env host
+    // import (registered in the emit phase, gated to host mode so standalone
+    // never leaks an unsatisfiable import). A pure-Wasm standalone lowering is a
+    // follow-up (mirrors the uri-encoding-native.ts machinery).
+    if (name === "escape" || name === "unescape") {
+      state.escapeNeeded.add(name);
     }
     if (name === "Number") {
       state.parseNeeded.add("parseFloat");
@@ -1479,6 +1490,22 @@ export function finalizeUnifiedCollector(ctx: CodegenContext, state: UnifiedColl
     }
     if (needsNativeDecode) {
       emitNativeUriDecode(ctx);
+    }
+  }
+
+  // (#3063) Legacy `escape` / `unescape` (§B.2.1 / §B.2.2). JS-host mode only:
+  // register an `(externref) -> externref` env host import that delegates to the
+  // native JS `escape` / `unescape` (runtime.ts). The generic call-site routing
+  // (calls.ts `funcMap.get(name)`) then dispatches it and ToString-coerces the
+  // argument, exactly like the URI globals above. Standalone / WASI are left
+  // unhandled here (no native lowering yet — a follow-up), so no unsatisfiable
+  // `env::escape` import is emitted in the host-free lanes. A user-declared
+  // `escape` / `unescape` already sits in funcMap → the `has` guard skips it.
+  if (!ctx.standalone && !ctx.wasi) {
+    for (const name of state.escapeNeeded) {
+      if (ctx.funcMap.has(name)) continue;
+      const typeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "externref" }]);
+      addImport(ctx, "env", name, { kind: "func", typeIdx });
     }
   }
 

@@ -10210,6 +10210,32 @@ assert._isSameValue = isSameValue;
             _dvViewMeta.set(buf, { offset: off, length: len });
           }
         };
+      // #3062: `DataView.prototype.byteLength` / `byteOffset` accessor value in
+      // JS-host mode. In host mode a `new DataView(buffer, offset, length)`
+      // returns the raw i32_byte buffer struct (no `$__dv_window` wrapper — that
+      // shape is standalone-only); the view window is recorded out-of-band in
+      // `_dvViewMeta` by `__dv_register_view` above. `dv.byteLength` /
+      // `dv.byteOffset` would otherwise fall through to `__extern_get(struct,
+      // "byteLength")` → undefined → NaN. Read the recorded window here.
+      //   sel === 0 → byteOffset (meta.offset, or 0 if unregistered)
+      //   sel !== 0 → byteLength (meta.length when concrete, else the
+      //               `length === -1` NaN sentinel: bufferByteLength − offset).
+      if (name === "__dv_view_byte_attr")
+        return (view: any, sel: number): number => {
+          if (view == null || typeof view !== "object") return 0;
+          const meta = _dvViewMeta.get(view);
+          const viewOffset = meta ? meta.offset : 0;
+          if (sel === 0) return viewOffset;
+          if (meta && meta.length >= 0) return meta.length;
+          // Default-length view (length sentinel −1): windowed byteLength is the
+          // remaining buffer past the offset. `__dv_byte_len` reads the backing
+          // i32_byte vec's field-0 (byte count), or −1 if the struct isn't one.
+          // Resolve exports FRESH at call time (the outer `exports` binding is
+          // captured at buildImports time, before instantiation → undefined).
+          const dvLen = callbackState?.getExports()?.__dv_byte_len as ((v: any) => number) | undefined;
+          const bufLen = typeof dvLen === "function" ? dvLen(view) : 0;
+          return bufLen >= 0 ? Math.max(0, bufLen - viewOffset) : 0;
+        };
       // #1515: mark an ArrayBuffer-shaped wasmGC struct as detached. Invoked
       // by the `$DETACHBUFFER` test262 harness shim and from `transfer()`.
       // Subsequent DataView/TypedArray ops on the buffer throw TypeError.
@@ -13202,6 +13228,11 @@ assert._isSameValue = isSameValue;
       if (name === "decodeURIComponent") return (s: any) => decodeURIComponent(s as any);
       if (name === "encodeURI") return (s: any) => encodeURI(s as any);
       if (name === "encodeURIComponent") return (s: any) => encodeURIComponent(s as any);
+      // (#3063) Legacy `escape` / `unescape` (§B.2.1 / §B.2.2) — pure string
+      // transforms. Like the URI globals, direct pass-through so the native
+      // ToString step throws TypeError on Symbol per spec step 1 (? ToString).
+      if (name === "escape") return (s: any) => escape(s as any);
+      if (name === "unescape") return (s: any) => unescape(s as any);
       // #1500 — `fetch` host import: bridge to globalThis.fetch when available.
       // The compiler routes bare `fetch(url, init?)` identifier calls through
       // this builtin; the host call returns a real JS `Promise<Response>` that
