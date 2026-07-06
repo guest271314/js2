@@ -1683,7 +1683,7 @@
           <div class="diagram-panel">
             <div id="conformance-donut-slot">
               <t262-donut
-                src="https://raw.githubusercontent.com/loopdive/js2wasm-baselines/main/test262-current.json"
+                src="./benchmarks/results/test262-report.json"
                 style="--t262-bg: var(--bg, #060a14)"
               ></t262-donut>
             </div>
@@ -4261,6 +4261,35 @@ console.log(instance.exports.run()); // &rarr; 55</pre
     <script src="./components/trend-chart.js"></script>
 
     <script>
+      // #3071 — Prefer the same-origin deployed copy of the JS-host test262
+      // report over raw.githubusercontent.com, which rate-limits (HTTP 429)
+      // under normal visitor traffic and intermittently broke the conformance
+      // donut. `./benchmarks/results/test262-report.json` is deployed to the
+      // Pages site with an identical schema; the raw baseline URL stays as a
+      // resilience fallback for the case where the same-origin file is missing
+      // from a build. URLs stay relative so they resolve against the dynamic
+      // <base href> (loopdive.github.io/js2wasm vs js2.loopdive.com vs local).
+      const JSHOST_TEST262_REPORT_URLS = [
+        "./benchmarks/results/test262-report.json",
+        "https://raw.githubusercontent.com/loopdive/js2wasm-baselines/main/test262-current.json",
+      ];
+      const fetchTest262ReportJson = async (urls = JSHOST_TEST262_REPORT_URLS) => {
+        let lastErr;
+        for (const url of urls) {
+          try {
+            const resp = await fetch(url);
+            if (!resp.ok) {
+              lastErr = new Error(`unavailable (${resp.status}): ${url}`);
+              continue;
+            }
+            return await resp.json();
+          } catch (err) {
+            lastErr = err;
+          }
+        }
+        throw lastErr ?? new Error("no test262 report URL available");
+      };
+
       (function hydrateFaqAccordions() {
         const items = document.querySelectorAll(".approach-faq details");
         if (!items.length) return;
@@ -4835,11 +4864,8 @@ console.log(instance.exports.run()); // &rarr; 55</pre
         if (!rateEl || !labelEl) return;
         try {
           if (window.__conformanceHeadlineHydrated) return;
-          const resp = await fetch(
-            "https://raw.githubusercontent.com/loopdive/js2wasm-baselines/main/test262-current.json",
-          );
-          if (!resp.ok) return;
-          const report = await resp.json();
+          // #3071 — same-origin first, raw.githubusercontent fallback.
+          const report = await fetchTest262ReportJson();
           if (window.__conformanceHeadlineHydrated) return;
           // Use strict-mode summary (tests compatible with ES modules) when available
           const s = report?.strict_summary ?? report?.summary;
@@ -5077,9 +5103,11 @@ console.log(instance.exports.run()); // &rarr; 55</pre
         const rateLabelEl = document.getElementById("compat-pass-rate-label");
         if (!donutSlot || !(editionTimeline instanceof HTMLElement)) return;
 
+        // #3071 — same-origin first to avoid raw.githubusercontent 429s; the
+        // raw baseline URL stays as a resilience fallback.
         const STANDALONE_TEST262_REPORT_URLS = [
-          "https://raw.githubusercontent.com/loopdive/js2wasm-baselines/main/test262-standalone-current.json",
           "./benchmarks/results/test262-standalone-report.json",
+          "https://raw.githubusercontent.com/loopdive/js2wasm-baselines/main/test262-standalone-current.json",
         ];
         const donutStyle = "--t262-bg: var(--bg, #060a14)";
         const renderDonut = (summary, captionMain = "ECMAScript", captionSub = "conformance") => {
@@ -5348,12 +5376,8 @@ console.log(instance.exports.run()); // &rarr; 55</pre
         };
 
         try {
-          const reportResp = await fetch(
-            "https://raw.githubusercontent.com/loopdive/js2wasm-baselines/main/test262-current.json",
-          );
-          if (!reportResp.ok) throw new Error("conformance data unavailable");
-
-          const report = await reportResp.json();
+          // #3071 — same-origin first, raw.githubusercontent fallback.
+          const report = await fetchTest262ReportJson();
           const overallSummary = report?.summary;
           if (!overallSummary) throw new Error("overall summary unavailable");
 
@@ -5748,11 +5772,8 @@ console.log(instance.exports.run()); // &rarr; 55</pre
         const labelEl = document.getElementById("feature-coverage-label");
         if (!coverageEl || !labelEl) return;
         try {
-          const resp = await fetch(
-            "https://raw.githubusercontent.com/loopdive/js2wasm-baselines/main/test262-current.json",
-          );
-          if (!resp.ok) return;
-          const report = await resp.json();
+          // #3071 — same-origin first, raw.githubusercontent fallback.
+          const report = await fetchTest262ReportJson();
           const categories = report?.categories;
           if (!Array.isArray(categories) || categories.length === 0) return;
 
