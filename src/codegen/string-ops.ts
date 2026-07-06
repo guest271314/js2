@@ -67,7 +67,7 @@ function valueExprTsType(ctx: CodegenContext, node: ts.Expression): ts.Type {
  * wrong. Detect the statically-undefined forms so callers can treat the arg as
  * absent. Unwraps paren/as/!-assertion wrappers.
  */
-function isStaticUndefinedArg(arg: ts.Expression | undefined): boolean {
+export function isStaticUndefinedArg(arg: ts.Expression | undefined): boolean {
   if (arg === undefined) return false;
   let cur: ts.Expression = arg;
   while (
