@@ -95,12 +95,6 @@ Options:
                     Auto-enabled (type-level only) when the source imports a
                     'node:' builtin (use 'none' to disable that); otherwise off,
                     and using process warns to add this flag (#2603).
-  --platform <p>    DEPRECATED (#2736): alias for --target {web,node,deno}.
-                    'web' = DOM globals (window/document/…) in scope (today's
-                    default); 'node'/'deno' = DOM globals NOT in scope (so
-                    window.stop is a type error) and Node-style API emulation on
-                    (implies --emulate node). Prefer --target; this prints a
-                    deprecation warning. Unset preserves today's behaviour.
   --no-host-imports Strict dual-mode: reject JS-host 'env' imports not on
                     the allowlist (#1524). Implied by --target wasi.
   --allow-host-imports
@@ -172,9 +166,9 @@ const linkedNamespaces = new Set<string>();
 let emulateNode = false;
 let emulateExplicit = false;
 // #2528/#2645/#2736 — the host environment, scoping the AMBIENT global surface
-// (DOM vs node) and node/deno emulation. Now driven by the unified `--target
-// {web,node,deno}` axis; `--platform` is a deprecated alias. `undefined`
-// preserves today's behaviour exactly (DOM ambient surface loaded, byte-neutral).
+// (DOM vs node) and node/deno emulation. Driven by the unified `--target
+// {web,node,deno}` axis. `undefined` preserves today's behaviour exactly
+// (DOM ambient surface loaded, byte-neutral).
 let platform: "web" | "node" | "deno" | undefined;
 const defines: Record<string, string> = {};
 
@@ -183,8 +177,7 @@ for (let i = 0; i < args.length; i++) {
   if (arg === "-o" || arg === "--out") {
     outDir = args[++i];
   } else if (arg === "--target" || arg.startsWith("--target=")) {
-    // #2736 — `--target` is now the SINGLE host/output axis (unifying the
-    // retired `--platform`). It accepts:
+    // #2736 — `--target` is the SINGLE host/output axis. It accepts:
     //   - the host environments: `web` (default), `node`, `deno` — these select
     //     the ambient global surface (#2528/#2645) and leave the backend at its
     //     WasmGC/JS-host default;
@@ -269,20 +262,6 @@ for (let i = 0; i < args.length; i++) {
       emulateExplicit = true;
     } else {
       console.error(`Unknown --emulate value: ${env ?? "(missing)"} (expected: node | none)`);
-      process.exit(1);
-    }
-  } else if (arg === "--platform" || arg.startsWith("--platform=")) {
-    // #2736 — DEPRECATED alias for `--target {web,node,deno}`. `--platform`
-    // selected the ambient global surface (#2528): `node`/`deno` drop the DOM
-    // globals and imply Node-style emulation (#2645); `web` keeps the DOM
-    // surface. The host axis is now unified under `--target`; this alias maps
-    // onto the same internal `platform` field and emits a one-line deprecation.
-    const p = arg.startsWith("--platform=") ? arg.slice("--platform=".length) : args[++i];
-    if (p === "node" || p === "web" || p === "deno") {
-      platform = p;
-      console.error(`warning: --platform is deprecated; use --target ${p} instead.`);
-    } else {
-      console.error(`Unknown --platform value: ${p ?? "(missing)"} (expected: node | web | deno)`);
       process.exit(1);
     }
   } else if (arg === "--no-host-imports") {

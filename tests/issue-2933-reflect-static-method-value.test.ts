@@ -11,9 +11,10 @@ import { compile } from "../src/index.js";
 // `Reflect.get`/`has`/`set`/`ownKeys` with a simple externref/i32 native
 // (`__extern_get` / `__extern_has` / `__reflect_set` / `__object_keys`); this
 // slice wires those SAME natives into `ensureStandaloneBuiltinStaticMethodClosure`
-// so the reified value calls identically. The variadic (`Math.max`) and
-// native-`$AnyValue`-return (`JSON.stringify`) methods stay refused (need
-// variadic / anyref-boundary closure work — tracked on #2933's remaining scope).
+// so the reified value calls identically. `JSON.stringify` as a value now works
+// too (host-free via `__json_stringify_root` — see
+// issue-2933-json-stringify-value.test.ts). The variadic `Math.max` value read
+// stays refused (needs variadic-closure work — split follow-up on #2933).
 
 async function runStandalone(body: string): Promise<number> {
   const r = await compile(`export function test(): number { ${body} }`, { target: "standalone" });
@@ -80,16 +81,9 @@ describe("#2933 — standalone Reflect.* static-method value reads", () => {
 });
 
 describe("#2933 — deferred namespace static-method value reads still refuse (scope boundary)", () => {
-  it("JSON.stringify as a value still refuses (needs anyref-boundary closure)", async () => {
-    const r = await compile(
-      `export function test(): number { const f: any = JSON.stringify; return f({ a: 1 }) ? 1 : 0; }`,
-      {
-        target: "standalone",
-      },
-    );
-    expect(r.success).toBe(false);
-    expect(r.errors.map((e) => e.message).join("\n")).toContain("JSON.stringify");
-  });
+  // (JSON.stringify as a value now WORKS host-free — moved to
+  // issue-2933-json-stringify-value.test.ts. Only the variadic Math.max value
+  // read remains refused below.)
 
   it("Math.max as a value still refuses (variadic — split follow-up)", async () => {
     const r = await compile(`export function test(): number { const g: any = Math.max; return g(1, 2, 3); }`, {
