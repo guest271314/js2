@@ -1,7 +1,8 @@
 ---
 id: 3049
 title: "Iterator.prototype helper methods (map/filter/take/drop/flatMap/…): 'X is not a function' + this-plain-iterator / return-forwarding residual (~27 fails)"
-status: ready
+status: in-progress
+assignee: ttraenkler/dev-3049
 sprint: current
 priority: medium
 horizon: m
