@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-07-05T22:49:59.092Z",
-  "baseline_generated_at": "2026-07-05T22:49:59.092Z",
-  "baseline_sha": "17c8f4aaa2be428cd09a9d89634894fd249321d3",
+  "timestamp": "2026-07-06T00:13:41.700Z",
+  "baseline_generated_at": "2026-07-06T00:13:41.700Z",
+  "baseline_sha": "fa131894e89f6e9d3086147f3d8304aa412ee628",
   "oracle_version": 1,
   "mode": {
     "target": "standalone",
@@ -1198,7 +1198,7 @@
     }
   ],
   "error_categories": {
-    "assertion_fail": 8931,
+    "assertion_fail": 8927,
     "illegal_cast": 828,
     "negative_test_fail": 55,
     "null_deref": 300,
@@ -1206,10 +1206,10 @@
     "other": 4820,
     "promise_error": 184,
     "range_error": 45,
-    "runtime_error": 460,
+    "runtime_error": 468,
     "syntax_error": 6,
     "type_error": 2980,
-    "unreachable": 7,
+    "unreachable": 3,
     "wasm_compile": 452
   },
   "hard_errors": {},
@@ -1278,8 +1278,8 @@
         },
         "sample_files": [
           "test/built-ins/Temporal/Now/zonedDateTimeISO/return-value.js",
-          "test/built-ins/Temporal/ZonedDateTime/prototype/eraYear/prop-desc.js",
           "test/built-ins/Temporal/PlainDateTime/subclass.js",
+          "test/built-ins/Temporal/ZonedDateTime/prototype/eraYear/prop-desc.js",
           "test/built-ins/Temporal/PlainDateTime/prototype/month/prop-desc.js",
           "test/built-ins/Temporal/Instant/prototype/toString/timezone-wrong-type.js"
         ],
@@ -1427,15 +1427,15 @@
         "sample_files": [
           "test/built-ins/JSON/parse/15.12.2-2-2.js",
           "test/built-ins/JSON/stringify/space-wrong-type.js",
+          "test/built-ins/JSON/stringify/replacer-array-empty.js",
           "test/built-ins/JSON/parse/reviver-array-define-prop-err.js",
-          "test/built-ins/JSON/parse/15.12.2-2-6.js",
-          "test/built-ins/JSON/stringify/replacer-array-empty.js"
+          "test/built-ins/JSON/parse/15.12.2-2-6.js"
         ],
         "sample_signatures": [
           "illegal_cast:L#:## illegal cast [in test()]",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(JSON.stringify(obj), JSON.stringify(obj, null, null));",
-          "assertion_fail:returned # — assert ## at L#: throw new Test262Error();",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue( JSON.stringify([#, {a: #}], []), '[#,{}]' );",
+          "assertion_fail:returned # — assert ## at L#: throw new Test262Error();",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(JSON.stringify(obj, null, ' '), [ '{' , ' \"a1\": {' , ' \"b1\": [' , ' #,' , ' #,' , ' #,' , ' #' , ' ],' , ' \"b2\": {' , ' \"c1\": #,' , ' \"c2\": #'"
         ]
       },
@@ -1648,7 +1648,7 @@
           "other:L#:## Codegen error: Reflect.construct not supported in standalone mode (## Phase C).",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue( Reflect.get(o, 'p1'), 'value #', 'Return value from data descriptor' );",
           "other:L#:## Codegen error: Reflect.getOwnPropertyDescriptor built-in static property value read is not supported in --target standalone (## / ## S6-b). Add a native built-in method closure for this pair.",
-          "other:L#:## Codegen error: Reflect.set with an explicit receiver argument is not yet supported in --target standalone (##); the receiver would be silently dropped and accessor setters would write to the target instead of the receiver."
+          "other:L#:## Codegen error: Reflect.preventExtensions not supported in standalone mode (## Phase C).; L#:## Codegen error: Reflect.preventExtensions not supported in standalone mode (## Phase C)."
         ]
       },
       {
@@ -1716,8 +1716,8 @@
           "null_deref": 3
         },
         "sample_files": [
-          "test/built-ins/AsyncGeneratorFunction/instance-name.js",
           "test/built-ins/AsyncGeneratorFunction/prototype/extensibility.js",
+          "test/built-ins/AsyncGeneratorFunction/instance-name.js",
           "test/built-ins/GeneratorFunction/prototype/extensibility.js",
           "test/built-ins/GeneratorPrototype/throw/from-state-completed.js",
           "test/language/expressions/generators/eval-body-proto-realm.js"
@@ -1777,35 +1777,34 @@
         "id": "object-to-primitive",
         "issues": ["#1910", "#1525b", "#1900", "#1472"],
         "label": "ToPrimitive / object-to-string dispatch residuals",
-        "count": 73,
+        "count": 77,
         "statuses": {
           "pass": 0,
-          "fail": 73,
+          "fail": 77,
           "compile_error": 0,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 73,
+          "total": 77,
           "host_free_pass": 0
         },
         "error_categories": {
           "assertion_fail": 44,
-          "unreachable": 4,
-          "runtime_error": 12,
+          "runtime_error": 20,
           "type_error": 13
         },
         "sample_files": [
           "test/built-ins/Error/error-message-tostring-toprimitive.js",
           "test/language/statements/try/S12.14_A19_T2.js",
           "test/annexB/built-ins/unescape/to-primitive-observe.js",
-          "test/built-ins/AggregateError/cause-property.js",
-          "test/language/expressions/modulus/bigint-toprimitive.js"
+          "test/annexB/built-ins/unescape/argument_types.js",
+          "test/built-ins/AggregateError/cause-property.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert.throws(TypeError, function () { Error({toString: undefined, valueOf: undefined}) }, \"Error should throw a TypeError in its ToPrimitive step\");",
           "assertion_fail:Test262Error: ##: Exception.toString()===\"Error: hello\". Actual: Exception is [object Object]",
-          "unreachable:returned # — assert ## at L#: toString() { throw new Test262Error('this should be unreachable'); },",
           "runtime_error:L#:## Cannot convert object to primitive value",
-          "type_error:TypeError: Cannot mix BigInt and other types, use explicit conversions"
+          "type_error:TypeError: Cannot mix BigInt and other types, use explicit conversions",
+          "type_error:TypeError: Cannot access property on null or undefined at #:#"
         ]
       },
       {
@@ -1824,8 +1823,8 @@
         },
         "error_categories": {
           "assertion_fail": 239,
-          "illegal_cast": 55,
           "type_error": 152,
+          "illegal_cast": 55,
           "other": 170,
           "promise_error": 3,
           "runtime_error": 3,
@@ -1836,15 +1835,15 @@
         },
         "sample_files": [
           "test/built-ins/TypedArray/out-of-bounds-has.js",
-          "test/built-ins/TypedArrayConstructors/ctors/buffer-arg/defined-length-sab.js",
           "test/built-ins/TypedArrayConstructors/internals/Set/detached-buffer.js",
+          "test/built-ins/TypedArrayConstructors/ctors/buffer-arg/defined-length-sab.js",
           "test/built-ins/TypedArrayConstructors/ctors/typedarray-arg/same-ctor-returns-new-cloned-typedarray.js",
           "test/built-ins/TypedArrayConstructors/internals/HasProperty/indexed-value.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert(i in array);",
-          "illegal_cast:L#:## illegal cast [in __closure_1() ← testWithTypedArrayConstructors ← test]",
           "type_error:TypeError: Cannot access property on null or undefined at #:#",
+          "illegal_cast:L#:## illegal cast [in __closure_1() ← testWithTypedArrayConstructors ← test]",
           "other:vacuous: harness-wrapper callback never executed (##) — no assertion ran",
           "type_error:TypeError: Object method called on null or undefined"
         ]
@@ -1963,18 +1962,18 @@
         "id": "annex-b-function-eval",
         "issues": ["#1594", "#1050"],
         "label": "Annex B function/eval semantics",
-        "count": 697,
+        "count": 693,
         "statuses": {
           "pass": 0,
-          "fail": 678,
+          "fail": 674,
           "compile_error": 19,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 697,
+          "total": 693,
           "host_free_pass": 0
         },
         "error_categories": {
-          "assertion_fail": 188,
+          "assertion_fail": 184,
           "type_error": 484,
           "runtime_error": 8,
           "other": 16,
@@ -1983,8 +1982,8 @@
         "sample_files": [
           "test/annexB/language/global-code/if-decl-no-else-global-skip-early-err-try.js",
           "test/annexB/language/eval-code/direct/global-if-decl-no-else-eval-global-block-scoping.js",
-          "test/annexB/language/eval-code/direct/func-if-decl-else-stmt-eval-func-skip-early-err-for-in.js",
           "test/annexB/language/global-code/switch-case-global-no-skip-try.js",
+          "test/annexB/language/eval-code/direct/func-if-decl-else-stmt-eval-func-skip-early-err-for-in.js",
           "test/annexB/language/eval-code/indirect/global-if-decl-else-decl-b-eval-global-update.js"
         ],
         "sample_signatures": [
@@ -2413,8 +2412,8 @@
         },
         "sample_files": [
           "test/built-ins/Promise/allSettled/resolve-element-function-name.js",
-          "test/built-ins/Promise/race/same-resolve-function.js",
           "test/built-ins/Promise/all/resolve-element-function-extensible.js",
+          "test/built-ins/Promise/race/same-resolve-function.js",
           "test/built-ins/Promise/allSettled/reject-element-function-multiple-calls.js",
           "test/built-ins/Promise/any/ctx-non-ctor.js"
         ],
