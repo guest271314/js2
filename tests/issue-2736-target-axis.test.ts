@@ -8,10 +8,11 @@
 // the same node-emulation / no-DOM ambient surface as `node` for now.
 //
 // Two surfaces are exercised:
-//   - the programmatic `platform` option (the internal host field `--target`
-//     and the deprecated `--platform` alias both feed), and
-//   - the CLI flag parsing (`--target node|deno|web` + the deprecated
-//     `--platform` alias with its one-line deprecation warning).
+//   - the programmatic `platform` option (the internal host field that
+//     `--target {web,node,deno}` feeds), and
+//   - the CLI flag parsing (`--target node|deno|web`). The `--platform` alias
+//     that #2736 added as deprecated was removed in #3073 and is now rejected
+//     as an unknown flag.
 
 import { describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
@@ -93,7 +94,7 @@ describe("#2736 — byte-neutrality of the host axis (ES-only program)", () => {
   });
 });
 
-describe("#2736 — CLI `--target {web,node,deno}` flag parsing + deprecated `--platform` alias", () => {
+describe("#2736 — CLI `--target {web,node,deno}` flag parsing (`--platform` alias removed, #3073)", () => {
   const NODE_PROC = `process.exit(0);\nexport function test(): number { return 1; }\n`;
 
   it("--target node compiles and suppresses the `process` TS2580 (emulation implied)", async () => {
@@ -131,21 +132,16 @@ describe("#2736 — CLI `--target {web,node,deno}` flag parsing + deprecated `--
     });
   });
 
-  it("--platform node still works but prints a one-line deprecation pointing at --target", async () => {
+  // #3073 — the deprecated `--platform` alias (introduced in #2736) has been
+  // removed; `--target {web,node,deno}` is the only host-axis spelling. The
+  // alias is now rejected by the CLI's unknown-flag handler (non-zero exit).
+  it("--platform is rejected as an unknown flag (removed; was deprecated in #2736)", async () => {
     await withTempTs(`export function test(): number { return 1; }\n`, async (dir, path) => {
-      const { stderr } = await execFileAsync("npx", [
-        "tsx",
-        CLI,
-        path,
-        "--platform",
-        "node",
-        "-o",
-        dir,
-        "--no-wat",
-        "--no-dts",
-        "-q",
-      ]);
-      expect(stderr).toMatch(/--platform is deprecated; use --target node/);
+      await expect(
+        execFileAsync("npx", ["tsx", CLI, path, "--platform", "node", "-o", dir, "-q"]),
+      ).rejects.toMatchObject({
+        stderr: expect.stringMatching(/Unknown option: --platform/),
+      });
     });
   });
 
