@@ -67,7 +67,7 @@ function valueExprTsType(ctx: CodegenContext, node: ts.Expression): ts.Type {
  * wrong. Detect the statically-undefined forms so callers can treat the arg as
  * absent. Unwraps paren/as/!-assertion wrappers.
  */
-function isStaticUndefinedArg(arg: ts.Expression | undefined): boolean {
+export function isStaticUndefinedArg(arg: ts.Expression | undefined): boolean {
   if (arg === undefined) return false;
   let cur: ts.Expression = arg;
   while (
@@ -2712,6 +2712,26 @@ export function compileNativeStringMethodCall(
     emitFlatten();
     const helperName = `__str_${method}`;
     const funcIdx = ctx.nativeStrHelpers.get(helperName)!;
+    fctx.body.push({ op: "call", funcIdx });
+    return nativeStringType(ctx);
+  }
+
+  // (#3068) isWellFormed / toWellFormed (ES2024 §22.1.3.8/.34) — pure UTF-16
+  // code-unit scans over the flattened receiver. `__str_isWellFormed` returns an
+  // i32 boolean; `__str_toWellFormed` returns a fresh NativeString with each lone
+  // surrogate replaced by U+FFFD. Both helpers take the flattened receiver
+  // (`ref $NativeString`), emitted in ensureNativeStringHelpers.
+  if (method === "isWellFormed") {
+    emitReceiver();
+    emitFlatten();
+    const funcIdx = ctx.nativeStrHelpers.get("__str_isWellFormed")!;
+    fctx.body.push({ op: "call", funcIdx });
+    return { kind: "i32" };
+  }
+  if (method === "toWellFormed") {
+    emitReceiver();
+    emitFlatten();
+    const funcIdx = ctx.nativeStrHelpers.get("__str_toWellFormed")!;
     fctx.body.push({ op: "call", funcIdx });
     return nativeStringType(ctx);
   }
