@@ -114,6 +114,44 @@ The binary validates but throws during instantiation/execution:
 
 ---
 
+## Re-measure (2026-07-06) — corpus improved 20→9 failing
+
+Re-ran `scripts/diff-test.ts` against current `upstream/main`
+(`07ad889185`). **Current set: 95 match / 7 mismatch / 2 runtime_error /
+0 malformed_wasm** — down from the 20 failing catalogued in the
+2026-06-28 triage below. The following 2026-06-28 entries now **pass** and
+are resolved by intervening work: `builtins/01-json-stringify`,
+`builtins/03-map-set`, `builtins/12-arraybuffer`, `builtins/15-tag-template`,
+`array/11-flat-flatMap`, `control/12-for-in-object`, `object/02-spread`,
+`object/12-assign`, `closures/09-callback`, `classes/10-toString-impl`, and
+`closures/10-mutual` (booleans now render `true`/`false` correctly at the
+`console.log` boundary — the stale "renders as 1" note no longer holds).
+
+**Remaining 9 failing — each maps to an open feature cluster (all
+substrate-level, no cheap localized codegen fix available):**
+
+| program                     | kind          | cluster / target issue                                                                                                    |
+| --------------------------- | ------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `builtins/04-symbol`        | mismatch      | #2795 — value→string rendering (`Symbol.prototype.toString`)                                                               |
+| `object/06-delete`          | mismatch      | #2796 — object literal is a fixed nominal struct; `delete o.a` can't drop a struct field (needs dynamic property bag)      |
+| `array/12-from-of`          | mismatch      | #2796 — `Array.from({length:3}, mapFn)` array-like host interop: native `Array.from` reads the wasm struct `.length` as 0 |
+| `closures/07-arrow-this`    | mismatch      | #2797 — arrow lexical `this` via `.call({})` → NaN                                                                         |
+| `builtins/07-promise-basic` | mismatch      | #1042 — Promise `.then` callback never runs                                                                                |
+| `builtins/08-promise-chain` | mismatch      | #1042 — promise chain callbacks never run                                                                                  |
+| `builtins/09-async-await`   | mismatch      | #1042 — `await`/async no-op → empty                                                                                        |
+| `builtins/14-spread-args`   | runtime_error | #2797 — `f(...arr)` / `Math.max(...arr)` illegal cast                                                                      |
+| `closures/08-method-chain`  | runtime_error | #2797 — dynamic method dispatch on returned object literal traps                                                           |
+
+Mechanisms pinned this pass (measure-first): `object/06-delete` — the object
+literal `{a:1,b:2}` lowers to a nominal struct with fixed fields, so
+`__delete_property` cannot remove `a` and `Object.keys` still enumerates it
+(`["a,b","1"]` vs V8 `["b","undefined"]`); `array/12-from-of` — `__array_from`
+(src/runtime.ts) hands the raw wasm array-like struct to native `Array.from`,
+which reads `.length` as 0 (no dynamic-reader bridge for the array-like host
+path). Both are #2796/#2797 substrate items, correctly deferred — no cheap
+floor-visible slice remains in the corpus (the earlier cheap wins — the ANSI
+harness fix and the two `malformed_wasm` cases — already landed).
+
 ## Triage (2026-06-28) — full A/B/C classification + fix plan
 
 Re-ran `scripts/diff-test.ts` against current main. **Current set: 84 match /
