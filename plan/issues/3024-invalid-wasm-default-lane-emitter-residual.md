@@ -269,3 +269,76 @@ around the destructure that compiles the nested default, then removing it:
   `Array.from` source-object-iterator pair, `class super in-static-methods`,
   `AsyncFromSyncIteratorPrototype`. These are independent root causes tracked under
   this same issue; this PR clears the largest *concentrated* remaining cluster only.
+
+---
+
+## Fresh measurement + banked root-cause (opus-3024, 2026-07-06)
+
+Re-harvested the 214 stale-cache invalid-Wasm candidates against **current
+`origin/main`** via `runTest262File` (default gc lane, oracle path). **The stale
+cache badly overstates** — the two biggest cache clusters are already fixed on
+main and must NOT be re-chased:
+- `extern.convert_any expected shared anyref, found array.get` (cache 53) — now
+  mostly **Temporal `skip`** (not a real default-lane floor loss).
+- `struct.new expected f#, found ref.as_non_null of type (ref N)` (cache 34) — the
+  `object/dstr` array-pattern method-destructuring family; on current main these
+  **compile validly** (now `pass` or plain oracle-fail), cleared by #2666 + follow-ons.
+
+### Actual current-main residual: **102 files across ~40 signatures, largest 7**
+No concentrated cheap slice remains. Top real signatures (function `test` dominates, 54):
+
+| reason (numbers normalised) | count |
+|---|--:|
+| `call[#] expected (ref null #)` (loose group, mixed root causes) | 12 |
+| `fN.ne expected fN, found local.tee of type externref` | 7 |
+| `array.set expected i#, found call of externref` | 4 |
+| `array.set expected externref, found local.get of f#` | 4 |
+| `call expected fN, found if of (ref null #)` | 4 |
+| `struct.set expected (ref null #)` | 4 |
+| `call expected externref, found ref.func of (ref #)` | 4 |
+| `type error in fallthru (expected externref, got (ref null #))` | 4 |
+| `call expected externref, found fN.mul of fN` | 4 |
+| everything else | ≤3 each (mostly singletons) |
+
+### The largest real cluster (`fN.ne`, 7) is the #2657 family — CROSS-STATEMENT variant
+All 7 are `language/line-terminators/S7.3_A7_T1..T7`. Despite the `line-terminators`
+name, the trigger is the **eval-var-promotion desync of #2657**, in the variant
+#2657 explicitly left open ("separate-statement eval → thought immune"):
+
+Minimal repro (default gc lane → INVALID; `f64.ne[0] expected f64, found local.tee externref`):
+```ts
+function test(){
+  var y=2,z=3;
+  var x=y+z;
+  if (x !== 5) throw 1;      // fN.ne read of x's slot emitted HERE (f64)
+  eval("var x = y+z; r=x;");  // LATER stmt: inlined var x re-decl flips x slot f64→externref
+}
+test();
+```
+Discriminators (verified): plain `var x` redeclaration (no eval) → VALID; eval with
+no prior `var x`+`x!==5` → VALID; top-level (unwrapped) → VALID (only fails inside the
+harness `test()` fn, where `x` is a function local). So the precise trigger is: a
+**function-local numeric `var x`** consumed by a numeric-only op (`fN.ne`/`!==`), then a
+**later** direct `eval("var x = …")` whose static-inline re-declaration
+(`statements/variables.ts` ~L1071 re-type) flips the shared hoisted slot to externref,
+**retroactively invalidating the already-emitted f64 read in the earlier statement**.
+
+### Why banked, not landed (blast radius; no bounded byte-inert slice exists)
+#2657's landed fix is a **within-expression** before/after slot snapshot — it cannot
+cover this case because the flip happens in a *later statement* than the read, so
+there is no consumer-side "after" to snapshot. The only fixes are (a) suppress the
+spurious f64→externref downgrade at the redeclaration re-type when the inlined
+initializer is statically numeric (an *untypeable foreign AST node* ≠ a genuinely
+dynamic binding), or (b) a post-emit patch that re-coerces prior reads when a slot
+flips. **Both are broad-impact codegen** and (a) directly touches the promotion
+contract #2657 *relies on* (its coercion depends on the flip firing) — so it needs
+full test262 CI, not a low-budget land. Turnkey next step for a fresh window:
+option (a) in `src/codegen/statements/variables.ts` (redeclaration re-type), gated
+to "existing slot is concrete numeric AND new type is externref *only* via
+untypeable-node fallback", validated against the #2657 suite + these 7 files.
+
+Everything below the top cluster is ≤4 files/signature — genuine independent
+singletons (iterator-close `__cb_N`, `__vec_from_extern` element-rep, async-gen
+`__closure_N`, `Parent_new` super-in-ctor, `__obj_meth_tramp_*_valueOf`), each its
+own root cause. No cheap concentrated default-lane slice exists at this point;
+future work on #3024 is per-root-cause, not per-cluster.

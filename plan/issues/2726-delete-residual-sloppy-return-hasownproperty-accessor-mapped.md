@@ -24,9 +24,14 @@ updated: 2026-07-05
 > (architect-spec first): `S11.4.1_A3.1` (`delete this.y === false` — top-level
 > `this` as the global object) and `S11.4.1_A3.3_T1` (`x = 1; delete x; x` →
 > ReferenceError — implicit-global creation + real deletion + unresolved read).
-> **(e)** mapped-arguments delete DEFERRED to #1726; **(f)**/**(g)** re-route to
-> their owning feature issues. This issue stays open (`status: ready`) for the 2
-> structural (b) tests — route to architect before further dispatch.
+> **(e)** mapped-arguments delete now **DONE** (2026-07-05, opus-2726: +1 test262
+> `11.4.1-4.a-17`, 0 regressions — see `## Resolution — group (e)`). **(g)**
+> prototype-chain (inherited) delete now **DONE** (2026-07-06, opus-2726fg: +1
+> test262 `S8.12.7_A2_T2`, 0 delete-dir regressions — see `## Resolution — group (g)`).
+> **(f)** (`11.4.1-5-a-27-s` — strict assign to a `preventExtensions`'d object)
+> re-routes to its owning strict-mode/preventExtensions feature issue. This issue
+> stays open (`status: ready`) for the 2 structural (b) tests — route to architect
+> before further dispatch.
 
 # #2726 — delete residual (non-throw) semantics
 
@@ -77,11 +82,12 @@ on its throw-semantics scope.
   (host `__delete_property` does not see the accessor's `configurable:false`
   flag). Runtime descriptor-storage fix in `src/runtime.ts`.
 
-### (e) Mapped-arguments delete (1)
+### (e) Mapped-arguments delete (1) — DONE (2026-07-05)
 `11.4.1-4.a-17.js`
 - `delete arguments[0]` in a mapped-arguments function: `=== true` and the slot
   reads `undefined` afterward. Routes through the `mappedArgsInfo` bookkeeping in
   `compileDeleteExpression` plus the element-delete on `arguments`.
+- **Resolved** — see `## Resolution — group (e)`.
 
 ### (f) preventExtensions interaction (1)
 `11.4.1-5-a-27-s.js`
@@ -187,6 +193,43 @@ Net **+1** test262. Flipped fail→pass: `11.4.1-4.a-8`. Guards verified unchang
 Regression test: `tests/issue-2726-configurable-global-delete.test.ts` (+ the
 corrected JSON/Object assertion in `tests/issue-2726-sloppy-unresolvable-delete.test.ts`).
 
+## Resolution — group (e) (2026-07-05, opus-2726)
+
+**Scope.** `11.4.1-4.a-17.js` — `delete arguments[0]` in a mapped-arguments
+function returns `true` AND `arguments[0]` reads `undefined` afterward.
+
+**Root cause (e).** The mapped-`arguments[i]` delete arm in
+`compileDeleteExpression` (`src/codegen/typeof-delete.ts`) recorded the
+sever-bookkeeping (`unmappedIndices.add(argIndex)`) and then **fell through to
+the generic `__delete_property` path**. That path reports `true` for a mapped
+arguments object but never clears the **WasmGC-vec backing slot** — the vec's
+indices carry no sidecar descriptor — so a subsequent `arguments[i]` read still
+returned the original argument. (The arguments object is vec-backed:
+`arguments[i]` reads array field 1 of the vec directly; param writes
+forward-sync into it, slot writes reverse-sync into the param. §10.4.4.5.)
+
+**Fix (e).** In the mapped, configurable-index arm, after recording the sever,
+write the canonical `undefined` externref into the backing slot
+(`vec.data[argIndex]`, null-guarded, mirroring `emitMappedArgParamSync`'s slot
+write) and emit `i32.const 1` (`true`), **short-circuiting the generic path**.
+The already-present `unmappedIndices` entry stops a later parameter write from
+resurrecting the slot (§10.4.4.2). The non-configurable arm (returns `false`) is
+untouched. Front-end only — no new host import; standalone and host lanes agree.
+`src/codegen/typeof-delete.ts`.
+
+### Test Results — group (e) (host/gc lane, authoritative `runTest262File`)
+
+| cluster | baseline → fix |
+|---|---|
+| `language/expressions/delete` (69 files) | 64 → **65** pass, **0 regressions** |
+| `language/arguments-object/mapped` (43 files) | 39 → 39 (no change; 4 pre-existing defineProperty fails unchanged) |
+
+Net **+1** test262. Flipped fail→pass: `11.4.1-4.a-17`. Remaining `delete`-dir
+fails are all out-of-scope: `S11.4.1_A3.1` + `S11.4.1_A3.3_T1` (structural (b),
+architect-first), `11.4.1-5-a-27-s` (f, preventExtensions), `S8.12.7_A2_T2`
+(g, prototype-chain read). Regression test:
+`tests/issue-2726-mapped-args-delete.test.ts`.
+
 ## Resolution — groups (c) + (d) (2026-06-27, dev2)
 
 **Root cause (c).** `var o = {}` infers an empty struct type, so the receiver
@@ -254,3 +297,45 @@ creation/real-deletion/unresolved-read) and need an architect spec first (NOT
 dev-claimable as-is). (e) mapped-arguments delete → #1726; (f)/(g) re-routed to
 owning feature issues. Stays `ready` for the 2 structural (b) tests — route to
 architect before further dispatch.
+
+## Resolution — group (g) (2026-07-06, opus-2726fg)
+
+**Scope.** `S8.12.7_A2_T2.js` — `delete __palette.red` where `red` is inherited
+from `Palette.prototype`, then the prototype-chain read `__palette.red` must
+still see the inherited value (CHECK#3). (The issue's original "fails at the
+inherited *read* before the delete" note is stale — CHECK#1's initial inherited
+read already passes on current main; the sole remaining failure is CHECK#3, the
+read *after* the delete.)
+
+**Root cause (g).** The WasmGC-struct arm of `__delete_property`
+(`src/runtime.ts`) unconditionally dropped the sidecar/descriptor entries **and
+recorded a tombstone** (`_wasmStructDeletedKeys`) for the key — even when the key
+is not an **own** property of the receiver. For `delete __palette.red`, `red`
+lives only on `Palette.prototype`, so the receiver owns nothing named `red`; the
+spurious tombstone then shadowed the still-present inherited value on the next
+`__palette.red` read (the read consults the tombstone before walking the
+prototype chain), returning `undefined` instead of `0xFF0000`.
+
+**Spec.** ECMA-262 §10.5.7 OrdinaryDelete step 2: `Let desc be
+O.[[GetOwnProperty]](P). If desc is undefined, return true.` — deleting a
+property the receiver does not **own** is a true no-op: return `true`, mutate
+nothing. (The delete still evaluates to `true`, so CHECK#2 was already passing;
+only the erroneous tombstone side-effect had to go.)
+
+**Fix (g).** Guard the struct delete arm with the existing own-property oracle
+`_wasmStructHasOwn(obj, k, exports)`: if the key is **not** own, `return 1`
+immediately without touching sidecar/descriptor/tombstone state. Own keys
+(struct field, sidecar, descriptor, class method) still `hasOwn === true` and
+fall through to the unchanged real delete, so groups (c)/(d)/(e) and every other
+own-delete case are untouched. `src/runtime.ts` (`__delete_property` struct arm).
+
+### Test Results — group (g) (host/gc lane, authoritative `runTest262File`)
+
+| cluster | baseline → fix |
+|---|---|
+| `language/expressions/delete` (full dir, 69 files) | 65 → **66** pass, **0 regressions** |
+
+Net **+1** test262. Flipped fail→pass: `S8.12.7_A2_T2`. The other 3 dir failures
+are unchanged: `11.4.1-5-a-27-s` (group (f), re-routed) and the 2 STRUCTURAL
+group-(b) tests (`S11.4.1_A3.1`, `S11.4.1_A3.3_T1`). Regression test:
+`tests/issue-2726-inherited-delete-noop.test.ts`.

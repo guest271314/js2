@@ -10,8 +10,8 @@
   },
   {
     "edition": "ES5",
-    "pass": 10346,
-    "fail": 2627,
+    "pass": 10348,
+    "fail": 2625,
     "ce": 102,
     "skip": 0,
     "total": 13075,
@@ -57,8 +57,8 @@
   },
   {
     "edition": "ES2015",
-    "pass": 11231,
-    "fail": 4011,
+    "pass": 11264,
+    "fail": 3978,
     "ce": 144,
     "skip": 0,
     "total": 15386,
@@ -111,8 +111,8 @@
       },
       {
         "name": "Symbol",
-        "pass": 386,
-        "fail": 236,
+        "pass": 388,
+        "fail": 234,
         "ce": 1,
         "skip": 0,
         "total": 623,
@@ -201,12 +201,12 @@
       },
       {
         "name": "Symbol.toPrimitive",
-        "pass": 41,
-        "fail": 40,
+        "pass": 43,
+        "fail": 38,
         "ce": 0,
         "skip": 0,
         "total": 81,
-        "pct": 51
+        "pct": 53
       },
       {
         "name": "Symbol.match",
@@ -1462,8 +1462,8 @@
   },
   {
     "edition": "ES2020",
-    "pass": 872,
-    "fail": 987,
+    "pass": 874,
+    "fail": 985,
     "ce": 19,
     "skip": 18,
     "total": 1896,
@@ -1471,8 +1471,8 @@
     "features": [
       {
         "name": "BigInt",
-        "pass": 221,
-        "fail": 797,
+        "pass": 223,
+        "fail": 795,
         "ce": 8,
         "skip": 0,
         "total": 1026,
@@ -2141,8 +2141,8 @@
   },
   {
     "edition": "ES2022",
-    "pass": 3266,
-    "fail": 771,
+    "pass": 3270,
+    "fail": 767,
     "ce": 197,
     "skip": 0,
     "total": 4234,
@@ -2213,12 +2213,12 @@
       },
       {
         "name": "resizable-arraybuffer",
-        "pass": 150,
-        "fail": 111,
+        "pass": 154,
+        "fail": 107,
         "ce": 171,
         "skip": 0,
         "total": 432,
-        "pct": 35
+        "pct": 36
       },
       {
         "name": "class-static-fields-private",
@@ -3925,8 +3925,8 @@
   {
     "edition": "Proposals",
     "pass": 1491,
-    "fail": 3170,
-    "ce": 216,
+    "fail": 3171,
+    "ce": 215,
     "skip": 105,
     "total": 4982,
     "pct": 30

@@ -3794,17 +3794,49 @@ export function compilePropertyAccess(
   // is always 0 for our non-offset views (a fresh backing store per view), which
   // already reads correctly today — handled here only for the externref-receiver
   // case so it doesn't leak `__extern_get`.
+  // (#3061) `.byteLength` / `.byteOffset` on an ArrayBuffer / SharedArrayBuffer
+  // are ALSO computed natively in JS-host mode. The host `__extern_get` fallback
+  // returns `undefined` for these accessors on the opaque WasmGC byte-vec struct
+  // (they are not real struct fields and no `__sget_byteLength` export exists), so
+  // `ab.byteLength` / `ab.byteOffset` read back NaN (~45 test262 fails). The
+  // `i32_byte` backing (field-0 = byte count, element size 1) is IDENTICAL across
+  // host and standalone, so the `isBuffer` arm below is representation-safe in both
+  // modes. (#3062) DataView is ALSO host-handled now, via the `__dv_view_byte_attr`
+  // helper that reads the `_dvViewMeta` window (see the dedicated arm below).
+  // TypedArray stays standalone-only here (its element-scaled backing diverges in
+  // host mode — a separate follow-up).
+  const hostBufferByteAttr =
+    !noJsHost(ctx) && !ctx.strictNoHostImports && (propName === "byteLength" || propName === "byteOffset");
   if (
-    (ctx.wasi || ctx.standalone || ctx.strictNoHostImports) &&
+    (ctx.wasi || ctx.standalone || ctx.strictNoHostImports || hostBufferByteAttr) &&
     (propName === "byteLength" || propName === "byteOffset" || propName === "BYTES_PER_ELEMENT")
   ) {
-    const recvName =
+    const recvNameRaw =
       objType.getSymbol()?.name ??
       (ts.isNewExpression(expr.expression) && ts.isIdentifier(expr.expression.expression)
         ? expr.expression.expression.text
         : undefined);
-    const isBuffer = recvName === "ArrayBuffer" || recvName === "SharedArrayBuffer";
-    const isTypedArr = recvName !== undefined && TYPED_ARRAY_NAMES.has(recvName);
+    // (#3062) `DataView.prototype.byteLength` / `ArrayBuffer.prototype.byteLength`
+    // etc. — a `.prototype` receiver has the buffer/view TYPE name but is NOT an
+    // instance (no [[DataView]] / [[ArrayBufferData]] internal slot), so per spec
+    // (§25.3.4.1 / §25.1.5.1 step 3) the getter must throw a TypeError. The native
+    // accessor arms below would instead read a bogus 0 off the non-instance
+    // prototype object (`__dv_byte_len` misses → 0, or a trapping `ref.cast`
+    // standalone). Null out `recvName` for a `<ctor>.prototype` receiver so every
+    // arm skips it and the read falls through to the generic reader, which
+    // reports the required TypeError (matches pre-#3061/#3062 behaviour).
+    const recvName =
+      ts.isPropertyAccessExpression(expr.expression) && expr.expression.name.text === "prototype"
+        ? undefined
+        : recvNameRaw;
+    // (#3061) In JS-host mode only the plain ArrayBuffer arm is
+    // representation-safe (`i32_byte`, field-0 = byte count, identical to
+    // standalone). SharedArrayBuffer's host-mode backing differs (a bare
+    // `i32_byte` `ref.test` misses → a wrong `0`), so keep SAB — like
+    // TypedArray — gated to no-host; both fall through to the generic reader in
+    // host mode exactly as before.
+    const isBuffer = recvName === "ArrayBuffer" || (recvName === "SharedArrayBuffer" && noJsHost(ctx));
+    const isTypedArr = recvName !== undefined && TYPED_ARRAY_NAMES.has(recvName) && noJsHost(ctx);
     const isDataView = recvName === "DataView";
     // (#2159/#38) DataView `byteOffset` / `byteLength` honour the constructor's
     // window. The receiver is either a `$__dv_window` wrapper (windowed view) or
@@ -3844,6 +3876,36 @@ export function compilePropertyAccess(
       } as Instr);
       if (!ctx.fast) fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
       return ctx.fast ? { kind: "i32" } : { kind: "f64" };
+    }
+    // (#3062) JS-host DataView `byteLength` / `byteOffset`. In host mode
+    // `new DataView(buf, offset, length)` returns the raw i32_byte buffer struct
+    // (no `$__dv_window` wrapper — that shape is `noJsHost`-only, see
+    // new-super.ts); the view window is recorded out-of-band in `_dvViewMeta` by
+    // `__dv_register_view` at construction. Without this arm the read falls
+    // through to `__extern_get(struct, "byteLength")` → undefined → NaN. Recover
+    // the window via the `__dv_view_byte_attr(view, sel)` host helper:
+    //   sel 0 → byteOffset, sel 1 → byteLength (windowed; sentinel handled host-side).
+    if (isDataView && !noJsHost(ctx) && propName !== "BYTES_PER_ELEMENT") {
+      const attrIdx = ensureLateImport(
+        ctx,
+        "__dv_view_byte_attr",
+        [{ kind: "externref" }, { kind: "i32" }],
+        [{ kind: "i32" }],
+      );
+      flushLateImportShifts(ctx, fctx);
+      if (attrIdx !== undefined) {
+        const recvType = compileExpression(ctx, fctx, expr.expression);
+        // The helper takes an externref. DataView locals are already externref;
+        // an inline `new DataView(...)` receiver may hand back a GC ref
+        // (`ref`/`ref_null`) — recover it to externref before the call.
+        if (recvType && recvType.kind !== "externref") {
+          fctx.body.push({ op: "extern.convert_any" } as Instr);
+        }
+        fctx.body.push({ op: "i32.const", value: propName === "byteOffset" ? 0 : 1 } as Instr);
+        fctx.body.push({ op: "call", funcIdx: attrIdx } as Instr);
+        if (!ctx.fast) fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+        return ctx.fast ? { kind: "i32" } : { kind: "f64" };
+      }
     }
     if (isBuffer || isTypedArr) {
       // byteOffset on a fresh-backing view is always 0.

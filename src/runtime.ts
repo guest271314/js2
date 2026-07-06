@@ -1,4 +1,19 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
+/**
+ * Host runtime and instantiation helpers for `@loopdive/js2` (the `/runtime`
+ * entry point).
+ *
+ * In the default JS-host (WasmGC) target a compiled binary needs an import
+ * object wiring up strings, number boxing, and other host capabilities. This
+ * module builds those imports ({@link buildImports},
+ * {@link buildStringConstants}, {@link buildWasiPolyfill}) and offers one-call
+ * instantiation helpers ({@link instantiateWasm},
+ * {@link instantiateWasmStreaming}, {@link compileAndInstantiate}), plus
+ * {@link wrapExports} for marshalling `Uint8Array` (and other TypedArray)
+ * arguments and returns across the JS↔Wasm boundary.
+ *
+ * @module
+ */
 import { compileSource } from "./compiler.js";
 import type { ImportDescriptor, ImportIntent, ImportPolicy } from "./index.js";
 import { createEvalShim, createNewFunctionShim } from "./runtime-eval.js";
@@ -10195,6 +10210,32 @@ assert._isSameValue = isSameValue;
             _dvViewMeta.set(buf, { offset: off, length: len });
           }
         };
+      // #3062: `DataView.prototype.byteLength` / `byteOffset` accessor value in
+      // JS-host mode. In host mode a `new DataView(buffer, offset, length)`
+      // returns the raw i32_byte buffer struct (no `$__dv_window` wrapper — that
+      // shape is standalone-only); the view window is recorded out-of-band in
+      // `_dvViewMeta` by `__dv_register_view` above. `dv.byteLength` /
+      // `dv.byteOffset` would otherwise fall through to `__extern_get(struct,
+      // "byteLength")` → undefined → NaN. Read the recorded window here.
+      //   sel === 0 → byteOffset (meta.offset, or 0 if unregistered)
+      //   sel !== 0 → byteLength (meta.length when concrete, else the
+      //               `length === -1` NaN sentinel: bufferByteLength − offset).
+      if (name === "__dv_view_byte_attr")
+        return (view: any, sel: number): number => {
+          if (view == null || typeof view !== "object") return 0;
+          const meta = _dvViewMeta.get(view);
+          const viewOffset = meta ? meta.offset : 0;
+          if (sel === 0) return viewOffset;
+          if (meta && meta.length >= 0) return meta.length;
+          // Default-length view (length sentinel −1): windowed byteLength is the
+          // remaining buffer past the offset. `__dv_byte_len` reads the backing
+          // i32_byte vec's field-0 (byte count), or −1 if the struct isn't one.
+          // Resolve exports FRESH at call time (the outer `exports` binding is
+          // captured at buildImports time, before instantiation → undefined).
+          const dvLen = callbackState?.getExports()?.__dv_byte_len as ((v: any) => number) | undefined;
+          const bufLen = typeof dvLen === "function" ? dvLen(view) : 0;
+          return bufLen >= 0 ? Math.max(0, bufLen - viewOffset) : 0;
+        };
       // #1515: mark an ArrayBuffer-shaped wasmGC struct as detached. Invoked
       // by the `$DETACHBUFFER` test262 harness shim and from `transfer()`.
       // Subsequent DataView/TypedArray ops on the buffer throw TypeError.
@@ -11659,6 +11700,18 @@ assert._isSameValue = isSameValue;
           }
           // WasmGC struct — operate on the sidecar storage.
           const k = typeof key === "symbol" ? key : String(key);
+          // (#2726 g) §10.5.7 OrdinaryDelete step 2: if the receiver has no OWN
+          // property P, [[Delete]] is a true no-op — it must NOT tombstone or
+          // otherwise mutate the receiver. Without this guard, `delete o.p` of a
+          // key that lives only on the prototype chain (e.g. `delete
+          // __palette.red` where `red` is inherited from `Palette.prototype`)
+          // recorded a tombstone on `o`, which then shadowed the still-present
+          // inherited value on the next prototype-chain read (returning
+          // undefined instead of the inherited value). Return true, mutate
+          // nothing. Own properties fall through to the real delete below.
+          if (!_wasmStructHasOwn(obj, k, callbackState?.getExports())) {
+            return 1;
+          }
           // Check the descriptor table for an explicit non-configurable flag.
           const descs = _wasmPropDescs.get(obj);
           if (descs) {
@@ -13208,6 +13261,11 @@ assert._isSameValue = isSameValue;
       if (name === "decodeURIComponent") return (s: any) => decodeURIComponent(s as any);
       if (name === "encodeURI") return (s: any) => encodeURI(s as any);
       if (name === "encodeURIComponent") return (s: any) => encodeURIComponent(s as any);
+      // (#3063) Legacy `escape` / `unescape` (§B.2.1 / §B.2.2) — pure string
+      // transforms. Like the URI globals, direct pass-through so the native
+      // ToString step throws TypeError on Symbol per spec step 1 (? ToString).
+      if (name === "escape") return (s: any) => escape(s as any);
+      if (name === "unescape") return (s: any) => unescape(s as any);
       // #1500 — `fetch` host import: bridge to globalThis.fetch when available.
       // The compiler routes bare `fetch(url, init?)` identifier calls through
       // this builtin; the host call returns a real JS `Promise<Response>` that
@@ -14588,7 +14646,9 @@ export function buildImports(
  * (b) wrap the returned plain `Array<number>` back into a `Uint8Array`.
  */
 export interface WrapExportsSignature {
+  /** Per-parameter TypedArray kind, positionally. */
   params: ("uint8array" | "typed-array" | "other")[];
+  /** TypedArray kind of the return value. */
   result: "uint8array" | "typed-array" | "other";
 }
 
@@ -14643,6 +14703,14 @@ function marshalTypedArrayArgs(
   return out;
 }
 
+/**
+ * Wrap a Wasm instance's exports so `Uint8Array` (and other TypedArray)
+ * arguments and return values marshal correctly across the JS↔Wasm boundary.
+ *
+ * Pass the per-export type metadata from {@link CompileResult.exportSignatures}
+ * as `options.signatures`; without it the wrapper is a passthrough. Returns a
+ * new exports object; the original is left untouched.
+ */
 export function wrapExports(
   rawExports: WebAssembly.Exports,
   options?: {

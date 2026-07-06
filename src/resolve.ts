@@ -26,6 +26,12 @@ export class ModuleResolver {
   private extensions: string[];
   private resolveCache = new Map<string, string | null>();
 
+  /**
+   * Create a resolver rooted at a directory.
+   *
+   * @param rootDir - Directory that bare and relative specifiers resolve against.
+   * @param options - Compile options; reads `externals` and `resolve.*`.
+   */
   constructor(
     private rootDir: string,
     options?: CompileOptions,
@@ -227,6 +233,7 @@ export class ModuleResolver {
     return null;
   }
 
+  /** True if `p` exists and is a directory. */
   private tryStatDir(p: string): boolean {
     const fs = getFs();
     if (!fs) return false;
@@ -237,6 +244,7 @@ export class ModuleResolver {
     }
   }
 
+  /** True if `p` exists and is a file. */
   private tryStatFile(p: string): boolean {
     const fs = getFs();
     if (!fs) return false;

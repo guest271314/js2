@@ -63,6 +63,7 @@ import { isStandalonePromiseActive } from "./async-scheduler.js";
 import { ensureNativeStringExternBridge, ensureNativeStringHelpers } from "./native-strings.js";
 import { emitNativeParseNumber } from "./parse-number-native.js";
 import { emitNativeUriDecode, emitNativeUriEncode } from "./uri-encoding-native.js";
+import { emitNativeEscape, emitNativeUnescape } from "./escape-native.js";
 import { emitNativeNumberFormat } from "./number-format-native.js";
 import {
   isNativeGeneratorCandidate,
@@ -111,6 +112,8 @@ interface UnifiedCollectorState {
   dateParseHostNeeded: boolean;
   // -- collectURIImports --
   uriNeeded: Set<string>;
+  // -- collectEscapeImports (#3063) — legacy global escape/unescape (§B.2.1/.2) --
+  escapeNeeded: Set<string>;
   // -- collectStringStaticImports --
   needsFromCharCode: boolean;
   needsFromCodePoint: boolean;
@@ -214,6 +217,7 @@ export function createUnifiedCollectorState(sourceFile: ts.SourceFile): UnifiedC
     parseNeeded: new Set(),
     dateParseHostNeeded: false,
     uriNeeded: new Set(),
+    escapeNeeded: new Set(),
     needsFromCharCode: false,
     needsFromCodePoint: false,
     promiseNeeded: new Set(),
@@ -684,6 +688,14 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
       name === "encodeURIComponent"
     ) {
       state.uriNeeded.add(name);
+    }
+    // (#3063) Legacy `escape` / `unescape` (§B.2.1 / §B.2.2) — pure string
+    // transforms. JS-host mode routes to the native JS globals via an env host
+    // import (registered in the emit phase, gated to host mode so standalone
+    // never leaks an unsatisfiable import). A pure-Wasm standalone lowering is a
+    // follow-up (mirrors the uri-encoding-native.ts machinery).
+    if (name === "escape" || name === "unescape") {
+      state.escapeNeeded.add(name);
     }
     if (name === "Number") {
       state.parseNeeded.add("parseFloat");
@@ -1480,6 +1492,29 @@ export function finalizeUnifiedCollector(ctx: CodegenContext, state: UnifiedColl
     if (needsNativeDecode) {
       emitNativeUriDecode(ctx);
     }
+  }
+
+  // (#3063 / #3064) Legacy `escape` / `unescape` (§B.2.1.1 / §B.2.1.2).
+  //   • JS-host mode: register an `(externref) -> externref` env host import
+  //     delegating to the native JS `escape` / `unescape` (runtime.ts). The
+  //     generic call-site routing (calls.ts `funcMap.get(name)`) dispatches it
+  //     and ToString-coerces the argument, exactly like the URI globals above.
+  //   • Standalone / WASI (#3064): there is no host, so emit the pure-Wasm
+  //     `__escape` / `__unescape` helpers (registered as DEFINED funcs; the
+  //     batched late-import shift keeps their funcMap index correct as later
+  //     imports register). The call site (calls.ts) routes each name through
+  //     its native helper.
+  // A user-declared `escape` / `unescape` already sits in funcMap → the `has`
+  // guard skips it in both lanes.
+  for (const name of state.escapeNeeded) {
+    if (ctx.funcMap.has(name)) continue;
+    if (ctx.standalone || ctx.wasi) {
+      if (name === "escape") emitNativeEscape(ctx);
+      else emitNativeUnescape(ctx);
+      continue;
+    }
+    const typeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "externref" }]);
+    addImport(ctx, "env", name, { kind: "func", typeIdx });
   }
 
   // ── collectStringStaticImports finalize ──

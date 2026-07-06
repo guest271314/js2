@@ -562,14 +562,58 @@ export function planIrCompilation(
   //
   // Build each function's set of local callers + local callees (restricted
   // to functions declared in this source file). Iteratively remove any
-  // claimed function whose any LOCAL caller or any LOCAL callee is not
-  // also claimed. Repeat until stable.
+  // claimed function whose LOCAL callee is not also claimed (and, in
+  // standalone/wasi, whose LOCAL caller is not claimed either — see below).
+  // Repeat until stable.
   //
   // This safeguards against signature mismatch: the IR path replaces a
   // function's typeIdx after the legacy path has already compiled its
   // callers' bodies. Ensuring both sides of every cross-function edge are
   // on the same side (IR or legacy) avoids cross-signature `call` ops.
+  //
+  // #2858 — the CALLER direction of this closure is only demoted OUTSIDE
+  // JS-host mode. Rationale:
+  //   * A legacy caller of an IR-claimed callee is signature-safe: the
+  //     callee's funcIdx is pre-allocated by legacy `compileDeclarations`
+  //     and its signature is derived from the same TS annotations via the
+  //     same mode-consistent `resolvePositionType`/`resolveWasmType`. The
+  //     historical `f(x: any)` fast-mode ABI divergence that motivated the
+  //     caller-direction demotion was eliminated by #2949 slice 3b
+  //     (AnyKeyword → `irDynamic()`: one `any` ABI for both front-ends in
+  //     both modes). So in host mode the caller-direction demotion is an
+  //     obsolete safeguard — dropping it claims individually-claimable leaf
+  //     helpers whose only unclaimed edge is a legacy caller, driving the
+  //     `call-graph-closure` bucket (measured in host mode) to zero with
+  //     zero post-claim demotions (verified: DOM/benchmark corpus).
+  //   * In standalone / wasi (`jsHostExterns` false) IR coverage still has
+  //     gaps (host-only ops such as f64 `.toString()`, `Map`), so a
+  //     claimed function whose caller defers can surface a *latent*
+  //     post-claim failure that the caller-direction demotion incidentally
+  //     masks (e.g. `joinNums` in `algorithms.ts` under wasi). Keep the
+  //     conservative caller-direction demotion there until those callee
+  //     bodies are rejected up front by the body-shape work (#2856/#2857).
   // -------------------------------------------------------------------------
+  const demoteOnLegacyCaller = options?.jsHostExterns !== true;
+  // #2858 host-mode narrowing (BANKED 2026-07-06 regression fix). Relaxing the
+  // caller-direction demotion in host mode is sound for value-param leaf helpers
+  // (the #2949 slice-3b `any`-ABI unification makes a legacy caller of an IR
+  // callee signature-safe). It is NOT sound when the claimed helper takes a
+  // **callable/closure param** (a `FunctionTypeNode` parameter, e.g.
+  // `fn: () => number`): #2949's `any`-ABI unification does not cover the
+  // closure-as-callable-param ABI. If such a helper is claimed for IR only
+  // because its lone unclaimed edge is a legacy caller passing it a
+  // captured-closure argument, the IR lowering illegal-casts that legacy
+  // captured-closure struct (legacy closure ABI ≠ IR callable/funcref
+  // signature) and diverges from the legacy output (the 3 equivalence-gate
+  // regressions on #2752). Keep the conservative caller-direction demotion for
+  // any function carrying a callable param so it stays on the legacy path
+  // alongside its legacy caller; value-param leaves keep the relaxation
+  // (bucket→0 win + the 24 tagged-template fixes preserved).
+  const hasCallableParam = (name: string): boolean => {
+    const fn = declByName.get(name);
+    if (!fn) return false;
+    return fn.parameters.some((p) => p.type !== undefined && ts.isFunctionTypeNode(p.type));
+  };
   const { callers, callees, hasExternalCall } = buildLocalCallGraph(declByName, localClasses);
 
   const claimed = new Set(individuallyClaimed);
@@ -588,13 +632,18 @@ export function planIrCompilation(
   while (changed) {
     changed = false;
     for (const name of [...claimed]) {
-      const myCallers = callers.get(name) ?? new Set<string>();
       const myCallees = callees.get(name) ?? new Set<string>();
       let safe = true;
-      for (const c of myCallers) {
-        if (!claimed.has(c)) {
-          safe = false;
-          break;
+      // Caller-direction demotion: always in standalone/wasi (#2858), and in
+      // host mode only for functions with a callable/closure param (BANKED
+      // 2026-07-06 — see `hasCallableParam` above).
+      if (demoteOnLegacyCaller || hasCallableParam(name)) {
+        const myCallers = callers.get(name) ?? new Set<string>();
+        for (const c of myCallers) {
+          if (!claimed.has(c)) {
+            safe = false;
+            break;
+          }
         }
       }
       if (safe) {
@@ -1424,6 +1473,34 @@ function dynamicUsesAreMoveOnly(
 // Shape check
 // ---------------------------------------------------------------------------
 
+/**
+ * Does `stmt` unconditionally terminate its control flow (return / throw, or a
+ * block / if-else whose every path does)? EXACT mirror of the identically-named
+ * helper in `from-ast.ts` (#1979) — the selector MUST agree with the builder on
+ * which non-tail `if (cond) <then>; <rest>` shapes are early-return rewrites
+ * (terminating then-arm → the then-arm is reinterpreted as a tail and `<rest>`
+ * becomes the else) versus non-terminating guards (side-effecting then-arm →
+ * `<rest>` runs afterward, lowered by the converging-guard path in
+ * `lowerStatementList`). Drift here re-introduces select↔builder mismatch —
+ * under #2138 IR-first that is a live `unreachable` trap, not a silent demote.
+ */
+function thenArmTerminates(stmt: ts.Statement): boolean {
+  if (ts.isReturnStatement(stmt) || ts.isThrowStatement(stmt)) {
+    return true;
+  }
+  if (ts.isBlock(stmt)) {
+    const last = stmt.statements[stmt.statements.length - 1];
+    return last !== undefined && thenArmTerminates(last);
+  }
+  if (ts.isIfStatement(stmt)) {
+    // An `if` terminates only when it has an else and BOTH arms terminate.
+    return (
+      stmt.elseStatement !== undefined && thenArmTerminates(stmt.thenStatement) && thenArmTerminates(stmt.elseStatement)
+    );
+  }
+  return false;
+}
+
 function isPhase1StatementList(
   stmts: ReadonlyArray<ts.Statement>,
   scope: Set<string>,
@@ -1552,16 +1629,34 @@ function isPhase1StatementList(
       }
       return shapeNo(arm, es);
     }
-    // Phase 2 extension: an `if (cond) <tail>` with NO else and the rest
-    // of the statements forming a tail. This is the classic early-return
-    // pattern: `if (base) return x; <recursive body>`. We structurally
-    // reinterpret as `if (cond) <tail> else { <rest> }`.
+    // Phase 2 extension: an `if (cond)` with NO else, split by whether the
+    // then-arm unconditionally terminates — mirroring `lowerStatementList`'s
+    // `thenArmTerminates` fork in `from-ast.ts` exactly (#1979).
     if (ts.isIfStatement(s) && !s.elseStatement) {
       if (!isPhase1Expr(s.expression, scope, localClasses)) return shapeNo("nontail-if-cond", s.expression);
-      if (!isPhase1Tail(s.thenStatement, new Set(scope), localClasses, isGenerator, isVoidReturn))
-        return shapeNo("nontail-if-then", s.thenStatement);
-      const rest = stmts.slice(i + 1);
-      return isPhase1StatementList(rest, new Set(scope), localClasses, isGenerator, isVoidReturn);
+      if (thenArmTerminates(s.thenStatement)) {
+        // Early-return rewrite: `if (cond) <tail>; <rest>` ≡
+        // `if (cond) <tail> else { <rest> }`. The then-arm must be a Phase-1
+        // tail (terminates on every path); the rest becomes the else block.
+        if (!isPhase1Tail(s.thenStatement, new Set(scope), localClasses, isGenerator, isVoidReturn))
+          return shapeNo("nontail-if-then", s.thenStatement);
+        const rest = stmts.slice(i + 1);
+        return isPhase1StatementList(rest, new Set(scope), localClasses, isGenerator, isVoidReturn);
+      }
+      // (#1979) Non-terminating guard: `if (cond) <side-effecting-stmt>;` where
+      // the then-arm is a plain body statement (assignment, call, nested guard,
+      // …). `from-ast.ts` lowers this via the converging-guard path
+      // (`lowerStatementList` lines ~759-782 → `lowerStmt(thenArm)`), so the
+      // shape-check for the then-arm mirrors `lowerStmt`'s accepted set exactly
+      // (`isPhase1BodyStatement`, not a tail). `<rest>` runs afterward — the
+      // outer loop continues validating it (ending in the tail), matching
+      // from-ast's `lowerStatementList(rest)` in the continuation block. The
+      // then-arm scope is cloned so arm-local `let`s don't leak into `<rest>`.
+      // Not in a loop here → `inLoop=false` (break/continue in the guard stay
+      // rejected; a `return` would have made `thenArmTerminates` true above).
+      if (!isPhase1BodyStatement(s.thenStatement, new Set(scope), localClasses, /* inLoop */ false))
+        return shapeNo("nontail-if-then-guard", s.thenStatement);
+      continue;
     }
     // Slice 6 part 2 (#1181) — for-of statement (always non-tail). The
     // body is itself shape-checked. The bridge in `from-ast.ts` lowers
