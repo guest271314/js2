@@ -156,3 +156,43 @@ errors back to 0 under both `standalone` and `wasi`).
    `Map` arms) *up front* in standalone/wasi, so relaxing the caller arm there no
    longer surfaces latent post-claim failures. Once that lands, drop the
    `jsHostExterns` gate and complete criterion 3.
+
+## BANKED (2026-07-06) — equivalence-gate REAL regression, host-mode caller-arm relaxation
+
+Finish-check on PR #2752 at a budget cliff. Re-merged `upstream/main` (CLEAN — no
+`select.ts`/baseline conflict) and ran the full host-mode equivalence gate
+(`node scripts/equivalence-gate.mjs`) that the #2858 verification had **skipped**.
+The failing `equivalence-gate` check was **NOT stale** — it is a **REAL** regression
+of the caller-arm relaxation (`demoteOnLegacyCaller = jsHostExterns !== true`), which
+in host mode newly claims leaf helpers whose only unclaimed edge is a legacy caller.
+
+**Gate result on re-merged branch:** 39 failing / 1596 passing. 24 baseline failures
+now PASS (tagged-template-literal cases — the intended win), **but 3 NEW regressions
+(not in baseline)** block the land:
+
+1. `tests/equivalence/illegal-cast-assert-throws.test.ts :: Illegal cast - assert_throws pattern closure with captures passed as callable param should not illegal-cast`
+2. `tests/equivalence/illegal-cast-assert-throws.test.ts :: Illegal cast - assert_throws pattern multiple closures with different captures passed to same function`
+3. `tests/equivalence/optimize-differential.test.ts :: --optimize differential (#1941) higher-order map-like: optimized output validates and matches unoptimized`
+
+**Root cause (all 3 share it):** a **closure-with-captures passed as a callable
+param** to a helper. The caller-arm relaxation newly claims that helper (the
+higher-order callee) for the IR path because its only unclaimed edge was a legacy
+caller. The IR lowering of the callable/closure param then **illegal-casts** the
+captured-closure struct (legacy closure ABI ≠ IR callable/funcref signature),
+diverging from the legacy output. This is precisely the caller-direction
+signature-safety hazard the demotion existed to prevent — the #2949 slice-3b
+`any`-ABI unification does NOT cover the **closure-as-callable-param** ABI, so the
+premise "in host mode the caller-direction demotion is an obsolete safeguard" is
+**too broad**: it holds for plain-value params but not for callable/closure params.
+
+**Fix direction for next window (do NOT do here — open-ended):** narrow the caller-arm
+relaxation so it still demotes a claimed callee whose legacy caller passes it (or it
+receives) a **closure/callable param with captures** — i.e. keep caller-direction
+demotion for functions with a callable/closure parameter, relax only for value-param
+leaf helpers. Alternatively teach the IR path to accept the legacy captured-closure
+ABI for callable params. Either closes the 3 regressions while preserving the
+tagged-template 24-fix win and the bucket-9→0 ratchet.
+
+**State:** branch `issue-2858-ir-callgraph` holds the bucket-9→0 work + a CLEAN
+re-merge of `upstream/main` (local only, not pushed — freeze). PR #2752 kept `hold`.
+Bucket ratchet (`scripts/ir-fallback-baseline.json` 9→0) stays committed on-branch.
