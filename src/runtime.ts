@@ -10830,7 +10830,16 @@ assert._isSameValue = isSameValue;
       // + struct shape).
       if (name === "__object_hasOwn")
         return (obj: any, key: any): number => {
-          if (obj == null) return 0;
+          // ES2022 Object.hasOwn(O, P): step 1 is `Let obj be ? ToObject(O)`,
+          // which THROWS a TypeError for null/undefined — and it happens BEFORE
+          // step 2 `ToPropertyKey(P)`, so the key must NOT be coerced first
+          // (test262 built-ins/Object/hasOwn/toobject_{null,undefined,before_topropertykey}).
+          // The pre-#3060 body delegated to native `Object.hasOwn`, which threw
+          // here; the struct-routing rewrite must preserve that throw rather than
+          // swallow the null receiver as `false`.
+          if (obj == null) {
+            throw new TypeError("Cannot convert undefined or null to object");
+          }
           key = _toPropertyKey(key, callbackState); // (#1716) ToPropertyKey on struct key
           if (typeof obj === "object" && _argumentsObjects.has(obj) && _argumentsHasOwn(obj, key)) {
             return 1;

@@ -77,12 +77,22 @@ still passes — own-only semantics intact (no prototype-walk regression).
 
 **Residual (6, distinct sub-issues — NOT this fix's scope):**
 
-- `toobject_null.js` / `toobject_undefined.js` / `toobject_before_topropertykey.js`
-  — require `Object.hasOwn(null/undefined, …)` to **throw TypeError** (the
-  `ToObject` step §20.1.2.13.1). Deferred: needs a host-thrown TypeError that
-  the compiled wasm surfaces as a catchable `TypeError` for `assert.throws`;
-  the shared `__hasOwnProperty` predicate returns 0 on a null receiver, so this
-  is a `__object_hasOwn`-specific spec add, validated separately.
+- ~~`toobject_null.js` / `toobject_undefined.js` / `toobject_before_topropertykey.js`~~
+  **FIXED (2026-07-06, ratio-gate follow-up).** These were **not** pre-existing
+  fails — they *passed* on the pre-#3060 body (which delegated to native
+  `Object.hasOwn`, and that throws TypeError on a null/undefined receiver). The
+  struct-routing rewrite guarded the null receiver with `if (obj == null) return 0`,
+  which **regressed** all three (pass→fail assertion_fail) and tripped the
+  merge_group regression-ratio gate (3 regressions / 21 improvements = 14.3% ≥ 10%).
+  Fix: replace the `return 0` with `throw new TypeError(...)`, implementing ES2022
+  step 1 `ToObject(O)` (§20.1.2.13.1) — placed *before* `_toPropertyKey(key)` so
+  ToObject throws prior to ToPropertyKey (the ordering `toobject_before_topropertykey`
+  asserts). A host-import throw surfaces as a catchable `TypeError` for
+  `assert.throws` exactly as the original native `Object.hasOwn` did. Verified: 3
+  host tests now pass; 125-file host+standalone sweep over `Object/hasOwn/**` +
+  `Object/prototype/hasOwnProperty/**` shows 0 pass→fail flips; all 21 improvements
+  retained. Standalone lane unaffected (does not use the `__object_hasOwn` host
+  import; those 3 were already `fail` in the standalone baseline, unchanged).
 - `symbol_property_toString.js` / `symbol_property_valueOf.js` /
   `symbol_property_toPrimitive.js` — a shared `_toPropertyKey` gap: a key object
   whose `toString`/`valueOf` returns a **Symbol** isn't coerced per ToPrimitive
