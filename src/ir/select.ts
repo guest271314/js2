@@ -1473,6 +1473,34 @@ function dynamicUsesAreMoveOnly(
 // Shape check
 // ---------------------------------------------------------------------------
 
+/**
+ * Does `stmt` unconditionally terminate its control flow (return / throw, or a
+ * block / if-else whose every path does)? EXACT mirror of the identically-named
+ * helper in `from-ast.ts` (#1979) — the selector MUST agree with the builder on
+ * which non-tail `if (cond) <then>; <rest>` shapes are early-return rewrites
+ * (terminating then-arm → the then-arm is reinterpreted as a tail and `<rest>`
+ * becomes the else) versus non-terminating guards (side-effecting then-arm →
+ * `<rest>` runs afterward, lowered by the converging-guard path in
+ * `lowerStatementList`). Drift here re-introduces select↔builder mismatch —
+ * under #2138 IR-first that is a live `unreachable` trap, not a silent demote.
+ */
+function thenArmTerminates(stmt: ts.Statement): boolean {
+  if (ts.isReturnStatement(stmt) || ts.isThrowStatement(stmt)) {
+    return true;
+  }
+  if (ts.isBlock(stmt)) {
+    const last = stmt.statements[stmt.statements.length - 1];
+    return last !== undefined && thenArmTerminates(last);
+  }
+  if (ts.isIfStatement(stmt)) {
+    // An `if` terminates only when it has an else and BOTH arms terminate.
+    return (
+      stmt.elseStatement !== undefined && thenArmTerminates(stmt.thenStatement) && thenArmTerminates(stmt.elseStatement)
+    );
+  }
+  return false;
+}
+
 function isPhase1StatementList(
   stmts: ReadonlyArray<ts.Statement>,
   scope: Set<string>,
@@ -1601,16 +1629,34 @@ function isPhase1StatementList(
       }
       return shapeNo(arm, es);
     }
-    // Phase 2 extension: an `if (cond) <tail>` with NO else and the rest
-    // of the statements forming a tail. This is the classic early-return
-    // pattern: `if (base) return x; <recursive body>`. We structurally
-    // reinterpret as `if (cond) <tail> else { <rest> }`.
+    // Phase 2 extension: an `if (cond)` with NO else, split by whether the
+    // then-arm unconditionally terminates — mirroring `lowerStatementList`'s
+    // `thenArmTerminates` fork in `from-ast.ts` exactly (#1979).
     if (ts.isIfStatement(s) && !s.elseStatement) {
       if (!isPhase1Expr(s.expression, scope, localClasses)) return shapeNo("nontail-if-cond", s.expression);
-      if (!isPhase1Tail(s.thenStatement, new Set(scope), localClasses, isGenerator, isVoidReturn))
-        return shapeNo("nontail-if-then", s.thenStatement);
-      const rest = stmts.slice(i + 1);
-      return isPhase1StatementList(rest, new Set(scope), localClasses, isGenerator, isVoidReturn);
+      if (thenArmTerminates(s.thenStatement)) {
+        // Early-return rewrite: `if (cond) <tail>; <rest>` ≡
+        // `if (cond) <tail> else { <rest> }`. The then-arm must be a Phase-1
+        // tail (terminates on every path); the rest becomes the else block.
+        if (!isPhase1Tail(s.thenStatement, new Set(scope), localClasses, isGenerator, isVoidReturn))
+          return shapeNo("nontail-if-then", s.thenStatement);
+        const rest = stmts.slice(i + 1);
+        return isPhase1StatementList(rest, new Set(scope), localClasses, isGenerator, isVoidReturn);
+      }
+      // (#1979) Non-terminating guard: `if (cond) <side-effecting-stmt>;` where
+      // the then-arm is a plain body statement (assignment, call, nested guard,
+      // …). `from-ast.ts` lowers this via the converging-guard path
+      // (`lowerStatementList` lines ~759-782 → `lowerStmt(thenArm)`), so the
+      // shape-check for the then-arm mirrors `lowerStmt`'s accepted set exactly
+      // (`isPhase1BodyStatement`, not a tail). `<rest>` runs afterward — the
+      // outer loop continues validating it (ending in the tail), matching
+      // from-ast's `lowerStatementList(rest)` in the continuation block. The
+      // then-arm scope is cloned so arm-local `let`s don't leak into `<rest>`.
+      // Not in a loop here → `inLoop=false` (break/continue in the guard stay
+      // rejected; a `return` would have made `thenArmTerminates` true above).
+      if (!isPhase1BodyStatement(s.thenStatement, new Set(scope), localClasses, /* inLoop */ false))
+        return shapeNo("nontail-if-then-guard", s.thenStatement);
+      continue;
     }
     // Slice 6 part 2 (#1181) — for-of statement (always non-tail). The
     // body is itself shape-checked. The bridge in `from-ast.ts` lowers
