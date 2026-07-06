@@ -1,7 +1,8 @@
 ---
 id: 3068
 title: "codegen: pure-Wasm String.prototype.isWellFormed / toWellFormed (§22.1.3) — standalone/WASI lowering"
-status: in-progress
+status: done
+completed: 2026-07-06
 sprint: current
 priority: medium
 horizon: m
@@ -67,17 +68,23 @@ replacement, no transcoding).
 - `src/codegen/native-strings.ts` — `ensureNativeStringHelpers` calls
   `emitNativeWellFormedHelpers` (alongside `emitNativeCaseConversion`) so the
   helpers exist before any body is compiled (no mid-body late-import shift).
-- `src/codegen/index.ts` — add `isWellFormed` (`i32`) / `toWellFormed`
-  (`externref`) to `STRING_METHODS`, and both to `NATIVE_STR_METHODS`.
-- `src/codegen/declarations.ts` — add both to its `NATIVE_STR_METHODS` set (skip
-  the host `string_*` import in native modes).
+  `ensureNativeStringHelpers` is a precondition of every
+  `compileNativeStringMethodCall`, so the helpers are always registered when the
+  arm needs them — no `STRING_METHODS` entry required to trigger emission.
 - `src/codegen/string-ops.ts` — arms in `compileNativeStringMethodCall`:
-  `emitReceiver(); emitFlatten(); call __str_{isWellFormed,toWellFormed}`.
+  `emitReceiver(); emitFlatten(); call __str_{isWellFormed,toWellFormed}`. These
+  only run under `ctx.nativeStrings` (standalone/WASI); host mode never reaches
+  them.
+- `src/checker/index.ts` — add `lib.es2024.string.d.ts` to `ES_BASE_LIB_NAMES`
+  so the checker types `X.isWellFormed()` / `X.toWellFormed()` as `boolean` /
+  `string`. Without the lib the result is `any`, and `X.toWellFormed() === y`
+  silently lowers to reference equality (always false for distinct strings).
 
-Host mode is unchanged: it now routes these two through the generic
-`string_method` host shim (identical to every other `STRING_METHODS` member —
-`recvStr[method](...)` on the real JS string), which was already the behaviour
-for `includes`/`toUpperCase`.
+Host mode is untouched (byte-identical): `isWellFormed`/`toWellFormed` are NOT
+added to `STRING_METHODS`, so a string-typed receiver keeps dispatching through
+the generic `__extern_method_call` bridge to the real ES2024 engine method (the
+existing behaviour, 14/16 test262 host-lane passes). The only host-visible change
+is the added lib, which corrects the static type of the two methods.
 
 ## Acceptance criteria
 
