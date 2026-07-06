@@ -923,6 +923,20 @@ function emitNumberMethodReceiverF64(
   const exprType = compileExpression(ctx, fctx, propAccess.expression);
   if (exprType && exprType.kind === "i32") {
     fctx.body.push({ op: "f64.convert_i32_s" });
+  } else if (exprType && exprType.kind !== "f64") {
+    // (#3081) A `number`-typed receiver can compile to a BOXED-number externref
+    // rather than an f64 — e.g. a namespace-constant read `Number.NaN.toFixed(0)`
+    // / `Number.POSITIVE_INFINITY.toExponential()` lowers `Number.NaN` through
+    // `__get_builtin` to a boxed externref. The `number_to{Fixed,Precision,
+    // Exponential}` runtime helpers expect an f64 receiver, so feeding the raw
+    // externref emits invalid Wasm ("call[0] expected type f64, found externref").
+    // Route through the #1917 coercion ENGINE (`coerceType` → f64), which unboxes
+    // a boxed-number externref exactly as the sibling argument path
+    // (`coerceNumberMethodArgToF64`) already does — no hand-rolled coercion
+    // vocabulary here (#2108 coercion-sites gate). An externref/ref receiver was
+    // ALWAYS invalid Wasm here, so this cannot regress any previously-instantiable
+    // module.
+    coerceType(ctx, fctx, exprType, { kind: "f64" });
   }
 }
 
