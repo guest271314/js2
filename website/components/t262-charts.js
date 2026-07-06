@@ -199,11 +199,18 @@ class T262Donut extends HTMLElement {
     const failDeg = passDeg + (fail / totalSafe) * 360;
     const ceDeg = failDeg + (ce / totalSafe) * 360;
 
-    // Orbit stats — positioned around the donut
-    // Container is 380x320, .gauge-core has inset: 45px 0 0 (height 275px from y=45)
-    // gauge-wrap is 250x250 centered in gauge-core, so donut center y = 45 + (275-250)/2 + 125 = 182.5
+    // Orbit stats — positioned around the donut.
+    // .gauge-orbit padding box is 380 wide × 380 tall (height:360 + padding-top:20).
+    // .gauge-core has inset: var(--_donut-top-inset)=45px 0 0, so it spans y=45..380
+    // (height 335); the 250px .gauge-wrap is centered in it → donut center
+    // y = 45 + 335/2 = 212.5. Horizontally the ring is centered → center x = 190.
+    // NOTE: these constants MUST match the orbit-stat anchor
+    // (left:50% = 190, top: calc(50% + topInset/2) = 190 + 22.5 = 212.5) so the
+    // label deltas (lp - center) land each label exactly on its computed point.
+    // They also feed collision detection via the absolute lp positions, so keep
+    // them consistent with the real ring center.
     const centerX = 190;
-    const centerY = 182;
+    const centerY = 212.5;
     const orbitPoint = (angle, radius) => {
       const rad = ((angle - 90) * Math.PI) / 180;
       return { x: centerX + Math.cos(rad) * radius, y: centerY + Math.sin(rad) * radius };
@@ -244,7 +251,7 @@ class T262Donut extends HTMLElement {
       const labelDx = lp.x - centerX;
       const labelDy = lp.y - centerY;
       return `
-        <div class="orbit-stat" style="left:50%;top:50%;transform:translate(calc(-50% + ${labelDx}px), calc(-50% + ${labelDy}px))">
+        <div class="orbit-stat" style="left:50%;top:calc(50% + (var(--_donut-top-inset) / 2));transform:translate(calc(-50% + ${labelDx}px), calc(-50% + ${labelDy}px))">
           <div class="orbit-value"${dataAttr} style="color:${color}">${id === "pass" ? "0" : Number(value).toLocaleString()}</div>
           <div class="orbit-label">${label}</div>
         </div>`;
@@ -277,6 +284,14 @@ class T262Donut extends HTMLElement {
           --_text: var(--t262-text, currentColor);
           --_text-muted: var(--t262-text-muted, rgba(139, 148, 158, 1));
           --_bg: var(--t262-bg, #0d1117);
+          /* Single source of truth for the donut's top inset. Used BOTH by
+             .gauge-core (which pushes the ring down from the top of the orbit
+             box) AND by the orbit-stat vertical anchor, so the labels always
+             orbit the ring's real center. Because .gauge-core has an asymmetric
+             inset (this value on top, 0 on the bottom), the ring center sits
+             exactly topInset/2 below the orbit box's 50% line — so the label
+             anchor adds that same topInset/2 to stay on the ring. */
+          --_donut-top-inset: 45px;
           font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
           color: var(--_text);
         }
@@ -343,7 +358,7 @@ class T262Donut extends HTMLElement {
         }
         .gauge-core {
           position: absolute;
-          inset: 45px 0 0;
+          inset: var(--_donut-top-inset) 0 0;
           display: grid;
           place-items: center;
         }
@@ -401,12 +416,28 @@ class T262Donut extends HTMLElement {
           grid-template-columns: 1fr 1fr;
           gap: 8px 16px;
           margin-top: 24px;
+          /* Only shown <440px (see media query). Constrain + auto-center so the
+             two-column legend sits centered under the 250px donut instead of
+             stretching the full host width. */
+          max-width: 320px;
+          margin-left: auto;
+          margin-right: auto;
         }
         /* Narrow viewports: orbit labels don't fit; rely on the legend below.
            The donut itself is 250px and fits comfortably in ~360px viewports. */
         @media (max-width: 440px) {
           .gauge-orbit {
             height: 280px;
+            /* Orbit labels are hidden on mobile, so the top inset that made room
+               for them above the ring is no longer needed. Zero it here so the
+               250px ring is CENTERED in the 300px padding box (height 280 +
+               padding-top 20). Centered leaves ~25px above and below the ring —
+               enough for the .gauge-glow (inset:-8px + blur(6px), ≈14px bleed)
+               to fully render instead of being clipped at the bottom by
+               :host { overflow: clip }. This override cascades to .gauge-core
+               (a descendant) and is scoped to the media query, so desktop
+               orbit-label overflow protection is unaffected. */
+            --_donut-top-inset: 0px;
           }
           .orbit-stat {
             display: none;
