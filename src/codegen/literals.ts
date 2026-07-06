@@ -2651,8 +2651,16 @@ export function compileObjectLiteralForStruct(
         pushDefinedFunc(ctx, methodFuncIdx, methodFunc);
       }
 
-      // Promote captured locals to globals so the method body can access them
-      promoteAccessorCapturesToGlobals(ctx, fctx, prop.body);
+      // Promote captured locals to globals so the method body can access them.
+      // (#3040) ALSO scan the parameter-default initializers — an object-literal
+      // method like `{ method([x] = iter) {} }` references the enclosing local
+      // `iter` ONLY from the default, which the body-only scan misses, so `iter`
+      // reads null and the array-destructure throws "Cannot destructure null".
+      // The class-method / getter-setter paths already pass these `extraNodes`
+      // (#1161, nested-declarations.ts:128-133); mirror it here for plain object
+      // methods (the object-method variants of the `ary-init-iter-close` cluster).
+      const objMethodParamInits = prop.parameters.map((p) => p.initializer).filter((e): e is ts.Expression => !!e);
+      promoteAccessorCapturesToGlobals(ctx, fctx, prop.body, objMethodParamInits);
 
       // Compile method body
       const methodFctxParams: { name: string; type: ValType }[] = [

@@ -1,10 +1,12 @@
 ---
 id: 3040
 title: "array-destructured parameter with a CAPTURED custom-iterable default throws 'Cannot destructure null' (blocks #2664 un-hold)"
-status: ready
+status: done
+assignee: ttraenkler/dev-3040
+completed: 2026-07-06
 sprint: current
 created: 2026-07-05
-updated: 2026-07-05
+updated: 2026-07-06
 priority: high
 horizon: l
 feasibility: hard
@@ -254,3 +256,82 @@ then Defect 2.
    (#1/#3/#5/#8/#10) must stay green (Defect-2 fast path preserved).
 4. Full `merge_group` — param-default handling is broad-impact (every defaulted
    destructured param); no scoped sweep suffices. Standalone floor green.
+
+## Implementation Notes (dev-3040, 2026-07-06 — executed on Opus, Fable rate-limited)
+
+### What actually shipped (2 sites, not the spec's 2 "defects")
+
+The bug is **one** root cause — capture-analysis scans only the function BODY,
+never the parameter DEFAULT initializers — replicated across **three** distinct
+lowering sites. The spec's "Defect 2" (custom-iterable defaults skip the iterator
+protocol via a typed-vec fast path) **does not reproduce**: instrumenting
+`destructureParamArray` shows the param is compiled as `externref` and enters the
+externref arm, which DOES drive `__array_from_iter_n`. The matrix's inline row
+`#11` fails only because a computed `[Symbol.iterator]` **inside** an object
+literal is not seen by the destructure iterator-drive (a separate, pre-existing
+substrate bug that also fails in body position — `for-of` over the same object
+works, member-read `obj[Symbol.iterator]` returns undefined). That is out of
+scope; the real test262 iter-close files use the `iter[Symbol.iterator] = fn`
+shape, which iterates correctly once the capture is threaded.
+
+Shipped fixes (both scan each parameter subtree with `ownLocals` as the shadow
+set, so binding names / earlier params stay local while free default references
+become captures):
+
+- **`src/codegen/closures.ts`** (arrow / function-EXPRESSION lowering) — adds a
+  param scan to `referencedNames` (before the transitive-capture loop) and to
+  `writtenInClosure`. This covers the async-generator / generator / function
+  EXPRESSION variants of the `ary-init-iter-close` cluster, **including the two
+  #2664 gate files** `expressions/async-generator/dstr/{dflt,named-dflt}-ary-init-iter-close.js`.
+- **`src/codegen/literals.ts`** (object-literal plain methods) — passes the
+  param-default initializers as the `extraNodes` arg to
+  `promoteAccessorCapturesToGlobals` (global promotion), mirroring the
+  class-method / getter-setter paths (#1161) which already did this. Object
+  methods promote captures to globals, so there is no transitive-threading hazard.
+
+### Validation (all runner-verified against current main)
+
+- **#2664 gate files: both PASS** (`doneCallCount === 1`, `callCount === 1`,
+  IteratorClose driven). **#2664 is unblocked** — un-hold is the lead's call.
+- Full 92-file `*ary-init-iter-close.js` cluster: **90/92 pass** (the 2 fails are
+  the DECLARATION-path statement variants — see deferred note).
+- `*/dstr/dflt-*.js` sweep (651 files): **+31 pass, ZERO regressions**
+  (422→453; fresh-process chunked to avoid the batch-runner state leak).
+- `*/object/dstr/*.js` sweep (561 files): **+16 pass, ZERO regressions**
+  (384→400; the object-method `-err` families are IMPROVEMENTS, confirming global
+  promotion is regression-free).
+- `npx tsc --noEmit` clean; 51 pre-existing param-default/destructuring/generator/
+  async unit tests green; new `tests/issue-3040.test.ts` (6 tests) green.
+
+### Deferred: declaration path (statements/nested-declarations.ts) — STOP-AND-DOCUMENT
+
+A parallel fix in `emitNestedFunctionDeclaration` (scan param defaults into
+`referencedNames` + the Phase-0 hoist capture check) was **implemented, validated,
+and reverted** because it introduces a real regression the spec's mechanism does
+not cover:
+
+- Threading a default-only capture into a plain function DECLARATION shifts it to
+  the **has-captures** lowering (leading capture params). Unlike the closures
+  lowering, the declaration/call-site path has **no transitive-capture threading**
+  (closures.ts:~1879 does; nested-declarations has none). So a declaration `f`
+  that captures via a param default, when called from **another closure** —
+  `assert.throws(Test262Error, function () { f(); })`, the standard test262
+  error-test shape — either mis-indexes (`local index out of range` at the caller)
+  or fails to thread the capture (default silently not applied → the expected
+  throw is lost). Measured: **18 `statements/*/dstr/dflt-*-err.js` regressions**
+  (iterator/getter-throwing families).
+- A secondary hoist mismatch (Phase-0 pre-reserved the function as capture-free
+  via a body-only scan, then `compileNestedFunctionDeclaration` saw the
+  param-default capture and took the `reuseReservedEntry` deferred early-return →
+  empty body, dropping a throwing default) is fixable by scanning params in the
+  Phase-0 check too, but the transitive-threading regression remains.
+
+The correct declaration-path fix is to route param-default captures through
+**global promotion** (the object-method mechanism) rather than the has-captures
+param-threading, OR to add transitive-capture threading to the declaration
+lowering. Both are a deeper redesign than this issue's mechanism and are left as a
+follow-up. This affects only the plain function/generator DECLARATION statement
+variants (`statements/{function,generators,async-generator}/dstr/dflt-ary-init-iter-close.js`)
+and declaration-form captured-iterable param defaults; the #2664 gate (all
+EXPRESSION form) is fully covered by the shipped fix. Follow-up filed as a note
+for the PO/architect; not blocking #2664.
