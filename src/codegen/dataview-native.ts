@@ -39,7 +39,7 @@
 import type { Instr, ValType } from "../ir/types.js";
 import { allocLocal } from "./context/locals.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
-import { noJsHost } from "./expressions/helpers.js";
+import { emitThrowTypeError, noJsHost } from "./expressions/helpers.js";
 import { getArrTypeIdxFromVec, getOrRegisterVecType } from "./index.js";
 import { stringConstantExternrefInstrs } from "./native-strings.js";
 import { emitWasiErrorConstructor } from "./registry/error-types.js";
@@ -2773,6 +2773,179 @@ export function emitTaViewWriteBack(
     blockType: { kind: "empty" },
     body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr],
   } as Instr);
+}
+
+/**
+ * (#3058) ValidateTypedArray (§10.4.5.11 IsTypedArrayOutOfBounds, §23.2.3.* step 1)
+ * for a boxed `$__ta_dyn_view` reached through an `any` receiver: throw a TypeError
+ * when the view is out-of-bounds over its (resizable) backing buffer. A
+ * NON-length-tracking (fixed) view — stored length field0 ≥ 0 — is OOB when its
+ * window no longer fits the buffer (`byteOffset + storedLen*elemSize(kind) >
+ * buf.byteLength`, e.g. after `rab.resize(smaller)`). A length-tracking view (field0
+ * sentinel `-1`) tracks the live buffer and is OOB only when its byteOffset itself
+ * exceeds the buffer. Emitted at the TOP of every dyn-view proto-method arm (#3058
+ * Bucket A) so the interleaved `assert.throws(TypeError, () => ta.<m>())` cases in
+ * every `prototype/<m>/resizable-buffer.js` file pass. `dvLocal` holds the
+ * `(ref $__ta_dyn_view)`.
+ * Leaves the stack unchanged (throws or falls through).
+ */
+export function emitTaDynViewValidate(ctx: CodegenContext, fctx: FunctionContext, dvLocal: number): void {
+  const dynIdx = ctx.taDynViewTypeIdx;
+  if (dynIdx < 0) return;
+  const { vecTypeIdx: bufVecTypeIdx } = i32ByteVec(ctx);
+  const kindLocal = allocLocal(fctx, `__tdvv_k_${fctx.locals.length}`, { kind: "i32" });
+  const esLocal = allocLocal(fctx, `__tdvv_es_${fctx.locals.length}`, { kind: "i32" });
+  const storedLocal = allocLocal(fctx, `__tdvv_s_${fctx.locals.length}`, { kind: "i32" });
+  const bufLenLocal = allocLocal(fctx, `__tdvv_bl_${fctx.locals.length}`, { kind: "i32" });
+  const byteOffLocal = allocLocal(fctx, `__tdvv_bo_${fctx.locals.length}`, { kind: "i32" });
+  // kind → elemSize
+  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 3 } as Instr);
+  fctx.body.push({ op: "local.set", index: kindLocal } as Instr);
+  pushElemSizeForKind(fctx, kindLocal);
+  fctx.body.push({ op: "local.set", index: esLocal } as Instr);
+  // storedLen = field0
+  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 0 } as Instr);
+  fctx.body.push({ op: "local.set", index: storedLocal } as Instr);
+  // bufLen = dv.buf.byteLength (buf field1 → $__vec_i32_byte; .length = field0)
+  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 1 } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: bufVecTypeIdx, fieldIdx: 0 } as Instr);
+  fctx.body.push({ op: "local.set", index: bufLenLocal } as Instr);
+  // byteOffset = field2
+  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 2 } as Instr);
+  fctx.body.push({ op: "local.set", index: byteOffLocal } as Instr);
+  // oob = storedLen >= 0 ? (byteOffset + storedLen*elemSize > bufLen)
+  //                      : (byteOffset > bufLen)
+  fctx.body.push({ op: "local.get", index: storedLocal } as Instr);
+  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+  fctx.body.push({ op: "i32.ge_s" } as Instr);
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "val", type: { kind: "i32" } },
+    then: [
+      { op: "local.get", index: byteOffLocal } as Instr,
+      { op: "local.get", index: storedLocal } as Instr,
+      { op: "local.get", index: esLocal } as Instr,
+      { op: "i32.mul" } as Instr,
+      { op: "i32.add" } as Instr,
+      { op: "local.get", index: bufLenLocal } as Instr,
+      { op: "i32.gt_s" } as Instr,
+    ],
+    else: [
+      { op: "local.get", index: byteOffLocal } as Instr,
+      { op: "local.get", index: bufLenLocal } as Instr,
+      { op: "i32.gt_s" } as Instr,
+    ],
+  } as Instr);
+  // if (oob) throw TypeError. emitThrowTypeError pushes onto fctx.body → capture it
+  // into a then-arm buffer via a body-swap. Keep the outer body registered on
+  // fctx.savedBodies for the swap so any late-import shift the throw triggers
+  // (WASI TypeError constructor) patches the outer funcIdxs too.
+  const throwArm: Instr[] = [];
+  const saved = fctx.body;
+  fctx.savedBodies.push(saved);
+  fctx.body = throwArm;
+  emitThrowTypeError(ctx, fctx, "TypeError: attempting to access out-of-bounds TypedArray");
+  fctx.body = saved;
+  fctx.savedBodies.pop();
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: throwArm, else: [] } as Instr);
+}
+
+/**
+ * (#3058) Materialize a boxed `$__ta_dyn_view` (runtime element `kind`) into a fresh
+ * native `$__vec_f64` by byte-decoding every in-bounds element little-endian on the
+ * runtime kind (the #3057 {@link emitDynDecodeDispatch} engine). Widening every kind
+ * to f64 lets the read-side array-method impls (`at`/`indexOf`/`includes`/`join`/
+ * `find*`/`every`/`some`/`forEach`/`reduce*`/`toLocaleString`) run over the copy
+ * through the EXISTING f64-vec dispatch — the caller rebinds the receiver identifier
+ * to this vec and re-enters `compileArrayMethodCall` (#3058 two-arm). `dvLocal` holds
+ * the `(ref $__ta_dyn_view)`; the caller has already run {@link emitTaDynViewValidate}
+ * (OOB → TypeError), so the effective length used here is the live in-bounds element
+ * count ({@link pushTaDynViewEffectiveLen}, resolving the auto-length `-1` sentinel).
+ * Leaves a `(ref $__vec_f64)` on the stack and returns its typeIdx.
+ */
+export function emitTaDynViewToVec(ctx: CodegenContext, fctx: FunctionContext, dvLocal: number): number {
+  const dynIdx = ctx.taDynViewTypeIdx;
+  const { vecTypeIdx: bufVecTypeIdx, arrTypeIdx: bufArrTypeIdx } = i32ByteVec(ctx);
+  const f64VecIdx = getOrRegisterVecType(ctx, "f64", { kind: "f64" });
+  const f64ArrIdx = getArrTypeIdxFromVec(ctx, f64VecIdx);
+
+  const kindLocal = allocLocal(fctx, `__tdtv_k_${fctx.locals.length}`, { kind: "i32" });
+  const esLocal = allocLocal(fctx, `__tdtv_es_${fctx.locals.length}`, { kind: "i32" });
+  const lenLocal = allocLocal(fctx, `__tdtv_len_${fctx.locals.length}`, { kind: "i32" });
+  const arrLocal = allocLocal(fctx, `__tdtv_arr_${fctx.locals.length}`, { kind: "ref", typeIdx: bufArrTypeIdx });
+  const baseLocal = allocLocal(fctx, `__tdtv_base_${fctx.locals.length}`, { kind: "i32" });
+  const leLocal = allocLocal(fctx, `__tdtv_le_${fctx.locals.length}`, { kind: "i32" });
+  const nArrLocal = allocLocal(fctx, `__tdtv_narr_${fctx.locals.length}`, { kind: "ref", typeIdx: f64ArrIdx });
+  const iLocal = allocLocal(fctx, `__tdtv_i_${fctx.locals.length}`, { kind: "i32" });
+  const offLocal = allocLocal(fctx, `__tdtv_off_${fctx.locals.length}`, { kind: "i32" });
+
+  // kind → elemSize
+  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 3 } as Instr);
+  fctx.body.push({ op: "local.set", index: kindLocal } as Instr);
+  pushElemSizeForKind(fctx, kindLocal);
+  fctx.body.push({ op: "local.set", index: esLocal } as Instr);
+  // len = effective (live, in-bounds) element count.
+  pushTaDynViewEffectiveLen(ctx, fctx, dvLocal, kindLocal, esLocal);
+  fctx.body.push({ op: "local.set", index: lenLocal } as Instr);
+  // arr = dv.buf.data ; base = dv.byteOffset ; le = 1
+  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 1 } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: bufVecTypeIdx, fieldIdx: 1 } as Instr);
+  fctx.body.push({ op: "local.set", index: arrLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 2 } as Instr);
+  fctx.body.push({ op: "local.set", index: baseLocal } as Instr);
+  fctx.body.push({ op: "i32.const", value: 1 } as Instr);
+  fctx.body.push({ op: "local.set", index: leLocal } as Instr);
+  // nArr = array.new_default(len)
+  fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
+  fctx.body.push({ op: "array.new_default", typeIdx: f64ArrIdx } as Instr);
+  fctx.body.push({ op: "local.set", index: nArrLocal } as Instr);
+  // for (i=0; i<len; i++) nArr[i] = decode(base + i*elemSize)
+  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+  fctx.body.push({ op: "local.set", index: iLocal } as Instr);
+  const decodeInstrs = emitDynDecodeDispatch(ctx, fctx, kindLocal, arrLocal, offLocal, leLocal, bufArrTypeIdx);
+  const stepInstrs: Instr[] = [];
+  // off = base + i*elemSize (runtime elemSize)
+  stepInstrs.push({ op: "local.get", index: baseLocal } as Instr);
+  stepInstrs.push({ op: "local.get", index: iLocal } as Instr);
+  stepInstrs.push({ op: "local.get", index: esLocal } as Instr);
+  stepInstrs.push({ op: "i32.mul" } as Instr);
+  stepInstrs.push({ op: "i32.add" } as Instr);
+  stepInstrs.push({ op: "local.set", index: offLocal } as Instr);
+  // nArr[i] = <decode(off) → f64>
+  stepInstrs.push({ op: "local.get", index: nArrLocal } as Instr);
+  stepInstrs.push({ op: "local.get", index: iLocal } as Instr);
+  stepInstrs.push(...decodeInstrs);
+  stepInstrs.push({ op: "array.set", typeIdx: f64ArrIdx } as Instr);
+  // i++
+  stepInstrs.push({ op: "local.get", index: iLocal } as Instr);
+  stepInstrs.push({ op: "i32.const", value: 1 } as Instr);
+  stepInstrs.push({ op: "i32.add" } as Instr);
+  stepInstrs.push({ op: "local.set", index: iLocal } as Instr);
+  stepInstrs.push({ op: "br", depth: 0 } as Instr);
+  const loopBody: Instr[] = [
+    { op: "local.get", index: iLocal } as Instr,
+    { op: "local.get", index: lenLocal } as Instr,
+    { op: "i32.ge_s" } as Instr,
+    { op: "br_if", depth: 1 } as Instr,
+    ...stepInstrs,
+  ];
+  fctx.body.push({
+    op: "block",
+    blockType: { kind: "empty" },
+    body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr],
+  } as Instr);
+  // struct.new $__vec_f64(len, nArr)
+  fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: nArrLocal } as Instr);
+  fctx.body.push({ op: "struct.new", typeIdx: f64VecIdx } as Instr);
+  return f64VecIdx;
 }
 
 /**

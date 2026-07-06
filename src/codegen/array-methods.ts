@@ -28,11 +28,12 @@ import {
   getArrTypeIdxFromVec,
   getOrRegisterArrayType,
   getOrRegisterSubviewType,
+  getOrRegisterTaDynViewType,
   getOrRegisterVecType,
   getSubviewArrTypeIdx,
   isTaViewTypeIdx,
 } from "./registry/types.js";
-import { emitTaViewToVec, emitTaViewWriteBack } from "./dataview-native.js"; // (#3054 B1 Option A) de-view; (B3) write-through
+import { emitTaDynViewToVec, emitTaDynViewValidate, emitTaViewToVec, emitTaViewWriteBack } from "./dataview-native.js"; // (#3054 B1 Option A) de-view; (B3) write-through; (#3058) dyn-view materialize+validate
 import { noJsHost } from "./expressions/helpers.js";
 import { ensureNativeIteratorRuntime, getOrRegisterIterRecType } from "./iterator-native.js";
 import { ensureObjVecBuilders } from "./object-runtime.js";
@@ -2859,6 +2860,196 @@ const ARRAY_METHODS = new Set([
 ]);
 
 /**
+ * (#3058 Bucket A, first slice) Read-side TypedArray proto-methods that (a) produce NO
+ * new TypedArray value so they can run over a materialized f64-vec copy of a dynamic
+ * `$__ta_dyn_view` (via {@link emitTaDynViewToVec}) through the ordinary f64-vec method
+ * impl, AND (b) whose non-dyn-view ELSE arm (re-dispatched through
+ * {@link compileExpression}) stays **host-import-free** in the standalone lane — a hard
+ * requirement, because both arms are emitted and a single `env.*` import in the (never-
+ * executed-for-a-dyn-view) ELSE arm still makes the pure-Wasm module fail to
+ * instantiate.
+ *
+ * BANKED (their externref ELSE arm pulls a host import in standalone, which would poison
+ * the module):
+ *   - `join` → `env.<TA>_join`
+ *   - the callback methods `find`/`findIndex`/`findLast`/`findLastIndex`/`every`/`some`/
+ *     `forEach`/`reduce`/`reduceRight` → `env.__make_callback`
+ * These flip only once the standalone externref-receiver callback/join paths are native
+ * (a separate follow-up). Also banked: in-place mutators (`fill`/`copyWithin`/`reverse`/
+ * `sort` — Bucket B, need write-back) and species/new-view producers (`slice`/`subarray`/
+ * `map`/`filter`/`with`/`toSorted`/`toReversed` — Bucket C, need real-buffer identity).
+ */
+const DYN_VIEW_READ_METHODS = new Set<string>(["at", "indexOf", "lastIndexOf", "includes", "toLocaleString"]);
+
+/**
+ * (#3058) Call expressions whose dyn-view two-arm ELSE arm is CURRENTLY re-dispatching
+ * through {@link compileExpression} to reproduce the exact non-dyn-view path. The
+ * two-arm gate skips a marked node so the re-dispatch runs the ORDINARY method
+ * compilation (the externref/plain-array/host fallback) instead of re-entering the
+ * two-arm (infinite recursion). Keyed by node identity (per-compile nodes) — never
+ * leaks across compiles.
+ */
+const dynViewTwoArmActive = new WeakSet<ts.CallExpression>();
+
+/**
+ * (#3058) True when identifier `name` resolves to an `externref`-typed local — the
+ * static rep of an `any`-typed variable, which is the ONLY shape a boxed
+ * `$__ta_dyn_view` receiver can take. Restricting the two-arm to externref locals
+ * keeps the runtime `ref.test` off statically-typed array/TA receivers (which can
+ * never be a dyn view) — pure overhead avoidance, and it matches the B1 rebind's
+ * identifier-local restriction.
+ */
+function dynViewReceiverIsExternref(fctx: FunctionContext, name: string): boolean {
+  const localIdx = fctx.localMap.get(name);
+  if (localIdx === undefined) return false;
+  const t = getLocalType(fctx, localIdx);
+  return t !== undefined && t.kind === "externref";
+}
+
+/**
+ * (#3058) Coerce a just-compiled method-arm result (already on the Wasm stack, or
+ * VOID) to `externref` so both arms of the dyn-view two-arm branch leave exactly one
+ * externref (the branch's unified result rep). Returns false when the arm declined
+ * (null/undefined) — the caller then abandons the two-arm and falls back to the
+ * ordinary single path.
+ */
+function coerceArmToExternref(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  r: ValType | null | undefined | typeof VOID_RESULT,
+  treatNullAsVoid = false,
+): boolean {
+  if (r === undefined || r === null) {
+    // THEN arm (treatNullAsVoid=false): a null/undefined from the recursive f64-vec
+    // impl means the method genuinely didn't compile — decline the whole two-arm.
+    // ELSE arm (treatNullAsVoid=true): the call WAS re-dispatched (side effects
+    // emitted); a null result is a void expression — push undefined-as-externref so
+    // the branch stays balanced rather than declining.
+    if (!treatNullAsVoid) return false;
+    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    return true;
+  }
+  if (r === VOID_RESULT) {
+    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    return true;
+  }
+  const vt = r as ValType;
+  if (vt.kind !== "externref") coerceType(ctx, fctx, vt, { kind: "externref" });
+  return true;
+}
+
+/**
+ * (#3058) Emit the runtime `ref.test $__ta_dyn_view` two-arm for a read-side Bucket-A
+ * method on an `any`/externref receiver in a `moduleUsesDynTaView` module.
+ *
+ *   if (ref.test $__ta_dyn_view <recv>) {
+ *     emitTaDynViewValidate(dv)          // §23.2.3.* step 1 ValidateTypedArray (OOB → TypeError)
+ *     mat = emitTaDynViewToVec(dv)        // widen runtime kind → $__vec_f64
+ *     <ordinary f64-vec method impl over mat>       // arm 1 (recursive compileArrayMethodCall)
+ *   } else {
+ *     <EXACT existing method compilation of the WHOLE call>   // arm 2 (unchanged)
+ *   }
+ *
+ * Arm 1 re-enters {@link compileArrayMethodCall} with `skipDynViewWrap=true` over the
+ * receiver identifier rebound to the materialized f64-vec local (a concrete vec ref, so
+ * it can't re-trigger the two-arm). Arm 2 re-dispatches the ENTIRE call expression via
+ * {@link compileExpression} — reproducing the caller's exact non-dyn-view behavior
+ * INCLUDING every host/externref fallback that lives ABOVE compileArrayMethodCall (an
+ * externref receiver makes compileArrayMethodCall return `undefined`, so the real impl
+ * is the caller's tail, not reachable by re-entering compileArrayMethodCall). A
+ * `dynViewTwoArmActive` guard on the call node prevents the re-dispatch from
+ * re-entering this two-arm (infinite recursion). Both results unify to `externref`.
+ * Returns the result ValType, or `undefined` when arm 1 declines (caller runs the
+ * single path).
+ *
+ * Late-import safety: the outer body + both arm buffers stay registered on
+ * `fctx.savedBodies` for the whole build, so any late-import funcIdx shift triggered
+ * inside an arm patches every already-emitted funcIdx (the shift walker dedups by
+ * array identity, so double-registration is harmless).
+ */
+function emitDynViewMethodTwoArm(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  propAccess: ts.PropertyAccessExpression | ts.ElementAccessExpression,
+  callExpr: ts.CallExpression,
+  receiverType: ts.Type,
+  methodName: string,
+  expectedType: ValType | undefined,
+): ValType | null | undefined | typeof VOID_RESULT {
+  const receiverExpr = propAccess.expression;
+  if (!ts.isIdentifier(receiverExpr)) return undefined;
+  const name = receiverExpr.text;
+  const dynIdx = getOrRegisterTaDynViewType(ctx);
+
+  // Compile the receiver ONCE → externref → recvExt; recvAny (anyref) for ref.test/cast.
+  const rt = compileExpression(ctx, fctx, receiverExpr);
+  if (rt && rt.kind !== "externref") coerceType(ctx, fctx, rt, { kind: "externref" });
+  const recvExt = allocLocal(fctx, `__dvm_recv_${fctx.locals.length}`, { kind: "externref" });
+  fctx.body.push({ op: "local.set", index: recvExt } as Instr);
+  const recvAny = allocLocal(fctx, `__dvm_any_${fctx.locals.length}`, { kind: "anyref" } as ValType);
+  fctx.body.push({ op: "local.get", index: recvExt } as Instr);
+  fctx.body.push({ op: "any.convert_extern" } as Instr);
+  fctx.body.push({ op: "local.set", index: recvAny } as Instr);
+
+  const dvLocal = allocLocal(fctx, `__dvm_dv_${fctx.locals.length}`, { kind: "ref", typeIdx: dynIdx });
+
+  const outer = fctx.body;
+  const thenArm: Instr[] = [];
+  const elseArm: Instr[] = [];
+  fctx.savedBodies.push(outer);
+  fctx.savedBodies.push(thenArm);
+  fctx.savedBodies.push(elseArm);
+
+  // --- THEN arm (dyn view) ---
+  fctx.body = thenArm;
+  fctx.body.push({ op: "local.get", index: recvAny } as Instr);
+  fctx.body.push({ op: "ref.cast", typeIdx: dynIdx } as Instr);
+  fctx.body.push({ op: "local.set", index: dvLocal } as Instr);
+  emitTaDynViewValidate(ctx, fctx, dvLocal);
+  const f64VecIdx = emitTaDynViewToVec(ctx, fctx, dvLocal);
+  const matLocal = allocLocal(fctx, `__dvm_mat_${fctx.locals.length}`, { kind: "ref", typeIdx: f64VecIdx });
+  fctx.body.push({ op: "local.set", index: matLocal } as Instr);
+  const savedBind = fctx.localMap.get(name);
+  fctx.localMap.set(name, matLocal);
+  const rThen = compileArrayMethodCall(ctx, fctx, propAccess, callExpr, receiverType, methodName, expectedType, true);
+  if (savedBind !== undefined) fctx.localMap.set(name, savedBind);
+  else fctx.localMap.delete(name);
+  const thenOk = coerceArmToExternref(ctx, fctx, rThen);
+
+  // --- ELSE arm (exact existing non-dyn-view impl) — re-dispatch the WHOLE call
+  // through compileExpression so the caller's host/externref fallback (which lives
+  // ABOVE compileArrayMethodCall) runs verbatim. The `dynViewTwoArmActive` guard
+  // stops the re-dispatch from re-entering this two-arm.
+  fctx.body = elseArm;
+  dynViewTwoArmActive.add(callExpr);
+  const rElse = compileExpression(ctx, fctx, callExpr, expectedType);
+  dynViewTwoArmActive.delete(callExpr);
+  const elseOk = coerceArmToExternref(ctx, fctx, rElse, /* treatNullAsVoid */ true);
+
+  fctx.body = outer;
+  fctx.savedBodies.pop(); // elseArm
+  fctx.savedBodies.pop(); // thenArm
+  fctx.savedBodies.pop(); // outer
+
+  if (!thenOk || !elseOk) {
+    // Arm 1 declined — abandon the two-arm. The recvExt/recvAny setup already emitted
+    // into `outer` is stack-balanced (local.set/get pairs) and merely a dead store;
+    // the caller re-compiles the receiver on the ordinary single path.
+    return undefined;
+  }
+
+  outer.push({ op: "local.get", index: recvAny } as Instr);
+  outer.push({ op: "ref.test", typeIdx: dynIdx } as Instr);
+  outer.push({
+    op: "if",
+    blockType: { kind: "val", type: { kind: "externref" } },
+    then: thenArm,
+    else: elseArm,
+  } as Instr);
+  return { kind: "externref" };
+}
+
+/**
  * Compile array method calls to inline Wasm instructions.
  * Returns undefined if the call is not an array method (caller should continue).
  * Returns ValType for successful compilation, VOID_RESULT for void methods,
@@ -2872,10 +3063,33 @@ export function compileArrayMethodCall(
   receiverType: ts.Type,
   overrideMethodName?: string,
   expectedType?: ValType,
+  skipDynViewWrap = false,
 ): ValType | null | undefined | typeof VOID_RESULT {
   const methodName =
     overrideMethodName ?? (ts.isPropertyAccessExpression(propAccess) ? propAccess.name.text : undefined);
   if (!methodName || !ARRAY_METHODS.has(methodName)) return undefined;
+
+  // (#3058) Runtime-kind proto-method dispatch on a boxed `$__ta_dyn_view` receiver
+  // (dynamic `new <ctorVar>(rab)` where the element kind is only known at runtime).
+  // A read-side Bucket-A method on such a view must (1) ValidateTypedArray (OOB →
+  // TypeError) and (2) run over a materialized f64-vec copy. Because the receiver is
+  // statically `any`/externref, its dyn-view-ness is a RUNTIME `ref.test`, NOT a
+  // compile-time fact — so we emit a two-arm branch that wraps BOTH the dyn-view
+  // f64-vec impl and the EXACT existing externref/plain-array impl (never hijacks a
+  // plain-array `any` receiver). See emitDynViewMethodTwoArm.
+  if (
+    !skipDynViewWrap &&
+    ctx.moduleUsesDynTaView &&
+    !dynViewTwoArmActive.has(callExpr) &&
+    ts.isPropertyAccessExpression(propAccess) &&
+    DYN_VIEW_READ_METHODS.has(methodName) &&
+    ts.isIdentifier(propAccess.expression) &&
+    dynViewReceiverIsExternref(fctx, propAccess.expression.text)
+  ) {
+    const two = emitDynViewMethodTwoArm(ctx, fctx, propAccess, callExpr, receiverType, methodName, expectedType);
+    if (two !== undefined) return two;
+    // Fell through (arm compile declined) — continue with the ordinary single path.
+  }
   // (#2863 Phase 2) `toLocaleString` is array-dispatched ONLY under standalone/
   // wasi (no host `__extern_toLocaleString` carrier). In host (gc) mode fall
   // through to the host `__extern_toLocaleString` path (real Intl grouping +

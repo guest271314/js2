@@ -1,7 +1,8 @@
 ---
 id: 3058
 title: "Resizable-TA proto-methods over a dynamic `$__ta_dyn_view` receiver — runtime-kind method dispatch (materialize-into-f64-vec + OOB ValidateTypedArray + write-back)"
-status: ready
+status: in-progress
+assignee: ttraenkler/opus-3058b
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -300,3 +301,91 @@ so a module without a dynamic TA construct is byte-identical (sha256). The
 #3000/#3057 precedent, if the oracle new-checker-call ratchet trips, pre-auth
 the added call sites with a reason in the PR. No verdict-logic change is
 involved, so no `oracle_version` bump is needed.
+
+## LANDED — Bucket A first slice (senior-dev opus-3058b, 2026-07-06)
+
+PR: runtime-kind two-arm dispatch for the **host-import-free read methods**
+`at` / `indexOf` / `lastIndexOf` / `includes` / `toLocaleString`, plus the two
+reusable scaffolding functions.
+
+### What shipped (`src/codegen/dataview-native.ts`, `src/codegen/array-methods.ts`)
+
+1. **`emitTaDynViewValidate`** (dataview-native.ts) — ValidateTypedArray
+   (§10.4.5.11): a fixed view (field0 ≥ 0) is OOB when
+   `byteOffset + storedLen*elemSize(kind) > buf.byteLength`; a length-tracking
+   view (field0 = −1) is OOB only when `byteOffset > buf.byteLength`. On OOB →
+   `emitThrowTypeError`. Required for the interleaved
+   `assert.throws(TypeError, () => ta.<m>())` cases.
+2. **`emitTaDynViewToVec`** (dataview-native.ts) — materialize the runtime-kinded
+   view into a fresh `$__vec_f64` by decoding every in-bounds element via the
+   #3057 `emitDynDecodeDispatch` engine (widen every kind → f64) with a
+   **runtime** `elemSize`; length = `pushTaDynViewEffectiveLen` (resolves the −1
+   auto-length sentinel).
+3. **`emitDynViewMethodTwoArm`** (array-methods.ts) — the runtime
+   `ref.test $__ta_dyn_view` branch. THEN: validate → materialize → rebind the
+   receiver identifier to the f64-vec local → re-enter `compileArrayMethodCall`
+   (`skipDynViewWrap=true`, concrete vec ref so it can't re-trigger). ELSE:
+   **re-dispatch the WHOLE call via `compileExpression(callExpr)`** guarded by a
+   `dynViewTwoArmActive` WeakSet — this reproduces the caller's EXACT non-dyn-view
+   behavior including the host/externref fallbacks that live ABOVE
+   `compileArrayMethodCall` (which returns `undefined` for an externref receiver).
+   Both arms unify to `externref` (the branch's typed-if result rep).
+
+### The crux the banked plan under-specified, now resolved
+
+The banked note correctly said the ELSE arm must be "the EXACT existing impl,"
+but its step 3 assumed that impl is reachable by re-entering
+`compileArrayMethodCall`. It is **not**: for an externref receiver
+`compileArrayMethodCall` returns `undefined` and the real impl is the **caller's
+tail** (host/`__extern_method_call`/native-vec fallbacks). Re-entering
+`compileArrayMethodCall` in the ELSE arm produced `undefined` → the two-arm
+silently abandoned → no flip. The fix is to re-dispatch the entire `callExpr`
+through `compileExpression` (with a WeakSet re-entry guard) so the ELSE arm runs
+the caller's full fallback verbatim.
+
+Late-import safety: outer body + both arm buffers stay registered on
+`fctx.savedBodies` for the whole build (the shift walker dedups by array
+identity), so a late-import funcIdx shift in either arm patches everything —
+no manual `shiftFuncIndices` and no double-remap.
+
+### Measured floor flips (standalone lane, host-enforced asserts)
+
++3 files flip fail→pass (enforced `sameValue`, non-vacuous):
+
+- `indexOf/resizable-buffer-special-float-values.js`
+- `includes/resizable-buffer-special-float-values.js`
+- `lastIndexOf/resizable-buffer-special-float-values.js`
+
+Byte-inert for non-dyn-view modules (gated on `moduleUsesDynTaView`); the base
+compiled the identical binary for a plain-array program (verified by construction
++ empty-imports assertion in the test).
+
+### Still banked (blocked, not attempted here)
+
+- **`join` + the callback methods** (`find*`/`every`/`some`/`forEach`/`reduce*`):
+  their non-dyn-view ELSE arm re-dispatch pulls a **host import** in standalone
+  (`env.<TA>_join`, `env.__make_callback`). Since both arms are emitted, that
+  single `env.*` import makes the pure-Wasm module fail to instantiate — so these
+  can only land once the standalone externref-receiver join/callback paths are
+  Wasm-native (a separate follow-up). This is why the initial `DYN_VIEW_READ_METHODS`
+  set is exactly the 5 host-import-free methods.
+- **The main `*/resizable-buffer.js` files** (the larger prize) are blocked by an
+  **unrelated harness limitation**, not the method dispatch: `resizableArrayBufferUtils.js`
+  builds subclass constructors via `new Function('return class MyUint8Array extends
+  Uint8Array {}')()` and iterates them in `ctors`/`floatCtors`. Standalone can't build
+  a `Function`-constructor TA subclass, so the `for (ctor of ctors)` loop hits an
+  undefined ctor and the harness element access traps ("array element access out of
+  bounds") BEFORE any method assert. Needs TA-subclass + `Function`-ctor support —
+  out of scope. (The `special-float-values` variants use a narrower path that flips.)
+- **Bucket B** (mutators `fill`/`copyWithin`/`reverse`/`sort` — need
+  `emitTaDynViewWriteBack`, mirroring #3054 B3 `emitTaViewWriteBack` +
+  `emitDynEncodeDispatch`) and **Bucket C** (species/new-view producers) remain
+  banked per the plan.
+
+### Tests
+
+`tests/issue-3058-dyn-view-proto-methods.test.ts` — 11 host-enforced cases:
+each of the 5 methods over a dyn view returns the correct value; fromIndex;
+byteOffset/windowed views; length-tracking; OOB-after-shrink → `TypeError`
+instance; regrow restores; the plain-array `any` HAZARD GUARD; and the
+byte-inert (zero env imports) check.
