@@ -923,6 +923,25 @@ function emitNumberMethodReceiverF64(
   const exprType = compileExpression(ctx, fctx, propAccess.expression);
   if (exprType && exprType.kind === "i32") {
     fctx.body.push({ op: "f64.convert_i32_s" });
+  } else if (exprType && (exprType.kind === "externref" || exprType.kind === "ref" || exprType.kind === "ref_null")) {
+    // (#3081) A `number`-typed receiver can compile to a BOXED-number externref
+    // rather than an f64 — e.g. a namespace-constant read `Number.NaN.toFixed(0)`
+    // / `Number.POSITIVE_INFINITY.toExponential()` lowers `Number.NaN` through
+    // `__get_builtin` to a boxed externref. The `number_to{Fixed,Precision,
+    // Exponential}` runtime helpers expect an f64 receiver, so feeding the raw
+    // externref emits invalid Wasm ("call[0] expected type f64, found externref").
+    // Recover the primitive via `__unbox_number` (the same helper the standalone
+    // wrapper path above uses). A non-externref ref is coerced to externref first;
+    // an externref receiver was ALWAYS invalid Wasm here, so adding the unbox
+    // cannot regress any previously-instantiable module.
+    if (exprType.kind !== "externref") {
+      coerceType(ctx, fctx, exprType, { kind: "externref" });
+    }
+    const unboxNumIdx = ensureLateImport(ctx, "__unbox_number", [{ kind: "externref" }], [{ kind: "f64" }]);
+    flushLateImportShifts(ctx, fctx);
+    if (unboxNumIdx !== undefined) {
+      fctx.body.push({ op: "call", funcIdx: unboxNumIdx });
+    }
   }
 }
 
