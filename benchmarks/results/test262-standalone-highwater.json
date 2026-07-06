@@ -1,10 +1,9 @@
 {
-  "pass": 18800,
-  "host_free_pass": 18800,
-  "official_pass": 20819,
+  "pass": 19211,
+  "host_free_pass": 19211,
+  "official_pass": 18861,
   "official_total": 43106,
-  "sha": "f20fb32f0265d719495e941a0a345a03a5caf252",
-  "generated_at": "2026-07-06T02:31:53Z",
-  "tolerance": 50,
-  "note": "Reconcile to manual honest re-baseline (js2wasm-baselines @ ts 06:09, host_free_pass 18861). Conservative floor 18800; next clean promote re-raises exactly. See #3056/#2097."
+  "sha": "c6c51667f13102240096e1c52851ab2306cbe76c",
+  "generated_at": "2026-07-06T07:09:17Z",
+  "tolerance": 50
 }
