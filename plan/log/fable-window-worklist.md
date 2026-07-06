@@ -14,6 +14,88 @@ findings this session were stale (verify-first).
 
 ---
 
+## Impact ranking — highest-ROI fix order (measured 2026-07-07)
+
+Rank the Tier-0 substrate roots by the **conformance they unblock**, so the
+next Fable window spends its budget on the biggest rocks first. Counts below are
+**measured** this session (harvested from `.test262-cache/test262-current.jsonl`
++ spot-verified with `runTest262File` on current `main`), not estimated. The
+headline: **one keystone bug gates the two largest clusters on the board.**
+
+### #1 — KEYSTONE: `#2939` / `#2940` closure-dispatch across the externref boundary
+
+**Root cause (one line):** a closure/callback held in an **`any`-typed
+container** (array element, or an `any` param) is **not dispatched** when
+invoked — `validators[i](value)` / `fn(...)` **no-ops** (or only fires when the
+call's arity *and* arg type-kinds exactly match the callback's declared
+params). The assertion/effect lives *inside* the callback, so a dropped
+dispatch yields a **vacuous pass**, not a visible error.
+
+**Why it's #1 — it gates the two largest clusters + a host-lane sibling:**
+
+| cluster | files (measured) | how it maps to the keystone |
+| --- | ---: | --- |
+| TypedArray harness-wrapper vacuous (`testWith*Constructors(function(TA){…})`) | **~1487** | #2940 — the wrapper's `fn(ctor, …)` closure never dispatches ⇒ every assertion in the body is dead. |
+| matchAll `compareIterator`/`matchValidator` ("assert is not defined") | **13** | #3083 — `validators[i](step.value)` on an `any[]` of closures no-ops (verified: a faithful shim flips 7/13 but a sabotaged-index negative control **still passed all 7** ⇒ dispatch dropped). |
+| Array HOF-with-callback (reduce 128 · reduceRight 111 · filter 71 · map 64 · every 61 · some 55 · forEach 55) | **~545** | **DUAL-ROOT — partial** (see caveat). Some are dispatch; the sampled `map` case is #2773. |
+| host-lane sibling: standalone destructuring throwing-accessor / user `@@iterator` | (dev-B) | #3076 — dev-B independently hit the *same* callback-across-boundary root from the host lane. |
+
+**Rough total unblocked: ~1500 files verified same-root (#2940 + #3083), up to
+~2000 counting the #2939 share of the HOF cluster.** By far the highest-ROI
+item on the board.
+
+**Fix approach:** arity/type-kind-tolerant dynamic dispatch of an `any`-typed
+closure (the `#2939` blocker cited by `#2940`) — invoke the closure by its
+`funcref`/wrapper regardless of arity/type-kind exactness, coercing args at the
+call boundary. Landing it flips the ~1487 TypedArray files from vacuous→honest
+and the 13 matchAll files pass→honest **with no per-test work**. (Same
+closure-through-`externref` dispatch that Tier-1 **#3049** iterator-helpers and
+**#3050**/#3076 need — landing the keystone also unblocks those.)
+
+> **Caveat (measured — do not over-credit #2939):** the HOF-with-callback
+> cluster is **dual-root**. I verified one `map` file
+> (`15.4.4.19-8-c-ii-1.js`): the callback *did* dispatch but received **wrong
+> args** — `obj[idx] !== val` over a heterogeneous `[0,1,true,null,{},"five"]`
+> + sparse array — which is **#2773 any-element-rep**, not dispatch-drop. The
+> generic `reduce.call(arraylike, cb)` variants add a **receiver-shape**
+> component. So treat the ~545 as an **upper bound** on #2939's share; a
+> per-file split is needed to attribute precisely. #2773 (below) closes the
+> element-rep half.
+
+### #2 — `#2773` any/dynamic value representation (Tier 0)
+
+Closes the **other half** of the HOF cluster (heterogeneous/sparse array
+elements + generic array-like receivers → correct callback args), plus most
+any-receiver read gaps and the object-destructuring-param `NaN` residual. Pairs
+with #2939 to fully close the Array HOF cluster.
+
+### #3 — Resizable/growable ArrayBuffer + `transfer` (feature, not a single bug)
+
+Not a substrate bug — a missing **ES2024 feature**. Measured: the
+`CreateRabForTest` **compile-fail** cluster is **~150** files (`resizable-buffer`
+tests across `Array/*` + `TypedArray/*`, all failing to compile the harness's
+`new ArrayBuffer(n, {maxByteLength})` + `.resize()`); plus ArrayBuffer
+`transfer` / `transferToImmutable` / `transferToFixedLength` / `.resize` =
+**~38** ("X is not a function"). Needs resizable-AB storage + detach semantics
+(#3054 area). Bounded to the feature, no substrate dependency — good standalone
+Fable rock.
+
+### #4 — `#2963` method/builtin first-class value identity (Tier 0)
+
+~87 files (class-method-identity `c.m === C.prototype.m`); enables #3080. Lower
+raw count than #1–#3 but unblocks a distinct semantic class.
+
+Tier-0 **#3037** (object-identity canonicalisation) and the async roots
+**#2865** / **#2895** remain as listed below — narrower conformance surface than
+#1–#4, sequenced after.
+
+> **Note:** #2939/#2940 is **not yet in the Tier-0 table below** (it was
+> scattered across the #2940/#3083 issue files). It belongs at the **head of
+> Tier 0** — this ranking is the authoritative statement until the table is
+> folded in.
+
+---
+
 ## Tier 0 — substrate roots (land these first; they unblock the Tier-1 gaps)
 
 These are the deep enablers. Most Tier-1 gaps below are *instances* of one of
