@@ -13202,6 +13202,11 @@ assert._isSameValue = isSameValue;
       if (name === "decodeURIComponent") return (s: any) => decodeURIComponent(s as any);
       if (name === "encodeURI") return (s: any) => encodeURI(s as any);
       if (name === "encodeURIComponent") return (s: any) => encodeURIComponent(s as any);
+      // (#3063) Legacy `escape` / `unescape` (§B.2.1 / §B.2.2) — pure string
+      // transforms. Like the URI globals, direct pass-through so the native
+      // ToString step throws TypeError on Symbol per spec step 1 (? ToString).
+      if (name === "escape") return (s: any) => escape(s as any);
+      if (name === "unescape") return (s: any) => unescape(s as any);
       // #1500 — `fetch` host import: bridge to globalThis.fetch when available.
       // The compiler routes bare `fetch(url, init?)` identifier calls through
       // this builtin; the host call returns a real JS `Promise<Response>` that
