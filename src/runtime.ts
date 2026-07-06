@@ -11679,6 +11679,18 @@ assert._isSameValue = isSameValue;
           }
           // WasmGC struct — operate on the sidecar storage.
           const k = typeof key === "symbol" ? key : String(key);
+          // (#2726 g) §10.5.7 OrdinaryDelete step 2: if the receiver has no OWN
+          // property P, [[Delete]] is a true no-op — it must NOT tombstone or
+          // otherwise mutate the receiver. Without this guard, `delete o.p` of a
+          // key that lives only on the prototype chain (e.g. `delete
+          // __palette.red` where `red` is inherited from `Palette.prototype`)
+          // recorded a tombstone on `o`, which then shadowed the still-present
+          // inherited value on the next prototype-chain read (returning
+          // undefined instead of the inherited value). Return true, mutate
+          // nothing. Own properties fall through to the real delete below.
+          if (!_wasmStructHasOwn(obj, k, callbackState?.getExports())) {
+            return 1;
+          }
           // Check the descriptor table for an explicit non-configurable flag.
           const descs = _wasmPropDescs.get(obj);
           if (descs) {
