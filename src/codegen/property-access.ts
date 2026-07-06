@@ -54,6 +54,7 @@ import {
   typedArrayPackedSignedness,
   typedArrayVecStorage,
 } from "./index.js";
+import { emitJsonStringifyValue } from "./json-codec-native.js";
 import { tryCompileNativeGeneratorResultProperty } from "./generators-native.js";
 import { tryCompileNativeMapSizeGet } from "./map-runtime.js";
 import { tryCompileNativeSetSizeGet } from "./set-runtime.js";
@@ -1297,6 +1298,15 @@ function ensureStandaloneBuiltinStaticMethodClosure(
       paramTypes = [{ kind: "externref" }];
       returnType = { kind: "externref" };
       break;
+    // (#2933) JSON.stringify as a VALUE — fixed 1-arg compact form. Serialises
+    // host-free via the native `__json_stringify_root` (the SAME entry the
+    // direct `JSON.stringify(o)` call uses); returns the JSON `$AnyString`
+    // coerced to an externref at the any-call boundary. Replacer/space args are
+    // out of scope (matching the standalone call-path narrowing).
+    case "JSON.stringify":
+      paramTypes = [{ kind: "externref" }];
+      returnType = { kind: "externref" };
+      break;
     default:
       return null;
   }
@@ -1378,6 +1388,25 @@ function ensureStandaloneBuiltinStaticMethodClosure(
       if (idx === undefined) return null;
       closureFctx.body.push({ op: "local.get", index: 1 });
       closureFctx.body.push({ op: "call", funcIdx: idx });
+    } else if (key === "JSON.stringify") {
+      // Ensure the native codec (`__json_stringify_value` + its 1-arg entry
+      // `__json_stringify_root`, `anyref -> ref $AnyString`) is registered; the
+      // helper is idempotent. The value arg reaches the closure as an externref
+      // (any-boundary); recover the internal ref (`any.convert_extern`), call
+      // root, then box the `$AnyString` result back to externref for the
+      // fixed-arity value-closure return — same coercion the call path applies.
+      // OBSERVATIONALLY IDENTICAL to the direct `JSON.stringify(anyVar)` path:
+      // objects/numbers/strings serialise correctly; an array reaching this via
+      // `any`-boxing inherits the SAME pre-existing substrate limitation the
+      // direct any-path has (top-level any-boxed array → "null"), so the closure
+      // introduces no new divergence — it is not a fresh correctness landmine.
+      emitJsonStringifyValue(ctx);
+      const rootIdx = ctx.funcMap.get("__json_stringify_root");
+      if (rootIdx === undefined) return null;
+      closureFctx.body.push({ op: "local.get", index: 1 });
+      closureFctx.body.push({ op: "any.convert_extern" } as Instr);
+      closureFctx.body.push({ op: "call", funcIdx: rootIdx });
+      closureFctx.body.push({ op: "extern.convert_any" } as Instr);
     }
 
     funcIdx = mintDefinedFunc(ctx);

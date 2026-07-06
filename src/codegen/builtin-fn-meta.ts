@@ -56,6 +56,13 @@ export const STANDALONE_STATIC_METHOD_META: Record<string, { name: string; lengt
   "Reflect.has": { name: "has", length: 2 },
   "Reflect.set": { name: "set", length: 3 },
   "Reflect.ownKeys": { name: "ownKeys", length: 1 },
+  // (#2933) JSON.stringify as a VALUE — the fixed 1-arg compact form. The value
+  // closure serialises via the native `__json_stringify_root` (host-free), the
+  // SAME entry the direct `JSON.stringify(o)` call path uses. Spec `.length` is
+  // 3 (value, replacer, space); the host-free closure supports only the leading
+  // value arg (replacer/space out of scope, matching the standalone call-path
+  // narrowing), but `.length` reports the spec arity.
+  "JSON.stringify": { name: "stringify", length: 3 },
 };
 
 /**
