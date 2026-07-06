@@ -1,9 +1,10 @@
 {
-  "pass": 21188,
-  "host_free_pass": 21188,
+  "pass": 19210,
+  "host_free_pass": 19210,
   "official_pass": 20819,
   "official_total": 43106,
   "sha": "f20fb32f0265d719495e941a0a345a03a5caf252",
   "generated_at": "2026-07-06T02:31:53Z",
-  "tolerance": 50
+  "tolerance": 50,
+  "note": "Honest re-baseline after #3055/#2757 (numeric any-eq de-vacuification) admin-merged; host_free_pass 21188->19210 (-1978, intentional). Next promote --update re-seeds exactly. See #3056/#2097."
 }
