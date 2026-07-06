@@ -239,3 +239,23 @@ generators-native.ts:2027-2029 does for abrupt). Concretely:
    try/finally (`language/statements/try/*`) — the eager→native promotion of these
    shapes must not perturb them.
 4. Full `merge_group` (generator lowering is broad; standalone floor green).
+
+## arch-3049 re-verification (2026-07-06) — spec CONFIRMED trustworthy
+
+Re-checked every cited anchor against current `main` @ 52937f5. **All accurate
+(within ~2 lines); root cause holds; the senior can implement directly.**
+
+- The two `fail()` guards: `generators-native.ts:556` (guard A `stmt.catchClause
+  || !stmt.finallyBlock`) and `:557` (guard B `!statementsAreYieldFree`) —
+  present verbatim. `lowerStatements` at `:511`; `statementsAreYieldFree` at
+  `:499`; the try case-3 handling + normal-path finally replay at `:553–566`.
+- Author's "try/catch-across-yield stays the next slice" note at `:2037` —
+  present. Abrupt-resume machinery: `abruptResume?: { finalizers }` at `:159`,
+  finalizer loop at `:2023–2027`, `MODE_THROW` re-throw via `ERROR_FIELD` +
+  `ensureExnTag` at `:2040–2041`, resume router `MODE_NEXT`/`MODE_THROW` at
+  `:2064/2071`, `resumeBindings` at `:2078`. `.throw()` entry sets
+  `MODE_THROW`/`ERROR_FIELD` at `:2864–2865` and `:3019–3022`.
+- Eager fallback confirmed: `function-body.ts:1053` (`__gen_create_buffer` →
+  `__create_generator`). Both target shapes still route here today.
+
+No downgrade. `architect_spec: done` is reliable.

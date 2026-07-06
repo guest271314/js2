@@ -125,7 +125,16 @@ files share the same resolution root — retest after the chain fix.
 spans codegen↔runtime prototype identity). Not started as a code change — no PR
 beyond this findings note.
 
-## Implementation Plan (arch, 2026-07-05)
+## Implementation Plan (arch, 2026-07-05) — SUPERSEDED
+
+> **SUPERSEDED by "## Implementation Plan — CORRECTED (arch-3049, 2026-07-06)"
+> at the end of this file.** This 2026-07-05 plan targeted a runtime
+> `%ArrayIteratorPrototype%` proto-chain off-by-one (dev-3049's Layer 3). That
+> off-by-one is real, but dev-3049's end-to-end trace (see "## Root cause —
+> CORRECTED & VERIFIED") proved it is NOT what fails the 27 host-lane files —
+> the dominant blockers are a codegen elision (Layer 1) + a module-init-timing
+> constraint (Layer 2) that gate the runtime path entirely. Kept below for
+> history; do NOT implement from it.
 
 **Bumped `feasibility: hard` / `reasoning_effort: max` / `model: fable`.** dev-3042's
 first read ("bounded medium") is right about the *mechanism* but understates the
@@ -361,3 +370,274 @@ sidesteps Layers 1–2 entirely (no host import, no module-init throw). Extendin
 standalone helper *bodies* onto that singleton (architect Lane B) remains a valid,
 independent follow-up, but the harvested 27 are **host-lane** and gated on
 Layers 1–2.
+
+## Implementation Plan — CORRECTED (arch-3049, 2026-07-06)
+
+> **RECOMMENDATION: PROCEED — but SURFACE TO USER FIRST.** dev-3049's three-layer
+> trace is correct and independently re-verified below against current `main`.
+> Layers 1 and 3 are bounded, low-risk fixes. Layer 2 is the crux and it is a
+> **module-init-timing** decision that reshapes when top-level code runs in the
+> host lane. The good news: the mechanism to fix Layer 2 **already exists,
+> already shipped, and is already tested** — the `deferTopLevelInit` option
+> (#2796). So this is not "invent new init machinery"; it is "decide how widely
+> to turn on a switch that already works." Because that switch changes init
+> ordering for host-mode modules, the lead should confirm the **scope choice**
+> (§ "Two staging choices") with the user before dispatch. `architect_spec: done`
+> — the plan below is complete and dev-ready once the scope is chosen.
+
+### Verification of dev-3049's three layers against current main (arch re-check)
+
+All four cited sites confirmed on `origin/main` @ 52937f5:
+
+- **Layer 1 CONFIRMED.** `src/codegen/declarations.ts` top-level assignment
+  filter: the `F.prototype = …` keep is `if (ctx.standalone &&
+  isFnctorPrototypeAssignTarget(ctx, expr.left))` (standalone-only), and the
+  #2671 host/GC static-write keep **explicitly excludes** `prototype`
+  (`expr.left.name.text !== "prototype"`) with the comment "consumed by the
+  compile-time fnctor-prototype lift." That lift —
+  `tryCompileFnctorPrototypeAssign` in
+  `src/codegen/expressions/fnctor-prototype.ts` — opens with
+  `if (!ctx.standalone) return undefined;`. So in host/GC mode **nothing**
+  keeps or consumes a top-level `F.prototype = <expr>`: the statement is
+  dropped, and if it is the only top-level code, **no `$__module_init` is
+  emitted at all**. Exactly as dev-3049 reported.
+- **Layer 2 CONFIRMED + a key nuance.** `__module_init` reaches the Wasm
+  `(start)` section via `declarations.ts` `ctx.mod.startFuncIdx = initFuncIdx`
+  — but **only** when `!ctx.wasi && !exportModuleInit`, where
+  `exportModuleInit = ctx.deferTopLevelInit && !ctx.wasi`. The `__iterator`
+  host import (`src/runtime.ts` ~L12491) reads
+  `callbackState?.getExports()` at L12498/12508/12516; pre-`setExports` those
+  are `undefined`, so the vec-fallback `__vec_len`/`__vec_get` are missing and
+  L12543 throws "… is not iterable". The test262 host runner
+  (`tests/test262-runner.ts` ~L3792–3797) instantiates → `setExports` → calls
+  `test()`, and does **not** set `deferTopLevelInit`, so the `(start)` section
+  runs `__module_init` inside `WebAssembly.instantiate`, before `setExports`.
+  Confirmed. **The nuance that makes this tractable:** the identical
+  before-`setExports` problem was already solved for the diff-test host lane by
+  **#2796's `deferTopLevelInit`** — when set (and `!wasi`) the compiler
+  **exports** `__module_init` and does **not** wire the `(start)` section, and
+  the host calls the exported `__module_init()` *after* `setExports`
+  (`scripts/diff-test.ts` ~L222–230). That is dev-3049's Option C, already
+  built and covered by `tests/issue-2796.test.ts`.
+- **Layer 3 CONFIRMED.** `src/runtime.ts` vec fallback (~L12524–12529) does a
+  **one-level** `Object.create(globalThis.Iterator.prototype)`. Because the
+  runner reads a **double** `getPrototypeOf`, the second hop overshoots to
+  `Object.prototype` — one level past the helper-bearing proto. Also note it
+  borrows `globalThis.Iterator.prototype` rather than the compiler's
+  `_getIteratorPrototype()` (runtime.ts:361). Real, but gated behind Layers 1–2
+  so it never runs for the 27 today.
+
+### Option evaluation (A / B / C), against current main
+
+**Option A — compile-time host resolution of `getPrototypeOf(<ArrayIterator>)`
+(mirror #3013's standalone singleton at `calls.ts` ~L7040). REJECTED as the
+primary fix.** Even if `getPrototypeOf(getPrototypeOf(x))` is folded to a host
+import returning `_getIteratorPrototype()`, the **argument** `x =
+[][Symbol.iterator]()` is still evaluated first and materialises an iterator
+via the `__iterator` host import → throws at init (Layer 2) unless the arg's
+evaluation is *elided*. Eliding a spec-observable sub-expression to dodge an
+init-time throw is a fragile, special-case compromise that only covers the
+exact `getPrototypeOf(getPrototypeOf([][Symbol.iterator]()))` shape and leaves
+every *other* top-level host-import expression still broken. It does not solve
+the root (top-level code runs before the runtime is wired); it patches one
+syntactic shape. Keep A only as a possible micro-optimisation *after* C, never
+instead of it.
+
+**Option B — lazy/deferred vec iterator (`__iterator` returns an iterator whose
+`.next()` lazily re-fetches `getExports()`). REJECTED.** (1) It moves a genuine
+GetIterator "not iterable" throw (§7.4.2, thrown at `GetIterator` time) to
+first `IteratorStep` — an **observable timing change** that risks flipping
+negative tests that assert the throw at loop entry. (2) It is a broad semantic
+change to the single most-used iteration primitive. (3) It only fixes
+iterators; any *other* top-level host-import expression (e.g. a top-level
+`Object.getPrototypeOf`, `String.prototype` touch, struct introspection) still
+throws at init. Narrow coverage, broad risk.
+
+**Option C — run `__module_init` after `setExports` (the #1789/#2796
+mechanism). SELECTED.** It fixes the **root**: top-level code runs against a
+fully-wired runtime, which is *more* spec-correct (ES module top-level runs at
+load with all facilities present) and is exactly the model the standalone/WASI
+`_start` lane and the diff-test host lane already use. It fixes the whole class
+(every top-level host-import expression), not just iterators. And the machinery
+(`deferTopLevelInit`) is already implemented, shipped, and tested. The only
+open decision is **how widely to enable it** — see the two staging choices.
+
+### The full fix = Layer 1 + Layer 2 (Option C) + Layer 3
+
+Order matters: all three are required for the 27 to pass. Layers 1 and 3 are
+bounded and safe; Layer 2 is the scope decision.
+
+**Layer 1 fix — keep top-level `F.prototype = <expr>` in host `__module_init`.**
+- File: `src/codegen/declarations.ts`, the top-level assignment-statement filter
+  (the `ts.isBinaryExpression` arm around L4489–4524).
+- Change: extend the #2671 host/GC static-write keep to **also** keep
+  `F.prototype = <expr>` when `F` is a top-level function name — i.e. drop the
+  `expr.left.name.text !== "prototype"` exclusion **for the host/GC lane only**,
+  OR add a sibling `!ctx.standalone && isFnctorPrototypeAssignTarget(...)` keep
+  mirroring the existing standalone keep. Either way the statement lands in
+  `ctx.moduleInitStatements` so the ordinary property-write arm
+  (`compileAssignment`) runs it at init.
+- **Safety (verified):** the host fnctor-prototype *lift*
+  (`tryCompileFnctorPrototypeAssign`) is `if (!ctx.standalone) return undefined`
+  — it never fires in host mode, so there is **no double-apply**. The comment
+  that claims the lift consumes it is stale for host mode; fix the comment too.
+- Scope guard: restrict to `ts.isPropertyAccessExpression` with
+  `ts.isIdentifier(expr.left.expression)` and
+  `ctx.topLevelFunctionNames.has(name)` (same predicate the #2671 arm already
+  uses) so only `F.prototype = …` for a *top-level function* `F` is kept —
+  `obj.prototype = …` on an arbitrary receiver is unaffected.
+
+**Layer 2 fix — Option C via `deferTopLevelInit`.** Two staging choices (below).
+No new compiler machinery; you are choosing where to flip the existing switch.
+
+**Layer 3 fix — two-level, identity-stable `%ArrayIteratorPrototype%` in the
+vec fallback.**
+- File: `src/runtime.ts` `__iterator` vec fallback (~L12524–12539).
+- Change: replace the one-level `Object.create(globalThis.Iterator.prototype)`
+  with an iterator that inherits from a **module-wide cached**
+  `%ArrayIteratorPrototype%` singleton whose own `[[Prototype]]` is the
+  compiler's `_getIteratorPrototype()` (runtime.ts:361), i.e.
+  `iterObj → %ArrayIteratorPrototype% → _getIteratorPrototype() → …`. Then the
+  runner's **double** `getPrototypeOf(getPrototypeOf(iterObj))` lands exactly on
+  `_getIteratorPrototype()` (which carries the helpers via
+  `_installIteratorHelperPolyfills`). Cache the singleton in a module-level
+  `let _ArrayIteratorPrototypeCache` (mirror `_GeneratorPrototypeCache` at
+  runtime.ts:269) so **all** array iterators share it by identity (the #3013
+  guard: `getPrototypeOf([].values()) === getPrototypeOf([][Symbol.iterator]())`
+  and `!== getPrototypeOf([1,2])`).
+- Prefer `_getIteratorPrototype()` over `globalThis.Iterator.prototype` as the
+  helper anchor: `_getIteratorPrototype()` is the compiler-owned proto the
+  generator path already chains to (runtime.ts:418 `_getGeneratorPrototype` does
+  `Object.create(_getIteratorPrototype())`), so array + generator receivers
+  resolve helpers via the **same** object — consistent identity.
+
+### Two staging choices for Layer 2 (SURFACE TO USER)
+
+Both use the already-built `deferTopLevelInit`. They differ only in blast radius.
+
+- **C1 — SCOPED to the host test262 lane (recommended first step; low compiler
+  risk).** Set `deferTopLevelInit: true` at the host-lane compile sites, and
+  call the exported `__module_init()` after `setExports` at the execute sites.
+  Four harness edits, **zero change to the compiler default** (production
+  npm/playground consumers keep eager `(start)` init):
+  1. `tests/test262-runner.ts` L3640 — add `deferTopLevelInit: true` to the
+     `compile()` options (host lane only; leave the `target ? {target}` standalone
+     path alone).
+  2. `tests/test262-runner.ts` ~L3797 — after `setExports`, before `test()`,
+     inside the **existing** try: `const mi = (instance.exports as any).__module_init;
+     if (typeof mi === "function") mi();`. (The single try/catch at L3787 already
+     wraps instantiate + setExports + `test()`, so a top-level throw simply moves
+     from the instantiate line to this call — same catch, same negative-test
+     bucketing. This is why C1's negative-test blast radius is small.)
+  3. `scripts/compiler-fork-worker.mjs` L62 — mirror the `deferTopLevelInit: true`
+     compile option so the **sharded baseline** (the committed JSONL) is compiled
+     the same way as the in-process runner (the #1251 "keep both paths aligned"
+     rule; a mismatch would make the validator disagree with the sharded run).
+  4. `tests/test262-shared.ts` ~L668–669 — after the `setExports` call, invoke
+     the exported `__module_init()` the same way as (2).
+  - **Trade-off to name for the user:** C1 makes the *conformance corpus* run
+    with deferred init while a *production* host consumer still gets eager
+    `(start)` init. For the 27 specifically this is defensible — the failing
+    `Iterator.prototype = getPrototypeOf(getPrototypeOf([][Symbol.iterator]()))`
+    is a **runner-injected harness prelude**, not user code, and #2796 already
+    established deferred-init as the "fully-wired" host model. But it does mean a
+    real user who writes top-level code touching a host import still hits the
+    init-time throw until C2 lands. C1 is honest as "align the harness with the
+    standalone/diff-test init model," not as "fix production."
+  - **Risk that must be validated:** C1 flips init timing for the **entire** host
+    test262 corpus, not just the 27. Expected net-positive/neutral (deferred is
+    strictly more-wired), but it MUST go through full `merge_group` (broad-impact,
+    no scoped sweep) to catch any test that depended on the pre-`setExports`
+    timing — especially runtime-negative tests whose throw currently lands during
+    `instantiate`.
+
+- **C2 — DEFAULT for the host/GC lane (the principled fix; foundational, needs
+  explicit user sign-off).** Make host-mode init defer by default so production
+  consumers get the same fully-wired top-level init. Two implementation shapes:
+  - **C2a (self-contained, preferred):** extend `applyModuleInitGuard`
+    (`src/codegen/index.ts` L2765, currently gated `if (ctx.wasi)` inside
+    `addWasiStartExport`) to the host/GC lane: add the `__init_done` idempotency
+    guard to `__module_init` and prepend `call __module_init` to every exported
+    function, and **stop** wiring the `(start)` section for host mode. Then the
+    first export the host calls self-initialises **after** `setExports` — **no
+    host cooperation required** (unlike `deferTopLevelInit`, which needs the host
+    to call `__module_init`). This is the WASI model, generalised.
+  - **C2b:** make `deferTopLevelInit` default-true for host mode and update every
+    in-repo host consumer (`src/runtime-instantiate.ts` L96–98, playground, both
+    test262 paths) to call `__module_init()` after `setExports`. More edit sites;
+    an out-of-repo npm consumer that forgets the call gets top-level code that
+    never runs (a silent regression) — so C2a is safer.
+  - **C2 blast radius — what depends on eager `(start)` init today (enumerate
+    before choosing):**
+    1. **Top-level side-effects with no export ever called** (e.g. a snippet that
+       is only top-level `console.log`). Under `(start)` they fire at instantiate;
+       under C2a they fire on first-export-entry and **never** if no export is
+       called. Check the playground "Run" path — if it always invokes an entry
+       export, fine; if it relies on instantiate-time side effects, it needs a
+       `__module_init()` call.
+    2. **Runtime-negative tests expecting an instantiate-time throw** — the throw
+       moves to first-export-entry. In-repo runners keep it in one try/catch, but
+       any consumer that distinguishes "instantiate threw" from "call threw" sees
+       the reclassification.
+    3. **`#2800 __in_module_init` flag** (`finalizeInModuleInitFlag`,
+       index.ts:2724). It wraps `__module_init`'s body with flag=1/flag=0 and the
+       comment explicitly notes "gc/host has no idempotency guard (the `(start)`
+       section runs the body exactly once)." C2a **adds** an idempotency guard
+       prologue to `__module_init`. Verify the compose order: the guard's early
+       `return` (when already-init) must sit **outside** the flag set/reset so a
+       second entry doesn't leave the flag stuck at 1. Simplest: apply the
+       `applyModuleInitGuard` prologue **before** `finalizeInModuleInitFlag`
+       wraps, or make the flag reset run on the guard's early-return path too.
+       This is the one genuinely new interaction C2 introduces — call it out in
+       the C2 PR.
+    4. Module-global reads: all go through exports, which now self-init first, so
+       reads still see initialised globals. No change.
+  - C2 is its own tracked issue (file via `claim-issue.mjs --allocate`), gated on
+    a green C1 + user sign-off. Do **not** fold C2 into the #3049 PR.
+
+### Recommended sequencing
+
+1. **PR 1 (this issue, #3049):** Layer 1 (declarations.ts) + Layer 3
+   (runtime.ts) + **C1** (four host-lane harness edits). Lands the 27 (+ the
+   string/map/set `this-plain-iterator` twins, which share the vec-fallback
+   chain — verify, don't assume). Validate via full `merge_group`.
+2. **PR 2 (follow-up issue, needs user sign-off):** **C2a** — make deferred
+   host init the default so production consumers get the same fix. Carries the
+   #2800-flag-compose check and the playground/no-export edge case.
+
+### Edge cases / regression guards
+
+- **#3013 identity** must still hold after Layer 3: cache the
+  `%ArrayIteratorPrototype%` singleton module-wide (one object); do **not**
+  `Object.create` a fresh proto per `[][Symbol.iterator]()` call.
+- **Generator receivers unaffected:** Layer 3 only touches the array/vec
+  fallback; generators already chain `instance → %GeneratorPrototype% →
+  _getIteratorPrototype()` (runtime.ts:418/517). Confirm a `function*(){}`
+  iterator's `.map` still resolves.
+- **`return()` forwarding** (`drop/return-is-forwarded.js`,
+  `filter/exhaustion-does-not-call-return.js`): once the helper resolves, its
+  body's `GetIteratorDirect` + IteratorClose runs on the plain-object receiver
+  (already implemented in `_installIteratorHelperPolyfills`). No wrapper is
+  introduced by C1/Layer-3 (the fallback returns a real inheriting object, not a
+  proxy), so `return` forwarding is unchanged — retest, don't special-case.
+- **flatMap `flattens-iterable` / `iterable-to-iterator-fallback`**: driven by
+  `GetIteratorFlattenable`; should fall out of the resolution fix — retest.
+- **Negative / instantiate-throw tests:** the primary C1 risk. Sweep
+  runtime-negative results in the full `merge_group` diff; a top-level throw
+  that previously landed at `instantiate` now lands at the `__module_init()`
+  call — verify the runner still buckets it as the expected negative.
+
+### Validation plan
+
+1. `.tmp/` host-lane repro: compile
+   `Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]())).map`
+   with `deferTopLevelInit: true`, instantiate, `setExports`, call
+   `__module_init()`, then assert `.map` is a function. Confirm it is
+   `undefined`/throws on main first.
+2. Local default-lane sweep of `built-ins/Iterator/prototype/*`: the 27
+   codegen-signature files flip to pass; generator-receiver corpus unchanged.
+3. Sweep `built-ins/Array/prototype/Symbol.iterator`,
+   `String.prototype/@@iterator`, `Map`/`Set` iterator suites for #3013 identity
+   regressions and the string/map/set `this-plain-iterator` twins.
+4. **Full `merge_group`** — C1 reshapes host init timing corpus-wide; broad-impact,
+   no scoped sweep suffices. Standalone floor must stay green (Lane B untouched).
