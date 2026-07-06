@@ -25,9 +25,13 @@ updated: 2026-07-05
 > `this` as the global object) and `S11.4.1_A3.3_T1` (`x = 1; delete x; x` →
 > ReferenceError — implicit-global creation + real deletion + unresolved read).
 > **(e)** mapped-arguments delete now **DONE** (2026-07-05, opus-2726: +1 test262
-> `11.4.1-4.a-17`, 0 regressions — see `## Resolution — group (e)`); **(f)**/**(g)**
-> re-route to their owning feature issues. This issue stays open (`status: ready`)
-> for the 2 structural (b) tests — route to architect before further dispatch.
+> `11.4.1-4.a-17`, 0 regressions — see `## Resolution — group (e)`). **(g)**
+> prototype-chain (inherited) delete now **DONE** (2026-07-06, opus-2726fg: +1
+> test262 `S8.12.7_A2_T2`, 0 delete-dir regressions — see `## Resolution — group (g)`).
+> **(f)** (`11.4.1-5-a-27-s` — strict assign to a `preventExtensions`'d object)
+> re-routes to its owning strict-mode/preventExtensions feature issue. This issue
+> stays open (`status: ready`) for the 2 structural (b) tests — route to architect
+> before further dispatch.
 
 # #2726 — delete residual (non-throw) semantics
 
@@ -293,3 +297,45 @@ creation/real-deletion/unresolved-read) and need an architect spec first (NOT
 dev-claimable as-is). (e) mapped-arguments delete → #1726; (f)/(g) re-routed to
 owning feature issues. Stays `ready` for the 2 structural (b) tests — route to
 architect before further dispatch.
+
+## Resolution — group (g) (2026-07-06, opus-2726fg)
+
+**Scope.** `S8.12.7_A2_T2.js` — `delete __palette.red` where `red` is inherited
+from `Palette.prototype`, then the prototype-chain read `__palette.red` must
+still see the inherited value (CHECK#3). (The issue's original "fails at the
+inherited *read* before the delete" note is stale — CHECK#1's initial inherited
+read already passes on current main; the sole remaining failure is CHECK#3, the
+read *after* the delete.)
+
+**Root cause (g).** The WasmGC-struct arm of `__delete_property`
+(`src/runtime.ts`) unconditionally dropped the sidecar/descriptor entries **and
+recorded a tombstone** (`_wasmStructDeletedKeys`) for the key — even when the key
+is not an **own** property of the receiver. For `delete __palette.red`, `red`
+lives only on `Palette.prototype`, so the receiver owns nothing named `red`; the
+spurious tombstone then shadowed the still-present inherited value on the next
+`__palette.red` read (the read consults the tombstone before walking the
+prototype chain), returning `undefined` instead of `0xFF0000`.
+
+**Spec.** ECMA-262 §10.5.7 OrdinaryDelete step 2: `Let desc be
+O.[[GetOwnProperty]](P). If desc is undefined, return true.` — deleting a
+property the receiver does not **own** is a true no-op: return `true`, mutate
+nothing. (The delete still evaluates to `true`, so CHECK#2 was already passing;
+only the erroneous tombstone side-effect had to go.)
+
+**Fix (g).** Guard the struct delete arm with the existing own-property oracle
+`_wasmStructHasOwn(obj, k, exports)`: if the key is **not** own, `return 1`
+immediately without touching sidecar/descriptor/tombstone state. Own keys
+(struct field, sidecar, descriptor, class method) still `hasOwn === true` and
+fall through to the unchanged real delete, so groups (c)/(d)/(e) and every other
+own-delete case are untouched. `src/runtime.ts` (`__delete_property` struct arm).
+
+### Test Results — group (g) (host/gc lane, authoritative `runTest262File`)
+
+| cluster | baseline → fix |
+|---|---|
+| `language/expressions/delete` (full dir, 69 files) | 65 → **66** pass, **0 regressions** |
+
+Net **+1** test262. Flipped fail→pass: `S8.12.7_A2_T2`. The other 3 dir failures
+are unchanged: `11.4.1-5-a-27-s` (group (f), re-routed) and the 2 STRUCTURAL
+group-(b) tests (`S11.4.1_A3.1`, `S11.4.1_A3.3_T1`). Regression test:
+`tests/issue-2726-inherited-delete-noop.test.ts`.
