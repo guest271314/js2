@@ -11334,6 +11334,13 @@ assert._isSameValue = isSameValue;
           // this, so we just call it through.
           return Object.getOwnPropertyDescriptor(Symbol.prototype, "description")!.get!.call(sym);
         };
+      // (#3085) Symbol.prototype.toString → SymbolDescriptiveString (§20.4.3.3 /
+      // §20.4.3.3.1): "Symbol(" + (desc ?? "") + ")". Host-mode companion to the
+      // native `emitSymbolToString` (nativeStrings) path. Without this the generic
+      // `.toString()` fallback emits "[object Object]", and `String(sym)`
+      // stringifies the raw i32 symbol id. `Symbol.prototype.toString.call`
+      // transparently unwraps Symbol-wrapper objects (ToObject on receiver).
+      if (name === "__symbol_to_string") return (sym: any): any => Symbol.prototype.toString.call(sym);
       // Error.isError(value) — ES2025 static method (#1467).
       // Spec §20.5.2.1: returns true for any value with an [[ErrorData]]
       // internal slot. Cross-realm safe because it checks the slot, not

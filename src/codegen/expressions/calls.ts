@@ -11384,6 +11384,28 @@ function compileCallExpression(
         emitSymbolToString(ctx, fctx);
         return nativeStringType(ctx);
       }
+      // (#3085) Host mode: box the symbol id to a JS Symbol and route through the
+      // host SymbolDescriptiveString (§20.4.3.3). Without this the generic
+      // `.toString()` fallback drops the id and emits "[object Object]". Mirrors
+      // the `.description` host path (property-access.ts); the native-strings path
+      // above is the standalone fallback.
+      if (method === "toString" && expr.arguments.length === 0 && !ctx.nativeStrings) {
+        const symToStrIdx = ensureLateImport(
+          ctx,
+          "__symbol_to_string",
+          [{ kind: "externref" }],
+          [{ kind: "externref" }],
+        );
+        if (symToStrIdx !== undefined) {
+          const recvType = compileExpression(ctx, fctx, propAccess.expression, { kind: "externref" });
+          if (recvType && recvType.kind !== "externref") {
+            coerceType(ctx, fctx, recvType, { kind: "externref" });
+          }
+          flushLateImportShifts(ctx, fctx);
+          fctx.body.push({ op: "call", funcIdx: symToStrIdx });
+          return { kind: "externref" };
+        }
+      }
     }
 
     if (isNumberMethodReceiver(ctx, receiverType) && propAccess.name.text === "toFixed") {
@@ -13213,6 +13235,26 @@ function compileCallExpression(
         }
         emitSymbolToString(ctx, fctx);
         return nativeStringType(ctx);
+      }
+      // (#3085) Host-mode counterpart: box the symbol id and route through the
+      // host SymbolDescriptiveString. Without this `String(sym)` falls through to
+      // the i32→number path and stringifies the raw symbol id (e.g. "101").
+      if (!ctx.nativeStrings && ctx.oracle.staticJsTypeOf(strArg0) === "symbol") {
+        const symToStrIdx = ensureLateImport(
+          ctx,
+          "__symbol_to_string",
+          [{ kind: "externref" }],
+          [{ kind: "externref" }],
+        );
+        if (symToStrIdx !== undefined) {
+          const recvType = compileExpression(ctx, fctx, strArg0, { kind: "externref" });
+          if (recvType && recvType.kind !== "externref") {
+            coerceType(ctx, fctx, recvType, { kind: "externref" });
+          }
+          flushLateImportShifts(ctx, fctx);
+          fctx.body.push({ op: "call", funcIdx: symToStrIdx });
+          return { kind: "externref" };
+        }
       }
 
       // #2160 — String(arr) in standalone: route an array argument through its
