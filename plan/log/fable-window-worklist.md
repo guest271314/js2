@@ -85,6 +85,24 @@ Ordered by leverage. Each names the Tier-0 substrate it depends on (if any).
   / static / via-local all pass). **Do not re-chase `.name`.**
 - **Ref:** #3080 (filed this session; `ready`, hard, `model: fable`).
 
+### #3084 — RegExp `@@match`/`@@replace`/`@@split` eager `lastIndex` coercion during a user-overridden `exec` fires `valueOf` when the spec does not
+- **Root cause:** `src/runtime.ts` (`RegExp.lastIndex` `set`, ~L7838-7847)
+  eagerly coerces a struct `lastIndex = {valueOf}` assigned during a protocol
+  call (`_regexProtocolDepth > 0`) via `Number(_hostToPrimitive(...))`. Per
+  §22.2.6.8 assignment stores verbatim; `ToLength(Get(rx,"lastIndex"))` runs
+  **only in the empty-match branch**, so a non-empty match must not coerce.
+- **Fix approach:** make the branch **deferred** (always `_makeLastIndexShim`)
+  and have the native `@@match`/`@@replace`/`@@split` loops read the JS-visible
+  `lastIndex` via `ToLength` in the empty-match branch (fires the shim exactly
+  when the spec mandates). **Tension:** `tests/issue-2671-regexp.test.ts:108`
+  depends on the eager firing for the `@@replace` **empty**-advance case (native
+  loop reads its own internal lastIndex) — the deferred fix must preserve it.
+- **Verified:** `g-match-no-coerce-lastindex.js` PASS on main `f426ef61`, FAIL
+  on the #2777 branch (throwing `valueOf` invoked). Un-masked by #2777/#3051, not
+  introduced by it.
+- **Ref:** #3084 (filed this session; `ready`, hard, `model: fable`); **blocks
+  #2777** (its sole "regression" is this bug's vacuity-unmask).
+
 ---
 
 ## Related context (not Fable-window, recorded to prevent re-chasing)
