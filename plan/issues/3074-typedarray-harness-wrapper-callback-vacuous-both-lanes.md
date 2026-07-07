@@ -159,3 +159,51 @@ regression surface that would jeopardize the clean, high-value keystone win for
 only ~13 additional files. It is NOT #2773 substrate (that is about dynamic
 value READS returning NaN/null; this is dispatch), so it belongs to #3083's
 domain as a follow-up dispatch-shim generalization.
+
+## Measured value + downstream gaps (VERIFY-FIRST — corrects the ~1800 estimate)
+
+Measured on real test262 via `runTest262File` (gc/host lane), branch vs current
+`main`:
+
+- **Zero regressions.** 113 currently-passing gc-lane callback tests (two
+  samples, non-harness): **0 pass→nonpass flips, 0 changes**. 24-file
+  TypedArray/fill+copyWithin + 30-file BigInt-TA harness samples: **0
+  pass→fail**. The fix is regression-safe against the current baseline.
+
+- **The keystone is the dispatch ENABLER + honest-classifier, not (yet) a large
+  pass-count jump.** The affected harness tests are already scored
+  `fail vacuous:true` in the default baseline, and after the fix they EXECUTE
+  and **honest-fail on a downstream gap** rather than pass. So the immediate
+  merge_group pass-count delta is modest; the durable win is (a) the general
+  gc-lane HOF-callback dispatch is now correct (a real compiler bug, benefits
+  any compiled higher-order code, not just TypedArray), and (b) ~1487 dishonest
+  vacuous scores become honest.
+
+Downstream gaps that gate the harness cluster's vacuous→**pass** realization
+(each a separate follow-up; the keystone is a prerequisite for all of them —
+without dispatch, none of these bodies run at all):
+
+1. **Dynamic `new TA(...)` on the gc/host lane.** Once the callback dispatches,
+   its body does `new TA(...)` where `TA` is an `any`-typed constructor value →
+   `No dependency provided for extern class "TA"` (the compiler treats a runtime
+   constructor value as a host extern class needing an import). This is the
+   dominant honest-fail after the fix (dynamic-constructor gap, #1679 area /
+   the "No dependency for extern class" class #812/#814). Standalone hits the
+   analogous native-construct gap.
+2. **Runner shim faithfulness — non-BigInt `testWithTypedArrayConstructors`
+   passes only 1 arg** (`fn(ctor)`), but the REAL test262 harness
+   (`testWithAllTypedArrayConstructors`) calls `f(constructor, boundArgFactory)`
+   — **2 args**. Many callbacks declare `function(TA, makeCtorArg)` (2 params,
+   void); called with 1 arg they are OVER-ARITY VOID candidates, which
+   `tryEmitInlineDynamicCall` intentionally SKIPS (#1837 — a void over-arity pad
+   makes a stack-invalid `call_ref`), so they stay vacuous even after the
+   de-gate (measured: 8/12 non-CE `fill/*.js` still vacuous). Making the
+   non-BigInt shim pass a `boundArgFactory` passthrough (mirroring the existing
+   BigInt shim) matches the real harness and lets the 2-param callbacks
+   dispatch. Deliberately NOT bundled here — it is coupled to the honest-baseline
+   rework (#3086/dev-honest is measuring against the current shim), and the
+   value is still gated on gap (1). A clean follow-up once the honest baseline
+   lands.
+3. **BigInt TypedArray i64 codegen CE** (`Binary emit error: RangeError: offset
+   is out of bounds`) — ~22/30 sampled BigInt-TA files; pre-existing, unrelated
+   to dispatch.
