@@ -33,6 +33,23 @@ export const REGRESSION_RATIO_LIMIT = 0.1;
 export const REGRESSION_BUCKET_LIMIT = 50;
 export const REGRESSION_BUCKET_PATH_DEPTH = 5;
 
+// #3086 — drift tolerance for a DELIBERATE oracle re-baseline (forward-bump
+// auto-rebase or ORACLE_REBASE=1). A pure re-baseline has ~0 improvements, so
+// the strict net<0 / ratio<10% gate is structurally inapplicable: ANY residual
+// regression makes net negative and the ratio ∞. The intended reclassification
+// (e.g. #2940/#3086 vacuity) is already excused from `regressionsWasmChange`;
+// what remains is main-side DRIFT the re-baseline cannot avoid (the baseline the
+// merge_group diffs against lags main HEAD by the promote-serialization window).
+// In rebase mode we therefore replace net/ratio with a bounded drift tolerance
+// PLUS the unchanged per-bucket (50) concentration check. The coarse safety nets
+// stay fully in force: the #1668 catastrophic guard (host, threshold 200) and
+// the #1897 standalone guard (tolerance 15) both parse "Regressions with
+// wasm-hash change" from this same output and are NOT affected by this exit-code
+// path. Set to 25 — comfortably above realistic single-window host drift, ~8×
+// below the catastrophic threshold, so a genuine concentrated break still trips
+// (bucket-50) or overflows (25) while ordinary drift self-lands the re-baseline.
+export const ORACLE_REBASE_DRIFT_TOLERANCE = 25;
+
 /**
  * Group regressed test files into path buckets (first
  * `REGRESSION_BUCKET_PATH_DEPTH` segments) and return them sorted by count
@@ -888,25 +905,60 @@ async function run(
   // regressionsWasmChange. Gate: improvements.length - regressionsWasmChange < 0.
   const netPerTest = improvements.length - regressionsWasmChange;
   let gateFailed = false;
-  if (netPerTest < 0) {
-    console.log(
-      `=== GATE FAIL: net_per_test ${netPerTest} < 0 (${improvements.length} improvements − ${regressionsWasmChange} regressions) ===`,
-    );
-    gateFailed = true;
-  }
 
-  // #1943 — enforce the documented ratio (10%) and per-bucket (50) thresholds
-  // that previously lived only in the dev-self-merge skill text. Same
-  // wasm-hash-filtered count the net gate uses (`noiseFiltered`), so
-  // compile_timeout flaps and byte-identical flips never trip these either.
-  const thresholdFailures = evaluateRegressionThresholds({
-    improvements: improvements.length,
-    regressionsWasmChange,
-    regressedFiles: noiseFiltered.map((r) => r.file),
-  });
-  for (const reason of thresholdFailures) {
-    console.log(`=== GATE FAIL: ${reason} ===`);
-    gateFailed = true;
+  // #3086 — is this a deliberate oracle RE-BASELINE? (forward-monotonic bump
+  // auto-rebase, or ORACLE_REBASE=1). Same condition the oracle guard above used
+  // to PROCEED across versions; both `baseOracle`/`newOracle` are in scope here.
+  const rebaseMode =
+    oracleRebase || (typeof baseOracle === "number" && typeof newOracle === "number" && newOracle > baseOracle);
+
+  if (rebaseMode) {
+    // A pure re-baseline has ~0 improvements → net/ratio are inapplicable (see
+    // ORACLE_REBASE_DRIFT_TOLERANCE). The intended reclassification is already
+    // excused from regressionsWasmChange; the residual is main drift. Gate on a
+    // bounded drift tolerance + the unchanged per-bucket concentration check; the
+    // #1668 / #1897 guards remain the coarse safety nets (they read the printed
+    // "Regressions with wasm-hash change" line, not this exit code).
+    if (regressionsWasmChange > ORACLE_REBASE_DRIFT_TOLERANCE) {
+      console.log(
+        `=== GATE FAIL: re-baseline residual ${regressionsWasmChange} non-excused wasm-change regressions exceeds drift tolerance ${ORACLE_REBASE_DRIFT_TOLERANCE} (#3086) ===`,
+      );
+      gateFailed = true;
+    }
+    for (const { bucket, count } of bucketRegressions(noiseFiltered.map((r) => r.file))) {
+      if (count > REGRESSION_BUCKET_LIMIT) {
+        console.log(
+          `=== GATE FAIL: bucket "${bucket}" has ${count} regressions, exceeds the ${REGRESSION_BUCKET_LIMIT}-test limit (re-baseline concentration check) ===`,
+        );
+        gateFailed = true;
+      }
+    }
+    if (!gateFailed) {
+      console.log(
+        `=== Re-baseline gate (#3086): ${regressionsWasmChange} residual non-excused wasm-change regression(s) within drift tolerance ${ORACLE_REBASE_DRIFT_TOLERANCE}; net/ratio skipped (0-improvement re-baseline). #1668 (200) + #1897 (15) guards remain in force. ===`,
+      );
+    }
+  } else {
+    if (netPerTest < 0) {
+      console.log(
+        `=== GATE FAIL: net_per_test ${netPerTest} < 0 (${improvements.length} improvements − ${regressionsWasmChange} regressions) ===`,
+      );
+      gateFailed = true;
+    }
+
+    // #1943 — enforce the documented ratio (10%) and per-bucket (50) thresholds
+    // that previously lived only in the dev-self-merge skill text. Same
+    // wasm-hash-filtered count the net gate uses (`noiseFiltered`), so
+    // compile_timeout flaps and byte-identical flips never trip these either.
+    const thresholdFailures = evaluateRegressionThresholds({
+      improvements: improvements.length,
+      regressionsWasmChange,
+      regressedFiles: noiseFiltered.map((r) => r.file),
+    });
+    for (const reason of thresholdFailures) {
+      console.log(`=== GATE FAIL: ${reason} ===`);
+      gateFailed = true;
+    }
   }
 
   if (gateFailed) {

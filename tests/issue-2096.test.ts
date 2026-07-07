@@ -99,6 +99,44 @@ describe("#2096 oracle_version stamping + cross-version diff guard", () => {
     expect(out).toMatch(/ORACLE_REBASE=1/);
   });
 
+  // #3086 — a deliberate oracle re-baseline (forward bump) has ~0 improvements,
+  // so the strict net<0/ratio gate is inapplicable; a small residual (main
+  // drift) within the drift tolerance must NOT block the re-baseline. The
+  // catastrophic/standalone guards (which parse the printed count, not this exit
+  // code) remain the coarse nets.
+  it("re-baseline (forward bump) with a residual regression within drift tolerance → exit 0 (#3086)", () => {
+    const p = paths();
+    writeJsonl(p.base, [
+      { oracle_version: 1, file: "a.js", status: "pass", wasm_sha: "b1" },
+      { oracle_version: 1, file: "b.js", status: "pass", wasm_sha: "b2" },
+    ]);
+    // a.js flips pass→fail with a CHANGED wasm_sha (a non-vacuous residual/drift).
+    writeJsonl(p.cand, [
+      { oracle_version: 2, file: "a.js", status: "fail", error: "drift", wasm_sha: "c1" },
+      { oracle_version: 2, file: "b.js", status: "pass", wasm_sha: "b2" },
+    ]);
+    const { code, out } = runDiff(p.base, p.cand);
+    expect(code).toBe(0);
+    expect(out).toMatch(/Re-baseline gate \(#3086\)/);
+    // The residual is still surfaced for the coarse guards.
+    expect(out).toMatch(/Regressions with wasm-hash change: 1/);
+  });
+
+  it("re-baseline (forward bump) exceeding the drift tolerance → exit 1 (#3086)", () => {
+    const p = paths();
+    const base = [];
+    const cand = [];
+    for (let i = 0; i < 30; i++) {
+      base.push({ oracle_version: 1, file: `t${i}.js`, status: "pass", wasm_sha: `b${i}` });
+      cand.push({ oracle_version: 2, file: `t${i}.js`, status: "fail", error: "break", wasm_sha: `c${i}` });
+    }
+    writeJsonl(p.base, base);
+    writeJsonl(p.cand, cand);
+    const { code, out } = runDiff(p.base, p.cand);
+    expect(code).toBe(1);
+    expect(out).toMatch(/exceeds drift tolerance/);
+  });
+
   it("hard-refuses a MIXED-version file (exit 2) even with ORACLE_REBASE=1", () => {
     const p = paths();
     writeJsonl(p.base, [{ oracle_version: 1, file: "a.js", status: "pass" }]);
