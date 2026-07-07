@@ -11,8 +11,8 @@
   {
     "edition": "ES5",
     "pass": 10348,
-    "fail": 2625,
-    "ce": 102,
+    "fail": 2626,
+    "ce": 101,
     "skip": 0,
     "total": 13075,
     "pct": 79,
@@ -57,8 +57,8 @@
   },
   {
     "edition": "ES2015",
-    "pass": 11267,
-    "fail": 3975,
+    "pass": 11271,
+    "fail": 3971,
     "ce": 144,
     "skip": 0,
     "total": 15386,
@@ -111,12 +111,12 @@
       },
       {
         "name": "Symbol",
-        "pass": 388,
-        "fail": 234,
+        "pass": 392,
+        "fail": 230,
         "ce": 1,
         "skip": 0,
         "total": 623,
-        "pct": 62
+        "pct": 63
       },
       {
         "name": "arrow-function",
@@ -1026,8 +1026,8 @@
   },
   {
     "edition": "ES2018",
-    "pass": 3844,
-    "fail": 379,
+    "pass": 3845,
+    "fail": 378,
     "ce": 28,
     "skip": 0,
     "total": 4251,
@@ -1098,12 +1098,12 @@
       },
       {
         "name": "object-spread",
-        "pass": 80,
-        "fail": 39,
+        "pass": 81,
+        "fail": 38,
         "ce": 0,
         "skip": 0,
         "total": 119,
-        "pct": 67
+        "pct": 68
       },
       {
         "name": "regexp-named-groups",
@@ -1152,12 +1152,12 @@
       },
       {
         "name": "Symbol",
-        "pass": 8,
-        "fail": 32,
+        "pass": 9,
+        "fail": 31,
         "ce": 0,
         "skip": 0,
         "total": 40,
-        "pct": 20
+        "pct": 23
       },
       {
         "name": "Promise.prototype.finally",
@@ -1271,8 +1271,8 @@
   },
   {
     "edition": "ES2019",
-    "pass": 88,
-    "fail": 48,
+    "pass": 89,
+    "fail": 47,
     "ce": 0,
     "skip": 0,
     "total": 136,
@@ -1361,12 +1361,12 @@
       },
       {
         "name": "Symbol.prototype.description",
-        "pass": 5,
-        "fail": 3,
+        "pass": 6,
+        "fail": 2,
         "ce": 0,
         "skip": 0,
         "total": 8,
-        "pct": 63
+        "pct": 75
       },
       {
         "name": "optional-catch-binding",
