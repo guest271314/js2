@@ -2879,15 +2879,36 @@ function ensureFuncValueWrappersRegistered(ctx: CodegenContext, sf: ts.SourceFil
   // which is what the dispatch discriminates on) for every func-expr / arrow used
   // as a call argument or a variable initializer.
   //
-  // Standalone-gated: on the gc/host lane a callback may instead take the
-  // `__make_callback` host path and never materialize a closure wrapper, so
-  // pre-registering one there would add a module type that lazy compilation
-  // would not — a byte change on the default lane. In standalone there is no
-  // host `__make_callback`, so every func-expr/arrow value compiles to a closure
-  // and the wrapper type is created regardless; pre-creating it only reorders
-  // when (all references stay internally consistent — same discipline the
-  // declaration loop above already relies on).
-  if (ctx.standalone) {
+  // (#3074) Applied on BOTH lanes. It was originally standalone-gated for
+  // byte-inertness on the gc/host lane, but that left the DEFAULT lane's
+  // harness-wrapper cluster (`testWith*TypedArrayConstructors(function(TA){…})`)
+  // stuck vacuous — measured at 1,535 default records vs 448 standalone, i.e.
+  // the LARGER cluster (#3074). Empirically the harness callback compiles to a
+  // real closure struct on the gc lane too (`ref.func …; struct.new $__fn_wrap_*;
+  // extern.convert_any` — verified via WAT), so the runtime value flowing into
+  // the higher-order body IS a wrapper struct that `tryEmitInlineDynamicCall`
+  // dispatches correctly; the ONLY reason the gc lane dropped the call was the
+  // compile-order candidate gap this pre-registration closes (identical to the
+  // declaration loop above, which already runs un-gated on both lanes).
+  //
+  // Safety on the gc lane (the two reasons for the old gate, both addressed):
+  //  1. Byte change on the default lane — intended: #3074 wants the gc lane
+  //     fixed, and the affected tests are ALL currently VACUOUS FAILS
+  //     (`return -262`), so dispatch can only move them fail→pass or stay fail
+  //     (never a pass→fail regression). The caller's only alternative to a
+  //     successful inline dispatch is the graceful `ref.null.extern` drop, so
+  //     enabling dispatch is a strict improvement.
+  //  2. A callback that instead takes the `__make_callback` host path (passed
+  //     to a host builtin, e.g. `arr.map(cb)`) never materializes a wrapper
+  //     STRUCT — only the wrapper TYPE is pre-registered here (the trampoline /
+  //     struct.new stays lazy at the value site). So an extra dispatch arm for
+  //     that signature never `ref.test`-matches the JS-function externref at
+  //     runtime → falls through to the default → same drop as before. No
+  //     behavior change for `__make_callback` callbacks, only the harness /
+  //     compiled-HOF callbacks gain dispatch. `getOrCreateFuncRefWrapperTypes`
+  //     is signature-cached, so the value site reuses the same funcTypeIdx —
+  //     no index inconsistency (the declaration loop already relies on this).
+  {
     const seenFnNodes = new Set<ts.Node>();
     const usedAsValueFn = (node: ts.FunctionExpression | ts.ArrowFunction): void => {
       if (seenFnNodes.has(node)) return;

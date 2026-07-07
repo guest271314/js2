@@ -1,7 +1,8 @@
 ---
 id: 3074
 title: "TypedArray harness-wrapper callback never executes → vacuous fail (both lanes; persists after #2939/#2940)"
-status: ready
+status: in-progress
+assignee: ttraenkler/dev-keystone
 sprint: Backlog
 priority: high
 feasibility: hard
