@@ -64,10 +64,26 @@ describe("#2096 oracle_version stamping + cross-version diff guard", () => {
     expect(code).toBe(0);
   });
 
-  it("refuses a cross-version diff (exit 2) without ORACLE_REBASE", () => {
+  // #3086: a FORWARD monotonic bump (baseline v1 → new v2) is always a
+  // deliberate re-baseline, so it auto-rebases (exit 0) WITHOUT ORACLE_REBASE —
+  // this is what lets an oracle bump self-land in merge_group, where main's YAML
+  // never sets the env flag.
+  it("auto-rebases a FORWARD cross-version bump (exit 0) without ORACLE_REBASE (#3086)", () => {
     const p = paths();
     writeJsonl(p.base, [{ oracle_version: 1, file: "a.js", status: "pass" }]);
     writeJsonl(p.cand, [{ oracle_version: 2, file: "a.js", status: "pass" }]);
+    const { code, out } = runDiff(p.base, p.cand);
+    expect(code).toBe(0);
+    expect(out).toMatch(/forward-bump auto-rebase/i);
+  });
+
+  // #3086: a BACKWARD skew (baseline v2, new v1 — stale code vs a newer
+  // baseline) is the accidental case the guard must still catch, so it refuses
+  // (exit 2) without an explicit ORACLE_REBASE.
+  it("refuses a BACKWARD cross-version diff (exit 2) without ORACLE_REBASE (#3086)", () => {
+    const p = paths();
+    writeJsonl(p.base, [{ oracle_version: 2, file: "a.js", status: "pass" }]);
+    writeJsonl(p.cand, [{ oracle_version: 1, file: "a.js", status: "pass" }]);
     const { code, out } = runDiff(p.base, p.cand);
     expect(code).toBe(2);
     expect(out).toMatch(/cross-version diff refused/i);

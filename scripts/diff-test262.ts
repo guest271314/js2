@@ -382,6 +382,25 @@ async function run(
   // and trips the gate on oracle change, not code change. Refuse such a diff
   // unless ORACLE_REBASE=1 — which is how the oracle-flip PR re-seeds the
   // baseline at the new version (promote-baseline picks it up on merge).
+  //
+  // #3086 — FORWARD-MONOTONIC AUTO-REBASE (the self-land key). A cross-version
+  // diff otherwise hard-refuses (exit 2) unless ORACLE_REBASE=1. But
+  // `merge_group` runs the BASE-branch (main) workflow YAML, which never sets
+  // that env var — so a naive oracle bump would exit 2 in the merged-tree diff,
+  // fail the required guard step (which does `exit $diff_exit`), and — worse —
+  // the push-to-main promote-baseline (`needs: merge-report`) would ALSO refuse,
+  // permanently wedging the queue (the refusal blocks the very promote that
+  // would re-seed the baseline at the new version). This is the untested hole
+  // #3003 documented (the oracle was never actually bumped before). Fix: a
+  // FORWARD bump (newOracle > baseOracle) is ALWAYS a deliberate re-baseline —
+  // the oracle is a hand-edited, append-only integer, never accidentally raised
+  // — so the merged-tree script treats it as an implicit rebase and PROCEEDS
+  // (loud warning, exit 0) regardless of which YAML runs. This self-lands like
+  // #3004's default-on excusal. A BACKWARD / equal-but-shouldn't diff is left to
+  // the explicit env flag (a backward skew IS the accidental case to catch).
+  // The guards keep their teeth: in rebase mode the diff still counts genuine
+  // (non-excused, non-vacuous) regressions, so a real codegen break in the same
+  // PR still trips; only the intended oracle-skew flips are excused.
   const oracleRebase = process.env.ORACLE_REBASE === "1";
   const baseOracle = baselineLoaded.oracleVersion;
   const newOracle = newerLoaded.oracleVersion;
@@ -406,20 +425,25 @@ async function run(
   // recorded oracle to conflict with, so we fall back to the legacy behaviour
   // and only emit an informational note.
   if (baseOracle !== undefined && newOracle !== undefined && baseOracle !== newOracle) {
-    if (!oracleRebase) {
+    // #3086: a FORWARD monotonic bump auto-rebases (see the block comment
+    // above); a backward skew still requires the explicit env flag.
+    const forwardBump = typeof baseOracle === "number" && typeof newOracle === "number" && newOracle > baseOracle;
+    const rebaseEffective = oracleRebase || forwardBump;
+    if (!rebaseEffective) {
       console.error(
         `\n✖ Oracle-version guard (#2096): cross-version diff refused.\n` +
           `  baseline oracle = ${fmtOracle(baseOracle)}, new oracle = ${fmtOracle(newOracle)}.\n` +
-          `  These rows were produced by different verdict logic, so the diff would read\n` +
-          `  oracle skew as regressions. To intentionally re-seed the baseline at the new\n` +
-          `  oracle version (e.g. the #1945 flip PR), re-run with ORACLE_REBASE=1.\n`,
+          `  The new side is an OLDER oracle than the baseline — that is the accidental\n` +
+          `  skew case (stale code vs a newer baseline), not a deliberate forward re-seed.\n` +
+          `  If this backward comparison is intentional, re-run with ORACLE_REBASE=1.\n`,
       );
       process.exit(2);
     }
     console.log(
-      `ORACLE_REBASE=1 — comparing across oracle versions ` +
-        `(baseline ${fmtOracle(baseOracle)} → new ${fmtOracle(newOracle)}). ` +
-        `Regression numbers below mix oracle skew with code changes; use only to re-seed.`,
+      `${forwardBump && !oracleRebase ? "ORACLE forward-bump auto-rebase (#3086)" : "ORACLE_REBASE=1"} — ` +
+        `comparing across oracle versions (baseline ${fmtOracle(baseOracle)} → new ${fmtOracle(newOracle)}). ` +
+        `This is a deliberate re-baseline: oracle-skew flips (e.g. #2940/#3086 vacuity) are excused, ` +
+        `but genuine non-vacuous regressions below still count. promote-baseline re-seeds at the new version.`,
     );
   } else if (baseOracle === undefined || newOracle === undefined) {
     console.log(

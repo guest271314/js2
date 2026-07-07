@@ -121,4 +121,40 @@ and stays a SEPARATE re-baseline, sequenced after this enabler.
 
 ## Implementation notes / measurement
 
-(before→after honest delta recorded here after the scoped run)
+### What landed
+- `tests/test262-runner.ts`: (a) harness **partial**-vacuity — snapshot
+  `__assert_count` around each `testWith*Constructors` `fn(...)`, count dead
+  invocations, flag when ALL are dead (generalizes the old `__assert_count === 1`
+  total check); (b) **general** non-harness gate — a would-be pass whose body has
+  `assert_*` calls but ran zero of them (`__assert_count === 1`) is `-262`
+  vacuous. Both carry `vacuous: true` via the existing `-262` plumbing (worker /
+  shared / runner unchanged downstream).
+- `tests/test262-oracle-version.ts`: `ORACLE_VERSION` 1 → 2 + history note.
+- `scripts/diff-test262.ts`: forward-monotonic bump auto-rebase (self-land key).
+
+### Measured before→after honest delta (scoped)
+- **General non-harness gate: 0 pass→vacuous flips on 440 real files** (220
+  standalone + 220 gc, across TypedArray/Array/RegExp/Object/String/language).
+  Independently corroborated by dev-keystone (#2790): 0 non-harness un-masks in
+  113 callback-filtered gc files (2 samples). The synthetic
+  `function(v: number)` drop shape flips (unit-tested), but **real** test262
+  callbacks use externref params that dispatch fine → the gate is a safe
+  detection net, not a mass reclassifier.
+- **Harness partial case: ~0 additional flips** — real harness tests run ZERO
+  top-level asserts before the wrapper, so `__assert_count === 1` already caught
+  them (the partial extension is a correctness net for the mixed case).
+- **Net honest delta ≈ 0 on the sampled corpus.** The dominant vacuous class
+  (the ~1487 `testWith*Constructors` cluster) was ALREADY `-262` vacuous-fail
+  under #2463, so the current baseline is already largely honest. This PR's value
+  is therefore (1) the **oracle bump** formalizing the #2463 policy (unblocks
+  #3001), (2) the **forward-auto-rebase infra** (#3003's missing self-land
+  piece), and (3) closing the non-harness/partial **detection gaps** so a future
+  regression is caught honestly. The authoritative full-corpus delta is measured
+  by the merge_group; all flips are `vacuous: true` → excused → self-lands.
+
+### Sequencing (dev-keystone / #2790)
+dev-keystone's #2790 (host-lane harness callback registration) un-masks the
+~1487 harness cluster from `vacuous-fail` → honest execution (fail→fail or
+fail→**pass** improvements) — **no pass→fail exposure** (measured). It is held
+DRAFT for clean sequencing after this v2 re-baseline; signalled to un-draft on
+landing.
