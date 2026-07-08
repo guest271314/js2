@@ -1879,6 +1879,26 @@ function $DETACHBUFFER(buf: any): void {
 }`;
   }
 
+  // (#3088) Identity `makeCtorArg`/`boundArgFactory` passthrough shared by both
+  // the non-BigInt and BigInt harness shims. Emitted once when EITHER wrapper is
+  // referenced (guarding against a duplicate top-level definition when both are).
+  if (needsTestTypedArray || needsTestBigIntTypedArray) {
+    p += `
+
+function __ta_makeCtorArgPassthrough(x: any): any {
+  return x;
+}`;
+  }
+
+  // (#3088) The real test262 harness (`testTypedArray.js` →
+  // `testWithAllTypedArrayConstructors`) invokes the callback as
+  // `f(constructor, boundArgFactory)` — 2 ARGS. Many non-BigInt tests declare
+  // `function (TA, makeCtorArg) { … }` (2 params, void) and use `makeCtorArg` in
+  // the body. The old 1-arg shim (`fn(constructors[i])`) left those callbacks as
+  // over-arity-void candidates, which `tryEmitInlineDynamicCall` SKIPS (#1837),
+  // so they stayed vacuous even after the #3074 dispatch fix. Pass the second
+  // `boundArgFactory` arg (identity passthrough) so 2-param callbacks match arity
+  // and dispatch; 1-param callbacks truncate the extra arg (under-arity is fine).
   if (needsTestTypedArray) {
     p += `
 
@@ -1887,7 +1907,7 @@ function testWithTypedArrayConstructors(fn: any): void {
   for (let i = 0; i < constructors.length; i++) {
     __harness_cb_expected = __harness_cb_expected + 1;
     const __ac_before = __assert_count;
-    fn(constructors[i]);
+    fn(constructors[i], __ta_makeCtorArgPassthrough);
     if (__assert_count === __ac_before) { __harness_cb_dead = __harness_cb_dead + 1; }
   }
 }`;
@@ -1899,17 +1919,13 @@ function testWithTypedArrayConstructors(fn: any): void {
   // is typically `function (TA, makeCtorArg) { … }`. Passing only the ctor
   // left `makeCtorArg` undefined; combined with the (now-fixed) nested-scope
   // dispatch gap the whole callback body was dead (a vacuous host-free pass,
-  // ~814 tests). Shim the 2-arg signature with an identity `makeCtorArg`
+  // ~814 tests). Shim the 2-arg signature with the shared identity `makeCtorArg`
   // passthrough (maps a length/iterable straight to the ctor's first arg).
-  // Only emitted when the body actually references the BigInt variant, so the
-  // non-BigInt corpus preamble is byte-unchanged. Requires the #2939 dispatch
-  // fix to land in lockstep — else it produces dishonest vacuous passes.
+  // Requires the #2939 dispatch fix to land in lockstep — else it produces
+  // dishonest vacuous passes.
   if (needsTestBigIntTypedArray) {
     p += `
 
-function __ta_makeCtorArgPassthrough(x: any): any {
-  return x;
-}
 function testWithBigIntTypedArrayConstructors(fn: any): void {
   const constructors = [BigInt64Array, BigUint64Array];
   for (let i = 0; i < constructors.length; i++) {

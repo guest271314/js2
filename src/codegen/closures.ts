@@ -286,6 +286,34 @@ export function collectReferencedIdentifiers(node: ts.Node, names: Set<string>, 
 }
 
 /**
+ * (#3096) Collect free-variable references that appear in a parameter list's
+ * default initializers — both top-level param defaults (`param.initializer`,
+ * e.g. `(a, b = outer) => ...`) and defaults / computed keys nested inside a
+ * binding pattern (`param.name`, e.g. `([x = outer]) => ...`, `({ [k]: v }) =>
+ * ...`). These are part of the function's scope but are NOT reached by scanning
+ * the body, so a closure whose ONLY use of an outer variable is in a parameter
+ * default would fail to capture it. The `shadowed` set (the function's own
+ * locals) excludes the parameters' own binding names, so only genuine outer
+ * references are added.
+ */
+export function collectParamDefaultReferences(
+  parameters: ts.NodeArray<ts.ParameterDeclaration>,
+  names: Set<string>,
+  shadowed: ReadonlySet<string>,
+): void {
+  for (const param of parameters) {
+    // Binding patterns can hold element defaults (`[x = e]`) and computed keys
+    // (`{ [k]: v }`) — walk the whole BindingName; own binding names are shadowed.
+    if (!ts.isIdentifier(param.name)) {
+      collectReferencedIdentifiers(param.name, names, shadowed);
+    }
+    if (param.initializer) {
+      collectReferencedIdentifiers(param.initializer, names, shadowed);
+    }
+  }
+}
+
+/**
  * Collect identifiers that are WRITTEN to within a node tree.
  * Detects: assignment (=, +=, etc.), ++, --.
  *
@@ -1872,6 +1900,16 @@ export function compileArrowAsClosure(
   } else {
     collectReferencedIdentifiers(body, referencedNames, ownLocals);
   }
+  // (#3096) Free variables referenced ONLY in a parameter default initializer
+  // — or in a binding-pattern element default / computed key — must be
+  // captured too. The body scan above misses them, so a default like
+  // `([x] = iter) => {}` (where `iter` is an outer var referenced nowhere in
+  // the body) never captured `iter`; the default then compiled to `ref.null`,
+  // and array destructuring threw "Cannot destructure null/undefined". Scan
+  // `param.name` (catches binding-pattern element defaults + computed keys) and
+  // `param.initializer` (top-level param default) with the same own-locals
+  // shadow set, so the param's own binding names stay excluded.
+  collectParamDefaultReferences(arrow.parameters, referencedNames, ownLocals);
 
   // Transitively add captures needed by called nested functions.
   // E.g. if this closure calls g() and g has nestedFuncCaptures {first, second},
@@ -3069,6 +3107,10 @@ export function compileArrowAsCallback(
   } else {
     collectReferencedIdentifiers(body, referencedNames, ownLocals);
   }
+  // (#3096) Also capture free variables referenced only in a parameter default
+  // initializer / binding-pattern element default / computed key (see the
+  // rationale on the identical scan in `compileArrowAsClosure`).
+  collectParamDefaultReferences(arrow.parameters, referencedNames, ownLocals);
 
   // Detect which captured variables are written inside the callback body (#859)
   const writtenInCallback = new Set<string>();
