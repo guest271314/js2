@@ -1,8 +1,8 @@
 ---
 id: 3088
 title: "test262-runner: non-BigInt testWithTypedArrayConstructors shim passes 1 arg but the real harness passes 2 (constructor + boundArgFactory) — 2-param callbacks stay vacuous via the #1837 over-arity-void skip"
-status: ready
-sprint: Backlog
+status: done
+sprint: current
 priority: medium
 horizon: s
 feasibility: medium
@@ -12,6 +12,7 @@ language_feature: typed-arrays, test262-harness, closures
 goal: host-independence
 related: [3074, 2939, 2940, 3086, 1837]
 created: 2026-07-07
+completed: 2026-07-08
 origin: "2026-07-07 measured under #3074 keystone validation (dev-keystone): 8/12 non-CE fill/*.js stay vacuous after the dispatch fix because their function(TA, makeCtorArg) callback is over-arity-void for the 1-arg shim."
 ---
 
@@ -62,3 +63,25 @@ conversion; this converts more vacuous→honest (executing) results.
   (then passes, or honest-fails on #3087, per its body).
 - Shim signature matches real test262 (`f(constructor, boundArgFactory)`).
 - No net regression.
+
+## Resolution (2026-07-08, dev-ta)
+
+Fixed in `tests/test262-runner.ts`: extracted the identity
+`__ta_makeCtorArgPassthrough` helper (previously emitted only inside the BigInt
+block) to a shared block emitted when EITHER wrapper is referenced, and changed
+the non-BigInt `testWithTypedArrayConstructors` shim from `fn(constructors[i])`
+to `fn(constructors[i], __ta_makeCtorArgPassthrough)` so 2-param
+`function(TA, makeCtorArg)` callbacks match arity and dispatch (instead of being
+skipped as over-arity-void per #1837).
+
+Scoped verification (via `runTest262File`, gc lane):
+
+- `fill/fill-values.js`, `fill/fill-values-relative-end.js`,
+  `fill/fill-values-non-numeric.js`: `vacuous:true` → **`vacuous:false`**, now
+  honest-fail on #3087 (`No dependency provided for extern class "TA"`) —
+  exactly the vacuous→honest transition this issue promised.
+- `fill/fill-values-conversion-operations.js` stays vacuous, but it uses a
+  *different* harness (`testTypedArrayConversions`, 4-param callback) outside
+  this issue's scope — correctly unchanged.
+
+tsc + prettier clean. Full vacuous→pass conversion still gated on #3087.
