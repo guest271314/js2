@@ -52,6 +52,38 @@ and the 13 matchAll files pass→honest **with no per-test work**. (Same
 closure-through-`externref` dispatch that Tier-1 **#3049** iterator-helpers and
 **#3050**/#3076 need — landing the keystone also unblocks those.)
 
+**UPDATE 2026-07-07 (dev-keystone, verify-first) — the keystone landed as
+`#3074`, corrected root cause + value:** The bug was NOT a missing dispatch
+shim. `#2939` already landed the nested-scope candidate registration but
+**gated it on `ctx.standalone`**, so the gc/HOST (default) lane never registered
+the harness callback → `fn(...)` dropped. The default lane is the broken one
+(1,535 default > 448 standalone). Fix = **de-gate to both lanes** (one line;
+`src/codegen/expressions/calls.ts` `ensureFuncValueWrappersRegistered`). Draft
+PR **#2790** (held for the `#3086` honest baseline). **0 regressions** measured
+(113 non-harness + 54 TypedArray real-corpus samples).
+
+**Corrected value (was ~1800 pass — optimistic):** the de-gate is the dispatch
+**ENABLER + honest-classifier**, not an immediate ~1800 pass jump. The un-masked
+harness bodies EXECUTE but then **honest-fail on downstream gaps**, so the
+immediate pass delta is modest; the durable wins are the general gc-lane
+HOF-dispatch bug fix + ~1487 dishonest-vacuous scores becoming honest. The
+vacuous→**pass** realization is gated on three filed follow-ups (keystone is a
+prerequisite for all):
+
+- **`#3087`** — dynamic `new TA(...)` on the gc/host lane ("No dependency
+  provided for extern class TA"). **Dominant honest-fail after #3074 → highest-
+  value next step.** (compiler; #1679/#812/#814 area)
+- **`#3088`** — non-BigInt `testWithTypedArrayConstructors` runner shim passes
+  1 arg vs the real harness's 2 → 2-param callbacks stay vacuous via the #1837
+  over-arity-void skip (runner, bounded; sequence AFTER the honest baseline).
+- **`#3089`** — BigInt-TA i64 `Binary emit error: offset out of bounds`
+  (~22/30, pre-existing CE, unrelated to dispatch).
+
+The `any[]`-element site (`validators[i](x)`, `#3083` matchAll ~13 files) is a
+DISTINCT dispatch path (needs a runtime-`ref.test` fallback in the hot
+element-access branch; a typed `CB[]` already dispatches) — deliberately not
+bundled with the keystone; belongs to `#3083`. It is NOT #2773 substrate.
+
 > **Caveat (measured — do not over-credit #2939):** the HOF-with-callback
 > cluster is **dual-root**. I verified one `map` file
 > (`15.4.4.19-8-c-ii-1.js`): the callback *did* dispatch but received **wrong
