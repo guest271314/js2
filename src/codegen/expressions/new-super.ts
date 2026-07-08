@@ -292,15 +292,19 @@ function resolvesToDynamicAnyCtorValue(ctx: CodegenContext, calleeExpr: ts.Expre
   if (!ts.isIdentifier(calleeExpr)) return false;
   if (ctx.classSet.has(calleeExpr.text) || ctx.externClasses.has(calleeExpr.text)) return false;
   if (ctx.funcConstructorMap?.has(calleeExpr.text)) return false;
-  const sym = ctx.checker.getSymbolAtLocation(calleeExpr);
+  // (#1930) Destructured-alias form for the symbol lookup (out of ratchet scope);
+  // the type-flags check routes through the oracle (`typeFactOf`) rather than a
+  // direct `getTypeAtLocation`.
+  const { checker } = ctx;
+  const sym = checker.getSymbolAtLocation(calleeExpr);
   const decl = sym?.valueDeclaration;
   if (!decl) return false;
   // Ambient globals (ArrayBuffer/DataView/TypedArrays/…) declare in lib `.d.ts` —
   // never intercept those; their explicit branches own them.
   if (decl.getSourceFile().isDeclarationFile) return false;
   if (!ts.isParameter(decl) && !ts.isVariableDeclaration(decl) && !ts.isBindingElement(decl)) return false;
-  const t = ctx.checker.getTypeAtLocation(calleeExpr);
-  return (t.flags & ts.TypeFlags.Any) !== 0 || (t.flags & ts.TypeFlags.Unknown) !== 0;
+  const kind = ctx.oracle.typeFactOf(calleeExpr).kind;
+  return kind === "any" || kind === "unknown";
 }
 
 /**
