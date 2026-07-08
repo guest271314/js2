@@ -771,6 +771,49 @@ function compileIdentifierCore(ctx: CodegenContext, fctx: FunctionContext, id: t
     if (builtinObject) return builtinObject;
   }
 
+  // (#3087) Host/gc lane: a bare TypedArray constructor name used as a VALUE
+  // (not `new TA()` / type position) resolves to the REAL host constructor
+  // externref via `__extern_get(__get_globalThis(), name)` — mirroring the #820h
+  // ERM-global-as-value pattern above. Placed BEFORE the ambient `declaredGlobals`
+  // route (which maps a bare `Int8Array` to a stub host import that returns
+  // `undefined` — so `constructors = [Int8Array, …]` degraded to a null carrier
+  // and a dynamic `new TA(...)` through the `__construct_closure` bridge saw
+  // "undefined is not a constructor"). This materializes the genuine host
+  // constructor so `fn(constructors[i])` and dynamic `new TA(...)` (#3087, the
+  // dominant #3074 downstream honest-fail) execute and pass. Covers the BigInt
+  // views too (not in the standalone `taCtorKindOf` list). Standalone/WASI keeps
+  // the native `$__ta_ctor` value below (host-free). Gated so a real
+  // local/captured/module/class binding — already returned above — wins.
+  if (
+    !ctx.standalone &&
+    !ctx.wasi &&
+    (taCtorKindOf(name) >= 0 || name === "BigInt64Array" || name === "BigUint64Array") &&
+    fctx.localMap.get(name) === undefined &&
+    !(fctx.boxedCaptures?.has(name) ?? false) &&
+    !ctx.classSet.has(name)
+  ) {
+    const gtFuncIdx = ensureLateImport(ctx, "__get_globalThis", [], [{ kind: "externref" }]);
+    const getIdx = ensureLateImport(
+      ctx,
+      "__extern_get",
+      [{ kind: "externref" }, { kind: "externref" }],
+      [{ kind: "externref" }],
+    );
+    flushLateImportShifts(ctx, fctx);
+    if (gtFuncIdx !== undefined && getIdx !== undefined) {
+      fctx.body.push({ op: "call", funcIdx: gtFuncIdx });
+      addStringConstantGlobal(ctx, name);
+      const strGlobalIdx = ctx.stringGlobalMap.get(name);
+      if (strGlobalIdx !== undefined) {
+        fctx.body.push({ op: "global.get", index: strGlobalIdx } as Instr);
+      } else {
+        fctx.body.push({ op: "ref.null.extern" });
+      }
+      fctx.body.push({ op: "call", funcIdx: getIdx });
+      return { kind: "externref" };
+    }
+  }
+
   // Check declared globals (e.g. document, window)
   const globalInfo = ctx.declaredGlobals.get(name);
   if (globalInfo) {
