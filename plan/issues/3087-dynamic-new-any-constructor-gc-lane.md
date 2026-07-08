@@ -2,7 +2,8 @@
 id: 3087
 title: "codegen: dynamic `new TA(...)` on an any-typed constructor value fails on the gc/host lane (No dependency provided for extern class) — dominant honest-fail after #3074"
 status: ready
-sprint: Backlog
+sprint: current
+model: opus
 priority: high
 horizon: l
 feasibility: hard

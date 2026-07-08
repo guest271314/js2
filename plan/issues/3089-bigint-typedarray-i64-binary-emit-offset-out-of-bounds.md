@@ -2,7 +2,8 @@
 id: 3089
 title: "codegen: BigInt TypedArray tests fail to compile — 'Binary emit error: RangeError: offset is out of bounds' (i64 codegen, ~22/30 sampled, pre-existing)"
 status: ready
-sprint: Backlog
+sprint: current
+model: opus
 priority: medium
 horizon: m
 feasibility: hard
