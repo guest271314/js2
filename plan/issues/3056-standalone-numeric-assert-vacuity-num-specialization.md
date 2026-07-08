@@ -3,7 +3,7 @@ id: 3056
 title: "Standalone numeric assertions are vacuous — add `assert_sameValue_num` harness routing (measurement re-baseline)"
 status: ready
 sprint: current
-model: fable
+model: opus
 created: 2026-07-05
 updated: 2026-07-08
 priority: high
