@@ -1,12 +1,12 @@
 ---
 id: 2963
 title: "Reify builtins as first-class values: retire the `__get_builtin` dynamic-shape CE cluster (~400 compile errors)"
-status: in-progress
-assignee: ttraenkler/senior-dev
+status: ready
 sprint: current
+model: fable
 created: 2026-07-02
-updated: 2026-07-02
-priority: medium
+updated: 2026-07-08
+priority: high
 horizon: l
 feasibility: hard
 reasoning_effort: high

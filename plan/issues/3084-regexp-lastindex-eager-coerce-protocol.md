@@ -2,8 +2,8 @@
 id: 3084
 title: "RegExp @@match/@@replace/@@split eager lastIndex coercion during protocol violates §22.2.6.8 (fires valueOf on non-empty match)"
 status: ready
-sprint: Backlog
-priority: medium
+sprint: current
+priority: high
 horizon: m
 feasibility: hard
 reasoning_effort: max
