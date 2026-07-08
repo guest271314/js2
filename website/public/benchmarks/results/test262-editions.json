@@ -57,8 +57,8 @@
   },
   {
     "edition": "ES2015",
-    "pass": 11241,
-    "fail": 4001,
+    "pass": 11261,
+    "fail": 3981,
     "ce": 144,
     "skip": 0,
     "total": 15386,
@@ -210,12 +210,12 @@
       },
       {
         "name": "Symbol.match",
-        "pass": 58,
-        "fail": 18,
+        "pass": 62,
+        "fail": 14,
         "ce": 0,
         "skip": 0,
         "total": 76,
-        "pct": 76
+        "pct": 82
       },
       {
         "name": "WeakMap",
@@ -228,12 +228,12 @@
       },
       {
         "name": "Symbol.replace",
-        "pass": 57,
-        "fail": 18,
+        "pass": 65,
+        "fail": 10,
         "ce": 0,
         "skip": 0,
         "total": 75,
-        "pct": 76
+        "pct": 87
       },
       {
         "name": "let",
@@ -255,12 +255,12 @@
       },
       {
         "name": "Symbol.split",
-        "pass": 35,
-        "fail": 21,
+        "pass": 39,
+        "fail": 17,
         "ce": 1,
         "skip": 0,
         "total": 57,
-        "pct": 61
+        "pct": 68
       },
       {
         "name": "upsert",
@@ -327,12 +327,12 @@
       },
       {
         "name": "Symbol.search",
-        "pass": 19,
-        "fail": 15,
+        "pass": 23,
+        "fail": 11,
         "ce": 0,
         "skip": 0,
         "total": 34,
-        "pct": 56
+        "pct": 68
       },
       {
         "name": "Symbol.isConcatSpreadable",
