@@ -1,10 +1,10 @@
 ---
 id: 2865
 title: "Standalone: no Wasm-native async-generator / for-await carrier — leaks __create_async_generator + Promise_* host imports"
-status: in-progress
-assignee: ttraenkler/sendev-flatten
+status: ready
+model: fable
 created: 2026-06-30
-updated: 2026-06-30
+updated: 2026-07-08
 priority: high
 feasibility: hard
 task_type: feature
