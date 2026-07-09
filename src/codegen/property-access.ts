@@ -7645,14 +7645,12 @@ export function isAnyTypedIndexExpression(ctx: CodegenContext, index: ts.Express
   }
   // A numeric literal is statically numeric → handled by the #2784 path.
   if (ts.isNumericLiteral(inner)) return false;
-  let t: ts.Type;
-  try {
-    t = ctx.checker.getTypeAtLocation(inner);
-  } catch {
-    return false;
-  }
-  if (t.isUnion?.()) return false;
-  return (t.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0;
+  // Route through the oracle (#1930): `typeFactOf` yields `{kind:"any"}` /
+  // `{kind:"unknown"}` for an implicit-any index and `{kind:"union"}` for a
+  // union (⇒ excluded), so the check is exactly "the index type is `any`/
+  // `unknown`". A string/symbol key resolves to a different fact kind ⇒ excluded.
+  const fact = ctx.oracle.typeFactOf(inner);
+  return fact.kind === "any" || fact.kind === "unknown";
 }
 
 /** Inner element access logic — assumes objType is on the stack and non-null */
