@@ -1868,7 +1868,25 @@ function resolveAsyncGenNextHelperName(ctx: CodegenContext, source: ts.Expressio
   const callee = source.expression;
   if (!ts.isIdentifier(callee)) return null;
   const name = `__async_gen_next_${sanitizeTypeName(callee.text)}`;
-  return ctx.funcMap.has(name) ? name : null;
+  if (ctx.funcMap.has(name)) return name;
+  // (#2865) A const/var-held fn-EXPRESSION producer (`const f = async
+  // function* () {...}`) registers under its synthesized anon stem, not the
+  // binding name. Resolve the callee's declaration through the checker and
+  // match the producer registry by INITIALIZER NODE — exact, no naming games.
+  if (ctx.asyncGenProducers !== undefined) {
+    const { checker } = ctx;
+    const sym = checker.getSymbolAtLocation(callee);
+    const vd = sym?.valueDeclaration;
+    if (vd !== undefined && ts.isVariableDeclaration(vd) && vd.initializer !== undefined) {
+      for (const [stem, p] of ctx.asyncGenProducers) {
+        if (p.decl === vd.initializer) {
+          const exprName = `__async_gen_next_${stem}`;
+          if (ctx.funcMap.has(exprName)) return exprName;
+        }
+      }
+    }
+  }
+  return null;
 }
 
 /**

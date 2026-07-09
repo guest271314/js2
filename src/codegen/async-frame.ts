@@ -279,6 +279,22 @@ export interface AsyncFrameInfo {
   asyncGen?: boolean;
   /** (#2906 slice 3d-i) `{value: externref, done: i32}` IteratorResult struct typeIdx (async-gen only). */
   asyncGenResultTypeIdx?: number;
+  /**
+   * (#2865) Capture-cell metadata of a NESTED producer (lifted with captures
+   * as leading params — nested-declarations.ts). The frame captures the cells
+   * as param fields; the resume body must deref reads/writes through them, so
+   * `ensureAsyncResumeFunction` copies this onto the resume FunctionContext.
+   */
+  boxedCaptures?: Map<string, { refCellTypeIdx: number; valType: ValType }>;
+  /** (#2865) Threaded from the producer fctx (nested `this`-referencing body). */
+  readsCurrentThis?: boolean;
+  /**
+   * (#2865) The `__self` capture-struct layout of a lifted CLOSURE body
+   * (closures.ts model: captures live in the `__self` struct, materialized
+   * into named locals by a body prologue). The resume fn re-runs that
+   * materialization from the frame-captured `__self` param field.
+   */
+  selfCaptureLayout?: FunctionContext["selfCaptureLayout"];
 }
 
 /**
@@ -867,6 +883,12 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
     continueStack: [],
     labelMap: new Map(),
     savedBodies: [],
+    // (#2865) A NESTED producer captures outer locals as ref cells (leading
+    // params of the lifted fn, spilled into frame param fields). The resume
+    // body compiles the same identifiers, so it needs the same cell-deref
+    // routing the lifted body had.
+    boxedCaptures: info.boxedCaptures,
+    readsCurrentThis: info.readsCurrentThis,
   };
   const frameLocal = 0;
 
@@ -892,6 +914,34 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
       fieldIdx: info.spillFieldOffset + i,
     });
     resumeFctx.body.push({ op: "local.set", index: idx });
+  }
+  // (#2865) A lifted-CLOSURE body (arrow / fn-expr) keeps its captures in the
+  // `__self` struct — closures.ts materializes each into a NAMED local in the
+  // lifted body's prologue, and every identifier/call site in the body resolves
+  // them via localMap (cells deref through `boxedCaptures`). This resume fn
+  // compiles the SAME body statements, so re-run that materialization from the
+  // frame-captured `__self` param field. Without it, capture resolution falls
+  // back to STALE outer-scope local indices (the capture-arg push in calls.ts
+  // uses `localMap.get(name) ?? cap.outerLocalIdx`) — a guaranteed miscompile.
+  if (info.selfCaptureLayout) {
+    const layout = info.selfCaptureLayout;
+    const selfIdx = resumeFctx.localMap.get(layout.selfParamName);
+    if (selfIdx !== undefined) {
+      let selfForCaptures = selfIdx;
+      if (layout.castToTypeIdx !== null) {
+        const castLocal = allocLocal(resumeFctx, "__self_cast", { kind: "ref", typeIdx: layout.castToTypeIdx });
+        resumeFctx.body.push({ op: "local.get", index: selfIdx });
+        resumeFctx.body.push({ op: "ref.cast", typeIdx: layout.castToTypeIdx } as Instr);
+        resumeFctx.body.push({ op: "local.set", index: castLocal });
+        selfForCaptures = castLocal;
+      }
+      for (const entry of layout.entries) {
+        const idx = allocLocal(resumeFctx, entry.name, entry.localType);
+        resumeFctx.body.push({ op: "local.get", index: selfForCaptures });
+        resumeFctx.body.push({ op: "struct.get", typeIdx: layout.structTypeIdx, fieldIdx: entry.fieldIdx } as Instr);
+        resumeFctx.body.push({ op: "local.set", index: idx });
+      }
+    }
   }
   // Load the result promise into a local; wire the `return` settle hook. Both
   // backends settle through `call <fulfill>(promise, value) -> value; drop` —
@@ -1597,6 +1647,13 @@ export function emitAsyncFrameStateMachine(
   const paramNames = fctx.params.map((p) => p.name);
   const paramTypes = fctx.params.map((p) => p.type);
   const info = buildAsyncFrameInfo(ctx, decl, plan, paramNames, paramTypes, promiseTypeIdx, hostImports);
+  // (#2865) A CLOSURE consumer (arrow / fn-expr, #2957 phase 2) may capture
+  // outer locals as ref cells (leading params of the lifted fn). The cells ride
+  // into frame param fields like ordinary params; the resume body must deref
+  // reads/writes through them, so thread the cell metadata onto the resume fctx.
+  info.boxedCaptures = fctx.boxedCaptures;
+  info.readsCurrentThis = fctx.readsCurrentThis;
+  info.selfCaptureLayout = fctx.selfCaptureLayout;
   const resumeFuncIdx = ensureAsyncResumeFunction(ctx, info, plan);
   if (resumeFuncIdx < 0) {
     reportError(ctx, decl, "internal: async-frame resume function unavailable (#2895 slice 1)");
@@ -1672,6 +1729,11 @@ export function emitAsyncFrameStateMachine(
  */
 export function isAsyncGenDriveCandidate(ctx: CodegenContext, decl: ts.FunctionLikeDeclaration): boolean {
   if (!ASYNC_CPS_ENABLED) return false;
+  // (#2865) Stem-collision guard: a SECOND same-named gen (different scope)
+  // would share the first's `__async_gen_next_<stem>` helper — typed for the
+  // FIRST frame struct — and trap on `ref.cast`. Correct-or-legacy: reject it.
+  const registered = ctx.asyncGenProducers?.get(sanitizeTypeName(asyncFnName(decl)));
+  if (registered !== undefined && registered.decl !== decl) return false;
   // (#2865) Own body locals become frame spills — every spill field must have a
   // spill-safe type (an inert `struct.new` default), or the layout is invalid.
   const spillsSafe = (): boolean => {
@@ -1747,6 +1809,11 @@ export function emitAsyncGenerator(ctx: CodegenContext, fctx: FunctionContext, d
   const info = buildAsyncFrameInfo(ctx, decl, plan, paramNames, paramTypes, promiseTypeIdx);
   info.asyncGen = true;
   info.asyncGenResultTypeIdx = resultTypeIdx;
+  // (#2865) Nested producers: thread the lifted fn's capture-cell metadata so
+  // the resume body derefs captured reads/writes through the cells.
+  info.boxedCaptures = fctx.boxedCaptures;
+  info.readsCurrentThis = fctx.readsCurrentThis;
+  info.selfCaptureLayout = fctx.selfCaptureLayout;
 
   const resumeFuncIdx = ensureAsyncResumeFunction(ctx, info, plan);
   if (resumeFuncIdx < 0) {
@@ -1758,6 +1825,21 @@ export function emitAsyncGenerator(ctx: CodegenContext, fctx: FunctionContext, d
   // Per-gen re-entrant next() driver + the generic reader probes (once/module).
   emitAsyncGenNextHelper(ctx, info, promiseTypeIdx);
   ensureAsyncGenReaderProbes(ctx, promiseTypeIdx, resultTypeIdx);
+
+  // (#2865) Register the producer so (a) the `.next()` runtime dispatch chain
+  // (calls.ts) can ref.test this frame type → its next helper, and (b) the
+  // stem-collision guard in `isAsyncGenDriveCandidate` rejects a SECOND,
+  // different gen with the same sanitized name (it would otherwise silently
+  // share this helper — typed for THIS frame — and trap on `ref.cast`).
+  const stem = sanitizeTypeName(info.functionName);
+  if (!ctx.asyncGenProducers) ctx.asyncGenProducers = new Map();
+  if (!ctx.asyncGenProducers.has(stem)) {
+    ctx.asyncGenProducers.set(stem, {
+      stateTypeIdx: info.stateTypeIdx,
+      nextHelperName: `__async_gen_next_${stem}`,
+      decl,
+    });
+  }
 
   // Build the frame WITHOUT kicking (lazy): state=0, sent/mode/abrupt/error inert,
   // params, [no spills — bounded shape], result_promise = fresh pending.

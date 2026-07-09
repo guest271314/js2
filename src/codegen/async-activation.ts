@@ -196,6 +196,17 @@ export function planAsyncClosureActivation(
   isAsync: boolean,
 ): AsyncActivationPlan | null {
   const decision = decideAsyncActivation(ctx, decl, isAsync, /*allowNonDeclaration*/ true);
+  // (#2865) Exception to the phase-2 park below: the for-await-over-async-
+  // GENERATOR consumer drive IS validated in the lifted-closure context (its
+  // machine is self-contained — every suspension awaits the producer's own
+  // `__async_gen_next_*` promise; no continuation capture-struct / `__self`
+  // interplay). Without this, an arrow/fn-expr consumer stays legacy while the
+  // producer returns the driven frame carrier — the legacy `__iterator` then
+  // ref.cast-traps on the frame. Every OTHER drive/host-drive closure shape
+  // stays parked (the #2646 33-regression class).
+  if (decision !== null && decision.lane === "drive" && asyncGenConsumerNeedsDrive(ctx, decl, decision.plan)) {
+    return decision;
+  }
   // Phase-2 scope: closures activate ONLY the single-tail-await CPS lane. The
   // host-drive ("host-drive") and native-drive ("drive") lanes activate
   // multi-await / try-finally-across-await shapes whose continuation
