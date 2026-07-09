@@ -332,6 +332,21 @@ export interface NativeGeneratorInfo {
    * ride the existing `abrupt` (return value) / `error` (thrown value) fields.
    */
   pendingFieldIdx?: number;
+  /**
+   * (#3050) Capturing NESTED generator: number of leading synthetic capture
+   * params preceding the user params in `paramNames`/`paramTypes` (the state
+   * struct stores them as ordinary `param_*` fields). The factory's wasm
+   * signature carries them first — call sites already prepend them via
+   * `ctx.nestedFuncCaptures`, identical to a lifted capturing function.
+   */
+  leadingCaptureCount?: number;
+  /**
+   * (#3050) The subset of leading captures that ride as ref CELLS (mutable /
+   * already-boxed captures). The resume function registers each in its
+   * `boxedCaptures` so identifier reads/writes inside resume states deref the
+   * shared cell — writes propagate to the enclosing frame.
+   */
+  leadingCaptureCells?: { name: string; refCellTypeIdx: number; valType: ValType }[];
 }
 
 export type NullishExclusion = "null" | "undefined" | "nullish";

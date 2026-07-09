@@ -1312,7 +1312,9 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
   // already in the state struct.
   function collectSpillsIn(node: ts.Node): void {
     function visit(n: ts.Node): void {
-      if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name)) {
+      // (#3050) A catch clause's binding IS a ts.VariableDeclaration — catch
+      // params are registered (externref-typed) by lowerTryRegion, not here.
+      if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && !ts.isCatchClause(n.parent)) {
         addSpill(n.name.text, n);
       }
       if (
@@ -1412,6 +1414,18 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
 
   // Final fallthrough state completes the generator.
   finishState(curId, { kind: "done" });
+
+  // (#3050) When the final fallthrough state carries trailing statements
+  // (`… yield x; trailing();`), it doubles as BOTH the last executable state
+  // and the completed-generator dispatch target (doneState = last id) — so
+  // every post-completion `.next()` re-dispatched into it and RE-RAN the
+  // trailing prelude (observable via a `unreachable += 1` after the last
+  // yield, GeneratorPrototype/throw/try-*-following-*). Mint a DEDICATED empty
+  // done state in that case; generators whose final state is already empty
+  // keep their exact state graph (byte-identical).
+  if (states[curId]!.statements.length > 0) {
+    reserveState(); // empty placeholder — its default terminator IS `done`
+  }
 
   // (#3050) Apply the runtime-throw route stamps now that every state object is
   // final (finishState rebuilds them, so stamping placeholders would be lost).
@@ -1516,7 +1530,15 @@ function bodyDeclaresBinding(body: ts.Node, name: string): boolean {
   let found = false;
   function visit(node: ts.Node): void {
     if (found) return;
-    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.name.text === name) {
+    if (
+      ts.isVariableDeclaration(node) &&
+      ts.isIdentifier(node.name) &&
+      node.name.text === name &&
+      // A catch clause's binding IS a ts.VariableDeclaration — catch params are
+      // exactly what this check protects, so they don't collide with themselves
+      // (same-named sibling catch params share the externref slot safely).
+      !ts.isCatchClause(node.parent)
+    ) {
       found = true;
       return;
     }
@@ -1624,7 +1646,7 @@ export type GeneratorDecl = ts.FunctionDeclaration | ts.MethodDeclaration;
  * `.next()` driving, so it does NOT flip the host lane.) Does not descend into
  * nested function-likes — their yields/trys belong to inner generators.
  */
-function bodyHasNewTryRegionAcrossYield(decl: GeneratorDecl): boolean {
+export function bodyHasNewTryRegionAcrossYield(decl: GeneratorDecl): boolean {
   if (!decl.body) return false;
   let found = false;
   function visit(node: ts.Node): void {
@@ -1913,7 +1935,13 @@ export function ensureNativeGeneratorResultType(ctx: CodegenContext, elemValType
 
   const fields: FieldDef[] = [
     { name: "value", type: elem, mutable: false },
-    { name: "done", type: { kind: "i32" }, mutable: false },
+    // (#3050) `done` is BRANDED boolean so any boxing to externref (the dynamic
+    // any-receiver `.done` read in the JS-host lane, `result.done` flowing into
+    // an `any` context) routes through `__box_boolean`, not `__box_number` —
+    // `result.done === true` must hold (a number-boxed 1 !== true, which failed
+    // the GeneratorPrototype/throw follow-up-`next()` asserts). Wasm-level the
+    // field is a plain i32 (brands are erased at emission).
+    { name: "done", type: { kind: "i32", boolean: true }, mutable: false },
   ];
   const typeIdx = ctx.mod.types.length;
   ctx.mod.types.push({ kind: "struct", name: structName, fields });
@@ -1922,6 +1950,20 @@ export function ensureNativeGeneratorResultType(ctx: CodegenContext, elemValType
   ctx.structFields.set(structName, fields);
   if (isF64) ctx.nativeGeneratorResultTypeIdx = typeIdx;
   return typeIdx;
+}
+
+/**
+ * (#3050) One leading synthetic capture param of a capturing nested native
+ * generator. The caller (nested-declarations.ts) prepends these before the
+ * user params — mutable captures ride as `ref $cell` (writes propagate to the
+ * enclosing frame through the shared cell), immutable ones by value. `boxed`
+ * carries the cell layout so the resume function registers the name in
+ * `boxedCaptures` (identifier reads/writes deref the cell, exactly like a
+ * lifted closure body).
+ */
+export interface NativeGeneratorCaptureParam {
+  name: string;
+  boxed?: { refCellTypeIdx: number; valType: ValType };
 }
 
 export function registerNativeGenerator(
@@ -1936,6 +1978,11 @@ export function registerNativeGenerator(
   // the param/name arrays stay aligned. Free functions / static methods leave
   // this `false` — byte-identical to pre-#2571.
   synthesizedThis = false,
+  // (#3050) Capturing nested generator: the caller passes
+  // `paramTypes = [...captureParamTypes, ...userParamTypes]` plus this aligned
+  // capture list. Mutually exclusive with `synthesizedThis` (methods never take
+  // the capturing path).
+  leadingCaptures?: NativeGeneratorCaptureParam[],
 ): NativeGeneratorInfo | null {
   const existing = ctx.nativeGenerators.get(functionName);
   if (existing) return existing;
@@ -1958,7 +2005,10 @@ export function registerNativeGenerator(
   // (two `[a,b]`/`{x}` params would otherwise both be `param_`, a dup field).
   // The raw arg lives in this field and is destructured in the resume prelude.
   const userParamNames = decl.parameters.map((p, i) => (ts.isIdentifier(p.name) ? p.name.text : `__genarg${i}`));
-  const paramNames = synthesizedThis ? ["this", ...userParamNames] : userParamNames;
+  // (#3050) Leading synthetic capture params (capturing nested generator)
+  // precede the user params, aligned with the caller's paramTypes prefix.
+  const captureNames = (leadingCaptures ?? []).map((c) => c.name);
+  const paramNames = synthesizedThis ? ["this", ...userParamNames] : [...captureNames, ...userParamNames];
   // (#2864 F1) `sent` / `abrupt` carry the `.next(v)` / `.return(v)` value. For
   // the boxed-any carrier they are externref so an arbitrary value survives; for
   // numeric / string carriers they stay f64 (byte-identical to before).
@@ -2100,6 +2150,13 @@ export function registerNativeGenerator(
     vecDelegationSlots: vecDelegationSlots.length > 0 ? vecDelegationSlots : undefined,
     iterableDelegationSlots: iterableDelegationSlots.length > 0 ? iterableDelegationSlots : undefined,
     pendingFieldIdx,
+    // (#3050) Capturing nested generator: leading capture-param count (for the
+    // resume prelude's user-param offset) + the cell layouts to register in the
+    // resume fctx's boxedCaptures.
+    leadingCaptureCount: leadingCaptures && leadingCaptures.length > 0 ? leadingCaptures.length : undefined,
+    leadingCaptureCells: leadingCaptures
+      ?.filter((c) => c.boxed)
+      .map((c) => ({ name: c.name, refCellTypeIdx: c.boxed!.refCellTypeIdx, valType: c.boxed!.valType })),
   };
   ctx.nativeGenerators.set(functionName, info);
   return info;
@@ -3250,6 +3307,17 @@ export function ensureNativeGeneratorResumeFunction(ctx: CodegenContext, info: N
     resumeFctx.body.push({ op: "local.set", index: localIdx });
   }
 
+  // (#3050) Capturing nested generator: register each cell-riding capture in
+  // `boxedCaptures` so identifier reads/writes inside resume states deref the
+  // shared cell (the exact mechanism a lifted capturing function body uses) —
+  // a `count += 1` inside the generator is visible in the enclosing frame.
+  if (info.leadingCaptureCells) {
+    for (const cap of info.leadingCaptureCells) {
+      if (!resumeFctx.boxedCaptures) resumeFctx.boxedCaptures = new Map();
+      resumeFctx.boxedCaptures.set(cap.name, { refCellTypeIdx: cap.refCellTypeIdx, valType: cap.valType });
+    }
+  }
+
   // Load spills into locals. (#2864 F1b) The load local is minted at the spill's
   // actual ValType so the `struct.get` (of the same-typed field) round-trips. The
   // body's var-declaration reuses this exact slot (it is already in `localMap`),
@@ -3270,7 +3338,9 @@ export function ensureNativeGeneratorResumeFunction(ctx: CodegenContext, info: N
   // re-run on resume (the spilled value is authoritative then). The bound-name
   // spill locals are already in `localMap`, so the destructure helper's
   // `ensureBindingLocals` reuses them (no double-alloc, no re-type).
-  const thisOffset = info.synthesizedThis ? 1 : 0;
+  // (#3050) Leading synthetic params (`this` OR capture params) offset the
+  // user-param indices in paramNames/paramTypes.
+  const thisOffset = info.synthesizedThis ? 1 : (info.leadingCaptureCount ?? 0);
   const patternParams = info.decl.parameters.filter((p) => !ts.isIdentifier(p.name));
   if (patternParams.length > 0) {
     // (#2920 funcIdx-shift fix) `destructureParamObject`/`destructureParamArray`

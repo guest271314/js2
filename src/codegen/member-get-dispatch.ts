@@ -187,9 +187,18 @@ export function fillMemberGetDispatch(ctx: CodegenContext): void {
         boxNumIdx !== undefined &&
         isNativeGeneratorResultStruct(ctx, cand.structTypeIdx);
       if (useSentinelBox) usedSentinelBox = true;
+      // (#3050) BOOLEAN-branded i32 field (e.g. the native generator result's
+      // `done`): box via __box_boolean so `x.done === true` holds through the
+      // dynamic read — the brand-blind coercion engine would `__box_number` it
+      // (number 1 !== true). Mirrors coerceType's i32-brand routing; funcMap-
+      // read-only (the union natives were registered at reserve).
+      const boxBoolIdx =
+        cand.fieldType.kind === "i32" && cand.fieldType.boolean === true ? ctx.funcMap.get("__box_boolean") : undefined;
       const box = useSentinelBox
         ? sentinelAwareF64BoxInstrs(2, boxNumIdx)
-        : coercionInstrs(ctx, cand.fieldType, { kind: "externref" });
+        : boxBoolIdx !== undefined
+          ? [{ op: "call", funcIdx: boxBoolIdx } as Instr]
+          : coercionInstrs(ctx, cand.fieldType, { kind: "externref" });
       const readInstrs: Instr[] = [
         { op: "local.get", index: 1 } as Instr, // __any
         { op: "ref.cast", typeIdx: cand.structTypeIdx } as Instr,
