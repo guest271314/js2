@@ -6883,6 +6883,12 @@ function emitPlainArrayUndefinedOobGet(
   // `__box_number`. Defaults to `elementType` (the byte-identical f64/number
   // path), so existing callers are unchanged.
   boxType: ValType = elementType,
+  // (#2773 S7) Optional LOGICAL-length bound (see emitBoundsCheckedArrayGet):
+  // a grown vec's backing capacity exceeds its length, so the in-bounds test
+  // must use the vec's length field or an index in [length, capacity) reads
+  // the boxed element DEFAULT (0/false) instead of `undefined`. Cloned per
+  // push (never alias one Instr object into the body twice).
+  lengthBoundInstrs?: Instr[],
 ): void {
   // Save index + array ref (consumed by the bounds test AND the bounded read).
   const idxLocal = allocLocal(fctx, `__oobu_idx_${fctx.locals.length}`, { kind: "i32" });
@@ -6890,12 +6896,17 @@ function emitPlainArrayUndefinedOobGet(
   fctx.body.push({ op: "local.set", index: idxLocal });
   fctx.body.push({ op: "local.set", index: arrLocal });
 
-  // (1) inBounds = (unsigned) idx < array.len. A negative index wraps to a huge
+  // (1) inBounds = (unsigned) idx < bound. A negative index wraps to a huge
   // unsigned value > any length, so it falls into the OOB (undefined) arm too.
+  // (#2773 S7) bound = logical length when supplied, else backing capacity.
   const inBoundsLocal = allocLocal(fctx, `__oobu_in_${fctx.locals.length}`, { kind: "i32" });
   fctx.body.push({ op: "local.get", index: idxLocal });
-  fctx.body.push({ op: "local.get", index: arrLocal });
-  fctx.body.push({ op: "array.len" });
+  if (lengthBoundInstrs) {
+    fctx.body.push(...lengthBoundInstrs.map((i) => ({ ...i }) as Instr));
+  } else {
+    fctx.body.push({ op: "local.get", index: arrLocal });
+    fctx.body.push({ op: "array.len" });
+  }
   fctx.body.push({ op: "i32.lt_u" } as Instr);
   fctx.body.push({ op: "local.set", index: inBoundsLocal });
 
@@ -8271,6 +8282,26 @@ export function compileElementAccessBody(
     // i32) correctly; defers packed-number / other i32 / externref. Computed even
     // when `oobUndefined` is false (cheap).
     const f1BoxType = f1ElementBoxType(ctx, expr, arrDef.element);
+    // (#2773 S7) Bound the unproven read by the vec's LOGICAL length (field 0),
+    // not the backing-array capacity. A grow (`a[idx]=v` / `a.push`) over-allocates
+    // (capacity = max(idx+1, cap*2, 4)), and `a.pop()` decrements only the length —
+    // so `array.len(data)` over-reports the bound and an index in
+    // [length, capacity) silently reads the element DEFAULT (null/0) or a stale
+    // popped slot instead of being OOB. That broke the test262 HOF "-c-ii-5"
+    // family on iteration 2+ (`kIndex[1]` after `kIndex[0]=1` grew capacity to 4).
+    // Tee the vec ref so the length field is available to the bounded-read arms
+    // below; skipped on the proven fast path and the TA arm (a typed-array view
+    // is fixed-length — capacity === length — so its bytes stay identical).
+    const useLenBound = !isSafeBoundsEliminated(fctx, expr) && !oobUndefinedTypedArray;
+    let vecLenBoundInstrs: Instr[] | undefined;
+    if (useLenBound) {
+      const vecRefLocal = allocLocal(fctx, `__vecref_${fctx.locals.length}`, { kind: "ref_null", typeIdx });
+      fctx.body.push({ op: "local.tee", index: vecRefLocal } as Instr);
+      vecLenBoundInstrs = [
+        { op: "local.get", index: vecRefLocal } as Instr,
+        { op: "struct.get", typeIdx, fieldIdx: 0 } as Instr, // logical length
+      ];
+    }
     // Unwrap: struct.get data field, then index into backing array
     fctx.body.push({ op: "struct.get", typeIdx, fieldIdx: 1 }); // get data from vec
     // #1179: hint i32 directly for the index. compileExpression will produce
@@ -8319,7 +8350,7 @@ export function compileElementAccessBody(
       // other i32 / object / externref elements stay deferred (`f1BoxType ===
       // null`) and fall through to the unchanged shared-helper read below
       // (bounds-checked, never traps).
-      emitPlainArrayUndefinedOobGet(ctx, fctx, arrTypeIdx, arrDef.element, f1BoxType);
+      emitPlainArrayUndefinedOobGet(ctx, fctx, arrTypeIdx, arrDef.element, f1BoxType, vecLenBoundInstrs);
       return { kind: "externref" };
     } else if (oobUndefinedTypedArray) {
       // (#2798 Row 9) Typed-array OOB → JS `undefined`, in-bounds → the element
@@ -8336,7 +8367,28 @@ export function compileElementAccessBody(
       // (#2001 S1) Pass `ctx` so the in-bounds `$Hole → undefined` read-boundary
       // mapping fires for an externref-element (`any[]`) vec. (#2593) Thread the
       // view-name signedness for packed i8/i16 reads.
-      emitBoundsCheckedArrayGet(fctx, arrTypeIdx, arrDef.element, ctx, false, taSignedness);
+      //
+      // (#2773 S7 — F1 completion for externref elements) A plain-array OOB read
+      // of an EXTERNREF element must produce JS `undefined`, not
+      // `ref.null.extern`: null makes `typeof a[i]` report "object" and
+      // `a[i] === undefined` false, which broke the whole test262 HOF
+      // "-c-ii-5" family (`var kIndex = []; … typeof kIndex[idx] ===
+      // "undefined"` — the very first probe of the empty tracking array reads
+      // null and every callback bails). The primitive elements got this via the
+      // type-aware box (#2785/#2792) above; externref needs NO box — the #1396
+      // sentinel arm of the shared helper already emits `__get_undefined` on
+      // the OOB branch (and keeps the in-bounds `$Hole → undefined` map), so
+      // opt in AT THIS CALL SITE only, gated on the same `oobUndefined` policy
+      // (plain array, non-numeric consumer, not the regex-match vec). The
+      // shared helper DEFAULT stays false (the #2198 S2 blast-radius
+      // discipline: subview / typed-array / array-method callers are
+      // byte-identical). Standalone is neutral by construction:
+      // `ensureGetUndefined` returns undefined under nativeStrings, so the
+      // helper falls back to `ref.null.extern` — the standalone undefined
+      // convention.
+      const externUndefOob =
+        oobUndefined && (arrDef.element.kind === "externref" || arrDef.element.kind === "ref_extern");
+      emitBoundsCheckedArrayGet(fctx, arrTypeIdx, arrDef.element, ctx, externUndefOob, taSignedness, vecLenBoundInstrs);
     }
     // (#2593) `Uint32Array` element read: the i32_byte storage holds the full 32
     // bits; the value as a JS number is the UNSIGNED interpretation (0..2^32-1).
@@ -8413,7 +8465,14 @@ export function compileElementAccessBody(
   } else {
     // (#2001 S1) Pass `ctx` for the in-bounds `$Hole → undefined` mapping.
     // (#2593) Thread the view-name signedness for packed i8/i16 reads.
-    emitBoundsCheckedArrayGet(fctx, typeIdx, typeDef.element, ctx, false, taSignednessArr);
+    // (#2773 S7) F1 completion for externref elements: plain-array OOB reads
+    // JS `undefined`, not `ref.null.extern` — same call-site-scoped opt-in as
+    // the vec-struct site above (see the full note there). Shared default
+    // untouched; standalone neutral (`ensureGetUndefined` → undefined →
+    // helper falls back to `ref.null.extern`).
+    const externUndefOobArr =
+      oobUndefinedArr && (typeDef.element.kind === "externref" || typeDef.element.kind === "ref_extern");
+    emitBoundsCheckedArrayGet(fctx, typeIdx, typeDef.element, ctx, externUndefOobArr, taSignednessArr);
   }
   return valueType;
 }

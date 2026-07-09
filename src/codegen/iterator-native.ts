@@ -50,7 +50,13 @@ import { addFuncType } from "./registry/types.js";
 import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S2 read chokepoint / S3b stable-regime minting)
 // (#3100) The vec-family normalize arms reuse the #2190 element-boxing recipe +
 // the non-array byte-carrier filter (ArrayBuffer/Uint8Array storage vecs).
-import { boxVecElementToExternref, NON_ARRAY_BYTE_VEC_ELEM_KINDS } from "./object-runtime.js";
+// (#3100 S4) ensureObjectRuntime provides the native `__extern_length` /
+// `__extern_get_idx` readers the index-based `__extern_slice` copies through.
+import { boxVecElementToExternref, ensureObjectRuntime, NON_ARRAY_BYTE_VEC_ELEM_KINDS } from "./object-runtime.js";
+// (#3100 S4) `__extern_slice`'s $AnyString arm reuses the #1470 code-point
+// char-vec helper so a string rest (`const [a, ...r] = "hello"`) yields the
+// spec §22.1.5.1 per-code-point elements natively.
+import { ensureStrToCharVecHelper } from "./native-strings.js";
 
 /** Slice-1 IterRec kind tag for a canonical externref `$Vec`. */
 const ITER_KIND_VEC = 3;
@@ -82,6 +88,13 @@ interface UserCarrierDeps {
   sgetDoneIdx: number;
   /** `__is_truthy(externref) -> i32` (ToBoolean on the boxed `done` flag). */
   isTruthyIdx: number;
+  /**
+   * (#3100 S5) `__call_return(externref) -> externref`
+   * (emitIteratorMethodExport) — OPTIONAL: present only when some module
+   * struct carries a `return` method. Absent ⇒ IteratorClose finds no
+   * `return` ⇒ NormalCompletion (§7.4.9 step 4), the empty-body no-op.
+   */
+  callReturnIdx?: number;
 }
 
 /**
@@ -265,7 +278,12 @@ export function ensureNativeIteratorRuntime(ctx: CodegenContext): void {
  *   - `n < 0` (rest patterns): unbounded drain until the iterator reports done.
  *   - `n >= 0` (no-rest patterns, §8.5.3): consume AT MOST `n` IteratorSteps —
  *     exactly one `.next()` per binding slot, never over-draining a lazy
- *     generator. Stopping at the bound is a NormalCompletion (no IteratorClose).
+ *     generator. (#3100 S5) Stopping at the bound with the iterator NOT done
+ *     calls `__iterator_return` (IteratorClose §7.4.9) — §8.5.2/§13.15.5.2
+ *     require close when the pattern does not exhaust the iterator. This
+ *     DIVERGES from the host `_arrayFromIter` (#1592 chose no-close there);
+ *     the native lane follows the spec — a no-op for VEC-kind records, the
+ *     USER close arm for custom iterators with a `return` method.
  *   - `null`/`undefined` source: return an empty vec (host returns `[]`).
  *
  * Returns a canonical externref `$Vec` (`__vec_externref`), which the downstream
@@ -309,6 +327,7 @@ export function ensureNativeArrayFromIterN(ctx: CodegenContext): number {
   //   7 = grow  (ref $arrExtern)   doubled array on growth
   //   8 = done  (i32)
   //   9 = value (externref)
+  //  10 = srcAny (anyref)          guard scratch (#3100 S5 multi-arm drain test)
   const arrRef: ValType = { kind: "ref", typeIdx: arrTypeIdx };
   const locals: { name: string; type: ValType }[] = [
     { name: "iter", type: { kind: "externref" } },
@@ -319,7 +338,50 @@ export function ensureNativeArrayFromIterN(ctx: CodegenContext): number {
     { name: "grow", type: arrRef },
     { name: "done", type: { kind: "i32" } },
     { name: "value", type: { kind: "externref" } },
+    { name: "srcAny", type: { kind: "anyref" } },
   ];
+
+  const body = buildArrayFromIterNBody(
+    { vecTypeIdx, arrTypeIdx },
+    { iteratorIdx, iteratorNextIdx, iteratorReturnIdx: ctx.funcMap.get("__iterator_return") },
+    [],
+  );
+
+  const typeIdx = addFuncType(ctx, [{ kind: "externref" }, { kind: "f64" }], [{ kind: "externref" }]);
+  const funcIdx = mintDefinedFunc(ctx);
+  ctx.funcMap.set("__array_from_iter_n", funcIdx);
+  pushDefinedFunc(ctx, funcIdx, { name: "__array_from_iter_n", typeIdx, locals, body, exported: false });
+  return funcIdx;
+}
+
+/**
+ * Build the `__array_from_iter_n(obj, n)` body. Shared by the eager
+ * registration (no user arms yet) and the (#3100 S5) finalize rebuild, which
+ * passes `extraDrainTypeIdxs` — the closed-struct types carrying an
+ * `@@iterator`/`next` method — so a custom-iterable source is genuinely
+ * DRAINED through the `__iterator` USER arm (values + IteratorClose) instead
+ * of passed through to the indexed reader (which cannot read it).
+ *
+ * The (#2904) guard rationale is unchanged for everything else: a non-`$Vec`,
+ * non-user-iterable source (JS array, `$ObjVec`, typed vec) is returned
+ * UNCHANGED for the caller's downstream `__extern_length`/`__extern_get_idx`
+ * carrier reads — byte-equivalent to the host result for an indexable source
+ * and never trapping.
+ *
+ * (#3100 S5) IteratorClose: when the bounded drain stops at the limit with the
+ * iterator NOT done (§8.5.2/§13.15.5.2 — the pattern did not exhaust the
+ * iterator), call `__iterator_return(iter)` before breaking. A VEC-kind record
+ * no-ops; a USER record with a `return` method dispatches `__call_return`.
+ *
+ * All instruction objects are FRESH per call (factory discipline, #2169b).
+ */
+function buildArrayFromIterNBody(
+  types: { vecTypeIdx: number; arrTypeIdx: number },
+  funcs: { iteratorIdx: number; iteratorNextIdx: number; iteratorReturnIdx: number | undefined },
+  extraDrainTypeIdxs: number[],
+): Instr[] {
+  const { vecTypeIdx, arrTypeIdx } = types;
+  const { iteratorIdx, iteratorNextIdx, iteratorReturnIdx } = funcs;
 
   // Build an empty `__vec_externref` and convert to externref.
   const emptyVec: Instr[] = [
@@ -350,7 +412,9 @@ export function ensureNativeArrayFromIterN(ctx: CodegenContext): number {
   ];
 
   const loopBody: Instr[] = [
-    // Bounded break: if (limit >= 0) && (len >= limit) → break.
+    // Bounded break: if (limit >= 0) && (len >= limit) → IteratorClose + break.
+    // Depth accounting: inside the `if.then` below, 0 = the if, 1 = the loop,
+    // 2 = the outer block — so the break out of the drain is `br 2`.
     { op: "local.get", index: 3 } as Instr,
     { op: "i32.const", value: 0 } as Instr,
     { op: "i32.ge_s" } as Instr,
@@ -358,13 +422,26 @@ export function ensureNativeArrayFromIterN(ctx: CodegenContext): number {
     { op: "local.get", index: 3 } as Instr,
     { op: "i32.ge_s" } as Instr,
     { op: "i32.and" } as Instr,
-    { op: "br_if", depth: 1 } as Instr,
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        // (#3100 S5) The iterator is NOT done here by construction (a done
+        // iterator breaks via the done-branch below without reaching the
+        // bound) → IteratorClose per §8.5.2/§13.15.5.2.
+        ...(iteratorReturnIdx !== undefined
+          ? [{ op: "local.get", index: 2 } as Instr, { op: "call", funcIdx: iteratorReturnIdx } as Instr]
+          : []),
+        { op: "br", depth: 2 } as Instr,
+      ],
+      else: [],
+    } as Instr,
     // (done, value) = __iterator_next(iter)
     { op: "local.get", index: 2 } as Instr,
     { op: "call", funcIdx: iteratorNextIdx } as Instr,
     { op: "local.set", index: 9 } as Instr, // value (top of stack)
     { op: "local.set", index: 8 } as Instr, // done
-    // if done → break
+    // if done → break (exhausted ⇒ [[Done]] true ⇒ NO IteratorClose, §7.4.9)
     { op: "local.get", index: 8 } as Instr,
     { op: "br_if", depth: 1 } as Instr,
     // grow if len == cap
@@ -385,28 +462,29 @@ export function ensureNativeArrayFromIterN(ctx: CodegenContext): number {
     { op: "br", depth: 0 } as Instr,
   ];
 
-  const body: Instr[] = [
+  // Drainability guard: canDrain = ref.test $Vec ∨ (ref.test each user-iterable
+  // struct). Everything else passes through unchanged (#2904 rationale above).
+  const drainTest: Instr[] = [
+    { op: "local.get", index: 0 } as Instr,
+    { op: "any.convert_extern" } as Instr,
+    { op: "local.set", index: 10 } as Instr,
+    { op: "local.get", index: 10 } as Instr,
+    { op: "ref.test", typeIdx: vecTypeIdx } as Instr,
+  ];
+  for (const t of extraDrainTypeIdxs) {
+    drainTest.push(
+      { op: "local.get", index: 10 } as Instr,
+      { op: "ref.test", typeIdx: t } as Instr,
+      { op: "i32.or" } as Instr,
+    );
+  }
+
+  return [
     // null/undefined guard → return empty vec (host `_arrayFromIter(null) → []`).
     { op: "local.get", index: 0 } as Instr,
     { op: "ref.is_null" } as Instr,
     { op: "if", blockType: { kind: "empty" }, then: [...emptyVec, { op: "return" } as Instr], else: [] } as Instr,
-    // (#2904) Only drain a genuine native externref `$Vec` through the iterator
-    // protocol. A NON-`__vec_externref` source — a JS array / `$ObjVec` / typed
-    // vec / custom iterable arriving as externref — would hit `__iterator`'s
-    // vec-only carrier and hard-cast → `illegal cast` (the vec-only carrier traps
-    // on a non-vec subject by design). The legacy JS-host `__array_from_iter_n`
-    // handled those via the JS iterator protocol; in standalone the indexable
-    // ones are read directly by the caller's downstream
-    // `__extern_length`/`__extern_get_idx` (and the `buildVecFromExternref`
-    // fallback, #792). So for a non-`$Vec` source, return it UNCHANGED and let
-    // that indexed reader handle it — byte-equivalent to the host result for an
-    // indexable source, and crucially NEVER trapping. This preserves the ~440
-    // indexable-source destructure tests that the unconditional drain regressed
-    // (the `__iterator` USER arm is unfilled in a bare destructure module, so a
-    // non-vec source has no safe drain path here).
-    { op: "local.get", index: 0 } as Instr,
-    { op: "any.convert_extern" } as Instr,
-    { op: "ref.test", typeIdx: vecTypeIdx } as Instr,
+    ...drainTest,
     { op: "i32.eqz" } as Instr,
     {
       op: "if",
@@ -414,7 +492,7 @@ export function ensureNativeArrayFromIterN(ctx: CodegenContext): number {
       then: [{ op: "local.get", index: 0 } as Instr, { op: "return" } as Instr],
       else: [],
     } as Instr,
-    // iter = __iterator(obj)  (only reached for a genuine `$Vec`)
+    // iter = __iterator(obj)  (a `$Vec` or a user-iterable closed struct)
     { op: "local.get", index: 0 } as Instr,
     { op: "call", funcIdx: iteratorIdx } as Instr,
     { op: "local.set", index: 2 } as Instr,
@@ -449,11 +527,221 @@ export function ensureNativeArrayFromIterN(ctx: CodegenContext): number {
     { op: "struct.new", typeIdx: vecTypeIdx } as Instr,
     { op: "extern.convert_any" } as Instr,
   ];
+}
+
+/**
+ * (#3100 S5) Standalone/WASI consumer helper: replace `externLocal`'s value
+ * with `__array_from_iter_n(value, -1)` — an unbounded iterator-protocol
+ * materialization. For every INDEXABLE carrier (`$Vec`, typed vecs, `$ObjVec`,
+ * host arrays) the materializer passes the value through UNCHANGED, so the
+ * caller's indexed reads behave exactly as before; for a USER custom-iterable
+ * closed struct it drains through the `__iterator` ladder (values + protocol),
+ * which the indexed reads cannot do. No-op in JS-host mode (the host lane
+ * materializes via its own `__array_from_iter` import where it needs to).
+ * Registration is append-only defined funcs — no import shift, no flush.
+ */
+export function emitStandaloneIterableMaterialize(
+  ctx: CodegenContext,
+  fctx: { body: Instr[] },
+  externLocal: number,
+): void {
+  if (!ctx.standalone && !ctx.wasi) return;
+  const afinIdx = ensureNativeArrayFromIterN(ctx);
+  if (afinIdx === undefined) return;
+  fctx.body.push({ op: "local.get", index: externLocal });
+  fctx.body.push({ op: "f64.const", value: -1 });
+  fctx.body.push({ op: "call", funcIdx: afinIdx });
+  fctx.body.push({ op: "local.set", index: externLocal });
+}
+
+/**
+ * (#3100 S4) Register a native standalone `__extern_slice(externref, f64) ->
+ * externref` defined function — the rest-element slice every array-destructure
+ * consumer uses (`[a, ...r] = src` assignment, `const [a, ...r] = src` string
+ * rest, for-of destructuring rest). In JS-host mode this is an `env::` import
+ * (host `Array.prototype.slice` semantics); standalone previously LEAKED that
+ * import (raw `addImport` at each consumer), breaking zero-import
+ * instantiation — the `__extern_slice` rows of the standalone JSONL.
+ *
+ * Semantics (index-based, mirroring the host `_externSlice(src, start)` for
+ * indexable sources):
+ *   - `$AnyString` source → per-CODE-POINT rest (§22.1.5.1) via the #1470
+ *     `__str_to_char_vec` helper: `[a, ...r] = "hello"` → r = ["e","l","l","o"].
+ *   - anything `__extern_length`/`__extern_get_idx` can read (canonical `$Vec`,
+ *     typed `__vec_*` carriers, `$ObjVec`, array-like `$Object` — the #2190
+ *     carrier arms) → copy elements [start..len) into a fresh canonical
+ *     externref `$Vec`.
+ *   - non-indexable / null → empty `$Vec` (never traps; matches the host
+ *     import's degenerate fallback).
+ *
+ * Index-based rather than `__iterator`-ladder-based BY DESIGN: every consumer
+ * calls it on an already-MATERIALIZED source (post-`__array_from_iter_n` /
+ * a for-of element), so iterator-protocol re-entry would be observable
+ * double-stepping; the indexed read is side-effect-free and covers every
+ * carrier the read substrate covers, in one place.
+ *
+ * Registered as a DEFINED function (append-only, no import-index shift). The
+ * baked `call` funcIdxs (`__extern_length`, `__extern_get_idx`,
+ * `__str_to_char_vec`) live in a defined body, which every later
+ * `shiftLateImportIndices` walk patches like any other defined function.
+ */
+export function ensureNativeExternSlice(ctx: CodegenContext): number | undefined {
+  const existing = ctx.funcMap.get("__extern_slice");
+  if (existing !== undefined) return existing;
+
+  // Native readers (defined funcs under standalone/wasi — ensureObjectRuntime
+  // is idempotent and registers both names in funcMap).
+  ensureObjectRuntime(ctx);
+  const lenIdx = ctx.funcMap.get("__extern_length");
+  const getIdxIdx = ctx.funcMap.get("__extern_get_idx");
+  if (lenIdx === undefined || getIdxIdx === undefined) return undefined;
+
+  // Canonical externref $Vec geometry for the result.
+  const vecTypeIdx = getOrRegisterVecType(ctx, "externref", { kind: "externref" });
+  const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
+  if (arrTypeIdx < 0) return undefined;
+
+  // ($AnyString arm) — only when the native-string runtime is active (it always
+  // is under standalone/wasi, where nativeStrings auto-enables). The helper call
+  // registers the string runtime if a string literal hasn't already.
+  const strArm: Instr[] = [];
+  let charVecGeom: { funcIdx: number; vecTypeIdx: number } | undefined;
+  if (ctx.nativeStrings) {
+    charVecGeom = ensureStrToCharVecHelper(ctx);
+  }
+
+  // Local layout:
+  //   0 = src   (externref, param)
+  //   1 = start (f64, param)
+  //   2 = s     (i32)  clamped start index
+  //   3 = len   (i32)  source length
+  //   4 = n     (i32)  result length
+  //   5 = j     (i32)  write cursor
+  //   6 = out   (ref null $arrExtern)
+  //   7 = srcAny(anyref) — for the $AnyString ref.test
+  const locals: { name: string; type: ValType }[] = [
+    { name: "s", type: { kind: "i32" } },
+    { name: "len", type: { kind: "i32" } },
+    { name: "n", type: { kind: "i32" } },
+    { name: "j", type: { kind: "i32" } },
+    { name: "out", type: { kind: "ref_null", typeIdx: arrTypeIdx } },
+    { name: "srcAny", type: { kind: "anyref" } },
+  ];
+
+  if (charVecGeom !== undefined) {
+    const anyStrTypeIdx = ctx.anyStrTypeIdx;
+    const charVecTypeIdx = charVecGeom.vecTypeIdx;
+    const charArrTypeIdx = getArrTypeIdxFromVec(ctx, charVecTypeIdx);
+    if (anyStrTypeIdx >= 0 && charArrTypeIdx >= 0) {
+      // Normalize the string into its per-code-point char vec and REPLACE the
+      // src param with it, then FALL THROUGH to the generic indexed copy — the
+      // char vec is a `__vec_ref_<anyStr>` carrier that `__extern_length`
+      // (vec-base arm) and `__extern_get_idx` (#2190 vec arms, each element
+      // `extern.convert_any`-boxed) read natively. No recursion, no per-arm
+      // copy loop of its own.
+      strArm.push(
+        { op: "local.get", index: 0 },
+        { op: "any.convert_extern" } as Instr,
+        { op: "local.tee", index: 7 },
+        { op: "ref.test", typeIdx: anyStrTypeIdx } as Instr,
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            { op: "local.get", index: 7 },
+            { op: "ref.cast", typeIdx: anyStrTypeIdx },
+            { op: "call", funcIdx: charVecGeom.funcIdx } as Instr,
+            { op: "extern.convert_any" } as Instr,
+            { op: "local.set", index: 0 },
+          ],
+          else: [],
+        } as Instr,
+      );
+    }
+  }
+
+  const body: Instr[] = [
+    ...strArm,
+    // len = i32(__extern_length(src))  (null / non-indexable → 0 → empty vec)
+    { op: "local.get", index: 0 },
+    { op: "call", funcIdx: lenIdx } as Instr,
+    { op: "i32.trunc_sat_f64_s" } as Instr,
+    { op: "local.set", index: 3 },
+    // s = max(0, trunc(start))
+    { op: "local.get", index: 1 },
+    { op: "i32.trunc_sat_f64_s" } as Instr,
+    { op: "local.tee", index: 2 },
+    { op: "i32.const", value: 0 },
+    { op: "i32.lt_s" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [{ op: "i32.const", value: 0 } as Instr, { op: "local.set", index: 2 } as Instr],
+      else: [],
+    } as Instr,
+    // n = max(0, len - s)
+    { op: "local.get", index: 3 },
+    { op: "local.get", index: 2 },
+    { op: "i32.sub" },
+    { op: "local.tee", index: 4 },
+    { op: "i32.const", value: 0 },
+    { op: "i32.lt_s" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [{ op: "i32.const", value: 0 } as Instr, { op: "local.set", index: 4 } as Instr],
+      else: [],
+    } as Instr,
+    // out = array.new_default(n)
+    { op: "local.get", index: 4 },
+    { op: "array.new_default", typeIdx: arrTypeIdx },
+    { op: "local.set", index: 6 },
+    // j = 0; while (j < n) out[j] = __extern_get_idx(src, f64(s + j)), j++
+    { op: "i32.const", value: 0 },
+    { op: "local.set", index: 5 },
+    {
+      op: "block",
+      blockType: { kind: "empty" },
+      body: [
+        {
+          op: "loop",
+          blockType: { kind: "empty" },
+          body: [
+            { op: "local.get", index: 5 },
+            { op: "local.get", index: 4 },
+            { op: "i32.ge_s" },
+            { op: "br_if", depth: 1 },
+            { op: "local.get", index: 6 },
+            { op: "ref.as_non_null" } as Instr,
+            { op: "local.get", index: 5 },
+            { op: "local.get", index: 0 },
+            { op: "local.get", index: 2 },
+            { op: "local.get", index: 5 },
+            { op: "i32.add" },
+            { op: "f64.convert_i32_s" },
+            { op: "call", funcIdx: getIdxIdx } as Instr,
+            { op: "array.set", typeIdx: arrTypeIdx } as Instr,
+            { op: "local.get", index: 5 },
+            { op: "i32.const", value: 1 },
+            { op: "i32.add" },
+            { op: "local.set", index: 5 },
+            { op: "br", depth: 0 },
+          ],
+        } as Instr,
+      ],
+    } as Instr,
+    // return $Vec{n, out} as externref
+    { op: "local.get", index: 4 },
+    { op: "local.get", index: 6 },
+    { op: "ref.as_non_null" } as Instr,
+    { op: "struct.new", typeIdx: vecTypeIdx },
+    { op: "extern.convert_any" } as Instr,
+  ];
 
   const typeIdx = addFuncType(ctx, [{ kind: "externref" }, { kind: "f64" }], [{ kind: "externref" }]);
   const funcIdx = mintDefinedFunc(ctx);
-  ctx.funcMap.set("__array_from_iter_n", funcIdx);
-  pushDefinedFunc(ctx, funcIdx, { name: "__array_from_iter_n", typeIdx, locals, body, exported: false });
+  ctx.funcMap.set("__extern_slice", funcIdx);
+  pushDefinedFunc(ctx, funcIdx, { name: "__extern_slice", typeIdx, locals, body, exported: false });
   return funcIdx;
 }
 
@@ -502,7 +790,15 @@ export function fillNativeIteratorLateArms(ctx: CodegenContext): void {
         // the pre-#2038 runtime rather than shipping a broken arm. The (#3100)
         // vec-family arms below fill regardless.
         undefined
-      : { callIteratorIdx, callNextIdx, sgetValueIdx, sgetDoneIdx, isTruthyIdx };
+      : {
+          callIteratorIdx,
+          callNextIdx,
+          sgetValueIdx,
+          sgetDoneIdx,
+          isTruthyIdx,
+          // (#3100 S5) optional — only when some struct has a `return` method.
+          callReturnIdx: ctx.funcMap.get("__call_return"),
+        };
 
   const types = iterRuntimeTypes(ctx);
   const familyArms = buildVecFamilyArms(ctx, types);
@@ -516,6 +812,140 @@ export function fillNativeIteratorLateArms(ctx: CodegenContext): void {
   const iteratorNextFn = definedFuncAt(ctx, iteratorNextIdx);
   if (iteratorFn) iteratorFn.body = buildIteratorBody(types, deps, familyArms);
   if (deps && iteratorNextFn) iteratorNextFn.body = buildIteratorNextBody(types, deps);
+
+  // (#3100 S5) `__iterator_rest` was VEC-only — a USER record (custom iterable)
+  // drained EMPTY under `[...iterable]` / `Array.from(iterable)`. Rebuild it
+  // with a USER arm that steps the (just-rebuilt) `__iterator_next` to
+  // exhaustion into a fresh canonical `$Vec` (exhaustion ⇒ [[Done]] ⇒ no
+  // IteratorClose, §7.4.9). Locals are replaced alongside the body — the
+  // encoder reads both at emit, after this fill.
+  if (deps) {
+    const iteratorRestIdx = ctx.funcMap.get("__iterator_rest");
+    const iteratorRestFn = iteratorRestIdx !== undefined ? definedFuncAt(ctx, iteratorRestIdx) : undefined;
+    if (iteratorRestFn) {
+      iteratorRestFn.locals = [
+        { name: "rec", type: { kind: "ref", typeIdx: types.iterRecTypeIdx } },
+        { name: "vec", type: { kind: "ref_null", typeIdx: types.vecTypeIdx } },
+        { name: "i", type: { kind: "i32" } },
+        { name: "len", type: { kind: "i32" } },
+        { name: "out", type: { kind: "ref_null", typeIdx: types.arrTypeIdx } },
+        { name: "j", type: { kind: "i32" } },
+        { name: "done", type: { kind: "i32" } },
+        { name: "value", type: { kind: "externref" } },
+        { name: "grow", type: { kind: "ref_null", typeIdx: types.arrTypeIdx } },
+      ];
+      iteratorRestFn.body = buildIteratorRestBodyWithUserArm(types, iteratorNextIdx);
+    }
+  }
+
+  // (#3100 S5) IteratorClose: rebuild `__iterator_return` with the USER close
+  // arm when a `return` dispatcher exists. Without one, close on a USER record
+  // finds no `return` method ⇒ NormalCompletion (§7.4.9 step 4) — the eager
+  // empty body is already exactly that, so it stays untouched (byte-identical).
+  if (deps && deps.callReturnIdx !== undefined) {
+    const iteratorReturnIdx = ctx.funcMap.get("__iterator_return");
+    const iteratorReturnFn = iteratorReturnIdx !== undefined ? definedFuncAt(ctx, iteratorReturnIdx) : undefined;
+    if (iteratorReturnFn) {
+      iteratorReturnFn.locals = [
+        { name: "recAny", type: { kind: "anyref" } },
+        { name: "userIter", type: { kind: "externref" } },
+      ];
+      iteratorReturnFn.body = buildIteratorReturnBody(types, deps.callReturnIdx);
+    }
+  }
+
+  // (#3100 S5) Rebuild `__array_from_iter_n` so USER-iterable closed structs
+  // (an `@@iterator` or `next` method registered) are genuinely DRAINED through
+  // the `__iterator` USER arm — values AND IteratorClose — instead of passed
+  // through to the indexed reader (which cannot read them). Gated on `deps`:
+  // without the USER arm a custom-iterable drain would hit the hard-cast tail.
+  if (deps) {
+    const afinIdx = ctx.funcMap.get("__array_from_iter_n");
+    const afinFn = afinIdx !== undefined ? definedFuncAt(ctx, afinIdx) : undefined;
+    if (afinFn && afinFn.body.length > 0) {
+      const userTypeIdxs = collectUserIterableStructTypeIdxs(ctx);
+      if (userTypeIdxs.length > 0) {
+        afinFn.body = buildArrayFromIterNBody(
+          { vecTypeIdx: types.vecTypeIdx, arrTypeIdx: types.arrTypeIdx },
+          {
+            iteratorIdx,
+            iteratorNextIdx,
+            iteratorReturnIdx: ctx.funcMap.get("__iterator_return"),
+          },
+          userTypeIdxs,
+        );
+      }
+    }
+  }
+}
+
+/**
+ * (#3100 S5) Closed-struct types that carry an iterator-protocol method —
+ * `<Struct>_@@iterator` (an iterable) or `<Struct>_next` (an iterator object).
+ * These are the subjects the `__iterator` USER arm can drive, so the
+ * `__array_from_iter_n` drainability guard admits them. Same struct filter as
+ * `emitIteratorMethodExport` (index.ts). Sorted for deterministic emission.
+ */
+function collectUserIterableStructTypeIdxs(ctx: CodegenContext): number[] {
+  const out: number[] = [];
+  for (const [structName] of ctx.structFields) {
+    if (
+      structName.startsWith("Wrapper") ||
+      structName === "$AnyValue" ||
+      structName.startsWith("__vec_") ||
+      structName.startsWith("__arr_")
+    )
+      continue;
+    const typeIdx = ctx.structMap.get(structName);
+    if (typeIdx === undefined) continue;
+    if (ctx.funcMap.has(`${structName}_@@iterator`) || ctx.funcMap.has(`${structName}_next`)) {
+      out.push(typeIdx);
+    }
+  }
+  out.sort((a, b) => a - b);
+  return out;
+}
+
+/**
+ * (#3100 S5) Build the `__iterator_return(recExt) -> ()` body — IteratorClose
+ * §7.4.9 for the USER carrier: call the iterator's `return` method through the
+ * closed-struct `__call_return` dispatcher, discarding its result. Every
+ * non-USER shape (VEC records — array iteration has no observable `return` —
+ * a null/foreign externref after drift) exits early; the body NEVER traps.
+ * The §7.4.9 "innerResult not an Object ⇒ TypeError" refinement is deferred,
+ * matching the `__iterator_next` §7.4.4 refinement note (#2038).
+ * Locals (set at fill): 1 = recAny (anyref), 2 = userIter (externref).
+ */
+function buildIteratorReturnBody(types: IterRuntimeTypes, callReturnIdx: number): Instr[] {
+  const { iterRecTypeIdx } = types;
+  return [
+    // recAny = any.convert_extern(recExt); not an $IterRec → no-op return.
+    { op: "local.get", index: 0 },
+    { op: "any.convert_extern" } as Instr,
+    { op: "local.tee", index: 1 },
+    { op: "ref.test", typeIdx: iterRecTypeIdx } as Instr,
+    { op: "i32.eqz" },
+    { op: "if", blockType: { kind: "empty" }, then: [{ op: "return" } as Instr], else: [] } as Instr,
+    // Only USER records have a user `return` to dispatch.
+    { op: "local.get", index: 1 },
+    { op: "ref.cast", typeIdx: iterRecTypeIdx },
+    { op: "struct.get", typeIdx: iterRecTypeIdx, fieldIdx: 0 },
+    { op: "i32.const", value: ITER_KIND_USER },
+    { op: "i32.ne" },
+    { op: "if", blockType: { kind: "empty" }, then: [{ op: "return" } as Instr], else: [] } as Instr,
+    // userIter = rec.userIter; null → no-op.
+    { op: "local.get", index: 1 },
+    { op: "ref.cast", typeIdx: iterRecTypeIdx },
+    { op: "struct.get", typeIdx: iterRecTypeIdx, fieldIdx: 3 },
+    { op: "local.tee", index: 2 },
+    { op: "ref.is_null" } as Instr,
+    { op: "if", blockType: { kind: "empty" }, then: [{ op: "return" } as Instr], else: [] } as Instr,
+    // __call_return(userIter) — drop the result ({done} carrier or null when
+    // the struct has no `return` method; the dispatcher returns null then).
+    { op: "local.get", index: 2 },
+    { op: "call", funcIdx: callReturnIdx } as Instr,
+    { op: "drop" },
+  ];
 }
 
 /**
@@ -882,6 +1312,111 @@ function buildIteratorNextBody(types: IterRuntimeTypes, deps: UserCarrierDeps | 
 }
 
 /**
+ * (#3100 S5) Build the finalize-rebuilt `__iterator_rest` body: the existing
+ * vec tail-copy PLUS a USER arm that steps `__iterator_next(recExt)` to
+ * exhaustion into a fresh canonical `$Vec` (doubling-array drain, byte-shaped
+ * after the materializer's loop). Before this, a USER record (custom iterable)
+ * had `vec: null` so the vec-only body returned an EMPTY vec — `[...iterable]`
+ * and `Array.from(iterable)` silently produced [] for custom iterables.
+ * Exhaustion ⇒ [[Done]] ⇒ NO IteratorClose (§7.4.9).
+ * Locals (replaced at fill): 0=recExt(param), 1=rec, 2=vec, 3=i, 4=len/cap,
+ * 5=out(arr), 6=j, 7=done, 8=value, 9=grow(arr).
+ */
+function buildIteratorRestBodyWithUserArm(types: IterRuntimeTypes, iteratorNextIdx: number): Instr[] {
+  const { iterRecTypeIdx, vecTypeIdx, arrTypeIdx } = types;
+  const userDrain: Instr[] = [
+    // cap = 4; out = array.new_default(4); j = 0
+    { op: "i32.const", value: 4 },
+    { op: "local.set", index: 4 },
+    { op: "local.get", index: 4 },
+    { op: "array.new_default", typeIdx: arrTypeIdx },
+    { op: "local.set", index: 5 },
+    { op: "i32.const", value: 0 },
+    { op: "local.set", index: 6 },
+    {
+      op: "block",
+      blockType: { kind: "empty" },
+      body: [
+        {
+          op: "loop",
+          blockType: { kind: "empty" },
+          body: [
+            // (done, value) = __iterator_next(recExt)
+            { op: "local.get", index: 0 },
+            { op: "call", funcIdx: iteratorNextIdx } as Instr,
+            { op: "local.set", index: 8 },
+            { op: "local.set", index: 7 },
+            { op: "local.get", index: 7 },
+            { op: "br_if", depth: 1 },
+            // grow if j >= cap
+            { op: "local.get", index: 6 },
+            { op: "local.get", index: 4 },
+            { op: "i32.ge_s" },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                { op: "local.get", index: 4 } as Instr,
+                { op: "i32.const", value: 2 } as Instr,
+                { op: "i32.mul" } as Instr,
+                { op: "local.set", index: 4 } as Instr,
+                { op: "local.get", index: 4 } as Instr,
+                { op: "array.new_default", typeIdx: arrTypeIdx } as Instr,
+                { op: "local.set", index: 9 } as Instr,
+                { op: "local.get", index: 9 } as Instr,
+                { op: "i32.const", value: 0 } as Instr,
+                { op: "local.get", index: 5 } as Instr,
+                { op: "i32.const", value: 0 } as Instr,
+                { op: "local.get", index: 6 } as Instr,
+                { op: "array.copy", dstTypeIdx: arrTypeIdx, srcTypeIdx: arrTypeIdx } as Instr,
+                { op: "local.get", index: 9 } as Instr,
+                { op: "local.set", index: 5 } as Instr,
+              ],
+              else: [],
+            } as Instr,
+            // out[j] = value; j++
+            { op: "local.get", index: 5 },
+            { op: "ref.as_non_null" } as Instr,
+            { op: "local.get", index: 6 },
+            { op: "local.get", index: 8 },
+            { op: "array.set", typeIdx: arrTypeIdx } as Instr,
+            { op: "local.get", index: 6 },
+            { op: "i32.const", value: 1 },
+            { op: "i32.add" },
+            { op: "local.set", index: 6 },
+            { op: "br", depth: 0 },
+          ],
+        } as Instr,
+      ],
+    } as Instr,
+    // return $Vec{j, out} as externref
+    { op: "local.get", index: 6 },
+    { op: "local.get", index: 5 },
+    { op: "ref.as_non_null" } as Instr,
+    { op: "struct.new", typeIdx: vecTypeIdx },
+    { op: "extern.convert_any" } as Instr,
+    { op: "return" } as Instr,
+  ];
+
+  return [
+    // rec = cast(recExt)
+    { op: "local.get", index: 0 },
+    { op: "any.convert_extern" } as Instr,
+    { op: "ref.cast", typeIdx: iterRecTypeIdx },
+    { op: "local.set", index: 1 },
+    // USER record → step-to-exhaustion drain
+    { op: "local.get", index: 1 },
+    { op: "struct.get", typeIdx: iterRecTypeIdx, fieldIdx: 0 },
+    { op: "i32.const", value: ITER_KIND_USER },
+    { op: "i32.eq" },
+    { op: "if", blockType: { kind: "empty" }, then: userDrain, else: [] } as Instr,
+    // VEC record → the existing tail-copy, reading rec from local 1
+    { op: "local.get", index: 1 },
+    ...buildIteratorRestVecTail(iterRecTypeIdx, vecTypeIdx, arrTypeIdx),
+  ];
+}
+
+/**
  * Build the `__iterator_rest` body: copy the canonical vec's elements from the
  * cursor to the end into a fresh externref vec, returned as externref.
  * Locals: 0=recExt(param), 1=rec, 2=vec, 3=i, 4=len, 5=out(arr), 6=j.
@@ -893,6 +1428,17 @@ function buildIteratorRestBody(iterRecTypeIdx: number, vecTypeIdx: number, arrTy
     { op: "any.convert_extern" } as Instr,
     { op: "ref.cast", typeIdx: iterRecTypeIdx },
     { op: "local.tee", index: 1 },
+    ...buildIteratorRestVecTail(iterRecTypeIdx, vecTypeIdx, arrTypeIdx),
+  ];
+}
+
+/**
+ * The vec tail-copy of `__iterator_rest` — everything after the record is on
+ * the stack. Shared by the eager vec-only body and the (#3100 S5) USER-aware
+ * rebuild. Expects the `$IterRec` (non-null ref) ON THE STACK; consumes it.
+ */
+function buildIteratorRestVecTail(iterRecTypeIdx: number, vecTypeIdx: number, arrTypeIdx: number): Instr[] {
+  return [
     // vec = rec.vec
     { op: "struct.get", typeIdx: iterRecTypeIdx, fieldIdx: 1 },
     { op: "local.set", index: 2 },
