@@ -45,6 +45,7 @@ import {
   awaitedExprIsPromiseCombinator,
   forAwaitAsyncNeedsDrive,
   forAwaitNeedsDrive,
+  asyncGenOwnLocalDecls,
   forAwaitSpillInfo,
   isAwaitFreeAsyncGenBody,
   isBoundedAsyncGenBody,
@@ -576,6 +577,20 @@ function computeAsyncSpills(
   plan: AsyncCpsPlan,
   paramNames: string[],
 ): { spillNames: string[]; spillTypes: ValType[] } {
+  // (#2865) Async GENERATOR (`async function*` — the only asterisked shape that
+  // reaches the async frame): EVERY yield is a suspend point (the resume fn
+  // returns and re-enters on the next `next()` kick), so every own identifier
+  // local is conservatively treated as live-across-suspend and spilled — the
+  // same widened rule the 3a loop machine uses. Params live in param fields.
+  if (decl.asteriskToken !== undefined) {
+    const spillNames: string[] = [];
+    const spillTypes: ValType[] = [];
+    for (const [name, node] of asyncGenOwnLocalDecls(decl)) {
+      spillNames.push(name);
+      spillTypes.push(resolveSpillLocalValType(ctx, node) ?? { kind: "externref" });
+    }
+    return { spillNames, spillTypes };
+  }
   const linear = planLinearAwaits(decl, plan);
   if (linear === null) {
     // (#2906 slice 3a) `while`-with-await loop: widened spill set (all loop
@@ -1657,10 +1672,18 @@ export function emitAsyncFrameStateMachine(
  */
 export function isAsyncGenDriveCandidate(ctx: CodegenContext, decl: ts.FunctionLikeDeclaration): boolean {
   if (!ASYNC_CPS_ENABLED) return false;
+  // (#2865) Own body locals become frame spills — every spill field must have a
+  // spill-safe type (an inert `struct.new` default), or the layout is invalid.
+  const spillsSafe = (): boolean => {
+    for (const node of asyncGenOwnLocalDecls(decl).values()) {
+      if (!isSpillSafeType(resolveSpillLocalValType(ctx, node) ?? { kind: "externref" })) return false;
+    }
+    return true;
+  };
   // Under the native-`$Promise` CARRIER (`isStandalonePromiseActive`, wasi
   // today): the full bounded shape, awaited yields included — the awaited
   // operand lowers to a native `$Promise` the suspend arm can assimilate.
-  if (isStandalonePromiseActive(ctx)) return isBoundedAsyncGenBody(decl);
+  if (isStandalonePromiseActive(ctx)) return isBoundedAsyncGenBody(decl) && spillsSafe();
   // (#2865) `--target standalone` with the carrier gate still OFF (#2980):
   // drive the producer host-free ONLY for await-free bodies. With the carrier
   // off an awaited operand does not lower to a native `$Promise`, so
@@ -1668,7 +1691,7 @@ export function isAsyncGenDriveCandidate(ctx: CodegenContext, decl: ts.FunctionL
   // — those bodies keep the legacy path (correct-or-legacy, #680 CE) until the
   // measured carrier widen. An await-free body is carrier-independent: every
   // promise the machine touches is minted by `__async_gen_next_<name>` itself.
-  if (isAsyncDriveActive(ctx)) return isAwaitFreeAsyncGenBody(decl);
+  if (isAsyncDriveActive(ctx)) return isAwaitFreeAsyncGenBody(decl) && spillsSafe();
   return false;
 }
 
