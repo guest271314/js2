@@ -1506,6 +1506,16 @@ export interface CodegenContext {
    */
   asyncGenLegacyBufferEmitted?: boolean;
   /**
+   * (#2980 conservative Promise-lane fallback) True when the module SOURCE has
+   * ANY async generator, set in the pre-body `collectDeclarations` walk. On the
+   * widened-standalone measure lane, `widenAsyncGenFallback` (async-scheduler.ts)
+   * keeps BOTH carrier gates OFF for such a module — a native `$Promise` fed into
+   * the gen's legacy `__gen_*` buffer / host `.then` over `__gen_next` mishandles
+   * it (the 07-09 async-generator −4). Pre-body so a `Promise.reject` INSIDE the
+   * gen sees it. Read only under the measure — wasi + gc/host stay byte-identical.
+   */
+  moduleHasAsyncGen?: boolean;
+  /**
    * Function declarations pre-registered during module-pass eager class body
    * compilation. The entry has a reserved `mod.functions` slot and signature,
    * but its body still belongs to the normal nested-function hoist pass.
