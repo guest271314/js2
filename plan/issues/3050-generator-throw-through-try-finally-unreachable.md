@@ -4,6 +4,7 @@ title: "GeneratorPrototype.throw() resumption through try/finally / try/catch hi
 status: done
 completed: 2026-07-09
 assignee: ttraenkler/fable-3050
+pr: 2807
 sprint: current
 priority: medium
 horizon: m
