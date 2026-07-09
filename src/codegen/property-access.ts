@@ -7624,6 +7624,35 @@ export function isNumericIndexExpression(ctx: CodegenContext, index: ts.Expressi
   return (t.flags & ts.TypeFlags.NumberLike) !== 0;
 }
 
+/**
+ * (#2773) True when an element-access index is a **dynamic `any`/`unknown`-typed**
+ * expression — the callback `idx` param of an `Array.prototype.{map,forEach,…}`
+ * callback passed as a *named function declaration* (TS does not contextually
+ * type such params → they are implicit `any`). This is the complement of
+ * {@link isNumericIndexExpression}: a statically-numeric index routes through the
+ * `#2784` native-vec read; a dynamic `any` index needs the runtime-guarded
+ * `__vec_len`/`__vec_get` read (property-access dynamic arm) so that `obj[idx]`
+ * on a native WasmGC vec coerced to `externref` returns the real element instead
+ * of the host `__extern_get` `undefined` (the vec is opaque to the host).
+ *
+ * A pure `string`/`symbol` key (a genuine property name, not an array index) and
+ * a union type are EXCLUDED — they stay on the string-keyed `__extern_get`.
+ */
+export function isAnyTypedIndexExpression(ctx: CodegenContext, index: ts.Expression): boolean {
+  let inner: ts.Expression = index;
+  while (ts.isParenthesizedExpression(inner) || ts.isAsExpression(inner) || ts.isTypeAssertionExpression(inner)) {
+    inner = inner.expression;
+  }
+  // A numeric literal is statically numeric → handled by the #2784 path.
+  if (ts.isNumericLiteral(inner)) return false;
+  // Route through the oracle (#1930): `typeFactOf` yields `{kind:"any"}` /
+  // `{kind:"unknown"}` for an implicit-any index and `{kind:"union"}` for a
+  // union (⇒ excluded), so the check is exactly "the index type is `any`/
+  // `unknown`". A string/symbol key resolves to a different fact kind ⇒ excluded.
+  const fact = ctx.oracle.typeFactOf(inner);
+  return fact.kind === "any" || fact.kind === "unknown";
+}
+
 /** Inner element access logic — assumes objType is on the stack and non-null */
 export function compileElementAccessBody(
   ctx: CodegenContext,
@@ -7728,6 +7757,103 @@ export function compileElementAccessBody(
         fctx.body.push({ op: "call", funcIdx: extGetIdx } as Instr);
         return { kind: "externref" };
       }
+      fctx.body.push({ op: "drop" } as Instr);
+      fctx.body.push({ op: "ref.null.extern" } as Instr);
+      return { kind: "externref" };
+    }
+    // (#2773) DYNAMIC-index native-vec element read. The #2784 arm above only
+    // fires for a STATICALLY-numeric index. When the index is a dynamic
+    // `any`/`unknown` expression — the untyped `idx` param of an
+    // `Array.prototype.{map,forEach,filter,reduce,…}` callback passed as a NAMED
+    // function declaration (TS does not contextually type such params) — the
+    // receiver `obj` (the callback's 3rd `array` arg) is a native WasmGC vec
+    // coerced to `externref`, opaque to the host. The old fallback below routes
+    // `obj[idx]` to the host `__extern_get`, which cannot read the vec → returns
+    // `undefined`, so `obj[idx] !== val` in the "callbackfn called with correct
+    // parameters" test262 family is wrongly true. Route through the native
+    // `__vec_len` (0 for a non-vec ⇒ doubles as the vec-vs-host-object
+    // discriminator AND the in-bounds guard) + `__vec_get` (per-element-kind read
+    // → boxed carrier externref; already maps `$Hole → undefined`). For a non-vec
+    // receiver, an OOB index, or a non-integer/string key the guard is false and
+    // we fall to the host `__extern_get(recv, key)` — byte-for-byte the same
+    // observable result the old path produced for those cases (a host object read
+    // / `undefined`), so this arm only *adds* the correct native-vec answer.
+    // Host/gc only: standalone has its own `__extern_get_idx` `$ObjVec` path.
+    if (!ctx.standalone && ctx.vecTypeMap.size > 0 && isAnyTypedIndexExpression(ctx, expr.argumentExpression)) {
+      // recv externref is on the stack → recvLocal (allocated FIRST so local
+      // numbering is stable through the index compile, per #3007).
+      const recvLocal = allocLocal(fctx, `__dyn_recv_${fctx.locals.length}`, { kind: "externref" });
+      fctx.body.push({ op: "local.set", index: recvLocal } as Instr);
+      // Compile the key as externref FIRST (preserves a string key's identity for
+      // the host fallback) BEFORE capturing helper funcIdxs — the key's own
+      // lowering may register late imports that shift them (#3007). Single flush.
+      compileExpression(ctx, fctx, expr.argumentExpression, { kind: "externref" });
+      const keyLocal = allocLocal(fctx, `__dyn_key_${fctx.locals.length}`, { kind: "externref" });
+      fctx.body.push({ op: "local.set", index: keyLocal } as Instr);
+      const unboxIdx = ensureLateImport(ctx, "__unbox_number", [{ kind: "externref" }], [{ kind: "f64" }]);
+      const extGetIdx = ensureLateImport(
+        ctx,
+        "__extern_get",
+        [{ kind: "externref" }, { kind: "externref" }],
+        [{ kind: "externref" }],
+      );
+      flushLateImportShifts(ctx, fctx);
+      const vgIdx = ctx.funcMap.get("__vec_get") ?? reserveVecMethodHelper(ctx, "get");
+      const vlIdx = ctx.funcMap.get("__vec_len") ?? reserveVecMethodHelper(ctx, "len");
+      if (unboxIdx !== undefined && extGetIdx !== undefined && vgIdx !== undefined && vlIdx !== undefined) {
+        const idxF64 = allocLocal(fctx, `__dyn_idxf_${fctx.locals.length}`, { kind: "f64" });
+        const idxI32 = allocLocal(fctx, `__dyn_idxi_${fctx.locals.length}`, { kind: "i32" });
+        // idxF64 = Number(key); idxI32 = truncated integer. Number(non-numeric
+        // string) is NaN, and i32.trunc_sat(NaN) = 0 — the integer round-trip
+        // check below rejects it so a genuine string key never mis-indexes.
+        fctx.body.push({ op: "local.get", index: keyLocal } as Instr);
+        fctx.body.push({ op: "call", funcIdx: unboxIdx } as Instr);
+        fctx.body.push({ op: "local.tee", index: idxF64 } as Instr);
+        fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
+        fctx.body.push({ op: "local.set", index: idxI32 } as Instr);
+        // cond = idxI32 >= 0 && idxI32 < __vec_len(recv) && f64(idxI32) === idxF64
+        fctx.body.push({ op: "local.get", index: idxI32 } as Instr);
+        fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+        fctx.body.push({ op: "i32.ge_s" } as Instr);
+        fctx.body.push({ op: "local.get", index: idxI32 } as Instr);
+        fctx.body.push({ op: "local.get", index: recvLocal } as Instr);
+        fctx.body.push({ op: "call", funcIdx: vlIdx } as Instr);
+        fctx.body.push({ op: "i32.lt_s" } as Instr);
+        fctx.body.push({ op: "i32.and" } as Instr);
+        fctx.body.push({ op: "local.get", index: idxI32 } as Instr);
+        fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+        fctx.body.push({ op: "local.get", index: idxF64 } as Instr);
+        fctx.body.push({ op: "f64.eq" } as Instr);
+        fctx.body.push({ op: "i32.and" } as Instr);
+        // then: __vec_get(recv, idxI32) — in-bounds native element (boxed carrier)
+        const thenInstrs: Instr[] = [
+          { op: "local.get", index: recvLocal } as Instr,
+          { op: "local.get", index: idxI32 } as Instr,
+          { op: "call", funcIdx: vgIdx } as Instr,
+        ];
+        // else: __extern_get(recv, key) — non-vec host object, OOB, or string key
+        const elseInstrs: Instr[] = [
+          { op: "local.get", index: recvLocal } as Instr,
+          { op: "local.get", index: keyLocal } as Instr,
+          { op: "call", funcIdx: extGetIdx } as Instr,
+        ];
+        fctx.body.push({
+          op: "if",
+          blockType: { kind: "val", type: { kind: "externref" } as ValType },
+          then: thenInstrs,
+          else: elseInstrs,
+        } as Instr);
+        return { kind: "externref" };
+      }
+      // Defensive fallback — helpers unavailable (unreachable in host mode). Read
+      // via the host from the stored key so the stack stays balanced.
+      fctx.body.push({ op: "local.get", index: recvLocal } as Instr);
+      fctx.body.push({ op: "local.get", index: keyLocal } as Instr);
+      if (extGetIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx: extGetIdx } as Instr);
+        return { kind: "externref" };
+      }
+      fctx.body.push({ op: "drop" } as Instr);
       fctx.body.push({ op: "drop" } as Instr);
       fctx.body.push({ op: "ref.null.extern" } as Instr);
       return { kind: "externref" };
