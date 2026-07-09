@@ -136,7 +136,7 @@ interface ObjCarrierDeps {
   applyClosureIdx: number;
   /** `__box_symbol(i32 id) -> externref` — interned `$Symbol` carrier (#2866). */
   boxSymbolIdx: number;
-  /** `__is_truthy(externref) -> i32` (§7.1.2 ToBoolean). */
+  /** The `(externref) -> i32` §7.1.2 ToBoolean helper (reused USER-deps funcIdx). */
   isTruthyIdx: number;
   /** `$Object` struct typeIdx — discriminates the step-result read path. */
   objectTypeIdx: number;
