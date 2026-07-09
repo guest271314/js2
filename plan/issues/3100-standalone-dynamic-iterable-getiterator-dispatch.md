@@ -1,7 +1,9 @@
 ---
 id: 3100
 title: "Standalone dynamic-iterable substrate: native GetIterator/IteratorStep dispatch for externref/any iterables (for-of over `Object.keys(any)` traps illegal_cast today)"
-status: ready
+status: done
+completed: 2026-07-09
+assignee: ttraenkler/fable-3100
 sprint: Backlog
 model: fable
 created: 2026-07-09
@@ -152,3 +154,126 @@ protocol arm. #3098 is independent (callback vs iteration) but shares the
 
 L–XL total; S1/S3 are the Fable-grade design slices (ladder + protocol ABI),
 S2/S4/S5 Opus-executable from the S1 template.
+
+## Implementation notes (S1, landed 2026-07-09 — fable-3100)
+
+### Verify-first repro (origin/main @ 825ffba1cf8d3)
+
+All three probe traps reproduced exactly as specced (`illegal cast`):
+`for (k of Object.keys(o:any))`, `for ([k,v] of Object.entries(o:any))`, and
+`for (x of a:any)` where `a` holds `[10,20,30]`. Controls passed. Two spec
+updates from the probes: (a) the **user-`@@iterator` probe already passes on
+current main** (#3099 landed method-shorthand materialization + the #2038
+USER arm covers it) — S3's "protocol dispatch" was already substantially
+alive; (b) **spread of `Object.keys(any)` already passes** (the #2904
+`__array_from_iter_n` non-vec guard routes indexable sources to
+`__extern_length`/`__extern_get_idx`, which have carrier arms).
+
+### Root cause, pinned to the instruction
+
+WAT tracing showed the failing lowering is NOT in for-of consumer codegen —
+the consumer correctly routes through the native `__iterator` /
+`__iterator_next` runtime (iterator-native.ts, #1320/#2038). The trap is
+inside **`__iterator` (GetIterator §7.4.1) itself**: its ladder accepted ONLY
+the canonical externref `$Vec` (`ref.test` then arm) and the else-arm
+**hard-cast to the same type** (`ref.cast $Vec<externref>` — the documented
+Slice-1 "trap loudly" fallback). But:
+
+- `Object.keys/values/entries(<any>)` return a **`$ObjVec`** (object-runtime
+  enumeration carrier, structurally `{len i32, data ref $ObjVecArr}` but a
+  DISTINCT type outside the `$__vec_base` hierarchy) → cast traps.
+- an `any`-held array literal is a typed **`__vec_<elemKind>`** (probe: `const
+a:any=[10,20,30]` builds `__vec_f64`, extern-converted) → cast traps.
+
+This is the exact iteration twin of #2190's read-side gap (`__extern_get_idx`
+had no typed-vec arms) and it has the same shape of fix.
+
+### What S1 landed
+
+**One normalize-at-GetIterator step; zero changes to IteratorStep.** At
+finalize — when every module-local carrier type is registered, the same
+reason `fillExternGetIdxVecArms` fills late — the renamed
+`fillNativeIteratorLateArms` (was `fillNativeIteratorUserArms`) rebuilds
+`__iterator` with **vec-FAMILY arms** between the canonical-vec arm and the
+USER/trap tail:
+
+- `$ObjVec` + every `ctx.vecTypeMap` carrier with a proven element-boxing
+  recipe (reuses `boxVecElementToExternref` from #2190: f64/i32 →
+  `__box_number`, externref → identity, `$AnyString`/`$NativeString` refs →
+  `extern.convert_any`; everything else — boolean-tagged i32, non-string GC
+  refs, packed `i8`/`i16` — is SKIPPED and keeps the legacy loud trap, never
+  silently-wrong iteration). `i32_byte`/`i8_byte`/`i32_elem` byte carriers
+  (ArrayBuffer/Uint8Array storage) are filtered out by key.
+- Each arm copy+boxes the elements into a **fresh canonical externref
+  `$Vec`** and returns the existing `$IterRec{VEC,…}` — so
+  `__iterator_next`/`__iterator_rest` and every consumer are untouched. A
+  copy (not an aliased rewrap of the carrier's data array) is deliberate:
+  cross-type `struct.new` over structurally-identical-but-distinct array
+  types would lean on engine iso-recursive canonicalization — the
+  #2009/#2158 hazard class. O(n) once per GetIterator; steps stay O(1).
+- The USER arm fill is now **independent** of the family arms (previously the
+  whole fill bailed when the closed-struct dispatchers were missing; now a
+  module with no custom iterable still iterates `Object.keys(<any>)`).
+  `__iterator_next` is rebuilt only when USER deps exist (without the USER
+  arm the kind is always VEC — family arms normalize INTO the canonical vec).
+
+Why this locus and not the for-of lowering: every dynamic-iteration consumer
+(for-of externref arm, `__array_from_iter_n` drain, future spread/`Array.from`
+migration) already binds to `__iterator` by name — widening the ladder fixes
+all of them at one chokepoint and is the "one walker, refactor consumers onto
+it" discipline the Design section asks for. The issue's provisional
+`__get_iterator`/`__iter_step` names were NOT introduced: `__iterator`/
+`__iterator_next` ARE that ladder; a parallel pair would duplicate the ABI.
+
+Discipline notes: fresh `Instr` objects per arm (factory style — the #2169b
+shared-object double-remap hazard); the only baked funcIdx is `__box_number`,
+resolved from funcMap at fill time exactly like the landed #2038 USER-arm
+dispatcher funcIdxs; three scratch locals (`i`/`len`/`out`) are declared at
+registration so the fill never grows the locals list.
+
+### Arm-6 finding (null/undefined TypeError)
+
+Under the current default value regime, `undefined` on the externref plane IS
+`ref.null extern`, and the for-of consumer (loops.ts) already null-guards and
+throws BEFORE calling `__iterator` — probe `for (x of null)` lands in `catch`
+today. So a separate ladder arm would be dead code until the #2106
+`undefinedSingleton` regime (flag-gated, default OFF) makes `undefined` a
+distinct non-null singleton. Deferred to the #2106 flip lane: when the
+singleton activates, add an identity arm (`ref.eq` against the
+`$undefined` global) that throws a real TypeError.
+
+### Validation (all measured, branch vs unmodified main)
+
+- **Repro→fixed**: all 3 traps flip (`2`, `11`, `3`), host-free; 15-case edge
+  probe (nested/re-entrant, break, empty, mixed elems, string vecs, Map,
+  generators, typed arrays, function-returning-any) 14/15 — the 1 failure
+  (`const [x,y] = a:any` fixed-arity dstr, "Cannot convert object to
+  primitive value") reproduces IDENTICALLY on main: pre-existing, different
+  lane (S2/S4 consumer, `__extern_get_idx` boxing), not a regression.
+- **`tests/issue-3100.test.ts`**: 15/15 (10 fix cases + 5 regression guards),
+  every case asserts ZERO host imports.
+- **Byte-identity**: 10-program corpus (host arith/for-of/class/async/spread/
+  dstr/`arr.values()`, standalone typed for-of/string for-of/typed
+  `Object.keys`) — SHA-256 identical main vs branch. Only modules that
+  register the native iterator runtime change bytes (that's the fix).
+- **Scoped equivalence**: 30 iterator/spread/generator/dstr test files — the
+  only failures (15+5) are byte-for-byte the same pre-existing set on main.
+- **test262 clusters via `runTest262File` (standalone lane)**:
+  `language/statements/for-of` (182 files: 81P/95F/6CE),
+  `built-ins/Array/from` (47: 4P/26F/17CE),
+  `language/expressions/assignment/dstr` (368: 228P/140F) — per-file status
+  maps IDENTICAL main vs branch, zero flips either way. test262's untyped JS
+  mostly presents checker-typed receivers to for-of, so the S1 population
+  there is small; the S1 value is the user-code `any` shape (the probes) and
+  the substrate for S2–S5 (S4's 4,348-file `__array_from_iter_n` retirement
+  is where the JSONL leak-count drop is expected).
+
+### Remaining slices (unchanged plan)
+
+S2 largely subsumed (entries destructuring works via the S1 arm — probe
+`[k,v]` sums values correctly); S3 protocol arm alive via #2038+#3099 for
+closed-struct iterables (plain-`$Object` `@@iterator` residuals may remain);
+S4 (spread/`Array.from` consumer migration onto `__iterator`, retiring
+`__array_from_iter_n`'s bypass) and S5 (Proxy arm + IteratorClose §7.4.9
+through the ladder) are open. Fixed-arity dstr from `any` (`const [x,y] =
+a`) is a distinct pre-existing bug in the read lane — worth its own issue.
