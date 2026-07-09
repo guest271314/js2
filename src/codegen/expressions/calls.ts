@@ -27,12 +27,8 @@ import { classMemberFuncKey } from "../class-member-keys.js"; // (#1983) collisi
 import { ensureNativeIteratorRuntime } from "../iterator-native.js"; // (#2169c) native Array.from drain
 import { reserveClosedMethodDispatch, reserveClosedMethodDispatchVararg } from "../closed-method-dispatch.js";
 import { emitNativeDateParse } from "../date-parse-native.js"; // (#2164) pure-Wasm Date.parse / new Date(str)
-import {
-  ensureObjVecBuilders,
-  ensureObjectGroupBy,
-  ensureObjectRuntime,
-  NATIVE_HOF_METHODS,
-} from "../object-runtime.js";
+import { NATIVE_HOF_METHODS } from "../hof-native.js";
+import { ensureObjVecBuilders, ensureObjectGroupBy, ensureObjectRuntime } from "../object-runtime.js";
 import {
   emitMicrotaskEnqueue,
   emitStandalonePromiseReject,

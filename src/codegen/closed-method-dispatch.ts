@@ -39,8 +39,9 @@
 import type { Instr, ValType, WasmFunction } from "../ir/types.js";
 import { ensureExternSameValueZeroHelper, ensureExternStrictEqHelper } from "./any-helpers.js";
 import type { CodegenContext } from "./context/types.js";
+import { ensureNativeArrayHof, NATIVE_HOF_METHODS } from "./hof-native.js";
 import { stringConstantExternrefInstrs } from "./native-strings.js";
-import { ensureNativeArrayHof, ensureObjVecBuilders, NATIVE_HOF_METHODS } from "./object-runtime.js";
+import { ensureObjVecBuilders } from "./object-runtime.js";
 import { addStringConstantGlobal } from "./registry/imports.js";
 import { addFuncType, getOrRegisterVecBaseType } from "./registry/types.js";
 import { addUnionImportsViaRegistry } from "./shared.js";

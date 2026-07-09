@@ -1,7 +1,7 @@
 {
   "generated": "2026-07-09",
   "threshold": 1500,
-  "totalCeiling": 385564,
+  "totalCeiling": 386034,
   "files": {
     "src/codegen-linear/index.ts": 5506,
     "src/codegen-linear/runtime.ts": 3638,
@@ -21,7 +21,7 @@
     "src/codegen/expressions.ts": 1567,
     "src/codegen/expressions/assignment.ts": 7284,
     "src/codegen/expressions/builtins.ts": 3709,
-    "src/codegen/expressions/calls.ts": 17374,
+    "src/codegen/expressions/calls.ts": 17396,
     "src/codegen/expressions/identifiers.ts": 1925,
     "src/codegen/expressions/new-super.ts": 5597,
     "src/codegen/expressions/unary-updates.ts": 2087,
