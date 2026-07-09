@@ -374,3 +374,61 @@ current main (probes: 3/3). What actually remained in the S4 consumer set:
 - `f(...anyVec)` fixed-arity spread call emits invalid Wasm ("not enough
   arguments on the stack") — 1 test262 row, pre-existing.
 - `Array.from(any, mapFn)` → 17 rows, blocked on the #3098 callback lane.
+
+## Implementation notes (S5, landed 2026-07-09 — fable-3100s4)
+
+### Scope shipped: IteratorClose §7.4.9 + custom-iterable consumer completion
+
+Verify-first probes on post-S4 main: `return()` was NEVER called standalone
+(for-of break/throw, assignment dstr, decl dstr — all `closed=0`), and the
+custom-iterable CONSUMERS were value-broken too: `[x,y] = customIterable`
+read nothing (the #2904 materializer guard passed closed structs through to
+indexed reads), `[...customIterable]` / `Array.from(customIterable)` drained
+EMPTY (`__iterator_rest` was vec-only). All fixed at the finalize fill:
+
+1. `emitMethodDispatch("return", "__call_return")` (index.ts, one line) —
+   emitted only when some struct carries a `return` method.
+2. `__iterator_return` rebuilt with the USER close arm (dispatch
+   `__call_return` on the record's userIter; every non-USER shape no-ops,
+   never traps). The §7.4.9 "innerResult not an Object ⇒ TypeError"
+   refinement deferred, matching the §7.4.4 note on `__iterator_next`.
+3. `__array_from_iter_n` (shared `buildArrayFromIterNBody`): drainability
+   guard widened at fill with the user-iterable closed-struct type tests
+   (`collectUserIterableStructTypeIdxs` — `<S>_@@iterator` / `<S>_next` in
+   funcMap, no runtime method invocation so no double-@@iterator); bounded
+   stop with the iterator NOT done now calls IteratorClose — a DELIBERATE
+   spec-following divergence from the host `_arrayFromIter` (#1592 no-close).
+4. `__iterator_rest` rebuilt with a USER step-to-exhaustion drain arm
+   (doubling-array via `__iterator_next`); exhaustion ⇒ no close ✓.
+5. Spread-literal externref arm materializes first via
+   `emitStandaloneIterableMaterialize` (new consumer helper in
+   iterator-native.ts — passthrough for indexable carriers, protocol drain
+   for custom iterables).
+
+### Measured
+
+- 14/14 close+consumer probes flip (close exactly once on break/throw/
+  non-exhausting dstr; no close on exhaustion/already-done/no-return-method;
+  dstr/rest/spread/Array.from values correct host-free).
+- `tests/issue-3100-s5.test.ts` 18/18 (+ S4's 17/17 green), zero-import
+  asserted per case.
+- 945-file standalone sweep (assignment/dstr + for-of/dstr +
+  assignment/destructuring), branch vs main @ e348f55: **zero flips either
+  way, host_free_pass +0/−0**. Byte-identity corpus 14/15 — the single diff
+  is the materializer module (the S5 rebuild target).
+- **Why test262's `*-close.js` cluster did NOT flip**: those tests build
+  iterators as PLAIN `$Object`s (`var iterator = { next: function(){}, … }`
+  + a COMPUTED `iterable[Symbol.iterator] = fn` install). That's the
+  dynamic-object protocol lane — invoking $Object-stored functions
+  (#3098 `__apply_closure`/`__make_callback`) plus the S3 plain-$Object
+  `@@iterator` residual — NOT the closed-struct dispatchers. They fail
+  before close semantics are even observable. S5's value is the TS/user-code
+  closed-struct lane (same population split S1 documented).
+
+### Remaining (S5-residual / explicitly out)
+
+- Proxy arm (ladder arm 1) — needs #1355 standalone Proxy infra; test262
+  Proxy rows are skip-filtered anyway.
+- Plain-`$Object` iterator protocol (test262 close cluster, ~57 rows) —
+  needs $Object-stored-function invocation; belongs with #3098's callback
+  lane or a dedicated S6.

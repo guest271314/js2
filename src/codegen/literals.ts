@@ -28,6 +28,7 @@ import {
 import { addStringConstantGlobal } from "./registry/imports.js";
 import { emitHoleSentinel } from "./array-holes.js"; // (#2001 S1)
 import { ensureStrToCharVecHelper, stringConstantExternrefInstrs } from "./native-strings.js";
+import { emitStandaloneIterableMaterialize } from "./iterator-native.js"; // (#3100 S5)
 import { popBody, pushBody } from "./context/bodies.js";
 import { reportError } from "./context/errors.js";
 import { allocLocal, allocTempLocal, releaseTempLocal } from "./context/locals.js";
@@ -3785,6 +3786,9 @@ export function compileArrayLiteral(
         fctx.body.push({ op: "local.set", index: externLocal });
         const matVecInfo = getVecInfo(ctx, vecTypeIdx);
         if (!matVecInfo) continue;
+        // (#3100 S5) Standalone: protocol-materialize FIRST (custom-iterable
+        // drain / indexable passthrough) so the indexed reads below stay right.
+        emitStandaloneIterableMaterialize(ctx, fctx, externLocal);
         const matInstrs = buildVecFromExternref(ctx, fctx, externLocal, vecTypeIdx, matVecInfo);
         for (const instr of matInstrs) fctx.body.push(instr);
         const srcLocal = allocLocal(fctx, `__spread_mat_${fctx.locals.length}`, {
