@@ -1646,6 +1646,180 @@ export type GeneratorDecl = ts.FunctionDeclaration | ts.MethodDeclaration;
  * `.next()` driving, so it does NOT flip the host lane.) Does not descend into
  * nested function-likes — their yields/trys belong to inner generators.
  */
+/**
+ * (#3050) True when any value-position identifier in the generator body has no
+ * checker symbol (an unresolvable global like test262's `test262unresolvable`).
+ * Host-lane native routing bails on these — the eager path's #928
+ * deferred-pending-throw is the behavior the JS-host lane relies on. Skips
+ * property names and does not descend into nested function-likes.
+ */
+function bodyReferencesUnresolvableIdentifier(ctx: CodegenContext, decl: GeneratorDecl): boolean {
+  if (!decl.body) return false;
+  const { checker } = ctx;
+  let found = false;
+  function visit(node: ts.Node): void {
+    if (found) return;
+    if (
+      ts.isFunctionDeclaration(node) ||
+      ts.isFunctionExpression(node) ||
+      ts.isArrowFunction(node) ||
+      ts.isMethodDeclaration(node)
+    ) {
+      return;
+    }
+    if (
+      ts.isIdentifier(node) &&
+      node.text !== "arguments" &&
+      node.text !== "undefined" &&
+      !(ts.isPropertyAccessExpression(node.parent) && node.parent.name === node) &&
+      !(ts.isPropertyAssignment(node.parent) && node.parent.name === node) &&
+      !((ts.isVariableDeclaration(node.parent) || ts.isBindingElement(node.parent)) && node.parent.name === node)
+    ) {
+      const sym = checker.getSymbolAtLocation(node);
+      if (!sym) {
+        found = true;
+        return;
+      }
+    }
+    ts.forEachChild(node, visit);
+  }
+  ts.forEachChild(decl.body, visit);
+  return found;
+}
+
+/**
+ * (#3050) Conservative HOST-lane use-site safety walk. The native generator
+ * state struct is a WasmGC ref the JS host cannot iterate, so it must never
+ * escape to a host-iterating context. Walks every `<name>(…)` call in the
+ * source file and demands its result flow into an allowlisted consumer:
+ *
+ *   - `g().next()/…` member access on the call result;
+ *   - `for (x of g())` (NO await), `[...g()]`, `Array.from(g())`;
+ *   - `const [a,b] = g()` array-destructuring;
+ *   - `iter = g()` / `var iter = g()` — where EVERY reference of `iter` is
+ *     itself allowlisted (member access — `.next()`/`.throw()` incl. inside
+ *     nested closures like `assert.throws(function(){ iter.throw(e) })` —
+ *     for-of/spread/Array.from subject, destructuring source, reassignment).
+ *
+ * Anything else (an eager generator's `yield*` subject, for-await-of, an
+ * arbitrary call argument such as `Promise.all(g())` / `new Map(g())`, a
+ * return value, a property value, …) fails the walk and the generator keeps
+ * the eager host path. Name-based matching over-approximates (a shadowing
+ * same-named function bails too) — conservative by design.
+ */
+function hostLaneGeneratorUsesAreSafe(ctx: CodegenContext, decl: GeneratorDecl): boolean {
+  if (!decl.name || !ts.isIdentifier(decl.name)) return false;
+  const genName = decl.name.text;
+  const sf = decl.getSourceFile();
+  const { checker } = ctx;
+
+  const isArrayFromArg = (node: ts.Node): boolean => {
+    const p = node.parent;
+    return (
+      ts.isCallExpression(p) &&
+      p.arguments.length > 0 &&
+      p.arguments[0] === node &&
+      ts.isPropertyAccessExpression(p.expression) &&
+      ts.isIdentifier(p.expression.expression) &&
+      p.expression.expression.text === "Array" &&
+      p.expression.name.text === "from"
+    );
+  };
+
+  /** A reference/result value consumed in an allowlisted, host-safe position? */
+  const useIsSafe = (node: ts.Node): boolean => {
+    const p = node.parent;
+    if (ts.isPropertyAccessExpression(p) && p.expression === node) return true; // .next()/.throw()/.value…
+    if (ts.isForOfStatement(p) && p.expression === node && !p.awaitModifier) return true;
+    if (ts.isSpreadElement(p)) return true;
+    if (isArrayFromArg(node)) return true;
+    if (ts.isParenthesizedExpression(p)) return useIsSafe(p);
+    return false;
+  };
+
+  /** Every reference of the binding `sym` (outside its declaration) is safe? */
+  const bindingUsesAreSafe = (bindingName: ts.Identifier): boolean => {
+    const sym = checker.getSymbolAtLocation(bindingName);
+    if (!sym) return false;
+    let safe = true;
+    const visitRef = (node: ts.Node): void => {
+      if (!safe) return;
+      if (ts.isIdentifier(node) && node.text === bindingName.text && node !== bindingName) {
+        // Skip non-value positions (property names, declaration names — incl.
+        // the binding's own `var iter;` declaration name).
+        if (ts.isPropertyAccessExpression(node.parent) && node.parent.name === node) return;
+        if (ts.isPropertyAssignment(node.parent) && node.parent.name === node) return;
+        if (ts.isVariableDeclaration(node.parent) && node.parent.name === node) return;
+        const refSym = checker.getSymbolAtLocation(node);
+        if (refSym !== sym) return;
+        const p = node.parent;
+        if (useIsSafe(node)) return;
+        // Reassignment target (`iter = g()` again) — the RHS call is checked
+        // at its own call site.
+        if (ts.isBinaryExpression(p) && p.operatorToken.kind === ts.SyntaxKind.EqualsToken && p.left === node) {
+          return;
+        }
+        // Array-destructuring SOURCE: `[a] = iter` / `const [a] = iter`.
+        if (ts.isVariableDeclaration(p) && p.initializer === node && !ts.isIdentifier(p.name)) return;
+        if (
+          ts.isBinaryExpression(p) &&
+          p.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+          p.right === node &&
+          ts.isArrayLiteralExpression(p.left)
+        ) {
+          return;
+        }
+        safe = false;
+      }
+      ts.forEachChild(node, visitRef);
+    };
+    ts.forEachChild(sf, visitRef);
+    return safe;
+  };
+
+  let allSafe = true;
+  const visit = (node: ts.Node): void => {
+    if (!allSafe) return;
+    if (
+      ts.isCallExpression(node) &&
+      ts.isIdentifier(node.expression) &&
+      node.expression.text === genName &&
+      // Only calls that actually resolve to THIS declaration (a same-named
+      // local in another scope is someone else's call).
+      (checker.getSymbolAtLocation(node.expression)?.declarations?.includes(decl) ?? true)
+    ) {
+      const p = node.parent;
+      if (useIsSafe(node)) {
+        // safe direct consumer
+      } else if (ts.isVariableDeclaration(p) && p.initializer === node) {
+        if (ts.isIdentifier(p.name)) {
+          if (!bindingUsesAreSafe(p.name)) allSafe = false;
+        }
+        // array/object-binding destructuring init → handled natively, safe.
+      } else if (
+        ts.isBinaryExpression(p) &&
+        p.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+        p.right === node &&
+        ts.isIdentifier(p.left)
+      ) {
+        if (!bindingUsesAreSafe(p.left)) allSafe = false;
+      } else if (
+        ts.isBinaryExpression(p) &&
+        p.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+        p.right === node &&
+        ts.isArrayLiteralExpression(p.left)
+      ) {
+        // `[a, b] = g()` destructuring-assignment source — native path.
+      } else {
+        allSafe = false;
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  ts.forEachChild(sf, visit);
+  return allSafe;
+}
+
 export function bodyHasNewTryRegionAcrossYield(decl: GeneratorDecl): boolean {
   if (!decl.body) return false;
   let found = false;
@@ -1686,6 +1860,22 @@ export function isNativeGeneratorCandidate(ctx: CodegenContext, decl: GeneratorD
     // via the plan gate below.
     if (!ts.isFunctionDeclaration(decl)) return false;
     if (!bodyHasNewTryRegionAcrossYield(decl)) return false;
+    // Conservative: a body referencing an UNRESOLVABLE identifier (e.g.
+    // `try { yield test262unresolvable } catch (e) {…}`) keeps the eager path —
+    // its host-lane semantics ride #928's deferred-pending-throw (the eager
+    // eval's JS ReferenceError is re-thrown at the first next()), which the
+    // resume-time evaluation may not reproduce identically.
+    if (bodyReferencesUnresolvableIdentifier(ctx, decl)) return false;
+    // Conservative use-site safety walk: the native state struct is a WasmGC
+    // ref the JS HOST cannot iterate — if it escapes to any host-iterating
+    // context (an EAGER generator's `yield*`, for-await-of, Promise.all,
+    // `new Map(g())`, an arbitrary call argument, …) the values silently drop
+    // (an eager outer's `yield* inner()` over a native inner yielded nothing).
+    // Only generators whose every call-site result flows into an ALLOWLISTED
+    // consumer — `.next()/.throw()/.return()` member calls, for-of (no await),
+    // spread, `Array.from`, destructuring — route natively under the JS host;
+    // anything else keeps the eager path.
+    if (!hostLaneGeneratorUsesAreSafe(ctx, decl)) return false;
   }
   if (!decl.name || !decl.body || !decl.asteriskToken) return false;
   // (#2571) An object-literal method with a computed/string name
