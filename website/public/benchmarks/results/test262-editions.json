@@ -57,8 +57,8 @@
   },
   {
     "edition": "ES2015",
-    "pass": 11625,
-    "fail": 3617,
+    "pass": 11651,
+    "fail": 3591,
     "ce": 144,
     "skip": 0,
     "total": 15386,
@@ -489,39 +489,39 @@
       },
       {
         "name": "DataView.prototype.getInt16",
-        "pass": 6,
-        "fail": 1,
+        "pass": 7,
+        "fail": 0,
         "ce": 0,
         "skip": 0,
         "total": 7,
-        "pct": 86
+        "pct": 100
       },
       {
         "name": "DataView.prototype.getInt32",
-        "pass": 6,
-        "fail": 1,
+        "pass": 7,
+        "fail": 0,
         "ce": 0,
         "skip": 0,
         "total": 7,
-        "pct": 86
+        "pct": 100
       },
       {
         "name": "DataView.prototype.getUint16",
-        "pass": 6,
-        "fail": 1,
+        "pass": 7,
+        "fail": 0,
         "ce": 0,
         "skip": 0,
         "total": 7,
-        "pct": 86
+        "pct": 100
       },
       {
         "name": "DataView.prototype.getUint32",
-        "pass": 6,
-        "fail": 1,
+        "pass": 7,
+        "fail": 0,
         "ce": 0,
         "skip": 0,
         "total": 7,
-        "pct": 86
+        "pct": 100
       },
       {
         "name": "Uint8Array",
@@ -543,12 +543,12 @@
       },
       {
         "name": "DataView.prototype.getInt8",
-        "pass": 4,
-        "fail": 1,
+        "pass": 5,
+        "fail": 0,
         "ce": 0,
         "skip": 0,
         "total": 5,
-        "pct": 80
+        "pct": 100
       },
       {
         "name": "for-of",
