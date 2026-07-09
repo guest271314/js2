@@ -1,7 +1,8 @@
 ---
 id: 3100
 title: "Standalone dynamic-iterable substrate: native GetIterator/IteratorStep dispatch for externref/any iterables (for-of over `Object.keys(any)` traps illegal_cast today)"
-status: in-progress
+status: done
+completed: 2026-07-09
 assignee: ttraenkler/fable-3100
 sprint: Backlog
 model: fable
