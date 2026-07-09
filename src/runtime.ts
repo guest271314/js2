@@ -1700,7 +1700,23 @@ function _compiledAbToHostBuffer(vec: any, exports: Record<string, Function> | u
     return undefined;
   }
   if (typeof n !== "number" || n < 0) return undefined;
-  let ab = new ArrayBuffer(n);
+  // (#3058) A `$__resizable_ab` struct (compiled `new ArrayBuffer(n,
+  // {maxByteLength})`) marshals to a HOST resizable ArrayBuffer so host
+  // TypedArray/DataView views built over it length-track a later
+  // `rab.resize()` natively (the resize arm in __extern_method_call keeps the
+  // canonical host buffer's byteLength in sync via hostAb.resize()).
+  const maxLenFn = exports.__ab_max_len as ((v: any) => number) | undefined;
+  let maxLen = -1;
+  if (typeof maxLenFn === "function") {
+    try {
+      maxLen = maxLenFn(vec);
+    } catch {
+      maxLen = -1;
+    }
+  }
+  // (lib.d.ts here predates the ES2024 options overload — cast the ctor.)
+  const AbCtor = ArrayBuffer as unknown as new (len: number, opts?: { maxByteLength?: number }) => ArrayBuffer;
+  let ab = typeof maxLen === "number" && maxLen >= 0 ? new AbCtor(n, { maxByteLength: maxLen }) : new ArrayBuffer(n);
   const view = new Uint8Array(ab);
   for (let i = 0; i < n; i++) view[i] = getFn(vec, i) & 0xff;
   _abHostBufferCache.set(vec, ab);
@@ -1713,6 +1729,95 @@ function _compiledAbToHostBuffer(vec: any, exports: Record<string, Function> | u
     }
   }
   return ab;
+}
+
+/**
+ * (#3058) `maxByteLength` of a compiled-ArrayBuffer vec struct: field 2 of a
+ * `$__resizable_ab` (≥ 0), or -1 when the struct is a fixed buffer / the module
+ * has no resizable-buffer type (no `__ab_max_len` export). The -1 sentinel is
+ * the host-side `resizable` discriminator, mirroring the compile-time
+ * `ref.test $__resizable_ab` identity.
+ */
+function _abMaxByteLength(vec: any, exports: Record<string, Function> | undefined): number {
+  const fn = exports?.__ab_max_len as ((v: any) => number) | undefined;
+  if (typeof fn !== "function") return -1;
+  try {
+    const m = fn(vec);
+    return typeof m === "number" ? m : -1;
+  } catch {
+    return -1;
+  }
+}
+
+/**
+ * (#3058) ArrayBuffer.prototype.resize (§25.1.6.4) on a compiled-ArrayBuffer
+ * i32_byte vec struct receiver — the host-lane arm of the #3054-C resizable
+ * machinery. Spec-ordered validation:
+ *   2. RequireInternalSlot([[ArrayBufferMaxByteLength]]) → TypeError when the
+ *      receiver is a fixed buffer (maxByteLength sentinel -1).
+ *   4. ToIndex(newLength) → RangeError on negative / non-index.
+ *   5. IsDetachedBuffer → TypeError.
+ *   6. newByteLength > maxByteLength → RangeError.
+ * Then `__rab_resize` swaps the struct's `data`/`length` fields IN PLACE (the
+ * compiled-side identity every native read site sees), and the canonical host
+ * ArrayBuffer (if the struct already crossed the #3097 marshal bridge) is
+ * resized in lock-step so host TypedArray/DataView views length-track.
+ *
+ * Returns true when the receiver was a byte-vec struct and the resize was
+ * handled (including by throwing); false → caller falls through.
+ */
+function _abResizeStruct(obj: any, newLengthArg: any, exports: Record<string, Function> | undefined): boolean {
+  if (!exports || obj == null || typeof obj !== "object" || !_isWasmStruct(obj)) return false;
+  const lenFn = exports.__dv_byte_len as ((v: any) => number) | undefined;
+  if (typeof lenFn !== "function") return false;
+  let n: number;
+  try {
+    n = lenFn(obj);
+  } catch {
+    return false;
+  }
+  if (typeof n !== "number" || n < 0) return false; // not an AB-backing byte vec
+  // §25.1.6.4 step 2 — a fixed-length buffer has no [[ArrayBufferMaxByteLength]].
+  const maxLen = _abMaxByteLength(obj, exports);
+  if (maxLen < 0) {
+    throw new TypeError("ArrayBuffer.prototype.resize called on a non-resizable buffer");
+  }
+  // step 4 — ToIndex(newLength).
+  let newLen = newLengthArg === undefined ? 0 : Number(newLengthArg);
+  if (Number.isNaN(newLen)) newLen = 0;
+  newLen = Math.trunc(newLen);
+  if (Object.is(newLen, -0)) newLen = 0;
+  if (newLen < 0 || newLen > Number.MAX_SAFE_INTEGER) {
+    throw new RangeError("Invalid array buffer length");
+  }
+  // step 5 — detached buffer.
+  if (_detachedBuffers.has(obj) || _sidecarGet(obj, "__detached__")) {
+    throw new TypeError("ArrayBuffer.prototype.resize called on a detached buffer");
+  }
+  // step 6 — out of declared bounds.
+  if (newLen > maxLen) {
+    throw new RangeError("ArrayBuffer.prototype.resize: newLength exceeds maxByteLength");
+  }
+  const resizeFn = exports.__rab_resize as ((v: any, l: number) => number) | undefined;
+  if (typeof resizeFn !== "function") {
+    // Unreachable when maxLen >= 0 (both exports are emitted together); be safe.
+    throw new TypeError("ArrayBuffer.prototype.resize called on a non-resizable buffer");
+  }
+  const status = resizeFn(obj, newLen);
+  if (status === 1) throw new TypeError("ArrayBuffer.prototype.resize called on a non-resizable buffer");
+  if (status !== 0) throw new RangeError("ArrayBuffer.prototype.resize: newLength exceeds maxByteLength");
+  // Keep the canonical host buffer (if any) in lock-step so host TA/DataView
+  // views over it length-track. The cache key is the struct identity, which
+  // `__rab_resize` preserves (it swaps FIELDS, not the struct).
+  const hostAb = _abHostBufferCache.get(obj);
+  if (hostAb) {
+    try {
+      (hostAb as ArrayBuffer & { resize?: (l: number) => void }).resize?.(newLen);
+    } catch {
+      /* non-resizable host buffer (pre-#3058 cache shape) — views can't track */
+    }
+  }
+  return true;
 }
 
 /**
@@ -8506,12 +8611,26 @@ assert._isSameValue = isSameValue;
         // fallback — keeps harness-shaped dynamic functions working).
         const wasmNewFnShim = createNewFunctionShim({});
         return (params: any, body: any) => {
-          try {
-            return wasmNewFnShim(params, body);
-          } catch {
-            // biome-ignore lint/security/noGlobalEval: intentional test262 runtime new Function
-            return new Function(String(params ?? ""), String(body ?? ""));
+          // (#3058) A body carrying a `class` expression/declaration can never
+          // round-trip through the meta-circular Wasm path usefully: the child
+          // module's compiled class value is an opaque struct the PARENT module
+          // cannot construct (its dyn-new tag dispatch only knows its own class
+          // tags), and a class extending a host builtin (the test262
+          // resizableArrayBufferUtils `subClass` shape — `return class MyUint8Array
+          // extends Uint8Array {}`) additionally loses the builtin's statics and
+          // [[Construct]] semantics. The host `Function` fallback below produces a
+          // genuine host class that interops through the extern paths, so route
+          // class-carrying bodies there directly.
+          const bodyStr = String(body ?? "");
+          if (!/\bclass\b/.test(bodyStr)) {
+            try {
+              return wasmNewFnShim(params, bodyStr);
+            } catch {
+              /* fall through to the host constructor */
+            }
           }
+          // biome-ignore lint/security/noGlobalEval: intentional test262 runtime new Function
+          return new Function(String(params ?? ""), bodyStr);
         };
       }
       if (name === "__extern_get")
@@ -8590,6 +8709,34 @@ assert._isSameValue = isSameValue;
             if (key === "byteLength") {
               const bl = _byteVecByteLength(obj, exports);
               if (bl !== undefined) return bl;
+            }
+            // (#3058) `maxByteLength` / `resizable` on a compiled-AB byte-vec
+            // struct: resizable-ness is the -1 sentinel from __ab_max_len; a
+            // fixed buffer reports maxByteLength === byteLength (§25.1.5.4);
+            // a detached buffer reports maxByteLength 0 (§25.1.5.2 step 4)
+            // while `resizable` keeps answering from the retained max slot.
+            if (key === "maxByteLength" || key === "resizable") {
+              const bl = _byteVecByteLength(obj, exports);
+              if (bl !== undefined) {
+                const ml = _abMaxByteLength(obj, exports);
+                if (key === "resizable") return ml >= 0;
+                if (_detachedBuffers.has(obj) || _sidecarGet(obj, "__detached__")) return 0;
+                return ml >= 0 ? ml : bl;
+              }
+            }
+            // (#3058) `.resize` read as a VALUE off a compiled-AB byte-vec
+            // struct (`typeof ab.resize === 'function'` — the lead assert of
+            // every resize-behavior test). An arrow function is deliberately
+            // non-constructible so `new ab.resize()` throws TypeError
+            // (resize/nonconstructor.js).
+            if (key === "resize") {
+              const bl = _byteVecByteLength(obj, exports);
+              if (bl !== undefined) {
+                return (newLength: any) => {
+                  _abResizeStruct(obj, newLength, exports);
+                  return undefined;
+                };
+              }
             }
           }
           return undefined;
@@ -10700,6 +10847,13 @@ assert._isSameValue = isSameValue;
                   : wrappedArgs[1];
               wrappedObj.set(key, value);
               return _unwrapForHost(value);
+            }
+            // (#3058) ArrayBuffer.prototype.resize on a compiled-AB vec struct
+            // (the host-lane arm of the #3054-C resizable machinery). Handles
+            // BOTH statically-typed and `any`-typed receivers — the static path
+            // also lands here because the vec struct is opaque to the host.
+            if (method === "resize" && _isWasmStruct(obj) && exports) {
+              if (_abResizeStruct(obj, wrappedArgs[0], exports)) return undefined;
             }
             // DataView method fallback (#1056): the compiler emits DataView as an
             // i32_byte vec struct, so DataView.prototype methods aren't directly
@@ -13837,6 +13991,26 @@ assert._isSameValue = isSameValue;
           if (key === "byteLength") {
             const bl = _byteVecByteLength(obj, exports);
             if (bl !== undefined) return bl;
+          }
+          // (#3058) `maxByteLength` / `resizable` / `resize` on a compiled-AB
+          // byte-vec struct (mirrors the __extern_get arms).
+          if (key === "maxByteLength" || key === "resizable") {
+            const bl = _byteVecByteLength(obj, exports);
+            if (bl !== undefined) {
+              const ml = _abMaxByteLength(obj, exports);
+              if (key === "resizable") return ml >= 0;
+              if (_detachedBuffers.has(obj) || _sidecarGet(obj, "__detached__")) return 0;
+              return ml >= 0 ? ml : bl;
+            }
+          }
+          if (key === "resize") {
+            const bl = _byteVecByteLength(obj, exports);
+            if (bl !== undefined) {
+              return (newLength: any) => {
+                _abResizeStruct(obj, newLength, exports);
+                return undefined;
+              };
+            }
           }
         }
         // #1057 — vec wrapper structs (results of String.prototype.split,
