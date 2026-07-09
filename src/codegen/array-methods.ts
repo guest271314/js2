@@ -395,6 +395,16 @@ export function emitBoundsCheckedArrayGet(
   // zero-extending (`get_u`). When undefined, fall back to the legacy
   // storage-kind heuristic (i8→get_u, i16→get_s) for non-typed-array callers.
   signedness?: "s" | "u",
+  // (#2773 S7) Optional replacement for the default `array.len(arr)` upper
+  // bound: instructions that push the LOGICAL length (i32). A grown vec's
+  // backing array is over-allocated (capacity = max(idx+1, cap*2, 4)), so
+  // `array.len` over-reports the bound and an index in [length, capacity)
+  // silently reads the element DEFAULT (null/0) instead of being OOB —
+  // `var k=[]; k[0]=1; k[1]` read null, not `undefined` (the test262 HOF
+  // "-c-ii-5" family). The vec-struct call site passes
+  // `[local.get vecRef, struct.get length]` here. When undefined, the legacy
+  // capacity bound is emitted — every existing caller is byte-identical.
+  lengthBoundInstrs?: Instr[],
 ): void {
   // Save index and array ref to locals so we can use them in both branches
   const idxLocal = allocLocal(fctx, `__bounds_idx_${fctx.locals.length}`, { kind: "i32" });
@@ -413,12 +423,22 @@ export function emitBoundsCheckedArrayGet(
     if (undefinedFuncIdx !== undefined) flushLateImportShifts(ctx, fctx);
   }
 
-  // Condition: idx >= 0 && idx < array.len(arr)
-  // We use: (unsigned)idx < array.len — this handles negative indices too
-  // since negative i32 interpreted as unsigned is > any valid length
+  // Condition: idx >= 0 && idx < bound
+  // We use: (unsigned)idx < bound — this handles negative indices too
+  // since negative i32 interpreted as unsigned is > any valid length.
+  // (#2773 S7) The bound is the caller-supplied LOGICAL length when provided
+  // (vec length field — capacity may exceed it after a grow), else the
+  // backing-array capacity (`array.len`, the legacy byte-identical default).
   fctx.body.push({ op: "local.get", index: idxLocal });
-  fctx.body.push({ op: "local.get", index: arrLocal });
-  fctx.body.push({ op: "array.len" });
+  if (lengthBoundInstrs) {
+    // Clone per use — a caller may pass the same template to sibling helpers,
+    // and one Instr OBJECT must never appear twice in a body (the DCE type
+    // remap would visit it twice; see reference_shared_instr_object_dce_double_remap).
+    fctx.body.push(...lengthBoundInstrs.map((i) => ({ ...i }) as Instr));
+  } else {
+    fctx.body.push({ op: "local.get", index: arrLocal });
+    fctx.body.push({ op: "array.len" });
+  }
   fctx.body.push({ op: "i32.lt_u" } as Instr);
 
   // Build the "then" branch: in-bounds -> array.get. (#2593) For a packed i8/i16
