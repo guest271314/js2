@@ -399,6 +399,22 @@ export interface FunctionContext {
   /** Map from variable name → ref cell info (for mutable closure captures) */
   boxedCaptures?: Map<string, { refCellTypeIdx: number; valType: ValType }>;
   /**
+   * (#2865) The `__self` capture-struct layout of a LIFTED CLOSURE body
+   * (closures.ts materializes each capture from `__self` field `i+1` into a
+   * named local in the body prologue). The async drive lane compiles the body
+   * in a FRESH resume FunctionContext whose frame captured only the closure's
+   * PARAMS — so the resume prologue must re-materialize these capture locals
+   * from the frame-captured `__self` before any body statement compiles.
+   * `castToTypeIdx` is set when `__self`'s param type is the wrapper base
+   * struct (needs a `ref.cast` to the concrete capture struct first).
+   */
+  selfCaptureLayout?: {
+    selfParamName: string;
+    structTypeIdx: number;
+    castToTypeIdx: number | null;
+    entries: { name: string; fieldIdx: number; localType: ValType }[];
+  };
+  /**
    * (#2976) Per-activation memo locals for capture-carrying nested function
    * declarations referenced as VALUES: funcName → local holding the
    * `(ref null $__fn_cap_<name>_struct)` closure instance. Every reference
@@ -1454,6 +1470,25 @@ export interface CodegenContext {
   nativeGeneratorResultTypeIdx: number;
   /** Function declarations lowered to Wasm-native generator state machines (#680). */
   nativeGenerators: Map<string, NativeGeneratorInfo>;
+  /**
+   * (#2865) Async-generator PRODUCERS driven on the async-frame machine, keyed
+   * by sanitized stem (the `__async_gen_next_<stem>` suffix). Populated by
+   * `emitAsyncGenerator`; consumed by (a) the `.next()` runtime dispatch chain
+   * in calls.ts and (b) the stem-collision guard in `isAsyncGenDriveCandidate`
+   * (two same-named gens in different scopes would otherwise share one
+   * `__async_gen_next_<stem>` helper typed for the FIRST gen's frame — a
+   * guaranteed `ref.cast` trap for the second).
+   */
+  asyncGenProducers?: Map<string, { stateTypeIdx: number; nextHelperName: string; decl: ts.Node }>;
+  /**
+   * (#2865) True once ANY async generator was emitted on the LEGACY buffer path
+   * (`__create_async_generator`). The `.next()` runtime dispatch chain uses this
+   * to decide its miss arm: with legacy receivers possible it must fall back to
+   * the host `__gen_next`; in an all-driven module it emits a plain null instead
+   * — referencing `__gen_next` there would force an otherwise-dead host import
+   * and break the zero-import (host-free) contract.
+   */
+  asyncGenLegacyBufferEmitted?: boolean;
   /**
    * Function declarations pre-registered during module-pass eager class body
    * compilation. The entry has a reserved `mod.functions` slot and signature,

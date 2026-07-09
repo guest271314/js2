@@ -36,6 +36,7 @@ import {
   extractConstantDefault,
   resolveWasmType,
 } from "../index.js";
+import { emitAsyncGenerator, isAsyncGenDriveCandidate } from "../async-frame.js"; // (#2865) nested async-gen producer
 import { ensureExnTag, nextModuleGlobalIdx } from "../registry/imports.js";
 import {
   addFuncType,
@@ -674,6 +675,15 @@ export function compileNestedFunctionDeclaration(
       // Wasm-native generator factory (builds + returns the state struct), the
       // same body the top-level path emits. No host imports, no JS buffer.
       compileNativeGeneratorFunction(ctx, liftedFctx, stmt, nativeGenInfo);
+    } else if (isGenerator && isAsync && isAsyncGenDriveCandidate(ctx, stmt)) {
+      // (#2865) NESTED async-generator producer (the dominant test262 shape —
+      // the runner wraps every test body inside `export function test()`, so
+      // the gen declaration is nested). Same interception the top-level
+      // `function-body.ts` path applies BEFORE the buffer/#680 arm: build the
+      // lazy `$AsyncFrame` carrier + the per-gen `__async_gen_next_<name>`
+      // driver on the async-frame CFG machine. No captures in this branch, so
+      // the frame captures the declared params only.
+      emitAsyncGenerator(ctx, liftedFctx, stmt);
     } else if (isGenerator) {
       // Generator function: eagerly evaluate body, collect yields into a JS array,
       // then wrap it with __create_generator to return a Generator-like object.
@@ -726,6 +736,8 @@ export function compileNestedFunctionDeclaration(
 
       // Return __create_generator or __create_async_generator depending on async flag
       const createGenName = isAsync ? "__create_async_generator" : "__create_generator";
+      // (#2865) Record legacy-buffer async gens so the .next() dispatch keeps a host miss arm.
+      if (createGenName === "__create_async_generator") ctx.asyncGenLegacyBufferEmitted = true;
       const createGenIdx = ctx.funcMap.get(createGenName)!;
       liftedFctx.body.push({ op: "local.get", index: bufferLocal });
       liftedFctx.body.push({ op: "local.get", index: pendingThrowLocal });
@@ -1041,13 +1053,26 @@ export function compileNestedFunctionDeclaration(
     }
 
     if (capturingNativeGen) {
-      // (#3050) Capturing nested `function*` with a try-region body — emit the
-      // Wasm-native generator factory. It reads EVERY wasm param (capture cells
-      // and values first, then user params — exactly this lifted function's
-      // param layout) into the state struct's `param_*` fields; the resume
-      // function rehydrates them and routes cell captures through
-      // `boxedCaptures` (see ensureNativeGeneratorResumeFunction).
+      // (#3050) Capturing nested SYNC `function*` with a try-region body — emit
+      // the Wasm-native generator factory. It reads EVERY wasm param (capture
+      // cells and values first, then user params — exactly this lifted
+      // function's param layout) into the state struct's `param_*` fields; the
+      // resume function rehydrates them and routes cell captures through
+      // `boxedCaptures` (see ensureNativeGeneratorResumeFunction). Disjoint
+      // from the #2865 async-gen arm below: `capturingNativeGen` is only
+      // registered for `!isAsync` declarations.
       compileNativeGeneratorFunction(ctx, liftedFctx, stmt, capturingNativeGen);
+    } else if (isGenerator && isAsync && tdzFlaggedCaptures.length === 0 && isAsyncGenDriveCandidate(ctx, stmt)) {
+      // (#2865) NESTED async-generator producer WITH captures — the dominant
+      // real test262 shape (`var callCount = 0; async function* f() {
+      // callCount++; ... }` inside the runner's `test()` wrapper: callCount is
+      // a test() local, so the gen captures it as a mutable ref cell). The
+      // lifted fn's leading capture-cell params are captured into `$AsyncFrame`
+      // param fields like ordinary params; `emitAsyncGenerator` threads
+      // `liftedFctx.boxedCaptures` onto the resume fn so body reads/writes
+      // deref the cells. TDZ-flagged captures store PARAM indices in
+      // `boxedTdzFlags` (wrong in the resume fn's local layout) → legacy.
+      emitAsyncGenerator(ctx, liftedFctx, stmt);
     } else if (isGenerator) {
       // Generator function: eagerly evaluate body, collect yields into a JS array,
       // then wrap it with __create_generator to return a Generator-like object.
@@ -1100,6 +1125,8 @@ export function compileNestedFunctionDeclaration(
 
       // Return __create_generator or __create_async_generator depending on async flag
       const createGenName = isAsync ? "__create_async_generator" : "__create_generator";
+      // (#2865) Record legacy-buffer async gens so the .next() dispatch keeps a host miss arm.
+      if (createGenName === "__create_async_generator") ctx.asyncGenLegacyBufferEmitted = true;
       const createGenIdx = ctx.funcMap.get(createGenName)!;
       liftedFctx.body.push({ op: "local.get", index: bufferLocal });
       liftedFctx.body.push({ op: "local.get", index: pendingThrowLocal });
