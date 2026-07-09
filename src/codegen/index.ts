@@ -53,7 +53,7 @@ import { scanForNewTarget } from "./new-target.js"; // (#2023)
 import { scanForArrayHoles, ensureHoleType } from "./array-holes.js"; // (#2001 S1)
 import { ensureDynReadHelpers, ensureDynMemberGet } from "./dyn-read.js"; // (#2580 M0) / (#3053 U0)
 import { collectClosureBaseWrapperTypeIdxs, buildClosureRefTestArms } from "./closure-classifier.js"; // (#2175 V2-S1)
-import { ensureNativeIteratorRuntime, fillNativeIteratorUserArms } from "./iterator-native.js";
+import { ensureNativeIteratorRuntime, fillNativeIteratorLateArms } from "./iterator-native.js";
 import { fillCombinatorToVec } from "./promise-combinators.js"; // (#2922) dynamic combinator-arg drain fill
 import { fillClosedMethodDispatch } from "./closed-method-dispatch.js";
 import { fillMemberSetDispatch, reserveVecFieldMaterializers } from "./member-set-dispatch.js";
@@ -2306,13 +2306,16 @@ export function generateModule(
     // Emit __call_@@iterator export for runtime Symbol.iterator dispatch on WasmGC structs
     emitIteratorMethodExport(ctx);
 
-    // (#2038, reserve-then-fill #1719) Rebuild the native `__iterator` /
-    // `__iterator_next` carrier bodies with the USER `{next()}`-protocol arm now
-    // that the closed-struct dispatchers exist: `__sget_value`/`__sget_done`
-    // (emitStructFieldGetters, above) and `__call_@@iterator`/`__call_next`
-    // (emitIteratorMethodExport, just above). No-op unless the standalone native
-    // iterator runtime was registered AND a custom iterable produced those
-    // dispatchers — otherwise the carrier stays vec-only and byte-identical.
+    // (#2038 / #3100, reserve-then-fill #1719) Rebuild the native `__iterator`
+    // carrier body with the LATE ladder arms now that every carrier type is
+    // known: the (#3100) vec-FAMILY normalization arms ($ObjVec +
+    // `__vec_<elemKind>` — dynamic iterables like `Object.keys(<any>)` /
+    // `any`-held array literals, previously an `illegal cast` trap) and, when
+    // the closed-struct dispatchers exist (`__sget_value`/`__sget_done` from
+    // emitStructFieldGetters above, `__call_@@iterator`/`__call_next` from
+    // emitIteratorMethodExport just above), the (#2038) USER
+    // `{next()}`-protocol arm (which also rebuilds `__iterator_next`). No-op
+    // unless the standalone native iterator runtime was registered.
     if (
       ctx.nativeIteratorUserArmPending &&
       ctx.funcMap.has("__call_@@iterator") &&
@@ -2328,7 +2331,7 @@ export function generateModule(
       // Native in standalone/WASI (appends funcs, no funcIdx shift).
       addUnionImports(ctx);
     }
-    fillNativeIteratorUserArms(ctx);
+    fillNativeIteratorLateArms(ctx);
 
     // (#2922) Rebuild `__combinator_to_vec`'s user-iterable arm with the same
     // closed-struct dispatchers (identical five-dispatcher condition, so the
@@ -3123,7 +3126,7 @@ function _emitStructFieldGettersInner(ctx: CodegenContext): void {
 
     // (#2038) Register in funcMap so the native iterator carrier's USER arm can
     // resolve `__sget_value` / `__sget_done` at finalize-fill time
-    // (`fillNativeIteratorUserArms`). No other code looks `__sget_*` up by funcMap
+    // (`fillNativeIteratorLateArms`). No other code looks `__sget_*` up by funcMap
     // key, so this is inert for every other path.
     ctx.funcMap.set(funcName, funcIdx);
   }
@@ -3919,7 +3922,7 @@ function emitIteratorMethodExport(ctx: CodegenContext): void {
 
     // (#2038) Register in funcMap so the native iterator carrier's USER arm can
     // resolve `__call_@@iterator` / `__call_next` at finalize-fill time
-    // (`fillNativeIteratorUserArms`). Harmless for the host/GC path — no other
+    // (`fillNativeIteratorLateArms`). Harmless for the host/GC path — no other
     // code looks these up by funcMap key.
     ctx.funcMap.set(exportName, funcIdx);
   };
