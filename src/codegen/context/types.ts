@@ -324,6 +324,14 @@ export interface NativeGeneratorInfo {
    * without an iterable-delegation site).
    */
   iterableDelegationSlots?: { fieldIdx: number }[];
+  /**
+   * (#3050) Field index of the i32 pending-completion kind (0 none / 1 return /
+   * 2 throw) consumed by a state-lowered finally's exit router. Present only
+   * when the generator has a yielding finally (appended LAST in the state
+   * struct so all other field indices are unaffected). The completion payloads
+   * ride the existing `abrupt` (return value) / `error` (thrown value) fields.
+   */
+  pendingFieldIdx?: number;
 }
 
 export type NullishExclusion = "null" | "undefined" | "nullish";
