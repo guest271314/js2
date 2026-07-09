@@ -12,7 +12,8 @@ language_feature: typed-array, resizable-arraybuffer, dynamic-index
 sprint: current
 horizon: l
 created: 2026-07-05
-updated: 2026-07-08
+updated: 2026-07-09
+assignee: ttraenkler/fable-3058
 es_edition: ES2024
 test262_category: built-ins/TypedArray
 goal: standalone-mode
@@ -391,3 +392,105 @@ each of the 5 methods over a dyn view returns the correct value; fromIndex;
 byteOffset/windowed views; length-tracking; OOB-after-shrink → `TypeError`
 instance; regrow restores; the plain-array `any` HAZARD GUARD; and the
 byte-inert (zero env imports) check.
+
+## LANDED — HOST-LANE resizable ArrayBuffer + length-tracking TA views (fable-3058, 2026-07-09)
+
+### Verify-first re-scope: the measured rock was the DEFAULT (JS-host) lane
+
+Empirical probes on current main flipped the priority. The standalone lane
+passes ALL basic resizable probes (resize / maxByteLength / resizable /
+length-tracking / element-read-after-grow — #3054-C works). The **default
+JS-host lane failed every one of them**: `resize is not a function`,
+`maxByteLength` → NaN, `resizable` → false. The fresh CI baseline confirmed
+the stake: **98 × "resize is not a function"** across the resizable corpus
+(293 files: 99 pass / 183 fail / 11 CE), because every `*/resizable-buffer.js`
+file's `CreateRabForTest` calls `rab.resize(...)` before any method assert.
+(The old CreateRabForTest invalid-Wasm CE bucket from the stale baseline was
+already fixed on main — always re-fetch the baseline before trusting it.)
+
+### Root cause
+
+The host lane ALREADY lowers `new ArrayBuffer(n)` to the same native
+`$__vec_i32_byte` struct as standalone (the #3097 construct bridge marshals it
+to a canonical host ArrayBuffer at the first TA/DataView crossing) — but every
+resizable-aware site was `noJsHost`-gated:
+
+1. the `$__resizable_ab` construct path (new-super.ts) dropped the
+   `{maxByteLength}` options bag in host mode → plain fixed vec;
+2. `.resize()` had only the standalone inline emitter (calls.ts, not touched)
+   — in host mode BOTH static- and any-typed receivers fall through to the
+   runtime `__extern_method_call`, which had no arm → generic
+   "resize is not a function";
+3. `.maxByteLength`/`.resizable` getters had only the standalone
+   property-access arm → host reads resolved undefined → NaN/false;
+4. the #3097 marshal minted a FIXED host buffer, so host TA views could never
+   length-track.
+
+### What shipped (zero new imports — no funcIdx-shift hazard by design)
+
+- **new-super.ts**: un-gated the `$__resizable_ab` construct — both lanes
+  allocate the subtype for `new ArrayBuffer(n, {maxByteLength})`. Standalone
+  path byte-identical (the gate was already true there).
+- **index.ts `emitResizableAbExports`** (mirrors `emitDataViewByteExports`,
+  both finalize paths): two exports, emitted ONLY when
+  `ctx.resizableAbTypeIdx >= 0` and NOT standalone/wasi —
+  `__ab_max_len(externref) -> f64` (field 2, or −1 sentinel = not resizable)
+  and `__rab_resize(externref, i32) -> i32` (realloc-copy-swap of `data` +
+  `length` IN PLACE on the same struct; status 0/1/2).
+- **runtime.ts `_abResizeStruct`** (+ `_abMaxByteLength`): the
+  `__extern_method_call` `resize` arm. Spec-ordered §25.1.6.4 validation
+  (TypeError fixed-buffer → ToIndex RangeError → TypeError detached →
+  RangeError > max), then `__rab_resize` (compiled-side identity) **and**
+  `hostAb.resize(newLen)` on the canonical host buffer (host-side views
+  length-track via V8). Handles BOTH static and `any` receivers — the static
+  path also lands in the runtime because the struct is opaque to the host.
+- **runtime.ts `__extern_get` + `_wrapForHost` proxy arms**: `maxByteLength`
+  (fixed → byteLength per §25.1.5.4; detached → 0), `resizable` (−1 sentinel
+  test), and `resize`-as-value (arrow fn → `typeof === 'function'` lead
+  asserts; non-constructible).
+- **runtime.ts `_compiledAbToHostBuffer`**: marshals a `$__resizable_ab` vec
+  to a HOST **resizable** ArrayBuffer (`{maxByteLength}`), so
+  `new ctor(rab)` / `new ctor(rab, off)` host TA views auto-length-track.
+- **runtime.ts `__extern_new_function`**: class-carrying bodies now route to
+  the host `Function` fallback directly — the meta-circular Wasm path can
+  never return a parent-usable class (child-module structs don't match the
+  parent's dyn-new class tags), and the harness `subClass` shape
+  (`return class MyUint8Array extends Uint8Array {}`) additionally lost the
+  builtin's statics/[[Construct]]. Now yields a genuine host TA subclass that
+  works end-to-end with resizable buffers. (Note: the test262 RUNNER injects
+  an eval-free adapted harness — #3054 E — so the corpus flips do NOT depend
+  on this; it fixes real-code fidelity.)
+
+### Measured (local, same-env main-vs-branch diffs)
+
+- `built-ins/ArrayBuffer/**` + `built-ins/DataView/**` (757 files):
+  **+16 fail→pass, 0 regressions** — all of resize-grow/shrink/same-size (7),
+  new-length-non-number, maxByteLength×3, resizable×2, options-maxbytelength
+  ×2 + options-non-object (ctor validation), detached-buffer getters.
+- Controls: 300-file mixed sample — no flips; 255-file Function-ctor cluster —
+  no flips; playground corpus 26 compiles — byte-identical (both lanes);
+  fixed-AB program byte-identical; standalone resizable program
+  byte-identical (exports are host-gated).
+- **Local TA-corpus numbers are sandbox-capped** (the runner's vm sandbox
+  exposes no TA ctors — `SANDBOX_GLOBAL_NAMES` allow-list — so every
+  `*/resizable-buffer.js` dies at `ctor.BYTES_PER_ELEMENT` locally, both
+  sides). The 98-file "resize is not a function" CI bucket is the expected
+  flip surface; an in-realm replica of the FULL at/resizable-buffer.js body
+  (9 ctors × 16 asserts incl. fixed-window OOB TypeErrors + tracking +
+  regrow-zeroing) passes end-to-end. **merge_group is the authoritative
+  measure.**
+- `tests/issue-3058-host-resizable-ab.test.ts` — 20 host-enforced cases.
+
+### Banked follow-ups (not attempted here)
+
+- `transfer` / `transferToFixedLength` on the vec struct (8+8 baseline fails)
+  — needs a byte-vec allocator export (mint the new struct) + detach wiring.
+- Static-route host-TA method dispatch: `.at()` on a STATICALLY-typed
+  `new Uint8Array(rab, 0, 4)` binding ref.cast-traps (pre-existing #3097 gap;
+  the dynamic-ctor route every resizable-buffer.js file uses is fine).
+- `resize/nonconstructor.js`: dyn-new no-match base skips the IsConstructor
+  probe for property-access callees (pre-existing; `new ab.resize()` should
+  TypeError).
+- Standalone Buckets B (mutator write-back) / C (species producers) +
+  iterators — unchanged from the plan above; join/callback methods unblock
+  when #3098 (PR #2813) retires `env.__make_callback` on the standalone lane.

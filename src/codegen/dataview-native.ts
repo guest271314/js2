@@ -45,6 +45,7 @@ import { stringConstantExternrefInstrs } from "./native-strings.js";
 import { emitWasiErrorConstructor } from "./registry/error-types.js";
 import { addStringConstantGlobal, ensureExnTag } from "./registry/imports.js";
 import {
+  addFuncType,
   getOrRegisterResizableAbType,
   getOrRegisterTaCtorType,
   getOrRegisterTaDynViewType,
@@ -3042,4 +3043,158 @@ export function emitDataViewToWriteScratch(
   } as Instr);
 
   return lenLocal;
+}
+
+/**
+ * (#3058) Resizable-ArrayBuffer helper exports for the JS-host runtime.
+ *
+ * The JS-host lane lowers `new ArrayBuffer(n, {maxByteLength})` to the same
+ * `$__resizable_ab` WasmGC subtype the standalone lane uses (#3054 C), but the
+ * host-lane method/getter dispatch happens in the JS runtime
+ * (`__extern_method_call` / `__extern_get`), which cannot touch WasmGC struct
+ * fields directly. Two exports bridge that:
+ *
+ *   __ab_max_len(externref) -> f64   — maxByteLength (field 2) for a
+ *       `$__resizable_ab` instance; -1 for a fixed buffer / any other value.
+ *       The -1 sentinel doubles as the `resizable` discriminator.
+ *   __rab_resize(externref, i32) -> i32 — the §25.1.6.4 resize core: realloc
+ *       the backing i8 array to newLen, copy min(oldLen, newLen) bytes, swap
+ *       `data` + `length` IN PLACE on the same struct (views/DataView fallback
+ *       observe the swap through `__dv_byte_len`). Status: 0 ok · 1 receiver
+ *       not resizable (TypeError) · 2 newLen out of range (RangeError). The
+ *       runtime arm pre-validates per spec order and maps statuses to host
+ *       error types; the in-function checks are a defensive backstop.
+ *
+ * Host lane only: standalone/WASI resize compiles to the inline native emitter
+ * (`emitArrayBufferResize`) and has no JS runtime to call exports — the gate
+ * keeps the standalone lane byte-identical. Modules that never construct a
+ * resizable buffer (`ctx.resizableAbTypeIdx < 0`) are byte-identical too.
+ */
+export function emitResizableAbExports(ctx: CodegenContext): void {
+  if (ctx.wasi || ctx.standalone) return; // JS-host lane only (see doc comment)
+  const rabTypeIdx = ctx.resizableAbTypeIdx;
+  if (rabTypeIdx < 0) return;
+  const mod = ctx.mod;
+  const byteVecTypeIdx = ctx.vecTypeMap.get("i32_byte");
+  if (byteVecTypeIdx === undefined) return;
+  const arrTypeIdx = getArrTypeIdxFromVec(ctx, byteVecTypeIdx);
+  if (arrTypeIdx < 0) return;
+
+  // __ab_max_len(externref) -> f64
+  {
+    const typeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "f64" }], "$__ab_max_len_type");
+    const funcIdx = ctx.numImportFuncs + mod.functions.length;
+    const body: Instr[] = [
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.set", index: 1 },
+      { op: "local.get", index: 1 },
+      { op: "ref.test", typeIdx: rabTypeIdx },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: 1 } as Instr,
+          { op: "ref.cast", typeIdx: rabTypeIdx },
+          { op: "struct.get", typeIdx: rabTypeIdx, fieldIdx: 2 },
+          { op: "f64.convert_i32_s" } as Instr,
+          { op: "return" } as Instr,
+        ],
+        else: [],
+      },
+      { op: "f64.const", value: -1 } as Instr,
+    ];
+    mod.functions.push({
+      name: "__ab_max_len",
+      typeIdx,
+      locals: [{ name: "__any", type: { kind: "anyref" } }],
+      body,
+      exported: true,
+    } as any);
+    mod.exports.push({ name: "__ab_max_len", desc: { kind: "func", index: funcIdx } });
+  }
+
+  // __rab_resize(externref, i32) -> i32
+  {
+    const typeIdx = addFuncType(ctx, [{ kind: "externref" }, { kind: "i32" }], [{ kind: "i32" }], "$__rab_resize_type");
+    const funcIdx = ctx.numImportFuncs + mod.functions.length;
+    // locals: 2 = anyref scratch, 3 = (ref null $__resizable_ab), 4 = (ref null
+    // $__arr_i32_byte) new backing, 5 = i32 copyLen.
+    const body: Instr[] = [
+      // if receiver is not a $__resizable_ab → status 1 (TypeError in the runtime arm)
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.set", index: 2 },
+      { op: "local.get", index: 2 },
+      { op: "ref.test", typeIdx: rabTypeIdx },
+      { op: "i32.eqz" } as Instr,
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "i32.const", value: 1 } as Instr, { op: "return" } as Instr],
+        else: [],
+      },
+      { op: "local.get", index: 2 },
+      { op: "ref.cast", typeIdx: rabTypeIdx },
+      { op: "local.set", index: 3 },
+      // if newLen < 0 || newLen > maxByteLength (field 2) → status 2 (RangeError)
+      { op: "local.get", index: 1 },
+      { op: "i32.const", value: 0 } as Instr,
+      { op: "i32.lt_s" } as Instr,
+      { op: "local.get", index: 1 },
+      { op: "local.get", index: 3 },
+      { op: "struct.get", typeIdx: rabTypeIdx, fieldIdx: 2 },
+      { op: "i32.gt_s" } as Instr,
+      { op: "i32.or" } as Instr,
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "i32.const", value: 2 } as Instr, { op: "return" } as Instr],
+        else: [],
+      },
+      // copyLen = min(oldLen = field 0, newLen)
+      { op: "local.get", index: 3 },
+      { op: "struct.get", typeIdx: rabTypeIdx, fieldIdx: 0 },
+      { op: "local.get", index: 1 },
+      { op: "local.get", index: 3 },
+      { op: "struct.get", typeIdx: rabTypeIdx, fieldIdx: 0 },
+      { op: "local.get", index: 1 },
+      { op: "i32.lt_s" } as Instr,
+      { op: "select" } as Instr,
+      { op: "local.set", index: 5 },
+      // newArr = array.new_default $__arr_i32_byte (newLen)
+      { op: "local.get", index: 1 },
+      { op: "array.new_default", typeIdx: arrTypeIdx },
+      { op: "local.set", index: 4 },
+      // array.copy newArr[0..copyLen) ← rab.data[0..copyLen)
+      { op: "local.get", index: 4 },
+      { op: "i32.const", value: 0 } as Instr,
+      { op: "local.get", index: 3 },
+      { op: "struct.get", typeIdx: rabTypeIdx, fieldIdx: 1 },
+      { op: "i32.const", value: 0 } as Instr,
+      { op: "local.get", index: 5 },
+      { op: "array.copy", dstTypeIdx: arrTypeIdx, srcTypeIdx: arrTypeIdx } as Instr,
+      // swap data + length IN PLACE (same struct → views observe the resize)
+      { op: "local.get", index: 3 },
+      { op: "local.get", index: 4 },
+      { op: "struct.set", typeIdx: rabTypeIdx, fieldIdx: 1 },
+      { op: "local.get", index: 3 },
+      { op: "local.get", index: 1 },
+      { op: "struct.set", typeIdx: rabTypeIdx, fieldIdx: 0 },
+      { op: "i32.const", value: 0 } as Instr,
+    ];
+    mod.functions.push({
+      name: "__rab_resize",
+      typeIdx,
+      locals: [
+        { name: "__any", type: { kind: "anyref" } },
+        { name: "__rab", type: { kind: "ref_null", typeIdx: rabTypeIdx } },
+        { name: "__newarr", type: { kind: "ref_null", typeIdx: arrTypeIdx } },
+        { name: "__copylen", type: { kind: "i32" } },
+      ],
+      body,
+      exported: true,
+    } as any);
+    mod.exports.push({ name: "__rab_resize", desc: { kind: "func", index: funcIdx } });
+  }
 }
