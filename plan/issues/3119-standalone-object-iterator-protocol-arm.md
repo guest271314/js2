@@ -2,7 +2,7 @@
 id: 3119
 title: "Standalone plain-$Object @@iterator protocol arm in the native __iterator ladder (#3100 Design arm 3) — post-hoc x[Symbol.iterator]=fn: 810 test262 files, 0 host-free"
 status: in-progress
-assignee: ttraenkler/fable-3022
+assignee: ttraenkler/fable-3119
 sprint: current
 model: fable
 created: 2026-07-09
@@ -120,7 +120,84 @@ L — the GetIterator/Step/Close arms are new codegen over `$Object` reads +
 design slice (arm ABI + symbol-read wiring); the consumer side is already
 built (S4/S5).
 
-## Suspended Work (2026-07-09, fable-3022) — verify-first done + de-risked plan
+## Implementation Notes (2026-07-09, fable-3119) — built on fable-3022's map
+
+**The #2866 crux resolved by direct probe, not new infra**: the host-free
+symbol-keyed `@@iterator` read is simply `__extern_get(obj, __box_symbol(1))`.
+Probe on pre-change main: `const f: any = o[Symbol.iterator]; f()(…).next()`
+already worked end-to-end host-free — `__obj_find` classifies a `$Symbol`
+search key by id (`searchIsSym`/`searchSymId`) and the stored key is the
+interned carrier, so id-compare matches regardless of carrier instance. No
+new symbol machinery was needed; only the ladder arm was missing.
+
+**Design decisions that differ from (or sharpen) the original map:**
+
+1. **No `ref.test $Object` gate on the GetIterator OBJ arm.** The arm calls
+   `__extern_get(obj, boxSym(1))` directly and gates on `__is_truthy` of the
+   result. Non-`$Object` subjects answer the miss (falsy) and fall through to
+   the USER tail unchanged — same net behavior as a type gate, but it also
+   serves any carrier the dynamic reader can handle (e.g. future sidecars).
+   `__is_truthy` is the single truthiness gate everywhere (it treats the
+   #2106 tag-1 `$undefined` singleton as falsy, unlike `ref.is_null`).
+2. **Carrier-branched property reads (the non-obvious part).** The iterator
+   OBJECT and the step RESULT both routinely pre-shape into CLOSED STRUCTS,
+   not `$Object`s (`{ next: function () {…} }` is a struct with a
+   field-stored closure, #3117; `{value, done}` likewise). `__extern_get`
+   returns miss for those. So `next`/`return`/`done`/`value` reads all
+   branch: `ref.test $Object` → `__extern_get`; else → the #2038 field
+   getters (`__sget_next` / `__sget_return` / `__sget_done` / `__sget_value`),
+   looked up optionally at fill time (present exactly when such a literal
+   exists in the module). Without this, iteration silently drains empty —
+   the first build did exactly that.
+3. **Invocation** is uniformly `__apply_closure(fn, recv, emptyVec)` (#1888):
+   `__extern_length(emptyVec)=0` → `__call_fn_method_0(recv, fn)`, which
+   dispatches field-stored closures with `recv` bound as `this`. The bridge is
+   reserve-then-fill; the fill reserves it if no other site did (safe at
+   finalize: `fillApplyClosure` runs later in the index.ts sequence, after
+   `emitClosureMethodCallExportN`).
+4. **OBJ deps fill independently of the USER deps** — the repro module has NO
+   closed-struct `__call_next`/`__call_@@iterator` dispatchers, so gating the
+   OBJ arm on `deps` (as `__iterator_next`'s rebuild used to) would never
+   fire. `__iterator_next` now rebuilds when `deps || objDeps`, with the kind
+   chain USER → OBJ → VEC. Anti-spin guard: a falsy step result (missing/
+   uncallable `next`, bridge degrade) reports `done=1` instead of looping
+   (§7.4.3 TypeError refinement deferred, S1 no-throw discipline).
+5. **`__array_from_iter_n` drainability**: the guard admits a source whose
+   `@@iterator` property is truthy (one extra `__extern_get` probe);
+   `@@iterator`-less array-like `$Object`s keep the #2904 indexed
+   pass-through — this is what keeps arguments-object destructuring intact.
+6. **`__iterator_rest`** admits every step-driven kind the fill installed
+   (`[USER]`, `[OBJ]`, or both) — the drain itself steps through
+   `__iterator_next`, which owns the kind dispatch.
+
+**Byte-identity**: `prove-emit-identity` (39 file×target hashes incl.
+standalone/wasi) — IDENTICAL vs main baseline. All builders emit exactly the
+previous instruction stream when `objDeps` is undefined.
+
+**Validated**: 9 new tests in `tests/issue-3119.test.ts` (for-of, spread,
+dstr-assign, const-dstr, close-on-break, close-on-non-exhaust, mixed
+array+obj, immediate-done, non-callable degrade) — all host-free (zero
+imports asserted). #3100/#3100-s4/#3100-s5/#3117/#2038/#1665 suites green
+(the one issue-2151-mixed-spread failure pre-exists on main).
+
+**Measured population flip (851-file `[Symbol.iterator] =` sweep,
+standalone lane, branch vs main, 2026-07-09):**
+
+| status        | main | branch |
+| ------------- | ---- | ------ |
+| pass          | 118  | 318    |
+| fail          | 688  | 487    |
+| compile_error | 17   | 17     |
+| skip          | 28   | 28     |
+| run_timeout   | 0    | 1      |
+
+Transitions: **fail→pass 200**, pass→non-pass **0** (zero regressions),
+fail→run_timeout 1 (`for-of/body-put-error.js` — a never-done iterator whose
+only exit is an abrupt LHS assignment we don't yet raise; added to
+`HANGING_TESTS` and tracked as **#3122**, no pass lost: it was host-lane
+compile_timeout / standalone fail before).
+
+## Suspended Work (2026-07-09, fable-3022) — verify-first done + de-risked plan (HISTORICAL, superseded by the notes above)
 
 **Status: verified-ready, groundwork complete, handed off for a fresh focused
 build session.** Repro confirmed on standalone `origin/main` (for-of over a
