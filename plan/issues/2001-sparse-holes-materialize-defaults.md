@@ -360,10 +360,27 @@ machinery — `__extern_has_idx` + `gatedBody`/`hasIdxCheck`
   `[5,,,2].reduce((a,b)=>a+b) === 7`. Typed guard: `([1,,3] as
 number[]).forEach` count stays `3`.
 
-### S2 landed (2026-07-09, fable-2773t) — visit-skip for the HasProperty methods
+### S2 landed (2026-07-09, fable-2773t) — visit-skip, NARROWED to net-0
 
-**Done — for forEach / filter / some / every / reduce / reduceRight / indexOf /
-lastIndexOf.** `map`'s result-hole is **DEFERRED** (see below).
+**Done — for forEach / filter / some / every.** `indexOf` / `lastIndexOf` /
+`reduce` / `reduceRight` hole-skip and `map`'s result-hole are **DEFERRED** —
+see the boundary reasoning below.
+
+**Why narrowed (measured).** The full S2 (all 8 HasProperty methods) was
+implemented and A/B-swept over 2,080 Array HOF/search test262 files (branch vs
+same-harness main): **0 wins, 2 regressions**
+(`reduceRight/15.4.4.22-8-c-4.js` — all-hole reduceRight must NOT throw;
+`indexOf/15.4.4.14-9-b-i-21.js` — `[,].indexOf(undefined) === 0`). **Both
+combine a hole with a prototype-INHERITED index**
+(`Object.defineProperty(Array.prototype,"N",…)` / `Array.prototype[N]=…`) —
+a feature the flat WasmGC vec **cannot model**. They passed on main only
+_coincidentally_ (S1's `$Hole → undefined` map matched the spec's
+inherited-`undefined`); a spec-correct skip regresses them. Critically,
+**test262 has ZERO clean bare-literal sparse HOF tests** — it exercises holes
+via getters / prototype inheritance / `delete`, none of which the vec models —
+so the search/throw skip-methods have no offsetting win. The net-0 subset is the
+four **pure visit-skip** methods (no observable search/throw effect that a
+prototype-inheritance test can hit): forEach / filter / some / every.
 
 Mechanism (`src/codegen/array-methods.ts`), all gated on `shouldHoleSkip(ctx,
 elemType)` = `usesArrayHoles && elemType.kind === "externref"` (so typed
@@ -371,25 +388,23 @@ elemType)` = `usesArrayHoles && elemType.kind === "externref"` (so typed
 prove-emit-identity **39/39**):
 
 - **`gateHoleSkip(loop, arrTypeIdx, elemType, inner)`** — wraps a no-value /
-  no-escaping-`br` body in `if (present) { inner }`. Used by **forEach** and
-  the **reduce/reduceRight fold** (`callInstrs` sets the accumulator; a hole
-  falls through to the increment/decrement).
+  no-escaping-`br` body in `if (present) { inner }`. Used by **forEach**.
 - **`gateHoleFlag(loop, …, flagInner)`** — for bodies that leave an `i32`
   truthy/falsy flag (**filter/some/every**): a hole yields flag `0`, so the
   caller's following match/break/push `if` does nothing — crucially WITHOUT
   adding a control-flow level around the caller's escaping `br` (its depths are
   unshifted). This was the key hazard: a naive `if(present){…}` wrapper would
   shift `some`/`every`'s `br 2` to `br 3`.
-- **`indexOf`/`lastIndexOf`** — the per-iteration match flag becomes
-  `test $Hole ? 0 : (data[i] === val)`, so a hole never matches while a REAL
-  `undefined` element (stored via `emitUndefined`, not the `$Hole` sentinel)
-  still does. This SUPERSEDES the S1 `$Hole → undefined` map at these sites.
-- **reduce/reduceRight no-initial-value seed** — now seek the first (reduce) /
-  last (reduceRight) **present** index (skipping leading/trailing holes) via a
-  small scan block, and throw `Reduce of empty array` when every slot is a hole.
 
-**NOT skip methods (unchanged):** `find`/`findIndex` use `[[Get]]` (ES6) — they
-VISIT holes as `undefined` (the S1 read map), spec-correct; `includes` likewise
+**DEFERRED skip-methods (kept on S1 `$Hole → undefined`, net-0):**
+`indexOf`/`lastIndexOf` (a hole reads undefined and matches — spec wants skip),
+`reduce`/`reduceRight` (fold the hole as undefined; no first/last-present seed
+seek). The seek + match-flag + all-hole-throw implementations exist in git
+history (reverted here) and can be re-landed once prototype-index inheritance is
+modeled, or once the regression is accepted as an unmodelable-feature divergence.
+
+**NOT skip methods (spec-correct as-is):** `find`/`findIndex` use `[[Get]]`
+(ES6) — they VISIT holes as `undefined` (the S1 read map); `includes` likewise
 uses Get (`[,].includes(undefined) === true`). The architect spec's grouping
 listed find/findIndex as skip-methods, but that is incorrect per §23.1.3.9/10
 (Get, not HasProperty); verified against Node — they visit.
@@ -405,15 +420,18 @@ result type through the downstream type-flow — a separate slice. Until then ma
 **visits** the hole (S1 read map → callback sees `undefined`), unchanged from
 pre-S2. `[1,,3].map(x=>x*10)` still joins `"10,NaN,30"`.
 
-**Validation:** `tests/issue-2001-s2-hof-hole-skip.test.ts` (26 cases,
-host+standalone: every skip method both directions, real-undefined-still-
-matches, seed first/last-present seek, all-hole throws, find/findIndex/includes
-visit, typed `number[]` byte-path guard). Updated 5 S1 read-boundary cases from
-visit→skip. prove-emit-identity 39/39 byte-identical; tsc/prettier clean.
-A/B test262 sweep over the Array HOF+search dirs pending (broad-impact gate is
-`merge_group`).
+**Validation:** `tests/issue-2001-s2-hof-hole-skip.test.ts` (host+standalone:
+forEach/filter/some/every skip both directions, real-undefined-still-matches,
+find/findIndex/includes visit, typed `number[]` byte-path guard, and the
+DEFERRED indexOf/lastIndexOf/reduce behavior pinned). Updated 4 S1 read-boundary
+cases (forEach/filter/some/every) from visit→skip; kept indexOf/reduce on S1.
+prove-emit-identity **39/39** byte-identical; tsc / oracle-ratchet /
+ir-fallbacks clean. A/B sweep over the Array HOF+search dirs: **net-0** (the two
+narrowed regressions re-pass). Broad-impact gate is `merge_group`.
 
-**S2 status: landed (this PR) except map (deferred to a follow-up slice). S3
+**S2 status: landed (this PR) for forEach/filter/some/every.
+indexOf/lastIndexOf/reduce/reduceRight skip + map result-hole DEFERRED (need
+prototype-index inheritance modeling, or acceptance of the divergence). S3
 (index-grow → `$Hole`) and S4 (destructuring numeric default) remain. Note:
 #2773 S7 already fills the index-grow gap with JS `undefined` (observationally
 `typeof === "undefined"`), so the S3 gap-fill now only needs `undefined → $Hole`
