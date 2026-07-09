@@ -10,36 +10,47 @@
 // Apr 25) → 16,565 (Jul 9). In the 12 days to 2026-07-09 four files absorbed
 // +7.1k LOC. See plan/log/compiler-consolidation-plan.md §1.2.
 //
-// This gate is the regrowth brake, modelled exactly on the IR-fallback ratchet
-// (#1376, scripts/check-ir-fallbacks.ts) and the oracle ratchet (#1930):
+// This gate is the regrowth brake, modelled on the IR-fallback ratchet (#1376)
+// and the oracle ratchet (#1930): a committed baseline
+// (scripts/loc-budget-baseline.json) records a per-file line ceiling for every
+// `src/**/*.ts` file over the threshold, plus a coarse total-`src`-LOC ceiling.
 //
-//   - A committed baseline (scripts/loc-budget-baseline.json) records a per-file
-//     line ceiling for every `src/**/*.ts` file currently over the threshold,
-//     plus a coarse total-`src`-LOC ceiling.
-//   - The gate FAILS when a baselined file exceeds its ceiling (regrowth) or a
-//     non-baselined file crosses the threshold (a new god-file), or total src
-//     LOC exceeds the total ceiling.
-//   - It GRANDFATHERS everything at its current size — it blocks *growth*, never
-//     demands immediate shrinkage, so it merges with zero refactoring.
-//   - `--update-on-decrease` banks shrinkage: when a PR lowers any ceiling it
-//     rewrites the (lower) baseline so the next PR can't silently regrow it.
-//     Growth still fails. Decreases are staged on disk only; the PR author
-//     commits the diff (same convention as the IR/oracle ratchets).
-//   - `--update` force-reseeds from current sizes, for the rare PR that
-//     deliberately grows a file (visible in review via the committed baseline).
+// CHANGE-SCOPED (merge-queue safe). The gate evaluates ONLY the src files the
+// current change-set actually modifies — the diff between the working tree and
+// `git merge-base origin/main HEAD` (the fork point, so it is the PR's OWN delta
+// even after main advances). A frozen ABSOLUTE baseline compared against the
+// whole tree wedges the merge queue: `main` advances past some ceiling via an
+// unrelated PR, and every subsequent PR's `merge_group` re-run of `quality`
+// then fails on a file it never touched (observed on #2808). Scoping to the
+// change-set keeps the strict "no regrowth of a file you touch" pressure while
+// never blaming a PR for another PR's growth.
+//
+//   - FAILS when a file the change-set modifies exceeds its recorded ceiling
+//     (regrowth) or crosses the threshold newly (a new god-file), or when the
+//     change-set is net-additive AND total src LOC exceeds the total ceiling.
+//   - GRANDFATHERS everything at its current size — blocks *growth of what you
+//     touch*, never demands shrinkage; merges with zero refactoring.
+//   - `--update-on-decrease` banks shrinkage: lowers (never raises) the ceilings
+//     of files the change-set shrank, so the next PR can't silently regrow them.
+//     Staged on disk only; the PR author commits the diff (IR/oracle convention).
+//   - `--update` force-reseeds every over-threshold file from current sizes, for
+//     the rare PR that deliberately grows a file (visible in review).
+//   - `--all` ignores change-scoping and audits the whole tree (local use).
 //
 // Line count matches `wc -l` (newline count) so the baseline is reproducible
 // with `find src -name '*.ts' ! -name '*.d.ts' | xargs wc -l`.
 //
 // USAGE
-//   pnpm run check:loc-budget                          # gate against baseline
-//   pnpm run check:loc-budget -- --update              # force-reseed the baseline
-//   pnpm run check:loc-budget -- --update-on-decrease  # gate, bank decreases
-//   pnpm run check:loc-budget -- --json                # machine-readable snapshot
+//   pnpm run check:loc-budget                           # gate the change-set
+//   pnpm run check:loc-budget -- --all                  # audit the whole tree
+//   pnpm run check:loc-budget -- --update               # force-reseed the baseline
+//   pnpm run check:loc-budget -- --update-on-decrease   # gate, bank decreases
+//   pnpm run check:loc-budget -- --json                 # machine-readable snapshot
 
 import { readFileSync, writeFileSync, existsSync, readdirSync, statSync } from "node:fs";
 import { join, dirname, resolve, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { execFileSync } from "node:child_process";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, "..");
@@ -83,6 +94,56 @@ function countLines(filePath) {
 /** Repo-relative path with forward slashes, so the baseline is OS-independent. */
 function relPath(filePath) {
   return relative(REPO_ROOT, filePath).split(sep).join("/");
+}
+
+function git(argv) {
+  return execFileSync("git", argv, { cwd: REPO_ROOT, encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] });
+}
+function gitTry(argv) {
+  try {
+    return git(argv).trim();
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Resolve the diff base: the merge base of origin/main and HEAD (the fork point,
+ * so the diff is this change-set's OWN delta even if main advanced). Falls back
+ * to origin/main (a tree diff — shallow-safe, may over-include if main moved),
+ * then to undefined (caller audits the whole tree).
+ */
+function resolveBase() {
+  if (gitTry(["rev-parse", "--is-inside-work-tree"]) !== "true") return undefined;
+  const hasMain = !!gitTry(["rev-parse", "--verify", "--quiet", "origin/main"]);
+  if (!hasMain) return undefined;
+  const mb = gitTry(["merge-base", "origin/main", "HEAD"]);
+  return mb || "origin/main";
+}
+
+/**
+ * The set of src `.ts` files the working tree changes relative to `base`
+ * (repo-relative, forward-slash). `git diff --name-only <base> -- src` compares
+ * the base tree to the WORKING TREE, so it includes committed + uncommitted edits.
+ */
+function changedSrcFiles(base) {
+  const out = gitTry(["diff", "--name-only", base, "--", "src"]);
+  if (out === undefined) return undefined;
+  const set = new Set();
+  for (const line of out.split("\n")) {
+    const p = line.trim();
+    if (p.endsWith(".ts") && !p.endsWith(".d.ts") && p.startsWith("src/")) set.add(p);
+  }
+  return set;
+}
+
+/** Lines of `path` on `base` (0 if the file is new on this change-set). */
+function baseLines(base, path) {
+  const blob = gitTry(["show", `${base}:${path}`]);
+  if (blob === undefined) return 0;
+  let n = 0;
+  for (let i = 0; i < blob.length; i++) if (blob[i] === "\n") n++;
+  return n;
 }
 
 /** Current line count per src file + total. */
@@ -133,6 +194,7 @@ function main() {
       : args.has("--json")
         ? "json"
         : "gate";
+  const auditAll = args.has("--all");
 
   const measured = measure();
 
@@ -159,28 +221,41 @@ function main() {
   const threshold = baseline.threshold ?? THRESHOLD;
   const baseFiles = baseline.files ?? {};
 
-  const regrown = []; // baselined file over its recorded ceiling
-  const newGiants = []; // non-baselined file crossing the threshold
+  // Change-scoping: evaluate only the files this change-set modifies. `--all`
+  // (or an unresolvable git base) audits the whole tree.
+  const base = auditAll ? undefined : resolveBase();
+  const changed = base ? changedSrcFiles(base) : undefined;
+  const inScope = (path) => auditAll || changed === undefined || changed.has(path);
+
+  const regrown = []; // baselined, modified, over its recorded ceiling
+  const newGiants = []; // non-baselined, modified, crossing the threshold
   let anyDecrease = false;
+  let changeNetDelta = 0; // net LOC the change-set adds across modified src files
 
   for (const [path, lines] of Object.entries(measured.files)) {
+    if (!inScope(path)) continue;
+    // `grew` blames a PR only for its OWN growth of a file: when a git base is
+    // available, a file only counts against the gate if the change-set made it
+    // bigger than its size at the fork point. This keeps a stale committed
+    // ceiling (main grew the file via an unrelated PR) from blocking a PR that
+    // merely edits or shrinks that file. Without a base (`--all` audit) every
+    // over-limit file is reported.
+    const priorLines = base && changed ? baseLines(base, path) : 0;
+    const grew = base && changed ? lines > priorLines : true;
+    if (base && changed) changeNetDelta += lines - priorLines;
     if (path in baseFiles) {
       const ceiling = baseFiles[path];
-      if (lines > ceiling) regrown.push({ path, ceiling, lines, delta: lines - ceiling });
+      if (lines > ceiling && grew) regrown.push({ path, ceiling, lines, delta: lines - ceiling });
       else if (lines < ceiling) anyDecrease = true;
-    } else if (lines > threshold) {
+    } else if (lines > threshold && grew) {
       newGiants.push({ path, lines, delta: lines - threshold });
     }
   }
-  // A baselined file that dropped below the threshold (removed from the reseed)
-  // is also a decrease worth banking.
-  for (const path of Object.keys(baseFiles)) {
-    const cur = measured.files[path];
-    if (cur === undefined || cur <= threshold) anyDecrease = true;
-  }
+
   const totalCeiling = baseline.totalCeiling ?? measured.total + TOTAL_HEADROOM;
-  const totalOver = measured.total > totalCeiling;
-  if (measured.total < totalCeiling) anyDecrease = true;
+  // Only fault the total when THIS change-set is net-additive — otherwise an
+  // unrelated main advance past the ceiling would wedge every later PR.
+  const totalOver = measured.total > totalCeiling && (auditAll || changeNetDelta > 0);
 
   const failed = regrown.length > 0 || newGiants.length > 0 || totalOver;
 
@@ -211,19 +286,31 @@ function main() {
   }
 
   if (mode === "update-on-decrease" && anyDecrease) {
-    const next = seedBaseline(measured);
-    // Preserve headroom but bank the shrink: total ceiling tracks current down.
-    next.totalCeiling = Math.min(totalCeiling, measured.total + TOTAL_HEADROOM);
+    // Bank the shrink: LOWER the ceilings of files this change-set reduced;
+    // never raise (so unrelated drift is not silently banked). Keep everything
+    // else — including files not in scope — exactly as the committed baseline.
+    const nextFiles = { ...baseFiles };
+    for (const [path, lines] of Object.entries(measured.files)) {
+      if (!inScope(path)) continue;
+      if (path in nextFiles && lines < nextFiles[path]) nextFiles[path] = lines;
+    }
+    const next = {
+      generated: new Date().toISOString().slice(0, 10),
+      threshold,
+      totalCeiling: Math.min(totalCeiling, measured.total + TOTAL_HEADROOM),
+      files: nextFiles,
+    };
     writeBaseline(next);
     process.stdout.write(
-      `\nLOC budget gate: ratcheted baseline (total src ${measured.total}, ceiling ${next.totalCeiling}). ` +
+      `\nLOC budget gate: ratcheted baseline (banked per-file shrink; total src ${measured.total}). ` +
         `Staged update to ${relPath(BASELINE_PATH)} — commit it with the PR.\n`,
     );
     return;
   }
 
+  const scopeNote = auditAll || changed === undefined ? "whole tree" : `${changed.size} changed src file(s)`;
   process.stdout.write(
-    `\nLOC budget gate: OK — no regrowth. ` +
+    `\nLOC budget gate: OK — no regrowth in ${scopeNote}. ` +
       `${Object.keys(baseFiles).length} files tracked, total src ${measured.total}/${totalCeiling}.\n`,
   );
 }
