@@ -911,15 +911,9 @@ export function compileArrayLikePrototypeCall(
   // discipline). Host lane only: standalone keeps the number box unless its
   // native `__box_boolean` is already registered (mirrors #2785's host-first
   // shipping; the arms below check funcMap at build time).
-  const cbTsReturnsBool = (() => {
-    try {
-      const t = ctx.checker.getTypeAtLocation(cbArg);
-      const rt = t?.getCallSignatures?.()[0]?.getReturnType?.();
-      return rt ? isBooleanType(rt) : false;
-    } catch {
-      return false;
-    }
-  })();
+  // Routed through the oracle (#1930): the signature fact's `returns` is
+  // `{kind:"boolean"}` exactly when the declared return type is boolean.
+  const cbTsReturnsBool = ctx.oracle.signatureOf(cbArg)?.returns.kind === "boolean";
   if (cbTsReturnsBool && !noJsHost(ctx)) {
     ensureLateImport(ctx, "__box_boolean", [{ kind: "i32" }], [{ kind: "externref" }]);
   }
