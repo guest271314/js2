@@ -1119,6 +1119,34 @@ export function compileObjectDefineProperty(
     return { kind: "externref" };
   }
 
+  // (#3116) A LITERAL `get: null` / `set: null` descriptor field is a
+  // compile-time-provable ToPropertyDescriptor TypeError (§10.1: present, not
+  // undefined, not callable). The inline lowerings used to classify null as
+  // "no accessor" and silently degrade to a data define, and the runtime route
+  // can't be trusted with it — a null struct field is indistinguishable from
+  // an absent/undefined one at the wasm boundary (#2106). Emit the throw
+  // eagerly after evaluating the arguments for side effects (spec order).
+  if (ts.isObjectLiteralExpression(descArg)) {
+    let nullAccessor: "Getter" | "Setter" | undefined;
+    for (const dp of descArg.properties) {
+      if (!ts.isPropertyAssignment(dp) || !ts.isIdentifier(dp.name)) continue;
+      if (unwrapTransparentExpression(dp.initializer).kind !== ts.SyntaxKind.NullKeyword) continue;
+      if (dp.name.text === "get") nullAccessor = "Getter";
+      else if (dp.name.text === "set" && nullAccessor === undefined) nullAccessor = "Setter";
+    }
+    if (nullAccessor !== undefined) {
+      const t1 = compileExpression(ctx, fctx, objArg);
+      if (t1) fctx.body.push({ op: "drop" });
+      const t2 = compileExpression(ctx, fctx, propArg);
+      if (t2) fctx.body.push({ op: "drop" });
+      const t3 = compileExpression(ctx, fctx, descArg);
+      if (t3) fctx.body.push({ op: "drop" });
+      emitThrowTypeError(ctx, fctx, `${nullAccessor} must be a function: null`);
+      fctx.body.push({ op: "unreachable" });
+      return { kind: "externref" };
+    }
+  }
+
   // (#1355 Slice F) Standalone proxy-receiver routing. A standalone `Proxy`
   // (`new Proxy(t, h)`) is an opaque externref typed `any` — it never resolves to
   // a static struct, so the inline-literal fast paths below
@@ -3000,6 +3028,39 @@ export function compileObjectDefineProperties(
 
   // ES spec 19.1.2.3 step 1: throw TypeError if first arg is not an object
   if (emitNonObjectArgGuard(ctx, fctx, objArg, "Object.defineProperties")) {
+    fctx.body.push({ op: "unreachable" });
+    return { kind: "externref" };
+  }
+
+  // (#3116) A LITERAL `get: null` / `set: null` in any inner descriptor is a
+  // compile-time-provable ToPropertyDescriptor TypeError (§10.1: present, not
+  // undefined, not callable). Routing it to the runtime is unreliable — a null
+  // struct field is indistinguishable from an absent/undefined one at the wasm
+  // boundary (#2106), so the runtime sometimes sees `{get: undefined}` (a
+  // VALID accessor) instead. Emit the throw eagerly, after evaluating the
+  // receiver + descriptors expressions for side effects (spec order: argument
+  // evaluation precedes the per-key ToPropertyDescriptor throw).
+  const nullAccessorField = ((): "Getter" | "Setter" | undefined => {
+    if (!ts.isObjectLiteralExpression(descsArg)) return undefined;
+    for (const prop of descsArg.properties) {
+      if (!ts.isPropertyAssignment(prop)) continue;
+      const inner = unwrapTransparentExpression(prop.initializer);
+      if (!ts.isObjectLiteralExpression(inner)) continue;
+      for (const dp of inner.properties) {
+        if (!ts.isPropertyAssignment(dp) || !ts.isIdentifier(dp.name)) continue;
+        if (unwrapTransparentExpression(dp.initializer).kind !== ts.SyntaxKind.NullKeyword) continue;
+        if (dp.name.text === "get") return "Getter";
+        if (dp.name.text === "set") return "Setter";
+      }
+    }
+    return undefined;
+  })();
+  if (nullAccessorField !== undefined) {
+    const objT = compileExpression(ctx, fctx, objArg);
+    if (objT) fctx.body.push({ op: "drop" });
+    const descsT = compileExpression(ctx, fctx, descsArg);
+    if (descsT) fctx.body.push({ op: "drop" });
+    emitThrowTypeError(ctx, fctx, `${nullAccessorField} must be a function: null`);
     fctx.body.push({ op: "unreachable" });
     return { kind: "externref" };
   }

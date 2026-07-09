@@ -5790,13 +5790,18 @@ function _vecDefineOwnProperty(
   if (idx === undefined) return false; // named prop → generic struct arm
   if (idx >= oldLen && idx + 1 > _VEC_DEFINE_GROW_LIMIT) return false; // allocation guard
 
-  // Existing in-bounds element with no explicit descriptor entry = default
-  // data property. Seed the table so _validatePropertyDescriptor validates a
-  // REdefinition (SameValue on non-writable, enumerable/configurable toggles,
-  // data⇄accessor flips) instead of treating it as a first definition.
+  // NOTE on existing-element synthesis: an in-bounds element with no explicit
+  // descriptor entry is treated as a FIRST definition (omitted attributes
+  // default false), not a redefinition of a default data property. The codegen
+  // pre-grows the vec to idx+1 (`maybeEmitVecLengthGrowth`) BEFORE the runtime
+  // call, so `idx < oldLen` cannot distinguish a genuine element from a
+  // compiler-created hole — seeding default (configurable) flags for a hole
+  // suppressed the §10.1.6.3 non-configurable rejection matrix for
+  // fresh-index defines (15.2.3.6-4-252 regression). Read-side descriptor
+  // synthesis (_readOwnDescriptor) still reports w/e/c=true for untouched
+  // in-bounds elements, which matches §10.4.2 defaults for literal elements.
   const nKey = _normalizeDescKey(keyStr);
   const hadEntry = sDescs.has(nKey);
-  if (!hadEntry && idx < oldLen) sDescs.set(nKey, _SC_ELEM_DEFAULT);
 
   let existingVal: any;
   let existingDesc: PropertyDescriptor | undefined;
@@ -5806,30 +5811,20 @@ function _vecDefineOwnProperty(
     } catch {
       existingVal = undefined;
     }
-    existingDesc = _readOwnDescriptor(obj, nKey, exports) ?? {
-      value: existingVal,
-      writable: true,
-      enumerable: true,
-      configurable: true,
-    };
+    if (hadEntry) {
+      existingDesc = _readOwnDescriptor(obj, nKey, exports);
+    }
   } else {
     // §10.4.2 step 2/4: adding an element at idx >= length requires length to
     // be writable.
     const lenFlags = sDescs.get("length");
     const lenWritable = lenFlags === undefined ? true : !!(lenFlags & _SC_WRITABLE);
     if (!lenWritable) {
-      if (!hadEntry) sDescs.delete(nKey);
       throw new TypeError("Cannot redefine property: " + keyStr);
     }
   }
 
-  let newFlags: number;
-  try {
-    newFlags = _validatePropertyDescriptor(sDescs, nKey, desc, existingVal, existingDesc);
-  } catch (e) {
-    if (!hadEntry) sDescs.delete(nKey); // undo the seed — no state change on throw
-    throw e;
-  }
+  const newFlags = _validatePropertyDescriptor(sDescs, nKey, desc, existingVal, existingDesc);
   sDescs.set(nKey, newFlags);
 
   // Apply the value into the vec itself so element reads observe it.
@@ -5839,11 +5834,16 @@ function _vecDefineOwnProperty(
       // unbox) — fall back to sidecar storage so at least dynamic reads see it.
       _sidecarSet(obj, keyStr, desc.value);
     }
-  } else if (idx >= oldLen) {
-    // Value-less define beyond length (accessor or bare attributes): extend
-    // length; the slot itself stays a hole/default.
-    setLen(obj, idx + 1);
   }
+  // NOTE: a VALUE-less define beyond length (accessor / bare attributes) does
+  // NOT extend the vec length here, although §10.4.2 says length becomes
+  // idx+1. The element read lane cannot serve accessors (typed vec reads),
+  // so extending length would turn a previously-OOB read (undefined — which
+  // matches a getter returning undefined) into a hole-default read (null/0)
+  // — a strict behavioral regression (15.2.3.6-4-312). The descriptor flags
+  // above still make the §10.1.6.3 redefinition matrix correct; length
+  // extension for accessor defines is deferred to the read-lane accessor
+  // follow-up (#3022).
 
   // Accessor storage mirrors the generic struct arm (`__get_<k>`/`__set_<k>`
   // in the props sidecar) so dynamic reads/hasOwnProperty observe it. NOTE:

@@ -17,7 +17,7 @@ goal: spec-completeness
 test262_category: built-ins/Object/defineProperty, built-ins/Object/defineProperties
 test262_fail: 728
 related: [1334, 1629, 1629a, 1631, 2726]
-children: [3042, 3043, 3044, 3045, 3046]
+children: [3042, 3043, 3044, 3045, 3046, 3116]
 ---
 
 > **UMBRELLA (decomposed 2026-07-05, dev-2726).** This 728-fail blob is NOT a
@@ -197,3 +197,27 @@ highest-leverage item in the whole #3022 tail and is architect-gated.
   clusters (value-round-trip, array-exotic, prototype-chain) + module-namespace.
 - **ARCH-gated:** the ~89-fail top-level-`this`/global-object model → #2726 (b).
 - **DEFERRED:** annexB `[[IsHTMLDDA]]`, `$262.createRealm` realms.
+
+## Senior pickup (2026-07-09, fable-3022)
+
+Regrounded the full 570-file `definePropert{y,ies}` residual on current main
+with per-test intrinsic snapshot/restore (the process-isolation contamination
+fix) and cross-tabbed error signature × compiled-import signature. Empirical
+mechanism sizes (supersede the 2026-07-05 estimates): **Array receivers 236**,
+descriptor-reader/prototype-chain ~160, arguments receivers 57, accessor
+read-lane ~80, residual transition matrix small (most of the #3043 headline
+repros — +0/-0 SameValue, enumerable toggle, false-positive redefine — already
+pass post-#3042).
+
+- **#3116 (filed + landed this pickup):** array-exotic `[[DefineOwnProperty]]`
+  — element/length defines now write into the native vec (`__vec_set_elem` /
+  `__vec_set_len` exports + runtime `_vecDefineOwnProperty` §10.4.2), plus
+  `get/set: null` compile-time TypeError and the compile-time/runtime
+  descriptor-state veto. Cluster: 570 → 424 fails (**+146**).
+- **#3043 remains open** (claimed, fable-3022): residual matrix is now the
+  fully-static lane divergence (accessor `configurable:false→true` and
+  data→accessor on struct receivers compile away without runtime mirroring)
+  plus the non-callable-getter define-leak.
+- Next cause-scoped candidates: descriptor prototype-chain/fnctor reads
+  (~160, needs #1712 registration for function-scope ctors), accessor
+  read-lane on vec elements (~80), arguments-object exotic (~57).
