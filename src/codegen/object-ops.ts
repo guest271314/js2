@@ -1119,6 +1119,34 @@ export function compileObjectDefineProperty(
     return { kind: "externref" };
   }
 
+  // (#3116) A LITERAL `get: null` / `set: null` descriptor field is a
+  // compile-time-provable ToPropertyDescriptor TypeError (§10.1: present, not
+  // undefined, not callable). The inline lowerings used to classify null as
+  // "no accessor" and silently degrade to a data define, and the runtime route
+  // can't be trusted with it — a null struct field is indistinguishable from
+  // an absent/undefined one at the wasm boundary (#2106). Emit the throw
+  // eagerly after evaluating the arguments for side effects (spec order).
+  if (ts.isObjectLiteralExpression(descArg)) {
+    let nullAccessor: "Getter" | "Setter" | undefined;
+    for (const dp of descArg.properties) {
+      if (!ts.isPropertyAssignment(dp) || !ts.isIdentifier(dp.name)) continue;
+      if (unwrapTransparentExpression(dp.initializer).kind !== ts.SyntaxKind.NullKeyword) continue;
+      if (dp.name.text === "get") nullAccessor = "Getter";
+      else if (dp.name.text === "set" && nullAccessor === undefined) nullAccessor = "Setter";
+    }
+    if (nullAccessor !== undefined) {
+      const t1 = compileExpression(ctx, fctx, objArg);
+      if (t1) fctx.body.push({ op: "drop" });
+      const t2 = compileExpression(ctx, fctx, propArg);
+      if (t2) fctx.body.push({ op: "drop" });
+      const t3 = compileExpression(ctx, fctx, descArg);
+      if (t3) fctx.body.push({ op: "drop" });
+      emitThrowTypeError(ctx, fctx, `${nullAccessor} must be a function: null`);
+      fctx.body.push({ op: "unreachable" });
+      return { kind: "externref" };
+    }
+  }
+
   // (#1355 Slice F) Standalone proxy-receiver routing. A standalone `Proxy`
   // (`new Proxy(t, h)`) is an opaque externref typed `any` — it never resolves to
   // a static struct, so the inline-literal fast paths below
@@ -1554,7 +1582,23 @@ export function compileObjectDefineProperty(
   // and emit an additional side-effect `__defineProperty_value` call further
   // below so attribute flags are propagated to the runtime sidecar
   // (`_wasmPropDescs`) for later `Object.getOwnPropertyDescriptor` reads.
-  const useStruct = !_anyFlagDynamic && structTypeIdx !== undefined && fields && fieldIdx >= 0 && valueExpr;
+  // (#3116) Veto the compile-time struct fast path when a PRIOR define for the
+  // same var:prop went through a runtime route (`sidecarDefinedPropertyKeys` —
+  // populated by emitDefinePropertyDescRuntime / emitExternDefineProperty*):
+  // the authoritative descriptor state (attributes AND the SameValue-relevant
+  // current value) then lives in the runtime sidecar, which the compile-time
+  // `definedPropertyFlags` tracker cannot see. A static struct.set here would
+  // skip §10.1.6.3 validation against that state (e.g. redefining `{value:-0}`
+  // over a non-writable `+0` defined via a descriptor variable must throw —
+  // 15.2.3.7-6-a-46). Routing to the externref path keeps validation in the
+  // runtime, and `_structFieldWriteback` still mirrors the value into the
+  // typed struct field for static reads.
+  const priorRuntimeDefine =
+    propName !== undefined &&
+    ts.isIdentifier(objArg) &&
+    ctx.sidecarDefinedPropertyKeys.has(`${objArg.text}:${propName}`);
+  const useStruct =
+    !_anyFlagDynamic && !priorRuntimeDefine && structTypeIdx !== undefined && fields && fieldIdx >= 0 && valueExpr;
   const anyFlagSpecified =
     _anyFlagDynamic || descWritable !== undefined || descEnumerable !== undefined || descConfigurable !== undefined;
 
@@ -2988,6 +3032,39 @@ export function compileObjectDefineProperties(
     return { kind: "externref" };
   }
 
+  // (#3116) A LITERAL `get: null` / `set: null` in any inner descriptor is a
+  // compile-time-provable ToPropertyDescriptor TypeError (§10.1: present, not
+  // undefined, not callable). Routing it to the runtime is unreliable — a null
+  // struct field is indistinguishable from an absent/undefined one at the wasm
+  // boundary (#2106), so the runtime sometimes sees `{get: undefined}` (a
+  // VALID accessor) instead. Emit the throw eagerly, after evaluating the
+  // receiver + descriptors expressions for side effects (spec order: argument
+  // evaluation precedes the per-key ToPropertyDescriptor throw).
+  const nullAccessorField = ((): "Getter" | "Setter" | undefined => {
+    if (!ts.isObjectLiteralExpression(descsArg)) return undefined;
+    for (const prop of descsArg.properties) {
+      if (!ts.isPropertyAssignment(prop)) continue;
+      const inner = unwrapTransparentExpression(prop.initializer);
+      if (!ts.isObjectLiteralExpression(inner)) continue;
+      for (const dp of inner.properties) {
+        if (!ts.isPropertyAssignment(dp) || !ts.isIdentifier(dp.name)) continue;
+        if (unwrapTransparentExpression(dp.initializer).kind !== ts.SyntaxKind.NullKeyword) continue;
+        if (dp.name.text === "get") return "Getter";
+        if (dp.name.text === "set") return "Setter";
+      }
+    }
+    return undefined;
+  })();
+  if (nullAccessorField !== undefined) {
+    const objT = compileExpression(ctx, fctx, objArg);
+    if (objT) fctx.body.push({ op: "drop" });
+    const descsT = compileExpression(ctx, fctx, descsArg);
+    if (descsT) fctx.body.push({ op: "drop" });
+    emitThrowTypeError(ctx, fctx, `${nullAccessorField} must be a function: null`);
+    fctx.body.push({ op: "unreachable" });
+    return { kind: "externref" };
+  }
+
   // Static path: descriptors is an object literal — expand to individual defineProperty calls.
   // Pre-check: if any inner descriptor is demonstrably malformed (primitive literal, or an
   // object literal mixing data and accessor fields, or non-function get/set), abort the
@@ -3029,11 +3106,18 @@ export function compileObjectDefineProperties(
         hasAccessor = true;
         const init = dp.initializer;
         const isFn = ts.isFunctionExpression(init) || ts.isArrowFunction(init);
+        // (#3116) `get: null` / `set: null` are spec TypeErrors (ToPropertyDescriptor
+        // §10.1: present, not undefined, not callable → throw) and `get/set:
+        // undefined` is a VALID accessor descriptor (not a data property). The
+        // static expansion used to classify all three as "no accessor" and
+        // degrade the define to a plain value write, silently losing the throw /
+        // the accessor-ness (15.2.3.7-5-b-21x). Route them to the dynamic
+        // runtime, whose ToPropertyDescriptor handles both correctly.
+        if (init.kind === ts.SyntaxKind.NullKeyword) return false;
+        if (ts.isIdentifier(init) && init.text === "undefined") return false;
         const isIdLike =
           ts.isIdentifier(init) || ts.isPropertyAccessExpression(init) || ts.isElementAccessExpression(init);
-        const isUndefOrNull =
-          init.kind === ts.SyntaxKind.NullKeyword || (ts.isIdentifier(init) && init.text === "undefined");
-        if (!isFn && !isIdLike && !isUndefOrNull) return false;
+        if (!isFn && !isIdLike) return false;
       }
     }
     if (hasData && hasAccessor) return false;
@@ -3158,8 +3242,17 @@ export function compileObjectDefineProperties(
         const structTypeIdx = structName ? ctx.structMap.get(structName) : undefined;
         const fields = structName ? ctx.structFields.get(structName) : undefined;
         const fieldIdx = fields && propName ? fields.findIndex((f) => f.name === propName) : -1;
+        // (#3116) Same veto as the singular `useStruct` path: a prior define
+        // for this var:prop went through a runtime route, so the authoritative
+        // descriptor state (attributes + SameValue-relevant current value)
+        // lives in the runtime sidecar — the compile-time struct.set would skip
+        // validation against it (15.2.3.7-6-a-46). Route to the externref path.
+        const priorRuntimeDefine =
+          propName !== undefined &&
+          ts.isIdentifier(objArg) &&
+          ctx.sidecarDefinedPropertyKeys.has(`${objArg.text}:${propName}`);
 
-        if (structTypeIdx !== undefined && fields && fieldIdx >= 0 && valueExpr) {
+        if (!priorRuntimeDefine && structTypeIdx !== undefined && fields && fieldIdx >= 0 && valueExpr) {
           // Struct path: emit struct.set directly
           const fieldType = fields[fieldIdx]!.type;
 

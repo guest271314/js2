@@ -6,6 +6,7 @@ import { analyzeLinearUint8 } from "./linear-uint8-analysis.js";
 import { analyzeFnctorEscapeGate, deriveFnctorFields } from "./fnctor-escape-gate.js";
 import { isLinearU8RepresentableNew } from "./linear-uint8-signatures.js";
 import { definedFuncAt } from "./func-space.js"; // (#1916 S2) positional-read chokepoint
+import { emitVecDefineWritebackExports } from "./vec-define-writeback.js"; // (#3116)
 import type { MultiTypedAST, TypedAST } from "../checker/index.js";
 import {
   isBigIntType,
@@ -6267,6 +6268,20 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
       mod.exports.push({ name: "__vec_pop", desc: { kind: "func", index: popFuncIdx } });
       ctx.funcMap.set("__vec_pop", popFuncIdx);
     }
+  }
+
+  // (#3116) __vec_set_elem / __vec_set_len — array-exotic [[DefineOwnProperty]]
+  // write-back exports (values into the vec, attributes in the sidecar — see
+  // src/codegen/vec-define-writeback.ts for the full rationale). Gated on a
+  // defineProperty import being present so modules that never define
+  // properties stay byte-identical.
+  const wantsDefineWriteback =
+    ctx.funcMap.has("__defineProperty_value") ||
+    ctx.funcMap.has("__defineProperty_desc") ||
+    ctx.funcMap.has("__defineProperty_accessor") ||
+    ctx.funcMap.has("__defineProperties");
+  if (wantsDefineWriteback) {
+    emitVecDefineWritebackExports(ctx, mutEntries, unboxNumIdx);
   }
 }
 
