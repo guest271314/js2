@@ -983,6 +983,73 @@ function applyDescriptorFlags(
   return flags;
 }
 
+/**
+ * (#3043) Compile-time §10.1.6.3 ValidateAndApplyPropertyDescriptor transition
+ * check for a statically-tracked `varName:propName` property. Emits a Wasm
+ * `throw TypeError` when redefining a NON-configurable property in a
+ * spec-forbidden way. Shared so the data fast path, the accessor fast path, and
+ * the attribute-only runtime path all enforce the SAME matrix against
+ * `definedPropertyFlags` — previously only the inline data path validated, so an
+ * accessor define (which records flags but routed a later attribute-only /
+ * get-set redefine through a path that skipped validation) silently accepted
+ * illegal transitions (15.2.3.6-4-30 / -252 / -312, 15.2.3.7-6-a-241).
+ *
+ * Mirrors the inline data-path check (writable-narrow, enum-toggle,
+ * config-false→true, data↔accessor flip) and adds the accessor-redefine case:
+ * `newProvidesFreshAccessorFn` is true when the redefining descriptor supplies a
+ * get/set as a *fresh function expression* (getNode/setNode) — always a distinct
+ * object, so redefining a non-configurable accessor's get/set with it can never
+ * be SameValue and MUST throw (spec step 10.a/b). An identifier-ref get/set is
+ * left to conservative allow (it *may* be SameValue with the existing accessor).
+ *
+ * The data/accessor KIND is read from `newFlags` (which `applyDescriptorFlags`
+ * already resolved — an attribute-only redefine like `{enumerable:true}`
+ * PRESERVES the existing kind), NOT from a raw "did this descriptor name a
+ * get/set" flag: the latter false-flags a bare-attribute redefine of an
+ * accessor as a data↔accessor flip (the accSameAttrs false-throw).
+ *
+ * Returns true when a throw was emitted (caller may skip further emission).
+ */
+function emitStaticDescriptorTransitionThrow(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  existingFlags: number | undefined,
+  newFlags: number,
+  _isAccessor: boolean,
+  newProvidesFreshAccessorFn: boolean,
+): boolean {
+  if (existingFlags === undefined) return false;
+  if (existingFlags & PROP_FLAG_CONFIGURABLE) return false; // configurable ⇒ any redefine ok
+  // configurable false → true is forbidden.
+  if (newFlags & PROP_FLAG_CONFIGURABLE) {
+    emitThrowTypeError(ctx, fctx, "Cannot redefine property");
+    return true;
+  }
+  // enumerable toggle is forbidden.
+  if ((existingFlags & PROP_FLAG_ENUMERABLE) !== (newFlags & PROP_FLAG_ENUMERABLE)) {
+    emitThrowTypeError(ctx, fctx, "Cannot redefine property");
+    return true;
+  }
+  const existingIsAccessor = !!(existingFlags & PROP_FLAG_ACCESSOR);
+  const newIsAccessor = !!(newFlags & PROP_FLAG_ACCESSOR);
+  // data ↔ accessor flip is forbidden on a non-configurable property.
+  if (existingIsAccessor !== newIsAccessor) {
+    emitThrowTypeError(ctx, fctx, "Cannot redefine property");
+    return true;
+  }
+  // Data property: writable false → true is forbidden.
+  if (!existingIsAccessor && !newIsAccessor && !(existingFlags & PROP_FLAG_WRITABLE) && newFlags & PROP_FLAG_WRITABLE) {
+    emitThrowTypeError(ctx, fctx, "Cannot redefine property");
+    return true;
+  }
+  // Accessor → accessor: a fresh (distinct) get/set can never be SameValue.
+  if (existingIsAccessor && newIsAccessor && newProvidesFreshAccessorFn) {
+    emitThrowTypeError(ctx, fctx, "Cannot redefine property");
+    return true;
+  }
+  return false;
+}
+
 // ── Mapped-arguments value redefine (#2667) ──────────────────────────────
 
 /**
@@ -1677,6 +1744,37 @@ export function compileObjectDefineProperty(
       // A later `configurable: true` redefine clears any earlier non-configurable
       // record for the same key (last-write-wins, mirroring runtime semantics).
       ctx.nonConfigurableAccessorKeys.delete(`${objArg.text}:${propName}`);
+    }
+
+    // (#3043) Record this accessor's descriptor flags in `definedPropertyFlags`
+    // (the compile-time descriptor source-of-truth) and validate the transition
+    // against any prior define for the same key. This fast path previously
+    // recorded ONLY `nonConfigurableAccessorKeys`, so a subsequent attribute-only
+    // redefine (routed through `emitExternDefinePropertyNoValue`) or a get/set
+    // redefine saw no existing descriptor and silently accepted illegal
+    // transitions on a non-configurable accessor (configurable false→true,
+    // enumerable toggle, data↔accessor flip, get/set change) — 15.2.3.6-4-30 /
+    // -252 / -312, 15.2.3.7-6-a-241. Only on an identifier receiver (the key
+    // shape the flag maps use).
+    // (#3043) HOST-lane only: recording an accessor key in `definedPropertyFlags`
+    // routes standalone `hasOwnProperty` through the wasm-native `__hasOwnProperty`
+    // helper (object-ops.ts ~4543), which does NOT report a defineProperty-added
+    // struct-shape property as own → regresses the standalone accessor
+    // hasOwnProperty case (#2726). The #3043 transition-validation cluster is the
+    // JS-host default lane, so gate the record + check to host mode; standalone
+    // keeps origin/main behaviour.
+    if (!ctx.standalone && ts.isIdentifier(objArg)) {
+      const dpKey = `${objArg.text}:${propName}`;
+      const existingFlags = ctx.definedPropertyFlags.get(dpKey);
+      const newFlags = applyDescriptorFlags(existingFlags, descWritable, descEnumerable, descConfigurable, true, false);
+      // On an illegal transition, RETURN immediately — emitting the compiled
+      // getter/setter below would register a second accessor that clobbers the
+      // still-live original (the define throws, so nothing must change).
+      if (emitStaticDescriptorTransitionThrow(ctx, fctx, existingFlags, newFlags, true, !!(getNode || setNode))) {
+        fctx.body.push({ op: "unreachable" });
+        return objType;
+      }
+      ctx.definedPropertyFlags.set(dpKey, newFlags);
     }
 
     // (#1888 S5c / C2) STORE arm — land dark behind `S5C_STRUCT_ACCESSOR_CLOSURE`.
@@ -2791,14 +2889,36 @@ function emitExternDefinePropertyNoValue(
       const varName = ts.isIdentifier(objArg) ? objArg.text : undefined;
       if (varName) {
         const key = `${varName}:${propName}`;
+        const existingFlags = ctx.definedPropertyFlags.get(key);
         const newFlags = applyDescriptorFlags(
-          ctx.definedPropertyFlags.get(key),
+          existingFlags,
           descWritable,
           descEnumerable,
           descConfigurable,
           isAccessor,
           descWritable !== undefined,
         );
+        // (#3043) §10.1.6.3 transition check. Covers the attribute-only redefine
+        // of a non-configurable accessor (`{configurable:true}` / enumerable
+        // toggle) whose FIRST define recorded flags via the accessor fast path,
+        // AND the `const o:any` accessor get/set redefine that lands here. The
+        // throw is emitted after argument side-effects (spec order). On a throw
+        // we RETURN immediately (unreachable) — continuing would emit a second,
+        // dead accessor registration that clobbers the still-live original
+        // accessor (15.2.3.6-4-540-*: the post-catch read must see the ORIGINAL
+        // get/set intact).
+        // Host-lane only (see the accessor fast-path note): the transition
+        // matrix is validated against `definedPropertyFlags`, which in standalone
+        // feeds the wasm-native hasOwnProperty routing; keep standalone on its
+        // origin/main path. The existing `definedPropertyFlags.set` below is
+        // unchanged in both modes.
+        if (
+          !ctx.standalone &&
+          emitStaticDescriptorTransitionThrow(ctx, fctx, existingFlags, newFlags, isAccessor, !!(getNode || setNode))
+        ) {
+          fctx.body.push({ op: "unreachable" });
+          return { kind: "externref" };
+        }
         ctx.definedPropertyFlags.set(key, newFlags);
       }
     }
