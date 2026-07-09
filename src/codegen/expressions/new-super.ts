@@ -3323,14 +3323,10 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
   // "[object Object]". Falls back to `ref.null.extern` only if the import
   // can't be registered.
   if (ts.isIdentifier(expr.expression) && expr.expression.text === "Object") {
-    // (#3118) `new Object(value)` is spec-identical to `Object(value)`
-    // (§20.1.1.1 step 1: if NewTarget is Object/undefined, return ToObject(value)).
-    // Previously this path ignored its argument and always built an empty object,
-    // so `new Object(42)` stringified to "[object Object]" instead of "42" and
-    // every String/Number/Boolean method-borrow-onto-`new Object(primitive)` test
-    // failed. Delegate to the shared ToObject coercion used by the call form so a
-    // primitive arg boxes to its Number/String/Boolean/BigInt wrapper, an object
-    // passes through unchanged, and null/undefined/no-arg build a fresh object.
+    // (#3118) `new Object(v)` is spec-identical to `Object(v)` (§20.1.1.1:
+    // return ToObject(v)). This arm previously ignored its arg and built an
+    // empty object; delegate to the shared coercion so a primitive boxes to its
+    // wrapper (an object passes through, null/undefined/none → fresh object).
     const r = emitObjectCoercion(ctx, fctx, expr.arguments ?? []);
     return r === null ? { kind: "externref" } : (r as ValType);
   }
