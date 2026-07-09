@@ -1,31 +1,32 @@
 ---
 id: 3117
-title: "Standalone $Object stored-function substrate: dot-member-set drops closures (o.f = fn → uncallable) + the plain-$Object @@iterator protocol arm (#3100 Design arm 3) — 810-file test262 population, 0 host-free"
-status: in-progress
+title: "Standalone $Object dot-member-set drops closures: o.f = function(){} is silently uncallable (computed-key o['f']=fn works) — closed-method dispatcher had no field-stored-closure arm"
+status: done
+completed: 2026-07-09
 assignee: ttraenkler/fable-3100s4
 sprint: current
 model: fable
 created: 2026-07-09
 priority: high
-horizon: l
+horizon: m
 feasibility: hard
 reasoning_effort: max
 task_type: feature
 area: codegen, standalone
-language_feature: iterators, functions, objects
+language_feature: functions, objects
 goal: standalone-mode
 umbrella: 2860
-related: [3100, 3098, 1888, 2664, 2866, 3031]
-origin: "2026-07-09 fable-3100s4 prove-first probe after S5 measured zero test262 flips — the *-close cluster (and per fable-3058, the broader standalone frontier) bottoms out on this lane; #3098's author stood down, lane unowned"
+related: [3100, 3098, 1888, 2664, 2866, 3119]
+origin: "2026-07-09 fable-3100s4 prove-first probe after #3100 S5 measured zero test262 flips — the *-close cluster bottoms out on the dynamic-$Object function lane; #3098's author stood down, lane unowned. Split from the original two-slice #3117: the $Object @@iterator protocol arm is now #3119."
 ---
 
-# #3117 — $Object stored-function invocation substrate (two slices)
+# #3117 — $Object dot-member-set stored-closure invocation
 
 ## Problem (verified against origin/main @ abdaabf, 2026-07-09, standalone)
 
-Two empirically-pinned sub-gaps, both in the dynamic-`$Object` lane:
-
-**(1) Dot-member-set DROPS function values.** Differential probes:
+Storing a function onto an `any`-typed object via a **dot** member-set drops
+the closure at the CALL site — the value is stored, but the call returns
+`undefined`. The computed-key twin works. Differential probes:
 
 ```ts
 const o: any = {};
@@ -41,73 +42,57 @@ o.f = function () {
 o.f(); // ✗ 0  (dot set — silently uncallable)
 o.f = () => 7;
 o.f(); // ✗ 0  (dot set)
+o.g = (x: number) => x + 1;
+o.g(4); // ✗ 0  (dot set + arg)
 ```
 
-Arrow vs function-expression is irrelevant — it is dot-set vs computed-set.
-So the #3098/#1888 invocation machinery (`__apply_closure`, boxed-closure
-read-back, `__call_fn_method_N`) is COMPLETE and reachable; the dot-property
-WRITE path loses the closure. Broad-population correctness bug beyond
-iteration (`obj.method = function` is pervasive in test262).
+Arrow vs function-expression is irrelevant — it is **dot-set vs
+computed-set**.
 
-**(2) No plain-`$Object` `@@iterator` protocol arm in the native `__iterator`
-ladder** — #3100's day-one Design arm 3, never built (tracked here, not by
-reopening #3100). The install itself works (computed set), but iteration has
-no arm:
+## Root cause (WAT-traced)
 
-```ts
-const o: any = {};
-o[Symbol.iterator] = function () {
-  let i = 0;
-  return {
-    next: function () {
-      i += 1;
-      return { value: i * 10, done: i > 3 };
-    },
-  };
-};
-[...o]; // ✗ [] (length 0)
-for (const v of o) // ✗ TRAP: illegal cast (ladder tail)
-  let x;
-[x] = o; // ✗ x undefined
-```
+The `{}` literal is pre-shaped into a **closed WasmGC struct** whose
+externref field `f` receives the closure via `struct.set` (the dot-set path,
+literals.ts). At the call `o.f()`, the any-receiver method dispatcher
+`__call_m_f_0` (closed-method-dispatch.ts) type-switches over structs having
+a `<Struct>_f` **method** func — but this struct has no method `f`, it has a
+**field** `f` holding a boxed closure. No arm matched → the open-`$Object`
+bottom arm → `__extern_method_call` → the field isn't a registered method
+either → `undefined`.
 
-## Population (fresh standalone baseline, 2026-07-09)
+The computed-key store (`o["f"]=`) instead goes through a genuine `$Object`
+property store (`__extern_set`), and `o.f()` on that shape reads the field
+through the open-`$Object` method-call path that DOES look up stored-callable
+values — hence the asymmetry.
 
-**810 test262 files** use the post-hoc `x[Symbol.iterator] = fn` install
-(185 in the dstr/for-of clusters alone, including the 57 `*-close.js` rows
-S5's closed-struct IteratorClose could not reach). Standalone lane status:
-740 fail(leaky) + 57 pass(leaky) + 13 CE — **zero host-free**. The protocol
-arm is NECESSARY for all of them; the dot-set fix additionally unblocks the
-general dynamic-method population outside the 810.
+The #3098/#1888 invocation machinery (`__apply_closure`, boxed-closure
+read-back, `__call_fn_method_N`) is COMPLETE and reachable; only the
+dispatcher's arm set was missing the field-stored-closure case.
 
-## Design
+## Fix
 
-- **S1 (dot-set fix)**: make the property-access member-set on `$Object`
-  receivers store function values exactly as the element-access set does
-  (boxed closure → `__extern_set`). Root cause to be pinned by WAT-diffing
-  the working (`o["f"]=`) vs broken (`o.f=`) stores.
-- **S2 (protocol arm)**: new `$IterRec` kind OBJ in the `__iterator` ladder
-  (fill-time, same reserve-then-fill infrastructure as S1/S5 of #3100):
-  - GetIterator: `ref.test $Object` → `Get(v, @@iterator)` via the
-    symbol-keyed object-runtime read (#2866 carrier) → callable →
-    `__apply_closure(fn, v, [])` → iterator object (must be Object else
-    TypeError §7.4.3) → `$IterRec{OBJ, iterObj}`.
-  - IteratorStep: `next = Get(iter, "next")` → `__apply_closure(next, iter,
-[])` → `done`/`value` via `__extern_get`.
-  - IteratorClose: `ret = Get(iter, "return")` → absent ⇒ no-op; else
-    `__apply_closure(ret, iter, [])`.
-  - Consumers (for-of, dstr materializer, `__iterator_rest`, spread) bind
-    through the existing names — no consumer changes (the #3100 chokepoint).
+`collectFieldEntries` (closed-method-dispatch.ts): every closed struct (same
+filter as `collectMethodEntries`, and a `<Struct>_<name>` **method** still
+wins) that has an externref FIELD named `<name>` gets a dispatcher arm —
+`ref.test <struct>` → read the field → null ⇒ `undefined` (the pre-#3117
+miss semantics, NOT a TypeError; that refinement rides the error lane) →
+else `__apply_closure(fn, recv, argvec)` (args marshaled to a fresh `$ObjVec`,
+same shape as the bottom arm). Added to BOTH the fixed-arity and vararg fills.
+`__apply_closure` is reserved at dispatcher-reserve time (it fills before this
+pass and degrades to the undefined sentinel when no closure dispatcher exists
+— never traps).
 
-## Acceptance
+## Validation (all measured, branch vs main)
 
-1. Differential probes flip (dot-set stored fns callable; `[...o]`, for-of,
-   dstr over post-hoc-`@@iterator` objects produce values host-free).
-2. Measured flips in the 810-file population (fresh sweep, branch vs main);
-   zero unexplained pass→fail anywhere; byte-identity on unrelated corpus.
-3. merge_group + standalone floor green.
+- 6/6 differential probes flip (dot-set arrow/fn-expr/named, with and without
+  args, computed control unchanged).
+- S4/S5 (#3100) + #2151 dispatch suites green; the 1 mixed-spread fail is
+  byte-for-byte pre-existing on main (verified).
+- LOC ratchet green.
 
-## Dependencies
+## Follow-up
 
-Stacked on #3100 S5 (PR #2823) — the fill infrastructure and
-`__call_return`/materializer builders. Enqueue after S5 lands.
+The plain-`$Object` `@@iterator` protocol arm (#3100 Design arm 3 — 810
+post-hoc-`x[Symbol.iterator]=fn` test262 files, 0 host-free) is a separate
+S1-grade design slice, split out as **#3119**. It reuses this lane's
+`__apply_closure` invoke plus a new `__iterator` OBJ ladder arm.
