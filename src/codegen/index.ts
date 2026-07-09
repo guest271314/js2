@@ -3926,6 +3926,7 @@ function emitIteratorMethodExport(ctx: CodegenContext): void {
 
   emitMethodDispatch("@@iterator", "__call_@@iterator");
   emitMethodDispatch("next", "__call_next");
+  emitMethodDispatch("return", "__call_return"); // (#3100 S5) IteratorClose §7.4.9 USER-arm dispatcher
 }
 
 /**
