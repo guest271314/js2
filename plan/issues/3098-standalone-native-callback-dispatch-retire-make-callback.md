@@ -1,7 +1,9 @@
 ---
 id: 3098
 title: "Standalone native callback-dispatch substrate: retire `env.__make_callback` on the dynamic-receiver lane (top-3 host-import leak root)"
-status: ready
+status: done
+completed: 2026-07-09
+assignee: ttraenkler/fable-3098
 sprint: Backlog
 model: fable
 created: 2026-07-09
@@ -185,3 +187,89 @@ one-site slice before S3 (fold or supersede it explicitly).
 L (5 slices, each S–M; S1+S2 together are the keystone ~1 senior-dev budget
 window; S3–S5 are mechanical from the S2 template). Fable for S1/S2 (ABI +
 classifier design), Opus-executable for S3–S5.
+
+## Implementation notes (fable-3098, 2026-07-09 — S1+S2+S3-array landed)
+
+**Repro verified first** (origin/main @ 825ffba1cf8d3): all four probe shapes
+(`any`-receiver `map`/`filter`/`forEach`/`reduce`) leaked `env.__make_callback`
+and failed WebAssembly instantiation standalone; the typed control was
+host-free. Probe: `.tmp/probe-3098-repro.mts`.
+
+**Mechanism pinned (differs slightly from the spec's assumption).** The
+`any`-receiver HOF call does NOT go through `array-methods.ts`'s dyn-view
+lowering — it routes through the #2151 closed-method dispatcher
+(`__call_m_map_1(recv, cbExternref)`), whose fill ladder had no array arm for
+the HOF names, so a vec receiver fell to the open-`$Object` bottom arm
+(`__extern_method_call` → null). Independently, the CALL SITE compiled the
+inline arrow via `isHostCallbackArgument` → `compileArrowAsCallback` →
+`__make_callback(cbId, caps)` — the leaked import. (The upfront
+`state.callbackFound` import registration in declarations.ts is NOT the leak
+root: `eliminateDeadImports` strips it when nothing calls it.)
+
+**What landed (three coupled pieces, all `ctx.standalone`-gated):**
+
+1. `object-runtime.ts` — `ensureNativeArrayHof(ctx, name)` emits
+   `__hof_<name>` native loops for forEach/map/filter/find/findIndex/
+   findLast/findLastIndex/every/some (`(recv, cb, thisArg) -> externref`) and
+   reduce/reduceRight (`(recv, cb, init, hasInit: i32) -> externref`) over
+   `__extern_length`/`__extern_get_idx`, invoking the callback via
+   `__apply_closure(cb, thisArg, [v, boxNum(i), recv])` (4-arg
+   `[acc, v, i, recv]` for reduce). Emitted at RESERVE time (append-only —
+   the fill only READS funcMap, #1719). `map`/`filter` results are `$ObjVec`s
+   (the established boxed-any dynamic-array carrier — #2379: no f64 unbox).
+2. `closed-method-dispatch.ts` — reserve registers the helper + `$__vec_base`;
+   the fill grows an arm testing `ref.test $__vec_base || ref.test $ObjVec`
+   (the OR covers chained HOFs, whose receivers are `$ObjVec` results) routing
+   to `__hof_<name>`. Sits UNDER the closed-struct arms, so a user
+   object-literal `{ map(cb){…} }` still wins (regression-tested).
+3. `expressions/calls.ts` — at the closed-dispatch call site, an inline
+   arrow/function-expression arg to a `NATIVE_HOF_METHODS` name compiles via
+   `compileArrowAsClosure` (GC closure struct as externref), not
+   `__make_callback`. Identifier-held callbacks already crossed as closure
+   structs (#2939/#3074 registration).
+
+**Arity tolerance** is inherited from `__apply_closure` →
+`__call_fn_method_N` (clamps to the closure's declared arity; verified: 1-, 2-
+and 3-param callbacks all correct, `.tmp/probe-3098-extended.mts` 26/27).
+
+**Validation:**
+- `tests/issue-3098.test.ts` — 15 tests, all pass (host-free asserted via
+  zero-import check + empty import object).
+- Byte-identity: `prove-emit-identity` main-vs-branch — IDENTICAL, all 39
+  (file,target) hashes across gc/standalone/wasi on the playground corpus.
+- Cluster (runTest262File, standalone lane): `built-ins/Array/prototype/{map,
+  filter,forEach,reduce,every,some,find*}` (1,439 non-skip files) — ZERO
+  regressions, zero flips. The sampled 81 "only-`__make_callback`" leak rows
+  from the 2026-06-16 standalone JSONL also show 0 flips: each depends on an
+  ADJACENT gap (see boundaries below). The value of this slice is the
+  substrate — the probe shapes flip pass+host-free, and #3100/#2928 consume
+  the same dispatch arm.
+
+**Boundaries / residuals (named, for S4/S5 + adjacent owners):**
+- **Typed `string[]` receivers of `find`/`filter`/`findIndex`/`findLast*`/
+  `every`/`some`/`reduce*`/`forEach` still leak `__make_callback`** — the
+  typed inline impls in `array-methods.ts:3350-3440` gate on
+  `f64|i32|externref` element kinds; ref-element (native-string) vecs fall to
+  the host-callback path (probe: `.tmp/probe-3098-typedstr.mts` — `str-find`/
+  `str-filter` leak; `str-map` is native via the #2688-widened gate). Fixing
+  this is typed-lane work (result-rep: typed callers expect a
+  `$NativeString` ref back, not externref) — S5 candidate, separate PR.
+- `sort(cmp)`, `flatMap`, `Array.from(x, mapFn)` — S4, not landed.
+- TypedArray dyn-view callback methods (#3058 BANKED) — S3's other half, not
+  landed (coordinate with #3058's two-arm).
+- `reduce` of an empty array with no initial value returns `undefined`
+  instead of the spec TypeError (§23.1.3.24 step 5) — same no-throw
+  discipline as `__apply_closure` S1 (late error-machinery registration is
+  the #1839 index-shift hazard). Upgrade together with `__apply_closure` S2.
+- Non-callable callback: no before-loop TypeError (falls through to
+  `__apply_closure`'s undefined sentinel) — same S2-upgrade bundle.
+- wasi lane unchanged (the `__extern_get_idx` vec/array-like arms are
+  standalone-only — `objArrayLikeArms`; same gate as the #2151 vararg
+  dispatcher).
+- **Discovered, pre-existing, NOT this issue:** `(any + any).length` on two
+  `any`-held strings returns 0 standalone (no HOF involved; reproduced on
+  pristine main — `.tmp/probe-3098-reduceright.mts` `any-concat.length`).
+  Root of the one extended-probe mismatch (string reduceRight `.length`).
+  Needs a PO issue (dynamic-add string-concat result rep).
+- Family 2 (async `__cb_<id>` step adapters) untouched per the spec —
+  #2864/#2867 own those; `async-cps.ts`/`async-frame.ts` not modified.
