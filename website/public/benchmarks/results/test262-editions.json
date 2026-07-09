@@ -2141,12 +2141,12 @@
   },
   {
     "edition": "ES2022",
-    "pass": 3268,
-    "fail": 925,
+    "pass": 3360,
+    "fail": 833,
     "ce": 41,
     "skip": 0,
     "total": 4234,
-    "pct": 77,
+    "pct": 79,
     "features": [
       {
         "name": "class",
@@ -2213,12 +2213,12 @@
       },
       {
         "name": "resizable-arraybuffer",
-        "pass": 169,
-        "fail": 248,
+        "pass": 261,
+        "fail": 156,
         "ce": 15,
         "skip": 0,
         "total": 432,
-        "pct": 39
+        "pct": 60
       },
       {
         "name": "class-static-fields-private",
@@ -2285,12 +2285,12 @@
       },
       {
         "name": "TypedArray",
-        "pass": 92,
-        "fail": 39,
+        "pass": 102,
+        "fail": 29,
         "ce": 0,
         "skip": 0,
         "total": 131,
-        "pct": 70
+        "pct": 78
       },
       {
         "name": "class-static-block",
@@ -2348,12 +2348,12 @@
       },
       {
         "name": "BigInt",
-        "pass": 32,
-        "fail": 8,
+        "pass": 36,
+        "fail": 4,
         "ce": 2,
         "skip": 0,
         "total": 42,
-        "pct": 76
+        "pct": 86
       },
       {
         "name": "logical-assignment-operators",
@@ -2438,12 +2438,12 @@
       },
       {
         "name": "Symbol.species",
-        "pass": 0,
-        "fail": 12,
+        "pass": 7,
+        "fail": 5,
         "ce": 0,
         "skip": 0,
         "total": 12,
-        "pct": 0
+        "pct": 58
       },
       {
         "name": "Symbol.toPrimitive",
@@ -2465,12 +2465,12 @@
       },
       {
         "name": "Array.prototype.includes",
-        "pass": 5,
-        "fail": 6,
+        "pass": 9,
+        "fail": 2,
         "ce": 0,
         "skip": 0,
         "total": 11,
-        "pct": 45
+        "pct": 82
       },
       {
         "name": "cross-realm",
@@ -2528,12 +2528,12 @@
       },
       {
         "name": "Atomics",
-        "pass": 0,
-        "fail": 4,
+        "pass": 1,
+        "fail": 3,
         "ce": 0,
         "skip": 0,
         "total": 4,
-        "pct": 0
+        "pct": 25
       },
       {
         "name": "optional-chaining",
@@ -2620,8 +2620,8 @@
   },
   {
     "edition": "ES2023",
-    "pass": 205,
-    "fail": 123,
+    "pass": 204,
+    "fail": 124,
     "ce": 6,
     "skip": 0,
     "total": 334,
@@ -2629,21 +2629,21 @@
     "features": [
       {
         "name": "change-array-by-copy",
-        "pass": 101,
-        "fail": 31,
+        "pass": 100,
+        "fail": 32,
         "ce": 0,
         "skip": 0,
         "total": 132,
-        "pct": 77
+        "pct": 76
       },
       {
         "name": "TypedArray",
-        "pass": 77,
-        "fail": 33,
+        "pass": 76,
+        "fail": 34,
         "ce": 0,
         "skip": 0,
         "total": 110,
-        "pct": 70
+        "pct": 69
       },
       {
         "name": "array-find-from-last",
@@ -2710,12 +2710,12 @@
       },
       {
         "name": "resizable-arraybuffer",
-        "pass": 6,
-        "fail": 1,
+        "pass": 5,
+        "fail": 2,
         "ce": 0,
         "skip": 0,
         "total": 7,
-        "pct": 86
+        "pct": 71
       },
       {
         "name": "arrow-function",
