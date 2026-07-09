@@ -4653,17 +4653,67 @@ export function emitCachedMethodClosureAccess(
   methodFuncIdx: number,
   objStructTypeIdx: number,
 ): boolean {
+  const singleton = ensureMethodClosureSingleton(ctx, fctx, methodName, methodFuncIdx, objStructTypeIdx);
+  if (!singleton) return false;
+  const { cacheGlobalIdx, trampolineFuncIdx, closureStructTypeIdx } = singleton;
+
+  // Emit the lazy-init access (mirrors `emitLazyProtoGet`):
+  //   global.get $cache
+  //   ref.is_null
+  //   if (then: build closure, store in $cache)
+  //   global.get $cache
+  const initBody: Instr[] = [
+    { op: "ref.func", funcIdx: trampolineFuncIdx } as Instr,
+    { op: "struct.new", typeIdx: closureStructTypeIdx } as Instr,
+    { op: "extern.convert_any" } as Instr,
+    { op: "global.set", index: cacheGlobalIdx } as Instr,
+  ];
+  fctx.body.push({ op: "global.get", index: cacheGlobalIdx });
+  fctx.body.push({ op: "ref.is_null" });
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: initBody,
+    else: [],
+  });
+  fctx.body.push({ op: "global.get", index: cacheGlobalIdx });
+  return true;
+}
+
+/**
+ * (#2963) The creation half of {@link emitCachedMethodClosureAccess}, split out
+ * so the member-get dispatcher (`member-get-dispatch.ts`) can pre-create the
+ * SAME canonical singleton machinery (trampoline + cache global) at reserve
+ * time — giving a DYNAMIC `any`-receiver method read (`c.m` where `c: any`)
+ * the identical value the typed read (`C.prototype.m`) yields, so
+ * `c.m === C.prototype.m` holds. Idempotent per `methodName`.
+ *
+ * Returns the handles, or `null` when the method signature is unresolvable
+ * (caller falls back / skips the candidate). NOTE: `trampolineFuncIdx` and
+ * `cacheGlobalIdx` are the CURRENT indices — late imports added after this
+ * call shift them. Compile-time callers baking instrs immediately (the typed
+ * read) are covered by the body walkers; FINALIZE-time consumers must
+ * re-resolve by name (`__obj_meth_tramp_<name>_cached` via funcMap,
+ * `ctx.methodClosureGlobals.get(methodName)` — both shift-maintained).
+ */
+export function ensureMethodClosureSingleton(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  methodName: string,
+  methodFuncIdx: number,
+  objStructTypeIdx: number,
+): { cacheGlobalIdx: number; trampolineFuncIdx: number; closureStructTypeIdx: number } | null {
   // Resolve the user-visible signature so we know the wrapper struct's
   // funcref shape. Method signature is [(ref null objStruct), ...userParams]
   // → results; strip the leading `this` to derive the closure-callable
   // user signature.
   const sig = getFuncSignature(ctx, methodFuncIdx);
-  if (!sig || sig.params.length === 0) return false;
+  if (!sig || sig.params.length === 0) return null;
   const userParams = sig.params.slice(1);
   const results = sig.results;
 
   const wrapperTypes = getOrCreateFuncRefWrapperTypes(ctx, userParams, results);
-  if (!wrapperTypes) return false;
+  if (!wrapperTypes) return null;
   const { structTypeIdx, liftedFuncTypeIdx } = wrapperTypes;
 
   // Reuse the canonical trampoline if one was already registered for
@@ -4747,27 +4797,7 @@ export function emitCachedMethodClosureAccess(
     ctx.methodClosureGlobals.set(methodName, cacheGlobalIdx);
   }
 
-  // Emit the lazy-init access (mirrors `emitLazyProtoGet`):
-  //   global.get $cache
-  //   ref.is_null
-  //   if (then: build closure, store in $cache)
-  //   global.get $cache
-  const initBody: Instr[] = [
-    { op: "ref.func", funcIdx: trampolineFuncIdx } as Instr,
-    { op: "struct.new", typeIdx: structTypeIdx } as Instr,
-    { op: "extern.convert_any" } as Instr,
-    { op: "global.set", index: cacheGlobalIdx } as Instr,
-  ];
-  fctx.body.push({ op: "global.get", index: cacheGlobalIdx });
-  fctx.body.push({ op: "ref.is_null" });
-  fctx.body.push({
-    op: "if",
-    blockType: { kind: "empty" },
-    then: initBody,
-    else: [],
-  });
-  fctx.body.push({ op: "global.get", index: cacheGlobalIdx });
-  return true;
+  return { cacheGlobalIdx, trampolineFuncIdx, closureStructTypeIdx: structTypeIdx };
 }
 
 /**
