@@ -105,13 +105,20 @@ describe.each(LANES)("#2963 dynamic method-value identity [%s]", (lane) => {
   });
 
   it("typeof c.m is 'function' (was 'undefined' on main)", async () => {
+    // NOTE: uses the store-to-local form deliberately. The INLINE
+    // `typeof c.m === "function"` comparison has a pre-existing host-lane
+    // fold bug (wrong even for object-literal methods on pristine main —
+    // verified) that is independent of this read-path fix.
     expect(
       await run(
         `let c: any;
          class C { m() { return 42; } }
          export function test(): number {
            c = new C();
-           return (typeof c.m === "function") ? 1 : 0;
+           const t = typeof c.m;
+           if (t === "function") return 1;
+           if (t === "undefined") return 2;
+           return 3;
          }`,
         lane,
       ),
