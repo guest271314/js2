@@ -5559,8 +5559,9 @@ function fields_type_kind(ctx: CodegenContext, structTypeIdx: number, fieldIdx: 
  * export + funcMap entry (shift-tracked); the finalize pass FILLS the body in
  * place (fill-or-build in `_emitVecAccessExportsInner`). Idempotent.
  */
-export function reserveVecMethodHelper(ctx: CodegenContext, kind: "push" | "pop" | "get"): number {
-  const name = kind === "push" ? "__vec_push" : kind === "pop" ? "__vec_pop" : "__vec_get";
+export function reserveVecMethodHelper(ctx: CodegenContext, kind: "push" | "pop" | "get" | "len"): number {
+  const name =
+    kind === "push" ? "__vec_push" : kind === "pop" ? "__vec_pop" : kind === "len" ? "__vec_len" : "__vec_get";
   const existing = ctx.funcMap.get(name);
   if (existing !== undefined) return existing;
   const typeIdx =
@@ -5568,11 +5569,13 @@ export function reserveVecMethodHelper(ctx: CodegenContext, kind: "push" | "pop"
       ? addFuncType(ctx, [{ kind: "externref" }, { kind: "externref" }], [{ kind: "i32" }], "$__vec_push_type")
       : kind === "pop"
         ? addFuncType(ctx, [{ kind: "externref" }], [{ kind: "externref" }], "$__vec_pop_type")
-        : addFuncType(ctx, [{ kind: "externref" }, { kind: "i32" }], [{ kind: "externref" }], "$__vec_get_type");
+        : kind === "len"
+          ? addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i32" }], "$__vec_len_type")
+          : addFuncType(ctx, [{ kind: "externref" }, { kind: "i32" }], [{ kind: "externref" }], "$__vec_get_type");
   const idx = ctx.numImportFuncs + ctx.mod.functions.length;
   // Placeholder body must match the declared result type.
   const placeholder: Instr[] =
-    kind === "push" ? [{ op: "i32.const", value: 0 } as Instr] : [{ op: "ref.null.extern" } as Instr];
+    kind === "push" || kind === "len" ? [{ op: "i32.const", value: 0 } as Instr] : [{ op: "ref.null.extern" } as Instr];
   ctx.mod.functions.push({ name, typeIdx, locals: [], body: placeholder, exported: true } as any);
   ctx.mod.exports.push({ name, desc: { kind: "func", index: idx } });
   ctx.funcMap.set(name, idx);
@@ -5693,17 +5696,32 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
     }
     body.push(...current);
 
-    mod.functions.push({
-      name: "__vec_len",
-      typeIdx: lenTypeIdx,
-      locals: [{ name: "__any", type: { kind: "anyref" } }],
-      body,
-      exported: true,
-    } as any);
-    mod.exports.push({
-      name: "__vec_len",
-      desc: { kind: "func", index: lenFuncIdx },
-    });
+    // (#2773) FILL-or-build. The dynamic-index native-vec element read
+    // (property-access.ts) reserves a `__vec_len` placeholder before this
+    // finalize pass (so it can bake the length-guard call at compile time); fill
+    // it in place if reserved, else push a fresh definition.
+    const reservedLen = ctx.funcMap.get("__vec_len");
+    if (reservedLen !== undefined) {
+      const fn = definedFuncAt(ctx, reservedLen)! as {
+        locals: { name: string; type: ValType }[];
+        body: Instr[];
+      };
+      fn.locals = [{ name: "__any", type: { kind: "anyref" } as ValType }];
+      fn.body = body;
+    } else {
+      mod.functions.push({
+        name: "__vec_len",
+        typeIdx: lenTypeIdx,
+        locals: [{ name: "__any", type: { kind: "anyref" } }],
+        body,
+        exported: true,
+      } as any);
+      mod.exports.push({
+        name: "__vec_len",
+        desc: { kind: "func", index: lenFuncIdx },
+      });
+      ctx.funcMap.set("__vec_len", lenFuncIdx);
+    }
   }
 
   // __vec_get(externref, i32) -> externref
