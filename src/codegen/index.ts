@@ -2307,15 +2307,12 @@ export function generateModule(
     emitIteratorMethodExport(ctx);
 
     // (#2038 / #3100, reserve-then-fill #1719) Rebuild the native `__iterator`
-    // carrier body with the LATE ladder arms now that every carrier type is
-    // known: the (#3100) vec-FAMILY normalization arms ($ObjVec +
-    // `__vec_<elemKind>` — dynamic iterables like `Object.keys(<any>)` /
-    // `any`-held array literals, previously an `illegal cast` trap) and, when
-    // the closed-struct dispatchers exist (`__sget_value`/`__sget_done` from
-    // emitStructFieldGetters above, `__call_@@iterator`/`__call_next` from
-    // emitIteratorMethodExport just above), the (#2038) USER
-    // `{next()}`-protocol arm (which also rebuilds `__iterator_next`). No-op
-    // unless the standalone native iterator runtime was registered.
+    // body with the LATE ladder arms now that every carrier type is known: the
+    // (#3100) vec-FAMILY normalization arms ($ObjVec + `__vec_<elemKind>` —
+    // dynamic iterables, previously an `illegal cast` trap) and, when the
+    // closed-struct dispatchers just emitted above exist, the (#2038) USER
+    // `{next()}` arm. Full docs on `fillNativeIteratorLateArms`. No-op unless
+    // the standalone native iterator runtime was registered.
     if (
       ctx.nativeIteratorUserArmPending &&
       ctx.funcMap.has("__call_@@iterator") &&
