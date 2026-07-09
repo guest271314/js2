@@ -47,8 +47,8 @@ Split-brain read/write paths for compiled arrays in JS-host mode:
   singular `maybeEmitVecLengthDefine` inline path covers only the
   statically-typed singular shape.)
 - In-bounds elements had **no synthesized existing descriptor**, so
-  `_validatePropertyDescriptor` treated every element redefine as a *first
-  definition* — the §10.1.6.3 rejection matrix (SameValue on non-writable,
+  `_validatePropertyDescriptor` treated every element redefine as a _first
+  definition_ — the §10.1.6.3 rejection matrix (SameValue on non-writable,
   configurable/enumerable toggles) never fired for array indices.
 
 Two adjacent codegen bugs found by the same probe series:

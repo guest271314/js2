@@ -125,7 +125,7 @@ minimal repro.
    returns nothing because `__register_fnctor_instance` is emitted **only for
    module-global constructor closures** (`new-super.ts` gates on
    `moduleGlobals/funcClosureGlobals`), so a **function-scope** `var Ctor =
-   function(){}` instance is never registered → `_fnctorInstanceCtor.get(inst)`
+function(){}` instance is never registered → `_fnctorInstanceCtor.get(inst)`
    is null. `15.2.3.6-3-1xx/2xx`. Fix touches #1712 closure/global machinery.
 
 4. **Fragmented long tail (~370).** Attribute-transition rules
@@ -153,14 +153,14 @@ to separate true root causes from shared symptoms.
 The dev-3022 causes 1–3 are the **senior** value-rep / exotic / closure clusters;
 the grab-bag (cause 4) splits into three cleaner pieces. Filed vs cause-scoped:
 
-| root cause | fails | scope | tracked as |
-|---|---|---|---|
-| **attribute round-trip fidelity** (writable/enumerable/configurable via `verifyProperty`, primitive values) | ~74 | **DEV** | **#3042** (filed) |
-| **illegal-transition + SameValue validation** (non-configurable redefine should-throw; +0/-0/NaN; false-positive Cannot-redefine) — dev-3022 cause 4 | ~50 | **SENIOR** | **#3043** (filed) |
-| **descriptor-shape codegen crashes** (invalid Wasm / illegal cast / op.endsWith / ctors-not-defined) | ~16 | **DEV** | **#3044** (filed) |
-| **value round-trip: struct-widening vs sidecar read** (`value: undefined`/object read returns struct default, `SameValue`-differs) — dev-3022 cause 1 | ~40+ | **SENIOR** (value-rep, #1629 S3 / #2106) | cause-scoped, file when a senior picks it up |
-| **array exotic `[[DefineOwnProperty]]`** (plural `defineProperties(arr,…)`, array-index/`length` §10.4.2) — dev-3022 cause 2 | ~83 | **SENIOR** (array-exotic, #2186 vec) | cause-scoped |
-| **prototype-chain descriptor-field read** (inherited `value`/`get` dropped; function-scope fnctor instance not registered) — dev-3022 cause 3 | ~33 | **SENIOR** (#1712 closure/global machinery) | cause-scoped |
+| root cause                                                                                                                                            | fails | scope                                       | tracked as                                   |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------- | ----- | ------------------------------------------- | -------------------------------------------- |
+| **attribute round-trip fidelity** (writable/enumerable/configurable via `verifyProperty`, primitive values)                                           | ~74   | **DEV**                                     | **#3042** (filed)                            |
+| **illegal-transition + SameValue validation** (non-configurable redefine should-throw; +0/-0/NaN; false-positive Cannot-redefine) — dev-3022 cause 4  | ~50   | **SENIOR**                                  | **#3043** (filed)                            |
+| **descriptor-shape codegen crashes** (invalid Wasm / illegal cast / op.endsWith / ctors-not-defined)                                                  | ~16   | **DEV**                                     | **#3044** (filed)                            |
+| **value round-trip: struct-widening vs sidecar read** (`value: undefined`/object read returns struct default, `SameValue`-differs) — dev-3022 cause 1 | ~40+  | **SENIOR** (value-rep, #1629 S3 / #2106)    | cause-scoped, file when a senior picks it up |
+| **array exotic `[[DefineOwnProperty]]`** (plural `defineProperties(arr,…)`, array-index/`length` §10.4.2) — dev-3022 cause 2                          | ~83   | **SENIOR** (array-exotic, #2186 vec)        | cause-scoped                                 |
+| **prototype-chain descriptor-field read** (inherited `value`/`get` dropped; function-scope fnctor instance not registered) — dev-3022 cause 3         | ~33   | **SENIOR** (#1712 closure/global machinery) | cause-scoped                                 |
 
 The three **cause-scoped** senior clusters keep their full repros in the dev-3022
 section above; they are deliberately NOT filed as separate issues yet (each is a
@@ -172,15 +172,15 @@ issues). #3042/#3044 are the immediately **dev-dispatchable** wins.
 Cross-tab (error string × feature) shows these are NOT one bug — they are
 internal `Object`/`Reflect` ops hitting a non-object receiver across ~7 features:
 
-| root cause | fails | scope | tracked as |
-|---|---|---|---|
-| **top-level `this` / global-object model** (`Object.defineProperty(this,…)` at script top level; global/eval var+func declaration binding) | ~89 | **ARCH/SENIOR** | folds into **#2726 (b)** — same structural root (top-level-`this`-as-global-object). Route to that issue's architect spec; do NOT dup. |
-| **class private-element brand check** (`Reflect.has` on non-object; private methods/generators/static-private) | ~8 | **DEV** | **#3045** (filed) |
-| **JSON.parse reviver `this`-binding** (reviver `this` must be the holder) | 4 | **DEV** | **#3046** (filed) |
-| **module namespace exotic object** (`Reflect.{has,deleteProperty,defineProperty,set,preventExtensions}` on `import * as ns`) | 10 | **SENIOR** (namespace-object representation) | cause-scoped, file on pickup |
-| **annexB `[[IsHTMLDDA]]`** (document.all emulation as `@@replace`/`@@match`) | 6 | DEFERRED (niche annexB) | note only |
-| **`$262.createRealm` cross-realm** (`create-proto-from-ctor-realm-*`; OArray undefined — realms unsupported) | 6 | DEFERRED (realm infra) | note only |
-| misc singletons (Date/Error/RegExp.prototype called-as-function, Proxy, typeof get-value, defineProperties edge) | ~5 | mixed | note only |
+| root cause                                                                                                                                 | fails | scope                                        | tracked as                                                                                                                             |
+| ------------------------------------------------------------------------------------------------------------------------------------------ | ----- | -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| **top-level `this` / global-object model** (`Object.defineProperty(this,…)` at script top level; global/eval var+func declaration binding) | ~89   | **ARCH/SENIOR**                              | folds into **#2726 (b)** — same structural root (top-level-`this`-as-global-object). Route to that issue's architect spec; do NOT dup. |
+| **class private-element brand check** (`Reflect.has` on non-object; private methods/generators/static-private)                             | ~8    | **DEV**                                      | **#3045** (filed)                                                                                                                      |
+| **JSON.parse reviver `this`-binding** (reviver `this` must be the holder)                                                                  | 4     | **DEV**                                      | **#3046** (filed)                                                                                                                      |
+| **module namespace exotic object** (`Reflect.{has,deleteProperty,defineProperty,set,preventExtensions}` on `import * as ns`)               | 10    | **SENIOR** (namespace-object representation) | cause-scoped, file on pickup                                                                                                           |
+| **annexB `[[IsHTMLDDA]]`** (document.all emulation as `@@replace`/`@@match`)                                                               | 6     | DEFERRED (niche annexB)                      | note only                                                                                                                              |
+| **`$262.createRealm` cross-realm** (`create-proto-from-ctor-realm-*`; OArray undefined — realms unsupported)                               | 6     | DEFERRED (realm infra)                       | note only                                                                                                                              |
+| misc singletons (Date/Error/RegExp.prototype called-as-function, Proxy, typeof get-value, defineProperties edge)                           | ~5    | mixed                                        | note only                                                                                                                              |
 
 **Big finding:** ~89 of the 128 "non-object" fails share the **top-level-`this`-
 as-global-object** root cause — the SAME structural gap as the two remaining

@@ -51,7 +51,7 @@ Two failure directions, same validate step:
 
 ```js
 var obj = {};
-Object.defineProperty(obj, "foo", { value: +0 });          // configurable:false (default)
+Object.defineProperty(obj, "foo", { value: +0 }); // configurable:false (default)
 // spec: SameValue(+0, -0) === false ⇒ this is a change on a non-writable,
 // non-configurable prop ⇒ must throw TypeError:
 Object.defineProperty(obj, "foo", { value: -0 });
@@ -84,7 +84,7 @@ The **array-index arm** of the matrix (element SameValue, shrink-blocking,
 RangeError) landed with #3116. What remains in THIS issue's scope:
 
 1. **Fully-static lane divergence** — `Object.defineProperty(obj, "foo",
-   {set: fn, configurable: false})` then `{configurable: true}` does NOT
+{set: fn, configurable: false})` then `{configurable: true}` does NOT
    throw when the first (accessor) define compiles away entirely (no runtime
    mirror), so the second define's runtime validation sees a first
    definition. Same for data→accessor on a non-configurable static field.
