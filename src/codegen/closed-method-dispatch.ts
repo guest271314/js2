@@ -41,7 +41,7 @@ import { ensureExternSameValueZeroHelper, ensureExternStrictEqHelper } from "./a
 import type { CodegenContext } from "./context/types.js";
 import { ensureNativeArrayHof, NATIVE_HOF_METHODS } from "./hof-native.js";
 import { stringConstantExternrefInstrs } from "./native-strings.js";
-import { ensureObjVecBuilders } from "./object-runtime.js";
+import { ensureObjVecBuilders, reserveApplyClosure } from "./object-runtime.js";
 import { addStringConstantGlobal } from "./registry/imports.js";
 import { addFuncType, getOrRegisterVecBaseType } from "./registry/types.js";
 import { addUnionImportsViaRegistry } from "./shared.js";
@@ -126,6 +126,14 @@ export function reserveClosedMethodDispatch(ctx: CodegenContext, methodName: str
   // `__extern_method_call(recv, "<name>", [args…])`.
   ensureObjVecBuilders(ctx);
   addStringConstantGlobal(ctx, methodName);
+
+  // (#3117) The fill adds FIELD-STORED-closure arms (a pre-shaped closed struct
+  // whose externref FIELD `<name>` holds a boxed closure — `o.f = function(){}`
+  // on a `{}` literal). Those arms invoke through `__apply_closure`; reserve it
+  // NOW so `fillApplyClosure` (which runs before this module's fill) gives it a
+  // real body and the fill only READS funcMap (#1719). Degrades to the
+  // undefined sentinel when no closure dispatcher exists — never traps.
+  reserveApplyClosure(ctx);
 
   // (#2583) For the callback-free array search/predicate methods, the fill adds
   // a native `$__vec_base` brand arm so a genuinely-`any` array receiver runs
@@ -220,6 +228,9 @@ export function reserveClosedMethodDispatchVararg(ctx: CodegenContext, methodNam
   // is read-only. The method-name string constant backs the fallback call.
   ensureObjVecBuilders(ctx);
   addStringConstantGlobal(ctx, methodName);
+  // (#3117) Field-stored-closure arms invoke via `__apply_closure` — see the
+  // fixed-arity reserve above.
+  reserveApplyClosure(ctx);
 
   // Signature: (recv: externref, args: externref) -> externref.
   const typeIdx = addFuncType(
@@ -275,6 +286,43 @@ function collectMethodEntries(ctx: CodegenContext, methodName: string, exactArit
     if (funcType.params.length < 1) continue;
     const resultType: ValType = funcType.results.length > 0 ? funcType.results[0]! : { kind: "externref" };
     entries.push({ typeIdx, funcIdx, paramTypes: funcType.params.slice(1), resultType });
+  }
+  return entries;
+}
+
+/**
+ * (#3117) One candidate closed struct whose externref FIELD `<methodName>`
+ * holds a (boxed) closure — the `o.f = function(){}`-on-a-pre-shaped-`{}`
+ * shape. The arm reads the field and invokes through `__apply_closure`.
+ */
+type FieldEntry = { typeIdx: number; fieldIdx: number };
+
+/**
+ * (#3117) Collect every closed struct (same filter as `collectMethodEntries`)
+ * that has an externref FIELD named `<methodName>` but NO `<Struct>_<name>`
+ * method (a method arm would shadow the field arm anyway — methods win).
+ * Before these arms, `const o: any = {}; o.f = function () {…}; o.f()` stored
+ * the closure fine (`struct.set` on the pre-shaped struct) but the dispatcher
+ * had no arm for it — the call silently returned undefined while the
+ * computed-key twin (`o["f"] = fn`, a genuine `$Object` store) worked.
+ */
+function collectFieldEntries(ctx: CodegenContext, methodName: string): FieldEntry[] {
+  const entries: FieldEntry[] = [];
+  for (const [structName, fields] of ctx.structFields) {
+    const typeIdx = ctx.structMap.get(structName);
+    if (typeIdx === undefined) continue;
+    if (
+      structName.startsWith("Wrapper") ||
+      structName === "$AnyValue" ||
+      structName.startsWith("__vec_") ||
+      structName.startsWith("__arr_") ||
+      structName.startsWith("$")
+    )
+      continue;
+    if (ctx.funcMap.has(`${structName}_${methodName}`)) continue; // method wins
+    const fieldIdx = fields.findIndex((f) => f.name === methodName && f.type.kind === "externref");
+    if (fieldIdx < 0) continue;
+    entries.push({ typeIdx, fieldIdx });
   }
   return entries;
 }
@@ -658,6 +706,60 @@ export function fillClosedMethodDispatch(ctx: CodegenContext): void {
       }
     }
 
+    // (#3117) FIELD-stored-closure arms — a pre-shaped closed struct whose
+    // externref field `<name>` holds a boxed closure (`o.f = function(){}` on
+    // a `{}` literal). Read the field and invoke via `__apply_closure` (args
+    // marshaled to a fresh $ObjVec, same shape as the bottom arm). Sits UNDER
+    // the real method arms (methods win via the wrap order below) and ABOVE
+    // the vec/HOF/open-$Object arms. Empty slot → undefined (the pre-#3117
+    // miss semantics, not a TypeError — that refinement rides the error lane).
+    const applyClosureIdx = ctx.funcMap.get("__apply_closure");
+    const canMarshalArgs = objVecNewIdx !== undefined && (arity === 0 || objVecPushIdx !== undefined);
+    const fieldEntries = applyClosureIdx !== undefined && canMarshalArgs ? collectFieldEntries(ctx, methodName) : [];
+    if (fieldEntries.length > 0) {
+      const fnLocalIdx = arity + 1 + locals.length;
+      locals.push({ name: "__fieldfn", type: { kind: "externref" } });
+      for (const fe of fieldEntries) {
+        const argVec: Instr[] = [];
+        if (arity > 0) {
+          const vecTmp = anyLocalIdx + 1; // the __argvec local (declared above)
+          argVec.push({ op: "call", funcIdx: objVecNewIdx as number } as Instr);
+          argVec.push({ op: "local.set", index: vecTmp } as Instr);
+          for (let a = 0; a < arity; a++) {
+            argVec.push({ op: "local.get", index: vecTmp } as Instr);
+            argVec.push({ op: "local.get", index: 1 + a } as Instr);
+            argVec.push({ op: "call", funcIdx: objVecPushIdx as number } as Instr);
+          }
+          argVec.push({ op: "local.get", index: vecTmp } as Instr);
+        } else {
+          argVec.push({ op: "call", funcIdx: objVecNewIdx as number } as Instr);
+        }
+        const armBody: Instr[] = [
+          { op: "local.get", index: anyLocalIdx } as Instr,
+          { op: "ref.cast", typeIdx: fe.typeIdx } as Instr,
+          { op: "struct.get", typeIdx: fe.typeIdx, fieldIdx: fe.fieldIdx } as Instr,
+          { op: "local.tee", index: fnLocalIdx } as Instr,
+          { op: "ref.is_null" } as Instr,
+          {
+            op: "if",
+            blockType: { kind: "val", type: { kind: "externref" } },
+            then: [{ op: "ref.null.extern" } as Instr],
+            else: [
+              { op: "local.get", index: fnLocalIdx } as Instr,
+              { op: "local.get", index: 0 } as Instr,
+              ...argVec,
+              { op: "call", funcIdx: applyClosureIdx } as Instr,
+            ],
+          } as Instr,
+        ];
+        current = [
+          { op: "local.get", index: anyLocalIdx } as Instr,
+          { op: "ref.test", typeIdx: fe.typeIdx } as Instr,
+          { op: "if", blockType: { kind: "val", type: { kind: "externref" } }, then: armBody, else: current },
+        ];
+      }
+    }
+
     for (const entry of entries) {
       const callAndCoerce = buildEntryArm(ci, anyLocalIdx, entry, (a) => [{ op: "local.get", index: 1 + a } as Instr]);
       current = [
@@ -706,6 +808,41 @@ export function fillClosedMethodDispatch(ctx: CodegenContext): void {
           ]
         : [{ op: "ref.null.extern" } as Instr];
 
+    // (#3117) FIELD-stored-closure arms — same as the fixed-arity fill, but the
+    // dispatcher's `args` externref forwards to `__apply_closure` unchanged.
+    const varargLocals: { name: string; type: ValType }[] = [{ name: "__any", type: { kind: "anyref" } }];
+    const applyClosureIdx = ctx.funcMap.get("__apply_closure");
+    const fieldEntries = applyClosureIdx !== undefined ? collectFieldEntries(ctx, methodName) : [];
+    if (fieldEntries.length > 0) {
+      const fnLocalIdx = anyLocalIdx + varargLocals.length; // after __any
+      varargLocals.push({ name: "__fieldfn", type: { kind: "externref" } });
+      for (const fe of fieldEntries) {
+        const armBody: Instr[] = [
+          { op: "local.get", index: anyLocalIdx } as Instr,
+          { op: "ref.cast", typeIdx: fe.typeIdx } as Instr,
+          { op: "struct.get", typeIdx: fe.typeIdx, fieldIdx: fe.fieldIdx } as Instr,
+          { op: "local.tee", index: fnLocalIdx } as Instr,
+          { op: "ref.is_null" } as Instr,
+          {
+            op: "if",
+            blockType: { kind: "val", type: { kind: "externref" } },
+            then: [{ op: "ref.null.extern" } as Instr],
+            else: [
+              { op: "local.get", index: fnLocalIdx } as Instr,
+              { op: "local.get", index: 0 } as Instr,
+              { op: "local.get", index: argsLocalIdx } as Instr,
+              { op: "call", funcIdx: applyClosureIdx } as Instr,
+            ],
+          } as Instr,
+        ];
+        current = [
+          { op: "local.get", index: anyLocalIdx } as Instr,
+          { op: "ref.test", typeIdx: fe.typeIdx } as Instr,
+          { op: "if", blockType: { kind: "val", type: { kind: "externref" } }, then: armBody, else: current },
+        ];
+      }
+    }
+
     for (const entry of entries) {
       // arg a ← __extern_get_idx(args, a). If the helper is absent, the arm can't
       // source args → skip (defensive; it is always present via reserve).
@@ -724,7 +861,7 @@ export function fillClosedMethodDispatch(ctx: CodegenContext): void {
       ];
     }
 
-    dispFn.locals = [{ name: "__any", type: { kind: "anyref" } }];
+    dispFn.locals = varargLocals;
     dispFn.body = [
       { op: "local.get", index: 0 } as Instr,
       { op: "any.convert_extern" } as Instr,

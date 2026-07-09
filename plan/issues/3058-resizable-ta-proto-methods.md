@@ -1,7 +1,8 @@
 ---
 id: 3058
 title: "Resizable-TA proto-methods over a dynamic `$__ta_dyn_view` receiver — runtime-kind method dispatch (materialize-into-f64-vec + OOB ValidateTypedArray + write-back)"
-status: ready
+status: done
+completed: 2026-07-09
 model: fable
 priority: high
 feasibility: hard

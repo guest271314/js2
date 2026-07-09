@@ -1027,3 +1027,59 @@ Decomposition (all probed):
   if playground/user-code ROI appears.
 - **HOF hole visit-skip** (#2001 S2), **array-like `.call(obj)` receiver-shape**
   (`-c-ii-20+`), **`arguments[3][idx]`** — unchanged from the S6 boundary list.
+  (S8 below closes the `.call(obj)` receiver-shape item.)
+
+---
+
+# SLICE S8 — array-like `.call(obj, cb, thisArg)` fidelity — #2773 (fable-2773t, 2026-07-09)
+
+**Role: senior-dev. Scoped to `compileArrayLikePrototypeCall`
+(array-methods.ts); prove-emit-identity: ALL 39 corpus emits byte-identical vs
+main.**
+
+## Root causes (probed)
+
+1. **thisArg never installed.** The generic array-like loop calls the callback
+   closure via `call_ref` but never installs the spec `thisArg` into the
+   `__current_this` global — the #2152 install/restore existed only on the
+   direct-array HOF path. `Array.prototype.map.call({0:11,length:2}, cb,
+thisArg)` ran `cb` with the wrong `this` (probe: `this.threshold === 10` →
+   false on every element). Direct `.map(cb, thisArg)` and `.call` WITHOUT
+   thisArg both worked — the gap was exactly the 3-arg `.call` form.
+2. **Boolean callback results boxed as numbers.** A boolean-returning callback
+   (`return prev === null`) has its i32 result boxed via `__box_number` (1/0)
+   into the reduce accumulator / map result array. Inline consumers mask it
+   (`r === true` folds i32-side, true) but any `any`-typed consumer — the
+   test262 harness's `isSameValue(a, b)` — sees Number 1 vs Boolean true →
+   `assert.sameValue(result, true)` fails.
+
+## Fix
+
+- **thisArg**: compile `args[2]` (spec arg-eval order; methods with a thisArg
+  slot only — reduce/reduceRight's `args[2]` is initialValue; arrow callbacks
+  ignored) into an externref local; wrap each arm's callback invocation via a
+  `withThisInstalled` factory. The factory is invoked at ARM-BUILD time and
+  reads `ctx.currentThisGlobalIdx` FRESH: `__current_this` is a module global
+  whose index shifts when an arm later adds a string-constant IMPORT global
+  (`addStringConstantGlobal` → `fixupModuleGlobalIndices` patches committed
+  bodies but NOT detached templates) — baking the idx early would desync.
+- **boolean brand**: detect boolean-ness from the callback's TS call-signature
+  return type (closure metadata erases the brand for named-fn refs);
+  pre-register `__box_boolean` in the #16 up-front import block (so no funcIdx
+  baked into a detached ladder template shifts later); the map/reduce/
+  reduceRight i32 ladders box via `__box_boolean` when boolean. Host lane;
+  standalone unchanged unless its native helper is registered (mirrors #2785's
+  host-first shipping).
+
+## Measured delta
+
+- **A/B batched sweep, 1,605 files (7 HOF dirs), branch vs same-harness main
+  control: +19 wins, 0 regressions** — the 13 targeted `-c-ii-20..23` files
+  plus collateral wins (`-c-ii-16/17/18/24/25/31/32/34/35`, reduce `2-5`/`3-24`).
+- `tests/issue-2773-arraylike-call-thisarg.test.ts` (9 cases: thisArg binding
+  across 5 methods, arrow-ignores-thisArg, no-thisArg unchanged, boolean brand
+  on reduce/reduceRight/map results, install/restore nesting).
+- prove-emit-identity 39/39 byte-identical; ir-fallbacks OK; LOC baseline +100.
+
+**S8 status: landed (this PR). Epic tail: #2768 (S5a) + `arguments[3][idx]` +
+#2001 S2 hole visit-skip + f64-gap/`typeof`-fold boundaries from S7.**
