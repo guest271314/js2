@@ -195,8 +195,25 @@ export function tryObjectCoercionCall(
   if (!(!expr.questionDotToken && ts.isIdentifier(expr.expression) && expr.expression.text === "Object")) {
     return undefined;
   }
-  const args = expr.arguments ?? [];
+  return emitObjectCoercion(ctx, fctx, expr.arguments ?? []);
+}
 
+/**
+ * (#3118) Emit the ECMAScript §20.1.1.1 / §7.1.18 ToObject coercion for the
+ * arguments of an `Object(...)` **or** `new Object(...)` construct. Both forms
+ * are spec-identical: for a primitive first arg they return the matching
+ * wrapper object (Number/String/Boolean/BigInt), for null/undefined/no-arg a
+ * fresh plain object, and for an object the argument unchanged. Shared by
+ * `tryObjectCoercionCall` (the call form) and the `new Object(arg)` path in
+ * new-super.ts — before #3118 the `new` form ignored its argument and always
+ * built an empty object, so `new Object(42)` stringified to "[object Object]"
+ * instead of "42" (breaking every method-borrow-onto-boxed-primitive test).
+ */
+export function emitObjectCoercion(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  args: readonly ts.Expression[],
+): InnerResult {
   // Object() / Object(null) / Object(undefined) → fresh empty object via
   // `__new_plain_object`. Mirrors the `new Object()` path in new-super.ts so the
   // result is a real object with the ordinary `Object.prototype` (Boolean(...) ===
