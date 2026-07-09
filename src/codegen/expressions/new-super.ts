@@ -33,6 +33,7 @@ import {
   getOrRegisterDvWindowType,
 } from "../dataview-native.js"; // (#2159/#38) DataView windowing wrapper; (#3054 B1/B2) shared-backing TA views + windowing; (#3054 D) dynamic ctor construct
 import { emitBoundsCheckedArrayGet } from "../array-methods.js";
+import { emitObjectCoercion } from "./calls-guards.js"; // (#3118) shared Object(...) / new Object(...) ToObject coercion
 import { ensureMapHelpers, coerceMapKeyToAnyref } from "../map-runtime.js";
 import { emitSetNewTargetBeforeCall, ensureNewTargetGlobal } from "../new-target.js"; // (#2023)
 import { ensureObjectRuntime } from "../object-runtime.js"; // (#1100) standalone Proxy native runtime
@@ -3322,14 +3323,16 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
   // "[object Object]". Falls back to `ref.null.extern` only if the import
   // can't be registered.
   if (ts.isIdentifier(expr.expression) && expr.expression.text === "Object") {
-    const createIdx = ensureLateImport(ctx, "__new_plain_object", [], [{ kind: "externref" }]);
-    flushLateImportShifts(ctx, fctx);
-    if (createIdx !== undefined) {
-      fctx.body.push({ op: "call", funcIdx: createIdx });
-      return { kind: "externref" };
-    }
-    fctx.body.push({ op: "ref.null.extern" });
-    return { kind: "externref" };
+    // (#3118) `new Object(value)` is spec-identical to `Object(value)`
+    // (§20.1.1.1 step 1: if NewTarget is Object/undefined, return ToObject(value)).
+    // Previously this path ignored its argument and always built an empty object,
+    // so `new Object(42)` stringified to "[object Object]" instead of "42" and
+    // every String/Number/Boolean method-borrow-onto-`new Object(primitive)` test
+    // failed. Delegate to the shared ToObject coercion used by the call form so a
+    // primitive arg boxes to its Number/String/Boolean/BigInt wrapper, an object
+    // passes through unchanged, and null/undefined/no-arg build a fresh object.
+    const r = emitObjectCoercion(ctx, fctx, expr.arguments ?? []);
+    return r === null ? { kind: "externref" } : (r as ValType);
   }
 
   // Handle `new Proxy(target, handler)`.

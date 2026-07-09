@@ -1,10 +1,11 @@
 ---
 id: 2978
 title: "Standalone async scheduler: for-await over a sync iterator yielding rejected promises loops forever (3GB JS-heap OOM)"
-status: ready
+status: blocked
+depends_on: [2895]
 sprint: current
 created: 2026-07-02
-updated: 2026-07-05
+updated: 2026-07-09
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -19,6 +20,38 @@ horizon: l
 ---
 
 # Standalone async scheduler: rejected-promise for-await loops forever (OOM)
+
+## BLOCKED on #2895 (async-frame suspension) — do NOT re-pick as stale WIP (fable-3058, 2026-07-09)
+
+Two prior attempts parked here; both reached the **same root cause via WAT
+dump**, and I re-verified both load-bearing claims against **current main**
+before setting `status: blocked`. This is a **genuine architectural block**, not
+stale WIP — a re-merge + re-push parks a third time in the same defect.
+
+- The repro's `for await` over a **sync** struct-iterator routes to
+  `compileForOfDirectIterator` (`statements/loops.ts:~5115`), which drives the
+  loop **synchronously and never consults `stmt.awaitModifier`** (that check is
+  at `~:5199`, AFTER the direct-iterator path returns). There is **no async
+  state machine in the compiled function at all**.
+- Standalone promises are **host imports** (`env::Promise_reject/resolve`), not
+  native `$Promise` structs. `isStandalonePromiseActive` is **wasi-only**
+  (`async-scheduler.ts:~3298`; standalone only under the unset
+  `JS2WASM_ASYNC_CARRIER_WIDEN` measurement flag), so the native `$Promise`
+  reject machinery the architect's Part-B premise relies on **never runs** for
+  the scored standalone lane.
+- The OOM is therefore an **infinite synchronous loop** allocating host rejected
+  promises with no microtask yield → 3 GB JS-heap OOM. **No bounded synchronous
+  fix exists** (a host promise's rejection can't be observed synchronously). The
+  branch-2 1M step-cap band-aid changed OOM→loud-TypeError but isn't spec-correct
+  (test wants `returnCount===1`, `caught===true`, bounded mem).
+- Part A (the #2934-3b drop-arity validity fix) **cannot land alone** — making
+  the module valid is exactly what exposes the OOM to CI shard workers (the hard
+  pairing constraint).
+
+The correct fix is **real async-frame suspension for the sync-iterator
+for-await drive in the host-promise lane** (the #2895 machinery) or the #2980
+carrier widen. Unblock when #2895 lands; re-verify the two claims above still
+hold on that base first.
 
 ## Problem
 
