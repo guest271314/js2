@@ -111,6 +111,16 @@ jobs:
         # reseeds; --update-on-decrease banks improvements).
         run: pnpm run check:oracle-ratchet
 
+      - name: LOC-regrowth ratchet (#3102)
+        # Fails when a baselined src file exceeds its recorded ceiling
+        # (regrowth), a new file crosses the 1,500 LOC threshold (a new
+        # god-file), or total src LOC exceeds its ceiling. Baseline:
+        # scripts/loc-budget-baseline.json (--update for intentional growth,
+        # visible in review; --update-on-decrease banks shrinkage). The
+        # god-file splits (#3103/#3104/…) never stick without this brake —
+        # see plan/log/compiler-consolidation-plan.md.
+        run: pnpm run check:loc-budget
+
       - name: IR adoption table freshness (#2145)
         # Fails when plan/log/ir-adoption.md drifts from its generator data or
         # from the IrFallbackReason union in src/ir/select.ts. Regenerate with

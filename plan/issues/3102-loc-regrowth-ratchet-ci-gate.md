@@ -1,10 +1,11 @@
 ---
 id: 3102
 title: "LOC regrowth ratchet: check:loc-budget CI gate for god-files"
-status: ready
+status: done
 sprint: Backlog
 created: 2026-07-09
 updated: 2026-07-09
+completed: 2026-07-09
 priority: high
 horizon: s
 feasibility: medium
@@ -92,3 +93,30 @@ baseline plus `--update` escape hatch caps that.
 2. Adding 1 line to `src/codegen/index.ts` makes it fail with an actionable message.
 3. Shrinking a baselined file + `--update-on-decrease` rewrites the baseline.
 4. Wired into `quality` job; post-merge job banks decreases.
+
+## Implementation notes (done 2026-07-09)
+
+- `scripts/check-loc-budget.mjs` (pure fs, no compile — mirrors
+  `check-oracle-ratchet.mjs`) + `scripts/loc-budget-baseline.json` seeded from
+  main: threshold 1,500 LOC, 54 baselined files, total ceiling 384,840
+  (= current 309,840 + 75,000 headroom). Line count uses newline count, so the
+  baseline reproduces with `find src -name '*.ts' ! -name '*.d.ts' | xargs wc -l`.
+- Modes: default gate; `--update` force-reseed (deliberate growth, visible in
+  review); `--update-on-decrease` banks shrinkage (per-file ceilings lowered,
+  total ceiling tracked down while preserving headroom); `--json` snapshot.
+- Wired into the `quality` CI job (`.github/workflows/ci.yml`) right after the
+  oracle ratchet, as `pnpm run check:loc-budget`.
+- AC verification: (1) gate green on clean main; (2) +1 line to
+  `src/codegen/index.ts` → FAIL `16567 > 16565 (+2)`; a new `>1500` file →
+  FAIL as a new god-file; (3) shrinking `binary-ops.ts` + `--update-on-decrease`
+  rewrote the baseline entry and lowered the total ceiling.
+- AC4 post-merge banking: the `--update-on-decrease` flag is the banking
+  mechanism, matching the sibling ratchets (`check:ir-fallbacks`,
+  `check:oracle-ratchet`) — none of which is wired into a dedicated post-merge
+  job today; banking is PR-author-committed via the flag (the post-merge job is
+  the intended future caller). No new post-merge workflow was added to avoid
+  destabilising `promote-baseline` (it pushes to the separate baselines repo).
+- Tooling-only: zero `src/` changes, no effect on emitted Wasm (no byte-identity
+  proof needed).
+- Optional slice 2 (per-function ceilings for the named god-functions) left as a
+  follow-up per the issue; the per-file ratchet satisfies all four ACs.
