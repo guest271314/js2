@@ -1686,15 +1686,19 @@ function compileForOfDestructuring(
             if (restIdx === undefined) {
               restIdx = allocLocal(fctx, restName, { kind: "externref" });
             }
+            // (#3100 S4) ensureLateImport routes `__extern_slice` to the
+            // NATIVE defined slice under standalone/wasi (the raw `env::`
+            // addImport this replaces leaked host imports); JS-host mode
+            // registers the same env import as before.
             let sliceIdx = ctx.funcMap.get("__extern_slice");
             if (sliceIdx === undefined) {
-              const importsBefore = ctx.numImportFuncs;
-              const sliceType = addFuncType(ctx, [{ kind: "externref" }, { kind: "f64" }], [{ kind: "externref" }]);
-              addImport(ctx, "env", "__extern_slice", {
-                kind: "func",
-                typeIdx: sliceType,
-              });
-              shiftLateImportIndices(ctx, fctx, importsBefore, ctx.numImportFuncs - importsBefore);
+              ensureLateImport(
+                ctx,
+                "__extern_slice",
+                [{ kind: "externref" }, { kind: "f64" }],
+                [{ kind: "externref" }],
+              );
+              flushLateImportShifts(ctx, fctx);
               sliceIdx = ctx.funcMap.get("__extern_slice");
             }
             if (sliceIdx !== undefined) {
@@ -2669,14 +2673,13 @@ function emitForOfRestAssignment(
     return true;
   }
 
-  // Ensure __extern_slice is available (env import in JS-host mode; the native
-  // object-runtime slice under --target standalone routes through the same name).
+  // Ensure __extern_slice is available (env import in JS-host mode; #3100 S4:
+  // ensureLateImport routes to the NATIVE defined slice under standalone/wasi —
+  // the raw `env::` addImport this replaces leaked the host import).
   let sliceIdx = ctx.funcMap.get("__extern_slice");
   if (sliceIdx === undefined) {
-    const importsBefore = ctx.numImportFuncs;
-    const sliceType = addFuncType(ctx, [{ kind: "externref" }, { kind: "f64" }], [{ kind: "externref" }]);
-    addImport(ctx, "env", "__extern_slice", { kind: "func", typeIdx: sliceType });
-    shiftLateImportIndices(ctx, fctx, importsBefore, ctx.numImportFuncs - importsBefore);
+    ensureLateImport(ctx, "__extern_slice", [{ kind: "externref" }, { kind: "f64" }], [{ kind: "externref" }]);
+    flushLateImportShifts(ctx, fctx);
     sliceIdx = ctx.funcMap.get("__extern_slice");
   }
   if (sliceIdx === undefined) {
