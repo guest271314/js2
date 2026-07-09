@@ -1275,6 +1275,22 @@ export interface CodegenContext {
    */
   memberGetDispatchNames?: Set<string>;
   /**
+   * (#2963) Class-METHOD arms for the `__get_member_<name>` dispatcher:
+   * propName → the receiver-typed arms that answer the canonical method-value
+   * singleton (the SAME per-`<Owner>_<method>` cache global the typed
+   * `C.prototype.m` read mints via `emitCachedMethodClosureAccess`), so a
+   * dynamic `any`-receiver read `c.m` is `===` the typed read. Recorded at
+   * reserve time (`ensureMethodArmsForProp` — the singleton machinery must be
+   * minted at compile time, never at finalize); consumed by
+   * `fillMemberGetDispatch`, which re-resolves the trampoline/cache-global
+   * indices BY NAME (shift-safe). Arms are children-first so an override's
+   * arm shadows the superclass arm under WasmGC subtyping.
+   */
+  memberGetMethodArms?: Map<
+    string,
+    { receiverStructTypeIdx: number; methodFullName: string; closureStructTypeIdx: number; depth: number }[]
+  >;
+  /**
    * (#2831) Per-target-vec-type host-externref → wasm-vec materializer helpers.
    * Maps a vec struct typeIdx (`$__vec_*`) → the reserved helper function NAME
    * `__vec_from_extern_<vecTypeIdx>(externref) -> (ref null $vec)`. The helper
