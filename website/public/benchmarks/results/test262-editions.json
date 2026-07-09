@@ -10,12 +10,12 @@
   },
   {
     "edition": "ES5",
-    "pass": 10056,
-    "fail": 2918,
+    "pass": 10202,
+    "fail": 2772,
     "ce": 101,
     "skip": 0,
     "total": 13075,
-    "pct": 77,
+    "pct": 78,
     "features": [
       {
         "name": "caller",
@@ -57,8 +57,8 @@
   },
   {
     "edition": "ES2015",
-    "pass": 11660,
-    "fail": 3582,
+    "pass": 11664,
+    "fail": 3578,
     "ce": 144,
     "skip": 0,
     "total": 15386,
@@ -156,12 +156,12 @@
       },
       {
         "name": "Reflect",
-        "pass": 188,
-        "fail": 140,
+        "pass": 189,
+        "fail": 139,
         "ce": 0,
         "skip": 0,
         "total": 328,
-        "pct": 57
+        "pct": 58
       },
       {
         "name": "Symbol.species",
