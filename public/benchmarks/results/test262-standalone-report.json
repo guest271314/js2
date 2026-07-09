@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-07-09T19:00:10.354Z",
-  "baseline_generated_at": "2026-07-09T19:00:10.354Z",
-  "baseline_sha": "f24937d7fe5040b52ba2bafda9303c9caafd1643",
+  "timestamp": "2026-07-09T19:40:55.559Z",
+  "baseline_generated_at": "2026-07-09T19:40:55.559Z",
+  "baseline_sha": "fc8b037bb5ac484660da00bcc63457b2ce74d65e",
   "oracle_version": 2,
   "mode": {
     "target": "standalone",
@@ -1198,12 +1198,12 @@
     }
   ],
   "error_categories": {
-    "assertion_fail": 12107,
+    "assertion_fail": 12106,
     "illegal_cast": 865,
     "negative_test_fail": 55,
     "null_deref": 305,
     "oob": 49,
-    "other": 6256,
+    "other": 6257,
     "promise_error": 192,
     "range_error": 44,
     "runtime_error": 475,
@@ -1298,8 +1298,8 @@
         },
         "error_categories": {
           "other": 2491,
-          "wasm_compile": 60,
           "illegal_cast": 2,
+          "wasm_compile": 60,
           "null_deref": 51,
           "type_error": 182,
           "assertion_fail": 782,
@@ -1310,13 +1310,13 @@
           "test/built-ins/Temporal/PlainDateTime/subclass.js",
           "test/built-ins/Temporal/ZonedDateTime/prototype/eraYear/prop-desc.js",
           "test/built-ins/Temporal/PlainDateTime/prototype/month/prop-desc.js",
-          "test/built-ins/Temporal/Instant/prototype/toString/timezone-wrong-type.js"
+          "test/built-ins/Temporal/PlainMonthDay/refisoyear-undefined.js"
         ],
         "sample_signatures": [
           "other:ReferenceError: Temporal is not defined",
           "other:ReferenceError: TemporalHelpers is not defined",
-          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: extern.convert_any[#] expected type shared anyref, found array.get of type i64 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $instance",
           "illegal_cast:illegal cast [in __str_to_number() ← test]",
+          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: extern.convert_any[#] expected type shared anyref, found array.get of type i64 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $instance",
           "null_deref:L#:## dereferencing a null pointer [in test()]"
         ]
       },
@@ -1342,8 +1342,8 @@
           "runtime_error": 2
         },
         "sample_files": [
-          "test/built-ins/DisposableStack/prototype/use/throws-if-value-Symbol.dispose-property-is-null.js",
           "test/built-ins/DisposableStack/prototype/use/throws-if-value-missing-Symbol.dispose.js",
+          "test/built-ins/DisposableStack/prototype/use/throws-if-value-Symbol.dispose-property-is-null.js",
           "test/built-ins/AsyncDisposableStack/undefined-newtarget-throws.js",
           "test/built-ins/AsyncDisposableStack/newtarget-prototype-is-not-object.js",
           "test/built-ins/DisposableStack/prototype/adopt/adds-value-onDispose.js"
@@ -1775,8 +1775,8 @@
         },
         "error_categories": {
           "runtime_error": 58,
-          "assertion_fail": 4915,
-          "other": 128,
+          "assertion_fail": 4914,
+          "other": 129,
           "type_error": 1092,
           "illegal_cast": 206,
           "wasm_compile": 156,
@@ -2006,23 +2006,23 @@
         "error_categories": {
           "assertion_fail": 176,
           "type_error": 484,
-          "other": 16,
           "runtime_error": 8,
+          "other": 16,
           "wasm_compile": 1
         },
         "sample_files": [
           "test/annexB/language/global-code/if-decl-no-else-global-skip-early-err-try.js",
-          "test/annexB/language/eval-code/direct/func-if-decl-else-stmt-eval-func-skip-early-err-for-in.js",
           "test/annexB/language/global-code/switch-case-global-no-skip-try.js",
+          "test/annexB/language/eval-code/direct/func-if-decl-else-stmt-eval-func-skip-early-err-for-in.js",
           "test/annexB/language/eval-code/direct/global-if-decl-no-else-eval-global-block-scoping.js",
-          "test/annexB/language/eval-code/indirect/global-if-decl-else-decl-b-eval-global-update.js"
+          "test/annexB/language/global-code/switch-case-global-update.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert.throws(ReferenceError, function() { f; }, 'An initialized binding is not created following evaluation');",
-          "type_error:TypeError: dynamic eval is not supported in standalone mode (##)",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue( f, undefined, 'Initialized binding created prior to evaluation' );",
+          "type_error:TypeError: dynamic eval is not supported in standalone mode (##)",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(typeof f, 'function');",
-          "other:L#:## ';' expected."
+          "runtime_error:L#:## Invalid left-hand side in for-in/for-of"
         ]
       },
       {
