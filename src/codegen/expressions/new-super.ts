@@ -4987,11 +4987,17 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     // (the entire test262 resizable corpus passes an object literal) at compile
     // time — resolving `maxByteLength` off an arbitrary dynamic object would need
     // the object-runtime and is deferred (a dynamic options object stays
-    // non-resizable rather than mis-constructing). Host-free lane only: the native
-    // vec / `$__resizable_ab` representation exists only standalone (a host-mode
-    // ArrayBuffer is a host object — same lane boundary as B1/B2).
+    // non-resizable rather than mis-constructing). BOTH lanes (#3058): the plain
+    // `new ArrayBuffer(n)` path below already lowers to the native i32_byte vec
+    // in the JS-host lane too (the #3097 construct bridge marshals it to a
+    // canonical host ArrayBuffer on first crossing), so the `$__resizable_ab`
+    // subtype is equally lane-agnostic. In host mode the runtime consumes the
+    // subtype through the `__rab_resize`/`__ab_max_len` exports (resize +
+    // maxByteLength/resizable arms in `__extern_method_call`/`__extern_get`)
+    // and `_compiledAbToHostBuffer` marshals it to a HOST resizable buffer, so
+    // host TypedArray views length-track a later `rab.resize()` natively.
     let maxByteLenInit: ts.Expression | undefined;
-    if (noJsHost(ctx) && args.length >= 2 && ts.isObjectLiteralExpression(args[1]!)) {
+    if (args.length >= 2 && ts.isObjectLiteralExpression(args[1]!)) {
       for (const prop of args[1]!.properties) {
         if (
           ts.isPropertyAssignment(prop) &&

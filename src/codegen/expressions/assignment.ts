@@ -2164,26 +2164,29 @@ function compileExternrefArrayDestructuringAssignment(
     }
   }
 
-  // Ensure __extern_get is available (#1866: ensureLateImport routes to the
-  // native object-runtime impl under --target standalone — no leaked
-  // `env::__extern_get` host import — and to the host import in JS-host mode).
-  ensureLateImport(ctx, "__extern_get", [{ kind: "externref" }, { kind: "externref" }], [{ kind: "externref" }]);
+  // (#3100 S4) Standalone/WASI element reads use the carrier-aware native
+  // `__extern_get_idx(mat, f64 i)` (#2190 vec/$ObjVec arms) — the native
+  // `__extern_get` is string-keyed and misses vec carriers. Host byte-identical.
+  const useIdxReads = ctx.standalone || ctx.wasi;
+  const readName = useIdxReads ? "__extern_get_idx" : "__extern_get";
+  const keyType: ValType = useIdxReads ? { kind: "f64" } : { kind: "externref" };
+  ensureLateImport(ctx, readName, [{ kind: "externref" }, keyType], [{ kind: "externref" }]);
   flushLateImportShifts(ctx, fctx);
-  let getIdx = ctx.funcMap.get("__extern_get");
+  let getIdx = ctx.funcMap.get(readName);
   if (getIdx === undefined) return null;
 
-  // Ensure __box_number is available (needed to convert index to externref)
+  // __box_number: host mode only — it boxes the index key for `__extern_get`.
   let boxIdx = ctx.funcMap.get("__box_number");
-  if (boxIdx === undefined) {
+  if (!useIdxReads && boxIdx === undefined) {
     const importsBefore = ctx.numImportFuncs;
     const boxType = addFuncType(ctx, [{ kind: "f64" }], [{ kind: "externref" }]);
     addImport(ctx, "env", "__box_number", { kind: "func", typeIdx: boxType });
     shiftLateImportIndices(ctx, fctx, importsBefore, ctx.numImportFuncs - importsBefore);
     boxIdx = ctx.funcMap.get("__box_number");
     // Also refresh getIdx since it may have shifted
-    getIdx = ctx.funcMap.get("__extern_get");
+    getIdx = ctx.funcMap.get(readName);
   }
-  if (boxIdx === undefined || getIdx === undefined) return null;
+  if ((!useIdxReads && boxIdx === undefined) || getIdx === undefined) return null;
 
   for (let i = 0; i < target.elements.length; i++) {
     const element = target.elements[i]!;
@@ -2199,13 +2202,11 @@ function compileExternrefArrayDestructuringAssignment(
         }
         let sliceIdx = ctx.funcMap.get("__extern_slice");
         if (sliceIdx === undefined) {
-          const importsBefore = ctx.numImportFuncs;
-          const sliceType = addFuncType(ctx, [{ kind: "externref" }, { kind: "f64" }], [{ kind: "externref" }]);
-          addImport(ctx, "env", "__extern_slice", { kind: "func", typeIdx: sliceType });
-          shiftLateImportIndices(ctx, fctx, importsBefore, ctx.numImportFuncs - importsBefore);
+          ensureLateImport(ctx, "__extern_slice", [{ kind: "externref" }, { kind: "f64" }], [{ kind: "externref" }]);
+          flushLateImportShifts(ctx, fctx);
           sliceIdx = ctx.funcMap.get("__extern_slice");
           boxIdx = ctx.funcMap.get("__box_number");
-          getIdx = ctx.funcMap.get("__extern_get");
+          getIdx = ctx.funcMap.get(readName);
         }
         if (sliceIdx !== undefined) {
           fctx.body.push({ op: "local.get", index: tmpLocal });
@@ -2217,10 +2218,9 @@ function compileExternrefArrayDestructuringAssignment(
       continue;
     }
 
-    // Emit: __extern_get(tmpLocal, box(i)) -> externref
     fctx.body.push({ op: "local.get", index: tmpLocal });
     fctx.body.push({ op: "f64.const", value: i });
-    fctx.body.push({ op: "call", funcIdx: boxIdx! });
+    if (!useIdxReads) fctx.body.push({ op: "call", funcIdx: boxIdx! });
     fctx.body.push({ op: "call", funcIdx: getIdx! });
 
     const elemType: ValType = { kind: "externref" };

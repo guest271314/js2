@@ -50,7 +50,13 @@ import { addFuncType } from "./registry/types.js";
 import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S2 read chokepoint / S3b stable-regime minting)
 // (#3100) The vec-family normalize arms reuse the #2190 element-boxing recipe +
 // the non-array byte-carrier filter (ArrayBuffer/Uint8Array storage vecs).
-import { boxVecElementToExternref, NON_ARRAY_BYTE_VEC_ELEM_KINDS } from "./object-runtime.js";
+// (#3100 S4) ensureObjectRuntime provides the native `__extern_length` /
+// `__extern_get_idx` readers the index-based `__extern_slice` copies through.
+import { boxVecElementToExternref, ensureObjectRuntime, NON_ARRAY_BYTE_VEC_ELEM_KINDS } from "./object-runtime.js";
+// (#3100 S4) `__extern_slice`'s $AnyString arm reuses the #1470 code-point
+// char-vec helper so a string rest (`const [a, ...r] = "hello"`) yields the
+// spec §22.1.5.1 per-code-point elements natively.
+import { ensureStrToCharVecHelper } from "./native-strings.js";
 
 /** Slice-1 IterRec kind tag for a canonical externref `$Vec`. */
 const ITER_KIND_VEC = 3;
@@ -454,6 +460,197 @@ export function ensureNativeArrayFromIterN(ctx: CodegenContext): number {
   const funcIdx = mintDefinedFunc(ctx);
   ctx.funcMap.set("__array_from_iter_n", funcIdx);
   pushDefinedFunc(ctx, funcIdx, { name: "__array_from_iter_n", typeIdx, locals, body, exported: false });
+  return funcIdx;
+}
+
+/**
+ * (#3100 S4) Register a native standalone `__extern_slice(externref, f64) ->
+ * externref` defined function — the rest-element slice every array-destructure
+ * consumer uses (`[a, ...r] = src` assignment, `const [a, ...r] = src` string
+ * rest, for-of destructuring rest). In JS-host mode this is an `env::` import
+ * (host `Array.prototype.slice` semantics); standalone previously LEAKED that
+ * import (raw `addImport` at each consumer), breaking zero-import
+ * instantiation — the `__extern_slice` rows of the standalone JSONL.
+ *
+ * Semantics (index-based, mirroring the host `_externSlice(src, start)` for
+ * indexable sources):
+ *   - `$AnyString` source → per-CODE-POINT rest (§22.1.5.1) via the #1470
+ *     `__str_to_char_vec` helper: `[a, ...r] = "hello"` → r = ["e","l","l","o"].
+ *   - anything `__extern_length`/`__extern_get_idx` can read (canonical `$Vec`,
+ *     typed `__vec_*` carriers, `$ObjVec`, array-like `$Object` — the #2190
+ *     carrier arms) → copy elements [start..len) into a fresh canonical
+ *     externref `$Vec`.
+ *   - non-indexable / null → empty `$Vec` (never traps; matches the host
+ *     import's degenerate fallback).
+ *
+ * Index-based rather than `__iterator`-ladder-based BY DESIGN: every consumer
+ * calls it on an already-MATERIALIZED source (post-`__array_from_iter_n` /
+ * a for-of element), so iterator-protocol re-entry would be observable
+ * double-stepping; the indexed read is side-effect-free and covers every
+ * carrier the read substrate covers, in one place.
+ *
+ * Registered as a DEFINED function (append-only, no import-index shift). The
+ * baked `call` funcIdxs (`__extern_length`, `__extern_get_idx`,
+ * `__str_to_char_vec`) live in a defined body, which every later
+ * `shiftLateImportIndices` walk patches like any other defined function.
+ */
+export function ensureNativeExternSlice(ctx: CodegenContext): number | undefined {
+  const existing = ctx.funcMap.get("__extern_slice");
+  if (existing !== undefined) return existing;
+
+  // Native readers (defined funcs under standalone/wasi — ensureObjectRuntime
+  // is idempotent and registers both names in funcMap).
+  ensureObjectRuntime(ctx);
+  const lenIdx = ctx.funcMap.get("__extern_length");
+  const getIdxIdx = ctx.funcMap.get("__extern_get_idx");
+  if (lenIdx === undefined || getIdxIdx === undefined) return undefined;
+
+  // Canonical externref $Vec geometry for the result.
+  const vecTypeIdx = getOrRegisterVecType(ctx, "externref", { kind: "externref" });
+  const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
+  if (arrTypeIdx < 0) return undefined;
+
+  // ($AnyString arm) — only when the native-string runtime is active (it always
+  // is under standalone/wasi, where nativeStrings auto-enables). The helper call
+  // registers the string runtime if a string literal hasn't already.
+  const strArm: Instr[] = [];
+  let charVecGeom: { funcIdx: number; vecTypeIdx: number } | undefined;
+  if (ctx.nativeStrings) {
+    charVecGeom = ensureStrToCharVecHelper(ctx);
+  }
+
+  // Local layout:
+  //   0 = src   (externref, param)
+  //   1 = start (f64, param)
+  //   2 = s     (i32)  clamped start index
+  //   3 = len   (i32)  source length
+  //   4 = n     (i32)  result length
+  //   5 = j     (i32)  write cursor
+  //   6 = out   (ref null $arrExtern)
+  //   7 = srcAny(anyref) — for the $AnyString ref.test
+  const locals: { name: string; type: ValType }[] = [
+    { name: "s", type: { kind: "i32" } },
+    { name: "len", type: { kind: "i32" } },
+    { name: "n", type: { kind: "i32" } },
+    { name: "j", type: { kind: "i32" } },
+    { name: "out", type: { kind: "ref_null", typeIdx: arrTypeIdx } },
+    { name: "srcAny", type: { kind: "anyref" } },
+  ];
+
+  if (charVecGeom !== undefined) {
+    const anyStrTypeIdx = ctx.anyStrTypeIdx;
+    const charVecTypeIdx = charVecGeom.vecTypeIdx;
+    const charArrTypeIdx = getArrTypeIdxFromVec(ctx, charVecTypeIdx);
+    if (anyStrTypeIdx >= 0 && charArrTypeIdx >= 0) {
+      // Normalize the string into its per-code-point char vec and REPLACE the
+      // src param with it, then FALL THROUGH to the generic indexed copy — the
+      // char vec is a `__vec_ref_<anyStr>` carrier that `__extern_length`
+      // (vec-base arm) and `__extern_get_idx` (#2190 vec arms, each element
+      // `extern.convert_any`-boxed) read natively. No recursion, no per-arm
+      // copy loop of its own.
+      strArm.push(
+        { op: "local.get", index: 0 },
+        { op: "any.convert_extern" } as Instr,
+        { op: "local.tee", index: 7 },
+        { op: "ref.test", typeIdx: anyStrTypeIdx } as Instr,
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            { op: "local.get", index: 7 },
+            { op: "ref.cast", typeIdx: anyStrTypeIdx },
+            { op: "call", funcIdx: charVecGeom.funcIdx } as Instr,
+            { op: "extern.convert_any" } as Instr,
+            { op: "local.set", index: 0 },
+          ],
+          else: [],
+        } as Instr,
+      );
+    }
+  }
+
+  const body: Instr[] = [
+    ...strArm,
+    // len = i32(__extern_length(src))  (null / non-indexable → 0 → empty vec)
+    { op: "local.get", index: 0 },
+    { op: "call", funcIdx: lenIdx } as Instr,
+    { op: "i32.trunc_sat_f64_s" } as Instr,
+    { op: "local.set", index: 3 },
+    // s = max(0, trunc(start))
+    { op: "local.get", index: 1 },
+    { op: "i32.trunc_sat_f64_s" } as Instr,
+    { op: "local.tee", index: 2 },
+    { op: "i32.const", value: 0 },
+    { op: "i32.lt_s" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [{ op: "i32.const", value: 0 } as Instr, { op: "local.set", index: 2 } as Instr],
+      else: [],
+    } as Instr,
+    // n = max(0, len - s)
+    { op: "local.get", index: 3 },
+    { op: "local.get", index: 2 },
+    { op: "i32.sub" },
+    { op: "local.tee", index: 4 },
+    { op: "i32.const", value: 0 },
+    { op: "i32.lt_s" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [{ op: "i32.const", value: 0 } as Instr, { op: "local.set", index: 4 } as Instr],
+      else: [],
+    } as Instr,
+    // out = array.new_default(n)
+    { op: "local.get", index: 4 },
+    { op: "array.new_default", typeIdx: arrTypeIdx },
+    { op: "local.set", index: 6 },
+    // j = 0; while (j < n) out[j] = __extern_get_idx(src, f64(s + j)), j++
+    { op: "i32.const", value: 0 },
+    { op: "local.set", index: 5 },
+    {
+      op: "block",
+      blockType: { kind: "empty" },
+      body: [
+        {
+          op: "loop",
+          blockType: { kind: "empty" },
+          body: [
+            { op: "local.get", index: 5 },
+            { op: "local.get", index: 4 },
+            { op: "i32.ge_s" },
+            { op: "br_if", depth: 1 },
+            { op: "local.get", index: 6 },
+            { op: "ref.as_non_null" } as Instr,
+            { op: "local.get", index: 5 },
+            { op: "local.get", index: 0 },
+            { op: "local.get", index: 2 },
+            { op: "local.get", index: 5 },
+            { op: "i32.add" },
+            { op: "f64.convert_i32_s" },
+            { op: "call", funcIdx: getIdxIdx } as Instr,
+            { op: "array.set", typeIdx: arrTypeIdx } as Instr,
+            { op: "local.get", index: 5 },
+            { op: "i32.const", value: 1 },
+            { op: "i32.add" },
+            { op: "local.set", index: 5 },
+            { op: "br", depth: 0 },
+          ],
+        } as Instr,
+      ],
+    } as Instr,
+    // return $Vec{n, out} as externref
+    { op: "local.get", index: 4 },
+    { op: "local.get", index: 6 },
+    { op: "ref.as_non_null" } as Instr,
+    { op: "struct.new", typeIdx: vecTypeIdx },
+    { op: "extern.convert_any" } as Instr,
+  ];
+
+  const typeIdx = addFuncType(ctx, [{ kind: "externref" }, { kind: "f64" }], [{ kind: "externref" }]);
+  const funcIdx = mintDefinedFunc(ctx);
+  ctx.funcMap.set("__extern_slice", funcIdx);
+  pushDefinedFunc(ctx, funcIdx, { name: "__extern_slice", typeIdx, locals, body, exported: false });
   return funcIdx;
 }
 
