@@ -239,3 +239,81 @@ The interim full A/B (rule 5, after class 1) is deferred to whoever lands
 class 3 or the #2906 slices next — re-running all 5 buckets now would only
 re-confirm the unchanged classes-2/3/4 residual at extra cost without new
 information.
+
+## FULL A/B RE-MEASURE — 2026-07-09 (fable-3100s4, main@0551d83)
+
+Per rule 5, ran the full 262-file construct-bucketed A/B on **current main**
+(after 3a/3b/3d-i/3d-ii + #3035 all landed since the 07-02 measure). The
+harness (corpus selector + per-arm runner + diff) is now **durably committed**
+under `scripts/measure/` (rule-5 fix — the prior `.tmp/` copy did not survive).
+
+**Baseline re-measure (before this issue's fallback layer):**
+
+| bucket           | n   | off | on  | net     |
+| ---------------- | --- | --- | --- | ------- |
+| async-function   | 60  | 32  | 35  | +3      |
+| for-await-of     | 60  | 14  | 20  | +6      |
+| async-generator  | 60  | 42  | 38  | **−4**  |
+| promise-then-all | 60  | 6   | 16  | +10     |
+| await-expr       | 22  | 9   | 10  | +1      |
+| **TOTAL**        | 262 | 103 | 119 | **+16** |
+
+The picture **transformed** since 07-02 (was −51 total): classes 1/2/3 all
+resolved (promise-then-all −18→+10 via #3035; for-await −15→+6 via 3a/3b;
+async-fn −12→+3). **`async-generator` (−4) is the SOLE flip-blocker.**
+
+**Root-cause of the −4 (per-file drill, NOT the async-gen drive).** All 5
+regressions are LEGACY-path async gens (function-expression / `yield*` — the
+3d-i named-decl drive never touches them; they leak `__gen_next`/
+`__gen_yield_star` in BOTH arms). File 1 import diff off→on shows
+`Promise.reject`/`resolve` + `__get_caught_exception` go NATIVE under the
+widen while `.then`/`.catch` STAY host and `__gen_next` stays legacy: the −4
+is the **native-`$Promise`-construction × host-`.then`/`.catch`-chain ×
+legacy-async-gen** interaction (the #2980 class-1 `.then`-receiver / #2978
+lane), NOT #2906 3d-iii. (arch-2980 §2 AND the bucket-level number both
+mis-attributed it to the async-gen drive; only the per-file drill found it.)
+
+### Conservative-fallback layer landed — 2026-07-09 (fable-3100s4)
+
+**A module containing ANY async generator keeps BOTH carrier gates OFF on the
+widened-standalone lane** (`isStandalonePromiseActive` +
+`isStandaloneThenChainNativeActive` → `ctx.standalone && !ctx.moduleHasAsyncGen`),
+so its whole promise pipeline stays host-consistent (native `$Promise` never
+feeds the legacy `__gen_*` buffer / host `.then`). `moduleHasAsyncGen` is set
+in the pre-body `collectDeclarations` walk (so a `Promise.reject` INSIDE the
+gen also sees it). NOTE: a construction-site-only fallback (Promise.resolve/
+reject → host) is INSUFFICIENT — the widen also flips `await`-unwrap +
+`__get_caught_exception` native, which break against the legacy async-gen too;
+the module-level predicate gate keeps the WHOLE lane host.
+
+**Re-measure WITH the fallback (same corpus, on-arm = widen+fallback):**
+
+| bucket           | n   | off | on  | net     |
+| ---------------- | --- | --- | --- | ------- |
+| async-function   | 60  | 32  | 35  | +3      |
+| for-await-of     | 60  | 14  | 18  | +4      |
+| async-generator  | 60  | 42  | 42  | **+0**  |
+| promise-then-all | 60  | 6   | 16  | +10     |
+| await-expr       | 22  | 9   | 10  | +1      |
+| **TOTAL**        | 262 | 103 | 121 | **+18** |
+
+**FLIP-BLOCKERS: NONE. VERDICT: FLIP** (rule 1: positive total AND no bucket
+net ≤ −2). async-gen −4→+0 (all 5 regressions verified PASS); total IMPROVED
++16→+18. Only cost: for-await +6→+4 (2 for-await files with async gens lose a
+native-promise win by falling back to host — still PASS, ZERO regressions).
+In-bucket residual negatives (async-function −1 `evaluation-body`,
+promise-then-all −3 capability/race) are PRE-EXISTING (unchanged by the
+fallback) and don't block (net-positive buckets).
+
+The fallback is **BANKED INERT**: gated inside the `ASYNC_CARRIER_WIDEN_MEASURE`
+branch, so un-measured gc/host/wasi/normal-standalone are byte-identical
+(`moduleHasAsyncGen` is set in collect but only READ under the measure — proven:
+21/21 program×lane sha256 identical to base). It makes the widen FLIPPABLE; the
+actual two-predicate flip is still its own tiny PR (rule 1), which per §3 must
+ride with/after the #2978 #2934-3b validity pairing AND (scoreboard-affecting)
+needs explicit stakeholder sign-off before merge.
+
+**Still filed forward:** #3120 — #2906 3d-iii implicit-yield-await (§27.6.3.8:
+plain `yield <promise>` must Await; currently yields NaN) — a real host-free
+async-gen conformance win, ORTHOGONAL to the flip (the −4 files are legacy, not
+driven), banked separately.
