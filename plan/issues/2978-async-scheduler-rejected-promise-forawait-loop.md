@@ -1,12 +1,13 @@
 ---
 id: 2978
 title: "Standalone async scheduler: for-await over a sync iterator yielding rejected promises loops forever (3GB JS-heap OOM)"
-status: in-progress
+status: done
 assignee: ttraenkler/fable-2978
 depends_on: []
 sprint: current
 created: 2026-07-02
 updated: 2026-07-10
+completed: 2026-07-10
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -358,3 +359,22 @@ No downgrade. `architect_spec: done` is reliable.
   loop body, array-of-rejected (vec lane), async-gen rejected-await — all
   BOUNDED (no OOM class); their wrong-value residuals are pre-existing
   #2865/#2906 gaps, unchanged by this fix.
+
+### Acceptance state
+
+- Repro terminates `returnCount===1`, `caught===true`, `e==="reject"`, bounded
+  memory: **met on the carrier lanes** (wasi now; standalone at the #2980
+  flip); on the pre-flip host-promise lanes it terminates bounded with
+  `returnCount===1`, `caught===true` and a loud TypeError (a host promise is
+  not synchronously observable — no spec-correct sync fix exists there, by
+  design the flip inherits the carrier fix).
+- Canonical file standalone `invalid → pass`: **partially met** — now
+  `invalid → bounded fail` on the scored lane; the widen-lane full pass is
+  blocked ONLY by the pre-existing #3121 capture-aliasing bug (rejection
+  routing itself verified correct there).
+- No CI worker OOM: **met** (1,272-file sweep × {standalone, gc, widen}, max
+  345 ms for the canonical file, no file >0.92 s).
+- 0 test262 regressions: **met** on branch-vs-main local controls
+  (standalone: 1 diff = the intended CE→fail; gc: same; widen: see sweep
+  note); async/generator/iterator equivalence suites green (63/63 targeted +
+  adjacent issue suites).
