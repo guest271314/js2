@@ -1,7 +1,8 @@
 ---
 id: 3043
 title: "Object.defineProperty: ValidateAndApplyPropertyDescriptor illegal-transition rules not enforced (should-throw + SameValue + false-positive Cannot-redefine)"
-status: ready
+status: in-progress
+assignee: ttraenkler/fable-3022
 sprint: current
 priority: high
 horizon: m
@@ -50,7 +51,7 @@ Two failure directions, same validate step:
 
 ```js
 var obj = {};
-Object.defineProperty(obj, "foo", { value: +0 });          // configurable:false (default)
+Object.defineProperty(obj, "foo", { value: +0 }); // configurable:false (default)
 // spec: SameValue(+0, -0) === false ⇒ this is a change on a non-writable,
 // non-configurable prop ⇒ must throw TypeError:
 Object.defineProperty(obj, "foo", { value: -0 });
@@ -72,3 +73,30 @@ consumer; the +0/-0/NaN `SameValue` edges are subtle. **Must validate IN BATCH
 
 - Illegal non-configurable transitions throw `TypeError`; legal configurable
   redefinitions succeed. No regression in `freeze`/`seal`/`create`.
+
+## Reground (2026-07-09, fable-3022)
+
+Verified the headline repros against current main (post-#3042): the +0/-0
+SameValue throw, NaN-SameValue no-throw, value-type-change throw,
+enumerable-toggle throw, and the false-positive
+non-writable-but-configurable redefine ALL pass now on the runtime lanes.
+The **array-index arm** of the matrix (element SameValue, shrink-blocking,
+RangeError) landed with #3116. What remains in THIS issue's scope:
+
+1. **Fully-static lane divergence** — `Object.defineProperty(obj, "foo",
+{set: fn, configurable: false})` then `{configurable: true}` does NOT
+   throw when the first (accessor) define compiles away entirely (no runtime
+   mirror), so the second define's runtime validation sees a first
+   definition. Same for data→accessor on a non-configurable static field.
+   Repro: `.tmp` probe matrix confToggle/dataToAccessor (both return 0,
+   expect 1).
+2. **Non-callable-getter define-leak** — `{get: {a: 1}}` via a descriptor
+   variable throws (correctly) but the property is still observably created
+   (`o.hasOwnProperty("foo")` true afterwards).
+3. Arguments-object receivers (~57 fails) share the exotic-receiver shape
+   and may belong here or in a separate cause-scoped issue.
+
+The fix direction for (1) is the same state-unification lever as the #3116
+veto: when the static accessor path compiles a define away, mirror the
+descriptor flags into the runtime sidecar (the data path already does this
+via the `anyFlagSpecified` side-effect `__defineProperty_value` call).
