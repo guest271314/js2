@@ -15,6 +15,14 @@ import { addUnionImportsViaRegistry } from "../shared.js";
 import { emitUndefinedExtern } from "../any-helpers.js";
 import { ensureObjectRuntime, OBJECT_RUNTIME_HELPER_NAMES } from "../object-runtime.js";
 import { ensureSymbolCarrier } from "../symbol-native.js";
+// (#3100 S4) Native standalone iteration substrate: the four `__iterator*`
+// protocol ops, the bounded materializer `__array_from_iter_n`, and the
+// rest-slice `__extern_slice` all have Wasm-native DEFINED implementations.
+import {
+  ensureNativeArrayFromIterN,
+  ensureNativeExternSlice,
+  ensureNativeIteratorRuntime,
+} from "../iterator-native.js";
 import { shiftAsyncSideChannelFuncIdxs } from "../async-scheduler.js";
 import { inLiveShiftRange } from "../../emit/resolve-layout.js";
 
@@ -447,6 +455,39 @@ export function ensureLateImport(
   if ((ctx.standalone || ctx.wasi) && name === "__box_symbol") {
     ensureSymbolCarrier(ctx);
     return ctx.funcMap.get(name);
+  }
+  // #3100 S4 — under no-JS-host mode the iteration-protocol ops (`__iterator`,
+  // `__iterator_next`, `__iterator_return`, `__iterator_rest`), the bounded
+  // iterable materializer `__array_from_iter_n` (#2904), and the rest-element
+  // slice `__extern_slice` are all emitted as native DEFINED functions
+  // (iterator-native.ts). Route by NAME at this single chokepoint so EVERY
+  // consumer — assignment array-destructuring, the custom-iterable drain,
+  // the literals rest drain, for-of rest — binds native with no per-site
+  // gating. Before this, each un-gated consumer leaked the `env::` import
+  // (e.g. `[a, b] = <any>` leaked `env::__array_from_iter_n`, the 60-row
+  // assignment/dstr cluster of the standalone JSONL; rest patterns leaked
+  // `env::__extern_slice`), breaking zero-import instantiation. MUST run
+  // BEFORE `refuseStandaloneObjectImport` — `__extern_slice` matches its
+  // `__extern_` refusal prefix. Registration is append-only (defined funcs,
+  // no import-index shift), the same invariant as the routes above.
+  if (ctx.standalone || ctx.wasi) {
+    if (name === "__array_from_iter_n") {
+      ensureNativeArrayFromIterN(ctx);
+      return ctx.funcMap.get(name);
+    }
+    if (name === "__extern_slice") {
+      ensureNativeExternSlice(ctx);
+      return ctx.funcMap.get(name);
+    }
+    if (
+      name === "__iterator" ||
+      name === "__iterator_next" ||
+      name === "__iterator_return" ||
+      name === "__iterator_rest"
+    ) {
+      ensureNativeIteratorRuntime(ctx);
+      return ctx.funcMap.get(name);
+    }
   }
   // #1472 Phase A — refuse dynamic-shape object/property host imports under
   // --target standalone with a clear compile error. We still register the
