@@ -982,8 +982,9 @@ through the DYNAMIC `any`-receiver read path** — INV-2 for method values:
   `prove-emit-identity` 39/39 IDENTICAL vs main.
 - #3080 (private-method value identity) folded in: the non-`this`-receiver
   private-method value read returned the RECEIVER; it now answers the same
-  singleton. See `plan/issues/2963-*.md` ("Class-METHOD value identity") for
-  the full mechanism + the `collectDeclaredFuncRefs`-ordering trap.
+  singleton. See `plan/issues/2963-builtin-first-class-reification.md`
+  ("Class-METHOD value identity") for the full mechanism + the
+  `collectDeclaredFuncRefs`-ordering trap.
 - Housekeeping: the CS0 case (d) pin (`getPrototypeOf` results stored in `any`
   locals) was stale-RED on main — an intervening landed change already
   canonicalizes the stored-null comparison to the correct `1`; the pin is
