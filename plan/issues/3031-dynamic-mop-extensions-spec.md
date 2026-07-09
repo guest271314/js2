@@ -578,7 +578,7 @@ third of which is the trap-dispatch gap the spec describes:
      misses same-file call-before-creation compile order, the #2754 class).
      Proxy-free programs never grow the arm.
 
-### Validation (PR #? — branch `issue-3031-proxy-apply-trap`)
+### Validation (PR #2815 — branch `issue-3031-proxy-apply-trap`)
 
 - **12/12 method-shorthand handler traps fire** (was 11/12 after #3099);
   arrow-property parity too.
