@@ -58,8 +58,8 @@
   {
     "edition": "ES2015",
     "pass": 11426,
-    "fail": 3813,
-    "ce": 147,
+    "fail": 3815,
+    "ce": 145,
     "skip": 0,
     "total": 15386,
     "pct": 74,
@@ -85,8 +85,8 @@
       {
         "name": "TypedArray",
         "pass": 639,
-        "fail": 462,
-        "ce": 2,
+        "fail": 463,
+        "ce": 1,
         "skip": 0,
         "total": 1103,
         "pct": 58
@@ -112,8 +112,8 @@
       {
         "name": "Symbol",
         "pass": 427,
-        "fail": 194,
-        "ce": 2,
+        "fail": 195,
+        "ce": 1,
         "skip": 0,
         "total": 623,
         "pct": 69
