@@ -72,6 +72,7 @@ import {
   widenLocalToNullable,
 } from "./helpers.js";
 import {
+  emitUndefined,
   ensureLateImport,
   flushLateImportShifts,
   patchStructNewForAddedField,
@@ -4249,6 +4250,50 @@ function compileElementAssignment(
         { op: "local.set", index: dataLocal } as Instr,
       ],
     } as Instr);
+
+    // (#2773 S7) Gap-fill for an index-grow write PAST the current length on an
+    // externref-element vec: `a[idx] = v` with idx > length leaves
+    // [length, idx) holding the array.new_default null (or a stale popped
+    // slot), and once `vec.length` is bumped to idx+1 below those slots are
+    // IN-BOUNDS — so a read returned `null` where JS reads `undefined`
+    // (test262 reduceRight "-c-ii-5": `kIndex[3]=1` on an empty tracking array,
+    // then `typeof kIndex[2]` must be "undefined"). Fill the gap with the JS
+    // `undefined` value so the length-bounded read (property-access) returns it
+    // directly. True HOLE fidelity ($Hole sentinel + HOF visit-skip) is #2001
+    // S2/S3 — out of scope here; `undefined` is what §OrdinaryGet reads either
+    // way. Externref elements only: an f64/i32 slot cannot hold `undefined`
+    // (its gap stays the numeric default — #2001 S3 boundary). Standalone is
+    // neutral: `emitUndefined` falls back to `ref.null.extern` there, which is
+    // what `array.new_default` already produced.
+    if (arrDef.element.kind === "externref" || arrDef.element.kind === "ref_extern") {
+      // undefined → local, emitted IMPERATIVELY so the `__get_undefined` late
+      // import registers/shifts through the normal path (never baked inside a
+      // detached branch array).
+      emitUndefined(ctx, fctx);
+      const gapUndefLocal = allocLocal(fctx, `__gap_undef_${fctx.locals.length}`, { kind: "externref" });
+      fctx.body.push({ op: "local.set", index: gapUndefLocal });
+      const gapOldLenLocal = allocLocal(fctx, `__gap_len_${fctx.locals.length}`, { kind: "i32" });
+      fctx.body.push({ op: "local.get", index: vecLocal });
+      fctx.body.push({ op: "struct.get", typeIdx, fieldIdx: 0 }); // current length
+      fctx.body.push({ op: "local.set", index: gapOldLenLocal });
+      // if (idx > length) array.fill(data, length, undefined, idx - length)
+      fctx.body.push({ op: "local.get", index: idxLocal });
+      fctx.body.push({ op: "local.get", index: gapOldLenLocal });
+      fctx.body.push({ op: "i32.gt_s" });
+      fctx.body.push({
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: dataLocal } as Instr,
+          { op: "local.get", index: gapOldLenLocal } as Instr,
+          { op: "local.get", index: gapUndefLocal } as Instr,
+          { op: "local.get", index: idxLocal } as Instr,
+          { op: "local.get", index: gapOldLenLocal } as Instr,
+          { op: "i32.sub" } as Instr,
+          { op: "array.fill", typeIdx: arrTypeIdx } as Instr,
+        ],
+      } as Instr);
+    }
 
     // array.set: data[idx] = val (using potentially grown data)
     fctx.body.push({ op: "local.get", index: dataLocal });
