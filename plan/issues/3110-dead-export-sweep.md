@@ -1,10 +1,11 @@
 ---
 id: 3110
 title: "Dead-code sweep: 128 exported symbols referenced nowhere else in src/tests/scripts"
-status: ready
+status: done
 sprint: Backlog
 created: 2026-07-09
 updated: 2026-07-09
+completed: 2026-07-09
 priority: medium
 horizon: s
 feasibility: easy
@@ -78,3 +79,52 @@ are 50+-line functions).
 2. `tsc --noEmit` clean; full vitest green; no test262 regression.
 3. `knip`/`ts-prune`-style scan (or the audit script) re-run in the PR shows
    the residual count.
+
+## Implementation notes (done 2026-07-09)
+
+Re-verified the audit snapshot mechanically with a **node-based** cross-reference
+scanner (not `grep`: `src/runtime-eval.ts` carries a NUL byte at offset 19327, so
+`grep -I` silently returns empty for it — a false-dead hazard; node `readFileSync`
+is reliable). The scanner counts word-boundary references for every named `src`
+export across all `.ts` in `src`+`tests`+`scripts`, excluding the defining file.
+
+Results on current main (283 exports with 0 external refs):
+
+- **34 fully-dead** (declared, referenced nowhere including their own file).
+- **249 internal-only** (used within their own file → demote-`export`-→-private,
+  ~0 LOC; larger review) — left as a follow-up batch.
+- **0 star-reexport-guarded** (no candidate is re-exposed via an `export *`
+  chain from a public entrypoint `index/runtime/optimize/cli.ts`).
+
+**This PR deletes 32 of the 34 fully-dead declarations** across 20 files
+(**−823 LOC, 0 insertions**), via the TypeScript AST (exact node spans incl.
+leading JSDoc), not fragile brace-matching. The 2 excluded are
+`defaultEvalShim`/`defaultNewFunctionShim` in `runtime-eval.ts` — skipped because
+the NUL byte makes automated AST edits on that file unsafe (documented for a
+separate manual pass; the NUL byte itself is a pre-existing anomaly worth a
+follow-up).
+
+Biggest removals: `ensureEncodeIntoHelper` (native-strings.ts, −446 — a genuine
+orphan: `TextEncoder.encodeInto` is served by a different live path and this
+helper had **zero call sites even historically**), the object-ops descriptor
+helpers `computeDescriptorFlags`/`emitDefinePropertyFlagCheck` (−227), plus dead
+type/interface/const declarations (regex `CharClass`/`VmMatch`, IR `IrSymRef`/
+`isIr*Ref`, `NATIVE_PROTO_FIELD_*`, `_Unused`/`_UnusedVal`, etc.).
+
+Safety — all three gates green:
+
+- `tsc --noEmit` clean (0 errors) — proves nothing referenced the deleted symbols.
+- `prove-emit-identity check` → **IDENTICAL** (all 39 (file,target) emits
+  byte-match the pre-deletion baseline) — deleting dead code did not change
+  emitted Wasm.
+- Biome lint clean; no orphaned-private lint errors.
+- A/B control: `tests/issue-1780.test.ts` (encodeInto) fails the same 8 tests on
+  clean `origin/main` as with the deletion — a pre-existing failure, unaffected
+  by this change (confirms `ensureEncodeIntoHelper` was truly dead).
+
+AC status: (1) partially — this PR removes the 32 fully-dead; the 249 demote-only
+candidates are documented above as a follow-up (they need `export`→private, not
+deletion, and yield ~0 LOC). (2) `tsc --noEmit` clean; targeted vitest green
+(defineProperty, regex), encodeInto A/B neutral; test262 unaffected (emit
+identical). (3) residual dead-export count recorded above (251 = 249 demote-only
++ 2 NUL-file-skipped).
