@@ -1,11 +1,12 @@
 ---
 id: 2773
 title: "[EPIC][ARCH] Value-rep substrate: consistent native dispatch for reconstructed-struct field access + DCE/finalize-stable typeIdx"
-status: ready
+status: in-progress
+assignee: ttraenkler/fable-2773t
 sprint: current
 model: fable
 created: 2026-06-28
-updated: 2026-07-08
+updated: 2026-07-09
 priority: high
 horizon: xl
 feasibility: hard
@@ -932,3 +933,97 @@ param-read` probe; pre-existing, unchanged.) Separate coercion slice.
 
 **S6 status: landed (this PR). The epic tail remains #2768 (S5a) + the boundary
 items above.**
+
+---
+
+# SLICE S7 — externref plain-array OOB → `undefined` + length-bounded vec reads + grow-write gap-fill — #2773 (fable-2773t, 2026-07-09)
+
+**Role: senior-dev. Broad-impact (touches every unproven plain-array element
+read in every lane). Emit drift confined to 4/39 corpus (file,target) emits —
+exactly the two files with dynamic array ops.**
+
+## Verify-first correction to the S6 boundary doc
+
+S6's boundary item 4 pinned the `-c-ii-5` family on the **dynamic-index
+WRITE**. Empirically (probes on main 300fc5a) that was wrong: the write+grow on
+the captured vec-struct receiver (`kIndex[idx] = 1`, typed `never[]` receiver)
+**already works natively** — the family hung entirely on the **READ** side.
+Decomposition (all probed):
+
+1. `typeof kIndex[0]` on the empty tracking array read `ref.null.extern` →
+   `typeof` = "object" ≠ "undefined" → every callback bailed on iteration 1.
+   Cause: the F1 OOB→undefined floor (#2760/#2785/#2792) covered
+   f64/boolean/symbol elements but **deferred externref** (`f1BoxType === null`
+   → `emitBoundsCheckedArrayGet(..., false)` → OOB null).
+2. After fixing (1), iteration 2 still failed: `kIndex[0]=1` on the empty vec
+   **grows capacity to 4** (length 1), and the bounded read tested
+   `idx < array.len(data)` — the **CAPACITY**, not the vec's logical `length`
+   field — so `kIndex[1]` read the null gap slot "in bounds" instead of OOB.
+   Same latent bug: `a.pop()` leaves the stale slot readable.
+3. The reduceRight variant writes DOWNWARD (`kIndex[3]=1` first): the grow
+   fills `[0,3)` with `array.new_default` nulls that become in-bounds once
+   `length=4` — reads of the gap gave null, not `undefined`.
+
+## The fix (three coordinated, call-site-scoped changes)
+
+- **`src/codegen/property-access.ts`** (two `compileElementAccessBody`
+  plain-array read sites): opt into the existing #1396 `useUndefinedSentinel`
+  arm for externref/ref_extern elements, gated on the same `oobUndefined`
+  policy (plain array, non-numeric consumer, not the regex-match vec). The
+  shared helper DEFAULT stays false — subview/TA/array-method callers are
+  byte-identical (#2198 S2 discipline). Numeric consumers keep the NaN
+  sentinel (no externref ripple — the F1 consumer-scoping).
+- **`src/codegen/array-methods.ts` `emitBoundsCheckedArrayGet`** +
+  **`emitPlainArrayUndefinedOobGet`**: new optional `lengthBoundInstrs` param —
+  the vec-struct call site tees the vec ref and passes
+  `[local.get vecRef, struct.get length]` so the bound is the LOGICAL length,
+  not capacity. Instrs are **cloned per push** (never alias one Instr object
+  into the body twice — DCE double-remap hazard,
+  `reference_shared_instr_object_dce_double_remap`). TA arm skipped
+  (fixed-length views: capacity === length, bytes identical).
+- **`src/codegen/expressions/assignment.ts`** (vec-struct element assign): on
+  an index-grow write past the current length, `array.fill` the gap
+  `[length, idx)` with JS `undefined` BEFORE the element write + length bump.
+  Externref elements only (an f64/i32 slot cannot hold undefined — its gap
+  stays the numeric default, #2001 S3 boundary). `emitUndefined` is emitted
+  imperatively so the `__get_undefined` late import registers/shifts through
+  the normal path.
+- **Standalone neutral by construction**: `ensureGetUndefined` returns
+  undefined under nativeStrings → the helpers fall back to `ref.null.extern`,
+  which IS the standalone undefined convention.
+
+## Measured delta
+
+- **All 8 baseline-failing family files flip locally** (runTest262File):
+  `every/some/map/forEach/reduce/reduceRight -c-ii-5`, `filter -c-ii-5`,
+  `filter -c-iii-1-6`.
+- New suite `tests/issue-2773-oob-length-bound.test.ts` (11 cases: tracking
+  patterns both directions, grow-gap, pop stale-slot, `string[]` OOB,
+  numeric-consumer NaN preservation, heterogeneous grow identity, standalone).
+- Related suites green: array-oob-bounds-check, at-oob, 2001-S1 holes, 2760,
+  2773-S6, 2785, 2792, 2798 (140 tests). The 2 failures in
+  `tests/issue-2766.test.ts` are **pre-existing on main** (verified: identical
+  failures on the main tree — `a[i] === undefined` constant-folds to false;
+  flagged to the lead, NOT from this slice).
+- `prove-emit-identity`: 35/39 (file,target) byte-identical vs main; the 4
+  drifts are `calendar.ts::{gc,standalone}` + `algorithms.ts::{standalone,wasi}`
+  — the corpus files with dynamic array reads/writes (intended surface).
+
+## Boundary — NOT closed by S7
+
+- **Static `typeof` fold on typed-element arrays**: `typeof a[i]` on a
+  homogeneous `string[]` folds to "string" at compile time WITHOUT reading —
+  wrong for an OOB/popped index. Orthogonal pre-existing defect (the fold, not
+  the read rep).
+- **f64/i32 vec grow-gap**: gap slots keep the numeric default (0) — in-length
+  reads after a sparse grow on `number[]` give 0 not undefined ($Hole rep is
+  #2001 S3).
+- **Dynamic-index WRITE on an externref RECEIVER** (`obj[idx] = v` inside a HOF
+  callback writing through the 3rd param): still drops silently via
+  `__extern_set` on the opaque vec (probe `objparam-write-readback`). Zero
+  test262 surface today (the `-c-ii-8` array-like variants pass — module-level
+  array-likes are genuine host objects). The symmetric `__vec_set` helper
+  (mirror `__vec_push`'s fill-or-build + reserve) is the next mechanical slice
+  if playground/user-code ROI appears.
+- **HOF hole visit-skip** (#2001 S2), **array-like `.call(obj)` receiver-shape**
+  (`-c-ii-20+`), **`arguments[3][idx]`** — unchanged from the S6 boundary list.
