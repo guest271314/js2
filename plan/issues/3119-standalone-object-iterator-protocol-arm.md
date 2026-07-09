@@ -1,7 +1,8 @@
 ---
 id: 3119
 title: "Standalone plain-$Object @@iterator protocol arm in the native __iterator ladder (#3100 Design arm 3) — post-hoc x[Symbol.iterator]=fn: 810 test262 files, 0 host-free"
-status: in-progress
+status: done
+completed: 2026-07-09
 assignee: ttraenkler/fable-3119
 sprint: current
 model: fable
