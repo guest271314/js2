@@ -1729,6 +1729,16 @@ export function emitAsyncFrameStateMachine(
  */
 export function isAsyncGenDriveCandidate(ctx: CodegenContext, decl: ts.FunctionLikeDeclaration): boolean {
   if (!ASYNC_CPS_ENABLED) return false;
+  // (#2865) Params must be plain identifiers: a binding-PATTERN param
+  // (`f([...x] = v)`) destructures into derived LOCALS of the lifted fn's
+  // prologue, which the fresh resume FunctionContext never sees — the body's
+  // reads then mis-resolve (observed: invalid wasm, a null-repaired call arg).
+  // A rest param builds a derived array local the same way. Identifier params
+  // WITH defaults are fine (the default is applied to the param local before
+  // the frame captures it). Correct-or-legacy.
+  for (const p of decl.parameters) {
+    if (!ts.isIdentifier(p.name) || p.dotDotDotToken !== undefined) return false;
+  }
   // (#2865) Stem-collision guard: a SECOND same-named gen (different scope)
   // would share the first's `__async_gen_next_<stem>` helper — typed for the
   // FIRST frame struct — and trap on `ref.cast`. Correct-or-legacy: reject it.

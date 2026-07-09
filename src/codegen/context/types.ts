@@ -1458,6 +1458,15 @@ export interface CodegenContext {
    */
   asyncGenProducers?: Map<string, { stateTypeIdx: number; nextHelperName: string; decl: ts.Node }>;
   /**
+   * (#2865) True once ANY async generator was emitted on the LEGACY buffer path
+   * (`__create_async_generator`). The `.next()` runtime dispatch chain uses this
+   * to decide its miss arm: with legacy receivers possible it must fall back to
+   * the host `__gen_next`; in an all-driven module it emits a plain null instead
+   * — referencing `__gen_next` there would force an otherwise-dead host import
+   * and break the zero-import (host-free) contract.
+   */
+  asyncGenLegacyBufferEmitted?: boolean;
+  /**
    * Function declarations pre-registered during module-pass eager class body
    * compilation. The entry has a reserved `mod.functions` slot and signature,
    * but its body still belongs to the normal nested-function hoist pass.
