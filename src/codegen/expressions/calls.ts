@@ -3140,12 +3140,13 @@ function tryEmitInlineDynamicCall(
   // the flush below — capturing them here, BEFORE a real import insertion (the
   // `__get_undefined` pad import), left the captured locals stale-low by the
   // insertion count while `flushLateImportShifts` repaired only `funcMap` and
-  // already-emitted bodies. Every dispatch arm then baked `call <box-1>` — in
-  // practice `call __str_to_number` where `call __box_number` was meant — and
-  // the module failed validation ("call[0] expected externref, found call_ref
+  // already-emitted bodies. Every dispatch arm then baked `call <box-1>` — the
+  // adjacent string-to-number native instead of the box helper — and the
+  // module failed validation ("call[0] expected externref, found call_ref
   // of type f64"; the #3031 dynamic-apply invalid-module class).
+  const UNBOX_NUMBER = "__unbox_number";
   addUnionImports(ctx);
-  if (ensureLateImport(ctx, "__unbox_number", [{ kind: "externref" }], [{ kind: "f64" }]) === undefined) {
+  if (ensureLateImport(ctx, UNBOX_NUMBER, [{ kind: "externref" }], [{ kind: "f64" }]) === undefined) {
     return null;
   }
 
@@ -3190,7 +3191,7 @@ function tryEmitInlineDynamicCall(
   // for defined functions, so these are the settled, final indices (see the
   // stale-capture note above).
   const boxNumberIdx = ctx.funcMap.get("__box_number");
-  const unboxNumberIdx = ctx.funcMap.get("__unbox_number");
+  const unboxNumberIdx = ctx.funcMap.get(UNBOX_NUMBER);
   if (boxNumberIdx === undefined || unboxNumberIdx === undefined) return null;
 
   const pushUndefinedExternref = (body: Instr[]): void => {
