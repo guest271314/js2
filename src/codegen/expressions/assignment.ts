@@ -2163,29 +2163,18 @@ function compileExternrefArrayDestructuringAssignment(
     }
   }
 
-  // (#3100 S4) Element-read op selection is mode-split:
-  //   - Standalone/WASI: the carrier-aware native `__extern_get_idx(mat, f64 i)`
-  //     (#2190 vec-family/$ObjVec/array-like arms). The native `__extern_get`
-  //     is a STRING-KEYED $Object reader — a boxed-number key would miss on
-  //     every vec carrier the (now native, via the ensureLateImport routing)
-  //     `__array_from_iter_n` materializer returns — and the raw
-  //     `env::__box_number` addImport below would itself leak.
-  //   - JS-host: the boxed-key `__extern_get(mat, __box_number(i))` host path,
-  //     byte-identical to before.
+  // (#3100 S4) Standalone/WASI element reads use the carrier-aware native
+  // `__extern_get_idx(mat, f64 i)` (#2190 vec/$ObjVec arms) — the native
+  // `__extern_get` is string-keyed and misses vec carriers. Host byte-identical.
   const useIdxReads = ctx.standalone || ctx.wasi;
   const readName = useIdxReads ? "__extern_get_idx" : "__extern_get";
-  ensureLateImport(
-    ctx,
-    readName,
-    [{ kind: "externref" }, useIdxReads ? { kind: "f64" } : { kind: "externref" }],
-    [{ kind: "externref" }],
-  );
+  const keyType: ValType = useIdxReads ? { kind: "f64" } : { kind: "externref" };
+  ensureLateImport(ctx, readName, [{ kind: "externref" }, keyType], [{ kind: "externref" }]);
   flushLateImportShifts(ctx, fctx);
   let getIdx = ctx.funcMap.get(readName);
   if (getIdx === undefined) return null;
 
-  // Ensure __box_number is available (host mode only — it boxes the index key
-  // for `__extern_get`; the standalone `__extern_get_idx` takes a raw f64).
+  // __box_number: host mode only — it boxes the index key for `__extern_get`.
   let boxIdx = ctx.funcMap.get("__box_number");
   if (!useIdxReads && boxIdx === undefined) {
     const importsBefore = ctx.numImportFuncs;
@@ -2210,10 +2199,6 @@ function compileExternrefArrayDestructuringAssignment(
         if (restLocalIdx === undefined) {
           restLocalIdx = allocLocal(fctx, restName, { kind: "externref" });
         }
-        // (#3100 S4) ensureLateImport routes `__extern_slice` to the NATIVE
-        // defined slice under standalone/wasi (previously this was a raw
-        // `env::` addImport that leaked); JS-host mode registers the same env
-        // import as before.
         let sliceIdx = ctx.funcMap.get("__extern_slice");
         if (sliceIdx === undefined) {
           ensureLateImport(ctx, "__extern_slice", [{ kind: "externref" }, { kind: "f64" }], [{ kind: "externref" }]);
@@ -2232,9 +2217,6 @@ function compileExternrefArrayDestructuringAssignment(
       continue;
     }
 
-    // Emit the element read:
-    //   host:       __extern_get(tmpLocal, __box_number(i)) -> externref
-    //   standalone: __extern_get_idx(tmpLocal, f64 i)       -> externref (#3100 S4)
     fctx.body.push({ op: "local.get", index: tmpLocal });
     fctx.body.push({ op: "f64.const", value: i });
     if (!useIdxReads) fctx.body.push({ op: "call", funcIdx: boxIdx! });

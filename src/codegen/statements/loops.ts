@@ -1686,10 +1686,7 @@ function compileForOfDestructuring(
             if (restIdx === undefined) {
               restIdx = allocLocal(fctx, restName, { kind: "externref" });
             }
-            // (#3100 S4) ensureLateImport routes `__extern_slice` to the
-            // NATIVE defined slice under standalone/wasi (the raw `env::`
-            // addImport this replaces leaked host imports); JS-host mode
-            // registers the same env import as before.
+            // (#3100 S4) ensureLateImport routes `__extern_slice` native standalone.
             let sliceIdx = ctx.funcMap.get("__extern_slice");
             if (sliceIdx === undefined) {
               ensureLateImport(
