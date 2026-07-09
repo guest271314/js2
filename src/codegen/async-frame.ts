@@ -46,6 +46,7 @@ import {
   forAwaitAsyncNeedsDrive,
   forAwaitNeedsDrive,
   forAwaitSpillInfo,
+  isAwaitFreeAsyncGenBody,
   isBoundedAsyncGenBody,
   isEmitOperand,
   loopAsyncSpillInfo,
@@ -1656,13 +1657,46 @@ export function emitAsyncFrameStateMachine(
  */
 export function isAsyncGenDriveCandidate(ctx: CodegenContext, decl: ts.FunctionLikeDeclaration): boolean {
   if (!ASYNC_CPS_ENABLED) return false;
-  // Gate on the native-`$Promise` CARRIER (`isStandalonePromiseActive`,
-  // currently wasi-only) — the SAME gate the plain/for-await drive lanes use
-  // (`decideAsyncActivation`). In non-wasi standalone the awaited operand does
-  // not lower to a native `$Promise`, so the drive machine would be broken; the
-  // widen to `standalone` is the shared slice-1d carrier move.
-  if (!isStandalonePromiseActive(ctx)) return false;
-  return isBoundedAsyncGenBody(decl);
+  // Under the native-`$Promise` CARRIER (`isStandalonePromiseActive`, wasi
+  // today): the full bounded shape, awaited yields included — the awaited
+  // operand lowers to a native `$Promise` the suspend arm can assimilate.
+  if (isStandalonePromiseActive(ctx)) return isBoundedAsyncGenBody(decl);
+  // (#2865) `--target standalone` with the carrier gate still OFF (#2980):
+  // drive the producer host-free ONLY for await-free bodies. With the carrier
+  // off an awaited operand does not lower to a native `$Promise`, so
+  // `yield await P` would deliver the un-awaited promise object (wrong value)
+  // — those bodies keep the legacy path (correct-or-legacy, #680 CE) until the
+  // measured carrier widen. An await-free body is carrier-independent: every
+  // promise the machine touches is minted by `__async_gen_next_<name>` itself.
+  if (isAsyncDriveActive(ctx)) return isAwaitFreeAsyncGenBody(decl);
+  return false;
+}
+
+/**
+ * (#2865) Standalone carrier-off analogue of {@link asyncFnNeedsDrive},
+ * restricted to the ONE shape that is carrier-independent: a bounded
+ * `for await (const x of g())` CONSUMER over a host-free async generator.
+ * Every suspension in that machine awaits a promise MINTED by the producer's
+ * own `__async_gen_next_<name>` driver (always a native `$Promise`, regardless
+ * of the carrier gate), so it drives correctly under `--target standalone`
+ * while plain awaits / Promise statics stay on the legacy path pending the
+ * #2980 carrier-widen decision. The 3b boxed-ARRAY for-await variant
+ * (`forAwaitNeedsDrive`) is deliberately NOT accepted here — its per-element
+ * `Await(value)` operands are host-backed promises under the un-widened
+ * carrier, which the suspend arm would mis-classify as settled plain values.
+ */
+export function asyncGenConsumerNeedsDrive(
+  ctx: CodegenContext,
+  fn: ts.FunctionLikeDeclaration,
+  plan: AsyncCpsPlan,
+): boolean {
+  if (!ASYNC_CPS_ENABLED) return false;
+  if (plan.awaitPoints.length !== 0) return false; // bare awaits are carrier-dependent
+  if (plan.forAwaitPoints.length === 0) return false;
+  if (!forAwaitAsyncNeedsDrive(ctx, fn, plan)) return false;
+  const fa = computeForAwaitSpills(ctx, fn, plan);
+  if (fa === null) return false;
+  return fa.spillTypes.every(isSpillSafeType);
 }
 
 /**

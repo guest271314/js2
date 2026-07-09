@@ -2145,6 +2145,22 @@ export function isBoundedAsyncGenBody(fn: ts.FunctionLikeDeclaration): boolean {
 }
 
 /**
+ * (#2865) True when `fn` is a bounded async-generator body that is ALSO
+ * await-free (`yield <plain>` / `yield;` only — no `yield await P`). This is
+ * the shape drivable under `--target standalone` while the native-`$Promise`
+ * CARRIER gate is still wasi-only (#2980): with the carrier off, an awaited
+ * operand does not lower to a native `$Promise`, so a `yield await P` would
+ * deliver the un-awaited promise OBJECT (wrong value). An await-free body is
+ * carrier-independent — every promise the machine touches is minted by its own
+ * `__async_gen_next_<name>` driver.
+ */
+export function isAwaitFreeAsyncGenBody(fn: ts.FunctionLikeDeclaration): boolean {
+  const yields = analyzeAsyncGen(fn);
+  if (yields === null) return false;
+  return yields.every((y) => y.awaited === null);
+}
+
+/**
  * Build the CFG for a bounded async-generator body. Dense ids in push order; a
  * `yield await P` contributes TWO states (await-suspend + yield-from-sent), a
  * plain `yield E` ONE, and a trailing `settleDone`:

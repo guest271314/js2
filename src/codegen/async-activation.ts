@@ -27,7 +27,12 @@ import {
   emitAsyncStateMachine,
   splitBodyAtAwait,
 } from "./async-cps.js";
-import { emitAsyncFrameStateMachine, asyncFnNeedsDrive, asyncFnNeedsHostDrive } from "./async-frame.js";
+import {
+  emitAsyncFrameStateMachine,
+  asyncFnNeedsDrive,
+  asyncFnNeedsHostDrive,
+  asyncGenConsumerNeedsDrive,
+} from "./async-frame.js";
 import { isStandalonePromiseActive } from "./async-scheduler.js";
 
 /**
@@ -86,6 +91,20 @@ function decideAsyncActivation(
     // just the single canonical await `asyncFnNeedsCps` gates on. For a single
     // await the verdict is identical, so wasi single-await routing is unchanged.
     if (asyncFnNeedsDrive(ctx, decl, asyncPlan)) return { lane: "drive", plan: asyncPlan };
+    return null;
+  }
+
+  // (#2865) `--target standalone` with the native-`$Promise` CARRIER gate still
+  // OFF (#2980 — the measured widen decision): activate the drive lane ONLY for
+  // the for-await-over-async-GENERATOR consumer shape. Its every suspension
+  // awaits a promise MINTED by the machine itself (the producer's
+  // `__async_gen_next_<name>` next()-promise — a native `$Promise` on every
+  // lane), so it is carrier-independent. Plain awaits / Promise statics /
+  // boxed-array for-await stay on the legacy path until the carrier widen —
+  // widening those here would be exactly the piecemeal flip #2980 rule 2 declines.
+  if (ctx.standalone === true) {
+    const asyncPlan = analyzeAsyncBody(ctx, decl);
+    if (asyncGenConsumerNeedsDrive(ctx, decl, asyncPlan)) return { lane: "drive", plan: asyncPlan };
     return null;
   }
 
