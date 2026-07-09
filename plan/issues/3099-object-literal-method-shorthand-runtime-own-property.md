@@ -1,10 +1,11 @@
 ---
 id: 3099
 title: "any-context object-literal METHOD-SHORTHAND props are compile-time-only — never materialized as runtime own properties on `$Object` (silently drops every shorthand Proxy trap, iterator `next()`, Object.keys entry)"
-status: ready
+status: done
 sprint: Backlog
 model: opus
 created: 2026-07-09
+completed: 2026-07-09
 priority: high
 horizon: m
 feasibility: medium
@@ -150,3 +151,60 @@ Filed from the Fable audit because it is the **highest-leverage single fix in
 the Proxy domain** — land it BEFORE any further trap/invariant work (#3031
 P3–P5, K2), then re-measure the standalone Proxy baseline so those slices
 are scoped against honest numbers.
+
+## Resolution (2026-07-09, dev-proxy)
+
+**Verify-first note (the spec was partly stale):** the "Fix" section assumed
+every method-shorthand literal already reaches
+`compileObjectLiteralAsExternref`. Empirically (DEBUG trace on current main),
+only the **Proxy-handler** literal does — via the no-resolvable-struct
+fallback (`compileObjectLiteral` line ~1296). A bare `const h: any = { m() {}
+}` instead routes to the **struct path** (`compileObjectLiteralForStruct`,
+anon-struct), because its inferred type maps to a struct even though the local
+is `any`/externref. So the fix has **two** parts:
+
+1. **The arm** (the keystone) — a `MethodDeclaration` arm in
+   `compileObjectLiteralAsExternref` (`src/codegen/literals.ts`) that
+   materializes a plain-named method (`identifier`/`string`/`numeric` key) as a
+   runtime own-property closure via `emitObjectLiteralMethodFn` + `__extern_set`,
+   mirroring the sibling arm in `compileObjectLiteralWithAccessors`. This alone
+   fully unblocks the standalone **Proxy substrate** (handlers reach this route).
+2. **The routing gate** — the standalone any-context divert gate now also accepts
+   plain-named method shorthand (new `isPlainNamedMethodDeclaration` predicate),
+   so `const h: any = { m() {} }` builds as an open `$Object` (fixing `h[k]` and
+   `Object.keys`) instead of an anon struct. Gated exactly like the data-prop
+   route (explicit any/unknown/object contextual type, standalone-only) — the
+   no-contextual-type case stays on the struct path (the #1897 −45 / #1901 −116
+   protection is preserved). Computed/well-known-symbol method keys are excluded
+   (they still route upstream for Symbol-boxing).
+
+**Re-measured Proxy trap delta (standalone, method-shorthand handlers):**
+
+| | before (origin/main) | after |
+| --- | --- | --- |
+| method-shorthand handler traps firing | **0 / 12** | **11 / 12** |
+
+The 11 that now fire: `get`, `set`, `has`, `deleteProperty`,
+`getOwnPropertyDescriptor`, `ownKeys`, `defineProperty`, `getPrototypeOf`,
+`setPrototypeOf`, `isExtensible`, `preventExtensions` — i.e. **full parity with
+the arrow-property handler form**, which the #1355 suite already exercises.
+The 12th, **`apply`**, remains dark for method-shorthand AND arrow handlers
+alike (both emit invalid Wasm on the standalone dynamic-apply-of-externref-callee
+path) — a **pre-existing** gap, not a handler-materialization issue. It is the
+#3031 **K1/K2** (inbound marshalling + `__construct_dispatch`/dynamic-apply)
+work; #3099 does not touch it.
+
+**Scope handed to #3031:** P-slices should now be scoped against **11/12
+shorthand-handler parity**, not "traps dark". The remaining standalone Proxy
+pass-rate levers are: `apply`/`construct` dynamic dispatch (K1/K2), `Reflect.*`
+wiring (S1), revocable synthesis (S0), and the §10.5 result-invariants (slice G)
+— none blocked on handler shape any longer.
+
+Regression validation: `tests/issue-3099.test.ts` (12 cases, standalone + host
+compile), plus scoped suites all green — `object-literals`,
+`object-literal-getters-setters`, `issue-1901`, `issue-1897`, `issue-1433`,
+`issue-1695(+propkey)`, `issue-2126`, `accessor-side-effects`, the `issue-1355`
+Proxy series (a–f), `iterators`, `issue-2162-iterators` (59 Proxy/iterator tests
+pass). The two pre-existing red suites (`proxy-passthrough` — obsolete #498
+tier-0 pass-through expectations; `issue-1897` — a diff-test262 tooling
+meta-test) fail identically on base origin/main and are unrelated.
