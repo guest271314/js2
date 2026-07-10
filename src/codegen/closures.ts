@@ -1921,6 +1921,25 @@ export function compileArrowAsClosure(
   // shadow set, so the param's own binding names stay excluded.
   collectParamDefaultReferences(arrow.parameters, referencedNames, ownLocals);
 
+  // (#3040) Parameter DEFAULT initializers can reference enclosing-scope names
+  // that appear NOWHERE in the body — e.g. `f = async function*([x] = iter)`
+  // where `iter` is an outer local used ONLY in the default. The body-only scan
+  // above misses them, so such a name is never captured and the lifted
+  // default-init reads a null local, which then destructures to "Cannot
+  // destructure null". This is the function-expression / arrow twin of the
+  // FunctionDeclaration fix in statements/nested-declarations.ts (the async-gen /
+  // gen / fn EXPRESSION variants of the `ary-init-iter-close` cluster lower here,
+  // not through the declaration path). Scan each parameter subtree (its
+  // `= <default>` initializer AND nested binding-pattern element defaults like
+  // `[x = outer]`) with `ownLocals` as the shadow set so the destructured binding
+  // names and earlier params stay local while free references in the defaults
+  // become captures. Placed BEFORE the transitive-capture loop so a default that
+  // calls a capturing nested function also pulls in that function's transitive
+  // captures.
+  for (const p of arrow.parameters) {
+    collectReferencedIdentifiers(p, referencedNames, ownLocals);
+  }
+
   // Transitively add captures needed by called nested functions.
   // E.g. if this closure calls g() and g has nestedFuncCaptures {first, second},
   // this closure must also capture first and second so it can pass ref cells to g.
@@ -1942,6 +1961,12 @@ export function compileArrowAsClosure(
     }
   } else {
     collectWrittenIdentifiers(body, writtenInClosure, ownLocals);
+  }
+  // (#3040) Symmetric with the referencedNames scan above: a param default that
+  // ASSIGNS an outer var (rare, e.g. `[x] = (outer = 5, [outer])`) must keep that
+  // capture boxed rather than snapshotted.
+  for (const p of arrow.parameters) {
+    collectWrittenIdentifiers(p, writtenInClosure, ownLocals);
   }
 
   // Also detect variables written in the enclosing scope (not just the closure).
