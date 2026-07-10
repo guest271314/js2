@@ -154,7 +154,7 @@ const isSrcTs = (p) => p.startsWith("src/") && p.endsWith(".ts") && !p.endsWith(
 function failWith({ regrown, newGiants, totalNote }) {
   process.stderr.write("\nLOC budget gate FAILED (#3102):\n");
   if (regrown.length > 0) {
-    process.stderr.write(`\n  God-files grown by this change-set (over their base size):\n`);
+    process.stderr.write(`\n  God-files grown past their allowed size:\n`);
     for (const r of regrown.sort((a, b) => b.delta - a.delta)) {
       process.stderr.write(`    ${r.path}: ${r.lines} > ${r.ceiling} (+${r.delta})\n`);
     }

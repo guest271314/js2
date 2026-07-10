@@ -1,11 +1,12 @@
 ---
 id: 3131
 title: "loc-budget/coercion-sites gates: end the per-PR baseline-bump merge-conflict churn"
-status: in-progress
+status: done
 assignee: ttraenkler/fable-locfix
 sprint: current
 created: 2026-07-10
 updated: 2026-07-10
+completed: 2026-07-10
 priority: high
 horizon: m
 feasibility: hard
@@ -131,3 +132,32 @@ it).
   `.github/workflows/baseline-summary-sync.yml` — post-merge
   `check-loc-budget.mjs --update` + staging next to the existing
   coercion-sites refresh (both normal and #3115 re-anchor paths).
+
+## Validation runs (2026-07-10, worktree + sim clones)
+
+- Case 1: zero-src-change change-set → both gates OK in scoped mode; repeated
+  with a deliberately corrupted committed baseline (ceiling 100, totalCeiling
+  5; coercion entry zeroed) → still OK (committed files provably unread).
+- Case 2: `src/codegen/index.ts` +2 → FAIL `16627 > 16625 (+2)`; frontmatter
+  `loc-budget-allow: [src/codegen/index.ts]` in this issue file → PASS with
+  grant logged. New untracked 1,600-line `src/codegen/probe-giant.ts` → FAIL
+  as new god-file. `__is_truthy(` use added to `math-helpers.ts` → coercion
+  FAIL `0 → 1 (__is_truthy 0→1)`; inline `coercion-sites-allow:` → PASS.
+- Case 3: `binary-ops.ts` −30 → PASS (net −30); PASS again with the committed
+  ceiling forged to 10 (stale-baseline immune).
+- Case 4: temp commit shrinking `binary-ops.ts` 4474→4444, then +10 regrow
+  gated against it (`LOC_GATE_BASE=HEAD`) → FAIL `4454 > 4444 (+10)` even
+  though origin/main still holds 4474 (structural banking). `--update` wrote
+  the 4444 ceiling; immediate rerun → "already current … not rewritten"
+  (idempotent, no stable-main commit churn).
+- CI arm: local clone, queue-style `--no-ff` merge (parent1 = base) with
+  `GITHUB_ACTIONS=true GITHUB_EVENT_NAME=merge_group` → base
+  `ci-merge-parent(merge_group)`, scope = the PR delta only; growth in the
+  merged tree FAILS and the merged issue-file allowance admits it. Repeated
+  from a `--depth 2` clone (exactly CI's fetch-depth) → identical results.
+  `push` event with a non-merge HEAD falls through to merge-base. No-git
+  (`GIT_DIR=/nonexistent`) falls back to the legacy committed-baseline gate,
+  which still catches growth (exit 1) and passes clean trees; `--all` audit
+  OK.
+- `update-issues.mjs` write-mode normalization preserves the allowance keys
+  (unknown frontmatter blocks round-trip via `extras`; `DROPPED_KEYS` empty).
