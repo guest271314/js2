@@ -145,7 +145,7 @@ import {
   getNativeProtoBuiltinGlue,
 } from "../native-proto.js";
 import { pushBuiltinFnSingletonValueInstrs } from "../builtin-fn-meta.js";
-import { tryEmitStandaloneBuiltinStaticGopd } from "../builtin-static-gopd.js"; // (#2984 Phase 3)
+import { resolveBuiltinReceiverName, tryEmitStandaloneBuiltinStaticGopd } from "../builtin-static-gopd.js"; // (#2984 Phase 3 + bucket-1 alias receivers)
 import { compileStatement, hoistFunctionDeclarations } from "../statements.js";
 import {
   emitSetExtrasArgv,
@@ -7990,15 +7990,16 @@ function compileCallExpression(
       // members (Symbol well-knowns / RegExp legacy statics / dynamic keys)
       // fall through to the existing refusal; host/gc keeps the working
       // `__get_builtin` host route untouched.
-      if (
-        ctx.standalone &&
-        propLiteral !== undefined &&
-        ts.isIdentifier(arg0) &&
-        BUILTIN_CLASS_NAMES.has(arg0.text) &&
-        !(fctx.localMap.has(arg0.text) || (fctx.boxedCaptures?.has(arg0.text) ?? false)) &&
-        tryEmitStandaloneBuiltinStaticGopd(ctx, fctx, arg0.text, propLiteral)
-      ) {
-        return { kind: "externref" };
+      // (#2984 bucket-1) The receiver recognizer now also follows one level of
+      // reaching-def aliasing (`var m = Math; gOPD(m, "atan2")` — the dominant
+      // 15.2.3.3-4-* fixture shape), via the conservative AST-only resolver in
+      // builtin-static-gopd.ts. Direct unshadowed builtin identifiers resolve
+      // exactly as the Phase 3 gate did.
+      if (ctx.standalone && propLiteral !== undefined) {
+        const builtinRecv = resolveBuiltinReceiverName(fctx, arg0, BUILTIN_CLASS_NAMES);
+        if (builtinRecv !== undefined && tryEmitStandaloneBuiltinStaticGopd(ctx, fctx, builtinRecv, propLiteral)) {
+          return { kind: "externref" };
+        }
       }
 
       // Fallback: dynamic case — delegate to __getOwnPropertyDescriptor host import
