@@ -28,6 +28,7 @@ import {
 import { coercionPlan } from "../coercion-plan.js"; // (#2934 1c) single coercion table for the copy-ctor element bridge
 import {
   emitDynamicTaViewConstruct,
+  emitTaDynCtorConstructFromLocals,
   emitTaViewConstruct,
   emitTaViewConstructWindowed,
   getOrRegisterDvWindowType,
@@ -2468,6 +2469,18 @@ function emitDynamicNewFallback(
     fctx.body.push({ op: "call", funcIdx: hostFuncIdx });
     fctx.body = savedBody2;
     noMatchBase = base;
+  } else if (noJsHost(ctx) && !useRuntimeArgv) {
+    // (#2872) Standalone/WASI unknown-ctor base: the runtime value may be a
+    // first-class `$__ta_ctor` (the TypedArray-harness `function (TA) { new
+    // TA(3) / new TA([…]) }` shape — the callee matched no user-class tag).
+    // Route through the runtime-gated general TA construct; any other runtime
+    // value keeps the pre-existing null-extern outcome (the ref.test declines).
+    const base: Instr[] = [];
+    const savedBase = fctx.body;
+    fctx.body = base;
+    emitTaDynCtorConstructFromLocals(ctx, fctx, descLocal, argLocals);
+    fctx.body = savedBase;
+    noMatchBase = base;
   } else {
     noMatchBase = [{ op: "ref.null.extern" }];
   }
@@ -4674,6 +4687,43 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
           }
         }
         if (emitDynamicNewFallback(ctx, fctx, expr, dynCallee, ctorName)) {
+          return { kind: "externref" };
+        }
+        // (#2872) Standalone/WASI class-free module: emitDynamicNewFallback
+        // declined (no struct-backed class candidates), so `new TA(n)` / `new
+        // TA([…])` / `new TA()` on an `any`-bound ctor previously fell through
+        // to the (absent) `__new_<name>` import → `ref.null.extern`, which made
+        // every `testWithTypedArrayConstructors` body read 0/undefined. Route
+        // the genuinely-dynamic callee through the same runtime `$__ta_ctor`
+        // construct arm the class-bearing no-match base uses; a non-TA runtime
+        // value still yields null-extern (byte-identical outcome to before).
+        if (
+          noJsHost(ctx) &&
+          resolvesToDynamicAnyCtorValue(ctx, dynCallee) &&
+          !(expr.arguments ?? []).some((a) => ts.isSpreadElement(a))
+        ) {
+          const taCalleeTy = compileExpression(ctx, fctx, dynCallee, { kind: "externref" });
+          if (taCalleeTy && taCalleeTy.kind !== "externref") {
+            coerceType(ctx, fctx, taCalleeTy, { kind: "externref" });
+          } else if (taCalleeTy === null) {
+            fctx.body.push({ op: "ref.null.extern" });
+          }
+          fctx.body.push({ op: "any.convert_extern" } as Instr);
+          const taDescLocal = allocLocal(fctx, `__dtac_desc_${fctx.locals.length}`, { kind: "anyref" } as ValType);
+          fctx.body.push({ op: "local.set", index: taDescLocal });
+          const taArgLocals: number[] = [];
+          for (const arg of expr.arguments ?? []) {
+            const aTy = compileExpression(ctx, fctx, arg, { kind: "externref" });
+            if (aTy && aTy.kind !== "externref") {
+              coerceType(ctx, fctx, aTy, { kind: "externref" });
+            } else if (aTy === null) {
+              fctx.body.push({ op: "ref.null.extern" });
+            }
+            const aLocal = allocLocal(fctx, `__dtac_arg_${fctx.locals.length}`, { kind: "externref" });
+            fctx.body.push({ op: "local.set", index: aLocal });
+            taArgLocals.push(aLocal);
+          }
+          emitTaDynCtorConstructFromLocals(ctx, fctx, taDescLocal, taArgLocals);
           return { kind: "externref" };
         }
       }
