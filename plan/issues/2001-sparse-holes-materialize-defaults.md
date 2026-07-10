@@ -437,6 +437,51 @@ prototype-index inheritance modeling, or acceptance of the divergence). S3
 `typeof === "undefined"`), so the S3 gap-fill now only needs `undefined → $Hole`
 so the grown gap is HOF-skipped rather than visited.**
 
+### S2 merge-group park + fix (2026-07-10, fable-shepherd) — `arrayProtoIndexDirty` static gate
+
+PR #2832 was auto-parked by the merge_group (net **-3**, all `assertion_fail`,
+run 29060112238): `built-ins/Array/prototype/every/15.4.4.16-7-c-i-22.js`,
+`filter/15.4.4.20-9-c-i-22.js`, `some/15.4.4.17-7-c-i-22.js`. These are the
+**prototype-inherited-index** shape the S2 notes above deferred indexOf/reduce
+for — `Object.defineProperty(Array.prototype, "0", { set(){}, configurable })`
+then `[, ].some(cb)`: `HasProperty(O, "0")` is TRUE via the prototype, so the
+callback MUST be visited (with `undefined` — the accessor has no getter), but
+the S2 visit-skip skipped it. The same family exists for the net-0 subset, not
+only the deferred methods; forEach's `-c-i-22` was already failing on main
+(never passed → could not regress), which is why the park listed exactly 3.
+
+**Why PR-level CI was green:** the last full test262 PR run predated the final
+merge commits — the `Test262 Sharded` runs at `aaa3777`/`eebfade` SKIPPED all
+shards (`detect test262-relevant changes` saw only baseline-regen diffs), so
+the regression surfaced only in the merge_group's fresh full run. NOT a #2830
+interaction (repro: S2 + pre-#2830 main fails the trio identically; post-#2830
+main alone passes).
+
+**Fix (compile-time, zero runtime cost):** the `scanForArrayHoles` pre-scan now
+also sets `ctx.arrayProtoIndexDirty` when the module WRITES an `Array.prototype`
+index (`Object.defineProperty(Array.prototype, …)` / `Object.defineProperties`
+/ `Reflect.defineProperty` with `Array.prototype` as first arg, or any
+`Array.prototype[…] = …` assignment). `shouldHoleSkip` adds
+`!ctx.arrayProtoIndexDirty` — a dirtying module falls back module-wide to the
+S1 visit-with-`undefined` behavior (observationally correct for the dominant
+inherited-accessor-without-getter shape, and exactly main's pre-S2 behavior),
+while clean modules keep the spec-correct skip byte-for-byte. Rejected
+alternatives: per-element prototype check (needs a host import + standalone
+global plumbing — a runtime cost on every hole for a test-only shape) and
+reverting the 3 methods to S1 (loses the genuine-hole spec correctness the
+slice exists for). Property-NAME writes (`Array.prototype.foo = …`) and reads
+do not set the flag.
+
+**Unit-test realm hazard (recorded for future HOF tests):** in host mode the
+compiled module executes `defineProperty(Array.prototype, "0", …)` against the
+vitest worker's REAL `Array.prototype`; the inherited index-0 no-op setter then
+silently drops element 0 of every later host array index-write — the TS
+compiler itself crashes on its next parse (`isFileProbablyExternalModule` →
+`node.kind` of undefined), and an `afterEach` delete is insufficient (async
+runtime state corrupts while poisoned). The new dirty-module tests therefore
+run **standalone** (per-instance in-module prototype model, zero host
+pollution); only the read-control runs in host mode.
+
 #### S3 — index-grow past length writes holes, not element defaults. **[independently landable after S1]**
 
 `b[5]=9` on a `length-1` `any[]`: the grow path

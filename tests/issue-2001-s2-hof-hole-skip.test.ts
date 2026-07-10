@@ -183,4 +183,85 @@ describe("#2001 S2 — HOF hole visit-skip (any[] / externref vecs)", () => {
       ).toBe(7);
     });
   });
+
+  // (PR #2832 merge-group park) §23.1.3.* keys the visit-skip on
+  // `HasProperty(O, k)` — TRUE for a hole whose index is inherited from
+  // `Array.prototype` (test262 `{every,filter,some}/*-c-i-22.js`:
+  // `Object.defineProperty(Array.prototype, "0", { set(){}, configurable: true })`
+  // then `[, ].some(cb)` MUST visit index 0 with `undefined`). The flat vec
+  // cannot check the prototype per element, so a module that writes an
+  // `Array.prototype` index anywhere (`arrayProtoIndexDirty` pre-scan) disables
+  // the module-wide skip and falls back to the S1 visit-with-`undefined`
+  // behavior — matching the observable result of the inherited
+  // accessor-without-getter shape ([[Get]] yields `undefined`).
+  describe("Array.prototype index write disables the module's visit-skip", () => {
+    // These run STANDALONE deliberately: in host mode the compiled module
+    // EXECUTES its `defineProperty(Array.prototype, "0", …)` against the host
+    // realm's REAL Array.prototype, and the inherited index-0 accessor poisons
+    // every later array index-write in this vitest worker (the TS compiler
+    // itself crashes on its next parse — statements arrays silently drop
+    // element 0 through the no-op setter; verified: an `afterEach` delete is
+    // not enough, async runtime state corrupts while poisoned). Standalone
+    // instances model Array.prototype in-module — fully isolated per test —
+    // and exercise the same `arrayProtoIndexDirty` compile-time gate.
+    it("some visits the hole after defineProperty(Array.prototype, '0', …)", async () => {
+      expect(
+        await runStandalone(`
+          function cb(val: any, idx: any): any { if (idx === 0) { return typeof val === "undefined"; } return false; }
+          Object.defineProperty(Array.prototype, "0", { set: function() {}, configurable: true });
+          export function run(): number { const a: any[] = [, ]; return a.some(cb) ? 1 : 0; }
+        `),
+      ).toBe(1);
+    });
+    it("every visits the hole (callback observed) after the proto write", async () => {
+      expect(
+        await runStandalone(`
+          let accessed = false;
+          function cb(val: any, idx: any): any { if (idx === 0) { accessed = true; return typeof val === "undefined"; } return true; }
+          Object.defineProperty(Array.prototype, "0", { set: function() {}, configurable: true });
+          export function run(): number {
+            const a: any[] = [, ];
+            if (!a.every(cb)) return 2;
+            return accessed ? 1 : 3;
+          }
+        `),
+      ).toBe(1);
+    });
+    it("filter keeps the visited hole after the proto write", async () => {
+      expect(
+        await runStandalone(`
+          function cb(val: any, idx: any): any { if (idx === 0) { return typeof val === "undefined"; } return false; }
+          Object.defineProperty(Array.prototype, "0", { set: function() {}, configurable: true });
+          export function run(): number { const a: any[] = [, ]; return a.filter(cb).length; }
+        `),
+      ).toBe(1);
+    });
+    it("element-assignment form (Array.prototype[0] = v) also disables the skip", async () => {
+      expect(
+        await runStandalone(`
+          Array.prototype[0] = 6.99;
+          export function run(): number {
+            const a: any[] = [, ];
+            let calls = 0;
+            a.forEach(function(x: any) { calls = calls + 1; });
+            return calls;
+          }
+        `),
+      ).toBe(1);
+    });
+    it("a mere READ of Array.prototype does NOT disable the skip", async () => {
+      // Host mode is safe here — reading Array.prototype mutates nothing.
+      expect(
+        await run(`
+          const f: any = Array.prototype.indexOf;
+          export function run(): number {
+            const a: any[] = [1, , 3];
+            let calls = 0;
+            a.forEach(function(x: any) { calls = calls + 1; });
+            return calls;
+          }
+        `),
+      ).toBe(2);
+    });
+  });
 });
