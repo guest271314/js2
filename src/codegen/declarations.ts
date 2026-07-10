@@ -879,6 +879,13 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
     // its six imports (__make_callback / Promise_resolve / Promise_then2 /
     // Promise_new_pending / Promise_settle_resolve / Promise_settle_reject)
     // carry stable import indices.
+    //
+    // (#2967) Post-flip both predicates can be true for the same fn (host-drive
+    // now claims the CPS shapes; an ARROW/FN-EXPR of that shape still emits CPS
+    // via the planAsyncClosureActivation re-lane). Registering both sets is the
+    // safe superset (the CPS trio is a subset of the host-drive six); the
+    // hazard-free direction — every emit path's imports pre-registered — holds
+    // for every routing outcome.
     if (!state.asyncHostDriveFound && asyncFnNeedsHostDrive(ctx, node, plan)) {
       state.asyncHostDriveFound = true;
     }
@@ -4457,12 +4464,30 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
       // here so the inner CallExpression is recognised and the statement
       // reaches `__module_init`.
       let expr: ts.Expression = stmt.expression;
-      while (ts.isParenthesizedExpression(expr)) expr = expr.expression;
+      // (#2992) `void <expr>` evaluates its operand for side effects and
+      // discards the result — in statement position it is transparent, so
+      // unwrap it like parentheses (`void (delete o.k)` must still delete).
+      while (ts.isParenthesizedExpression(expr) || ts.isVoidExpression(expr)) {
+        expr = expr.expression;
+      }
       if (ts.isNewExpression(expr) || ts.isCallExpression(expr)) {
         ctx.moduleInitStatements.push(stmt);
         continue;
       }
       if (ts.isPrefixUnaryExpression(expr) || ts.isPostfixUnaryExpression(expr)) {
+        ctx.moduleInitStatements.push(stmt);
+        continue;
+      }
+      // (#2992) Top-level `delete o.k` / `delete o["k"]` — a DeleteExpression
+      // is its OWN node kind (NOT a PrefixUnaryExpression), so it matched no
+      // case here and was silently dropped from `__module_init`: the property
+      // survived, every later read observed the stale value, and `"k" in o`
+      // stayed true. Delete INSIDE a function always worked — only the
+      // top-level collection dropped it. This was the mechanism behind the
+      // #2992 "delete-tombstone read survival" headline repro. Affects ALL
+      // lanes (gc/standalone/wasi) identically; programs without a top-level
+      // delete statement are byte-identical.
+      if (ts.isDeleteExpression(expr)) {
         ctx.moduleInitStatements.push(stmt);
         continue;
       }

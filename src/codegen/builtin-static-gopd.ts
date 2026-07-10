@@ -57,11 +57,12 @@
  * instructions in `fctx.body`.
  */
 import { ts } from "../ts-api.js";
-import type { Instr } from "../ir/types.js";
+import type { Instr, ValType } from "../ir/types.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { BUILTIN_STATIC_METHOD_ARITY, pushBuiltinFnSingletonValueInstrs } from "./builtin-fn-meta.js";
+import { allocLocal } from "./context/locals.js";
 import { emitLazyNativeProtoGet } from "./native-proto.js";
-import { stringConstantExternrefInstrs } from "./native-strings.js";
+import { nativeStringLiteralInstrs, stringConstantExternrefInstrs } from "./native-strings.js";
 import {
   BUILTIN_CTOR_ARITY,
   ensureStandaloneBuiltinStaticMethodClosure,
@@ -71,7 +72,7 @@ import {
   tryEnsureNativeProtoBrand,
 } from "./property-access.js";
 import { addStringConstantGlobal } from "./registry/imports.js";
-import { ensureLateImport, flushLateImportShifts } from "./shared.js";
+import { coerceType, compileExpression, ensureLateImport, flushLateImportShifts } from "./shared.js";
 
 // §6.1.7.3 attribute flag bits — mirrors object-runtime's `__create_descriptor`
 // (1=writable, 2=enumerable, 4=configurable).
@@ -313,5 +314,210 @@ export function tryEmitStandaloneBuiltinStaticGopd(
   // surface is fully covered above, so the member is genuinely absent.
   if (builtinName === "Symbol" || builtinName === "RegExp") return false;
   fctx.body.push({ op: "ref.null.extern" } as Instr);
+  return true;
+}
+
+/**
+ * (#2984 "arg-2 name coercion") Standalone `Object.getOwnPropertyDescriptor(
+ * <struct-shaped obj>, <NON-literal key>)` — runtime ToPropertyKey dispatch
+ * over the compile-time field set.
+ *
+ * ## Why
+ *
+ * A plain object literal lowers to a TYPED STRUCT, not a runtime `$Object`.
+ * The gOPD call site answers struct receivers only through the LITERAL-key
+ * fast path (calls.ts, `structName && propLiteral !== undefined`); any
+ * non-literal key (`gOPD(obj, NaN)`, `gOPD(obj, k)`, `gOPD(obj, {toString})`)
+ * fell through to the dynamic `__getOwnPropertyDescriptor` native, which only
+ * walks `$Object`s — so a struct receiver always answered `undefined`
+ * (test262 15.2.3.3-2-*: 17/47 failed, measured 2026-07-10). Here we compile
+ * the key, run it through the central `__to_property_key` coercion (#2042 S1 /
+ * #2985 — canonical ToString(ToPrimitive(key,"string")) for every non-Symbol
+ * key), then string-match it against the struct's known field names and
+ * synthesize the SAME descriptor the literal fast path emits per field.
+ *
+ * ## Safety envelope
+ *
+ * `ctx.standalone`-gated by the caller; host/gc keeps its working host-import
+ * route (byte-inert). Bails (returns `false`, nothing pushed) for class
+ * receivers (methods keep the #1364a dynamic-fallback behavior) and
+ * sidecar-defined keys (#1629b defineProperty migration). A non-string
+ * post-coercion key (a genuine Symbol; nullish under the legacy no-singleton
+ * regime) answers `undefined` — exactly what the dynamic native answered for
+ * every struct receiver before, so nothing passing changes.
+ */
+export function tryEmitStandaloneStructGopdKeyDispatch(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  arg0: ts.Expression,
+  arg1: ts.Expression,
+  structName: string,
+): boolean {
+  const structTypeIdx = ctx.structMap.get(structName);
+  const fields = ctx.structFields.get(structName);
+  if (structTypeIdx === undefined || !fields) return false;
+  // Class receivers: proto/static method lookups keep the dynamic fallback
+  // (#1364a/#1395) — only plain data-shape structs take this arm.
+  if (ctx.classMethodNames.has(structName) || ctx.classStaticMethodNames.has(structName)) return false;
+  const anyStrTypeIdx = ctx.anyStrTypeIdx;
+  const nativeStrTypeIdx = ctx.nativeStrTypeIdx;
+  if (anyStrTypeIdx < 0 || nativeStrTypeIdx < 0) return false;
+  const userFields = fields
+    .map((f, idx) => ({ field: f, fieldIdx: idx }))
+    .filter((e) => !e.field.name.startsWith("__"));
+  // Sidecar-defined keys (#1629b) migrate the property off the struct — the
+  // dynamic fallback owns those receivers.
+  if (
+    ts.isIdentifier(arg0) &&
+    userFields.some((e) => ctx.sidecarDefinedPropertyKeys.has(`${arg0.text}:${e.field.name}`))
+  ) {
+    return false;
+  }
+
+  // ── Operands first (their lowering may add late imports; indices are
+  // captured AFTER, so no stale-funcIdx hazard — late-funcidx discipline). ──
+  const objAny = allocLocal(fctx, `__gopdkd_obj_${fctx.locals.length}`, { kind: "anyref" });
+  const keyExt = allocLocal(fctx, `__gopdkd_key_${fctx.locals.length}`, { kind: "externref" });
+  const keyStr = allocLocal(fctx, `__gopdkd_kstr_${fctx.locals.length}`, {
+    kind: "ref_null",
+    typeIdx: nativeStrTypeIdx,
+  });
+  const objType = compileExpression(ctx, fctx, arg0, { kind: "externref" });
+  if (!objType || typeof objType !== "object") {
+    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    return true;
+  }
+  if (objType.kind === "externref") {
+    fctx.body.push({ op: "any.convert_extern" } as Instr);
+  } else if (objType.kind !== "ref" && objType.kind !== "ref_null" && objType.kind !== "anyref") {
+    // Primitive receiver — coerce through externref; the struct ref.test
+    // below fails and the arm answers `undefined` (same as the dynamic path).
+    coerceType(ctx, fctx, objType, { kind: "externref" });
+    fctx.body.push({ op: "any.convert_extern" } as Instr);
+  }
+  fctx.body.push({ op: "local.set", index: objAny } as Instr);
+  const keyType = compileExpression(ctx, fctx, arg1, { kind: "externref" });
+  if (!keyType || typeof keyType !== "object") {
+    fctx.body.push({ op: "drop" } as Instr, { op: "ref.null.extern" } as Instr);
+    return true;
+  }
+  if (keyType.kind !== "externref") coerceType(ctx, fctx, keyType, { kind: "externref" });
+  fctx.body.push({ op: "local.set", index: keyExt } as Instr);
+
+  // ── Resolve natives AFTER operand lowering (shift-maintained maps). ──────
+  const createIdx = resolveCreateDescriptor(ctx, fctx);
+  const boxIdx = resolveBoxNumber(ctx, fctx);
+  const tpkIdx = ctx.funcMap.get("__to_property_key");
+  const dynGopdIdx = ctx.funcMap.get("__getOwnPropertyDescriptor");
+  const strFlattenIdx = ctx.nativeStrHelpers.get("__str_flatten");
+  const strEqualsIdx = ctx.nativeStrHelpers.get("__str_equals");
+  if (
+    createIdx === undefined ||
+    boxIdx === undefined ||
+    tpkIdx === undefined ||
+    dynGopdIdx === undefined ||
+    strFlattenIdx === undefined ||
+    strEqualsIdx === undefined
+  ) {
+    // Natives unavailable — answer `undefined` (operands are already parked
+    // in locals, so the stack is clean; same answer as the dynamic native).
+    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    return true;
+  }
+  // Strictly-additive fall-through: anything this arm does not positively
+  // resolve (non-string post-ToPropertyKey key — a genuine Symbol; a runtime
+  // value that is not the checker-typed struct, e.g. a migrated `$Object`)
+  // keeps EXACTLY today's answer by delegating to the dynamic native with the
+  // ORIGINAL key (the native re-runs ToPropertyKey itself — idempotent).
+  // FACTORY, not a shared array — aliasing one Instr[] into two branches
+  // double-remaps funcIdx on late-import/DCE shifts.
+  const dynFallthrough = (): Instr[] => [
+    { op: "local.get", index: objAny } as Instr,
+    { op: "extern.convert_any" } as Instr,
+    { op: "local.get", index: keyExt } as Instr,
+    { op: "call", funcIdx: dynGopdIdx } as Instr,
+  ];
+
+  // Per-field flags: shape table + per-variable defineProperty overrides —
+  // the exact logic of the literal fast path (calls.ts / #1629b).
+  const flagsArr = ctx.shapePropFlags.get(structTypeIdx);
+  const flagsFor = (userIdx: number, name: string): number => {
+    let flags = flagsArr && userIdx >= 0 ? (flagsArr[userIdx] ?? 0x07) : 0x07;
+    if (ts.isIdentifier(arg0)) {
+      const dpf = ctx.definedPropertyFlags.get(`${arg0.text}:${name}`);
+      if (dpf !== undefined) flags = dpf & 0x0f;
+    }
+    return flags;
+  };
+
+  // Innermost→outermost: fold the field chain from the last field backwards.
+  const externrefBlock = { kind: "val" as const, type: { kind: "externref" } as ValType };
+  let chain: Instr[] = [{ op: "ref.null.extern" } as Instr]; // no field matched → undefined
+  for (let i = userFields.length - 1; i >= 0; i--) {
+    const { field, fieldIdx } = userFields[i]!;
+    const value: Instr[] = [
+      { op: "local.get", index: objAny } as Instr,
+      { op: "ref.cast", typeIdx: structTypeIdx } as Instr,
+      { op: "struct.get", typeIdx: structTypeIdx, fieldIdx } as Instr,
+    ];
+    const ft = field.type;
+    if (ft.kind === "f64") {
+      value.push({ op: "call", funcIdx: boxIdx } as Instr);
+    } else if (ft.kind === "i32") {
+      value.push({ op: "f64.convert_i32_s" } as Instr, { op: "call", funcIdx: boxIdx } as Instr);
+    } else if (ft.kind === "i64") {
+      value.push({ op: "f64.convert_i64_s" } as Instr, { op: "call", funcIdx: boxIdx } as Instr);
+    } else if (ft.kind !== "externref") {
+      value.push({ op: "extern.convert_any" } as Instr);
+    }
+    chain = [
+      { op: "local.get", index: keyStr } as Instr,
+      { op: "ref.as_non_null" } as Instr,
+      ...nativeStringLiteralInstrs(ctx, field.name),
+      { op: "call", funcIdx: strEqualsIdx } as Instr,
+      {
+        op: "if",
+        blockType: externrefBlock,
+        then: [
+          ...value,
+          { op: "i32.const", value: flagsFor(i, field.name) } as Instr,
+          { op: "call", funcIdx: createIdx } as Instr,
+        ],
+        else: chain,
+      } as Instr,
+    ];
+  }
+
+  // key = __to_property_key(key); string key + struct receiver → dispatch.
+  const keyAny = allocLocal(fctx, `__gopdkd_kany_${fctx.locals.length}`, { kind: "anyref" });
+  fctx.body.push(
+    { op: "local.get", index: keyExt } as Instr,
+    { op: "call", funcIdx: tpkIdx } as Instr,
+    { op: "any.convert_extern" } as Instr,
+    { op: "local.tee", index: keyAny } as Instr,
+    { op: "ref.test", typeIdx: anyStrTypeIdx } as Instr,
+    {
+      op: "if",
+      blockType: externrefBlock,
+      then: [
+        { op: "local.get", index: keyAny } as Instr,
+        { op: "ref.cast", typeIdx: anyStrTypeIdx } as Instr,
+        { op: "call", funcIdx: strFlattenIdx } as Instr,
+        { op: "local.set", index: keyStr } as Instr,
+        { op: "local.get", index: objAny } as Instr,
+        { op: "ref.test", typeIdx: structTypeIdx } as Instr,
+        {
+          op: "if",
+          blockType: externrefBlock,
+          then: chain,
+          // Runtime value is not the checker-typed struct → dynamic native.
+          else: dynFallthrough(),
+        } as Instr,
+      ],
+      // Non-string property key after ToPropertyKey (a genuine Symbol; nullish
+      // under the legacy regime) — keep today's dynamic-native answer.
+      else: dynFallthrough(),
+    } as Instr,
+  );
   return true;
 }

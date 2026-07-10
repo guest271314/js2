@@ -317,6 +317,83 @@ export function compileAssignment(ctx: CodegenContext, fctx: FunctionContext, ex
         return null;
       }
 
+      // (#3128) The RHS may itself contain a closure that CAPTURES `name`:
+      // compiling it boxes the local into a fresh ref cell mid-RHS
+      // (closures.ts construction-site boxing) and re-points
+      // `fctx.localMap[name]` at the `__boxed_<name>` cell local — or an
+      // object-literal method/accessor in the RHS promotes the name to a
+      // captured global (`promoteAccessorCapturesToGlobals`). The `localIdx`
+      // resolved BEFORE the RHS then addresses the ORPHANED raw slot: writing
+      // it makes this assignment invisible both to the closure (which holds
+      // the cell) and to every subsequent read (which routes through the
+      // re-pointed store) — `p2 = p1.then(function(){ return p2; })` lost the
+      // assignment entirely. Re-resolve the storage NOW and write through the
+      // live store. Mirrors the post-initializer re-resolution in
+      // statements/variables.ts (#1177/#2692/#1672).
+      {
+        const boxedPostRhs = fctx.boxedCaptures?.get(name);
+        const localIdxPostRhs = fctx.localMap.get(name);
+        if (boxedPostRhs && localIdxPostRhs !== undefined && localIdxPostRhs !== localIdx) {
+          if (!valTypesMatch(resultType, boxedPostRhs.valType)) {
+            coerceType(ctx, fctx, resultType, boxedPostRhs.valType);
+          }
+          const tmpVal = allocLocal(fctx, `__box_tmp_${fctx.locals.length}`, boxedPostRhs.valType);
+          fctx.body.push({ op: "local.set", index: tmpVal });
+          fctx.body.push({ op: "local.get", index: localIdxPostRhs });
+          fctx.body.push({ op: "ref.is_null" });
+          fctx.body.push({
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [] as Instr[],
+            else: [
+              { op: "local.get", index: localIdxPostRhs } as Instr,
+              { op: "local.get", index: tmpVal } as Instr,
+              { op: "struct.set", typeIdx: boxedPostRhs.refCellTypeIdx, fieldIdx: 0 } as Instr,
+            ],
+          });
+          // Keep the orphaned raw slot in sync too: reads compiled BEFORE the
+          // mid-RHS boxing still address it (e.g. earlier statements of a loop
+          // body executing on the NEXT iteration). The raw slot's type equals
+          // the cell's value type (the cell wrapped this very slot).
+          const rawLocalType =
+            localIdx < fctx.params.length
+              ? fctx.params[localIdx]!.type
+              : fctx.locals[localIdx - fctx.params.length]?.type;
+          if (rawLocalType && valTypesMatch(rawLocalType, boxedPostRhs.valType)) {
+            fctx.body.push({ op: "local.get", index: tmpVal });
+            fctx.body.push({ op: "local.set", index: localIdx });
+          }
+          // Assignment expression result: the assigned value.
+          fctx.body.push({ op: "local.get", index: tmpVal });
+          return boxedPostRhs.valType;
+        }
+        if (localIdxPostRhs === undefined) {
+          // The name left localMap during RHS compilation — promoted to a
+          // captured global. Route the write through the promoted store.
+          const boxGlobalPostRhs = getCapturedBoxGlobal(ctx, name);
+          if (boxGlobalPostRhs !== undefined) {
+            if (!valTypesMatch(resultType, boxGlobalPostRhs.valType)) {
+              coerceType(ctx, fctx, resultType, boxGlobalPostRhs.valType);
+            }
+            const tmpVal = allocLocal(fctx, `__box_g_tmp_${fctx.locals.length}`, boxGlobalPostRhs.valType);
+            fctx.body.push({ op: "local.set", index: tmpVal });
+            emitCapturedBoxGlobalWrite(fctx, boxGlobalPostRhs, tmpVal);
+            fctx.body.push({ op: "local.get", index: tmpVal });
+            return boxGlobalPostRhs.valType;
+          }
+          const capturedIdxPostRhs = ctx.capturedGlobals.get(name);
+          if (capturedIdxPostRhs !== undefined) {
+            const globalDefPost = ctx.mod.globals[localGlobalIdx(ctx, capturedIdxPostRhs)];
+            if (globalDefPost && !valTypesMatch(resultType, globalDefPost.type)) {
+              coerceType(ctx, fctx, resultType, globalDefPost.type);
+            }
+            fctx.body.push({ op: "global.set", index: capturedIdxPostRhs });
+            fctx.body.push({ op: "global.get", index: capturedIdxPostRhs });
+            return globalDefPost?.type ?? resultType;
+          }
+        }
+      }
+
       // If a closure struct ref was assigned to a local that already has a closure
       // ref type, update the local's type to match the new struct.
       // BUT: do NOT update externref locals — hoistVarDecl already emitted externref

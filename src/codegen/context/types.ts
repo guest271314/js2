@@ -413,6 +413,18 @@ export interface FunctionContext {
    */
   promotedCaptureNames?: Set<string>;
   /**
+   * (#3128) Function-expression / arrow nodes INLINED into this function's
+   * body by the IIFE-inlining path (calls.ts). Their AST function boundary
+   * does NOT exist in the emitted Wasm — their locals live in THIS fctx's
+   * frame. The closure capture-mutability analysis (`compileArrowAsClosure`
+   * `writtenInOuter`) must walk PAST these nodes when locating the enclosing
+   * scope: a closure nested inside an inlined IIFE that captures a var of the
+   * REAL enclosing function would otherwise scan only the IIFE body, miss the
+   * outer write, and capture the var BY VALUE — a stale copy the outer
+   * assignment never reaches (`p2 = (function(){ return () => p2; })()`).
+   */
+  inlinedIifeNodes?: Set<ts.Node>;
+  /**
    * (#2865) The `__self` capture-struct layout of a LIFTED CLOSURE body
    * (closures.ts materializes each capture from `__self` field `i+1` into a
    * named local in the body prologue). The async drive lane compiles the body
