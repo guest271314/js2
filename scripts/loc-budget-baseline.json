@@ -1,7 +1,7 @@
 {
   "generated": "2026-07-10",
   "threshold": 1500,
-  "totalCeiling": 388977,
+  "totalCeiling": 389229,
   "files": {
     "src/codegen-linear/index.ts": 5506,
     "src/codegen-linear/runtime.ts": 3638,
@@ -21,7 +21,7 @@
     "src/codegen/expressions.ts": 1567,
     "src/codegen/expressions/assignment.ts": 7329,
     "src/codegen/expressions/builtins.ts": 3709,
-    "src/codegen/expressions/calls.ts": 17396,
+    "src/codegen/expressions/calls.ts": 17532,
     "src/codegen/expressions/identifiers.ts": 1925,
     "src/codegen/expressions/new-super.ts": 5602,
     "src/codegen/expressions/unary-updates.ts": 2087,
@@ -37,7 +37,7 @@
     "src/codegen/number-format-native.ts": 1712,
     "src/codegen/number-ryu.ts": 1632,
     "src/codegen/object-ops.ts": 4712,
-    "src/codegen/object-runtime.ts": 9726,
+    "src/codegen/object-runtime.ts": 9842,
     "src/codegen/parse-number-native.ts": 1838,
     "src/codegen/property-access.ts": 8478,
     "src/codegen/regexp-standalone.ts": 2893,
