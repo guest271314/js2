@@ -4,8 +4,8 @@ title: "De-polymorph the IR front-end on string mode: abstract IR string ops res
 status: ready
 sprint: current
 created: 2026-07-02
-updated: 2026-07-03
-assignee: ttraenkler/agent-a4461
+updated: 2026-07-10
+assignee: ttraenkler/fable-2856
 priority: medium
 horizon: m
 feasibility: medium
@@ -155,3 +155,37 @@ none is a sub-25-min byte-inert land like Slice 1 was (Slice 1 exploited an
 already-abstract `coerce.to_externref` op whose new elision arm was dead for
 all existing callers). Banking this corrected map instead of sinking final
 budget into a half-finished op introduction. `status` stays `ready`.
+
+## Slice 2 (2026-07-10, fable-2856) — site 3641 `lowerStringMethodCall`: the mode table moves to the resolver
+
+The WHOLE mode decision — target name (`string_<m>` vs `__str_<m>`),
+index-arg representation (f64 vs i32-truncated), omitted-optional strategy
+(#1248 slice-end / #2002 NaN-position / native defer), and the #2002
+native-mode 4-method defer — is relocated into a single resolver callback,
+`IrFromAstResolver.stringMethodPlan(method, argCount)`, implemented in
+`integration.ts` (the lower-time side, next to the mode discriminator).
+`lowerStringMethodCall` now reads NO `nativeStrings`: it applies the plan
+mechanically, and a `null` plan is this mode's demote decision (demote set
+unchanged).
+
+**Why a resolver callback, not (yet) the abstract `str.method` op the Slice-5
+sketch above wanted:** half of this site's polymorphism is CLAIM/DEMOTE
+(native indexOf/includes/startsWith/endsWith; native omitted optionals) —
+and demote decisions must be settled at build time (there is no lower-time
+demote channel; post-claim demotion buckets are gated). So any faithful move
+keeps a build-time mode-owned query; the callback IS that query, owned by
+the lower side. The rep half (the `i32.trunc_sat_f64_s` insertion, which
+still makes the IR differ per mode) can later move into a true abstract op
+lowered per mode — that promotion (op-union + verifier + lower.ts case +
+byte proof) remains the follow-up for this site and is what would satisfy
+the "identical IR across modes" criterion here.
+
+**Verification:** byte-inert in BOTH modes — sha256-identical compiled
+binaries vs pristine base over a 13-function corpus covering every table
+method incl. omitted-optional forms (host `01fa36e630951f86`, native
+`ce91bb7087c850b7`; postClaim counts unchanged 0/7); `check:ir-fallbacks`
+gate unchanged; `issue-1232`/`issue-1248`/`issue-2002`/`issue-2192b` suites
+41/41; IR equivalence suites 73/73; tsc clean. `nativeStrings` reads in
+from-ast: 4 remain (the 3263/3275/5846 coercion-demote class, 3432
+number-toString capability, 4155 for-of strategy — Slices 2–4 in the map
+above).

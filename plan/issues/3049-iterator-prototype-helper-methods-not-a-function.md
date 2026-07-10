@@ -1,7 +1,8 @@
 ---
 id: 3049
 title: "Iterator.prototype helper methods (map/filter/take/drop/flatMap/…): 'X is not a function' + this-plain-iterator / return-forwarding residual (~27 fails)"
-status: ready
+status: done
+assignee: ttraenkler/fable-3084
 sprint: current
 priority: medium
 horizon: l
@@ -10,6 +11,7 @@ reasoning_effort: max
 model: fable
 architect_spec: needs-revision
 created: 2026-07-05
+completed: 2026-07-10
 task_type: bugfix
 area: codegen, runtime
 language_feature: iterator-helpers
@@ -719,3 +721,77 @@ the helper proto's chain. This is a compiled \*\*function-`prototype`-field stor
 
 `status: ready` kept (not claiming further); the chain-fix draft is documented
 above for whoever resumes after the assignment-wall lands.
+
+## Resolution (fable-3084, 2026-07-10 — MEASURED, two stacked fixes)
+
+**Fix 1 — spec chain depth (`src/runtime.ts`, `__iterator` vec fallback).**
+The synthesized array iterator had a ONE-level chain
+(iter → %IteratorPrototype%); §23.1.5.2 mandates
+iter → %ArrayIteratorPrototype% → %IteratorPrototype%. Tests and the runner's
+`Iterator` shim hardcode the spec walk
+`getPrototypeOf(getPrototypeOf([][Symbol.iterator]()))`, which overshot the
+helper-bearing proto onto Object.prototype — every
+`Iterator.prototype.<helper>` lookup returned undefined. Fixed with a SHARED
+cached `_getSynthArrayIteratorPrototype` middle level (identity-stable across
+iterators, @@toStringTag "Array Iterator").
+
+**Fix 2 — iterator-record faithfulness (`_iteratorRecordForHost` +
+two hooks in `__extern_method_call`).** The ES2025 helpers drive their
+receiver host-side via the spec iterator record; compiled receivers broke it
+three ways: raw-struct receivers (opaque reads), `next` values that are Wasm
+closure structs (not host-callable → "object is not a function"), and
+Wasm-struct step results (opaque done/value → infinite drive loop). The shim
+lazily (accessor-based — an eager read fired user getter effects before the
+helper's own argument validation, breaking `argument-effect-order.js` × 7)
+bridges `next`/`return`/`throw` callable and host-mirrors struct step results.
+Mirrors the `_setLikeRecordForHost` (#1627) precedent.
+
+**Measured (branch vs upstream/main-equivalent control, full 510-file
+`built-ins/Iterator` sweep):** 267 → 281 pass — **+14 fail→pass, ZERO
+pass→fail**: `this-plain-iterator.js` × 8
+(drop/every/find/forEach/reduce/some/take/toArray),
+`Symbol.iterator/{return-val,is-function,name}.js`,
+`Symbol.dispose/{is-function,name}.js`, `reduce/argument-effect-order.js`;
+the other `argument-effect-order.js` × 7 kept passing after the lazy rework.
+`tests/issue-3049.test.ts` (7 tests); iterator unit guards
+(1367/1464/3013/3023/iterators) 36/36; extern-dispatch guards
+(1382/1627/2015) 41/41.
+
+## Residuals (separate roots, NOT this issue's plumbing — follow-ups)
+
+1. **Lazy-helper captured-counter visibility (#3128 family)** —
+   `map/filter this-plain-iterator.js` now DRIVE correctly (callback runs,
+   values flow — verified by throw/sum probes) but the test's
+   `++mapperCalls` inside the callback mutates a DETACHED cell when the
+   closure is invoked during a LATER for-of (deferred invocation); the same
+   counter works when the helper is EAGER (forEach/every/find/reduce/toArray
+   all pass). Compiler capture-analysis bug, not host glue.
+2. **`class X extends Iterator` proto chain** — `new TestIterator().drop(0)`
+   → "Cannot read properties of null": compiled-class inheritance from a
+   compiled function whose `.prototype` was reassigned to an externref host
+   object does not wire the instance's method resolution
+   (`drop/take return-is-forwarded.js`, `exhaustion-does-not-call-return.js`).
+3. **flatMap GetIteratorFlattenable on compiled inner iterables** —
+   `flattens-iterable.js` / `iterable-to-iterator-fallback.js`
+   ("undefined is not a function"): the mapper's RETURN value (a compiled
+   iterable) needs the same record treatment inside the native flatMap.
+4. **PRE-EXISTING upstream regression (NOT this branch — verified with fixes
+   env-disabled):** `Iterator.{zip,zipKeyed}/basic-{longest,strict}.js` (4
+   files) pass on aaa14719 but are vacuous-fail on d7a1feaa1c — introduced by
+   one of the ~4 intervening commits (suspect: #2984 refusal-body-closure
+   reification). Flagged to the tech lead 2026-07-10.
+
+## Why the CORRECTED plan's Layer 1/2 gating no longer applies (fable-3084, 2026-07-10)
+
+dev-3049's 2026-07-06 trace found the runner-preamble `Iterator.prototype = …`
+assignment ELIDED (Layer 1) and the module-init `__iterator` throw (Layer 2)
+gating everything. **Both are gone on current main (d7a1feaa1c)** — verified
+empirically before this fix: the compiled preamble shape executes, and
+`Iterator.prototype` reads back the (pre-fix, overshot) proto object with no
+init throw (probe `protoNull=false`). The interim keystone merges (#3074 PR
+#2790 + follow-ups #2800/#2802) closed those layers. What remained was
+Layer 3 (the chain off-by-one) plus the iterator-record host-callability gaps
+documented in the Resolution above — which is exactly what this PR fixes, with
+the 13-file measured flip proving the layers no longer gate. The Layer-2
+architecture decision (A/B/C) is therefore moot; do not implement from that
+plan.

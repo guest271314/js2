@@ -79,6 +79,7 @@ import {
   S5C_STRUCT_ACCESSOR_CLOSURE,
   buildAccessorClosure,
   ensureStructAccessorGlobal,
+  isDefinePropertyReceiverLiteral,
 } from "./struct-accessor-closure.js";
 import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S2 read chokepoint / S3b stable-regime minting)
 
@@ -1150,7 +1151,9 @@ export function compileObjectLiteral(
       !!ctxType &&
       ctxType.getProperties().length === 0 &&
       !!ctx.checker.getIndexInfoOfType(ctxType, ts.IndexKind.String);
-    if (isAnyContext || isPureStringIndexEmpty) {
+    // (#3076) defineProperty({}) receiver → open $Object (standalone/wasi;
+    // rationale in isDefinePropertyReceiverLiteral, struct-accessor-closure.ts).
+    if (isAnyContext || isPureStringIndexEmpty || isDefinePropertyReceiverLiteral(ctx, expr)) {
       const funcIdx = ensureLateImport(ctx, "__new_plain_object", [], [{ kind: "externref" }]);
       flushLateImportShifts(ctx, fctx);
       if (funcIdx !== undefined) {
