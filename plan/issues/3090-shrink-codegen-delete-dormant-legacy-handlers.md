@@ -1,10 +1,11 @@
 ---
 id: 3090
 title: "Shrink codegen: delete dormant legacy direct-codegen handlers superseded by IR (~40–55K net LOC)"
-status: ready
+status: in-progress
+assignee: ttraenkler/fable-6th
 sprint: current
 created: 2026-07-08
-updated: 2026-07-08
+updated: 2026-07-10
 priority: high
 horizon: xl
 feasibility: medium
