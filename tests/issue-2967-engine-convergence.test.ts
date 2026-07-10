@@ -288,3 +288,81 @@ describe("#2967 slice 2a — host-drive CLOSURES (the lifted #2646 park)", () =>
     await expect(settled(exports.main())).rejects.toBeTruthy();
   });
 });
+
+describe("#2967 slice 2a PARK FIX (PR #2873, merge_group 29120059791)", () => {
+  it("async fn-expr through a VOID-typed param after an `() => any` wrapper minted first (the 32-file null_deref: wrapper-order RTT mismatch)", async () => {
+    // `firstMint` (`() => any`) compiles BEFORE `runVoid` (`() => void`), so the
+    // externref-result wrapper struct is the chain ROOT and the void wrapper a
+    // `sub final` SIBLING. The activated async closure allocates under the
+    // externref wrapper (its rewritten Promise signature); pre-fix, runVoid's
+    // cast to the void wrapper nulled out and the funcref fetch trapped
+    // ("dereferencing a null pointer" — the asyncTest() harness cluster).
+    // Post-fix the cast targets the wrapper root and the funcref sig-dispatch
+    // picks the externref arm (result dropped — fire-and-forget semantics).
+    const exports = await compileToWasm(`
+      function firstMint(cb: () => any): any {
+        return cb();
+      }
+      function runVoid(cb: () => void): void {
+        cb();
+      }
+      let acc: number = 0;
+      export function main(): any {
+        firstMint(function (): any { return 1; });
+        runVoid(async function (): Promise<void> {
+          const a = await Promise.resolve(20).then((x: number) => x + 1);
+          const b = await Promise.resolve(20).then((x: number) => x + 1);
+          acc = a + b;
+        });
+        return 1;
+      }
+      export function readAcc(): number { return acc; }
+    `);
+    expect(exports.main()).toBe(1); // pre-fix: wasm trap here
+    await new Promise((r) => setTimeout(r, 50)); // drain the host microtasks
+    expect(exports.readAcc()).toBe(42);
+  });
+
+  it("a body local mutably captured by a NESTED fn and live across the await re-lanes off host-drive (cell-spill hazard, the struct.set[1] wasm_compile class)", async () => {
+    // `flag` is cell-boxed at `set`'s creation (nested fn writes it) but the
+    // frame spill field was typed i32 from the declaration — pre-fix host-drive
+    // emitted `struct.set[1] expected i32, found (ref null N)` (invalid Wasm,
+    // the await-using microtask cluster). The hazard gate re-lanes this body
+    // exactly as pre-slice-2a (CPS here — single canonical await), so no
+    // `__async_resume_fanon` is minted and the module VALIDATES (watOf asserts
+    // both). Behavior parity with main is byte-level, not re-asserted here —
+    // the CPS cell handling has its own pre-existing quirks that #2967 phase 3
+    // (cell-aware frame layout) retires together with this decline.
+    const wat = await watOf(`
+      export function main(): any {
+        const g = async function (): Promise<number> {
+          let flag: number = 0;
+          const set = function (): void { flag = 40; };
+          set();
+          const a = await Promise.resolve(2).then((x: number) => x + 0);
+          return flag + a;
+        };
+        return g();
+      }
+    `);
+    expect(wat).not.toContain("__async_resume_fanon");
+  });
+
+  it("a ref-typed spill guess (array-literal local live across the await) re-lanes off host-drive (rep-divergence hazard class)", async () => {
+    // `resolveSpillLocalValType` guesses a typed vec for `arr` before the body
+    // compiles; the body's inferred element rep can lawfully differ (the
+    // fromAsync `const expected = [prom]` file, where the #3134 Promise unwrap
+    // types the vec element as the unwrapped struct). Conservatively declined.
+    const exports = await compileToWasm(`
+      export function main(): any {
+        const g = async function (): Promise<number> {
+          const arr: number[] = [40, 2];
+          const a = await Promise.resolve(0).then((x: number) => x + 0);
+          return arr[0] + arr[1] + a;
+        };
+        return g();
+      }
+    `);
+    await expect(settled(exports.main())).resolves.toBe(42);
+  });
+});

@@ -29,6 +29,7 @@ import {
 } from "./async-cps.js";
 import {
   emitAsyncFrameStateMachine,
+  asyncClosureCellSpillHazard,
   asyncFnNeedsDrive,
   asyncFnNeedsHostDrive,
   asyncGenConsumerNeedsDrive,
@@ -236,8 +237,25 @@ export function planAsyncClosureActivation(
   // see tests/issue-2967-engine-convergence.test.ts slice-2a cases).
   // The native `drive` lane stays gated on the asyncGen-consumer exception
   // above (carrier-dependent, unchanged).
-  if (decision !== null && decision.lane === "host-drive") return decision;
-  if (decision === null || decision.lane !== "cps") return null;
+  //
+  // (#2873 park fix) ONE admitted shape stays excluded: a body whose declared
+  // local is mutably captured by a nested function-like AND lives across an
+  // await. The nested-closure capture CELL-BOXES the local at body-compile
+  // time, but the frame spill layout was fixed earlier from the DECLARED
+  // ValType — the suspend spill-back then stores the `(ref null $cell)` local
+  // into an i32/f64 frame field (invalid Wasm: the merge_group
+  // `struct.set[1] expected i32, found (ref null N)` cluster — await-using
+  // microtask tests, fromAsync does-not-await-input, asyncDispose
+  // invokes-return), and the cell is not re-materialized on resume. Those
+  // bodies re-lane exactly as pre-slice-2a (CPS if CPS-shaped, else legacy)
+  // until the frame layout is made cell-aware (#2967 phase 3). See
+  // `asyncClosureCellSpillHazard`.
+  let effective: AsyncActivationPlan | null = decision;
+  if (decision !== null && decision.lane === "host-drive") {
+    if (!asyncClosureCellSpillHazard(ctx, decl, decision.plan)) return decision;
+    effective = asyncFnNeedsCps(decl, decision.plan) ? { lane: "cps", plan: decision.plan } : null;
+  }
+  if (effective === null || effective.lane !== "cps") return null;
 
   // (#2957 phase-2 re-park fix) DISCARDED-TAIL-AWAIT guard for the closure path.
   //
@@ -280,7 +298,7 @@ export function planAsyncClosureActivation(
   // DECLARATION entry (`maybeActivateAsync`) is unchanged — declarations are not
   // lifted into a closure struct, so the discard shape emits correctly there and
   // the decl CPS lane keeps full single-tail-await support (byte-identity).
-  const split = splitBodyAtAwait(decl, decision.plan);
+  const split = splitBodyAtAwait(decl, effective.plan);
   if (split === null) return null;
 
   // Reject the two UNSAFE bare-`await P;` (shape 3, no binding, not a
@@ -308,7 +326,7 @@ export function planAsyncClosureActivation(
   // resolves to the correct value there, so the suite stays green.
   const isBareTailAwait = !split.isReturnAwait && split.resumeBinding === null;
   if (isBareTailAwait && (split.suffix.length === 0 || suffixReturnsValue(split.suffix))) return null;
-  return decision;
+  return effective;
 }
 
 /**

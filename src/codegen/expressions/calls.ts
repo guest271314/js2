@@ -59,6 +59,7 @@ import {
   compileArrowAsClosure,
   compileArrowFunction,
   computeClosureWrapperSig,
+  getFuncRefWrapperRootTypeIdx,
   getFuncSignature,
   getOrCreateFuncRefWrapperTypes,
 } from "../closures.js";
@@ -14229,10 +14230,27 @@ function compileCallExpression(
           // Save closure ref to a local
           let closureLocal: number;
           let rawCalleeLocal: number | undefined;
+          // (#2873 park fix) Struct type the externref callee is cast to. The
+          // declared-signature wrapper (`matchedStructTypeIdx`) only accepts
+          // values whose ACTUAL signature wrapper is the same type — but the
+          // wrapper chain is a star of `sub final` siblings under the FIRST
+          // wrapper created, so a value allocated under a different signature's
+          // wrapper (an activated ASYNC closure whose result was rewritten to
+          // externref/Promise while the param says `() => void`; a covariant
+          // sync closure like `() => string` passed as `() => void`) nulls the
+          // guarded cast and the funcref fetch below traps "dereferencing a
+          // null pointer" (the 32-file asyncTest() merge_group cluster on PR
+          // #2873 — creation ORDER decided which modules survived). Cast to the
+          // wrapper ROOT instead — the guaranteed supertype of every wrapper —
+          // and let the per-candidate funcref `ref.test` (which encodes the
+          // exact signature) discriminate; each dispatch arm re-casts self to
+          // its own candidate's struct type.
+          let closureCastStructIdx = matchedStructTypeIdx;
           if (innerResultType?.kind === "externref") {
+            closureCastStructIdx = getFuncRefWrapperRootTypeIdx(ctx) ?? matchedStructTypeIdx;
             const closureRefType: ValType = {
               kind: "ref_null",
-              typeIdx: matchedStructTypeIdx,
+              typeIdx: closureCastStructIdx,
             };
             closureLocal = allocLocal(fctx, `__callable_param_${fctx.locals.length}`, closureRefType);
             // (#1712) Keep the raw externref callee around for the host-callable
@@ -14243,7 +14261,7 @@ function compileCallExpression(
             rawCalleeLocal = allocLocal(fctx, `__callable_raw_${fctx.locals.length}`, { kind: "externref" });
             fctx.body.push({ op: "local.tee", index: rawCalleeLocal });
             fctx.body.push({ op: "any.convert_extern" });
-            emitGuardedRefCast(fctx, matchedStructTypeIdx);
+            emitGuardedRefCast(fctx, closureCastStructIdx);
             fctx.body.push({ op: "local.set", index: closureLocal });
           } else {
             const closureRefType: ValType = innerResultType ?? {
@@ -14426,11 +14444,14 @@ function compileCallExpression(
           }
 
           // Extract funcref from the closure struct (field 0) — null-check → TypeError (#728)
+          // (#2873) Fetched via the CAST struct type (the wrapper root on the
+          // externref path) — field 0 (funcref) is the root's own field, so the
+          // read is valid for a closure of ANY wrapper subtype.
           fctx.body.push({ op: "local.get", index: closureLocal });
-          emitNullCheckThrow(ctx, fctx, { kind: "ref_null", typeIdx: matchedStructTypeIdx });
+          emitNullCheckThrow(ctx, fctx, { kind: "ref_null", typeIdx: closureCastStructIdx });
           fctx.body.push({
             op: "struct.get",
-            typeIdx: matchedStructTypeIdx,
+            typeIdx: closureCastStructIdx,
             fieldIdx: 0,
           });
 
@@ -14443,7 +14464,16 @@ function compileCallExpression(
             fctx.body.push({ op: "local.set", index: funcrefLocal });
             // Push self (null-check)
             fctx.body.push({ op: "local.get", index: closureLocal });
-            emitNullCheckThrow(ctx, fctx, { kind: "ref_null", typeIdx: matchedStructTypeIdx });
+            emitNullCheckThrow(ctx, fctx, { kind: "ref_null", typeIdx: closureCastStructIdx });
+            // (#2873) Root-typed local → the single candidate's self param type.
+            // The guarded funcref cast below already gates the call (TypeError
+            // on signature mismatch); a value that passes it is of the matched
+            // wrapper (or a capture subtype), so this cast succeeds for every
+            // value that reaches the call — and traps no earlier than the old
+            // struct.get-on-null did for mismatched shapes.
+            if (closureCastStructIdx !== matchedStructTypeIdx) {
+              fctx.body.push({ op: "ref.cast_null", typeIdx: matchedStructTypeIdx } as Instr);
+            }
             // Push args
             for (const al of argLocals) {
               fctx.body.push({ op: "local.get", index: al });
@@ -14491,10 +14521,18 @@ function compileCallExpression(
               // but call_ref expects (ref $specificStruct). We use ref.cast to cast
               // closureLocal to the funcref's expected struct type.
               const fcCallBody: Instr[] = [];
-              // Push self (cast to the funcref's expected struct type)
+              // Push self (cast to the funcref's expected struct type).
+              // (#2873) Compare against the LOCAL's static type (the wrapper
+              // root on the externref path), not the declared wrapper: an arm
+              // only runs when its funcref `ref.test` matched, and a closure's
+              // struct is always its funcref-signature's wrapper (or a capture
+              // subtype of it), so the downcast from the root succeeds exactly
+              // on the live arm. NB the old "V8 canonicalizes same-layout
+              // structs" claim is FALSE for the wrapper chain — `sub final
+              // $root` siblings do not canonicalize together; only root-casts
+              // are universal.
               fcCallBody.push({ op: "local.get", index: closureLocal });
-              if (fc.structTypeIdx !== matchedStructTypeIdx) {
-                // V8 canonicalizes same-layout structs, so this cast succeeds
+              if (fc.structTypeIdx !== closureCastStructIdx) {
                 fcCallBody.push({ op: "ref.cast", typeIdx: fc.structTypeIdx });
               }
               // Push args
