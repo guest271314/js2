@@ -1222,6 +1222,84 @@ function compileFnctorNewAsObject(ctx: CodegenContext, fctx: FunctionContext, fn
  * 3. Create a constructor function that allocates the struct, binds `this`, runs the body, returns the struct.
  * 4. Cache the struct type and constructor so subsequent `new Foo()` calls reuse them.
  */
+/**
+ * (#3138) Call-site instance→ctor registration for FUNCTION-SCOPE fnctors.
+ *
+ * The #1712 registration (`__register_fnctor_instance`, ctor PROLOGUE) reads
+ * the ctor closure from a module GLOBAL (`moduleGlobals`/`funcClosureGlobals`)
+ * — which does not exist when the fnctor is a function-local binding
+ * (`export function test() { var Ctor = function(){}; … new Ctor(); }`, the
+ * test262 wrap shape). The prologue (inside the synthesized
+ * `__fnctor_<Name>_new`) cannot see the caller's local, so for that case the
+ * link is registered at the CALL SITE, where the closure local IS in scope.
+ * Without the link, `_fnctorProtoLookup` misses and every INHERITED read off
+ * the instance — including ToPropertyDescriptor's prototype-inclusive Get
+ * (#2680) when the instance is used as a property DESCRIPTOR — silently drops
+ * (the `15.2.3.6-3-129` inherited-attribute family).
+ *
+ * Emitted with the ctor-call result (`(ref null $__fnctor_<Name>)`) on the
+ * stack; restores that exact value/type, so downstream consumers are
+ * unaffected:
+ *
+ *   local.tee $__fnctor_reg_tmp      ;; keep the typed instance
+ *   extern.convert_any               ;; instance → externref
+ *   local.get $<funcName>            ;; closure value (+ convert if a GC ref)
+ *   call $__register_fnctor_instance
+ *   local.get $__fnctor_reg_tmp      ;; restore
+ *
+ * Gates (all must hold; any miss = status quo, no emission):
+ *  - host lane only (`!ctx.standalone && !ctx.wasi`) — the sidecar/proto-walk
+ *    machinery is JS-host; standalone stays byte-identical;
+ *  - the module-global gate MISSED (module-global fnctors keep the prologue
+ *    registration — byte-identical for them);
+ *  - `fctx.localMap` has a slot for `funcName` holding the closure VALUE
+ *    (externref or a GC ref). Ref-cell boxed captures are skipped — the raw
+ *    local is the CELL, not the closure, and registering the cell identity
+ *    would poison the WeakMap;
+ *  - runtime handlers are null-tolerant, so a hoisted `new` before the
+ *    assignment registers nothing (status quo) instead of trapping.
+ *
+ * Late-import discipline: `ensureLateImport` + ONE `flushLateImportShifts`
+ * AFTER the ctor call is already emitted, then a FRESH `funcMap` lookup for
+ * the register import (the #2608 "one terminal flush, never mid-emission"
+ * rule; the flush repairs the just-emitted ctor-call index if the import
+ * insertion shifted defined functions).
+ */
+function emitCallSiteFnctorRegistration(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  funcName: string,
+  instanceTypeIdx: number,
+): void {
+  if (ctx.standalone || ctx.wasi) return;
+  if (ctx.moduleGlobals.get(funcName) !== undefined || ctx.funcClosureGlobals.get(funcName) !== undefined) {
+    return; // module-global fnctor — the ctor-prologue registration (#1712) owns it
+  }
+  const slot = fctx.localMap.get(funcName);
+  if (slot === undefined) return;
+  if (fctx.boxedCaptures?.has(funcName)) return; // slot holds a ref CELL, not the closure
+  const slotType = getLocalType(fctx, slot);
+  if (!slotType) return;
+  const isExtern = slotType.kind === "externref" || slotType.kind === "ref_extern";
+  const isGcRef =
+    slotType.kind === "ref" || slotType.kind === "ref_null" || slotType.kind === "anyref" || slotType.kind === "eqref";
+  if (!isExtern && !isGcRef) return; // numeric/funcref slot — not a closure value
+  ensureLateImport(ctx, "__register_fnctor_instance", [{ kind: "externref" }, { kind: "externref" }], []);
+  flushLateImportShifts(ctx, fctx);
+  const regIdx = ctx.funcMap.get("__register_fnctor_instance");
+  if (regIdx === undefined) return;
+  const tmp = allocLocal(fctx, `__fnctor_reg_tmp_${fctx.locals.length}`, {
+    kind: "ref_null",
+    typeIdx: instanceTypeIdx,
+  });
+  fctx.body.push({ op: "local.tee", index: tmp });
+  fctx.body.push({ op: "extern.convert_any" });
+  fctx.body.push({ op: "local.get", index: slot });
+  if (!isExtern) fctx.body.push({ op: "extern.convert_any" });
+  fctx.body.push({ op: "call", funcIdx: regIdx });
+  fctx.body.push({ op: "local.get", index: tmp });
+}
+
 function compileNewFunctionDeclaration(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -1500,6 +1578,10 @@ function compileNewFunctionDeclaration(
   const finalCtorIdx = ctx.funcMap.get(classMemberFuncKey(ctx, ctorName)) ?? ctorFuncIdx; // (#1983)
   maybeSetArgcForKnownCall(ctx, fctx, ctorName, args.length, paramTypes?.length ?? args.length);
   fctx.body.push({ op: "call", funcIdx: finalCtorIdx });
+  // (#3138) Function-scope fnctor: link instance → ctor closure at the call
+  // site (the ctor prologue can't — no module global to read). No-op for
+  // module-global fnctors / standalone / non-closure slots.
+  emitCallSiteFnctorRegistration(ctx, fctx, funcName, structTypeIdx);
   return { kind: "ref", typeIdx: structTypeIdx };
 }
 
@@ -4237,6 +4319,9 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
         const finalIdx = ctx.funcMap.get(cachedFnCtor.ctorFuncName) ?? ctorFuncIdx;
         maybeSetArgcForKnownCall(ctx, fctx, cachedFnCtor.ctorFuncName, args.length, paramTypes?.length ?? args.length);
         fctx.body.push({ op: "call", funcIdx: finalIdx });
+        // (#3138) Function-scope fnctor: call-site instance→ctor link (the
+        // cached arm bypasses compileNewFunctionDeclaration's emission).
+        emitCallSiteFnctorRegistration(ctx, fctx, fnName, cachedFnCtor.structTypeIdx);
         return { kind: "ref", typeIdx: cachedFnCtor.structTypeIdx };
       }
     }

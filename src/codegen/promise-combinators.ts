@@ -20,10 +20,14 @@
 // `any`-typed values, and statically-non-iterable primitives — normalized at
 // runtime by `__combinator_to_vec` (vec passthrough / user-iterable drain /
 // null = not-iterable → the result promise rejects with a native TypeError).
-// The `allSettled` / `any` combinators (which additionally need per-element
-// status objects / `AggregateError`), string arguments, f64-backed `number[]`
-// vecs (the Gap-4 output-representation escalation), and generator-state
-// arguments still fall through to the existing host path (follow-ups).
+// (#3137) The `allSettled` / `any` combinators lower natively on the same
+// machinery: per-element status objects (`$Object` via the object runtime) and
+// a native `AggregateError` (`$Error_struct`, `.errors` on `$props`), lazily
+// registered ONLY when a module compiles one (ensureSettledAnyCombinators) so
+// all/race-only modules stay byte-identical. String arguments, f64-backed
+// `number[]` vecs (the Gap-4 output-representation escalation), and
+// generator-state arguments still fall through to the existing host path
+// (follow-ups).
 //
 // **Inert until the widen.** Every emission site is gated on
 // `isStandalonePromiseActive(ctx)`, which is `ctx.wasi`-only today, so the
@@ -34,9 +38,24 @@
 
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import type { Instr, LocalDef, ValType } from "../ir/types.js";
-import { addFuncType, getArrTypeIdxFromVec, getOrRegisterVecType } from "./registry/types.js";
+import {
+  addFuncType,
+  getArrTypeIdxFromVec,
+  getOrRegisterErrorStructType,
+  getOrRegisterVecType,
+} from "./registry/types.js";
 import { allocLocal } from "./context/locals.js";
 import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S2/S3) positional-read chokepoint + stable mint/push
+// (#3137) allSettled/any additions: status objects live on the object runtime
+// ($Object via __new_plain_object/__extern_set), the AggregateError is a native
+// $Error_struct (tag from builtin-tags), and the "status"/"fulfilled"/… keys are
+// interned native-string constants. All lazily pulled ONLY when a module
+// actually compiles a native allSettled/any (see ensureSettledAnyCombinators) so
+// all/race-only modules stay byte-identical.
+import { ensureObjectRuntime } from "./object-runtime.js";
+import { addStringConstantGlobal } from "./registry/imports.js";
+import { stringConstantExternrefInstrs } from "./native-strings.js";
+import { BUILTIN_TYPE_TAGS } from "./builtin-tags.js";
 import {
   ensureAsyncDriveRuntime,
   getOrRegisterPromiseType,
@@ -49,11 +68,11 @@ const EXTERNREF: ValType = { kind: "externref" };
 
 type AsyncDriveRuntimeT = ReturnType<typeof ensureAsyncDriveRuntime>;
 
-/** The combinators this module lowers natively. `allSettled`/`any` are deferred. */
-export type NativeCombinator = "all" | "race";
+/** The combinators this module lowers natively (#2867 Gap 4 `all`/`race`; #3137 `allSettled`/`any`). */
+export type NativeCombinator = "all" | "race" | "allSettled" | "any";
 
 export function isNativeCombinatorMethod(method: string): method is NativeCombinator {
-  return method === "all" || method === "race";
+  return method === "all" || method === "race" || method === "allSettled" || method === "any";
 }
 
 interface CombinatorRuntime {
@@ -75,6 +94,20 @@ interface CombinatorRuntime {
   raceFulfillFuncIdx: number;
   /** `__combinator_reject(caps, reason) -> reason` (shared all/race). */
   rejectFuncIdx: number;
+  // ── (#3137) allSettled/any wrappers — lazily minted by
+  // ensureSettledAnyCombinators ONLY when a module compiles a native
+  // allSettled/any, so all/race-only modules stay byte-identical. Every field
+  // MUST also be listed in COMBINATOR_FUNC_IDX_KEYS (async-scheduler.ts) — the
+  // late-import lockstep shift (#2918) — because emit sites bake
+  // `ref.func`/`call` from these long after registration.
+  /** `__combinator_allsettled_fulfill(caps, value) -> value` — stores `{status:"fulfilled", value}`. */
+  allSettledFulfillFuncIdx?: number;
+  /** `__combinator_allsettled_reject(caps, reason) -> reason` — stores `{status:"rejected", reason}`; never rejects the aggregate. */
+  allSettledRejectFuncIdx?: number;
+  /** `__combinator_any_reject(caps, reason) -> reason` — stores the reason; last rejection rejects with an AggregateError. */
+  anyRejectFuncIdx?: number;
+  /** `__combinator_new_aggregate_error(errorsVec) -> externref` — native $Error_struct with tag AggregateError + `.errors` on $props. */
+  aggErrNewFuncIdx?: number;
 }
 
 type CtxWithCombinators = CodegenContext & { __promiseCombinators?: CombinatorRuntime };
@@ -197,6 +230,143 @@ export function ensureCombinatorFunctions(ctx: CodegenContext): CombinatorRuntim
 
   (ctx as CtxWithCombinators).__promiseCombinators = ids;
   return ids;
+}
+
+/** (#3137) CombinatorRuntime with the allSettled/any wrapper fields guaranteed present. */
+type SettledAnyCombinatorRuntime = CombinatorRuntime &
+  Required<
+    Pick<
+      CombinatorRuntime,
+      "allSettledFulfillFuncIdx" | "allSettledRejectFuncIdx" | "anyRejectFuncIdx" | "aggErrNewFuncIdx"
+    >
+  >;
+
+/**
+ * (#3137) Lazily mint the allSettled/any reaction wrappers on top of the shared
+ * combinator runtime. Kept OUT of ensureCombinatorFunctions so `all`/`race`-only
+ * modules never pull the object runtime / error struct / key-string constants —
+ * their emitted bytes stay identical to pre-#3137 output.
+ *
+ * Registration discipline mirrors ensureCombinatorFunctions: all dependencies
+ * (object runtime for `__new_plain_object`/`__extern_set`, the `$Error_struct`,
+ * the interned key strings) are ensured BEFORE the wrappers are minted/built, so
+ * no dependency append can shift a baked index mid-build. The minted funcIdxs
+ * are stored on `ctx.__promiseCombinators` and listed in
+ * COMBINATOR_FUNC_IDX_KEYS (async-scheduler.ts) for the #2918 late-import
+ * lockstep shift.
+ */
+function ensureSettledAnyCombinators(ctx: CodegenContext): SettledAnyCombinatorRuntime {
+  const ids = ensureCombinatorFunctions(ctx);
+  if (ids.allSettledFulfillFuncIdx !== undefined && ids.anyRejectFuncIdx !== undefined) {
+    return ids as SettledAnyCombinatorRuntime;
+  }
+  const rt = ensureAsyncDriveRuntime(ctx);
+  ensureObjectRuntime(ctx);
+  const errStructTypeIdx = getOrRegisterErrorStructType(ctx);
+
+  // Intern every key/message string BEFORE building bodies (the same
+  // "register, then materialize" order emitErrorStructConstructor uses).
+  const STRINGS = [
+    "status",
+    "fulfilled",
+    "rejected",
+    "value",
+    "reason",
+    "errors",
+    "AggregateError",
+    ANY_REJECT_MESSAGE,
+  ];
+  for (const s of STRINGS) addStringConstantGlobal(ctx, s);
+
+  const newPlainObjIdx = ctx.funcMap.get("__new_plain_object");
+  const externSetIdx = ctx.funcMap.get("__extern_set");
+  if (newPlainObjIdx === undefined || externSetIdx === undefined) {
+    // Structurally impossible after ensureObjectRuntime; keep the invariant loud.
+    throw new Error("#3137: object runtime did not register __new_plain_object/__extern_set");
+  }
+
+  const aggErrNewFuncIdx = mintDefinedFunc(ctx);
+  const allSettledFulfillFuncIdx = mintDefinedFunc(ctx);
+  const allSettledRejectFuncIdx = mintDefinedFunc(ctx);
+  const anyRejectFuncIdx = mintDefinedFunc(ctx);
+
+  const wrapperTypeIdx = addFuncType(ctx, [EXTERNREF, EXTERNREF], [EXTERNREF]);
+  const aggErrTypeIdx = addFuncType(ctx, [EXTERNREF], [EXTERNREF]);
+
+  pushDefinedFunc(ctx, aggErrNewFuncIdx, {
+    name: "__combinator_new_aggregate_error",
+    typeIdx: aggErrTypeIdx,
+    locals: [{ name: "$props", type: EXTERNREF }],
+    body: buildNewAggregateErrorBody(ctx, errStructTypeIdx, newPlainObjIdx, externSetIdx),
+    exported: false,
+  });
+  ctx.funcMap.set("__combinator_new_aggregate_error", aggErrNewFuncIdx);
+
+  pushDefinedFunc(ctx, allSettledFulfillFuncIdx, {
+    name: "__combinator_allsettled_fulfill",
+    typeIdx: wrapperTypeIdx,
+    locals: buildSettledWrapperLocals(ids),
+    body: buildAllSettledBody(ctx, ids, rt, "fulfilled", newPlainObjIdx, externSetIdx),
+    exported: false,
+  });
+  ctx.funcMap.set("__combinator_allsettled_fulfill", allSettledFulfillFuncIdx);
+
+  pushDefinedFunc(ctx, allSettledRejectFuncIdx, {
+    name: "__combinator_allsettled_reject",
+    typeIdx: wrapperTypeIdx,
+    locals: buildSettledWrapperLocals(ids),
+    body: buildAllSettledBody(ctx, ids, rt, "rejected", newPlainObjIdx, externSetIdx),
+    exported: false,
+  });
+  ctx.funcMap.set("__combinator_allsettled_reject", allSettledRejectFuncIdx);
+
+  pushDefinedFunc(ctx, anyRejectFuncIdx, {
+    name: "__combinator_any_reject",
+    typeIdx: wrapperTypeIdx,
+    locals: buildAllFulfillLocals(ids),
+    body: buildAnyRejectBody(ids, rt, aggErrNewFuncIdx),
+    exported: false,
+  });
+  ctx.funcMap.set("__combinator_any_reject", anyRejectFuncIdx);
+
+  ids.aggErrNewFuncIdx = aggErrNewFuncIdx;
+  ids.allSettledFulfillFuncIdx = allSettledFulfillFuncIdx;
+  ids.allSettledRejectFuncIdx = allSettledRejectFuncIdx;
+  ids.anyRejectFuncIdx = anyRejectFuncIdx;
+  return ids as SettledAnyCombinatorRuntime;
+}
+
+/** (#3137) V8-compatible `Promise.any` total-rejection message (§27.2.4.3 AggregateError). */
+const ANY_REJECT_MESSAGE = "All promises were rejected";
+
+/**
+ * (#3137) Per-method reaction-wrapper selection for the two combinator
+ * emitters. MUST be called at the TOP of an emitter (before element buffers /
+ * loop code splice into fctx.body) — the settled/any arm lazily registers
+ * functions, and the emitters' ordering contract requires every registration
+ * to precede the copy (see the #2919 liveBodies note at the literal call site).
+ */
+function combinatorReactionFns(
+  ctx: CodegenContext,
+  ids: CombinatorRuntime,
+  method: NativeCombinator,
+): { fulfillIdx: number; rejectIdx: number } {
+  switch (method) {
+    case "all":
+      return { fulfillIdx: ids.allFulfillFuncIdx, rejectIdx: ids.rejectFuncIdx };
+    case "race":
+      return { fulfillIdx: ids.raceFulfillFuncIdx, rejectIdx: ids.rejectFuncIdx };
+    case "allSettled": {
+      const e = ensureSettledAnyCombinators(ctx);
+      return { fulfillIdx: e.allSettledFulfillFuncIdx, rejectIdx: e.allSettledRejectFuncIdx };
+    }
+    case "any": {
+      // First fulfillment settles the aggregate — exactly the race fulfill
+      // wrapper; only the rejection side (collect + AggregateError) is new.
+      const e = ensureSettledAnyCombinators(ctx);
+      return { fulfillIdx: e.raceFulfillFuncIdx, rejectIdx: e.anyRejectFuncIdx };
+    }
+  }
 }
 
 // ── __combinator_subscribe ───────────────────────────────────────────────────
@@ -416,6 +586,211 @@ function buildRejectBody(ids: CombinatorRuntime, rt: AsyncDriveRuntimeT): Instr[
   return buildSettleResultBody(ids, rt.rejectFuncIdx);
 }
 
+// ── (#3137) __combinator_allsettled_fulfill / _reject ────────────────────────
+// params: 0 caps externref, 1 value externref.
+// locals: 2 c (ref $CombinatorElemCaps), 3 st (ref $CombinatorState), 4 rem i32,
+//         5 obj externref (the {status, value|reason} result object).
+
+function buildSettledWrapperLocals(ids: CombinatorRuntime): LocalDef[] {
+  return [
+    { name: "$c", type: { kind: "ref", typeIdx: ids.elemCapsTypeIdx } },
+    { name: "$st", type: { kind: "ref", typeIdx: ids.stateTypeIdx } },
+    { name: "$rem", type: { kind: "i32" } },
+    { name: "$obj", type: EXTERNREF },
+  ];
+}
+
+/**
+ * (#3137) `allSettled` reaction wrapper body (§27.2.4.2.2/.3): build the
+ * `{ status: "fulfilled", value }` / `{ status: "rejected", reason }` result
+ * object as a plain `$Object`, store it at the element index, and — this is the
+ * allSettled-defining difference from `all` — count down on BOTH arms and only
+ * ever FULFILL the aggregate. Insertion order status→value|reason matches the
+ * spec's CreateDataProperty order.
+ */
+function buildAllSettledBody(
+  ctx: CodegenContext,
+  ids: CombinatorRuntime,
+  rt: AsyncDriveRuntimeT,
+  status: "fulfilled" | "rejected",
+  newPlainObjIdx: number,
+  externSetIdx: number,
+): Instr[] {
+  const CAPS = 0;
+  const VALUE = 1;
+  const C = 2;
+  const ST = 3;
+  const REM = 4;
+  const OBJ = 5;
+  return [
+    // obj = __new_plain_object(); obj.status = <status>; obj.<value|reason> = value
+    { op: "call", funcIdx: newPlainObjIdx },
+    { op: "local.set", index: OBJ },
+    { op: "local.get", index: OBJ },
+    ...stringConstantExternrefInstrs(ctx, "status"),
+    ...stringConstantExternrefInstrs(ctx, status),
+    { op: "call", funcIdx: externSetIdx },
+    { op: "local.get", index: OBJ },
+    ...stringConstantExternrefInstrs(ctx, status === "fulfilled" ? "value" : "reason"),
+    { op: "local.get", index: VALUE },
+    { op: "call", funcIdx: externSetIdx },
+
+    { op: "local.get", index: CAPS },
+    { op: "any.convert_extern" },
+    { op: "ref.cast", typeIdx: ids.elemCapsTypeIdx } as Instr,
+    { op: "local.set", index: C },
+    { op: "local.get", index: C },
+    { op: "struct.get", typeIdx: ids.elemCapsTypeIdx, fieldIdx: 0 } as Instr,
+    { op: "local.set", index: ST },
+
+    // results[index] = obj
+    { op: "local.get", index: ST },
+    { op: "struct.get", typeIdx: ids.stateTypeIdx, fieldIdx: 1 } as Instr,
+    { op: "local.get", index: C },
+    { op: "struct.get", typeIdx: ids.elemCapsTypeIdx, fieldIdx: 1 } as Instr,
+    { op: "local.get", index: OBJ },
+    { op: "array.set", typeIdx: ids.arrTypeIdx } as Instr,
+
+    // remaining -= 1
+    { op: "local.get", index: ST },
+    { op: "local.get", index: ST },
+    { op: "struct.get", typeIdx: ids.stateTypeIdx, fieldIdx: 3 } as Instr,
+    { op: "i32.const", value: 1 },
+    { op: "i32.sub" },
+    { op: "local.tee", index: REM },
+    { op: "struct.set", typeIdx: ids.stateTypeIdx, fieldIdx: 3 } as Instr,
+
+    // if remaining == 0: FULFILL the aggregate with the results vec (never reject).
+    { op: "local.get", index: REM },
+    { op: "i32.eqz" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: ST },
+        { op: "struct.get", typeIdx: ids.stateTypeIdx, fieldIdx: 0 } as Instr,
+        { op: "local.get", index: ST },
+        { op: "struct.get", typeIdx: ids.stateTypeIdx, fieldIdx: 2 } as Instr,
+        { op: "local.get", index: ST },
+        { op: "struct.get", typeIdx: ids.stateTypeIdx, fieldIdx: 1 } as Instr,
+        { op: "struct.new", typeIdx: ids.vecTypeIdx } as Instr,
+        { op: "extern.convert_any" },
+        { op: "call", funcIdx: rt.fulfillFuncIdx },
+        { op: "drop" },
+      ],
+    } as Instr,
+
+    { op: "local.get", index: VALUE },
+  ];
+}
+
+// ── (#3137) __combinator_any_reject ──────────────────────────────────────────
+// params: 0 caps externref, 1 reason externref. Locals as buildAllFulfillLocals.
+
+/**
+ * (#3137) `Promise.any` rejection wrapper (§27.2.4.3.2): store the reason at the
+ * element index, count down; when the LAST input rejects, reject the aggregate
+ * with a native AggregateError carrying the reasons vec as `.errors`.
+ * Fulfillment settles via the shared race-fulfill wrapper (first value wins).
+ */
+function buildAnyRejectBody(ids: CombinatorRuntime, rt: AsyncDriveRuntimeT, aggErrNewFuncIdx: number): Instr[] {
+  const CAPS = 0;
+  const VALUE = 1;
+  const C = 2;
+  const ST = 3;
+  const REM = 4;
+  return [
+    { op: "local.get", index: CAPS },
+    { op: "any.convert_extern" },
+    { op: "ref.cast", typeIdx: ids.elemCapsTypeIdx } as Instr,
+    { op: "local.set", index: C },
+    { op: "local.get", index: C },
+    { op: "struct.get", typeIdx: ids.elemCapsTypeIdx, fieldIdx: 0 } as Instr,
+    { op: "local.set", index: ST },
+
+    // errors[index] = reason
+    { op: "local.get", index: ST },
+    { op: "struct.get", typeIdx: ids.stateTypeIdx, fieldIdx: 1 } as Instr,
+    { op: "local.get", index: C },
+    { op: "struct.get", typeIdx: ids.elemCapsTypeIdx, fieldIdx: 1 } as Instr,
+    { op: "local.get", index: VALUE },
+    { op: "array.set", typeIdx: ids.arrTypeIdx } as Instr,
+
+    // remaining -= 1
+    { op: "local.get", index: ST },
+    { op: "local.get", index: ST },
+    { op: "struct.get", typeIdx: ids.stateTypeIdx, fieldIdx: 3 } as Instr,
+    { op: "i32.const", value: 1 },
+    { op: "i32.sub" },
+    { op: "local.tee", index: REM },
+    { op: "struct.set", typeIdx: ids.stateTypeIdx, fieldIdx: 3 } as Instr,
+
+    // if remaining == 0: reject the aggregate with AggregateError(errorsVec).
+    { op: "local.get", index: REM },
+    { op: "i32.eqz" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: ST },
+        { op: "struct.get", typeIdx: ids.stateTypeIdx, fieldIdx: 0 } as Instr,
+        { op: "local.get", index: ST },
+        { op: "struct.get", typeIdx: ids.stateTypeIdx, fieldIdx: 2 } as Instr,
+        { op: "local.get", index: ST },
+        { op: "struct.get", typeIdx: ids.stateTypeIdx, fieldIdx: 1 } as Instr,
+        { op: "struct.new", typeIdx: ids.vecTypeIdx } as Instr,
+        { op: "extern.convert_any" },
+        { op: "call", funcIdx: aggErrNewFuncIdx },
+        { op: "call", funcIdx: rt.rejectFuncIdx },
+        { op: "drop" },
+      ],
+    } as Instr,
+
+    { op: "local.get", index: VALUE },
+  ];
+}
+
+// ── (#3137) __combinator_new_aggregate_error ─────────────────────────────────
+// params: 0 errorsVec externref. locals: 1 props externref.
+
+/**
+ * (#3137) Build a native AggregateError `$Error_struct` (§20.5.7.1 semantics
+ * for the combinator's internal use): tag = BUILTIN_TYPE_TAGS.AggregateError
+ * (so `instanceof AggregateError` discriminates), message = the V8-compatible
+ * total-rejection message, and `.errors` stored on the `$props` own-field
+ * backing object (#2101a R5 — reads route through `__extern_get`'s error arm).
+ * Deliberately NOT named `__new_AggregateError`: that funcMap name is the
+ * 3-param HOST import contract (#1467, new-super.ts) and must not be shadowed
+ * with a different arity.
+ */
+function buildNewAggregateErrorBody(
+  ctx: CodegenContext,
+  errStructTypeIdx: number,
+  newPlainObjIdx: number,
+  externSetIdx: number,
+): Instr[] {
+  const ERRVEC = 0;
+  const PROPS = 1;
+  return [
+    // props = __new_plain_object(); props.errors = errorsVec
+    { op: "call", funcIdx: newPlainObjIdx },
+    { op: "local.set", index: PROPS },
+    { op: "local.get", index: PROPS },
+    ...stringConstantExternrefInstrs(ctx, "errors"),
+    { op: "local.get", index: ERRVEC },
+    { op: "call", funcIdx: externSetIdx },
+    // struct.new $Error_struct { tag, message, name, stack, userClassId, props }
+    { op: "i32.const", value: BUILTIN_TYPE_TAGS.AggregateError },
+    ...stringConstantExternrefInstrs(ctx, ANY_REJECT_MESSAGE),
+    ...stringConstantExternrefInstrs(ctx, "AggregateError"),
+    { op: "ref.null.extern" },
+    { op: "i32.const", value: -1 },
+    { op: "local.get", index: PROPS },
+    { op: "struct.new", typeIdx: errStructTypeIdx } as Instr,
+    { op: "extern.convert_any" },
+  ];
+}
+
 /**
  * Emit a native `Promise.all([...])` / `Promise.race([...])`. `elementInstrs` is
  * the pre-compiled list of element expressions (each already coerced to
@@ -429,6 +804,10 @@ export function emitStandalonePromiseCombinator(
 ): ValType {
   const ids = ensureCombinatorFunctions(ctx);
   const rt = ensureAsyncDriveRuntime(ctx);
+  // (#3137) MUST run before any element buffer splices into fctx.body — the
+  // allSettled/any arm lazily registers wrapper functions (see the ordering
+  // note above about ensure* preceding the buffer copy).
+  const reaction = combinatorReactionFns(ctx, ids, method);
   const n = elementInstrs.length;
 
   const resultLocal = allocLocal(fctx, `__comb_result_${fctx.locals.length}`, {
@@ -465,9 +844,12 @@ export function emitStandalonePromiseCombinator(
   fctx.body.push({ op: "local.set", index: stateLocal });
 
   if (n === 0) {
-    // `Promise.all([])` fulfills immediately with an empty array. `Promise.race([])`
-    // stays pending forever (spec) — emit nothing.
-    if (method === "all") {
+    // `Promise.all([])` / `Promise.allSettled([])` fulfill immediately with an
+    // empty array. `Promise.any([])` rejects immediately with an AggregateError
+    // whose `.errors` is empty (§27.2.4.3 step 4 via the remaining-count
+    // reaching zero with no fulfillment). `Promise.race([])` stays pending
+    // forever (spec) — emit nothing.
+    if (method === "all" || method === "allSettled") {
       fctx.body.push({ op: "local.get", index: resultLocal });
       fctx.body.push({ op: "i32.const", value: 0 });
       fctx.body.push({ op: "local.get", index: arrLocal });
@@ -475,16 +857,24 @@ export function emitStandalonePromiseCombinator(
       fctx.body.push({ op: "extern.convert_any" });
       fctx.body.push({ op: "call", funcIdx: rt.fulfillFuncIdx });
       fctx.body.push({ op: "drop" });
+    } else if (method === "any") {
+      fctx.body.push({ op: "local.get", index: resultLocal });
+      fctx.body.push({ op: "i32.const", value: 0 });
+      fctx.body.push({ op: "local.get", index: arrLocal });
+      fctx.body.push({ op: "struct.new", typeIdx: ids.vecTypeIdx } as Instr);
+      fctx.body.push({ op: "extern.convert_any" });
+      fctx.body.push({ op: "call", funcIdx: ids.aggErrNewFuncIdx! });
+      fctx.body.push({ op: "call", funcIdx: rt.rejectFuncIdx });
+      fctx.body.push({ op: "drop" });
     }
   } else {
-    const fulfillFn = method === "all" ? ids.allFulfillFuncIdx : ids.raceFulfillFuncIdx;
     for (let i = 0; i < n; i++) {
       for (const instr of elementInstrs[i]!) fctx.body.push(instr);
       fctx.body.push({ op: "local.get", index: stateLocal });
       fctx.body.push({ op: "extern.convert_any" });
       fctx.body.push({ op: "i32.const", value: i });
-      fctx.body.push({ op: "ref.func", funcIdx: fulfillFn } as Instr);
-      fctx.body.push({ op: "ref.func", funcIdx: ids.rejectFuncIdx } as Instr);
+      fctx.body.push({ op: "ref.func", funcIdx: reaction.fulfillIdx } as Instr);
+      fctx.body.push({ op: "ref.func", funcIdx: reaction.rejectIdx } as Instr);
       fctx.body.push({ op: "call", funcIdx: ids.subscribeFuncIdx });
     }
   }
@@ -562,6 +952,9 @@ export function emitStandalonePromiseCombinatorRuntime(
 ): ValType {
   const ids = ensureCombinatorFunctions(ctx);
   const rt = ensureAsyncDriveRuntime(ctx);
+  // (#3137) Lazily registers the allSettled/any wrappers; must precede all
+  // emission below (registration-before-bake, same contract as the literal arm).
+  const reaction = combinatorReactionFns(ctx, ids, method);
 
   const resultLocal = allocLocal(fctx, `__comb_result_${fctx.locals.length}`, {
     kind: "ref",
@@ -623,10 +1016,13 @@ export function emitStandalonePromiseCombinatorRuntime(
     } as Instr);
   }
 
-  // `Promise.all(<empty>)` fulfills immediately with the empty results vec;
+  // `Promise.all(<empty>)` / `Promise.allSettled(<empty>)` fulfill immediately
+  // with the empty results vec; `Promise.any(<empty>)` rejects immediately with
+  // an empty-`.errors` AggregateError (one-shot settle keeps the opts
+  // not-iterable TypeError reject above authoritative when both fire);
   // `Promise.race(<empty>)` stays pending forever (spec). The subscribe loop
   // below runs zero iterations either way.
-  if (method === "all") {
+  if (method === "all" || method === "allSettled") {
     fctx.body.push({ op: "local.get", index: nLocal });
     fctx.body.push({ op: "i32.eqz" });
     fctx.body.push({
@@ -642,13 +1038,29 @@ export function emitStandalonePromiseCombinatorRuntime(
         { op: "drop" },
       ],
     } as Instr);
+  } else if (method === "any") {
+    fctx.body.push({ op: "local.get", index: nLocal });
+    fctx.body.push({ op: "i32.eqz" });
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: resultLocal },
+        { op: "i32.const", value: 0 },
+        { op: "local.get", index: arrLocal },
+        { op: "struct.new", typeIdx: ids.vecTypeIdx } as Instr,
+        { op: "extern.convert_any" },
+        { op: "call", funcIdx: ids.aggErrNewFuncIdx! },
+        { op: "call", funcIdx: rt.rejectFuncIdx },
+        { op: "drop" },
+      ],
+    } as Instr);
   }
 
   // for (i = 0; i < n; i++) __combinator_subscribe(argVec.data[i], state, i,
   //                                                fulfillFn, rejectFn)
   // Subscribe never settles synchronously (already-settled inputs only ENQUEUE),
   // so `remaining` stays == n through the whole loop — no mid-loop settle race.
-  const fulfillFn = method === "all" ? ids.allFulfillFuncIdx : ids.raceFulfillFuncIdx;
   fctx.body.push({ op: "i32.const", value: 0 });
   fctx.body.push({ op: "local.set", index: iLocal });
   fctx.body.push({
@@ -674,8 +1086,8 @@ export function emitStandalonePromiseCombinatorRuntime(
           { op: "local.get", index: stateLocal },
           { op: "extern.convert_any" },
           { op: "local.get", index: iLocal },
-          { op: "ref.func", funcIdx: fulfillFn } as Instr,
-          { op: "ref.func", funcIdx: ids.rejectFuncIdx } as Instr,
+          { op: "ref.func", funcIdx: reaction.fulfillIdx } as Instr,
+          { op: "ref.func", funcIdx: reaction.rejectIdx } as Instr,
           { op: "call", funcIdx: ids.subscribeFuncIdx },
 
           // i++

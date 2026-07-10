@@ -43,6 +43,7 @@ import {
   getOrRegisterVecType,
   hoistLetConstWithTdz,
   hoistVarDeclarations,
+  isTupleType,
   nextModuleGlobalIdx,
   resolveWasmType,
 } from "./index.js";
@@ -1632,6 +1633,25 @@ export function computeClosureWrapperSig(
     if (ctx.forceExternrefCallbackParams && isVecOrArrayRefType(ctx, wasmType)) {
       wasmType = { kind: "externref" };
     }
+    // (#3137) TUPLE-typed params of a native `.then`/`.catch` callback widen to
+    // externref. TS contextually types combinator callbacks over tuple inputs
+    // as tuples (`Promise.allSettled([x]).then((rs) => …)` ⇒ rs:
+    // `[PromiseSettledResult<…>]`, lowered to a concrete 1-field struct), but
+    // the native then-wrapper ABI always delivers externref — the combinator
+    // results vec can never BE that tuple struct, so the wrapper's `ref.cast`
+    // trapped (illegal cast in __then_fulfill_N). Widened, the body reads the
+    // value through the dynamic reader (vec length/index + status objects),
+    // which is representation-correct for both the combinator vec and a
+    // genuine tuple value. Scoped to the then-callback compile window
+    // (`widenTupleCallbackParams`, set in compileStandalonePromiseThenCallback)
+    // so every other closure compile is byte-identical.
+    if (
+      ctx.widenTupleCallbackParams === true &&
+      (wasmType.kind === "ref" || wasmType.kind === "ref_null") &&
+      isTupleType(paramType)
+    ) {
+      wasmType = { kind: "externref" };
+    }
     arrowParams.push(wasmType);
   }
 
@@ -1921,6 +1941,25 @@ export function compileArrowAsClosure(
   // shadow set, so the param's own binding names stay excluded.
   collectParamDefaultReferences(arrow.parameters, referencedNames, ownLocals);
 
+  // (#3040) Parameter DEFAULT initializers can reference enclosing-scope names
+  // that appear NOWHERE in the body — e.g. `f = async function*([x] = iter)`
+  // where `iter` is an outer local used ONLY in the default. The body-only scan
+  // above misses them, so such a name is never captured and the lifted
+  // default-init reads a null local, which then destructures to "Cannot
+  // destructure null". This is the function-expression / arrow twin of the
+  // FunctionDeclaration fix in statements/nested-declarations.ts (the async-gen /
+  // gen / fn EXPRESSION variants of the `ary-init-iter-close` cluster lower here,
+  // not through the declaration path). Scan each parameter subtree (its
+  // `= <default>` initializer AND nested binding-pattern element defaults like
+  // `[x = outer]`) with `ownLocals` as the shadow set so the destructured binding
+  // names and earlier params stay local while free references in the defaults
+  // become captures. Placed BEFORE the transitive-capture loop so a default that
+  // calls a capturing nested function also pulls in that function's transitive
+  // captures.
+  for (const p of arrow.parameters) {
+    collectReferencedIdentifiers(p, referencedNames, ownLocals);
+  }
+
   // Transitively add captures needed by called nested functions.
   // E.g. if this closure calls g() and g has nestedFuncCaptures {first, second},
   // this closure must also capture first and second so it can pass ref cells to g.
@@ -1942,6 +1981,12 @@ export function compileArrowAsClosure(
     }
   } else {
     collectWrittenIdentifiers(body, writtenInClosure, ownLocals);
+  }
+  // (#3040) Symmetric with the referencedNames scan above: a param default that
+  // ASSIGNS an outer var (rare, e.g. `[x] = (outer = 5, [outer])`) must keep that
+  // capture boxed rather than snapshotted.
+  for (const p of arrow.parameters) {
+    collectWrittenIdentifiers(p, writtenInClosure, ownLocals);
   }
 
   // Also detect variables written in the enclosing scope (not just the closure).
