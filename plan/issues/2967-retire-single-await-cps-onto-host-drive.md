@@ -160,3 +160,39 @@ CI is the gate; watch promise-identity + unhandled-rejection-timing buckets.
 **Next slices:** (2) delete CPS engine on a banked non-negative A/B;
 (3) widen `planLinearAwaits` (try/catch-across-await first); plus the
 producer fix (typed resume bindings, ratchet `call-arg-coerce` back to ≤6).
+
+## Slice 1 A/B — BANKED (2026-07-10, merge_group run 29117178921)
+
+PR #2871 merged via the queue. Full-corpus merge_group A/B, 48,088 tests
+(js-host lane): **net −1**, where the single delta is one
+`pass → compile_timeout` on a ≤5000ms-baseline test — classified `ct_flake`
+(runner-load noise) by the gate itself. **Regressions excluding
+compile_timeout: 0. Regressions with wasm-hash change: 0. Improvements: 0.**
+The flip is measured net-neutral — the "population unchanged, engine per
+member flipped" prediction held exactly. Acceptance criterion "async cluster
+net ≥ 0" is met.
+
+## Pre-existing-bug triage (acceptance item, 2026-07-10)
+
+- **`const p = f(); return await p;` → null/NaN**: ROOT-CAUSED and split out
+  as **#3134**. `resolveWasmType` unwraps `Promise<T>` → T (f64) on the host
+  lane (src/codegen/index.ts:11848), so a Promise-typed local coerces the real
+  promise externref through `__unbox_number` → NaN at the DECLARATION
+  (WAT-verified). Not a suspension-engine bug; same hazard class the #2905
+  wasi-carrier fix addressed at line 11847. Fix is a measured rep change —
+  see #3134 for the two fix directions.
+- **`tests/async-function.test.ts` fails to load**: STALE — the file no
+  longer exists on main; the suite lives at
+  `tests/equivalence/async-function.test.ts` and passes 7/7.
+
+## Slice 2 re-scope (why deletion isn't next)
+
+The banked A/B unlocks deletion **per the flip**, but slice 1 deliberately
+kept two populations on CPS: (a) lifted closures (the parked #2646
+33-regression class), (b) pattern/rest-param CPS-shaped decls. Deleting
+`emitAsyncStateMachine`/`splitBodyAtAwait` now would strand both. So the
+actual gate for deletion is: **slice 2a — migrate CPS-shaped closures onto
+the frame engine** (fix the capture-struct/`__self` interplay in the
+lifted-closure context), **2b — pattern/rest params** (spill the
+prologue-derived locals into the frame), **2c — delete CPS**. Widening
+(try/catch-across-await) remains slice 3.
