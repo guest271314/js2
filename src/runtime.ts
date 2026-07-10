@@ -12989,7 +12989,20 @@ assert._isSameValue = isSameValue;
           return (Promise as any).any.call(C, _toIterable(arr));
         };
       if (name === "Promise_resolve") return (val: any) => Promise.resolve(val);
-      if (name === "Promise_reject") return (val: any) => Promise.reject(val);
+      if (name === "Promise_reject")
+        return (val: any) => {
+          // (#2978) Pre-mark the rejection as handled. Compiled code holds the
+          // promise as an opaque externref and may drop it without attaching a
+          // handler (e.g. the for-await sync drive's bounded step cap discards
+          // one rejected promise per iteration) — without this, each discarded
+          // rejection fires the host's unhandledRejection machinery, and a
+          // capped loop emits a 100k-event storm that vitest/CI runners count
+          // as errors. The no-op catch derives a separate promise; consumers of
+          // the returned promise observe the rejection unchanged.
+          const p = Promise.reject(val);
+          p.catch(() => {});
+          return p;
+        };
       // (#1042) async/await CPS scheduling primitives. The state machine
       // allocates one pending outer Promise per async function, then settles
       // it from a continuation that runs as a microtask. We stash the

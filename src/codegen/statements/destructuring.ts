@@ -43,7 +43,7 @@ import {
   valTypesMatch,
 } from "../shared.js";
 import { collectInstrs } from "./shared.js";
-import { emitLocalTdzInit, emitTdzInitForBindingPattern } from "./tdz.js";
+import { emitLocalTdzInit } from "./tdz.js";
 import { arrayIteratorOverrideGlobalIdx, emitArrayProtoIteratorDrive } from "../expressions/proto-override.js";
 import { ensureNativeIteratorRuntime } from "../iterator-native.js";
 import { emitDrainCustomIterableToVec, isCustomIterable } from "../custom-iterable.js";

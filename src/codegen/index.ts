@@ -15140,7 +15140,6 @@ export {
 } from "./registry/imports.js";
 export {
   addFuncType,
-  funcTypeEq,
   getArrTypeIdxFromVec,
   getOrRegisterArrayType,
   getOrRegisterRefCellType,
