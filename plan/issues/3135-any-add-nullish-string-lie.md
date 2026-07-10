@@ -14,6 +14,8 @@ area: codegen
 language_feature: any-boxing, addition, standalone
 goal: standalone-mode
 related: [1888, 2966, 3055, 2106, 3086, 2940, 3033]
+loc-budget-allow:
+  - src/codegen/any-helpers.ts
 ---
 
 # #3135 — `__any_add` nullish-operand honesty (tag-5 string-lie family)
