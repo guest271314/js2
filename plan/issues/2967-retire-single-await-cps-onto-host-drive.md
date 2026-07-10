@@ -1,7 +1,8 @@
 ---
 id: 2967
 title: "Async engine convergence: retire emitAsyncStateMachine/splitBodyAtAwait onto the #2906 host-drive engine; widen planLinearAwaits gaps once for both lanes"
-status: ready
+status: in-progress
+assignee: ttraenkler/fable-senior1
 created: 2026-07-02
 updated: 2026-07-02
 priority: medium
