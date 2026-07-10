@@ -18,6 +18,9 @@ goal: spec-completeness
 related: [3038, 3039, 3023, 2664]
 model: fable
 architect_spec: done
+loc-budget-allow:
+  - src/codegen/closures.ts
+  - src/codegen/literals.ts
 ---
 
 # #3040 — array-destructured param with a CAPTURED custom-iterable default → "Cannot destructure null"
