@@ -24,7 +24,7 @@ import { emitGlobalThisGopdFold } from "../dyn-read.js"; // (#2984)
 import { mintDefinedFunc, pushDefinedFunc } from "../func-space.js"; // (#1916 S3b) stable-regime minting
 import { emitCollectionIteratorVec } from "../map-runtime.js"; // (#42) native Set/Map → vec, shared with spread / Array.from
 import { isSetReflectiveCallShape, tryCompileSetReflectiveCall } from "../set-runtime.js"; // (#2604) Set.prototype.METHOD.call brand-check
-import { classMemberFuncKey } from "../class-member-keys.js"; // (#1983) collision-free class-member funcMap keys
+import { classMemberFuncKey, fnctorAncestorOfClass } from "../class-member-keys.js"; // (#1983 / #3123)
 import { ensureNativeIteratorRuntime } from "../iterator-native.js"; // (#2169c) native Array.from drain
 import { reserveClosedMethodDispatch, reserveClosedMethodDispatchVararg } from "../closed-method-dispatch.js";
 import { emitNativeDateParse } from "../date-parse-native.js"; // (#2164) pure-Wasm Date.parse / new Date(str)
@@ -91,6 +91,7 @@ import {
   compileArrayConstructorCall,
   compileObjectLiteralAsExternref,
   compileSymbolCall,
+  objectLiteralTakesStandaloneAnyObjectPath,
   resolveComputedKeyExpression,
   resolvePropertyNameText,
 } from "../literals.js";
@@ -145,7 +146,11 @@ import {
   getNativeProtoBuiltinGlue,
 } from "../native-proto.js";
 import { pushBuiltinFnSingletonValueInstrs } from "../builtin-fn-meta.js";
-import { resolveBuiltinReceiverName, tryEmitStandaloneBuiltinStaticGopd } from "../builtin-static-gopd.js"; // (#2984 Phase 3 + bucket-1 alias receivers)
+import {
+  resolveBuiltinReceiverName,
+  tryEmitStandaloneBuiltinStaticGopd,
+  tryEmitStandaloneStructGopdKeyDispatch,
+} from "../builtin-static-gopd.js"; // (#2984 Phase 3 + bucket-1 alias receivers + arg-2 name coercion)
 import { compileStatement, hoistFunctionDeclarations } from "../statements.js";
 import {
   emitSetExtrasArgv,
@@ -3092,13 +3097,34 @@ function tryEmitInlineDynamicCall(
     // adopts the JS arity semantics the direct-closure path (`compileClosureCall`
     // L122-129) already implements.
     //
-    // (#1837) Over-arity padding stays gated to NON-VOID results: a void-result
-    // closure padded past its arity marshals its padded self/args into a
-    // stack-invalid `call_ref` (the async-gen-meth-dflt win — the reason padding
-    // exists — all have a non-void generator result). An UNDER-arity void
-    // candidate is fine (no padding, just truncation), so only skip when the
-    // candidate is strictly OVER-arity AND void.
-    if (info.paramTypes.length > arity && info.returnType === null) continue;
+    // (#1837) Over-arity padding was gated to NON-VOID results: the June-21
+    // arm emitter produced a stack-invalid `call_ref` ("not enough arguments
+    // on the stack") for padded void candidates — 52 merge_group regressions
+    // in Promise/{all,race,any,allSettled} + TypedArray internals. The arm
+    // construction has since been reworked (#3031 dynamic-apply, #2611 flush,
+    // #2923) and now marshals exactly `paramTypes.length` formals with typed
+    // pads plus a `ref.null.extern` block result for void returns — stack-
+    // valid for void candidates too.
+    //
+    // (#3128) Narrowly re-admit over-arity VOID candidates whose padded
+    // formals are all externref (`undefined` pad is exact). This is the
+    // Promise settle-closure shape: a 0-arg `resolve()` inside a
+    // `new Promise(function(resolve){ resolve(); })` executor must dispatch
+    // the canonical `(externref) -> ()` settle wrapper with an undefined pad
+    // (§7.3.14 missing args are `undefined`) — the gate made the call a
+    // silent no-op, so the promise never settled (resolve-settled-*-self).
+    // Void candidates needing a non-externref pad stay excluded
+    // (conservative: their pad values are NaN/0/typed-null guesses).
+    if (info.paramTypes.length > arity && info.returnType === null) {
+      let padsAllExternref = true;
+      for (let i = arity; i < info.paramTypes.length; i++) {
+        if (info.paramTypes[i]!.kind !== "externref") {
+          padsAllExternref = false;
+          break;
+        }
+      }
+      if (!padsAllExternref) continue;
+    }
     if (!supported(info.returnType)) continue;
     let ok = true;
     for (const p of info.paramTypes) {
@@ -3828,6 +3854,61 @@ function tryEmitAsyncGenNextDispatch(
   return { kind: "externref" };
 }
 
+/**
+ * (#2903) Host-import names that PRODUCE promises the standalone module did
+ * not mint natively. Checked (alongside the pre-body syntactic scan flag
+ * `ctx.moduleHasHostPromiseSource`) before replacing the `.then`/`.catch`
+ * bridge's host fallback arm with a native TypeError: if any of these is
+ * registered, a runtime receiver can genuinely be a HOST promise and the host
+ * arm must stay (exactly the pre-#2903 lowering — the module was irreducibly
+ * host-import-leaky anyway, so keeping the arm sacrifices zero host-free
+ * passes). All the *statically-detectable* producers register UPFRONT in the
+ * `collectPromiseImports` finalize (declarations.ts) — before any function
+ * body compiles — so this check is compile-order-safe for them; the
+ * lazily-registered producers (dynamic `import()`, `.finally(…)`) are covered
+ * by the pre-body syntactic scan instead.
+ *
+ * Deliberately NOT listed (upfront-registered even when the lowering is
+ * native, so funcMap presence is a false-positive that would forfeit the
+ * de-leak): `Promise_resolve`/`Promise_reject` (unconditionally native under
+ * `isStandalonePromiseActive`, expressions.ts) and `Promise_new` (native for
+ * inline executors via `emitStandalonePromiseFromExecutor`; the genuine host
+ * fallthrough in new-super.ts sets `ctx.moduleHasHostPromiseSource` at
+ * emission instead).
+ */
+const HOST_PROMISE_PRODUCER_IMPORTS = [
+  "Promise_all",
+  "Promise_race",
+  "Promise_allSettled",
+  "Promise_any",
+  "Promise_finally",
+  "__dynamic_import",
+  "__array_from_async",
+] as const;
+
+/**
+ * (#2903) True when the `.then`/`.catch` receiver bridge's miss arm can be
+ * NATIVE (a catchable TypeError) instead of the host `Promise_then*` fallback.
+ * Standalone-only (wasi keeps its `nullMiss` contract; gc/host never emits the
+ * bridge). Requires that the module provably cannot mint a host promise: no
+ * syntactic producer (pre-body scan, `moduleHasHostPromiseSource`) and no
+ * producer host import registered. Under that proof every runtime receiver
+ * that fails the `ref.test $Promise` is a non-promise (§27.2.5.4 step 2 —
+ * TypeError), and dropping the host arm removes the
+ * `Promise_then*`/`__make_callback` imports that kept ~626 otherwise-passing
+ * standalone modules host-import-leaky (measured 2026-07-10, see
+ * plan/issues/2903: 662 then-chain-only leaky passes, 626 with the host arm
+ * never CALLED at runtime).
+ */
+function standaloneThenMissArmCanBeNative(ctx: CodegenContext): boolean {
+  if (ctx.standalone !== true || ctx.wasi === true) return false;
+  if (ctx.moduleHasHostPromiseSource === true) return false;
+  for (const name of HOST_PROMISE_PRODUCER_IMPORTS) {
+    if (ctx.funcMap.has(name)) return false;
+  }
+  return true;
+}
+
 function emitStandaloneThenWithNativeFallback(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -3878,7 +3959,20 @@ function emitStandaloneThenWithNativeFallback(
       fctx.savedBodies.push(outerBody);
       fctx.body = hostArm;
       try {
-        emitHostPromiseThenFallback(ctx, fctx, recvLocal, method, onFulfilledArg, onRejectedArg);
+        if (standaloneThenMissArmCanBeNative(ctx)) {
+          // (#2903) The module provably cannot mint a HOST promise (no
+          // syntactic producer, no producer import), so a receiver failing
+          // the `ref.test $Promise` is a non-promise: throw the §27.2.5.4
+          // step-2 TypeError NATIVELY instead of baking the dead host
+          // `Promise_then*` arm. This is what makes the whole module
+          // host-free — the host arm's `ensureLateImport` was the sole
+          // source of the `Promise_then*`/`__make_callback` leak in ~626
+          // otherwise-passing standalone modules. `throw` is terminal
+          // (stack-polymorphic), so the externref-typed arm validates.
+          emitThrowTypeError(ctx, fctx, `Promise.prototype.${method} called on a non-Promise receiver`);
+        } else {
+          emitHostPromiseThenFallback(ctx, fctx, recvLocal, method, onFulfilledArg, onRejectedArg);
+        }
       } finally {
         fctx.savedBodies.pop();
         fctx.body = outerBody;
@@ -8001,6 +8095,19 @@ function compileCallExpression(
         }
       }
 
+      // (#2984 arg-2 name coercion) Struct receiver + NON-literal key: runtime
+      // ToPropertyKey dispatch over the compile-time field set (the dynamic
+      // native below only walks $Objects, so a struct receiver always answered
+      // `undefined` — test262 15.2.3.3-2-*). See builtin-static-gopd.ts.
+      if (
+        ctx.standalone &&
+        propLiteral === undefined &&
+        structName &&
+        tryEmitStandaloneStructGopdKeyDispatch(ctx, fctx, arg0, arg1, structName)
+      ) {
+        return { kind: "externref" };
+      }
+
       // Fallback: dynamic case — delegate to __getOwnPropertyDescriptor host import
       // If arg0 is a known built-in global identifier, use __get_builtin to get
       // the real JS object instead of the ref.null.extern from compileIdentifier.
@@ -10980,6 +11087,16 @@ function compileCallExpression(
         const recvPropNames = new Set(recvProps.map((p) => p.name));
         for (const className of ctx.classSet) {
           if (!ctx.funcMap.has(`${className}_${methodName}`)) continue;
+          // (#3123) Never INFER a fnctor-subclass (`class C extends F`, F a
+          // top-level plain function) for an any/unknown-typed receiver: the
+          // runtime value may be a HOST object (e.g. an Iterator-helper
+          // wrapper minted by F.prototype's live methods), and the static
+          // tag-dispatch would run the class method with a null self instead
+          // of forwarding to the host object. The any-receiver ladder below
+          // (__gen_next/__gen_return/__extern_method_call) dispatches on the
+          // runtime value for BOTH host objects and struct instances (the
+          // struct arm resolves via _safeGet → __member_kind_* exports).
+          if (fnctorAncestorOfClass(ctx, className) !== undefined) continue;
           // Quick heuristic: check that the class has at least the same property names
           // as the interface (structural compatibility check)
           const classFields = ctx.structFields.get(className);
@@ -11007,6 +11124,31 @@ function compileCallExpression(
       const methodName = ts.isPrivateIdentifier(propAccess.name)
         ? "__priv_" + propAccess.name.text.slice(1)
         : propAccess.name.text;
+      // (#3123) A WIDENED fnctor-subclass binding (`let iterator = new C();
+      // iterator = iterator.drop(0)`) may hold a HOST object at runtime — the
+      // static tag-dispatch below would guarded-cast it to null and run the
+      // class method/getter with a null self. Dispatch member calls on such
+      // bindings dynamically: the runtime value (struct instance or host
+      // wrapper) decides, via __extern_method_call + the host-side
+      // member-kind resolution.
+      {
+        let recvInner: ts.Expression = propAccess.expression;
+        while (
+          ts.isParenthesizedExpression(recvInner) ||
+          ts.isAsExpression(recvInner) ||
+          ts.isNonNullExpression(recvInner)
+        ) {
+          recvInner = recvInner.expression;
+        }
+        if (
+          ts.isIdentifier(recvInner) &&
+          fctx.fnctorWidenedLocals?.has(recvInner.text) &&
+          fnctorAncestorOfClass(ctx, receiverClassName) !== undefined
+        ) {
+          const dynResult = emitFnctorSubclassDynamicMethodCall(ctx, fctx, expr, propAccess, methodName);
+          if (dynResult !== undefined) return dynResult;
+        }
+      }
       let fullName = `${receiverClassName}_${methodName}`;
       let funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, fullName)); // (#1983)
       // Walk inheritance chain to find the method in a parent class
@@ -11119,6 +11261,18 @@ function compileCallExpression(
           methodName,
         );
         if (objProtoResult !== undefined) return objProtoResult;
+      }
+      // (#3123) Method MISS on a fnctor-subclass (`class C extends F`, F a
+      // top-level plain function): the method may live on F's LIVE
+      // `.prototype` — assigned at RUNTIME (module init; the test262 harness
+      // `Iterator` shim installs the ES2025 Iterator-helper prototype there),
+      // which no static dispatch can see. Route through the generic
+      // `__extern_method_call` host ladder (the ctor registered the instance
+      // in `_fnctorInstanceCtor`, so the host resolves the member through the
+      // live prototype chain) instead of falling to the graceful-null tail.
+      if (funcIdx === undefined && fnctorAncestorOfClass(ctx, receiverClassName) !== undefined) {
+        const dynResult = emitFnctorSubclassDynamicMethodCall(ctx, fctx, expr, propAccess, methodName);
+        if (dynResult !== undefined) return dynResult;
       }
       if (funcIdx !== undefined) {
         const isStaticMethod = ctx.staticMethodSet.has(fullName);
@@ -15076,6 +15230,15 @@ function compileCallExpression(
         const iifeNeedsArguments = ts.isFunctionExpression(callee) && callee.body && usesArguments(callee.body);
         // Support IIFEs with matching parameter/argument counts
         if (params.length <= args.length) {
+          // (#3128) Record that this function node is being INLINED into the
+          // current fctx: its AST function boundary does not exist in the
+          // emitted Wasm. The closure capture-mutability analysis
+          // (compileArrowAsClosure `writtenInOuter`) reads this to walk PAST
+          // the IIFE when locating the real enclosing scope — otherwise a
+          // closure inside the IIFE body that captures an outer var written
+          // outside the IIFE (`p2 = (function(){ return () => p2; })()`)
+          // misses the write and captures a stale by-value copy.
+          (fctx.inlinedIifeNodes ??= new Set()).add(callee);
           // Allocate locals for parameters and compile arguments
           const paramLocals: number[] = [];
           const allArgLocals: { idx: number; type: ValType }[] = [];
@@ -15189,7 +15352,42 @@ function compileCallExpression(
 
           // Determine return type from TS
           const iifeRetType = ctx.checker.getTypeAtLocation(expr);
-          const iifeWasmRetType = isVoidType(iifeRetType) ? null : resolveWasmType(ctx, iifeRetType);
+          let iifeWasmRetType = isVoidType(iifeRetType) ? null : resolveWasmType(ctx, iifeRetType);
+          // (#3128) The ret-local type must agree with what the returned
+          // expression will ACTUALLY lower to. Under standalone, an object
+          // literal in any/unknown/dictionary context diverts to the open
+          // `$Object` path and produces an **externref**
+          // (`objectLiteralTakesStandaloneAnyObjectPath`, the #1901/#2542
+          // gate) — but `resolveWasmType` types the ret local from the TS
+          // struct type. The return-site coercion externref→(ref null $struct)
+          // then goes through a `ref.test` arm that silently yields NULL
+          // (measured: `p2 = (function(){ return { a: (function(){ return
+          // p2; }) }; })()` — p2 read back null; the #3128-A cell write itself
+          // was correct, it faithfully wrote the nulled ret value). Mirror the
+          // literal's own divert decision here and widen the ret local to
+          // externref; struct-typed sibling returns coerce ref→externref
+          // losslessly (`extern.convert_any`). Scan only the IIFE's OWN
+          // returns — nested function boundaries keep their own return type.
+          if (iifeWasmRetType && (iifeWasmRetType.kind === "ref" || iifeWasmRetType.kind === "ref_null")) {
+            let divertedObjlitReturn = false;
+            const scanReturns = (node: ts.Node): void => {
+              if (divertedObjlitReturn) return;
+              if (ts.isFunctionLike(node) && node !== callee) return;
+              if (ts.isReturnStatement(node) && node.expression) {
+                let retExpr: ts.Expression = node.expression;
+                while (ts.isParenthesizedExpression(retExpr)) retExpr = retExpr.expression;
+                if (ts.isObjectLiteralExpression(retExpr) && objectLiteralTakesStandaloneAnyObjectPath(ctx, retExpr)) {
+                  divertedObjlitReturn = true;
+                  return;
+                }
+              }
+              forEachChild(node, scanReturns);
+            };
+            for (const stmt of bodyStmts) scanReturns(stmt);
+            if (divertedObjlitReturn) {
+              iifeWasmRetType = { kind: "externref" };
+            }
+          }
 
           if (iifeWasmRetType) {
             // Returning IIFE: allocate a result local, compile body into a block,
@@ -16735,6 +16933,78 @@ function compileCallExpression(
     fctx.body.push({ op: "ref.null.extern" });
     return { kind: "externref" };
   }
+}
+
+/**
+ * (#3123) Generic dynamic method dispatch for a method MISS on a
+ * fnctor-subclass receiver (`class C extends F`, F a top-level plain
+ * function). The member may live on F's runtime-assigned `.prototype`
+ * (host-side), so compile the receiver as externref (extern.convert_any for
+ * the struct instance), marshal the args into a host JS array (native $ObjVec
+ * under standalone), and call `__extern_method_call(recv, "<name>", args)` —
+ * mirroring the any-receiver generic ladder (#799 WI3) so both entry points
+ * behave identically. Helper indices are re-read from funcMap at each use so
+ * late-import shifts during arg compilation cannot bake stale call targets.
+ */
+function emitFnctorSubclassDynamicMethodCall(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.CallExpression,
+  propAccess: ts.PropertyAccessExpression,
+  methodName: string,
+): InnerResult | undefined {
+  let arrNewIdx: number | undefined;
+  let arrPushIdx: number | undefined;
+  const arrNewName = ctx.standalone ? "__objvec_new" : "__js_array_new";
+  const arrPushName = ctx.standalone ? "__objvec_push" : "__js_array_push";
+  if (ctx.standalone) {
+    const b = ensureObjVecBuilders(ctx);
+    arrNewIdx = b.newIdx;
+    arrPushIdx = b.pushIdx;
+  } else {
+    arrNewIdx = ensureLateImport(ctx, "__js_array_new", [], [{ kind: "externref" }]);
+    arrPushIdx = ensureLateImport(ctx, "__js_array_push", [{ kind: "externref" }, { kind: "externref" }], []);
+  }
+  const methodCallIdx = ensureLateImport(
+    ctx,
+    "__extern_method_call",
+    [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
+    [{ kind: "externref" }],
+  );
+  // The fallback's method-name string constant, materialized BEFORE any body
+  // instructions so the global index is settled.
+  addStringConstantGlobal(ctx, methodName);
+  flushLateImportShifts(ctx, fctx);
+  if (methodCallIdx === undefined || arrNewIdx === undefined || arrPushIdx === undefined) return undefined;
+
+  const recvType = compileExpression(ctx, fctx, propAccess.expression, { kind: "externref" });
+  if (recvType === null) {
+    fctx.body.push({ op: "ref.null.extern" });
+  } else if (recvType.kind !== "externref") {
+    fctx.body.push({ op: "extern.convert_any" } as Instr);
+  }
+  const recvLocal = allocLocal(fctx, `__fsd_recv_${fctx.locals.length}`, { kind: "externref" });
+  fctx.body.push({ op: "local.set", index: recvLocal });
+
+  fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get(arrNewName) ?? arrNewIdx });
+  const argsLocal = allocLocal(fctx, `__fsd_args_${fctx.locals.length}`, { kind: "externref" });
+  fctx.body.push({ op: "local.set", index: argsLocal });
+  for (const arg of expr.arguments) {
+    fctx.body.push({ op: "local.get", index: argsLocal });
+    const argType = compileExpression(ctx, fctx, arg, { kind: "externref" });
+    if (argType && argType.kind !== "externref") {
+      fctx.body.push({ op: "extern.convert_any" } as Instr);
+    }
+    if (argType === null) {
+      fctx.body.push({ op: "ref.null.extern" });
+    }
+    fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get(arrPushName) ?? arrPushIdx });
+  }
+  fctx.body.push({ op: "local.get", index: recvLocal });
+  fctx.body.push(...stringConstantExternrefInstrs(ctx, methodName));
+  fctx.body.push({ op: "local.get", index: argsLocal });
+  fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__extern_method_call") ?? methodCallIdx });
+  return { kind: "externref" };
 }
 
 /**

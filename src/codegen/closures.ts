@@ -1955,16 +1955,38 @@ export function compileArrowAsClosure(
     try {
       // Find the symbol for this variable
       const sym = ctx.checker.getSymbolAtLocation(ts.isBlock(body) ? (body.statements[0] ?? body) : body);
-      // Use the enclosing function body to find all writes to this name
+      // Use the enclosing function body to find all writes to this name.
+      // (#3128) Walk PAST function nodes the call-site inliner flattened into
+      // this fctx (`fctx.inlinedIifeNodes`): an inlined IIFE is not a real
+      // scope boundary in the emitted Wasm — its "locals" live in fctx's
+      // frame, so writes to the captured name in the REAL enclosing body
+      // (e.g. `p2 = (function(){ return () => p2; })()`) must count as outer
+      // writes. Stopping at the erased boundary made the capture by-value:
+      // a stale copy the outer assignment never reached.
+      //
+      // Shadow guard: only walk past an inlined IIFE that does NOT itself
+      // declare `name` (params / own function-scoped decls). If it does, the
+      // capture refers to the IIFE's OWN binding — an outer same-named write
+      // targets a DIFFERENT variable and must not force-box the shadow
+      // (`var x=1; (function(){ var x=5; return ()=>x; })(); x=2;` — the
+      // closure must keep seeing 5).
+      const iifeDeclaresName = (fn: ts.Node): boolean => {
+        const own = new Set<string>();
+        addFunctionOwnLocals(fn, own);
+        return own.has(name);
+      };
       let enclosing: ts.Node | undefined = arrow.parent;
       while (
         enclosing &&
-        !ts.isFunctionDeclaration(enclosing) &&
-        !ts.isFunctionExpression(enclosing) &&
-        !ts.isArrowFunction(enclosing) &&
-        !ts.isMethodDeclaration(enclosing) &&
-        !ts.isConstructorDeclaration(enclosing) &&
-        !ts.isSourceFile(enclosing)
+        (!(
+          ts.isFunctionDeclaration(enclosing) ||
+          ts.isFunctionExpression(enclosing) ||
+          ts.isArrowFunction(enclosing) ||
+          ts.isMethodDeclaration(enclosing) ||
+          ts.isConstructorDeclaration(enclosing) ||
+          ts.isSourceFile(enclosing)
+        ) ||
+          ((fctx.inlinedIifeNodes?.has(enclosing) ?? false) && !iifeDeclaresName(enclosing)))
       ) {
         enclosing = enclosing.parent;
       }

@@ -10,10 +10,66 @@ area: codegen, runtime
 goal: standalone-mode
 related: [2965, 2861, 2863, 2896, 2949, 2989]
 origin: "#2965 descriptor-cluster triage — follow-up class 1"
-assignee: ttraenkler/fable-6th
+assignee: ttraenkler/fable-16th
+loc-budget-allow:
+  - src/codegen/expressions/calls.ts
 ---
 
 # #2984 — standalone gOPD-on-builtin descriptor MOP
+
+## Slice "arg-2 name coercion" LANDED (2026-07-10, fable-16th) — struct-receiver runtime key dispatch
+
+> PR: `issue-2984-gopd-key-dispatch` (stacked on `issue-2984-gopd-runtime-dispatch`
+> / PR #2865). Takes the **15.2.3.3-2-\*** bucket ("arg-2 name coercion",
+> 17/47 failing) of "Still remaining after Phase 3".
+
+### Root cause (measured, probe-pinned)
+
+A plain object literal lowers to a TYPED STRUCT, not a runtime `$Object`. The
+gOPD call site (calls.ts) answers struct receivers only through the
+LITERAL-key fast path (`structName && propLiteral !== undefined`); ANY
+non-literal key — `gOPD(obj, NaN)`, `gOPD(obj, k)`, `gOPD(obj, {toString})`,
+even a plain STRING variable — fell through to the dynamic
+`__getOwnPropertyDescriptor` native, which only walks `$Object`s, so a struct
+receiver always answered `undefined`. The key coercion itself was NOT the gap:
+`__to_property_key` (#2042 S1 / #2985) already canonicalises every non-Symbol
+key (boxed number → `number_toString`, object → `__extern_toString`).
+
+### Fix
+
+New `tryEmitStandaloneStructGopdKeyDispatch` (builtin-static-gopd.ts), called
+from a thin gate in the calls.ts gOPD handler (`ctx.standalone && structName
+&& propLiteral === undefined`): compile receiver+key, run the key through
+`__to_property_key`, string-match it against the struct's compile-time field
+names (`__str_equals` chain) and synthesize per-field the SAME descriptor the
+literal fast path emits (struct.get + box + shapePropFlags/#1629b
+definedPropertyFlags → `__create_descriptor`). **Strictly additive**: class
+receivers and sidecar-defined keys bail to the dynamic path (gate), and both
+runtime misses (non-string post-ToPropertyKey key; runtime value not the
+checker-typed struct) fall through to the dynamic native with the ORIGINAL
+key — every previously-answered shape keeps its exact answer.
+
+### Measured (real runner, standalone lane, base = PR #2865 tree)
+
+| Sweep                                           | before      | after          | Δ                      |
+| ----------------------------------------------- | ----------- | -------------- | ---------------------- |
+| `getOwnPropertyDescriptor/15.2.3.3-2-*` (47)    | 30 / 17 / 0 | **41 / 6 / 0** | **+11, 0 regressions** |
+| `built-ins/Object/getOwnPropertyDescriptor{,s}` | —           | 281 / 47 / 0   | 0 CE                   |
+
+- `prove-emit-identity`: **IDENTICAL** — all 39 (file,target) emits across
+  gc/standalone/wasi match the predecessor baseline.
+- `tests/issue-2984-key-dispatch.test.ts` 9/9 (NaN/Infinity/var/object-toString
+  keys, full attribute triple, absent key, literal fast-path GUARD, sidecar
+  GUARD); prior suites (2984/phase3/alias-receivers) 34/34.
+- Still failing in the dir (NOT this slice): `-3`/`-4` (undefined/null keys —
+  blocked on the #2106 undefined-singleton regime; `String(undefined)` cannot
+  yield `"undefined"` under the legacy no-singleton lowering), `-38/-40/-41`
+  (ARRAY keys — the any-lane array ToString residual: `String([1])` ≠ `"1"`
+  when the array flows through the boxed-any rep), `-47` (proto-INHERITED
+  `toString` on the key object — `__to_primitive`'s method lookup misses
+  inherited methods).
+- loc-budget: dispatch lives in the subsystem module; the +17 thin gate in
+  calls.ts is covered by the `loc-budget-allow` frontmatter above (#3131).
 
 ## Bucket-1 slice LANDED (2026-07-10, fable-6th) — alias (obj-VAR) gOPD receivers
 
