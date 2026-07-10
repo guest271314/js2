@@ -1,8 +1,9 @@
 ---
 id: 3074
 title: "TypedArray harness-wrapper callback never executes → vacuous fail (both lanes; persists after #2939/#2940)"
-status: in-progress
+status: done
 assignee: ttraenkler/dev-keystone
+completed: 2026-07-08
 sprint: Backlog
 priority: high
 feasibility: hard
@@ -207,3 +208,12 @@ without dispatch, none of these bodies run at all):
 3. **BigInt TypedArray i64 codegen CE** (`Binary emit error: RangeError: offset
    is out of bounds`) — ~22/30 sampled BigInt-TA files; pre-existing, unrelated
    to dispatch.
+
+## Status reconcile (fable-3084, 2026-07-10)
+
+Frontmatter flipped `in-progress` → `done` retroactively: the implementation
+PR **#2790** (`fix(#3074): dispatch any-typed HOF callbacks on the gc/host
+lane`) MERGED 2026-07-08 but did not carry the status flip (the pre-#2786-era
+watcher died before the post-merge cleanup). Follow-ups all resolved: #3087
+done (PRs #2800 + #2802), #3088 done (PR #2796), #3089 wont-fix, #3083
+wont-fix.

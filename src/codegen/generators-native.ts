@@ -4154,7 +4154,15 @@ export function tryCompileNativeGeneratorResultProperty(
       typeIdx: rtIdx,
       fieldIdx: propName === "value" ? RESULT_VALUE_FIELD : RESULT_DONE_FIELD,
     });
-    return propName === "value" ? valVT : { kind: "i32" };
+    // (#2938) `.done` carries the #2030 boolean BRAND, exactly like the host
+    // path's `__gen_result_done` read (property-access.ts). Without it, the
+    // i32→externref arg coercion boxes the value kind-keyed as a NUMBER
+    // ($BoxedNumber(1)), while a `boolean`-typed comparand boxes as
+    // $BoxedBoolean — the any `!==` typeof-partition chain then falls to
+    // ref-identity and answers UNEQUAL, so the test262 harness shape
+    // `assert_sameValue_bool(g.next().done, true)` failed on every native
+    // generator (the residual "returned 2" of the #2938 no-yield relax).
+    return propName === "value" ? valVT : { kind: "i32", boolean: true };
   }
 
   if (resultType?.kind === "externref") {
@@ -4188,7 +4196,8 @@ export function tryCompileNativeGeneratorResultProperty(
   if (propName === "done") {
     // `done` is i32 for every carrier — test each result type, read field 1.
     fctx.body.push(buildOpenResultRead(anyLocal, resultEntries, RESULT_DONE_FIELD, { kind: "i32" }));
-    return { kind: "i32" };
+    // (#2938) boolean brand — see the typed arm above.
+    return { kind: "i32", boolean: true };
   }
 
   // `value`: choose the return ValType from the STATIC type of the result's
