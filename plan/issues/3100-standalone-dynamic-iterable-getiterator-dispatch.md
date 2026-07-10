@@ -277,3 +277,158 @@ S4 (spread/`Array.from` consumer migration onto `__iterator`, retiring
 `__array_from_iter_n`'s bypass) and S5 (Proxy arm + IteratorClose §7.4.9
 through the ladder) are open. Fixed-arity dstr from `any` (`const [x,y] =
 a`) is a distinct pre-existing bug in the read lane — worth its own issue.
+
+## Implementation notes (S4, landed 2026-07-09 — fable-3100s4)
+
+### Re-grounding: the "4,348-file drop" was already banked
+
+The S4 headline number was measured on the 2026-06-26 JSONL — the Slices
+table itself flags it "@ stale baseline". Verify-first against the FRESH
+standalone baseline (refreshed 2026-07-09, post-S1): `__array_from_iter_n`
+leaks had already collapsed **4,348 → 60 rows** — #2904 (native materializer
++ per-site gating in destructuring-params/type-coercion) and the S1 ladder
+did that work between the two baselines. Spread `[...any]` and
+`Array.from(any)` (no mapFn) were ALREADY clean+correct standalone on
+current main (probes: 3/3). What actually remained in the S4 consumer set:
+
+- `[a, b] = <any>` **assignment**-form array destructure —
+  `ensureLateImport("__array_from_iter_n")` in `compileExternArrayAssignment-
+  Destructure` (assignment.ts) had NO standalone gate → `env::` leak.
+  The 60-row `language/expressions/assignment/dstr` cluster.
+- rest elements — FOUR consumers raw-`addImport`ed `env::__extern_slice`
+  (assignment.ts, statements/destructuring.ts string-rest, loops.ts ×2):
+  16 rows, and NO native `__extern_slice` existed at all (a loops.ts comment
+  claimed one — it was aspirational).
+- stray `env::__iterator`/`__iterator_next` ensureLateImport consumers
+  (custom-iterable.ts, literals.ts, proto-override drives): ~40 rows, all
+  co-leaking `__gen_*` (the #2864 lane) or iterator-prototype-introspection
+  fails.
+- `Array.from(any, mapFn)` (17 rows) — needs the callback bridge
+  (`__make_callback`, #3098's lane). NOT taken here.
+
+### What S4 landed
+
+1. **ensureLateImport chokepoint routing** (late-imports.ts): under
+   standalone/wasi, `__iterator{,_next,_return,_rest}` →
+   `ensureNativeIteratorRuntime`, `__array_from_iter_n` →
+   `ensureNativeArrayFromIterN`, `__extern_slice` →
+   `ensureNativeExternSlice`. One place, every present AND future consumer
+   binds native by name — the same discipline as the
+   OBJECT_RUNTIME/UNION_NATIVE routes above it. (Must precede
+   `refuseStandaloneObjectImport`: `__extern_slice` matches the `__extern_`
+   refusal prefix.)
+2. **`ensureNativeExternSlice`** (iterator-native.ts): index-based rest
+   slice over the native read substrate — `len = __extern_length(src)`,
+   copy `[start..len)` via `__extern_get_idx` into a fresh canonical
+   externref `$Vec`; `$AnyString` arm normalizes through the #1470
+   `__str_to_char_vec` (per-code-point, §22.1.5.1) then falls through to
+   the same copy. Index-based rather than `__iterator`-ladder-based BY
+   DESIGN: every consumer slices an already-materialized source, so
+   protocol re-entry would double-step observable iterators; the indexed
+   read is side-effect-free and inherits every carrier arm the read
+   substrate has (#2190). Non-indexable → empty vec, never traps.
+3. **Assignment consumer reads** (assignment.ts): standalone element reads
+   via `__extern_get_idx(mat, f64 i)` — the native `__extern_get` is a
+   string-keyed `$Object` reader; a boxed-number key misses every vec
+   carrier (and the raw `env::__box_number` addImport would itself leak).
+   Host lane keeps the boxed-key path byte-identical.
+4. **String rest** (statements/destructuring.ts): `const [a, ...r] =
+   "hello"` now builds the rest NATIVELY as a `string[]` nstrVec
+   (`__str_to_char_vec` + `array.copy` tail, `srcOff` clamped for
+   short-source `array.copy` bounds). The old lowering was broken in BOTH
+   modes for the typed rest local: host `__extern_slice` can't slice an
+   opaque WasmGC struct, and the externref result hit the pre-declared
+   `string[]` local's `ref.cast $nstrVec` → illegal cast. WAT-traced to the
+   exact cast before fixing.
+
+### Measured (branch vs main @ 300fc5a, standalone lane, runTest262File)
+
+- **69-file leak cluster** (`__array_from_iter_n` ∪ `__extern_slice` rows of
+  the 2026-07-09 baseline): **37 files stop leaking entirely** (zero env
+  imports); 13 keep OTHER co-leaks (`__gen_*`/`__make_callback`/Promise —
+  the #2864/#3098 lanes); the rest were CE/vacuous either way.
+- **945-file broad sweep** (assignment/dstr 368 + for-of/dstr 569 +
+  assignment/destructuring 8): see PR body — zero unexplained flips; the
+  only pass→fail flips are the two `array-rest-iteration.js` SHIM-ARTIFACT
+  passes: `[...x] = <host-shim generator>` "passed" on main only because the
+  leaked host `__array_from_iter_n` shim stepped the generator; those
+  modules still leak `__gen_*` (cannot instantiate host-free at all), so the
+  HONEST (host_free_pass) floor is unaffected. #2864's native generator
+  carrier is the lane that re-flips them host-free.
+- **Byte-identity**: 15-program corpus (9 host incl. `[a,b] = any` host
+  path + 6 standalone unrelated) — SHA-256 identical main vs branch.
+- `tests/issue-3100-s4.test.ts`: 17/17, every fix case asserts ZERO host
+  imports.
+
+### Follow-up seams found while tracing (NOT this slice)
+
+- `__iterator` family arms skip `ref`-element vecs (vec-of-vecs:
+  `for ([x,...y] of <any [[1,2],[3]]>)` traps `illegal cast` in `__iterator`
+  — pre-existing S1 conservatism; extern.convert_any boxing for nested vec
+  refs looks safe and would open the nested-destructure rows).
+- `[a, ...r] = ("hello" as any)` never reaches the externref consumer —
+  a different lane intercepts via the static string type and silently drops
+  the pattern (module contains NONE of the iterator helpers). Pre-existing.
+- for-of destructure over STRING elements (`for ([a,...r] of ["hello"])`)
+  compiles the element pattern to an EMPTY block (silent drop, pre-existing).
+- `f(...anyVec)` fixed-arity spread call emits invalid Wasm ("not enough
+  arguments on the stack") — 1 test262 row, pre-existing.
+- `Array.from(any, mapFn)` → 17 rows, blocked on the #3098 callback lane.
+
+## Implementation notes (S5, landed 2026-07-09 — fable-3100s4)
+
+### Scope shipped: IteratorClose §7.4.9 + custom-iterable consumer completion
+
+Verify-first probes on post-S4 main: `return()` was NEVER called standalone
+(for-of break/throw, assignment dstr, decl dstr — all `closed=0`), and the
+custom-iterable CONSUMERS were value-broken too: `[x,y] = customIterable`
+read nothing (the #2904 materializer guard passed closed structs through to
+indexed reads), `[...customIterable]` / `Array.from(customIterable)` drained
+EMPTY (`__iterator_rest` was vec-only). All fixed at the finalize fill:
+
+1. `emitMethodDispatch("return", "__call_return")` (index.ts, one line) —
+   emitted only when some struct carries a `return` method.
+2. `__iterator_return` rebuilt with the USER close arm (dispatch
+   `__call_return` on the record's userIter; every non-USER shape no-ops,
+   never traps). The §7.4.9 "innerResult not an Object ⇒ TypeError"
+   refinement deferred, matching the §7.4.4 note on `__iterator_next`.
+3. `__array_from_iter_n` (shared `buildArrayFromIterNBody`): drainability
+   guard widened at fill with the user-iterable closed-struct type tests
+   (`collectUserIterableStructTypeIdxs` — `<S>_@@iterator` / `<S>_next` in
+   funcMap, no runtime method invocation so no double-@@iterator); bounded
+   stop with the iterator NOT done now calls IteratorClose — a DELIBERATE
+   spec-following divergence from the host `_arrayFromIter` (#1592 no-close).
+4. `__iterator_rest` rebuilt with a USER step-to-exhaustion drain arm
+   (doubling-array via `__iterator_next`); exhaustion ⇒ no close ✓.
+5. Spread-literal externref arm materializes first via
+   `emitStandaloneIterableMaterialize` (new consumer helper in
+   iterator-native.ts — passthrough for indexable carriers, protocol drain
+   for custom iterables).
+
+### Measured
+
+- 14/14 close+consumer probes flip (close exactly once on break/throw/
+  non-exhausting dstr; no close on exhaustion/already-done/no-return-method;
+  dstr/rest/spread/Array.from values correct host-free).
+- `tests/issue-3100-s5.test.ts` 18/18 (+ S4's 17/17 green), zero-import
+  asserted per case.
+- 945-file standalone sweep (assignment/dstr + for-of/dstr +
+  assignment/destructuring), branch vs main @ e348f55: **zero flips either
+  way, host_free_pass +0/−0**. Byte-identity corpus 14/15 — the single diff
+  is the materializer module (the S5 rebuild target).
+- **Why test262's `*-close.js` cluster did NOT flip**: those tests build
+  iterators as PLAIN `$Object`s (`var iterator = { next: function(){}, … }`
+  + a COMPUTED `iterable[Symbol.iterator] = fn` install). That's the
+  dynamic-object protocol lane — invoking $Object-stored functions
+  (#3098 `__apply_closure`/`__make_callback`) plus the S3 plain-$Object
+  `@@iterator` residual — NOT the closed-struct dispatchers. They fail
+  before close semantics are even observable. S5's value is the TS/user-code
+  closed-struct lane (same population split S1 documented).
+
+### Remaining (S5-residual / explicitly out)
+
+- Proxy arm (ladder arm 1) — needs #1355 standalone Proxy infra; test262
+  Proxy rows are skip-filtered anyway.
+- Plain-`$Object` iterator protocol (test262 close cluster, ~57 rows) —
+  needs $Object-stored-function invocation; belongs with #3098's callback
+  lane or a dedicated S6.

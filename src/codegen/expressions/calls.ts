@@ -27,6 +27,7 @@ import { classMemberFuncKey } from "../class-member-keys.js"; // (#1983) collisi
 import { ensureNativeIteratorRuntime } from "../iterator-native.js"; // (#2169c) native Array.from drain
 import { reserveClosedMethodDispatch, reserveClosedMethodDispatchVararg } from "../closed-method-dispatch.js";
 import { emitNativeDateParse } from "../date-parse-native.js"; // (#2164) pure-Wasm Date.parse / new Date(str)
+import { NATIVE_HOF_METHODS } from "../hof-native.js";
 import { ensureObjVecBuilders, ensureObjectGroupBy, ensureObjectRuntime } from "../object-runtime.js";
 import {
   emitMicrotaskEnqueue,
@@ -9548,9 +9549,9 @@ function compileCallExpression(
       if (isResolveReject) {
         const methodName = propAccess.name.text;
         // (#1326 Phase 1B) Standalone-mode `Promise.resolve(v)` /
-        // `Promise.reject(r)` — emit Wasm-native `$Promise` struct.new
-        // instead of calling the JS-host `Promise_resolve_import` /
-        // `Promise_reject_import` (unsatisfiable in WASI).
+        // `Promise.reject(r)` — emit Wasm-native `$Promise` struct.new instead
+        // of the JS-host `Promise_{resolve,reject}_import` (unsatisfiable in
+        // WASI). (#2980 async-gen fallback lives in `isStandalonePromiseActive`.)
         if (isStandalonePromiseActive(ctx)) {
           // Compile the value/reason argument FIRST into a side buffer
           // so the helper controls the final Wasm op order
@@ -12594,6 +12595,27 @@ function compileCallExpression(
           // Each argument compiled and boxed to externref (the dispatcher unboxes
           // to the method's declared param type per candidate struct).
           for (const arg of dispatchArgs) {
+            // (#3098) An inline arrow/function-expression callback to a native-
+            // HOF-served method compiles as a raw GC CLOSURE struct (crossing as
+            // externref), NOT via the `__make_callback` host bridge that
+            // `isHostCallbackArgument` would pick for the HOST_CALLBACK_METHODS
+            // names: standalone has no host, so that env import leaked and the
+            // whole module failed to instantiate (the #2 leaked import of the
+            // 2026-06-26 standalone JSONL). The dispatcher's `$__vec_base`/
+            // `$ObjVec` HOF arm invokes the closure natively via
+            // `__apply_closure` (same rep an identifier-held callback already
+            // crosses with). Mirrors the `Object.groupBy` / `.call`/`.apply`
+            // (#3016) precedent; standalone-gated so gc/wasi stay byte-identical.
+            if (
+              ctx.standalone &&
+              NATIVE_HOF_METHODS.has(methodName) &&
+              (ts.isArrowFunction(arg) || ts.isFunctionExpression(arg))
+            ) {
+              const at = compileArrowAsClosure(ctx, fctx, arg);
+              if (at && at.kind !== "externref") coerceType(ctx, fctx, at, { kind: "externref" });
+              else if (at === null) fctx.body.push({ op: "ref.null.extern" });
+              continue;
+            }
             const at = compileExpression(ctx, fctx, arg, { kind: "externref" });
             if (at && at.kind !== "externref") coerceType(ctx, fctx, at, { kind: "externref" });
             else if (at === null) fctx.body.push({ op: "ref.null.extern" });

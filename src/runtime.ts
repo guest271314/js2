@@ -1700,7 +1700,23 @@ function _compiledAbToHostBuffer(vec: any, exports: Record<string, Function> | u
     return undefined;
   }
   if (typeof n !== "number" || n < 0) return undefined;
-  let ab = new ArrayBuffer(n);
+  // (#3058) A `$__resizable_ab` struct (compiled `new ArrayBuffer(n,
+  // {maxByteLength})`) marshals to a HOST resizable ArrayBuffer so host
+  // TypedArray/DataView views built over it length-track a later
+  // `rab.resize()` natively (the resize arm in __extern_method_call keeps the
+  // canonical host buffer's byteLength in sync via hostAb.resize()).
+  const maxLenFn = exports.__ab_max_len as ((v: any) => number) | undefined;
+  let maxLen = -1;
+  if (typeof maxLenFn === "function") {
+    try {
+      maxLen = maxLenFn(vec);
+    } catch {
+      maxLen = -1;
+    }
+  }
+  // (lib.d.ts here predates the ES2024 options overload — cast the ctor.)
+  const AbCtor = ArrayBuffer as unknown as new (len: number, opts?: { maxByteLength?: number }) => ArrayBuffer;
+  let ab = typeof maxLen === "number" && maxLen >= 0 ? new AbCtor(n, { maxByteLength: maxLen }) : new ArrayBuffer(n);
   const view = new Uint8Array(ab);
   for (let i = 0; i < n; i++) view[i] = getFn(vec, i) & 0xff;
   _abHostBufferCache.set(vec, ab);
@@ -1713,6 +1729,95 @@ function _compiledAbToHostBuffer(vec: any, exports: Record<string, Function> | u
     }
   }
   return ab;
+}
+
+/**
+ * (#3058) `maxByteLength` of a compiled-ArrayBuffer vec struct: field 2 of a
+ * `$__resizable_ab` (≥ 0), or -1 when the struct is a fixed buffer / the module
+ * has no resizable-buffer type (no `__ab_max_len` export). The -1 sentinel is
+ * the host-side `resizable` discriminator, mirroring the compile-time
+ * `ref.test $__resizable_ab` identity.
+ */
+function _abMaxByteLength(vec: any, exports: Record<string, Function> | undefined): number {
+  const fn = exports?.__ab_max_len as ((v: any) => number) | undefined;
+  if (typeof fn !== "function") return -1;
+  try {
+    const m = fn(vec);
+    return typeof m === "number" ? m : -1;
+  } catch {
+    return -1;
+  }
+}
+
+/**
+ * (#3058) ArrayBuffer.prototype.resize (§25.1.6.4) on a compiled-ArrayBuffer
+ * i32_byte vec struct receiver — the host-lane arm of the #3054-C resizable
+ * machinery. Spec-ordered validation:
+ *   2. RequireInternalSlot([[ArrayBufferMaxByteLength]]) → TypeError when the
+ *      receiver is a fixed buffer (maxByteLength sentinel -1).
+ *   4. ToIndex(newLength) → RangeError on negative / non-index.
+ *   5. IsDetachedBuffer → TypeError.
+ *   6. newByteLength > maxByteLength → RangeError.
+ * Then `__rab_resize` swaps the struct's `data`/`length` fields IN PLACE (the
+ * compiled-side identity every native read site sees), and the canonical host
+ * ArrayBuffer (if the struct already crossed the #3097 marshal bridge) is
+ * resized in lock-step so host TypedArray/DataView views length-track.
+ *
+ * Returns true when the receiver was a byte-vec struct and the resize was
+ * handled (including by throwing); false → caller falls through.
+ */
+function _abResizeStruct(obj: any, newLengthArg: any, exports: Record<string, Function> | undefined): boolean {
+  if (!exports || obj == null || typeof obj !== "object" || !_isWasmStruct(obj)) return false;
+  const lenFn = exports.__dv_byte_len as ((v: any) => number) | undefined;
+  if (typeof lenFn !== "function") return false;
+  let n: number;
+  try {
+    n = lenFn(obj);
+  } catch {
+    return false;
+  }
+  if (typeof n !== "number" || n < 0) return false; // not an AB-backing byte vec
+  // §25.1.6.4 step 2 — a fixed-length buffer has no [[ArrayBufferMaxByteLength]].
+  const maxLen = _abMaxByteLength(obj, exports);
+  if (maxLen < 0) {
+    throw new TypeError("ArrayBuffer.prototype.resize called on a non-resizable buffer");
+  }
+  // step 4 — ToIndex(newLength).
+  let newLen = newLengthArg === undefined ? 0 : Number(newLengthArg);
+  if (Number.isNaN(newLen)) newLen = 0;
+  newLen = Math.trunc(newLen);
+  if (Object.is(newLen, -0)) newLen = 0;
+  if (newLen < 0 || newLen > Number.MAX_SAFE_INTEGER) {
+    throw new RangeError("Invalid array buffer length");
+  }
+  // step 5 — detached buffer.
+  if (_detachedBuffers.has(obj) || _sidecarGet(obj, "__detached__")) {
+    throw new TypeError("ArrayBuffer.prototype.resize called on a detached buffer");
+  }
+  // step 6 — out of declared bounds.
+  if (newLen > maxLen) {
+    throw new RangeError("ArrayBuffer.prototype.resize: newLength exceeds maxByteLength");
+  }
+  const resizeFn = exports.__rab_resize as ((v: any, l: number) => number) | undefined;
+  if (typeof resizeFn !== "function") {
+    // Unreachable when maxLen >= 0 (both exports are emitted together); be safe.
+    throw new TypeError("ArrayBuffer.prototype.resize called on a non-resizable buffer");
+  }
+  const status = resizeFn(obj, newLen);
+  if (status === 1) throw new TypeError("ArrayBuffer.prototype.resize called on a non-resizable buffer");
+  if (status !== 0) throw new RangeError("ArrayBuffer.prototype.resize: newLength exceeds maxByteLength");
+  // Keep the canonical host buffer (if any) in lock-step so host TA/DataView
+  // views over it length-track. The cache key is the struct identity, which
+  // `__rab_resize` preserves (it swaps FIELDS, not the struct).
+  const hostAb = _abHostBufferCache.get(obj);
+  if (hostAb) {
+    try {
+      (hostAb as ArrayBuffer & { resize?: (l: number) => void }).resize?.(newLen);
+    } catch {
+      /* non-resizable host buffer (pre-#3058 cache shape) — views can't track */
+    }
+  }
+  return true;
 }
 
 /**
@@ -1953,11 +2058,22 @@ function _toPropertyDescriptorValidate(
       "TypeError: Invalid property descriptor. Cannot both specify accessors and a value or writable attribute",
     );
   }
+  // (#3116) Stringify defensively: `String(x)` on a null-prototype / opaque
+  // WasmGC value throws "Cannot convert object to primitive value" INSIDE the
+  // error-message construction, replacing the spec TypeError with a confusing
+  // one (and masking the real rejection reason).
+  const safeStr = (x: any): string => {
+    try {
+      return String(x);
+    } catch {
+      return "[object Object]";
+    }
+  };
   if (hasGet && getFn !== undefined && typeof getFn !== "function") {
-    throw new TypeError("TypeError: Getter must be a function: " + String(getFn));
+    throw new TypeError("TypeError: Getter must be a function: " + safeStr(getFn));
   }
   if (hasSet && setFn !== undefined && typeof setFn !== "function") {
-    throw new TypeError("TypeError: Setter must be a function: " + String(setFn));
+    throw new TypeError("TypeError: Setter must be a function: " + safeStr(setFn));
   }
   if (hasValue) desc.value = val;
   if (hasWritable) desc.writable = !!wr;
@@ -5243,6 +5359,66 @@ function _readOwnDescriptor(
   prop: string | symbol,
   exports: Record<string, Function> | undefined,
 ): PropertyDescriptor | undefined {
+  // 0. (#3116) Vec (compiled array) receiver: element and `length` descriptors
+  // read LIVE from the vec (values live in the vec, attributes in the sidecar
+  // table — see _vecDefineOwnProperty). Previously an in-bounds element with no
+  // sidecar entry read back as "not an own property", and one WITH a flags
+  // entry read its value through `__sget_<idx>` (a struct-field getter that
+  // does not exist for indices) — both wrong. Accessor-flagged entries fall
+  // through to the generic sidecar branch, which serves get/set correctly.
+  if (typeof prop === "string" && exports) {
+    const isVecFn = exports.__is_vec as ((v: any) => number) | undefined;
+    let isVecRecv = false;
+    if (typeof isVecFn === "function") {
+      try {
+        isVecRecv = isVecFn(obj) === 1;
+      } catch {
+        isVecRecv = false;
+      }
+    }
+    if (isVecRecv) {
+      const lenFn = exports.__vec_len as ((v: any) => number) | undefined;
+      const getVE = exports.__vec_get as ((v: any, i: number) => any) | undefined;
+      const vecDescs = _wasmPropDescs.get(obj);
+      if (prop === "length" && typeof lenFn === "function") {
+        const lf = vecDescs?.get("length");
+        return {
+          value: lenFn(obj),
+          writable: lf === undefined ? true : !!(lf & _SC_WRITABLE),
+          enumerable: false,
+          configurable: false,
+        };
+      }
+      const idx = _asArrayIndex(prop);
+      if (idx !== undefined && typeof lenFn === "function" && typeof getVE === "function") {
+        let vlen = 0;
+        try {
+          vlen = lenFn(obj);
+        } catch {
+          vlen = 0;
+        }
+        if (idx < vlen) {
+          const f = vecDescs?.get(prop);
+          if (f === undefined || !(f & _SC_ACCESSOR)) {
+            let value: any;
+            try {
+              value = getVE(obj, idx);
+            } catch {
+              value = undefined;
+            }
+            const flags = f ?? _SC_ELEM_DEFAULT;
+            return {
+              value,
+              writable: !!(flags & _SC_WRITABLE),
+              enumerable: !!(flags & _SC_ENUMERABLE),
+              configurable: !!(flags & _SC_CONFIGURABLE),
+            };
+          }
+        }
+        // idx >= length or accessor-flagged → generic sidecar handling below.
+      }
+    }
+  }
   // 1. Sidecar (dynamically added / defineProperty'd props).
   const sc = _wasmStructProps.get(obj);
   const descs = _wasmPropDescs.get(obj);
@@ -5583,6 +5759,217 @@ function _asArrayIndex(key: string): number | undefined {
   const n = Number(key);
   if (Number.isInteger(n) && n >= 0 && n < 4294967295 && String(n) === key) return n;
   return undefined;
+}
+
+// (#3116) Default attribute flags for a live array element that has never been
+// reconfigured: data property, writable+enumerable+configurable (§10.4.2).
+const _SC_ELEM_DEFAULT = _SC_DEFINED | _SC_WRITABLE | _SC_ENUMERABLE | _SC_CONFIGURABLE;
+// Allocation guard for beyond-length element defines / length grows (mirrors
+// the 16M guard in maybeEmitVecLengthDefine; element defines double capacity,
+// so use half). Defines beyond this fall back to the generic sidecar arm.
+const _VEC_DEFINE_GROW_LIMIT = 8388608;
+
+/**
+ * (#3116) §10.4.2 Array exotic [[DefineOwnProperty]] for a native WasmGC vec
+ * receiver in JS-host mode.
+ *
+ * Root cause this implements: defineProperty/defineProperties on a compiled
+ * array reaches the runtime with the RAW vec struct; the generic opaque-struct
+ * arm could only store values in the host-side sidecar, but element/length
+ * reads compile to direct vec accesses (struct.get / array.get / __vec_get)
+ * that never consult the sidecar — so defined values were invisible and the
+ * `length` machinery (§10.4.2.1 ArraySetLength: RangeError validation, shrink
+ * honoring non-configurable elements, non-writable length) did not exist.
+ *
+ * Split representation: VALUES live in the vec itself (written through the
+ * `__vec_set_elem` / `__vec_set_len` exports so both static and dynamic read
+ * lanes observe them); ATTRIBUTES live in the per-object sidecar descriptor
+ * table (`_getSidecarDescs`), with "no entry" meaning the §10.4.2 default
+ * (data, writable+enumerable+configurable). `_validatePropertyDescriptor`
+ * provides the §10.1.6.3 rejection matrix; existing in-bounds elements are
+ * seeded with the default flags first so redefinition validation sees a data
+ * property, not a first definition.
+ *
+ * Returns true when fully handled. Returns false → caller falls through to
+ * the generic struct arm (receiver is not a vec / mutation exports missing /
+ * unsupported element kind / non-index non-length key / grow limit exceeded).
+ * Ordering: throws (TypeError/RangeError) only fire on genuine vec receivers,
+ * before any mutation, matching DefinePropertyOrThrow.
+ */
+function _vecDefineOwnProperty(
+  obj: any,
+  key: any,
+  desc: PropertyDescriptor,
+  callbackState?: { getExports: () => Record<string, Function> | undefined },
+): boolean {
+  if (typeof key === "symbol") return false;
+  const exports = callbackState?.getExports();
+  if (!exports) return false;
+  const isVec = exports.__is_vec as ((v: any) => number) | undefined;
+  const mutSup = exports.__vec_mut_supported as ((v: any) => number) | undefined;
+  const lenFn = exports.__vec_len as ((v: any) => number) | undefined;
+  const getFn = exports.__vec_get as ((v: any, i: number) => any) | undefined;
+  const setElem = exports.__vec_set_elem as ((v: any, i: number, x: any) => number) | undefined;
+  const setLen = exports.__vec_set_len as ((v: any, n: number) => number) | undefined;
+  if (
+    typeof isVec !== "function" ||
+    typeof mutSup !== "function" ||
+    typeof lenFn !== "function" ||
+    typeof getFn !== "function" ||
+    typeof setElem !== "function" ||
+    typeof setLen !== "function"
+  ) {
+    return false;
+  }
+  try {
+    if (isVec(obj) !== 1 || mutSup(obj) !== 1) return false;
+  } catch {
+    return false;
+  }
+
+  const keyStr = String(key);
+  const sDescs = _getSidecarDescs(obj);
+  const oldLen = lenFn(obj);
+  const hasValue = Object.prototype.hasOwnProperty.call(desc, "value");
+  const hasWritable = Object.prototype.hasOwnProperty.call(desc, "writable");
+  const hasGet = Object.prototype.hasOwnProperty.call(desc, "get");
+  const hasSet = Object.prototype.hasOwnProperty.call(desc, "set");
+
+  // ── "length" → §10.4.2.1 ArraySetLength ─────────────────────────────
+  if (keyStr === "length") {
+    // length is a non-configurable, non-enumerable DATA property.
+    if (hasGet || hasSet) throw new TypeError("Cannot redefine property: length");
+    if (desc.configurable === true) throw new TypeError("Cannot redefine property: length");
+    if (desc.enumerable === true) throw new TypeError("Cannot redefine property: length");
+    const lenFlags = sDescs.get("length");
+    const lenWritable = lenFlags === undefined ? true : !!(lenFlags & _SC_WRITABLE);
+    if (!hasValue) {
+      // Attribute-only define ({writable:false} — freeze/seal shape).
+      if (hasWritable) {
+        if (!lenWritable && desc.writable === true) {
+          throw new TypeError("Cannot redefine property: length");
+        }
+        sDescs.set("length", desc.writable ? _SC_DEFINED | _SC_WRITABLE : _SC_DEFINED);
+      }
+      return true;
+    }
+    // Steps 3-8: newLen = ToUint32(value), numberLen = ToNumber(value);
+    // SameValueZero mismatch → RangeError (catches negatives, non-integers,
+    // NaN, > 2^32-1). ToNumber goes through the wasm-aware ToPrimitive so an
+    // object value with compiled valueOf/toString converts per §7.1.1
+    // (15.2.3.7-6-a-14x) instead of throwing "Cannot convert object".
+    const numberLen = Number(_toPrimitiveSync(desc.value, "number", callbackState));
+    const newLen = numberLen >>> 0;
+    if (newLen !== numberLen) throw new RangeError("Invalid array length");
+    if (newLen > oldLen && newLen > _VEC_DEFINE_GROW_LIMIT) return false; // allocation guard
+    if (newLen !== oldLen && !lenWritable) {
+      throw new TypeError("Cannot redefine property: length");
+    }
+    // Shrink: delete elements from the top, stopping at the first
+    // non-configurable one (steps 19.b-d: length lands at that index + 1 and
+    // the define reports failure → DefinePropertyOrThrow TypeError).
+    let finalLen = newLen;
+    let blocked = false;
+    if (newLen < oldLen) {
+      for (let i = oldLen - 1; i >= newLen; i--) {
+        const f = sDescs.get(String(i));
+        const configurable = f === undefined ? true : !!(f & _SC_CONFIGURABLE);
+        if (!configurable) {
+          finalLen = i + 1;
+          blocked = true;
+          break;
+        }
+        sDescs.delete(String(i));
+      }
+    }
+    if (finalLen !== oldLen) setLen(obj, finalLen);
+    if (hasWritable) {
+      sDescs.set("length", desc.writable ? _SC_DEFINED | _SC_WRITABLE : _SC_DEFINED);
+    }
+    if (blocked) throw new TypeError("Cannot redefine property: length");
+    return true;
+  }
+
+  // ── array-index keys ─────────────────────────────────────────────────
+  const idx = _asArrayIndex(keyStr);
+  if (idx === undefined) return false; // named prop → generic struct arm
+  if (idx >= oldLen && idx + 1 > _VEC_DEFINE_GROW_LIMIT) return false; // allocation guard
+
+  // NOTE on existing-element synthesis: an in-bounds element with no explicit
+  // descriptor entry is treated as a FIRST definition (omitted attributes
+  // default false), not a redefinition of a default data property. The codegen
+  // pre-grows the vec to idx+1 (`maybeEmitVecLengthGrowth`) BEFORE the runtime
+  // call, so `idx < oldLen` cannot distinguish a genuine element from a
+  // compiler-created hole — seeding default (configurable) flags for a hole
+  // suppressed the §10.1.6.3 non-configurable rejection matrix for
+  // fresh-index defines (15.2.3.6-4-252 regression). Read-side descriptor
+  // synthesis (_readOwnDescriptor) still reports w/e/c=true for untouched
+  // in-bounds elements, which matches §10.4.2 defaults for literal elements.
+  const nKey = _normalizeDescKey(keyStr);
+  const hadEntry = sDescs.has(nKey);
+
+  let existingVal: any;
+  let existingDesc: PropertyDescriptor | undefined;
+  if (idx < oldLen) {
+    try {
+      existingVal = getFn(obj, idx);
+    } catch {
+      existingVal = undefined;
+    }
+    if (hadEntry) {
+      existingDesc = _readOwnDescriptor(obj, nKey, exports);
+    }
+  } else {
+    // §10.4.2 step 2/4: adding an element at idx >= length requires length to
+    // be writable.
+    const lenFlags = sDescs.get("length");
+    const lenWritable = lenFlags === undefined ? true : !!(lenFlags & _SC_WRITABLE);
+    if (!lenWritable) {
+      throw new TypeError("Cannot redefine property: " + keyStr);
+    }
+  }
+
+  const newFlags = _validatePropertyDescriptor(sDescs, nKey, desc, existingVal, existingDesc);
+  sDescs.set(nKey, newFlags);
+
+  // Apply the value into the vec itself so element reads observe it.
+  if (hasValue) {
+    if (setElem(obj, idx, desc.value) !== 1) {
+      // Element kind can't hold this value (e.g. string into an f64 vec after
+      // unbox) — fall back to sidecar storage so at least dynamic reads see it.
+      _sidecarSet(obj, keyStr, desc.value);
+    }
+  }
+  // NOTE: a VALUE-less define beyond length (accessor / bare attributes) does
+  // NOT extend the vec length here, although §10.4.2 says length becomes
+  // idx+1. The element read lane cannot serve accessors (typed vec reads),
+  // so extending length would turn a previously-OOB read (undefined — which
+  // matches a getter returning undefined) into a hole-default read (null/0)
+  // — a strict behavioral regression (15.2.3.6-4-312). The descriptor flags
+  // above still make the §10.1.6.3 redefinition matrix correct; length
+  // extension for accessor defines is deferred to the read-lane accessor
+  // follow-up (#3022).
+
+  // Accessor storage mirrors the generic struct arm (`__get_<k>`/`__set_<k>`
+  // in the props sidecar) so dynamic reads/hasOwnProperty observe it. NOTE:
+  // static/typed element reads bypass accessors — known limitation; the flags
+  // above still make the validation matrix (shrink-blocking, redefinition
+  // rules) spec-correct.
+  if (hasGet || hasSet) {
+    const sc = _wasmStructProps.get(obj) ?? {};
+    _wasmStructProps.set(obj, sc);
+    if (keyStr in sc && typeof (sc as any)[keyStr] !== "function") delete (sc as any)[keyStr];
+    if (hasGet) {
+      if (desc.get === undefined) delete (sc as any)[`__get_${keyStr}`];
+      else (sc as any)[`__get_${keyStr}`] = desc.get;
+    }
+    if (hasSet) {
+      if (desc.set === undefined) delete (sc as any)[`__set_${keyStr}`];
+      else (sc as any)[`__set_${keyStr}`] = desc.set;
+    }
+    if (!(keyStr in sc)) (sc as any)[keyStr] = undefined;
+  }
+  return true;
 }
 
 // (#2801) Present a WasmGC vec (array) to the host as a REAL JS array view.
@@ -8506,12 +8893,26 @@ assert._isSameValue = isSameValue;
         // fallback — keeps harness-shaped dynamic functions working).
         const wasmNewFnShim = createNewFunctionShim({});
         return (params: any, body: any) => {
-          try {
-            return wasmNewFnShim(params, body);
-          } catch {
-            // biome-ignore lint/security/noGlobalEval: intentional test262 runtime new Function
-            return new Function(String(params ?? ""), String(body ?? ""));
+          // (#3058) A body carrying a `class` expression/declaration can never
+          // round-trip through the meta-circular Wasm path usefully: the child
+          // module's compiled class value is an opaque struct the PARENT module
+          // cannot construct (its dyn-new tag dispatch only knows its own class
+          // tags), and a class extending a host builtin (the test262
+          // resizableArrayBufferUtils `subClass` shape — `return class MyUint8Array
+          // extends Uint8Array {}`) additionally loses the builtin's statics and
+          // [[Construct]] semantics. The host `Function` fallback below produces a
+          // genuine host class that interops through the extern paths, so route
+          // class-carrying bodies there directly.
+          const bodyStr = String(body ?? "");
+          if (!/\bclass\b/.test(bodyStr)) {
+            try {
+              return wasmNewFnShim(params, bodyStr);
+            } catch {
+              /* fall through to the host constructor */
+            }
           }
+          // biome-ignore lint/security/noGlobalEval: intentional test262 runtime new Function
+          return new Function(String(params ?? ""), bodyStr);
         };
       }
       if (name === "__extern_get")
@@ -8590,6 +8991,34 @@ assert._isSameValue = isSameValue;
             if (key === "byteLength") {
               const bl = _byteVecByteLength(obj, exports);
               if (bl !== undefined) return bl;
+            }
+            // (#3058) `maxByteLength` / `resizable` on a compiled-AB byte-vec
+            // struct: resizable-ness is the -1 sentinel from __ab_max_len; a
+            // fixed buffer reports maxByteLength === byteLength (§25.1.5.4);
+            // a detached buffer reports maxByteLength 0 (§25.1.5.2 step 4)
+            // while `resizable` keeps answering from the retained max slot.
+            if (key === "maxByteLength" || key === "resizable") {
+              const bl = _byteVecByteLength(obj, exports);
+              if (bl !== undefined) {
+                const ml = _abMaxByteLength(obj, exports);
+                if (key === "resizable") return ml >= 0;
+                if (_detachedBuffers.has(obj) || _sidecarGet(obj, "__detached__")) return 0;
+                return ml >= 0 ? ml : bl;
+              }
+            }
+            // (#3058) `.resize` read as a VALUE off a compiled-AB byte-vec
+            // struct (`typeof ab.resize === 'function'` — the lead assert of
+            // every resize-behavior test). An arrow function is deliberately
+            // non-constructible so `new ab.resize()` throws TypeError
+            // (resize/nonconstructor.js).
+            if (key === "resize") {
+              const bl = _byteVecByteLength(obj, exports);
+              if (bl !== undefined) {
+                return (newLength: any) => {
+                  _abResizeStruct(obj, newLength, exports);
+                  return undefined;
+                };
+              }
             }
           }
           return undefined;
@@ -9873,6 +10302,9 @@ assert._isSameValue = isSameValue;
           }
           // WasmGC struct obj: apply via sidecar
           const d = _toPropertyDescriptorValidate(desc, getField, wrap, hasField);
+          // (#3116) Array exotic receiver: element/length defines apply into
+          // the vec itself (§10.4.2) so vec-lane reads observe them.
+          if (_vecDefineOwnProperty(obj, key, d, callbackState)) return obj;
           const sDescs = _getSidecarDescs(obj);
           const nKey = _normalizeDescKey(key);
           const existingDesc = _readOwnDescriptor(obj, nKey, callbackState?.getExports());
@@ -9937,6 +10369,9 @@ assert._isSameValue = isSameValue;
               // Distinguish WasmGC "opaque" errors from spec-mandated errors.
               const msg = (e as Error).message || "";
               if (msg.includes("opaque") || msg.includes("WebAssembly")) {
+                // (#3116) Array exotic receiver: element/length defines apply
+                // into the vec itself (§10.4.2) so vec-lane reads observe them.
+                if (_vecDefineOwnProperty(obj, prop, desc, callbackState)) return obj;
                 // WasmGC struct — validate against sidecar descriptors, then store.
                 // Pass existing sidecar value for SameValue check on non-writable props.
                 const sDescs = _getSidecarDescs(obj);
@@ -9992,6 +10427,10 @@ assert._isSameValue = isSameValue;
             if (e instanceof TypeError) {
               const msg = (e as Error).message || "";
               if (msg.includes("opaque") || msg.includes("WebAssembly")) {
+                // (#3116) Array exotic receiver: index-keyed accessor defines
+                // route through §10.4.2 so the validation matrix (shrink
+                // blocking, redefinition rules) sees them.
+                if (_vecDefineOwnProperty(obj, prop, desc, callbackState)) return obj;
                 // WasmGC struct — store accessor in sidecar
                 const sDescs = _getSidecarDescs(obj);
                 const nProp = _normalizeDescKey(prop);
@@ -10160,6 +10599,9 @@ assert._isSameValue = isSameValue;
             // the spec's step-5 DefinePropertyOrThrow ordering.
             for (const { key, desc } of gathered) {
               if (isObjWasm) {
+                // (#3116) Array exotic receiver: element/length defines apply
+                // into the vec itself (§10.4.2).
+                if (_vecDefineOwnProperty(obj, key, desc, callbackState)) continue;
                 const nKey = _normalizeDescKey(key as string);
                 const existingDesc2 = _readOwnDescriptor(obj, nKey, callbackState?.getExports());
                 const existingVal2 = _sidecarGet(obj, key as string);
@@ -10210,6 +10652,9 @@ assert._isSameValue = isSameValue;
                   validated.push({ key: key as string, desc });
                 }
                 for (const { key, desc } of validated) {
+                  // (#3116) Array exotic receiver: element/length defines apply
+                  // into the vec itself (§10.4.2).
+                  if (_vecDefineOwnProperty(obj, key, desc, callbackState)) continue;
                   const nKey = _normalizeDescKey(key);
                   const existingDesc2 = _readOwnDescriptor(obj, nKey, callbackState?.getExports());
                   const existingVal2 = _sidecarGet(obj, key);
@@ -10700,6 +11145,13 @@ assert._isSameValue = isSameValue;
                   : wrappedArgs[1];
               wrappedObj.set(key, value);
               return _unwrapForHost(value);
+            }
+            // (#3058) ArrayBuffer.prototype.resize on a compiled-AB vec struct
+            // (the host-lane arm of the #3054-C resizable machinery). Handles
+            // BOTH statically-typed and `any`-typed receivers — the static path
+            // also lands here because the vec struct is opaque to the host.
+            if (method === "resize" && _isWasmStruct(obj) && exports) {
+              if (_abResizeStruct(obj, wrappedArgs[0], exports)) return undefined;
             }
             // DataView method fallback (#1056): the compiler emits DataView as an
             // i32_byte vec struct, so DataView.prototype methods aren't directly
@@ -13837,6 +14289,26 @@ assert._isSameValue = isSameValue;
           if (key === "byteLength") {
             const bl = _byteVecByteLength(obj, exports);
             if (bl !== undefined) return bl;
+          }
+          // (#3058) `maxByteLength` / `resizable` / `resize` on a compiled-AB
+          // byte-vec struct (mirrors the __extern_get arms).
+          if (key === "maxByteLength" || key === "resizable") {
+            const bl = _byteVecByteLength(obj, exports);
+            if (bl !== undefined) {
+              const ml = _abMaxByteLength(obj, exports);
+              if (key === "resizable") return ml >= 0;
+              if (_detachedBuffers.has(obj) || _sidecarGet(obj, "__detached__")) return 0;
+              return ml >= 0 ? ml : bl;
+            }
+          }
+          if (key === "resize") {
+            const bl = _byteVecByteLength(obj, exports);
+            if (bl !== undefined) {
+              return (newLength: any) => {
+                _abResizeStruct(obj, newLength, exports);
+                return undefined;
+              };
+            }
           }
         }
         // #1057 — vec wrapper structs (results of String.prototype.split,

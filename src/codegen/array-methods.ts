@@ -395,6 +395,16 @@ export function emitBoundsCheckedArrayGet(
   // zero-extending (`get_u`). When undefined, fall back to the legacy
   // storage-kind heuristic (i8→get_u, i16→get_s) for non-typed-array callers.
   signedness?: "s" | "u",
+  // (#2773 S7) Optional replacement for the default `array.len(arr)` upper
+  // bound: instructions that push the LOGICAL length (i32). A grown vec's
+  // backing array is over-allocated (capacity = max(idx+1, cap*2, 4)), so
+  // `array.len` over-reports the bound and an index in [length, capacity)
+  // silently reads the element DEFAULT (null/0) instead of being OOB —
+  // `var k=[]; k[0]=1; k[1]` read null, not `undefined` (the test262 HOF
+  // "-c-ii-5" family). The vec-struct call site passes
+  // `[local.get vecRef, struct.get length]` here. When undefined, the legacy
+  // capacity bound is emitted — every existing caller is byte-identical.
+  lengthBoundInstrs?: Instr[],
 ): void {
   // Save index and array ref to locals so we can use them in both branches
   const idxLocal = allocLocal(fctx, `__bounds_idx_${fctx.locals.length}`, { kind: "i32" });
@@ -413,12 +423,22 @@ export function emitBoundsCheckedArrayGet(
     if (undefinedFuncIdx !== undefined) flushLateImportShifts(ctx, fctx);
   }
 
-  // Condition: idx >= 0 && idx < array.len(arr)
-  // We use: (unsigned)idx < array.len — this handles negative indices too
-  // since negative i32 interpreted as unsigned is > any valid length
+  // Condition: idx >= 0 && idx < bound
+  // We use: (unsigned)idx < bound — this handles negative indices too
+  // since negative i32 interpreted as unsigned is > any valid length.
+  // (#2773 S7) The bound is the caller-supplied LOGICAL length when provided
+  // (vec length field — capacity may exceed it after a grow), else the
+  // backing-array capacity (`array.len`, the legacy byte-identical default).
   fctx.body.push({ op: "local.get", index: idxLocal });
-  fctx.body.push({ op: "local.get", index: arrLocal });
-  fctx.body.push({ op: "array.len" });
+  if (lengthBoundInstrs) {
+    // Clone per use — a caller may pass the same template to sibling helpers,
+    // and one Instr OBJECT must never appear twice in a body (the DCE type
+    // remap would visit it twice; see reference_shared_instr_object_dce_double_remap).
+    fctx.body.push(...lengthBoundInstrs.map((i) => ({ ...i }) as Instr));
+  } else {
+    fctx.body.push({ op: "local.get", index: arrLocal });
+    fctx.body.push({ op: "array.len" });
+  }
   fctx.body.push({ op: "i32.lt_u" } as Instr);
 
   // Build the "then" branch: in-bounds -> array.get. (#2593) For a packed i8/i16
@@ -637,6 +657,12 @@ const ARRAY_LIKE_METHOD_SET = new Set([
 
 /** Search methods handled inline (no callback). #1360 */
 const ARRAY_LIKE_SEARCH_METHODS = new Set(["indexOf", "lastIndexOf", "includes"]);
+
+// (#2773 S8) Array-like `.call(obj, cb, thisArg)` methods with a spec thisArg
+// slot at args[2] (§23.1.3.* `If thisArg is present, its value is used as the
+// this value`). reduce/reduceRight take initialValue at args[2] — NEVER a
+// thisArg (their callback `this` is undefined).
+const ARRAY_LIKE_THISARG_METHODS = new Set(["every", "some", "forEach", "find", "findIndex", "filter", "map"]);
 
 /**
  * #2036 S6 step 1 — Array.prototype methods that, over a borrowed array-like
@@ -874,6 +900,23 @@ export function compileArrayLikePrototypeCall(
   ensureLateImport(ctx, "__js_array_push", [{ kind: "externref" }, { kind: "externref" }], []);
   ensureLateImport(ctx, "__extern_set", [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }], []);
   ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
+  // (#2773 S8) A boolean-returning callback (`return prev === null` — the
+  // test262 reduce/map "-c-ii-2x" family) must box its i32 result via
+  // `__box_boolean` (true/false), not `__box_number` (1/0): the number-boxed
+  // value fails `assert.sameValue(result, true)` in any `any`-typed consumer.
+  // Detect boolean-ness from the callback's TS signature (works for named fn
+  // refs whose closure metadata erases the brand) and pre-register the host
+  // box HERE, with the other up-front imports, so no funcIdx baked into a
+  // detached ladder template below is shifted by a late registration (the #16
+  // discipline). Host lane only: standalone keeps the number box unless its
+  // native `__box_boolean` is already registered (mirrors #2785's host-first
+  // shipping; the arms below check funcMap at build time).
+  // Routed through the oracle (#1930): the signature fact's `returns` is
+  // `{kind:"boolean"}` exactly when the declared return type is boolean.
+  const cbTsReturnsBool = ctx.oracle.signatureOf(cbArg)?.returns.kind === "boolean";
+  if (cbTsReturnsBool && !noJsHost(ctx)) {
+    ensureLateImport(ctx, "__box_boolean", [{ kind: "i32" }], [{ kind: "externref" }]);
+  }
   flushLateImportShifts(ctx, fctx);
 
   // Compile receiver to externref
@@ -921,6 +964,33 @@ export function compileArrayLikePrototypeCall(
 
   const closureTmp = allocLocal(fctx, `__ali_cl_${fctx.locals.length}`, cbResult);
   fctx.body.push({ op: "local.set", index: closureTmp });
+
+  // (#2773 S8) Spec `thisArg` for the `.call(obj, cb, thisArg)` form. The
+  // direct-array HOF path installs thisArg into the `__current_this` global
+  // around the call_ref (#2152), but this generic array-like loop never did —
+  // `Array.prototype.map.call({0:11,length:2}, cb, thisArg)` ran `cb` with the
+  // wrong `this` (the test262 HOF "-c-ii-20" family). Compile it here (spec
+  // arg-eval order: receiver, callback, thisArg) into an externref local;
+  // each method arm wraps its callback invocation via `withThisInstalled`
+  // below. Args layout for the `.call` form: 0=receiver, 1=callback,
+  // 2=thisArg — ONLY for methods with a spec thisArg slot (reduce/reduceRight
+  // take initialValue at args[2], never a thisArg). Arrow callbacks are
+  // lexically `this`-bound — thisArg MUST be ignored (mirrors compileThisArg).
+  // Runs BEFORE the #16 re-resolves below (this compile can register imports).
+  let thisSlots: { thisArgTmp: number; prevThisTmp: number } | undefined;
+  if (ARRAY_LIKE_THISARG_METHODS.has(methodName) && callExpr.arguments.length >= 3 && !ts.isArrowFunction(cbArg)) {
+    ensureCurrentThisGlobal(ctx);
+    const thisArgTmp = allocLocal(fctx, `__ali_this_${fctx.locals.length}`, { kind: "externref" });
+    const prevThisTmp = allocLocal(fctx, `__ali_prevthis_${fctx.locals.length}`, { kind: "externref" });
+    const tArgType = compileExpression(ctx, fctx, callExpr.arguments[2]!);
+    if (tArgType && tArgType.kind !== "externref") {
+      coerceType(ctx, fctx, tArgType, { kind: "externref" });
+    } else if (!tArgType) {
+      emitUndefined(ctx, fctx);
+    }
+    fctx.body.push({ op: "local.set", index: thisArgTmp });
+    thisSlots = { thisArgTmp, prevThisTmp };
+  }
 
   // #16 — re-resolve the per-element helpers AFTER the callback compile (which,
   // like the receiver compile, can register new functions and shift every
@@ -990,6 +1060,41 @@ export function compileArrayLikePrototypeCall(
     { op: "ref.as_non_null" } as Instr,
     { op: "call_ref", typeIdx: closureInfo.funcTypeIdx } as Instr,
   ];
+
+  /**
+   * (#2773 S8) Wrap a callback-invocation template with the #2152
+   * `__current_this` install/restore so the spec `thisArg` binds as the
+   * callback's `this` for the duration of the call_ref. MUST be invoked at
+   * arm-build time (immediately before the loop instrs are assembled), NOT
+   * baked early: `ctx.currentThisGlobalIdx` is a MODULE global whose index
+   * shifts when an arm later adds a string-constant IMPORT global
+   * (`addStringConstantGlobal` → `fixupModuleGlobalIndices` — which patches
+   * ctx fields and committed bodies but NOT detached templates). Reading the
+   * idx fresh at invocation keeps the baked index correct. The restore after
+   * the call_ref does not disturb the call result already on the stack.
+   * Fresh install/restore Instr objects per invocation (no aliasing).
+   */
+  const withThisInstalled = (call: Instr[]): Instr[] =>
+    thisSlots === undefined || ctx.currentThisGlobalIdx < 0
+      ? call
+      : [
+          { op: "global.get", index: ctx.currentThisGlobalIdx } as Instr,
+          { op: "local.set", index: thisSlots.prevThisTmp } as Instr,
+          { op: "local.get", index: thisSlots.thisArgTmp } as Instr,
+          { op: "global.set", index: ctx.currentThisGlobalIdx } as Instr,
+          ...call,
+          { op: "local.get", index: thisSlots.prevThisTmp } as Instr,
+          { op: "global.set", index: ctx.currentThisGlobalIdx } as Instr,
+        ];
+
+  // (#2773 S8) Resolved `__box_boolean` funcIdx for a boolean-returning
+  // callback's i32 result (registered up-front — see the #16 block note).
+  // undefined ⇒ the ladders keep the legacy number box (standalone without the
+  // native helper, or a non-boolean callback).
+  const cbBoolBoxIdx =
+    cbTsReturnsBool || (closureInfo.returnType as { boolean?: boolean } | null)?.boolean === true
+      ? ctx.funcMap.get("__box_boolean")
+      : undefined;
 
   /** Convert callback result to i32 truthy flag */
   const toTruthy: Instr[] =
@@ -1068,7 +1173,7 @@ export function compileArrayLikePrototypeCall(
               ...exitIfDone,
               ...gatedBody([
                 ...loadElem,
-                ...callClosure,
+                ...withThisInstalled(callClosure),
                 ...toTruthy,
                 { op: "i32.eqz" } as Instr,
                 {
@@ -1105,7 +1210,7 @@ export function compileArrayLikePrototypeCall(
               ...exitIfDone,
               ...gatedBody([
                 ...loadElem,
-                ...callClosure,
+                ...withThisInstalled(callClosure),
                 ...toTruthy,
                 {
                   op: "if",
@@ -1138,7 +1243,7 @@ export function compileArrayLikePrototypeCall(
               ...exitIfDone,
               ...gatedBody([
                 ...loadElem,
-                ...callClosure,
+                ...withThisInstalled(callClosure),
                 // drop return value if any
                 ...(closureInfo.returnType !== null ? [{ op: "drop" } as Instr] : []),
               ]),
@@ -1164,7 +1269,7 @@ export function compileArrayLikePrototypeCall(
             body: [
               ...exitIfDone,
               ...loadElem,
-              ...callClosure,
+              ...withThisInstalled(callClosure),
               ...toTruthy,
               {
                 op: "if",
@@ -1198,7 +1303,7 @@ export function compileArrayLikePrototypeCall(
             body: [
               ...exitIfDone,
               ...loadElem,
-              ...callClosure,
+              ...withThisInstalled(callClosure),
               ...toTruthy,
               {
                 op: "if",
@@ -1254,7 +1359,7 @@ export function compileArrayLikePrototypeCall(
               ...exitIfDone,
               ...gatedBody([
                 ...loadElem,
-                ...callClosure,
+                ...withThisInstalled(callClosure),
                 ...toTruthy,
                 {
                   op: "if",
@@ -1325,7 +1430,10 @@ export function compileArrayLikePrototypeCall(
           : closureInfo.returnType.kind === "f64"
             ? [{ op: "call", funcIdx: mapBoxIdx } as Instr]
             : closureInfo.returnType.kind === "i32"
-              ? [{ op: "f64.convert_i32_s" }, { op: "call", funcIdx: mapBoxIdx } as Instr]
+              ? // (#2773 S8) boolean-returning callback → __box_boolean (true/false)
+                cbBoolBoxIdx !== undefined
+                ? [{ op: "call", funcIdx: cbBoolBoxIdx } as Instr]
+                : [{ op: "f64.convert_i32_s" }, { op: "call", funcIdx: mapBoxIdx } as Instr]
               : closureInfo.returnType.kind === "ref" || closureInfo.returnType.kind === "ref_null"
                 ? [{ op: "extern.convert_any" }]
                 : []; // externref: already right type
@@ -1372,7 +1480,7 @@ export function compileArrayLikePrototypeCall(
               ...exitIfDone,
               ...gatedBody([
                 ...loadElem,
-                ...callClosure,
+                ...withThisInstalled(callClosure),
                 ...mapReturnToExternref,
                 { op: "local.set", index: mappedTmp } as Instr,
                 ...storeMapped,
@@ -1514,7 +1622,10 @@ export function compileArrayLikePrototypeCall(
           : closureInfo.returnType.kind === "f64"
             ? [{ op: "call", funcIdx: rdBoxIdx } as Instr]
             : closureInfo.returnType.kind === "i32"
-              ? [{ op: "f64.convert_i32_s" }, { op: "call", funcIdx: rdBoxIdx } as Instr]
+              ? // (#2773 S8) boolean-returning callback → __box_boolean (true/false)
+                cbBoolBoxIdx !== undefined
+                ? [{ op: "call", funcIdx: cbBoolBoxIdx } as Instr]
+                : [{ op: "f64.convert_i32_s" }, { op: "call", funcIdx: rdBoxIdx } as Instr]
               : closureInfo.returnType.kind === "ref" || closureInfo.returnType.kind === "ref_null"
                 ? [{ op: "extern.convert_any" }]
                 : []; // externref: already right type
@@ -1669,7 +1780,10 @@ export function compileArrayLikePrototypeCall(
           : closureInfo.returnType.kind === "f64"
             ? [{ op: "call", funcIdx: rrBoxIdx } as Instr]
             : closureInfo.returnType.kind === "i32"
-              ? [{ op: "f64.convert_i32_s" }, { op: "call", funcIdx: rrBoxIdx } as Instr]
+              ? // (#2773 S8) boolean-returning callback → __box_boolean (true/false)
+                cbBoolBoxIdx !== undefined
+                ? [{ op: "call", funcIdx: cbBoolBoxIdx } as Instr]
+                : [{ op: "f64.convert_i32_s" }, { op: "call", funcIdx: rrBoxIdx } as Instr]
               : closureInfo.returnType.kind === "ref" || closureInfo.returnType.kind === "ref_null"
                 ? [{ op: "extern.convert_any" }]
                 : [];

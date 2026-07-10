@@ -6,6 +6,7 @@ import { analyzeLinearUint8 } from "./linear-uint8-analysis.js";
 import { analyzeFnctorEscapeGate, deriveFnctorFields } from "./fnctor-escape-gate.js";
 import { isLinearU8RepresentableNew } from "./linear-uint8-signatures.js";
 import { definedFuncAt } from "./func-space.js"; // (#1916 S2) positional-read chokepoint
+import { emitVecDefineWritebackExports } from "./vec-define-writeback.js"; // (#3116)
 import type { MultiTypedAST, TypedAST } from "../checker/index.js";
 import {
   isBigIntType,
@@ -54,6 +55,7 @@ import { scanForArrayHoles, ensureHoleType } from "./array-holes.js"; // (#2001 
 import { ensureDynReadHelpers, ensureDynMemberGet } from "./dyn-read.js"; // (#2580 M0) / (#3053 U0)
 import { collectClosureBaseWrapperTypeIdxs, buildClosureRefTestArms } from "./closure-classifier.js"; // (#2175 V2-S1)
 import { ensureNativeIteratorRuntime, fillNativeIteratorLateArms } from "./iterator-native.js";
+import { emitResizableAbExports } from "./dataview-native.js"; // (#3058)
 import { fillCombinatorToVec } from "./promise-combinators.js"; // (#2922) dynamic combinator-arg drain fill
 import { fillClosedMethodDispatch } from "./closed-method-dispatch.js";
 import { fillMemberSetDispatch, reserveVecFieldMaterializers } from "./member-set-dispatch.js";
@@ -2290,6 +2292,11 @@ export function generateModule(
     // DataView.prototype.{get,set}{Uint,Int,Float}* on i32_byte vec structs (#1056)
     emitDataViewByteExports(ctx);
 
+    // (#3058) __rab_resize / __ab_max_len exports so the host runtime can
+    // implement ArrayBuffer.prototype.resize + maxByteLength/resizable on
+    // $__resizable_ab vec structs (no-op unless a resizable buffer exists).
+    emitResizableAbExports(ctx);
+
     // (#1503) __vec_set_byte for crypto.getRandomValues to write into Uint8Array vecs.
     emitVecSetByteExport(ctx);
 
@@ -2315,11 +2322,14 @@ export function generateModule(
     // the standalone native iterator runtime was registered.
     if (
       ctx.nativeIteratorUserArmPending &&
-      ctx.funcMap.has("__call_@@iterator") &&
-      ctx.funcMap.has("__call_next") &&
-      ctx.funcMap.has("__sget_value") &&
-      ctx.funcMap.has("__sget_done") &&
-      !ctx.funcMap.has("__is_truthy")
+      !ctx.funcMap.has("__is_truthy") &&
+      ((ctx.funcMap.has("__call_@@iterator") &&
+        ctx.funcMap.has("__call_next") &&
+        ctx.funcMap.has("__sget_value") &&
+        ctx.funcMap.has("__sget_done")) ||
+        // (#3119) The plain-`$Object` OBJ arm needs `__is_truthy` too (the
+        // `@@iterator`/`res` truthiness gates + the ToBoolean on `done`).
+        (ctx.funcMap.has("__extern_get") && ctx.funcMap.has("__box_symbol") && ctx.objectRuntimeTypes !== undefined))
     ) {
       // The USER `done` flag needs `__is_truthy` (ToBoolean on the boxed bool).
       // `emitStructFieldGetters` usually registers it via `addUnionImports` when a
@@ -3926,6 +3936,7 @@ function emitIteratorMethodExport(ctx: CodegenContext): void {
 
   emitMethodDispatch("@@iterator", "__call_@@iterator");
   emitMethodDispatch("next", "__call_next");
+  emitMethodDispatch("return", "__call_return"); // (#3100 S5) IteratorClose §7.4.9 USER-arm dispatcher
 }
 
 /**
@@ -6261,6 +6272,20 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
       ctx.funcMap.set("__vec_pop", popFuncIdx);
     }
   }
+
+  // (#3116) __vec_set_elem / __vec_set_len — array-exotic [[DefineOwnProperty]]
+  // write-back exports (values into the vec, attributes in the sidecar — see
+  // src/codegen/vec-define-writeback.ts for the full rationale). Gated on a
+  // defineProperty import being present so modules that never define
+  // properties stay byte-identical.
+  const wantsDefineWriteback =
+    ctx.funcMap.has("__defineProperty_value") ||
+    ctx.funcMap.has("__defineProperty_desc") ||
+    ctx.funcMap.has("__defineProperty_accessor") ||
+    ctx.funcMap.has("__defineProperties");
+  if (wantsDefineWriteback) {
+    emitVecDefineWritebackExports(ctx, mutEntries, unboxNumIdx);
+  }
 }
 
 /**
@@ -7141,6 +7166,9 @@ export function generateMultiModule(
 
     // Emit __dv_byte_{len,get,set} exports for DataView host runtime.
     emitDataViewByteExports(ctx);
+
+    // (#3058) Resizable-ArrayBuffer helper exports (mirrors generateModule path).
+    emitResizableAbExports(ctx);
 
     // Emit __test_str_from_externref / __test_str_to_externref helpers
     // (no-op unless ctx.testRuntime && ctx.nativeStrings).

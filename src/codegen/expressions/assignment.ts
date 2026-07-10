@@ -72,6 +72,7 @@ import {
   widenLocalToNullable,
 } from "./helpers.js";
 import {
+  emitUndefined,
   ensureLateImport,
   flushLateImportShifts,
   patchStructNewForAddedField,
@@ -2163,26 +2164,29 @@ function compileExternrefArrayDestructuringAssignment(
     }
   }
 
-  // Ensure __extern_get is available (#1866: ensureLateImport routes to the
-  // native object-runtime impl under --target standalone — no leaked
-  // `env::__extern_get` host import — and to the host import in JS-host mode).
-  ensureLateImport(ctx, "__extern_get", [{ kind: "externref" }, { kind: "externref" }], [{ kind: "externref" }]);
+  // (#3100 S4) Standalone/WASI element reads use the carrier-aware native
+  // `__extern_get_idx(mat, f64 i)` (#2190 vec/$ObjVec arms) — the native
+  // `__extern_get` is string-keyed and misses vec carriers. Host byte-identical.
+  const useIdxReads = ctx.standalone || ctx.wasi;
+  const readName = useIdxReads ? "__extern_get_idx" : "__extern_get";
+  const keyType: ValType = useIdxReads ? { kind: "f64" } : { kind: "externref" };
+  ensureLateImport(ctx, readName, [{ kind: "externref" }, keyType], [{ kind: "externref" }]);
   flushLateImportShifts(ctx, fctx);
-  let getIdx = ctx.funcMap.get("__extern_get");
+  let getIdx = ctx.funcMap.get(readName);
   if (getIdx === undefined) return null;
 
-  // Ensure __box_number is available (needed to convert index to externref)
+  // __box_number: host mode only — it boxes the index key for `__extern_get`.
   let boxIdx = ctx.funcMap.get("__box_number");
-  if (boxIdx === undefined) {
+  if (!useIdxReads && boxIdx === undefined) {
     const importsBefore = ctx.numImportFuncs;
     const boxType = addFuncType(ctx, [{ kind: "f64" }], [{ kind: "externref" }]);
     addImport(ctx, "env", "__box_number", { kind: "func", typeIdx: boxType });
     shiftLateImportIndices(ctx, fctx, importsBefore, ctx.numImportFuncs - importsBefore);
     boxIdx = ctx.funcMap.get("__box_number");
     // Also refresh getIdx since it may have shifted
-    getIdx = ctx.funcMap.get("__extern_get");
+    getIdx = ctx.funcMap.get(readName);
   }
-  if (boxIdx === undefined || getIdx === undefined) return null;
+  if ((!useIdxReads && boxIdx === undefined) || getIdx === undefined) return null;
 
   for (let i = 0; i < target.elements.length; i++) {
     const element = target.elements[i]!;
@@ -2198,13 +2202,11 @@ function compileExternrefArrayDestructuringAssignment(
         }
         let sliceIdx = ctx.funcMap.get("__extern_slice");
         if (sliceIdx === undefined) {
-          const importsBefore = ctx.numImportFuncs;
-          const sliceType = addFuncType(ctx, [{ kind: "externref" }, { kind: "f64" }], [{ kind: "externref" }]);
-          addImport(ctx, "env", "__extern_slice", { kind: "func", typeIdx: sliceType });
-          shiftLateImportIndices(ctx, fctx, importsBefore, ctx.numImportFuncs - importsBefore);
+          ensureLateImport(ctx, "__extern_slice", [{ kind: "externref" }, { kind: "f64" }], [{ kind: "externref" }]);
+          flushLateImportShifts(ctx, fctx);
           sliceIdx = ctx.funcMap.get("__extern_slice");
           boxIdx = ctx.funcMap.get("__box_number");
-          getIdx = ctx.funcMap.get("__extern_get");
+          getIdx = ctx.funcMap.get(readName);
         }
         if (sliceIdx !== undefined) {
           fctx.body.push({ op: "local.get", index: tmpLocal });
@@ -2216,10 +2218,9 @@ function compileExternrefArrayDestructuringAssignment(
       continue;
     }
 
-    // Emit: __extern_get(tmpLocal, box(i)) -> externref
     fctx.body.push({ op: "local.get", index: tmpLocal });
     fctx.body.push({ op: "f64.const", value: i });
-    fctx.body.push({ op: "call", funcIdx: boxIdx! });
+    if (!useIdxReads) fctx.body.push({ op: "call", funcIdx: boxIdx! });
     fctx.body.push({ op: "call", funcIdx: getIdx! });
 
     const elemType: ValType = { kind: "externref" };
@@ -4249,6 +4250,50 @@ function compileElementAssignment(
         { op: "local.set", index: dataLocal } as Instr,
       ],
     } as Instr);
+
+    // (#2773 S7) Gap-fill for an index-grow write PAST the current length on an
+    // externref-element vec: `a[idx] = v` with idx > length leaves
+    // [length, idx) holding the array.new_default null (or a stale popped
+    // slot), and once `vec.length` is bumped to idx+1 below those slots are
+    // IN-BOUNDS — so a read returned `null` where JS reads `undefined`
+    // (test262 reduceRight "-c-ii-5": `kIndex[3]=1` on an empty tracking array,
+    // then `typeof kIndex[2]` must be "undefined"). Fill the gap with the JS
+    // `undefined` value so the length-bounded read (property-access) returns it
+    // directly. True HOLE fidelity ($Hole sentinel + HOF visit-skip) is #2001
+    // S2/S3 — out of scope here; `undefined` is what §OrdinaryGet reads either
+    // way. Externref elements only: an f64/i32 slot cannot hold `undefined`
+    // (its gap stays the numeric default — #2001 S3 boundary). Standalone is
+    // neutral: `emitUndefined` falls back to `ref.null.extern` there, which is
+    // what `array.new_default` already produced.
+    if (arrDef.element.kind === "externref" || arrDef.element.kind === "ref_extern") {
+      // undefined → local, emitted IMPERATIVELY so the `__get_undefined` late
+      // import registers/shifts through the normal path (never baked inside a
+      // detached branch array).
+      emitUndefined(ctx, fctx);
+      const gapUndefLocal = allocLocal(fctx, `__gap_undef_${fctx.locals.length}`, { kind: "externref" });
+      fctx.body.push({ op: "local.set", index: gapUndefLocal });
+      const gapOldLenLocal = allocLocal(fctx, `__gap_len_${fctx.locals.length}`, { kind: "i32" });
+      fctx.body.push({ op: "local.get", index: vecLocal });
+      fctx.body.push({ op: "struct.get", typeIdx, fieldIdx: 0 }); // current length
+      fctx.body.push({ op: "local.set", index: gapOldLenLocal });
+      // if (idx > length) array.fill(data, length, undefined, idx - length)
+      fctx.body.push({ op: "local.get", index: idxLocal });
+      fctx.body.push({ op: "local.get", index: gapOldLenLocal });
+      fctx.body.push({ op: "i32.gt_s" });
+      fctx.body.push({
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: dataLocal } as Instr,
+          { op: "local.get", index: gapOldLenLocal } as Instr,
+          { op: "local.get", index: gapUndefLocal } as Instr,
+          { op: "local.get", index: idxLocal } as Instr,
+          { op: "local.get", index: gapOldLenLocal } as Instr,
+          { op: "i32.sub" } as Instr,
+          { op: "array.fill", typeIdx: arrTypeIdx } as Instr,
+        ],
+      } as Instr);
+    }
 
     // array.set: data[idx] = val (using potentially grown data)
     fctx.body.push({ op: "local.get", index: dataLocal });
