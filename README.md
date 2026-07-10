@@ -12,13 +12,13 @@ Direct AOT compilation from JavaScript and TypeScript to WebAssembly GC.
 Conformance is tracked along the two compile paths — both figures auto-update on every merge to `main`:
 
 <!-- AUTO:conformance-start -->
-**test262 conformance**: 32,651 / 43,106 (75.7 %)
+**test262 conformance**: 32,681 / 43,106 (75.8 %)
 <!-- AUTO:conformance-end -->
 
 The line above is the **JS-host path** (default `gc` target): runs alongside the js2wasm JS runtime, which supplies host imports for some built-ins.
 
 <!-- AUTO:conformance-standalone-start -->
-**standalone (host-free) test262 conformance**: 20,417 / 43,106 (47.4 %)
+**standalone (host-free) test262 conformance**: 20,422 / 43,106 (47.4 %)
 <!-- AUTO:conformance-standalone-end -->
 
 The line above is the **standalone path** (`--target standalone`/`wasi`): pure WasmGC with no JS host, measured host-free on the same official denominator. Lower today and actively hardening — this is where the current gap is.
