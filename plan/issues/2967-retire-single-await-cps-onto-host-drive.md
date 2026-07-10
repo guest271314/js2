@@ -185,6 +185,34 @@ net ≥ 0" is met.
   longer exists on main; the suite lives at
   `tests/equivalence/async-function.test.ts` and passes 7/7.
 
+## Slice 2a — host-drive closures (2026-07-10, this PR)
+
+`planAsyncClosureActivation` now ADMITS `host-drive` decisions instead of
+re-laning them to CPS / parking them. Why the #2646 park no longer applies:
+the park predates #2865's resume-fn environment re-establishment —
+`ensureAsyncResumeFunction` re-runs the `__self` capture-struct
+materialization (`selfCaptureLayout`), threads capture-cell deref routing
+(`boxedCaptures`) and `readsCurrentThis`. Local validation (7 new suite
+cases): multi-await fn-expr callback through the sig-dispatch ladder,
+captured outer locals across awaits, capture cells, single-await captures,
+discarded-tail bare await (the 22-regression CPS-emit bug — CORRECT on the
+frame), bare-await + promise-return adoption (the 23rd), rejection. All pass.
+
+Three PRE-EXISTING boundaries probed and control-verified identical on
+pristine main (NOT slice-2a scope):
+- `(): Promise<T>`-typed runner boundary → NaN (#3134);
+- `cb: any` / untyped-param call → the callee body compiles to
+  `return ref.null` (general any-callee gap; even SYNC closures return null
+  through it — likely the TRUE #2646 null_deref mechanism, since test262's
+  `asyncTest(testFunc)` is exactly this boundary);
+- local-env wasi trio in issue-2906-gap3 + 7 AsyncFromSyncIterator/
+  symbol-async-iterator e2e failures (identical on pristine main).
+
+Remaining CPS population after 2a: concise arrow bodies
+(`async x => await P`, non-block — planLinearAwaits can't drive), and the
+pattern/rest-param carve-out. Those are slice 2b's to migrate; deletion (2c)
+follows.
+
 ## Slice 2 re-scope (why deletion isn't next)
 
 The banked A/B unlocks deletion **per the flip**, but slice 1 deliberately

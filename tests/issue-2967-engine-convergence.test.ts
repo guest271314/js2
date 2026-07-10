@@ -53,7 +53,7 @@ describe("#2967 routing — one engine on the JS-host lane", () => {
     expect(wat).toContain("Promise_new_pending");
   });
 
-  it("an arrow closure of the same shape stays on the CPS lane (parked #2646 class)", async () => {
+  it("an arrow closure of the same shape takes the host-drive frame engine (slice 2a — #2646 park lifted)", async () => {
     const wat = await watOf(`
       const g = async (x: number): Promise<number> => {
         const a = await Promise.resolve(x).then((y: number) => y + 1);
@@ -61,8 +61,8 @@ describe("#2967 routing — one engine on the JS-host lane", () => {
       };
       export function main(): number { g(20); return 1; }
     `);
-    // Arrow resume fns would be named __async_resume_fanon_<pos>.
-    expect(wat).not.toContain("__async_resume_fanon");
+    // Arrow resume fns are named __async_resume_fanon_<pos>.
+    expect(wat).toContain("__async_resume_fanon");
   });
 
   it("a binding-pattern-param declaration stays on the CPS lane (derived prologue locals)", async () => {
@@ -172,5 +172,119 @@ describe("#2967 behavior — flipped single-await shapes on the frame engine", (
     const p = exports.main();
     expect(typeof p?.then).toBe("function");
     await expect(settled(p.then((v: number) => v))).resolves.toBe(42);
+  });
+});
+
+describe("#2967 slice 2a — host-drive CLOSURES (the lifted #2646 park)", () => {
+  it("multi-await function EXPRESSION callback (the exact #2646 asyncTest harness shape)", async () => {
+    // The runner is typed `() => any` so the call takes the #1131 sig-dispatch
+    // ladder (with the #2174 async-candidate externref widening). Two probed
+    // PRE-EXISTING boundaries are deliberately avoided (both control-verified
+    // broken on pristine main 32bae1f48f, where this closure was still legacy):
+    //   - `(): Promise<number>` runner return → #3134 (Promise<T>→f64 unwrap
+    //     mangles the real promise to NaN);
+    //   - `cb: any` / untyped param → the general any-callee call gap (the
+    //     body compiles to `return ref.null`; even a SYNC closure returns null
+    //     through it — not async-scope).
+    const exports = await compileToWasm(`
+      function runTest(cb: () => any): any {
+        return cb();
+      }
+      export function main(): any {
+        return runTest(async function (): Promise<number> {
+          const a = await Promise.resolve(9).then((x: number) => x + 1);
+          const b = await Promise.resolve(30).then((x: number) => x + 2);
+          return a + b;
+        });
+      }
+    `);
+    await expect(settled(exports.main())).resolves.toBe(42);
+  });
+
+  it("multi-await arrow reading a captured outer local across both awaits (__self materialization)", async () => {
+    const exports = await compileToWasm(`
+      export function main(): any {
+        const k: number = 20;
+        const g = async (): Promise<number> => {
+          const a = await Promise.resolve(1).then((x: number) => x + 0);
+          const b = await Promise.resolve(1).then((x: number) => x + 0);
+          return (a + b) * k + 2;
+        };
+        return g();
+      }
+    `);
+    await expect(settled(exports.main())).resolves.toBe(42);
+  });
+
+  it("single-await arrow with capture (the slice-1 re-lane population, now framed)", async () => {
+    const exports = await compileToWasm(`
+      export function main(): any {
+        const base: number = 40;
+        const g = async (x: number): Promise<number> => {
+          const a = await Promise.resolve(x).then((y: number) => y + 1);
+          return a + base;
+        };
+        return g(1);
+      }
+    `);
+    await expect(settled(exports.main())).resolves.toBe(42);
+  });
+
+  it("discarded-tail bare `await P;` closure resolves (the 22-regression CPS-emit bug, correct on the frame)", async () => {
+    const exports = await compileToWasm(`
+      let acc: number = 0;
+      export function main(): any {
+        const g = async (): Promise<void> => {
+          await Promise.resolve(0).then((x: number) => { acc = acc + 42; return x; });
+        };
+        return g().then(() => acc);
+      }
+    `);
+    await expect(settled(exports.main())).resolves.toBe(42);
+  });
+
+  it("bare `await P; return Q` closure adopts the returned promise (the 23rd-regression CPS-emit bug)", async () => {
+    const exports = await compileToWasm(`
+      export function main(): any {
+        const g = async (): Promise<number> => {
+          await Promise.resolve(0).then((x: number) => x);
+          return Promise.resolve(21).then((x: number) => x * 2) as any;
+        };
+        return g();
+      }
+    `);
+    await expect(settled(exports.main())).resolves.toBe(42);
+  });
+
+  it("a mutated capture CELL read after resume sees the pre-suspension write (boxedCaptures deref)", async () => {
+    const exports = await compileToWasm(`
+      export function main(): any {
+        let n: number = 0;
+        const bump = (): void => { n = n + 40; };
+        const g = async (): Promise<number> => {
+          n = n + 1;
+          const a = await Promise.resolve(1).then((x: number) => x + 0);
+          return n + a;
+        };
+        bump();
+        return g();
+      }
+    `);
+    // bump() → 40, closure pre-await → 41, +a(1) = 42.
+    await expect(settled(exports.main())).resolves.toBe(42);
+  });
+
+  it("rejected await inside a multi-await closure rejects the result promise", async () => {
+    const exports = await compileToWasm(`
+      export function main(): any {
+        const g = async (): Promise<number> => {
+          const a = await Promise.resolve(1).then((x: number) => x + 0);
+          const b = await Promise.resolve(1).then((x: number): number => { throw new Error("boom-closure"); });
+          return a + b;
+        };
+        return g();
+      }
+    `);
+    await expect(settled(exports.main())).rejects.toBeTruthy();
   });
 });

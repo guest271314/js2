@@ -204,7 +204,7 @@ export function planAsyncClosureActivation(
   decl: ts.FunctionLikeDeclaration,
   isAsync: boolean,
 ): AsyncActivationPlan | null {
-  let decision = decideAsyncActivation(ctx, decl, isAsync, /*allowNonDeclaration*/ true);
+  const decision = decideAsyncActivation(ctx, decl, isAsync, /*allowNonDeclaration*/ true);
   // (#2865) Exception to the phase-2 park below: the for-await-over-async-
   // GENERATOR consumer drive IS validated in the lifted-closure context (its
   // machine is self-contained — every suspension awaits the producer's own
@@ -216,30 +216,27 @@ export function planAsyncClosureActivation(
   if (decision !== null && decision.lane === "drive" && asyncGenConsumerNeedsDrive(ctx, decl, decision.plan)) {
     return decision;
   }
-  // (#2967 slice 1) The engine-convergence flip makes the host-drive machine
-  // claim the single-tail-await shapes in decideAsyncActivation — but ONLY for
-  // declarations. In the lifted-closure context host-drive is the parked #2646
-  // 33-regression class (continuation capture-struct / `__self` interplay not
-  // validated), so re-lane exactly the CPS-shaped subset back onto the proven
-  // CPS lane here, keeping the entire closure population byte-stable across
-  // the flip. Migrating closures onto the frame engine is #2967's later step
-  // (it gates the final CPS deletion).
-  if (decision !== null && decision.lane === "host-drive" && asyncFnNeedsCps(decl, decision.plan)) {
-    decision = { lane: "cps", plan: decision.plan };
-  }
-  // Phase-2 scope: closures activate ONLY the single-tail-await CPS lane. The
-  // host-drive ("host-drive") and native-drive ("drive") lanes activate
-  // multi-await / try-finally-across-await shapes whose continuation
-  // capture-struct + `__self` handling is NOT yet validated in the lifted-closure
-  // context — activating them from the arrow/fn-expr path null_deref'd the
-  // async-iteration builtins (Array.fromAsync / await-using /
-  // AsyncFromSyncIteratorPrototype / AsyncDisposableStack), whose test262
-  // `asyncTest(async function () { …multi-await… })` harness callbacks are
-  // multi-await function expressions (33 merge_group regressions on the first
-  // #2646 attempt). Those richer closure shapes stay on the legacy path; the
-  // drive lanes for closures are a follow-up that needs closure-context
-  // validation. The single-tail-await CPS shape (the phase-2 target, e.g.
-  // `async (x) => await g(x)`) is unaffected.
+  // (#2967 slice 2a) HOST-DRIVE closures are now ADMITTED. The original #2646
+  // park (33 null_deref merge_group regressions in the async-iteration
+  // builtins' `asyncTest(async function () { …multi-await… })` harness
+  // callbacks) predates the #2865 resume-fn environment re-establishment:
+  // `ensureAsyncResumeFunction` now (a) re-runs the `__self` capture-struct
+  // materialization from the frame-captured `__self` param field
+  // (`info.selfCaptureLayout`), (b) threads capture-CELL deref routing
+  // (`info.boxedCaptures`) and (c) `readsCurrentThis` onto the resume
+  // FunctionContext — exactly the interplay whose absence null_deref'd the
+  // first attempt. That infrastructure is validated in the lifted-closure
+  // context by the #2865 async-gen-consumer exception above; slice 2a extends
+  // it to the general host-drive closure population (single- and multi-await).
+  // This also retires the CPS lifted-closure emit's two known-wrong shapes:
+  // the discarded-tail / value-return-suffix bare-await guards below are
+  // CPS-EMIT bugs (the lifted CPS continuation loses the result promise),
+  // while the frame engine settles the pre-allocated result promise uniformly
+  // in the dispatch loop, so those shapes are correct on it (probe-verified —
+  // see tests/issue-2967-engine-convergence.test.ts slice-2a cases).
+  // The native `drive` lane stays gated on the asyncGen-consumer exception
+  // above (carrier-dependent, unchanged).
+  if (decision !== null && decision.lane === "host-drive") return decision;
   if (decision === null || decision.lane !== "cps") return null;
 
   // (#2957 phase-2 re-park fix) DISCARDED-TAIL-AWAIT guard for the closure path.

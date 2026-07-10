@@ -881,11 +881,12 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
     // carry stable import indices.
     //
     // (#2967) Post-flip both predicates can be true for the same fn (host-drive
-    // now claims the CPS shapes; an ARROW/FN-EXPR of that shape still emits CPS
-    // via the planAsyncClosureActivation re-lane). Registering both sets is the
-    // safe superset (the CPS trio is a subset of the host-drive six); the
-    // hazard-free direction — every emit path's imports pre-registered — holds
-    // for every routing outcome.
+    // claims the CPS shapes on declarations AND — since slice 2a — on lifted
+    // closures; only the shapes host-drive declines, e.g. concise arrow bodies
+    // and the pattern-param carve-out, still emit CPS). Registering both sets
+    // is the safe superset (the CPS trio is a subset of the host-drive six);
+    // the hazard-free direction — every emit path's imports pre-registered —
+    // holds for every routing outcome.
     if (!state.asyncHostDriveFound && asyncFnNeedsHostDrive(ctx, node, plan)) {
       state.asyncHostDriveFound = true;
     }

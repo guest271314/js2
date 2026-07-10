@@ -54,6 +54,27 @@ wasi carrier (which already returns externref at line 11847 when
 blanket flip breaks the sync-fakery population's rep — it must be a measured
 change.
 
+## Additional probe shape (found during #2967 slice 2a, 2026-07-10)
+
+The bug is not limited to locals — any `Promise<T>`-typed slot mangles a real
+promise, including **non-async function returns and typed callback params**:
+
+```ts
+function runTest(cb: () => Promise<number>): Promise<number> {
+  return cb(); // runTest's wasm return is f64 → real promise → NaN
+}
+export function main(): any {
+  return runTest(async function (): Promise<number> { ... }); // NaN
+}
+```
+
+Control-verified NaN on pristine main 32bae1f48f (pre-slice-2a, closure still
+legacy) — pre-existing, engine-independent. Untyped (`any`) boundaries are
+unaffected (externref end-to-end). Fix direction 1 must therefore cover
+non-async RETURN types and function-type param signatures, not just locals —
+which pushes toward direction 2 (always-externref + call-site assimilation)
+as the honest end-state.
+
 ## Fix directions (pick one, measure on full CI)
 
 1. **Initializer-sensitive slot typing (narrow)**: at variable-declaration
