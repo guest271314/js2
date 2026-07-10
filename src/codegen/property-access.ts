@@ -6467,7 +6467,21 @@ export function compilePropertyAccess(
             if (fieldKinds.size === 1) {
               const k = [...fieldKinds][0];
               if (k === "f64" || k === "i32") {
-                resultWasm = { kind: k } as ValType;
+                // (#2938) Preserve the #2030/#2785 boolean BRAND through the
+                // Phase-3 narrowing. When EVERY candidate field is a boolean-
+                // branded i32 (e.g. the native generator result's `done`,
+                // generators-native.ts ensureNativeGeneratorResultType), the
+                // narrowed read result is boolean too — the caller's
+                // i32→externref boxing then routes through `__box_boolean`
+                // (coerceType's #2785 brand-aware arm), so the test262 harness
+                // shape `const d: any = g.next().done; d === true` holds. A
+                // fresh unbranded `{kind:"i32"}` here ERASED the brand: the
+                // value re-boxed as $BoxedNumber(1), the any-`===` typeof
+                // partition saw number-vs-boolean, fell to ref identity, and
+                // answered UNEQUAL (the residual wrong-value failure of the
+                // #2938 no-yield relax — generators/no-yield.js, return.js).
+                const allBoolean = k === "i32" && structCandidates.every((c) => c.fieldType.boolean === true);
+                resultWasm = allBoolean ? { kind: "i32", boolean: true } : ({ kind: k } as ValType);
                 if (unboxIdx === undefined) {
                   unboxIdx = ensureLateImport(ctx, "__unbox_number", [{ kind: "externref" }], [{ kind: "f64" }]);
                   flushLateImportShifts(ctx, fctx);
@@ -6550,8 +6564,11 @@ export function compilePropertyAccess(
           // sees f64/i32 directly, no enclosing unbox needed. Falls
           // back to the legacy accessWasm-based return when no
           // narrowing was possible.
-          if (resultWasm.kind === "f64") return { kind: "f64" };
-          if (resultWasm.kind === "i32") return { kind: "i32" };
+          // (#2938) Return `resultWasm` itself for the narrowed primitives so
+          // the boolean brand (set above when all candidates are branded)
+          // survives to the caller's coercions — a fresh `{kind:"i32"}` here
+          // re-erased it.
+          if (resultWasm.kind === "f64" || resultWasm.kind === "i32") return resultWasm;
           if (accessWasm.kind === "f64") return { kind: "f64" };
           if (accessWasm.kind === "i32") return { kind: "i32" };
           return { kind: "externref" };
