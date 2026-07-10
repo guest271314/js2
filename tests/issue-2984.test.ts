@@ -112,3 +112,47 @@ describe("#2984 — boolean-typed dynamic property reads (descriptor attributes)
     expect(await runStandalone(ABSENT_ATTR_UNDEFINED)).toBe(1);
   });
 });
+
+// (#2984) gOPD(this, "NaN"|"Infinity"|"undefined") — the sloppy-mode global
+// receiver folds to the spec §19.1.1–19.1.3 all-false value descriptor when
+// `this` is nullish at runtime; a REAL receiver keeps the dynamic read.
+// Pre-fix these were phantom passes riding the undefined→ToNumber coincidence
+// the boolean-read fix retired (the merge_group park on PR #2845).
+const GLOBAL_NAN_DESCRIPTOR = `
+  var hits = 0;
+  var check = function (a: any, b: any): void { if (a === b) { hits = hits + 1; } };
+  var desc = Object.getOwnPropertyDescriptor(this, "NaN");
+  check(desc.writable, false);
+  check(desc.enumerable, false);
+  check(desc.configurable, false);
+  return hits;
+`;
+
+// A host-dispatched object-literal method receives a REAL `this` (installed
+// via __current_this) — the runtime guard must take the dynamic else-arm and
+// find the receiver's OWN "NaN" prop, not the global fold.
+const REAL_RECEIVER_KEEPS_DYNAMIC = `
+  var o: any = {
+    NaN: 42,
+    m: function () {
+      var d = Object.getOwnPropertyDescriptor(this, "NaN");
+      if (d === undefined) return -1;
+      return d.value === 42 ? 1 : 0;
+    }
+  };
+  return o.m();
+`;
+
+describe("#2984 — gOPD(this, <global value prop>) fold", () => {
+  it("standalone: gOPD(this, 'NaN') yields the all-false spec descriptor", async () => {
+    expect(await runStandalone(GLOBAL_NAN_DESCRIPTOR)).toBe(3);
+  });
+
+  it("host: gOPD(this, 'NaN') yields the all-false spec descriptor", async () => {
+    expect(await runHost(GLOBAL_NAN_DESCRIPTOR)).toBe(3);
+  });
+
+  it("host: a real receiver with an own 'NaN' prop keeps the dynamic read", async () => {
+    expect(await runHost(REAL_RECEIVER_KEEPS_DYNAMIC)).toBe(1);
+  });
+});

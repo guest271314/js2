@@ -45,7 +45,7 @@ import {
   ensureAnyFromExternHelper, // (#3053 U0) settled honest classifier (CS1b)
   ensureAnyToExternHelper, // (#3053 U0) key marshalling
 } from "./any-helpers.js";
-import { ensureGetUndefined } from "./expressions/late-imports.js";
+import { emitUndefined, ensureGetUndefined } from "./expressions/late-imports.js";
 import { ensureObjectRuntime } from "./object-runtime.js";
 import { stringConstantExternrefInstrs } from "./native-strings.js";
 import { addStringConstantGlobal } from "./registry/imports.js";
@@ -1117,4 +1117,89 @@ export function isBooleanLikeAccessType(t: ts.Type): boolean {
  */
 export function widenBooleanDynamicAccess(t: ts.Type, wasm: ValType): ValType {
   return wasm.kind === "i32" && isBooleanLikeAccessType(t) ? { kind: "externref" } : wasm;
+}
+
+/**
+ * (#2984) `Object.getOwnPropertyDescriptor(this, "NaN"|"Infinity"|"undefined")`
+ * — the sloppy-mode global-`this` receiver. The compiler models an unbound
+ * top-level `this` as `undefined`, so the dynamic gOPD saw
+ * `gOPD(undefined, key)` → no descriptor; the test262
+ * `built-ins/{NaN,Infinity,undefined}` + gOPD 15.2.3.3-4-178..180 attribute
+ * asserts only "passed" through the pre-#2984 undefined→ToNumber(NaN)→i32
+ * 0 === false coincidence that the boolean-read fix retired. This emits a
+ * RUNTIME-guarded fold: a nullish receiver (the unbound global `this` — null
+ * extern on standalone, the non-null host `undefined` sentinel via
+ * `__extern_is_undefined` on the host lane) yields the spec §19.1.1–19.1.3
+ * value-property data descriptor `{ value, writable:false, enumerable:false,
+ * configurable:false }`; a REAL receiver (a host-dispatched body invoked with
+ * one) keeps the dynamic `__getOwnPropertyDescriptor` read, so an own "NaN"
+ * prop still wins. Only these three immutable global value props are folded —
+ * their descriptors are spec constants.
+ *
+ * Contract: the CALLER has already pushed the receiver as externref (this
+ * ordering is load-bearing — the receiver's own lowering may register late
+ * imports, e.g. `__get_undefined`, so every funcIdx here is captured AFTER
+ * it and flushed before use). Always consumes the receiver and leaves exactly
+ * one externref on the stack.
+ */
+export function emitGlobalThisGopdFold(ctx: CodegenContext, fctx: FunctionContext, key: string): void {
+  const recvTmp = allocLocal(fctx, `__gopd_this_${fctx.locals.length}`, { kind: "externref" });
+  fctx.body.push({ op: "local.set", index: recvTmp } as Instr);
+  const boxIdx =
+    key === "undefined" ? undefined : ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
+  const createIdx = ensureLateImport(
+    ctx,
+    "__create_descriptor",
+    [{ kind: "externref" }, { kind: "i32" }],
+    [{ kind: "externref" }],
+  );
+  const dynGopdIdx = ensureLateImport(
+    ctx,
+    "__getOwnPropertyDescriptor",
+    [{ kind: "externref" }, { kind: "externref" }],
+    [{ kind: "externref" }],
+  );
+  const isUndefIdx = ensureLateImport(ctx, "__extern_is_undefined", [{ kind: "externref" }], [{ kind: "i32" }]);
+  const getUndefIdx = key === "undefined" ? ensureGetUndefined(ctx) : undefined;
+  addStringConstantGlobal(ctx, key);
+  flushLateImportShifts(ctx, fctx);
+  if (createIdx === undefined || dynGopdIdx === undefined || isUndefIdx === undefined) {
+    // Degenerate (imports unregisterable): preserve the one-externref contract.
+    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    return;
+  }
+  // nullish? (ref.is_null catches the standalone null-extern regime; the host
+  // `undefined` sentinel is a NON-null externref → __extern_is_undefined.)
+  fctx.body.push({ op: "local.get", index: recvTmp } as Instr);
+  fctx.body.push({ op: "ref.is_null" } as Instr);
+  fctx.body.push({ op: "local.get", index: recvTmp } as Instr);
+  fctx.body.push({ op: "call", funcIdx: isUndefIdx } as Instr);
+  fctx.body.push({ op: "i32.or" } as Instr);
+  const thenInstrs: Instr[] = [];
+  if (key === "undefined") {
+    // Regime-aware `undefined` (host sentinel / standalone singleton / null
+    // extern) — its import was pre-ensured above (getUndefIdx), so this
+    // detached-array emission cannot add a late import mid-build.
+    void getUndefIdx;
+    const savedBody = fctx.body;
+    fctx.body = thenInstrs;
+    emitUndefined(ctx, fctx);
+    fctx.body = savedBody;
+  } else {
+    thenInstrs.push({ op: "f64.const", value: key === "NaN" ? Number.NaN : Number.POSITIVE_INFINITY } as Instr);
+    if (boxIdx !== undefined) thenInstrs.push({ op: "call", funcIdx: boxIdx } as Instr);
+    else thenInstrs.push({ op: "drop" } as Instr, { op: "ref.null.extern" } as Instr);
+  }
+  thenInstrs.push({ op: "i32.const", value: 0 } as Instr); // writable/enumerable/configurable: false (§19.1)
+  thenInstrs.push({ op: "call", funcIdx: createIdx } as Instr);
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "val", type: { kind: "externref" } },
+    then: thenInstrs,
+    else: [
+      { op: "local.get", index: recvTmp } as Instr,
+      ...stringConstantExternrefInstrs(ctx, key),
+      { op: "call", funcIdx: dynGopdIdx } as Instr,
+    ],
+  } as Instr);
 }
