@@ -765,8 +765,12 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
   // (#2906 slice 3d-i) An async GENERATOR builds its CFG from the yield-aware
   // `planAsyncGenCfg` (settleYield/settleDone terminators); every other async fn
   // uses the linear/while/for-await `planAsyncCfg`.
+  // (#3120) The implicit §27.6.3.8 yield-operand await is classified ONLY on
+  // the native-`$Promise` CARRIER lane — the same predicate the admission gate
+  // (`isAsyncGenDriveCandidate`) keyed the body's shape check on, so gate and
+  // planner always see the same segment split.
   const cfg = info.asyncGen
-    ? planAsyncGenCfg(ctx.checker, info.decl)
+    ? planAsyncGenCfg(info.decl, isStandalonePromiseActive(ctx) ? { checker: ctx.checker } : null)
     : planAsyncCfg(ctx, info.decl, plan, { allowLoops: !info.host });
   if (cfg === null) {
     reportError(ctx, info.decl, "internal: async-frame resume built on an unsupported body shape (#2906 slice 1/3a)");
@@ -1729,9 +1733,6 @@ export function emitAsyncFrameStateMachine(
  */
 export function isAsyncGenDriveCandidate(ctx: CodegenContext, decl: ts.FunctionLikeDeclaration): boolean {
   if (!ASYNC_CPS_ENABLED) return false;
-  // (#3120) The shape gates classify Promise-typed plain yields as awaited
-  // segments (implicit §27.6.3.8 Await(operand)) — they need the checker.
-  const { checker } = ctx;
   // (#2865) Params must be plain identifiers: a binding-PATTERN param
   // (`f([...x] = v)`) destructures into derived LOCALS of the lifted fn's
   // prologue, which the fresh resume FunctionContext never sees — the body's
@@ -1758,7 +1759,7 @@ export function isAsyncGenDriveCandidate(ctx: CodegenContext, decl: ts.FunctionL
   // Under the native-`$Promise` CARRIER (`isStandalonePromiseActive`, wasi
   // today): the full bounded shape, awaited yields included — the awaited
   // operand lowers to a native `$Promise` the suspend arm can assimilate.
-  if (isStandalonePromiseActive(ctx)) return isBoundedAsyncGenBody(checker, decl) && spillsSafe();
+  if (isStandalonePromiseActive(ctx)) return isBoundedAsyncGenBody(decl) && spillsSafe();
   // (#2865) `--target standalone` with the carrier gate still OFF (#2980):
   // drive the producer host-free ONLY for await-free bodies. With the carrier
   // off an awaited operand does not lower to a native `$Promise`, so
@@ -1766,9 +1767,10 @@ export function isAsyncGenDriveCandidate(ctx: CodegenContext, decl: ts.FunctionL
   // — those bodies keep the legacy path (correct-or-legacy, #680 CE) until the
   // measured carrier widen. An await-free body is carrier-independent: every
   // promise the machine touches is minted by `__async_gen_next_<name>` itself.
-  // (#3120: a Promise-typed plain `yield P` counts as awaited here too — it
-  // is carrier-DEPENDENT for exactly the same reason as `yield await P`.)
-  if (isAsyncDriveActive(ctx)) return isAwaitFreeAsyncGenBody(checker, decl) && spillsSafe();
+  // (#3120: a Promise-typed plain `yield P` deliberately stays PLAIN — and
+  // driven, byte-identically — on this lane; its implicit-await value gap is
+  // the carrier widen's to close. See ImplicitYieldAwaitMode in async-cps.ts.)
+  if (isAsyncDriveActive(ctx)) return isAwaitFreeAsyncGenBody(decl) && spillsSafe();
   return false;
 }
 
