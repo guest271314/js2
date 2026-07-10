@@ -1,7 +1,7 @@
 {
   "generated": "2026-07-10",
   "threshold": 1500,
-  "totalCeiling": 390891,
+  "totalCeiling": 390992,
   "files": {
     "src/codegen-linear/index.ts": 5530,
     "src/codegen-linear/runtime.ts": 3638,
@@ -53,7 +53,7 @@
     "src/compiler/early-errors/node-checks.ts": 1865,
     "src/emit/binary.ts": 1989,
     "src/ir/builder.ts": 1587,
-    "src/ir/from-ast.ts": 6684,
+    "src/ir/from-ast.ts": 6785,
     "src/ir/integration.ts": 2643,
     "src/ir/lower.ts": 3532,
     "src/ir/nodes.ts": 2926,
