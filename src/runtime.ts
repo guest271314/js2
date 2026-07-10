@@ -5168,16 +5168,18 @@ const _hostProxyReverse = new WeakMap<object, any>();
 // unwraps the shim to the raw struct so an explicit `r.lastIndex` read keeps
 // object identity (`assert.sameValue(r.lastIndex, obj)`).
 //
-// Exception — a set that happens DURING a regex protocol call (`_regexProtocolDepth
-// > 0`), i.e. inside a user-overridden `exec` invoked by
-// RegExp.prototype[@@replace/@@split/…]: the native protocol then does NOT coerce
-// the JS-visible `lastIndex` (V8's @@replace skips the empty-match ToLength of
-// the property), so a deferred shim would never fire valueOf. Coerce eagerly
-// here so a throwing `valueOf` surfaces at the assignment (matching the spec's
-// "abrupt completion during coercion of lastIndex"), storing the resulting
-// number. Primitive numbers are always stored verbatim.
+// (#3084) A set DURING a regex protocol call (inside a user-overridden `exec`
+// invoked by RegExp.prototype[@@match/@@replace/@@split]) ALSO defers.
+// §22.2.6.8/11/14 store the assigned value verbatim; the property is only read
+// as `ToLength(? Get(rx, "lastIndex"))` in the EMPTY-match advance branch, and
+// V8's slow (modified-RegExp) protocol path performs exactly that read —
+// measured: empty match fires the shim's valueOf via the native ToLength;
+// non-empty match never reads it (so a throwing valueOf must NOT fire,
+// Symbol.match/g-match-no-coerce-lastindex.js). The former eager
+// protocol-depth coercion here fired valueOf unconditionally at assignment
+// time, which was spec-incorrect for the non-empty-match case.
+// Primitive numbers are always stored verbatim.
 const _lastIndexShimRaw = new WeakMap<object, any>();
-let _regexProtocolDepth = 0;
 function _makeLastIndexShim(
   struct: any,
   callbackState?: { getExports: () => Record<string, Function> | undefined },
@@ -8438,13 +8440,22 @@ function resolveImport(
           return (self: any, v: any) => {
             if (!_isWasmStruct(v)) {
               _safeSet(self, "lastIndex", v);
-            } else if (_regexProtocolDepth > 0) {
-              // Set during a regex protocol method (overridden exec): the native
-              // protocol won't coerce the JS-visible lastIndex, so fire valueOf
-              // eagerly (a throw surfaces as the program's own error) and store
-              // the number.
-              _safeSet(self, "lastIndex", Number(_hostToPrimitive(v, "number", callbackState)));
             } else {
+              // (#3084) ALWAYS defer — including during a regex protocol call
+              // (`r.lastIndex = {valueOf(){…}}` inside a user-overridden `exec`
+              // invoked by @@match/@@replace/@@split). §22.2.6.8/11/14 store
+              // the assigned value verbatim and only READ it as
+              // `ToLength(? Get(rx, "lastIndex"))` in the EMPTY-match advance
+              // branch. V8's slow (modified-RegExp) protocol path is
+              // spec-compliant here — measured: with an overridden `exec`, an
+              // empty match fires the stored object's valueOf via that ToLength
+              // read; a non-empty match never reads it. The shim's
+              // Symbol.toPrimitive bridges that native read to the struct's
+              // compiled valueOf (a throw propagates as the program's own
+              // error), so the previous eager `_regexProtocolDepth > 0`
+              // coercion was both unnecessary (empty match: the shim fires) and
+              // spec-incorrect (non-empty match: valueOf must NOT fire —
+              // Symbol.match/g-match-no-coerce-lastindex.js).
               _safeSet(self, "lastIndex", _makeLastIndexShim(v, callbackState));
             }
           };
@@ -11412,44 +11423,39 @@ assert._isSameValue = isSameValue;
           // ToString(arg) coercion finds the struct's toString/valueOf
           // closures via the host proxy.
           const wrappedArg0 = _isWasmStruct(arg0) ? _wrapForHost(arg0, exports) : arg0;
-          // (#2671) Track regex-protocol nesting so a `lastIndex` set performed
-          // by a user-overridden `exec` invoked from here coerces eagerly (the
-          // native protocol won't ToLength the JS-visible property). A counter,
-          // not a flag, so nested protocol calls (a replace callback that calls
-          // .match) restore the depth correctly; `finally` covers every return
-          // and any thrown abrupt completion.
-          _regexProtocolDepth++;
-          try {
-            // @@match/@@matchAll/@@search are 1-arg (string).
-            // @@replace is 2-arg: (string, replaceValue) — replaceValue may
-            //   be a function or a string.
-            // @@split is 2-arg: (string, limit) — limit is a number.
-            if (symbolId === 7 || symbolId === 9 || symbolId === 15) {
-              return fn.call(regex, wrappedArg0);
-            }
-            if (symbolId === 8) {
-              // Treat missing arg1 (null from ref.null.extern padding) as
-              // undefined → ToString gives "undefined" per spec, matching
-              // `regex[Symbol.replace](str)` with no replaceValue.
-              if (arg1 == null) return fn.call(regex, wrappedArg0, undefined);
-              return fn.call(regex, wrappedArg0, wrapCallable(arg1));
-            }
-            if (symbolId === 10) {
-              // split: missing limit (null padding) → call without second arg
-              // so the spec default 2^32-1 applies. JS `splitter.call(rx, S, null)`
-              // would coerce null to 0 and return [] — wrong.
-              if (arg1 == null) return fn.call(regex, wrappedArg0);
-              // The limit goes through ToUint32 → ToNumber → ToPrimitive; when
-              // it's a wasmGC struct (e.g. `{valueOf(){…}}`), wrap it so the
-              // host proxy exposes the struct's valueOf/toString closure (#1331).
-              return fn.call(regex, wrappedArg0, wrapCallable(arg1));
-            }
-            // Generic fallback
-            if (arg1 == null) return fn.call(regex, wrappedArg0);
-            return fn.call(regex, wrappedArg0, arg1);
-          } finally {
-            _regexProtocolDepth--;
+          // (#3084) No protocol-depth tracking here anymore: a `lastIndex` set
+          // performed by a user-overridden `exec` invoked from these protocols
+          // now ALWAYS stores the deferred shim; V8's spec-compliant slow path
+          // fires it via `ToLength(? Get(rx, "lastIndex"))` exactly in the
+          // empty-match advance branch (§22.2.6.8/11/14) and never otherwise.
+          //
+          // @@match/@@matchAll/@@search are 1-arg (string).
+          // @@replace is 2-arg: (string, replaceValue) — replaceValue may
+          //   be a function or a string.
+          // @@split is 2-arg: (string, limit) — limit is a number.
+          if (symbolId === 7 || symbolId === 9 || symbolId === 15) {
+            return fn.call(regex, wrappedArg0);
           }
+          if (symbolId === 8) {
+            // Treat missing arg1 (null from ref.null.extern padding) as
+            // undefined → ToString gives "undefined" per spec, matching
+            // `regex[Symbol.replace](str)` with no replaceValue.
+            if (arg1 == null) return fn.call(regex, wrappedArg0, undefined);
+            return fn.call(regex, wrappedArg0, wrapCallable(arg1));
+          }
+          if (symbolId === 10) {
+            // split: missing limit (null padding) → call without second arg
+            // so the spec default 2^32-1 applies. JS `splitter.call(rx, S, null)`
+            // would coerce null to 0 and return [] — wrong.
+            if (arg1 == null) return fn.call(regex, wrappedArg0);
+            // The limit goes through ToUint32 → ToNumber → ToPrimitive; when
+            // it's a wasmGC struct (e.g. `{valueOf(){…}}`), wrap it so the
+            // host proxy exposes the struct's valueOf/toString closure (#1331).
+            return fn.call(regex, wrappedArg0, wrapCallable(arg1));
+          }
+          // Generic fallback
+          if (arg1 == null) return fn.call(regex, wrappedArg0);
+          return fn.call(regex, wrappedArg0, arg1);
         };
       // Type.prototype.method.call(receiver, ...args) dispatch for built-in types.
       // Used when e.g. Array.prototype.every.call(functionObj, fn) — the receiver

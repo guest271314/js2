@@ -1,7 +1,8 @@
 ---
 id: 3084
 title: "RegExp @@match/@@replace/@@split eager lastIndex coercion during protocol violates §22.2.6.8 (fires valueOf on non-empty match)"
-status: ready
+status: done
+assignee: ttraenkler/fable-3084
 sprint: current
 priority: high
 horizon: m
@@ -14,6 +15,7 @@ model: fable
 related: [3051, 2777, 2671]
 blocks: [2777]
 created: 2026-07-07
+completed: 2026-07-10
 origin: "2026-07-07 — surfaced by PR #2777 (#3051 accessor-only exec-result marshaling). Verified on main f426ef61 (PASS) vs #2777 branch (FAIL) via runTest262File."
 ---
 
@@ -136,3 +138,45 @@ fable`**.
   that is *this* pre-existing bug). #2777 is held (option B, cluster-gated with
   #2774/#3076 on the owner's vacuity-metric decision), not excused, until this
   lands.
+
+## Resolution (fable-3084, 2026-07-10 — MEASURED)
+
+**Fix landed:** delete the eager `_regexProtocolDepth > 0` coercion branch in
+the `RegExp.lastIndex` set handler (`src/runtime.ts`) — a struct assignment now
+ALWAYS stores the deferred `_makeLastIndexShim`, protocol or not. The
+now-dead `_regexProtocolDepth` counter (decl + inc/dec around
+`__regex_symbol_call`) was removed with it.
+
+**Why the issue's "correct fix" section over-scoped.** It proposed re-implementing
+the three protocol loops to read the JS-visible `lastIndex` per spec, on the
+premise (inherited from #2671's comment) that *"native @@replace does not
+ToLength the JS-visible lastIndex"*. **Measured: that premise is false.** A
+pure-V8 control (overridden `exec`, no compiler involved) shows V8's slow
+(modified-RegExp) protocol path is spec-compliant: an EMPTY match fires the
+stored object's `valueOf` via the §22.2.6.8/11 `ToLength(? Get(rx,"lastIndex"))`
+advance read; a NON-empty match never reads it. So the deferred shim alone is
+sufficient — V8's own protocol loop fires its `Symbol.toPrimitive` exactly when
+the spec mandates. No custom protocol loops needed.
+
+**Measured on the branch (gc/host lane):**
+
+- Compiled probes: non-empty @@match — throwing `valueOf` NOT fired (was:
+  fired, the bug); empty @@match — `valueOf` fired exactly once; empty
+  @@replace — throwing `valueOf` still propagates (the #2671:108 shape, now via
+  the shim instead of the eager hack); non-empty @@replace — object identity
+  preserved (`r.lastIndex === marker`), zero coercions, correct result.
+- `tests/issue-2671-regexp.test.ts`: 8/8 pass (incl. the :108 empty-advance
+  throw).
+- Full RegExp protocol sweep, `built-ins/RegExp/prototype/Symbol.{match,replace,split,search}`
+  (189 files, `poisoned-stdlib.js` excluded as an in-process-harness hazard),
+  branch vs main: **identical 152 pass / 37 fail — zero flips in either
+  direction**. All 37 fails pre-exist on main (dominated by the #3051/#2777
+  accessor-exec-result masking, e.g. `g-match-empty-coerce-lastindex-err.js`).
+- `g-match-no-coerce-lastindex.js` passes on the branch. Note its baseline flip
+  is currently masked (on main it passes VACUOUSLY because the accessor `get 0()`
+  result marshals to null); the honest flip realizes when #2777 lands — which
+  this fix unblocks (acceptance: #2777's sole "regression" was this bug's
+  unmask).
+
+New regression tests: `tests/issue-3084.test.ts` (4 tests, incl. the
+data-property variant of the masked test262 shape).
