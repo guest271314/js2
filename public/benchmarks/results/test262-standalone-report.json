@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-07-10T15:36:38.590Z",
-  "baseline_generated_at": "2026-07-10T15:36:38.590Z",
-  "baseline_sha": "cf1426937ff18ab211ab236cab2c039a955c538a",
+  "timestamp": "2026-07-10T15:51:05.952Z",
+  "baseline_generated_at": "2026-07-10T15:51:05.953Z",
+  "baseline_sha": "9a8e393d6b20a18c727a58258a953f24f02ce22b",
   "oracle_version": 2,
   "mode": {
     "target": "standalone",
@@ -1198,12 +1198,12 @@
     }
   ],
   "error_categories": {
-    "assertion_fail": 12033,
+    "assertion_fail": 12034,
     "illegal_cast": 482,
     "negative_test_fail": 55,
     "null_deref": 310,
     "oob": 53,
-    "other": 5876,
+    "other": 5875,
     "promise_error": 137,
     "range_error": 44,
     "runtime_error": 484,
@@ -1300,8 +1300,8 @@
         "error_categories": {
           "other": 2852,
           "assertion_fail": 1051,
-          "wasm_compile": 53,
           "illegal_cast": 2,
+          "wasm_compile": 53,
           "null_deref": 53,
           "type_error": 221,
           "oob": 2
@@ -1317,8 +1317,8 @@
           "other:ReferenceError: Temporal is not defined",
           "assertion_fail:returned # — assert ## at L#: assert.throws( RangeError, () => instance.round({ largestUnit: \"months\", relativeTo: { year: #, month: #, day: #, timeZone } }), \"reject minus zero as extended year\" );",
           "other:ReferenceError: TemporalHelpers is not defined",
-          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: extern.convert_any[#] expected type shared anyref, found array.get of type i64 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $instance",
-          "illegal_cast:illegal cast [in __str_to_number() ← test]"
+          "illegal_cast:illegal cast [in __str_to_number() ← test]",
+          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: extern.convert_any[#] expected type shared anyref, found array.get of type i64 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $instance"
         ]
       },
       {
@@ -1337,22 +1337,22 @@
         },
         "error_categories": {
           "wasm_compile": 17,
-          "assertion_fail": 42,
           "other": 9,
+          "assertion_fail": 42,
           "type_error": 9,
           "runtime_error": 2
         },
         "sample_files": [
           "test/built-ins/DisposableStack/prototype/use/throws-if-value-Symbol.dispose-property-is-null.js",
           "test/built-ins/DisposableStack/prototype/use/throws-if-value-missing-Symbol.dispose.js",
-          "test/built-ins/AsyncDisposableStack/undefined-newtarget-throws.js",
           "test/built-ins/AsyncDisposableStack/newtarget-prototype-is-not-object.js",
+          "test/built-ins/AsyncDisposableStack/undefined-newtarget-throws.js",
           "test/built-ins/DisposableStack/prototype/adopt/adds-value-onDispose.js"
         ],
         "sample_signatures": [
           "wasm_compile:L#:## Symbol(Symbol.dispose) is not a function",
-          "assertion_fail:returned # — assert ## at L#: assert.throws(TypeError, function() { AsyncDisposableStack(); });",
           "other:L#:## Codegen error: Reflect.construct not supported in standalone mode (## Phase C).; L#:## Codegen error: Reflect.construct not supported in standalone mode (## Phase C).; L#:## Codegen error: Reflect.construct not supported in standalone",
+          "assertion_fail:returned # — assert ## at L#: assert.throws(TypeError, function() { AsyncDisposableStack(); });",
           "type_error:TypeError: Cannot access property on null or undefined at #:#",
           "wasm_compile:L#:## [object Object] is not a function"
         ]
@@ -1696,9 +1696,9 @@
           "host_free_pass": 0
         },
         "error_categories": {
-          "assertion_fail": 2047,
+          "assertion_fail": 2046,
           "type_error": 395,
-          "other": 158,
+          "other": 159,
           "illegal_cast": 122,
           "runtime_error": 93,
           "wasm_compile": 54,
@@ -1776,8 +1776,8 @@
         },
         "error_categories": {
           "runtime_error": 58,
-          "assertion_fail": 4757,
-          "other": 123,
+          "assertion_fail": 4759,
+          "other": 121,
           "type_error": 1019,
           "illegal_cast": 203,
           "wasm_compile": 144,
@@ -1791,15 +1791,15 @@
         "sample_files": [
           "test/language/expressions/class/subclass-builtins/subclass-Number.js",
           "test/language/expressions/class/dstr/meth-ary-ptrn-elem-ary-rest-init.js",
-          "test/language/expressions/array/S11.1.4_A1.4.js",
           "test/language/expressions/class/cpn-class-expr-accessors-computed-property-name-from-function-declaration.js",
+          "test/language/expressions/array/S11.1.4_A1.4.js",
           "test/language/expressions/class/dstr/gen-meth-obj-ptrn-id-get-value-err.js"
         ],
         "sample_signatures": [
           "runtime_error:L#:## Codegen error: 'class Subclass extends Number' is not yet supported in --target standalone (##). The primitive-wrapper subclass native box is not implemented yet — routing it through the host path would emit invalid Wasm (the standalo",
           "assertion_fail:returned # — assert ## at L#: assert.notSameValue(x, values);",
-          "assertion_fail:Test262Error: ##: var array = [,,,#,#]; array.toString === Array.prototype.toString. Actual: [object Object]",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue( c[f()], # );",
+          "assertion_fail:Test262Error: ##: var array = [,,,#,#]; array.toString === Array.prototype.toString. Actual: [object Object]",
           "assertion_fail:returned # — assert ## at L#: throw new Test262Error();"
         ]
       },
@@ -1867,8 +1867,8 @@
           "test/built-ins/TypedArray/out-of-bounds-has.js",
           "test/built-ins/TypedArray/resizable-buffer-length-tracking-1.js",
           "test/built-ins/TypedArrayConstructors/ctors/buffer-arg/defined-length-sab.js",
-          "test/built-ins/TypedArrayConstructors/internals/Set/detached-buffer.js",
-          "test/built-ins/TypedArrayConstructors/ctors/typedarray-arg/same-ctor-returns-new-cloned-typedarray.js"
+          "test/built-ins/TypedArrayConstructors/ctors/typedarray-arg/same-ctor-returns-new-cloned-typedarray.js",
+          "test/built-ins/TypedArrayConstructors/internals/Set/detached-buffer.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert(i in array);",
@@ -1944,14 +1944,14 @@
           "test/language/expressions/object/cpn-obj-lit-computed-property-name-from-multiplicative-expression-mult.js",
           "test/language/expressions/object/literal-property-name-bigint.js",
           "test/language/statements/variable/12.2.1-21-s.js",
-          "test/built-ins/Object/create/properties-arg-to-object-bigint.js"
+          "test/built-ins/Object/defineProperties/15.2.3.7-5-b-247.js"
         ],
         "sample_signatures": [
           "type_error:TypeError: Cannot destructure 'null' or 'undefined'",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue( o[# * #], # );",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(o[\"#\"], true, \"the property name must be the string representation of the numeric value.\");",
           "type_error:TypeError: Cannot access property on null or undefined",
-          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: extern.convert_any[#] expected type shared anyref, found i64.const of type i64 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $proto ex"
+          "type_error:TypeError: Object.defineProperties unsupported descriptor shape in standalone mode (##)"
         ]
       },
       {
@@ -2014,8 +2014,8 @@
         "sample_files": [
           "test/annexB/language/global-code/if-decl-no-else-global-skip-early-err-try.js",
           "test/annexB/language/eval-code/direct/func-if-decl-else-stmt-eval-func-skip-early-err-for-in.js",
-          "test/annexB/language/eval-code/direct/global-if-decl-no-else-eval-global-block-scoping.js",
           "test/annexB/language/global-code/switch-case-global-no-skip-try.js",
+          "test/annexB/language/eval-code/direct/global-if-decl-no-else-eval-global-block-scoping.js",
           "test/annexB/language/eval-code/indirect/global-if-decl-else-decl-b-eval-global-update.js"
         ],
         "sample_signatures": [
@@ -2384,8 +2384,8 @@
           "host_free_pass": 0
         },
         "error_categories": {
-          "type_error": 5,
           "assertion_fail": 98,
+          "type_error": 5,
           "promise_error": 5,
           "wasm_compile": 9,
           "negative_test_fail": 13,
@@ -2395,15 +2395,15 @@
           "runtime_error": 2
         },
         "sample_files": [
-          "test/language/module-code/namespace/internals/delete-non-exported.js",
           "test/language/module-code/instn-local-bndng-cls.js",
+          "test/language/module-code/namespace/internals/delete-non-exported.js",
           "test/language/statements/for/dstr/const-ary-ptrn-elem-id-iter-val-err.js",
           "test/language/statements/for/dstr/const-ary-ptrn-rest-id-iter-val-err.js",
           "test/language/statements/const/dstr/obj-ptrn-prop-ary-value-null.js"
         ],
         "sample_signatures": [
-          "type_error:TypeError: Cannot destructure 'null' or 'undefined'",
           "assertion_fail:returned # — assert ## at L#: assert.throws(ReferenceError, function() { typeof test262; }, 'Binding is created but not initialized.');",
+          "type_error:TypeError: Cannot destructure 'null' or 'undefined'",
           "assertion_fail:returned # — assert ## at L#: throw new Test262Error();",
           "assertion_fail:returned # — assert ## at L#: assert.throws(TypeError, function() { const { w: [x, y, z] = [#, #, #] } = { w: null }; });",
           "assertion_fail:returned # — assert ## at L#: assert.throws(ReferenceError, function() { typeof D; }, 'binding is created but not initialized');"
@@ -2547,7 +2547,7 @@
           "test/language/line-terminators/S7.3_A7_T6.js",
           "test/language/directive-prologue/14.1-3-s.js",
           "test/language/expressions/import.meta/syntax/goal-script.js",
-          "test/language/line-terminators/S7.3_A7_T2.js"
+          "test/language/line-terminators/S7.3_A7_T8.js"
         ],
         "sample_signatures": [
           "assertion_fail:Test262Error: ##: Check Function Expression for automatic semicolon insertion",
