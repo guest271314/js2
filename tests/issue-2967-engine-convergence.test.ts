@@ -288,3 +288,57 @@ describe("#2967 slice 2a — host-drive CLOSURES (the lifted #2646 park)", () =>
     await expect(settled(exports.main())).rejects.toBeTruthy();
   });
 });
+
+describe("#2967 slice 2b — concise arrow bodies on the frame engine", () => {
+  it("`async x => await P` routes host-drive and resolves the awaited value", async () => {
+    const exports = await compileToWasm(`
+      export function main(): any {
+        const g = async (x: number): Promise<number> => await Promise.resolve(x).then((y: number) => y * 2);
+        return g(21);
+      }
+    `);
+    await expect(settled(exports.main())).resolves.toBe(42);
+  });
+
+  it("concise body with a CAPTURE (`async x => await p.then(y => y + k)`)", async () => {
+    const exports = await compileToWasm(`
+      export function main(): any {
+        const k: number = 2;
+        const g = async (x: number): Promise<number> => await Promise.resolve(x).then((y: number) => y * k);
+        return g(21);
+      }
+    `);
+    await expect(settled(exports.main())).resolves.toBe(42);
+  });
+
+  it("parenthesized concise body `async () => (await P)`", async () => {
+    const exports = await compileToWasm(`
+      export function main(): any {
+        const g = async (): Promise<number> => (await Promise.resolve(21).then((x: number) => x * 2));
+        return g();
+      }
+    `);
+    await expect(settled(exports.main())).resolves.toBe(42);
+  });
+
+  it("a RICHER concise body (`=> (await P) + 1`, await nested in an expression) keeps the legacy fallback", async () => {
+    // Not linear-canonical (the await is nested in a binary expression), so it
+    // must NOT mint a resume fn — it stays on the legacy path. Its VALUE is
+    // wrong there (NaN — the legacy sync fakery adds 1 to the promise), which
+    // is pre-existing and is exactly the nested/buried-await gap slice 3's
+    // planLinearAwaits widening owns. This case pins only the routing.
+    const wat = await watOf(`
+      const g = async (): Promise<number> => (await Promise.resolve(41).then((x: number) => x + 0)) + 1;
+      export function main(): number { g(); return 1; }
+    `);
+    expect(wat).not.toContain("__async_resume_fanon");
+  });
+
+  it("concise `=> await P` routing artifact: the arrow mints a resume fn", async () => {
+    const wat = await watOf(`
+      const g = async (x: number): Promise<number> => await Promise.resolve(x).then((y: number) => y + 1);
+      export function main(): number { g(20); return 1; }
+    `);
+    expect(wat).toContain("__async_resume_fanon");
+  });
+});

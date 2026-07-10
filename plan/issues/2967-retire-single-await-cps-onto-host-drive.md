@@ -213,6 +213,20 @@ Remaining CPS population after 2a: concise arrow bodies
 pattern/rest-param carve-out. Those are slice 2b's to migrate; deletion (2c)
 follows.
 
+## Slice 2b (part 1) — concise arrow bodies (2026-07-10)
+
+`planLinearAwaits` now admits the ONE drivable concise shape:
+`async (…) => await P` (possibly parenthesized) → the single-segment
+isReturnAwait plan (semantically `{ return await P; }`). Exactly the concise
+population `splitBodyAtAwait` owned, so those closures move onto the frame
+engine (concise bodies exist only on arrows — observable only through the
+slice-2a closure admission; declarations and the wasi closure park are
+byte-stable). Richer concise bodies (`=> (await P) + 1` — await nested in an
+expression) are NOT linear-canonical and keep the legacy fallback; their
+wrong legacy VALUE (NaN) is pre-existing and belongs to slice 3's
+nested/buried-await widening. Remaining CPS population after 2b-1:
+pattern/rest-param shapes only (2b-2).
+
 ## Slice 2 re-scope (why deletion isn't next)
 
 The banked A/B unlocks deletion **per the flip**, but slice 1 deliberately
