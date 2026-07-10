@@ -185,6 +185,36 @@ export interface IrFromAstResolver {
    */
   consoleArgVariant?(arg: ts.Expression): "number" | "bool" | "string" | "externref";
   /**
+   * (#2955 slice 2) The ENTIRE string-prototype-method mode decision for
+   * `lowerStringMethodCall`, resolved on the lower-time side (the resolver is
+   * owned by integration/lower) so from-ast reads no `nativeStrings` at this
+   * site. Given the method name and the call-site arg count (user args,
+   * receiver excluded), returns:
+   *   - `null` — this mode cannot lower the call (native-mode
+   *     indexOf/includes/startsWith/endsWith, native-mode omitted optionals
+   *     other than `slice(start)`, or no resolver at all) → from-ast returns
+   *     null and the function demotes to legacy, exactly as before.
+   *   - a plan: `funcName` is the mode's target (`string_<m>` host import vs
+   *     `__str_<m>` native helper); `indexArgRep` is the representation of
+   *     index-style (f64) user args (`"i32"` ⇒ from-ast inserts
+   *     `i32.trunc_sat_f64_s`, the native helper signature); `padOmitted`
+   *     picks the omitted-optional strategy (`"host"` = the host-shim
+   *     sentinel conventions incl. #1248 slice-end + #2002 NaN-position;
+   *     `"native-slice-len"` = `slice(start)`'s implicit end = recv.length,
+   *     i32-truncated).
+   *
+   * Capability note: demote/claim decisions must be settled at BUILD time
+   * (post-claim demotion is the documented residual channel; there is no
+   * lower-time demote), which is why this is a resolver callback rather than
+   * an abstract-instr lowering case. Promoting the rep half (the trunc
+   * insertion) into a true `str.method` instr lowered per mode is the
+   * follow-up slice recorded in #2955.
+   */
+  stringMethodPlan?(
+    method: string,
+    argCount: number,
+  ): { funcName: string; indexArgRep: "f64" | "i32"; padOmitted: "host" | "native-slice-len" } | null;
+  /**
    * (#2856) Resolve an extern-class member through the legacy inheritance
    * chain (`ctx.externClasses` + `ctx.externClassParent` — e.g. `appendChild`
    * on an `Element` receiver resolves on `Node`). `node`, when provided, is
@@ -3683,7 +3713,7 @@ interface StringMethodSig {
   readonly requiredArgs: number;
 }
 
-const STRING_METHOD_TABLE: Readonly<Record<string, StringMethodSig>> = {
+export const STRING_METHOD_TABLE: Readonly<Record<string, StringMethodSig>> = {
   toUpperCase: { hostArgs: [], result: { kind: "string" }, requiredArgs: 0 },
   toLowerCase: { hostArgs: [], result: { kind: "string" }, requiredArgs: 0 },
   trim: { hostArgs: [], result: { kind: "string" }, requiredArgs: 0 },
@@ -3736,20 +3766,17 @@ function lowerStringMethodCall(
     );
   }
 
-  const useNative = cx.resolver?.nativeStrings?.() === true;
-  if (
-    useNative &&
-    (methodName === "indexOf" ||
-      methodName === "includes" ||
-      // #2002 — the native string backend lowers the position arg via its
-      // own __str_* helpers (src/codegen/string-ops.ts); defer to the legacy
-      // native path rather than re-implement position handling in the IR.
-      methodName === "startsWith" ||
-      methodName === "endsWith")
-  ) {
-    return null;
-  }
-  const funcName = useNative ? `__str_${methodName}` : `string_${methodName}`;
+  // (#2955 slice 2) The mode decision — target name, index-arg rep, and the
+  // omitted-optional strategy — is resolved by the lower-time side via
+  // `stringMethodPlan` (implemented in integration.ts, where the string-mode
+  // discriminator lives). from-ast reads NO `nativeStrings` here: it just
+  // applies the plan mechanically. A `null` plan is this mode's demote
+  // decision (native indexOf/includes/startsWith/endsWith per #2002, native
+  // omitted optionals other than slice(start), or a resolver without the
+  // callback) — return null so the caller's clean throw demotes to legacy.
+  const plan = cx.resolver?.stringMethodPlan?.(methodName, args.length) ?? null;
+  if (plan === null) return null;
+  const funcName = plan.funcName;
 
   // Build the argument list. params[0] is always the receiver
   // (`IrType.string`). Remaining args are coerced per backend.
@@ -3758,9 +3785,13 @@ function lowerStringMethodCall(
     const expectedHost = sig.hostArgs[i]!;
     let argVal: IrValueId;
     if (expectedHost.kind === "f64") {
-      // Index-style arg. Lower as f64, then truncate to i32 in native mode.
+      // Index-style arg. Lower as f64, then truncate to i32 when the plan's
+      // target signature takes i32 indices (the native helpers).
       const f64Val = lowerExpr(args[i]!, cx, irVal({ kind: "f64" }));
-      argVal = useNative ? cx.builder.emitUnary("i32.trunc_sat_f64_s", f64Val, irVal({ kind: "i32" })) : f64Val;
+      argVal =
+        plan.indexArgRep === "i32"
+          ? cx.builder.emitUnary("i32.trunc_sat_f64_s", f64Val, irVal({ kind: "i32" }))
+          : f64Val;
     } else if (expectedHost.kind === "externref") {
       // String-style arg. Lower as IrType.string — resolver maps to
       // externref (host) or (ref $NativeString) (native) at lower time.
@@ -3788,10 +3819,10 @@ function lowerStringMethodCall(
   // implicit `end` arg.
   for (let i = args.length; i < sig.hostArgs.length; i++) {
     const expectedHost = sig.hostArgs[i]!;
-    if (useNative) {
+    if (plan.padOmitted === "native-slice-len") {
       // #1248 native-mode: slice's missing `end` defaults to `recv.len`.
-      // For other methods we still throw — Phase 1 only covers fully-
-      // specified call sites for native mode.
+      // The plan only selects this strategy for `slice(start)` — any other
+      // native-mode omission already returned a null plan (demote) above.
       if (methodName === "slice" && i === 1 && expectedHost.kind === "f64") {
         // emitStringLen returns f64; truncate to i32 for native helpers
         const f64Len = cx.builder.emitStringLen(recv);
