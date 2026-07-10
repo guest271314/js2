@@ -80,16 +80,22 @@ describe("#2933 — standalone Reflect.* static-method value reads", () => {
   });
 });
 
-describe("#2933 — deferred namespace static-method value reads still refuse (scope boundary)", () => {
+describe("#2933 — deferred namespace static-method value reads (scope boundary, updated by #2984 Phase 3)", () => {
   // (JSON.stringify as a value now WORKS host-free — moved to
-  // issue-2933-json-stringify-value.test.ts. Only the variadic Math.max value
-  // read remains refused below.)
+  // issue-2933-json-stringify-value.test.ts. The variadic Math.max value read
+  // this guard used to pin as REFUSED is now reified by #2984 Phase 3: every
+  // `BUILTIN_STATIC_METHOD_ARITY` member mints an identity-stable first-class
+  // closure — un-wired ones with a catchable-TypeError body — so the READ
+  // compiles; the gOPD static-descriptor synthesis relies on it for
+  // `gOPD(Math, "max").value === Math.max`.)
 
-  it("Math.max as a value still refuses (variadic — split follow-up)", async () => {
-    const r = await compile(`export function test(): number { const g: any = Math.max; return g(1, 2, 3); }`, {
-      target: "standalone",
-    });
-    expect(r.success).toBe(false);
-    expect(r.errors.map((e) => e.message).join("\n")).toContain("Math.max");
+  it("Math.max as a value reifies first-class and identity-stable (#2984 Phase 3)", async () => {
+    expect(
+      await runStandaloneNS(
+        `const a: any = Math.max; const b: any = Math.max;
+         if (typeof a !== "function") { return -1; }
+         return a === b ? 1 : 0;`,
+      ),
+    ).toBe(1);
   });
 });
