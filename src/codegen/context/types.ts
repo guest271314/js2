@@ -1581,6 +1581,24 @@ export interface CodegenContext {
    */
   moduleHasAsyncGen?: boolean;
   /**
+   * (#2903) True when the module SOURCE contains any construct that can mint a
+   * HOST promise under `--target standalone` while the native `$Promise` chain
+   * is active: dynamic `import()`, host-routed combinators
+   * (`Promise.allSettled`/`any`/`allKeyed`/`allSettledKeyed`, subclass
+   * `X.all`/`X.race`), `.finally(…)` (host-routed instance method), or
+   * `Array.fromAsync`. Set in the pre-body `collectDeclarations` walk (same
+   * discipline as {@link moduleHasAsyncGen} so compile order cannot miss a
+   * textually-later producer). The `.then`/`.catch` receiver bridge
+   * (`emitStandaloneThenWithNativeFallback`, calls.ts) keys its miss arm on
+   * this: with NO host-promise source in the module every runtime promise is a
+   * native `$Promise`, so the host fallback arm is provably dead and is
+   * replaced by a native TypeError — dropping the `Promise_then*` /
+   * `__make_callback` host imports that kept ~626 otherwise-passing standalone
+   * modules host-import-leaky (unscored under the honest #2879 metric).
+   * Unset/false on the gc/host and wasi lanes (setter is standalone-gated).
+   */
+  moduleHasHostPromiseSource?: boolean;
+  /**
    * Function declarations pre-registered during module-pass eager class body
    * compilation. The entry has a reserved `mod.functions` slot and signature,
    * but its body still belongs to the normal nested-function hoist pass.
