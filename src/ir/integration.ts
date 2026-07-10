@@ -1045,6 +1045,22 @@ function makeFromAstResolver(ctx: CodegenContext, sourceFile?: ts.SourceFile): I
     jsHostExterns(): boolean {
       return !(ctx.standalone || ctx.wasi || ctx.strictNoHostImports);
     },
+    // (#2955 number-box slice) Capability: this lane owns the
+    // `__box_number` / `__unbox_number` f64⇄externref host imports (legacy
+    // registers them via `addUnionImports`). The from-ast boxing arms
+    // (`coerceToExpectedExtern`, `coerceReturnValue`) consult THIS predicate
+    // instead of reading `nativeStrings` directly — the mode knowledge lives
+    // here, on the lower/integration side, per #2955's de-polymorph
+    // direction. Implementation is deliberately the exact truth value the
+    // old in-place `nativeStrings?.() === false` reads produced (byte-inert
+    // relocation). Widening — e.g. allowing the box pair under a
+    // native-strings HOST compile, or lowering to `$AnyValue` boxing in
+    // standalone instead of demoting — is a semantic follow-up tracked in
+    // #2955's remaining-slices map, and must be validated against the
+    // standalone floor (the demote arm is load-bearing there).
+    hasHostNumberBox(): boolean {
+      return !ctx.nativeStrings;
+    },
     // (#2856 C2) TypedArray-view receiver detection for element STORES —
     // the same checker walk as the legacy `elementAccessTypedArrayName`
     // (assignment.ts): symbol name of the receiver's TS type against the

@@ -120,6 +120,20 @@ export interface IrExternClassMeta {
 export interface IrFromAstResolver {
   nativeStrings?(): boolean;
   resolveString?(): ValType;
+  /**
+   * (#2955 number-box slice) Capability predicate: does this compile's lane
+   * own the `__box_number` / `__unbox_number` host imports (the f64⇄externref
+   * boxing pair legacy registers via `addUnionImports`)? The two from-ast
+   * boxing arms (`coerceToExpectedExtern` f64→externref, `coerceReturnValue`
+   * externref→f64) previously read `nativeStrings?.() === false` as a PROXY
+   * for this — a mode read the #2955 grep gate wants out of the front-end.
+   * The mode knowledge now lives on the resolver/lower side
+   * (`integration.ts`); from-ast only asks "can I box here?" and demotes when
+   * the answer is no. The implementation is intentionally `!ctx.nativeStrings`
+   * today (byte-inert relocation); widening it (native-strings host compiles,
+   * standalone `$AnyValue` boxing) is a semantic follow-up tracked in #2955.
+   */
+  hasHostNumberBox?(): boolean;
   resolveVec?(valType: ValType): IrVecLowering | null;
   /**
    * #1804 — register-or-recover the vec struct for an element ValType so
@@ -3264,9 +3278,15 @@ function coerceToExpectedExtern(value: IrValueId, expected: ValType, cx: LowerCt
   // (#2856 C3) f64 → externref: box through the `__box_number` host import —
   // the exact coercion legacy's `coerceType` emits for the same site (so the
   // import is registered by legacy's own compile of the function in the
-  // dual-compile model). JS-host lane only: standalone has no `__box_number`
-  // (its boxing is the `$AnyValue` family), so demote there.
-  if (expected.kind === "externref" && got !== null && got.kind === "f64" && cx.resolver?.nativeStrings?.() === false) {
+  // dual-compile model). Gated on the resolver's number-box CAPABILITY
+  // (#2955): standalone has no `__box_number` (its boxing is the `$AnyValue`
+  // family), so the predicate is false there and we fall to the demote throw.
+  if (
+    expected.kind === "externref" &&
+    got !== null &&
+    got.kind === "f64" &&
+    cx.resolver?.hasHostNumberBox?.() === true
+  ) {
     const boxed = cx.builder.emitCall({ kind: "func", name: "__box_number" }, [value], irVal({ kind: "externref" }));
     if (boxed === null) {
       throw new Error(`ir/from-ast: __box_number produced no result in ${cx.funcName}`);
@@ -4087,13 +4107,14 @@ function coerceReturnValue(value: IrValueId, cx: LowerCtx): IrValueId {
   // `return hit;` where `hit = cache.get(n)` is the externref Map_get
   // result. Unbox through `__unbox_number`, exactly what legacy emits for
   // the same site (import registered by legacy's own compile in the
-  // dual-compile model). Host lane only — standalone demotes. Before this
+  // dual-compile model). Gated on the resolver's number-box capability
+  // (#2955) — the lane without `__unbox_number` demotes. Before this
   // arm such returns slipped to the verifier's #1798 gate and demoted;
   // now they lower like legacy.
   if (declared && declared.kind === "val" && declared.val.kind === "f64") {
     const actualT = cx.builder.typeOf(value);
     const actualV = asVal(actualT);
-    if (actualV && actualV.kind === "externref" && cx.resolver?.nativeStrings?.() === false) {
+    if (actualV && actualV.kind === "externref" && cx.resolver?.hasHostNumberBox?.() === true) {
       const unboxed = cx.builder.emitCall({ kind: "func", name: "__unbox_number" }, [value], irVal({ kind: "f64" }));
       if (unboxed === null) {
         throw new Error(`ir/from-ast: __unbox_number produced no result in ${cx.funcName}`);
