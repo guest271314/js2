@@ -7924,7 +7924,12 @@ function compileCallExpression(
         const protoGlue = protoBrand !== undefined ? getNativeProtoBuiltinGlue(ctx, protoBrand) : undefined;
         if (protoBrand !== undefined && protoGlue && protoGlue.memberCsv.split(",").includes(protoMember)) {
           const memberKind = protoGlue.memberKind(protoMember);
-          const protoClosure = ensureStandaloneNativeMethodClosure(ctx, protoBrand, protoMember, memberKind);
+          // (#2984 Phase 2) Un-wired members reify as identity-stable throwing
+          // closures (see native-proto-value-read.ts) so the descriptor is
+          // spec-shaped and `desc.value === <Builtin>.prototype.<m>` holds.
+          const protoClosure = ensureStandaloneNativeMethodClosure(ctx, protoBrand, protoMember, memberKind, {
+            refusalBodyFallback: true,
+          });
           if (protoClosure) {
             if (memberKind === "getter") {
               // Accessor descriptor: get=<closure>, set=undefined,
