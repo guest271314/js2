@@ -243,8 +243,10 @@ function emitCallbackTypeCheck(
 
 /**
  * (#3126, the #3098 typed-lane residual) Gate for admitting a REF/REF_NULL
- * element receiver (native-string `string[]` vecs on the nativeStrings lanes,
- * object-struct `T[]` arrays on every lane) into the native typed HOF impls.
+ * element receiver (native-string `string[]` vecs, object-struct `T[]`
+ * arrays) into the native typed HOF impls on the HOST-FREE lanes
+ * (standalone/wasi — the caller checks the lane; see hofElemKindOk for why
+ * the gc host lane keeps its `__make_callback` fallback).
  *
  * The typed loops are element-kind agnostic on the CLOSURE path
  * (`buildClosureCallInstrs` — `call_ref` + `coercionInstrs`), but the
@@ -257,9 +259,8 @@ function emitCallbackTypeCheck(
  *   - any other expression → transactional probe-compile (#1919 machinery),
  *     admitted iff the compiled type is a ref with registered ClosureInfo.
  * Missing or known-non-callable callbacks are admitted too: the typed impls
- * emit the spec §23.1.3 step-3 TypeError, which beats the fallback (a silent
- * vacuous no-op — find→undefined / filter→[] — on the gc lane, and an
- * unsatisfiable `env.__make_callback` host-import leak standalone/wasi).
+ * emit the spec §23.1.3 step-3 TypeError, which beats the fallback (an
+ * unsatisfiable `env.__make_callback` host-import leak on these lanes).
  *
  * The opaque-externref callback residual (a callback VALUE typed `any`)
  * deliberately stays on the current fallback — that is #3015's bridge-path
@@ -3431,20 +3432,33 @@ export function compileArrayMethodCall(
 
   // (#3126, #3098 typed-lane residual) Element-kind gate for the callback-
   // consuming HOF impls below. f64/i32/externref were always admitted;
-  // ref/ref_null (native-string / object-struct) elements are admitted when
-  // the callback provably takes the native closure path (see
-  // refElemHofCallbackIsClosure). Previously these fell through to the generic
-  // fallback, which is a silent vacuous no-op on the gc lane (find→undefined,
-  // filter→[], some→false on `T[]` struct arrays) and an unsatisfiable
-  // `env.__make_callback` host-import leak on the standalone/wasi lanes
-  // (typed `string[]` find/filter — the #3098 boundary). Mirrors the #1967
-  // `sort` and #2688 `map` gate widenings. Evaluated lazily: at most one
-  // probe-compile per call site, only for ref-element receivers.
+  // ref/ref_null (native-string / object-struct) elements are admitted on the
+  // HOST-FREE lanes (standalone/wasi) when the callback provably takes the
+  // native closure path (see refElemHofCallbackIsClosure). There the generic
+  // fallback is strictly unusable — it materializes the callback via
+  // `env.__make_callback`, an unsatisfiable host import (typed `string[]`
+  // find/filter — the #3098 boundary), so routing native can only gain.
+  //
+  // The gc HOST lane is deliberately NOT widened. Its fallback compiles the
+  // inline arrow via compileArrowAsCallback (`__make_callback`), whose body
+  // resolves HOST globals (`Temporal`, `TemporalHelpers`, …) and host-object
+  // method calls; the closure path (compileArrowAsClosure) does not — a
+  // widened gc gate flipped 212 Temporal merge_group tests pass→fail
+  // ("TemporalHelpers is not defined" inside the lifted closure) on PR #2838's
+  // first merge-group attempt. The gc-lane residual (struct-array `T[]`
+  // find/filter/some are a silent no-op through the SAME fallback when the
+  // body is host-free) stays pre-existing and documented in the #3126 issue
+  // file — its real root is closure-lifted host-global resolution, not this
+  // gate. Mirrors the #1967 `sort` / #2688 `map` widenings otherwise.
+  // Evaluated lazily: at most one probe-compile per call site, only for
+  // ref-element receivers on the host-free lanes.
   const hofElemKindOk = (et: ValType): boolean =>
     et.kind === "f64" ||
     et.kind === "i32" ||
     et.kind === "externref" ||
-    ((et.kind === "ref" || et.kind === "ref_null") && refElemHofCallbackIsClosure(ctx, fctx, callExpr));
+    ((et.kind === "ref" || et.kind === "ref_null") &&
+      (ctx.standalone || ctx.wasi) &&
+      refElemHofCallbackIsClosure(ctx, fctx, callExpr));
 
   let result: ValType | null | undefined;
   switch (methodName) {

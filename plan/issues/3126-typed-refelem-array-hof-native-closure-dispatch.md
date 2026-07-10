@@ -46,10 +46,9 @@ fallback, which is broken in two lane-specific ways:
    num-find-control:   HOST-FREE PASS
    ```
 
-2. **gc host lane** (probe `.tmp/probe-3098r-gclane.mts`) — worse than the
-   #3098 boundary note assumed: the fallback is a **silent vacuous no-op** on
-   struct arrays, not a working host path (the host cannot iterate a WasmGC
-   vec struct):
+2. **gc host lane** (probe `.tmp/probe-3098r-gclane.mts`): for struct arrays
+   with HOST-FREE callback bodies the same fallback is a **silent vacuous
+   no-op** (the host cannot iterate a WasmGC vec struct):
 
    ```
    objs.find(o => o.x > 1)          → undefined (want {x:2})
@@ -57,7 +56,12 @@ fallback, which is broken in two lane-specific ways:
    objs.some(o => o.x === 2)        → false (want true)
    ```
 
-   This is the #1837/#3088 vacuity class: wrong results, no error.
+   This is the #1837/#3088 vacuity class: wrong results, no error. **BUT**
+   (measured on PR #2838's first merge-group attempt — see the reversal note
+   below) the fallback is NOT universally broken on gc: for callbacks whose
+   BODIES reference host globals or host-object methods it is the ONLY
+   working path, so the gc lane keeps it (this issue fixes standalone/wasi
+   only; the gc struct-array vacuity stays a named residual).
 
 ## Root cause
 
@@ -92,10 +96,11 @@ The only genuinely elem-kind-specific pieces:
    admitted (the typed impls emit the spec §23.1.3 step-3 TypeError — strictly
    better than the vacuous fallback).
 2. Widen the 10 gates: `hofElemKindOk(elemType)` = old kinds ∪
-   (`ref`/`ref_null` ∧ closure-callback). All lanes — the gc fallback is
-   broken too (above), so there is no working behavior to preserve.
+   (`ref`/`ref_null` ∧ **standalone/wasi lane** ∧ closure-callback). The gc
+   host lane is NOT widened — see the merge-group reversal note below.
 3. `compileArrayFind`/`compileArrayFindLast`: ref-element result rep =
-   `{ref_null, elemTypeIdx}` local + `ref.null` sentinel; return that type.
+   `{ref_null, elemTypeIdx}` local + `ref.null` sentinel; return that type
+   (reachable only via the widened lanes, byte-inert on gc).
 
 Non-closure (opaque externref) callbacks on ref-element receivers keep the
 current fallback — #3015's slice. `sort(cmp)`/`flatMap`/`Array.from` remain
@@ -107,13 +112,50 @@ path).
 1. All 9 leaking typed `string[]` probe shapes compile HOST-FREE standalone
    (zero imports), instantiate with an empty import object, and return correct
    values; `map`/`number[]` controls unchanged.
-2. gc-lane struct-array probes return correct values (find→{x:2}, filter→2,
-   some→true).
+2. gc-lane emission byte-identical to main (the lane is not widened).
 3. `prove-emit-identity` main-vs-branch: byte-identical on corpus files not
    using ref-element HOF receivers.
 4. Zero regressions vs the honest baseline (merge_group gates).
 
 ## Implementation notes (fable-3098r, 2026-07-10)
+
+### MERGE-GROUP REVERSAL — why the gc lane is NOT widened (the key lesson)
+
+The first version of this PR widened the gate on ALL lanes, on the argument
+"the gc fallback is measurably broken too (struct-array vacuity), so there is
+no working behavior to preserve." **That argument was wrong, and the
+merge_group caught it**: PR #2838's first merge-group attempt regressed
+**212 tests, all `built-ins/Temporal/*`** (net −145; auto-park `hold`).
+
+Mechanism (verified locally, `.tmp/dump-ceil.ts` +
+`JS2WASM_3126_ONLY=forEach` bisect): the Temporal tests' top-level
+`expected.forEach(([unit, pos, neg]) => { TemporalHelpers.assertDuration(
+instance.round({...}), ...) })` iterates a **ref-element tuple array** — so
+the widened gate re-routed the callback from `compileArrowAsCallback`
+(`__make_callback`, host-lifted) to `compileArrowAsClosure` (GC closure).
+`Temporal` and `TemporalHelpers` are **HOST globals** (src/runtime.ts) that
+are NOT in the compiled module's scope — the host-lifted path resolves them,
+the closure-lifted path compiles them to `"TemporalHelpers is not defined"`
+runtime throws. So on the gc lane the fallback is the ONLY working path for
+host-global-referencing callback bodies, and the vacuity probe result
+("`objs.find` is a no-op on gc") holds only for HOST-FREE bodies. The
+attribution method that pinned this: diff my merge-group merged-report
+against predecessor PR #2815's merge-group merged-report (identical state
+minus my PR) — 212/212 flips attributable to my PR, 100% under
+`built-ins/Temporal/`.
+
+Consequences baked into the final PR:
+
+- The widening carries `(ctx.standalone || ctx.wasi)` — lanes where
+  `__make_callback` is **unsatisfiable**, so re-routing can only gain.
+- gc emission is byte-identical to main (verified by shape-hash probe:
+  `gcstr gc`, `ident/opaque/numeric` all match current origin/main).
+- The gc struct-array vacuity is a NAMED RESIDUAL (below), whose real root
+  is **closure-lifted host-global/host-method resolution**, not this gate.
+- Sample validation: 31/31 of the 212 regressed Temporal files (every 7th)
+  pass on the re-scoped branch.
+
+### Design WHYs
 
 - WHY gate on closure-provability instead of fixing the bridge for ref
   elements: the bridge's f64 ABI fundamentally cannot carry a GC struct; a
@@ -121,39 +163,35 @@ path).
   args. Admitting only provable closures means the widened path is exactly the
   `call_ref` path, and every previously-working shape (numeric/externref
   elems, opaque callbacks) is byte-identical.
-- WHY all lanes rather than standalone-only: the gc fallback was measured
-  broken (silent no-op), so lane-gating would have preserved a bug for zero
-  risk reduction; unconditional widening also matches the #1967/#2688
-  precedents.
 - The probe in the gate runs at most once per call site (only for ref-element
-  receivers of the 10 methods) and is fully rolled back (#1919
-  `probeCompiledType` restores body/locals/imports/errors).
+  receivers of the 10 methods on standalone/wasi) and is fully rolled back
+  (#1919 `probeCompiledType` restores body/locals/imports/errors).
 
-### Validation (all on the post-#2815 merge state)
+### Validation (post-#3127 merge state)
 
-- `.tmp/probe-3098r-typedstr.mts`: all 9 previously-leaking shapes →
-  HOST-FREE PASS; `map`/`number[]` controls unchanged.
-- `.tmp/probe-3098r-gclane.mts`: gc struct-array find/filter/some → PASS
-  (was undefined/0/false).
-- `.tmp/probe-3126-edges.mts`: identifier-closure admission, 2-/3-arg arity,
-  chained filter→find, find/findLast miss → `undefined`, reduce seed-from-
-  first / empty-throw / reduceRight, native-string truthiness, forEach
-  capture, some early-exit, struct arrays, opaque-`any`-callback parity —
-  PASS on both lanes (parity cases byte-identical to main by sha256).
+- `.tmp/probe-3098r-typedstr.mts` (standalone): all 9 previously-leaking
+  shapes → HOST-FREE PASS; `map`/`number[]` controls unchanged.
+- `.tmp/probe-3126-edges.mts` (standalone): identifier-closure admission,
+  2-/3-arg arity, chained filter→find, find/findLast miss → `undefined`,
+  reduce seed-from-first / empty-throw / reduceRight, native-string
+  truthiness, forEach capture, some early-exit, struct arrays,
+  opaque-`any`-callback parity — PASS.
 - Explicit `thisArg` + function-expression callback: host-free PASS
   (`.tmp/probe-3126-thisarg.mts`).
-- `prove-emit-identity`: **IDENTICAL** — all 39 (file,target) hashes across
-  gc/standalone/wasi vs BOTH main tips (pre- and post-#2815).
+- Temporal restoration: the 3 named repros + 31/31 sampled regressed files
+  pass on the gc lane.
+- Shape-hash probe vs current origin/main: gc hashes identical everywhere;
+  standalone differs ONLY on the ref-elem HOF shape (the fix).
+- `prove-emit-identity` vs current origin/main: all 39 (file,target) hashes
+  across gc/standalone/wasi — IDENTICAL (corpus has no ref-elem HOF sites).
 - test262 cluster (`built-ins/Array/prototype/{map,filter,forEach,reduce,
 reduceRight,every,some,find,findIndex,findLast,findLastIndex}`, 1,699 files
-  × gc+standalone = 3,398 rows): **zero flips** either direction. Expected:
-  test262 sources are untyped JS (dynamic-lane receivers); the typed-lane fix
-  serves TS-typed user code and the standalone leak metric (same shape as
-  #3098's own cluster result).
-- `tests/issue-3126.test.ts`: 39 pass / 2 documented gc-lane skips; suites
-  3098/array-methods/array-prototype-methods/3031 all green (102 tests).
-- Gates: tsc, biome lint (error level), prettier, loc-budget (+65 in-module,
-  baseline regen), coercion-sites, speculative-rollback — all OK.
+  × gc+standalone = 3,398 rows, run on the all-lanes draft which is a
+  superset of this final gate): **zero flips** either direction.
+- `tests/issue-3126.test.ts` green (gc struct-array cases are documented
+  skips); suites 3098/array-methods/array-prototype-methods/3031 green.
+- Gates: tsc, biome lint (error level), prettier, loc-budget (in-module
+  growth, baseline regen), coercion-sites, speculative-rollback — all OK.
 
 ### Discovered residuals (pre-existing, byte-identical to main — NOT this PR)
 
@@ -170,3 +208,12 @@ reduceRight,every,some,find,findIndex,findLast,findLastIndex}`, 1,699 files
    Pre-existing, emission byte-identical to main; the 2 `it.skip`s in
    `tests/issue-3126.test.ts` document it. Needs a PO issue on the externref
    miss-rep equality.
+3. **gc-lane struct-array HOF vacuity** (`objs.find/filter/some` with a
+   host-free callback body are silent no-ops through the `__make_callback`
+   fallback — `.tmp/probe-3098r-gclane.mts`). Deliberately NOT fixed here
+   (see the merge-group reversal note): widening the gc gate breaks
+   host-global-referencing callback bodies (Temporal). The real fix is
+   **closure-lifted host-global/host-object-method resolution** (make
+   `compileArrowAsClosure` bodies resolve `Temporal`-class host globals), OR
+   a body-scan that routes host-free bodies natively. Needs a PO issue; the
+   4 gc `it.skip`s in `tests/issue-3126.test.ts` document it.

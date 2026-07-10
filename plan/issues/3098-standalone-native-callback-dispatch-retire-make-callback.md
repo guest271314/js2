@@ -256,9 +256,11 @@ filter,forEach,reduce,every,some,find*}` (1,439 non-skip files) — ZERO
   `str-filter` leak; `str-map` is native via the #2688-widened gate). Fixing
   this is typed-lane work (result-rep: typed callers expect a
   `$NativeString` ref back, not externref) — S5 candidate, separate PR.
-  **→ RETIRED by #3126** (gates widened to ref/ref_null under a
-  closure-provability check; also fixed the silent gc-lane vacuous no-op the
-  same fallback caused on object-struct `T[]` arrays).
+  **→ RETIRED by #3126** (gates widened to ref/ref_null on the
+  standalone/wasi lanes under a closure-provability check; the gc host lane
+  deliberately keeps the `__make_callback` fallback — it is the only path
+  that resolves host globals like `Temporal`/`TemporalHelpers` inside
+  callback bodies; see #3126's merge-group reversal note).
 - `sort(cmp)`, `flatMap`, `Array.from(x, mapFn)` — S4, not landed.
 - TypedArray dyn-view callback methods (#3058 BANKED) — S3's other half, not
   landed (coordinate with #3058's two-arm).

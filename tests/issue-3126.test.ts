@@ -5,20 +5,26 @@
 // Root cause: the typed HOF gates in compileArrayMethodCall admitted only
 // f64/i32/externref element kinds for find/findIndex/findLast/findLastIndex/
 // filter/every/some/forEach/reduce/reduceRight. Ref-element receivers —
-// native-string `string[]` vecs on the standalone/wasi lanes, object-struct
-// `T[]` arrays on EVERY lane — fell through to the generic fallback, which
-//   (a) standalone/wasi: materialized the callback via `env.__make_callback`,
-//       an unsatisfiable host import (instantiation failure), and
-//   (b) gc host lane: was a silent vacuous no-op (find→undefined, filter→[],
-//       some→false) because the host cannot iterate a WasmGC vec struct.
+// native-string `string[]` vecs, object-struct `T[]` arrays — fell through to
+// the generic fallback, which on the HOST-FREE lanes (standalone/wasi)
+// materialized the callback via `env.__make_callback`, an unsatisfiable host
+// import (instantiation failure).
 //
-// Fix: the gates admit ref/ref_null elements when the callback provably
-// compiles to a GC closure struct (inline arrow/function expression, or a
-// probe-compiled expression with registered ClosureInfo) — the typed loops'
-// closure path (`call_ref` + coercionInstrs) is element-kind agnostic.
-// find/findLast additionally type their result as the element's nullable ref
-// with a `ref.null` "not found" sentinel (the typed lane's `undefined` rep).
-// Non-closure (opaque externref) callbacks keep the previous fallback (#3015).
+// Fix (standalone/wasi ONLY): the gates admit ref/ref_null elements when the
+// callback provably compiles to a GC closure struct (inline arrow/function
+// expression, or a probe-compiled expression with registered ClosureInfo) —
+// the typed loops' closure path (`call_ref` + coercionInstrs) is element-kind
+// agnostic. find/findLast additionally type their result as the element's
+// nullable ref with a `ref.null` "not found" sentinel (the typed lane's
+// `undefined` rep). Non-closure (opaque externref) callbacks keep the
+// previous fallback (#3015).
+//
+// The gc HOST lane is deliberately NOT widened: its `__make_callback`
+// fallback resolves HOST globals (`Temporal`, `TemporalHelpers`, …) inside
+// callback bodies, which the closure-lifted path cannot — an earlier
+// all-lanes widening flipped 212 Temporal merge_group tests pass→fail
+// (PR #2838 first merge-group attempt). gc emission is byte-identical to
+// main in this PR.
 
 import { describe, expect, it } from "vitest";
 import { compileAndInstantiate } from "../src/runtime-instantiate.js";
@@ -163,30 +169,40 @@ const CASES: { name: string; body: string; want: number; skipGc?: string }[] = [
            return r === "gamma" ? 1 : 0;`,
     want: 1,
   },
+  // The struct-array cases below are fixed on the HOST-FREE lanes only. The gc
+  // host lane deliberately keeps its `__make_callback` fallback (which is a
+  // silent no-op for these host-free bodies — pre-existing): widening the gc
+  // gate flipped 212 Temporal merge_group tests whose callbacks reference HOST
+  // globals (`TemporalHelpers`/`Temporal`) that the closure-lifted path cannot
+  // resolve. See hofElemKindOk in array-methods.ts and the #3126 issue file.
   {
-    name: "object-struct array find returns the matched struct (was: silent undefined on gc)",
+    name: "object-struct array find returns the matched struct",
     body: `const objs = [{x: 1}, {x: 2}, {x: 3}];
            const r = objs.find((o: {x: number}) => o.x > 1);
            return r ? r.x : -1;`,
     want: 2,
+    skipGc: "gc keeps the host fallback (host-global callbacks); struct-array vacuity is a pre-existing gc residual",
   },
   {
-    name: "object-struct array filter (was: silent [] on gc)",
+    name: "object-struct array filter",
     body: `const objs = [{x: 1}, {x: 2}, {x: 3}];
            return objs.filter((o: {x: number}) => o.x > 1).length;`,
     want: 2,
+    skipGc: "gc keeps the host fallback (host-global callbacks); struct-array vacuity is a pre-existing gc residual",
   },
   {
-    name: "object-struct array some (was: silent false on gc)",
+    name: "object-struct array some",
     body: `const objs = [{x: 1}, {x: 2}];
            return objs.some((o: {x: number}) => o.x === 2) ? 1 : 0;`,
     want: 1,
+    skipGc: "gc keeps the host fallback (host-global callbacks); struct-array vacuity is a pre-existing gc residual",
   },
   {
     name: "object-struct array every",
     body: `const objs = [{x: 1}, {x: 2}];
            return objs.every((o: {x: number}) => o.x > 0) ? 1 : 0;`,
     want: 1,
+    skipGc: "gc keeps the host fallback (host-global callbacks); struct-array vacuity is a pre-existing gc residual",
   },
 ];
 
