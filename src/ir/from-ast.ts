@@ -5198,6 +5198,14 @@ function lowerPrefixUnary(expr: ts.PrefixUnaryExpression, cx: LowerCtx): IrValue
   switch (expr.operator) {
     case ts.SyntaxKind.MinusToken: {
       const randType = typeOfValue(rand, cx);
+      // #2949 S5.5 — unary `-` on a boxed-any carrier is ToNumber then negate
+      // (§13.5.5 Unary Minus): `dyn.to_number` (canonical `__any_to_f64` gc /
+      // `__unbox_number` host — D4) feeds the existing `f64.neg`. Byte-inert
+      // until the S5.P scan admits dynamic-unary bodies.
+      if (randType.kind === "dynamic") {
+        const n = cx.builder.emitDynToNumber(rand);
+        return cx.builder.emitUnary("f64.neg", n, irVal({ kind: "f64" }));
+      }
       if (asVal(randType)?.kind !== "f64") {
         throw new Error(`ir/from-ast: unary '-' expects number in ${cx.funcName}`);
       }
@@ -5205,6 +5213,11 @@ function lowerPrefixUnary(expr: ts.PrefixUnaryExpression, cx: LowerCtx): IrValue
     }
     case ts.SyntaxKind.PlusToken: {
       const randType = typeOfValue(rand, cx);
+      // #2949 S5.5 — unary `+` on a boxed-any carrier IS ToNumber (§13.5.4
+      // Unary Plus is exactly `? ToNumber(value)`): a bare `dyn.to_number`.
+      if (randType.kind === "dynamic") {
+        return cx.builder.emitDynToNumber(rand);
+      }
       if (asVal(randType)?.kind !== "f64") {
         throw new Error(`ir/from-ast: unary '+' expects number in ${cx.funcName}`);
       }
@@ -5212,6 +5225,14 @@ function lowerPrefixUnary(expr: ts.PrefixUnaryExpression, cx: LowerCtx): IrValue
     }
     case ts.SyntaxKind.ExclamationToken: {
       const randType = typeOfValue(rand, cx);
+      // #2949 S5.5 — `!dyn` is ToBoolean then negate (§13.5.7): `dyn.truthy`
+      // (the S5.1 primitive — canonical `__any_unbox_bool` gc / `__is_truthy`
+      // host) feeds the existing `i32.eqz`. Inherits S5.1's documented gc
+      // boxed-NaN-is-truthy byte-parity quirk (host is spec-correct).
+      if (randType.kind === "dynamic") {
+        const t = cx.builder.emitDynTruthy(rand);
+        return cx.builder.emitUnary("i32.eqz", t, irVal({ kind: "i32" }));
+      }
       if (asVal(randType)?.kind !== "i32") {
         throw new Error(`ir/from-ast: unary '!' expects bool in ${cx.funcName}`);
       }
@@ -5482,6 +5503,23 @@ function lowerBinary(expr: ts.BinaryExpression, cx: LowerCtx, hint: IrType): IrV
     // operand, where ARC never takes the both-strings branch).
     const dynRel = tryLowerDynamicRelational(op, lhs, rhs, lt, rt, cx);
     if (dynRel !== null) return dynRel;
+    // #2949 S5.5 — dynamic numeric arithmetic: `-`/`*`/`/`/`%` where either
+    // operand is a boxed-any carrier. Each dynamic operand is ToNumber'd to
+    // f64 via `dyn.to_number` (the S5.3 primitive — canonical `__any_to_f64`
+    // gc / `__unbox_number` host, D4), then the EXISTING f64 lowering runs
+    // (`f64.sub`/`mul`/`div`; `%` via the shared exact-`__fmod` helper,
+    // #2945). This is spec-exact: `-`/`*`/`/`/`%` are pure ToNumber operators
+    // (§13.7 / §13.8.2 — ApplyStringOrNumericBinaryOperation with a
+    // numeric-only opText never takes the string branch) — unlike `+`, which
+    // is ToPrimitive + string-concat-OR-add dispatch and is deliberately
+    // EXCLUDED (the Row-7 `proveAdditiveOperand` gate above already demotes
+    // an unprovable-`any` `+` to the SAFE legacy `emitAnyAdd`). This is the
+    // missing producer for the reduce-style `obj[idx-1]` bodies the #3053 U2
+    // measurement flagged (its follow-up 2). Reachable only once the S5.P
+    // scan admits dynamic-arithmetic bodies; today the move-only gate
+    // rejects them, so this arm is byte-inert.
+    const dynArith = tryLowerDynamicArithmetic(op, lhs, rhs, lt, rt, cx);
+    if (dynArith !== null) return dynArith;
   }
 
   // String operand path (slice 1, #1169a) — `+`, `===`, `!==`, `==`, `!=`.
@@ -6104,18 +6142,81 @@ function tryLowerDynamicRelational(
 }
 
 /**
- * #2949 S5.3 — coerce ONE relational operand to `f64` for the numeric-abstract
- * compare: a dynamic carrier ToNumbers via `dyn.to_number`; a concrete `f64` is
- * used as-is. Any other concrete kind (i32/ref/string) returns `null` so the
- * caller demotes cleanly — this slice only converts the dynamic side, and adds
- * no i32/string→number coercion (numeric literals lower to `f64` under the f64
- * hint the operands were lowered with, so `dyn > 0` / `dyn <= 10` are covered).
+ * #2949 S5.3/S5.5 — coerce ONE numeric-abstract operand to `f64` (shared by the
+ * relational compare and the numeric-arithmetic arm): a dynamic carrier
+ * ToNumbers via `dyn.to_number`; a concrete `f64` is used as-is. Any other
+ * concrete kind (i32/ref/string) returns `null` so the caller demotes cleanly —
+ * these slices only convert the dynamic side, and add no i32/string→number
+ * coercion (numeric literals lower to `f64` under the f64 hint the operands
+ * were lowered with, so `dyn > 0` / `dyn - 1` are covered).
  */
 function relOperandToF64(v: IrValueId, t: IrType, cx: LowerCtx): IrValueId | null {
   if (t.kind === "dynamic") return cx.builder.emitDynToNumber(v);
   const tv = asVal(t);
   if (tv && tv.kind === "f64") return v;
   return null;
+}
+
+/**
+ * #2949 S5.5 — lower `dyn - x` / `dyn * x` / `dyn / x` / `dyn % x` (either or
+ * both operands dynamic) as NUMERIC arithmetic: each dynamic operand is
+ * ToNumber'd to `f64` via `dyn.to_number` (canonical `__any_to_f64` gc /
+ * `__unbox_number` host — D4, the same primitive S5.3's relational arm uses),
+ * then the existing f64 op runs (`f64.sub`/`mul`/`div`; `%` calls the shared
+ * exact-`__fmod` helper — #2945/#2056, the SAME helper legacy `emitModulo`
+ * emits, so every fmod edge — `x % 0` → NaN, `-0 % x` → -0, `x % Inf` → x —
+ * agrees bit-for-bit). Returns `null` (clean demote) for any other operator, or
+ * for a concrete operand this slice cannot feed the f64 op (see
+ * {@link relOperandToF64}).
+ *
+ * These four operators are PURE ToNumber operators per §13.7 (multiplicative)
+ * and §13.8.2 (subtraction): ApplyStringOrNumericBinaryOperation with a
+ * numeric-only opText never takes a string branch, so — unlike relational
+ * (string×string lexicographic deferred) and unlike `+` (concat dispatch,
+ * excluded) — the ToNumber lowering is spec-complete for EVERY runtime operand
+ * partition (string operands ToNumber per §7.1.4: host `Number(v)`; the gc
+ * boxed-string→f64-slot gap matches legacy `__any_sub`-family behavior and is
+ * the documented S5.3 deferred imperfection). BigInt operands are out of scope
+ * (the IR claims no BigInt-typed shapes).
+ */
+function tryLowerDynamicArithmetic(
+  op: ts.SyntaxKind,
+  lhs: IrValueId,
+  rhs: IrValueId,
+  lt: IrType,
+  rt: IrType,
+  cx: LowerCtx,
+): IrValueId | null {
+  let binop: IrBinop | null;
+  switch (op) {
+    case ts.SyntaxKind.MinusToken:
+      binop = "f64.sub";
+      break;
+    case ts.SyntaxKind.AsteriskToken:
+      binop = "f64.mul";
+      break;
+    case ts.SyntaxKind.SlashToken:
+      binop = "f64.div";
+      break;
+    case ts.SyntaxKind.PercentToken:
+      binop = null; // routed through the __fmod helper call below
+      break;
+    default:
+      return null;
+  }
+  const lf = relOperandToF64(lhs, lt, cx);
+  if (lf === null) return null;
+  const rf = relOperandToF64(rhs, rt, cx);
+  if (rf === null) return null;
+  if (binop === null) {
+    const fmodResult = cx.builder.emitCall({ kind: "func", name: FMOD_FN }, [lf, rf], irVal({ kind: "f64" }));
+    if (fmodResult === null) {
+      // Unreachable: a non-null resultType always yields a value id.
+      throw new Error(`ir/from-ast: internal — dynamic __fmod call produced no value in ${cx.funcName}`);
+    }
+    return fmodResult;
+  }
+  return cx.builder.emitBinary(binop, lf, rf, irVal({ kind: "f64" }));
 }
 
 // ---------------------------------------------------------------------------
