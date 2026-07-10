@@ -241,6 +241,44 @@ function emitCallbackTypeCheck(
   return false;
 }
 
+/**
+ * (#3126, the #3098 typed-lane residual) Gate for admitting a REF/REF_NULL
+ * element receiver (native-string `string[]` vecs on the nativeStrings lanes,
+ * object-struct `T[]` arrays on every lane) into the native typed HOF impls.
+ *
+ * The typed loops are element-kind agnostic on the CLOSURE path
+ * (`buildClosureCallInstrs` — `call_ref` + `coercionInstrs`), but the
+ * non-closure fallback (`buildBridgeCallInstrs`) converts the element to the
+ * host bridge's f64 argument, which has no lowering for a GC struct element —
+ * admitting that shape would emit invalid Wasm. So ref-element receivers are
+ * admitted ONLY when the callback provably compiles to a GC closure struct:
+ *   - inline arrow / function expression → `compileArrowAsClosure`, always a
+ *     closure struct;
+ *   - any other expression → transactional probe-compile (#1919 machinery),
+ *     admitted iff the compiled type is a ref with registered ClosureInfo.
+ * Missing or known-non-callable callbacks are admitted too: the typed impls
+ * emit the spec §23.1.3 step-3 TypeError, which beats the fallback (a silent
+ * vacuous no-op — find→undefined / filter→[] — on the gc lane, and an
+ * unsatisfiable `env.__make_callback` host-import leak standalone/wasi).
+ *
+ * The opaque-externref callback residual (a callback VALUE typed `any`)
+ * deliberately stays on the current fallback — that is #3015's bridge-path
+ * slice, not this gate's scope.
+ */
+function refElemHofCallbackIsClosure(ctx: CodegenContext, fctx: FunctionContext, callExpr: ts.CallExpression): boolean {
+  if (callExpr.arguments.length < 1) return true; // typed impl emits the spec TypeError
+  const cbArg = callExpr.arguments[0]!;
+  if (isKnownNonCallable(ctx, cbArg)) return true; // typed impl emits the spec TypeError
+  if (ts.isArrowFunction(cbArg) || ts.isFunctionExpression(cbArg)) return true;
+  const probed = probeCompiledType(ctx, fctx, () => compileExpression(ctx, fctx, cbArg));
+  return (
+    probed !== null &&
+    probed !== undefined &&
+    (probed.kind === "ref" || probed.kind === "ref_null") &&
+    ctx.closureInfoByTypeIdx.has((probed as { typeIdx: number }).typeIdx)
+  );
+}
+
 // ── Guarded funcref cast (ref.test before ref.cast to avoid illegal cast traps) ──
 function guardedFuncRefCastInstrs(fctx: FunctionContext, funcTypeIdx: number): Instr[] {
   const tmpFunc = allocLocal(fctx, `__gfc_${fctx.locals.length}`, { kind: "funcref" } as ValType);
@@ -3391,6 +3429,23 @@ export function compileArrayMethodCall(
     }
   }
 
+  // (#3126, #3098 typed-lane residual) Element-kind gate for the callback-
+  // consuming HOF impls below. f64/i32/externref were always admitted;
+  // ref/ref_null (native-string / object-struct) elements are admitted when
+  // the callback provably takes the native closure path (see
+  // refElemHofCallbackIsClosure). Previously these fell through to the generic
+  // fallback, which is a silent vacuous no-op on the gc lane (find→undefined,
+  // filter→[], some→false on `T[]` struct arrays) and an unsatisfiable
+  // `env.__make_callback` host-import leak on the standalone/wasi lanes
+  // (typed `string[]` find/filter — the #3098 boundary). Mirrors the #1967
+  // `sort` and #2688 `map` gate widenings. Evaluated lazily: at most one
+  // probe-compile per call site, only for ref-element receivers.
+  const hofElemKindOk = (et: ValType): boolean =>
+    et.kind === "f64" ||
+    et.kind === "i32" ||
+    et.kind === "externref" ||
+    ((et.kind === "ref" || et.kind === "ref_null") && refElemHofCallbackIsClosure(ctx, fctx, callExpr));
+
   let result: ValType | null | undefined;
   switch (methodName) {
     case "indexOf":
@@ -3469,12 +3524,12 @@ export function compileArrayMethodCall(
           ? compileArraySort(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType)
           : undefined;
       break;
-    // Functional array methods -- supported for numeric (f64, i32) and externref element types
+    // Functional array methods -- numeric (f64, i32) / externref element types,
+    // plus ref/ref_null elements when the callback is a provable closure (#3126).
     case "filter":
-      result =
-        elemType.kind === "f64" || elemType.kind === "i32" || elemType.kind === "externref"
-          ? compileArrayFilter(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType)
-          : undefined;
+      result = hofElemKindOk(elemType)
+        ? compileArrayFilter(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType)
+        : undefined;
       break;
     case "map":
       // (#2688) Include ref/ref_null struct-element receivers (mirrors the #1967
@@ -3495,61 +3550,52 @@ export function compileArrayMethodCall(
           : undefined;
       break;
     case "reduce":
-      result =
-        elemType.kind === "f64" || elemType.kind === "i32" || elemType.kind === "externref"
-          ? compileArrayReduce(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType)
-          : undefined;
+      result = hofElemKindOk(elemType)
+        ? compileArrayReduce(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType)
+        : undefined;
       break;
     case "reduceRight":
-      result =
-        elemType.kind === "f64" || elemType.kind === "i32" || elemType.kind === "externref"
-          ? compileArrayReduceRight(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType)
-          : undefined;
+      result = hofElemKindOk(elemType)
+        ? compileArrayReduceRight(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType)
+        : undefined;
       break;
     case "forEach": {
-      const feResult =
-        elemType.kind === "f64" || elemType.kind === "i32" || elemType.kind === "externref"
-          ? compileArrayForEach(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType)
-          : undefined;
+      const feResult = hofElemKindOk(elemType)
+        ? compileArrayForEach(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType)
+        : undefined;
       // forEach returns void; use VOID_RESULT so compileExpression doesn't rollback
       result = feResult === null ? (VOID_RESULT as any) : feResult;
       break;
     }
     case "find":
-      result =
-        elemType.kind === "f64" || elemType.kind === "i32" || elemType.kind === "externref"
-          ? compileArrayFind(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType)
-          : undefined;
+      result = hofElemKindOk(elemType)
+        ? compileArrayFind(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType)
+        : undefined;
       break;
     case "findIndex":
-      result =
-        elemType.kind === "f64" || elemType.kind === "i32" || elemType.kind === "externref"
-          ? compileArrayFindIndex(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType)
-          : undefined;
+      result = hofElemKindOk(elemType)
+        ? compileArrayFindIndex(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType)
+        : undefined;
       break;
     case "findLast":
-      result =
-        elemType.kind === "f64" || elemType.kind === "i32" || elemType.kind === "externref"
-          ? compileArrayFindLast(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType)
-          : undefined;
+      result = hofElemKindOk(elemType)
+        ? compileArrayFindLast(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType)
+        : undefined;
       break;
     case "findLastIndex":
-      result =
-        elemType.kind === "f64" || elemType.kind === "i32" || elemType.kind === "externref"
-          ? compileArrayFindLastIndex(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType)
-          : undefined;
+      result = hofElemKindOk(elemType)
+        ? compileArrayFindLastIndex(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType)
+        : undefined;
       break;
     case "some":
-      result =
-        elemType.kind === "f64" || elemType.kind === "i32" || elemType.kind === "externref"
-          ? compileArraySome(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType)
-          : undefined;
+      result = hofElemKindOk(elemType)
+        ? compileArraySome(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType)
+        : undefined;
       break;
     case "every":
-      result =
-        elemType.kind === "f64" || elemType.kind === "i32" || elemType.kind === "externref"
-          ? compileArrayEvery(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType)
-          : undefined;
+      result = hofElemKindOk(elemType)
+        ? compileArrayEvery(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType)
+        : undefined;
       break;
     case "toReversed":
       result = compileArrayToReversed(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType);
@@ -7556,10 +7602,21 @@ function compileArrayFind(
   // as `externref` for an externref element (and use `ref.null.extern` — the
   // `undefined` sentinel — for "not found", which is the spec result anyway).
   const elemIsExternref = elemType.kind === "externref";
-  // Result local -- NaN/undefined (not found) or element value
-  const findResType: ValType = ctx.fast || elemIsExternref ? elemType : { kind: "f64" };
+  // (#3126) ref/ref_null element (native-string / object-struct arrays): the
+  // result is the element's NULLABLE ref with a `ref.null` "not found"
+  // sentinel — the typed lane's `undefined` rep (same rep pop()/at() misses
+  // use). The numeric NaN sentinel below would `local.set` a GC ref into an
+  // f64 local (invalid Wasm).
+  const refElemResType: ValType | undefined =
+    elemType.kind === "ref" || elemType.kind === "ref_null"
+      ? { kind: "ref_null", typeIdx: (elemType as { typeIdx: number }).typeIdx }
+      : undefined;
+  // Result local -- null/NaN/undefined (not found) or element value
+  const findResType: ValType = refElemResType ?? (ctx.fast || elemIsExternref ? elemType : { kind: "f64" });
   const findResTmp = allocLocal(fctx, `__arr_find_res_${fctx.locals.length}`, findResType);
-  if (elemIsExternref) {
+  if (refElemResType) {
+    fctx.body.push({ op: "ref.null", typeIdx: refElemResType.typeIdx });
+  } else if (elemIsExternref) {
     fctx.body.push({ op: "ref.null.extern" });
   } else if (ctx.fast) {
     fctx.body.push({ op: "i32.const", value: 0 });
@@ -7604,7 +7661,7 @@ function compileArrayFind(
   emitArrayLoop(fctx, loopBody);
 
   fctx.body.push({ op: "local.get", index: findResTmp });
-  return ctx.fast || elemIsExternref ? elemType : { kind: "f64" };
+  return findResType;
 }
 
 /**
@@ -7761,9 +7818,17 @@ function compileArrayFindLast(
   // not an f64; keep the result type externref with a `ref.null.extern`
   // (undefined) "not found" sentinel. See compileArrayFind.
   const elemIsExternref = elemType.kind === "externref";
-  const findResType: ValType = ctx.fast || elemIsExternref ? elemType : { kind: "f64" };
+  // (#3126) ref/ref_null element: nullable elem ref + `ref.null` sentinel —
+  // see compileArrayFind.
+  const refElemResType: ValType | undefined =
+    elemType.kind === "ref" || elemType.kind === "ref_null"
+      ? { kind: "ref_null", typeIdx: (elemType as { typeIdx: number }).typeIdx }
+      : undefined;
+  const findResType: ValType = refElemResType ?? (ctx.fast || elemIsExternref ? elemType : { kind: "f64" });
   const findResTmp = allocLocal(fctx, `__arr_findLast_res_${fctx.locals.length}`, findResType);
-  if (elemIsExternref) {
+  if (refElemResType) {
+    fctx.body.push({ op: "ref.null", typeIdx: refElemResType.typeIdx });
+  } else if (elemIsExternref) {
     fctx.body.push({ op: "ref.null.extern" });
   } else if (ctx.fast) {
     fctx.body.push({ op: "i32.const", value: 0 });
@@ -7806,7 +7871,7 @@ function compileArrayFindLast(
   emitArrayLoop(fctx, loopBody);
 
   fctx.body.push({ op: "local.get", index: findResTmp });
-  return ctx.fast || elemIsExternref ? elemType : { kind: "f64" };
+  return findResType;
 }
 
 /**
