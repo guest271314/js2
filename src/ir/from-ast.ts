@@ -171,6 +171,36 @@ export interface IrFromAstResolver {
    */
   consoleArgVariant?(arg: ts.Expression): "number" | "bool" | "string" | "externref";
   /**
+   * (#2955 slice 2) The ENTIRE string-prototype-method mode decision for
+   * `lowerStringMethodCall`, resolved on the lower-time side (the resolver is
+   * owned by integration/lower) so from-ast reads no `nativeStrings` at this
+   * site. Given the method name and the call-site arg count (user args,
+   * receiver excluded), returns:
+   *   - `null` — this mode cannot lower the call (native-mode
+   *     indexOf/includes/startsWith/endsWith, native-mode omitted optionals
+   *     other than `slice(start)`, or no resolver at all) → from-ast returns
+   *     null and the function demotes to legacy, exactly as before.
+   *   - a plan: `funcName` is the mode's target (`string_<m>` host import vs
+   *     `__str_<m>` native helper); `indexArgRep` is the representation of
+   *     index-style (f64) user args (`"i32"` ⇒ from-ast inserts
+   *     `i32.trunc_sat_f64_s`, the native helper signature); `padOmitted`
+   *     picks the omitted-optional strategy (`"host"` = the host-shim
+   *     sentinel conventions incl. #1248 slice-end + #2002 NaN-position;
+   *     `"native-slice-len"` = `slice(start)`'s implicit end = recv.length,
+   *     i32-truncated).
+   *
+   * Capability note: demote/claim decisions must be settled at BUILD time
+   * (post-claim demotion is the documented residual channel; there is no
+   * lower-time demote), which is why this is a resolver callback rather than
+   * an abstract-instr lowering case. Promoting the rep half (the trunc
+   * insertion) into a true `str.method` instr lowered per mode is the
+   * follow-up slice recorded in #2955.
+   */
+  stringMethodPlan?(
+    method: string,
+    argCount: number,
+  ): { funcName: string; indexArgRep: "f64" | "i32"; padOmitted: "host" | "native-slice-len" } | null;
+  /**
    * (#2856) Resolve an extern-class member through the legacy inheritance
    * chain (`ctx.externClasses` + `ctx.externClassParent` — e.g. `appendChild`
    * on an `Element` receiver resolves on `Node`). `node`, when provided, is
@@ -1242,8 +1272,27 @@ function lowerVarDecl(stmt: ts.VariableStatement, cx: LowerCtx): void {
     // here without a TS checker. Defer those to inference from the
     // initializer — `typeNodeToIr` only fires for primitive type
     // keywords; everything else falls through to inference.
-    const annotated =
+    let annotated =
       d.type && isPrimitiveTypeNode(d.type) ? typeNodeToIr(d.type, `local ${name} of ${cx.funcName}`) : undefined;
+    // (#2856) `number[]` annotation → resolve the f64-element vec and use its
+    // struct ref as the annotated type. This is what gives an EMPTY literal
+    // initializer (`const arr: number[] = []`) the vec-typed hint
+    // `lowerArrayLiteral` needs to type its `vec.new_fixed`. Parity: the
+    // selector's `isPhase1TypeNode` accepts exactly this shape (ArrayTypeNode
+    // with a NumberKeyword element), so every claim reaches a hint here. A
+    // resolver that can't register the vec throws → clean demote to legacy.
+    if (annotated === undefined && d.type && ts.isArrayTypeNode(d.type)) {
+      if (d.type.elementType.kind !== ts.SyntaxKind.NumberKeyword) {
+        throw new Error(`ir/from-ast: array annotation on '${name}' must be number[] in ${cx.funcName}`);
+      }
+      const vec = cx.resolver?.resolveVecForElement?.({ kind: "f64" });
+      if (!vec) {
+        throw new Error(
+          `ir/from-ast: resolver cannot register vec for number[] annotation on '${name}' (${cx.funcName})`,
+        );
+      }
+      annotated = irVal({ kind: "ref", typeIdx: vec.vecStructTypeIdx });
+    }
     const hint: IrType = annotated ?? irVal({ kind: "f64" });
     const value = lowerExpr(d.initializer, cx, hint);
     const inferred = cx.builder.typeOf(value);
@@ -1481,7 +1530,12 @@ function lowerArrayPattern(pattern: ts.ArrayBindingPattern, source: IrValueId, c
   }
 }
 
-function typeNodeToIr(node: ts.TypeNode | undefined, where: string): IrType {
+// #2956 L1: exported so the linear IR driver (backend/linear-integration.ts)
+// can pre-seed `calleeTypes` from ANNOTATIONS with the exact same primitive
+// mapping this builder uses for its own params (self/mutual recursion needs
+// the callee signature before the callee has built). Export is additive —
+// no behavior change.
+export function typeNodeToIr(node: ts.TypeNode | undefined, where: string): IrType {
   if (!node) throw new Error(`ir/from-ast: missing type annotation (${where})`);
   switch (node.kind) {
     case ts.SyntaxKind.NumberKeyword:
@@ -3485,6 +3539,60 @@ function lowerMethodCall(expr: ts.CallExpression, cx: LowerCtx, statementPositio
     return r;
   }
 
+  // (#2856) `arr.push(v)` on a growable vec receiver. Rides the C2
+  // element-store helper: `__vec_elem_set_<vecTypeIdx>(recv, len, v)` writes
+  // at index == length, which is EXACTLY the legacy push semantics (grow the
+  // backing array when at capacity, store, length = idx + 1 — see
+  // src/codegen/vec-elem-set.ts). The length is read BEFORE the store.
+  // Restricted to a NON-NULL `(ref $vec)` receiver: `emitVecLen` struct-reads
+  // the receiver without a null guard, so a nullable receiver (`ref_null`,
+  // e.g. an unnarrowed param) demotes to legacy, which carries the runtime
+  // TypeError null-guard. Single-arg only (multi-arg push demotes); f64 /
+  // externref element vecs only (mirrors `lowerElementStore`).
+  {
+    const vecRecvVal = asVal(recvType);
+    if (methodName === "push" && vecRecvVal && vecRecvVal.kind === "ref") {
+      const vec = cx.resolver?.resolveVec?.(vecRecvVal);
+      if (vec) {
+        if (expr.arguments.length !== 1 || ts.isSpreadElement(expr.arguments[0]!)) {
+          throw new Error(
+            `ir/from-ast: .push with ${expr.arguments.length} args / spread not in IR scope (single plain arg only) (${cx.funcName})`,
+          );
+        }
+        const elem = vec.elementValType;
+        if (elem.kind !== "f64" && elem.kind !== "externref") {
+          throw new Error(`ir/from-ast: .push into '${elem.kind}' vec not in IR scope (${cx.funcName})`);
+        }
+        // Old length — the store index. `emitVecLen` yields the f64 JS length.
+        const lenF64 = cx.builder.emitVecLen(recv);
+        const lenI32 = cx.builder.emitUnary("i32.trunc_sat_f64_s", lenF64, irVal({ kind: "i32" }));
+        const valRaw = lowerExpr(expr.arguments[0]!, cx, irVal(elem));
+        let val: IrValueId;
+        if (elem.kind === "f64") {
+          const valTy = asVal(cx.builder.typeOf(valRaw));
+          if (valTy?.kind !== "f64") {
+            throw new Error(
+              `ir/from-ast: .push value ${describeIrType(cx.builder.typeOf(valRaw))} into f64 vec ` +
+                `not in IR scope (${cx.funcName})`,
+            );
+          }
+          val = valRaw;
+        } else {
+          val = coerceToExpectedExtern(valRaw, elem, cx, `value of .push`);
+        }
+        cx.builder.emitCall(
+          { kind: "func", name: `__vec_elem_set_${vec.vecStructTypeIdx}` },
+          [recv, lenI32, val],
+          null,
+        );
+        if (statementPosition) return null;
+        // Expression position: JS `push` returns the NEW length = old + 1.
+        const one = cx.builder.emitConst({ kind: "f64", value: 1 }, irVal({ kind: "f64" }));
+        return cx.builder.emitBinary("f64.add", lenF64, one, irVal({ kind: "f64" }));
+      }
+    }
+  }
+
   if (recvType.kind !== "class") {
     throw new Error(
       `ir/from-ast: method call .${methodName}(...) on ${describeIrType(recvType)} not in slice 4 (${cx.funcName})`,
@@ -3585,7 +3693,7 @@ interface StringMethodSig {
   readonly requiredArgs: number;
 }
 
-const STRING_METHOD_TABLE: Readonly<Record<string, StringMethodSig>> = {
+export const STRING_METHOD_TABLE: Readonly<Record<string, StringMethodSig>> = {
   toUpperCase: { hostArgs: [], result: { kind: "string" }, requiredArgs: 0 },
   toLowerCase: { hostArgs: [], result: { kind: "string" }, requiredArgs: 0 },
   trim: { hostArgs: [], result: { kind: "string" }, requiredArgs: 0 },
@@ -3638,20 +3746,17 @@ function lowerStringMethodCall(
     );
   }
 
-  const useNative = cx.resolver?.nativeStrings?.() === true;
-  if (
-    useNative &&
-    (methodName === "indexOf" ||
-      methodName === "includes" ||
-      // #2002 — the native string backend lowers the position arg via its
-      // own __str_* helpers (src/codegen/string-ops.ts); defer to the legacy
-      // native path rather than re-implement position handling in the IR.
-      methodName === "startsWith" ||
-      methodName === "endsWith")
-  ) {
-    return null;
-  }
-  const funcName = useNative ? `__str_${methodName}` : `string_${methodName}`;
+  // (#2955 slice 2) The mode decision — target name, index-arg rep, and the
+  // omitted-optional strategy — is resolved by the lower-time side via
+  // `stringMethodPlan` (implemented in integration.ts, where the string-mode
+  // discriminator lives). from-ast reads NO `nativeStrings` here: it just
+  // applies the plan mechanically. A `null` plan is this mode's demote
+  // decision (native indexOf/includes/startsWith/endsWith per #2002, native
+  // omitted optionals other than slice(start), or a resolver without the
+  // callback) — return null so the caller's clean throw demotes to legacy.
+  const plan = cx.resolver?.stringMethodPlan?.(methodName, args.length) ?? null;
+  if (plan === null) return null;
+  const funcName = plan.funcName;
 
   // Build the argument list. params[0] is always the receiver
   // (`IrType.string`). Remaining args are coerced per backend.
@@ -3660,9 +3765,13 @@ function lowerStringMethodCall(
     const expectedHost = sig.hostArgs[i]!;
     let argVal: IrValueId;
     if (expectedHost.kind === "f64") {
-      // Index-style arg. Lower as f64, then truncate to i32 in native mode.
+      // Index-style arg. Lower as f64, then truncate to i32 when the plan's
+      // target signature takes i32 indices (the native helpers).
       const f64Val = lowerExpr(args[i]!, cx, irVal({ kind: "f64" }));
-      argVal = useNative ? cx.builder.emitUnary("i32.trunc_sat_f64_s", f64Val, irVal({ kind: "i32" })) : f64Val;
+      argVal =
+        plan.indexArgRep === "i32"
+          ? cx.builder.emitUnary("i32.trunc_sat_f64_s", f64Val, irVal({ kind: "i32" }))
+          : f64Val;
     } else if (expectedHost.kind === "externref") {
       // String-style arg. Lower as IrType.string — resolver maps to
       // externref (host) or (ref $NativeString) (native) at lower time.
@@ -3690,10 +3799,10 @@ function lowerStringMethodCall(
   // implicit `end` arg.
   for (let i = args.length; i < sig.hostArgs.length; i++) {
     const expectedHost = sig.hostArgs[i]!;
-    if (useNative) {
+    if (plan.padOmitted === "native-slice-len") {
       // #1248 native-mode: slice's missing `end` defaults to `recv.len`.
-      // For other methods we still throw — Phase 1 only covers fully-
-      // specified call sites for native mode.
+      // The plan only selects this strategy for `slice(start)` — any other
+      // native-mode omission already returned a null plan (demote) above.
       if (methodName === "slice" && i === 1 && expectedHost.kind === "f64") {
         // emitStringLen returns f64; truncate to i32 for native helpers
         const f64Len = cx.builder.emitStringLen(recv);

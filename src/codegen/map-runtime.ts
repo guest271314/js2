@@ -1159,21 +1159,6 @@ export function ensureMapHelpers(ctx: CodegenContext): void {
 }
 
 /**
- * (#1103a) Coerce a freshly-compiled Map key/value argument to `anyref` — the
- * uniform slot type the runtime stores. Numbers arrive as `f64` and are boxed
- * via `__box_number` (the contract `__same_value_zero` / `__hash_anyref`
- * assume); native strings and other GC refs are already anyref subtypes;
- * externrefs externalize via `any.convert_extern`.
- */
-/**
- * (#2162) Re-exported for the Set runtime, which reuses the Map backing store
- * and needs the identical key/value → anyref boxing for its element arg.
- */
-export function coerceSetArgToAnyref(ctx: CodegenContext, fctx: FunctionContext, t: ValType | null): void {
-  coerceArgToAnyref(ctx, fctx, t);
-}
-
-/**
  * (#2162) Re-exported for the WeakMap/WeakSet runtime, which reuses the Map
  * backing store and needs the identical key/value → anyref boxing.
  */

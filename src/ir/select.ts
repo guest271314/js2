@@ -744,6 +744,20 @@ let currentFnIsGenerator = false;
 let currentFnIsVoidReturn = false;
 
 /**
+ * (#2856) Names LEAKED into the flat scope set by a sibling for-init
+ * (`for (let i = ...)` adds `i` to the outer scope after the loop so
+ * later statements can reference the counter — the scope tracker is a
+ * flat set, not block-scoped). A SECOND sibling `for (let i = ...)`
+ * re-declaring such a leaked name is fine: from-ast scopes each for-init
+ * in its own `innerCx` copy (`lowerForStatement`), so the two loop
+ * counters never collide at build time. Genuine outer bindings (params,
+ * body-level locals) are NOT in this set, so shadowing THOSE still
+ * rejects — which mirrors `lowerVarDecl`'s redeclaration throw exactly
+ * (select↔build parity, #2138). Reset per function walk.
+ */
+let forInitLeakedNames = new Set<string>();
+
+/**
  * (#2856) Host-extern resolution for the CURRENT `planIrCompilation` run.
  * Set (and cleared) at the selector entry from `IrSelectionOptions` —
  * module-level for the same reason as `currentHostGlobalResolver`: the
@@ -926,6 +940,7 @@ function whyNotIrClaimable(
   // (#2856 C1) Reset the early-return context for this function's walk.
   earlyReturnLoopDepth = 0;
   earlyReturnBarrierDepth = 0;
+  forInitLeakedNames = new Set();
   currentFnIsGenerator = isGenerator;
   currentFnIsVoidReturn = isVoidReturn;
   // #1370 Phase A: constructor bodies don't have a return-statement tail —
@@ -1680,9 +1695,13 @@ function isPhase1StatementList(
       // statements can reference the loop counter (TypeScript would
       // narrow scope to the for-statement, but our scope tracker is
       // a flat set; the conservative addition is fine for shape check).
+      // (#2856) Record the leak so a SIBLING for-init may re-declare it.
       if (s.initializer && ts.isVariableDeclarationList(s.initializer)) {
         for (const d of s.initializer.declarations) {
-          if (ts.isIdentifier(d.name)) scope.add(d.name.text);
+          if (ts.isIdentifier(d.name) && !scope.has(d.name.text)) {
+            scope.add(d.name.text);
+            forInitLeakedNames.add(d.name.text);
+          }
         }
       }
       continue;
@@ -1925,7 +1944,11 @@ function isPhase1ForStatement(
         if (!ts.isIdentifier(d.name)) return false;
         if (!d.initializer) return false;
         if (!isPhase1Expr(d.initializer, innerScope, localClasses)) return false;
-        if (innerScope.has(d.name.text)) return false; // duplicate
+        // (#2856) A name a SIBLING for-init leaked into the flat scope set is
+        // NOT a genuine duplicate — from-ast scopes each for-init in its own
+        // innerCx copy, so `for (let i...) {} for (let i...) {}` builds fine.
+        // Genuine outer bindings still reject (build-side redeclaration).
+        if (innerScope.has(d.name.text) && !forInitLeakedNames.has(d.name.text)) return false; // duplicate
         innerScope.add(d.name.text);
       }
     } else {
@@ -2104,9 +2127,13 @@ function isPhase1BodyStatement(
   }
   if (ts.isForStatement(stmt)) {
     if (!isPhase1ForStatement(stmt, scope, localClasses)) return false;
+    // (#2856) Record the leak so a SIBLING for-init may re-declare it.
     if (stmt.initializer && ts.isVariableDeclarationList(stmt.initializer)) {
       for (const d of stmt.initializer.declarations) {
-        if (ts.isIdentifier(d.name)) scope.add(d.name.text);
+        if (ts.isIdentifier(d.name) && !scope.has(d.name.text)) {
+          scope.add(d.name.text);
+          forInitLeakedNames.add(d.name.text);
+        }
       }
     }
     return true;
@@ -2490,6 +2517,16 @@ function bodyReferencesIdentifier(body: ts.Block, name: string): boolean {
 }
 
 function isPhase1TypeNode(node: ts.TypeNode): boolean {
+  // (#2856) `number[]` array annotation — the from-ast vardecl arm resolves
+  // it to a vec-ref hint (`resolveVecForElement(f64)`), which is what lets an
+  // EMPTY initializer (`const arr: number[] = []`) type its `vec.new_fixed`.
+  // Kept in lockstep with `lowerVarDecl`'s ArrayTypeNode arm (parity: every
+  // annotation accepted here MUST produce a hint there). Only the f64 element
+  // is in scope — `string[]` / `boolean[]` element carriers are backend-
+  // dependent and stay deferred.
+  if (ts.isArrayTypeNode(node)) {
+    return node.elementType.kind === ts.SyntaxKind.NumberKeyword;
+  }
   return (
     node.kind === ts.SyntaxKind.NumberKeyword ||
     node.kind === ts.SyntaxKind.BooleanKeyword ||

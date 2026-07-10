@@ -1835,17 +1835,6 @@ export interface AsyncDriveRuntime {
 }
 
 /**
- * (#2895 PATH B) Public accessor for the `$PromiseCallback` reaction-node type.
- * The async frame driver prepends a reaction (its per-fn resume-step funcref +
- * the frame as caps) onto a pending awaited promise's `callbacks` list, so it
- * needs the node's typeIdx. Internally identical to the private registrar the
- * `.then` machinery uses — same node shape, same cache.
- */
-export function getOrRegisterPromiseCallbackTypeIdx(ctx: CodegenContext): number {
-  return getOrRegisterPromiseCallbackType(ctx);
-}
-
-/**
  * (#2895 PATH B) Idempotently register the full async-drive runtime substrate
  * (Promise type, reaction node, microtask ring, settle helpers) and return the
  * stable func/type indices. Must be invoked BEFORE emitting any function body

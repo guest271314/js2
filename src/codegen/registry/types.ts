@@ -71,18 +71,6 @@ function valTypeEq(a: ValType, b: ValType): boolean {
   return true;
 }
 
-export function funcTypeEq(t: FuncTypeDef, params: ValType[], results: ValType[]): boolean {
-  if (t.params.length !== params.length) return false;
-  if (t.results.length !== results.length) return false;
-  for (let i = 0; i < params.length; i++) {
-    if (!valTypeEq(t.params[i]!, params[i]!)) return false;
-  }
-  for (let i = 0; i < results.length; i++) {
-    if (!valTypeEq(t.results[i]!, results[i]!)) return false;
-  }
-  return true;
-}
-
 /**
  * Get or register a Wasm array type for a given element kind.
  * Reuses existing registrations so each element type only gets one array type.

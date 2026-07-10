@@ -161,3 +161,43 @@ export function ensureStructAccessorGlobal(
  *   separate `u32 out of range: -1` emit error in this path — diagnose as part of
  *   C5, it is pre-existing and unrelated to the closure rework.
  */
+
+/**
+ * (#3076) Is this object literal the RECEIVER argument of an
+ * `Object.defineProperty/defineProperties` (or `Reflect` twin) call?
+ *
+ * Why it matters: the standalone runtime descriptor store
+ * (`__defineProperty_value` / `__defineProperty_accessor`) is a lenient no-op
+ * on a non-`$Object` receiver. TS's generic `defineProperty<T>(o: T, …)` gives
+ * an inline `{}` receiver a CONCRETE empty contextual type, so
+ * `compileObjectLiteral`'s any-context arm never fires and the literal lowers
+ * to a closed struct — the accessor is then silently dropped, and every later
+ * read (member read AND destructuring GetV, §13.3.3.7 step 4) returns
+ * undefined instead of firing a poisoned getter (the canonical test262
+ * `dstr/*obj-ptrn-*get-value-err` / `*ary-ptrn-*-iter-val-err` shapes).
+ * `compileObjectLiteral` uses this predicate (standalone/wasi only) to build
+ * such a receiver as an open `$Object` via `__new_plain_object`, which the
+ * native store and the `__extern_get` accessor dispatch (#1888 S5b) service
+ * end-to-end. The JS-host import stores descriptors in an identity-keyed
+ * sidecar, so the host lanes never need this routing — the predicate returns
+ * false outside standalone/wasi, keeping those lanes byte-identical.
+ */
+export function isDefinePropertyReceiverLiteral(ctx: CodegenContext, expr: ts.ObjectLiteralExpression): boolean {
+  if (!ctx.standalone && !ctx.wasi) return false;
+  let node: ts.Node = expr;
+  while (
+    node.parent &&
+    (ts.isAsExpression(node.parent) || ts.isParenthesizedExpression(node.parent) || ts.isNonNullExpression(node.parent))
+  ) {
+    node = node.parent;
+  }
+  const call = node.parent;
+  if (!call || !ts.isCallExpression(call) || call.arguments[0] !== node) return false;
+  const callee = call.expression;
+  return (
+    ts.isPropertyAccessExpression(callee) &&
+    ts.isIdentifier(callee.expression) &&
+    (callee.expression.text === "Object" || callee.expression.text === "Reflect") &&
+    (callee.name.text === "defineProperty" || callee.name.text === "defineProperties")
+  );
+}
