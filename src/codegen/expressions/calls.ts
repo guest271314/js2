@@ -3090,13 +3090,34 @@ function tryEmitInlineDynamicCall(
     // adopts the JS arity semantics the direct-closure path (`compileClosureCall`
     // L122-129) already implements.
     //
-    // (#1837) Over-arity padding stays gated to NON-VOID results: a void-result
-    // closure padded past its arity marshals its padded self/args into a
-    // stack-invalid `call_ref` (the async-gen-meth-dflt win — the reason padding
-    // exists — all have a non-void generator result). An UNDER-arity void
-    // candidate is fine (no padding, just truncation), so only skip when the
-    // candidate is strictly OVER-arity AND void.
-    if (info.paramTypes.length > arity && info.returnType === null) continue;
+    // (#1837) Over-arity padding was gated to NON-VOID results: the June-21
+    // arm emitter produced a stack-invalid `call_ref` ("not enough arguments
+    // on the stack") for padded void candidates — 52 merge_group regressions
+    // in Promise/{all,race,any,allSettled} + TypedArray internals. The arm
+    // construction has since been reworked (#3031 dynamic-apply, #2611 flush,
+    // #2923) and now marshals exactly `paramTypes.length` formals with typed
+    // pads plus a `ref.null.extern` block result for void returns — stack-
+    // valid for void candidates too.
+    //
+    // (#3128) Narrowly re-admit over-arity VOID candidates whose padded
+    // formals are all externref (`undefined` pad is exact). This is the
+    // Promise settle-closure shape: a 0-arg `resolve()` inside a
+    // `new Promise(function(resolve){ resolve(); })` executor must dispatch
+    // the canonical `(externref) -> ()` settle wrapper with an undefined pad
+    // (§7.3.14 missing args are `undefined`) — the gate made the call a
+    // silent no-op, so the promise never settled (resolve-settled-*-self).
+    // Void candidates needing a non-externref pad stay excluded
+    // (conservative: their pad values are NaN/0/typed-null guesses).
+    if (info.paramTypes.length > arity && info.returnType === null) {
+      let padsAllExternref = true;
+      for (let i = arity; i < info.paramTypes.length; i++) {
+        if (info.paramTypes[i]!.kind !== "externref") {
+          padsAllExternref = false;
+          break;
+        }
+      }
+      if (!padsAllExternref) continue;
+    }
     if (!supported(info.returnType)) continue;
     let ok = true;
     for (const p of info.paramTypes) {
@@ -15028,6 +15049,15 @@ function compileCallExpression(
         const iifeNeedsArguments = ts.isFunctionExpression(callee) && callee.body && usesArguments(callee.body);
         // Support IIFEs with matching parameter/argument counts
         if (params.length <= args.length) {
+          // (#3128) Record that this function node is being INLINED into the
+          // current fctx: its AST function boundary does not exist in the
+          // emitted Wasm. The closure capture-mutability analysis
+          // (compileArrowAsClosure `writtenInOuter`) reads this to walk PAST
+          // the IIFE when locating the real enclosing scope — otherwise a
+          // closure inside the IIFE body that captures an outer var written
+          // outside the IIFE (`p2 = (function(){ return () => p2; })()`)
+          // misses the write and captures a stale by-value copy.
+          (fctx.inlinedIifeNodes ??= new Set()).add(callee);
           // Allocate locals for parameters and compile arguments
           const paramLocals: number[] = [];
           const allArgLocals: { idx: number; type: ValType }[] = [];
