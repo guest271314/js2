@@ -61,7 +61,7 @@ import {
 import type { CodegenContext, FunctionContext } from "../codegen/context/types.js";
 import { applyIrTailCalls } from "../codegen/ir-tail-call.js";
 import { ensureFmod, FMOD_FN } from "../codegen/fmod.js"; // #2945 — on-demand `%` helper materialization
-import { lowerFunctionAstToIr, type IrFromAstResolver } from "./from-ast.js";
+import { lowerFunctionAstToIr, STRING_METHOD_TABLE, type IrFromAstResolver } from "./from-ast.js";
 import {
   lowerIrFunctionToWasm,
   lowerIrTypeToValType,
@@ -1004,6 +1004,39 @@ function makeFromAstResolver(ctx: CodegenContext, sourceFile?: ts.SourceFile): I
   return {
     nativeStrings(): boolean {
       return ctx.nativeStrings;
+    },
+    // (#2955 slice 2) The WHOLE string-prototype-method mode decision table,
+    // relocated here from from-ast's `lowerStringMethodCall` so the front-end
+    // reads no `nativeStrings` at that site. Byte-inert by construction: the
+    // returned plan reproduces exactly the decisions the old inline reads
+    // made — same demotes (null), same target names, same index reps, same
+    // pad strategy — so the emitted IR per mode is unchanged. The demote
+    // half MUST stay a build-time answer (there is no lower-time demote
+    // channel), which is why this is a resolver callback and not an
+    // abstract-instr lowering case; promoting the rep half into a true
+    // `str.method` instr is #2955's follow-up slice.
+    stringMethodPlan(method: string, argCount: number) {
+      const native = ctx.nativeStrings;
+      // #2002 — the native string backend lowers the position arg via its
+      // own __str_* helpers (src/codegen/string-ops.ts); defer to the legacy
+      // native path rather than re-implement position handling in the IR.
+      if (
+        native &&
+        (method === "indexOf" || method === "includes" || method === "startsWith" || method === "endsWith")
+      ) {
+        return null;
+      }
+      const sig = STRING_METHOD_TABLE[method];
+      if (!sig) return null;
+      const omitted = argCount < sig.hostArgs.length;
+      // #1248 — native mode only lowers fully-specified call sites, except
+      // `slice(start)` whose implicit end defaults to recv.length.
+      if (native && omitted && !(method === "slice" && argCount === 1)) return null;
+      return {
+        funcName: native ? `__str_${method}` : `string_${method}`,
+        indexArgRep: (native ? "i32" : "f64") as "i32" | "f64",
+        padOmitted: (native ? "native-slice-len" : "host") as "native-slice-len" | "host",
+      };
     },
     resolveString(): ValType {
       if (ctx.nativeStrings && ctx.anyStrTypeIdx >= 0) {
