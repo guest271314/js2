@@ -168,6 +168,23 @@ interface UnifiedCollectorState {
 
 const CONSOLE_METHODS_SET = new Set(["log", "warn", "error", "info", "debug"]);
 
+// (#2903) Method names whose CALL can mint a HOST promise in a standalone
+// module even while the native `$Promise` chain is active — the host-routed
+// combinators/instance methods (`Promise_allSettled`/`Promise_any`/
+// `Promise_finally`/`__array_from_async` imports). Matched on ANY receiver
+// (conservative: a false positive only preserves the pre-#2903 host fallback
+// arm). Plain `Promise.all`/`Promise.race` are NOT listed — those lower to the
+// host-free native combinators (#2919/#2867 Gap 4); only the
+// subclass-receiver form is flagged (inline check at the scan site).
+const HOST_PROMISE_SOURCE_METHOD_NAMES = new Set([
+  "finally",
+  "allSettled",
+  "any",
+  "allKeyed",
+  "allSettledKeyed",
+  "fromAsync",
+]);
+
 /**
  * (#1700) Record TypedArray classifications for a user-exported function so
  * the JS-host `wrapExports` can marshal `Uint8Array` params/returns across
@@ -1075,6 +1092,52 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
     hasAsyncModifier(node)
   ) {
     ctx.moduleHasAsyncGen = true;
+  }
+
+  // (#2903) Flag any construct that can mint a HOST promise in a standalone
+  // module while the native `$Promise` chain is active: dynamic `import()`,
+  // host-routed combinators (`allSettled`/`any`/`allKeyed`/`allSettledKeyed`;
+  // subclass-receiver `all`/`race`), the host-routed `.finally(…)` instance
+  // method, and `Array.fromAsync`. The `.then`/`.catch` receiver bridge keys
+  // its miss arm on this (see `moduleHasHostPromiseSource` in
+  // context/types.ts): no producer in the module ⇒ the host fallback arm is
+  // provably dead ⇒ it is replaced by a native TypeError, dropping the
+  // `Promise_then*`/`__make_callback` leak. Conservative by design — a false
+  // positive merely keeps the pre-#2903 host arm (module stays leaky, exactly
+  // as before); only a false NEGATIVE could change behaviour, so names match
+  // on ANY receiver where the lowering can be host-routed. Pre-body (same
+  // discipline as `moduleHasAsyncGen` above) so a textually-later producer is
+  // seen before any `.then` bridge compiles. gc/host + wasi are untouched
+  // (standalone-only setter; the consumer re-checks the target too).
+  if (
+    ctx.standalone === true &&
+    ctx.wasi !== true &&
+    ctx.moduleHasHostPromiseSource !== true &&
+    ts.isCallExpression(node)
+  ) {
+    if (node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+      ctx.moduleHasHostPromiseSource = true;
+    } else {
+      let calleeName: string | undefined;
+      let recvIsPromiseIdent = false;
+      if (ts.isPropertyAccessExpression(node.expression)) {
+        calleeName = node.expression.name.text;
+        recvIsPromiseIdent =
+          ts.isIdentifier(node.expression.expression) && node.expression.expression.text === "Promise";
+      } else if (
+        ts.isElementAccessExpression(node.expression) &&
+        ts.isStringLiteralLike(node.expression.argumentExpression)
+      ) {
+        calleeName = node.expression.argumentExpression.text;
+      }
+      if (
+        calleeName !== undefined &&
+        (HOST_PROMISE_SOURCE_METHOD_NAMES.has(calleeName) ||
+          ((calleeName === "all" || calleeName === "race") && !recvIsPromiseIdent))
+      ) {
+        ctx.moduleHasHostPromiseSource = true;
+      }
+    }
   }
 
   // ── collectArrayIteratorImports ──

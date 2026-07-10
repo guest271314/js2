@@ -3011,6 +3011,19 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     ) {
       return { kind: "externref" };
     }
+    // (#2903) This is the genuine HOST `new Promise` fallthrough (executor not
+    // native-lowerable) — the runtime value is a host promise, so the
+    // `.then`/`.catch` bridge's miss arm must keep its host fallback for the
+    // rest of this module. (`Promise_new` funcMap presence can't signal this:
+    // it is upfront-registered for every syntactic `new Promise` even when the
+    // lowering is native.) Order caveat: a bridge compiled BEFORE this point
+    // already chose its arm; acceptable — the affected shape (a `.then` in an
+    // earlier function over a later non-inline-executor promise) now throws a
+    // catchable TypeError instead of host-chaining, and can only occur in
+    // modules that were irreducibly host-import-leaky anyway.
+    if (ctx.standalone === true && ctx.wasi !== true) {
+      ctx.moduleHasHostPromiseSource = true;
+    }
     let funcIdx =
       ctx.funcMap.get("Promise_new") ??
       ensureLateImport(ctx, "Promise_new", [{ kind: "externref" }], [{ kind: "externref" }]);
