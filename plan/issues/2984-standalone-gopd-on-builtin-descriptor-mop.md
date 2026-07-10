@@ -10,10 +10,99 @@ area: codegen, runtime
 goal: standalone-mode
 related: [2965, 2861, 2863, 2896, 2949, 2989]
 origin: "#2965 descriptor-cluster triage — follow-up class 1"
-assignee: ttraenkler/fable-2984b
+assignee: ttraenkler/fable-2984c
 ---
 
 # #2984 — standalone gOPD-on-builtin descriptor MOP
+
+## Phase 3 LANDED (2026-07-10, fable-2984c) — ctor/namespace-receiver static-property descriptor synthesis
+
+> PR: `issue-2984-gopd-ctor-receivers`. Takes the **72 CE ctor/namespace
+> receivers** bucket (bucket 1 of "Still remaining after Phase 2" below) —
+> `gOPD(Math, "atan2")`, `gOPD(Date, "prototype")`, `gOPD(Number,
+> "MAX_VALUE")`, `gOPD(String, "length")`, `gOPD(JSON, "stringify")`.
+
+### Root cause (re-measured on main @ d7a1feaa1cf, 72 CE confirmed intact)
+
+Two refusals compound: (1) a builtin ctor/namespace IDENTIFIER as a gOPD
+receiver routes through the `__get_builtin` shortcut in the calls.ts dynamic
+fallback, which refuses-loud standalone (#1472 Phase B); (2) even with (1)
+fixed, the dominant assertion `desc.value === Math.atan2` needs the plain
+static VALUE READ, which hard-refused too (#1907 "built-in static property
+value read is not supported") — the closure factory
+`ensureStandaloneBuiltinStaticMethodClosure` knew only ~8 hand-written
+statics.
+
+### Fix (two pieces, both `ctx.standalone`-gated)
+
+1. **Generic static-closure reification** (property-access.ts): the factory's
+   `default:` arm now mints an identity-stable closure for ANY
+   `BUILTIN_STATIC_METHOD_ARITY` member with an `emitThrowTypeError` body
+   (the #2193/#2651/Phase-2 degrade-to-catchable pattern) + spec meta from
+   the arity table (`static:<key>` meta subtype → per-(builtin, method)
+   singleton). Hand-written statics keep their exact wired bodies/meta
+   (byte-identical). Every shape reaching the arm CE'd before, so nothing
+   passing changes. Invoking the extracted value currently traps through the
+   direct-call plumbing — pre-existing (`var f = Object.keys; f(o)`
+   null-derefs on main); the corpus never invokes.
+2. **New subsystem module `src/codegen/builtin-static-gopd.ts`** —
+   `tryEmitStandaloneBuiltinStaticGopd`, called from a new synthesis site in
+   the calls.ts gOPD handler (after Site-2, before the `__get_builtin`
+   fallback; gate = standalone + unshadowed `BUILTIN_CLASS_NAMES` identifier
+   + literal key). Classification: static method → `{w:true,e:false,c:true}`
+   + singleton `.value` (same value the plain read yields — identity holds);
+   Math/Number constants + `<TypedArray>.BYTES_PER_ELEMENT` → all-false
+   value descriptors; `prototype` (ctors only; Proxy §28.2 and the
+   namespaces own none) → all-false + `$NativeProto` value via
+   `emitLazyNativeProtoGet`; `length`/`name` → `{w:false,e:false,c:true}`;
+   unknown string keys on CLOSED-universe receivers → `undefined`
+   (`gOPD(Math,"caller")`). **Symbol + RegExp unknown members keep the loud
+   refusal** (open universes: well-known-symbol own props / annex-B legacy
+   statics — refuse-loud > silent-wrong).
+
+### Measured (real runner, standalone lane, base = main @ d7a1feaa1cf)
+
+| Sweep                                                                                       | main                       | branch               | Δ                      |
+| -------------------------------------------------------------------------------------------- | -------------------------- | -------------------- | ---------------------- |
+| `built-ins/Object/getOwnPropertyDescriptor{,s}` (328)                                       | 199 pass / 57 fail / 72 CE | **270 / 58 / 0**     | **+71, 0 regressions** |
+| collateral (defineProperty + gOPN + Boolean + Function + Error + **Math** + **JSON**, 2286) | 1122 / 1063 / 101 CE       | **1165 / 1068 / 53** | **+43, 0 regressions** |
+
+- Every flip is CE→pass or CE→fail (the 1 gOPD-dirs CE→fail is
+  `gOPDs/tamper-with-global-object.js`, global-tampering shape, out of scope).
+  The +43 collateral flips are dominated by `not-a-constructor.js` (the value
+  read now compiles → `isConstructor(Math.abs)` runs) — expect more radiating
+  flips suite-wide in CI (other dirs' not-a-constructor / verifyProperty
+  clusters).
+- `prove-emit-identity`: **IDENTICAL** — all 39 (file,target) emits across
+  gc/standalone/wasi match the main baseline.
+- `tests/issue-2984-phase3.test.ts` 11/11 (identity, constants, prototype,
+  length, absent→undefined, Symbol/RegExp refusal GUARD); related suites
+  (2984/2651/2861/2875/2876/2885/2896/2933/2963/2965 +
+  array-prototype-methods) 204/204 after updating the #2933 scope-boundary
+  guard (it pinned "Math.max value read still refuses" — exactly the refusal
+  this phase retires by design).
+- loc-budget: synthesis extracted to the new module; residual +23 (calls.ts)
+  / +36 (property-access.ts) reseeded via the sanctioned `--update` (a
+  `loc-budget-allow` frontmatter mechanism does not exist in the shipped
+  gate).
+- Known pre-existing quirks measured on MAIN (not regressions, documented in
+  tests): desc-vs-desc `.value` identity across two separate gOPD calls fails
+  (also fails for Phase-2 proto members on main — $Object store/read
+  round-trip); ternary-string→console.log emits invalid Wasm on main
+  (validation error, tripped a probe, unrelated).
+
+### Still remaining after Phase 3 (the next slices)
+
+1. **gOPD-dirs residual 58 fails**: `15.2.3.3-2-*` (arg-2 name coercion),
+   global-object receivers (`this`/`window`), `obj`-VAR receivers (need
+   runtime dispatch — the synthesis is syntactic), gOPDs-plural residuals
+   (`normal-object.js`, order/observability, `tamper-with-global-object.js`),
+   `primitive-string(s)`.
+2. **`.value` INVOCATION** stays blocked on #2949 (pre-existing: direct-call
+   of an extracted externref-signature static closure null-derefs on main —
+   `var f = Object.keys; f(o)`).
+3. Symbol well-known-key + RegExp legacy-static gOPD receivers (deliberately
+   left refusing — need a well-known-symbol/legacy-static descriptor model).
 
 ## Phase 2 LANDED (2026-07-10, fable-2984b) — proto-receiver reification via refusal-body closures
 

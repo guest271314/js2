@@ -145,6 +145,7 @@ import {
   getNativeProtoBuiltinGlue,
 } from "../native-proto.js";
 import { pushBuiltinFnSingletonValueInstrs } from "../builtin-fn-meta.js";
+import { tryEmitStandaloneBuiltinStaticGopd } from "../builtin-static-gopd.js"; // (#2984 Phase 3)
 import { compileStatement, hoistFunctionDeclarations } from "../statements.js";
 import {
   emitSetExtrasArgv,
@@ -7976,6 +7977,28 @@ function compileCallExpression(
             }
           }
         }
+      }
+
+      // (#2984 Phase 3) Standalone builtin-CTOR/NAMESPACE-receiver descriptor
+      // synthesis — `gOPD(Math, "atan2")`, `gOPD(Date, "prototype")`,
+      // `gOPD(Number, "MAX_VALUE")`, `gOPD(String, "length")`. The dynamic
+      // fallback below routes a builtin-identifier receiver through
+      // `__get_builtin`, which refuses-loud under standalone (#1472 Phase B) —
+      // every shape this arm intercepts was a hard CE on main, so synthesizing
+      // the §6.1.7.3 descriptor from the compile-time static-property tables
+      // (builtin-static-gopd.ts) is strictly regression-free. Unresolvable
+      // members (Symbol well-knowns / RegExp legacy statics / dynamic keys)
+      // fall through to the existing refusal; host/gc keeps the working
+      // `__get_builtin` host route untouched.
+      if (
+        ctx.standalone &&
+        propLiteral !== undefined &&
+        ts.isIdentifier(arg0) &&
+        BUILTIN_CLASS_NAMES.has(arg0.text) &&
+        !(fctx.localMap.has(arg0.text) || (fctx.boxedCaptures?.has(arg0.text) ?? false)) &&
+        tryEmitStandaloneBuiltinStaticGopd(ctx, fctx, arg0.text, propLiteral)
+      ) {
+        return { kind: "externref" };
       }
 
       // Fallback: dynamic case — delegate to __getOwnPropertyDescriptor host import
