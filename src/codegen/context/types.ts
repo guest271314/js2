@@ -1455,6 +1455,16 @@ export interface CodegenContext {
    * upstream), so the typed `arr.forEach(cb)` hot path is never touched.
    */
   forceExternrefCallbackParams?: boolean;
+  /**
+   * (#3137) True while compiling a native `.then`/`.catch` callback closure
+   * (`compileStandalonePromiseThenCallback` window). TUPLE-typed callback
+   * params widen to externref in `computeClosureWrapperSig`: the native
+   * then-wrapper ABI always delivers externref, and a combinator results vec
+   * can never be the contextually-inferred tuple struct — the unguarded
+   * `ref.cast` trapped (illegal cast in `__then_fulfill_N`, the #3137
+   * allSettled harness class). Every other closure compile is unaffected.
+   */
+  widenTupleCallbackParams?: boolean;
   /** Map from local variable name → closure metadata (for call_ref dispatch) */
   closureMap: Map<string, ClosureInfo>;
   /** Map from closure struct type index → closure metadata (for anonymous closures) */

@@ -43,6 +43,7 @@ import {
   getOrRegisterVecType,
   hoistLetConstWithTdz,
   hoistVarDeclarations,
+  isTupleType,
   nextModuleGlobalIdx,
   resolveWasmType,
 } from "./index.js";
@@ -1630,6 +1631,25 @@ export function computeClosureWrapperSig(
       wasmType = { kind: "externref" };
     }
     if (ctx.forceExternrefCallbackParams && isVecOrArrayRefType(ctx, wasmType)) {
+      wasmType = { kind: "externref" };
+    }
+    // (#3137) TUPLE-typed params of a native `.then`/`.catch` callback widen to
+    // externref. TS contextually types combinator callbacks over tuple inputs
+    // as tuples (`Promise.allSettled([x]).then((rs) => …)` ⇒ rs:
+    // `[PromiseSettledResult<…>]`, lowered to a concrete 1-field struct), but
+    // the native then-wrapper ABI always delivers externref — the combinator
+    // results vec can never BE that tuple struct, so the wrapper's `ref.cast`
+    // trapped (illegal cast in __then_fulfill_N). Widened, the body reads the
+    // value through the dynamic reader (vec length/index + status objects),
+    // which is representation-correct for both the combinator vec and a
+    // genuine tuple value. Scoped to the then-callback compile window
+    // (`widenTupleCallbackParams`, set in compileStandalonePromiseThenCallback)
+    // so every other closure compile is byte-identical.
+    if (
+      ctx.widenTupleCallbackParams === true &&
+      (wasmType.kind === "ref" || wasmType.kind === "ref_null") &&
+      isTupleType(paramType)
+    ) {
       wasmType = { kind: "externref" };
     }
     arrowParams.push(wasmType);
