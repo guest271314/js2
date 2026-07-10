@@ -17,6 +17,8 @@ language_feature: compiler-internals
 goal: ir-full-coverage
 related: [1852, 1926, 2138, 2135, 2855]
 origin: "2026-07-02 July Fable audit (plan/log/analysis-2026-07/00-ir-async-standalone-audit.md §1)"
+loc-budget-allow:
+  - src/ir/from-ast.ts
 ---
 
 # #2949 — the IR's type system is Wasm types, not JS types
@@ -1510,7 +1512,7 @@ vs the branch base (`e66b066d4`). Decisions and the WHY:
      `binary-ops.ts:1091-1096`) to "compile with numeric hint" → `__unbox_number`
      (`Number(v)`) per operand + numeric compare. String-correct via `Number()`.
    - **standalone**: a pure-Wasm runtime branch — `if both-are-strings →
-  lexicographic string compare, else → __any_to_f64 each + f64.lt` (the full
+lexicographic string compare, else → __any_to_f64 each + f64.lt` (the full
      ARC in Wasm; the else arm reads the box's f64 slot for a string → 0, a known
      legacy mixed-string/number gap).
      The `__any_lt`/`__any_gt`/`__any_le`/`__any_ge` helper family EXISTS
