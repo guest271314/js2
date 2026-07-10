@@ -1150,7 +1150,43 @@ export function compileObjectLiteral(
       !!ctxType &&
       ctxType.getProperties().length === 0 &&
       !!ctx.checker.getIndexInfoOfType(ctxType, ts.IndexKind.String);
-    if (isAnyContext || isPureStringIndexEmpty) {
+    // (#3076) An empty `{}` that is the RECEIVER argument of
+    // `Object.defineProperty/defineProperties` (or the `Reflect` twins) must be
+    // an open `$Object`: the standalone runtime store
+    // (`__defineProperty_value` / `__defineProperty_accessor`) is a lenient
+    // no-op on a closed struct, so `var o = Object.defineProperty({}, "p",
+    // { get() { throw … } })` silently dropped the accessor — every later read
+    // (member read, destructuring GetV) returned undefined instead of firing
+    // the poisoned getter (the canonical test262
+    // `dstr/*obj-ptrn-*get-value-err` shape). TS's generic
+    // `defineProperty<T>(o: T, …)` gives the literal a CONCRETE empty
+    // contextual type, so the any-context arm above never catches this shape.
+    // Standalone/wasi only — the JS-host import stores descriptors in a
+    // sidecar keyed by object identity, which works for closed structs, so the
+    // host lanes stay byte-identical.
+    const isDefinePropertyReceiver =
+      (ctx.standalone || ctx.wasi) &&
+      (() => {
+        let node: ts.Node = expr;
+        while (
+          node.parent &&
+          (ts.isAsExpression(node.parent) ||
+            ts.isParenthesizedExpression(node.parent) ||
+            ts.isNonNullExpression(node.parent))
+        ) {
+          node = node.parent;
+        }
+        const call = node.parent;
+        if (!call || !ts.isCallExpression(call) || call.arguments[0] !== node) return false;
+        const callee = call.expression;
+        return (
+          ts.isPropertyAccessExpression(callee) &&
+          ts.isIdentifier(callee.expression) &&
+          (callee.expression.text === "Object" || callee.expression.text === "Reflect") &&
+          (callee.name.text === "defineProperty" || callee.name.text === "defineProperties")
+        );
+      })();
+    if (isAnyContext || isPureStringIndexEmpty || isDefinePropertyReceiver) {
       const funcIdx = ensureLateImport(ctx, "__new_plain_object", [], [{ kind: "externref" }]);
       flushLateImportShifts(ctx, fctx);
       if (funcIdx !== undefined) {
