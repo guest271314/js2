@@ -3,6 +3,7 @@ import { ts, forEachChild } from "../ts-api.js";
 import type { MultiTypedAST, TypedAST } from "../checker/index.js";
 import type { FuncTypeDef, Instr, ValType, WasmModule } from "../ir/types.js";
 import { createEmptyModule } from "../ir/types.js";
+import { compileLinearIrFunctions, linearIrEnabled } from "../ir/backend/linear-integration.js";
 import type { CollectionKind, FinallyEntry, LinearContext, LinearFuncContext } from "./context.js";
 import { addLocal } from "./context.js";
 import type { ClassLayout } from "./layout.js";
@@ -178,8 +179,31 @@ export function generateLinearModule(ast: TypedAST, opts: LinearOptions = {}): W
     compileClassDeclaration(ctx, classDecl);
   }
 
+  // ── #2956 L1: IR overlay for selector-claimed top-level functions ──
+  // Gated on JS2WASM_LINEAR_IR=1 (flag off ⇒ byte-identical module). Runs
+  // AFTER slot pre-assignment + module-global collection so the linear IR
+  // resolver's name-based lookups (funcMap / moduleGlobals) are complete,
+  // and BEFORE the funcDecls loop so an IR-lowered body lands at exactly
+  // its pre-assigned slot position. Anything the gate demotes compiles via
+  // the direct path below, unchanged.
+  const linearIr = linearIrEnabled() ? compileLinearIrFunctions(ctx, ast.sourceFile) : undefined;
+
   // ── Compile top-level function declarations ──
   for (const decl of funcDecls) {
+    const irFunc = linearIr?.funcs.get(decl.name!.text);
+    if (irFunc) {
+      // Insert the IR-lowered body at this decl's slot position (push order
+      // must match the forward-registered funcMap indices). Mirror
+      // compileFunction's export record.
+      ctx.mod.functions.push(irFunc);
+      if (irFunc.exported) {
+        ctx.mod.exports.push({
+          name: irFunc.name,
+          desc: { kind: "func", index: ctx.funcMap.get(irFunc.name)! },
+        });
+      }
+      continue;
+    }
     compileFunction(ctx, decl);
   }
 
