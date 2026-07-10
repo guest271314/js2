@@ -15,10 +15,24 @@
  * baseline down step by step until the count outside the engine is ~0 and the
  * grep becomes a hard seal.
  *
- * Mechanism mirrors the IR-fallback ratchet (scripts/check-ir-fallbacks.ts) and
- * the AnyValue box-site gate (scripts/check-any-box-sites.mjs): per-(file,token)
- * counts vs. a committed baseline; growth fails, shrink auto-ratchets with
- * --update-on-decrease.
+ * CHANGE-SCOPED (#3131, same rework as check-loc-budget.mjs): when a git diff
+ * base is resolvable (scripts/lib/change-scope.mjs), the gate counts the
+ * vocabulary in each changed file at the BASE blob vs the WORKING TREE and
+ * fails only when THIS change-set grew a file's count. The committed baseline
+ * (scripts/coercion-sites-baseline.json) is NOT consulted on that path — and
+ * PRs must NOT commit changes to it (the per-PR bump merge-conflicted with
+ * every post-merge refresh promote-baseline pushes to main — the same churn
+ * class as the loc-budget baseline). Intentional growth (a reviewed migration
+ * step) is granted per change-set via a `coercion-sites-allow:` frontmatter
+ * list (repo-relative src paths) in the PR's own plan/issues/*.md file.
+ * The committed baseline remains for the no-git fallback and the writer
+ * modes; main's post-merge refresh is its sole writer.
+ *
+ * Mechanism otherwise mirrors the IR-fallback ratchet
+ * (scripts/check-ir-fallbacks.ts) and the AnyValue box-site gate
+ * (scripts/check-any-box-sites.mjs): per-file counts; growth fails, shrink
+ * banks (automatically under change-scoping; via --update-on-decrease in the
+ * legacy mode).
  *
  * Scope: walks src/codegen/** and src/codegen-linear/** (recursively),
  * EXCLUDING the engine-owned files (SANCTIONED) that legitimately define /
@@ -39,17 +53,21 @@
  *
  * Usage:
  *   node scripts/check-coercion-sites.mjs                    # fail on growth
- *   node scripts/check-coercion-sites.mjs --update           # write current counts
+ *   node scripts/check-coercion-sites.mjs --update           # write current counts (post-merge/main only)
  *   node scripts/check-coercion-sites.mjs --update-on-decrease
  *   node scripts/check-coercion-sites.mjs --verbose          # print per-file breakdown
  */
 import { readFileSync, readdirSync, writeFileSync, statSync } from "fs";
-import { join, relative } from "path";
+import { join, relative, basename } from "path";
+import { resolveChangeBase, changedPaths, baseBlob, changeSetAllowances } from "./lib/change-scope.mjs";
 
+const REPO_ROOT = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 const ROOTS = [
   new URL("../src/codegen", import.meta.url).pathname,
   new URL("../src/codegen-linear", import.meta.url).pathname,
 ];
+// Repo-relative prefixes matching ROOTS, for change-scoping.
+const ROOT_PREFIXES = ["src/codegen/", "src/codegen-linear/"];
 const SRC_ROOT = new URL("../src", import.meta.url).pathname;
 const BASELINE_PATH = new URL("./coercion-sites-baseline.json", import.meta.url).pathname;
 
@@ -99,6 +117,24 @@ function tokenPattern(tok) {
 
 const PATTERNS = VOCAB.map((tok) => [tok, tokenPattern(tok)]);
 
+/** Per-token counts for one file's text. */
+function countTokens(text) {
+  const perToken = {};
+  for (const [tok, re] of PATTERNS) {
+    re.lastIndex = 0;
+    const n = (text.match(re) || []).length;
+    if (n > 0) perToken[tok] = n;
+  }
+  return perToken;
+}
+
+/** Total vocabulary uses in one file's text. */
+function countText(text) {
+  let total = 0;
+  for (const n of Object.values(countTokens(text))) total += n;
+  return total;
+}
+
 function walk(dir, out) {
   let entries;
   try {
@@ -124,16 +160,9 @@ function countSites() {
   for (const full of files) {
     const text = readFileSync(full, "utf-8");
     const key = relative(SRC_ROOT, full);
-    const perToken = {};
+    const perToken = countTokens(text);
     let total = 0;
-    for (const [tok, re] of PATTERNS) {
-      re.lastIndex = 0;
-      const n = (text.match(re) || []).length;
-      if (n > 0) {
-        perToken[tok] = n;
-        total += n;
-      }
-    }
+    for (const n of Object.values(perToken)) total += n;
     if (total > 0) counts[key] = total;
     counts[key] && (counts[`${key}::tokens`] = perToken);
   }
@@ -166,17 +195,101 @@ if (verbose) {
   console.error("");
 }
 
+if (update) {
+  // Post-merge/main writer only (#3131) — PRs must not commit the result.
+  let prev = {};
+  try {
+    prev = JSON.parse(readFileSync(BASELINE_PATH, "utf-8"));
+  } catch {
+    // first run
+  }
+  if (JSON.stringify(prev) === JSON.stringify(current)) {
+    console.log("coercion-sites baseline already current — not rewritten.");
+    process.exit(0);
+  }
+  writeFileSync(BASELINE_PATH, `${JSON.stringify(current, null, 2)}\n`);
+  console.log("coercion-sites baseline written:", Object.keys(current).length, "files");
+  process.exit(0);
+}
+
+/**
+ * Change-scoped gate (#3131): compare each changed file's vocabulary count at
+ * the base blob vs the working tree. Only this change-set's own growth can
+ * fail; the committed baseline is not involved. Returns false when the diff
+ * cannot be computed (caller falls back to the legacy baseline comparison).
+ */
+function gateScoped() {
+  const { base, how } = resolveChangeBase(REPO_ROOT);
+  if (!base) return false;
+  const changedAll = changedPaths(REPO_ROOT, base, "src");
+  if (changedAll === undefined) return false;
+  const changed = [...changedAll]
+    .filter((p) => p.endsWith(".ts") && ROOT_PREFIXES.some((r) => p.startsWith(r)) && !SANCTIONED.has(basename(p)))
+    .sort();
+  const allow = changeSetAllowances(REPO_ROOT, base, "coercion-sites-allow");
+
+  const grown = [];
+  const granted = [];
+  for (const p of changed) {
+    const key = p.slice("src/".length); // baseline/report keys are src-relative
+    const now = current[key] ?? 0; // deleted file → 0
+    const blob = baseBlob(REPO_ROOT, base, p);
+    const was = blob === undefined ? 0 : countText(blob);
+    if (now <= was) continue;
+    if (allow.has(p)) {
+      granted.push(`  ${key}: ${was} → ${now} granted by ${allow.get(p).join(", ")}`);
+      continue;
+    }
+    const nowTokens = detail[`${key}::tokens`] || {};
+    const wasTokens = blob === undefined ? {} : countTokens(blob);
+    const grewTokens = Object.keys(nowTokens)
+      .filter((t) => (nowTokens[t] ?? 0) > (wasTokens[t] ?? 0))
+      .map((t) => `${t} ${wasTokens[t] ?? 0}→${nowTokens[t]}`)
+      .join(", ");
+    grown.push(`  ${key}: ${was} → ${now}${grewTokens ? ` (${grewTokens})` : ""}`);
+  }
+
+  if (granted.length > 0) {
+    console.log("coercion-sites: intentional growth allowed by this change-set's issue file:\n" + granted.join("\n"));
+  }
+
+  if (grown.length > 0) {
+    console.error("coercion-sites gate FAILED — new hand-rolled coercion vocabulary outside the engine:");
+    console.error(grown.join("\n"));
+    console.error(
+      "\nRoute the coercion through the single coercion engine (#1917 / #2108).\n" +
+        "Do NOT hand-roll a fresh ToString/ToNumber/ToPrimitive/equality matrix.\n" +
+        "See plan/log/analysis-2026-06/03-coercion-engine-spec.md §5.\n" +
+        "If this growth is an intentional, reviewed migration step, grant THIS\n" +
+        "change-set an allowance: list the repo-relative path(s) under a\n" +
+        "`coercion-sites-allow:` key in the YAML frontmatter of this PR's own\n" +
+        "issue file (any plan/issues/*.md the PR adds or modifies), e.g.\n\n" +
+        "  coercion-sites-allow:\n" +
+        "    - src/codegen/property-access.ts\n\n" +
+        "Do NOT commit changes to scripts/coercion-sites-baseline.json in a PR —\n" +
+        "it is refreshed post-merge on main only (#3131).",
+    );
+    process.exit(1);
+  }
+
+  console.log(
+    `coercion-sites gate: OK (no unallowed growth in ${changed.length} changed codegen file(s); base: ${how}).`,
+  );
+  return true;
+}
+
+if (!updateOnDecrease && gateScoped()) {
+  process.exit(0);
+}
+
+// Legacy whole-tree comparison against the committed baseline — used when no
+// git base is resolvable, and by --update-on-decrease (a writer mode: the
+// post-merge refresh / local banking; PRs must not commit the result, #3131).
 let baseline = {};
 try {
   baseline = JSON.parse(readFileSync(BASELINE_PATH, "utf-8"));
 } catch {
   // first run
-}
-
-if (update) {
-  writeFileSync(BASELINE_PATH, `${JSON.stringify(current, null, 2)}\n`);
-  console.log("coercion-sites baseline written:", Object.keys(current).length, "files");
-  process.exit(0);
 }
 
 const grown = [];
@@ -196,8 +309,9 @@ if (grown.length > 0) {
     "\nRoute the coercion through the single coercion engine (#1917 / #2108).\n" +
       "Do NOT hand-roll a fresh ToString/ToNumber/ToPrimitive/equality matrix.\n" +
       "See plan/log/analysis-2026-06/03-coercion-engine-spec.md §5.\n" +
-      "If this growth is an intentional, reviewed migration step, refresh the\n" +
-      "baseline: node scripts/check-coercion-sites.mjs --update",
+      "If this growth is an intentional, reviewed migration step, grant the\n" +
+      "change-set a `coercion-sites-allow:` frontmatter allowance (see #3131);\n" +
+      "the committed baseline is refreshed post-merge on main only.",
   );
   process.exit(1);
 }
